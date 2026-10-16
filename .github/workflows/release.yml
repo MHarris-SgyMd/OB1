@@ -310,9 +310,10 @@ jobs:
               extra=()
               if [ "$mode" = raw ]; then extra=(--no-interpolate); fi
               [ "$(docker compose -f compose.yaml -f compose.release.yaml "${files[@]:2}" config --profiles)" = "$list" ]
-              base="$(docker compose "${files[@]}" "${profiles[@]}" config "${extra[@]}" --format json | jq -c --argjson pins "$pins" "$rest")"
+              # By file, not argument: a render nears the 128 KiB Linux gives one argument (SMD-1849 PR 3c review pass 1).
+              docker compose "${files[@]}" "${profiles[@]}" config "${extra[@]}" --format json | jq -c --argjson pins "$pins" "$rest" > /tmp/release-base.json
               docker compose -f compose.yaml -f compose.release.yaml "${files[@]:2}" "${profiles[@]}" config "${extra[@]}" --format json \
-                | jq -c --argjson pins "$pins" "$rest" | jq -e --argjson base "$base" '. == $base' >/dev/null
+                | jq -c --argjson pins "$pins" "$rest" | jq -e --slurpfile base /tmp/release-base.json '. == $base[0]' >/dev/null
             done
           done
           pull=(postgres proxy forwarder)

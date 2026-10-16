@@ -26,6 +26,12 @@
  *   ./with-postgres.sh bun test-live.ts        # starts a throwaway container
  *   DATABASE_URL=... bun test-live.ts          # against a LOCAL one you already have
  *   OB1_ALLOW_REMOTE_DB=1 DATABASE_URL=... bun test-live.ts   # anything else
+ *
+ * OB1_LIVE_SHARD=sleep|long|extract|rest runs one shard of the sections
+ * (SHARDS below). Fork Checks runs the four side by side, one job each, every
+ * one on a database of its own (SMD-3048). From one checkout, run them one at
+ * a time: [2] edits a migration file while it runs, which another shard's
+ * migrations would read.
  */
 
 import { SQL } from "bun";
@@ -33,13 +39,15 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlin
 import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
 import { PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
+import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
+import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
 import { MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
@@ -76,6 +84,51 @@ if (!URL_) {
   process.exit(2);
 }
 
+/**
+ * The suite's shards (SMD-3048): the sections each runs, by the id in its
+ * header. The slow sections wait on workers' real timers, so they are
+ * split apart by CI section time. A section no shard here lists is the
+ * rest's, [1] among them, so a new section runs in CI unless it is listed.
+ * A shard without [1] migrates in the preamble without asserting.
+ * [33] and [35] check the projection after the sections that write tickets
+ * and sources, which are the rest's, so they stay there; [end] checks it again
+ * at every run's end. Extract takes four short sections of the rest's, each
+ * on its own client, to keep the rest under the full-stack jobs.
+ * db/README.md states each shard's assertion count beside the full run's,
+ * and [doc] checks, on every run, that they add up.
+ */
+const SHARDS: Readonly<Record<string, readonly string[]>> = {
+  sleep: ["38"],
+  long: ["9", "10g", "38b"],
+  extract: ["10", "10e", "10f", "17", "37", "39", "41", "43"],
+};
+/** Every shard's name: SHARDS' and the rest. */
+const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
+const SHARD = process.env.OB1_LIVE_SHARD;
+if (SHARD !== undefined && SHARD !== "rest" && !Object.hasOwn(SHARDS, SHARD)) {
+  console.error(`OB1_LIVE_SHARD=${JSON.stringify(SHARD)} names no shard: ${SHARD_NAMES.join(", ")}, or unset for every section`);
+  process.exit(2);
+}
+const LISTED_ALL = Object.values(SHARDS).flat();
+const LISTED = new Set(LISTED_ALL);
+// A section listed twice would run in two shards and count in both, while a full run counts it once.
+if (LISTED.size !== LISTED_ALL.length) {
+  console.error(`SHARDS lists a section in more than one shard: ${LISTED_ALL.filter((id, i) => LISTED_ALL.indexOf(id) !== i).map((id) => `[${id}]`).join(", ")}`);
+  process.exit(2);
+}
+/** The sections this run has begun, by id: [doc] checks a shard's are all there. */
+const begun = new Set<string>();
+/** Every id a header has asked about, in order: [doc] checks no two headers share one. */
+const headed: string[] = [];
+/** Whether section `id` runs here: every section with no shard named, else the shard's. */
+const runsHere = (id: string): boolean => SHARD === undefined || (SHARD === "rest" ? !LISTED.has(id) : SHARDS[SHARD].includes(id));
+/** runsHere, noting the section begun: each section's header reads it. */
+function want(id: string): boolean {
+  headed.push(id);
+  const runs = runsHere(id);
+  if (runs) begun.add(id);
+  return runs;
+}
 
 const { assert, skip, total, skipped, docCheck, report } = createAssert();
 
@@ -133,11 +186,20 @@ await dropSchema(URL_);
 
 let sql = new SQL({ url: URL_, max: 4 });
 console.log(`  server: ${(await sql`SELECT version() AS v`)[0].v.split(" on ")[0]}\n`);
+if (SHARD !== undefined) console.log(`  shard: ${SHARD} (OB1_LIVE_SHARD)\n`);
+// [1] applies the migrations, asserting as it goes: a shard without it applies them here, quietly.
+if (!runsHere("1")) {
+  const m = await migrateInProcess();
+  if (m.code !== 0) {
+    console.error(`the shard's migrations failed (exit ${m.code}):\n${m.stdout}${m.stderr}`);
+    process.exit(1);
+  }
+}
 
 // ── 1. The runner ────────────────────────────────────────────────────────────
 
-console.log("[1] migrate.ts against a real server");
-{
+if (want("1")) {
+  console.log("[1] migrate.ts against a real server");
   const dry = await migrate("--dry-run");
   assert(dry.code === 0, "--dry-run exits 0");
   assert(/would apply \d+, skipped 0/.test(dry.out), "--dry-run reports everything pending");
@@ -188,8 +250,8 @@ console.log("[1] migrate.ts against a real server");
   assert(ledger[0].c > 0, `schema_migrations records ${ledger[0].c} migrations`);
 }
 
-console.log("\n[2] Append-only enforcement");
-{
+if (want("2")) {
+  console.log("\n[2] Append-only enforcement");
   const target = join(HERE, "migrations", "002_match_thoughts.sql");
   const original = readFileSync(target, "utf8");
   try {
@@ -218,8 +280,8 @@ console.log("\n[2] Append-only enforcement");
 
 // ── 3. Driver-level binding — the class PGlite cannot reach ──────────────────
 
-console.log("\n[3] jsonb parameter binding through a real driver");
-{
+if (want("3")) {
+  console.log("\n[3] jsonb parameter binding through a real driver");
   await sql`DELETE FROM thoughts`;
 
   // Bun.sql binds a JS string to jsonb as a JSON *string*. Before migration 005
@@ -249,8 +311,8 @@ console.log("\n[3] jsonb parameter binding through a real driver");
 
 // ── 4. Real pgvector round trip ──────────────────────────────────────────────
 
-console.log("\n[4] Capture and search through Bun.sql and real pgvector");
-{
+if (want("4")) {
+  console.log("\n[4] Capture and search through Bun.sql and real pgvector");
   await sql`DELETE FROM thoughts`;
   // Every row of this section also carries a shared fixture key, so the
   // ordering read below filters on it and takes match_thoughts' exact branch
@@ -288,8 +350,8 @@ console.log("\n[4] Capture and search through Bun.sql and real pgvector");
   assert(merged.has === true, "a NULL embedding did not blank the stored vector");
 }
 
-console.log("\n[5] The planner can reach the HNSW index");
-{
+if (want("5")) {
+  console.log("\n[5] The planner can reach the HNSW index");
   // Reachable, not chosen: with sequential scans disabled the index is the
   // plan, which proves it exists and fits the operator class. Whether the
   // planner CHOOSES it on the function's own statements, at a size where it
@@ -311,13 +373,20 @@ console.log("\n[5] The planner can reach the HNSW index");
   assert(!/thoughts_embedding_idx/.test(await explainOrdered(`embedding <=> '${unit(0)}'::vector`)), "…and not in the plan for an ORDER BY on the raw column: the cast is the index's key");
 }
 
-console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale (migration 014)");
-{
-  // 014 seeds the walk's bounds with ALTER DATABASE, which a session reads at
-  // connect. This pool predates the migration, so open a fresh one — and assert
-  // the bounds are in force, since the section claims to exercise them.
-  await sql.close();
-  sql = new SQL({ url: URL_, max: 1 });
+// 014 seeds the walk's bounds with ALTER DATABASE, which a session reads at
+// connect. This pool predates the migration, so open a fresh one, of one
+// connection. Every shard does it here, outside [5b], so each later section
+// meets the pool a full run gives it, the database's settings in force on it
+// (SMD-3048). [5b] holds the settings, in the rest; nothing in the other
+// shards reads them or the pool's size today (with this back inside [5b],
+// they pass), so this is for a section a rebalance moves out of the rest.
+await sql.close();
+sql = new SQL({ url: URL_, max: 1 });
+
+if (want("5b")) {
+  console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale (migration 014)");
+  // The fresh pool above, opened after 014: assert the bounds are in force,
+  // since the section claims to exercise them.
   // What the DATABASE has, not the shipped literals: 014 leaves an operator's
   // earlier value alone, and a non-owner role cannot seed at all. Assert that
   // whatever pg_db_role_setting holds is what a fresh session sees.
@@ -409,8 +478,8 @@ console.log("\n[5b] A filtered match_thoughts agrees with an exact scan at scale
   assert(versionAtLeast(String(library), 0, 8), `the server's pgvector library (${library}) supports the iterative scan 014 declares`);
 }
 
-console.log("\n[5c] The unfiltered candidate scan reaches both HNSW indexes at the configured width, with and without a recency weight (migrations 019, 020)");
-{
+if (want("5c")) {
+  console.log("\n[5c] The unfiltered candidate scan reaches both HNSW indexes at the configured width, with and without a recency weight (migrations 019, 020)");
   // SMD-969 (upstream #469). At the shipped width a vector is TOASTed, and the
   // planner's sequential-scan estimate counts heap pages and never the detoast
   // reads — so on 014's function it chose a seq scan of the chunk table at
@@ -495,8 +564,8 @@ console.log("\n[5c] The unfiltered candidate scan reaches both HNSW indexes at t
   assert(Number(mt) === 10 && Number(kw) === 25, `match_thoughts declares ROWS 10 and search_thoughts_keyword ROWS 25 on a real server (${mt}, ${kw})`);
 }
 
-console.log("\n[5d] The routing count is skipped when a sample of the heap says the filter is far too broad, and runs otherwise exactly as before (migrations 037 and 038)");
-{
+if (want("5d")) {
+  console.log("\n[5d] The routing count is skipped when a sample of the heap says the filter is far too broad, and runs otherwise exactly as before (migrations 037 and 038)");
   // 037 gates 014's capped GIN collection — the statement every filtered call
   // opened with, whose cost is the number of matching rows — behind a sample
   // of ROUTE_SAMPLE_PAGES pages, skipping it when the sample puts the filter
@@ -733,8 +802,8 @@ console.log("\n[5d] The routing count is skipped when a sample of the heap says 
   }
 }
 
-console.log("\n[5e] A planner path disabled at session level no longer JIT-compiles the gate's sample, and the two the sample is built around are pinned: match_thoughts runs with jit = off (migration 040, SMD-1624) and enable_nestloop = on, enable_tidscan = on (migration 041, SMD-1677 and SMD-1703)");
-{
+if (want("5e")) {
+  console.log("\n[5e] A planner path disabled at session level no longer JIT-compiles the gate's sample, and the two the sample is built around are pinned: match_thoughts runs with jit = off (migration 040, SMD-1624) and enable_nestloop = on, enable_tidscan = on (migration 041, SMD-1677 and SMD-1703)");
   // 038's sample statement has one viable path per piece — a TID Range Scan
   // for the block, a Nested Loop for the LATERAL join, Sort/Unique or
   // HashAggregate for the DISTINCT draw — and a session, role or database
@@ -983,8 +1052,8 @@ console.log("\n[5e] A planner path disabled at session level no longer JIT-compi
   }
 }
 
-console.log("\n[5f] Every join in the body keeps its nested loop under an operator's enable_nestloop = off: match_thoughts pins the path on the function, and the mutant shows what the setting did (migration 041, SMD-1677)");
-{
+if (want("5f")) {
+  console.log("\n[5f] Every join in the body keeps its nested loop under an operator's enable_nestloop = off: match_thoughts pins the path on the function, and the mutant shows what the setting did (migration 041, SMD-1677)");
   // Under `enable_nestloop = off` — the spelling an operator uses at database
   // level to tame a misestimated nested loop elsewhere — the planner had
   // replaced every join in the body: the parent lookup that closes each
@@ -1147,8 +1216,8 @@ console.log("\n[5f] Every join in the body keeps its nested loop under an operat
   }
 }
 
-console.log("\n[6] The unique partial index is enforced by the server");
-{
+if (want("6")) {
+  console.log("\n[6] The unique partial index is enforced by the server");
   await sql`DELETE FROM thoughts`;
   await sql`INSERT INTO thoughts (content, content_fingerprint) VALUES ('a', 'dup')`;
   let rejected = false;
@@ -1177,8 +1246,8 @@ console.log("\n[6] The unique partial index is enforced by the server");
 // and returns ok with duplicate_of. A statement_timeout bounds the wait, so a
 // lock that never released fails the test rather than hanging it.
 
-console.log("\n[6b] Two legacy twins fingerprinted at once: the second waits, then is told, not refused (migration 018)");
-{
+if (want("6b")) {
+  console.log("\n[6b] Two legacy twins fingerprinted at once: the second waits, then is told, not refused (migration 018)");
   await sql`DELETE FROM thoughts`;
   const [a] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding) VALUES ('Legacy Twin', NULL, ${unit(0)}::vector) RETURNING id`;
   const [b] = await sql`INSERT INTO thoughts (content, content_fingerprint, embedding) VALUES ('legacy   twin', NULL, ${unit(0)}::vector) RETURNING id`;
@@ -1232,8 +1301,8 @@ console.log("\n[6b] Two legacy twins fingerprinted at once: the second waits, th
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[6c] The backfill holds the table: a capture and an edit wait for it, then merge and are told (migration 023)");
-{
+if (want("6c")) {
+  console.log("\n[6c] The backfill holds the table: a capture and an edit wait for it, then merge and are told (migration 023)");
   await sql`DELETE FROM thoughts`;
   const legacy = (content: string, createdAt: string) => plantLegacyRow(sql, content, unit(0), createdAt);
   const singleton = await legacy("A Legacy Singleton", "2024-01-01");
@@ -1331,8 +1400,8 @@ console.log("\n[6c] The backfill holds the table: a capture and an edit wait for
 const RACE_SETTINGS: Record<string, string> = (await sql`SELECT current_setting('is_superuser') = 'on' AS su`)[0].su ? { deadlock_timeout: "50ms" } : {};
 const racer = () => new SQL({ url: URL_!, max: 1, connection: RACE_SETTINGS });
 
-console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR UPDATE on the target deadlocks with the FK's KEY SHARE, update_thought's FOR NO KEY UPDATE does not (migration 032)");
-{
+if (want("6d")) {
+  console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR UPDATE on the target deadlocks with the FK's KEY SHARE, update_thought's FOR NO KEY UPDATE does not (migration 032)");
   await sql`DELETE FROM thoughts`;
   // Q is about to supersede Z and take the text T; Z is being edited to T at
   // the same moment. A stands where update_thought stands mid-call with
@@ -1436,8 +1505,8 @@ console.log("\n[6d] An edit naming supersedes meets an edit of its target: FOR U
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[6e] A capture and an edit of one text: the edit waits on the advisory lock the capture holds, then is told, not refused — and 022's two races find the row (migration 033)");
-{
+if (want("6e")) {
+  console.log("\n[6e] A capture and an edit of one text: the edit waits on the advisory lock the capture holds, then is told, not refused — and 022's two races find the row (migration 033)");
   await sql`DELETE FROM thoughts`;
   type R = { ok: boolean; error?: string; duplicate_of?: string };
   const waitFor = async (pred: () => boolean | Promise<boolean>, ticks = 400) => { for (let i = 0; i < ticks && !(await pred()); i++) await Bun.sleep(20); };
@@ -1552,8 +1621,8 @@ console.log("\n[6e] A capture and an edit of one text: the edit waits on the adv
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[6f] Four writers on two texts: the row-then-fingerprint order 018 wrote deadlocks, the one order every writer takes since 033 does not (migration 033)");
-{
+if (want("6f")) {
+  console.log("\n[6f] Four writers on two texts: the row-then-fingerprint order 018 wrote deadlocks, the one order every writer takes since 033 does not (migration 033)");
   await sql`DELETE FROM thoughts`;
   // R owns Y and R' owns X. Two edits swap the rows' texts — edit(R → X),
   // edit(R' → Y) — while both texts are re-captured. Found by the first
@@ -1642,8 +1711,8 @@ console.log("\n[6f] Four writers on two texts: the row-then-fingerprint order 01
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[6g] delete_thought joins the lock order: an accept racing a delete of the superseded thought deadlocks without the advisory lock and does not with it, forty tries each (migration 036, SMD-1462)");
-{
+if (want("6g")) {
+  console.log("\n[6g] delete_thought joins the lock order: an accept racing a delete of the superseded thought deadlocks without the advisory lock and does not with it, forty tries each (migration 036, SMD-1462)");
   await sql`DELETE FROM thoughts`;
   // Z is the older, superseded thought — the delete's target, and the row the
   // accept's FK check takes KEY SHARE on; S the newer that supersedes it; P a
@@ -1717,8 +1786,8 @@ console.log("\n[6g] delete_thought joins the lock order: an accept racing a dele
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[6h] update_thought naming supersedes races a delete of that target: never a raw 23503, always SUPERSEDES_NOT_FOUND or a clean write — the same lock closes it (migration 036, SMD-1462)");
-{
+if (want("6h")) {
+  console.log("\n[6h] update_thought naming supersedes races a delete of that target: never a raw 23503, always SUPERSEDES_NOT_FOUND or a clean write — the same lock closes it (migration 036, SMD-1462)");
   await sql`DELETE FROM thoughts`;
   // No proposal row here (a plain edit naming supersedes deadlocked 0 of 40
   // pre-fix, the ticket says — nothing for the cascade to fight over). What
@@ -1767,8 +1836,8 @@ console.log("\n[6h] update_thought naming supersedes races a delete of that targ
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[6i] A citation written while a delete of its source is in flight: the citation's transaction holds the source KEY SHARE (a raw insert) or the writers' advisory lock (record_citation), the delete waits and then sees it — refused, never a dangling source; and the raw-writer residue the lock order exists for, reproduced (migration 042, SMD-1712)");
-{
+if (want("6i")) {
+  console.log("\n[6i] A citation written while a delete of its source is in flight: the citation's transaction holds the source KEY SHARE (a raw insert) or the writers' advisory lock (record_citation), the delete waits and then sees it — refused, never a dangling source; and the raw-writer residue the lock order exists for, reproduced (migration 042, SMD-1712)");
   await sql`DELETE FROM thoughts`;
   const mk = async (tag: string) => ({
     s: ((await sql`SELECT upsert_thought(${"a source about to be cited — " + tag}, '{"metadata":{}}'::jsonb, ${unit(0)}::vector) AS r`)[0].r as { id: string }).id,
@@ -1911,8 +1980,8 @@ console.log("\n[6i] A citation written while a delete of its source is in flight
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[6j] An unlink and an accept's lapse: the unlink takes the review lock the accept holds, so either waits for the other's transaction — the lapse never reads a link an unlink has moved out from under it — and neither order deadlocks (migration 099, SMD-3045)");
-{
+if (want("6j")) {
+  console.log("\n[6j] An unlink and an accept's lapse: the unlink takes the review lock the accept holds, so either waits for the other's transaction — the lapse never reads a link an unlink has moved out from under it — and neither order deadlocks (migration 099, SMD-3045)");
   await sql`DELETE FROM thoughts`;
   // W is the operator's; S the hook's, proposed to stand over W; X the hook's
   // too, linked onto S by the operator (a write key's link, which stays);
@@ -2006,8 +2075,8 @@ console.log("\n[6j] An unlink and an accept's lapse: the unlink takes the review
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[7] Chunk context survives capture, edit and a payload without it");
-{
+if (want("7")) {
+  console.log("\n[7] Chunk context survives capture, edit and a payload without it");
   await sql`DELETE FROM thoughts`;
 
   /**
@@ -2139,8 +2208,8 @@ console.log("\n[7] Chunk context survives capture, edit and a payload without it
 // would fire if the second had to wait; then four workers on four connections
 // racing through the pool — and the assertions are on ids, not counts.
 
-console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases expire, the claim stays cheap");
-{
+if (want("8")) {
+  console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases expire, the claim stays cheap");
   await sql`DELETE FROM thoughts`;
   const JOB = "test:concurrent";
   await sql.unsafe(`INSERT INTO thoughts (content) SELECT 'pool ' || g FROM generate_series(1, 600) g`);
@@ -2375,8 +2444,8 @@ console.log("\n[8] thought_work_claims: concurrent claimers are disjoint, leases
 // model is switched back and --switch-model to it again must start the key's
 // pool over rather than find every thought's terminal row and do nothing.
 
-console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a stub provider");
-{
+if (want("9")) {
+  console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a stub provider");
   await sql`DELETE FROM thoughts`;
   // Prefixed as preflight attributes a pass to the tool — see reembed.ts's
   // header. The configured model's key is reembed:stub-embed@<dim>; this one
@@ -3493,8 +3562,8 @@ console.log("\n[9] db/reembed.ts: a full re-embed through the claims, against a 
 // a second run writes nothing, an edit re-extracts and the stale entity goes,
 // a delete leaves no edge citing the thought, and the cost is recorded.
 
-console.log("\n[10] db/extract-entities.ts: extraction through the claims, against a stub model");
-{
+if (want("10")) {
+  console.log("\n[10] db/extract-entities.ts: extraction through the claims, against a stub model");
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   const KEY = "extract:stub-meta@p2";
@@ -3795,11 +3864,14 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   const status = await extract("--status");
   assert(status.code === 0 && /9 extracted, 1 failed/.test(status.out) && /graph: \d+ entities/.test(status.out), "--status reports the pass and the graph");
   // …and on a caller's client, in-process: the same lines, and the client
-  // still open after. Two workers and a spare: three connections, and this
-  // section's own one-connection client refused as too narrow.
+  // still open after. Two workers and a spare: three connections, and a
+  // one-connection client refused as too narrow — its own, not the suite's
+  // shared one, whose size is not this section's to rely on (SMD-3048).
   const caller = new SQL({ url: URL_, max: 3 });
+  const narrow = new SQL({ url: URL_, max: 1 });
   const statusIn = await extractInProcess({ status: true, sql: caller });
-  const narrowIn = await extractInProcess({ status: true, sql });
+  const narrowIn = await extractInProcess({ status: true, sql: narrow });
+  await narrow.close();
   assert(same(statusIn, status) && (await caller`SELECT 1 AS one`)[0].one === 1, `run() --status on a caller's client prints the spawned --status byte for byte, and leaves the client open (exit ${statusIn.code}${statusIn.stderr ? `: ${statusIn.stderr.slice(0, 100)}` : ""})`);
   assert(narrowIn.code === 2 && narrowIn.stdout === "" && /needs a client of at least 3 connections for 2 worker\(s\)/.test(narrowIn.stderr), `…and a one-connection client is refused before anything is read (exit ${narrowIn.code})`);
   await caller.close();
@@ -4777,8 +4849,8 @@ console.log("\n[10] db/extract-entities.ts: extraction through the claims, again
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[10e] db/extract-entities.ts: a runaway escalates to the larger model — the dump line and the summary say which (SMD-2000)");
-{
+if (want("10e")) {
+  console.log("\n[10e] db/extract-entities.ts: a runaway escalates to the larger model — the dump line and the summary say which (SMD-2000)");
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   const big = { entities: [{ name: "Bigfoot", type: "person", confidence: 0.9 }], relationships: [] };
@@ -4895,8 +4967,8 @@ console.log("\n[10e] db/extract-entities.ts: a runaway escalates to the larger m
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[10f] db/extract-entities.ts: Ollama's repeat limit is a runaway, sent to the retry — never a provider pause, never a stop (SMD-2449)");
-{
+if (want("10f")) {
+  console.log("\n[10f] db/extract-entities.ts: Ollama's repeat limit is a runaway, sent to the retry — never a provider pause, never a stop (SMD-2449)");
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   const good = { entities: [{ name: "Linear", type: "tool", confidence: 0.9 }], relationships: [] };
@@ -4972,8 +5044,8 @@ console.log("\n[10f] db/extract-entities.ts: Ollama's repeat limit is a runaway,
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows survive a hard stop, and the next run sends only the rest (migration 093, SMD-2694)");
-{
+if (want("10g")) {
+  console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows survive a hard stop, and the next run sends only the rest (migration 093, SMD-2694)");
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   const KEY = "extract:stub-meta@p2";
@@ -5360,8 +5432,8 @@ console.log("\n[10g] db/extract-entities.ts: a long thought's answered windows s
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[11] search_thoughts_hybrid through Bun.sql on real pgvector (migration 017)");
-{
+if (want("11")) {
+  console.log("\n[11] search_thoughts_hybrid through Bun.sql on real pgvector (migration 017)");
   await sql`DELETE FROM thoughts`;
   // A shared fixture key on every row, so the hybrid reads below filter on it
   // and the vector arm — match_thoughts with the filter passed through (017/027)
@@ -5400,8 +5472,8 @@ console.log("\n[11] search_thoughts_hybrid through Bun.sql on real pgvector (mig
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[12] thought_stats_summary() equals the page walk, proves the old cap truncated, and full-scans as its header says (migration 024)");
-{
+if (want("12")) {
+  console.log("\n[12] thought_stats_summary() equals the page walk, proves the old cap truncated, and full-scans as its header says (migration 024)");
   // Seed a known corpus, oldest → newest, chosen to exercise every arm:
   //   - two types, so a newest-only prefix misses one (the truncation proof);
   //   - a topic on three rows and another on one (the count aggregation);
@@ -5485,8 +5557,8 @@ console.log("\n[12] thought_stats_summary() equals the page walk, proves the old
   assert(JSON.stringify(empty.types) === "{}" && JSON.stringify(empty.topics) === "{}" && JSON.stringify(empty.people) === "{}", "…and empty breakdown maps, not null");
 }
 
-console.log("\n[13] Provenance through the real write path: the chain traces both ways, a deleted parent behaves as 008/009 say, and a bad reference is refused (migration 025)");
-{
+if (want("13")) {
+  console.log("\n[13] Provenance through the real write path: the chain traces both ways, a deleted parent behaves as 008/009 say, and a bad reference is refused (migration 025)");
   // Round-trip through upsert_thought, as 016's eval does — not a raw INSERT.
   // A three-thought chain: grandparent ← parent ← child, and the child also
   // supersedes the parent.
@@ -5590,8 +5662,8 @@ console.log("\n[13] Provenance through the real write path: the chain traces bot
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[14] trace_provenance bounds its WORK on a dense DAG: each node expanded once, diamonds keep every edge, no path explosion (migration 026, SMD-1288)");
-{
+if (want("14")) {
+  console.log("\n[14] trace_provenance bounds its WORK on a dense DAG: each node expanded once, diamonds keep every edge, no path explosion (migration 026, SMD-1288)");
   const cap = async (content: string, at: number, derived?: string[]) =>
     ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { type: "synthesis" }, ...(derived ? { derived_from: derived } : {}) }}::jsonb, ${unit(at)}::vector) AS r`)[0].r as { id: string }).id;
 
@@ -5678,8 +5750,8 @@ console.log("\n[14] trace_provenance bounds its WORK on a dense DAG: each node e
   await sql`DELETE FROM thoughts`;
 }
 
-console.log("\n[15] search_thoughts_hybrid admits relative to the top match on real pgvector (migration 027, SMD-1300)");
-{
+if (want("15")) {
+  console.log("\n[15] search_thoughts_hybrid admits relative to the top match on real pgvector (migration 027, SMD-1300)");
   await sql`DELETE FROM thoughts`;
   // Three rows at known cosines to the query unit(0): top 0.30, near 0.18
   // (≥ 0.5×top, kept), far 0.10 (< 0.5×top, trimmed). All sit BELOW the old 0.5
@@ -5722,8 +5794,8 @@ console.log("\n[15] search_thoughts_hybrid admits relative to the top match on r
 // row, a reject leaving thoughts untouched, a second run not re-proposing a
 // rejected pair, and the cost line.
 
-console.log("\n[16] db/consolidate.ts: proposals through the claims, against a stub judge (migration 029, SMD-1294)");
-{
+if (want("16")) {
+  console.log("\n[16] db/consolidate.ts: proposals through the claims, against a stub judge (migration 029, SMD-1294)");
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_entities`;
   // The pass key from the one function that spells it (a hand-written "@p2"
@@ -7130,8 +7202,8 @@ console.log("\n[16] db/consolidate.ts: proposals through the claims, against a s
   await sql`DELETE FROM ob1_entities`;
 }
 
-console.log("\n[17] Over near-equidistant vectors the HNSW walk misses live rows an exact scan would find, and db/hnsw-graph.ts reads why from the index itself (SMD-1632)");
-{
+if (want("17")) {
+  console.log("\n[17] Over near-equidistant vectors the HNSW walk misses live rows an exact scan would find, and db/hnsw-graph.ts reads why from the index itself (SMD-1632)");
   // Why [7]'s found-by reads flaked, reproduced deterministically. Over the
   // suite's orthogonal unit axes (every pair at cosine distance 1.0) pgvector's
   // HNSW graph is not connected, so a search from the entry point misses a live
@@ -7279,8 +7351,8 @@ console.log("\n[17] Over near-equidistant vectors the HNSW walk misses live rows
 
 // ── 18. The community schemas over TCP ───────────────────────────────────────
 
-console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema, applies over TCP with no Supabase role present, and migrate.ts --grant makes a LOGIN role able to use them (SMD-1796, SMD-1810)");
-{
+if (want("18")) {
+  console.log("\n[18] Every schemas/*.sql, then every extension and recipe schema, applies over TCP with no Supabase role present, and migrate.ts --grant makes a LOGIN role able to use them (SMD-1796, SMD-1810)");
   // test-schema [40] and [50] are the PGlite halves of this; here is what PGlite cannot do:
   // the migrator's --grant over TCP — its presence probe against a real
   // server's to_regclass/to_regprocedure, its "not yet present, skipped" list
@@ -7475,8 +7547,8 @@ function syncHarness(unitIndex: number) {
   return { store, calls, writer, dbNow, sync };
 }
 
-console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled and idempotent, an edit moves one row, duplicate content is skipped, and a file of items goes through the CLI end to end (SMD-1806, SMD-2136)");
-{
+if (want("19")) {
+  console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled and idempotent, an edit moves one row, duplicate content is skipped, and a file of items goes through the CLI end to end (SMD-1806, SMD-2136)");
   const count = (s: string) => sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'source' = ${s}`.then((r) => r[0].c);
   const mk = (source: Doc["source"], key: string, content: string): Doc => ({ id: recordId(source, key), content, source, meta: {} });
 
@@ -7659,10 +7731,10 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`; // per-id: Bun binds a JS array as a comma string, not a {…} literal
 }
 
-console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary database (SMD-1806), and the CLI names a side that does not answer (SMD-2182); --replay and --diff run over HTTP since SMD-2875 (db/test-brain-compare.ts)");
-{
+if (want("20")) {
+  console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary database (SMD-1806), and the CLI names a side that does not answer (SMD-2182); --replay and --diff run over HTTP since SMD-2875 (db/test-brain-compare.ts)");
   // A real pg_dump refresh needs client tools this job does not have: the
-  // deploy-stack job runs one through deploy/tier.sh (SMD-2036), and below,
+  // deploy-stack-brains job runs one through deploy/tier.sh (SMD-2036), and below,
   // stand-in tools drive refresh() to its restore and the guards run before
   // any tool is looked for.
   await sql`DELETE FROM query_log`; // the log empty for the sections after, as it was when this one replayed it
@@ -8096,8 +8168,8 @@ console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary d
   await sql`DELETE FROM query_log`;
 }
 
-console.log("\n[21] said_by on real pgvector: the mark 050 stamps is filtered through 014's route — 001's GIN index, scanned inside the call — and the answer is the operator's rows alone (SMD-1726)");
-{
+if (want("21")) {
+  console.log("\n[21] said_by on real pgvector: the mark 050 stamps is filtered through 014's route — 001's GIN index, scanned inside the call — and the answer is the operator's rows alone (SMD-1726)");
   // The ticket's verification: EXPLAIN cannot see into plpgsql, so the route
   // is read the way [5] reads it — the GIN index's scan count before and after
   // one call. Rows through two classified keys, stamped by 050's trigger as
@@ -8134,8 +8206,8 @@ console.log("\n[21] said_by on real pgvector: the mark 050 stamps is filtered th
   for (const id of [...opIds, ...botIds]) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
 }
 
-console.log("\n[21b] min_trust on real pgvector: an injected instruction through the ingester's key is stored and labelled, and min_trust operator excludes it through 074's index, scanned inside the call — 014's route, not a filter over the ranked list (SMD-1724)");
-{
+if (want("21b")) {
+  console.log("\n[21b] min_trust on real pgvector: an injected instruction through the ingester's key is stored and labelled, and min_trust operator excludes it through 074's index, scanned inside the call — 014's route, not a filter over the ranked list (SMD-1724)");
   // SMD-1724's Verify, the database half: the route read as [21] reads it,
   // the index's scan count before and after one call.
   await sql`SELECT set_agent_kind('op-trust', 'operator')`;
@@ -8173,8 +8245,8 @@ console.log("\n[21b] min_trust on real pgvector: an injected instruction through
   for (const id of [...opIds, ...impIds]) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
 }
 
-console.log("\n[22] one renderer, one merge rule: a corpus dump through ingest-records.ts and the board sync through sync-linear.ts converge on one row in both orders, and an older dump does not move a ticket back (SMD-1958)");
-{
+if (want("22")) {
+  console.log("\n[22] one renderer, one merge rule: a corpus dump through ingest-records.ts and the board sync through sync-linear.ts converge on one row in both orders, and an older dump does not move a ticket back (SMD-1958)");
   const { store, calls, dbNow, sync } = syncHarness(7);
   const ticketRows = async (identifier: string) => (await sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'issue' = ${identifier}`)[0].c as number;
   const holderOf = async (identifier: string) => (await sql`SELECT thought_id::text AS t, canonical FROM thought_sources WHERE system = 'linear' AND identity = ${identifier}`)[0] as { t: string; canonical: string } | undefined;
@@ -8254,8 +8326,8 @@ console.log("\n[22] one renderer, one merge rule: a corpus dump through ingest-r
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
 }
 
-console.log("\n[23] a ticket's dated sections are thoughts of their own — derived_from the ticket, type observation, one row per section from either writer, and both writers converge on them (SMD-2059)");
-{
+if (want("23")) {
+  console.log("\n[23] a ticket's dated sections are thoughts of their own — derived_from the ticket, type observation, one row per section from either writer, and both writers converge on them (SMD-2059)");
   const { store, calls, dbNow, sync } = syncHarness(9);
   const holderOf = async (identifier: string) => (await sql`SELECT thought_id::text AS t FROM thought_sources WHERE system = 'linear' AND identity = ${identifier}`)[0]?.t as string | undefined;
   const partsOf = async (identifier: string) => (await sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'ticket' = ${identifier}`)[0].c as number;
@@ -8320,8 +8392,8 @@ console.log("\n[23] a ticket's dated sections are thoughts of their own — deri
 // to 5 s, which also bounds a lock that never released. The holder is a second
 // connection with a transaction held open.
 
-console.log("\n[24] resolve_agent under a held key row: a recently used key answers without waiting, a stale one waits, and a revocation or a delete that commits during the wait is what the lookup answers (migration 054, SMD-2090)");
-{
+if (want("24")) {
+  console.log("\n[24] resolve_agent under a held key row: a recently used key answers without waiting, a stale one waits, and a revocation or a delete that commits during the wait is what the lookup answers (migration 054, SMD-2090)");
   type R = { ok: boolean; error?: string; agent_id?: string; created?: boolean; rotated?: boolean };
   const keys = { fresh: "b1".repeat(32), stale: "b2".repeat(32), race: "b3".repeat(32), gone: "b4".repeat(32), early: "b5".repeat(32), store: "b6".repeat(32), rr: "b8".repeat(32) };
   const labelOf = (k: keyof typeof keys) => `live-2090-${k}`;
@@ -8563,8 +8635,8 @@ console.log("\n[24] resolve_agent under a held key row: a recently used key answ
 
 await sql.close();
 
-console.log("\n[25] Migration 055's payload backfill under two connections: a second pass beside a held one skips what the first filled and counts only its own; the derivation of a capture whose update was stamped before it by an older transaction reads that update (SMD-2115)");
-{
+if (want("25")) {
+  console.log("\n[25] Migration 055's payload backfill under two connections: a second pass beside a held one skips what the first filled and counts only its own; the derivation of a capture whose update was stamped before it by an older transaction reads that update (SMD-2115)");
   // PGlite is one connection, so test-schema [51] cannot hold what the
   // header promises of two passes at once — the fill's re-read under the row
   // lock (`NOT COALESCE(a.diff ? 'content', false)`) is what makes the second
@@ -8717,8 +8789,8 @@ console.log("\n[25] Migration 055's payload backfill under two connections: a se
   await sql.close();
 }
 
-console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim: the export pages every thought past one page and skips a table that is not there, the sweep's counts are the table's, neither needs a key, and a Supabase URL is refused before any query (SMD-2144)");
-{
+if (want("26")) {
+  console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim: the export pages every thought past one page and skips a table that is not there, the sweep's counts are the table's, neither needs a key, and a Supabase URL is refused before any query (SMD-2144)");
   // The two read-only recipe scripts SMD-2126 sent to compat/supabase-sql,
   // driven as deployed — `bun <file>` in a directory of their own, SUPABASE_URL
   // the one variable — against this database carrying the schemas their reads
@@ -8883,8 +8955,8 @@ console.log("\n[26] recipes/brain-backup and recipes/lint-sweep on the SQL shim:
   }
 }
 
-console.log("\n[28] Migration 060 on a real server: the windowed capture and an edit with windows append then project (PGlite cannot drive the chunk INSERT); two identical captures racing serialise on the fingerprint lock into one row and one event; a fold's replay on one connection beside a live capture on another; a delete racing the successor's edit (SMD-2116)");
-{
+if (want("28")) {
+  console.log("\n[28] Migration 060 on a real server: the windowed capture and an edit with windows append then project (PGlite cannot drive the chunk INSERT); two identical captures racing serialise on the fingerprint lock into one row and one event; a fold's replay on one connection beside a live capture on another; a delete racing the successor's edit (SMD-2116)");
   // Its own pool: the section before closes the shared one.
   const sql = new SQL({ url: URL_, max: 4 });
   await sql`DELETE FROM thoughts`;
@@ -9083,8 +9155,8 @@ console.log("\n[28] Migration 060 on a real server: the windowed capture and an 
 // is lower when a group is skipped (PostgreSQL 18, or JIT off), so only a full
 // run — as CI's pg16-with-JIT job is — is compared to the headline (SMD-1805).
 
-console.log("\n[27] search_thoughts_current against a hand oracle on real Postgres: ties in score go to the current row, then to the hybrid's order, whichever order the join hands the rows over in (migration 059, SMD-2255)");
-{
+if (want("27")) {
+  console.log("\n[27] search_thoughts_current against a hand oracle on real Postgres: ties in score go to the current row, then to the hybrid's order, whichever order the join hands the rows over in (migration 059, SMD-2255)");
   // test-schema [55] holds the rule under PGlite, whose small plans hand the
   // window to the final sort in the hybrid's order, so a tie-break by that
   // order is invisible there (review pass 1: dropping it survived [55]). Here
@@ -9147,8 +9219,8 @@ console.log("\n[27] search_thoughts_current against a hand oracle on real Postgr
   await sql.close();
 }
 
-console.log("\n[29] recipes/thought-enrichment on the SQL shim: the type and sensitivity backfills write the planted rows' columns and nothing else, the enrichment writes a stub model's answer as metadata objects and checkpoints, a refused write ends a run on its first row, a role granted the README's privileges writes, and no URL, a Supabase URL or a refused connection is one line naming no value (SMD-2139)");
-{
+if (want("29")) {
+  console.log("\n[29] recipes/thought-enrichment on the SQL shim: the type and sensitivity backfills write the planted rows' columns and nothing else, the enrichment writes a stub model's answer as metadata objects and checkpoints, a refused write ends a run on its first row, a role granted the README's privileges writes, and no URL, a Supabase URL or a refused connection is one line naming no value (SMD-2139)");
   // The three enrichment scripts SMD-2126 sent to compat/supabase-sql — the
   // class's first writers — driven as deployed: `bun <file>` in a directory
   // of their own, SUPABASE_URL the one variable beyond PATH and HOME, against
@@ -9456,8 +9528,8 @@ console.log("\n[29] recipes/thought-enrichment on the SQL shim: the type and sen
   }
 }
 
-console.log("\n[30] Migration 061 on a real server: the windowed capture's lineage (PGlite cannot drive the chunk INSERT) — the 4-argument form records the chunk set from the envelope's recipe, or the label alone marked undeclared; an edit with windows replaces the row under 'edit' at the new text, an edit without windows drops it, a re-capture under another label drops it with the windows (022); lineage.ts's recipe builder is the one spelling the server sends (SMD-1731)");
-{
+if (want("30")) {
+  console.log("\n[30] Migration 061 on a real server: the windowed capture's lineage (PGlite cannot drive the chunk INSERT) — the 4-argument form records the chunk set from the envelope's recipe, or the label alone marked undeclared; an edit with windows replaces the row under 'edit' at the new text, an edit without windows drops it, a re-capture under another label drops it with the windows (022); lineage.ts's recipe builder is the one spelling the server sends (SMD-1731)");
   // Its own pool, as [28] has: the sections before close the shared one.
   const sql = new SQL({ url: URL_, max: 2 });
   await sql`DELETE FROM thoughts`;
@@ -9566,8 +9638,8 @@ console.log("\n[30] Migration 061 on a real server: the windowed capture's linea
   await sql.close();
 }
 
-console.log("\n[31] Migration 063 on a real server: db/rebuild.ts drives rebuild_derived — a dry run keeps nothing, a run feeds the three pools and sets the proposal stale, --status reads the census, --orphans sweeps a row whose windows a raw delete removed; the walk rides the GIN index; two sessions racing — a rebuild against a reviewer's accept (serialised by the supersession lock), a forget-arm rebuild against a worker's extraction (the entity lock, no deadlock) (SMD-1732)");
-{
+if (want("31")) {
+  console.log("\n[31] Migration 063 on a real server: db/rebuild.ts drives rebuild_derived — a dry run keeps nothing, a run feeds the three pools and sets the proposal stale, --status reads the census, --orphans sweeps a row whose windows a raw delete removed; the walk rides the GIN index; two sessions racing — a rebuild against a reviewer's accept (serialised by the supersession lock), a forget-arm rebuild against a worker's extraction (the entity lock, no deadlock) (SMD-1732)");
   // Its own pool, as [30] has.
   const sql = new SQL({ url: URL_, max: 2 });
   await sql`DELETE FROM thoughts`;
@@ -9699,8 +9771,8 @@ console.log("\n[31] Migration 063 on a real server: db/rebuild.ts drives rebuild
   await sql.close();
 }
 
-console.log("\n[32] Migration 064 on a real server: the page store under concurrency — two sessions' first write of one section serialise on the page (one created, one updated), two sessions on two sections of one page leave the render the thought's content, a human's edit and a machine's regeneration racing leave the human's text live whichever commits first, a section write racing delete_thought of the page waits and finds no page (no deadlock), two creates of one slug — one title or two — leave one page and one refusal by name (SMD-1812)");
-{
+if (want("32")) {
+  console.log("\n[32] Migration 064 on a real server: the page store under concurrency — two sessions' first write of one section serialise on the page (one created, one updated), two sessions on two sections of one page leave the render the thought's content, a human's edit and a machine's regeneration racing leave the human's text live whichever commits first, a section write racing delete_thought of the page waits and finds no page (no deadlock), two creates of one slug — one title or two — leave one page and one refusal by name (SMD-1812)");
   const sql = new SQL({ url: URL_, max: 1 });
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM derivations`;
@@ -9831,8 +9903,8 @@ console.log("\n[32] Migration 064 on a real server: the page store under concurr
   await sql.close();
 }
 
-console.log("\n[33] Migration 068's projection under two connections: writers of one ticket serialise on its key and the later one recomputes from the earlier's commit; a row gaining a key while it is superseded holds its own pointer lock; a pointer write waits for a concurrent move of its target's issue; two successors at once; a ticket write reads no whole table; the suite leaves no drift (SMD-2256)");
-{
+if (want("33")) {
+  console.log("\n[33] Migration 068's projection under two connections: writers of one ticket serialise on its key and the later one recomputes from the earlier's commit; a row gaining a key while it is superseded holds its own pointer lock; a pointer write waits for a concurrent move of its target's issue; two successors at once; a ticket write reads no whole table; the suite leaves no drift (SMD-2256)");
   // test-schema [62] holds the rules on one connection; what it cannot hold is
   // a second writer's uncommitted row. Each race below goes stale without the
   // lock it names, and drift() — 058's formulas against the
@@ -10095,12 +10167,12 @@ console.log("\n[33] Migration 068's projection under two connections: writers of
   await db`DELETE FROM thoughts WHERE metadata->>'kind' = 'race2256'`;
   const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_ticket_head WHERE issue IN ('R-1', 'A-1', 'D-1', 'M-1', 'M-2') OR issue LIKE 'G-%') AS heads`;
   assert(suiteDrift === 0 && left.drift === 0 && left.heads === 0,
-    `every section before this one left the projection exact (${suiteDrift}), and deleting this section's rows takes their heads with them (${left.heads} left, drift ${left.drift})`);
+    `every section this run ran before this one left the projection exact (${suiteDrift}), and deleting this section's rows takes their heads with them (${left.heads} left, drift ${left.drift})`);
   await db.close();
 }
 
-console.log("\n[34] The reset guards ask the server where the connection went: an exported PGDATABASE that beats the URL's database refuses dropSchema and tier.ts --refresh, override or not, and the refresh asks again on the connection that drops (SMD-2317)");
-{
+if (want("34")) {
+  console.log("\n[34] The reset guards ask the server where the connection went: an exported PGDATABASE that beats the URL's database refuses dropSchema and tier.ts --refresh, override or not, and the refresh asks again on the connection that drops (SMD-2317)");
   // Bun 1.4.0 lets an exported PGDATABASE beat the URL's database, and
   // dropSchema(".../canary") with PGDATABASE=stable dropped stable's tables in
   // SMD-2302's review. Two scratch databases, each with a `thoughts` table as
@@ -10390,8 +10462,8 @@ console.log("\n[34] The reset guards ask the server where the connection went: a
 // this is the resolve half, which needs resolve_agent: a valid key gets an agent
 // id and its name through SqlStore.resolveAgent (the lock_timeout cap the raw
 // call the workers ran did not have), and a revoked one is refused.
-console.log("\n[24b] workerIdentity: a valid worker key resolves to an agent id and its name through the capped path; a revoked key is refused (SMD-2303)");
-{
+if (want("24b")) {
+  console.log("\n[24b] workerIdentity: a valid worker key resolves to an agent id and its name through the capped path; a revoked key is refused (SMD-2303)");
   const raw = "live-2303-worker-key";
   const hash = hashKey(raw);
   const spec = `extract-worker:write:${hash}`;
@@ -10413,8 +10485,8 @@ console.log("\n[24b] workerIdentity: a valid worker key resolves to an agent id 
     "a revoked key is refused with its revocation time and reason, and never runs");
 }
 
-console.log("\n[35] Migration 071's gate under two connections: a status move and a source write of one thought take turns on its bucket, either way round, and the mirror reads the later commit; a take and a status move of both its thoughts, and a thought's delete and its source row's, commit without a deadlock; node_state(<ids>) reads its links by index on a brain of twenty thousand; the suite leaves no drift (SMD-2267)");
-{
+if (want("35")) {
+  console.log("\n[35] Migration 071's gate under two connections: a status move and a source write of one thought take turns on its bucket, either way round, and the mirror reads the later commit; a take and a status move of both its thoughts, and a thought's delete and its source row's, commit without a deadlock; node_state(<ids>) reads its links by index on a brain of twenty thousand; the suite leaves no drift (SMD-2267)");
   // test-schema [63] holds the rules on one connection; what it cannot hold is
   // a second writer's uncommitted row. drift()'s source_gate arm is the check.
   const db = new SQL({ url: URL_!, max: 1 });
@@ -10790,12 +10862,12 @@ console.log("\n[35] Migration 071's gate under two connections: a status move an
   await db`DELETE FROM thoughts WHERE metadata->>'kind' = 'race2267'`;
   const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_source_gate g WHERE NOT EXISTS (SELECT 1 FROM thought_sources s WHERE s.thought_id = g.thought_id)) AS orphans`;
   assert(suiteDrift === 0 && left.drift === 0 && left.orphans === 0,
-    `every section before this one left the projection and the gate exact (${suiteDrift}), and deleting this section's rows takes their mirror rows with them (${left.orphans} left, drift ${left.drift})`);
+    `every section this run ran before this one left the projection and the gate exact (${suiteDrift}), and deleting this section's rows takes their mirror rows with them (${left.orphans} left, drift ${left.drift})`);
   await db.close();
 }
 
-console.log("\n[36] db/weekly-digest.ts: the digest is a sink through the egress gate (SMD-2239) — under the default deny the synthesized digest is refused before it reaches Telegram and the refusal names the rule; declared by an OB1_EGRESS_ALLOW type:digest term it posts. One stub answers both hops: it records zero Telegram sends under deny (the gate holding), at least one when allowed (not a dead sender). The chat endpoint is declared local so only the Telegram gate varies.");
-{
+if (want("36")) {
+  console.log("\n[36] db/weekly-digest.ts: the digest is a sink through the egress gate (SMD-2239) — under the default deny the synthesized digest is refused before it reaches Telegram and the refusal names the rule; declared by an OB1_EGRESS_ALLOW type:digest term it posts. One stub answers both hops: it records zero Telegram sends under deny (the gate holding), at least one when allowed (not a dead sender). The chat endpoint is declared local so only the Telegram gate varies.");
   // A connection of this section's own — the shared `sql` has sat idle through
   // the long prior section and its single pooled connection is closed by now.
   const wsql = new SQL({ url: URL_!, max: 1 });
@@ -10900,8 +10972,8 @@ console.log("\n[36] db/weekly-digest.ts: the digest is a sink through the egress
   }
 }
 
-console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one ob1_config row per worker and job, stamped after each pass and re-stamped while one runs, a failed write said once, and board-sync's loop stamping ok, failed and stopped (SMD-2261)");
-{
+if (want("37")) {
+  console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one ob1_config row per worker and job, stamped after each pass and re-stamped while one runs, a failed write said once, and board-sync's loop stamping ok, failed and stopped (SMD-2261)");
   const hsql = new SQL({ url: URL_!, max: 2 });
   const row = async (key: string) => {
     const [r] = await hsql`SELECT value, extract(epoch FROM now() - updated_at)::float8 AS age FROM ob1_config WHERE key = ${key}`;
@@ -11073,8 +11145,8 @@ console.log("\n[37] db/pass-stamp.ts: a long-running worker's heartbeat — one 
   }
 }
 
-console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet, extraction alone until its pool drains, then consolidation beside it; a live read or write wakes it and the passes stop at once, their leases returned; a sync write does not; the passes write no audit row and nothing to thoughts.supersedes; --follow's heartbeat is heartbeat:sleep (SMD-1794)");
-{
+if (want("38")) {
+  console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet, extraction alone until its pool drains, then consolidation beside it; a live read or write wakes it and the passes stop at once, their leases returned; a sync write does not; the passes write no audit row and nothing to thoughts.supersedes; --follow's heartbeat is heartbeat:sleep (SMD-1794)");
   // The suite's client closed at [24]; each section since opens its own.
   const sql = new SQL({ url: URL_, max: 4 });
   await sql`DELETE FROM thoughts`;
@@ -11380,12 +11452,23 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const wakesBefore = lines.filter((l) => /awake: a live/.test(l)).length;
     const synced = await capture("A ticket the sync copied in.", "sync-sleep", 0, 3);
     const [syncKind] = await sql`SELECT actor_kind FROM thought_audit WHERE thought_id = ${synced}::uuid ORDER BY created_at DESC LIMIT 1`;
+    // A mend (SMD-2889): the servers' vector mender giving a row saved without
+    // one its vector is background work, as the passes are — it leaves the
+    // brain asleep, though its event's actor_kind is NULL.
+    const mendText = "A row saved without a vector, which the mender gives one.";
+    const bare = ((await sql`SELECT upsert_thought(${mendText}, ${{ metadata: { source: "live" }, actor: { name: "sync-sleep", via: "test-live" } }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
+    const [{ ts }] = await sql`SELECT COALESCE(updated_at, created_at) AS ts FROM thoughts WHERE id = ${bare}::uuid`;
+    const [{ r: mended }] = await sql`SELECT update_thought(${bare}::uuid, ${mendText}::text, NULL::jsonb, ${unit(2)}::vector, NULL::jsonb, ${ts}::timestamptz,
+      ${actorPayload({ name: MENDER_ACTOR, via: "open-brain", background: MENDER_ACTOR })}::jsonb, 'stub-model'::text, NULL::jsonb, NULL::jsonb, NULL::jsonb) AS r`;
+    const [mendEvent] = await sql`SELECT actor_name, actor_kind, actor_context->>'background' AS background FROM thought_audit WHERE thought_id = ${bare}::uuid AND action = 'update'`;
     await Bun.sleep(2500);
     const wakesAfterSync = lines.filter((l) => /awake: a live/.test(l)).length;
     await capture("A note typed by the operator.", "op-sleep", 0, 3);
     await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 10_000);
     assert(syncKind?.actor_kind === "ingested" && wakesAfterSync === wakesBefore && lines.some((l) => /awake: a live write/.test(l)),
-      `a sync write ('ingested') leaves it asleep; an operator's capture wakes it (${syncKind?.actor_kind}; ${wakesAfterSync - wakesBefore} wake(s) on the sync write)`);
+      `a sync write ('ingested') and a mend leave it asleep; an operator's capture wakes it (${syncKind?.actor_kind}; ${wakesAfterSync - wakesBefore} wake(s) on the sync write and the mend)`);
+    assert((mended as { ok?: boolean }).ok === true && mendEvent?.actor_name === MENDER_ACTOR && mendEvent.actor_kind === null && mendEvent.background === MENDER_ACTOR,
+      `…and so does the vector mender's write, an event with no actor_kind (${JSON.stringify(mendEvent)})`);
     ac.abort();
     const followCode = await following;
     const endBeat = await beat();
@@ -12011,8 +12094,8 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
   }
 }
 
-console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 3.5 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694); a capture made during a sleep goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same sleep; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008)");
-{
+if (want("38b")) {
+  console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 3.5 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694); a capture made during a sleep goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same sleep; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008)");
   const sql = new SQL({ url: URL_, max: 4 });
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM query_log`;
@@ -12352,8 +12435,8 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     // judge's pool never drained, and parked extraction got nothing for the
     // sleep (SMD-3008). The judge on its own model, as a judge that will not
     // load beside a serving extraction model is; at its start (a probe
-    // answering 500) and mid-pass (judgements answering "not found", a missing
-    // model, which a follower waits out at once rather than after its pauses).
+    // answering 500) and mid-pass (judgements answering "not found", which
+    // starts the wait at once rather than after the pauses, its probes 500).
     const envJ: Record<string, string | undefined> = { ...env, OB1_JUDGE_MODEL: JUDGE };
     const COJ = consolidateKey(JUDGE);
     const judgeCase = async (mid: boolean) => {
@@ -12368,17 +12451,25 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
       await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${stalledJ}::uuid, ${EX}, ${fpj}, ${sig}, 3, 3)`;
       await capture("We bill monthly, decided in March.", 3, 0);
       await capture("We bill annually now.", 0, 0);
-      // At its start, beside a lease a scheduler gone left on a stalled thought
-      // of its own — not this process's, so it neither sets the let-out
+      // At its start, beside a lease another host's scheduler holds on a
+      // stalled thought — not this process's, so it neither sets the let-out
       // aside nor is claimed (a day left on it) — and with two workers, the
       // let-out's one worker not claiming the stalled thought beside the
       // note (review pass 2).
       if (!mid) {
-        const foreign = await capture("The stuckdoc note another host's scheduler left a lease on.", 0, 21);
-        await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'extract-otherhost-1-0-deadbeef', claimed_at = now(), ttl_expires_at = now() + interval '1 day', attempt_count = 1
-                   WHERE thought_id = ${foreign}::uuid AND work_type = ${EX}`;
-        const [{ fpf }] = await sql`SELECT content_fingerprint AS fpf FROM thoughts WHERE id = ${foreign}::uuid`;
-        await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${foreign}::uuid, ${EX}, ${fpf}, ${sig}, 3, 3)`;
+        /** A stalled thought another scheduler holds a lease on, under `worker`, claimed `ago` before now, a day left on it. */
+        const plantLease = async (text: string, axis: number, worker: string, ago: string) => {
+          const id = await capture(text, 0, axis);
+          await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = ${worker}, claimed_at = now() - ${ago}::interval, ttl_expires_at = now() + interval '1 day', attempt_count = 1
+                     WHERE thought_id = ${id}::uuid AND work_type = ${EX}`;
+          const [{ fpl }] = await sql`SELECT content_fingerprint AS fpl FROM thoughts WHERE id = ${id}::uuid`;
+          await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${id}::uuid, ${EX}, ${fpl}, ${sig}, 3, 3)`;
+        };
+        await plantLease("The stuckdoc note another host's scheduler left a lease on.", 21, "extract-otherhost-1-0-deadbeef", "0 seconds");
+        // And one under this process's own worker-id prefix, claimed before the
+        // run began — a container restarted in place keeps its hostname and pid,
+        // and its last run's lease lives on: not this run's (post-merge review).
+        await plantLease("The stuckdoc note this container's last run left a lease on.", 22, `extract-${hostname()}-${process.pid}-9-deadbeef`, "10 minutes");
       }
       // At its start: down from the first. Mid-pass: up at the start, down from the first judgement.
       judgeProbeDown = !mid;
@@ -12531,6 +12622,19 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     await Promise.race([orderRun, Bun.sleep(15_000)]);
     assert(order.moved && order.n === 2 && order.ids[0] === planted,
       `as a sleep begins the stopped thoughts move behind new captures, the less stalled first though it was the newer, no two dated alike (${JSON.stringify({ ...order, planted, planted2 })})`);
+    // A forward date outlives its stop record: a thought finished since and put
+    // back by a --retry-* flag keeps it, and went behind every capture for up
+    // to 30 days. The sleep's move dates it now (post-merge review).
+    const retried = await capture("A note put back by --retry-partial after it finished.", 0, 23);
+    await sql`UPDATE thought_work_claims SET enqueued_at = now() + interval '20 days' WHERE thought_id = ${retried}::uuid AND work_type = ${EX}`;
+    let stopRetried: PassStop | null = null;
+    const retriedRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, onPass: (s) => { stopRetried = s; }, writer: { out: () => {}, err: () => {} } });
+    const redated = await pollUntil(async () => ((await sql`SELECT enqueued_at <= now() AS ok FROM thought_work_claims WHERE thought_id = ${retried}::uuid AND work_type = ${EX}`)[0] as { ok: boolean } | undefined)?.ok === true, 15_000);
+    (stopRetried as PassStop | null)?.();
+    await (stopRetried as PassStop | null)?.();
+    await Promise.race([retriedRun, Bun.sleep(15_000)]);
+    await sql`DELETE FROM thoughts WHERE id = ${retried}::uuid`;
+    assert(redated, "a forward-dated row that is no longer a stopped thought (put back by a retry after it finished) is dated now as a sleep begins, not left behind every capture");
     // A scheduler started while thoughts are held names them before its first sleep.
     // The row case C's scheduler ended names its own stuck thought: gone first.
     await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
@@ -12603,8 +12707,8 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
   }
 }
 
-console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N connections are N backends at once, no call starts after the deadline, every pair is reached, the first error stops the run and is thrown, and the container's memory and CPU are read or the reason they are not is given (SMD-1500)");
-{
+if (want("39")) {
+  console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N connections are N backends at once, no call starts after the deadline, every pair is reached, the first error stops the run and is thrown, and the container's memory and CPU are read or the reason they are not is given (SMD-1500)");
   const pool = Array.from({ length: 4 }, () => new SQL({ url: URL_, max: 1 }));
   const memory = new SQL({ url: URL_, max: 1 });
   /** Every run bounded: a loop that ignored its deadline would otherwise hang the suite. */
@@ -12678,8 +12782,8 @@ console.log("\n[39] db/bench-load.ts: bench-hnsw's section F closed loop — N c
   }
 }
 
-console.log("\n[40] BITMAP_BYTES_PER_PAGE against this server: a TID bitmap over N heap pages stays exact at N × 64 bytes of work_mem and goes lossy below it — the constant preflight's filter bitmap memory row reports the bitmap against work_mem with (SMD-1499)");
-{
+if (want("40")) {
+  console.log("\n[40] BITMAP_BYTES_PER_PAGE against this server: a TID bitmap over N heap pages stays exact at N × 64 bytes of work_mem and goes lossy below it — the constant preflight's filter bitmap memory row reports the bitmap against work_mem with (SMD-1499)");
   // ~4,000 pages with a matching row on every one, a forced bitmap heap scan,
   // and work_mem 8 kB either side of the rule (this layout: 34 rows a page,
   // ~4,118 pages, rule ~257 kB). A separate first measurement on PostgreSQL
@@ -12713,8 +12817,8 @@ console.log("\n[40] BITMAP_BYTES_PER_PAGE against this server: a TID bitmap over
   }
 }
 
-console.log("\n[41] db/board-findings.ts: a consolidation finding between two tickets the board does not link is posted as one comment on the newer ticket, against a stub Linear GraphQL endpoint — once per ticket pair and word, never for a non-Linear side, one ticket's two rows, a settled proposal, a pair linked or marked duplicate since, or a closed relation; a marker on either ticket, as Linear returns it, is recorded, not posted; the cap and two posters at once, the egress gate and its re-gate, a failed or unanswered post, a ticket Linear has not, the census, a dry run and a granted role (SMD-2681)");
-{
+if (want("41")) {
+  console.log("\n[41] db/board-findings.ts: a consolidation finding between two tickets the board does not link is posted as one comment on the newer ticket, against a stub Linear GraphQL endpoint — once per ticket pair and word, never for a non-Linear side, one ticket's two rows, a settled proposal, a pair linked or marked duplicate since, or a closed relation; a marker on either ticket, as Linear returns it, is recorded, not posted; the cap and two posters at once, the egress gate and its re-gate, a failed or unanswered post, a ticket Linear has not, the census, a dry run and a granted role (SMD-2681)");
   const bsql = new SQL({ url: URL_!, max: 2 });
   // The stub: every operation logged by name; a ticket's comments kept so a
   // marker posted is read back; failNext answers one comment with an error.
@@ -13114,8 +13218,8 @@ console.log("\n[41] db/board-findings.ts: a consolidation finding between two ti
   }
 }
 
-console.log("\n[42] What became of a finding posted to the board — db/board-findings.ts --report and brain_info's Findings read, over one read: accepted (a proposal accepted, or the board linking the pair since, either way, from a section row too, duplicate_of included; a link taken back, or to a third ticket, is no answer), rejected (a reviewer's no outlasts a link), withdrawn (every proposal gone, or a relation the judge closed or re-judged to another word within the window), open (a stale proposal too), unanswered (a relation the judge closed after the window too); the pass's own settle is no reviewer's no, open (a relation re-judged at its word still stands), unanswered past the window, a found row apart; the rate; a granted server role reads it, one without the grant is told (SMD-2682)");
-{
+if (want("42")) {
+  console.log("\n[42] What became of a finding posted to the board — db/board-findings.ts --report and brain_info's Findings read, over one read: accepted (a proposal accepted, or the board linking the pair since, either way, from a section row too, duplicate_of included; a link taken back, or to a third ticket, is no answer), rejected (a reviewer's no outlasts a link), withdrawn (every proposal gone, or a relation the judge closed or re-judged to another word within the window), open (a stale proposal too), unanswered (a relation the judge closed after the window too); the pass's own settle is no reviewer's no, open (a relation re-judged at its word still stands), unanswered past the window, a found row apart; the rate; a granted server role reads it, one without the grant is told (SMD-2682)");
   const bsql = new SQL({ url: URL_!, max: 2 });
   const row = async (content: string, metadata: Record<string, unknown>) =>
     ((await bsql`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES (${content}, ${metadata}::jsonb, content_fingerprint_of(${content})) RETURNING id, content_fingerprint AS fp`)[0]) as { id: string; fp: string };
@@ -13353,8 +13457,8 @@ console.log("\n[42] What became of a finding posted to the board — db/board-fi
   }
 }
 
-console.log("\n[43] Migration 095: the stated-status label's inputs read the hits, not the log, under either plan — 060's order an index probe for a list (its every-row arm never runs), and the tickets matched by = ANY, with no join filter that pairs each event with each key (SMD-2540)");
-{
+if (want("43")) {
+  console.log("\n[43] Migration 095: the stated-status label's inputs read the hits, not the log, under either plan — 060's order an index probe for a list (its every-row arm never runs), and the tickets matched by = ANY, with no join filter that pairs each event with each key (SMD-2540)");
   const tsql = new SQL({ url: URL_!, max: 1 });
   try {
     // Sixty ticket rows, each moved through three statuses in place, as board-sync moves them.
@@ -13411,8 +13515,8 @@ console.log("\n[43] Migration 095: the stated-status label's inputs read the hit
   }
 }
 
-console.log("\n[44] Migration 096 on a real Postgres: pg_stat_statements created where the server offers it, left out by a migrator that is no superuser, and kept from PUBLIC on every run; login-role.ts --member-of pg_monitor (SMD-1849 PR 3b)");
-{
+if (want("44")) {
+  console.log("\n[44] Migration 096 on a real Postgres: pg_stat_statements created where the server offers it, left out by a migrator that is no superuser, and kept from PUBLIC on every run; login-role.ts --member-of pg_monitor (SMD-1849 PR 3b)");
   const xsql = new SQL({ url: URL_!, max: 1 });
   try {
     const [{ offered, installed }] = (await xsql`SELECT (SELECT count(*)::int FROM pg_available_extensions WHERE name = 'pg_stat_statements') AS offered, (SELECT count(*)::int FROM pg_extension WHERE extname = 'pg_stat_statements') AS installed`) as { offered: number; installed: number }[];
@@ -13579,17 +13683,95 @@ console.log("\n[44] Migration 096 on a real Postgres: pg_stat_statements created
   }
 }
 
-console.log("\n[doc] db/README.md states this suite's assertion total (full runs only)");
+if (want("45")) {
+  console.log("\n[45] Migration 098 on a real Postgres: a lock on a table the stated-status label reads costs a search at most 200 ms and its label, never the hold — the call fails 55P03, the store answers null and says so once, then reads again (SMD-2540)");
+  const holder = new SQL({ url: URL_!, max: 1 }), caller = new SQL({ url: URL_!, max: 1 });
+  const { createStore } = await import("../server-portable/store.ts");
+  const store = await createStore({ OB1_STORE: "sql", DATABASE_URL: URL_! });
+  const realWarn = console.warn, warned: string[] = [];
+  let release = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  // Whatever happens, the lock goes in 4 s: without 098's lock_timeout the reads below would wait it out, and fail, not hang.
+  const safety = setTimeout(() => release(), 4000);
+  try {
+    let locked = () => {};
+    const lockTaken = new Promise<void>((r) => (locked = r));
+    const holding = holder.begin(async (tx) => { await tx`LOCK TABLE thought_audit IN ACCESS EXCLUSIVE MODE`; locked(); await held; });
+    await lockTaken;
+    const t0 = performance.now();
+    const direct = await caller`SELECT count(*) FROM ticket_status_inputs(ARRAY[]::uuid[], ARRAY['SMD-1'])`.then(() => "answered", (e: { errno?: unknown }) => String(e?.errno));
+    const directMs = performance.now() - t0;
+    console.warn = (...a: unknown[]) => { warned.push(a.map(String).join(" ")); };
+    const t1 = performance.now();
+    const viaStore = [await store.ticketStatusInputs([], ["SMD-1"]), await store.ticketStatusInputs([], ["SMD-1"])];
+    const storeMs = performance.now() - t1;
+    console.warn = realWarn;
+    release();
+    await holding;
+    const after = await store.ticketStatusInputs([], ["SMD-1"]);
+    assert(direct === "55P03" && directMs < 1500,
+      `under an ACCESS EXCLUSIVE lock on thought_audit the call gives up with 55P03 (${direct}) in ${Math.round(directMs)} ms, not the hold`);
+    assert(viaStore.every((x) => x === null) && storeMs < 3000 && warned.length === 1 && /stated-status label not read \(55P03\)/.test(warned[0] ?? "") && after !== null,
+      `…the store answers null twice in ${Math.round(storeMs)} ms and says so once, then reads again once the lock goes (${JSON.stringify({ warned: warned.map((w) => w.slice(0, 60)), after: after !== null })})`);
+  } finally {
+    clearTimeout(safety);
+    release();
+    console.warn = realWarn;
+    await store.close();
+    await holder.close();
+    await caller.close();
+  }
+}
+
+console.log("\n[end] Every section this run ran left the node_state projection exact (SMD-3048)");
+{
+  // [33] and [35] check the projection after the sections before them, in the
+  // rest; this checks it after a run's last section, so a section in another
+  // shard, and one after [35], is checked too. A fresh client: [24] closed the
+  // suite's.
+  const db = new SQL({ url: URL_, max: 1 });
+  try {
+    const drifted = (await db`SELECT projection, key FROM ob1_node_projection_drift()`) as { projection: string; key: string }[];
+    assert(drifted.length === 0, `the projection and the source gate are exact after this run's ${begun.size} section(s) (${drifted.length} row(s) drifted${drifted.length ? `: ${drifted.slice(0, 3).map((r) => `${r.projection} ${r.key}`).join(", ")}` : ""})`);
+  } finally {
+    await db.close();
+  }
+}
+
+console.log("\n[doc] db/README.md states this suite's assertion total, and each shard's");
 {
   const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
   const n = total();
-  const claims = [...readme.matchAll(/^.*\btest-live\.ts\b.*$/gm)]
-    .flatMap((line) => [...line[0].matchAll(/(\d+)\s+assertions/g)].map((x) => Number(x[1])));
+  const lines = [...readme.matchAll(/^.*\btest-live\.ts\b.*$/gm)].map((m) => m[0]);
+  const counts = (ls: string[]) => ls.flatMap((l) => [...l.matchAll(/(\d+)\s+assertions/g)].map((x) => Number(x[1])));
+  const shardOf = (l: string) => /\bOB1_LIVE_SHARD=(\S+)/.exec(l)?.[1];
+  const full = counts(lines.filter((l) => shardOf(l) === undefined));
+  const byShard = new Map(SHARD_NAMES.map((s) => [s, counts(lines.filter((l) => shardOf(l) === s))]));
+  // On every run, the README's own sum: one count a shard, adding up to the
+  // full run's once [end], which every run has, is counted once. An
+  // assertion outside a want() section counts in every shard too, and shows
+  // here as the shards adding up to more than the full run.
+  const sum = [...byShard.values()].reduce((a, c) => a + (c[0] ?? 0), 0) - (SHARD_NAMES.length - 1);
+  const sumHolds = [...byShard.values()].every((c) => c.length === 1) && full.length > 0 && full.every((c) => c === sum);
+  docCheck(sumHolds,
+    `db/README.md quotes one count for each of test-live.ts's shards (${SHARD_NAMES.map((s) => `${s} ${byShard.get(s)!.join("/") || "none"}`).join(", ")}), adding up to its full run's, [end] counted once (${sum}; found ${[...new Set(full)].join(", ") || "none"})${sumHolds ? "" : " — if the README is right, look for a section or assertion with no want(), which runs in every shard"}`);
+  // No two headers share an id: a copied header would take its section to the other's shard unseen.
+  const twice = [...new Set(headed.filter((id, i) => headed.indexOf(id) !== i))];
+  docCheck(twice.length === 0, `every section header names an id of its own (${twice.length ? `${twice.map((id) => `[${id}]`).join(", ")} twice` : `${headed.length} headers`})`);
+  // Every section a shard lists is one this file has: a stale id would leave the shard short of what it says.
+  // The rest lists none: its job leaves a stale id to the shard that lists it.
+  if (SHARD !== "rest") {
+    const listed = SHARD === undefined ? [...LISTED] : SHARDS[SHARD];
+    const absent = listed.filter((id) => !begun.has(id));
+    docCheck(absent.length === 0, `every section ${SHARD === undefined ? "the shards list" : `shard ${SHARD} lists`} ran (${absent.length ? `none headed ${absent.map((id) => `[${id}]`).join(", ")}` : `${listed.length} listed`})`);
+  }
+  const claims = SHARD === undefined ? full : byShard.get(SHARD)!;
+  const run = SHARD === undefined ? "a full run" : `shard ${SHARD}`;
   if (skipped() === 0) {
     docCheck(claims.length > 0 && claims.every((c) => c === n),
-      `db/README.md quotes test-live.ts's ${n} assertions for a full run (found ${[...new Set(claims)].join(", ") || "none"})`);
+      `db/README.md quotes test-live.ts's ${n} assertions for ${run} (found ${[...new Set(claims)].join(", ") || "none"})`);
   } else {
-    console.log(`  ·  (doc) skipped — ${skipped()} skip(s), a group or an assertion, so this ${n}-assertion run is not the full count the README states`);
+    console.log(`  ·  (doc) skipped — ${skipped()} skip(s), a group or an assertion, so this ${n}-assertion run is not the count the README states for ${run}`);
   }
 }
 

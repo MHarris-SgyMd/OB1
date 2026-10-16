@@ -68,14 +68,85 @@ and why to a key that can read; that it was, to one that cannot), the write's
 audit row records the word (`thought_audit.actor_context.vector_failed`:
 `provider_unreachable`, `provider_timeout`, `provider_<status>` — that this
 write's call failed, which on a re-capture is not that the row has no vector),
-and `search_thoughts_keyword` finds it at once. The same text captured again
-once the provider answers takes its vector; so does a re-embed pass. Any other
+and `search_thoughts_keyword` finds it at once. The vector mender gives it its
+vector once the provider answers (below); so does the same text captured again,
+or a re-embed pass. Any other
 embedding failure still fails the capture — a 4xx (an input the model refuses, a
 credential, a model that is not there), a body that is not JSON, a vector of the
 wrong width — because those say the brain is misconfigured, and a thought with
 no vector is invisible to semantic search. An edit (`update_thought`) whose
 provider does not answer is refused whole, as before: nothing is lost, and
 storing the new text would clear a vector the thought had.
+
+The **vector mender** (`core/mend.ts`, SMD-2889) is what gives a thought with
+no vector its vector, by itself — one the provider did not answer for, one the
+gate refused, or one an import wrote bare. Both servers run one (`index.ts` and
+`api.ts`), every `OB1_VECTOR_MEND_INTERVAL` seconds (60 unless set, 1 to 86400;
+`0` or `off` for none), and a tick acts only while it holds a Postgres advisory
+lock (`ob1:vector-mender`) taken on a connection of its own, never the pool's,
+so one tick acts at a time across the two and across replicas. Each server
+keeps its own cursor, holds and log; the lock only takes turns, so a brain's
+two servers mend up to 8 rows a tick each (16 an interval), and a held row is
+tried by each on its own schedule. A session lock needs a session: behind a
+pooler in statement or transaction mode it is not let go where it was taken
+(the mender says so, once) — point `DATABASE_URL` at Postgres, or set the knob
+off on every server but one. The lock's connection is one beyond
+`OB1_PG_POOL` per server. A tick reads in id order from where the last stopped,
+passing over the rows the gate refuses and the rows held, until it has tried
+8 rows (a long row is a call per window and one for the whole, and a blurb call
+per window under `OB1_CHUNK_CONTEXT`), read 256 rows, or reached the end; a
+policy that refuses every call (deny with no allow term, an endpoint not
+declared local) makes it idle, said once. It embeds each by the capture's own
+path — windows, blurbs and the head-window fallback included — and writes it
+through `update_thought` with the stamp it read: one `update` event per row,
+actor `vector-mender` (marked `background` on the audit row, which
+`db/sleep.ts` reads past, as it reads past an ingested write), the row's own
+stamp (who wrote the text, its trust) kept, the egress decision recorded, and
+its `updated_at` moved, as any event moves it — an agent holding the old stamp
+for `if_unchanged_since` re-reads. The provider away needs no rule about which
+row is to blame: every failure holds its row — an outage-shaped one (refused,
+reset, timed out, 5xx, 408, 429, or a body that is not JSON, a proxy's page)
+for 1, 2, then up to 4 sweeps — and two outage-shaped failures in a row stop
+the tick, so the provider away costs two calls a tick at most. Two ticks
+running whose calls met outages and none was answered are the provider away,
+said once; the first answer after — a vector, or an HTTP status that is not an
+outage's — is its return, said, and lets every outage hold go, so the rows
+that waited through it are tried again at once. One such tick alone, or an
+outage met beside an answer, lets nothing go: a text the provider fails alone,
+a blip or a rate limit waits out its own short hold, and nothing is said; and a
+row that has failed three times speaks no more for the provider — a tick whose
+outages all met such rows counts toward no outage. An
+egress refusal is the row's failure and says nothing either way. A sweep's end
+drops the holds of rows no longer waiting (mended by another writer, or
+deleted); with no outage hold left, an outage that stood is over, and said so.
+The only row waiting through an outage has no other row's answer to show the
+provider back, so it waits out its hold: up to 4 sweeps, about 5 intervals. A row whose call
+or write fails otherwise (a 4xx other than 408 or 429, the wrong width, a write the database refuses)
+is held for 1, 2, 4 … up to 32 sweeps; the holds are the process's, so a
+restart tries every row again. A database not there to answer stops the tick, and the loop
+waits twice as long each time, up to 32 times the interval. The egress gate is
+asked what the row's writer asked: a row a key captured through a server (its
+capture's audit `origin` a server's name) as the capture was asked — the key
+and the text — and as a pass asks of a row, its metadata too, sent only when
+both allow, so a `source:` the caller claimed opens nothing and a `source:`
+deny term keeps the row home; any other row — an import's, board-sync's — as
+`db/reembed.ts` asks, its metadata and text and no actor, since its
+`actor_name` may be a label the tool chose, and again with that `actor_name`,
+so a deny term naming it (board-sync's own gate asked with its name) keeps it
+home. Blurbs the gate refuses for a row are left off and its windows go in
+bare, as a capture's do. The door and actor the mender trusts are the ones the
+capture's own session declared (046, 050): a database role in the capture
+group can name a server's door and a key, as it can name any actor today, so
+such roles are trusted as the servers are. A row edited between the read and the write is left
+for the next sweep (`STALE_READ`). `brain_info` (its `Vectors` row) and a keyed
+`/health` (`database.vectorless`) count the thoughts that wait. The cost lands
+as rows do: an import written bare for a later `db/reembed.ts`, or a backlog
+after an outage, is embedded on the configured provider — a hosted one's bill
+included — unless the knob is off. No mender runs over the PostgREST store —
+Cloudflare Workers has no process to hold the timer, and on Bun the servers say
+once that they start none — where the replies' "the server embeds it by
+itself" does not hold. `db/reembed.ts` stays the tool for a model change or a
+whole brain at once.
 
 A call the **egress gate** refuses is neither (`egress.ts`, SMD-1903). The
 server asks the gate before either call and makes only the ones it allows: a
@@ -301,6 +372,41 @@ demotes; `evals/eval-supersession.ts` records what the demotion finds higher
 (the current version, the live ticket) and lower (the topical answer, a note
 under a finished ticket, a finished ticket looked up by its key).
 
+### Tickets that moved since a hit was written (migration 095)
+
+Both searches label, and never rank lower, a hit naming a ticket whose status
+type has moved since the hit was written (SMD-2540): `search_thoughts` prints
+`⚠ Moved since written: SMD-2306 In Progress → Done; …` after the superseded
+and demoted lines, every moved ticket by key, and lists them in each hit's
+`moved` (`{ticket, was, now}` in status types; the REST answer carries each
+status's name and type); `search` gives that result `moved`, in status types
+over REST as well, and over MCP starts its title `[moved since written: …]` —
+before the thought's own words, which could forge it at the end. A status prints as its type's word (Triage,
+Backlog, Todo, In Progress, Done, Canceled), never the board's name: any write
+key can write a ticket row's name, and it would print on other people's hits.
+A hit's first 50 keys, in the order it mentions them, are read; the rest are
+counted (`movedNotRead`; beside a move, `(+N more named past the first 50, not
+checked)`). Written is
+the session's end the hook's last line records, else the row's stored time,
+and a ticket that already held its current type an hour later is the writer's
+own move, not labelled — the reading `evals/eval-stated-status.ts` measured
+(`server-portable/stated-status.ts`).
+A superseded hit, a ticket row and a note filed under a ticket are not
+checked: their `moved` is null, as is every hit naming a ticket on a brain
+before 095; an empty one means checked and nothing moved. The inputs are one call to 095's
+`ticket_status_inputs`, made only when a hit names a ticket; a brain before
+095, or a role without `ob1_config`, labels nothing and searches as before.
+
+There is no switch: the label never moves a rank or refuses a search. A wrong
+label is a wrong reading of one ticket. Its status now is the ticket's head
+(`SELECT head_id, status, status_type FROM ob1_ticket_head WHERE issue =
+'SMD-…'`): a write key's ticket row with a later `linear_updated_at` takes
+it (SMD-3047), so `delete_thought` that row, or `update_thought` it with
+`metadata_patch: {"issue": null}` — an edit of its text alone leaves it the
+head — and board-sync's own row is read again. A list step can read a count as a ticket
+(`SMD-2306, 1006 summaries` names SMD-1006), labelled only if that ticket
+exists and moved.
+
 ## Steps
 
 ### 1. Install
@@ -347,7 +453,7 @@ slip — `OB1_STORE=postgrest` kept beside a `SUPABASE_URL` that holds a
 `postgres://` string — is refused by name too, the string masked, rather than
 handed to supabase-js as a base URL.
 
-Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, and on Bun `OB1_STOP_GRACE` (the platform's grace period for a stop, in whole seconds with no unit; default 10 — see Caveats).
+Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, and on Bun `OB1_STOP_GRACE` (the platform's grace period for a stop, in whole seconds with no unit; default 10 — see Caveats) and `OB1_VECTOR_MEND_INTERVAL` (seconds between the vector mender's ticks, 1 to 86400; default 60, `0` or `off` for none — see "The vector mender" above).
 
 On a container these are ordinary environment variables. On Workers use
 `wrangler secret put NAME` — **never** put them in `wrangler.toml`, which is

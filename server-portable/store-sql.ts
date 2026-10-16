@@ -28,7 +28,7 @@ import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgr
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, normaliseTicketStatusInputs, ticketList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -52,6 +52,7 @@ import type {
   ReleaseLeasesResult,
   DryRunClaimResult,
   ThoughtIdPage,
+  VectorlessRow,
   ThoughtListItem,
   ThoughtMatch,
   RecencyOpts,
@@ -131,6 +132,10 @@ export class SqlStore implements ThoughtStore {
   /** The store's own database URL and OB1_PLUGIN_DB_PASSWORD: the plugin login URL is built from them at a plugin's first transaction. */
   private readonly url: string;
   private readonly pluginPassword: string | undefined;
+  /** The vector mender's leader lock's own connection (SMD-2889): opened at the first tick, never one of the pool's. */
+  private lockSql: SQL | null = null;
+  /** How often that connection has closed: an unlock on a new session after one is no pooler's doing. */
+  private lockCloses = 0;
 
   /** `pluginPassword`: OB1_PLUGIN_DB_PASSWORD, the plugin login role's (SMD-2310). */
   constructor(url: string, opts: { max?: number; pluginPassword?: string } = {}) {
@@ -353,6 +358,46 @@ export class SqlStore implements ThoughtStore {
       digest = (agg.digest as string | null) ?? null;
     }
     return { ids, total, digest, cursor };
+  }
+
+  async listVectorless(opts: { limit: number; after: string | null }): Promise<VectorlessRow[]> {
+    // A sequential scan: no index reads `embedding IS NULL`, and at 2,000
+    // thoughts the page costs under a millisecond (SMD-2889, measured).
+    const after = opts.after && UUID_RE.test(opts.after) ? opts.after.toLowerCase() : null;
+    // Two statements, not one with `$1 IS NULL OR id > $1`: under a generic
+    // plan that form walked the index from its start every page (129 ms a
+    // page at 100,000 thoughts, review pass 3); each of these has one plan.
+    const origin = this.sql`(SELECT a.origin FROM thought_audit a WHERE a.thought_id = t.id AND a.action = 'capture' ORDER BY a.created_at ASC, a.id ASC LIMIT 1)`;
+    const rows = after === null
+      ? await this.sql`
+          SELECT id, content, COALESCE(updated_at, created_at) AS updated_at, metadata, ${origin} AS origin
+          FROM thoughts t WHERE embedding IS NULL ORDER BY id ASC LIMIT ${opts.limit}::int`
+      : await this.sql`
+          SELECT id, content, COALESCE(updated_at, created_at) AS updated_at, metadata, ${origin} AS origin
+          FROM thoughts t WHERE embedding IS NULL AND id > ${after}::uuid ORDER BY id ASC LIMIT ${opts.limit}::int`;
+    return rows.map((r: Record<string, unknown>) => normaliseVectorlessRow(r));
+  }
+
+  async mendLock(): Promise<(() => Promise<boolean>) | null> {
+    // A session-level lock, held for the tick, on a client of one connection
+    // of its own: never a pool connection, so live requests do not wait on a
+    // tick's provider calls, and a pool of one does not wedge — the tick's
+    // own reads and writes went through the pool while its lock held the
+    // pool's only connection (review pass 2: OB1_PG_POOL=1 hung the server).
+    this.lockSql ??= new SQL({ url: this.url, max: 1, onclose: () => { this.lockCloses++; } });
+    const lock = this.lockSql;
+    const closes = this.lockCloses;
+    const [r] = await lock`SELECT pg_try_advisory_lock(hashtext('ob1:vector-mender')) AS got`;
+    if (r.got !== true) return null;
+    // False when the session that took it is not the one that lets it go —
+    // a pooler in statement or transaction mode between here and Postgres —
+    // and the lock is then left on a backend no tick will reach; the mender
+    // says so. Not when that session closed since (a restart, a dropped
+    // connection): the lock went with it (review pass 3).
+    return async () => {
+      const [u] = await lock`SELECT pg_advisory_unlock(hashtext('ob1:vector-mender')) AS released`;
+      return u.released === true || this.lockCloses !== closes;
+    };
   }
 
   async listLoggedSearches(opts: { since: string | null; limit: number }): Promise<LoggedSearchPage> {
@@ -895,9 +940,13 @@ export class SqlStore implements ThoughtStore {
       rows = await this.sql`
         SELECT kind, thought_id::text AS thought_id, issue, status, status_type, history
           FROM ticket_status_inputs(${this.sql.array(valid, "TEXT")}::uuid[], ${this.sql.array(keys, "TEXT")}::text[])`;
-    } catch {
+    } catch (e) {
+      // Said once (labelReadFailed): a lock 098 gave up on, a grant, a timeout — not a brain before 095.
+      // errno is the SQLSTATE; a client-side failure (refused, closed) carries Bun's code instead, as db/ reads it.
+      labelReadFailed(String((e as { errno?: unknown; code?: unknown })?.errno ?? (e as { code?: unknown })?.code ?? ""), (e as Error)?.message ?? String(e));
       return null;
     }
+    labelReadOk();
     return normaliseTicketStatusInputs(rows);
   }
 
@@ -1067,6 +1116,6 @@ export class SqlStore implements ThoughtStore {
   }
 
   async close(): Promise<void> {
-    await Promise.all([this.sql.close(), ...[...this.pluginPools.values()].map((pool) => pool.close())]);
+    await Promise.all([this.sql.close(), ...(this.lockSql ? [this.lockSql.close()] : []), ...[...this.pluginPools.values()].map((pool) => pool.close())]);
   }
 }

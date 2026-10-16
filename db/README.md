@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2899 assertions: 2899 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports ninety-eight (98) migrations applied, and
+`bun test-schema.ts` prints `2902 assertions: 2902 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports ninety-nine (99) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 099 SMD-3045).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1640,6 +1640,21 @@ after an older tree's `--reapply` over a 097 brain run this tree's
 raw cycle), test-upgrade [20aq]; the behaviour cells of the trigger's [72]
 and [82] and the read's [84] unchanged.
 
+Migration 098 bounds 095's `ticket_status_inputs`, which SMD-2540 PR 2b reads
+on every search that names a ticket (SMD-2540): the same signature, rows and
+order, with `SET lock_timeout = '200ms'` — the call reads `thought_audit`,
+`ob1_config` and `ob1_ticket_head`, which the search does not, so a lock on
+one (an `ALTER TABLE`, a `VACUUM FULL`) held for seconds had every labelled
+search wait the whole hold on a pool connection; now the label is dropped
+(55P03, said once by the server) and the search answers — `SET jit = off`,
+since the order's every-row arm is estimated at the whole log and JIT compiled
+on every call past ~100,000 audit rows (about 7 ms), and an `OFFSET 0` fence
+that reads each event's diff once instead of four times. It refuses to apply
+without 095; 095 re-applied puts its unbounded body back and 098 after it the
+bounds, so after an older tree's `--reapply` over a 098 brain run this tree's
+`--reapply` (a plain run skips 098, recorded as applied). test-schema [88],
+test-upgrade [20ar], test-live [45] (the lock).
+
 Migration 099 has an unlink take the review lock (SMD-3045). 088's
 `update_thought` took `ob1:supersession-review` only for a pointer onto a
 thought, so `{"supersedes": null}` ran straight through an accept, which
@@ -2039,6 +2054,18 @@ with `OB1_EMBEDDING_MODEL`'s spelling — and which are not. The retired
 `recipes/local-ollama-embeddings` did the same by hand — an Ollama call per
 thought, then `upsert_thought` over a PostgREST this stack does not run
 (SMD-2138).
+
+A thought with no vector at all — the provider did not answer the capture's
+call, the egress gate refused it, or an import wrote it bare — needs no run of
+its own: the servers' vector mender embeds it once the provider answers and
+the gate allows, 8 rows a tick per server (`server-portable/README.md`, "The vector
+mender", SMD-2889), asking the gate what `reembed.ts` would ask of an import's
+row. `reembed.ts` is for a model change, a whole brain at once — an import of
+thousands is hours at 8 rows a tick per server — or a brain whose mender is off
+(`OB1_VECTOR_MEND_INTERVAL=off`). The two run side by side safely — each write
+carries the stamp it read, so neither writes over a newer text — but a row both
+reach may be embedded twice and written twice: `reembed.ts` re-reads a row
+another writer moved and embeds it again, vector or not.
 
 ### `reembed.ts`
 
@@ -2870,8 +2897,9 @@ or no vector yet when the newer side is judged:
   `workers` compose profile, `deploy/README.md`, SMD-2424).
 - **A failed extraction.** `--retry-failed` extracts it, but the newer
   thoughts already judged are not judged again.
-- **A failed embedding.** A candidate needs a vector; `reembed.ts` gives it
-  one, and the same holds.
+- **A failed embedding.** A candidate needs a vector; the servers' vector
+  mender gives it one once the provider answers (SMD-2889), or `reembed.ts`
+  does, and the same holds.
 - **An import dated older than thoughts already judged.** Same: its pairs
   with them are not judged.
 
@@ -3176,7 +3204,8 @@ with the opt-in `sleep` group as well for a search to wake it (below). It
 has no `--job`.
 
 **What wakes it.** A write the audit recorded through a key not classified
-`ingested`, and — only under the server's `OB1_QUERY_LOG=on` (off by default),
+`ingested` — the servers' vector mender's writes, marked background on the
+audit row, do not (SMD-2889) — and — only under the server's `OB1_QUERY_LOG=on` (off by default),
 and only for a role that may read `query_log`: the owner, or one granted the
 opt-in `sleep` group, `migrate.ts --grant <role> --groups <its groups>,sleep`
 ("Grants for a capturing role"; the log holds every search's text, so a
@@ -3226,17 +3255,21 @@ sleep; and once consolidation has joined, a stalled thought in hand keeps
 its turn, and a capture made then waits for the next sleep, where it goes
 first, as one behind a thought still gaining windows, or a stall or two
 short of the join, waits for its window. While consolidation waits for its
-provider — at its start, or mid-pass past its workers' pauses — its pool
+provider — at its start, or mid-pass (past its workers' pauses for a 5xx,
+at once for a model gone missing or a call no probe answers) — its pool
 cannot drain: extraction is let out for the newer work meanwhile, at most
 once a minute, and set aside again once it reaches the stalled thought(s),
 which wait for consolidation, so the judge, on the same chat endpoint, does
 not queue behind their window when it answers (SMD-3008); the let-out runs
-one worker, its claims read by this process's worker ids so a lease another
-left does not count, and each stalled thought it reaches is stopped, a stop
+one worker, its claims read by this process's worker ids since this run
+began so a lease another left, or this container before a restart, does not
+count, and each stalled thought it reaches is stopped, a stop
 counted on it. If the judge answers and consolidation drains while it is
 out, it goes on with one worker under `--workers 1`, and with more it is
-set aside once it holds nothing, so the drain's resume starts them all. Mid-pass, a judge answering 5xx is waited for only past those
-pauses, a minute and more.
+set aside once it holds nothing, so the drain's resume starts them all. A
+judge model missing at the start is refused, as before. Each sleep's move
+also dates now a forward-dated row that is no longer a stopped thought (one
+finished, then put back by a retry).
 A brain before 093, or a role that cannot read its table (the
 extraction group's), joins once extraction drains alone, and the start says
 so; granted later, the scheduler takes it up once restarted. `--dry-run`
@@ -4195,8 +4228,10 @@ A canary stood beside compose.yaml's stack with `deploy/canary.sh` answers at
 `/mcp` on a loopback port of its own (SMD-2874; "A canary beside the stack" in
 deploy/README.md), and `--compare` takes the two URLs as they are, with a read
 key in `--a-key`/`--b-key`, else `?key=` on a URL, else `OB1_COMPARE_KEY`
-(one key opens both: the canary takes stable's keys):
-`OB1_COMPARE_KEY=<key> bun db/tier.ts --compare http://127.0.0.1:8000/mcp http://127.0.0.1:8011/mcp`,
+(no key opens both: the canary's is its own, `OB1_CANARY_KEY` in its env
+file; SMD-2874):
+`bun db/tier.ts --compare open-brain open-brain-canary`, each connector's own key off the command line,
+or `--compare http://127.0.0.1:8000/mcp http://127.0.0.1:8011/mcp` with `--a-key`/`--b-key`,
 each labelled by host and path. A user and password in a URL
 (`http://user:pass@host/mcp`, for a front before the brain) are sent as
 Basic beside the key, on any Bun, and are in neither the label nor the
@@ -4392,8 +4427,8 @@ nearest a shallow merge comes to removing it (`tagsOverExisting`, the rule in
 `server-portable/metadata.ts` every writer that edits a tagged row shares). A row
 whose tags fell back at capture, with its text unchanged, is not this tool's to
 repair: that is SMD-1975's retag worker, for every thought and not ticket rows
-alone; a row that landed without a vector is `reembed.ts`'s, as any vectorless row
-is. Labels render and store
+alone; a row that landed without a vector is the servers' vector mender's
+(SMD-2889), as any vectorless row is. Labels render and store
 sorted, whatever order Linear returns them. A ticket deleted in Linear (trashed)
 falls out of the census and its row reads *extra*; a completed one Linear
 archived stays a ticket. `--only` syncs the identifiers named whatever the plan
@@ -4673,8 +4708,12 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2899 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1381 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2902 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1386 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 835 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 55 assertions: the shards SHARDS lists in test-live.ts, each its own job
+OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 264 assertions
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 235 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

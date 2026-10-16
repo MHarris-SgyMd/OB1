@@ -26,6 +26,8 @@ import { trustAtOrAbove, TRUST } from "./core/filter.ts";
 import { INGESTED_NOTICE } from "./render.ts";
 import { fileURLToPath } from "node:url";
 import { mcpTarget, mcpUnderTest, servedAsNamed, SUITE_CARRIER } from "./test-support.ts";
+import { createCore, newMendState } from "./core/index.ts";
+import { createStore, type ThoughtStore } from "./store.ts";
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -3401,7 +3403,7 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     const id = idIn(down.text)!;
     assert(!down.isError && !!id && /Note: saved WITHOUT a vector — the embedding provider at https:\/\/stub\.invalid\/v1 was unavailable \(the connection was refused\)\./.test(down.text),
       `a refused connection: the capture succeeds and says the vector is missing, where and why (${down.text.replace(/\n+/g, " / ").slice(0, 240)})`);
-    assert(/findable by exact text \(search_thoughts_keyword\)/.test(down.text) && /re-capture the same text once the provider is back/.test(down.text), "…and how it is reachable meanwhile, and how it gets its vector");
+    assert(/findable by exact text \(search_thoughts_keyword\)/.test(down.text) && /the server embeds it by itself once the provider answers/.test(down.text), "…and how it is reachable meanwhile, and how it gets its vector");
     assert(/Note: no topics, people or type were extracted — the chat provider at https:\/\/stub\.invalid\/v1 was unavailable \(provider_unreachable\)\./.test(down.text), "…and that no tags were made: the chat call met the same closed socket");
     assert(down.sc?.embeddingCall === true && down.sc?.vectorFailed === "provider_unreachable",
       `the typed result says the call was made, and the word for why no vector came of it (${JSON.stringify(down.sc)})`);
@@ -3464,6 +3466,237 @@ console.log("\n[20] A provider that does not answer leaves a capture saved witho
     assert(!hookAgain.isError && idIn(hookAgain.text) === hid && (await rowOf(hid))?.bare === false, "…and so does a capture key's, onto its own row");
   } finally {
     stubDown = null;
+    await sql.close();
+  }
+}
+
+console.log("\n[21] The vector mender (SMD-2889): rows saved while the provider was down get their vector once it answers, through update_thought, the row's own stamp kept, semantic search finding them; a row edited between the read and the write is left for the next sweep; a row the egress gate refuses stays vectorless until the policy allows it; brain_info counts the rows that wait");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  // The mender's core over this database, as index.ts builds it at boot: the
+  // same env, its own store (the server's is the suite's worker's).
+  const env: Record<string, string | undefined> = { ...process.env };
+  const store = await createStore(env as never);
+  const core = createCore({ env: () => env as never, store: async () => store, door: "open-brain" });
+  const sweep = async (c = core): Promise<{ mended: number; refused: number; raced: number; down: boolean }> => {
+    const state = newMendState();
+    const total = { mended: 0, refused: 0, raced: 0, down: false };
+    for (let i = 0; i < 50; i++) {
+      const t = await c.mendOnce(state);
+      total.mended += t.mended; total.refused += t.refused; total.raced += t.raced;
+      if (t.down) { total.down = true; break; }
+      if (state.cursor === null) break;
+    }
+    return total;
+  };
+  const rowOf = async (id: string) => (await sql`SELECT embedding IS NULL AS bare, embedding_model AS m, metadata->>'actor_name' AS name, metadata->>'actor_kind' AS kind, metadata->>'trust' AS trust,
+      (SELECT count(*)::int FROM thought_chunks c WHERE c.thought_id = t.id) AS windows FROM thoughts t WHERE id = ${id}::uuid`)[0];
+  const idIn = (s: string) => /id ([0-9a-f-]{36})/.exec(s)?.[1];
+  const captureAs = async (key: string, content: string) => {
+    const r = await fetch(BASE, { method: "POST", headers: { ...H, "x-brain-key": key }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name: "capture_thought", arguments: { content } } }) });
+    const t = await r.text();
+    const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+    return idIn((b.result?.content ?? []).map((c: { text?: string }) => c.text ?? "").join("\n"))!;
+  };
+  try {
+    // Whatever earlier sections left without a vector, mended first, so the counts below are this section's.
+    await sweep();
+    stubDown = "refused";
+    const wid = await captureAs("e2e-key", "[21] gamma: a thought the mender gives its vector");
+    const hid = await captureAs(CAPTURE_KEY, "[21] gamma: a session summary the mender gives its vector");
+    const longText = `[21] gamma long: ${"a window's worth of sentence the chunker splits. ".repeat(450)}the end`;
+    const lid = await captureAs("e2e-key", longText);
+    const before = { w: await rowOf(wid), h: await rowOf(hid), l: await rowOf(lid) };
+    assert(before.w?.bare && before.h?.bare && before.l?.bare && before.l?.windows === 0, `three captures while the provider is down: no vector, no windows (${JSON.stringify(before)})`);
+    assert(/Vectors:\s+3 thoughts wait for a vector — the servers' vector mender embeds them/.test(await call("brain_info")), "brain_info counts the three that wait");
+    const health = await (await fetch(`${BASE}/health`, { headers: { "x-brain-key": "e2e-key" } })).json() as { database?: { vectorless?: number } };
+    assert(health.database?.vectorless === 3, `keyed /health carries the count (${JSON.stringify(health.database?.vectorless)})`);
+
+    // Still down: the tick stops at the first row, nothing written.
+    const auditBefore = (await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'vector-mender'`)[0].n;
+    const downTick = await sweep();
+    assert(downTick.down && downTick.mended === 0 && (await rowOf(wid))?.bare === true, `the provider still down: the sweep stops at once, nothing written (${JSON.stringify(downTick)})`);
+
+    // The provider back: one sweep mends all three.
+    stubDown = null;
+    const up = await sweep();
+    const after = { w: await rowOf(wid), h: await rowOf(hid), l: await rowOf(lid) };
+    assert(up.mended === 3 && !after.w?.bare && !after.h?.bare && !after.l?.bare && after.w?.m === EMBEDDING_MODEL, `the provider back: all three mended, the model beside the vector (${JSON.stringify(up)}, ${JSON.stringify(after.w)})`);
+    assert(after.w?.name === before.w?.name && after.w?.kind === before.w?.kind && after.w?.trust === before.w?.trust && after.h?.name === "session-hook" && after.h?.kind === before.h?.kind && after.h?.trust === before.h?.trust,
+      `who wrote each text stands: the mender's write keeps the row's stamp (${JSON.stringify({ before: before.h, after: after.h })})`);
+    const [ev] = await sql`SELECT count(*)::int AS n, min(action) AS action, min(origin) AS origin, min(actor_context->>'background') AS background FROM thought_audit WHERE actor_name = 'vector-mender' AND thought_id = ${wid}::uuid`;
+    assert(ev.n === 1 && ev.action === "update" && ev.origin === "open-brain" && ev.background === "vector-mender", `one update event per mend, the mender's, through the server's door, marked background for db/sleep.ts (${JSON.stringify(ev)})`);
+    assert((await sql`SELECT count(*)::int AS n FROM thought_audit WHERE actor_name = 'vector-mender'`)[0].n - auditBefore === 3, "…and none for the down tick");
+    const [lineage] = await sql`SELECT count(*)::int AS n, min(recipe->>'model') AS model, min(recipe->'params'->>'tokens') AS tokens FROM derivations WHERE artifact_kind = 'chunks' AND (artifact_id = ${lid}::uuid OR ${lid}::uuid = ANY(input_ids))`;
+    assert((after.l?.windows ?? 0) > 1 && lineage.n >= 1 && lineage.model === EMBEDDING_MODEL && Number(lineage.tokens) > 0, `the long thought: its windows written, and their recipe recorded — the model and the chunker's sizing (${after.l?.windows} windows, ${JSON.stringify(lineage)})`);
+    assert((await call("search_thoughts", { query: "gamma", limit: 20 })).includes(wid), "semantic search finds a mended thought");
+    assert(/Vectors:\s+every thought has one/.test(await call("brain_info")), "brain_info: none wait");
+
+    // Edited between the mender's read and its write: update_thought's guard
+    // refuses the write (STALE_READ) and the row waits for the next sweep —
+    // the edit is never written over, nor its stamp ignored.
+    stubDown = "refused";
+    const eid = await captureAs("e2e-key", "[21] gamma: a thought edited while the mender embeds it");
+    stubDown = null;
+    const racing = new Proxy(store, { get(target, prop, receiver) {
+      if (prop === "listVectorless") return async (opts: { limit: number; after: string | null }) => {
+        const rows = await target.listVectorless(opts);
+        await new Promise((r) => setTimeout(r, 5));
+        if (rows.some((r) => r.id === eid)) await target.updateThought({ id: eid, metadataPatch: { edited: "between the read and the write" }, actor: { name: "e2e-key" } });
+        return rows;
+      };
+      const v = Reflect.get(target, prop, receiver);
+      return typeof v === "function" ? v.bind(target) : v;
+    } }) as ThoughtStore;
+    const raced = await sweep(createCore({ env: () => env as never, store: async () => racing, door: "open-brain" }));
+    const [edited] = await sql`SELECT embedding IS NULL AS bare, metadata->>'edited' AS edited FROM thoughts WHERE id = ${eid}::uuid`;
+    assert(raced.raced === 1 && raced.mended === 0 && edited.bare === true && edited.edited === "between the read and the write", `edited between read and write: STALE_READ, the edit stands, the row still waits (${JSON.stringify({ raced, edited })})`);
+    assert((await sweep()).mended === 1 && (await rowOf(eid))?.bare === false, "…and the next sweep mends it");
+
+    // The egress gate: the stub not declared local, under deny with no term,
+    // refuses the call — the row stays vectorless, no call made; an allow
+    // term naming the key that wrote it lets the next sweep mend it.
+    stubDown = "refused";
+    const gid = await captureAs("e2e-key", "[21] gamma: a thought the gate keeps home");
+    stubDown = null;
+    const writer = (await rowOf(gid))?.name;
+    const gated: Record<string, string | undefined> = { ...env, OB1_LLM_LOCAL: undefined, OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: undefined };
+    const gatedCore = createCore({ env: () => gated as never, store: async () => store, door: "open-brain" });
+    const bodies = stubBodies.length;
+    // Deny with no allow term refuses every call: the tick is idle, nothing read.
+    const idle = await gatedCore.mendOnce(newMendState());
+    assert(idle.refusedAll !== null && idle.refused === 0 && (await rowOf(gid))?.bare === true && stubBodies.length === bodies, `deny, no term: idle, nothing read, no call, still vectorless (${idle.refusedAll})`);
+    // A term naming another key: this row refused, row by row, no call.
+    gated.OB1_EGRESS_ALLOW = "actor:someone-else";
+    const refused = await sweep(gatedCore);
+    assert(refused.refused >= 1 && refused.mended === 0 && (await rowOf(gid))?.bare === true && stubBodies.length === bodies, `deny, another key's term: refused, no call, still vectorless (${JSON.stringify(refused)})`);
+    gated.OB1_EGRESS_ALLOW = `actor:${writer}`;
+    const allowed = await sweep(gatedCore);
+    assert(allowed.mended === 1 && (await rowOf(gid))?.bare === false, `an allow term naming the writer: mended (${JSON.stringify(allowed)}, writer ${writer})`);
+    const [sent] = await sql`SELECT actor_context->'egress' AS egress FROM thought_audit WHERE thought_id = ${gid}::uuid AND actor_name = 'vector-mender'`;
+    assert(sent?.egress?.policy === "deny" && sent.egress.embeddings?.allowed === true && sent.egress.embeddings?.rule === "allow-term", `the mend's audit row carries the egress decision that let the text go, as a capture's does (${JSON.stringify(sent?.egress)})`);
+
+    // A row an import wrote bare (db/ingest-records.ts's shape: its own door,
+    // a label for an actor) is asked as db/reembed.ts asks — its metadata, no
+    // actor: a term naming the label opens nothing, its source opens it.
+    const imported = await store.captureThought({ content: "[21] gamma: an imported note, written bare for a later re-embed", payload: { metadata: { source: "e2e-import" } }, embedding: null, actor: { name: "e2e-importer", via: "ingest-records" } } as never);
+    const [origin] = await sql`SELECT origin FROM thought_audit WHERE thought_id = ${imported.id}::uuid AND action = 'capture'`;
+    gated.OB1_EGRESS_ALLOW = "actor:e2e-importer";
+    const byLabel = await sweep(gatedCore);
+    assert(origin?.origin === "ingest-records" && byLabel.refused === 1 && byLabel.mended === 0 && (await rowOf(imported.id))?.bare === true, `an import's row: an actor term naming its label opens nothing (${JSON.stringify({ origin, byLabel })})`);
+    gated.OB1_EGRESS_ALLOW = "source:e2e-import";
+    const bySource = await sweep(gatedCore);
+    assert(bySource.mended === 1 && (await rowOf(imported.id))?.bare === false, `…a source: term over its metadata opens it, as db/reembed.ts's gate would (${JSON.stringify(bySource)})`);
+
+    // More rows the gate refuses than a page holds, on the real store: the
+    // keyset walks every one exactly once and the sweep ends.
+    stubDown = "refused";
+    for (let i = 0; i < 11; i++) await captureAs("e2e-key", `[21] gamma: refused row ${i}`);
+    stubDown = null;
+    gated.OB1_EGRESS_ALLOW = "actor:someone-else";
+    const waitingNow = (await sql`SELECT count(*)::int AS n FROM thoughts WHERE embedding IS NULL`)[0].n;
+    const walk = await sweep(gatedCore);
+    assert(waitingNow >= 11 && walk.refused === waitingNow && walk.mended === 0, `a sweep over ${waitingNow} refused rows, more than a page: each refused once, and the sweep ends (${JSON.stringify(walk)})`);
+
+    // The lock's connection dropped while held (a restart, an idle reaper):
+    // the unlock runs on a new session and finds nothing, and the lock went
+    // with the old one — let go, not a pooler's keeping.
+    const rel = await store.mendLock();
+    await sql`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND query LIKE ${"%pg_try_advisory_lock(hashtext('ob1:vector-mender'))%"}`;
+    await Bun.sleep(100);
+    const letGo = await rel!().catch(() => true);
+    const [{ held: stillHeld }] = await sql`SELECT count(*)::int AS held FROM pg_locks WHERE locktype = 'advisory'`;
+    assert(letGo === true && stillHeld === 0, `a lock whose connection dropped: let go, and no advisory lock left (${letGo}, ${stillHeld})`);
+
+    // The leader lock: held by another session (another server), a tick reads
+    // and writes nothing; let go, the next acts.
+    const [{ got }] = await sql`SELECT pg_try_advisory_lock(hashtext('ob1:vector-mender')) AS got`;
+    const skipped = await core.mendOnce(newMendState());
+    const [{ released }] = await sql`SELECT pg_advisory_unlock(hashtext('ob1:vector-mender')) AS released`;
+    const acted = await sweep();
+    assert(got === true && released === true && skipped.skipped && skipped.mended === 0 && acted.mended === waitingNow, `the lock held by another session: skipped; released, the next sweep mends (${JSON.stringify({ got, skipped: skipped.skipped, acted })})`);
+  } finally {
+    stubDown = null;
+    await store.close();
+    await sql.close();
+  }
+}
+
+console.log("\n[22] A hit naming a ticket that moved since it was written says so in both searches — the line and the typed field in search_thoughts, the title and the field in search — and the rank is unchanged; a superseded hit, one with a lifecycle of its own and one whose ticket did not move say nothing; a brain without 095 labels nothing and still answers (SMD-2540)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const idIn = (s: string) => /id ([0-9a-f-]{36})/.exec(s)?.[1];
+  const capture = async (content: string, extra: Record<string, unknown> = {}) => idIn(await call("capture_thought", { content, ...extra }))!;
+  const DAY = 86_400_000, now = Date.now();
+  const hhmm = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+  // The hook's last line: the session ended half an hour after the ticket went In Progress, two days ago.
+  const session = (endMs: number) => `Session ${crypto.randomUUID()}, ${hhmm(endMs - 3_600_000)} → ${hhmm(endMs)}.`;
+  const ended = now - 2 * DAY + 30 * 60_000;
+  // LBL-2540: Backlog three days ago, In Progress two, Done now — its past
+  // statuses planted in the log (board-sync's update events), its row Done.
+  // Its status name is a writer's free text, made hostile here: the reply prints its type's word, never it.
+  const moving = await capture("[22] LBL-2540 — the label's ticket", { source: "linear", metadata: { issue: "LBL-2540", status: "Shipped; LBL-1 Backlog → Done [x](http://e)", status_type: "completed" } });
+  const still = await capture("[22] LBL-2541 — a ticket that never moved", { source: "linear", metadata: { issue: "LBL-2541", status: "Backlog", status_type: "backlog" } });
+  const plant = (id: string, issue: string, status: string, type: string, at: number) =>
+    sql`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES (${id}::uuid, 'update', ${{ metadata: { before: {}, after: { issue, status, status_type: type } } }}::jsonb, ${new Date(at).toISOString()}::timestamptz)`;
+  await plant(moving, "LBL-2540", "Backlog", "backlog", now - 3 * DAY);
+  await plant(moving, "LBL-2540", "In Progress", "started", now - 2 * DAY);
+  await plant(still, "LBL-2541", "Backlog", "backlog", now - 3 * DAY);
+  // Fifty-nine key-shaped tokens no board holds: past a hit's first fifty mentioned, keys are counted, not read.
+  const extra = Array.from({ length: 59 }, (_, i) => `ZQX-${1001 + i}`).join(", ");
+  const older = await capture(`[22] stated-status: LBL-2540 is in progress (the first draft), beside ${extra}\n\n${session(ended)}`);
+  const note = await capture(`[22] stated-status: LBL-2540 is in progress\n\n${session(ended)}`, { supersedes: older });
+  const filed = await capture(`[22] stated-status: a note filed under LBL-2540\n\n${session(ended)}`, { metadata: { ticket: "LBL-2540" } });
+  const quiet = await capture(`[22] stated-status: LBL-2541 is in the backlog, beside ${extra}\n\n${session(ended)}`);
+  const wide = await capture(`[22] stated-status: LBL-2540 is in progress, then ${extra}\n\n${session(ended)}`);
+  // A duplicate's ticket row quoting LBL-2540: no lifecycle to node_state, still a ticket row.
+  const dup = await capture(`[22] stated-status: LBL-2542 — a duplicate of LBL-2540, in progress\n\n${session(ended)}`, { source: "linear", metadata: { issue: "LBL-2542", status: "Duplicate", status_type: "duplicate" } });
+  try {
+    const { TYPE_WORDS } = await import("./stated-status.ts");
+    const [{ known }] = await sql`SELECT node_lifecycle_types() AS known`;
+    assert(JSON.stringify(Object.keys(TYPE_WORDS).sort()) === JSON.stringify([...known].sort()),
+      `the label's fixed words are node_lifecycle_types()'s, one each (${JSON.stringify(known)})`);
+    const query = `"[22] stated-status"`;
+    const r = await result("search_thoughts", { query, limit: 10, threshold: -1 });
+    const hits = (r.sc?.hits ?? []) as { id: string; moved?: unknown; movedNotRead?: number }[];
+    const notReadOf = (id: string) => hits.find((h) => h.id === id)?.movedNotRead;
+    const fieldOf = (id: string) => JSON.stringify(hits.find((h) => h.id === id)?.moved);
+    const block = (id: string) => r.text.split(/\n(?=--- Result )/).find((b) => b.includes(`ID: ${id}`)) ?? "";
+    assert(!r.isError && fieldOf(note) === JSON.stringify([{ ticket: "LBL-2540", was: "started", now: "completed" }])
+        && block(note).includes("⚠ Moved since written: LBL-2540 In Progress → Done"),
+      `search_thoughts: the note says LBL-2540 moved, In Progress → Done — its type's word, not the row's name — in its header and its typed field (${fieldOf(note)} ${block(note).split("\n").slice(0, 4).join(" / ")})`);
+    assert(fieldOf(wide) === fieldOf(note) && notReadOf(wide) === 10 && notReadOf(note) === 0
+        && block(wide).includes("⚠ Moved since written: LBL-2540 In Progress → Done (+10 more named past the first 50, not checked)"),
+      `…a note mentioning sixty keys reads its first fifty and counts the other ten beside the move, in its line and \`movedNotRead\` (${notReadOf(wide)})`);
+    assert([older, filed, dup].every((id) => fieldOf(id) === "null" && notReadOf(id) === 0 && !block(id).includes("Moved since written") && block(id) !== "")
+        && fieldOf(quiet) === "[]" && notReadOf(quiet) === 10 && !block(quiet).includes("Moved since written"),
+      `…the draft it supersedes, the note filed under the ticket and a duplicate's ticket row quoting it are not checked (null); the note on a ticket that never moved is, and nothing moved ([]) of its first fifty, its other ten counted (${[older, filed, dup, quiet].map(fieldOf).join(" ")})`);
+    // The rank is the search's: the same query with the label's inputs gone returns the same order.
+    await sql`DROP FUNCTION ticket_status_inputs(uuid[], text[])`;
+    try {
+      const bare = await result("search_thoughts", { query, limit: 10, threshold: -1 });
+      const order = (x: typeof r) => ((x.sc?.hits ?? []) as { id: string }[]).map((h) => h.id).join(",");
+      assert(!bare.isError && order(bare) === order(r) && !bare.text.includes("Moved since written") && ((bare.sc?.hits ?? []) as { id: string; moved: unknown[] | null; movedNotRead: number }[]).every((h) => (h.moved === null || h.moved.length === 0) && h.movedNotRead === 0)
+          && ((bare.sc?.hits ?? []) as { id: string; moved: unknown }[]).filter((h) => [note, wide, quiet].includes(h.id)).every((h) => h.moved === null),
+        `a brain without 095: the same hits in the same order, no label, no error, and a hit naming a ticket says it was not checked (null) — so the label moved no rank (${order(bare) === order(r)})`);
+      const c = await result("search", { query });
+      assert(!c.isError && !c.text.includes("moved since written") && ((c.sc?.results ?? []) as object[]).every((x) => !("moved" in x)), "…and search answers without it");
+    } finally {
+      await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_ticket_status_inputs.sql") });
+    }
+    // search: ChatGPT's shape, the label in the title and a field — only on the result it is about.
+    const c = await result("search", { query });
+    const results = (c.sc?.results ?? []) as Record<string, unknown>[];
+    const mine = results.find((x) => x.id === note), wideR = results.find((x) => x.id === wide), others = results.filter((x) => x.id !== note && x.id !== wide);
+    assert(String(wideR?.title).startsWith("[moved since written: LBL-2540 In Progress → Done (+10 more named past the first 50, not checked)] ") && wideR?.movedNotRead === 10 && !("movedNotRead" in (mine ?? {})),
+      `search: the sixty-key note's title and field count the ten unread beside its move (${JSON.stringify(wideR && { title: String(wideR.title).slice(-80), n: wideR.movedNotRead })})`);
+    assert(!c.isError && c.text === JSON.stringify(c.sc) && typeof mine?.title === "string" && (mine.title as string).startsWith("[moved since written: LBL-2540 In Progress → Done] ")
+        && JSON.stringify(mine.moved) === JSON.stringify([{ ticket: "LBL-2540", was: "started", now: "completed" }]),
+      `search: the note's title starts with the move, before its own words, and the result carries it typed (${JSON.stringify(mine)})`);
+    assert(others.length >= 4 && others.every((x) => JSON.stringify(Object.keys(x)) === JSON.stringify(["id", "title", "url"]) && !String(x.title).includes("moved since written")),
+      `…every other result keeps the shape exactly (${others.map((x) => Object.keys(x).join("|")).join(" ")})`);
+  } finally {
+    await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([moving, still, older, note, filed, quiet, dup, wide], "TEXT")}::uuid[])`;
     await sql.close();
   }
 }

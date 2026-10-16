@@ -7661,7 +7661,7 @@ console.log("\n[51] Migration 055: the capture event carries the payload — a c
   const under046 = await script("under 046");
   assert(!("content" in under046.captureDiff) && !("created_at" in under046.captureDiff), "…under which a capture records no content and no created_at (the differential is between two different logs)");
   const restored = await restoreShipped("thoughts_write_audit", "thought_audit_refuse_mutation");
-  assert(restored.length === 8 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("090") && restored[6].startsWith("095") && restored[7].startsWith("099") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
+  assert(restored.length === 9 && restored[0].startsWith("055") && restored[1].startsWith("060") && restored[2].startsWith("073") && restored[3].startsWith("080") && restored[4].startsWith("086") && restored[5].startsWith("090") && restored[6].startsWith("095") && restored[7].startsWith("098") && restored[8].startsWith("099") && /ob1:capture-event-carries-content/.test(await src("thoughts_write_audit()")) && /ob1:projection-checked-against-its-event/.test(await src("thoughts_write_audit()")), `…and the last definers re-applied (${restored.join(", ")}) put 055's refusal trigger and 060's audit trigger — carrying 055's payload — back`);
   const mismatches = under054.events.map((e, i) => [JSON.stringify(e), JSON.stringify(under046.events[i])]).filter(([x, y]) => x !== y);
   assert(under046.events.length === 7 && mismatches.length === 0,
     `the two logs are equal on every column outside the three additions — action, source, actor, kind, trust, door, stance, cites, window, context, the diff's other keys (${mismatches.length} mismatch(es)${mismatches.length ? `: ${mismatches[0][0].slice(0, 160)} / ${mismatches[0][1].slice(0, 160)}` : ""})`);
@@ -14568,8 +14568,8 @@ console.log("\n[85] Migration 095: what the stated-status label reads, in one ca
     `SELECT pg_get_function_arguments(p.oid) AS args, pg_get_function_result(p.oid) AS result, p.provolatile::text AS vol, l.lanname AS lang, p.prosecdef AS definer, p.proacl::text AS acl, p.proconfig AS cfg
        FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang WHERE p.proname = 'ticket_status_inputs'`);
   assert(fn && fn.args === "p_ids uuid[], p_issues text[]" && fn.result === "TABLE(kind text, thought_id uuid, issue text, status text, status_type text, history jsonb)"
-      && fn.vol === "s" && fn.lang === "sql" && !fn.definer && fn.acl === null && JSON.stringify(fn.cfg) === JSON.stringify(["max_parallel_workers_per_gather=0"]) && lastDefinerOf("ticket_status_inputs").startsWith("095") && (await functionsNamed("ticket_status_inputs")) === 1,
-    `ticket_status_inputs(uuid[], text[]): one tagged row set, STABLE, LANGUAGE sql, invoker, no parallel workers, EXECUTE for everyone; 095 defines it (${JSON.stringify(fn)})`);
+      && fn.vol === "s" && fn.lang === "sql" && !fn.definer && fn.acl === null && JSON.stringify([...(fn.cfg ?? [])].sort()) === JSON.stringify(["jit=off", "lock_timeout=200ms", "max_parallel_workers_per_gather=0"]) && lastDefinerOf("ticket_status_inputs").startsWith("098") && (await functionsNamed("ticket_status_inputs")) === 1,
+    `ticket_status_inputs(uuid[], text[]): one tagged row set, STABLE, LANGUAGE sql, invoker, no parallel workers, EXECUTE for everyone; 095 defines it and 098 bounds it — no JIT, a 200 ms lock timeout (${JSON.stringify(fn)})`);
   const [order] = await q<{ src: string }>(`SELECT prosrc AS src FROM pg_proc WHERE oid = to_regprocedure('ob1_thought_events_in_order(uuid[])')`);
   assert(lastDefinerOf("ob1_thought_events_in_order").startsWith("095") && (await functionsNamed("ob1_thought_events_in_order")) === 1
       && /UNION ALL/.test(order.src) && /p_thoughts IS NOT NULL AND thought_id = ANY\(p_thoughts\)/.test(order.src) && /WHERE p_thoughts IS NULL\)/.test(order.src),
@@ -14637,10 +14637,10 @@ console.log("\n[85] Migration 095: what the stated-status label reads, in one ca
   assert(idsAlone.length === 1 && idsAlone[0].kind === "lifecycle" && idsAlone[0].thought_id === t1 && (await inputs(null, ["SMD-1"])).every((r) => r.kind !== "lifecycle"),
     "ids alone give only their lifecycle rows — the ticket row's one, the note none — and tickets alone only heads and histories");
 
-  // A re-apply moves nothing.
+  // A re-apply moves nothing — and every read above ran 098's body, so 095's put back answering the same rows holds the two equal.
   const before = JSON.stringify(await inputs([t1, note, filed, t6], ALL_KEYS));
   await reapply("095");
-  assert(JSON.stringify(await inputs([t1, note, filed, t6], ALL_KEYS)) === before && (await functionsNamed("ticket_status_inputs")) === 1, "095 re-applied: one function, the same rows");
+  assert(JSON.stringify(await inputs([t1, note, filed, t6], ALL_KEYS)) === before && (await functionsNamed("ticket_status_inputs")) === 1, "095 re-applied over 098: one function, the same rows");
   await db.exec(`DELETE FROM thoughts`);
 }
 
@@ -14812,6 +14812,17 @@ console.log("\n[87] Migration 097: one walk for 082's lapse — ob1_lapse_walk i
   await reapply("097");
   assert(own && (await shape()), "092 and 094 re-applied put their own lapse and read back; 097 re-applied after them, the walk");
   await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[88] Migration 098: 095's ticket_status_inputs bounded — the same signature and rows ([85] reads them through it), a lock waited for at most 200 ms, no JIT, each event's diff read once (SMD-2540)");
+{
+  // [85] re-applied 095 last; 098 puts the bounds back, as a --reapply does in order.
+  await reapply("098");
+  const [p] = (await db.query<{ cfg: string[] | null; src: string; comment: string | null }>(
+    `SELECT proconfig AS cfg, prosrc AS src, obj_description(oid, 'pg_proc') AS comment FROM pg_proc WHERE oid = 'ticket_status_inputs(uuid[], text[])'::regprocedure`)).rows;
+  assert(JSON.stringify([...(p?.cfg ?? [])].sort()) === JSON.stringify(["jit=off", "lock_timeout=200ms", "max_parallel_workers_per_gather=0"])
+      && /AS md OFFSET 0\) x/.test(p?.src ?? "") && /bounded, 098\./.test(p?.comment ?? "") && lastDefinerOf("ticket_status_inputs").startsWith("098") && (await functionsNamed("ticket_status_inputs")) === 1,
+    `ticket_status_inputs as 098 leaves it: no parallel workers, no JIT, a 200 ms lock timeout, the metadata fenced (OFFSET 0), its comment naming 098, one function (${JSON.stringify(p?.cfg)})`);
 }
 
 console.log("\n[89] Migration 099: an unlink takes the review lock — update_thought takes ob1:supersession-review whenever its envelope names supersedes, a clear included, before the fingerprint lock and the row; 088's DDL otherwise verbatim; 088 re-applied puts its gate back, 099 restores it; a re-apply a no-op (SMD-3045)");

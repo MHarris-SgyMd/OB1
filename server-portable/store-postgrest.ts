@@ -16,7 +16,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, normaliseTicketStatusInputs, ticketList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -40,6 +40,7 @@ import type {
   ReleaseLeasesResult,
   DryRunClaimResult,
   ThoughtIdPage,
+  VectorlessRow,
   ThoughtListItem,
   ThoughtMatch,
   RecencyOpts,
@@ -215,6 +216,25 @@ export class PostgrestStore implements ThoughtStore {
     const cursor = ids.length === opts.limit && ids.length > 0 ? ids[ids.length - 1] : null;
     const total = after === null ? await this.countThoughts() : 0;
     return { ids, total, digest: null, cursor };
+  }
+
+  async listVectorless(opts: { limit: number; after: string | null }): Promise<VectorlessRow[]> {
+    // The SQL store's page: no COALESCE in a PostgREST select, so both stamps
+    // are read and the fallback is taken here.
+    const after = opts.after && UUID_RE.test(opts.after) ? opts.after.toLowerCase() : null;
+    let q = this.client.from("thoughts").select("id, content, updated_at, created_at, metadata").is("embedding", null).order("id", { ascending: true }).limit(opts.limit);
+    if (after) q = q.gt("id", after);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    // No origin: thought_audit is not published to PostgREST, so each row is
+    // asked of the gate as a pass asks (mend.ts mendAllowed).
+    return ((data ?? []) as Record<string, unknown>[]).map((r) => normaliseVectorlessRow({ ...r, updated_at: r.updated_at ?? r.created_at, origin: null }));
+  }
+
+  async mendLock(): Promise<(() => Promise<boolean>) | null> {
+    // No session to hold a lock in. This store serves Workers, which starts
+    // no mender, and on Bun the servers start none over it (mend.ts).
+    return async () => true;
   }
 
   async listLoggedSearches(opts: { since: string | null; limit: number }): Promise<LoggedSearchPage> {
@@ -660,11 +680,16 @@ export class PostgrestStore implements ThoughtStore {
     let rows: Record<string, unknown>[];
     try {
       const { data, error } = await this.client.rpc("ticket_status_inputs", { p_ids: valid, p_issues: keys });
-      if (error) return null;
+      if (error) {
+        labelReadFailed(String((error as { code?: unknown }).code ?? ""), String((error as { message?: unknown }).message ?? ""));
+        return null;
+      }
       rows = data as Record<string, unknown>[]; // the normaliser reads anything that is not a list as no rows
-    } catch {
+    } catch (e) {
+      labelReadFailed("", (e as Error)?.message ?? String(e));
       return null;
     }
+    labelReadOk();
     return normaliseTicketStatusInputs(rows);
   }
 

@@ -180,7 +180,13 @@ x-otel-env: &otel-env
 #           or still starting, Traefik's 502 becomes a bare 404
 #           (`tier-absent`), as auth-absent does for the authorization
 #           server. The tiers' protected-resource paths are not routed, so
-#           a tier is reached with keys (OAuth per tier is SMD-2286's);
+#           a tier is reached with keys (OAuth per tier is SMD-2286's).
+#           Deprecated (SMD-3057): since SMD-2874 a canary is a brain of its
+#           own on its own port, and the three-brain stack
+#           (compose.tiers.yaml) routes its own canary and working tiers;
+#           v2.0.0 removes these two routes, and until then every answer
+#           carries a Deprecation header and a Link to the README's "A
+#           canary beside the stack", which names both (`tier-deprecated`);
 #   tier-off every other path that starts with /canary or /working, in
 #           any case and whatever follows: a bare 404 (`not-served`), so a
 #           client handed a tier's URL changed in any way after the prefix
@@ -223,6 +229,9 @@ x-otel-env: &otel-env
 #           upgrade guide;
 #   not-legacy  deletes that marker (an empty value deletes the header), so a
 #           client cannot send it on /mcp and be logged as a straggler;
+#   tier-deprecated  adds to every answer on the canary and working routes a
+#           Deprecation header (RFC 9745) dated 2026-10-16 and a Link to
+#           deploy/README.md's "A canary beside the stack" (SMD-3057);
 #   auth-absent, tier-absent  any 502 — Traefik's own: no such name, nothing
 #           listening, or a request the server dropped mid-flight, as its
 #           registration stall does at 30 s; the server never answers 502
@@ -288,13 +297,13 @@ x-proxy-routes: &proxy-routes |
         rule: "Path(`/canary/mcp`) || PathPrefix(`/canary/mcp/`)"
         priority: 30
         entryPoints: [web]
-        middlewares: [not-legacy, tier-absent]
+        middlewares: [not-legacy, tier-deprecated, tier-absent]
         service: canary
       working:
         rule: "Path(`/working/mcp`) || PathPrefix(`/working/mcp/`)"
         priority: 30
         entryPoints: [web]
-        middlewares: [not-legacy, tier-absent]
+        middlewares: [not-legacy, tier-deprecated, tier-absent]
         service: working
       tier-off:
         rule: "PathRegexp(`(?i)^/(canary|working)`)"
@@ -338,6 +347,11 @@ x-proxy-routes: &proxy-routes |
           service: noop@internal
           statusRewrites:
             "502": 404
+      tier-deprecated:
+        headers:
+          customResponseHeaders:
+            Deprecation: "@1792108800"
+            Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#a-canary-beside-the-stack>; rel="deprecation"; type="text/html"'
       api-off:
         errors:
           status: ["418"]
@@ -920,6 +934,11 @@ services:
       # less (SMD-2250). Unset, 10 — and stop_grace_period below reads the same
       # variable, so compose waits exactly what the server plans for.
       OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
+      # Seconds between the vector mender's ticks, 1 to 86400, 0 or off for
+      # none: the servers embed the thoughts saved without a vector once the
+      # provider answers (SMD-2889). Unset, 60. Both this server and the REST
+      # core read it; a leader lock lets one mend at a time.
+      OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
       PORT: "8000"
     environment:
       <<: [*server-env, *plugin-env, *otel-env]
@@ -1964,8 +1983,14 @@ services:
   # reads Prometheus's names for the servers' metrics, which this pin's OTLP
   # receiver writes with underscores and a unit suffix
   # (`gen_ai_client_operation_duration_seconds`, measured), and each flag below
-  # is this pin's (measured: each binary started with it). Check 28
-  # (scripts/check-fork-consistency.ts, LGTM_SERVICE) holds this service whole.
+  # is this pin's (measured: each binary started with it). A bump re-measures
+  # check 37's DASHBOARD_IMAGE_SERIES, DASHBOARD_RESOURCE_LABELS and
+  # DASHBOARD_DATASOURCES (the dashboard's rate window also rests on this
+  # image's Prometheus data source, timeInterval 60s) and runs CI's "The
+  # observability profile's dashboard reads every series it names", which
+  # also fails should Prometheus stop taking created-timestamp-zero-ingestion.
+  # Check 28 (scripts/check-fork-consistency.ts, LGTM_SERVICE) holds this
+  # service whole but its labels, which check 37 holds.
   #
   # Grafana's image signs anyone in as Admin unless told otherwise
   # (run-grafana.sh, GF_AUTH_ANONYMOUS_ENABLED defaulting to true): here
@@ -2041,7 +2066,15 @@ services:
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
       GF_CLOUD_MIGRATION_ENABLED: "false"
-      PROMETHEUS_EXTRA_ARGS: "--web.listen-address=127.0.0.1:9090"
+      # The provisioned dashboard (the grafana-dashboard config) is the page
+      # Grafana opens on.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/open-brain-dashboard.json
+      # A zero at each of the servers' series' start (its OTLP start time):
+      # their counters are born at their first count, which a rate otherwise
+      # never counts — one failure read 0 on every failure panel (PR 3c review
+      # pass 2; measured: a tool called once, its increase 0, with this 1.007).
+      # Series the collector scrapes get none (measured).
+      PROMETHEUS_EXTRA_ARGS: "--web.listen-address=127.0.0.1:9090 --enable-feature=created-timestamp-zero-ingestion"
       # Loki keeps every log record for ever unless its compactor's retention is
       # on: 14 days, as Tempo keeps its traces by default; Prometheus keeps 15 days.
       LOKI_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -reporting.enabled=false -compactor.retention-enabled=true -compactor.delete-request-store=filesystem -store.retention=336h"
@@ -2059,6 +2092,21 @@ services:
     # Prometheus's, Tempo's, Loki's, Pyroscope's and Grafana's data, in one volume.
     volumes:
       - lgtm-data:/data
+    # The dashboard and its provider (PR 3c), the last two of the configs at
+    # the end of this file: Grafana reads every file in its provisioning
+    # directory's dashboards/ as a provider.
+    configs:
+      - source: grafana-dashboard
+        target: /otel-lgtm/open-brain-dashboard.json
+      - source: grafana-dashboard-provider
+        target: /otel-lgtm/grafana/conf/provisioning/dashboards/open-brain.yaml
+    # Each config's sha256 (check 37 holds them): compose recreates a
+    # container when a label changes, and not when only an inline config does
+    # (docker/compose#11900, as with the proxy's table), so an upgrade that
+    # changes the dashboard reaches Grafana on its `up -d`.
+    labels:
+      ob1.grafana-dashboard: "sha256:d5d2486a57a6101b14c533e238956aacfc2b633017402524593ed82fe30cbb83"
+      ob1.grafana-dashboard-provider: "sha256:2a13b2862670670482aadbadfcf7a864e28fe4d3c9704faa9ac75ff66b9d021d"
     # `mesh` as lgtm.ob1.internal: the two servers send to it there, and
     # compose.grafana-public.yaml's proxy reaches its Grafana there; and
     # `telemetry`, where it scrapes pg-exporter alone (SMD-1849 PR 3b). No
@@ -2121,7 +2169,10 @@ services:
   # exporter's default collectors. On `data`, where Postgres is, and on the
   # internal `telemetry`, where lgtm's collector scrapes it every 30 s and
   # nothing else is; it publishes nothing. Confined as the authorization
-  # server is: read-only, no capability, no new privileges.
+  # server is: read-only, no capability, no new privileges. The dashboard's
+  # Postgres row reads its names (check 37's DASHBOARD_IMAGE_SERIES, measured
+  # on this pin): a bump re-measures them, and CI's "The observability
+  # profile's dashboard reads every series it names" runs each query.
   pg-exporter:
     image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
     profiles: ["observability"]
@@ -2208,3 +2259,772 @@ configs:
   # The forwarder's script, inline: x-forwarder above the services.
   forwarder:
     content: *forwarder
+  # The observability profile's dashboard (SMD-1849 PR 3c), which lgtm's
+  # Grafana loads at its start and opens on: deploy/observability/dashboard.json,
+  # inline here as the route table is, so a release's compose.yaml carries it
+  # with nothing else to fetch, each dollar sign doubled, since compose reads
+  # one as a variable. Check 37 (scripts/check-fork-consistency.ts) holds it
+  # to that file, and the file to the names the stack writes.
+  grafana-dashboard:
+    content: |
+      {
+        "uid": "ob1",
+        "title": "Open Brain",
+        "description": "The brain's requests, provider calls, store operations, jobs and Postgres, from the observability profile (SMD-1849). Provisioned from deploy/compose.yaml, so Grafana will not save a change made here: save a copy to keep one.",
+        "tags": ["open-brain"],
+        "editable": false,
+        "graphTooltip": 1,
+        "schemaVersion": 41,
+        "time": {"from": "now-6h", "to": "now"},
+        "refresh": "1m",
+        "timezone": "browser",
+        "templating": {
+          "list": [
+            {
+              "name": "service",
+              "label": "Server",
+              "description": "open-brain is the MCP server, open-brain-api the REST core: each server's own service.name.",
+              "type": "query",
+              "datasource": {"type": "prometheus", "uid": "prometheus"},
+              "query": {
+                "query": "label_values(http_server_request_duration_seconds_count, service_name)",
+                "refId": "service-var"
+              },
+              "definition": "label_values(http_server_request_duration_seconds_count, service_name)",
+              "refresh": 2,
+              "includeAll": true,
+              "allValue": ".+",
+              "multi": true,
+              "current": {"text": "All", "value": "$$__all"},
+              "sort": 1
+            },
+            {
+              "name": "tier",
+              "label": "Tier",
+              "description": "A pipeline tier's brain (OB1_TIER); a stack that is no tier has none, which All includes.",
+              "type": "query",
+              "datasource": {"type": "prometheus", "uid": "prometheus"},
+              "query": {
+                "query": "label_values(http_server_request_duration_seconds_count, deployment_environment_name)",
+                "refId": "tier-var"
+              },
+              "definition": "label_values(http_server_request_duration_seconds_count, deployment_environment_name)",
+              "refresh": 2,
+              "includeAll": true,
+              "allValue": ".*",
+              "multi": true,
+              "current": {"text": "All", "value": "$$__all"},
+              "sort": 1
+            },
+            {
+              "name": "database",
+              "label": "Database",
+              "description": "This stack's Postgres's databases (its templates aside), for its rows; the brain's is openbrain.",
+              "type": "query",
+              "datasource": {"type": "prometheus", "uid": "prometheus"},
+              "query": {
+                "query": "label_values(pg_stat_database_numbackends{datname!~\"template.*\"}, datname)",
+                "refId": "database-var"
+              },
+              "definition": "label_values(pg_stat_database_numbackends{datname!~\"template.*\"}, datname)",
+              "refresh": 2,
+              "includeAll": true,
+              "multi": true,
+              "current": {"text": "All", "value": "$$__all"},
+              "sort": 1
+            }
+          ]
+        },
+        "annotations": {"list": []},
+        "links": [],
+        "panels": [
+          {
+            "type": "row",
+            "id": 1,
+            "title": "Requests — both servers, per request (http_server_request_duration_seconds)",
+            "collapsed": false,
+            "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1},
+            "panels": []
+          },
+          {
+            "type": "timeseries",
+            "id": 2,
+            "title": "Requests per second, by tool",
+            "description": "Each request either server recorded, by door and the tool it ran: an MCP tool call's, a REST route's operation, a mirror's (a keyed /health is brain_info's). (no tool) is the rest — initialize, tools/list, a path no route serves, and a request refused at its key, whose tool the metric leaves out. The keyless liveness probe makes no point.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 0, "y": 1, "w": 12, "h": 8},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "label_replace(sum by (ob1_door, ob1_tool) (rate(http_server_request_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval])), \"ob1_tool\", \"(no tool)\", \"ob1_tool\", \"\")",
+                "legendFormat": "{{ob1_door}} {{ob1_tool}}"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "timeseries",
+            "id": 3,
+            "title": "Requests per second, by outcome",
+            "description": "ok; refused (a refusal: the key, the input, a busy registry, a thing not found); error, stalled and cut (the server's failures); abandoned (the client left); unrun.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 12, "y": 1, "w": 12, "h": 8},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "sum by (ob1_outcome) (rate(http_server_request_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval]))",
+                "legendFormat": "{{ob1_outcome}}"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {"unit": "reqps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 30}},
+              "overrides": []
+            },
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "timeseries",
+            "id": 4,
+            "title": "Latency p50, by tool",
+            "description": "The median request's time, from its arrival to its answer's handing over, or to its stream's end (an MCP answer, a job stream).",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 0, "y": 9, "w": 12, "h": 8},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "label_replace(histogram_quantile(0.5, sum by (le, ob1_door, ob1_tool) (rate(http_server_request_duration_seconds_bucket{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval]))), \"ob1_tool\", \"(no tool)\", \"ob1_tool\", \"\")",
+                "legendFormat": "{{ob1_door}} {{ob1_tool}}"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "timeseries",
+            "id": 5,
+            "title": "Latency p99, by tool",
+            "description": "The 99th percentile request's time, by tool; read it beside the rate — at a few requests a minute it is the slowest request.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 12, "y": 9, "w": 12, "h": 8},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "label_replace(histogram_quantile(0.99, sum by (le, ob1_door, ob1_tool) (rate(http_server_request_duration_seconds_bucket{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval]))), \"ob1_tool\", \"(no tool)\", \"ob1_tool\", \"\")",
+                "legendFormat": "{{ob1_door}} {{ob1_tool}}"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "timeseries",
+            "id": 6,
+            "title": "Server failures, share of requests",
+            "description": "Requests whose outcome was error, stalled or cut, as a share of all; refusals are the caller's and are left out.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 0, "y": 17, "w": 12, "h": 7},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "(sum(rate(http_server_request_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\", ob1_outcome=~\"error|stalled|cut\"}[$$__rate_interval])) or 0 * sum(rate(http_server_request_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval]))) / sum(rate(http_server_request_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval]))",
+                "legendFormat": "failures"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "custom": {"axisSoftMax": 0.05}}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "timeseries",
+            "id": 7,
+            "title": "Server failures, by error type",
+            "description": "Each failed request's fault code (STORE_UNAVAILABLE or FAILED) or, with neither, its outcome.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 12, "y": 17, "w": 12, "h": 7},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "sum by (ob1_door, error_type) (rate(http_server_request_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\", ob1_outcome=~\"error|stalled|cut\"}[$$__rate_interval]))",
+                "legendFormat": "{{ob1_door}} {{error_type}}"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "reqps", "noValue": "none"}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "row",
+            "id": 8,
+            "title": "Model provider — each embedding and chat call past the egress gate (gen_ai_client_operation_duration_seconds)",
+            "collapsed": false,
+            "gridPos": {"x": 0, "y": 24, "w": 24, "h": 1},
+            "panels": []
+          },
+          {
+            "type": "timeseries",
+            "id": 9,
+            "title": "Provider calls per second",
+            "description": "Embedding and chat calls the two servers made, by model; the workers' are not sent (SMD-2910).",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 0, "y": 25, "w": 8, "h": 8},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "sum by (gen_ai_operation_name, gen_ai_request_model) (rate(gen_ai_client_operation_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval]))",
+                "legendFormat": "{{gen_ai_operation_name}} {{gen_ai_request_model}}"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "timeseries",
+            "id": 10,
+            "title": "Provider latency p50 and p99",
+            "description": "Each call's time to its answer, by operation.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 8, "y": 25, "w": 8, "h": 8},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "histogram_quantile(0.5, sum by (le, gen_ai_operation_name) (rate(gen_ai_client_operation_duration_seconds_bucket{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval])))",
+                "legendFormat": "p50 {{gen_ai_operation_name}}"
+              },
+              {
+                "refId": "B",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "histogram_quantile(0.99, sum by (le, gen_ai_operation_name) (rate(gen_ai_client_operation_duration_seconds_bucket{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval])))",
+                "legendFormat": "p99 {{gen_ai_operation_name}}"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "timeseries",
+            "id": 11,
+            "title": "Provider failures, by error type",
+            "description": "Calls that failed, by operation: the provider's status (404, 503 …), timeout, invalid_body or the runtime's code.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 16, "y": 25, "w": 8, "h": 8},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "sum by (gen_ai_operation_name, error_type) (rate(gen_ai_client_operation_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\", error_type!=\"\"}[$$__rate_interval]))",
+                "legendFormat": "{{gen_ai_operation_name}} {{error_type}}"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "reqps", "noValue": "none"}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "row",
+            "id": 12,
+            "title": "Store — each store operation the core calls (db_client_operation_duration_seconds)",
+            "collapsed": false,
+            "gridPos": {"x": 0, "y": 33, "w": 24, "h": 1},
+            "panels": []
+          },
+          {
+            "type": "timeseries",
+            "id": 13,
+            "title": "Store operations per second",
+            "description": "By the store's method name (matchThoughts, captureThought …), one point per operation, not per SQL statement.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 0, "y": 34, "w": 8, "h": 8},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "sum by (db_operation_name) (rate(db_client_operation_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval]))",
+                "legendFormat": "{{db_operation_name}}"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "timeseries",
+            "id": 14,
+            "title": "Store latency p99, by operation",
+            "description": "The 99th percentile operation's time; the statements under it are in the Postgres row below.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 8, "y": 34, "w": 8, "h": 8},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "histogram_quantile(0.99, sum by (le, db_operation_name) (rate(db_client_operation_duration_seconds_bucket{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval])))",
+                "legendFormat": "{{db_operation_name}}"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "timeseries",
+            "id": 15,
+            "title": "Store errors: refusals, faults and stops",
+            "description": "Refusals are the data's: a SQLSTATE of class 22 (a value the brain's functions refuse), 23 (a constraint), P0 (a function's RAISE) or OB (the brain's own codes). Faults are everything else — the database's (08 connection, 53 resources, 57 shut down, XX internal, a bug's 42), and a database the store cannot reach, whose code is the driver's or the network's (ERR_POSTGRES_…, ECONNREFUSED). Stops are operations a server's stop cut.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 16, "y": 34, "w": 8, "h": 8},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "sum(rate(db_client_operation_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\", error_type=~\"(22|23|P0|OB)[0-9A-Z]{3}\"}[$$__rate_interval])) or 0 * sum(rate(db_client_operation_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval]))",
+                "legendFormat": "refusals"
+              },
+              {
+                "refId": "B",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "sum(rate(db_client_operation_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\", error_type!=\"\", error_type!=\"cut\", error_type!~\"(22|23|P0|OB)[0-9A-Z]{3}\"}[$$__rate_interval])) or 0 * sum(rate(db_client_operation_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval]))",
+                "legendFormat": "faults"
+              },
+              {
+                "refId": "C",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "sum(rate(db_client_operation_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\", error_type=\"cut\"}[$$__rate_interval])) or 0 * sum(rate(db_client_operation_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval]))",
+                "legendFormat": "stops"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "ops", "min": 0, "custom": {"axisSoftMax": 0.1}}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "row",
+            "id": 16,
+            "title": "Jobs — each async job's body (ob1_job_duration_seconds)",
+            "collapsed": false,
+            "gridPos": {"x": 0, "y": 42, "w": 24, "h": 1},
+            "panels": []
+          },
+          {
+            "type": "timeseries",
+            "id": 17,
+            "title": "Jobs per second, by kind and error type",
+            "description": "Each job that ended, by kind; error_type is set on one that failed (JOB_TIMEOUT …).",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 0, "y": 43, "w": 12, "h": 7},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "sum by (ob1_job_kind, error_type) (rate(ob1_job_duration_seconds_count{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval]))",
+                "legendFormat": "{{ob1_job_kind}} {{error_type}}"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "ops", "min": 0, "custom": {"axisSoftMax": 0.1}}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "timeseries",
+            "id": 18,
+            "title": "Job time p99, by kind",
+            "description": "The 99th percentile job's time, by kind.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 12, "y": 43, "w": 12, "h": 7},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "histogram_quantile(0.99, sum by (le, ob1_job_kind) (rate(ob1_job_duration_seconds_bucket{service_name=~\"$$service\", deployment_environment_name=~\"$$tier\"}[$$__rate_interval])))",
+                "legendFormat": "{{ob1_job_kind}}"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "row",
+            "id": 19,
+            "title": "Postgres — this stack's own, pg-exporter every 30 s (pg_stat_statements, pg_stat_activity); the Tier variable does not apply",
+            "collapsed": false,
+            "gridPos": {"x": 0, "y": 50, "w": 24, "h": 1},
+            "panels": []
+          },
+          {
+            "type": "table",
+            "id": 20,
+            "title": "Statements by total time over the range",
+            "description": "The statements that took the most time in the dashboard's range, each by its normalized text (cut to 120 characters; constants are $$1, $$2): total seconds, calls and the mean per call. Only among the 100 the exporter reads — those with the most time since Postgres's statistics were reset, above the tenth percentile — so one that grew costly today but is not among them is missing. Every role's statements but the exporter's own.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 0, "y": 51, "w": 24, "h": 9},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "topk(15, sum by (queryid) (increase(pg_stat_statements_seconds_total{job=\"postgres\", datname=~\"$$database\"}[$$__range])) * on (queryid) group_left (query) topk by (queryid) (1, max by (queryid, query) (pg_stat_statements_query_id_total)) ^ 0)",
+                "legendFormat": "",
+                "instant": true,
+                "format": "table",
+                "range": false
+              },
+              {
+                "refId": "B",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "sum by (queryid) (increase(pg_stat_statements_calls_total{job=\"postgres\", datname=~\"$$database\"}[$$__range]))",
+                "legendFormat": "",
+                "instant": true,
+                "format": "table",
+                "range": false
+              },
+              {
+                "refId": "C",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "sum by (queryid) (increase(pg_stat_statements_seconds_total{job=\"postgres\", datname=~\"$$database\"}[$$__range])) / sum by (queryid) (increase(pg_stat_statements_calls_total{job=\"postgres\", datname=~\"$$database\"}[$$__range]))",
+                "legendFormat": "",
+                "instant": true,
+                "format": "table",
+                "range": false
+              }
+            ],
+            "transformations": [
+              {"id": "merge", "options": {}},
+              {
+                "id": "filterByValue",
+                "options": {
+                  "filters": [{"fieldName": "Value #A", "config": {"id": "isNull", "options": {}}}],
+                  "type": "exclude",
+                  "match": "any"
+                }
+              },
+              {
+                "id": "organize",
+                "options": {
+                  "excludeByName": {"Time": true},
+                  "renameByName": {"query": "statement", "Value #A": "total", "Value #B": "calls", "Value #C": "mean"},
+                  "indexByName": {"query": 0, "Value #A": 1, "Value #B": 2, "Value #C": 3, "queryid": 4}
+                }
+              },
+              {"id": "sortBy", "options": {"sort": [{"field": "total", "desc": true}]}}
+            ],
+            "fieldConfig": {
+              "defaults": {},
+              "overrides": [
+                {"matcher": {"id": "byName", "options": "total"}, "properties": [{"id": "unit", "value": "s"}]},
+                {
+                  "matcher": {"id": "byName", "options": "calls"},
+                  "properties": [{"id": "unit", "value": "short"}, {"id": "decimals", "value": 0}]
+                },
+                {"matcher": {"id": "byName", "options": "mean"}, "properties": [{"id": "unit", "value": "s"}]},
+                {
+                  "matcher": {"id": "byName", "options": "statement"},
+                  "properties": [{"id": "custom.width", "value": 760}]
+                }
+              ]
+            }
+          },
+          {
+            "type": "timeseries",
+            "id": 21,
+            "title": "The brain's SQL functions, mean time per call",
+            "description": "Statements calling one of the brain's own functions (match_thoughts, search_thoughts_[a-z]+, upsert_thought, update_thought, delete_thought, thought_stats_summary, claim_thoughts), each by its text, among the 100 the exporter reads: match_thoughts' next to the bench numbers.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 0, "y": 60, "w": 16, "h": 9},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "(sum by (queryid) (rate(pg_stat_statements_seconds_total{job=\"postgres\", datname=~\"$$database\"}[$$__rate_interval])) / sum by (queryid) (rate(pg_stat_statements_calls_total{job=\"postgres\", datname=~\"$$database\"}[$$__rate_interval]))) * on (queryid) group_left (query) topk by (queryid) (1, max by (queryid, query) (pg_stat_statements_query_id_total{query=~\"(?s).*(match_thoughts|search_thoughts_[a-z]+|upsert_thought|update_thought|delete_thought|thought_stats_summary|claim_thoughts)\\\\(.*\"})) ^ 0",
+                "legendFormat": "{{query}}"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "timeseries",
+            "id": 22,
+            "title": "Connections, by role and state",
+            "description": "Postgres's client connections in the databases picked above (the brain's is openbrain): the servers' pools among them, which their client cannot count, and the exporter's own.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 16, "y": 60, "w": 8, "h": 9},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "sum by (usename, state) (pg_stat_activity_count{job=\"postgres\", datname=~\"$$database\", usename!=\"\"})",
+                "legendFormat": "{{usename}} {{state}}"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {"unit": "short", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 30}},
+              "overrides": []
+            },
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "timeseries",
+            "id": 23,
+            "title": "Buffer cache hit ratio",
+            "description": "Blocks found in Postgres's shared buffers, as a share of blocks read, in the databases picked above.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 0, "y": 69, "w": 8, "h": 7},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "sum(rate(pg_stat_database_blks_hit_total{job=\"postgres\", datname=~\"$$database\"}[$$__rate_interval])) / (sum(rate(pg_stat_database_blks_hit_total{job=\"postgres\", datname=~\"$$database\"}[$$__rate_interval])) + sum(rate(pg_stat_database_blks_read_total{job=\"postgres\", datname=~\"$$database\"}[$$__rate_interval])))",
+                "legendFormat": "hit ratio"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "timeseries",
+            "id": 24,
+            "title": "Database size",
+            "description": "Each database picked above, on disk (the brain's is openbrain).",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 8, "y": 69, "w": 8, "h": 7},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "sum by (datname) (pg_database_size_bytes{job=\"postgres\", datname=~\"$$database\"})",
+                "legendFormat": "{{datname}}"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "stat",
+            "id": 25,
+            "title": "Exporter reaching Postgres",
+            "description": "up while the collector scrapes pg-exporter and pg-exporter reads Postgres; down when either fails (pg-exporter stopped or unhealthy, a wrong OB1_MONITOR_DB_PASSWORD, Postgres down); no data before the collector's first scrape of it (lgtm just started).",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 16, "y": 69, "w": 8, "h": 7},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "min(up{job=\"postgres\"}) * (min(pg_up{job=\"postgres\"}) or on () vector(0))",
+                "legendFormat": "up"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "mappings": [
+                  {
+                    "type": "value",
+                    "options": {"0": {"text": "down", "color": "red"}, "1": {"text": "up", "color": "green"}}
+                  }
+                ],
+                "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}
+              },
+              "overrides": []
+            },
+            "options": {
+              "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+              "colorMode": "background",
+              "graphMode": "none",
+              "textMode": "value"
+            }
+          },
+          {
+            "type": "row",
+            "id": 26,
+            "title": "Requests not ok, and the telemetry itself",
+            "collapsed": false,
+            "gridPos": {"x": 0, "y": 76, "w": 24, "h": 1},
+            "panels": []
+          },
+          {
+            "type": "logs",
+            "id": 27,
+            "title": "Request records whose outcome was not ok",
+            "description": "Each request's log record (the line's fields: no key, URL, argument or thought text), newest first, each with its trace id (trace_id), which Tempo's search finds. By server alone: a path-mode canary sending here under the same service.name is among them whatever the Tier.",
+            "datasource": {"type": "loki", "uid": "loki"},
+            "gridPos": {"x": 0, "y": 77, "w": 12, "h": 10},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "loki", "uid": "loki"},
+                "expr": "{service_name=~\"$$service\"} != `\"outcome\":\"ok\"` | json | __error__ = \"\" | outcome != \"\" | outcome != \"ok\"",
+                "queryType": "range"
+              }
+            ],
+            "options": {
+              "showTime": true,
+              "wrapLogMessage": true,
+              "sortOrder": "Descending",
+              "enableLogDetails": true,
+              "dedupStrategy": "none"
+            }
+          },
+          {
+            "type": "table",
+            "id": 28,
+            "title": "Traces with an error",
+            "description": "Requests, tool calls, provider calls, store operations and job bodies whose span ended in error, newest first. By server alone, as the records beside it.",
+            "datasource": {"type": "tempo", "uid": "tempo"},
+            "gridPos": {"x": 12, "y": 77, "w": 12, "h": 10},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "tempo", "uid": "tempo"},
+                "queryType": "traceql",
+                "query": "{resource.service.name=~\"$$service\" && status=error}",
+                "limit": 20,
+                "tableType": "traces"
+              }
+            ]
+          },
+          {
+            "type": "timeseries",
+            "id": 29,
+            "title": "Telemetry the collector could not store, per second",
+            "description": "Spans, metric points and log records lgtm's collector refused, failed to queue (its sending queue full) or failed to hand its own backends: none in a healthy stack. A loss's counter is born at its first count, which a rate does not see, so a single lost batch shows only in the totals beside this. Loki refused every record with the disk under lgtm-data 92% full (measured; its write-ahead log's threshold is 90%), which only lgtm's own log and these two panels say.",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 0, "y": 87, "w": 16, "h": 6},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "((sum(rate(otelcol_exporter_send_failed_spans_total[$$__rate_interval])) or vector(0)) + (sum(rate(otelcol_exporter_enqueue_failed_spans_total[$$__rate_interval])) or vector(0)) + (sum(rate(otelcol_receiver_refused_spans_total[$$__rate_interval])) or vector(0)) + (sum(rate(otelcol_receiver_failed_spans_total[$$__rate_interval])) or vector(0))) and on () sum(otelcol_process_uptime_total)",
+                "legendFormat": "spans"
+              },
+              {
+                "refId": "B",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "((sum(rate(otelcol_exporter_send_failed_metric_points_total[$$__rate_interval])) or vector(0)) + (sum(rate(otelcol_exporter_enqueue_failed_metric_points_total[$$__rate_interval])) or vector(0)) + (sum(rate(otelcol_receiver_refused_metric_points_total[$$__rate_interval])) or vector(0)) + (sum(rate(otelcol_receiver_failed_metric_points_total[$$__rate_interval])) or vector(0))) and on () sum(otelcol_process_uptime_total)",
+                "legendFormat": "metric points"
+              },
+              {
+                "refId": "C",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "((sum(rate(otelcol_exporter_send_failed_log_records_total[$$__rate_interval])) or vector(0)) + (sum(rate(otelcol_exporter_enqueue_failed_log_records_total[$$__rate_interval])) or vector(0)) + (sum(rate(otelcol_receiver_refused_log_records_total[$$__rate_interval])) or vector(0)) + (sum(rate(otelcol_receiver_failed_log_records_total[$$__rate_interval])) or vector(0))) and on () sum(otelcol_process_uptime_total)",
+                "legendFormat": "log records"
+              }
+            ],
+            "fieldConfig": {"defaults": {"unit": "cps", "min": 0, "custom": {"axisSoftMax": 0.1}}, "overrides": []},
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+              "tooltip": {"mode": "multi", "sort": "desc"}
+            }
+          },
+          {
+            "type": "stat",
+            "id": 30,
+            "title": "Telemetry lost since lgtm started",
+            "description": "The collector's counts of what it refused, failed to queue or could not store, from its start: any above 0 is data a panel here is missing. For five minutes after lgtm restarts, the run before's counts are added to these (its series are still the latest of theirs).",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "gridPos": {"x": 16, "y": 87, "w": 8, "h": 6},
+            "targets": [
+              {
+                "refId": "A",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "((sum(otelcol_exporter_send_failed_spans_total) or vector(0)) + (sum(otelcol_exporter_enqueue_failed_spans_total) or vector(0)) + (sum(otelcol_receiver_refused_spans_total) or vector(0)) + (sum(otelcol_receiver_failed_spans_total) or vector(0))) and on () sum(otelcol_process_uptime_total)",
+                "legendFormat": "spans"
+              },
+              {
+                "refId": "B",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "((sum(otelcol_exporter_send_failed_metric_points_total) or vector(0)) + (sum(otelcol_exporter_enqueue_failed_metric_points_total) or vector(0)) + (sum(otelcol_receiver_refused_metric_points_total) or vector(0)) + (sum(otelcol_receiver_failed_metric_points_total) or vector(0))) and on () sum(otelcol_process_uptime_total)",
+                "legendFormat": "metric points"
+              },
+              {
+                "refId": "C",
+                "datasource": {"type": "prometheus", "uid": "prometheus"},
+                "expr": "((sum(otelcol_exporter_send_failed_log_records_total) or vector(0)) + (sum(otelcol_exporter_enqueue_failed_log_records_total) or vector(0)) + (sum(otelcol_receiver_refused_log_records_total) or vector(0)) + (sum(otelcol_receiver_failed_log_records_total) or vector(0))) and on () sum(otelcol_process_uptime_total)",
+                "legendFormat": "log records"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "short",
+                "decimals": 0,
+                "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}
+              },
+              "overrides": []
+            },
+            "options": {
+              "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+              "colorMode": "value",
+              "graphMode": "none",
+              "textMode": "value_and_name"
+            }
+          }
+        ]
+      }
+  # Where Grafana finds it: a file provider reading that one file into a
+  # folder of its own, Grafana's UI refused a save of it, and kept, no longer
+  # provisioned, rather than deleted should the file go; held byte for byte by
+  # check 37.
+  grafana-dashboard-provider:
+    content: |
+      apiVersion: 1
+      providers:
+        - name: open-brain-dashboard
+          type: file
+          folder: Open Brain
+          disableDeletion: true
+          allowUiUpdates: false
+          options:
+            path: /otel-lgtm/open-brain-dashboard.json
+            foldersFromFilesStructure: false

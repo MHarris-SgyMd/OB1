@@ -35,6 +35,7 @@ import { ago, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readD
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
+import { mendIntervalFrom } from "./core/mend.ts";
 import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
 import { enabledHooks, hookSecrets, loadPlugins, pluginNames, pluginProblem } from "./core/plugins.ts";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -791,7 +792,11 @@ if (!egress.problems.length) {
   }
 }
 /** What a refused call costs, per endpoint, for the rows below. */
-const EMB_REFUSED = "captures land without a vector, findable by exact text only, until a re-embed pass against an endpoint the gate allows";
+// What the servers do with such a capture depends on the mender's knob (SMD-2889).
+const MEND = mendIntervalFrom(env.OB1_VECTOR_MEND_INTERVAL);
+const EMB_REFUSED = MEND.intervalS > 0
+  ? "captures land without a vector, findable by exact text only, until the gate allows the call (a changed policy takes a restart) — the servers' vector mender then embeds them (SMD-2889)"
+  : "captures land without a vector, findable by exact text only — OB1_VECTOR_MEND_INTERVAL is off, so only a db/reembed.ts pass against an endpoint the gate allows embeds them";
 const CHAT_REFUSED = "captures land untagged (no topics, no type) and the entity and consolidation passes fail every row they claim";
 /**
  * One row per endpoint: declared local (the gate does not apply), or what
@@ -863,6 +868,17 @@ if (env.OB1_STOP_GRACE) {
   } else {
     add("stop grace", "ok", `${grace.graceS} s (OB1_STOP_GRACE) — a stop drains what is in flight for up to ${grace.drainBoundMs / 1000} s`);
   }
+}
+
+// ── Vector mender ────────────────────────────────────────────────────────────
+
+// Only when set, as the stop grace is (SMD-2889): unset is every 60 s. A value
+// the servers cannot read is the default there, with a warning in their log
+// that an operator may never read — said here as well.
+if (env.OB1_VECTOR_MEND_INTERVAL !== undefined && env.OB1_VECTOR_MEND_INTERVAL !== "") {
+  if (MEND.problem) add("vector mender", "warn", MEND.problem, "Set OB1_VECTOR_MEND_INTERVAL to whole seconds from 1 to 86400, or off, or unset it for 60.");
+  else if (MEND.intervalS === 0) add("vector mender", "ok", "off (OB1_VECTOR_MEND_INTERVAL) — a thought saved without a vector keeps none until a db/reembed.ts pass gives it one");
+  else add("vector mender", "ok", `every ${MEND.intervalS} s (OB1_VECTOR_MEND_INTERVAL) — the servers embed the thoughts saved without a vector once the provider answers and the egress gate allows`);
 }
 
 // ── Access keys ──────────────────────────────────────────────────────────────
