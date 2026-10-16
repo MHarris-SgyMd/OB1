@@ -21,6 +21,10 @@ import type { AgentOutcome } from "./agents.ts";
 import { ROUTES, pathFields } from "./rest/routes.ts";
 import { createRestApp, inputFromQuery, headerKeys, REFUSAL_STATUS } from "./rest/app.ts";
 import { openApiDocument } from "./rest/openapi.ts";
+import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
+import { keyScopeOf as authKeyScopeOf, SCOPES as authScopes } from "../deploy/auth/layout.ts";
+import { OAUTH_SCOPES } from "./oauth-edge.ts";
+import { AUTH_JWKS_URL, checkerOver, JWKS_CACHE_MAX_AGE_MS, keyScopeOf, remoteChecker, subjectHash, tokenSettings, type TokenCheck } from "./oauth-token.ts";
 
 const { assert, report } = createAssert();
 type Op = { operationId: string; "x-ob1-scope"?: string; parameters?: { name: string; in: string; required?: boolean; schema: { type?: string; items?: { type?: string } } }[]; requestBody?: { content: { "application/json": { schema: { properties?: Record<string, unknown> } } } } };
@@ -346,6 +350,161 @@ console.log("\n[5c] A keyed /health answers the brain's record on the health sur
   release();
   resolveGate = null;
   assert(r.status === 200 && same(r.body, live) && took >= 2_400 && took < 4_000, `a registry silent past the deadline: liveness, at it (${Math.round(took)} ms)`);
+  answer = async () => ok({});
+}
+
+console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audience, ES256 at+jwt, scopes one to one, `oauth:<sub>`, act; unconfigured none; no keys a 503");
+{
+  const ORIGIN = "https://brain.example.test";
+  const settings = tokenSettings({ COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: ORIGIN })!;
+  assert(same(settings, { issuer: `${ORIGIN}/auth`, audience: `${ORIGIN}/api` }), `configured: issuer <origin>/auth, audience <origin>/api (${JSON.stringify(settings)})`);
+  assert(tokenSettings({ OB1_PUBLIC_ORIGIN: ORIGIN }) === null && tokenSettings({ COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: "http://brain.example.test" }) === null,
+    "not configured, or an unsound origin: no settings, so no token is accepted");
+  for (const [scope, want] of [
+    ["brain:write", "write"], ["brain:read brain:write brain:capture", "write"], ["brain:read", "read"], ["brain:capture", "capture"],
+    ["openid offline_access brain:read", "read"], ["brain:read brain:capture", null], ["", null], ["openid", null], [undefined, null], [42, null],
+  ] as const) assert(keyScopeOf(scope) === want, `keyScopeOf(${JSON.stringify(scope)}) → ${want} (${keyScopeOf(scope)})`);
+  // The authorization server issues by the same rule (deploy/auth/layout.ts keyScopeOf): every set of its scopes, read alike.
+  const offered = [...authScopes, "openid", "offline_access"];
+  const subsets = Array.from({ length: 1 << offered.length }, (_, m) => offered.filter((_, i) => m & (1 << i)));
+  const differ = subsets.filter((s) => keyScopeOf(s.join(" ")) !== authKeyScopeOf(s));
+  assert(differ.length === 0 && same([...authScopes], [...OAUTH_SCOPES]), `the REST core and the authorization server read all ${subsets.length} sets of scopes alike, over the same three brain scopes${differ.length ? ` (differ: ${differ.map((s) => s.join("+")).join(", ")})` : ""}`);
+
+  const { publicKey, privateKey } = await generateKeyPair("ES256", { extractable: true });
+  const kid = "ob1-test";
+  const jwks = { keys: [{ ...(await exportJWK(publicKey)), kid, alg: "ES256", use: "sig" }] };
+  const other = await generateKeyPair("ES256");
+  type Claims = Record<string, unknown>;
+  const mint = (claims: Claims = {}, opt: { key?: CryptoKey; kid?: string; typ?: string; exp?: string | number } = {}) =>
+    new SignJWT({ scope: "brain:write", ...claims })
+      .setProtectedHeader({ alg: "ES256", typ: opt.typ ?? "at+jwt", kid: opt.kid ?? kid })
+      .setIssuer(String(claims.iss ?? settings.issuer)).setAudience((claims.aud as string) ?? settings.audience)
+      .setSubject(String(claims.sub ?? "operator")).setIssuedAt().setExpirationTime(opt.exp ?? "10m")
+      .sign(opt.key ?? privateKey);
+  let check: TokenCheck | null = checkerOver(settings, createLocalJWKSet(jwks));
+  const tokenApp = createRestApp({
+    core,
+    init: () => {},
+    keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")},f:forward:${hashKey("fwd-raw")}` }),
+    tokens: () => check,
+    resolve: async (p) => { resolvedNames.push(p.name); return p.scope === "forward" ? carrierIdentity : identity; },
+    track: (run) => run(),
+    log: () => {},
+  });
+  const call = (path: string, token: string, init: RequestInit & { headers?: Record<string, string> } = {}) =>
+    tokenApp.fetch(new Request(`http://api${path}`, { ...init, headers: { authorization: `Bearer ${token}`, ...(init.body ? { "content-type": "application/json" } : {}), ...init.headers } }));
+  identity = { status: "ok", agentId: "agent-o" };
+  answer = async () => ok({});
+
+  let r = await json(await call("/v1/whoami", await mint()));
+  assert(r.status === 200 && r.body.name === "oauth:operator" && r.body.scope === "write" && r.body.agentId === "agent-o" && !("act" in r.body),
+    `a write token: the caller is oauth:operator, write scope, its agent id resolved (${JSON.stringify(r.body).slice(0, 120)})`);
+  calls.length = 0;
+  await call("/v1/stats", await mint());
+  const p = calls[0]?.principal;
+  assert(p?.name === "oauth:operator" && p.keyHash === subjectHash(settings.issuer, "operator") && /^[0-9a-f]{64}$/.test(p.keyHash),
+    `the operation runs as oauth:operator, its keyHash the subject's fixed digest (64 hex, the registry's CHECK) (${p?.name} ${p?.keyHash})`);
+  assert(subjectHash(settings.issuer, "operator") !== subjectHash("https://other.example.test/auth", "operator") && subjectHash(settings.issuer, "operator") !== hashKey("operator"),
+    "…a digest of issuer and subject: not another issuer's, nor a key's");
+
+  const read = await mint({ scope: "brain:read" });
+  r = await json(await call("/v1/stats", read));
+  assert(r.status === 200, `a read token reads (${r.status})`);
+  calls.length = 0;
+  r = await json(await call("/v1/thoughts", read, { method: "POST", body: JSON.stringify({ content: "x" }) }));
+  assert(r.status === 403 && r.body.code === "FORBIDDEN" && r.body.needs === "capture" && calls.length === 0, `a read token cannot capture: 403 needs capture, nothing ran (${r.status} ${JSON.stringify(r.body)})`);
+  r = await json(await call("/v1/thoughts/00000000-0000-4000-8000-000000000000", read, { method: "DELETE" }));
+  assert(r.status === 403 && r.body.needs === "write", `…nor delete (${r.status})`);
+  const cap = await mint({ scope: "brain:capture" });
+  r = await json(await call("/v1/stats", cap));
+  assert(r.status === 403 && r.body.needs === "read", `a capture token cannot read (${r.status})`);
+  r = await json(await call("/v1/whoami", cap));
+  assert(r.status === 200 && r.body.scope === "capture" && same(r.body.operations, CAPTURE_TOOL_NAMES), `…its operations are a capture key's (${JSON.stringify(r.body.operations)})`);
+
+  // Every token this server does not accept: 401 as a token, RFC 6750's invalid_token, and nothing runs.
+  const refused: [string, Promise<string>][] = [
+    ["brain:read with brain:capture, no key's scope", mint({ scope: "brain:read brain:capture" })],
+    ["no brain scope", mint({ scope: "openid offline_access" })],
+    ["the /mcp audience (Verify: the MCP-audience token sent straight to the REST core)", mint({ aud: `${ORIGIN}/mcp` })],
+    ["another tier's REST core", mint({ aud: `${ORIGIN}/canary/api` })],
+    ["another issuer", mint({ iss: "https://elsewhere.example.test/auth" })],
+    ["expired", mint({}, { exp: Math.floor(Date.now() / 1000) - 60 })],
+    ["no expiry at all", new SignJWT({ scope: "brain:write" }).setProtectedHeader({ alg: "ES256", typ: "at+jwt", kid }).setIssuer(settings.issuer).setAudience(settings.audience).setSubject("operator").setIssuedAt().sign(privateKey)],
+    ["typ JWT, not at+jwt (an ID token's shape)", mint({}, { typ: "JWT" })],
+    ["signed by another key under the server's kid", mint({}, { key: other.privateKey })],
+    ["a kid the key set does not hold", mint({}, { kid: "ob1-unknown", key: other.privateKey })],
+    ["HS256", new SignJWT({ scope: "brain:write" }).setProtectedHeader({ alg: "HS256", typ: "at+jwt", kid }).setIssuer(settings.issuer).setAudience(settings.audience).setSubject("operator").setIssuedAt().setExpirationTime("10m").sign(new TextEncoder().encode("x".repeat(32)))],
+    ["a subject holding a character a log or egress term cannot carry", mint({ sub: "oper ator" })],
+    ["an act naming no actor", mint({ act: { client: "mcp" } })],
+    ["unsigned (alg none)", Promise.resolve(`${btoa(JSON.stringify({ alg: "none", typ: "at+jwt" })).replace(/=+$/, "")}.${btoa(JSON.stringify({ iss: settings.issuer, aud: settings.audience, sub: "operator", scope: "brain:write", exp: Math.floor(Date.now() / 1000) + 600 })).replace(/=+$/, "")}.`)],
+  ];
+  for (const [label, made] of refused) {
+    calls.length = 0;
+    const res = await call("/v1/stats", await made);
+    const body = await res.json() as Record<string, unknown>;
+    assert(res.status === 401 && body.code === "UNAUTHORIZED" && body.credential === "token" && res.headers.get("www-authenticate") === 'Bearer error="invalid_token"' && calls.length === 0,
+      `refused, ${label}: 401 UNAUTHORIZED credential token, invalid_token (${res.status} ${JSON.stringify(body)} ${res.headers.get("www-authenticate")})`);
+  }
+
+  // An exchanged token names the MCP service as act, signed; a forwarder slot beside it is checked and does not replace it.
+  const exchanged = await mint({ scope: "brain:read", act: { sub: "mcp" } });
+  r = await json(await call("/v1/whoami", exchanged));
+  assert(r.status === 200 && r.body.name === "oauth:operator" && same(r.body.act, { name: "oauth:mcp" }), `an exchanged token: the subject, act oauth:<the MCP client> (${JSON.stringify(r.body).slice(0, 120)})`);
+  r = await json(await call("/v1/whoami", exchanged, { headers: { "x-brain-forwarder": "fwd-raw" } }));
+  assert(r.status === 200 && same(r.body.act, { name: "oauth:mcp" }), `…beside a forwarder's key, the token's own act stands (${JSON.stringify(r.body.act)})`);
+  r = await json(await call("/v1/whoami", exchanged, { headers: { "x-brain-forwarder": "read-raw" } }));
+  assert(r.status === 401 && r.body.credential === "forwarder", `…and a slot holding no forwarder's key is refused all the same (${r.status} ${JSON.stringify(r.body)})`);
+  r = await json(await call("/v1/whoami", await mint(), { headers: { "x-brain-forwarder": "fwd-raw" } }));
+  assert(r.status === 200 && same(r.body.act, { name: "f", agentId: "agent-f" }), `a token naming no act, carried by a forwarder: the forwarder is act, as for a key (${JSON.stringify(r.body.act)})`);
+  // A service's client-credentials token: the authorization server's `sub` is the client id.
+  r = await json(await call("/v1/whoami", await mint({ sub: "runner", scope: "brain:capture" })));
+  assert(r.status === 200 && r.body.name === "oauth:runner", `a service's token: oauth:<its client id> (${r.body.name})`);
+
+  // The registry's word holds for a token as for a key.
+  identity = { status: "revoked", agentId: "agent-o", revokedAt: "2026-10-16T00:00:00Z", reason: null };
+  r = await json(await call("/v1/stats", await mint()));
+  assert(r.status === 401 && r.body.code === "REVOKED", `a subject the registry revoked → 401 REVOKED (${r.status} ${r.body.code})`);
+  identity = { status: "ok", agentId: "agent-o" };
+
+  // A key beside a token is the caller: keys first, as before.
+  r = await json(await tokenApp.fetch(new Request("http://api/v1/whoami", { headers: { "x-brain-key": "read-raw", authorization: `Bearer ${await mint()}` } })));
+  assert(r.status === 200 && r.body.name === "r", `a key beside a token: the key is the caller (${r.body.name})`);
+  // A bearer that is no JWT's shape is a key, never handed to the check.
+  let checked = 0;
+  const counted = check;
+  check = async (t) => { checked++; return counted!(t); };
+  r = await json(await call("/v1/whoami", "not-a-jwt"));
+  assert(r.status === 401 && !("credential" in r.body) && checked === 0, `a wrong key as Bearer: an unknown key, the token check not asked (${r.status} ${JSON.stringify(r.body)} ${checked})`);
+  // Unconfigured (no check): a token is an unknown key, as before SMD-2286.
+  check = null;
+  r = await json(await call("/v1/whoami", await mint()));
+  assert(r.status === 401 && r.body.code === "UNAUTHORIZED" && !("credential" in r.body), `not configured: a valid token is an unknown key (${r.status} ${JSON.stringify(r.body)})`);
+  const plainApp = await json(await app.fetch(new Request("http://api/v1/whoami", { headers: { authorization: `Bearer ${await mint()}` } })));
+  assert(plainApp.status === 401 && !("credential" in plainApp.body), `…and a REST app given no token check accepts none (${plainApp.status})`);
+
+  // The key set on the network (remoteChecker): read once and cached; the authorization server gone, a token is
+  // checked against the keys read; never read and unreachable, a token is a 503 with the 30 s wait, not a 401.
+  let served = 0;
+  let failing = false;
+  const jwksServer = Bun.serve({ port: 0, fetch: (req) => (new URL(req.url).pathname === "/auth/jwks" ? (served++, failing ? new Response("down", { status: 503 }) : Response.json(jwks)) : new Response("no", { status: 404 })) });
+  const at = `http://127.0.0.1:${jwksServer.port}/auth/jwks`;
+  check = remoteChecker(settings, at);
+  r = await json(await call("/v1/whoami", await mint()));
+  const second = await json(await call("/v1/whoami", await mint()));
+  assert(r.status === 200 && second.status === 200 && served === 1, `the remote key set: read once, then cached (${r.status} ${second.status}, ${served} read)`);
+  failing = true;
+  r = await json(await call("/v1/whoami", await mint()));
+  assert(r.status === 200, `…the authorization server failing, a token is checked against the keys read (${r.status})`);
+  check = remoteChecker(settings, at);
+  const down = await call("/v1/whoami", await mint());
+  const downBody = await down.json() as Record<string, unknown>;
+  assert(down.status === 503 && downBody.code === "BUSY" && downBody.credential === "token" && down.headers.get("retry-after") === "30",
+    `a key set never read, the server answering 503: the token is 503 BUSY credential token, Retry-After 30 — not refused (${down.status} ${JSON.stringify(downBody)} ${down.headers.get("retry-after")})`);
+  jwksServer.stop(true);
+  check = remoteChecker(settings, at);
+  const gone = await call("/v1/whoami", await mint());
+  assert(gone.status === 503 && gone.headers.get("retry-after") === "30", `…nothing listening: 503 all the same (${gone.status})`);
+  assert(AUTH_JWKS_URL === "http://auth.ob1.internal.:3000/auth/jwks" && JWKS_CACHE_MAX_AGE_MS === 600_000, "a deploy reads the authorization server's key set on the mesh, kept for the access tokens' 600 s");
   answer = async () => ok({});
 }
 

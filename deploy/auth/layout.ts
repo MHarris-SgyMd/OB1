@@ -32,6 +32,48 @@
  */
 export const SCOPES = ["brain:read", "brain:write", "brain:capture"] as const;
 
+/**
+ * The access-key scope a set of scopes names, or null for none (SMD-2286 step
+ * 5: the brain's scopes are its key scopes, one to one, and no privilege
+ * exists only in OAuth). `brain:write` is a write key's, which reads and
+ * captures too; `brain:read` alone a read key's; `brain:capture` alone a
+ * capture key's. `brain:read` with `brain:capture` and no `brain:write` is no
+ * key's, and none of the three is none. Scopes that are not the brain's
+ * (`openid`, `offline_access`) are ignored. The REST core reads a token by the
+ * same rule (server-portable/oauth-token.ts keyScopeOf) and refuses a token it
+ * gives null for, so the server never issues a combination with no key's
+ * meaning; server-portable/test-rest.ts holds the two rules together.
+ */
+export function keyScopeOf(scopes: readonly string[]): "write" | "read" | "capture" | null {
+  const held = new Set(scopes.filter((s) => (SCOPES as readonly string[]).includes(s)));
+  if (held.has("brain:write")) return "write";
+  if (held.size !== 1) return null;
+  return held.has("brain:read") ? "read" : "capture";
+}
+
+/** Whether a set of scopes names brain scopes that no access key holds together: brain:read with brain:capture, without brain:write. */
+export const noKeysScope = (scopes: readonly string[]) => keyScopeOf(scopes) === null && scopes.some((s) => (SCOPES as readonly string[]).includes(s));
+
+/** The one account, whose `sub` every signed-in token carries; a service's tokens carry its client id, so no service may be named this. */
+export const OPERATOR = "operator";
+
+/** A grant's whole life, which no refresh token outlives: 30 days from the consent. */
+export const GRANT_TTL_S = 30 * 86_400;
+/** How long a refresh token lasts unused: each refresh rotates it, and the new one has this long again, within the grant's life. */
+export const REFRESH_IDLE_S = 14 * 86_400;
+
+/**
+ * A refresh token's lifetime (SMD-2286, the maintainer's choice: rotate, 14
+ * days idle): REFRESH_IDLE_S, cut to what is left of GRANT_TTL_S since the
+ * first refresh token of the chain was issued (`iiat`, which oidc-provider
+ * carries across every rotation), and never less than a second: a chain that
+ * old has no grant left to refresh in any case.
+ */
+export function refreshTtl(iiat: number | undefined, now: number): number {
+  const spent = iiat === undefined ? 0 : Math.max(0, now - iiat);
+  return Math.max(1, Math.min(REFRESH_IDLE_S, GRANT_TTL_S - spent));
+}
+
 export const TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange";
 export const ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token";
 
@@ -172,10 +214,13 @@ export function servicesFromEnv(tiers: TierName[], env: Record<string, string | 
     const [, id, scopes, tierList] = m;
     if (!SERVICE_ID.test(id)) throw new Error(`OB1_AUTH_SERVICES: "${id}" is not a service id (lowercase letters, digits and inner hyphens, at most 64)`);
     if (id === "gui" || id === "mcp" || id.startsWith("mcp-")) throw new Error(`OB1_AUTH_SERVICES: "${id}" is a reserved client id`);
+    // A service's token's subject is its id (the REST core's caller `oauth:<id>`), so it may not be the operator's.
+    if (id === OPERATOR) throw new Error(`OB1_AUTH_SERVICES: "${id}" is the operator's subject; a service named so would act as the operator`);
     if (Object.hasOwn(out, id)) throw new Error(`OB1_AUTH_SERVICES: "${id}" is listed twice`);
     const scope = parts(scopes, "+", `OB1_AUTH_SERVICES: "${id}"'s scopes`);
     const badScope = scope.filter((s) => !(SCOPES as readonly string[]).includes(s));
     if (badScope.length) throw new Error(`OB1_AUTH_SERVICES: "${id}" asks for unknown scope ${badScope.join(", ")}`);
+    if (noKeysScope(scope)) throw new Error(`OB1_AUTH_SERVICES: "${id}" asks for ${scope.join("+")}, which no access key holds together; brain:write reads and captures, or name one of them`);
     const named = parts(tierList, ",", `OB1_AUTH_SERVICES: "${id}"'s tiers`);
     const badTier = named.filter((t) => !(tiers as string[]).includes(t));
     if (badTier.length) throw new Error(`OB1_AUTH_SERVICES: "${id}" names a tier OB1_AUTH_TIERS does not: ${badTier.join(", ")}`);

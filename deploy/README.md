@@ -687,8 +687,9 @@ such an `up` without it recreates the proxy without the route, and `/api` is the
 404 again — which is also how to turn it off; an `up` of other services alone
 leaves the proxy, and `/api`, as they were. With the file named and the REST
 core down or starting, `/api` answers the proxy's 502. The REST core takes its key
-from a header (`x-brain-key`, `x-access-key` or `Authorization: Bearer`), never
-from `?key=`, so a client of `/api` needs a header; a URL-only connector stays
+from a header (`x-brain-key`, `x-access-key` or `Authorization: Bearer`, which on
+a stack with the `auth` profile also carries the authorization server's tokens:
+"Tokens at the REST core", SMD-2286), never from `?key=`, so a client of `/api` needs a header; a URL-only connector stays
 on `/mcp`. The proxy deletes `x-brain-forwarder` on the way in: a request's
 carrier (SMD-2284) is named only from inside the stack, where the MCP server
 will name itself once it forwards (SMD-2286). Its writes record their door as
@@ -3047,8 +3048,10 @@ OAuth for the brain (SMD-2285; `../docs/operator-surface-tiers.md`, decisions
 (`auth/server.ts`), which won the proof of concept (`../evals/README.md`). The
 `auth` profile runs it. It publishes no port: the proxy routes `/auth` and
 the three discovery paths outside it to it while it answers, and answers them
-404 itself while it does not ("One origin", above). No service is its client
-yet: the MCP server and the GUI become its clients with SMD-2286/2287. The
+404 itself while it does not ("One origin", above). The REST core accepts
+its tokens (SMD-2286, "Tokens at the REST core" below). The MCP server
+becomes its client with SMD-2286's exchange in `mcp-server/`, live with
+SMD-2287, and the GUI with SMD-2280. The
 MCP server already sends clients to it (SMD-2382), a preview: at the public origin, while
 this server answers its probe on the mesh, it serves the protected-resource
 document and answers a keyless `/mcp` with the 401 challenge naming it.
@@ -3117,7 +3120,31 @@ its log (`compose logs auth`) says why each time. `OB1_PUBLIC_ORIGIN` must be
 an origin alone, `https://`, or `http://` on a loopback host. A service
 client named in `OB1_AUTH_SERVICES` needs its secret's line added to the
 `auth` service's environment in `deploy/compose.yaml`, since compose cannot
-pass a variable it does not name: `provision.ts` says which line.
+pass a variable it does not name: `provision.ts` says which line. A service's
+id may not be `operator`, the account every sign-in's token names, and its
+scopes must be one access key's: `brain:read+brain:capture` without
+`brain:write` is refused, as `brain:write` already reads and captures.
+
+**Tokens at the REST core** (SMD-2286). On a configured stack the REST core
+accepts a bearer token this server issued for it: issuer `<origin>/auth`,
+audience exactly `<origin>/api`, ES256, unexpired. A token for `/mcp` is
+refused there; it reaches the REST core only exchanged by the MCP server.
+- **Scopes:** `brain:write` acts as a write key, `brain:read` as a read
+  key, `brain:capture` as a capture key. The consent page words them so.
+- **The caller** is `oauth:operator` for a sign-in, `oauth:<id>` for a
+  service. Use that name in `actor:` egress terms (`actor:oauth:operator`)
+  and the search tools' actor filter; an exchanged token's audit row names
+  the MCP service as `act`.
+- **The keys:** it reads this server's signing keys on the mesh and keeps
+  them ten minutes, the tokens' lifetime. A token issued before an outage
+  works to its end; one it has no keys for gets 503 with `Retry-After: 30`.
+  Not configured, a token is an unknown key.
+- **Lifetimes:** an access token lasts 600 s. A client that asked for
+  `offline_access` gets a refresh token that lasts 14 days unused. Each use
+  replaces it with a new one, and no chain outlives the 30-day grant behind
+  it, so a connector signs in again at least monthly. A replaced token used
+  again is taken as stolen: the grant is revoked, and the client signs in
+  again.
 
 **Its state** — sessions, grants, refresh tokens and dynamically registered
 clients — is one SQLite file in the `auth-data` volume, so a restart keeps
@@ -3164,7 +3191,7 @@ host tunnel:
   it the sign-in page asks for a moment. A guesser gets about 3,600 tries an
   hour, but a flood of them holds the right password off too while it lasts:
   nothing outlasts the flood, and the loopback sign-in that answers one is
-  SMD-2286's.
+  SMD-2280's.
 - **Each sign-in** takes five wrong passwords, then must start again from the
   app.
 - **Registration** has the cap and the idle purge above.
@@ -3212,7 +3239,7 @@ measured). Only these per-address limits read it. Two hops need the tunnel to wr
 `forwardedHeaders.trustedIPs`, which compose does not set); a tunnel that
 passes the header through unwritten lets the client name entry 2. A password from `--init`, or one of 12 characters
 or more, is what holds against many addresses guessing; the loopback
-break-glass sign-in is SMD-2286's. The proxy in front sets no rate limit of
+break-glass sign-in is SMD-2280's. The proxy in front sets no rate limit of
 its own, by design ("No rate limits on `/mcp`, by design" above).
 
 **Custody and backups.**
@@ -3266,8 +3293,8 @@ in today, so leave the profile off where others' claude.ai connectors must
 keep working; turning it off again makes the document a 404, and they
 proceed on the key.
 Not yet: passkey sign-in, which needs the public origin (SMD-2382,
-SMD-2286), and the MCP server and the GUI as this server's clients
-(SMD-2286, SMD-2287). The release overlay does not pin an image for it yet,
+SMD-2286), and the MCP server and the GUI as this server's clients (SMD-2286's exchange with
+SMD-2287; SMD-2280). The release overlay does not pin an image for it yet,
 so the profile builds from a checkout.
 
 ## What this does not cover

@@ -140,7 +140,7 @@ export function challengeHeader(origin: string, refusedToken: boolean): string {
  * `Authorization: Bearer`. A legacy raw MCP_ACCESS_KEY written with two dots
  * would read as a token too; keygen.ts never mints one.
  */
-const JWT_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/;
+export const JWT_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/;
 
 /**
  * What a refused request presented: no key form, a key (in any of auth.ts's

@@ -89,7 +89,7 @@ import { generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto"
 import { existsSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { discoverAuthorizationServerMetadata, discoverOAuthProtectedResourceMetadata } from "@modelcontextprotocol/client";
-import { layoutFromEnv } from "../deploy/auth/layout.ts";
+import { GRANT_TTL_S, keyScopeOf, layoutFromEnv, noKeysScope, REFRESH_IDLE_S, refreshTtl } from "../deploy/auth/layout.ts";
 import { answerProbes, guardProbes } from "./auth/fetch-guard-probes.ts";
 import { Browser, claimsOf, pkce, tampered, tokenRequest, type Claims, type TokenReply } from "./auth/flows.ts";
 import { ACCESS_TOKEN_TYPE, INTERNAL, layout, NATIVE_REDIRECT, TIERS, TOKEN_EXCHANGE, type Layout } from "./auth/policy.ts";
@@ -611,6 +611,19 @@ async function grants(c: Ctx): Promise<{ gui?: string }> {
     const shown = consentPage.includes(`client ${id}`) && consentPage.includes("returning to http://localhost:9876") && /asks for brain:read offline_access on /.test(consentPage) && /keep access after you close it \( offline_access \)/.test(consentPage);
     const ok5 = shown && first.status === 200 && Boolean(first.body.refresh_token) && refreshed.status === 200 && oneAud(rc, L.mcp("")) && rc.sub === "operator" && brainScopes(rc.scope) === "brain:read";
     row("G5 a third-party client refreshes for its granted resource, and consent said so", ok5, `consent page names the client id and http://localhost:9876, lists offline_access and explains it: ${shown}; first ${first.status} refresh_token ${first.body.refresh_token ? "issued" : "none"}; refreshed ${errOf(refreshed)} aud ${audOf(rc)} scope ${rc.scope}`);
+    // The deploy's refresh policy (SMD-2286, deploy/auth/server.ts), not a
+    // criterion of the comparison, so the winner's alone: every refresh
+    // rotates, a spent token presented again is refused and revokes the grant,
+    // so the token it rotated to is refused after it. And the consent page
+    // says what brain:read is in an access key's words.
+    if (c.candidate === "oidc-provider") {
+      const rotated = String(refreshed.body.refresh_token ?? "");
+      const replay = await tokenRequest(meta.token_endpoint, { grant_type: "refresh_token", refresh_token: String(first.body.refresh_token ?? "") }, { id });
+      const after = await tokenRequest(meta.token_endpoint, { grant_type: "refresh_token", refresh_token: rotated }, { id });
+      const means = /brain:read : read thoughts, and nothing else — what a read key may do/.test(consentPage);
+      const okR = Boolean(rotated) && rotated !== first.body.refresh_token && replay.status === 400 && replay.body.error === "invalid_grant" && after.status === 400 && after.body.error === "invalid_grant" && means;
+      row("G5r every refresh rotates; a replayed refresh token is refused and revokes the grant; consent says a scope in a key's words", okR, `rotated ${rotated ? (rotated !== first.body.refresh_token ? "to a new token" : "to the same token") : "none issued"}; replay ${errOf(replay)}; the rotated token after it ${errOf(after)}; consent explains brain:read as a read key's: ${means}`);
+    }
   } catch (e) {
     row("G5 a third-party client refreshes for its granted resource, and consent said so", false, (e as Error).message);
   }
@@ -979,12 +992,26 @@ async function selfCheck(): Promise<number> {
   expect("unset settings: the stable tier's two resources, the GUI and one exchange client", JSON.stringify(D?.resources) === JSON.stringify([`${O}/mcp`, `${O}/api`]) && keys(D) === JSON.stringify(["gui", "mcp"]));
   const B = accepted("blank settings", { OB1_AUTH_TIERS: " ", OB1_AUTH_SERVICES: "" });
   expect("blank settings (compose's unset ${X:-}) are the unset ones", !!B && JSON.stringify(B.resources) === JSON.stringify(D?.resources) && keys(B) === keys(D));
-  const W = accepted("spaced tiers and whitespace-separated services", { OB1_AUTH_TIERS: " stable , working ", OB1_AUTH_SERVICES: "\n digest=brain:read+brain:capture@stable,working\trunner=brain:capture@stable\n" });
+  const W = accepted("spaced tiers and whitespace-separated services", { OB1_AUTH_TIERS: " stable , working ", OB1_AUTH_SERVICES: "\n digest=brain:write+brain:read@stable,working\trunner=brain:capture@stable\n" });
   expect("tier names are trimmed, and services split on any whitespace", keys(W) === JSON.stringify(["gui", "mcp", "mcp-working", "digest", "runner"]));
   const ex = W?.clients["mcp-working"];
   expect("a tier's exchange client trades its own /mcp for its own REST core", ex?.kind === "exchange" && ex.from === `${O}/working/mcp` && ex.to === `${O}/working/api`);
   const svc = W?.clients.digest;
-  expect("a service gets its scopes and its tiers' REST cores", svc?.kind === "service" && svc.scope === "brain:read brain:capture" && JSON.stringify(svc.resources) === JSON.stringify([`${O}/api`, `${O}/working/api`]));
+  expect("a service gets its scopes and its tiers' REST cores", svc?.kind === "service" && svc.scope === "brain:write brain:read" && JSON.stringify(svc.resources) === JSON.stringify([`${O}/api`, `${O}/working/api`]));
+  // The brain's scopes are the key scopes, one to one (SMD-2286 step 5), and a refresh token's life is 14 days idle within the grant's 30.
+  for (const [scopes, want] of [
+    [["brain:write"], "write"], [["brain:read", "brain:write", "brain:capture"], "write"], [["brain:read"], "read"], [["brain:capture"], "capture"],
+    [["openid", "offline_access", "brain:capture"], "capture"], [["brain:read", "brain:capture"], null], [[], null], [["openid"], null],
+  ] as const) expect(`keyScopeOf(${scopes.join("+") || "none"}) is ${want}`, keyScopeOf(scopes) === want);
+  expect("only brain scopes no key holds together are no key's scope: read+capture, not none or openid alone", noKeysScope(["brain:read", "brain:capture"]) && noKeysScope(["openid", "brain:capture", "brain:read"]) && !noKeysScope([]) && !noKeysScope(["openid"]) && !noKeysScope(["brain:write", "brain:read", "brain:capture"]));
+  const DAY = 86_400;
+  const T = 1_800_000_000;
+  for (const [iiat, want, what] of [
+    [undefined, 14 * DAY, "a first refresh token: 14 days"], [T, 14 * DAY, "rotated at once: 14 days"], [T - 10 * DAY, 14 * DAY, "rotated on day 10: 14 more days, to day 24"],
+    [T - 20 * DAY, 10 * DAY, "rotated on day 20: cut to the grant's day 30"], [T - 30 * DAY, 1, "rotated on day 30: a second, the grant spent"], [T - 40 * DAY, 1, "past the grant: never less than a second"],
+    [T + 60, 14 * DAY, "an iiat a minute ahead (a clock step): 14 days, not more"],
+  ] as const) expect(`refreshTtl: ${what} (${refreshTtl(iiat, T)})`, refreshTtl(iiat, T) === want);
+  expect("the grant lives 30 days and a refresh token 14 idle", GRANT_TTL_S === 30 * DAY && REFRESH_IDLE_S === 14 * DAY);
   expect("the GUI stays the GUI beside services", W?.clients.gui?.kind === "gui");
   const id64 = `r${"0-9".repeat(20)}abz`;
   const E = accepted("the id rule's edges", { OB1_AUTH_SERVICES: `${id64}=brain:read@stable a1=brain:read@stable q=brain:read@stable` });
@@ -1003,6 +1030,8 @@ async function selfCheck(): Promise<number> {
     ["a tier MCP server's id", { OB1_AUTH_SERVICES: "mcp-x=brain:read@stable" }, /"mcp-x" is a reserved client id/],
     ["a repeated id", { OB1_AUTH_SERVICES: "runner=brain:read@stable runner=brain:capture@stable" }, /"runner" is listed twice/],
     ["an unknown scope", { OB1_AUTH_SERVICES: "runner=brain:admin@stable" }, /asks for unknown scope brain:admin/],
+    ["scopes no access key holds together", { OB1_AUTH_SERVICES: "digest=brain:read+brain:capture@stable" }, /"digest" asks for brain:read\+brain:capture, which no access key holds together/],
+    ["the operator's subject as an id", { OB1_AUTH_SERVICES: "operator=brain:read@stable" }, /"operator" is the operator's subject/],
     ["an empty scope", { OB1_AUTH_SERVICES: "runner=brain:read+@stable" }, /"runner"'s scopes has an empty entry/],
     ["a repeated scope", { OB1_AUTH_SERVICES: "runner=brain:read+brain:read@stable" }, /"runner"'s scopes lists brain:read twice/],
     ["a tier the tiers do not list", { OB1_AUTH_SERVICES: "runner=brain:capture@canary" }, /names a tier OB1_AUTH_TIERS does not: canary/],

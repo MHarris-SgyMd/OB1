@@ -64,12 +64,23 @@ export function loginPage(a: Asking, action: string, { wrong = false, note = "",
   return pageHtml("login", `${wrong ? "<p>Wrong password.</p>" : ""}${note ? `<p>${esc(note)}</p>` : ""}<p>Sign in to let ${who(a)} reach your brain.</p>${fields}`);
 }
 
+/**
+ * What each brain scope lets a client do, in the words of the access key that
+ * holds the same (SMD-2286 step 5: one to one, nothing only OAuth grants).
+ */
+export const SCOPE_MEANS: Record<string, string> = {
+  "brain:write": "read, add, change and delete thoughts — what a write key may do",
+  "brain:read": "read thoughts, and nothing else — what a read key may do",
+  "brain:capture": "add thoughts, and nothing else — what a capture key may do",
+};
+
 /** The consent page, with an Allow form posting to `confirm` and a Deny form posting to `abort`. */
 export function consentPage(a: Asking, confirm: string, abort: string): string {
   const asked = a.scope.split(" ").filter(Boolean);
   const offline = asked.includes("offline_access") ? " It may keep access after you close it (<code>offline_access</code>)." : "";
+  const means = asked.filter((s) => Object.hasOwn(SCOPE_MEANS, s)).map((s) => `<li><code>${esc(s)}</code>: ${esc(SCOPE_MEANS[s])}</li>`).join("");
   return pageHtml(
     "consent",
-    `<p>${who(a)}, asks for <code>${esc(asked.join(" "))}</code> on <code>${esc(a.resources.join(" "))}</code>.${offline}</p><form method="post" action="${esc(confirm)}"><button>Allow</button></form><form method="post" action="${esc(abort)}"><button>Deny</button></form>`,
+    `<p>${who(a)}, asks for <code>${esc(asked.join(" "))}</code> on <code>${esc(a.resources.join(" "))}</code>.${offline}</p>${means ? `<ul>${means}</ul>` : ""}<form method="post" action="${esc(confirm)}"><button>Allow</button></form><form method="post" action="${esc(abort)}"><button>Deny</button></form>`,
   );
 }

@@ -30,7 +30,7 @@ const codesAt = (status: number): string => Object.entries(REFUSAL_STATUS).filte
 /** The answers every keyed operation may give besides its success: the caller's standing, the input, a refusal by its status, a fault. */
 const KEYED_ANSWERS = {
   "400": refusal(`The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: ${codesAt(400)}.`),
-  "401": refusal("No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: \"forwarder\"`, the forwarder slot held something other than a forward-scope key, or a revoked one."),
+  "401": refusal("No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: \"forwarder\"`, the forwarder slot held something other than a forward-scope key, or a revoked one; with `credential: \"token\"` (and `WWW-Authenticate: Bearer error=\"invalid_token\"`), a bearer token that is not one the authorization server issued for this REST core with one key scope's worth of `brain:` scopes (SMD-2286)."),
   "403": refusal(`The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: ${codesAt(403)}.`),
   "404": refusal(`Nothing there: ${codesAt(404)}.`),
   "409": refusal(`The state conflicts: ${codesAt(409)}.`),
@@ -38,7 +38,7 @@ const KEYED_ANSWERS = {
   "405": refusal("A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does."),
   "500": refusal("A fault (FAILED, with its message; no retryable until SMD-2461)."),
   "501": refusal(`A mode not built: ${codesAt(501)}.`),
-  "503": { ...refusal(`Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as \`name\` to a forwarder; with \`credential: "forwarder"\` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or ${codesAt(503)}.`), headers: { "Retry-After": { description: "Seconds to wait before retrying.", schema: { type: "integer" } } } },
+  "503": { ...refusal(`Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as \`name\` to a forwarder; with \`credential: "forwarder"\` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with \`credential: "token"\`, Retry-After 30), or ${codesAt(503)}.`), headers: { "Retry-After": { description: "Seconds to wait before retrying.", schema: { type: "integer" } } } },
 };
 /** A keyed operation's answers: every one of KEYED_ANSWERS but 501, which only an operation with a mode not built (run_worker's drain) gives. */
 const answersFor = (name: ToolName) => {
@@ -142,7 +142,7 @@ export function openApiDocument(plugins: readonly LoadedOp[] = []): Json {
       securitySchemes: {
         brainKey: { type: "apiKey", in: "header", name: "x-brain-key" },
         accessKey: { type: "apiKey", in: "header", name: "x-access-key" },
-        bearer: { type: "http", scheme: "bearer" },
+        bearer: { type: "http", scheme: "bearer", description: "A caller's key, or, on a stack configured with the authorization server, an access token it issued for this REST core (`<origin>/api`): the key scope its `brain:` scopes name, the caller `oauth:<sub>` (SMD-2286)." },
         // Beside a caller's key, never alone: the MCP server's forward-scope key, recorded as the request's `act` (SMD-2284).
         forwarder: { type: "apiKey", in: "header", name: "x-brain-forwarder", description: "A forward-scope key, beside a caller's: names who carried the request (recorded as act); grants nothing — but a request it carries is answered its refusals and its captures whole, the words the MCP server says them in, so it is the MCP server's alone. Read only inside the stack: the public /api route deletes it." },
       },

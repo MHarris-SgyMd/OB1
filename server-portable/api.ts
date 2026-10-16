@@ -12,6 +12,7 @@ import { createCore, mendIntervalFrom } from "./core/index.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { markRunningLost } from "./jobs.ts";
 import { createRestApp } from "./rest/app.ts";
+import { remoteChecker, tokenSettings, type TokenCheck } from "./oauth-token.ts";
 import { cutOpenRequests, flushTelemetry, startTelemetry } from "./telemetry.ts";
 
 /**
@@ -22,6 +23,20 @@ import { cutOpenRequests, flushTelemetry, startTelemetry } from "./telemetry.ts"
 export const API_DOOR = "open-brain-api";
 
 const core = createCore({ env, store: db, door: API_DOOR });
+
+/**
+ * The token check for the stack's settings (oauth-token.ts, SMD-2286): null
+ * unless configured, and one check — one cached key set — per issuer and
+ * audience, so a request costs a read of the key set only when its cache says.
+ */
+let tokenCheck: { at: string; check: TokenCheck } | null = null;
+function tokens(): TokenCheck | null {
+  const settings = tokenSettings(env());
+  if (!settings) return null;
+  const at = `${settings.issuer} ${settings.audience}`;
+  if (tokenCheck?.at !== at) tokenCheck = { at, check: remoteChecker(settings) };
+  return tokenCheck.check;
+}
 
 /** The calls running — each request and each detached job run — counted for the stop (SMD-2250). */
 const calls = createCallCount();
@@ -37,6 +52,7 @@ export function restApp(log?: (line: string) => void) {
     core,
     init: () => initEnv(),
     keys: () => ({ MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS, MCP_ACCESS_KEY: env().MCP_ACCESS_KEY }),
+    tokens,
     resolve: (principal) => agents().resolve(db(), principal),
     track: calls.track,
     plugins,

@@ -94,7 +94,7 @@ import { createLocalJWKSet, jwtVerify, type JWK } from "jose";
 import { guardedFetch } from "./fetch-guard.ts";
 import { consentPage, esc, loginPage, PAGE_HEADERS, pageHtml, type Asking } from "./pages.ts";
 import { configFromEnv, type Config } from "./config.ts";
-import { ACCESS_TOKEN_TYPE, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
+import { ACCESS_TOKEN_TYPE, GRANT_TTL_S, noKeysScope, OPERATOR, refreshTtl, SCOPES, TOKEN_EXCHANGE } from "./layout.ts";
 import { Bucket, clientAddress, clientIdOf, clientKey, countsAgainstClient, retryAfter, SIGN_IN_RATE, SignInBackoff, TOKEN_FAILURES, TOKEN_PATH, Tries, TRIES_PER_SIGN_IN, trustedProxy, WindowLimit } from "./limits.ts";
 import { REGISTRATION_PATH, REGISTRATION_TIMEOUT_MS, RegistrationGate } from "./registration.ts";
 import { CLOCK_TOLERANCE, sqliteAdapter } from "./store.ts";
@@ -129,7 +129,6 @@ try {
 } catch (e) {
   await refuseStart((e as Error).message);
 }
-const OPERATOR = "operator";
 const ACCESS_TTL = 600;
 /** The public half of the signing keys, to verify a subject token without a network hop. */
 const ownKeys = createLocalJWKSet({ keys: C.jwks.keys.map(({ d, ...pub }) => pub as JWK) });
@@ -179,7 +178,19 @@ const provider = new Provider(L.issuer, {
   // The brain's scopes are resource scopes, but a client's registered `scope` is checked against this list too.
   scopes: ["openid", "offline_access", ...SCOPES],
   // Access tokens take their resource's accessTokenTTL, which the library's default ttl functions read; a number here would override it.
-  ttl: { Interaction: 600, Session: 86_400, Grant: 30 * 86_400, AuthorizationCode: 60 },
+  // A refresh token (a third-party client's, with offline_access) lasts 14 days unused, within its grant's 30 (layout.ts refreshTtl, SMD-2286).
+  ttl: {
+    Interaction: 600,
+    Session: 86_400,
+    Grant: GRANT_TTL_S,
+    AuthorizationCode: 60,
+    RefreshToken: (_ctx, token) => refreshTtl((token as { iiat?: number }).iiat, Math.floor(Date.now() / 1000)),
+  },
+  // Every refresh spends the token and issues a new one (OAuth 2.1 §4.3.1 for a
+  // client whose tokens are not sender-bound, which none here are: DPoP is off).
+  // A spent one presented again is a replay, and the library then revokes the
+  // whole grant, the new token with it.
+  rotateRefreshToken: true,
   // The one signing key is P-256, so a registered client's ID token defaults to ES256 (the library's default is RS256).
   clientDefaults: { id_token_signed_response_alg: "ES256" },
   enabledJWA: { idTokenSigningAlgValues: ["ES256"] },
@@ -312,6 +323,8 @@ provider.registerGrantType(TOKEN_EXCHANGE, async (ctx: KoaContextWithOIDC) => {
   const asked = params.scope ? params.scope.split(" ").filter(Boolean) : [...held];
   const wider = asked.filter((s) => !held.has(s));
   if (wider.length) throw new errors.InvalidScope(`scope wider than the subject token's: ${wider.join(" ")}`, wider.join(" "));
+  // Narrowed to scopes no access key holds together, the token would mean nothing at the REST core (layout.ts keyScopeOf).
+  if (noKeysScope(asked)) throw new errors.InvalidScope(`${asked.join(" ")} names no access key's scope: brain:write reads and captures, or ask one of them`, asked.join(" "));
 
   // Never outlive the token it was exchanged from. `exp` is set outright: the
   // library stamps `token.exp || now + expiration`, and a TTL alone lands a
@@ -373,6 +386,13 @@ async function interaction(req: http.IncomingMessage, res: http.ServerResponse, 
     resources: [params.resource ?? []].flat().map(String).filter(Boolean),
   };
   const base = `/auth/interaction/${encodeURIComponent(uid)}`;
+  // Scopes no access key holds together (brain:read with brain:capture, no
+  // brain:write) are refused before a sign-in or a consent, so no grant ever
+  // holds them: the REST core would refuse every token they made (layout.ts
+  // keyScopeOf, SMD-2286 step 5). The client is sent back with invalid_scope.
+  if (noKeysScope(asking.scope.split(" ").filter(Boolean))) {
+    return provider.interactionFinished(req, res, { error: "invalid_scope", error_description: "brain:read with brain:capture names no access key's scope: ask for brain:write, which reads and captures, or for one of them" }, { mergeWithLastSubmission: false });
+  }
   if (req.method === "GET" && !action) {
     if (prompt.name === "login") return send(res, 200, loginPage(asking, `${base}/login`));
     return send(res, 200, consentPage(asking, `${base}/confirm`, `${base}/abort`));

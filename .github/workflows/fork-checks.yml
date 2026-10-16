@@ -3227,6 +3227,52 @@ jobs:
           [ "$got" = "503 30" ] || { echo "a token with the authorization server stopped answered \"$got\", not 503 with Retry-After 30"; exit 1; }
           auth rm -sfv auth
 
+      # SMD-2286 step 1: the REST core accepts the authorization server's
+      # tokens, and only its own. A real sign-in and consent (restart-check.ts
+      # --tokens) gives an /mcp token, exchanged as the MCP service for a REST
+      # core one, as the MCP server does at the hop. The REST core, recreated
+      # to read the configured .env and asked on its own port inside its
+      # container (it is published only by an overlay), names the caller
+      # oauth:operator with the MCP service as act, refuses the /mcp token
+      # (Verify: the MCP-audience token sent straight to it) and a read token's
+      # capture (Verify), and a write token's capture writes an audit row
+      # naming both. The authorization server stopped, the keys it read are
+      # still used; read none (the REST core recreated), a token is a 503 with
+      # Retry-After 30, never let through.
+      - name: The REST core accepts the authorization server's tokens, and only its own
+        working-directory: deploy
+        run: |
+          auth() { docker compose -f compose.yaml --profile auth "$@"; }
+          q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
+          # The step above filled the store's cap of 3 (its volume stays); the two
+          # sign-ins here register a client each, so this start's cap is higher
+          # (the shell's value is compose's over .env's).
+          OB1_AUTH_MAX_CLIENTS=10 auth up -d --wait --wait-timeout 120 --no-deps auth
+          auth up -d --force-recreate --wait --wait-timeout 120 --no-deps api
+          pw=$(sed -n 's/^OB1_AUTH_OPERATOR_PASSWORD=//p' .env | tr -d "'")
+          read_t=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD="$pw" auth bun restart-check.ts --tokens brain:read)
+          write_t=$(auth exec -T -e OB1_AUTH_OPERATOR_PASSWORD="$pw" auth bun restart-check.ts --tokens brain:write)
+          # "<status> <Retry-After or -> <body>" for a request to the REST core with this bearer.
+          # shellcheck disable=SC2016 # JavaScript, run in the container
+          at_api() { auth exec -T -e P="$1" -e T="$2" -e M="${3:-GET}" -e B="${4:-}" api bun -e 'const r = await fetch("http://127.0.0.1:8000" + process.env.P, { method: process.env.M, headers: { authorization: "Bearer " + process.env.T, ...(process.env.B ? { "content-type": "application/json" } : {}) }, body: process.env.B || undefined }); console.log(r.status, r.headers.get("retry-after") ?? "-", (await r.text()).replace(/\s+/g, " "))'; }
+          check() { local got="$1" want="$2" filter="$3" what="$4"; if ! { [ "${got%% *}" = "$want" ] && jq -e "$filter" <<<"$(cut -d' ' -f3- <<<"$got")" > /dev/null; }; then echo "$what answered \"${got:0:300}\""; exit 1; fi; }
+          api_w=$(jq -r .api <<<"$write_t")
+          check "$(at_api /v1/whoami "$api_w")" 200 '.name == "oauth:operator" and .scope == "write" and .act == {"name": "oauth:mcp"}' "whoami with an exchanged write token"
+          check "$(at_api /v1/whoami "$(jq -r .mcp <<<"$read_t")")" 401 '.code == "UNAUTHORIZED" and .credential == "token"' "whoami with the /mcp token"
+          check "$(at_api /v1/thoughts "$(jq -r .api <<<"$read_t")" POST '{"content":"SMD-2286: a read token may not capture"}')" 403 '.code == "FORBIDDEN" and .needs == "capture"' "a capture with an exchanged read token"
+          got=$(at_api /v1/thoughts "$api_w" POST '{"content":"SMD-2286: captured with an exchanged token"}')
+          check "$got" 201 '.id | type == "string"' "a capture with an exchanged write token"
+          id=$(cut -d' ' -f3- <<<"$got" | jq -r .id)
+          row=$(q "SELECT actor_name || ' ' || coalesce(actor_context->'act'->>'name', '-') FROM thought_audit WHERE thought_id = '$id'::uuid AND action = 'capture' ORDER BY id DESC LIMIT 1")
+          [ "$row" = "oauth:operator oauth:mcp" ] || { echo "the capture's audit row names \"$row\", not the subject and the MCP service as act"; exit 1; }
+          auth stop auth
+          check "$(at_api /v1/whoami "$api_w")" 200 '.name == "oauth:operator"' "whoami, the authorization server stopped and its keys already read,"
+          auth up -d --force-recreate --wait --wait-timeout 120 --no-deps api
+          got=$(at_api /v1/whoami "$api_w")
+          check "$got" 503 '.code == "BUSY" and .credential == "token"' "whoami, the authorization server stopped and no keys read,"
+          [ "$(cut -d' ' -f2 <<<"$got")" = 30 ] || { echo "the 503 for a token with no keys read says Retry-After \"$(cut -d' ' -f2 <<<"$got")\", not 30"; exit 1; }
+          auth rm -sfv auth
+
       # SMD-1846. What the proxy itself owes, beside the smoke:
       # - /.well-known, bare and under it, is answered by the proxy, not the
       #   server — Traefik's 404 body, where the server's would be "Not

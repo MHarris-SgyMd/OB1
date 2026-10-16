@@ -189,6 +189,9 @@ export class AgentResolver {
    * authentication succeeds, so a key must already be in MCP_ACCESS_KEYS to
    * create an entry. The key space is the configured key set, not anything a
    * caller controls, and an expired entry is overwritten rather than added to.
+   * A token the REST core accepts (oauth-token.ts, SMD-2286) adds one entry
+   * per subject the authorization server signs for — its one account and its
+   * configured service clients — so that space is the configuration's too.
    */
   private cache = new Map<string, Entry>();
 
