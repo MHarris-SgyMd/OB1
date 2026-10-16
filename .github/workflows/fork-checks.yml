@@ -793,7 +793,7 @@ jobs:
         working-directory: db
         run: bun install --frozen-lockfile
 
-      # [38], the sleep scheduler (SMD-1794).
+      # The sections test-live.ts's SHARDS lists under sleep.
       - name: Run the live suite's sleep shard
         working-directory: db
         run: bun test-live.ts
@@ -832,8 +832,7 @@ jobs:
         working-directory: db
         run: bun install --frozen-lockfile
 
-      # [9] the re-embed, [10g] a long thought's windows across hard stops,
-      # and [38b] a long thought across sleeps (SMD-2694).
+      # The sections test-live.ts's SHARDS lists under long.
       - name: Run the live suite's long shard
         working-directory: db
         run: bun test-live.ts
@@ -872,8 +871,7 @@ jobs:
         working-directory: db
         run: bun install --frozen-lockfile
 
-      # [10], [10e] and [10f], extraction through the claims, with [17], [33]
-      # and [35] to even the shards.
+      # The sections test-live.ts's SHARDS lists under extract.
       - name: Run the live suite's extract shard
         working-directory: db
         run: bun test-live.ts

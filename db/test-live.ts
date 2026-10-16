@@ -86,28 +86,38 @@ if (!URL_) {
  * split apart by CI section time. A section no shard here lists is the
  * rest's, [1] among them, so a new section runs in CI unless it is listed.
  * A shard without [1] migrates in the preamble without asserting.
- * db/README.md states each shard's assertion count beside the full run's, and
- * [doc] checks, on every run, that the shards' add up to the full run's.
+ * [33] and [35] check the projection after the sections that write tickets
+ * and sources, which are the rest's, so they stay there; [end] checks it again
+ * at every run's end. db/README.md states each shard's assertion count beside
+ * the full run's, and [doc] checks, on every run, that they add up.
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["38"],
   long: ["9", "10g", "38b"],
-  extract: ["10", "10e", "10f", "17", "33", "35"],
+  extract: ["10", "10e", "10f", "17"],
 };
+/** Every shard's name: SHARDS' and the rest. */
+const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
 const SHARD = process.env.OB1_LIVE_SHARD;
 if (SHARD !== undefined && SHARD !== "rest" && !Object.hasOwn(SHARDS, SHARD)) {
-  console.error(`OB1_LIVE_SHARD=${JSON.stringify(SHARD)} names no shard: ${[...Object.keys(SHARDS), "rest"].join(", ")}, or unset for every section`);
+  console.error(`OB1_LIVE_SHARD=${JSON.stringify(SHARD)} names no shard: ${SHARD_NAMES.join(", ")}, or unset for every section`);
   process.exit(2);
 }
 const LISTED = new Set(Object.values(SHARDS).flat());
+// A section listed twice would run in two shards and count in both, while a full run counts it once.
+if (LISTED.size !== Object.values(SHARDS).flat().length) {
+  console.error(`SHARDS lists a section in more than one shard: ${Object.values(SHARDS).flat().filter((id, i, all) => all.indexOf(id) !== i).map((id) => `[${id}]`).join(", ")}`);
+  process.exit(2);
+}
 /** The sections this run has begun, by id: [doc] checks a shard's are all there. */
 const begun = new Set<string>();
 /** Whether section `id` runs here: every section with no shard named, else the shard's. */
 const runsHere = (id: string): boolean => SHARD === undefined || (SHARD === "rest" ? !LISTED.has(id) : SHARDS[SHARD].includes(id));
 /** runsHere, noting the section begun: each section's header reads it. */
 function want(id: string): boolean {
-  if (runsHere(id)) begun.add(id);
-  return runsHere(id);
+  const runs = runsHere(id);
+  if (runs) begun.add(id);
+  return runs;
 }
 
 const { assert, skip, total, skipped, docCheck, report } = createAssert();
@@ -356,8 +366,8 @@ if (want("5")) {
 // 014 seeds the walk's bounds with ALTER DATABASE, which a session reads at
 // connect. This pool predates the migration, so open a fresh one, of one
 // connection. Every shard does it here, outside [5b], so each later section
-// meets the client a full run gives it: [10] refuses this one as too narrow
-// for two workers (SMD-3048).
+// meets the pool a full run gives it, the database's settings in force on it
+// (SMD-3048).
 await sql.close();
 sql = new SQL({ url: URL_, max: 1 });
 
@@ -3747,11 +3757,14 @@ if (want("10")) {
   const status = await extract("--status");
   assert(status.code === 0 && /9 extracted, 1 failed/.test(status.out) && /graph: \d+ entities/.test(status.out), "--status reports the pass and the graph");
   // …and on a caller's client, in-process: the same lines, and the client
-  // still open after. Two workers and a spare: three connections, and this
-  // section's own one-connection client refused as too narrow.
+  // still open after. Two workers and a spare: three connections, and a
+  // one-connection client refused as too narrow — its own, not the suite's
+  // shared one, whose size is not this section's to rely on (SMD-3048).
   const caller = new SQL({ url: URL_, max: 3 });
+  const narrow = new SQL({ url: URL_, max: 1 });
   const statusIn = await extractInProcess({ status: true, sql: caller });
-  const narrowIn = await extractInProcess({ status: true, sql });
+  const narrowIn = await extractInProcess({ status: true, sql: narrow });
+  await narrow.close();
   assert(same(statusIn, status) && (await caller`SELECT 1 AS one`)[0].one === 1, `run() --status on a caller's client prints the spawned --status byte for byte, and leaves the client open (exit ${statusIn.code}${statusIn.stderr ? `: ${statusIn.stderr.slice(0, 100)}` : ""})`);
   assert(narrowIn.code === 2 && narrowIn.stdout === "" && /needs a client of at least 3 connections for 2 worker\(s\)/.test(narrowIn.stderr), `…and a one-connection client is refused before anything is read (exit ${narrowIn.code})`);
   await caller.close();
@@ -10047,7 +10060,7 @@ if (want("33")) {
   await db`DELETE FROM thoughts WHERE metadata->>'kind' = 'race2256'`;
   const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_ticket_head WHERE issue IN ('R-1', 'A-1', 'D-1', 'M-1', 'M-2') OR issue LIKE 'G-%') AS heads`;
   assert(suiteDrift === 0 && left.drift === 0 && left.heads === 0,
-    `every section before this one left the projection exact (${suiteDrift}), and deleting this section's rows takes their heads with them (${left.heads} left, drift ${left.drift})`);
+    `every section this run ran before this one left the projection exact (${suiteDrift}), and deleting this section's rows takes their heads with them (${left.heads} left, drift ${left.drift})`);
   await db.close();
 }
 
@@ -10742,7 +10755,7 @@ if (want("35")) {
   await db`DELETE FROM thoughts WHERE metadata->>'kind' = 'race2267'`;
   const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_source_gate g WHERE NOT EXISTS (SELECT 1 FROM thought_sources s WHERE s.thought_id = g.thought_id)) AS orphans`;
   assert(suiteDrift === 0 && left.drift === 0 && left.orphans === 0,
-    `every section before this one left the projection and the gate exact (${suiteDrift}), and deleting this section's rows takes their mirror rows with them (${left.orphans} left, drift ${left.drift})`);
+    `every section this run ran before this one left the projection and the gate exact (${suiteDrift}), and deleting this section's rows takes their mirror rows with them (${left.orphans} left, drift ${left.drift})`);
   await db.close();
 }
 
@@ -13531,6 +13544,21 @@ if (want("44")) {
   }
 }
 
+console.log("\n[end] Every section this run ran left the node_state projection exact (SMD-3048)");
+{
+  // [33] and [35] check the projection after the sections before them, in the
+  // rest; this checks it after a run's last section, so a section in another
+  // shard, and one after [35], is checked too. A fresh client: [24] closed the
+  // suite's.
+  const db = new SQL({ url: URL_, max: 1 });
+  try {
+    const drifted = (await db`SELECT projection, key FROM ob1_node_projection_drift()`) as { projection: string; key: string }[];
+    assert(drifted.length === 0, `the projection and the source gate are exact after this run's ${begun.size} section(s) (${drifted.length} row(s) drifted${drifted.length ? `: ${drifted.slice(0, 3).map((r) => `${r.projection} ${r.key}`).join(", ")}` : ""})`);
+  } finally {
+    await db.close();
+  }
+}
+
 console.log("\n[doc] db/README.md states this suite's assertion total, and each shard's");
 {
   const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");
@@ -13538,13 +13566,14 @@ console.log("\n[doc] db/README.md states this suite's assertion total, and each 
   const lines = [...readme.matchAll(/^.*\btest-live\.ts\b.*$/gm)].map((m) => m[0]);
   const counts = (ls: string[]) => ls.flatMap((l) => [...l.matchAll(/(\d+)\s+assertions/g)].map((x) => Number(x[1])));
   const shardOf = (l: string) => /\bOB1_LIVE_SHARD=(\S+)/.exec(l)?.[1];
-  const names = [...Object.keys(SHARDS), "rest"];
+  const names = SHARD_NAMES;
   const full = counts(lines.filter((l) => shardOf(l) === undefined));
   const byShard = new Map(names.map((s) => [s, counts(lines.filter((l) => shardOf(l) === s))]));
-  // On every run, the README's own sum: one count a shard, adding up to the full run's.
-  const sum = [...byShard.values()].reduce((a, c) => a + (c[0] ?? 0), 0);
+  // On every run, the README's own sum: one count a shard, adding up to the
+  // full run's once [end], which every run has, is counted once.
+  const sum = [...byShard.values()].reduce((a, c) => a + (c[0] ?? 0), 0) - (names.length - 1);
   docCheck([...byShard.values()].every((c) => c.length === 1) && full.length > 0 && full.every((c) => c === sum),
-    `db/README.md quotes one count for each of test-live.ts's shards (${names.map((s) => `${s} ${byShard.get(s)!.join("/") || "none"}`).join(", ")}), adding up to its full run's (${sum}; found ${[...new Set(full)].join(", ") || "none"})`);
+    `db/README.md quotes one count for each of test-live.ts's shards (${names.map((s) => `${s} ${byShard.get(s)!.join("/") || "none"}`).join(", ")}), adding up to its full run's, [end] counted once (${sum}; found ${[...new Set(full)].join(", ") || "none"})`);
   // Every section a shard lists is one this file has: a stale id would leave the shard short of what it says.
   const listed = SHARD === undefined ? [...LISTED] : SHARD === "rest" ? [] : SHARDS[SHARD];
   const absent = listed.filter((id) => !begun.has(id));
