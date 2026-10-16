@@ -184,7 +184,9 @@ export function sqliteAdapter(path: string, clock: () => number = nowS) {
       const found = parsed(q.find.get({ model, id, now: clock() }));
       // A refresh token spent less than REFRESH_REUSE_GRACE_S ago reads as unspent, so the library rotates it again
       // instead of revoking the grant: a client refreshing several times at once (the MCP SDK has no lock) is not signed out.
-      if (model === "RefreshToken" && typeof found?.consumed === "number" && clock() - found.consumed < REFRESH_REUSE_GRACE_S) delete found.consumed;
+      // An age below zero (the wall clock stepped back past the spend) is no grace: the token stays spent.
+      const age = typeof found?.consumed === "number" ? clock() - found.consumed : -1;
+      if (model === "RefreshToken" && age >= 0 && age < REFRESH_REUSE_GRACE_S) delete found!.consumed;
       return found;
     },
     async findByUid(uid: string) {
@@ -312,6 +314,10 @@ async function selfCheck(): Promise<number> {
     t += 1;
     const late = await refresh.find("rg");
     expect(`at ${REFRESH_REUSE_GRACE_S} s it reads as spent, stamped with its first spend, which the later consumes kept`, late?.consumed === spentAt && REFRESH_REUSE_GRACE_S === 10, JSON.stringify(late));
+    const now0 = t;
+    t = spentAt - 7200;
+    expect("the wall clock stepped back two hours past the spend: still spent, no grace reopened", (await refresh.find("rg"))?.consumed === spentAt);
+    t = now0;
     await code.upsert("kg", { grantId: "g4" }, 60);
     await code.consume("kg");
     expect("a code spent a second ago reads as spent: the grace is a refresh token's alone", (await code.find("kg"))?.consumed === t);

@@ -892,7 +892,8 @@ stripped (`X-Forwarded-Prefix`).
   `credential: "token"`. A valid one whose scopes name no key scope is a 403
   `FORBIDDEN` with `credential: "token"` (`insufficient_scope`). One it has no
   signing keys for is a 503 `BUSY` with `credential: "token"` and `Retry-After:
-  30`. Elsewhere a token is an unknown key.
+  30`; one whose subject the registry revoked, a 401 `REVOKED` with
+  `credential: "token"`. Elsewhere a token is an unknown key.
 - **Forwarded** (SMD-2284, the ADR's decision 7): beside a caller's key, the
   `x-brain-forwarder` header carries the key of whoever forwarded it — the MCP
   server's, a `forward`-scope key that grants nothing (`keygen.ts --scope

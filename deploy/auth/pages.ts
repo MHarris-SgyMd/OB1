@@ -69,8 +69,8 @@ export function loginPage(a: Asking, action: string, { wrong = false, note = "",
  * holds the same (SMD-2286 step 5: one to one, nothing only OAuth grants).
  */
 export const SCOPE_MEANS: Record<string, string> = {
-  "brain:write": "read, add, change and delete thoughts — what a write key may do",
-  "brain:read": "read thoughts, and nothing else — what a read key may do",
+  "brain:write": "read, add, change and delete thoughts, and run the workers of the brain — what a write key may do",
+  "brain:read": "read thoughts and the records about the brain (its searches, workers and state), and change nothing — what a read key may do",
   "brain:capture": "add thoughts, and nothing else — what a capture key may do",
 };
 

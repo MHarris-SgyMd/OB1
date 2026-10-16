@@ -39,7 +39,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { createLocalJWKSet, errors as jose, jwtVerify, type JSONWebKeySet, type JWTVerifyGetKey } from "jose";
+import { createLocalJWKSet, decodeJwt, errors as jose, jwtVerify, type JSONWebKeySet, type JWTVerifyGetKey } from "jose";
 import type { Principal, Scope } from "./auth.ts";
 import { edgeSettings, OAUTH_SCOPES } from "./oauth-edge.ts";
 
@@ -207,7 +207,8 @@ export function jwksOver(url: string): () => Promise<JSONWebKeySet> {
     const r = await fetch(url, { headers: { accept: "application/json" }, redirect: "manual", signal: AbortSignal.timeout(JWKS_TIMEOUT_MS) });
     if (r.status !== 200) throw new Error(`the key set answered ${r.status}`);
     const set = (await r.json()) as JSONWebKeySet;
-    if (!Array.isArray(set?.keys)) throw new Error("the key set holds no keys array");
+    // No keys is no answer: it would replace a good set and refuse every token 401, sending its client to sign in.
+    if (!Array.isArray(set?.keys) || set.keys.length === 0) throw new Error("the key set holds no keys");
     return set;
   };
 }
@@ -216,6 +217,19 @@ export function jwksOver(url: string): () => Promise<JSONWebKeySet> {
 export function checkerOver(settings: TokenSettings, keys: JWTVerifyGetKey): TokenCheck {
   const read = guarded(keys);
   return async (token) => {
+    // Another issuer's or audience's token is refused on its claims before any key is looked up, so it is told 401,
+    // never "retry" (a 503) while the keys cannot be read. Read unverified, this only ever refuses: acceptance is
+    // jwtVerify's, below, whose signature binds these same claims. The audience is exactly this REST core's: jose
+    // alone accepts an `aud` list that holds it among others, and the authorization server issues one a token.
+    let claimed: Record<string, unknown>;
+    try {
+      claimed = decodeJwt(token);
+    } catch {
+      return { status: "invalid", why: "not a JWT" };
+    }
+    const claimedAud = claimed.aud;
+    if (claimed.iss !== settings.issuer) return { status: "invalid", why: "iss is not this REST core's issuer" };
+    if (!(claimedAud === settings.audience || (Array.isArray(claimedAud) && claimedAud.length === 1 && claimedAud[0] === settings.audience))) return { status: "invalid", why: "aud names more than this REST core" };
     let payload: Record<string, unknown>;
     try {
       ({ payload } = await jwtVerify(token, read, {
@@ -230,9 +244,6 @@ export function checkerOver(settings: TokenSettings, keys: JWTVerifyGetKey): Tok
       const { code, claim } = e as { code?: string; claim?: string };
       return { status: "invalid", why: `${code ?? "ERR_JWT_INVALID"}${claim ? ` (${claim})` : ""}` };
     }
-    // Exactly this audience: jose accepts an `aud` list that holds it among others, and the authorization server issues one audience a token.
-    const aud = payload.aud;
-    if (!(aud === settings.audience || (Array.isArray(aud) && aud.length === 1 && aud[0] === settings.audience))) return { status: "invalid", why: "aud names more than this REST core" };
     const sub = payload.sub;
     if (typeof sub !== "string" || !SUBJECT.test(sub)) return { status: "invalid", why: "sub is not a subject this server names" };
     const scope = keyScopeOf(payload.scope);
@@ -248,6 +259,7 @@ export function checkerOver(settings: TokenSettings, keys: JWTVerifyGetKey): Tok
 }
 
 /** The check a deploy uses: the authorization server's key set on the mesh, kept (cachedKeys). `now` is for a suite. */
-export function remoteChecker(settings: TokenSettings, url: string = AUTH_JWKS_URL, now: () => number = Date.now): TokenCheck {
+export function remoteChecker(settings: TokenSettings, url: string = AUTH_JWKS_URL, now?: () => number): TokenCheck {
+  // No clock given (a deploy): cachedKeys's own, monotonic.
   return checkerOver(settings, cachedKeys(jwksOver(url), now));
 }

@@ -631,7 +631,7 @@ async function grants(c: Ctx): Promise<{ gui?: string }> {
       const refresh = (token: string) => tokenRequest(meta.token_endpoint, { grant_type: "refresh_token", refresh_token: token }, { id });
       const [one, two] = await Promise.all([refresh(rotated), refresh(rotated)]);
       const next = await refresh(String(two.body.refresh_token ?? ""));
-      const means = /brain:read : read thoughts, and nothing else — what a read key may do/.test(consentPage);
+      const means = /brain:read : read thoughts and the records about the brain .*, and change nothing — what a read key may do/.test(consentPage);
       const fresh = (r: TokenReply) => r.status === 200 && Boolean(r.body.refresh_token) && r.body.refresh_token !== rotated;
       const okR = Boolean(rotated) && rotated !== first && fresh(one) && fresh(two) && one.body.refresh_token !== two.body.refresh_token && fresh(next) && means;
       row(G5R, okR, `rotated ${rotated ? (rotated !== first ? "to a new token" : "to the same token") : "none issued"}; two at once ${errOf(one)} and ${errOf(two)}${one.body.refresh_token && one.body.refresh_token === two.body.refresh_token ? " (the same new token)" : ""}; the chain after them ${errOf(next)}; consent explains brain:read as a read key's: ${means}`);

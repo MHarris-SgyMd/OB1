@@ -22,6 +22,7 @@ import { ROUTES, pathFields } from "./rest/routes.ts";
 import { createRestApp, inputFromQuery, headerKeys, REFUSAL_STATUS } from "./rest/app.ts";
 import { openApiDocument } from "./rest/openapi.ts";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
+import { setSystemTime } from "bun:test";
 import { keyScopeOf as authKeyScopeOf, SCOPES as authScopes } from "../deploy/auth/layout.ts";
 import { OAUTH_SCOPES } from "./oauth-edge.ts";
 import { AUTH_JWKS_URL, cachedKeys, checkerOver, JWKS_CACHE_MAX_AGE_MS, JWKS_COOLDOWN_MS, keyScopeOf, remoteChecker, subjectHash, tokenSettings, type TokenCheck } from "./oauth-token.ts";
@@ -633,6 +634,54 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
     C = 30;
     const r2 = await ok(k);
     assert(r1 === "unavailable" && r2 === "ok", `a reader that throws at once: 503, then a read 30 s on serves (${r1}, ${r2})`);
+  }
+  // Review pass 3: the deploy's path (remoteChecker with no clock) is monotonic; a foreign token is a 401 even with no
+  // keys; an empty key set is no answer.
+  {
+    let hits = 0;
+    let body: unknown = jwks;
+    let status = 200;
+    const srv = Bun.serve({ port: 0, fetch: () => (hits++, status === 200 ? Response.json(body) : new Response("down", { status })) });
+    const url = `http://127.0.0.1:${srv.port}/auth/jwks`;
+    const k = remoteChecker(settings, url);
+    assert((await k(await mint())).status === "ok" && hits === 1, `the deploy's checker reads once (${hits})`);
+    // The engine's own clock moved (setSystemTime), as an operating system's step moves it: a captured Date.now moves too.
+    setSystemTime(new Date(Date.now() + 700_000));
+    let jumped: string;
+    try {
+      jumped = (await k(await mint())).status;
+    } finally {
+      setSystemTime();
+    }
+    assert(jumped === "ok" && hits === 1, `…the wall clock jumping 700 s ahead does not make its set stale: its clock is monotonic (${jumped}, ${hits} read(s))`);
+    status = 503;
+    const cold = remoteChecker(settings, url, () => 0);
+    for (const [label, made] of [
+      ["the /mcp audience", mint({ aud: `${ORIGIN}/mcp` })],
+      ["another issuer", mint({ iss: "https://elsewhere.example.test/auth" })],
+    ] as const) {
+      const before = hits;
+      const got = await cold(await made);
+      assert(got.status === "invalid" && hits === before, `no keys to be had, ${label}: 401 on its claims, no key read for it (${got.status}, ${hits - before})`);
+    }
+    assert((await cold(await mint())).status === "unavailable", "…while this REST core's own token is a 503 there");
+    status = 200;
+    body = { keys: [] };
+    let C3 = 0;
+    const emptied = remoteChecker(settings, url, () => C3 * S);
+    assert((await emptied(await mint())).status === "unavailable", "a key set answered with no keys is no answer: 503, not a 401 that sends clients to sign in");
+    body = jwks;
+    C3 = 30;
+    assert((await emptied(await mint())).status === "ok", "…and the next read, 30 s on, serves");
+    srv.stop(true);
+    // A token's subject revoked in the registry: REVOKED, said as a token's.
+    check = checkerOver(settings, createLocalJWKSet(jwks));
+    identity = { status: "revoked", agentId: "agent-o", revokedAt: "2026-10-16T00:00:00Z", reason: null };
+    const rv = await json(await call("/v1/whoami", await mint()));
+    identity = { status: "ok", agentId: "agent-o" };
+    assert(rv.status === 401 && rv.body.code === "REVOKED" && rv.body.credential === "token", `a revoked subject's token: 401 REVOKED, credential token (${rv.status} ${JSON.stringify(rv.body)})`);
+    const rk = await (async () => { identity = { status: "revoked", agentId: "agent-1", revokedAt: "2026-10-16T00:00:00Z", reason: null }; const out = await json(await app.fetch(new Request("http://api/v1/whoami", { headers: { "x-brain-key": "read-raw" } }))); identity = { status: "ok", agentId: "agent-o" }; return out; })();
+    assert(rk.status === 401 && rk.body.code === "REVOKED" && !("credential" in rk.body), `…while a revoked key's refusal carries no credential, as before (${JSON.stringify(rk.body)})`);
   }
   assert(AUTH_JWKS_URL === "http://auth.ob1.internal.:3000/auth/jwks" && JWKS_CACHE_MAX_AGE_MS === 600_000 && JWKS_COOLDOWN_MS === 30_000,
     "a deploy reads the authorization server's key set on the mesh, kept for the access tokens' 600 s, with 30 s between reads");

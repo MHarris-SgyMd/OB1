@@ -3124,10 +3124,22 @@ pass a variable it does not name: `provision.ts` says which line. A service's
 id may not be `operator`, the account every sign-in's token names, and its
 scopes must be one access key's: `brain:read+brain:capture` without
 `brain:write` is refused, as `brain:write` already reads and captures. Either
-stops the server starting, so a deploy that lists such a service changes it
-before upgrading (to `brain:write`, or one scope; another id). A
-service names its scope in each token request (`scope=brain:capture`): a
-request without one gets a token with no scope, which the REST core refuses.
+stops the server starting, so change such a service before upgrading: split a
+read+capture one into two services, one scope each (like for like:
+`brain:write` would also let it change and delete), and give a renamed one
+its new secret (`--init` writes it) and its line in `deploy/compose.yaml`.
+
+A service gets its token from `<origin>/auth/token` by client credentials,
+naming the REST core and its scope, and sends it as `Authorization: Bearer`
+to `/api`:
+
+```bash
+curl -s -u "runner:$OB1_AUTH_SECRET_RUNNER" -d grant_type=client_credentials \
+  -d resource=https://brain.example.com/api -d scope=brain:capture \
+  https://brain.example.com/auth/token
+```
+
+A request without a scope gets a token with none, which the REST core refuses.
 
 **Tokens at the REST core** (SMD-2286). On a configured stack the REST core
 accepts a bearer token this server issued for it: issuer `<origin>/auth`,
@@ -3138,12 +3150,26 @@ refused there; it reaches the REST core only exchanged by the MCP server.
   token holding none of them, or `brain:read` with `brain:capture` and no
   `brain:write`, is answered 403 `insufficient_scope`.
 - **The caller** is `oauth:operator` for a sign-in, `oauth:<id>` for a
-  service. Use that name in `actor:` egress terms (`actor:oauth:operator`)
-  and the search tools' actor filter; an exchanged token's audit row names
-  the MCP service as `act`. Classify it in the registry as you would a key
-  (`set_agent_kind`): until then its writes carry no kind, so a `said_by`
-  filter does not find them. Every client signed in as the operator shares
-  this one name for now (SMD-3064).
+  service. That name is what egress terms (`actor:oauth:operator` in
+  `OB1_EGRESS_ALLOW` or `OB1_EGRESS_DENY`), the search tools' actor filter
+  and the audit row see; an exchanged token's audit row names the MCP
+  service as `act`. Every client signed in as the operator shares this one
+  name for now (SMD-3064).
+- **Classify it** as you would a key, or its writes carry no kind and a
+  `said_by` filter misses them:
+  `compose exec -T postgres psql -U postgres -d openbrain -c "SELECT set_agent_kind('oauth:operator', 'agent')"`,
+  then `SELECT backfill_thought_audit_events()` for the rows written before.
+  `agent` is the cautious kind while every connector shares the name:
+  `operator` would give every connector the operator signs in the
+  operator's trust.
+- **Revoking it in the registry bans the subject for good.** Its digest is
+  fixed, so no new sign-in escapes it: every token of it is refused 401
+  `REVOKED` (`credential: "token"`), and there is no function to undo it.
+  For a leaked token, act at this server instead. An access token dies
+  within ten minutes on its own. A client can revoke its own refresh token
+  (RFC 7009, `<origin>/auth/token/revocation`), which revokes its grant. The
+  operator's page of grants is SMD-2280's; until then, the compromise steps
+  under "Custody and backups" below end every grant.
 - **The keys:** it reads this server's signing keys on the mesh and keeps
   them ten minutes, the tokens' lifetime, reading again after that or for a
   key it lacks, at most once in 30 s. Once the keys are stale and reads fail,
