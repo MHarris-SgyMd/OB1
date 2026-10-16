@@ -45,6 +45,15 @@ export type Env = {
    */
   OB1_STOP_GRACE?: string;
   /**
+   * Seconds between the vector mender's ticks (core/mend.ts, SMD-2889): the
+   * servers give the thoughts saved without a vector theirs once the provider
+   * answers and the egress gate allows. Whole seconds from 1 to 86400, `0` or
+   * `off` for none; 60 unless set, and a value that does not read is the
+   * default, said. Read once, at start-up, from the process's environment, by
+   * index.ts and api.ts, whose menders take turns under the store's leader lock.
+   */
+  OB1_VECTOR_MEND_INTERVAL?: string;
+  /**
    * `1` continues a caller's W3C `traceparent` (telemetry.ts, SMD-1849 PR 2b),
    * for a deployment whose proxy sets it; unset, a request starts its own
    * trace and links the caller's. Read per request from the process's
