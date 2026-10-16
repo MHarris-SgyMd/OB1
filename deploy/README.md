@@ -2266,7 +2266,8 @@ From then on the file is the canary's own:
 
 **Its own keys** (SMD-2874). No key of stable's opens the canary, and no key
 of the canary's opens stable. Its `MCP_ACCESS_KEYS` holds a write key `up`
-mints, named for the canary's project (`open-brain-canary:write:<sha256>`),
+mints, named for the canary's project (`open-brain-canary:write:<sha256>`,
+or `open-brain-canary-2` and on when an entry of the canary's holds that name),
 and the raw key is the file's `OB1_CANARY_KEY`, which `up` smokes and
 registers the connector with and which no container is handed. For another
 client, mint a key with `bun server-portable/keygen.ts --name <client>
@@ -2293,7 +2294,8 @@ forwarder: `http://127.0.0.1:N/mcp`, on loopback whatever `SERVER_BIND` says
 for stable (SMD-2874; docs/one-brain-per-stack.md). The first `up` needs
 `--port N`, which it writes to the canary's env file as `SERVER_PORT`; later
 ones read it there. A `--port` that differs is the canary's port from then
-on: `up` writes it to the file in place, one line a setting
+on: `up` writes it to the file, one line a setting, its old line removed and
+the new one at the file's end
 (`deploy/env-file.ts`), reads it back through compose, and says so. It does the same for the address, tier and
 profiles when the file holds others than the canary's own, as one made
 before SMD-2874 does (stable's). Stable's port (its env file's
@@ -2318,7 +2320,8 @@ own origin instead, its two servers on stable's `mesh` network
 `up --port N`: its servers are recreated on its own networks alone, on the
 same volume, behind its own proxy on `N`, and its env file, whose
 `SERVER_PORT` was stable's, takes `N` and the canary's own address, tier and
-profiles (written in place, the rest of the file as it was). A connector left at `/canary/mcp`
+profiles (their old lines removed and the new ones at the file's end, the
+rest of the file as it was). A connector left at `/canary/mcp`
 is stable's URL, not the canary's: `up` names it, `up --connect` refuses to
 replace it until it is removed (`claude mcp remove --scope user
 open-brain-canary`), and `down` leaves it alone. That same `up` takes

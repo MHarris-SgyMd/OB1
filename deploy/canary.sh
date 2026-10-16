@@ -47,7 +47,8 @@
 # (docs/one-brain-per-stack.md). Its networks are its own project's; it joins
 # none of stable's. The port is --port, which the first `up` needs, and from
 # then on the canary's env file's SERVER_PORT: a --port that differs is
-# written to the file in place (deploy/env-file.ts), read back through compose.
+# written to the file (deploy/env-file.ts: its old line removed, the new one
+# at the file's end), read back through compose.
 # A canary stood up at /canary/mcp on stable's origin, its servers on stable's
 # mesh (SMD-2294 to SMD-2874), moves to its port at its next `up --port N`:
 # its servers are recreated on its own networks alone, on the same volume, and
@@ -552,8 +553,6 @@ if mode == "own-fix":
                 return True
         return False
     spans = [n for n in ("MCP_ACCESS_KEYS", "MCP_ACCESS_KEY", "OB1_CANARY_KEY", "OB1_HOOK_SECRETS", "OB1_PLUGIN_DB_PASSWORD", "OB1_WORKER_KEY", "OB1_FORWARDER_KEY") if spans_lines(out, n)]
-    if spans:
-        sys.exit("%s in %s spans lines: write it on one line, its entries separated by commas" % (", ".join(spans), os.environ.get("SHOWN") or out))
     stable_digests = {d for _, _, _, d in entries(s["MCP_ACCESS_KEYS"]) if d} | ({sha(s["MCP_ACCESS_KEY"])} if s["MCP_ACCESS_KEY"] else set())
     fix, said = {}, []
     # The canary'"'"'s port, address, tier and profiles (SMD-2874 PR 1).
@@ -573,8 +572,15 @@ if mode == "own-fix":
         said.append("removed %d of stable'"'"'s access keys from MCP_ACCESS_KEYS" % (len(have) - len(kept)))
     if not own_ok:
         raw = secrets.token_hex(32)
+        # Under a name no kept entry holds (parseKeyRecords refuses one twice):
+        # an operator'"'"'s own entry under the canary'"'"'s name stays (code review).
+        taken = {x[1] for x in kept}
         name = os.environ["OWN_PROJECT"]
-        kept = [x for x in kept if x[1] != name] + [("%s:write:%s" % (name, sha(raw)), name, "write", sha(raw))]
+        n = 2
+        while name in taken:
+            name = "%s-%d" % (os.environ["OWN_PROJECT"], n)
+            n += 1
+        kept = kept + [("%s:write:%s" % (name, sha(raw)), name, "write", sha(raw))]
         fix["OB1_CANARY_KEY"] = raw
         said.append("minted the canary'"'"'s own write key, %s (its hash in MCP_ACCESS_KEYS, the raw key in OB1_CANARY_KEY)" % name)
     if len(kept) < len(have) or not own_ok:
@@ -588,20 +594,26 @@ if mode == "own-fix":
     # server-portable/core/plugins.ts hookSecrets reads them: any secret of
     # stable'"'"'s, under any plugin'"'"'s name (review pass 1: split on commas, it
     # matched only the whole value).
-    hooks = lambda v: {x.split("=", 1)[1] for x in (v or "").split() if "=" in x and x.split("=", 1)[1]}
+    hooks = lambda v: {x.split("=", 1)[1] for x in (v or "").split() if "=" in x and x.split("=", 1)[0] and x.split("=", 1)[1]}
     stable_hooks = hooks(s["OB1_HOOK_SECRETS"])
     pairs = (c["OB1_HOOK_SECRETS"] or "").split()
     own_pairs = [x for x in pairs if not ("=" in x and x.split("=", 1)[1] in stable_hooks)]
     if len(own_pairs) < len(pairs):
         # Stable'"'"'s pairs out, the canary'"'"'s own kept.
         fix["OB1_HOOK_SECRETS"] = " ".join(own_pairs)
-        said.append("cleared OB1_HOOK_SECRETS of stable'"'"'s webhook secrets (%d)" % (len(pairs) - len(own_pairs)))
+        said.append("cleared OB1_HOOK_SECRETS of stable'"'"'s webhook secrets (%d); a webhook OB1_HOOKS serves with no secret of the canary'"'"'s answers 503 until it has one" % (len(pairs) - len(own_pairs)))
     # The plugin role'"'"'s password (SMD-3032): its own wherever stable sets one;
     # the canary'"'"'s migrate sets the role to it.
     sp, cp = s["OB1_PLUGIN_DB_PASSWORD"], c["OB1_PLUGIN_DB_PASSWORD"]
     if sp and (not cp or cp == sp or (len(sp) >= STRONG and sp in cp)):
         fix["OB1_PLUGIN_DB_PASSWORD"] = secrets.token_hex(24)
         said.append("OB1_PLUGIN_DB_PASSWORD, a fresh one (up sets the plugin role to it before the refresh)")
+    # A setting spanning lines is refused only when it must be rewritten: one
+    # the server reads (parseKeyRecords takes entries a line each) and that
+    # needs nothing is left as it is (code review).
+    blocked = [n for n in spans if n in fix]
+    if blocked:
+        sys.exit("%s in %s spans lines: write it on one line, its entries separated by commas" % (", ".join(blocked), os.environ.get("SHOWN") or out))
     print(json.dumps({"values": fix, "said": said}))
     sys.exit(0)
 if mode == "write":
@@ -683,8 +695,8 @@ make_canary_env() {
 # be the canary's own (SMD-2874, SMD-3032): its port, address, tier and
 # profiles, its own access key, none of stable's keys or webhook secrets, and
 # a plugin role password of its own. Written by deploy/env-file.ts's
-# setEnvValues, one line per setting, replaced where the file has one and
-# appended where it has none, the rest of the file as it was; the values reach
+# setEnvValues, one line a setting: its old lines removed and the new one at
+# the file's end, the rest of the file as it was; the values reach
 # it on stdin, never argv. Then read back through compose, which must find
 # nothing left to fix. OWN_SAID says what was written (names, and the values
 # that are no secret); empty when there was nothing to write. Returns 1, with
@@ -813,12 +825,22 @@ relations_in() {
 # that wins for this directory, so a local one hides a user one behind it.
 CONN_URL=""
 CONN_SCOPE=""
+#
+# CONN_KEY is the key the connector sends, its `x-brain-key` header or its
+# URL's ?key=, or nothing: held in memory, never printed or written (piped
+# through builtins, not a here-string, which bash 3.2 keeps in a temporary
+# file), so `up` can say when the connector holds a key the canary does not
+# take, however long ago that began (code review).
+CONN_KEY=""
 read_connector() {
-  CONN_URL=""; CONN_SCOPE=""
+  CONN_URL=""; CONN_SCOPE=""; CONN_KEY=""
   command -v claude >/dev/null 2>&1 || return 0
-  local got scope
-  got="$({ claude mcp get "$NAME" 2>/dev/null || true; } | sed -nE 's/^ *(URL|Scope): */\1 /p')"
+  local all got scope
+  all="$({ claude mcp get "$NAME" 2>/dev/null || true; })"
+  got="$(printf '%s\n' "$all" | sed -nE 's/^ *(URL|Scope): */\1 /p')"
+  CONN_KEY="$(printf '%s\n' "$all" | sed -nE 's/^ *[Xx]-[Bb]rain-[Kk]ey: *//p' | head -n 1 | tr -d '\r' | sed 's/[[:space:]]*$//')"
   CONN_URL="$(sed -n 's/^URL //p' <<<"$got" | head -n 1)"
+  [ -n "$CONN_KEY" ] || CONN_KEY="$(printf '%s\n' "$CONN_URL" | sed -nE 's/.*[?&]key=([^&]*).*/\1/p')"
   scope="$(sed -n 's/^Scope //p' <<<"$got" | head -n 1)"
   case "$scope" in
     "") CONN_SCOPE="" ;;
@@ -1360,9 +1382,16 @@ else
     # key was taken out of MCP_ACCESS_KEYS): the connector holds another one,
     # which the canary no longer takes (review pass 1).
     # Only at the canary's own URL: one elsewhere is told to move, and the
-    # --connect that moves it gives it the key (review pass 2).
+    # --connect that moves it gives it the key (review pass 2). By the key it
+    # sends, on every run, so a run that failed after giving the canary its
+    # own keys does not leave it unsaid (code review); by this run's changes
+    # when the connector's key cannot be read.
     if [ "$at" = "$(endpoint_of "$BASE")" ]; then
-      case "$OWN_SAID" in *"minted the canary"*|*"of stable's access keys"*) say "connector $NAME may hold a key this canary no longer takes (this up gave it keys of its own): re-run with --connect to give it OB1_CANARY_KEY" ;; esac
+      if [ -n "$CONN_KEY" ]; then
+        [ "$CONN_KEY" = "$KEY" ] || say "connector $NAME sends a key this canary does not take (not its OB1_CANARY_KEY): re-run with --connect"
+      else
+        case "$OWN_SAID" in *"minted the canary"*|*"of stable's access keys"*) say "connector $NAME may hold a key this canary no longer takes (this up gave it keys of its own): re-run with --connect to give it OB1_CANARY_KEY" ;; esac
+      fi
     fi
   elif [ "${at#* }" = /canary/mcp ] && stable_port "${at%% *}"; then
     say "connector $NAME points at $(shown "$CONN_URL"), on $STABLE's origin, where the canary answered before SMD-2874: move it with claude mcp remove --scope $CONN_SCOPE $NAME, then up --connect"

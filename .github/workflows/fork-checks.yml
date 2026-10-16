@@ -2560,10 +2560,17 @@ jobs:
           # A setting stable gains after the canary's file was made does not
           # reach it, and `up` names it, by name alone.
           echo 'OB1_QUERY_LOG_RETENTION_DAYS=31' >> .env
+          # SMD-3032: the plugins' login role made on stable's password, as a
+          # canary that ran plugins before its file had a password of its own
+          # holds it: migrate.ts never changes it, so the up must (code review).
+          cq "CREATE ROLE ob1_plugins LOGIN PASSWORD 'ci-dummy-plugin-password-0123456789'" > /dev/null
           touch /tmp/provider-stub-wrong
           rc=0; SERVER_BIND=0.0.0.0 ./canary.sh up > /tmp/canary-wrong.out 2>&1 || rc=$?
           rm -f /tmp/provider-stub-wrong
           sed -i '/^OB1_QUERY_LOG_RETENTION_DAYS=31$/d' .env
+          plugin_login() { PGPASSWORD="$1" docker run --rm --network open-brain-canary_data -e PGPASSWORD pgvector/pgvector:0.8.6-pg16 psql -h postgres -U ob1_plugins -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1; }
+          plugin_login "$canary_plugin" || { echo "the canary's plugin role does not take the canary's own password" >&2; exit 1; }
+          if plugin_login ci-dummy-plugin-password-0123456789; then echo "the canary's plugin role still takes stable's password" >&2; exit 1; fi
           if grep -qFf <(printf '%s\n' "$PG_CANARY" "$CANARY_KEY" "$canary_plugin") /tmp/canary-wrong.out /tmp/canary-up.out; then echo "canary.sh printed the canary's password (the lines are not shown here, so this log does not)" >&2; exit 1; fi
           [ "$rc" = 1 ] || { cat /tmp/canary-wrong.out >&2; echo "up passed its smoke under a provider serving another model (exit $rc)" >&2; exit 1; }
           grep -F "differs from stable's on OB1_QUERY_LOG_RETENTION_DAYS" /tmp/canary-wrong.out
