@@ -173,6 +173,7 @@ x-server-env: &server-env
   OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
   OB1_PG_POOL: ${OB1_PG_POOL:-}
   OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
+  OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
   PORT: "8000"
 
 # The migrate one-shot's environment, minus its per-tier DATABASE_URL — the schema

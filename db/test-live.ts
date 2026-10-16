@@ -40,6 +40,8 @@ import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
 import { PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
+import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
+import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
 import { MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
@@ -7567,7 +7569,7 @@ console.log("\n[19] db/ingest-records.ts: the records upsert is source-labelled 
 console.log("\n[20] db/tier.ts: --refresh's guards and --promote over a canary database (SMD-1806), and the CLI names a side that does not answer (SMD-2182); --replay and --diff run over HTTP since SMD-2875 (db/test-brain-compare.ts)");
 {
   // A real pg_dump refresh needs client tools this job does not have: the
-  // deploy-stack job runs one through deploy/tier.sh (SMD-2036), and below,
+  // deploy-stack-brains job runs one through deploy/tier.sh (SMD-2036), and below,
   // stand-in tools drive refresh() to its restore and the guards run before
   // any tool is looked for.
   await sql`DELETE FROM query_log`; // the log empty for the sections after, as it was when this one replayed it
@@ -11285,12 +11287,23 @@ console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet,
     const wakesBefore = lines.filter((l) => /awake: a live/.test(l)).length;
     const synced = await capture("A ticket the sync copied in.", "sync-sleep", 0, 3);
     const [syncKind] = await sql`SELECT actor_kind FROM thought_audit WHERE thought_id = ${synced}::uuid ORDER BY created_at DESC LIMIT 1`;
+    // A mend (SMD-2889): the servers' vector mender giving a row saved without
+    // one its vector is background work, as the passes are — it leaves the
+    // brain asleep, though its event's actor_kind is NULL.
+    const mendText = "A row saved without a vector, which the mender gives one.";
+    const bare = ((await sql`SELECT upsert_thought(${mendText}, ${{ metadata: { source: "live" }, actor: { name: "sync-sleep", via: "test-live" } }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
+    const [{ ts }] = await sql`SELECT COALESCE(updated_at, created_at) AS ts FROM thoughts WHERE id = ${bare}::uuid`;
+    const [{ r: mended }] = await sql`SELECT update_thought(${bare}::uuid, ${mendText}::text, NULL::jsonb, ${unit(2)}::vector, NULL::jsonb, ${ts}::timestamptz,
+      ${actorPayload({ name: MENDER_ACTOR, via: "open-brain", background: MENDER_ACTOR })}::jsonb, 'stub-model'::text, NULL::jsonb, NULL::jsonb, NULL::jsonb) AS r`;
+    const [mendEvent] = await sql`SELECT actor_name, actor_kind, actor_context->>'background' AS background FROM thought_audit WHERE thought_id = ${bare}::uuid AND action = 'update'`;
     await Bun.sleep(2500);
     const wakesAfterSync = lines.filter((l) => /awake: a live/.test(l)).length;
     await capture("A note typed by the operator.", "op-sleep", 0, 3);
     await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 10_000);
     assert(syncKind?.actor_kind === "ingested" && wakesAfterSync === wakesBefore && lines.some((l) => /awake: a live write/.test(l)),
-      `a sync write ('ingested') leaves it asleep; an operator's capture wakes it (${syncKind?.actor_kind}; ${wakesAfterSync - wakesBefore} wake(s) on the sync write)`);
+      `a sync write ('ingested') and a mend leave it asleep; an operator's capture wakes it (${syncKind?.actor_kind}; ${wakesAfterSync - wakesBefore} wake(s) on the sync write and the mend)`);
+    assert((mended as { ok?: boolean }).ok === true && mendEvent?.actor_name === MENDER_ACTOR && mendEvent.actor_kind === null && mendEvent.background === MENDER_ACTOR,
+      `…and so does the vector mender's write, an event with no actor_kind (${JSON.stringify(mendEvent)})`);
     ac.abort();
     const followCode = await following;
     const endBeat = await beat();

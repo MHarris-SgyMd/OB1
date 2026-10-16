@@ -19,6 +19,8 @@ import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TY
 import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, ProviderError, resolveEmbedConfig } from "./embed.ts";
 import { createContext } from "./core/context.ts";
 import { capture } from "./core/writes.ts";
+import { MEND_BATCH, MEND_SCAN, MENDER_ACTOR, mendIntervalFrom, mendOnce, newMendState, OUTAGE_TICKS, SERVER_DOORS, SPENT_FAILURES, startVectorMender, type MendState } from "./core/mend.ts";
+import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, evidenceIn, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
@@ -1025,6 +1027,643 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   } finally {
     plain.stop(true);
   }
+}
+
+console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vector through update_thought with the stamp it read; two outages in a row stop the tick, and two such ticks running are the provider away; the gate is asked the question the row's writer asked; a failing row is held for doubling sweeps and holds back nothing; a tick acts only under the leader lock");
+{
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const closedNow = () => { const srv = Bun.serve({ port: 0, fetch: () => new Response("") }); const port = srv.port; srv.stop(true); return port; };
+  // A provider that answers an embedding of the configured width; `bad` texts
+  // get the status they map to, and a `hook` runs before each answer.
+  const bad = new Map<string, number>();
+  let hook: (() => void) | undefined;
+  let calls = 0;
+  const callsFor = new Map<string, number>();
+  const provider = Bun.serve({ port: 0, async fetch(req) {
+    calls++;
+    const body = await req.json() as { input: string | string[]; model: string };
+    const inputs = Array.isArray(body.input) ? body.input : [body.input];
+    for (const i of inputs) callsFor.set(i, (callsFor.get(i) ?? 0) + 1);
+    hook?.();
+    const status = inputs.map((i) => [...bad].find(([t]) => i.includes(t))?.[1]).find((x) => x !== undefined);
+    if (status === -1) return new Response("<html>a proxy's page</html>", { status: 200 });
+    if (status === -2) return Response.json({ model: body.model, data: inputs.map(() => ({ embedding: [0.1, 0.2, 0.3] })) });
+    if (status) return new Response(JSON.stringify({ error: `stub answers ${status}: ${inputs.join(" ")}` }), { status });
+    return Response.json({ model: body.model, data: inputs.map(() => ({ embedding: [0.1, 0.2, 0.3, 0.4] })) });
+  } });
+  // A chat endpoint that counts what reaches it (the windows' blurbs).
+  let chatCalls = 0;
+  const chat = Bun.serve({ port: 0, fetch: () => { chatCalls++; return Response.json({ choices: [{ message: { content: "a blurb" } }] }); } });
+  type Row = { id: string; content: string; updatedAt: string; metadata: Record<string, unknown> | null; origin: string | null; vector?: boolean };
+  const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const row = (n: number, actor: string | null, extra: Record<string, unknown> = {}, origin: string | null = "open-brain", content = `vectorless thought ${n}`): Row =>
+    ({ id: id(n), content, updatedAt: `2026-10-15T00:00:0${n % 10}.000Z`, metadata: { ...(actor ? { actor_name: actor } : {}), ...extra }, origin });
+  const harness = (rows: Row[], env: Record<string, string>, opts: { answer?: (args: Record<string, any>) => Record<string, unknown>; lock?: () => Promise<(() => Promise<boolean>) | null> } = {}) => {
+    const writes: Record<string, any>[] = [];
+    const limits: number[] = [];
+    const store = {
+      listVectorless: async ({ limit, after }: { limit: number; after: string | null }) => {
+        limits.push(limit);
+        return rows.filter((r) => !r.vector && (after === null || r.id > after)).sort((a, b) => (a.id < b.id ? -1 : 1)).slice(0, limit).map(({ vector: _, ...r }) => r);
+      },
+      updateThought: async (args: Record<string, any>) => {
+        writes.push(args);
+        const out = (opts.answer ?? (() => ({ ok: true })))(args);
+        if (out.ok) { const r = rows.find((x) => x.id === args.id); if (r) r.vector = true; }
+        return out;
+      },
+      ...(opts.lock ? { mendLock: opts.lock } : {}),
+    };
+    const ctx = createContext({ env: () => ({ OB1_EMBEDDING_DIM: "4", ...env }), store: async () => store as never, door: "test-door" });
+    return { ctx, writes, limits };
+  };
+  const at = (port: number | undefined) => `http://127.0.0.1:${port}/v1`;
+  const local = () => ({ OB1_LLM_BASE_URL: at(provider.port), OB1_LLM_LOCAL: "1" });
+  try {
+    // Mended: through update_thought with the text it read, the stamp it read,
+    // the mender as actor and the model beside the vector — no patch, so the
+    // row's own stamp (who wrote the text) stands. A page is MEND_BATCH rows.
+    {
+      const rows = [row(1, "writer"), row(2, "hook")];
+      const { ctx, writes, limits } = harness(rows, local());
+      const state = newMendState();
+      const t = await mendOnce(ctx, state);
+      assert(t.mended === 2 && t.failed === 0 && t.down === null && !t.recovered && writes.length === 2 && limits[0] === MEND_BATCH, `two vectorless rows, two writes, a page of ${MEND_BATCH} asked (${JSON.stringify(t)}, ${limits})`);
+      const w = writes[0];
+      assert(w.id === id(1) && w.content === "vectorless thought 1" && w.ifUnchangedSince === rows[0].updatedAt && w.embedding?.length === 4 && typeof w.embeddingModel === "string" && w.metadataPatch === undefined,
+        `the write: the text and the stamp it read, a vector, its model, no patch (${JSON.stringify({ ...w, embedding: w.embedding?.length })})`);
+      assert(w.actor?.name === MENDER_ACTOR && w.actor?.via === "test-door", `the actor is the mender, through this server's door (${JSON.stringify(w.actor)})`);
+      assert(state.cursor === null && t.sweepEnded && state.sweep === 1, "a short page ends the sweep: the cursor starts over");
+      const again = await mendOnce(ctx, state);
+      assert(again.mended === 0 && writes.length === 2, "a row that has its vector is not read again");
+    }
+    // Two outages in a row stop the tick, both rows held as an outage's, two
+    // calls spent; a second such tick running is the provider away.
+    {
+      const rows = [row(1, "other"), row(2, "writer"), row(3, "writer"), row(4, "writer")];
+      const { ctx, writes } = harness(rows, { OB1_LLM_BASE_URL: at(closedNow()), OB1_EGRESS_ALLOW: "actor:writer" });
+      const state = newMendState();
+      const t = await mendOnce(ctx, state);
+      assert(t.down?.reason === "provider_unreachable" && t.refused === 1 && t.failed === 2 && t.mended === 0 && writes.length === 0 && state.unanswered === 1 && !state.down, `an outage: two calls, the tick stopped, nothing written, one tick unanswered — not yet the provider away (${JSON.stringify({ ...t, firstError: undefined })})`);
+      assert(state.cursor === id(3) && state.held.get(id(2))?.outage === true && state.held.get(id(3))?.outage === true && !state.held.has(id(4)), `the cursor past the second row; both held as an outage's, the row behind untouched (${state.cursor})`);
+      await mendOnce(ctx, state);
+      assert(state.down && state.unanswered === OUTAGE_TICKS, `a second tick unanswered: the provider away (${state.unanswered})`);
+    }
+    // The provider away for many ticks over many rows, some of them failed
+    // before: two calls a tick at most, whatever the rows' history.
+    {
+      bad.set("", 503);
+      const rows = Array.from({ length: 30 }, (_, i) => row(i + 1, "writer"));
+      const { ctx } = harness(rows, local());
+      const state = newMendState();
+      for (let i = 1; i <= 6; i++) state.held.set(id(i), { failures: 2, until: 0, outage: false, seen: 0 });
+      const perTick: number[] = [];
+      for (let i = 0; i < 12; i++) { const before = calls; await mendOnce(ctx, state); perTick.push(calls - before); }
+      bad.delete("");
+      assert(perTick.every((n) => n <= 2) && state.down, `the provider away over 30 rows: at most two calls a tick (${JSON.stringify(perTick)}), the outage standing`);
+    }
+    // A text the provider fails alone with an outage's answer (a 500 for that
+    // input), first in the page or in the middle: held, the tick goes on (one
+    // outage is no stop), the rest mended, nothing said.
+    {
+      bad.set("poison-500", 500);
+      for (const at0 of [0, 1]) {
+        const rows = [row(1, "writer"), row(2, "writer"), row(3, "writer")];
+        rows[at0] = row(at0 + 1, "writer", {}, "open-brain", `poison-500 text ${at0}`);
+        const { ctx } = harness(rows, local());
+        const state = newMendState();
+        const t = await mendOnce(ctx, state);
+        const h = state.held.get(id(at0 + 1));
+        assert(t.down === null && t.mended === 2 && t.failed === 1 && h?.failures === 1 && !state.down, `a 500 for one text at row ${at0 + 1}: held, the rest mended, nothing said (${JSON.stringify({ ...t, firstError: undefined, h })})`);
+      }
+      bad.delete("poison-500");
+    }
+    // The keyset walk: a row the gate refuses costs no call and does not hold
+    // back the row behind it; a non-local endpoint under deny with an actor term.
+    {
+      const rows = [row(1, "other"), row(2, "writer")];
+      const before = calls;
+      const { ctx, writes } = harness(rows, { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_ALLOW: "actor:writer" });
+      const t = await mendOnce(ctx, newMendState());
+      assert(t.refused === 1 && t.mended === 1 && writes.length === 1 && writes[0].id === id(2) && calls - before === 1, `the refused row: no call; the row behind it mended (${JSON.stringify(t)}, ${calls - before} call(s))`);
+    }
+    // The question the writer's gate asked. A row a key captured through a
+    // server: as the capture (a claimed source opens nothing) AND as the row
+    // (a source: deny term keeps it home). Any other row — an import, a
+    // pass's — as db/reembed.ts asks: its metadata, no actor, since its
+    // actor_name is a label the tool chose.
+    {
+      const denied = harness([row(1, "writer", { source: "private-notes" })], { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "source:private-notes" });
+      const t1 = await mendOnce(denied.ctx, newMendState());
+      assert(t1.refused === 1 && denied.writes.length === 0, `a key's row, allow mode, a source: deny term: the row stays home (${JSON.stringify(t1)})`);
+      const claimed = harness([row(1, "other", { source: "linear" })], { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_ALLOW: "source:linear" });
+      const t2 = await mendOnce(claimed.ctx, newMendState());
+      assert(t2.refused === 1 && claimed.writes.length === 0, `a key's row, deny mode, a source: allow term alone: a claimed source does not open the gate (${JSON.stringify(t2)})`);
+      const opened = harness([row(1, "writer", { source: "linear" })], { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_ALLOW: "actor:writer" });
+      const t3 = await mendOnce(opened.ctx, newMendState());
+      assert(t3.mended === 1 && opened.writes.length === 1, `a key's row, deny mode, the writer's actor term: sent (${JSON.stringify(t3)})`);
+      const label = harness([row(1, "writer", {}, "ingest-records"), row(2, "writer", {}, null)], { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_ALLOW: "actor:writer" });
+      const t4 = await mendOnce(label.ctx, newMendState());
+      assert(t4.refused === 2 && label.writes.length === 0, `an import's row and a row no capture event names: an actor term matching its label opens nothing (${JSON.stringify(t4)})`);
+      const bySource = harness([row(1, "board-sync", { source: "linear" }, "sync-linear")], { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_ALLOW: "source:linear" });
+      const t5 = await mendOnce(bySource.ctx, newMendState());
+      assert(t5.mended === 1, `a pass's row, a source: allow term: sent, as db/reembed.ts would send it (${JSON.stringify(t5)})`);
+    }
+    // Blurbs under OB1_CHUNK_CONTEXT: a chat endpoint the gate refuses for this
+    // row — a type: deny term over the row's own metadata — gets no call, and
+    // the windows go in bare, as a capture's do; the recipe says no blurb.
+    {
+      const long = `${"a sentence the chunker splits into windows. ".repeat(260)}the end`;
+      const env = { ...local(), OB1_CHUNK_TOKENS: "100", OB1_CHAT_BASE_URL: at(chat.port), OB1_CHUNK_CONTEXT: "on", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "type:private" };
+      const before = chatCalls;
+      const { ctx, writes } = harness([row(1, "writer", { type: "private" }, "open-brain", long)], env);
+      const t = await mendOnce(ctx, newMendState());
+      assert(t.mended === 1 && t.refused === 0 && chatCalls === before && (writes[0]?.chunks?.length ?? 0) > 1 && writes[0].chunks.every((c: { context?: string }) => !c.context) && writes[0].lineage?.chunks?.blurb_model === undefined,
+        `blurbs refused: mended with bare windows, no chat call, no blurb in the recipe (${JSON.stringify({ t, chat: chatCalls - before, windows: writes[0]?.chunks?.length, recipe: writes[0]?.lineage })})`);
+      assert(writes[0]?.actor?.egress?.chat?.allowed === false && writes[0].actor.egress.chat.rule === "deny-term", `…and the audit record says the blurb was refused (${JSON.stringify(writes[0]?.actor?.egress)})`);
+      const open = harness([row(2, "writer", { type: "public" }, "open-brain", long)], env);
+      const t2 = await mendOnce(open.ctx, newMendState());
+      assert(t2.mended === 1 && chatCalls > before && open.writes[0].lineage?.chunks?.blurb_model !== undefined, `blurbs allowed: they are asked for (${chatCalls - before} chat call(s))`);
+    }
+    // A 400 holds the row and moves on; a write that lost a race is counted
+    // apart; a write the database refuses (a throw) holds the row too.
+    {
+      bad.set("poison-400", 400);
+      const rows = [row(1, "writer", {}, "open-brain", "poison-400 text"), row(2, "writer")];
+      const { ctx, writes } = harness(rows, local());
+      const t = await mendOnce(ctx, newMendState());
+      assert(t.failed === 1 && t.mended === 1 && t.down === null && writes.length === 1 && /the provider answered 400/.test(t.firstError ?? "") && !/poison-400|stub answers/.test(t.firstError ?? ""), `a 400: the row failed and held, the one behind it mended, its words the status and never the body, which echoes the text (${t.firstError})`);
+      const raced = harness([row(1, "writer")], local(), { answer: () => ({ ok: false, error: "STALE_READ" }) });
+      const t2 = await mendOnce(raced.ctx, newMendState());
+      assert(t2.raced === 1 && t2.failed === 0 && t2.mended === 0, `STALE_READ: raced, for the next sweep to read afresh (${JSON.stringify(t2)})`);
+      const refusedWrite = () => Object.assign(new Error(`invalid input syntax for type vector: "${"0,".repeat(500)}"`), { errno: "22P02" });
+      const thrown = harness([row(1, "writer"), row(2, "writer")], local(), { answer: (a) => { if (a.id === id(1)) throw refusedWrite(); return { ok: true }; } });
+      const s3 = newMendState();
+      const t3 = await mendOnce(thrown.ctx, s3);
+      assert(t3.failed === 1 && t3.mended === 1 && s3.held.has(id(1)) && (t3.firstError ?? "").length <= 301 + id(1).length + 2 + "update_thought: ".length, `a write the database refuses (a SQLSTATE): held, the next row mended, its words cut short (${JSON.stringify({ ...t3, firstError: t3.firstError?.length })})`);
+      // A database not there to answer (no SQLSTATE) is the tick's: thrown, for the loop to back off, and no row held.
+      const gone = harness([row(1, "writer"), row(2, "writer")], local(), { answer: () => { throw new Error("Failed to connect"); } });
+      const s4 = newMendState();
+      let threw: unknown;
+      try { await mendOnce(gone.ctx, s4); } catch (e) { threw = e; }
+      assert(String(threw).includes("Failed to connect") && s4.held.size === 0, `a write that cannot reach the database: the tick throws, no row held (${String(threw)}, ${s4.held.size})`);
+      // A SQLSTATE that says the server is going (57P01, an administrator's shutdown) is the database away, not a refusal.
+      const shut = harness([row(1, "writer")], local(), { answer: () => { throw Object.assign(new Error("terminating connection due to administrator command"), { errno: "57P01" }); } });
+      const s5 = newMendState();
+      let threw5: unknown;
+      try { await mendOnce(shut.ctx, s5); } catch (e) { threw5 = e; }
+      assert(threw5 !== undefined && s5.held.size === 0, `a shutdown's SQLSTATE mid-write: the tick throws, no row held (${String(threw5)})`);
+      for (const errno of ["08006", "53300"]) {
+        const gone2 = harness([row(1, "writer")], local(), { answer: () => { throw Object.assign(new Error(`database away (${errno})`), { errno }); } });
+        const s6 = newMendState();
+        let threw6: unknown;
+        try { await mendOnce(gone2.ctx, s6); } catch (e) { threw6 = e; }
+        assert(threw6 !== undefined && s6.held.size === 0, `SQLSTATE ${errno} mid-write (a connection lost, too many clients): the tick throws, no row held`);
+      }
+      bad.delete("poison-400");
+    }
+    // A held row waits 1, 2, 4 … sweeps — no call meanwhile — and is tried
+    // again after; a mend clears its hold.
+    {
+      bad.set("poison-hold", 400);
+      const rows = [row(1, "writer", {}, "open-brain", "poison-hold text")];
+      const { ctx } = harness(rows, local());
+      const state = newMendState();
+      const tried: number[] = [];
+      for (let sweep = 0; sweep < 12; sweep++) { const t = await mendOnce(ctx, state); if (t.failed) tried.push(sweep); }
+      assert(JSON.stringify(tried) === JSON.stringify([0, 2, 5, 10]), `tried at sweeps 0, 2, 5, 10 — held 1, 2, 4 sweeps between (${JSON.stringify(tried)})`);
+      bad.delete("poison-hold");
+      for (let i = 0; i < 9 && !rows[0].vector; i++) await mendOnce(ctx, state);
+      assert(rows[0].vector === true && !state.held.has(id(1)), "the provider answers: at its next try the row is mended, its hold cleared");
+    }
+    // A full page holds the cursor on its last row; the next tick reads on.
+    {
+      const rows = Array.from({ length: MEND_BATCH + 2 }, (_, i) => row(i + 1, "writer"));
+      const { ctx } = harness(rows, local());
+      const state = newMendState();
+      const t1 = await mendOnce(ctx, state);
+      assert(t1.mended === MEND_BATCH && state.cursor === id(MEND_BATCH) && !t1.sweepEnded, `a full page: the cursor on its last row (${state.cursor})`);
+      const t2 = await mendOnce(ctx, state);
+      assert(t2.mended === 2 && state.cursor === null && t2.sweepEnded, `the next tick reads on, and the short page ends the sweep (${JSON.stringify(t2)})`);
+    }
+    // The leader lock: held elsewhere, the tick reads and writes nothing; held
+    // here, released after the tick, a throw included.
+    {
+      let released = 0;
+      const busy = harness([row(1, "writer")], local(), { lock: async () => null });
+      const t = await mendOnce(busy.ctx, newMendState());
+      assert(t.skipped && busy.writes.length === 0 && busy.limits.length === 0, "the lock held elsewhere: skipped, nothing read");
+      const mine = harness([row(1, "writer")], local(), { lock: async () => async () => { released++; return true; } });
+      const t1 = await mendOnce(mine.ctx, newMendState());
+      const throws = harness([row(1, "writer")], local(), { lock: async () => async () => { released++; return true; }, answer: () => { throw new Error("x"); } });
+      await mendOnce(throws.ctx, newMendState()).catch(() => {});
+      assert(released === 2 && mine.writes.length === 1 && !t1.lockKept, `the lock released after each tick, one whose write threw included (${released})`);
+      // A release the database says did not let go (a pooler between): the tick says so.
+      const kept = harness([row(1, "writer")], local(), { lock: async () => async () => false });
+      assert((await mendOnce(kept.ctx, newMendState())).lockKept, "a lock not let go by the session that took it: said on the tick");
+      const gone = harness([row(1, "writer")], local(), { lock: async () => async () => { throw new Error("Connection closed"); } });
+      assert(!(await mendOnce(gone.ctx, newMendState())).lockKept, "a release whose connection is gone: the lock went with it, not kept");
+    }
+    // A stop starts no further call, and a stop that comes while the provider
+    // answers writes nothing.
+    {
+      const before = calls;
+      const { ctx, writes } = harness([row(1, "writer")], local());
+      const t = await mendOnce(ctx, newMendState(), () => true);
+      assert(t.mended === 0 && writes.length === 0 && calls === before, "stopped: no call, no write");
+      let stop = false;
+      hook = () => { stop = true; };
+      const mid = harness([row(1, "writer"), row(2, "writer")], local());
+      const t2 = await mendOnce(mid.ctx, newMendState(), () => stop);
+      hook = undefined;
+      assert(t2.mended === 0 && mid.writes.length === 0, "stopped while the provider answered: nothing written");
+    }
+    // The outage rule's cells (review pass 6's rule). The only row there is,
+    // failing alone with an outage's answer and nothing else answered: the
+    // provider away, as far as this mender can tell — held as an outage's at
+    // each try, its calls falling away, the outage standing, said once.
+    {
+      bad.set("lone-500", 500);
+      const rows = [row(1, "writer", {}, "open-brain", "lone-500 text")];
+      const { ctx } = harness(rows, local());
+      const state = newMendState();
+      const before = callsFor.get("lone-500 text") ?? 0;
+      for (let i = 0; i < 16; i++) await mendOnce(ctx, state);
+      const lone = (callsFor.get("lone-500 text") ?? 0) - before;
+      assert(lone >= 2 && lone <= 6 && state.held.get(id(1))?.outage === true && state.down, `the lone row: held as an outage's at each try, its calls falling away (${lone} in 16 ticks), the outage standing`);
+      bad.delete("lone-500");
+    }
+    // An outage's hold stops growing at MAX_OUTAGE_HOLD_SWEEPS (4), a failure's at 32.
+    {
+      const { ctx } = harness([row(1, "writer")], { OB1_LLM_BASE_URL: at(closedNow()), OB1_LLM_LOCAL: "1" });
+      const state = newMendState();
+      state.held.set(id(1), { failures: 6, until: 0, outage: true, seen: 0 });
+      await mendOnce(ctx, state);
+      assert(state.held.get(id(1))?.until === 1 + 4, `a seventh outage: held 4 sweeps, not 64 (until ${state.held.get(id(1))?.until})`);
+    }
+    // An answer between two failing texts ends the run: outage, answer, outage is no stop.
+    {
+      bad.set("gap-500", 500);
+      const rows = [row(1, "writer", {}, "open-brain", "gap-500 a"), row(2, "writer"), row(3, "writer", {}, "open-brain", "gap-500 b"), row(4, "writer"), row(5, "writer")];
+      const { ctx } = harness(rows, local());
+      const t = await mendOnce(ctx, newMendState());
+      assert(t.down === null && t.mended === 3 && t.failed === 2, `outage, answer, outage, answer: no stop, the good rows mended (${JSON.stringify({ ...t, firstError: undefined })})`);
+      bad.delete("gap-500");
+    }
+    // A fault that is neither an outage nor an answer — a vector of the wrong width — ends a run of outages too: outage, width, outage is no stop.
+    {
+      bad.set("run-500", 500);
+      bad.set("run-width", -2);
+      const rows = [row(1, "writer", {}, "open-brain", "run-500 a"), row(2, "writer", {}, "open-brain", "run-width text"), row(3, "writer", {}, "open-brain", "run-500 b"), row(4, "writer")];
+      const { ctx } = harness(rows, local());
+      const t = await mendOnce(ctx, newMendState());
+      assert(t.failed === 3 && t.mended === 1, `outage, wrong width, outage, answer: no stop, the last row mended (${JSON.stringify({ ...t, firstError: undefined })})`);
+      bad.delete("run-500");
+      bad.delete("run-width");
+    }
+    // Two texts the provider fails alone, nothing else waiting: read as the provider away, both held, their calls falling away.
+    {
+      bad.set("pair-500", 500);
+      const rows = [1, 2].map((n) => row(n, "writer", {}, "open-brain", `pair-500 text ${n}`));
+      const { ctx } = harness(rows, local());
+      const state = newMendState();
+      const before = (callsFor.get("pair-500 text 1") ?? 0) + (callsFor.get("pair-500 text 2") ?? 0);
+      for (let i = 0; i < 20; i++) await mendOnce(ctx, state);
+      const pair = (callsFor.get("pair-500 text 1") ?? 0) + (callsFor.get("pair-500 text 2") ?? 0) - before;
+      assert(pair <= 12 && state.held.get(id(1))?.outage === true && state.held.get(id(2))?.outage === true, `two failing rows alone: both held, ${pair} calls in 20 ticks`);
+      bad.delete("pair-500");
+    }
+    // Two texts the provider fails alone, already failed three times
+    // (SPENT_FAILURES), coming due together in a quiet brain: their unanswered
+    // ticks declare no outage; fresh rows failing so do.
+    {
+      bad.set("spent-500", 500);
+      const rows = [1, 2].map((n) => row(n, "writer", {}, "open-brain", `spent-500 text ${n}`));
+      const { ctx } = harness(rows, local());
+      const state = newMendState();
+      for (const n of [1, 2]) state.held.set(id(n), { failures: 3, until: 0, outage: true, seen: 0 });
+      for (let i = 0; i < 40; i++) await mendOnce(ctx, state);
+      assert(SPENT_FAILURES === 3 && !state.down && state.unanswered === 0, `spent rows alone over 40 ticks: no outage declared (${state.unanswered})`);
+      const fresh = harness([1, 2].map((n) => row(n, "writer", {}, "open-brain", `spent-500 text ${n}`)), local());
+      const fs = newMendState();
+      for (let i = 0; i < 12 && !fs.down; i++) await mendOnce(fresh.ctx, fs);
+      assert(fs.down, "the same texts fresh: their unanswered ticks declare an outage before they are spent");
+      bad.delete("spent-500");
+    }
+    // Two such texts side by side, good rows behind them: tried together they
+    // read as the provider away; each answer lets them go until their third
+    // failure, after which they wait out their growing holds — the stops
+    // falling away to one every few sweeps.
+    {
+      bad.set("side-500", 500);
+      const rows = [row(1, "writer", {}, "open-brain", "side-500 a"), row(2, "writer", {}, "open-brain", "side-500 b"), row(3, "writer"), row(4, "writer")];
+      const { ctx } = harness(rows, local());
+      const state = newMendState();
+      const downs: number[] = [];
+      for (let i = 0; i < 30; i++) {
+        if (i % 4 === 0) rows.push(row(10 + i, "writer"));
+        const t = await mendOnce(ctx, state);
+        if (t.down) downs.push(i);
+      }
+      // The gaps between their stops grow as their holds do (up to 8 sweeps): a line pair every few sweeps at most.
+      const gaps = downs.slice(1).map((d, k) => d - downs[k]);
+      assert(downs.length <= 6 && gaps.every((g, k) => k === 0 || g >= gaps[k - 1]) && (state.held.get(id(1))?.failures ?? 0) >= 3 && rows.slice(2).every((r) => r.vector), `side by side: ${downs.length} stop(s), the gaps growing (stops at ${JSON.stringify(downs)}); the good rows mended`);
+      bad.delete("side-500");
+    }
+    // One failing text and a stream of good rows: it is released by answers
+    // until its third failure, then waits out its own growing hold — its calls
+    // and any stops fall away.
+    {
+      bad.set("stream-500", 500);
+      const rows = [row(1, "writer", {}, "open-brain", "stream-500 text")];
+      const { ctx } = harness(rows, local());
+      const state = newMendState();
+      const before = callsFor.get("stream-500 text") ?? 0;
+      const downs: number[] = [];
+      for (let i = 0; i < 40; i++) {
+        if (i % 2 === 1) rows.push(row(100 + i, "writer"));
+        const t = await mendOnce(ctx, state);
+        if (t.down) downs.push(i);
+      }
+      const calls40 = (callsFor.get("stream-500 text") ?? 0) - before;
+      const running = downs.some((d, k) => k > 0 && d === downs[k - 1] + 1);
+      assert(calls40 <= 10 && !running && !state.down && (state.held.get(id(1))?.failures ?? 0) >= 3, `a failing text in a stream of good rows: ${calls40} calls in 40 ticks, its unanswered ticks never two running (${JSON.stringify(downs)}), no outage declared`);
+      bad.delete("stream-500");
+    }
+    // A real outage after a mend this tick: the next two rows' outages stop
+    // the tick (answered, so not an unanswered tick); two ticks unanswered
+    // hold four more and are the provider away; the provider back, its first
+    // answer lets every one of them go at once.
+    {
+      let served = 0;
+      let down = false;
+      const flaky = Bun.serve({ port: 0, async fetch(req) {
+        const body = await req.json() as { input: string | string[]; model: string };
+        if (down || served++ >= 1) { down = true; return new Response("{}", { status: 503 }); }
+        return Response.json({ model: body.model, data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }] });
+      } });
+      try {
+        const rows = Array.from({ length: 8 }, (_, i) => row(i + 1, "writer"));
+        const { ctx } = harness(rows, { OB1_LLM_BASE_URL: at(flaky.port), OB1_LLM_LOCAL: "1" });
+        const state = newMendState();
+        const t1 = await mendOnce(ctx, state);
+        assert(t1.mended === 1 && t1.failed === 2 && t1.down === null && state.held.get(id(2))?.outage === true && state.held.get(id(3))?.outage === true && !state.down, `mid-tick: one mended, the next two held as an outage's, the tick stopped — answered, so not unanswered (${JSON.stringify({ ...t1, firstError: undefined })})`);
+        const t2 = await mendOnce(ctx, state);
+        const t2b = await mendOnce(ctx, state);
+        assert(t2.down !== null && t2b.down !== null && state.down && state.held.get(id(4))?.outage === true && state.held.get(id(7))?.outage === true, "two ticks unanswered: four more held, the provider away");
+        down = false;
+        served = -100;
+        const t3 = await mendOnce(ctx, state);
+        assert(t3.recovered && t3.mended >= 1 && !state.down && [2, 3, 4, 5, 6, 7].every((n) => (state.held.get(id(n))?.until ?? -1) <= state.sweep),
+          `the provider back: recovered; every outage hold let go at once (${JSON.stringify({ two: state.held.get(id(2)), seven: state.held.get(id(7)), sweep: state.sweep })})`);
+      } finally {
+        flaky.stop(true);
+      }
+    }
+    // A failing row at the batch cap: held, and no call past the cap.
+    {
+      bad.set("at-cap", 500);
+      const rows = [...Array.from({ length: MEND_BATCH - 1 }, (_, i) => row(i + 1, "writer")), row(MEND_BATCH, "writer", {}, "open-brain", "at-cap text"), row(MEND_BATCH + 1, "writer")];
+      const { ctx } = harness(rows, local());
+      const t = await mendOnce(ctx, newMendState());
+      assert(t.mended === MEND_BATCH - 1 && t.failed === 1 && t.down === null, `a row failing as the ${MEND_BATCH}th: held, no call past the cap (${JSON.stringify({ ...t, firstError: undefined })})`);
+      bad.delete("at-cap");
+    }
+    // A 4xx during an outage is the provider answering: the outage is over, its holds let go.
+    {
+      bad.set("four-oh-oh", 400);
+      const { ctx } = harness([row(1, "writer", {}, "open-brain", "four-oh-oh text")], local());
+      const state = newMendState();
+      state.down = true;
+      state.held.set(id(9), { failures: 1, until: 99, outage: true, seen: -1 });
+      const t = await mendOnce(ctx, state);
+      assert(t.recovered && !state.down && !state.held.has(id(9)), `a 400 during an outage: recovered, the outage's hold let go (the row it held, no longer waiting, dropped at the sweep's end) (${JSON.stringify({ recovered: t.recovered, nine: state.held.get(id(9)) })})`);
+      bad.delete("four-oh-oh");
+    }
+    // A body that is not JSON (a proxy's page) is taken as an outage — held as one, no answer — and two stop the tick.
+    {
+      bad.set("html-body", -1);
+      const rows = [row(1, "writer", {}, "open-brain", "html-body text")];
+      const { ctx } = harness(rows, local());
+      const state = newMendState();
+      state.down = true;
+      state.held.set(id(9), { failures: 1, until: 99, outage: true, seen: 0 });
+      const t = await mendOnce(ctx, state);
+      assert(!t.recovered && t.failed === 1 && state.held.get(id(1))?.outage === true && /not JSON/.test(t.firstError ?? ""), `a 200 that is not JSON: held as an outage's, no recovery read into it (${JSON.stringify({ ...t, firstError: t.firstError })})`);
+      bad.delete("html-body");
+      // A proxy's page for every call: two calls, the tick stopped, the provider away.
+      bad.set("", -1);
+      const many = harness(Array.from({ length: 10 }, (_, i) => row(i + 1, "writer")), local());
+      const ms = newMendState();
+      const before = calls;
+      const tp = await mendOnce(many.ctx, ms);
+      bad.delete("");
+      assert(calls - before === 2 && tp.down?.reason === "provider_body" && ms.unanswered === 1, `a proxy's page for every call: two calls, stopped, an unanswered tick (${calls - before}, ${tp.down?.reason})`);
+    }
+    // The rows an outage held mended by another writer: the sweep's end drops
+    // their holds, and with none left the outage is over for this mender.
+    {
+      const rows = [row(1, "writer")];
+      const { ctx } = harness(rows, { OB1_LLM_BASE_URL: at(closedNow()), OB1_LLM_LOCAL: "1" });
+      const state = newMendState();
+      for (let i = 0; i < 12 && !state.down; i++) await mendOnce(ctx, state);
+      assert(state.down && state.held.has(id(1)), "an outage: the row held, the outage standing");
+      rows[0].vector = true;
+      let over = false;
+      for (let i = 0; i < 2; i++) over ||= (await mendOnce(ctx, state)).over;
+      assert(over && !state.down && state.unanswered === 0 && state.held.size === 0, `the row given a vector elsewhere: its hold dropped at the sweep's end, the outage over (${state.down}, ${state.held.size})`);
+    }
+    // The egress record: the endpoints the call went to that are not local —
+    // the chat one only where blurbs were asked for.
+    {
+      const env = { OB1_LLM_BASE_URL: at(provider.port), OB1_CHAT_BASE_URL: at(chat.port), OB1_EGRESS_ALLOW: "actor:writer" };
+      const plain = harness([row(1, "writer")], env);
+      await mendOnce(plain.ctx, newMendState());
+      const rec = plain.writes[0]?.actor?.egress;
+      assert(rec?.policy === "deny" && rec.embeddings?.allowed === true && rec.embeddings.rule === "allow-term" && rec.chat === undefined, `no blurbs asked for: the record names the embeddings endpoint alone (${JSON.stringify(rec)})`);
+    }
+    // Under OB1_CHUNK_CONTEXT, a short row asks for no blurb: its record names no chat endpoint; a long row's does.
+    {
+      const env = { OB1_LLM_BASE_URL: at(provider.port), OB1_LLM_LOCAL: "1", OB1_CHUNK_TOKENS: "100", OB1_CHAT_BASE_URL: at(chat.port), OB1_CHUNK_CONTEXT: "on", OB1_EGRESS_POLICY: "allow" };
+      const short = harness([row(1, "writer")], env);
+      await mendOnce(short.ctx, newMendState());
+      const long = harness([row(2, "writer", {}, "open-brain", `${"a sentence the chunker splits into windows. ".repeat(60)}end`)], env);
+      await mendOnce(long.ctx, newMendState());
+      assert(short.writes[0]?.actor?.egress === undefined && long.writes[0]?.actor?.egress?.chat?.allowed === true, `a short row: no chat in its record; a long row: the blurbs' chat endpoint named (${JSON.stringify([short.writes[0]?.actor?.egress, long.writes[0]?.actor?.egress])})`);
+    }
+    // A policy that refuses every call to the embedding endpoint: the tick reads nothing.
+    {
+      const { ctx, limits } = harness([row(1, "writer")], { OB1_LLM_BASE_URL: at(provider.port) });
+      const t = await mendOnce(ctx, newMendState());
+      assert(t.refusedAll !== null && /no OB1_EGRESS_ALLOW term/.test(t.refusedAll) && limits.length === 0, `deny with no allow term: idle, nothing read (${t.refusedAll})`);
+    }
+    // A row a key captured through the REST core is a key's row too: its door is a server's.
+    {
+      assert(SERVER_DOORS.includes(API_DOOR), `the REST core's door is a server door (${API_DOOR})`);
+      const rest = harness([row(1, "writer", {}, API_DOOR)], { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_ALLOW: "actor:writer" });
+      assert((await mendOnce(rest.ctx, newMendState())).mended === 1, "a REST capture's row under deny with its writer's actor term: sent");
+      // A pass's row under a deny term naming its actor_name: home, as board-sync's own gate kept it.
+      const synced = harness([row(1, "board-sync", { source: "linear" }, "sync-linear")], { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "actor:board-sync" });
+      const ts = await mendOnce(synced.ctx, newMendState());
+      assert(ts.refused === 1 && synced.writes.length === 0, `a pass's row, allow mode, a deny term naming its actor: home (${JSON.stringify(ts)})`);
+    }
+    // Refused rows take no place in a tick's calls: the tick reads on past
+    // them, up to MEND_SCAN rows, to a row it may send.
+    {
+      const rows = [...Array.from({ length: 20 }, (_, i) => row(i + 1, "other")), row(21, "writer")];
+      const { ctx } = harness(rows, { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_ALLOW: "actor:writer" });
+      const t = await mendOnce(ctx, newMendState());
+      assert(t.refused === 20 && t.mended === 1 && t.sweepEnded, `twenty refused rows then one allowed: one tick reaches it (${JSON.stringify({ ...t, firstError: undefined })})`);
+      // Refused rows first, then many it may send: the tick embeds MEND_BATCH and no more, whatever page it is on.
+      const mixed = harness([...Array.from({ length: 3 }, (_, i) => row(i + 1, "other")), ...Array.from({ length: 12 }, (_, i) => row(i + 4, "writer"))], { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_ALLOW: "actor:writer" });
+      const tm = await mendOnce(mixed.ctx, newMendState());
+      assert(tm.refused === 3 && tm.mended === MEND_BATCH && !tm.sweepEnded, `three refused then twelve it may send: ${MEND_BATCH} embedded, not more (${tm.mended})`);
+      const far = [...Array.from({ length: MEND_SCAN + 10 }, (_, i) => row(i + 1, "other")), row(MEND_SCAN + 11, "writer")];
+      const f = harness(far, { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_ALLOW: "actor:writer" });
+      const fs = newMendState();
+      const f1 = await mendOnce(f.ctx, fs);
+      const f2 = await mendOnce(f.ctx, fs);
+      assert(f1.refused === MEND_SCAN && f1.mended === 0 && f2.mended === 1, `past MEND_SCAN rows a tick stops, and the next reads on (${f1.refused}, ${f2.mended})`);
+    }
+    // The held rows are bounded: past the cap the stalest hold goes. A raced
+    // write lets a hold go.
+    {
+      bad.set("cap-400", 400);
+      const rows = [1, 2, 3].map((n) => row(n, "writer", {}, "open-brain", `cap-400 text ${n}`));
+      const { ctx } = harness(rows, local());
+      const state = newMendState(2);
+      await mendOnce(ctx, state);
+      assert(state.held.size === 2 && !state.held.has(id(1)) && state.held.has(id(3)), `three failing rows, a cap of two: the first held dropped (${[...state.held.keys()].map((k) => k.slice(-1))})`);
+      bad.delete("cap-400");
+      const raced = harness([row(1, "writer")], local(), { answer: () => ({ ok: false, error: "STALE_READ" }) });
+      const rs = newMendState();
+      rs.held.set(id(1), { failures: 1, until: 0, outage: false, seen: 0 });
+      await mendOnce(raced.ctx, rs);
+      assert(!rs.held.has(id(1)), "a held row whose write raced: its hold let go, the next sweep reads it afresh");
+    }
+    // The loop: a failing row costs a call only at its tries, while every
+    // tick runs at the interval — a row that arrives is mended at the next
+    // tick, held back by nothing; what is left is said once per change.
+    {
+      bad.set("poison-loop", 400);
+      const rows = [row(1, "writer", {}, "open-brain", "poison-loop text")];
+      const { ctx, writes } = harness(rows, local());
+      const said: string[] = [];
+      const loop = startVectorMender(ctx, { intervalS: 0.04, firstDelayMs: 0, log: (l) => said.push(l) });
+      try {
+        await sleep(1000);
+        const ticks = loop.ticks();
+        const poison = callsFor.get("poison-loop text") ?? 0;
+        // Bounds wide for a loaded runner: ~25 ticks; tries at sweeps 0, 2, 5, 10, 19.
+        assert(ticks >= 10 && poison >= 2 && poison <= 6, `the loop runs at its interval (${ticks} ticks in a second) and the failing row is tried ${poison} times`);
+        assert(said.filter((l) => /left without a vector this sweep/.test(l)).length === 1, `said once, not per sweep (${said.filter((l) => /left/.test(l)).join(" / ")})`);
+        rows.push(row(2, "writer"));
+        for (let i = 0; i < 20 && writes.length === 0; i++) await sleep(20);
+        assert(writes.length === 1 && writes[0].id === id(2), `a row that arrives is mended at once, the failing row holding nothing back (${writes.length})`);
+      } finally {
+        loop.stop();
+        bad.delete("poison-loop");
+      }
+      const stoppedAt = loop.ticks();
+      await sleep(150);
+      assert(loop.ticks() === stoppedAt, "stopped: no further tick");
+      // More refused rows than a page: said once, though the pages alternate full and short.
+      const many = Array.from({ length: 10 }, (_, i) => row(i + 1, "other"));
+      const g = harness(many, { OB1_LLM_BASE_URL: at(provider.port), OB1_EGRESS_ALLOW: "actor:writer" });
+      const said2: string[] = [];
+      const loop2 = startVectorMender(g.ctx, { intervalS: 0.03, firstDelayMs: 0, log: (l) => said2.push(l) });
+      await sleep(500);
+      loop2.stop();
+      assert(said2.length === 1 && /10 refused by the egress gate/.test(said2[0]), `ten refused rows over full and short pages: one line (${said2.join(" / ")})`);
+      // A tick that throws (the database away) backs the loop off, said once.
+      const broken = createContext({ env: () => ({ OB1_EMBEDDING_DIM: "4", ...local() }), store: async () => ({ listVectorless: async () => { throw new Error("connection refused"); } }) as never, door: "t" });
+      const said3: string[] = [];
+      const loop3 = startVectorMender(broken, { intervalS: 0.04, firstDelayMs: 0, log: (l) => said3.push(l) });
+      await sleep(1000);
+      loop3.stop();
+      assert(loop3.ticks() >= 2 && loop3.ticks() <= 8 && said3.length === 1 && /the tick failed: connection refused/.test(said3[0]), `a throwing tick backs off (${loop3.ticks()} ticks in a second; 25 without) and is said once (${said3.length})`);
+      // The database back after throwing ticks: the loop returns to its interval.
+      let failing = 3;
+      const healing = createContext({ env: () => ({ OB1_EMBEDDING_DIM: "4", ...local() }), store: async () => ({ listVectorless: async () => { if (failing-- > 0) throw new Error("connection refused"); return []; } }) as never, door: "t" });
+      const loop5 = startVectorMender(healing, { intervalS: 0.03, firstDelayMs: 0, log: () => {} });
+      await sleep(900);
+      const atHeal = loop5.ticks();
+      await sleep(300);
+      loop5.stop();
+      assert(loop5.ticks() - atHeal >= 4, `after the database answers again the ticks return to the interval (${loop5.ticks() - atHeal} in 300 ms at 30 ms)`);
+      // The PostgREST store: no mender, said once.
+      const said6: string[] = [];
+      const pgrst = createContext({ env: () => ({ OB1_EMBEDDING_DIM: "4", ...local() }), store: async () => ({ kind: "postgrest", listVectorless: async () => [] }) as never, door: "t" });
+      const loop6 = startVectorMender(pgrst, { intervalS: 0.03, firstDelayMs: 0, log: (l) => said6.push(l) });
+      await sleep(200);
+      loop6.stop();
+      assert(loop6.ticks() === 0 && said6.length === 1 && /not started — the PostgREST store/.test(said6[0]), `over PostgREST: not started, said once (${said6.join(" / ")})`);
+      // A lock the session did not let go: said once, not per tick.
+      const said7: string[] = [];
+      const kept = createContext({ env: () => ({ OB1_EMBEDDING_DIM: "4", ...local() }), store: async () => ({ mendLock: async () => async () => false, listVectorless: async () => [] }) as never, door: "t" });
+      const loop7 = startVectorMender(kept, { intervalS: 0.03, firstDelayMs: 0, log: (l) => said7.push(l) });
+      await sleep(250);
+      loop7.stop();
+      assert(loop7.ticks() >= 3 && said7.length === 1 && /leader lock was not let go/.test(said7[0]), `a lock kept by a pooler: said once over ${loop7.ticks()} ticks`);
+      // A lone row the provider fails alone, and an outage with one row waiting: "unavailable" said once, not per sweep.
+      bad.set("lone-loop", 500);
+      const lone = harness([row(1, "writer", {}, "open-brain", "lone-loop text")], local());
+      const said8: string[] = [];
+      const loop8 = startVectorMender(lone.ctx, { intervalS: 0.03, firstDelayMs: 0, log: (l) => said8.push(l) });
+      await sleep(600);
+      loop8.stop();
+      bad.delete("lone-loop");
+      assert(said8.filter((l) => /provider is unavailable/.test(l)).length === 1 && !said8.some((l) => /answers again/.test(l)) && (callsFor.get("lone-loop text") ?? 0) <= 6, `a lone failing row: unavailable said once, never "answers again", ${callsFor.get("lone-loop text")} calls over ${loop8.ticks()} ticks (${said8.join(" / ")})`);
+      // A tick that finds the provider back and then loses it again: "answers again" then "unavailable", each once.
+      let phase = 0;
+      const twice = Bun.serve({ port: 0, async fetch(req) {
+        const body = await req.json() as { input: string | string[]; model: string };
+        const input = Array.isArray(body.input) ? body.input[0] : body.input;
+        if (phase === 0 || (phase === 1 && !input.includes("good"))) return new Response("{}", { status: 503 });
+        return Response.json({ model: body.model, data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }] });
+      } });
+      try {
+        const rows = [row(1, "writer", {}, "open-brain", "a good one"), row(2, "writer", {}, "open-brain", "bad one"), row(3, "writer", {}, "open-brain", "bad two")];
+        const flip = harness(rows, { OB1_LLM_BASE_URL: at(twice.port), OB1_LLM_LOCAL: "1" });
+        const said10: string[] = [];
+        const loop10 = startVectorMender(flip.ctx, { intervalS: 0.05, firstDelayMs: 0, log: (l) => said10.push(l) });
+        for (let i = 0; i < 40 && !said10.some((l) => /unavailable/.test(l)); i++) await sleep(20);
+        // The provider back for good texts; two fresh texts it fails, side by side, behind them.
+        rows.push(row(0, "writer", {}, "open-brain", "good zero"), row(7, "writer", {}, "open-brain", "bad x"), row(8, "writer", {}, "open-brain", "bad y"));
+        phase = 1;
+        for (let i = 0; i < 60 && said10.filter((l) => /unavailable/.test(l)).length < 2; i++) await sleep(20);
+        loop10.stop();
+        const seq = said10.filter((l) => /unavailable|answers again/.test(l)).map((l) => (/answers again/.test(l) ? "again" : "down"));
+        assert(seq.slice(0, 3).join(",") === "down,again,down", `a tick that recovers and goes down again: said in order, once each (${seq.join(",")})`);
+      } finally {
+        twice.stop(true);
+      }
+      // The policy refusing every call: idle, said once.
+      const idle = harness([row(1, "writer")], { OB1_LLM_BASE_URL: at(provider.port) });
+      const said9: string[] = [];
+      const loop9 = startVectorMender(idle.ctx, { intervalS: 0.03, firstDelayMs: 0, log: (l) => said9.push(l) });
+      await sleep(200);
+      loop9.stop();
+      assert(said9.length === 1 && /vector mender: idle — OB1_EGRESS_POLICY=deny/.test(said9[0]) && idle.limits.length === 0, `a policy refusing every call: idle, said once over ${loop9.ticks()} ticks, nothing read`);
+      // A delay past setTimeout's ceiling (2^31 ms) fires at once unless clamped:
+      // an interval that large, after one throwing tick, must not spin.
+      const loop4 = startVectorMender(broken, { intervalS: 3_000_000, firstDelayMs: 0, log: () => {} });
+      await sleep(300);
+      loop4.stop();
+      assert(loop4.ticks() === 1, `a delay past the timer's ceiling is clamped, not fired at once (${loop4.ticks()} tick(s) in 300 ms)`);
+    }
+  } finally {
+    provider.stop(true);
+    chat.stop(true);
+  }
+  // OB1_VECTOR_MEND_INTERVAL: whole seconds 1 to a day, 0 or off for none;
+  // anything else is the default, said.
+  const m = (raw: string | undefined) => mendIntervalFrom(raw);
+  assert(m(undefined).intervalS === 60 && m(" ").intervalS === 60 && m(undefined).problem === null, "unset: every 60 s");
+  assert(m("0").intervalS === 0 && m(" OFF ").intervalS === 0 && m("off").problem === null, "0 or off: no mender");
+  assert(m("30").intervalS === 30 && m("86400").intervalS === 86400 && m("30").problem === null, "30 and 86400 read as given");
+  assert(m("86401").intervalS === 60 && /from 1 to 86400/.test(m("86401").problem ?? "") && m("1.5").intervalS === 60 && /OB1_VECTOR_MEND_INTERVAL="1.5"/.test(m("1.5").problem ?? "") && m("-1").intervalS === 60 && m("fast").problem !== null,
+    "past a day, a fraction, a sign or a word: the default, said");
 }
 
 report();
