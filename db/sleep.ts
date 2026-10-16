@@ -73,14 +73,16 @@
  * extraction is set aside — stopped, if in hand with a stalled thought —
  * until consolidation's pool drains, then resumes, so on a one-slot model the
  * judge is not left waiting behind the window. While consolidation waits for
- * its provider — at its start, or mid-pass past its workers' pauses
- * (consolidate.ts's providerWait) — its pool cannot drain, and extraction is
- * let out for the newer work meanwhile, with one worker, at most once a
- * minute, then set aside again once it holds a stalled thought — its own
- * claims, by worker id — or holds nothing and nothing newer is left; the
- * stalled thought(s) wait for consolidation (SMD-3008): the judge model failing while the extraction model serves, as
- * both are on the one chat endpoint. Mid-pass, a judge answering 5xx is
- * waited for only past those pauses, a minute and more. The thought is tried in every
+ * its provider — at its start, or mid-pass (consolidate.ts's providerWait):
+ * past its workers' pauses for a 5xx, a minute and more, at once for a model
+ * gone missing or a call no probe answers — its pool cannot drain, and
+ * extraction is let out for the newer work meanwhile, with one worker, at
+ * most once a minute, then set aside again once it holds a stalled thought —
+ * its own claims, by worker id, since this run began — or holds nothing and
+ * nothing newer is left; the stalled thought(s) wait for consolidation
+ * (SMD-3008): the judge model failing while the extraction model serves, as
+ * both are on the one chat endpoint. A judge model missing at the start is
+ * refused, as before. The thought is tried in every
  * sleep once consolidation's pool drains, and finished by the first sleep
  * long enough for both. A brain before 093, or a role that cannot read it,
  * joins once extraction is drained alone, and the start says so; granted
@@ -268,9 +270,10 @@ export interface SleepOptions {
  * window saved between, and none since (migration 093, SMD-2694), 0 where the
  * scheduler cannot read them — and `stalledPending`, those of them pending
  * (SMD-3008); `stalledRead`, whether that read ran. `mine` counts the rows in
- * flight under this process's extraction worker ids (MINE), and `stalledMine`
- * those of them stalled: another's claim, a lapsed lease of a scheduler gone,
- * is no thought this one holds.
+ * flight under this process's extraction worker ids (MINE) claimed since this
+ * run began, and `stalledMine` those of them stalled: another's claim, or a
+ * lease a scheduler gone left — on another host, or this container before a
+ * restart — is no thought this one holds.
  */
 type Pool = { pending: number; claimed: number; failed: number; unpooled: number; stalled: number; stalledPending: number; stalledRead: boolean; mine: number; stalledMine: number };
 /** Nothing for the pass to do: no row pending or in flight, and nothing to add. A failed row is the operator's. */
@@ -309,7 +312,11 @@ const currentProgress = (sql: SQL, sig: string) => sql`e.windowing = ${sig} AND 
  * every thought (enqueue_thoughts adds those with no row under the key);
  * consolidation's is migration 029's consolidation_pool.
  */
-async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: string, unread?: (e: Error) => void, claimsOnly = false): Promise<Pool> {
+async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: string, unread?: (e: Error) => void, claimsOnly = false, mineSince?: Date): Promise<Pool> {
+  // A claim made before this run began is not its own, though it carries this
+  // process's worker id: a container restarted in place keeps its hostname and
+  // pid, and its last run's lease lives on for its TTL (post-merge review).
+  const since = mineSince === undefined ? sql`'-infinity'::timestamptz` : sql`${mineSince}::timestamptz`;
   // One statement, so one snapshot: read apart, a claim made between the two
   // reads counted neither claimed nor unpooled, and a pool just being claimed
   // read drained — extraction resumed 14 ms after consolidation joined, before
@@ -325,7 +332,7 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
   const [by] = (await sql`
     SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'claimed')::int AS claimed,
            count(*) FILTER (WHERE status = 'failed')::int AS failed, (${unpooled}) AS n,
-           count(*) FILTER (WHERE status = 'claimed' AND starts_with(worker_id, ${MINE}))::int AS mine
+           count(*) FILTER (WHERE status = 'claimed' AND starts_with(worker_id, ${MINE}) AND claimed_at >= ${since})::int AS mine
       FROM thought_work_claims WHERE work_type = ${job}`) as { pending: number; claimed: number; failed: number; n: number; mine: number }[];
   // Read only where the start found 093's table readable (stalledUnder, the
   // windowing). One gone or refused since reads none stalled, said by the
@@ -336,7 +343,7 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
     try {
       [{ s, sp, sm }] = (await sql`
         SELECT count(*)::int AS s, count(*) FILTER (WHERE c.status = 'pending')::int AS sp,
-               count(*) FILTER (WHERE c.status = 'claimed' AND starts_with(c.worker_id, ${MINE}))::int AS sm
+               count(*) FILTER (WHERE c.status = 'claimed' AND starts_with(c.worker_id, ${MINE}) AND c.claimed_at >= ${since})::int AS sm
           FROM thought_work_claims c
           JOIN extraction_progress e USING (thought_id, work_type) JOIN thoughts t ON t.id = c.thought_id
          WHERE c.work_type = ${job} AND c.status IN ('pending', 'claimed') AND e.stalled >= ${SLEEP_STALLED_JOIN} AND e.gained = 0 AND ${currentProgress(sql, stalledUnder)}`) as { s: number; sp: number; sm: number }[];
@@ -528,6 +535,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   const atStart = <T>(read: () => Promise<T>) => throughOutage(read, { wake: startWake, said: startSaid, out, err });
   const logState = await atStart(() => readsQueryLog(sql));
   if (logState === null) { err(STOPPED_EARLY); return 130; }
+  /** The database's clock as this run began: a claim older than it is no pass of this run's (poolOf's `mineSince`). */
+  const startedAt = await atStart(async () => new Date((await sql`SELECT now() AS now`)[0].now));
+  if (startedAt === null) { err(STOPPED_EARLY); return 130; }
   const readsLog = logState === "yes";
   out(`  quiet:  ${QUIET} s with no write in thought_audit but sync's (actor_kind 'ingested')${readsLog ? " and no read logged in query_log" : " — reads are not watched"}`);
   if (logState === "denied") err("  query_log: this role cannot read it — only writes wake the brain; grant it the sleep group (bun db/migrate.ts --grant <role> --groups sleep) or run as the owner for reads to wake it");
@@ -928,7 +938,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
    * behind a stalled thought dated at the sleep's start it waited out the
    * window in hand (SMD-3008). claim_thoughts orders by enqueued_at and reads
    * no clock (015), so the date is an order, not a delay; a wake's tail move
-   * dates them now again, and the next sleep forward. A courtesy, as the
+   * dates the thought(s) in hand now, and the next sleep dates every stopped
+   * thought forward again. A courtesy, as the
    * wake's tail move is: one that fails is said once, and returns false.
    * A lapsed lease is moved too: a scheduler gone left it claimed, and the
    * next claim reaps it with its old date, ahead of the sleep's captures
@@ -938,6 +949,15 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   const stoppedLast = async (): Promise<boolean> => {
     if (SIG === undefined) return false;
     try {
+      // A forward date outlives its stop record: a thought finished since (its
+      // row deleted) and put back by a --retry-* flag or retry_failed keeps the
+      // date and went behind every capture for up to 30 days. Dated now, then
+      // moved forward again below if it is still a stopped thought (post-merge review).
+      await sql`
+        UPDATE thought_work_claims c SET enqueued_at = now()
+         WHERE c.work_type = ${JOBS.extract} AND c.status = 'pending' AND c.enqueued_at > now()
+           AND NOT EXISTS (SELECT 1 FROM extraction_progress e JOIN thoughts t ON t.id = e.thought_id
+                            WHERE e.thought_id = c.thought_id AND e.work_type = c.work_type AND e.stops > 0 AND ${currentProgress(sql, SIG)})`;
       await sql`
         UPDATE thought_work_claims c SET enqueued_at = now() + make_interval(days => ${FORWARD_DAYS}) + o.rn * interval '1 microsecond'
           FROM (SELECT c2.thought_id, row_number() OVER (ORDER BY CASE WHEN e.gained > 0 THEN 0 ELSE e.stalled END, c2.enqueued_at, c2.thought_id) AS rn
@@ -1031,7 +1051,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     const restartEvery = opts.restartEveryMs ?? RESTART_EVERY_MS;
     /**
      * Extraction let out of the set-aside while consolidation waits for its
-     * provider — at its start, or mid-pass after its workers' pauses — for the
+     * provider — at its start, or mid-pass (providerWait) — for the
      * newer work only: its pool would not drain until the judge answered, and
      * extraction got nothing for the sleep (SMD-3008). Set aside again once it
      * reaches the stalled thought(s), which wait for consolidation as before,
@@ -1042,7 +1062,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     const judgeWaits = (): boolean => waitingAtStart.has("consolidate") || waitingMidPass.has("consolidate");
     /**
      * Extraction stopped hard and taken out of the sleep's passes, for the
-     * join and the restart alike. True when a stop landed while it settled: no
+     * join, the restart, the let-out's set-aside and the drain's alike. True
+     * when a stop landed while it settled: no
      * pass starts after it, nor stamps a row a second signal has ended (review
      * pass 6).
      */
@@ -1060,7 +1081,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       }
       return stopping;
     };
-    const firstPool = SIG === undefined ? null : await reading(() => poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread));
+    const firstPool = SIG === undefined ? null : await reading(() => poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, false, startedAt));
     if (SIG !== undefined && firstPool === null) return stopped();
     if (firstPool && joinsPast(firstPool)) {
       out(`  extraction holds only ${firstPool.stalled} thought(s) that ${SLEEP_STALLED_JOIN} or more long hard stops in a row took with no window gained — consolidating first; extraction resumes once its pool drains`);
@@ -1138,7 +1159,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           start("extract");
           parked = false;
         } else if (judgeWaits() && reorders && Date.now() - restartedAt >= restartEvery) {
-          const ex = await reading(() => poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, true));
+          const ex = await reading(() => poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, true, startedAt));
           if (ex === null) return stopped();
           // Only where the stalled thoughts can be told and moved behind the
           // newer work: otherwise one is claimed first, set aside at the next
@@ -1159,7 +1180,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
         // once only stalled thoughts are in hand, or nothing is left to do;
         // once the judge answers and consolidation drains, extraction stays
         // out, as after any drain.
-        const ex = await reading(() => poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, true));
+        const ex = await reading(() => poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, true, startedAt));
         if (ex === null) return stopped();
         // Any stalled thought this process holds, or one it can no longer tell
         // (093 gone or refused since): a lease another left is not its own,
@@ -1188,7 +1209,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           }
         }
       } else if (!consolidating || !FOLLOW) {
-        const pools = await reading(async () => ({ extract: await poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread), consolidate: consolidating ? await poolOf(sql, "consolidate", JOBS.consolidate) : null }));
+        const pools = await reading(async () => ({ extract: await poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, false, startedAt), consolidate: consolidating ? await poolOf(sql, "consolidate", JOBS.consolidate) : null }));
         if (pools === null) return stopped();
         behindPolls = !consolidating && queuesBehind(pools.extract) ? behindPolls + 1 : 0;
         if (!consolidating && drained(pools.extract)) {

@@ -33,7 +33,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlin
 import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
@@ -12257,8 +12257,8 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     // judge's pool never drained, and parked extraction got nothing for the
     // sleep (SMD-3008). The judge on its own model, as a judge that will not
     // load beside a serving extraction model is; at its start (a probe
-    // answering 500) and mid-pass (judgements answering "not found", a missing
-    // model, which a follower waits out at once rather than after its pauses).
+    // answering 500) and mid-pass (judgements answering "not found", which
+    // starts the wait at once rather than after the pauses, its probes 500).
     const envJ: Record<string, string | undefined> = { ...env, OB1_JUDGE_MODEL: JUDGE };
     const COJ = consolidateKey(JUDGE);
     const judgeCase = async (mid: boolean) => {
@@ -12273,8 +12273,8 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
       await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${stalledJ}::uuid, ${EX}, ${fpj}, ${sig}, 3, 3)`;
       await capture("We bill monthly, decided in March.", 3, 0);
       await capture("We bill annually now.", 0, 0);
-      // At its start, beside a lease a scheduler gone left on a stalled thought
-      // of its own — not this process's, so it neither sets the let-out
+      // At its start, beside a lease another host's scheduler holds on a
+      // stalled thought — not this process's, so it neither sets the let-out
       // aside nor is claimed (a day left on it) — and with two workers, the
       // let-out's one worker not claiming the stalled thought beside the
       // note (review pass 2).
@@ -12284,6 +12284,14 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
                    WHERE thought_id = ${foreign}::uuid AND work_type = ${EX}`;
         const [{ fpf }] = await sql`SELECT content_fingerprint AS fpf FROM thoughts WHERE id = ${foreign}::uuid`;
         await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${foreign}::uuid, ${EX}, ${fpf}, ${sig}, 3, 3)`;
+        // And one under this process's own worker-id prefix, claimed before the
+        // run began — a container restarted in place keeps its hostname and pid,
+        // and its last run's lease lives on: not this run's (post-merge review).
+        const before = await capture("The stuckdoc note this container's last run left a lease on.", 0, 22);
+        await sql`UPDATE thought_work_claims SET status = 'claimed', worker_id = ${`extract-${hostname()}-${process.pid}-9-deadbeef`}, claimed_at = now() - interval '10 minutes', ttl_expires_at = now() + interval '1 day', attempt_count = 1
+                   WHERE thought_id = ${before}::uuid AND work_type = ${EX}`;
+        const [{ fpb }] = await sql`SELECT content_fingerprint AS fpb FROM thoughts WHERE id = ${before}::uuid`;
+        await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${before}::uuid, ${EX}, ${fpb}, ${sig}, 3, 3)`;
       }
       // At its start: down from the first. Mid-pass: up at the start, down from the first judgement.
       judgeProbeDown = !mid;
@@ -12436,6 +12444,19 @@ console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain w
     await Promise.race([orderRun, Bun.sleep(15_000)]);
     assert(order.moved && order.n === 2 && order.ids[0] === planted,
       `as a sleep begins the stopped thoughts move behind new captures, the less stalled first though it was the newer, no two dated alike (${JSON.stringify({ ...order, planted, planted2 })})`);
+    // A forward date outlives its stop record: a thought finished since and put
+    // back by a --retry-* flag keeps it, and went behind every capture for up
+    // to 30 days. The sleep's move dates it now (post-merge review).
+    const retried = await capture("A note put back by --retry-partial after it finished.", 0, 23);
+    await sql`UPDATE thought_work_claims SET enqueued_at = now() + interval '20 days' WHERE thought_id = ${retried}::uuid AND work_type = ${EX}`;
+    let stopRetried: PassStop | null = null;
+    const retriedRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, onPass: (s) => { stopRetried = s; }, writer: { out: () => {}, err: () => {} } });
+    const redated = await pollUntil(async () => ((await sql`SELECT enqueued_at <= now() AS ok FROM thought_work_claims WHERE thought_id = ${retried}::uuid AND work_type = ${EX}`)[0] as { ok: boolean } | undefined)?.ok === true, 15_000);
+    (stopRetried as PassStop | null)?.();
+    await (stopRetried as PassStop | null)?.();
+    await Promise.race([retriedRun, Bun.sleep(15_000)]);
+    await sql`DELETE FROM thoughts WHERE id = ${retried}::uuid`;
+    assert(redated, "a forward-dated row that is no longer a stopped thought (put back by a retry after it finished) is dated now as a sleep begins, not left behind every capture");
     // A scheduler started while thoughts are held names them before its first sleep.
     // The row case C's scheduler ended names its own stuck thought: gone first.
     await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'`;
