@@ -312,10 +312,12 @@ status's name and type); `search` ends that result's title `— moved since
 written: …` and gives it `moved`. A status prints as its type's word (Triage,
 Backlog, Todo, In Progress, Done, Canceled), never the board's name: any write
 key can write a ticket row's name, and it would print on other people's hits.
-A hit's first 50 named tickets are read, the rest counted (`movedNotRead`). Written is the session's end the hook's last
-line records, else the row's stored time, and a ticket that already held its
-current type an hour later is the writer's own move, not labelled — the
-reading `evals/eval-stated-status.ts` measured (`server-portable/stated-status.ts`).
+A hit's first 50 keys, in the order it mentions them, are read; beside a move
+the rest are counted (`movedNotRead`, `(+N more keys not read)`). Written is
+the session's end the hook's last line records, else the row's stored time,
+and a ticket that already held its current type an hour later is the writer's
+own move, not labelled — the reading `evals/eval-stated-status.ts` measured
+(`server-portable/stated-status.ts`).
 A superseded hit, a ticket row and a note filed under a ticket are not
 labelled, so an empty `moved` makes no claim. The inputs are one call to 095's
 `ticket_status_inputs`, made only when a hit names a ticket; a brain before

@@ -36,14 +36,19 @@ const SESSION_RE = /^Session [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 /** The writer's own move reaching the brain late: a ticket at its current type this long after the note is not labelled. */
 export const SETTLE_MS = 60 * 60 * 1000;
 /**
- * The tickets read per hit: its first this many named, by key. Stable's most
- * on one thought is 12; a hit naming thousands (a write key's, or a huge
- * board's) would make the line and 095's call grow without bound — 10,000 keys
+ * The keys read per hit: the first this many it mentions. Stable's most on one
+ * thought is 39 key-shaped tokens; a hit naming thousands (a write key's, or a
+ * huge board's) made the line and 095's call grow without bound — 10,000 keys
  * took a second (the maintainer's call, review pass 2).
  */
 export const MOVED_READ = 50;
 /** The tickets `text` names by key or list step, each once, sorted (byte order). */
 export function ticketsNamed(text: string): string[] {
+  return keysInOrder(text).sort();
+}
+
+/** ticketsNamed's keys in the order `text` first mentions them: MOVED_READ reads the first. */
+export function keysInOrder(text: string): string[] {
   const out = new Set<string>();
   for (const m of text.matchAll(KEY_RE)) {
     const team = m[1], digits = m[2].length;
@@ -56,7 +61,7 @@ export function ticketsNamed(text: string): string[] {
       at += s[0].length;
     }
   }
-  return [...out].sort();
+  return [...out];
 }
 
 /** When the thought was written, ms since the epoch: the end of the session its hook line records (the last second of that minute, UTC), else `stored`. */
@@ -103,6 +108,9 @@ export function movedSince(text: string, stored: number, head: (ticket: string) 
   return out;
 }
 
+/** A labelled hit: the tickets that moved, and how many keys it mentions past MOVED_READ, which were not read. */
+export type MovedHit = { moved: Moved[]; notRead: number };
+
 /** What the label reads, as migration 095 answers it (store.ts's TicketStatusInputs; spelled here so this module imports nothing). */
 export type MovedInputs = { lifecycle: ReadonlySet<string>; heads: ReadonlyMap<string, Status>; history: ReadonlyMap<string, readonly Change[]> };
 
@@ -117,14 +125,14 @@ export type MovedInputs = { lifecycle: ReadonlySet<string>; heads: ReadonlyMap<s
  * labelled nothing (no change is at or before an unknown time); one with
  * nothing moved is absent.
  */
-export function movedAmong(hits: readonly { id: string; content: string; created_at: string | null; metadata?: Record<string, unknown> | null }[], superseded: Readonly<Record<string, string>>, inputs: MovedInputs): Record<string, Moved[]> {
-  const out: Record<string, Moved[]> = {};
+export function movedAmong(hits: readonly { id: string; content: string; created_at: string | null; metadata?: Record<string, unknown> | null }[], superseded: Readonly<Record<string, string>>, inputs: MovedInputs): Record<string, MovedHit> {
+  const out: Record<string, MovedHit> = {};
   for (const h of hits) {
     if (superseded[h.id] || inputs.lifecycle.has(h.id.toLowerCase()) || h.metadata?.issue !== undefined) continue;
-    // Its first MOVED_READ named only, as movedOf reads them: another hit's may be among the heads.
-    const read = new Set(ticketsNamed(h.content).slice(0, MOVED_READ));
+    // Its first MOVED_READ keys only, as movedOf reads them: another hit's may be among the heads.
+    const keys = keysInOrder(h.content), read = new Set(keys.slice(0, MOVED_READ));
     const moved = movedSince(h.content, Date.parse(h.created_at ?? ""), (t) => (read.has(t) ? inputs.heads.get(t) : undefined), (t) => inputs.history.get(t) ?? []);
-    if (moved.length > 0) out[h.id] = moved;
+    if (moved.length > 0) out[h.id] = { moved, notRead: Math.max(0, keys.length - MOVED_READ) };
   }
   return out;
 }
@@ -145,15 +153,12 @@ const word = (type: string) => TYPE_WORDS[type] ?? "?";
 /**
  * The moved tickets in words — `SMD-2306 In Progress → Done; …` — every one
  * read, by key (stable's dd70dccc names seven, and the one its reader came for,
- * SMD-2306, is the fifth: the maintainer's call), and how many named tickets
- * past MOVED_READ were not read; null when none moved and none went unread.
+ * SMD-2306, is the fifth: the maintainer's call), and beside them how many
+ * keys past MOVED_READ were not read; null when none moved — a line that claims
+ * nothing is not printed (review pass 3).
  */
 export function movedWords(moved: readonly Moved[], notRead = 0): string | null {
-  const unread = notRead > 0 ? `${notRead} more named, not read` : "";
-  if (moved.length === 0) return unread ? `none of the first ${MOVED_READ} named; ${unread}` : null;
+  if (moved.length === 0) return null;
   const words = moved.map((m) => `${m.ticket} ${word(m.then.type)} → ${word(m.now.type)}`).join("; ");
-  return unread ? `${words}; ${unread}` : words;
+  return notRead > 0 ? `${words} (+${notRead} more keys not read)` : words;
 }
-
-/** How many tickets `text` names past the MOVED_READ that are read. */
-export const notReadIn = (text: string) => Math.max(0, ticketsNamed(text).length - MOVED_READ);

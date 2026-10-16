@@ -7,7 +7,7 @@
 import { thoughtTitle, thoughtUrl } from "../thoughts.ts";
 import { mayLeaveBox, type EgressSubject } from "../egress.ts";
 import { storeKind, UUID_RE, type AuditChange, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
-import { MOVED_READ, movedAmong, notReadIn, ticketsNamed, type Moved } from "../stated-status.ts";
+import { keysInOrder, MOVED_READ, movedAmong, ticketsNamed, type Moved, type MovedHit } from "../stated-status.ts";
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
 import { brainInfo as readBrain, type BrainInfo, type ReadOptions, type ServerFacts } from "../brain-info.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "../version.ts";
@@ -148,8 +148,7 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
       title: thoughtTitle(t.content, t.created_at),
       url: thoughtUrl(ctx.citationBase(), t.id),
       trust: t.metadata?.trust,
-      ...(moved[t.id] ? { moved: moved[t.id] } : {}),
-      ...(notReadIn(t.content) > 0 ? { movedNotRead: notReadIn(t.content) } : {}),
+      ...(moved[t.id] ? { moved: moved[t.id].moved, ...(moved[t.id].notRead > 0 ? { movedNotRead: moved[t.id].notRead } : {}) } : {}),
     })),
   });
 }
@@ -209,14 +208,14 @@ const factsOf = (r: ThoughtHybridMatch | undefined): QueryFacts | null =>
  * brain before 095, or a role without ob1_config, labels nothing and the
  * search goes on.
  */
-export async function movedOf(store: Pick<ThoughtStore, "supersededAmong" | "ticketStatusInputs">, hits: readonly Pick<ThoughtHybridMatch, "id" | "content" | "created_at" | "metadata">[], superseded: Record<string, string> | null): Promise<Record<string, Moved[]>> {
+export async function movedOf(store: Pick<ThoughtStore, "supersededAmong" | "ticketStatusInputs">, hits: readonly Pick<ThoughtHybridMatch, "id" | "content" | "created_at" | "metadata">[], superseded: Record<string, string> | null): Promise<Record<string, MovedHit>> {
   const naming = hits.filter((h) => ticketsNamed(h.content).length > 0);
   if (naming.length === 0) return {};
   const over = superseded ?? await store.supersededAmong(naming.map((h) => h.id));
   // Only the unsuperseded hits' tickets are read; movedAmong leaves the superseded ones out.
   const open = naming.filter((h) => !over[h.id]);
-  // Each hit's first MOVED_READ named (stated-status.ts): 095's call grows with the keys sent.
-  const tickets = [...new Set(open.flatMap((h) => ticketsNamed(h.content).slice(0, MOVED_READ)))];
+  // Each hit's first MOVED_READ keys mentioned (stated-status.ts): 095's call grows with the keys sent.
+  const tickets = [...new Set(open.flatMap((h) => keysInOrder(h.content).slice(0, MOVED_READ)))];
   if (tickets.length === 0) return {};
   const inputs = await store.ticketStatusInputs(open.map((h) => h.id), tickets);
   return inputs ? movedAmong(naming, over, inputs) : {};
@@ -261,7 +260,7 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
     hits: data.map((t) => ({
       id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, similarity: t.similarity,
       matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
-      supersededBy: superseded[t.id] ?? null, moved: moved[t.id] ?? [], movedNotRead: notReadIn(t.content),
+      supersededBy: superseded[t.id] ?? null, moved: moved[t.id]?.moved ?? [], movedNotRead: moved[t.id]?.notRead ?? 0,
     })),
     facts: factsOf(data[0]),
     window: data[0].window ?? null,

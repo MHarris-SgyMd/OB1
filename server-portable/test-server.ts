@@ -2615,7 +2615,7 @@ console.log("\n[16l] A supersession proposal names who wrote each side, and is f
 
 console.log("\n[16m] The stated-status label in words and fields: every moved ticket named, a board's status name on one line, the measured population only, and a REST core's answer without it read as none (SMD-2540)");
 {
-  const { movedAmong, movedWords, notReadIn, MOVED_READ, TYPE_WORDS } = await import("./stated-status.ts");
+  const { movedAmong, movedWords, MOVED_READ, TYPE_WORDS } = await import("./stated-status.ts");
   const { renderSearchThoughts, renderSearch } = await import("./render.ts");
   const st = (name: string, type: string) => ({ name, type });
   const m = (n: number) => ({ ticket: `SMD-${n}`, then: st("In Progress", "started"), now: st("Done", "completed") });
@@ -2628,8 +2628,8 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
   assert(w === "SMD-9 Todo → Done" && JSON.stringify(Object.keys(TYPE_WORDS).sort()) === JSON.stringify(["backlog", "canceled", "completed", "started", "triage", "unstarted"])
       && movedWords([{ ...forged, now: st("x", "weird") }]) === "SMD-9 Todo → ?",
     `…each status as its type's fixed word, never the board's name — a forged one prints nothing of itself, an unknown type "?" (${JSON.stringify(w)})`);
-  assert(movedWords([], 3) === `none of the first ${MOVED_READ} named; 3 more named, not read` && movedWords([m(1)], 2) === "SMD-1 In Progress → Done; 2 more named, not read" && movedWords([], 0) === null && MOVED_READ === 50,
-    `…and a hit naming more than ${MOVED_READ} tickets says how many went unread`);
+  assert(movedWords([], 3) === null && movedWords([m(1)], 2) === "SMD-1 In Progress → Done (+2 more keys not read)" && movedWords([], 0) === null && MOVED_READ === 50,
+    `…a line only beside a move — none that claims nothing — saying how many keys past the first ${MOVED_READ} went unread`);
 
   // movedAmong: the measured population, by id.
   const H = 3_600_000, T = Date.parse("2026-10-01T12:00:00.000Z");
@@ -2651,17 +2651,16 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
     // A duplicate's ticket row: no lifecycle to node_state, but a ticket row all the same.
     { ...hit(9, "SMD-77 — a duplicate of SMD-1, which is in progress"), metadata: { issue: "SMD-77", status: "Duplicate", status_type: "duplicate" } },
   ], { [hit(2, "").id]: "bbbbbbbb-0000-4000-8000-000000000000" }, inputs);
-  assert(JSON.stringify(Object.keys(out)) === JSON.stringify([hit(1, "").id, hit(8, "").id]) && JSON.stringify(out[hit(1, "").id]) === JSON.stringify([{ ticket: "SMD-1", then: st("In Progress", "started"), now: st("Done", "completed") }]),
+  assert(JSON.stringify(Object.keys(out)) === JSON.stringify([hit(1, "").id, hit(8, "").id]) && JSON.stringify(out[hit(1, "").id]) === JSON.stringify({ moved: [{ ticket: "SMD-1", then: st("In Progress", "started"), now: st("Done", "completed") }], notRead: 0 }),
     `movedAmong: only the unsuperseded hits with no lifecycle (an id read in any case), no ticket row (a duplicate's included) and a time to read "then" at — stored, or the session line's when stored is unreadable — and not a move that settled within the hour or a ticket with no head (${JSON.stringify(Object.keys(out))})`);
 
-  const sixty = { ...hit(1, Array.from({ length: 60 }, (_, i) => `SMD-${1000 + i} is in progress`).join("; ")), metadata: {} };
-  const both = { ...inputs, heads: new Map([["SMD-1001", st("Done", "completed")], ["SMD-1055", st("Done", "completed")]]), history: new Map([
-    ["SMD-1001", [{ at: T - 2 * H, ...st("In Progress", "started") }, { at: T + 3 * H, ...st("Done", "completed") }]],
-    ["SMD-1055", [{ at: T - 2 * H, ...st("In Progress", "started") }, { at: T + 3 * H, ...st("Done", "completed") }]],
-  ]) };
-  const bounded = movedAmong([sixty], {}, both)[sixty.id] ?? [];
-  assert(JSON.stringify(bounded.map((x) => x.ticket)) === JSON.stringify(["SMD-1001"]) && notReadIn(sixty.content) === 10,
-    `movedAmong: a hit's first ${MOVED_READ} named only — a head past them (another hit's) labels nothing; the 10 past them counted (${JSON.stringify(bounded.map((x) => x.ticket))})`);
+  // Sixty keys mentioned in descending order, so the first fifty by mention (SMD-1059 … SMD-1010) are not the first fifty by key.
+  const sixty = { ...hit(1, Array.from({ length: 60 }, (_, i) => `SMD-${1059 - i} is in progress`).join("; ")), metadata: {} };
+  const moves = [{ at: T - 2 * H, ...st("In Progress", "started") }, { at: T + 3 * H, ...st("Done", "completed") }];
+  const both = { ...inputs, heads: new Map([["SMD-1010", st("Done", "completed")], ["SMD-1009", st("Done", "completed")]]), history: new Map([["SMD-1010", moves], ["SMD-1009", moves]]) };
+  const bounded = movedAmong([sixty], {}, both)[sixty.id];
+  assert(JSON.stringify(bounded?.moved.map((x) => x.ticket)) === JSON.stringify(["SMD-1010"]) && bounded?.notRead === 10,
+    `movedAmong: a hit's first ${MOVED_READ} keys by mention — the fiftieth labelled, the fifty-first (another hit's head) not — and the 10 past them counted beside the move (${JSON.stringify(bounded)})`);
 
   // The renders: the line after the superseded and demoted ones; the typed field tokens; an answer without `moved` reads as none.
   const id = (n: number) => `cccccccc-0000-4000-8000-00000000000${n}`;
@@ -2711,8 +2710,8 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
   const sent = (calls.splice(0)[0] ?? "").split(" ")[2]?.split(",") ?? [];
   assert(JSON.stringify(none) === "{}" && noneCalls.length === 0
       && JSON.stringify(someCalls) === JSON.stringify([`superseded ${id(2)},${id(3)}`, `inputs ${id(2)} SMD-1`]) && JSON.stringify(Object.keys(some)) === JSON.stringify([id(2)])
-      && JSON.stringify(given) === "{}" && givenCalls.length === 0 && JSON.stringify(nul) === "{}" && nulCalls.length === 1 && sent.length === MOVED_READ && sent.at(-1) === "SMD-1049",
-    `movedOf: no hit naming a ticket reads nothing; otherwise supersession over the naming hits only (when the caller has not read it) and one read of the unsuperseded hits and their tickets; every naming hit superseded reads nothing more; a store answering null labels nothing; a hit's first ${MOVED_READ} named are sent, no more (${JSON.stringify({ noneCalls, someCalls, givenCalls, sent: sent.length })})`);
+      && JSON.stringify(given) === "{}" && givenCalls.length === 0 && JSON.stringify(nul) === "{}" && nulCalls.length === 1 && sent.length === MOVED_READ && sent.at(-1) === "SMD-1010",
+    `movedOf: no hit naming a ticket reads nothing; otherwise supersession over the naming hits only (when the caller has not read it) and one read of the unsuperseded hits and their tickets; every naming hit superseded reads nothing more; a store answering null labels nothing; a hit's first ${MOVED_READ} keys by mention are sent, no more (${JSON.stringify({ noneCalls, someCalls, givenCalls, sent: sent.length })})`);
 }
 
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
