@@ -738,12 +738,16 @@ jobs:
 
       # Covers what PGlite structurally cannot: the migration runner over TCP,
       # driver-level jsonb binding (where the double-encoding bug lived), and
-      # whether the planner actually reaches for the HNSW index.
+      # whether the planner actually reaches for the HNSW index. The suite runs
+      # in four shards, one job each (SMD-3048). This job runs the shard named
+      # rest: [1] and every section test-live.ts's SHARDS does not list. The
+      # three jobs below run SHARDS' three, each on a database of its own.
       - name: Run the live suite
         working-directory: db
         run: bun test-live.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_LIVE_SHARD: rest
 
       # pgvector installed off the connection's search_path — how Supabase and
       # several managed providers ship it. The runner heals its own session and
@@ -754,6 +758,126 @@ jobs:
         run: bun test-search-path.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+  # The live suite's three other shards (SMD-3048): its sections that wait
+  # out workers' timers, split by their CI times so no shard outlasts the
+  # full-stack jobs. Each is db-live's job with the shard named.
+  db-live-sleep:
+    name: "Schema against real Postgres: the sleep scheduler"
+    runs-on: ubuntu-24.04
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg16
+        env:
+          POSTGRES_PASSWORD: ob1test
+          POSTGRES_DB: ob1test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.3"
+
+      - name: Install
+        working-directory: db
+        run: bun install --frozen-lockfile
+
+      # The sections test-live.ts's SHARDS lists under sleep.
+      - name: Run the live suite's sleep shard
+        working-directory: db
+        run: bun test-live.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_LIVE_SHARD: sleep
+
+  db-live-long:
+    name: "Schema against real Postgres: long thoughts and the re-embed"
+    runs-on: ubuntu-24.04
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg16
+        env:
+          POSTGRES_PASSWORD: ob1test
+          POSTGRES_DB: ob1test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.3"
+
+      - name: Install
+        working-directory: db
+        run: bun install --frozen-lockfile
+
+      # The sections test-live.ts's SHARDS lists under long.
+      - name: Run the live suite's long shard
+        working-directory: db
+        run: bun test-live.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_LIVE_SHARD: long
+
+  db-live-extract:
+    name: "Schema against real Postgres: extraction"
+    runs-on: ubuntu-24.04
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg16
+        env:
+          POSTGRES_PASSWORD: ob1test
+          POSTGRES_DB: ob1test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.3"
+
+      - name: Install
+        working-directory: db
+        run: bun install --frozen-lockfile
+
+      # The sections test-live.ts's SHARDS lists under extract.
+      - name: Run the live suite's extract shard
+        working-directory: db
+        run: bun test-live.ts
+        env:
+          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+          OB1_LIVE_SHARD: extract
 
   data-layer:
     name: SQL data layer against real Postgres
@@ -1524,8 +1648,10 @@ jobs:
           # directory's compose files at the end.
           rendered=()
           trap 'rm -f compose.release.yaml .bun-view.*.json' EXIT
-          # What each render must hold. Labels are held on the substituted
-          # render alone: --no-interpolate leaves two files' labels a list,
+          # What each render must hold: beside the tables, the forwarder's
+          # script and, with lgtm in the render, the dashboard and its
+          # provider (SMD-1849 PR 3c), each compose.yaml's. Labels are held on
+          # the substituted render alone: --no-interpolate leaves two files' labels a list,
           # and their environment one too, which `env` reads as a mapping
           # (compose.grafana-port.yaml sets one key of lgtm's, SMD-1849 PR 3a).
           # shellcheck disable=SC2016 # jq's variables, not the shell's
@@ -1534,16 +1660,18 @@ jobs:
             def rest: del(.services.proxy, .configs) | (.services[]? |= (if has("environment") then .environment |= env else . end)) | delpaths($declared) | with_entries(select(.key | startswith("x-") | not));
             ($p | del(.configs, .labels, .depends_on)) == ($base | del(.configs, .labels, .depends_on))
             and $p.configs == [$want[] | {source, target}]
-            and (($r.configs // {}) | keys) == ([$want[].source, "forwarder"] | sort)
+            and (($r.configs // {}) | keys) == ([$want[].source, "forwarder", (if $r.services.lgtm then "grafana-dashboard", "grafana-dashboard-provider" else empty end)] | sort)
             and all($want[]; ($r.configs[.source] | keys) == ["content", "name"])
             and $r.configs.forwarder == $alone.configs.forwarder
+            and $r.configs["grafana-dashboard"] == $alone.configs["grafana-dashboard"]
+            and $r.configs["grafana-dashboard-provider"] == $alone.configs["grafana-dashboard-provider"]
             and ($r | rest) == ($alone | rest)
             and ([$r.networks[].name] | length == (unique | length))
             and ([$r.services[].ports[]? | if type == "object" then [.host_ip, .published] else . end] | length == (unique | length))'
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           labelled="$held"' and $p.labels == ([$want[] | {(.label): $r.configs[.source].content}] | add)'
           proxy_loads() {
-            local want="$1" render raw alone row r paths prev="" first="" project=() only=() twins=()
+            local want="$1" render raw row r paths prev="" first="" project=() only=() twins=()
             shift
             paths=""
             for a in "$@"; do
@@ -1568,15 +1696,19 @@ jobs:
               || { echo "$*: a profile $first alone does not define, under which a service would go unrendered here" >&2; return 1; }
             render="$(docker compose "$@" config --format json)"
             [ "$(docker compose "${twins[@]}" config --format json)" = "$render" ] || { echo "compose reads $* otherwise than Bun.YAML does" >&2; return 1; }
-            alone="$(docker compose "${project[@]}" -f "$first" "${only[@]}" config --format json)"
-            jq -e --argjson want "$want" --argjson base "$base" --argjson alone "$alone" --argjson declared "$paths" "$labelled" <<<"$render" >/dev/null \
+            # By file, not argument: a render is past the 128 KiB Linux gives one
+            # argument (MAX_ARG_STRLEN) since the dashboard's inline (SMD-1849 PR 3c
+            # review pass 1: compose.yaml's every-profile render 148 KB, measured),
+            # and macOS has no such limit.
+            docker compose "${project[@]}" -f "$first" "${only[@]}" config --format json > .bun-view.alone.json
+            jq -e --argjson want "$want" --argjson base "$base" --slurpfile alones .bun-view.alone.json --argjson declared "$paths" "\$alones[0] as \$alone | $labelled" <<<"$render" >/dev/null \
               || { echo "$*: the render is not compose.yaml's alone but for what its overlays declare, or its proxy and tables are not the held ones" >&2; return 1; }
             # The same, with no variable substituted: a value that matched under
             # CI's settings and moved under an operator's (pass 6) differs here.
             raw="$(docker compose "$@" config --no-interpolate --format json)"
             [ "$(docker compose "${twins[@]}" config --no-interpolate --format json)" = "$raw" ] || { echo "compose reads $* otherwise than Bun.YAML does, with no variable substituted" >&2; return 1; }
-            alone="$(docker compose "${project[@]}" -f "$first" "${only[@]}" config --no-interpolate --format json)"
-            jq -e --argjson want "$want" --argjson base "$base_raw" --argjson alone "$alone" --argjson declared "$paths" "$held" <<<"$raw" >/dev/null \
+            docker compose "${project[@]}" -f "$first" "${only[@]}" config --no-interpolate --format json > .bun-view.alone.json
+            jq -e --argjson want "$want" --argjson base "$base_raw" --slurpfile alones .bun-view.alone.json --argjson declared "$paths" "\$alones[0] as \$alone | $held" <<<"$raw" >/dev/null \
               || { echo "$*: the same, with no variable substituted" >&2; return 1; }
             while read -r row; do
               for r in "$render" "$raw"; do
@@ -1814,7 +1946,8 @@ jobs:
       # SMD-1849 PR 3a: /grafana is the proxy's 404 unless
       # compose.grafana-public.yaml is named — never the legacy route and the
       # MCP server, a keyed POST included — and with the overlay named while
-      # the observability profile is off (CI pulls no Grafana image), Traefik's
+      # the observability profile is off (it is off here: PR 3c's step later
+      # starts it and removes it again), Traefik's
       # 502 is the overlay's 404 (grafana-absent); dropped again, the base's.
       # Check 28 holds both tables byte for byte; this holds what Traefik does
       # with them.
@@ -1870,7 +2003,7 @@ jobs:
       # database, which no migration calls — and
       # holds no role statement, whose text an ALTER ROLE … PASSWORD would
       # carry. The exporter that reads it runs under the observability
-      # profile, which CI does not start.
+      # profile, which the next step starts.
       - name: Postgres counts the brain's statements in pg_stat_statements
         working-directory: deploy
         run: |
@@ -1883,6 +2016,177 @@ jobs:
           n="$(q "SELECT count(*) FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND query ~ '(thought_stats_summary|search_thoughts_keyword)\('")"
           [ "$n" -gt 0 ] || { echo "pg_stat_statements counts none of the brain's statements ($n)" >&2; exit 1; }
           [ "$(q "SELECT count(*) FROM pg_stat_statements WHERE query ~* '^[[:space:]]*(CREATE|ALTER)[[:space:]]+(ROLE|USER)'")" = 0 ] || { echo "pg_stat_statements kept a role statement" >&2; exit 1; }
+
+      # SMD-1849 PR 3c: the observability profile on this stack, the one place
+      # CI starts it. The servers send to its collector (the endpoint and a 5 s
+      # metric interval in deploy/.env, as deploy/README.md turns it on, with
+      # dummy passwords of its own; deploy-stack-brains' canary step plants
+      # its own in its job), smoke.sh's refused requests are the log
+      # records not ok, and four tool calls make traffic on every poll below —
+      # a capture embeds through the stub and its metadata call is the stub's
+      # 404, so the provider rows have points; scan_thoughts runs a job — since
+      # every series here is new: a counter that moved once and then stayed
+      # flat rates 0 and its quantile is NaN (review pass 2), and the
+      # exporter's first scrape may come after one round. Then
+      # compose's render of the dashboard is deploy/observability/dashboard.json
+      # (the `$$` read back as `$`), Grafana's own copy (compose.yaml's
+      # grafana-dashboard config) is read back with every query the file has,
+      # rows' nested panels included, and is the page Grafana opens on, and
+      # every query is run where Grafana would run it, its variables at All
+      # and its rate window 5 m. Each Prometheus query must return a series
+      # with a number above 0 in it within three minutes (the exporter is
+      # scraped every 30 s) — or 0 itself for the ten that answer 0 where
+      # their family has series and their filter matches nothing (`or 0 * …`:
+      # the failure share, the store's three, the collector's three and its
+      # three totals), empty
+      # where it has none — but the NO_TRAFFIC panel, whose events this
+      # traffic does not make; each Loki query must return a record (one that
+      # parsed and has an outcome); each Tempo query must find a trace (the
+      # stub's 404 ends a provider span in error). So this holds every name,
+      # and every label a
+      # matcher requires, on the pinned images; check 37 holds the names and
+      # labels without a running profile. Loki refuses every record with its
+      # disk past 90% (PR 3c, measured), so the runner's is read once lgtm's
+      # image is pulled, before Loki starts, and room made where it is tight. The
+      # step puts the stack's containers and deploy/.env back as it found
+      # them (the thought, the job, the query log's rows, lgtm-data and the
+      # telemetry network stay): the steps after it read the servers' stop
+      # line, which a collector would lengthen. A capture citing a thought
+      # that is not there makes the store's refusals line read above 0, and
+      # one tool called once proves Prometheus's zero at a series' start.
+      - name: The observability profile's dashboard reads every series it names
+        working-directory: deploy
+        run: |
+          cp .env /tmp/env-before-observability
+          printf 'GRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\nOB1_MONITOR_DB_PASSWORD=ci-dummy-monitor-password-0123456789\nOTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm.ob1.internal.:4318\nOTEL_METRIC_EXPORT_INTERVAL=5000\n' >> .env
+          # compose's render prints each `$` doubled again, as compose.yaml has it,
+          # so it reads back as the file once undoubled (Grafana's mount has one).
+          docker compose -f compose.yaml --profile observability config --format json | jq -j '.configs["grafana-dashboard"].content | gsub("[$][$]"; "$")' | cmp - observability/dashboard.json \
+            || { echo "compose renders the grafana-dashboard config otherwise than deploy/observability/dashboard.json" >&2; exit 1; }
+          # The disk read once lgtm's image (2.6 GB) is pulled and before Loki
+          # starts on it: Loki refuses every record with the disk under lgtm-data
+          # past 90% (PR 3c, measured), and the log query below would fail with
+          # no reason given. Where it is tight, the runner image's SDKs this job
+          # never uses (several GB) make room.
+          docker compose -f compose.yaml --profile observability pull lgtm pg-exporter
+          root=$(docker info -f '{{.DockerRootDir}}')
+          used=$(df --output=pcent "$root" | tail -1 | tr -dc 0-9)
+          if [ "$used" -ge 85 ]; then
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+            used=$(df --output=pcent "$root" | tail -1 | tr -dc 0-9)
+          fi
+          df -h "$root"
+          [ "$used" -lt 90 ] || { echo "the runner's disk under Docker's root is ${used}% full: Loki refuses every record from 90% (lgtm-data is there), so the log query below could not pass" >&2; exit 1; }
+          docker compose -f compose.yaml --profile observability up -d --wait --wait-timeout 300 lgtm pg-monitor-role pg-exporter
+          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 server api
+          ./smoke.sh http://127.0.0.1:8010 "$OB1_SMOKE_KEY" > /tmp/observability-smoke.log 2>&1 || { cat /tmp/observability-smoke.log; exit 1; }
+          # Each call's tool, status and, where the tool refused, isError;
+          # curl's own failure as status 000.
+          call() {
+            local code
+            rm -f /tmp/call-body
+            code=$(curl -s --max-time 60 -o /tmp/call-body -w '%{http_code}' -X POST -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "x-brain-key: $OB1_SMOKE_KEY" \
+              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}" http://127.0.0.1:8010/mcp) || code=000
+            if grep -q '"isError":true' /tmp/call-body 2> /dev/null; then code="$code isError"; fi
+            if grep -q '"error":{' /tmp/call-body 2> /dev/null; then code="$code error"; fi
+            echo "$1 $code"
+          }
+          traffic() {
+            call capture_thought '{"content":"The observability step captures this so the provider and store rows have points."}'
+            call search_thoughts '{"query":"observability step provider rows"}'
+            call search_thoughts_keyword '{"query":"observability"}'
+            call scan_thoughts '{"limit":5}'
+          }
+          # A capture citing a thought that is not there: the store refuses it with
+          # P0001 (measured), so the store's refusals line has a point to read.
+          refusal() { call capture_thought '{"content":"The observability step cites a thought that is not there.","derived_from":["00000000-0000-0000-0000-000000000000"]}'; }
+          first=$(traffic)
+          echo "$first"
+          refusal > /dev/null || true
+          # Called once, never again: its series is born at its first count, which
+          # only the zero Prometheus ingests at a series' start lets a rate see
+          # (created-timestamp-zero-ingestion, PR 3c review pass 2): an image bump
+          # that drops the flag fails here, where Prometheus's own warning goes to
+          # a log the image discards.
+          once=$(call worker_status '{}')
+          [[ "$once" == "worker_status 200" ]] || { echo "worker_status answered $once" >&2; exit 1; }
+          # docker exec by the container's id, not compose exec: about thirty
+          # a poll, and compose reads compose.yaml again for each.
+          lgtm_id=$(docker compose -f compose.yaml --profile observability ps -q lgtm)
+          in_lgtm() { docker exec -i "$lgtm_id" "$@" < /dev/null; }
+          said() {
+            echo "$1" >&2
+            df -h / "$(docker info -f '{{.DockerRootDir}}')" >&2 || true
+            in_lgtm curl -s -G http://127.0.0.1:9090/api/v1/query --data-urlencode 'query={__name__=~"otelcol_(exporter_(send|enqueue)_failed|receiver_(refused|failed))_.+"} > 0' | jq -c '[.data.result[] | {(.metric.__name__): .value[1]}]' >&2 || true
+            docker compose -f compose.yaml --profile observability logs --tail 40 lgtm pg-exporter >&2 || true
+            exit 1
+          }
+          if grep -v ' 200$' <<<"$first"; then said "a tool call above did not answer 200 without isError, so the dashboard's queries would wait on traffic that is not there"; fi
+          # Grafana provisions in a service of its own after its health
+          # answers: up to 30 s for it.
+          for _ in $(seq 30); do
+            # shellcheck disable=SC2016 # the password is lgtm's own variable, expanded in its shell
+            if in_lgtm bash -c 'curl -fsS -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/dashboards/uid/ob1' > /tmp/grafana-dashboard.json 2> /dev/null; then break; fi
+            sleep 1
+          done
+          [ "$(jq '.meta.provisioned' /tmp/grafana-dashboard.json 2> /dev/null)" = true ] || said "Grafana has no provisioned dashboard ob1: compose.yaml's provider did not load deploy/observability/dashboard.json"
+          # shellcheck disable=SC2016 # as above
+          # Grafana 13 answers its home with a redirect to the file's
+          # dashboard by its title's slug (measured on the pin).
+          home=$(in_lgtm bash -c 'curl -fsS -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/dashboards/home' | jq -r '.redirectUri // .dashboard.title') || said "Grafana's home did not answer"
+          [[ "$home" == */open-brain || "$home" == "Open Brain" ]] || said "Grafana does not open on the dashboard Open Brain (GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH): its home is $home"
+          # shellcheck disable=SC2016 # jq's variables, not the shell's
+          targets='[.panels[] | (., .panels[]?) | select(.type != "row") | .title as $t | (.targets // [])[] | {t: $t, r: .refId, u: .datasource.uid, q: (.expr // .query)}]'
+          jq -c ".dashboard | $targets | .[]" /tmp/grafana-dashboard.json > /tmp/grafana-queries.jsonl
+          want=$(jq "$targets | length" observability/dashboard.json)
+          if [ "$want" -lt 25 ] || [ "$(wc -l < /tmp/grafana-queries.jsonl)" -ne "$want" ]; then said "Grafana's dashboard ob1 has $(wc -l < /tmp/grafana-queries.jsonl) queries where deploy/observability/dashboard.json has $want"; fi
+          # Server failures by error type count only a request the server
+          # failed, which nothing here makes.
+          NO_TRAFFIC="Server failures, by error type"
+          # The queries that answer 0 where their filter matches nothing.
+          zero_ok() { grep -qE ' or 0 \* | or vector\(0\)' <<<"$1"; }
+          # But the store's refusals, which refusal() makes.
+          REQUIRED="Store errors: refusals, faults and stops [A]"
+          empty() {
+            local line t r u q n z missing=""
+            while IFS= read -r line; do
+              t=$(jq -r .t <<<"$line"); r=$(jq -r .r <<<"$line"); u=$(jq -r .u <<<"$line"); q=$(jq -r .q <<<"$line")
+              z=positive; if zero_ok "$q" && [ "$t [$r]" != "$REQUIRED" ]; then z=any; fi
+              q=${q//\$__rate_interval/5m}; q=${q//\$__range/15m}; q=${q//\$service/.+}; q=${q//\$tier/.*}; q=${q//\$database/.+}
+              case "$u" in
+                prometheus) n=$(in_lgtm curl -s -G http://127.0.0.1:9090/api/v1/query --data-urlencode "query=$q" | jq -r --arg z "$z" 'if .status == "success" then [.data.result[] | select(.value[1] | test("^[-+]?[0-9]")) | select($z == "any" or (.value[1] | tonumber) > 0)] | length else "error: \(.error)" end') ;;
+                loki) n=$(in_lgtm curl -s -G http://127.0.0.1:3100/loki/api/v1/query_range --data-urlencode "query=$q" --data-urlencode since=15m --data-urlencode limit=5 | jq -r 'if .status == "success" then .data.result | length else "error" end' 2> /dev/null || echo error) ;;
+                tempo) n=$(in_lgtm curl -s -G http://127.0.0.1:3200/api/search --data-urlencode "q=$q" --data-urlencode limit=5 | jq -r 'if has("traces") then .traces | length else "error" end' 2> /dev/null || echo error) ;;
+                *) n="error: data source $u" ;;
+              esac
+              if [ "$n" = 0 ] && [ "$t" = "$NO_TRAFFIC" ]; then continue; fi
+              case "$n" in [1-9]*) ;; *) missing="$missing"$'\n'"  $t [$r]: $n" ;; esac
+            done < /tmp/grafana-queries.jsonl
+            printf '%s' "$missing"
+          }
+          t0=$(date +%s)
+          while :; do
+            missing=$(empty)
+            [ -z "$missing" ] && break
+            [ $(($(date +%s) - t0)) -lt 180 ] || said "these dashboard queries returned no number (above 0 where they have no 0 of their own) within 3 minutes of traffic, or failed:$missing"
+            traffic > /dev/null || true
+            refusal > /dev/null || true
+            sleep 10
+          done
+          echo "every query of the dashboard's $want returned a series, $NO_TRAFFIC aside, in $(($(date +%s) - t0)) s"
+          for _ in $(seq 12); do
+            born=$(in_lgtm curl -s -G http://127.0.0.1:9090/api/v1/query --data-urlencode 'query=sum(increase(http_server_request_duration_seconds_count{ob1_tool="worker_status"}[10m]))' | jq -r '.data.result[0].value[1] // "none"')
+            [[ "$born" =~ ^[0-9.]+$ ]] && awk -v b="$born" 'BEGIN { exit !(b > 0.5) }' && break
+            sleep 5
+          done
+          if ! { [[ "$born" =~ ^[0-9.]+$ ]] && awk -v b="$born" 'BEGIN { exit !(b > 0.5) }'; }; then said "worker_status, called once, increased by $born over 10 m: Prometheus no longer ingests a zero at a series' start (created-timestamp-zero-ingestion in compose.yaml's PROMETHEUS_EXTRA_ARGS), so a single failure reads 0 on every panel"; fi
+          cp /tmp/env-before-observability .env
+          docker compose -f compose.yaml --profile observability rm -sf lgtm pg-exporter pg-monitor-role
+          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 server api
+          for s in server api; do
+            endpoint=$(docker compose -f compose.yaml exec -T "$s" printenv OTEL_EXPORTER_OTLP_ENDPOINT) || { echo "could not read $s's OTEL_EXPORTER_OTLP_ENDPOINT after the step" >&2; exit 1; }
+            [ -z "$endpoint" ] || { echo "$s still sends to the collector after the step" >&2; exit 1; }
+          done
 
       # SMD-2874: stable routes no tier. A canary or a working tier is a brain
       # of its own on its own port; from SMD-2294 to v2.0.0 stable's proxy
@@ -2152,6 +2456,8 @@ jobs:
         working-directory: deploy
         run: |
           docker compose -f compose.yaml logs --tail 60
+          echo "--- the observability profile (its step's, if it stopped with them up) ---"
+          docker compose -f compose.yaml --profile observability logs --tail 60 lgtm pg-exporter pg-monitor-role || true
           echo "--- provider stub (the runner's listener on :11434) ---"
           cat /tmp/provider-stub.log 2>/dev/null || echo "(no stub log)"
 
