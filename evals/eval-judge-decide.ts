@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * eval-judge-decide.ts — can decider-4b settle the consolidation judge's easy pairs? (SMD-3058)
+ * eval-judge-decide.ts — can the typed-decision tier settle the consolidation judge's easy pairs? (SMD-3058)
  *
  * The judge (server-portable/consolidate.ts, prompt 4) spends one call to the metadata model on every candidate
  * pair, with both thoughts' text in the prompt, and nearly every pair ends unrelated, related, evolves or
@@ -22,6 +22,11 @@
  * The decider never settles `outdates`: a proposal needs a direction and a quote from the current thought, prompt
  * 4's guard against invented supersessions, which a classifier cannot give. So the cascade loses a true
  * supersession only by settling it as something else, and that count is what this spike exists to measure.
+ *
+ * "The decider" is any model behind the contract: decider-4b (jev/decider) and H2O-Lightning-4B (jev/h2o) were run.
+ * Beside the cascades, the report applies the rule for reopening fixed before H2O's run (as accurate as the judge on
+ * the labelled pairs a band settles, nothing lost, cheaper on the candidates), and shows, as exploration, the
+ * decider's top verdict as the judge itself and P(outdates) as a supersession flag.
  *
  *   OB1_JEV_BASE_URL=http://127.0.0.1:8021 OB1_JEV_LOCAL=1 OB1_JEV_MODEL=decider-4b \
  *     bun eval-judge-decide.ts --pairs /private/tmp/smd3058/judge-pairs.jsonl --out /private/tmp/smd3058/decider.jsonl
@@ -102,14 +107,20 @@ export type DeciderLine = { pair: string; S?: Decided; T?: Decided; C?: Decided;
 /**
  * A band. One-pass: settle C's top verdict when it is not `outdates`, its probability is at least `settle` and
  * `outdates` holds at most `outdatesMax`. Two-pass: S at most `lo` settles `unrelated`; S at least `hi` asks T,
- * settled by the same rule over its four; anything between goes to the judge.
+ * settled by the same rule over its four; anything between goes to the judge. `allow`, when given, settles only
+ * those verdicts and sends the pairs it would settle otherwise to the judge.
  */
-export type Band = { framing: "one" | "two"; settle: number; outdatesMax: number; lo: number; hi: number };
+export type Band = { framing: "one" | "two"; settle: number; outdatesMax: number; lo: number; hi: number; allow?: readonly Verdict[] };
 
 const topOf = (x: Decided, vs: readonly Verdict[]): Verdict => vs.reduce((a, v) => ((x.probabilities[v] ?? 0) > (x.probabilities[a] ?? 0) ? v : a), vs[0]);
 
 /** The verdict the decider settles a pair at, or null to send it to the judge. Never `outdates`. */
 export function settledVerdict(d: DeciderLine, b: Band): Verdict | null {
+  const v = bandVerdict(d, b);
+  return v && b.allow && !b.allow.includes(v) ? null : v;
+}
+
+function bandVerdict(d: DeciderLine, b: Band): Verdict | null {
   const choose = (x: Decided | undefined, vs: readonly Verdict[]): Verdict | null => {
     if (!x || x.abstained) return null;
     const v = topOf(x, vs);
@@ -153,6 +164,12 @@ export type Score = {
   agree: number; agreeCandidates: number; droppedRelations: number; droppedRelationsCandidates: number; addedRelations: number; addedRelationsCandidates: number;
   /** On the labelled pairs the decider settles, how many the judge it replaced had right: the bar its own settledRight meets or misses. */
   settledJudgeRight: number;
+  /**
+   * Model time on the candidates, the pass's own population: the cascade's (the decider, and the judge where it
+   * sends a pair on) and the judge's alone. Over every pair, the labelled ones, which the decider settles more
+   * readily, flatter the cascade.
+   */
+  candMs: number; judgeCandMs: number;
 };
 
 const RELATIONS = new Set(["related", "evolves", "duplicate"]);
@@ -167,7 +184,7 @@ export function score(pairs: PairLine[], decider: Map<string, DeciderLine>, judg
     right: 0, supersessions: 0, caught: 0, lost: 0, falseProposals: 0, proposedCandidates: 0,
     judgeCalls: 0, judgeErrors: 0, deciderMs: 0, judgeMs: 0, settledBy: {},
     agree: 0, agreeCandidates: 0, droppedRelations: 0, droppedRelationsCandidates: 0, addedRelations: 0, addedRelationsCandidates: 0,
-    settledJudgeRight: 0,
+    settledJudgeRight: 0, candMs: 0, judgeCandMs: 0,
   };
   for (const p of pairs) {
     const d = decider.get(p.pair);
@@ -176,6 +193,7 @@ export function score(pairs: PairLine[], decider: Map<string, DeciderLine>, judg
     if (candidate) s.candidates++; else s.labelled++;
     const settled = band && d ? settledVerdict(d, band) : null;
     if (band && d) s.deciderMs += deciderMs(d, band);
+    if (candidate) { s.candMs += (band && d ? deciderMs(d, band) : 0) + (settled ? 0 : a?.ms ?? 0); s.judgeCandMs += a?.ms ?? 0; }
     let verdict: string | null;
     if (settled) {
       verdict = settled;
@@ -243,7 +261,103 @@ export function pick(pairs: PairLine[], decider: Map<string, DeciderLine>, judge
 export const foldOf = (pair: string): 0 | 1 => (parseInt(createHash("md5").update(pair).digest("hex").slice(0, 8), 16) % 2) as 0 | 1;
 
 export const bandText = (b: Band) =>
-  b.framing === "one" ? `one-pass: top ≥ ${b.settle}, outdates ≤ ${b.outdatesMax}` : `two-pass: same ≤ ${b.lo} unrelated; ≥ ${b.hi} then top ≥ ${b.settle}, outdates ≤ ${b.outdatesMax}`;
+  (b.framing === "one" ? `one-pass: top ≥ ${b.settle}, outdates ≤ ${b.outdatesMax}` : `two-pass: same ≤ ${b.lo} unrelated; ≥ ${b.hi} then top ≥ ${b.settle}, outdates ≤ ${b.outdatesMax}`) +
+  (b.allow ? `, settling ${b.allow.join(" or ")} only` : "");
+
+// ── The reopen rule (fixed before the H2O run; pure) ─────────────────────────
+
+/**
+ * What would reopen the cascade, fixed before H2O-Lightning-4B was run: a band at least as accurate as the judge it
+ * replaces on the labelled pairs it settles (RULE_MIN_LABELLED or more of them), losing no supersession the judge
+ * caught, and costing less model time on the candidates than the judge alone.
+ */
+export const RULE_MIN_LABELLED = 20;
+/** As accurate as the judge on enough settled labelled pairs, with nothing lost: the rule without its cost. */
+export const ruleAccurate = (s: Score): boolean => s.settledLabelled >= RULE_MIN_LABELLED && s.lost === 0 && s.settledRight >= s.settledJudgeRight;
+export const meetsRule = (s: Score): boolean => ruleAccurate(s) && s.candMs < s.judgeCandMs;
+
+/** The verdict sets the rule's bands may settle (undefined: any). */
+const ALLOW_SETS: (readonly Verdict[] | undefined)[] = [undefined, ["evolves", "related", "duplicate"], ["evolves", "related"], ["evolves"], ["related"], ["unrelated"]];
+
+/** The rule's grid: the cascade's made finer (cutoffs to 0.99, outdates ceilings to 0.005), under each verdict set. */
+export function ruleGrid(): Band[] {
+  const out: Band[] = [];
+  for (const allow of ALLOW_SETS) {
+    const a = allow ? { allow } : {};
+    for (const settle of [0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.97, 0.99]) for (const outdatesMax of [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3])
+      out.push({ framing: "one", settle, outdatesMax, lo: 0, hi: 1, ...a });
+    for (const lo of [0, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3]) for (const hi of [0.6, 0.8, 0.9, 0.95, 0.99]) for (const settle of [0.5, 0.7, 0.8, 0.9, 0.95, 0.99]) for (const outdatesMax of [0.005, 0.01, 0.05, 0.2])
+      out.push({ framing: "two", settle, outdatesMax, lo, hi, ...a });
+  }
+  return out;
+}
+
+type Picked = { band: Band; score: Score };
+const wider = (a: Picked | null, b: Picked) =>
+  !a || b.score.settledCandidates > a.score.settledCandidates || (b.score.settledCandidates === a.score.settledCandidates && b.score.settled > a.score.settled);
+
+/** The rule over its grid: how many bands are accurate, how many meet it, and the widest of each (most candidates settled, then most pairs). */
+export function ruleSweep(pairs: PairLine[], decider: Map<string, DeciderLine>, judge: Map<string, AnswerLine>): { bands: number; accurate: number; meeting: number; widestAccurate: Picked | null; widestMeeting: Picked | null } {
+  const grid = ruleGrid();
+  let accurate = 0, meeting = 0, widestAccurate: Picked | null = null, widestMeeting: Picked | null = null;
+  for (const band of grid) {
+    const sc = score(pairs, decider, judge, band);
+    if (!ruleAccurate(sc)) continue;
+    accurate++;
+    if (wider(widestAccurate, { band, score: sc })) widestAccurate = { band, score: sc };
+    if (!meetsRule(sc)) continue;
+    meeting++;
+    if (wider(widestMeeting, { band, score: sc })) widestMeeting = { band, score: sc };
+  }
+  return { bands: grid.length, accurate, meeting, widestAccurate, widestMeeting };
+}
+
+// ── The decider beyond the cascade (exploratory; pure) ──────────────────────
+
+/** A verdict on every pair, scored as a judge's: right on the labelled pairs, supersessions proposed, false proposals, proposals on candidates, and model time on the candidates. */
+export type AsJudge = { right: number; caught: number; falseProposals: number; candidatesProposed: number; candMs: number };
+
+export function asJudge(pairs: PairLine[], verdictOf: (p: PairLine) => string | null, msOf: (p: PairLine) => number): AsJudge {
+  const t: AsJudge = { right: 0, caught: 0, falseProposals: 0, candidatesProposed: 0, candMs: 0 };
+  for (const p of pairs) {
+    const v = verdictOf(p);
+    const prop = v !== null && proposes(v);
+    if (p.gold.source === "candidate") { t.candMs += msOf(p); if (prop) t.candidatesProposed++; continue; }
+    if (v !== null && rightFor(p.gold, v, prop) === true) t.right++;
+    if (isSupersession(p)) { if (prop) t.caught++; } else if (prop) t.falseProposals++;
+  }
+  return t;
+}
+
+/** The decider's top one-pass verdict, and its best verdict that proposes nothing (what it settles where the judge does not look). */
+export const topC = (d: DeciderLine | undefined): Verdict | null => (d?.C && !d.C.abstained ? topOf(d.C, FIVE) : null);
+export const settleC = (d: DeciderLine | undefined): Verdict | null => (d?.C && !d.C.abstained ? topOf(d.C, FIVE.filter((v) => v !== "outdates")) : null);
+const pOutdates = (d: DeciderLine | undefined) => d?.C?.probabilities.outdates ?? 0;
+export const flagged = (d: DeciderLine | undefined, t: number) => !!d?.C && !d.C.abstained && pOutdates(d) >= t;
+
+/** P(outdates) at least t as a supersession flag: true supersessions it raises, other labelled pairs it raises, candidates it raises. */
+export function flagTally(pairs: PairLine[], decider: Map<string, DeciderLine>, t: number): { raised: number; supersessions: number; falseFlags: number; others: number; candidatesFlagged: number; candidates: number } {
+  const r = { raised: 0, supersessions: 0, falseFlags: 0, others: 0, candidatesFlagged: 0, candidates: 0 };
+  for (const p of pairs) {
+    const f = flagged(decider.get(p.pair), t);
+    if (p.gold.source === "candidate") { r.candidates++; if (f) r.candidatesFlagged++; }
+    else if (isSupersession(p)) { r.supersessions++; if (f) r.raised++; }
+    else { r.others++; if (f) r.falseFlags++; }
+  }
+  return r;
+}
+
+/**
+ * The judge sees only the pairs the flag raises, and the decider's best verdict that proposes nothing settles the
+ * rest. `lost`: supersessions the judge proposed on a pair the flag left.
+ */
+export function onFlags(pairs: PairLine[], decider: Map<string, DeciderLine>, judge: Map<string, AnswerLine>, t: number): AsJudge & { lost: number } {
+  const seen = (p: PairLine) => flagged(decider.get(p.pair), t);
+  const r = asJudge(pairs, (p) => (seen(p) ? judge.get(p.pair)?.judgement?.verdict ?? null : settleC(decider.get(p.pair))),
+    (p) => (decider.get(p.pair)?.C?.ms ?? 0) + (seen(p) ? judge.get(p.pair)?.ms ?? 0 : 0));
+  const lost = pairs.filter((p) => isSupersession(p) && !seen(p) && proposes(judge.get(p.pair)?.judgement?.verdict ?? "")).length;
+  return { ...r, lost };
+}
 
 // ── The run: asking the decider ───────────────────────────────────────────────
 
@@ -353,6 +467,41 @@ function report(pairs: PairLine[], decider: Map<string, DeciderLine>, judges: [s
       }
     }
   }
+
+  const perCand = (ms: number, n: number) => `${(ms / n / 1000).toFixed(2)} s a candidate`;
+  const ruleRow = (name: string, sc: Score) =>
+    `settles ${pct(sc.settledCandidates, sc.candidates)} of candidates (${sc.settled} pairs); right on ${sc.settledRight} of ${sc.settledLabelled} settled labelled pairs, ${name} on ${sc.settledJudgeRight}; ` +
+    `lost ${sc.lost}; ${perCand(sc.candMs, sc.candidates)} against ${(sc.judgeCandMs / sc.candidates / 1000).toFixed(2)} for ${name} alone`;
+  const misses = (sc: Score) =>
+    [sc.settledLabelled < RULE_MIN_LABELLED && `fewer than ${RULE_MIN_LABELLED} labelled pairs`, sc.lost > 0 && "a supersession lost", sc.settledRight < sc.settledJudgeRight && "less accurate", !(sc.candMs < sc.judgeCandMs) && "not cheaper"].filter(Boolean).join(", ");
+  console.log(`\nThe reopen rule, fixed before the H2O run: a band at least as accurate as the judge it replaces on ${RULE_MIN_LABELLED} or more settled labelled pairs, losing no supersession, and costing less model time on the candidates than the judge alone`);
+  for (const [name, judge] of judges) {
+    const sw = ruleSweep(pairs, decider, judge);
+    console.log(`  ${name}: ${sw.accurate} of ${sw.bands} bands are as accurate with nothing lost; ${sw.meeting} of them are also cheaper on the candidates`);
+    const shown = sw.widestMeeting ?? sw.widestAccurate;
+    if (shown) console.log(`    ${sw.widestMeeting ? "the widest meeting it" : "the widest accurate one, not cheaper"}: ${bandText(shown.band)}: ${ruleRow(name, shown.score)}`);
+    if (!sw.widestMeeting) continue;
+    for (const f of [0, 1] as const) {
+      const fit = pairs.filter((p) => foldOf(p.pair) === f), test = pairs.filter((p) => foldOf(p.pair) !== f);
+      const best = ruleSweep(fit, decider, judge).widestMeeting;
+      if (!best) { console.log(`    held out: nothing meets the rule on fold ${f}`); continue; }
+      const sc = score(test, decider, judge, best.band);
+      console.log(`    held out: picked on fold ${f} (${bandText(best.band)}), scored on ${1 - f}: ${ruleRow(name, sc)}; ${meetsRule(sc) ? "meets the rule" : `misses it: ${misses(sc)}`}`);
+    }
+  }
+
+  const labelledN = pairs.filter((p) => p.gold.source !== "candidate").length, candN = pairs.length - labelledN, supN = pairs.filter(isSupersession).length;
+  const asJudgeRow = (name: string, t: AsJudge) =>
+    `  ${name.padEnd(18)} right on ${t.right} of ${labelledN} labelled pairs, ${t.caught} of ${supN} supersessions proposed, ${t.falseProposals} false proposals, proposes on ${t.candidatesProposed} of ${candN} candidates, ${perCand(t.candMs, candN)}`;
+  console.log("\nBeyond the cascade (exploratory, not the rule): the decider's top one-pass verdict as the judge itself, beside each judge alone");
+  for (const [name, judge] of judges) console.log(asJudgeRow(`${name} alone`, asJudge(pairs, (p) => judge.get(p.pair)?.judgement?.verdict ?? null, (p) => judge.get(p.pair)?.ms ?? 0)));
+  console.log(asJudgeRow("the decider alone", asJudge(pairs, (p) => topC(decider.get(p.pair)), (p) => decider.get(p.pair)?.C?.ms ?? 0)));
+  console.log("  P(outdates) ≥ t as a supersession flag, and each judge reading only the pairs it raises, the decider settling the rest");
+  for (const t of [0.2, 0.3, 0.5, 0.7]) {
+    const f = flagTally(pairs, decider, t);
+    const each = judges.map(([name, judge]) => { const o = onFlags(pairs, decider, judge, t); return `${name} on them: ${o.caught} proposed (${o.lost} of its own lost), right on ${o.right}, ${perCand(o.candMs, candN)}`; });
+    console.log(`    t ${t}: raises ${f.raised} of ${f.supersessions} supersessions and ${f.falseFlags} of ${f.others} other labelled pairs (precision ${pct(f.raised, f.raised + f.falseFlags)}), ${f.candidatesFlagged} of ${f.candidates} candidates; ${each.join("; ")}`);
+  }
 }
 
 // ── Self-check ────────────────────────────────────────────────────────────────
@@ -407,6 +556,51 @@ function selfCheck(): never {
   const dropped = score(ps, unrelatedAll, judge, one);
   ok(dropped.droppedRelations === 1 && dropped.droppedRelationsCandidates === 1 && dropped.agree === 1, "against the judge: a candidate it called related, settled unrelated, is a dropped relation");
   ok(foldOf("x") === foldOf("x") && [0, 1].includes(foldOf("y")), "folds are deterministic");
+
+  // A band restricted to some verdicts settles only those.
+  const relatedPair: DeciderLine = { pair: "a", C: dec({ related: 0.9, outdates: 0.01 }) };
+  ok(settledVerdict(relatedPair, { ...one, allow: ["evolves"] }) === null && settledVerdict(relatedPair, { ...one, allow: ["related"] }) === "related", "a band settling evolves only sends a related pair on; one settling related settles it");
+  ok(settledVerdict({ pair: "a", S: dec({}, { p_true: 0.05 }) }, { ...two, allow: ["related", "evolves"] }) === null, "two-pass: a band that does not settle unrelated sends a different subject on");
+  ok(bandText({ ...one, allow: ["evolves", "related"] }).endsWith("settling evolves or related only"), "a restricted band says so");
+
+  // Time on the candidates: the cascade pays the decider and, where it sends a pair on, the judge.
+  ok(cascade.candMs === 100 && cascade.judgeCandMs === 3000 && alone.candMs === 3000 && alone.judgeCandMs === 3000, "on the candidates: a settled one costs the decider's read; the judge alone, its call");
+  const sendAll = score(ps, new Map(ps.map((p) => [p.pair, { pair: p.pair, C: dec({ related: 0.5, outdates: 0.4 }) }])), judge, one);
+  ok(sendAll.candMs === 3100, "a candidate sent on costs the decider's read and the judge's call");
+
+  // The rule: a tie with the judge meets it; a labelled pair short, a supersession lost, one fewer right or no saving misses it.
+  const meets: Score = { ...cascade, settledLabelled: RULE_MIN_LABELLED, lost: 0, settledRight: 15, settledJudgeRight: 15, candMs: 2999, judgeCandMs: 3000 };
+  ok(meetsRule(meets), "the rule: as accurate as the judge on 20 settled labelled pairs, nothing lost and cheaper meets it");
+  ok(!meetsRule({ ...meets, settledLabelled: RULE_MIN_LABELLED - 1 }), "the rule: 19 settled labelled pairs miss it");
+  ok(!meetsRule({ ...meets, lost: 1 }), "the rule: a lost supersession misses it");
+  ok(!meetsRule({ ...meets, settledRight: 14 }), "the rule: one fewer right than the judge misses it");
+  ok(!meetsRule({ ...meets, candMs: 3000 }) && ruleAccurate({ ...meets, candMs: 9999 }), "the rule: the judge's own cost misses it, though the band is accurate");
+  ok(ruleGrid().length === 6 * 1016 && ruleGrid().some((b) => b.allow?.length === 1 && b.allow[0] === "evolves"), "the rule's grid: 1,016 bands under each of six verdict sets");
+  const many: PairLine[] = [...Array.from({ length: 24 }, (_, i) => pair(`l${i}`, { source: "link", label: "relates_to" })), pair("c1", { source: "candidate", label: "none", similarity: 0.7 }), pair("c2", { source: "candidate", label: "none", similarity: 0.7 })];
+  const manyJudge = new Map<string, AnswerLine>(many.map((p) => [p.pair, { pair: p.pair, ms: 3000, judgement: { verdict: "related" } as never }]));
+  const relatedEvery = new Map<string, DeciderLine>(many.map((p) => [p.pair, { pair: p.pair, C: dec({ related: 0.99, outdates: 0 }) }]));
+  const sw = ruleSweep(many, relatedEvery, manyJudge);
+  ok(sw.meeting > 0 && sw.widestMeeting?.score.settledCandidates === 2 && sw.widestMeeting.score.settledLabelled === 24, "the sweep: a decider as right as the judge and cheaper meets the rule, settling everything");
+  const unrelatedEvery = new Map<string, DeciderLine>(many.map((p) => [p.pair, { pair: p.pair, C: dec({ unrelated: 0.99, outdates: 0 }), S: dec({}, { p_true: 0.01 }) }]));
+  ok(ruleSweep(many, unrelatedEvery, manyJudge).accurate === 0, "the sweep: a decider wrong where the judge is right is never accurate");
+
+  // Beyond the cascade: the decider's top verdict as a judge, P(outdates) as a flag, the judge reading only what it raises.
+  const three = new Map<string, DeciderLine>([
+    ["sup", { pair: "sup", C: dec({ outdates: 0.9, duplicate: 0.1 }) }],
+    ["link", { pair: "link", C: dec({ related: 0.8, outdates: 0.1, unrelated: 0.1 }) }],
+    ["cand", { pair: "cand", C: dec({ outdates: 0.5, related: 0.3, evolves: 0.2 }) }],
+  ]);
+  ok(topC(three.get("sup")) === "outdates" && settleC(three.get("sup")) === "duplicate", "the decider's best verdict that proposes nothing passes over outdates");
+  const me = asJudge(ps, (p) => topC(three.get(p.pair)), (p) => three.get(p.pair)!.C!.ms);
+  ok(me.caught === 1 && me.falseProposals === 0 && me.right === 2 && me.candidatesProposed === 1 && me.candMs === 100, "the decider as a judge: the supersession proposed, the link right, the candidate proposed");
+  const everyOutdates = asJudge(ps, () => "outdates", () => 0);
+  ok(everyOutdates.caught === 1 && everyOutdates.falseProposals === 1 && everyOutdates.right === 1, "a judge proposing on every pair: the supersession caught, the link a false proposal and wrong");
+  const fl = flagTally(ps, three, 0.5);
+  ok(fl.raised === 1 && fl.supersessions === 1 && fl.falseFlags === 0 && fl.others === 1 && fl.candidatesFlagged === 1, "the flag at 0.5 raises the supersession and the candidate at exactly 0.5, not the link");
+  const on5 = onFlags(ps, three, judge, 0.5);
+  ok(on5.caught === 1 && on5.lost === 0 && on5.right === 2 && on5.candMs === 3100 && on5.candidatesProposed === 0, "the judge reading the raised pairs proposes the supersession; the decider settles the link related");
+  const on95 = onFlags(ps, three, judge, 0.95);
+  ok(on95.caught === 0 && on95.lost === 1 && on95.candMs === 100, "a flag that raises nothing: the judge's own supersession is lost, and the pass costs the decider's reads");
 
   console.log(bad === 0 ? "eval-judge-decide.ts self-check PASS" : `eval-judge-decide.ts self-check: ${bad} FAILED`);
   process.exit(bad === 0 ? 0 : 1);
