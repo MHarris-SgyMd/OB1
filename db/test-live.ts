@@ -11154,6 +11154,8 @@ if (want("38")) {
   let slowExtract = 0;
   /** Judge calls only: a wake with a judgement in hand. */
   let slowJudge = 0;
+  /** Judge calls held by slowJudge right now: the case reads its claim once one is (SMD-3048). */
+  let judgesHeld = 0;
   /** Every request, probes too: the model not served (a 404 naming it) — a refusal at a pass's start. */
   let missing = false;
   /** Every request, probes too: the provider unavailable (503) — an outage a follower waits out. */
@@ -11181,7 +11183,10 @@ if (want("38")) {
       modelCalls.push({ kind: judging ? "judge" : "extract", at: Date.now() });
       if (slow) await Bun.sleep(slow);
       if (!judging && slowExtract) await Bun.sleep(slowExtract);
-      if (judging && slowJudge) await Bun.sleep(slowJudge);
+      if (judging && slowJudge) {
+        judgesHeld++;
+        try { await Bun.sleep(slowJudge); } finally { judgesHeld--; }
+      }
       if (judging) {
         const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
         const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
@@ -11576,7 +11581,12 @@ if (want("38")) {
     let retryDone = false;
     const retrying = sleepRun({ follow: true, signal: ac3.signal, minStampEveryS: 1 }).finally(() => { retryDone = true; });
     await pollUntil(async () => lines.some((l) => /extraction drained/.test(l)), 20_000);
-    await pollUntil(async () => (await claims(CO)).claimed === 1, 40_000);
+    // The claim read once its judge call is held, not at the first claim seen:
+    // under load that was a thought with no pair (finished at once), or one
+    // whose call had not begun when the model went, so the wake had nothing in
+    // hand to move (SMD-3048 PR 2's review pass 4; on main too, 2 runs in 10
+    // under a loaded machine).
+    await pollUntil(async () => judgesHeld > 0 && (await claims(CO)).claimed === 1, 40_000);
     const [judgedInHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'claimed'`;
     missing = true;
     await capture("A note that wakes it before the model goes.", "op-sleep", 0, 5);
