@@ -11154,7 +11154,7 @@ if (want("38")) {
   let slowExtract = 0;
   /** Judge calls only: a wake with a judgement in hand. */
   let slowJudge = 0;
-  /** Judge calls held by slowJudge right now: the case reads its claim once one is (SMD-3048). */
+  /** Judge calls slowJudge holds now, a call's hold ending with its client's abort: the case reads its claim once one is (SMD-3048). */
   let judgesHeld = 0;
   /** Every request, probes too: the model not served (a 404 naming it) — a refusal at a pass's start. */
   let missing = false;
@@ -11185,7 +11185,8 @@ if (want("38")) {
       if (!judging && slowExtract) await Bun.sleep(slowExtract);
       if (judging && slowJudge) {
         judgesHeld++;
-        try { await Bun.sleep(slowJudge); } finally { judgesHeld--; }
+        await Promise.race([Bun.sleep(slowJudge), new Promise<void>((r) => req.signal.addEventListener("abort", () => r(), { once: true }))]);
+        judgesHeld--;
       }
       if (judging) {
         const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
@@ -11586,15 +11587,21 @@ if (want("38")) {
     // whose call had not begun when the model went, so the wake had nothing in
     // hand to move (SMD-3048 PR 2's review pass 4; on main too, 2 runs in 10
     // under a loaded machine).
-    await pollUntil(async () => judgesHeld > 0 && (await claims(CO)).claimed === 1, 40_000);
-    const [judgedInHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'claimed'`;
+    // Read in the poll that sees the call held, and held still after the read, so the two are one moment.
+    let judgedInHand: { id: string } | undefined;
+    const held = await pollUntil(async () => {
+      if (judgesHeld === 0) return false;
+      const rows = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'claimed'`) as { id: string }[];
+      judgedInHand = rows.length === 1 && judgesHeld > 0 ? rows[0] : undefined;
+      return judgedInHand !== undefined;
+    }, 40_000);
     missing = true;
     await capture("A note that wakes it before the model goes.", "op-sleep", 0, 5);
     const refusedLater = await pollUntil(async () => lines.some((l) => /tries it again in 5 s/.test(l)), 20_000);
     slowJudge = 0;
     const coOrder = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'pending' ORDER BY enqueued_at, thought_id`).map((r: { id: string }) => r.id);
     assert(judgedInHand?.id !== undefined && coOrder.at(-1) === judgedInHand.id && !(await claims(CO)).claimed,
-      `a wake with a judgement in hand returns it and moves it to the back of consolidation's queue too (${coOrder.indexOf(judgedInHand?.id)} of ${coOrder.length})`);
+      `a wake with a judgement in hand returns it and moves it to the back of consolidation's queue too (${coOrder.indexOf(judgedInHand?.id as string)} of ${coOrder.length}${held ? "" : "; no judge call was held within 40 s"})`);
     const laterBeat = await beat();
     // Still refused at the next try: the wait doubles (5 s, then 10 s).
     const backedOff = await pollUntil(async () => lines.some((l) => /tries it again in 10 s/.test(l)), 30_000);
