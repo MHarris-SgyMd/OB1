@@ -2986,8 +2986,14 @@ tier gives each pair's verdict, not the judge:
 - **The writer.** Only when the tier's top verdict is outdates is the judge's
   model asked, and only to write the proposal: which thought is current, the
   words in it that show the other is not, and the other's words that no
-  longer hold, with the part rule (a part of some work finishing does not
-  outdate the whole).
+  longer hold. Two rules hold it:
+  - **The part rule:** a part of some work finishing does not outdate the
+    whole.
+  - **The record rule** (decide version 2): a record of past understanding (a
+    done ticket, a session summary, a change record) is outdated only by a
+    later thought, from any source, that says something different about its
+    subject. Its work reported done never outdates it, and neither does a
+    later record that goes on with that work.
 - **Both quotes must check out** in the side each names and not in the other,
   or the pair stays at the tier's best verdict that proposes nothing.
 - **The distribution is the tier's.** A proposal is recorded at its

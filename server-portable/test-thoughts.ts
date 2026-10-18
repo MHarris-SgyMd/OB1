@@ -24,7 +24,7 @@ import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, evidenceIn, judgedRecipe, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
-import { consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, PART_RULE, PASS_WRITER, stands, verdictDistribution, WRITER_HEAD, writerMessages } from "./consolidate-decide.ts";
+import { consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, PART_RULE, PASS_WRITER, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe } from "./lineage.ts";
 import { probeTier } from "../db/worker-bootstrap.ts";
@@ -1704,12 +1704,19 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     "decide mode's lineage names the writer, the decider and its own prompt's hash");
   assert(judgedR.prompt_hash === promptHash(CONSOLIDATE_PROMPT) && !("decider" in judgedR) && !("decide_version" in judgedR), "…and the judge's names prompt 4's, as before");
 
-  // The writer's question: prompt 4's rendering of both thoughts, two-sided with the part rule, as the pass runs it.
+  // The writer's question: prompt 4's rendering of both thoughts, two-sided with the part rule and the record rule
+  // (decide version 2), as the pass runs it.
   const older = { content: "the plan is to ship on Friday", createdAt: "2026-10-01T00:00:00Z" };
   const newer = { content: "we shipped on Monday instead of Friday", createdAt: "2026-10-03T00:00:00Z" };
-  const msg = writerMessages({ older, newer }, PASS_WRITER.twoSided, PASS_WRITER.partRule)[0].content;
-  assert(msg.startsWith(WRITER_HEAD) && msg.includes("<thought_a>\nthe plan is to ship on Friday\n</thought_a>") && msg.includes('"stale": words copied') && msg.includes(PART_RULE.trim()),
-    "the pass's writer: both thoughts, the stale quote and the part rule");
+  const msg = writerMessages({ older, newer }, PASS_WRITER.twoSided, PASS_WRITER.partRule, PASS_WRITER.recordRule)[0].content;
+  assert(msg.startsWith(WRITER_HEAD) && msg.includes("<thought_a>\nthe plan is to ship on Friday\n</thought_a>") && msg.includes('"stale": words copied') && msg.includes(PART_RULE.trim()) && msg.includes(RECORD_RULE.trim()),
+    "the pass's writer: both thoughts, the stale quote, the part rule and the record rule");
+  // Under the record rule the definition no longer counts a later summary of the same work, or one saying the other is
+  // done, as outdating it; without the rule the writer's text is SMD-3114's, unchanged.
+  const v1 = writerRules(true, true), v2 = writerRules(true, true, true);
+  assert(DECIDE_VERSION === 2 && v1.includes("a progress note or summary of some work and a later one of the same work") && v1.includes("or one saying the other is done, closed, obsolete or replaced") && !v1.includes(RECORD_RULE.trim())
+      && !v2.includes("a later one of the same work") && !v2.includes("one saying the other is done") && v2.includes("the two say different things about the same subject") && v2.includes("a status and a later status of something still open"),
+    "the record rule's definition drops a later summary and a report of done from what outdates; SMD-3114's text stands without it");
   assert(stands(prop, older.content, newer.content, true) && !stands({ ...prop, stale: "Monday" }, older.content, newer.content, true), "both quotes checked, each in its own side");
 
   // decidePair end to end, against an in-process tier and writer.
@@ -1746,7 +1753,8 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     const a = await decidePair(older, newer, cfg, jev);
     assert(a.verdict === "outdates" && a.supersedes === "newer" && a.decide.top === "outdates" && a.decide.writer?.stale_found === true && a.decide.decider.name === "h2o-test" && writerCalls === 1,
       "the tier's outdates asks the writer, and its standing proposal is the judgement");
-    assert(writerBody.model === "writer-test" && (writerBody.messages?.[0]?.content ?? "").includes(PART_RULE.trim()), "the writer is the judge's model, asked the pass's question");
+    assert(writerBody.model === "writer-test" && (writerBody.messages?.[0]?.content ?? "").includes(PART_RULE.trim()) && (writerBody.messages?.[0]?.content ?? "").includes(RECORD_RULE.trim()),
+      "the writer is the judge's model, asked the pass's question, the record rule in it");
     tierP = { ...p, outdates: 0.05, related: 0.75 };
     const b = await decidePair(older, newer, cfg, jev);
     assert(b.verdict === "related" && b.decide.writer === undefined && writerCalls === 1, "the tier's related: no writer call, the relation stands");

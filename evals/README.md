@@ -4225,6 +4225,22 @@ this eval did not apply: a proposal is recorded at H2O's P(outdates) and only at
 without the part rule would lose 8 of 64 on the first set and 5 of 116 on the
 confirmation.
 
+**The record rule (decide version 2).** The canary's first decide-mode
+proposals answered the question these sets could not: what the writer proposes
+on the candidates the pass judges.
+- Of the first 48, 38 outdated a Linear ticket. 35 of those tickets already
+  said Done, and 23 gave the ticket's work being completed as the whole reason,
+  some quoting the ticket's own status line as the claim that no longer holds.
+- The maintainer's model: a done ticket stands as a historical record of past
+  understanding, as a session summary or a change record does. Any later
+  source can outdate what it understood, by saying something different about
+  the same subject, but never by reporting its work done.
+- `--record-rule` adds that to the writer (`RECORD_RULE`), and decide mode
+  runs it from version 2.
+- These sets can't measure it: nearly all their true supersessions are pointer
+  pairs, mostly the session hook's later summary of the same session, which
+  the pass never judges. The canary's proposals are its test set.
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline

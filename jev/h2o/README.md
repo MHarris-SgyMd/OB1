@@ -126,9 +126,18 @@ pass's decide mode, to be reviewed on the canary. With
 `OB1_CONSOLIDATE_DECIDER=h2o-lightning-4b`, `db/consolidate.ts` asks this tier
 prompt 4's five verdicts as one choice for every pair. When the top verdict is
 outdates it asks `OB1_JUDGE_MODEL` only to write the proposal, two-sided with
-the part rule, and both quotes must check out in the texts. Anything else
-leaves the pair at H2O's best verdict that proposes nothing. A proposal records
-H2O's P(outdates) as its confidence, under the pass's usual floor of 0.5.
+the part rule and the record rule, and both quotes must check out in the
+texts. Anything else leaves the pair at H2O's best verdict that proposes
+nothing. A proposal records H2O's P(outdates) as its confidence, under the
+pass's usual floor of 0.5.
+
+**The record rule** (decide version 2) came from the canary's first proposals.
+There, 38 of 48 outdated a Linear ticket, 35 of those tickets already said Done,
+and 23 gave the ticket's work being completed as the whole reason. The
+maintainer's model: a done ticket stands as a historical record of past
+understanding, and so does a session summary or a change record. Any later
+source can outdate what it understood, by saying something different about the
+same subject. Its work being reported done never does.
 
 For a brain on this Mac, serve the tier on the host and point the stack at it:
 
@@ -151,8 +160,9 @@ OB1_JEV_LOCAL=1
 - **An outage mid-pass** is handled like the judge's: a follower checks the
   writer's chat endpoint and then the tier's `/info` before it claims anything,
   and waits out an outage of either.
-- **The pass key** is `consolidate:h2o-lightning-4b+<writer>@p4d1`, so turning
-  decide mode on starts a fresh pass over the pool. Proposals are reviewed as
+- **The pass key** is `consolidate:h2o-lightning-4b+<writer>@p4d2`, so turning
+  decide mode on, or moving to a new decide version, starts a fresh pass over
+  the pool. Proposals are reviewed as
   the judge's are (`bun db/consolidate.ts --list`, then `--accept` or
   `--reject`). Each one's lineage records the decider, the writer, decide
   mode's prompt hash, and what each model said.

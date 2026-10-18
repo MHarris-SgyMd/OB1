@@ -13,10 +13,12 @@
  *
  * Two writers: the one-sided quote prompt 4 asks for, and a two-sided one (SMD-2938) that also quotes the other
  * thought's claim that no longer holds, checked in that thought and not in the current one. --part-rule adds
- * PART_RULE to either: a part of some work finishing does not outdate the larger work.
+ * PART_RULE to either: a part of some work finishing does not outdate the larger work. --record-rule adds RECORD_RULE
+ * (SMD-3115's decide version 2): a record of past understanding, a done ticket or a session summary, is outdated only
+ * by a later thought that says something different about its subject, never by its work reported done.
  *
  *   OB1_LLM_BASE_URL=http://127.0.0.1:11434/v1 OB1_LLM_LOCAL=1 OB1_JUDGE_MODEL=qwen2.5:7b … \
- *     bun eval-judge-propose.ts --pairs …/judge-pairs.jsonl --decider …/h2o.jsonl --out …/writer-7b.jsonl [--two-sided] [--part-rule]
+ *     bun eval-judge-propose.ts --pairs …/judge-pairs.jsonl --decider …/h2o.jsonl --out …/writer-7b.jsonl [--two-sided] [--part-rule] [--record-rule]
  *   bun eval-judge-propose.ts --pairs … --decider … --writer 7b=…/writer-7b.jsonl … --judge 7b=… --judge 27b=…
  *   bun eval-judge-propose.ts --self-check     # the prompt, the parse, the checks, the scoring and the rule; no model
  *
@@ -36,16 +38,16 @@ import { mayLeaveBox } from "../server-portable/egress.ts";
 import { REASON_MAX, type Verdict } from "../server-portable/consolidate.ts";
 // The writer's question, its parse and its checks are the pass's own (SMD-3115's decide mode runs the two-sided writer
 // with the part rule): one copy, so what this measures is what the pass sends.
-import { parseProposal, PART_RULE, stands, WRITER_HEAD, writerMessages, writerRules, type Proposal } from "../server-portable/consolidate-decide.ts";
+import { parseProposal, PART_RULE, RECORD_RULE, stands, WRITER_HEAD, writerMessages, writerRules, type Proposal } from "../server-portable/consolidate-decide.ts";
 import { FIVE, flagged, isSupersession, topC, type DeciderLine } from "./eval-judge-decide.ts";
 import { proposes, rightFor, type AnswerLine, type Gold, type PairLine } from "./eval-judge.ts";
 
-export { parseProposal, PART_RULE, stands, WRITER_HEAD, writerMessages, writerRules, type Proposal };
+export { parseProposal, PART_RULE, RECORD_RULE, stands, WRITER_HEAD, writerMessages, writerRules, type Proposal };
 
 // ── The file shapes ──────────────────────────────────────────────────────────
 
-/** One pair's writer answer: the model, which writer (and whether it had the part rule), the call's time, and the answer or the error. */
-export type WriterLine = { pair: string; model: string; twoSided: boolean; partRule?: boolean; ms: number; raw?: string; proposal?: Proposal; error?: string };
+/** One pair's writer answer: the model, which writer (and whether it had the part rule and the record rule), the call's time, and the answer or the error. */
+export type WriterLine = { pair: string; model: string; twoSided: boolean; partRule?: boolean; recordRule?: boolean; ms: number; raw?: string; proposal?: Proposal; error?: string };
 
 // ── Scoring (pure) ───────────────────────────────────────────────────────────
 
@@ -121,13 +123,13 @@ export const ruleMisses = (t: Tally, bar27: Tally, bar7: Tally): string =>
 // ── The run: asking the writer ───────────────────────────────────────────────
 
 /** Ask the writer of every pair either flag raises and not yet in `out`, one at a time. */
-async function writeAll(pairs: PairLine[], decider: Map<string, DeciderLine>, out: string, cfg: EmbedConfig, twoSided: boolean, partRule: boolean): Promise<void> {
+async function writeAll(pairs: PairLine[], decider: Map<string, DeciderLine>, out: string, cfg: EmbedConfig, twoSided: boolean, partRule: boolean, recordRule = false): Promise<void> {
   const done = new Set(existsSync(out) ? readFileSync(out, "utf8").split("\n").filter(Boolean).map((l) => (JSON.parse(l) as WriterLine).pair) : []);
   const todo = pairs.filter((p) => FLAGS.some((f) => raisedBy(decider.get(p.pair), f)) && !done.has(p.pair));
-  console.error(`  writer ${cfg.judgeModel} (${twoSided ? "two-sided" : "one-sided"}${partRule ? ", part rule" : ""}) at temperature ${cfg.metadataTemperature} via ${cfg.chat.base}: ${todo.length} raised pairs to ask, ${done.size} already in ${out}`);
+  console.error(`  writer ${cfg.judgeModel} (${twoSided ? "two-sided" : "one-sided"}${partRule ? ", part rule" : ""}${recordRule ? ", record rule" : ""}) at temperature ${cfg.metadataTemperature} via ${cfg.chat.base}: ${todo.length} raised pairs to ask, ${done.size} already in ${out}`);
   let n = 0;
   for (const p of todo) {
-    const line: WriterLine = { pair: p.pair, model: cfg.judgeModel, twoSided, ...(partRule ? { partRule } : {}), ms: 0 };
+    const line: WriterLine = { pair: p.pair, model: cfg.judgeModel, twoSided, ...(partRule ? { partRule } : {}), ...(recordRule ? { recordRule } : {}), ms: 0 };
     try {
       for (const side of [p.older, p.newer]) {
         const gate = mayLeaveBox({ kind: "judge", metadata: side.metadata, content: side.content }, cfg.chat, cfg.egress);
@@ -136,7 +138,7 @@ async function writeAll(pairs: PairLine[], decider: Map<string, DeciderLine>, ou
       const t0 = performance.now();
       const r = await fetch(`${cfg.chat.base}/chat/completions`, {
         method: "POST", headers: cfg.chat.headers, signal: AbortSignal.timeout(300_000), timeout: false,
-        body: JSON.stringify({ model: cfg.judgeModel, response_format: { type: "json_object" }, temperature: cfg.metadataTemperature, ...cfg.metadataReasoning, messages: writerMessages(p, twoSided, partRule) }),
+        body: JSON.stringify({ model: cfg.judgeModel, response_format: { type: "json_object" }, temperature: cfg.metadataTemperature, ...cfg.metadataReasoning, messages: writerMessages(p, twoSided, partRule, recordRule) }),
       });
       if (!r.ok) throw new Error(`writer request failed: ${r.status} ${(await r.text().catch(() => "")).slice(0, 200)}`);
       const d = (await r.json()) as { choices?: [{ message?: { content?: string } }] };
@@ -166,7 +168,7 @@ function report(pairs: PairLine[], decider: Map<string, DeciderLine>, writers: [
   if (!bar27 || !bar7) console.log("  (the rule needs --judge 7b=… and --judge 27b=…)");
   for (const [name, w] of writers) {
     const first = [...w.values()][0];
-    const kind = `${first?.twoSided ? "two-sided" : "one-sided"}${first?.partRule ? ", part rule" : ""}`;
+    const kind = `${first?.twoSided ? "two-sided" : "one-sided"}${first?.partRule ? ", part rule" : ""}${first?.recordRule ? ", record rule" : ""}`;
     const errors = [...w.values()].filter((l) => l.error).length;
     for (const flag of FLAGS) {
       const t = pipeline(pairs, decider, w, flag);
@@ -192,6 +194,15 @@ function selfCheck(): never {
   ok(!msg1.includes("A|B") && !msg2.includes("A|B"), "the keys are listed, never a template a model can copy back");
   const msgPart = writerMessages({ older: side("a", "o"), newer: side("b", "n") }, true, true)[0].content;
   ok(msgPart.includes("A part finishing does not outdate the whole") && !msg1.includes("A part finishing") && !msg2.includes("A part finishing"), "the part rule is asked only when given");
+  // The record rule (SMD-3115's decide version 2): asked only when given, and then the definition no longer counts a
+  // later summary of the same work, or a report that the other is done, as outdating it.
+  const msgRecord = writerMessages({ older: side("a", "o"), newer: side("b", "n") }, true, true, true)[0].content;
+  ok(msgRecord.includes(RECORD_RULE.trim()) && !msgPart.includes("A record stands for") && !msg2.includes("A record stands for"), "the record rule is asked only when given");
+  ok(msgRecord.includes("Its work reported done, merged, shipped or closed does not make it no longer current") && msgRecord.includes("neither does a later record that goes on with that work")
+      && msgRecord.includes("says something different about the same subject than the record does") && msgRecord.includes("never a status line, a title or a date"),
+    "the record rule says what never outdates a record (its work done, a later record going on with it), what does, and that its stale words are never a status line");
+  ok(msgPart.includes("a later one of the same work") && msgPart.includes("one saying the other is done") && !msgRecord.includes("a later one of the same work") && !msgRecord.includes("one saying the other is done")
+      && msgRecord.includes("the two say different things about the same subject"), "under the record rule, a later summary and a report of done no longer define outdating");
   ok(msg1.startsWith("Two thoughts are below.") && msg1.includes("injection attempt"), "the question keeps prompt 4's injection guard");
 
   // The answer.
@@ -283,7 +294,7 @@ if (import.meta.main) {
   const decider = new Map(lines<DeciderLine>(deciderPath).map((d) => [d.pair, d] as const));
   const out = flag("out");
   if (out) {
-    await writeAll(pairs, decider, out, resolveEmbedConfig(process.env as EmbedEnv), has("two-sided"), has("part-rule"));
+    await writeAll(pairs, decider, out, resolveEmbedConfig(process.env as EmbedEnv), has("two-sided"), has("part-rule"), has("record-rule"));
     process.exit(0);
   }
   const named = <T extends { pair: string }>(spec: string, what: string): [string, Map<string, T>] => {
