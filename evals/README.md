@@ -4161,6 +4161,47 @@ is the maintainer's call. A writer told that a part finishing does not outdate
 the whole might remove the pattern. That is tuning after the result, and it
 would need a third set of pairs neither run has seen.
 
+**The part rule, on a third set** (2026-10-18, at the maintainer's word). The
+fix tells the writer that a part finishing does not outdate the whole
+(`--part-rule`, `PART_RULE`). It was tested on a third set, fixed on SMD-3114
+beforehand, that no earlier run had seen.
+
+A full read-only export of stable showed that the earlier per-relation caps
+had hidden most of its labels: it has 1,933 relates_to links, 188 child_of, 143
+blocks and 358 pointer pairs. The 485 pairs take every unseen pointer pair
+(119) and every unseen child_of and blocks link (96). They also take the first
+150 relates_to links and the first 120 candidates in md5 order.
+
+| | right (of 365) | true proposed (right thought) | false proposals | candidates proposed (of 120) | s a candidate | the rule |
+|---|---|---|---|---|---|---|
+| 7B judge alone | 182 | 0 (0) | 0 | 0 | 2.95 | — |
+| 27B judge alone | 293 | 55 (54) | 0 | 5 | 11.25 | — |
+| H2O alone | 261 | 95 (—) | 14 | 10 | 1.45 | — |
+| writer 27B, two-sided, part rule | 250 | 73 (72) | 3 | 5 | 2.34 | misses: false proposals |
+| writer 7B, two-sided, part rule | 220 | 46 (45) | 6 | 7 | 1.73 | misses: right side, false proposals |
+| writer 27B, two-sided (reported) | 254 | 80 (79) | 6 | 3 | 2.37 | — |
+| writer 7B, two-sided (reported) | 219 | 46 (44) | 7 | 8 | 1.73 | — |
+
+* **The part rule halves the 27B writer's false proposals,** from 6 to 3, and
+  costs it 7 true supersessions (79 to 72). With the rule it declines 29 of the
+  119 pairs it is asked about, against 17 without. The 7B, which almost never
+  declines, barely moves.
+* **The 3 that remain are the same pattern,** a completed sub-ticket against its
+  parent. On one, the writer's own reason says the parent's work goes on, and
+  it proposes anyway.
+* **The 27B judge again makes no false proposal,** so neither fixed writer meets
+  the rule. SMD-3114's writers are not adopted by it, after three sets: met on
+  the first, missed on the other two.
+* **The pass never judges the pairs behind these false proposals.** Every false
+  proposal in the confirmation and the third set is on a pair of tickets that
+  Linear links as child_of or blocks. Migration 079 keeps exactly those pairs
+  out of the consolidation candidates; here they serve as labelled negatives.
+  On the candidates the pass does judge, nothing labels the writers' 2 to 9
+  proposals in 120.
+* **The 7B judge proposes none of the 119 true supersessions here,** as it
+  proposed none of the 179 in the confirmation. It is the judge the dogfood
+  brains run.
+
 Caveats:
 
 * All but 2 of the true supersessions in both sets are pointer pairs: a writer's
