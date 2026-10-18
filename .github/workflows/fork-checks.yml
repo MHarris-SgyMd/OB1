@@ -354,6 +354,14 @@ jobs:
         working-directory: evals
         run: bun eval-judge-decide.ts --self-check
 
+      # H2O deciding supersession, an LLM writing only the proposal (SMD-3114):
+      # the writer's question and answer, its quotes checked in the side they
+      # name (and, two-sided, the stale one in the other), the scoring, and the
+      # rule fixed before the run. No decider, no model.
+      - name: Proposal writer rules
+        working-directory: evals
+        run: bun eval-judge-propose.ts --self-check
+
       # The projection-replay spike's rules (SMD-1998): the snapshot key per
       # projection, the replay rule branch by branch, the five scenarios on a
       # hand-known corpus, the sample, the cost arithmetic, the verdict against
