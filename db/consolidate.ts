@@ -155,9 +155,11 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeRefusal, probeUntil, ProviderDown, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { consolidatePassKey, decidePair } from "../server-portable/consolidate-decide.ts";
+import { resolveJevConfig, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeRefusal, probeTier, probeUntil, ProviderDown, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
-  actorKindOf, consolidateKey, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
+  actorKindOf, judgedRecipe, CONSOLIDATE_PROMPT_VERSION, VERDICTS, judgePair, passSettledNote, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, JUDGE_LOGPROBS, staleStandings, staleStandingsText, staleStandingText,
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
   type Judgement, type StaleStandingRow,
 } from "../server-portable/consolidate.ts";
@@ -514,19 +516,38 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   };
 
   const cfg = resolveEmbedConfig(env as EmbedEnv);
+  // Decide mode (SMD-3115): the typed-decision tier's model gives each verdict, and the judge's model writes only
+  // the proposals it calls. It needs the tier, at OB1_JEV_BASE_URL, and the model the tier is held to is the
+  // decider, so an answer from any other is refused (the pass key names the decider).
+  // A review (--accept/--reject) judges nothing, so it needs no tier.
+  let jev: JevConfig | null = null;
+  if (cfg.decider && !REVIEW_ONLY) {
+    const tier = resolveJevConfig(env as JevEnv);
+    if (!tier) return refused("usage", `\n  OB1_CONSOLIDATE_DECIDER is ${cfg.decider} and OB1_JEV_BASE_URL is unset: decide mode asks the typed-decision tier for every verdict (SMD-3115). Point OB1_JEV_BASE_URL at the tier serving ${cfg.decider}, or unset OB1_CONSOLIDATE_DECIDER for the judge.`);
+    if (tier.model && tier.model !== cfg.decider) return refused("usage", `\n  OB1_JEV_MODEL is ${tier.model} and OB1_CONSOLIDATE_DECIDER is ${cfg.decider}: the tier's verdicts would come from a model the pass key does not name. Set the two to the same model.`);
+    jev = { ...tier, model: cfg.decider };
+  }
   // The judge's model, not the extractor's: OB1_JUDGE_MODEL, else the metadata
   // model (SMD-1901). The key carries it, so a pass under another judge is
-  // another pass — --status and preflight report each by name.
-  const JOB = consolidateKey(cfg.judgeModel);
+  // another pass — --status and preflight report each by name. In decide mode
+  // the key names the decider and the writer (consolidatePassKey).
+  const JOB = consolidatePassKey(cfg);
 
   say(`  job:    ${JOB}`);
   // Which knob named it is read off the resolved pair, not the raw variable: a
   // value the resolver treats as unset (empty, or the metadata model's own name)
   // is the metadata model here too, however it was spelled.
   if (!REVIEW_ONLY) say(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== cfg.metadataModel ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}; outdates recorded at confidence >= ${MIN_CONFIDENCE}, the token probability where the endpoint returns one`);
+  if (jev) say(`  decide: ${cfg.decider} through the typed-decision tier at ${jev.endpoint.base} gives each verdict, its P(outdates) the confidence; ${cfg.judgeModel} only writes the proposals it calls, two-sided with the part rule (OB1_CONSOLIDATE_DECIDER, SMD-3115)`);
   // What may leave the box (SMD-1903): a pair either row of which the gate
   // refuses is not judged, and the thought's claim fails naming the rule.
   if (!REVIEW_ONLY) say(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
+  if (jev) say(`  tier:   ${egressDescription(jev.endpoint, jev.egress, "OB1_JEV_LOCAL")}`);
+  if (jev) {
+    // The tier's gate, as the chat endpoint's below: a policy that refuses every row stops the run before it claims.
+    const blanket = blanketGate({ endpoint: jev.endpoint, policy: jev.egress, units: env.OB1_WORKER_KEY ? undefined : ROW_UNITS, verb: "decided", localKnobKey: "OB1_JEV_LOCAL" });
+    if (blanket && !STATUS_ONLY && !DRY_RUN) return refused("egress", `\n  ${blanket}`);
+  }
   {
     // A policy that refuses whatever the row (SMD-1903): stop before claiming,
     // rather than fail every row in the pool one at a time. A dry run and
@@ -558,12 +579,17 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * answers (review pass 2). After a pair's timeout the probe has the call's
    * whole timeout, and the pass's stop ends it.
    */
-  const probe = (ms = Math.min(TIMEOUT_S, 60) * 1000, wake?: AbortSignal) => probeChat(cfg.chat, cfg.judgeModel, ms, wake);
+  // In decide mode both must answer: the writer's chat endpoint, then the tier serving the decider (SMD-3115) — a
+  // tier that is down while the chat endpoint answers is still an outage, not a pass to go on with.
+  const probe = async (ms = Math.min(TIMEOUT_S, 60) * 1000, wake?: AbortSignal): Promise<Probe> => {
+    const chat = await probeChat(cfg.chat, cfg.judgeModel, ms, wake);
+    return jev && chat.state === "up" ? probeTier(jev, cfg.decider, ms, wake) : chat;
+  };
   const outage = new ProviderOutage();
   /** Probe until the provider answers, saying when it stopped and when it answered; a stop ends the wait. */
   async function waitForProvider(wake: AbortSignal): Promise<void> {
     const down = Date.now();
-    err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${cfg.judgeModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+    err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${cfg.judgeModel} at ${cfg.chat.base} for one token${jev ? `, then reads the tier's /info at ${jev.endpoint.base},` : ""} after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
     // Said to the sleep scheduler, which sets extraction to the newer work
     // while the judge waits (SMD-3008); a stop wakes the probes, so the end is
     // said before the pass settles.
@@ -579,6 +605,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   }
   /** The start's refusal of what a probe found — the judge model unserved, or the endpoint refusing — or null. */
   function startRefusal(p: Probe): string | null {
+    if (p.state !== "up" && p.tier && p.state !== "out") {
+      return `\n  ${p.why.slice(0, 300)} at start.\n` +
+        `  A --follow worker refuses this before it claims anything (SMD-2599, SMD-3115): ${p.state === "missing" ? `serve ${cfg.decider} at OB1_JEV_BASE_URL, or set OB1_CONSOLIDATE_DECIDER to the model the tier serves (a new pass key). Once running, a decider that goes missing is waited for.` : "check OB1_JEV_BASE_URL: it must be an ob1-jev/1 tier (jev/README.md)."}`;
+    }
     if (p.state === "missing") {
       return `\n  ${cfg.chat.base} does not serve ${cfg.judgeModel} at start (${p.why.slice(0, 300)}).\n` +
         "  A --follow worker refuses this before it claims anything (SMD-2599): pull the model, or set OB1_JUDGE_MODEL (else OB1_METADATA_MODEL) to one the provider serves. Once running, a model that goes missing is waited for.";
@@ -1460,9 +1490,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // SMD-1726: the judge hears who wrote each side — the database's mark
         // (050), never a payload field — so "an agent's summary supersedes what
         // the operator typed" is a proposal it can decline on that ground.
-        j = await judgePair({ content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined, writer: actorKindOf(older.metadata) },
-                            { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined, writer: actorKindOf(row.metadata) },
-                            cfg, AbortSignal.any([AbortSignal.timeout(TIMEOUT_S * 1000), onHardStop.signal]), keyName, { logprobs: JUDGE_LOGPROBS });
+        const olderSide = { content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined, writer: actorKindOf(older.metadata) };
+        const newerSide = { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined, writer: actorKindOf(row.metadata) };
+        const callSignal = AbortSignal.any([AbortSignal.timeout(TIMEOUT_S * 1000), onHardStop.signal]);
+        // Decide mode (SMD-3115): the tier's verdict, the judge's model writing only a proposal it calls; one
+        // deadline for both calls, as for the judge's one.
+        j = jev ? await decidePair(olderSide, newerSide, cfg, jev, callSignal, keyName)
+                : await judgePair(olderSide, newerSide, cfg, callSignal, keyName, { logprobs: JUDGE_LOGPROBS });
       } catch (e) {
         llmMs += Date.now() - t0;
         // The hard stop aborted the call: the thought is abandoned, not failed.

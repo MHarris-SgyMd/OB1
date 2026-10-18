@@ -117,3 +117,44 @@ judge's easy pairs", has the tables.
 - **The binary shape is this adapter's choice, not H2O's.** SMD-3058's "same
   subject?" question did poorly in it: it settled 93 pairs unrelated and was
   right on 33. It is the first thing to vary before another binary workload.
+
+## SMD-3115: deciding in the consolidation pass
+
+SMD-3114 measured H2O deciding supersession while an LLM writes only the
+proposal, and the maintainer adopted it on 2026-10-18 as the consolidation
+pass's decide mode, to be reviewed on the canary. With
+`OB1_CONSOLIDATE_DECIDER=h2o-lightning-4b`, `db/consolidate.ts` asks this tier
+prompt 4's five verdicts as one choice for every pair. When the top verdict is
+outdates it asks `OB1_JUDGE_MODEL` only to write the proposal, two-sided with
+the part rule, and both quotes must check out in the texts. Anything else
+leaves the pair at H2O's best verdict that proposes nothing. A proposal records
+H2O's P(outdates) as its confidence, under the pass's usual floor of 0.5.
+
+For a brain on this Mac, serve the tier on the host and point the stack at it:
+
+```bash
+JEV_PORT=8022 <venv>/bin/python -I jev/h2o/serve.py
+```
+
+```bash
+# deploy/.env
+OB1_CONSOLIDATE_DECIDER=h2o-lightning-4b
+OB1_JUDGE_MODEL=qwen3.8:27b                         # the writer SMD-3114 measured
+OB1_JEV_BASE_URL=http://host.containers.internal:8022
+OB1_JEV_MODEL=h2o-lightning-4b
+OB1_JEV_LOCAL=1
+```
+
+- **The tier must stay up.** Preflight dials `OB1_JEV_BASE_URL` on every server
+  start and fails when nothing answers, so the server will not start without
+  the tier.
+- **An outage mid-pass** is handled like the judge's: a follower checks the
+  writer's chat endpoint and then the tier's `/info` before it claims anything,
+  and waits out an outage of either.
+- **The pass key** is `consolidate:h2o-lightning-4b+<writer>@p4d1`, so turning
+  decide mode on starts a fresh pass over the pool. Proposals are reviewed as
+  the judge's are (`bun db/consolidate.ts --list`, then `--accept` or
+  `--reject`). Each one's lineage records the decider, the writer, decide
+  mode's prompt hash, and what each model said.
+- **Memory:** in float16 the tier holds about 9 GB of unified memory beside
+  Ollama's models.

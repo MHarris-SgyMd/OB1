@@ -4211,6 +4211,20 @@ Caveats:
 * A proposal still goes to review. The writer is the precision gate only in
   the sense that it decides which pairs reach the queue.
 
+**Adopted anyway, for review on the canary (SMD-3115).** The maintainer adopted
+H2O with the 27B two-sided writer and the part rule on 2026-10-18, the rule
+notwithstanding. The reason: the misses are on pairs migration 079 keeps out of
+the pass, and only the canary's review queue can say what the writer proposes
+on the candidates the pass does judge. It is the pass's decide mode
+(`OB1_CONSOLIDATE_DECIDER`, `server-portable/consolidate-decide.ts`): the
+question, the writer's prompt and the quote checks are the ones measured here,
+moved out of this eval, which imports them back. The pass adds one floor that
+this eval did not apply: a proposal is recorded at H2O's P(outdates) and only at
+0.5 or more. On the third set that drops 5 of the adopted writer's 81 proposals:
+3 true supersessions, 1 false proposal and 1 unlabelled candidate. The writer
+without the part rule would lose 8 of 64 on the first set and 5 of 116 on the
+confirmation.
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline

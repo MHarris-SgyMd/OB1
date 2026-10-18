@@ -858,6 +858,10 @@ services:
       OB1_JEV_BASE_URL: ${OB1_JEV_BASE_URL:-}
       OB1_JEV_MODEL: ${OB1_JEV_MODEL:-}
       OB1_JEV_LOCAL: ${OB1_JEV_LOCAL:-}
+      # Consolidation's decide mode (SMD-3115): the tier's model gives each
+      # verdict and OB1_JUDGE_MODEL writes only the proposals it calls. The
+      # workers inherit this block; preflight here names the pass key by it.
+      OB1_CONSOLIDATE_DECIDER: ${OB1_CONSOLIDATE_DECIDER:-}
       OB1_LLM_TIMEOUT: ${OB1_LLM_TIMEOUT:-}
       # What may leave the box (SMD-1903): whether a thought's text may reach
       # an endpoint not declared local — deny (the default), allow or off —

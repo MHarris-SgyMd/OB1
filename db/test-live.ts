@@ -54,6 +54,7 @@ import { MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import type { PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
+import { decideKey, DECIDE_PROMPT, DECIDE_VERSION, PART_RULE } from "../server-portable/consolidate-decide.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, extractionKey } from "../server-portable/entities.ts";
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
 import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
@@ -7200,6 +7201,122 @@ if (want("16")) {
   try { unlinkSync(dump); } catch { /* already gone */ }
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_entities`;
+
+  // SMD-3115, decide mode: a stub tier (ob1-jev/1) answers prompt 4's five
+  // verdicts as one choice, and a stub writer, asked only where the tier's top
+  // is outdates, writes the proposal. The pass key names both; a standing
+  // proposal is recorded at the tier's P(outdates) with decide mode's lineage,
+  // a related pair is a relation with no writer call, and a writer's "none"
+  // leaves neither. A start without the tier, or with the tier held to
+  // another model, is refused before anything is claimed.
+  {
+    const DECIDER = "h2o-stub", WRITER = "stub-writer";
+    const DKEY = decideKey(DECIDER, WRITER);
+    const thoughtsIn = (prompt: string) => ["a", "b"].map((s) => new RegExp(`<thought_${s}>\\n([\\s\\S]*?)\\n</thought_${s}>`).exec(prompt)?.[1] ?? "").join(" | ");
+    let tierServes = DECIDER;
+    let tierCalls = 0;
+    const tier = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const path = new URL(req.url).pathname;
+        const model = { name: tierServes, source: "stub", revision: "r1", weights_sha256: "w1", calibrator_sha256: "c1", rules: "x1" };
+        if (path === "/info") return Response.json({ contract: "ob1-jev/1", model, kinds: ["binary", "choice"], max_options: 24, max_batch: 64, max_tokens: 32000 });
+        if (path !== "/decide") return new Response("not found", { status: 404 });
+        const body = (await req.json()) as { model?: string; decisions: { context: string; options: { id: string }[] }[] };
+        if (body.model !== undefined && body.model !== tierServes) return Response.json({ error: `this service serves ${tierServes}, not ${body.model}` }, { status: 409 });
+        tierCalls++;
+        const d = body.decisions[0];
+        const both = thoughtsIn(d.context);
+        const p: Record<string, number> = /tenancy/.test(both) ? { unrelated: 0.03, related: 0.1, evolves: 0.05, duplicate: 0.02, outdates: 0.8 }
+          : /cutover/.test(both) ? { unrelated: 0.05, related: 0.2, evolves: 0.1, duplicate: 0.05, outdates: 0.6 }
+          : /runbook/.test(both) ? { unrelated: 0.05, related: 0.7, evolves: 0.15, duplicate: 0.05, outdates: 0.05 }
+          : { unrelated: 0.9, related: 0.05, evolves: 0.02, duplicate: 0.01, outdates: 0.02 };
+        const probabilities: Record<string, number> = { ...Object.fromEntries(d.options.map((o) => [o.id, p[o.id] ?? 0])), __insufficient_evidence__: 0 };
+        const ids = Object.keys(probabilities);
+        return Response.json({ contract: "ob1-jev/1", model, ms: 1, results: [{ kind: "choice", probabilities, selected: ids.reduce((x, k) => (probabilities[k] > probabilities[x] ? k : x)), abstained: false, p_insufficient: 0, logits: ids.map(() => 0), temperature: 1, tokens: 10, truncated: false }] });
+      },
+    });
+    let writerCalls = 0, writerPartRule = 0;
+    const writerModels = new Set<string>();
+    const writer = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const body = (await req.json()) as { model?: string; messages?: { content: string }[] };
+        const prompt = body.messages?.[0]?.content ?? "";
+        if (prompt === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+        writerCalls++;
+        writerModels.add(String(body.model));
+        if (prompt.includes(PART_RULE.trim())) writerPartRule++;
+        const answer = /tenancy/.test(thoughtsIn(prompt)) ? { current: "B", evidence: "now runs 90 days", stale: "runs 30 days", reason: "the tenancy was extended" }
+          : { current: "none", evidence: "", stale: "", reason: "both stay current" };
+        return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }] });
+      },
+    });
+    try {
+      const tenOld = await seed("[16d] The tenancy runs 30 days.", 50, 3, ["tenancy"]);
+      const tenNew = await seed("[16d] The tenancy now runs 90 days.", 50, 0, ["tenancy"]);
+      await seed("[16d] The cutover is planned for Friday.", 51, 3, ["cutover"]);
+      await seed("[16d] The cutover checklist has a new owner.", 51, 0, ["cutover"]);
+      const runOld = await seed("[16d] The runbook lives in the wiki.", 52, 3, ["runbook"]);
+      const runNew = await seed("[16d] The runbook has a section on restores.", 52, 0, ["runbook"]);
+      const denv: Record<string, string | undefined> = {
+        ...env, OB1_LLM_BASE_URL: `http://127.0.0.1:${writer.port}/v1`, OB1_JUDGE_MODEL: WRITER, OB1_CONSOLIDATE_DECIDER: DECIDER,
+        OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_MODEL: DECIDER, OB1_JEV_LOCAL: "1",
+      };
+      const decide = (e: Record<string, string | undefined>, ...extra: string[]) => runScript(["bun", join(HERE, "consolidate.ts"), "--url", URL_!, ...extra], { env: e as Record<string, string>, cwd: HERE });
+      const last = (out: string) => out.trim().split("\n").filter(Boolean).slice(-2).join(" | ").slice(0, 300);
+
+      const noTier = await decide({ ...denv, OB1_JEV_BASE_URL: "" });
+      assert(noTier.code === 2 && /OB1_CONSOLIDATE_DECIDER is h2o-stub and OB1_JEV_BASE_URL is unset/.test(noTier.out) && tierCalls === 0 && writerCalls === 0,
+        `decide mode with no tier is refused at start, naming both knobs (exit ${noTier.code}: ${last(noTier.out)})`);
+      const heldElsewhere = await decide({ ...denv, OB1_JEV_MODEL: "h2o-other" });
+      assert(heldElsewhere.code === 2 && /OB1_JEV_MODEL is h2o-other and OB1_CONSOLIDATE_DECIDER is h2o-stub/.test(heldElsewhere.out),
+        `…and so is a tier held to a model the key would not name (exit ${heldElsewhere.code}: ${last(heldElsewhere.out)})`);
+      const ddry = await decide(denv, "--dry-run");
+      const banner = ddry.out.split("\n").filter((l) => /^\s*(job|decide|tier):/.test(l));
+      assert(ddry.code === 0 && banner.some((l) => /^\s*job:\s+/.test(l) && l.trim().endsWith(DKEY)) && banner.some((l) => /^\s*decide: h2o-stub through the typed-decision tier at http:\/\/127\.0\.0\.1:\d+ gives each verdict/.test(l))
+          && banner.some((l) => /^\s*tier:\s+/.test(l)) && /add 6 thoughts to the pool/.test(ddry.out) && tierCalls === 0 && writerCalls === 0,
+        `a dry run names decide mode's key, its decider and the tier's egress, and asks neither model (exit ${ddry.code}: ${banner.join(" | ").trim().slice(0, 300)})`);
+
+      const drun = await decide(denv);
+      const dprops = (await sql`SELECT sp.older_id::text AS o, sp.newer_id::text AS n, sp.verdict, sp.confidence::float AS confidence, d.recipe
+                                  FROM supersession_proposals sp LEFT JOIN derivations d ON d.artifact_kind = 'proposal' AND d.artifact_id = sp.id AND d.produced_by = ${DKEY}
+                                 WHERE sp.judge_key = ${DKEY}`) as { o: string; n: string; verdict: string; confidence: number; recipe: Record<string, unknown> | null }[];
+      assert(drun.code === 0 && dprops.length === 1 && dprops[0].o === tenOld && dprops[0].n === tenNew && dprops[0].verdict === "newer_supersedes_older" && dprops[0].confidence === 0.8,
+        `the tier's outdates with the writer's standing proposal is the run's one proposal, under decide mode's key at the tier's P(outdates) (exit ${drun.code}: ${JSON.stringify(dprops.map(({ recipe: _, ...r }) => r))}; ${last(drun.out)})`);
+      type DecideRecipe = { model?: string; decider?: string; decide_version?: number; prompt_hash?: string; judged?: { verdict?: string; confidence_source?: string; evidence_found?: boolean; decide?: { top?: string; decider?: { name?: string }; writer?: { model?: string; current?: string; stale_found?: boolean } } } };
+      const rec = dprops[0]?.recipe as DecideRecipe | null | undefined;
+      assert(rec?.model === WRITER && rec.decider === DECIDER && rec.decide_version === DECIDE_VERSION && rec.prompt_hash === promptHash(DECIDE_PROMPT)
+          && rec.judged?.verdict === "outdates" && rec.judged.confidence_source === "token" && rec.judged.evidence_found === true
+          && rec.judged.decide?.top === "outdates" && rec.judged.decide.decider?.name === DECIDER && rec.judged.decide.writer?.model === WRITER && rec.judged.decide.writer.current === "newer" && rec.judged.decide.writer.stale_found === true,
+        `its lineage names the writer, the decider and decide mode's prompt, and carries what the tier and the writer said (${JSON.stringify(rec ?? null).slice(0, 400)})`);
+      const drels = (await sql`SELECT thought_id::text AS t, payload->>'target' AS target, payload->>'relation' AS relation, payload->>'judge_key' AS key
+                                 FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL
+                                  AND thought_id IN (SELECT id FROM thoughts WHERE content LIKE '[16d]%')`) as { t: string; target: string; relation: string; key: string }[];
+      assert(drels.length === 1 && drels[0].t === runNew && drels[0].target === runOld && drels[0].relation === "related" && drels[0].key === DKEY,
+        `the tier's related is a relation under decide mode's key, and the writer's "none" leaves the cutover pair neither a proposal nor a relation, the relation words' mass under the floor (${JSON.stringify(drels)})`);
+      assert(tierCalls === 3 && writerCalls === 2 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2,
+        `the tier was asked about each of the three pairs and the writer only about the two it called outdates, as the judge's model with the part rule (tier ${tierCalls}, writer ${writerCalls}: ${[...writerModels].join(", ")})`);
+      const dclaims = Object.fromEntries(((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${DKEY} GROUP BY status`) as { status: string; c: number }[]).map((r) => [r.status, Number(r.c)]));
+      assert(dclaims.succeeded === 6 && Object.keys(dclaims).length === 1, `every thought's claim succeeded under decide mode's key (${JSON.stringify(dclaims)})`);
+
+      // A follower checks the tier at start as it checks the chat endpoint: a
+      // tier serving another model is refused before anything is claimed.
+      tierServes = "h2o-other";
+      const follower = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", URL_!, "--follow", "1"], { env: denv as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+      const stopFollower = setTimeout(() => follower.kill(), 30_000);
+      const [fo, fe] = await Promise.all([new Response(follower.stdout).text(), new Response(follower.stderr).text()]);
+      const fcode = await follower.exited;
+      clearTimeout(stopFollower);
+      assert(fcode === 2 && /the tier at http:\/\/127\.0\.0\.1:\d+ serves h2o-other, not h2o-stub at start/.test(fe) && /serve h2o-stub at OB1_JEV_BASE_URL/.test(fe) && tierCalls === 3,
+        `a follower whose tier serves another model is refused at start, naming the remedy, and decides nothing (exit ${fcode}: ${last(fo + fe)})`);
+    } finally {
+      tier.stop(true);
+      writer.stop(true);
+    }
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM ob1_entities`;
+  }
 }
 
 if (want("17")) {

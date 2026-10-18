@@ -23,7 +23,11 @@ import { MEND_BATCH, MEND_SCAN, MENDER_ACTOR, mendIntervalFrom, mendOnce, newMen
 import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
-import { actorKindOf, buildJudgeMessages, cleanForDisplay, CONSOLIDATE_PROMPT_VERSION, evidenceIn, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
+import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, evidenceIn, judgedRecipe, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
+import { consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, PART_RULE, PASS_WRITER, stands, verdictDistribution, WRITER_HEAD, writerMessages } from "./consolidate-decide.ts";
+import { resolveJevConfig } from "./jev.ts";
+import { promptHash, proposalRecipe } from "./lineage.ts";
+import { probeTier } from "../db/worker-bootstrap.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
 import { decideEntities, type DecideFn } from "./hybrid-extract.ts";
@@ -1664,6 +1668,134 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
   assert(m("30").intervalS === 30 && m("86400").intervalS === 86400 && m("30").problem === null, "30 and 86400 read as given");
   assert(m("86401").intervalS === 60 && /from 1 to 86400/.test(m("86401").problem ?? "") && m("1.5").intervalS === 60 && /OB1_VECTOR_MEND_INTERVAL="1.5"/.test(m("1.5").problem ?? "") && m("-1").intervalS === 60 && m("fast").problem !== null,
     "past a day, a fraction, a sign or a word: the default, said");
+}
+
+// ── 15. Decide mode: the tier decides, the judge's model writes the proposal ──
+
+console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal written only on its outdates and only when both quotes check, a pass key naming both, and the pass's readers taking it as a judgement");
+{
+  // The key: decide mode's names the decider, the writer and the mode's version; with no decider the judge's stands.
+  assert(consolidatePassKey({ judgeModel: "qwen2.5:7b", decider: "" }) === consolidateKey("qwen2.5:7b"), "no decider: the judge's key");
+  assert(consolidatePassKey({ judgeModel: "qwen3.8:27b", decider: "h2o-lightning-4b" }) === `consolidate:h2o-lightning-4b+qwen3.8:27b@p${CONSOLIDATE_PROMPT_VERSION}d${DECIDE_VERSION}` && decideKey("a", "b") !== consolidateKey("b"),
+    "a decider: a key of its own, apart from the judge's, naming prompt 4's version and decide mode's");
+  assert(resolveEmbedConfig({ OB1_CONSOLIDATE_DECIDER: " h2o-lightning-4b " }).decider === "h2o-lightning-4b" && resolveEmbedConfig({}).decider === "", "OB1_CONSOLIDATE_DECIDER read trimmed; unset, off");
+
+  // H2O's distribution: the tier's insufficient-evidence option out, the five renormalised.
+  const dist = verdictDistribution({ unrelated: 0.1, related: 0.2, evolves: 0.1, duplicate: 0.1, outdates: 0.3, __insufficient_evidence__: 0.2 });
+  assert(Math.abs(dist.outdates - 0.375) < 1e-4 && Math.abs(VERDICTS.reduce((s, v) => s + dist[v], 0) - 1) < 1e-3, "the five renormalised without the tier's own option");
+
+  // The judgement: a standing proposal is an outdates in its side; anything else is H2O's best verdict that proposes nothing.
+  const p = { unrelated: 0.05, related: 0.25, evolves: 0.1, duplicate: 0.05, outdates: 0.55 };
+  const prop = { current: "newer" as const, evidence: "shipped on Monday", stale: "ship on Friday", reason: "later", malformed: false };
+  const stood = decideJudgement(p, prop, true);
+  assert(stood.verdict === "outdates" && stood.supersedes === "newer" && stood.evidence === "shipped on Monday" && stood.evidenceFound === true, "a standing proposal: outdates, the side it names, its quote");
+  assert(proposalVerdict(stood) === "newer_supersedes_older" && proposalConfidence(stood).confidence === 0.55 && proposalConfidence(stood).source === "token", "the pass records it at H2O's P(outdates), as a token probability under its floor");
+  const declined = decideJudgement(p, { ...prop, current: "none" }, false);
+  assert(declined.verdict === "related" && proposalVerdict(declined) === null && relationVerdict(declined) === "related" && /neither current/.test(declined.reason), "a decline: H2O's best verdict that proposes nothing, a relation, said");
+  assert(relationConfidence(declined).mass === 0.4 && relationConfidence(declined).source === "token", "its relation floor reads the relation words' mass in H2O's distribution");
+  const unchecked = decideJudgement(p, prop, false);
+  assert(unchecked.verdict === "related" && /quotes did not check out/.test(unchecked.reason), "quotes that fail: no proposal, said");
+  const noWriter = decideJudgement({ ...p, outdates: 0.05, unrelated: 0.55 }, null, false);
+  assert(noWriter.verdict === "unrelated" && noWriter.reason === "" && relationVerdict(noWriter) === null, "no writer asked: H2O's top verdict");
+  assert((judgedRecipe({ ...stood, decide: { top: "outdates" } }, "token").decide as { top?: string } | undefined)?.top === "outdates", "the recipe carries decide mode's note");
+  const found = { similarity: 0.9, candidates: 5, minSimilarity: 0.7 };
+  const decided = proposalRecipe({ judgeModel: "qwen3.8:27b", decider: "h2o-lightning-4b" }, found), judgedR = proposalRecipe({ judgeModel: "qwen2.5:7b", decider: "" }, found);
+  assert(decided.model === "qwen3.8:27b" && decided.decider === "h2o-lightning-4b" && decided.decide_version === DECIDE_VERSION && decided.prompt_hash === promptHash(DECIDE_PROMPT) && decided.prompt_hash !== promptHash(CONSOLIDATE_PROMPT),
+    "decide mode's lineage names the writer, the decider and its own prompt's hash");
+  assert(judgedR.prompt_hash === promptHash(CONSOLIDATE_PROMPT) && !("decider" in judgedR) && !("decide_version" in judgedR), "…and the judge's names prompt 4's, as before");
+
+  // The writer's question: prompt 4's rendering of both thoughts, two-sided with the part rule, as the pass runs it.
+  const older = { content: "the plan is to ship on Friday", createdAt: "2026-10-01T00:00:00Z" };
+  const newer = { content: "we shipped on Monday instead of Friday", createdAt: "2026-10-03T00:00:00Z" };
+  const msg = writerMessages({ older, newer }, PASS_WRITER.twoSided, PASS_WRITER.partRule)[0].content;
+  assert(msg.startsWith(WRITER_HEAD) && msg.includes("<thought_a>\nthe plan is to ship on Friday\n</thought_a>") && msg.includes('"stale": words copied') && msg.includes(PART_RULE.trim()),
+    "the pass's writer: both thoughts, the stale quote and the part rule");
+  assert(stands(prop, older.content, newer.content, true) && !stands({ ...prop, stale: "Monday" }, older.content, newer.content, true), "both quotes checked, each in its own side");
+
+  // decidePair end to end, against an in-process tier and writer.
+  const MODEL = { name: "h2o-test", source: "stub", revision: "r1", weights_sha256: "w1", calibrator_sha256: "c1", rules: "x1" };
+  let tierP: Record<string, number> = p, tierStatus = 200, tierCalls = 0;
+  const tier = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const path = new URL(req.url).pathname;
+      if (path === "/info") return Response.json({ contract: "ob1-jev/1", model: MODEL, kinds: ["binary", "choice"], max_options: 24, max_batch: 64, max_tokens: 32000 });
+      if (path !== "/decide") return new Response("not found", { status: 404 });
+      tierCalls++;
+      if (tierStatus !== 200) return new Response("the tier failed", { status: tierStatus });
+      const d = ((await req.json()) as { decisions: { id?: string; options: { id: string }[] }[] }).decisions[0];
+      const probabilities: Record<string, number> = { ...Object.fromEntries(d.options.map((o) => [o.id, tierP[o.id] ?? 0])), __insufficient_evidence__: 0 };
+      const ids = Object.keys(probabilities);
+      return Response.json({ contract: "ob1-jev/1", model: MODEL, ms: 1, results: [{ id: d.id, kind: "choice", probabilities, selected: ids.reduce((a, k) => (probabilities[k] > probabilities[a] ? k : a)), abstained: false, p_insufficient: 0, logits: ids.map(() => 0), temperature: 1, tokens: 10, truncated: false }] });
+    },
+  });
+  let writerAnswer = JSON.stringify({ current: "B", evidence: "shipped on Monday", stale: "ship on Friday", reason: "it shipped later" });
+  let writerStatus = 200, writerCalls = 0, writerBody: { model?: string; messages?: { content: string }[] } = {};
+  const writer = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      writerCalls++;
+      writerBody = (await req.json()) as typeof writerBody;
+      if (writerStatus !== 200) return new Response("busy", { status: writerStatus });
+      return Response.json({ choices: [{ message: { content: writerAnswer } }] });
+    },
+  });
+  try {
+    const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${writer.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "writer-test", OB1_CONSOLIDATE_DECIDER: "h2o-test" });
+    const jev = resolveJevConfig({ OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "h2o-test" })!;
+    const a = await decidePair(older, newer, cfg, jev);
+    assert(a.verdict === "outdates" && a.supersedes === "newer" && a.decide.top === "outdates" && a.decide.writer?.stale_found === true && a.decide.decider.name === "h2o-test" && writerCalls === 1,
+      "the tier's outdates asks the writer, and its standing proposal is the judgement");
+    assert(writerBody.model === "writer-test" && (writerBody.messages?.[0]?.content ?? "").includes(PART_RULE.trim()), "the writer is the judge's model, asked the pass's question");
+    tierP = { ...p, outdates: 0.05, related: 0.75 };
+    const b = await decidePair(older, newer, cfg, jev);
+    assert(b.verdict === "related" && b.decide.writer === undefined && writerCalls === 1, "the tier's related: no writer call, the relation stands");
+    tierP = p;
+    writerAnswer = JSON.stringify({ current: "none", evidence: "", stale: "", reason: "both stay current" });
+    const c = await decidePair(older, newer, cfg, jev);
+    assert(c.verdict === "related" && c.decide.writer?.current === "none" && c.decide.writer.stale_found === false && c.decide.writer.evidence_found === false && proposalVerdict(c) === null,
+      "a writer's none: H2O's best verdict that proposes nothing, its note checking no quote");
+    writerAnswer = "not json";
+    const d = await decidePair(older, newer, cfg, jev);
+    assert(d.verdict === "related" && d.decide.writer?.current === "unparsed" && !d.malformed, "a writer's answer that does not parse is a decline, not a malformed judgement");
+    writerStatus = 503;
+    const e = await decidePair(older, newer, cfg, jev).then(() => null, (x: Error & { status?: number }) => x);
+    assert(e?.status === 503 && /Writer request/.test(e.message), "a writer's 503 throws with its status, for the pass to classify");
+    writerStatus = 200;
+    tierStatus = 500;
+    const f = await decidePair(older, newer, cfg, jev).then(() => null, (x: Error & { status?: number }) => x);
+    assert(f !== null && f.status === 500, "a tier's 500 throws with its status, for the pass to classify");
+    tierStatus = 200;
+    const other = resolveJevConfig({ OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "another" })!;
+    const g = await decidePair(older, newer, cfg, other).then(() => null, (x: Error) => x);
+    assert(g !== null && /another/.test(g.message), "an answer from a model the decider does not name is refused");
+
+    // The egress gate, before any request, as judgePair's: a remote writer endpoint under the default policy refuses
+    // the pair, and so does an older side the policy keeps from a remote tier, though the newer side alone would pass
+    // the gate the tier's client applies to the call.
+    const before = { tier: tierCalls, writer: writerCalls };
+    const remoteWriter = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${writer.port}/v1`, OB1_JUDGE_MODEL: "writer-test", OB1_CONSOLIDATE_DECIDER: "h2o-test" });
+    const h = await decidePair(older, newer, remoteWriter, jev).then(() => null, (x: unknown) => x);
+    assert(h instanceof ProviderError && h.kind === "egress" && /^Writer request to /.test(h.message) && tierCalls === before.tier && writerCalls === before.writer,
+      "a writer endpoint the gate refuses: the pair refused before the tier is asked");
+    const allowAll = { OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "source:private-notes" };
+    const localWriter = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${writer.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "writer-test", OB1_CONSOLIDATE_DECIDER: "h2o-test", ...allowAll });
+    const remoteTier = resolveJevConfig({ OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_MODEL: "h2o-test", ...allowAll })!;
+    const i = await decidePair({ ...older, metadata: { source: "private-notes" } }, newer, localWriter, remoteTier).then(() => null, (x: unknown) => x);
+    assert(i instanceof ProviderError && i.kind === "egress" && /^Decision request to /.test(i.message) && tierCalls === before.tier,
+      "an older side the policy keeps from a remote tier: the pair refused before the tier is asked");
+    assert((await decidePair(older, newer, localWriter, remoteTier)).verdict === "related" && tierCalls === before.tier + 1, "…while the same pair without it is decided");
+
+    // The follower's probe of the tier: up when it serves the decider, missing when another, out when nothing answers.
+    assert((await probeTier(jev, "h2o-test", 2000)).state === "up", "probeTier: the tier serving the decider is up");
+    const miss = await probeTier(jev, "h2o-other", 2000);
+    assert(miss.state === "missing" && miss.tier === true && /serves h2o-test/.test(miss.why), "probeTier: a tier serving another model is the decider missing");
+    const dead = resolveJevConfig({ OB1_JEV_BASE_URL: "http://127.0.0.1:1", OB1_JEV_LOCAL: "1" })!;
+    assert((await probeTier(dead, "h2o-test", 2000)).state === "out", "probeTier: nothing answering is an outage");
+  } finally {
+    tier.stop(true);
+    writer.stop(true);
+  }
 }
 
 report();

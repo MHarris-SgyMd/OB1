@@ -196,7 +196,7 @@ import type { SQL } from "bun";
 import { hostname } from "node:os";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractionKey, windowingFor } from "../server-portable/entities.ts";
-import { consolidateKey } from "../server-portable/consolidate.ts";
+import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
 import { heldWords, SLEEP_HELD_NAMED, SLEEP_STALLED_JOIN, STALE_AFTER_INTERVALS, type SleepHeld } from "../server-portable/brain-info.ts";
 import { run as runExtract } from "./extract-entities.ts";
 import { run as runConsolidate } from "./consolidate.ts";
@@ -528,7 +528,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   const FOLLOW = opts.follow === true;
   const env = opts.env ?? process.env;
   const cfg = resolveEmbedConfig(env as EmbedEnv);
-  const JOBS: Record<PassName, string> = { extract: extractionKey(cfg.metadataModel), consolidate: consolidateKey(cfg.judgeModel) };
+  // Consolidation's key is decide mode's when OB1_CONSOLIDATE_DECIDER is set (SMD-3115), the judge's otherwise.
+  const JOBS: Record<PassName, string> = { extract: extractionKey(cfg.metadataModel), consolidate: consolidatePassKey(cfg) };
 
   // The start's reads wait out a database not answering yet, as the sleep's
   // own do (reading, below): the compose service starts beside a Postgres that
