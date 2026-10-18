@@ -99,12 +99,13 @@ Run over the judge's 444 pairs on 2026-10-17. `evals/README.md`, "Settling the
 judge's easy pairs", has the tables.
 
 - **As a cheap first pass behind the 7B,** the judge both dogfood brains run, it
-  fails SMD-3058's rule when gated on its own confidence, and meets it when
-  gated on P(outdates). The outdates gate has the 7B read only the possible
-  supersessions. At a ceiling of 0.5 it settles 93% of the candidates at the
-  7B's accuracy, and costs 1.69 s a candidate against 3.76. On held-out halves
-  it sits on the line, a pair short on one, so it is reopened pending a
-  confirmation run.
+  fails SMD-3058's rule when gated on its own confidence. Gated on P(outdates),
+  it met the rule on the first 444 pairs: the 7B read only the possible
+  supersessions, and at a ceiling of 0.5 the gate settled 93% of the candidates
+  at the 7B's accuracy. It then failed the confirmation on 533 fresh pairs. It
+  was 10 pairs less accurate than the 7B on the pairs it settled, all on
+  relates_to links, which it calls unrelated more often. The cascade is
+  declined.
 - **Its one-pass verdicts come close to the judges'.** On the 170 labelled pairs
   its loosest band settles, it is right on 140, against the 7B's 143 and the
   27B's 156.
