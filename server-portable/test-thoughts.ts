@@ -24,7 +24,7 @@ import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, evidenceIn, judgedRecipe, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
-import { consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, PART_RULE, PASS_WRITER, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
+import { consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, onlyQuoted, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe } from "./lineage.ts";
 import { probeTier } from "../db/worker-bootstrap.ts";
@@ -1718,6 +1718,27 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
       && !v2.includes("a later one of the same work") && !v2.includes("one saying the other is done") && v2.includes("the two say different things about the same subject") && v2.includes("a status and a later status of something still open"),
     "the record rule's definition drops a later summary and a report of done from what outdates; SMD-3114's text stands without it");
   assert(stands(prop, older.content, newer.content, true) && !stands({ ...prop, stale: "Monday" }, older.content, newer.content, true), "both quotes checked, each in its own side");
+  // A quote shortened with "…" or "...": read piece by piece when the pass asks (decide version 2), every piece in its
+  // side and not every piece in the other; as SMD-3114 measured otherwise.
+  const shortened = { ...prop, evidence: "we shipped … instead of Friday", stale: "the plan is ... on Friday" };
+  assert(quoteIn("we shipped … instead of Friday", newer.content, older.content) && quoteIn("the plan is ... on Friday", older.content, newer.content)
+      && stands(shortened, older.content, newer.content, true, true) && !stands(shortened, older.content, newer.content, true) && PASS_WRITER.v2Quotes,
+    "a shortened quote stands piece by piece when the pass reads it so, and not under SMD-3114's whole-quote check");
+  assert(!quoteIn("we shipped … on Tuesday", newer.content, older.content) && !quoteIn("alpha beta … gamma delta", "alpha beta gamma delta", "alpha beta and gamma delta too")
+      && quoteIn("alpha beta gamma delta", "alpha beta gamma delta", "alpha beta and gamma delta too") && quoteIn("we shipped on Monday …", newer.content, older.content),
+    "…a piece missing from its side fails it, every piece also in the other fails it, and a trailing mark is read whole");
+  // A refutation quotes the claim it refutes: version 2 lets the stale claim sit in the current thought where it is
+  // only quoted, between quotation marks, never where the current thought states it too.
+  const claim = "The only cost is index build time.", refutes = '**"The only cost is index build time" is wrong.** Storage grows with every write.';
+  const restates = "The only cost is index build time, and storage grows with every write.";
+  const refutation = { ...prop, evidence: "Storage grows with every write", stale: "The only cost is index build time" };
+  assert(onlyQuoted("the only cost is index build time", refutes) && !onlyQuoted("the only cost is index build time", restates) && !onlyQuoted("index build time", `"index build time" is one cost; index build time recurs`),
+    "onlyQuoted: between quotation marks every time, not where the words are stated, and not when one place of two is quoted");
+  assert(stands(refutation, claim, refutes, true, true) && !stands(refutation, claim, refutes, true) && !stands(refutation, claim, restates, true, true),
+    "a refutation quoting the claim it refutes stands under version 2's reading, not under SMD-3114's, and a thought restating the claim never does");
+  const strawman = { ...refutation, stale: "Storage is free" };
+  assert(!onlyQuoted("an absent phrase", refutes) && !stands(strawman, claim, '"Storage is free" is wrong. Storage grows with every write.', true, true),
+    "…and the claim must be the other thought's: a quoted claim the other never made stands for nothing, and onlyQuoted is false where the words are nowhere");
 
   // decidePair end to end, against an in-process tier and writer.
   const MODEL = { name: "h2o-test", source: "stub", revision: "r1", weights_sha256: "w1", calibrator_sha256: "c1", rules: "x1" };
@@ -1759,6 +1780,9 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     const b = await decidePair(older, newer, cfg, jev);
     assert(b.verdict === "related" && b.decide.writer === undefined && writerCalls === 1, "the tier's related: no writer call, the relation stands");
     tierP = p;
+    writerAnswer = JSON.stringify({ current: "B", evidence: "we shipped … instead of Friday", stale: "the plan is ... on Friday", reason: "it shipped later" });
+    const s = await decidePair(older, newer, cfg, jev);
+    assert(s.verdict === "outdates" && s.decide.writer?.evidence_found === true && s.decide.writer.stale_found === true, "a writer's quotes shortened with \"…\" stand in the pass, and its note says both were found");
     writerAnswer = JSON.stringify({ current: "none", evidence: "", stale: "", reason: "both stay current" });
     const c = await decidePair(older, newer, cfg, jev);
     assert(c.verdict === "related" && c.decide.writer?.current === "none" && c.decide.writer.stale_found === false && c.decide.writer.evidence_found === false && proposalVerdict(c) === null,

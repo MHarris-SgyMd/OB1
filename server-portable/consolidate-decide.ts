@@ -112,10 +112,10 @@ export const writerMessages = (p: { older: PairSide; newer: PairSide }, twoSided
   [{ role: "user" as const, content: WRITER_HEAD + pairContext(p) + writerRules(twoSided, partRule, recordRule) }];
 
 /**
- * The writer the pass runs: two-sided with the part rule, SMD-3114's adopted one (decide version 1), and the record
- * rule since version 2. Its version is the key's.
+ * The writer the pass runs: two-sided with the part rule, SMD-3114's adopted one (decide version 1), and since
+ * version 2 the record rule and version 2's quote reading (stands' `v2Quotes`). Its version is the key's.
  */
-export const PASS_WRITER = { twoSided: true, partRule: true, recordRule: true } as const;
+export const PASS_WRITER = { twoSided: true, partRule: true, recordRule: true, v2Quotes: true } as const;
 
 /** The fixed text decide mode asks with, the decider's question and definitions and the writer's head and rules, which a recipe's prompt_hash names (lineage.ts). */
 export const DECIDE_PROMPT = [RELATION_QUESTION, ...OFFERED.map((v) => DESCRIPTIONS[v]), WRITER_HEAD, writerRules(PASS_WRITER.twoSided, PASS_WRITER.partRule, PASS_WRITER.recordRule)].join("\n");
@@ -146,19 +146,64 @@ export function parseProposal(raw: string): Proposal {
   return { current, evidence: named ? quoteOf(o.evidence) : "", stale: named ? quoteOf(o.stale) : "", reason: typeof o.reason === "string" ? cutByCodePoint(oneLine(o.reason), REASON_MAX) : "", malformed: false };
 }
 
-/** A proposal stands when it names a side, its quote is in that side and not the other, and, two-sided, its stale quote is in the other side and not the current one. */
-export function stands(p: Proposal, older: string, newer: string, twoSided: boolean): boolean {
+/** The marks a writer shortens a long quote with: three dots or an ellipsis, with any space around them. */
+const SHORTENED = /\s*(?:\.{3}|…)\s*/;
+
+/**
+ * Whether `quote` is in `side` and not in `other`, as evidenceIn reads it, accepting a quote the writer shortened with
+ * "…" or "...": every piece between the marks must be in `side`, and not every piece in `other`; their order is not
+ * checked. SMD-3115's v2 measurement lost two true supersessions to shortened quotes, the writer naming the right
+ * thought for the right reason. A quote with no mark, or only a trailing one, is read whole.
+ */
+export function quoteIn(quote: string, side: string, other: string): boolean {
+  const pieces = quote.split(SHORTENED).map((p) => p.trim()).filter(Boolean);
+  if (pieces.length <= 1) return evidenceIn(pieces[0] ?? "", side, other);
+  return pieces.every((p) => evidenceIn(p, side)) && !pieces.every((p) => evidenceIn(p, other));
+}
+
+/** The marks a thought quotes another's words between. */
+const OPENS = `"“‘'\`«`, CLOSES = `"”’'\`»`;
+
+/**
+ * Whether `quote` sits in `text`, and every time between quotation marks: a thought that quotes a claim to refute it
+ * (`"The only cost is index build time" is wrong`) holds the claim's words without stating them. Case and runs of
+ * space are ignored; markdown emphasis next to a mark, and punctuation inside the closing one, are skipped. SMD-3115's
+ * v2 measurement lost a true supersession to it: the refutation's stale claim was in both thoughts.
+ */
+export function onlyQuoted(quote: string, text: string): boolean {
+  const flat = (s: string) => s.replace(/\s+/g, " ").toLowerCase();
+  const t = flat(text), q = flat(quote).trim();
+  if (q.length < 3) return false;
+  let seen = 0;
+  for (let at = t.indexOf(q); at >= 0; at = t.indexOf(q, at + 1)) {
+    seen++;
+    const before = t.slice(Math.max(0, at - 4), at).replace(/[*_\s]/g, "");
+    const after = t.slice(at + q.length, at + q.length + 4).replace(/[*_\s.,;:!?]/g, "");
+    if (!before || !after || !OPENS.includes(before.slice(-1)) || !CLOSES.includes(after[0])) return false;
+  }
+  return seen > 0;
+}
+
+/**
+ * A proposal stands when it names a side, its quote is in that side and not the other, and, two-sided, its stale
+ * quote is in the other side and not the current one. With `v2Quotes`, decide version 2's reading: a quote shortened
+ * with "…" is read piece by piece (quoteIn), and the stale claim may also sit in the current thought where it only
+ * quotes it (onlyQuoted); without it, as SMD-3114 measured.
+ */
+export function stands(p: Proposal, older: string, newer: string, twoSided: boolean, v2Quotes = false): boolean {
   if (p.malformed || p.current === "none") return false;
   const [current, other] = p.current === "newer" ? [newer, older] : [older, newer];
-  if (!evidenceIn(p.evidence, current, other)) return false;
-  return !twoSided || evidenceIn(p.stale, other, current);
+  const found = v2Quotes ? quoteIn : evidenceIn;
+  if (!found(p.evidence, current, other)) return false;
+  return !twoSided || found(p.stale, other, current) || (v2Quotes && evidenceIn(p.stale, other) && onlyQuoted(p.stale, current));
 }
 
 // ── The mode's key and its judgement (pure) ───────────────────────────────────
 
 /**
  * Bumped when the decider's question, the writer's prompt or the rules between them change: a new pool. 1: SMD-3114's
- * writer, two-sided with the part rule. 2: the record rule added (RECORD_RULE).
+ * writer, two-sided with the part rule. 2: the record rule added (RECORD_RULE), with version 2's quote reading: quotes
+ * shortened with "…" read piece by piece (quoteIn), and a stale claim the current thought only quotes (onlyQuoted).
  */
 export const DECIDE_VERSION = 2;
 
@@ -253,12 +298,16 @@ export async function decidePair(older: PairSide, newer: PairSide, cfg: EmbedCon
   }
   const d = (await r.json()) as { choices?: [{ message?: { content?: string } }] };
   const proposal = parseProposal(d?.choices?.[0]?.message?.content ?? "");
-  const standing = stands(proposal, older.content, newer.content, PASS_WRITER.twoSided);
+  const standing = stands(proposal, older.content, newer.content, PASS_WRITER.twoSided, PASS_WRITER.v2Quotes);
   const [current, other] = proposal.current === "newer" ? [newer.content, older.content] : [older.content, newer.content];
+  const named = proposal.current !== "none" && !proposal.malformed;
   note.writer = {
     model: cfg.judgeModel, current: proposal.malformed ? "unparsed" : proposal.current, stale: proposal.stale, reason: proposal.reason,
-    evidence_found: proposal.current !== "none" && !proposal.malformed && evidenceIn(proposal.evidence, current, other),
-    stale_found: proposal.current !== "none" && !proposal.malformed && evidenceIn(proposal.stale, other, current),
+    evidence_found: named && (PASS_WRITER.v2Quotes ? quoteIn : evidenceIn)(proposal.evidence, current, other),
+    // The stale quote as stands reads it: in the other thought, and not in this one or only quoted here.
+    stale_found: named && (PASS_WRITER.v2Quotes
+      ? quoteIn(proposal.stale, other, current) || (evidenceIn(proposal.stale, other) && onlyQuoted(proposal.stale, current))
+      : evidenceIn(proposal.stale, other, current)),
   };
   return { ...decideJudgement(p, proposal, standing), decide: note };
 }

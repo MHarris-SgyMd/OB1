@@ -19,7 +19,9 @@
  *
  *   OB1_LLM_BASE_URL=http://127.0.0.1:11434/v1 OB1_LLM_LOCAL=1 OB1_JUDGE_MODEL=qwen2.5:7b … \
  *     bun eval-judge-propose.ts --pairs …/judge-pairs.jsonl --decider …/h2o.jsonl --out …/writer-7b.jsonl [--two-sided] [--part-rule] [--record-rule]
- *   bun eval-judge-propose.ts --pairs … --decider … --writer 7b=…/writer-7b.jsonl … --judge 7b=… --judge 27b=…
+ *   bun eval-judge-propose.ts --pairs … --decider … --writer 7b=…/writer-7b.jsonl … --judge 7b=… --judge 27b=… [--v2-quotes]
+ *     (--v2-quotes scores quotes as decide version 2 reads them: shortened with "…" piece by piece, quoteIn, and a
+ *     stale claim the current thought only quotes, onlyQuoted)
  *   bun eval-judge-propose.ts --self-check     # the prompt, the parse, the checks, the scoring and the rule; no model
  *
  * The writer is asked of every pair either flag raises (H2O's top verdict outdates, or P(outdates) ≥ 0.3), one at a
@@ -102,12 +104,12 @@ export const deciderAlone = (pairs: PairLine[], decider: Map<string, DeciderLine
  * otherwise settled at H2O's best verdict that proposes nothing, as every pair the flag leaves is. Time: H2O's read of
  * every pair, and the writer's call on every pair the flag raises.
  */
-export function pipeline(pairs: PairLine[], decider: Map<string, DeciderLine>, writer: Map<string, WriterLine>, flag: Flag): Tally {
+export function pipeline(pairs: PairLine[], decider: Map<string, DeciderLine>, writer: Map<string, WriterLine>, flag: Flag, shortened = false): Tally {
   return tally(pairs, (p) => {
     const d = decider.get(p.pair), read = d?.C?.ms ?? 0;
     if (!raisedBy(d, flag)) return { verdict: settleBest(d), ms: read };
     const w = writer.get(p.pair), prop = w?.proposal;
-    if (prop && w && stands(prop, p.older.content, p.newer.content, w.twoSided)) return { verdict: "outdates", current: prop.current, ms: read + w.ms, asked: true };
+    if (prop && w && stands(prop, p.older.content, p.newer.content, w.twoSided, shortened)) return { verdict: "outdates", current: prop.current, ms: read + w.ms, asked: true };
     const unparsed = !prop || prop.malformed, declined = unparsed || prop.current === "none";
     return { verdict: settleBest(d), ms: read + (w?.ms ?? 0), asked: true, declined, unparsed, quoteFailed: !declined };
   });
@@ -155,7 +157,7 @@ async function writeAll(pairs: PairLine[], decider: Map<string, DeciderLine>, ou
 
 // ── The report ───────────────────────────────────────────────────────────────
 
-function report(pairs: PairLine[], decider: Map<string, DeciderLine>, writers: [string, Map<string, WriterLine>][], judges: [string, Map<string, AnswerLine>][]): void {
+function report(pairs: PairLine[], decider: Map<string, DeciderLine>, writers: [string, Map<string, WriterLine>][], judges: [string, Map<string, AnswerLine>][], shortened = false): void {
   const labelled = pairs.filter((p) => p.gold.source !== "candidate").length, cand = pairs.length - labelled, sups = pairs.filter(isSupersession).length;
   const row = (name: string, t: Tally) =>
     `  ${name.padEnd(44)} right on ${t.right} of ${labelled}; proposes ${t.caught} of ${sups} supersessions (${t.caughtRightSide} naming the right thought), ${t.falseProposals} false; ` +
@@ -171,7 +173,7 @@ function report(pairs: PairLine[], decider: Map<string, DeciderLine>, writers: [
     const kind = `${first?.twoSided ? "two-sided" : "one-sided"}${first?.partRule ? ", part rule" : ""}${first?.recordRule ? ", record rule" : ""}`;
     const errors = [...w.values()].filter((l) => l.error).length;
     for (const flag of FLAGS) {
-      const t = pipeline(pairs, decider, w, flag);
+      const t = pipeline(pairs, decider, w, flag, shortened);
       const verdict = bar27 && bar7 ? (flag === "top" ? (meetsRule(t, bar27, bar7) ? "MEETS the rule" : `misses the rule: ${ruleMisses(t, bar27, bar7)}`) : "reported, not decided") : "";
       console.log(row(`H2O + writer ${name} (${kind}), flag ${flag === "top" ? "top verdict" : "P(outdates) ≥ 0.3"}`, t));
       console.log(`      asked ${t.asked}: ${t.declined} declined (${t.unparsed} of them unparsed), ${t.quoteFailed} quotes failed the check${errors ? `, ${errors} calls failed` : ""}; ${verdict}`);
@@ -250,6 +252,9 @@ function selfCheck(): never {
   ok(p3.asked === 4 && p3.quoteFailed === 1 && p3.candidatesProposed === 0 && p3.candMs === 1100, "flag P(outdates) ≥ 0.3: the candidate is asked, its quote fails, and it pays the writer");
   const candStands = pipeline(ps, h2o, new Map(writer).set("cand", wl("cand", '{"current":"B","evidence":"shipped on Monday"}', 700)[1]), "p0.3");
   ok(candStands.candidatesProposed === 1 && candStands.candMs === 800, "a candidate whose proposal stands is proposed, and pays the writer");
+  // A quote shortened with "…" is scored piece by piece only under --v2-quotes (decide version 2's quoteIn).
+  const shortenedW = new Map(writer).set("sup", wl("sup", '{"current":"B","evidence":"we shipped … instead of Friday"}')[1]);
+  ok(pipeline(ps, h2o, shortenedW, "top").caught === 0 && pipeline(ps, h2o, shortenedW, "top", true).caught === 1, "a shortened quote stands only when scored as the pass reads it");
   const wrongSide = new Map(writer).set("sup", wl("sup", '{"current":"A","evidence":"the plan is to ship"}')[1]);
   ok(pipeline(ps, h2o, wrongSide, "top").caught === 1 && pipeline(ps, h2o, wrongSide, "top").caughtRightSide === 0, "a proposal naming the older thought is caught but on the wrong side");
   const withLow = new Map(h2o).set("cand", dec({ outdates: 0.28, evolves: 0.27, related: 0.25, unrelated: 0.2 }));
@@ -305,5 +310,5 @@ if (import.meta.main) {
   const writers = flags("writer").map((s) => named<WriterLine>(s, "writer"));
   const judges = flags("judge").map((s) => named<AnswerLine>(s, "judge"));
   if (!judges.length) { console.error("Pass --judge 7b=<answers> --judge 27b=<answers>: the rule's bars."); process.exit(2); }
-  report(pairs, decider, writers, judges);
+  report(pairs, decider, writers, judges, has("v2-quotes"));
 }

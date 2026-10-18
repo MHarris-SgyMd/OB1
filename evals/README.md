@@ -4237,6 +4237,15 @@ on the candidates the pass judges.
   the same subject, but never by reporting its work done.
 - `--record-rule` adds that to the writer (`RECORD_RULE`), and decide mode
   runs it from version 2.
+- **The first measurement**, with the bar fixed first, was on the canary's 54
+  proposals, labelled before the run. The rule kept 6 of 10 true and 6 of 40
+  false, where the writer without it kept all 54. That missed the bar of 8
+  true, and 3 of the 4 true it lost failed the quote check, not the judgment.
+- **Version 2's quote reading** (`--v2-quotes` when scoring) reads a quote
+  shortened with "…" piece by piece. It lets the stale claim sit in the
+  current thought where that thought only quotes it, between quotation marks,
+  as a refutation does. It is measured on proposals made after the first
+  measurement (SMD-3115).
 - These sets can't measure it: nearly all their true supersessions are pointer
   pairs, mostly the session hook's later summary of the same session, which
   the pass never judges. The canary's proposals are its test set.

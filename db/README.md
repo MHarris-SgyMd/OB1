@@ -2995,7 +2995,10 @@ tier gives each pair's verdict, not the judge:
     subject. Its work reported done never outdates it, and neither does a
     later record that goes on with that work.
 - **Both quotes must check out** in the side each names and not in the other,
-  or the pair stays at the tier's best verdict that proposes nothing.
+  or the pair stays at the tier's best verdict that proposes nothing. Version
+  2 reads a quote shortened with "…" piece by piece. It also lets the stale
+  claim sit in the current thought where that thought only quotes it, as a
+  refutation quotes the claim it calls wrong.
 - **The distribution is the tier's.** A proposal is recorded at its
   P(outdates) under the same floor, and a relation by the mass of the relation
   words.
