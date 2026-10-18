@@ -4244,8 +4244,14 @@ on the candidates the pass judges.
 - **Version 2's quote reading** (`--v2-quotes` when scoring) reads a quote
   shortened with "…" piece by piece. It lets the stale claim sit in the
   current thought where that thought only quotes it, between quotation marks,
-  as a refutation does. It is measured on proposals made after the first
-  measurement (SMD-3115).
+  as a refutation does.
+- **The second measurement** was on 41 proposals made after the first, again
+  with the bar and the labels fixed before the run. Version 2 kept 3 of 5
+  true and 12 of 28 false, missing on both, and the quote reading changed
+  nothing there. The false it kept are mostly a record's own status line (a
+  session summary's "the PR needs a review") read as the status of open work,
+  and a plan read as outdated by its implementation. Version 2 is not
+  deployed.
 - These sets can't measure it: nearly all their true supersessions are pointer
   pairs, mostly the session hook's later summary of the same session, which
   the pass never judges. The canary's proposals are its test set.
