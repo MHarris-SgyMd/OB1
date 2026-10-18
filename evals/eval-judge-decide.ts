@@ -25,8 +25,9 @@
  *
  * "The decider" is any model behind the contract: decider-4b (jev/decider) and H2O-Lightning-4B (jev/h2o) were run.
  * Beside the cascades, the report applies the rule for reopening fixed before H2O's run (as accurate as the judge on
- * the labelled pairs a band settles, nothing lost, cheaper on the candidates), and shows, as exploration, the
- * decider's top verdict as the judge itself and P(outdates) as a supersession flag.
+ * the labelled pairs a band settles, nothing lost, cheaper on the candidates). Its sweep includes the outdates gate,
+ * a one-pass band with no cutoff, under which the judge reads only the possible supersessions. As exploration, it
+ * shows the decider's top verdict as the judge itself, and P(outdates) as a supersession flag.
  *
  *   OB1_JEV_BASE_URL=http://127.0.0.1:8021 OB1_JEV_LOCAL=1 OB1_JEV_MODEL=decider-4b \
  *     bun eval-judge-decide.ts --pairs /private/tmp/smd3058/judge-pairs.jsonl --out /private/tmp/smd3058/decider.jsonl
@@ -261,7 +262,7 @@ export function pick(pairs: PairLine[], decider: Map<string, DeciderLine>, judge
 export const foldOf = (pair: string): 0 | 1 => (parseInt(createHash("md5").update(pair).digest("hex").slice(0, 8), 16) % 2) as 0 | 1;
 
 export const bandText = (b: Band) =>
-  (b.framing === "one" ? `one-pass: top ≥ ${b.settle}, outdates ≤ ${b.outdatesMax}` : `two-pass: same ≤ ${b.lo} unrelated; ≥ ${b.hi} then top ≥ ${b.settle}, outdates ≤ ${b.outdatesMax}`) +
+  (b.framing === "one" ? `one-pass: ${b.settle > 0 ? `top ≥ ${b.settle}` : "any top"}, outdates ≤ ${b.outdatesMax}` : `two-pass: same ≤ ${b.lo} unrelated; ≥ ${b.hi} then top ≥ ${b.settle}, outdates ≤ ${b.outdatesMax}`) +
   (b.allow ? `, settling ${b.allow.join(" or ")} only` : "");
 
 // ── The reopen rule (fixed before the H2O run; pure) ─────────────────────────
@@ -279,12 +280,17 @@ export const meetsRule = (s: Score): boolean => ruleAccurate(s) && s.candMs < s.
 /** The verdict sets the rule's bands may settle (undefined: any). */
 const ALLOW_SETS: (readonly Verdict[] | undefined)[] = [undefined, ["evolves", "related", "duplicate"], ["evolves", "related"], ["evolves"], ["related"], ["unrelated"]];
 
-/** The rule's grid: the cascade's made finer (cutoffs to 0.99, outdates ceilings to 0.005), under each verdict set. */
+/**
+ * The rule's grid: the cascade's made finer (cutoffs to 0.99, outdates ceilings from 0.005 to 0.5), under each
+ * verdict set. A one-pass cutoff of 0 is the outdates gate: whatever its confidence, the decider's top verdict
+ * settles a pair unless it is `outdates` or P(outdates) passes the ceiling, so the judge reads only the possible
+ * supersessions.
+ */
 export function ruleGrid(): Band[] {
   const out: Band[] = [];
   for (const allow of ALLOW_SETS) {
     const a = allow ? { allow } : {};
-    for (const settle of [0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.97, 0.99]) for (const outdatesMax of [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3])
+    for (const settle of [0, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.97, 0.99]) for (const outdatesMax of [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5])
       out.push({ framing: "one", settle, outdatesMax, lo: 0, hi: 1, ...a });
     for (const lo of [0, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3]) for (const hi of [0.6, 0.8, 0.9, 0.95, 0.99]) for (const settle of [0.5, 0.7, 0.8, 0.9, 0.95, 0.99]) for (const outdatesMax of [0.005, 0.01, 0.05, 0.2])
       out.push({ framing: "two", settle, outdatesMax, lo, hi, ...a });
@@ -329,9 +335,8 @@ export function asJudge(pairs: PairLine[], verdictOf: (p: PairLine) => string | 
   return t;
 }
 
-/** The decider's top one-pass verdict, and its best verdict that proposes nothing (what it settles where the judge does not look). */
+/** The decider's top one-pass verdict. */
 export const topC = (d: DeciderLine | undefined): Verdict | null => (d?.C && !d.C.abstained ? topOf(d.C, FIVE) : null);
-export const settleC = (d: DeciderLine | undefined): Verdict | null => (d?.C && !d.C.abstained ? topOf(d.C, FIVE.filter((v) => v !== "outdates")) : null);
 const pOutdates = (d: DeciderLine | undefined) => d?.C?.probabilities.outdates ?? 0;
 export const flagged = (d: DeciderLine | undefined, t: number) => !!d?.C && !d.C.abstained && pOutdates(d) >= t;
 
@@ -345,18 +350,6 @@ export function flagTally(pairs: PairLine[], decider: Map<string, DeciderLine>, 
     else { r.others++; if (f) r.falseFlags++; }
   }
   return r;
-}
-
-/**
- * The judge sees only the pairs the flag raises, and the decider's best verdict that proposes nothing settles the
- * rest. `lost`: supersessions the judge proposed on a pair the flag left.
- */
-export function onFlags(pairs: PairLine[], decider: Map<string, DeciderLine>, judge: Map<string, AnswerLine>, t: number): AsJudge & { lost: number } {
-  const seen = (p: PairLine) => flagged(decider.get(p.pair), t);
-  const r = asJudge(pairs, (p) => (seen(p) ? judge.get(p.pair)?.judgement?.verdict ?? null : settleC(decider.get(p.pair))),
-    (p) => (decider.get(p.pair)?.C?.ms ?? 0) + (seen(p) ? judge.get(p.pair)?.ms ?? 0 : 0));
-  const lost = pairs.filter((p) => isSupersession(p) && !seen(p) && proposes(judge.get(p.pair)?.judgement?.verdict ?? "")).length;
-  return { ...r, lost };
 }
 
 // ── The run: asking the decider ───────────────────────────────────────────────
@@ -480,6 +473,10 @@ function report(pairs: PairLine[], decider: Map<string, DeciderLine>, judges: [s
     console.log(`  ${name}: ${sw.accurate} of ${sw.bands} bands are as accurate with nothing lost; ${sw.meeting} of them are also cheaper on the candidates`);
     const shown = sw.widestMeeting ?? sw.widestAccurate;
     if (shown) console.log(`    ${sw.widestMeeting ? "the widest meeting it" : "the widest accurate one, not cheaper"}: ${bandText(shown.band)}: ${ruleRow(name, shown.score)}`);
+    for (const t of [0.2, 0.3, 0.4, 0.5]) {   // the outdates gate: the judge reads only the possible supersessions
+      const sc = score(pairs, decider, judge, { framing: "one", settle: 0, outdatesMax: t, lo: 0, hi: 1 });
+      console.log(`    the outdates gate at ${t}: ${ruleRow(name, sc)}; ${meetsRule(sc) ? "meets the rule" : `misses it: ${misses(sc)}`}`);
+    }
     if (!sw.widestMeeting) continue;
     for (const f of [0, 1] as const) {
       const fit = pairs.filter((p) => foldOf(p.pair) === f), test = pairs.filter((p) => foldOf(p.pair) !== f);
@@ -496,11 +493,10 @@ function report(pairs: PairLine[], decider: Map<string, DeciderLine>, judges: [s
   console.log("\nBeyond the cascade (exploratory, not the rule): the decider's top one-pass verdict as the judge itself, beside each judge alone");
   for (const [name, judge] of judges) console.log(asJudgeRow(`${name} alone`, asJudge(pairs, (p) => judge.get(p.pair)?.judgement?.verdict ?? null, (p) => judge.get(p.pair)?.ms ?? 0)));
   console.log(asJudgeRow("the decider alone", asJudge(pairs, (p) => topC(decider.get(p.pair)), (p) => decider.get(p.pair)?.C?.ms ?? 0)));
-  console.log("  P(outdates) ≥ t as a supersession flag, and each judge reading only the pairs it raises, the decider settling the rest");
+  console.log("  P(outdates) ≥ t as a supersession flag (the outdates gate sends these pairs to the judge)");
   for (const t of [0.2, 0.3, 0.5, 0.7]) {
     const f = flagTally(pairs, decider, t);
-    const each = judges.map(([name, judge]) => { const o = onFlags(pairs, decider, judge, t); return `${name} on them: ${o.caught} proposed (${o.lost} of its own lost), right on ${o.right}, ${perCand(o.candMs, candN)}`; });
-    console.log(`    t ${t}: raises ${f.raised} of ${f.supersessions} supersessions and ${f.falseFlags} of ${f.others} other labelled pairs (precision ${pct(f.raised, f.raised + f.falseFlags)}), ${f.candidatesFlagged} of ${f.candidates} candidates; ${each.join("; ")}`);
+    console.log(`    t ${t}: raises ${f.raised} of ${f.supersessions} supersessions and ${f.falseFlags} of ${f.others} other labelled pairs (precision ${pct(f.raised, f.raised + f.falseFlags)}), ${f.candidatesFlagged} of ${f.candidates} candidates`);
   }
 }
 
@@ -575,7 +571,15 @@ function selfCheck(): never {
   ok(!meetsRule({ ...meets, lost: 1 }), "the rule: a lost supersession misses it");
   ok(!meetsRule({ ...meets, settledRight: 14 }), "the rule: one fewer right than the judge misses it");
   ok(!meetsRule({ ...meets, candMs: 3000 }) && ruleAccurate({ ...meets, candMs: 9999 }), "the rule: the judge's own cost misses it, though the band is accurate");
-  ok(ruleGrid().length === 6 * 1016 && ruleGrid().some((b) => b.allow?.length === 1 && b.allow[0] === "evolves"), "the rule's grid: 1,016 bands under each of six verdict sets");
+  ok(ruleGrid().length === 6 * 1041 && ruleGrid().some((b) => b.allow?.length === 1 && b.allow[0] === "evolves"), "the rule's grid: 1,041 bands under each of six verdict sets");
+  ok(ruleGrid().some((b) => b.framing === "one" && b.settle === 0 && b.outdatesMax === 0.5 && !b.allow), "the rule's grid holds the outdates gate up to 0.5");
+
+  // The outdates gate (a one-pass band with no cutoff): any top settles unless it is outdates or outdates passes the ceiling.
+  const gate: Band = { ...one, settle: 0, outdatesMax: 0.3 };
+  ok(settledVerdict({ pair: "a", C: dec({ related: 0.3, evolves: 0.29, unrelated: 0.21, outdates: 0.2 }) }, gate) === "related", "the gate settles an unsure top when outdates is under its ceiling");
+  ok(settledVerdict({ pair: "a", C: dec({ related: 0.4, evolves: 0.25, outdates: 0.35 }) }, gate) === null, "the gate sends a pair on when outdates passes its ceiling");
+  ok(settledVerdict({ pair: "a", C: dec({ outdates: 0.28, related: 0.27, evolves: 0.25, unrelated: 0.2 }) }, gate) === null, "the gate sends a pair on when outdates is the top, however low");
+  ok(bandText(gate).startsWith("one-pass: any top, outdates ≤ 0.3"), "the gate says it has no cutoff");
   const many: PairLine[] = [...Array.from({ length: 24 }, (_, i) => pair(`l${i}`, { source: "link", label: "relates_to" })), pair("c1", { source: "candidate", label: "none", similarity: 0.7 }), pair("c2", { source: "candidate", label: "none", similarity: 0.7 })];
   const manyJudge = new Map<string, AnswerLine>(many.map((p) => [p.pair, { pair: p.pair, ms: 3000, judgement: { verdict: "related" } as never }]));
   const relatedEvery = new Map<string, DeciderLine>(many.map((p) => [p.pair, { pair: p.pair, C: dec({ related: 0.99, outdates: 0 }) }]));
@@ -590,17 +594,12 @@ function selfCheck(): never {
     ["link", { pair: "link", C: dec({ related: 0.8, outdates: 0.1, unrelated: 0.1 }) }],
     ["cand", { pair: "cand", C: dec({ outdates: 0.5, related: 0.3, evolves: 0.2 }) }],
   ]);
-  ok(topC(three.get("sup")) === "outdates" && settleC(three.get("sup")) === "duplicate", "the decider's best verdict that proposes nothing passes over outdates");
   const me = asJudge(ps, (p) => topC(three.get(p.pair)), (p) => three.get(p.pair)!.C!.ms);
   ok(me.caught === 1 && me.falseProposals === 0 && me.right === 2 && me.candidatesProposed === 1 && me.candMs === 100, "the decider as a judge: the supersession proposed, the link right, the candidate proposed");
   const everyOutdates = asJudge(ps, () => "outdates", () => 0);
   ok(everyOutdates.caught === 1 && everyOutdates.falseProposals === 1 && everyOutdates.right === 1, "a judge proposing on every pair: the supersession caught, the link a false proposal and wrong");
   const fl = flagTally(ps, three, 0.5);
   ok(fl.raised === 1 && fl.supersessions === 1 && fl.falseFlags === 0 && fl.others === 1 && fl.candidatesFlagged === 1, "the flag at 0.5 raises the supersession and the candidate at exactly 0.5, not the link");
-  const on5 = onFlags(ps, three, judge, 0.5);
-  ok(on5.caught === 1 && on5.lost === 0 && on5.right === 2 && on5.candMs === 3100 && on5.candidatesProposed === 0, "the judge reading the raised pairs proposes the supersession; the decider settles the link related");
-  const on95 = onFlags(ps, three, judge, 0.95);
-  ok(on95.caught === 0 && on95.lost === 1 && on95.candMs === 100, "a flag that raises nothing: the judge's own supersession is lost, and the pass costs the decider's reads");
 
   console.log(bad === 0 ? "eval-judge-decide.ts self-check PASS" : `eval-judge-decide.ts self-check: ${bad} FAILED`);
   process.exit(bad === 0 ? 0 : 1);

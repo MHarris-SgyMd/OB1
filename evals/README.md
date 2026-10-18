@@ -3791,7 +3791,7 @@ Caveats:
   two accepted proposals. Recall on supersessions other writers would set is
   not measured here.
 
-## Settling the judge's easy pairs with the typed-decision tier: declined (SMD-3058)
+## Settling the judge's easy pairs with the typed-decision tier (SMD-3058)
 
 `eval-judge-decide.ts`. Every candidate pair costs the consolidation judge one
 LLM call with both thoughts' text, and nearly every pair ends unrelated,
@@ -3799,6 +3799,9 @@ related, evolves or duplicate. The spike asked whether the typed-decision tier
 (behind `ob1-jev/1`, SMD-2050) could settle those pairs cheaply and send only
 the uncertain ones, and every possible `outdates`, to the LLM judge. It measured
 decider-4b, then H2O-Lightning-4B, a stronger model of the same size.
+decider-4b is declined. H2O, gated on whether a pair could be a supersession
+rather than on its own confidence, is reopened behind the 7B, pending a
+confirmation run.
 It asks three decisions of every pair in `eval-judge.ts`'s export, read as
 prompt 4 renders the two thoughts, so both framings score from one run:
 
@@ -3883,7 +3886,7 @@ same pairs. Picked on one half of the pairs and scored on the other, the bands
 lose up to one of the 7B's supersessions, and up to three of the 27B's at 300
 and 600 characters.
 
-**Why it is declined.** Packing and clipping make the cascade cheap. Behind the
+**Why decider-4b is declined.** Packing and clipping make the cascade cheap. Behind the
 7B the cheapest variant needs about half the 7B's model time, and behind the
 27B the packed variants need 35–45% less. But on every variant, on the pairs it
 would settle, the decider is right less often than the judge it replaces would
@@ -3906,8 +3909,9 @@ reliable: it is right on every labelled pair it settles that way.
 **What would reopen it** (written after decider-4b): a decider whose "same
 subject" and relation calls match the judges' on the linked pairs, through a
 fine-tune or a framing this spike didn't try, measured with this harness.
-H2O-Lightning-4B, below, comes close on the relation calls, and cost is what
-stops it behind the 7B. A faster runtime won't do it
+H2O-Lightning-4B, below, comes close on the relation calls. Gated on whether a
+pair could be a supersession, not on its confidence, it meets the rule behind
+the 7B. A faster runtime won't do it
 alone: reading costs the 7B on llama.cpp 0.84 ms a token, so a 4B on the same
 runtime would read about twice as fast as now, and accuracy is the binding
 problem.
@@ -3935,9 +3939,10 @@ S and T in one request and C alone.
 The rule for reopening was fixed before the run. A band must be at least as
 accurate as the judge it replaces on the labelled pairs it settles (20 or more
 of them), lose no supersession, and cost less model time on the candidates than
-the judge alone. The report's "reopen rule" section sweeps 6,096 bands: the
-cascade's grid made finer, and restricted to sets of verdicts. It also checks
-the widest passing band picked on one half of the pairs against the other.
+the judge alone. The report's "reopen rule" section sweeps 6,246 bands: the
+cascade's grid made finer, restricted to sets of verdicts, and with no cutoff
+at all, which is the outdates gate below. It also checks the widest passing
+band picked on one half of the pairs against the other.
 
 | label | pairs | unrelated | related | evolves | duplicate | outdates | median P(same subject) |
 |---|---|---|---|---|---|---|---|
@@ -3948,30 +3953,48 @@ the widest passing band picked on one half of the pairs against the other.
 | linked: relates_to | 39 | 18 | 7 | 14 | 0 | 0 | 0.13 |
 | linked: blocks, child_of, duplicate_of | 96 | 5 | 23 | 58 | 0 | 10 | 0.29–0.60 |
 
-* **Behind the 7B, which both dogfood brains run, it fails the rule.** 67
-  bands are as accurate as the 7B with nothing lost, and none is cheaper. A
-  read costs 1.41 s a candidate against the 7B's 3.76, so a band would have to
-  settle about 38% of the candidates to save time. The accurate ones settle at
-  most 18%.
-* **Behind the 27B it passes, narrowly.** Five bands meet it. The widest
-  settles only evolves, related and duplicate, at a top of 0.5 or more with
-  outdates at most 0.3. It settles 18% of the candidates and is right on 137 of
-  146 settled labelled pairs, as the 27B is. It loses nothing, and it costs
-  10.56 s a candidate against 11.30, 7% less. Picked on either half of the
-  pairs, it meets the rule on the other.
-* **The loosest cascade comes close on accuracy.** The report's own pick,
+* **Gated on its confidence, it fails behind the 7B,** which both dogfood
+  brains run. A read costs 1.41 s a candidate against the 7B's 3.76, so a band
+  must settle about 38% of the candidates to save time. The bands that need H2O
+  to be confident settle at most 18% at the 7B's accuracy, and none is cheaper.
+* **Gated on P(outdates), it meets the rule behind the 7B.** The outdates gate
+  settles a pair at H2O's top verdict, whatever its confidence, unless that
+  verdict is outdates or P(outdates) passes a ceiling. So the 7B reads only the
+  possible supersessions. Ceilings of 0.3, 0.4 and 0.5 meet the rule. At 0.5 the
+  gate settles 93% of the candidates and is right on 207 of the 240 labelled
+  pairs it settles, as the 7B is. It loses nothing, and it costs 1.69 s a
+  candidate against 3.76, 55% less.
+* **The gate joined the sweep after the run.** The maintainer asked whether the
+  cascade's order was inverted. The first sweep held only bands that need H2O
+  to be confident, the wrong question, since only a possible supersession needs
+  the judge.
+* **On held-out halves, the gate sits on the line.** Picked on one half, the
+  gate at 0.5 is one pair short on the other (97 against 98 right). The widest
+  band passing on the other half settles only evolves, related and duplicate;
+  scored on the first half, it meets the rule, saving 5%.
+* **Behind the 27B,** a gate settling only evolves, related and duplicate, at
+  outdates ≤ 0.3, meets the rule. It settles 38% of the candidates and is right
+  on 187 of 196, against the 27B's 185. It costs 8.30 s a candidate against
+  11.30, 27% less. Picked on one half, the widest passing band meets the rule on
+  the other; picked on that other half, it loses a supersession on the first.
+  The unrestricted gate is 14–18 pairs less accurate than the 27B.
+* **Its one-pass verdicts come close to the judges'.** The report's own pick,
   one-pass at a top of 0.5, settles 60% of the candidates. On the 170 labelled
-  pairs it settles, H2O is right on 140, against the 7B's 143 and the 27B's
-  156: 2 and 9 points behind, where decider-4b's one-pass pick was 10 and 32
-  behind. Model time is
-  3.20 s a pair against the 7B's 3.64, and 7.30 against the 27B's 12.99. Its
-  misses are 21 pairs settled unrelated, and 9 true supersessions settled as
-  duplicate (8) or related (1).
+  pairs it settles, H2O is right on 140, against the 7B's 143 and the 27B's 156.
+  decider-4b's one-pass pick was 10 and 32 points behind. H2O's misses are 21
+  pairs settled unrelated, and 9 true supersessions settled as duplicate (8) or
+  related (1).
 * **The two-pass framing fails, as it did for decider-4b.** S settles 93 pairs
   unrelated and is right on 33.
+* **decider-4b still doesn't pass.** Only its 1,500-character run has bands
+  meeting the rule behind the 7B: two, saving 1%. Neither holds on the held-out
+  halves.
 
-So the cascade stays declined. Behind the 7B, no band accurate enough saves
-time. Behind the 27B, the saving is 7%, not worth a second model in the pass.
+So the cascade is reopened behind the 7B, with the outdates gate, pending a
+confirmation run on labelled pairs it hasn't seen. It matches the 7B's accuracy
+to within a pair on either half, and halves the 7B's model time. It proposes
+nothing the 7B wouldn't: the 7B still writes every proposal, and proposes 2 of
+the 62.
 
 **What H2O does beyond the cascade** (explored after the run, not the rule;
 the report's last section):
@@ -3989,14 +4012,14 @@ the report's last section):
   3. This was checked by hand.
 * **As a flag.** At P(outdates) ≥ 0.3, it raises 53 of the 62 supersessions and
   13% of the candidates, with a precision of 53% among the labelled pairs. A
-  judge reading only the raised pairs keeps every proposal of its own, at 1.88 s
-  a candidate for the 7B and 2.84 for the 27B. But it proposes no more than it
-  does alone: it judges each pair afresh and misses most of what H2O raises.
+  judge that rereads the raised pairs, as the outdates gate has the 7B do,
+  proposes no more than it does alone. It judges each pair afresh, and misses
+  most of what H2O raises.
 
-H2O's recall would need a pass that writes the proposal for its call: the
-direction from the capture dates, and a quote from an LLM asked only for that.
-That pass is unmeasured, and so is H2O's precision on the candidates, where no
-label says.
+SMD-3114 measures the other way round: H2O decides a supersession, and an LLM
+only writes the proposal (the current side and a quote from it) or declines
+when it can't. H2O's precision on the candidates, where no label says, is
+unmeasured.
 
 Caveats:
 
@@ -4014,9 +4037,9 @@ Caveats:
   descriptions were measured. H2O was read through a port of its shim, checked
   against its own answers. Its binary question was asked in a yes/no shape the
   adapter chose (`jev/h2o/README.md`).
-* H2O's exploration was chosen after its run. 60 of the 62 true supersessions
-  are pointer pairs, and the candidates have no label, so its precision there
-  is unknown.
+* The outdates gate and H2O's exploration were chosen after its run, so the
+  gate needs the confirmation run. 60 of the 62 true supersessions are pointer
+  pairs, and the candidates have no label, so H2O's precision there is unknown.
 
 ## The query-log replay loop — measuring against real use (SMD-1295)
 

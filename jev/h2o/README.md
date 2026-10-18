@@ -98,17 +98,21 @@ own; it is only read.
 Run over the judge's 444 pairs on 2026-10-17. `evals/README.md`, "Settling the
 judge's easy pairs", has the tables.
 
-- **As a cheap first pass, it fails SMD-3058's rule behind the 7B,** the judge
-  both dogfood brains run. A read costs 1.41 s a candidate, and no band
-  accurate enough settles enough candidates to save time. Behind the 27B it
-  passes by 7%. The cascade stays declined.
+- **As a cheap first pass behind the 7B,** the judge both dogfood brains run, it
+  fails SMD-3058's rule when gated on its own confidence, and meets it when
+  gated on P(outdates). The outdates gate has the 7B read only the possible
+  supersessions. At a ceiling of 0.5 it settles 93% of the candidates at the
+  7B's accuracy, and costs 1.69 s a candidate against 3.76. On held-out halves
+  it sits on the line, a pair short on one, so it is reopened pending a
+  confirmation run.
 - **Its one-pass verdicts come close to the judges'.** On the 170 labelled pairs
   its loosest band settles, it is right on 140, against the 7B's 143 and the
   27B's 156.
 - **As the judge itself** (explored after the run), it is right on 259 of 324
   labelled pairs, where the 7B gets 239 and the 27B 263. It proposes 52 of the
   62 true supersessions (the 7B 2, the 27B 23), with 32 false proposals (3 and
-  17).
+  17). SMD-3114 measures it deciding supersession, with an LLM writing only the
+  proposal.
 - **The binary shape is this adapter's choice, not H2O's.** SMD-3058's "same
   subject?" question did poorly in it: it settled 93 pairs unrelated and was
   right on 33. It is the first thing to vary before another binary workload.
