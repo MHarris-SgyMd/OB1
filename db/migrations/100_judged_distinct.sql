@@ -35,15 +35,18 @@
 --   db/consolidate.ts, through server-portable/consolidate.ts's
 --   relationVerdict: a well-formed unrelated verdict whose own probability —
 --   the word's token probability under the judge, H2O's under decide mode
---   (SMD-3115) — is at the floor; under it the verdict closes the pair's
---   edge, as before. Prompt 4's word stays unrelated, so no pass key moves.
+--   (SMD-3115), where only H2O's own top unrelated counts, not one taken
+--   after a proposal failed — is at the floor; under it the verdict closes
+--   the pair's edge, as before. Prompt 4's word stays unrelated, so no pass
+--   key moves.
 --
 -- NOT HERE
 --   * A pair judged unrelated before this file has no distinct row: nothing
 --     recorded the verdict. It gains one when the pass judges it again.
 --   * Keeping distinct apart from the relations a reader counts: board
---     findings never post one, and brain_info, --status and --list
---     relations report it on its own (SMD-3117) — code, not this file.
+--     findings never post one, brain_info and --status count it on its
+--     own, and --list relations leaves it out (SMD-3117) — code, not this
+--     file.
 --   * Skipping the re-judge of a pair whose distinct stands at the texts
 --     judged, and showing distinct at retrieval: follow-ups if wanted.
 --

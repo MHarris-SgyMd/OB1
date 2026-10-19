@@ -14921,10 +14921,6 @@ console.log("\n[89] Migration 099: an unlink takes the review lock — update_th
   await db.exec(`DELETE FROM thoughts`);
 }
 
-// db/README.md quotes this suite's assertion total in two places ("Expected
-// outcome" and the Testing block). It used to be edited by hand and drifted;
-// this holds every count the README gives for test-schema.ts to what the suite
-// actually ran (SMD-1805). A doc check, so it does not move the number it reads.
 console.log("\n[90] Migration 100: the consolidation judge's distinct is stored — 084's relation vocabulary gains distinct: the validator and record_thought_relation take it, as one more word on the pair's one standing edge (added, kept, replaced by a relation and back, closed); a delete closes or drops it as 084's; the prompt's word, unrelated, is not a stored one; the sentinel the pass reads is in the door's body; 084 re-applied takes distinct away and the shipped definers put it back; a re-apply a no-op (SMD-3117)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
@@ -15007,6 +15003,10 @@ console.log("\n[90] Migration 100: the consolidation judge's distinct is stored 
   await db.exec(`DELETE FROM thoughts`);
 }
 
+// db/README.md quotes this suite's assertion total in two places ("Expected
+// outcome" and the Testing block). It used to be edited by hand and drifted;
+// this holds every count the README gives for test-schema.ts to what the suite
+// actually ran (SMD-1805). A doc check, so it does not move the number it reads.
 console.log("\n[doc] db/README.md states this suite's own assertion total");
 {
   const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");

@@ -1706,6 +1706,10 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   const noWriter = decideJudgement({ ...p, outdates: 0.05, unrelated: 0.55 }, null, false);
   assert(noWriter.verdict === "unrelated" && noWriter.reason === "" && relationVerdict(noWriter) === "distinct", "no writer asked: H2O's top verdict, a distinct (SMD-3117)");
   assert(JSON.stringify(relationConfidence(noWriter)) === JSON.stringify({ confidence: 0.55, mass: 0.55, source: "token" }), "…cut at H2O's P(unrelated) itself, not the relation words' mass");
+  // SMD-3117 review pass 1: only H2O's own top unrelated records a distinct — not one taken after its top outdates found no proposal.
+  const fellBack = { ...decideJudgement({ unrelated: 0.35, related: 0.05, evolves: 0.05, duplicate: 0.05, outdates: 0.5 }, prop, false), decide: { top: "outdates" } };
+  assert(fellBack.verdict === "unrelated" && relationVerdict(fellBack) === null && relationVerdict({ ...noWriter, decide: { top: "unrelated" } }) === "distinct",
+    `a fallback unrelated after H2O's top outdates found no proposal records no distinct; H2O's own top unrelated does (${fellBack.verdict})`);
   assert((judgedRecipe({ ...stood, decide: { top: "outdates" } }, "token").decide as { top?: string } | undefined)?.top === "outdates", "the recipe carries decide mode's note");
   const found = { similarity: 0.9, candidates: 5, minSimilarity: 0.7 };
   const decided = proposalRecipe({ judgeModel: "qwen3.8:27b", decider: "h2o-lightning-4b" }, found), judgedR = proposalRecipe({ judgeModel: "qwen2.5:7b", decider: "" }, found);

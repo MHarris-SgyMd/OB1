@@ -1915,7 +1915,9 @@ current, an accept needs `--direction newer` or `--direction older`.
 
 Since migration 084 the pass also stores its related, evolves and duplicate
 verdicts as `relation` facets on the newer thought — edges, not proposals,
-nothing to review (`--list relations` lists them). The service connects as the
+nothing to review (`--list relations` lists them) — and since 100 a pair it
+calls unrelated as a `distinct` one, two near neighbours kept apart (`--status`
+counts them; SMD-3117). The service connects as the
 superuser, so it stores them. A brain that ran the pass before 084 has none for
 the thoughts judged then: `--status` counts them and prints the `DELETE FROM
 thought_work_claims …` that has the next pass judge exactly those again (their

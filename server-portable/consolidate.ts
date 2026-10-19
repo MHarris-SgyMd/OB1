@@ -619,7 +619,14 @@ export type RelationWord = RelationVerdict | "distinct";
  */
 export function relationVerdict(j: Judgement): RelationWord | null {
   if (j.malformed) return null;
-  if (j.verdict === "unrelated") return "distinct";
+  if (j.verdict === "unrelated") {
+    // Under decide mode the verdict may be a fallback: H2O's top said outdates, no
+    // proposal stood, and the best of the other four was taken. A distinct says
+    // the two are about different subjects, which a top of outdates denies, so
+    // only H2O's own top unrelated records one (SMD-3117 review pass 1).
+    const top = j.decide?.top;
+    return top !== undefined && top !== "unrelated" ? null : "distinct";
+  }
   return (RELATION_VERDICTS as readonly string[]).includes(j.verdict) ? (j.verdict as RelationVerdict) : null;
 }
 

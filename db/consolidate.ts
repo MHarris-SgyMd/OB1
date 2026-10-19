@@ -1115,6 +1115,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // A pair this key no longer reaches keeps the relation another key judged (review pass 3).
       out(`  relations: ${r.related + r.evolves + r.duplicate} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate${r.other_key ? `; ${r.other_key} judged under another key, which this pass replaces only for the pairs it judges again` : ""}${r.edited ? `; ${r.edited} on a text edited since judged` : ""}) — --list relations shows them` +
         (r.distinct_pairs ? `; ${r.distinct_pairs} pair(s) judged distinct — near neighbours the judge called unrelated, kept apart (100)` : ""));
+      // 100 (SMD-3117): a brain short of it stores no distinct, which the next run says at its start; --status says it too (review pass 1).
+      if (!HAS_100) out(`  distinct: not stored — ${NO_100}`);
       // A thought this key judged before 084 was applied has no relations, and
       // nothing re-judges it on its own: said here, with the statement that
       // puts exactly those back in the pool (review pass 4). The ledger is
@@ -1128,7 +1130,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           `DELETE FROM thought_work_claims WHERE work_type = '${JOB.replaceAll("'", "''")}' AND status = 'succeeded' AND finished_at < '${new Date(before[0].at).toISOString()}'`);
       }
     } else {
-      out("  relations: not stored — this brain lacks migration 084, so related, evolves and duplicate verdicts are counted only (cd db && bun migrate.ts --url <owner's url>)");
+      out("  relations: not stored — this brain lacks migration 084, so related, evolves, duplicate and unrelated verdicts are counted only (cd db && bun migrate.ts --url <owner's url>)");
     }
   }
 
@@ -1192,15 +1194,28 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * 100 (SMD-3117): whether record_thought_relation takes distinct. 084's door
    * refuses the word, so a pass that sent it to a brain short of 100 would
    * fail every thought with an unrelated pair at the floor. Without it an
-   * unrelated verdict closes the pair's edge, as before 100, and the summary
-   * counts what was not stored. 100 keeps 084's signature, so its sentinel in
-   * the door's body is read (the 014 convention), once per run as 079's is.
+   * unrelated verdict closes the pair's edge, as before 100, the run says so
+   * at its start, and the summary counts what was not stored. 100 keeps 084's
+   * signature, so its sentinel in the door's body is read (the 014
+   * convention): at start, again on every poll of a follower, as relationsOff
+   * is (review pass 1: a follower started at 099 never stored a distinct once
+   * 100 was applied), and when the door refuses the word mid-pass (084
+   * re-applied by hand under a running pass).
    */
-  const has100 = await atStart(async () => ((await sql`
+  const readHas100 = async (): Promise<boolean> => ((await sql`
     SELECT COALESCE((SELECT prosrc LIKE '%ob1:relation-distinct%' FROM pg_proc
-                      WHERE oid = to_regprocedure('record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb)')), false) AS has_100`) as { has_100: boolean }[])[0].has_100);
+                      WHERE oid = to_regprocedure('record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb)')), false) AS has_100`) as { has_100: boolean }[])[0].has_100;
+  const has100 = await atStart(readHas100);
   if (has100 === null) return stoppedWaiting();
-  const HAS_100 = has100;
+  let HAS_100 = has100;
+  /** What a run short of 100 says: both remedies, as 079's does — the ledger may already record 100 under a hand re-apply of 084 (review pass 1). */
+  const NO_100 = "this brain lacks migration 100: apply it (cd db && bun migrate.ts --url <owner's url>), or, where the ledger already records 100 and 084 was re-applied by hand over it, re-apply (add --reapply)";
+  /** A change in whether distinct is stored, said once, whichever worker or poll sees it first. */
+  function distinctNow(has: boolean, when: string): void {
+    if (has === HAS_100) return;
+    out(has ? `  distinct: stored ${when}` : `  distinct: not stored ${when} — ${NO_100}`);
+    HAS_100 = has;
+  }
   /**
    * 084 (SMD-1873 PR 2): whether the pass stores its related, evolves and
    * duplicate verdicts as relations — the migration applied, and this role
@@ -1273,7 +1288,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // pass waits for it at its own start (SMD-2752).
   if (CHECK) {
     // The relations note at the start too; each pass says it again whatever its banner, since grants or 084 may change between sleeps (review pass 1).
-    if (RELATIONS_OFF) say(`  relations: not stored — ${RELATIONS_OFF}; a pass stores no relations then, counting its related, evolves and duplicate verdicts only`);
+    if (RELATIONS_OFF) say(`  relations: not stored — ${RELATIONS_OFF}; a pass stores no relations then, counting its related, evolves, duplicate and unrelated verdicts only`);
+    else if (!HAS_100) say(`  distinct: not stored — ${NO_100}; a pass closes the edge of a pair it calls unrelated then, as before 100`);
     if (startOut !== null) err(`  the provider is not answering at start (${startOut.slice(0, 200)}) — each pass waits for it at its own start`);
     opts.onStart?.({ ok: true, provider: startOut === null ? "up" : "out" });
     return 0;
@@ -1368,7 +1384,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   /** Rows that went to the judge — finished or not — so the pairs-per-thought ratio divides by the rows that cost pairs. */
   let judged = 0;
   let llmMs = 0;
-  const totals = { pairs: 0, unrelated: 0, related: 0, evolves: 0, duplicate: 0, outdates: 0, tokenScored: 0, statedScored: 0, relationsAdded: 0, relationsKept: 0, relationsReplaced: 0, relationsClosed: 0, relationsGone: 0, relationsUnstored: 0, relationsDistinct: 0, distinctUnstored: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
+  const totals = { pairs: 0, unrelated: 0, related: 0, evolves: 0, duplicate: 0, outdates: 0, tokenScored: 0, statedScored: 0, relationsAdded: 0, relationsKept: 0, relationsReplaced: 0, relationsClosed: 0, relationsGone: 0, relationsUnstored: 0, distinctAdded: 0, distinctKept: 0, distinctReplaced: 0, distinctNo100: 0, distinctUnstored: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
     // 079 (SMD-2448): the judge calls fewer than 066's list would have cost at --k, and the claims whose read failed (counted 0).
     ticketCalls: 0, ticketCallsUnread: 0,
     // 067: the stale rows this run met — replaced in place (proposed again),
@@ -1597,18 +1613,34 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // has none and none is due — record_thought_relation answers "none".
       let relation: string | null = null;
       const rv = relationVerdict(j);
-      // A brain short of 100 refuses distinct: there the verdict closes the edge, as it did before 100.
-      const word = rv === "distinct" && !HAS_100 ? null : rv;
       if (RELATIONS_OFF === null) {
         const rs = relationConfidence(j);
         // The floor on the mass of the three relation words (a distinct's on its own probability); the word's own probability is what the relation stores.
-        const write = word !== null && rs.mass >= MIN_CONFIDENCE ? word : null;
+        const due = rv !== null && rs.mass >= MIN_CONFIDENCE ? rv : null;
+        // A brain short of 100 refuses distinct: there the verdict closes the edge, as it did before 100, and is counted.
+        let write = due === "distinct" && !HAS_100 ? null : due;
+        let apartLost = due === "distinct" && write === null;
+        const writeRelation = async (w: string | null) => ((await sql`
+            SELECT record_thought_relation(${row.id}::uuid, ${c.older_id}::uuid, ${w}::text, ${w === null ? null : rs.confidence}::numeric,
+                                           ${JOB}::text, ${agentId}::uuid, ${older.fingerprint}::text, ${row.fingerprint}::text,
+                                           ${proposalRecipe(cfg, { similarity: c.similarity, candidates: K, minSimilarity: MIN_SIM }, judgedRecipe(j, rs.source))}::jsonb) AS r`) as { r: { action: string } }[])[0].r;
         let r: { action: string; gone?: boolean; unstored?: boolean };
         try {
-          [{ r }] = (await sql`
-            SELECT record_thought_relation(${row.id}::uuid, ${c.older_id}::uuid, ${write}::text, ${write === null ? null : rs.confidence}::numeric,
-                                           ${JOB}::text, ${agentId}::uuid, ${older.fingerprint}::text, ${row.fingerprint}::text,
-                                           ${proposalRecipe(cfg, { similarity: c.similarity, candidates: K, minSimilarity: MIN_SIM }, judgedRecipe(j, rs.source))}::jsonb) AS r`) as { r: { action: string } }[];
+          try {
+            r = await writeRelation(write);
+          } catch (e) {
+            // 084's door under a running pass (084 re-applied by hand since the
+            // sentinel was read): it refuses distinct by name. Read the sentinel
+            // again; where it is gone, distinct stops here and the pair's edge is
+            // closed, as before 100 — not a failed thought (review pass 1).
+            const code = (e as { code?: string; errno?: string }).errno ?? (e as { code?: string }).code;
+            if (!(write === "distinct" && code === "22023" && /relation must be related, evolves, duplicate or NULL/.test((e as Error).message))) throw e;
+            if (await readHas100().catch(() => true)) throw e;
+            distinctNow(false, "from this pair on");
+            write = null;
+            apartLost = true;
+            r = await writeRelation(null);
+          }
         } catch (e) {
           // A side deleted between the judgement and this write (the target
           // check, or the foreign key) is that pair's, not the thought's: the
@@ -1632,13 +1664,15 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         if (r.gone) totals.relationsGone++;
         // A distinct counts apart from the three words: the summary names each (SMD-3117).
         if (r.unstored && rv !== null) totals[rv === "distinct" ? "distinctUnstored" : "relationsUnstored"]++;
-        else if (rv === "distinct" && word === null) totals.distinctUnstored++;
+        // One at the floor that a brain short of 100 could not take — not one under the floor, nor a pair a delete took (review pass 1).
+        else if (apartLost && !r.gone) totals.distinctNo100++;
         relation = r.action;
-        if (r.action === "added") totals.relationsAdded++;
-        else if (r.action === "kept") totals.relationsKept++;
-        else if (r.action === "replaced") totals.relationsReplaced++;
+        // Each action counts the pair's one standing edge, and says how many of its writes were a distinct (review pass 1).
+        const apart = write === "distinct" ? 1 : 0;
+        if (r.action === "added") { totals.relationsAdded++; totals.distinctAdded += apart; }
+        else if (r.action === "kept") { totals.relationsKept++; totals.distinctKept += apart; }
+        else if (r.action === "replaced") { totals.relationsReplaced++; totals.distinctReplaced += apart; }
         else if (r.action === "closed") totals.relationsClosed++;
-        if (write === "distinct" && (r.action === "added" || r.action === "kept" || r.action === "replaced")) totals.relationsDistinct++;
       } else if (rv !== null) totals[rv === "distinct" ? "distinctUnstored" : "relationsUnstored"]++;
       if (DUMP) {
         appendFileSync(DUMP, JSON.stringify({
@@ -2111,15 +2145,18 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   // A verdict counted but not stored is lost to this key — its claim ends
   // succeeded — so the run says so first, not only in its summary (review pass 3).
-  if (RELATIONS_OFF) out(`  relations: not stored this run — ${RELATIONS_OFF}; related, evolves and duplicate verdicts are counted only, and a pair judged now gets no relation until its claim is cleared`);
+  if (RELATIONS_OFF) out(`  relations: not stored this run — ${RELATIONS_OFF}; related, evolves, duplicate and unrelated verdicts are counted only, and a pair judged now gets no relation until its claim is cleared`);
+  // 100 (SMD-3117): the same for a distinct, whose verdict is lost to the key as well (review pass 1).
+  else if (!HAS_100) out(`  distinct: not stored this run — ${NO_100}; a pair judged unrelated now has its edge closed, as before 100, and gets no distinct until its claim is cleared`);
   let after = await followedPass();
   if (FOLLOW) {
     await stamper?.stamp(passOutcome);
     while (!stopping && !limitReached()) {
       await sleepUnless(FOLLOW * 1000, onStop.signal);
       if (stopping) break;
-      // A follower sees a migration or a grant applied while it runs.
+      // A follower sees a migration or a grant applied while it runs — 100's sentinel too (SMD-3117).
       relationsNow(await relationsOff().catch(() => RELATIONS_OFF), "from this poll on");
+      distinctNow(await readHas100().catch(() => HAS_100), "from this poll on");
       after = await followedPass();
       await stamper?.stamp(passOutcome);
     }
@@ -2159,12 +2196,16 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // and the verdicts judged while it could not beside them (review pass 4:
   // the summary read only the last state, hiding a relation the run added).
   const unstored = totals.relationsUnstored ? `${totals.relationsUnstored} related, evolves or duplicate verdict(s) counted only` : "";
-  // 100 (SMD-3117): the distincts this run recorded, and the unrelated verdicts it could not — a brain short of 100, or relations off.
+  // 100 (SMD-3117): how many of each action's writes were a distinct — part of
+  // the action's count, said beside it, never added again (review pass 1) —
+  // and the unrelated verdicts not stored: at the floor on a brain short of
+  // 100, or counted while relations were not stored.
+  const ofThem = (n: number) => (n ? ` (${n} distinct)` : "");
   const distinctTail =
-    (totals.relationsDistinct ? `; ${totals.relationsDistinct} recorded as distinct — an unrelated verdict, two near neighbours kept apart (100)` : "") +
-    (totals.distinctUnstored ? `; ${totals.distinctUnstored} unrelated verdict(s) not stored as distinct — ${!HAS_100 ? "this brain lacks migration 100 (cd db && bun migrate.ts --url <owner's url>)" : "judged while relations were not stored"}` : "");
+    (totals.distinctNo100 ? `; ${totals.distinctNo100} unrelated verdict(s) at the floor not stored as distinct, the edge closed as before 100 — ${NO_100}` : "") +
+    (totals.distinctUnstored ? `; ${totals.distinctUnstored} unrelated verdict(s) counted only, judged while relations were not stored` : "");
   out(RELATIONS_EVER_ON
-    ? `  relations: ${totals.relationsAdded} added, ${totals.relationsKept} kept, ${totals.relationsReplaced} replaced, ${totals.relationsClosed} closed${totals.relationsGone ? `, ${totals.relationsGone} skipped — a side deleted mid-pass` : ""}` +
+    ? `  relations: ${totals.relationsAdded} added${ofThem(totals.distinctAdded)}, ${totals.relationsKept} kept${ofThem(totals.distinctKept)}, ${totals.relationsReplaced} replaced${ofThem(totals.distinctReplaced)}, ${totals.relationsClosed} closed${totals.relationsGone ? `, ${totals.relationsGone} skipped — a side deleted mid-pass` : ""}` +
         `${unstored ? `; ${unstored}, judged while relations were not stored${RELATIONS_OFF ? ` — ${RELATIONS_OFF}` : ""}` : ""}` + distinctTail
     : `  relations: not stored — ${RELATIONS_OFF} — ${unstored || "0 related, evolves or duplicate verdict(s) counted only"}` + distinctTail);
   if (totals.pairs > 0) out(`  model time per pair: ${(llmMs / totals.pairs / 1000).toFixed(1)}s`);

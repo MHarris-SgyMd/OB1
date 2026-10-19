@@ -1391,7 +1391,8 @@ services:
     logging: *logging
 
   # Consolidation never applies a proposal; since 084 it stores related,
-  # evolves and duplicate verdicts as relation facets. Each proposal waits for review
+  # evolves and duplicate verdicts as relation facets, and since 100 an
+  # unrelated one as a distinct (SMD-3117). Each proposal waits for review
   # (`bun db/consolidate.ts --list`, then --accept or --reject; 029), but for
   # a stale one the next pass settles (067). Beside extraction: the pool holds
   # only thoughts with entities and a vector, and a candidate shares an

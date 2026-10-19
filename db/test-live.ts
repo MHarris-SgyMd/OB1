@@ -5826,6 +5826,8 @@ if (want("16")) {
   let rotaConfidence = 0.85;
   /** Token alternatives for the rota answer's verdict, when set (review pass 1: the floor on the relation words' mass). */
   let rotaTop: [string, number][] | null = null;
+  // SMD-3117 review pass 1: when set, the stub puts 084's door back as it answers the rota pair — a hand re-apply under a running pass.
+  let swapDoorOnRota = false;
   const judge = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -5858,6 +5860,10 @@ if (want("16")) {
       else if (/rota/.test(a) && /rota/.test(b)) answer = { verdict: rotaAnswer, supersedes: "unknown", confidence: rotaConfidence, reason: "the same rota" };
       else if (/deploy/.test(a) && /deploy/.test(b)) answer = { verdict: "evolves", supersedes: "unknown", confidence: 0.8, reason: "the later deploy note follows the earlier" };
       else answer = { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
+      if (swapDoorOnRota && /rota/.test(a) && /rota/.test(b)) {
+        swapDoorOnRota = false;
+        await sql.unsafe(readFileSync(join(HERE, "migrations", "084_judged_relations.sql"), "utf8"));
+      }
       const content = JSON.stringify(answer);
       // SMD-1873: two answers come with token probabilities when the pass asks —
       // the verdict's first token among three alternatives. The billing pair's
@@ -6974,7 +6980,7 @@ if (want("16")) {
     // the newer thought — two near neighbours judged apart, kept, not listed.
     const asUnrelated = await rejudge("unrelated");
     const ru = (await relOf()).filter((r) => r.active);
-    assert(/relations: 1 added, 0 kept, 0 replaced, 0 closed; 1 recorded as distinct/.test(asUnrelated.out) && ru.map((r) => `${r.relation}@${r.confidence}`).join() === "distinct@0.85" && ru[0]?.lineage === 1,
+    assert(/relations: 1 added \(1 distinct\), 0 kept, 0 replaced, 0 closed/.test(asUnrelated.out) && ru.map((r) => `${r.relation}@${r.confidence}`).join() === "distinct@0.85" && ru[0]?.lineage === 1,
       `judged unrelated at the floor, the pair is a distinct on the newer thought at the stated confidence, its lineage under the pass's key (${asUnrelated.out.split("\n").find((l) => /relations:/.test(l))?.trim()}; ${JSON.stringify(ru)})`);
     const apartStatus = await consolidate("--status");
     const apartList = await consolidate("--list", "relations");
@@ -6982,7 +6988,7 @@ if (want("16")) {
     assert(/— --list relations shows them; \d+ pair\(s\) judged distinct — near neighbours the judge called unrelated, kept apart \(100\)/.test(apartStatus.out) && !/\] distinct/.test(apartList.out) && !apartList.out.includes(rotaNew),
       `--status counts the distinct apart from the relations, and --list relations does not list it (${apartStatus.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
     const apartUnder = await rejudge("unrelated", 0.3);
-    assert(/relations: 0 added, 0 kept, 0 replaced, 1 closed/.test(apartUnder.out) && !/recorded as distinct/.test(apartUnder.out) && (await relOf()).every((r) => !r.active),
+    assert(/relations: 0 added, 0 kept, 0 replaced, 1 closed/.test(apartUnder.out) && !/\(\d+ distinct\)/.test(apartUnder.out) && (await relOf()).every((r) => !r.active),
       `judged unrelated under the floor, nothing is recorded and the standing distinct is closed (${apartUnder.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
     const apartNone = await rejudge("unrelated", 0.3);
     assert(/relations: 0 added, 0 kept, 0 replaced, 0 closed/.test(apartNone.out) && (await relOf()).every((r) => !r.active),
@@ -6996,7 +7002,7 @@ if (want("16")) {
     rotaTop = [["unr", 0.8], ["rel", 0.15], ["ev", 0.05]];
     const apartSure = await rejudge("unrelated", 0.9);
     rotaTop = null;
-    assert(/relations: 0 added, 0 kept, 0 replaced, 0 closed/.test(apartSplit.out) && /relations: 1 added, 0 kept, 0 replaced, 0 closed; 1 recorded as distinct/.test(apartSure.out) && (await relOf()).find((r) => r.active)?.confidence === 0.8,
+    assert(/relations: 0 added, 0 kept, 0 replaced, 0 closed/.test(apartSplit.out) && /relations: 1 added \(1 distinct\), 0 kept, 0 replaced, 0 closed/.test(apartSure.out) && (await relOf()).find((r) => r.active)?.confidence === 0.8,
       `a distinct's floor is its own token probability, not the relation words' mass (${[apartSplit, apartSure].map((r) => r.out.split("\n").find((l) => /relations:/.test(l))?.trim()).join(" / ")})`);
     // A brain short of 100 — 084's door, which refuses distinct: the verdict
     // closes the pair's edge as before 100, and the run counts it, the thought not failed.
@@ -7005,9 +7011,51 @@ if (want("16")) {
       const pre100 = await rejudge("unrelated");
       // The run's exit is the relic note's (it fails on purpose, above); the rota's own claim says whether its thought failed.
       const [rotaClaim] = await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
-      assert(rotaClaim?.status === "succeeded" && /relations: 0 added, 0 kept, 0 replaced, 1 closed; 1 unrelated verdict\(s\) not stored as distinct — this brain lacks migration 100/.test(pre100.out) && (await relOf()).every((r) => !r.active),
-        `on a brain short of 100 an unrelated verdict closes the standing distinct and is counted, the thought not failed (${rotaClaim?.status}: ${pre100.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+      const BOTH = /this brain lacks migration 100: apply it \(cd db && bun migrate\.ts --url <owner's url>\), or, where the ledger already records 100 and 084 was re-applied by hand over it, re-apply \(add --reapply\)/;
+      assert(rotaClaim?.status === "succeeded" && /relations: 0 added, 0 kept, 0 replaced, 1 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct, the edge closed as before 100 — this brain lacks migration 100/.test(pre100.out)
+          && BOTH.test(pre100.out) && /distinct: not stored this run — this brain lacks migration 100/.test(pre100.out) && (await relOf()).every((r) => !r.active),
+        `on a brain short of 100 an unrelated verdict closes the standing distinct and is counted, the run saying so first with both remedies, the thought not failed (${rotaClaim?.status}: ${pre100.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+      const under100 = await rejudge("unrelated", 0.3);
+      assert(/relations: 0 added, 0 kept, 0 replaced, 0 closed/.test(under100.out) && !/not stored as distinct/.test(under100.out),
+        "…and one under the floor, which 100 would not store either, is not counted as lost (review pass 1)");
+      const status100 = await consolidate("--status");
+      assert(/^ {2}distinct: not stored — this brain lacks migration 100/m.test(status100.out) && BOTH.test(status100.out), `--status says a brain short of 100 stores no distinct, with both remedies (${status100.out.split("\n").find((l) => /distinct:/.test(l))?.trim()})`);
+      // Review pass 1: a follower started short of 100 reads the sentinel on every
+      // poll — 100 applied under it, its next unrelated verdict is a distinct.
+      rotaAnswer = "unrelated";
+      rotaConfidence = 0.85;
+      const follower = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", URL_!, "--follow", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+      let followApart = false;
+      try {
+        await Bun.sleep(2500);
+        await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
+        await Bun.sleep(2000);
+        await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+        for (let i = 0; i < 80 && !followApart; i++) {
+          await Bun.sleep(250);
+          followApart = (await relOf()).some((r) => r.active && r.relation === "distinct");
+        }
+      } finally {
+        follower.kill("SIGINT");
+      }
+      const followOut = (await new Response(follower.stdout).text()) + (await new Response(follower.stderr).text());
+      await follower.exited;
+      assert(followApart && /distinct: not stored this run — this brain lacks migration 100/.test(followOut) && /distinct: stored from this poll on/.test(followOut),
+        `a follower started short of 100 says so at its start, reads the sentinel again on its next poll once 100 is applied, and records the next unrelated verdict as a distinct (${followOut.split("\n").filter((l) => /distinct:|relations:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 300)})`);
     } finally {
+      await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
+    }
+    // Review pass 1: 084's door put back under a running pass refuses distinct by
+    // name; the pass reads the sentinel again and closes the edge instead of failing the thought.
+    swapDoorOnRota = true;
+    try {
+      const swapped = await rejudge("unrelated");
+      const [swapClaim] = await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+      assert(!swapDoorOnRota && swapClaim?.status === "succeeded" && /distinct: not stored from this pair on — this brain lacks migration 100/.test(swapped.out)
+          && /relations: 0 added, 0 kept, 0 replaced, 1 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct/.test(swapped.out) && (await relOf()).every((r) => !r.active),
+        `084's door under a running pass: the distinct the follower left is closed, the verdict counted, the thought not failed (${swapClaim?.status}: ${swapped.out.split("\n").filter((l) => /distinct:|relations:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 300)})`);
+    } finally {
+      swapDoorOnRota = false;
       await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
     }
     // A brain without 084: the pass counts the verdicts and says relations are not stored.
@@ -7017,6 +7065,9 @@ if (want("16")) {
       const noList = await consolidate("--list", "relations");
       assert(/relations: not stored — this brain lacks migration 084 \(cd db && bun migrate\.ts --url <owner's url>\) — 1 related, evolves or duplicate verdict\(s\) counted only/.test(without.out) && noList.code === 1 && /--list relations needs migration 084/.test(noList.out),
         `without 084 the pass counts the verdict and says relations are not stored, and --list relations names the migration (${without.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+      const withoutApart = await rejudge("unrelated");
+      assert(/relations: not stored — this brain lacks migration 084 \(cd db && bun migrate\.ts --url <owner's url>\) — 0 related, evolves or duplicate verdict\(s\) counted only; 1 unrelated verdict\(s\) counted only, judged while relations were not stored/.test(withoutApart.out) && !/lacks migration 100/.test(withoutApart.out),
+        `without 084 an unrelated verdict is counted only, beside the three words and not blamed on 100 (${withoutApart.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
     } finally {
       await sql.unsafe(`ALTER FUNCTION record_thought_relation_hidden(uuid, uuid, text, numeric, text, uuid, text, text, jsonb) RENAME TO record_thought_relation`);
     }
@@ -7026,10 +7077,24 @@ if (want("16")) {
     await sql`SELECT record_thought_relation(${rotaNew}::uuid, ${rotaOld}::uuid, 'related', 0.6, 'consolidate:other-model@p4', NULL, 'a', 'b', NULL)`;
     const superseder = await seed("The on-call rota, as of this week.", 14, 0, ["rota-replacement"]);
     await sql`UPDATE thoughts SET supersedes = ${rotaOld}::uuid WHERE id = ${superseder}::uuid`;
+    // SMD-3117 review pass 1: a distinct is not one of the relations --status's
+    // clauses count — this one is under another key, on lineage its texts no
+    // longer match. Two thoughts outside the pool (no vector), so no pass judges them.
+    const outside = async (text: string) => ((await sql`SELECT upsert_thought(${text}, ${{ metadata: { source: "test" } }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
+    const apartA = await outside("A note on the boiler room, judged apart."), apartB = await outside("A note on the boiler's warranty, judged apart.");
+    await sql`SELECT record_thought_relation(${apartB}::uuid, ${apartA}::uuid, 'distinct', 0.7, 'consolidate:other-model@p4', NULL, 'a', 'b', NULL)`;
     const marked = await consolidate("--list", "relations");
     const statusOther = await consolidate("--status");
     assert(/\] related  .*OLDER SUPERSEDED.*ANOTHER JUDGE KEY/.test(marked.out) && /1 judged under another key, which this pass replaces only for the pairs it judges again/.test(statusOther.out),
-      `--list relations marks a relation whose older side is superseded and one judged under another key, and --status counts the other key's (${marked.out.split("\n").find((l) => /\] related/.test(l))?.trim()})`);
+      `--list relations marks a relation whose older side is superseded and one judged under another key, and --status counts the other key's — not the distinct's (${marked.out.split("\n").find((l) => /\] related/.test(l))?.trim()})`);
+    const [{ c: editedWant }] = await sql`SELECT count(*)::int AS c FROM thought_facets f JOIN thoughts n ON n.id = f.thought_id JOIN thoughts o ON o.id = (f.payload->>'target')::uuid
+                                            JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = f.payload->>'judge_key'
+                                           WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'relation' <> 'distinct'
+                                             AND (content_fingerprint_of(o.content) IS DISTINCT FROM d.input_fingerprints[1] OR content_fingerprint_of(n.content) IS DISTINCT FROM d.input_fingerprints[2])`;
+    const editedSaid = Number(/; (\d+) on a text edited since judged/.exec(statusOther.out)?.[1] ?? 0);
+    assert(editedSaid === Number(editedWant) && Number(editedWant) > 0,
+      `--status's edited count is the relations', not the distinct's beside them (${editedSaid} said, ${editedWant} relations edited)`);
+    await sql`DELETE FROM thoughts WHERE id IN (${apartA}::uuid, ${apartB}::uuid)`;
     // Review pass 4: a side superseded on the NEWER thought is marked too.
     const newerSuperseder = await seed("The on-call rota, newer still.", 15, 0, ["rota-next"]);
     await sql`UPDATE thoughts SET supersedes = ${rotaNew}::uuid WHERE id = ${newerSuperseder}::uuid`;
