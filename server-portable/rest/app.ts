@@ -2,8 +2,9 @@
 // expose, as JSON, over the same core (core/index.ts) — routes from ROUTES,
 // inputs held to the tool's own zod schema, a refusal answered as its code and
 // its declared facts, a fault as FAILED. Authorization is here: a key's scope
-// decides which operations it may call, and the agent registry decides whether
-// the key still stands. Nothing here reads the store or calls a model; that is
+// — or the key scope an authorization server's token maps to (oauth-token.ts,
+// SMD-2286) — decides which operations it may call, and the agent registry
+// decides whether the key still stands. Nothing here reads the store or calls a model; that is
 // the core's, as it is for the MCP server.
 
 import { Hono, type Context } from "hono";
@@ -13,6 +14,8 @@ import type { AgentOutcome } from "../agents.ts";
 import { HEALTH_DEADLINE_MS, SPECS, type Core } from "../core/index.ts";
 import { failure, refusalValue, type Refusal } from "../core/refusal.ts";
 import { mayCall, scopeOf, unlocks, visibleToolNames, type ToolName } from "../tools.ts";
+import { JWT_SHAPE, UNREACHABLE_RETRY_AFTER_SECONDS } from "../oauth-edge.ts";
+import type { TokenCheck } from "../oauth-token.ts";
 import { runHook, runOperation, type LoadedHook, type LoadedOp, type LoadedPlugin } from "../core/index.ts";
 import { subscribe as subscribeJob } from "../jobs.ts";
 import { labelPart, withSseKeepalive } from "../sse.ts";
@@ -31,6 +34,12 @@ export interface RestDeps {
   init(): void;
   /** The configured keys. */
   keys(): AuthConfig;
+  /**
+   * The check of the authorization server's access tokens (oauth-token.ts),
+   * or null where none is accepted: a stack that is not configured. Read per
+   * request, as the keys are; absent, no token is accepted (SMD-2286).
+   */
+  tokens?(): TokenCheck | null;
   /** The agent registry's answer for a key: its stable id, a revocation, or busy (agents.ts). */
   resolve(principal: Principal): Promise<AgentOutcome>;
   /** Wraps a detached run (a job), so the stop waits for it. */
@@ -101,6 +110,9 @@ const KEY_REFUSALS: ReadonlySet<string> = new Set(["UNAUTHORIZED", "REVOKED", "B
 const RETRY_AFTER_SECONDS = 2;
 const RETRY_AFTER = { "Retry-After": String(RETRY_AFTER_SECONDS) };
 
+/** The value of an `Authorization: Bearer` header, or undefined. */
+const bearerOf = (req: Request): string | undefined => req.headers.get("authorization")?.match(/^Bearer\s+(\S+)\s*$/i)?.[1];
+
 /**
  * The keys a request presents, from its headers alone: `x-brain-key`,
  * `x-access-key` or `Authorization: Bearer`. Never `?key=` — the MCP server
@@ -108,8 +120,7 @@ const RETRY_AFTER = { "Retry-After": String(RETRY_AFTER_SECONDS) };
  * a URL reaches access logs and history.
  */
 export function headerKeys(req: Request): string[] {
-  const bearer = req.headers.get("authorization")?.match(/^Bearer\s+(\S+)\s*$/i)?.[1];
-  const forms = [req.headers.get("x-brain-key"), req.headers.get("x-access-key"), bearer];
+  const forms = [req.headers.get("x-brain-key"), req.headers.get("x-access-key"), bearerOf(req)];
   return [...new Set(forms.filter((k): k is string => Boolean(k)))];
 }
 
@@ -374,7 +385,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
 
   /**
    * The caller, or the answer that refuses it: a key that authenticates (a
-   * caller's scope — a forwarder key alone is unknown here), then the registry's word on it — revoked is refused for good, busy
+   * caller's scope — a forwarder key alone is unknown here) or, configured, the
+   * authorization server's token (SMD-2286), then the registry's word on it — revoked is refused for good, busy
    * for now — with its stable agent id set for the audit row. A request that
    * carries the forwarder slot is refused unless the slot holds a forward-scope
    * key the registry stands by (the refusal says `credential: "forwarder"`), and
@@ -387,6 +399,25 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     for (const key of headerKeys(c.req.raw)) {
       principal = authenticate(key, keys, { admit: CLIENT_SCOPES });
       if (principal) break;
+    }
+    // No key matched: a bearer of a JWT's shape is the authorization server's
+    // token, checked where the stack is configured (oauth-token.ts). A token
+    // that is not one this server accepts is refused as a token
+    // (`credential: "token"`, RFC 6750's invalid_token, or insufficient_scope
+    // for a valid one whose scopes name no key scope); with no keys to check
+    // it against, it is answered as the MCP server answers a token while the
+    // authorization server is down: 503, retry in 30 s. Unconfigured, it is an
+    // unknown key, as before.
+    const bearer = bearerOf(c.req.raw);
+    const check = !principal && bearer !== undefined && JWT_SHAPE.test(bearer) ? deps.tokens?.() ?? null : null;
+    const byToken = check !== null;
+    if (check) {
+      const checked = await check(bearer!);
+      if (checked.status === "unavailable") return refuse(c, 503, { code: "BUSY", retryable: true, credential: "token" }, { "Retry-After": String(UNREACHABLE_RETRY_AFTER_SECONDS) });
+      if (checked.status === "invalid") return refuse(c, 401, { code: "UNAUTHORIZED", credential: "token" }, { "WWW-Authenticate": 'Bearer error="invalid_token"' });
+      // A valid token whose scopes name no key scope (none of the brain's, or read with capture and no write) reaches no operation: RFC 6750's insufficient_scope.
+      if (checked.status === "scope") return refuse(c, 403, { code: "FORBIDDEN", credential: "token" }, { "WWW-Authenticate": 'Bearer error="insufficient_scope"' });
+      principal = checked.principal;
     }
     if (!principal) return refuse(c, 401, { code: "UNAUTHORIZED" }, { "WWW-Authenticate": "Bearer" });
     const trace = traceOf(c.req.raw);
@@ -406,7 +437,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     // and the forwarder's key matched its digest above. Its own revocation is read after the caller's (PR 3a's lock
     // order), so a revoked forwarder holding a revoked caller's key is told that key's name — its label, no more.
     const named = carrier ? { name: principal.name } : {};
-    if (identity.status === "revoked") return refuse(c, 401, { code: "REVOKED", ...named }, { "WWW-Authenticate": "Bearer" });
+    // A token's subject revoked in the registry says so as a token's refusal: no sign-in clears it, since the subject's digest is fixed (oauth-token.ts).
+    if (identity.status === "revoked") return refuse(c, 401, { code: "REVOKED", ...named, ...(byToken ? { credential: "token" } : {}) }, { "WWW-Authenticate": "Bearer" });
     if (identity.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, ...named }, RETRY_AFTER);
     principal.agentId = identity.agentId;
     principal.agentUnresolved = identity.unresolved;
@@ -420,7 +452,9 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       // pass 5); a revoked forwarder is the server's misconfiguration, whose line names no caller.
       if (carried.status === "revoked") return refuse(c, 401, { code: "REVOKED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
       if (carried.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, credential: "forwarder", name: principal.name }, RETRY_AFTER);
-      principal.act = { name: carrier.name, ...(carried.agentId ? { agentId: carried.agentId } : {}) };
+      // An exchanged token names its own carrier, signed (`act`, oauth-token.ts): that stands, and the slot's key, still
+      // checked above, only says the forwarder's traceparent may be continued.
+      principal.act ??= { name: carrier.name, ...(carried.agentId ? { agentId: carried.agentId } : {}) };
     }
     return principal;
   }
