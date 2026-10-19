@@ -6,7 +6,8 @@
 
 import { thoughtTitle, thoughtUrl } from "../thoughts.ts";
 import { mayLeaveBox, type EgressSubject } from "../egress.ts";
-import { storeKind, UUID_RE, type AuditChange, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type WorkerStatusRow } from "../store.ts";
+import { storeKind, UUID_RE, type AuditChange, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
+import { keysInOrder, MOVED_READ, movedAmong, typesOf, type Moved, type MovedHit, type MovedType } from "../stated-status.ts";
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
 import { brainInfo as readBrain, type BrainInfo, type ReadOptions, type ServerFacts } from "../brain-info.ts";
 import { FORK_VERSION, LATEST_MIGRATION, RELEASE_RANGE } from "../version.ts";
@@ -115,11 +116,22 @@ function searchFilter(input: { filter?: unknown; said_by?: string; actor?: strin
 // TOPICAL -0.127, a note under a Done ticket -0.292 and -0.524 once the
 // window fills, a settled ticket looked up by its key -0.750 to -1.000), and
 // this surface has no caller who can ask for it.
+//
+// It does carry the stated-status label (SMD-2540), as search_thoughts does:
+// a label moves no rank, and the maintainer's call is the title AND a field —
+// the title because it is what every ChatGPT surface hands the model, the
+// field for a reader that reads the shape (render.ts).
 const SEARCH_COMPAT_RECENCY_WEIGHT = 0;
 const SEARCH_COMPAT_PREFER_CURRENT = false;
 
-/** ChatGPT's search shape, with each result's trust beside it (SMD-1724) — render.ts marks an ingested title with it and sends the shape alone. */
-export type SearchResult = { results: { id: string; title: string; url: string; trust: unknown }[] };
+/**
+ * ChatGPT's search shape, with each result's trust (SMD-1724) and, where a
+ * ticket it names moved, its moved tickets (SMD-2540) beside it — render.ts
+ * marks the title with both and sends the shape, `moved` only where one moved.
+ * Absent, not empty, elsewhere: an MCP server older than this REST core passes
+ * an unknown field through, and then only the results it is about carry it.
+ */
+export type SearchResult = { results: { id: string; title: string; url: string; trust: unknown; moved?: MovedType[]; movedNotRead?: number }[] };
 
 export async function search(ctx: Ctx, principal: Principal, { query }: Input<"search">): Promise<Outcome<SearchResult>> {
   // The one search op, hybrid arm (SMD-1490); this surface is fixed, so it
@@ -129,12 +141,14 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
   // recency weight above. runSearch gates the query (SMD-1903) and logs.
   const r = await runSearch(ctx, principal, { tool: "search", arm: "hybrid", query, limit: 10, threshold: 0, recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT, preferCurrent: SEARCH_COMPAT_PREFER_CURRENT, filter: {} });
   if (r.refusal) return refuse(r.refusal);
+  const moved = await movedOf(await ctx.store(), r.rows, null);
   return ok({
     results: r.rows.map((t) => ({
       id: t.id,
       title: thoughtTitle(t.content, t.created_at),
       url: thoughtUrl(ctx.citationBase(), t.id),
       trust: t.metadata?.trust,
+      ...resultLabel(moved[t.id]),
     })),
   });
 }
@@ -164,8 +178,14 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
 
 /** What the query was taken to mean — every hybrid row carries the same four. */
 export type QueryFacts = Pick<ThoughtHybridMatch, "needles" | "needleCounts" | "commonNeedles" | "literalOnly">;
-/** A hybrid hit, with the newer thought that supersedes it (025), if any. */
-export type SearchHit = Pick<ThoughtHybridMatch, "id" | "content" | "metadata" | "created_at" | "similarity" | "matchedNeedles" | "score" | "fused" | "demoted"> & { supersededBy: string | null };
+/**
+ * A hybrid hit, with the newer thought that supersedes it (025), if any, and
+ * the tickets it names that moved since it was written (095, SMD-2540):
+ * `moved` null when they were not checked (superseded, a ticket row or a note
+ * under one, no written time, a brain before 095), empty when checked and none
+ * moved or it names none; `movedNotRead` the keys past the first 50, not checked.
+ */
+export type SearchHit = Pick<ThoughtHybridMatch, "id" | "content" | "metadata" | "created_at" | "similarity" | "matchedNeedles" | "score" | "fused" | "demoted"> & { supersededBy: string | null; moved: Moved[] | null; movedNotRead: number };
 export type SearchThoughtsResult = {
   query: string;
   preferCurrent: boolean;
@@ -183,6 +203,48 @@ export type SearchThoughtsResult = {
 
 const factsOf = (r: ThoughtHybridMatch | undefined): QueryFacts | null =>
   r ? { needles: r.needles, needleCounts: r.needleCounts, commonNeedles: r.commonNeedles, literalOnly: r.literalOnly } : null;
+
+/**
+ * The stated-status label (SMD-2540): per hit, the tickets it names whose
+ * status moved since it was written — moved-session-settled, the reading
+ * evals/eval-stated-status.ts measured (stated-status.ts). It labels and never
+ * ranks. Read only when a hit names a ticket: then which hits are superseded
+ * (`superseded`, or one query when the caller has not read it) and one query
+ * for the rest's lifecycles and tickets. Best-effort, as supersededAmong: a
+ * brain before 095, or a role without ob1_config, labels nothing and the
+ * search goes on.
+ */
+/** A search_thoughts hit's label fields: `[]` when it names no ticket, null when its tickets were not checked, the unread keys counted. */
+export const hitLabel = (content: string, checked: MovedHit | undefined): { moved: Moved[] | null; movedNotRead: number } =>
+  ({ moved: keysInOrder(content).length === 0 ? [] : (checked?.moved ?? null), movedNotRead: checked?.notRead ?? 0 });
+
+/**
+ * A compat result's label fields, only where a ticket moved, in status types:
+ * an MCP server older than this REST core passes them through to ChatGPT as
+ * they stand (review pass 5), so no board name and no empty field.
+ */
+export const resultLabel = (checked: MovedHit | undefined): { moved?: MovedType[]; movedNotRead?: number } =>
+  checked?.moved.length ? { moved: typesOf(checked.moved), ...(checked.notRead > 0 ? { movedNotRead: checked.notRead } : {}) } : {};
+
+export async function movedOf(store: Pick<ThoughtStore, "supersededAmong" | "ticketStatusInputs">, hits: readonly Pick<ThoughtHybridMatch, "id" | "content" | "created_at" | "metadata">[], superseded: Record<string, string> | null): Promise<Record<string, MovedHit>> {
+  // A ticket row tells its own status and is never labelled (movedAmong): its keys are not sent.
+  const naming = hits.filter((h) => h.metadata?.issue === undefined && keysInOrder(h.content).length > 0);
+  if (naming.length === 0) return {};
+  // Each hit's first MOVED_READ keys mentioned (stated-status.ts): 095's call grows with the keys sent.
+  const keysOf = (rows: typeof naming) => [...new Set(rows.flatMap((h) => keysInOrder(h.content).slice(0, MOVED_READ)))];
+  if (superseded === null) {
+    // search has not read supersession: both reads at once (review pass 7), the superseded hits' keys
+    // sent too and their rows left out by movedAmong.
+    const [over, inputs] = await Promise.all([store.supersededAmong(naming.map((h) => h.id)), store.ticketStatusInputs(naming.map((h) => h.id), keysOf(naming))]);
+    return inputs ? movedAmong(naming, over, inputs) : {};
+  }
+  // Only the unsuperseded hits' tickets are read; movedAmong leaves the superseded ones out.
+  const open = naming.filter((h) => !superseded[h.id]);
+  const tickets = keysOf(open);
+  if (tickets.length === 0) return {};
+  const inputs = await store.ticketStatusInputs(open.map((h) => h.id), tickets);
+  return inputs ? movedAmong(naming, superseded, inputs) : {};
+}
 
 export async function searchThoughts(ctx: Ctx, principal: Principal, input: Input<"search_thoughts">): Promise<Outcome<SearchThoughtsResult>> {
   const { query, limit, threshold, recency_weight, prefer_current, min_trust } = input;
@@ -214,14 +276,16 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
   // SMD-2255), priced by eval-supersession.ts. A hit ranked beside the
   // version that replaced it is the failure this ticket is about — say so
   // on the row rather than let it pass as current.
-  const superseded = await (await ctx.store()).supersededAmong(data.map((t) => t.id));
+  const store = await ctx.store();
+  const superseded = await store.supersededAmong(data.map((t) => t.id));
+  const moved = await movedOf(store, data, superseded);
   return ok({
     query,
     preferCurrent: prefer_current,
     hits: data.map((t) => ({
       id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, similarity: t.similarity,
       matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
-      supersededBy: superseded[t.id] ?? null,
+      supersededBy: superseded[t.id] ?? null, ...hitLabel(t.content, moved[t.id]),
     })),
     facts: factsOf(data[0]),
     window: data[0].window ?? null,

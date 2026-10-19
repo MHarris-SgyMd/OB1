@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2890 assertions: 2890 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports ninety-seven (97) migrations applied, and
+`bun test-schema.ts` prints `2902 assertions: 2902 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports ninety-nine (99) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1623,9 +1623,15 @@ write's cycle let 092's re-firing clear it and 060 then refused the write.
 Outside raw cycles nothing cleared below the bound changes. The walk reads
 one snapshot and re-reads each cleared row, not the path below it: a link
 moved out from under the event's row between the two still has the pointers
-above it cleared, and one moved in misses its own — under an accept only an
-unlink moves one, since a re-point onto a thought waits on the review lock
-(092 had the window one level wide; SMD-3046, SMD-3045). No signature
+above it cleared, and one moved in misses its own. Under an accept no
+write function moves one out since 099: every pointer write through
+`update_thought`, an unlink included, and every delete waits on the review
+lock the accept holds. Two writes still take none and move nothing out: a
+first capture naming supersedes (a new row, nothing above it), and another
+taker's own lapse clears, which clear nothing the accept's walk read as
+staying. A taker that holds none — a
+write key's re-capture, a text move, board-sync's adoption — still has the
+window (092 had it one level wide; SMD-3046). No signature
 changes; the listings read the same. It refuses to apply without 092 or 094;
 092 or 094 re-applied puts its own body back and 097 after it the walk, so
 after an older tree's `--reapply` over a 097 brain run this tree's
@@ -1633,6 +1639,54 @@ after an older tree's `--reapply` over a 097 brain run this tree's
 (the accept's clears, in order, against the read; the flag per pointer; the
 raw cycle), test-upgrade [20aq]; the behaviour cells of the trigger's [72]
 and [82] and the read's [84] unchanged.
+
+Migration 098 bounds 095's `ticket_status_inputs`, which SMD-2540 PR 2b reads
+on every search that names a ticket (SMD-2540): the same signature, rows and
+order, with `SET lock_timeout = '200ms'` — the call reads `thought_audit`,
+`ob1_config` and `ob1_ticket_head`, which the search does not, so a lock on
+one (an `ALTER TABLE`, a `VACUUM FULL`) held for seconds had every labelled
+search wait the whole hold on a pool connection; now the label is dropped
+(55P03, said once by the server) and the search answers — `SET jit = off`,
+since the order's every-row arm is estimated at the whole log and JIT compiled
+on every call past ~100,000 audit rows (about 7 ms), and an `OFFSET 0` fence
+that reads each event's diff once instead of four times. It refuses to apply
+without 095; 095 re-applied puts its unbounded body back and 098 after it the
+bounds, so after an older tree's `--reapply` over a 098 brain run this tree's
+`--reapply` (a plain run skips 098, recorded as applied). test-schema [88],
+test-upgrade [20ar], test-live [45] (the lock).
+
+Migration 099 has an unlink take the review lock (SMD-3045). 088's
+`update_thought` took `ob1:supersession-review` only for a pointer onto a
+thought, so `{"supersedes": null}` ran straight through an accept, which
+holds that lock while its lapse reads the tree above the accepted row and
+clears what it found: an unlink committed between the two left the accept
+clearing a capture-only pointer above a link no longer under it (SMD-3035's
+review pass 2, raced live). The lock is now taken whenever the envelope
+names `supersedes`, a clear included and whatever the row's pointer — before
+the fingerprint lock and the row, 033's order — so either side waits for the
+other's transaction. That also closes the 40P01 the same pass found, a
+transaction unlinking a row and then re-pointing it while an accept waited
+on that row. Outside the order, as before: a transaction of several calls
+that holds a row and then takes the review lock by any call (a pointer
+write, a clear now too, a delete, a citation, `rebuild_derived`, an
+accept) deadlocks against a holder of the lock that waits on something it
+holds — a row, or an advisory lock taken after the review lock, such as a
+fingerprint lock or a node-state bucket — and since 099 that holder can be
+a single-call unlink (no shipped caller makes such a transaction; take the
+lock first). And an unlink, like a re-point or a
+delete, holds the brain's one supersession lock until its transaction
+ends, with every delete, accept and pointer write waiting behind it: a
+caller that wraps one in a transaction commits before slow work.
+097's header still says only an unlink moves a link under an accept —
+migrations are append-only — and the paragraph above says what holds. 088's
+body otherwise verbatim, under its signature; it refuses to apply without
+073; 088 (or 061, 073) re-applied puts the old gate back and 099 after it
+the lock — `update_thought` alone, the rest is `--reapply`'s. Preflight
+does not read the gate, so an 088 re-applied by hand over 099 passes its
+edit-signature check (SMD-1227); `bun migrate.ts --reapply` puts it back.
+test-schema [89] (the gate, 088's DDL verbatim, the lock held
+by each call that names `supersedes`), test-live [6j] (each order, the other
+side waiting), test-upgrade [20as].
 
 ## What changed relative to the guide
 
@@ -4654,9 +4708,9 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2890 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1378 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 827 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
+bun test-schema.ts                          # 2902 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1386 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 835 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 55 assertions: the shards SHARDS lists in test-live.ts, each its own job
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 264 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 235 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)

@@ -531,7 +531,9 @@ file provider reads), so a release's `compose.yaml` carries them and there is no
 second file to fetch; an overlay may add a file beside it, as
 `compose.api-public.yaml` does. Such a file is a `ROUTE_FILES` entry with its
 table built in `scripts/check-fork-consistency.ts` (check 28); no compose
-file defines a config that is not a route table (SMD-2658). Every overlay is
+file defines a config that is not a route table (SMD-2658) but compose.yaml's
+forwarder script and the observability profile's dashboard and its provider
+(check 28's `BASE_CONFIGS`, check 37). Every overlay is
 an `OVERLAYS` entry there, naming the keys it sets on each service, and a
 combination in CI's "The proxy loads only the held route tables", whose
 `declared()` names the paths it may change in a render: that step holds each
@@ -1500,9 +1502,9 @@ What it holds, from the two servers (the workers send nothing, SMD-2910):
   block read and write seconds for the 100 statements that took the most time
   (of those above the tenth percentile of total time: the exporter's own query
   leaves out the rest), each by `queryid`, `user` and `datname`, with
-  `pg_stat_statements_query_id` naming each `queryid`'s normalized text cut to
-  120 characters (constants are `$1`, `$2`; `SELECT count(*)::int AS c FROM
-  match_thoughts($1 ::vector, …)`, measured); connections by state,
+  `pg_stat_statements_query_id_total` naming each `queryid`'s normalized text
+  cut to 120 characters (constants are `$1`, `$2`; `SELECT count(*)::int AS c
+  FROM match_thoughts($1 ::vector, …)`, measured); connections by state,
   `pg_stat_activity_count` by database and state — the servers' pool among
   them, which their client cannot count — and the exporter's default
   collectors (`pg_up`, locks, database sizes, the WAL). The statements are the
@@ -1536,6 +1538,74 @@ What it holds, from the two servers (the workers send nothing, SMD-2910):
   credentials its caller names — so a caller on `telemetry` (lgtm, or a data
   source its admin adds) can try passwords against Postgres through it, each
   failure in Postgres's log.
+
+Grafana opens on the stack's own dashboard, **Open Brain**, provisioned at
+each start as `/grafana/d/ob1` in a folder of that name (its home page is the
+same file, at `/grafana/d/default-home-dashboard/open-brain`; the image's own
+dashboards are under Dashboards) from `deploy/observability/dashboard.json`,
+which compose.yaml carries inline as the `grafana-dashboard` config (check 37
+holds the copy to the file, and every Prometheus name and label its queries
+read to one the stack writes; CI's "The observability profile's dashboard
+reads every series it names" runs each query on the pinned images). `lgtm`
+carries the file's sha256 as a label, so an `up -d` after the dashboard
+changed recreates it: compose recreates a container for a changed label, not
+for a changed inline config alone, and recreating it restarts Prometheus, Loki
+and Tempo, which replay their write-ahead logs while the servers' sends fail
+for those seconds. Grafana's home is the dashboard only where no user or
+organisation has picked a home of its own. Prometheus ingests a zero at the
+start of each of the servers' series (`created-timestamp-zero-ingestion`):
+their counters are born at their first count, which a rate otherwise never
+counts, so one failure would read 0 (measured); series already stored are as
+they were. The series the collector scrapes — pg-exporter's and its own — get
+no such zero, so its losses have totals beside their rate. Its rows, each
+panel saying what it counts:
+- **Requests**, both servers: per second by door and the tool each ran (an
+  MCP tool call's, a REST route's operation, a mirror's; a keyed `/health` is
+  `brain_info`'s), latency p50 and p99 by tool, by outcome, the share the
+  server failed (`error`, `stalled`, `cut`; a refusal is the caller's), and
+  those failures by fault code or outcome.
+- **Model provider**: calls per second by model, latency p50 and p99 by
+  operation, and failures by status or kind.
+- **Store**: operations per second and p99 by the store's method, and its
+  errors split into refusals (SQLSTATE classes 22, 23, P0 and the brain's own
+  OB), faults (every other code: the database's, and the driver's or the
+  network's where the store cannot reach it) and operations a stop cut. A
+  method (`matchThoughts`) is not a statement, so this row and Postgres's are
+  read side by side, not joined.
+- **Jobs**: by kind, with their error type and p99.
+- **Postgres**, this stack's own whatever the tier: the statements that took
+  the most time over the range, with their text, calls and mean — among the
+  100 the exporter reads, those with the most time since Postgres's statistics
+  were reset, so one that grew costly lately but is not among them is missing;
+  the brain's own SQL functions' mean time per call (`match_thoughts` beside
+  the bench numbers); connections by role and state, the servers' pools among
+  them; the buffer cache's hit ratio, the databases' sizes, and whether the
+  collector reaches pg-exporter and it Postgres.
+- **Requests not ok, and the telemetry itself**: the request records whose
+  outcome was not ok and the traces that ended in error, by server alone (a
+  path-mode canary's are among them whatever the tier), and the spans, points
+  and records the collector refused or could not store, per second and in
+  total since `lgtm` started.
+
+Its variables pick the server (`open-brain`, `open-brain-api`, each server's
+own `service.name`), a pipeline tier (for the request, provider, store and job
+rows; a stack that is no tier sends none, so All takes a path-mode canary's
+beside stable's and stable alone cannot be picked) and the database (All takes
+every one but Postgres's templates, the brain's being `openbrain`). Grafana
+will not save a change made to it — it is provisioned (measured) — so save a
+copy to keep one; to change the stack's own, export the copy's JSON (not "for
+sharing externally", which writes `${DS_…}` placeholders) over
+`deploy/observability/dashboard.json`, put back its uid `ob1`, its title `Open
+Brain` and `"editable": false` (a saved copy has its own of each; check 37
+says so), and run `bun scripts/inline-dashboard.ts`, which writes
+compose.yaml's inline copy and `lgtm`'s labels. Loki refused every record with
+the disk under `lgtm-data` 92% full (measured on a podman machine; its
+write-ahead log's threshold is 90%), answering the collector "Ingester is
+shutting down": only `lgtm`'s own log and the dashboard's last two panels say
+so. The records sent meanwhile are lost; free room (`compose exec lgtm sh -c
+'du -sh /data/*'` says what each backend holds), then `compose restart lgtm`
+(whether Loki takes records again by itself once under 90% is unmeasured).
+Nothing on the dashboard shows the disk itself.
 
 The servers send Pyroscope no profiles; it keeps about 70 MB of its own state.
 All of it is in one volume, `lgtm-data`: Prometheus keeps 15 days, Tempo 14
@@ -1573,7 +1643,7 @@ too, through the port's network — on Docker Desktop and a podman machine by
 `host.docker.internal`, its loopback ports included (a host Ollama, Postgres's
 port with the host-ports file); on Linux the host's other listeners, by the
 network's gateway. The image's own sample dashboards (RED metrics, JVM) read
-other names; this stack's dashboard is PR 3c's.
+other names; this stack's is Open Brain, above.
 
 A canary (`deploy/canary.sh`) is not on stable's `mesh` (SMD-2874), and its
 env file is made from stable's at its first `up`: with the endpoint in

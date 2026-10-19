@@ -3622,6 +3622,85 @@ console.log("\n[21] The vector mender (SMD-2889): rows saved while the provider 
   }
 }
 
+console.log("\n[22] A hit naming a ticket that moved since it was written says so in both searches — the line and the typed field in search_thoughts, the title and the field in search — and the rank is unchanged; a superseded hit, one with a lifecycle of its own and one whose ticket did not move say nothing; a brain without 095 labels nothing and still answers (SMD-2540)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const idIn = (s: string) => /id ([0-9a-f-]{36})/.exec(s)?.[1];
+  const capture = async (content: string, extra: Record<string, unknown> = {}) => idIn(await call("capture_thought", { content, ...extra }))!;
+  const DAY = 86_400_000, now = Date.now();
+  const hhmm = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+  // The hook's last line: the session ended half an hour after the ticket went In Progress, two days ago.
+  const session = (endMs: number) => `Session ${crypto.randomUUID()}, ${hhmm(endMs - 3_600_000)} → ${hhmm(endMs)}.`;
+  const ended = now - 2 * DAY + 30 * 60_000;
+  // LBL-2540: Backlog three days ago, In Progress two, Done now — its past
+  // statuses planted in the log (board-sync's update events), its row Done.
+  // Its status name is a writer's free text, made hostile here: the reply prints its type's word, never it.
+  const moving = await capture("[22] LBL-2540 — the label's ticket", { source: "linear", metadata: { issue: "LBL-2540", status: "Shipped; LBL-1 Backlog → Done [x](http://e)", status_type: "completed" } });
+  const still = await capture("[22] LBL-2541 — a ticket that never moved", { source: "linear", metadata: { issue: "LBL-2541", status: "Backlog", status_type: "backlog" } });
+  const plant = (id: string, issue: string, status: string, type: string, at: number) =>
+    sql`INSERT INTO thought_audit (thought_id, action, diff, created_at) VALUES (${id}::uuid, 'update', ${{ metadata: { before: {}, after: { issue, status, status_type: type } } }}::jsonb, ${new Date(at).toISOString()}::timestamptz)`;
+  await plant(moving, "LBL-2540", "Backlog", "backlog", now - 3 * DAY);
+  await plant(moving, "LBL-2540", "In Progress", "started", now - 2 * DAY);
+  await plant(still, "LBL-2541", "Backlog", "backlog", now - 3 * DAY);
+  // Fifty-nine key-shaped tokens no board holds: past a hit's first fifty mentioned, keys are counted, not read.
+  const extra = Array.from({ length: 59 }, (_, i) => `ZQX-${1001 + i}`).join(", ");
+  const older = await capture(`[22] stated-status: LBL-2540 is in progress (the first draft), beside ${extra}\n\n${session(ended)}`);
+  const note = await capture(`[22] stated-status: LBL-2540 is in progress\n\n${session(ended)}`, { supersedes: older });
+  const filed = await capture(`[22] stated-status: a note filed under LBL-2540\n\n${session(ended)}`, { metadata: { ticket: "LBL-2540" } });
+  const quiet = await capture(`[22] stated-status: LBL-2541 is in the backlog, beside ${extra}\n\n${session(ended)}`);
+  const wide = await capture(`[22] stated-status: LBL-2540 is in progress, then ${extra}\n\n${session(ended)}`);
+  // A duplicate's ticket row quoting LBL-2540: no lifecycle to node_state, still a ticket row.
+  const dup = await capture(`[22] stated-status: LBL-2542 — a duplicate of LBL-2540, in progress\n\n${session(ended)}`, { source: "linear", metadata: { issue: "LBL-2542", status: "Duplicate", status_type: "duplicate" } });
+  try {
+    const { TYPE_WORDS } = await import("./stated-status.ts");
+    const [{ known }] = await sql`SELECT node_lifecycle_types() AS known`;
+    assert(JSON.stringify(Object.keys(TYPE_WORDS).sort()) === JSON.stringify([...known].sort()),
+      `the label's fixed words are node_lifecycle_types()'s, one each (${JSON.stringify(known)})`);
+    const query = `"[22] stated-status"`;
+    const r = await result("search_thoughts", { query, limit: 10, threshold: -1 });
+    const hits = (r.sc?.hits ?? []) as { id: string; moved?: unknown; movedNotRead?: number }[];
+    const notReadOf = (id: string) => hits.find((h) => h.id === id)?.movedNotRead;
+    const fieldOf = (id: string) => JSON.stringify(hits.find((h) => h.id === id)?.moved);
+    const block = (id: string) => r.text.split(/\n(?=--- Result )/).find((b) => b.includes(`ID: ${id}`)) ?? "";
+    assert(!r.isError && fieldOf(note) === JSON.stringify([{ ticket: "LBL-2540", was: "started", now: "completed" }])
+        && block(note).includes("⚠ Moved since written: LBL-2540 In Progress → Done"),
+      `search_thoughts: the note says LBL-2540 moved, In Progress → Done — its type's word, not the row's name — in its header and its typed field (${fieldOf(note)} ${block(note).split("\n").slice(0, 4).join(" / ")})`);
+    assert(fieldOf(wide) === fieldOf(note) && notReadOf(wide) === 10 && notReadOf(note) === 0
+        && block(wide).includes("⚠ Moved since written: LBL-2540 In Progress → Done (+10 more named past the first 50, not checked)"),
+      `…a note mentioning sixty keys reads its first fifty and counts the other ten beside the move, in its line and \`movedNotRead\` (${notReadOf(wide)})`);
+    assert([older, filed, dup].every((id) => fieldOf(id) === "null" && notReadOf(id) === 0 && !block(id).includes("Moved since written") && block(id) !== "")
+        && fieldOf(quiet) === "[]" && notReadOf(quiet) === 10 && !block(quiet).includes("Moved since written"),
+      `…the draft it supersedes, the note filed under the ticket and a duplicate's ticket row quoting it are not checked (null); the note on a ticket that never moved is, and nothing moved ([]) of its first fifty, its other ten counted (${[older, filed, dup, quiet].map(fieldOf).join(" ")})`);
+    // The rank is the search's: the same query with the label's inputs gone returns the same order.
+    await sql`DROP FUNCTION ticket_status_inputs(uuid[], text[])`;
+    try {
+      const bare = await result("search_thoughts", { query, limit: 10, threshold: -1 });
+      const order = (x: typeof r) => ((x.sc?.hits ?? []) as { id: string }[]).map((h) => h.id).join(",");
+      assert(!bare.isError && order(bare) === order(r) && !bare.text.includes("Moved since written") && ((bare.sc?.hits ?? []) as { id: string; moved: unknown[] | null; movedNotRead: number }[]).every((h) => (h.moved === null || h.moved.length === 0) && h.movedNotRead === 0)
+          && ((bare.sc?.hits ?? []) as { id: string; moved: unknown }[]).filter((h) => [note, wide, quiet].includes(h.id)).every((h) => h.moved === null),
+        `a brain without 095: the same hits in the same order, no label, no error, and a hit naming a ticket says it was not checked (null) — so the label moved no rank (${order(bare) === order(r)})`);
+      const c = await result("search", { query });
+      assert(!c.isError && !c.text.includes("moved since written") && ((c.sc?.results ?? []) as object[]).every((x) => !("moved" in x)), "…and search answers without it");
+    } finally {
+      await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_ticket_status_inputs.sql") });
+    }
+    // search: ChatGPT's shape, the label in the title and a field — only on the result it is about.
+    const c = await result("search", { query });
+    const results = (c.sc?.results ?? []) as Record<string, unknown>[];
+    const mine = results.find((x) => x.id === note), wideR = results.find((x) => x.id === wide), others = results.filter((x) => x.id !== note && x.id !== wide);
+    assert(String(wideR?.title).startsWith("[moved since written: LBL-2540 In Progress → Done (+10 more named past the first 50, not checked)] ") && wideR?.movedNotRead === 10 && !("movedNotRead" in (mine ?? {})),
+      `search: the sixty-key note's title and field count the ten unread beside its move (${JSON.stringify(wideR && { title: String(wideR.title).slice(-80), n: wideR.movedNotRead })})`);
+    assert(!c.isError && c.text === JSON.stringify(c.sc) && typeof mine?.title === "string" && (mine.title as string).startsWith("[moved since written: LBL-2540 In Progress → Done] ")
+        && JSON.stringify(mine.moved) === JSON.stringify([{ ticket: "LBL-2540", was: "started", now: "completed" }]),
+      `search: the note's title starts with the move, before its own words, and the result carries it typed (${JSON.stringify(mine)})`);
+    assert(others.length >= 4 && others.every((x) => JSON.stringify(Object.keys(x)) === JSON.stringify(["id", "title", "url"]) && !String(x.title).includes("moved since written")),
+      `…every other result keeps the shape exactly (${others.map((x) => Object.keys(x).join("|")).join(" ")})`);
+  } finally {
+    await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([moving, still, older, note, filed, quiet, dup, wide], "TEXT")}::uuid[])`;
+    await sql.close();
+  }
+}
+
 server.stop();
 globalThis.fetch = realFetch;
 

@@ -1993,6 +1993,101 @@ if (want("6i")) {
   await sql`DELETE FROM thoughts`;
 }
 
+if (want("6j")) {
+  console.log("\n[6j] An unlink and an accept's lapse: the unlink takes the review lock the accept holds, so either waits for the other's transaction — the lapse never reads a link an unlink has moved out from under it — and neither order deadlocks (migration 099, SMD-3045)");
+  await sql`DELETE FROM thoughts`;
+  // W is the operator's; S the hook's, proposed to stand over W; X the hook's
+  // too, linked onto S by the operator (a write key's link, which stays);
+  // Y the hook's capture pointer onto X. Accepting S takes S and so X
+  // (092), and the lapse clears Y — when X is still under S as it reads
+  // the tree. Under 088 an unlink of X took no review lock: B's unlink
+  // committed during the accept's walk left the accept clearing Y above a
+  // link no longer under S (SMD-3035's review pass 2, raced live). Each arm
+  // holds one side's transaction open, so the order is fixed and the other
+  // side's wait is read from pg_locks.
+  const agentOf = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
+  const HOOK = { name: "hook-6j", agent_id: await agentOf("e", "hook-6j", "capture"), via: "test-door", scope: "capture" };
+  const OPER = { name: "oper-6j", agent_id: await agentOf("7", "oper-6j", "write"), via: "test-door" };
+  await sql`SELECT set_agent_kind('hook-6j', 'agent'), set_agent_kind('oper-6j', 'operator')`;
+  const cap = async (content: string, actor: Record<string, unknown>, supersedes?: string) =>
+    ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "test" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }}::jsonb, ${unit(41)}::vector) AS r`)[0].r as { id: string }).id;
+  const pointerOf = async (id: string) => (await sql`SELECT supersedes FROM thoughts WHERE id = ${id}::uuid`)[0].supersedes as string | null;
+  const mkCase = async (arm: number) => {
+    const w = await cap(`[6j.${arm}] the rota is weekly, the operator's word`, OPER);
+    const s = await cap(`[6j.${arm}] the rota is daily, the hook's word`, HOOK);
+    const x = await cap(`[6j.${arm}] the hook's note under the rota`, HOOK);
+    const y = await cap(`[6j.${arm}] the hook's next word on that note`, HOOK, x);
+    const linked = (await sql`SELECT update_thought(p_id := ${x}::uuid, p_actor := ${OPER}::jsonb, p_provenance := jsonb_build_object('supersedes', ${s}::uuid)) AS r`)[0].r as { ok: boolean };
+    const p = String((await sql`SELECT record_supersession_proposal(${w}::uuid, ${s}::uuid, 'newer_supersedes_older', 0.95::numeric, 'raced by test [6j]', 0.9, 'test:3045', NULL) AS id`)[0].id);
+    assert(linked.ok && (await pointerOf(y)) === x && (await pointerOf(x)) === s, `[6j.${arm}] setup: Y→X, the operator's X→S, a pending proposal for S over W`);
+    return { w, s, x, y, p };
+  };
+  const waitFor = async (pred: () => boolean | Promise<boolean>, ticks = 400) => { for (let i = 0; i < ticks && !(await pred()); i++) await Bun.sleep(20); };
+  const advisoryWaiters = async (pid: number) => Number((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND pid = ${pid}`)[0].n);
+  const gate = () => { let open: () => void = () => {}; const p = new Promise<void>((r) => { open = r; }); return { p, open }; };
+  type R = { ok: boolean; error?: string };
+  /** One call in a transaction held open until `done`; its pid reported first, `out.result` set once the call returns. */
+  const hold = (conn: SQL, stmt: (tx: SQL) => Promise<R>, done: Promise<void>, out: { pid: number; result?: R; error?: string }) =>
+    conn.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      out.pid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      out.result = await stmt(tx);
+      await done;
+    }).catch((e: Error) => { out.error = e.message; });
+  const unlink = (x: string) => (tx: SQL) => tx`SELECT update_thought(p_id := ${x}::uuid, p_actor := ${OPER}::jsonb, p_provenance := '{"supersedes": null}'::jsonb) AS r`.then((r) => r[0].r as R);
+  const accept = (p: string) => (tx: SQL) => tx`SELECT review_supersession_proposal(${p}::uuid, 'accept') AS r`.then((r) => r[0].r as R);
+
+  // Arm 1 — the unlink first: B unlinks X and holds its transaction; A's
+  // accept waits on the review lock B now holds (under 088 it ran at once,
+  // read X under S — B uncommitted — and cleared Y). B commits; the accept's
+  // walk then reads X unlinked, and Y stands.
+  {
+    const { w, s, x, y, p } = await mkCase(1);
+    const connA = racer(), connB = racer();
+    const { p: bDoneP, open: bDone } = gate(), { p: aDoneP, open: aDone } = gate();
+    const b: { pid: number; result?: R; error?: string } = { pid: -1 }, a: { pid: number; result?: R; error?: string } = { pid: -1 };
+    const bTx = hold(connB, unlink(x), bDoneP, b);
+    await waitFor(() => b.result !== undefined || b.error !== undefined);
+    const aTx = hold(connA, accept(p), aDoneP, a);
+    await waitFor(async () => a.result !== undefined || a.error !== undefined || (a.pid > 0 && (await advisoryWaiters(a.pid)) === 1));
+    const aWaited = a.result === undefined && a.pid > 0 && (await advisoryWaiters(a.pid)) === 1;
+    bDone();
+    await bTx;
+    await waitFor(() => a.result !== undefined || a.error !== undefined);
+    aDone();
+    await aTx;
+    await connA.close(); await connB.close();
+    assert(b.result?.ok === true && aWaited, `with B's unlink of X held open, A's accept waits on the review lock B holds (${b.error ?? "unlinked"}; A ${aWaited ? "waited" : `did not wait: ${a.error ?? JSON.stringify(a.result)}`})`);
+    assert(a.result?.ok === true && !/deadlock/.test((a.error ?? "") + (b.error ?? "")) && (await pointerOf(s)) === w && (await pointerOf(x)) === null && (await pointerOf(y)) === x,
+      `…then, once B commits, accepts S over W and leaves the hook's Y→X standing — X is no longer under S (Y→${await pointerOf(y)}, X→${await pointerOf(x)}; ${a.error ?? "accepted"})`);
+  }
+
+  // Arm 2 — the accept first: A accepts, its lapse clearing Y, and holds its
+  // transaction; B's unlink of X waits on the review lock (under 088 it ran
+  // at once). A commits, then B unlinks: the order A, B, as both read it.
+  {
+    const { w, s, x, y, p } = await mkCase(2);
+    const connA = racer(), connB = racer();
+    const { p: aDoneP, open: aDone } = gate(), { p: bDoneP, open: bDone } = gate();
+    const a: { pid: number; result?: R; error?: string } = { pid: -1 }, b: { pid: number; result?: R; error?: string } = { pid: -1 };
+    const aTx = hold(connA, accept(p), aDoneP, a);
+    await waitFor(() => a.result !== undefined || a.error !== undefined);
+    const bTx = hold(connB, unlink(x), bDoneP, b);
+    await waitFor(async () => b.result !== undefined || b.error !== undefined || (b.pid > 0 && (await advisoryWaiters(b.pid)) === 1));
+    const bWaited = b.result === undefined && b.pid > 0 && (await advisoryWaiters(b.pid)) === 1;
+    aDone();
+    await aTx;
+    await waitFor(() => b.result !== undefined || b.error !== undefined);
+    bDone();
+    await bTx;
+    await connA.close(); await connB.close();
+    assert(a.result?.ok === true && bWaited, `with A's accept held open, B's unlink of X waits on the review lock A holds (${a.error ?? "accepted"}; B ${bWaited ? "waited" : `did not wait: ${b.error ?? JSON.stringify(b.result)}`})`);
+    assert(b.result?.ok === true && !/deadlock/.test((a.error ?? "") + (b.error ?? "")) && (await pointerOf(s)) === w && (await pointerOf(x)) === null && (await pointerOf(y)) === null,
+      `…then, once A commits, unlinks X — the hook's Y lapsed by the accept, X under S when it read the tree (Y→${await pointerOf(y)}, X→${await pointerOf(x)}; ${b.error ?? "unlinked"})`);
+  }
+  await sql`DELETE FROM thoughts`;
+}
+
 if (want("7")) {
   console.log("\n[7] Chunk context survives capture, edit and a payload without it");
   await sql`DELETE FROM thoughts`;
@@ -13704,6 +13799,46 @@ if (want("44")) {
     }
   } finally {
     await xsql.close();
+  }
+}
+
+if (want("45")) {
+  console.log("\n[45] Migration 098 on a real Postgres: a lock on a table the stated-status label reads costs a search at most 200 ms and its label, never the hold — the call fails 55P03, the store answers null and says so once, then reads again (SMD-2540)");
+  const holder = new SQL({ url: URL_!, max: 1 }), caller = new SQL({ url: URL_!, max: 1 });
+  const { createStore } = await import("../server-portable/store.ts");
+  const store = await createStore({ OB1_STORE: "sql", DATABASE_URL: URL_! });
+  const realWarn = console.warn, warned: string[] = [];
+  let release = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  // Whatever happens, the lock goes in 4 s: without 098's lock_timeout the reads below would wait it out, and fail, not hang.
+  const safety = setTimeout(() => release(), 4000);
+  try {
+    let locked = () => {};
+    const lockTaken = new Promise<void>((r) => (locked = r));
+    const holding = holder.begin(async (tx) => { await tx`LOCK TABLE thought_audit IN ACCESS EXCLUSIVE MODE`; locked(); await held; });
+    await lockTaken;
+    const t0 = performance.now();
+    const direct = await caller`SELECT count(*) FROM ticket_status_inputs(ARRAY[]::uuid[], ARRAY['SMD-1'])`.then(() => "answered", (e: { errno?: unknown }) => String(e?.errno));
+    const directMs = performance.now() - t0;
+    console.warn = (...a: unknown[]) => { warned.push(a.map(String).join(" ")); };
+    const t1 = performance.now();
+    const viaStore = [await store.ticketStatusInputs([], ["SMD-1"]), await store.ticketStatusInputs([], ["SMD-1"])];
+    const storeMs = performance.now() - t1;
+    console.warn = realWarn;
+    release();
+    await holding;
+    const after = await store.ticketStatusInputs([], ["SMD-1"]);
+    assert(direct === "55P03" && directMs < 1500,
+      `under an ACCESS EXCLUSIVE lock on thought_audit the call gives up with 55P03 (${direct}) in ${Math.round(directMs)} ms, not the hold`);
+    assert(viaStore.every((x) => x === null) && storeMs < 3000 && warned.length === 1 && /stated-status label not read \(55P03\)/.test(warned[0] ?? "") && after !== null,
+      `…the store answers null twice in ${Math.round(storeMs)} ms and says so once, then reads again once the lock goes (${JSON.stringify({ warned: warned.map((w) => w.slice(0, 60)), after: after !== null })})`);
+  } finally {
+    clearTimeout(safety);
+    release();
+    console.warn = realWarn;
+    await store.close();
+    await holder.close();
+    await caller.close();
   }
 }
 
