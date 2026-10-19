@@ -510,8 +510,10 @@ export async function run(opts: SleepOptions): Promise<number> {
     err(settled);
     return 2;
   }
-  // A caller's, not an operator's: 0 would hand the passes no --follow at all (SMD-3048).
-  if (opts.passFollowS !== undefined && !(Number.isInteger(opts.passFollowS) && opts.passFollowS >= 1)) throw new RangeError(`passFollowS must be a whole number of seconds, at least 1 (got ${opts.passFollowS})`);
+  // A caller's, not an operator's, so thrown: 0 would hand the passes no
+  // --follow at all. The rule the flags' numbers keep (SMD-3048).
+  const followProblem = opts.passFollowS === undefined ? null : numberProblem("passFollowS", opts.passFollowS, { min: 1 });
+  if (followProblem !== null) throw new RangeError(followProblem);
   if (opts.signal?.aborted && !opts.dryRun) {
     err(STOPPED_EARLY);
     return 130;
