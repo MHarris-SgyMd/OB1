@@ -5444,6 +5444,8 @@ const API_ROLE: TransportRole = {
     // The request rebuilt where its URL will not parse (SMD-2535), in auth.ts so the vendored copies have it (SMD-2595).
     ["./auth.ts", new Set(["routable"])],
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
+    // The authorization server's token check, built from the environment (SMD-2286): authorization, as auth.ts is, no store.
+    ["./oauth-token.ts", new Set(["remoteChecker", "tokenSettings", "TokenCheck"])],
     // The stop's lines for what it cuts, and the spans' start and flush (SMD-1849): request records and telemetry, no store.
     ["./telemetry.ts", new Set(["cutOpenRequests", "flushTelemetry", "startTelemetry"])],
   ]),
@@ -5456,6 +5458,9 @@ const REST_IMPORTS = new Map<string, "*" | ReadonlySet<string>>([
   ["../agents.ts", new Set(["AgentOutcome"])],
   ["../core/index.ts", "*"],
   ["../core/refusal.ts", new Set(["failure", "ok", "refusalValue", "Refusal", "RefusalCode"])],
+  // A bearer token's shape and the 503's wait (SMD-2382), and the token check's type (SMD-2286): authorization, as auth.ts is.
+  ["../oauth-edge.ts", new Set(["JWT_SHAPE", "UNREACHABLE_RETRY_AFTER_SECONDS"])],
+  ["../oauth-token.ts", new Set(["TokenCheck"])],
   ["./routes.ts", "*"], ["./openapi.ts", "*"],
   ["../telemetry.ts", "*"],
 ]);

@@ -386,7 +386,7 @@ function programOf(ts: typeof TS, dir: string, roots: string[], extra: Record<st
  */
 const EXEMPT: Record<string, Record<string, [number, string]>> = {
   "server.ts": {
-    Provider: [11, "the provider's settings and its adapter: the library calls each inside its own request handling, where a throw is that request's error answer (measured: a throw in the client validator was that registration's 500)"],
+    Provider: [13, "the provider's settings and its adapter: the library calls each inside its own request handling, where a throw is that request's error answer (measured: a throw in the client validator was that registration's 500); the refresh token's TTL and its rotation (SMD-2286) are arithmetic on the token's iiat, called inside the token endpoint"],
     registerGrantType: [1, "the token exchange's handler: the library runs it inside its token endpoint, where a throw is that request's error answer, as each of its refusals is"],
     jwtVerify: [1, "the key set jose reads while the exchange awaits the verification"],
   },
