@@ -89,7 +89,7 @@ import { generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto"
 import { existsSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { discoverAuthorizationServerMetadata, discoverOAuthProtectedResourceMetadata } from "@modelcontextprotocol/client";
-import { layoutFromEnv } from "../deploy/auth/layout.ts";
+import { chainRotates, GRANT_TTL_S, keyScopeOf, layoutFromEnv, noKeysScope, REFRESH_IDLE_S, refreshTtl } from "../deploy/auth/layout.ts";
 import { answerProbes, guardProbes } from "./auth/fetch-guard-probes.ts";
 import { Browser, claimsOf, pkce, tampered, tokenRequest, type Claims, type TokenReply } from "./auth/flows.ts";
 import { ACCESS_TOKEN_TYPE, INTERNAL, layout, NATIVE_REDIRECT, TIERS, TOKEN_EXCHANGE, type Layout } from "./auth/policy.ts";
@@ -599,6 +599,7 @@ async function grants(c: Ctx): Promise<{ gui?: string }> {
   row("G4 client credentials: a service identity, within its scope and resource", ccOk, `token ${cc.status} aud ${audOf(cr)} sub ${cr.sub} scope ${cr.scope}; brain:write → ${err(wider)}; /mcp → ${err(toMcp)}`);
 
   // Refresh, which a third-party client may use: the consent page must say so, and the refreshed token keeps its one audience.
+  let g5: { id: string; first: string; rotated: string; consentPage: string } | undefined;
   try {
     const id = await register(meta, ["authorization_code", "refresh_token"]);
     const pk3 = pkce();
@@ -611,8 +612,32 @@ async function grants(c: Ctx): Promise<{ gui?: string }> {
     const shown = consentPage.includes(`client ${id}`) && consentPage.includes("returning to http://localhost:9876") && /asks for brain:read offline_access on /.test(consentPage) && /keep access after you close it \( offline_access \)/.test(consentPage);
     const ok5 = shown && first.status === 200 && Boolean(first.body.refresh_token) && refreshed.status === 200 && oneAud(rc, L.mcp("")) && rc.sub === "operator" && brainScopes(rc.scope) === "brain:read";
     row("G5 a third-party client refreshes for its granted resource, and consent said so", ok5, `consent page names the client id and http://localhost:9876, lists offline_access and explains it: ${shown}; first ${first.status} refresh_token ${first.body.refresh_token ? "issued" : "none"}; refreshed ${errOf(refreshed)} aud ${audOf(rc)} scope ${rc.scope}`);
+    g5 = { id, first: String(first.body.refresh_token ?? ""), rotated: String(refreshed.body.refresh_token ?? ""), consentPage };
   } catch (e) {
     row("G5 a third-party client refreshes for its granted resource, and consent said so", false, (e as Error).message);
+  }
+  // The deploy's refresh policy (SMD-2286, deploy/auth/server.ts and store.ts),
+  // not a criterion of the comparison, so the winner's alone: every refresh
+  // rotates, and two refreshes at once with one token (the MCP SDK has no
+  // lock) both succeed inside the 10 s reuse grace, rather than the second
+  // revoking the grant; the chain goes on after them. (A replay after the
+  // grace revokes the grant: store.ts's self-check holds the boundary.) And
+  // the consent page says what brain:read is in an access key's words.
+  if (c.candidate === "oidc-provider") {
+    const G5R = "G5r every refresh rotates; two refreshes at once with one token both succeed and the chain goes on; consent says a scope in a key's words";
+    try {
+      if (!g5) throw new Error("G5 gave no refresh token to go on from");
+      const { id, first, rotated, consentPage } = g5;
+      const refresh = (token: string) => tokenRequest(meta.token_endpoint, { grant_type: "refresh_token", refresh_token: token }, { id });
+      const [one, two] = await Promise.all([refresh(rotated), refresh(rotated)]);
+      const next = await refresh(String(two.body.refresh_token ?? ""));
+      const means = /brain:read : read thoughts and the records about the brain .*, and change nothing — what a read key may do/.test(consentPage);
+      const fresh = (r: TokenReply) => r.status === 200 && Boolean(r.body.refresh_token) && r.body.refresh_token !== rotated;
+      const okR = Boolean(rotated) && rotated !== first && fresh(one) && fresh(two) && one.body.refresh_token !== two.body.refresh_token && fresh(next) && means;
+      row(G5R, okR, `rotated ${rotated ? (rotated !== first ? "to a new token" : "to the same token") : "none issued"}; two at once ${errOf(one)} and ${errOf(two)}${one.body.refresh_token && one.body.refresh_token === two.body.refresh_token ? " (the same new token)" : ""}; the chain after them ${errOf(next)}; consent explains brain:read as a read key's: ${means}`);
+    } catch (e) {
+      row(G5R, false, (e as Error).message);
+    }
   }
   // What the consent page says. A native client with a custom scheme returns
   // to an app, whatever host the URI names; a request for openid alone still
@@ -838,6 +863,52 @@ async function audiences(c: Ctx, mcpToken: string | undefined, guiToken: string 
   row("A8 every token issued with no brain scope is refused where it is presented", a8, `${results.join("; ")}; issued ${issuedKeys.join(", ") || "none"} (this candidate: ${wantIssued.join(", ")})`);
 }
 
+/**
+ * The deploy's own rules (SMD-2286), the winner's alone, not criteria of the
+ * comparison: refresh rotation is the server's setting, not the library's
+ * default (a confidential client, which the library would leave unrotated,
+ * rotates); scopes no access key holds together are refused at the
+ * authorization request, before any page, and at the exchange.
+ */
+async function policy(c: Ctx, cimd: SdkRun | undefined) {
+  const { L, meta, env } = c;
+  const P1 = "P1 rotation is the deploy's: a confidential client's refresh token rotates too (the library's default would keep it)";
+  try {
+    const reg = await registerRaw(meta, { client_name: "POC confidential client", redirect_uris: [NATIVE_REDIRECT], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "client_secret_basic", application_type: "native" });
+    if (reg.status !== 201 || !reg.body.client_id || !reg.body.client_secret) throw new Error(`registration failed: HTTP ${reg.status} ${errOf(reg)}`);
+    const client = { id: String(reg.body.client_id), secret: String(reg.body.client_secret) };
+    const pk = pkce();
+    const back = await new Browser(env.OB1_AUTH_OPERATOR_PASSWORD).authorize(authorizeUrl(meta, { client_id: client.id, response_type: "code", redirect_uri: NATIVE_REDIRECT, scope: "brain:read offline_access", resource: L.mcp(""), prompt: "consent", code_challenge: pk.challenge, code_challenge_method: "S256", state: "p1" }), NATIVE_REDIRECT);
+    const first = await tokenRequest(meta.token_endpoint, { grant_type: "authorization_code", code: back.get("code") ?? "", redirect_uri: NATIVE_REDIRECT, code_verifier: pk.verifier, resource: L.mcp("") }, client);
+    const again = await tokenRequest(meta.token_endpoint, { grant_type: "refresh_token", refresh_token: String(first.body.refresh_token ?? "") }, client);
+    const ok = first.status === 200 && Boolean(first.body.refresh_token) && again.status === 200 && Boolean(again.body.refresh_token) && again.body.refresh_token !== first.body.refresh_token;
+    row(P1, ok, `code ${errOf(first)} refresh_token ${first.body.refresh_token ? "issued" : "none"}; refreshed ${errOf(again)} ${again.body.refresh_token ? (again.body.refresh_token !== first.body.refresh_token ? "to a new refresh token" : "to the same refresh token") : "with none"}`);
+  } catch (e) {
+    row(P1, false, (e as Error).message);
+  }
+  const P2 = "P2 brain:read with brain:capture, which no access key holds, is refused at the authorization request before any page";
+  try {
+    const id = await register(meta);
+    const pk = pkce();
+    const b = new Browser(env.OB1_AUTH_OPERATOR_PASSWORD);
+    const back = await b.authorize(authorizeUrl(meta, { client_id: id, response_type: "code", redirect_uri: NATIVE_REDIRECT, scope: "brain:read brain:capture", resource: L.mcp(""), code_challenge: pk.challenge, code_challenge_method: "S256", state: "p2" }), NATIVE_REDIRECT);
+    const ok = back.get("error") === "invalid_scope" && !back.get("code") && b.prompts.length === 0;
+    row(P2, ok, `back with ${back.get("error") ?? "no error"}${back.get("code") ? " and a code" : ""} after ${b.prompts.length ? b.prompts.join(", ") : "no page"}`);
+  } catch (e) {
+    row(P2, false, (e as Error).message);
+  }
+  const P3 = "P3 the exchange refuses a narrowing to brain:read with brain:capture";
+  const subject = cimd?.accessToken;
+  if (!subject) {
+    row(P3, false, "no /mcp token: R1 failed");
+    return;
+  }
+  const held = String(claimsOf(subject).scope ?? "");
+  const x = await tokenRequest(meta.token_endpoint, { grant_type: TOKEN_EXCHANGE, subject_token: subject, subject_token_type: ACCESS_TOKEN_TYPE, resource: L.api(""), scope: "brain:read brain:capture" }, { id: "mcp", secret: env.OB1_AUTH_SECRET_MCP });
+  const ok = held.includes("brain:read") && held.includes("brain:capture") && x.status === 400 && x.body.error === "invalid_scope" && /names no access key's scope/.test(String(x.body.error_description ?? ""));
+  row(P3, ok, `the subject token holds "${held}"; narrowed to brain:read brain:capture: ${errOf(x)} ${String(x.body.error_description ?? "")}`);
+}
+
 async function exchange(c: Ctx, cimd: SdkRun | undefined, guiToken: string | undefined) {
   const { L, meta, env } = c;
   const seen = cimd ? toolSeen(cimd) : {};
@@ -911,6 +982,7 @@ async function verify(candidate: Candidate, json: boolean): Promise<number> {
   const { gui } = await grants(c);
   await audiences(c, cimd?.accessToken, gui);
   await exchange(c, cimd, gui);
+  if (candidate === "oidc-provider") await policy(c, cimd);
   row("M1 claude.ai connector", "manual", `needs a public origin (claude.ai refuses private and CGNAT hosts): add ${L.mcp("")} as a custom connector and sign in`);
   row("M2 Claude Code 2.1.275 on the bare metadata path", "manual", `claude mcp add --transport http poc ${L.mcp("")}, then /mcp: it reads ${L.discovery[3]}, whose issuer is ${L.issuer}`);
 
@@ -979,12 +1051,27 @@ async function selfCheck(): Promise<number> {
   expect("unset settings: the stable tier's two resources, the GUI and one exchange client", JSON.stringify(D?.resources) === JSON.stringify([`${O}/mcp`, `${O}/api`]) && keys(D) === JSON.stringify(["gui", "mcp"]));
   const B = accepted("blank settings", { OB1_AUTH_TIERS: " ", OB1_AUTH_SERVICES: "" });
   expect("blank settings (compose's unset ${X:-}) are the unset ones", !!B && JSON.stringify(B.resources) === JSON.stringify(D?.resources) && keys(B) === keys(D));
-  const W = accepted("spaced tiers and whitespace-separated services", { OB1_AUTH_TIERS: " stable , working ", OB1_AUTH_SERVICES: "\n digest=brain:read+brain:capture@stable,working\trunner=brain:capture@stable\n" });
+  const W = accepted("spaced tiers and whitespace-separated services", { OB1_AUTH_TIERS: " stable , working ", OB1_AUTH_SERVICES: "\n digest=brain:write+brain:read@stable,working\trunner=brain:capture@stable\n" });
   expect("tier names are trimmed, and services split on any whitespace", keys(W) === JSON.stringify(["gui", "mcp", "mcp-working", "digest", "runner"]));
   const ex = W?.clients["mcp-working"];
   expect("a tier's exchange client trades its own /mcp for its own REST core", ex?.kind === "exchange" && ex.from === `${O}/working/mcp` && ex.to === `${O}/working/api`);
   const svc = W?.clients.digest;
-  expect("a service gets its scopes and its tiers' REST cores", svc?.kind === "service" && svc.scope === "brain:read brain:capture" && JSON.stringify(svc.resources) === JSON.stringify([`${O}/api`, `${O}/working/api`]));
+  expect("a service gets its scopes and its tiers' REST cores", svc?.kind === "service" && svc.scope === "brain:write brain:read" && JSON.stringify(svc.resources) === JSON.stringify([`${O}/api`, `${O}/working/api`]));
+  // The brain's scopes are the key scopes, one to one (SMD-2286 step 5), and a refresh token's life is 14 days idle within the grant's 30.
+  for (const [scopes, want] of [
+    [["brain:write"], "write"], [["brain:read", "brain:write", "brain:capture"], "write"], [["brain:read"], "read"], [["brain:capture"], "capture"],
+    [["openid", "offline_access", "brain:capture"], "capture"], [["brain:read", "brain:capture"], null], [[], null], [["openid"], null],
+  ] as const) expect(`keyScopeOf(${scopes.join("+") || "none"}) is ${want}`, keyScopeOf(scopes) === want);
+  expect("only brain scopes no key holds together are no key's scope: read+capture, not none or openid alone", noKeysScope(["brain:read", "brain:capture"]) && noKeysScope(["openid", "brain:capture", "brain:read"]) && !noKeysScope([]) && !noKeysScope(["openid"]) && !noKeysScope(["brain:write", "brain:read", "brain:capture"]));
+  const DAY = 86_400;
+  const T = 1_800_000_000;
+  for (const [iiat, want, what] of [
+    [undefined, 14 * DAY, "a first refresh token: 14 days"], [T, 14 * DAY, "rotated at once: 14 days"], [T - 10 * DAY, 14 * DAY, "rotated on day 10: 14 more days, to day 24"],
+    [T - 20 * DAY, 10 * DAY, "rotated on day 20: cut to the grant's day 30"], [T - 30 * DAY, 1, "rotated on day 30: a second, the grant spent"], [T - 40 * DAY, 1, "past the grant: never less than a second"],
+    [T + 60, 14 * DAY, "an iiat a minute ahead (a clock step): 14 days, not more"],
+  ] as const) expect(`refreshTtl: ${what} (${refreshTtl(iiat, T)})`, refreshTtl(iiat, T) === want);
+  expect("the grant lives 30 days and a refresh token 14 idle", GRANT_TTL_S === 30 * DAY && REFRESH_IDLE_S === 14 * DAY);
+  expect("a chain rotates until 30 days old and no further (so the 1 s floor never stretches it)", chainRotates(undefined, T) && chainRotates(T - 30 * DAY + 1, T) && !chainRotates(T - 30 * DAY, T) && !chainRotates(T - 31 * DAY, T));
   expect("the GUI stays the GUI beside services", W?.clients.gui?.kind === "gui");
   const id64 = `r${"0-9".repeat(20)}abz`;
   const E = accepted("the id rule's edges", { OB1_AUTH_SERVICES: `${id64}=brain:read@stable a1=brain:read@stable q=brain:read@stable` });
@@ -1003,6 +1090,8 @@ async function selfCheck(): Promise<number> {
     ["a tier MCP server's id", { OB1_AUTH_SERVICES: "mcp-x=brain:read@stable" }, /"mcp-x" is a reserved client id/],
     ["a repeated id", { OB1_AUTH_SERVICES: "runner=brain:read@stable runner=brain:capture@stable" }, /"runner" is listed twice/],
     ["an unknown scope", { OB1_AUTH_SERVICES: "runner=brain:admin@stable" }, /asks for unknown scope brain:admin/],
+    ["scopes no access key holds together", { OB1_AUTH_SERVICES: "digest=brain:read+brain:capture@stable" }, /"digest" asks for brain:read\+brain:capture, which no access key holds together/],
+    ["the operator's subject as an id", { OB1_AUTH_SERVICES: "operator=brain:read@stable" }, /"operator" is the operator's subject/],
     ["an empty scope", { OB1_AUTH_SERVICES: "runner=brain:read+@stable" }, /"runner"'s scopes has an empty entry/],
     ["a repeated scope", { OB1_AUTH_SERVICES: "runner=brain:read+brain:read@stable" }, /"runner"'s scopes lists brain:read twice/],
     ["a tier the tiers do not list", { OB1_AUTH_SERVICES: "runner=brain:capture@canary" }, /names a tier OB1_AUTH_TIERS does not: canary/],
