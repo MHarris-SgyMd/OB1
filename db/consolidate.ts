@@ -1196,14 +1196,16 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * 100 (SMD-3117): whether record_thought_relation takes distinct. 084's door
    * refuses the word, so a pass that sent it to a brain short of 100 would
    * fail every thought with an unrelated pair at the floor. Without it an
-   * unrelated verdict closes the pair's edge, as before 100 — unless that
-   * edge is a distinct, which stands (review pass 2) — the run says so at its
-   * start, and the summary counts what was not stored. 100 keeps 084's
-   * signature, so its sentinel in the door's body is read (the 014
-   * convention): at start, again on every poll of a follower, as relationsOff
-   * is (review pass 1: a follower started at 099 never stored a distinct once
-   * 100 was applied), and when the door refuses the word mid-pass (084
-   * re-applied by hand under a running pass).
+   * unrelated verdict at the floor closes the pair's edge, as before 100 —
+   * unless that edge is a distinct, which stands (review pass 2) — the run
+   * says so at its start, and the summary counts what was not stored. 100
+   * keeps 084's signature, so its sentinel in the door's body is read (the
+   * 014 convention): at start, again on every poll of a follower, as
+   * relationsOff is (review pass 1: a follower started at 099 never stored a
+   * distinct once 100 was applied), when the door refuses the word mid-pass
+   * (084 re-applied by hand under a running pass), before a distinct is given
+   * up, and for the summary's remedy (review pass 3: a one-shot run read it
+   * only at its start).
    */
   const readHas100 = async (): Promise<boolean> => ((await sql`
     SELECT COALESCE((SELECT prosrc LIKE '%ob1:relation-distinct%' FROM pg_proc
@@ -1249,25 +1251,32 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let RELATIONS_OFF: string | null = relations.off;
   /** Whether relations were stored at any point of this run — the summary's counts are then real, beside what was counted only (review pass 4). */
   let RELATIONS_EVER_ON = RELATIONS_OFF === null;
-  /** A change in whether relations are stored, said once, whichever worker or poll sees it first. */
-  function relationsNow(off: string | null, when: string): void {
-    if (off === RELATIONS_OFF) return;
-    out(off === null ? `  relations: stored ${when}` : `  relations: not stored ${when} — ${off}`);
-    RELATIONS_OFF = off;
-    if (off === null) RELATIONS_EVER_ON = true;
-    // On a brain short of 100, what the start did not say while relations were off (review pass 2).
-    if (off === null && !HAS_100) out(`  distinct: not stored — ${NO_100}`);
-  }
   /**
-   * A change in whether distinct is stored, said once, whichever worker or
-   * poll sees it first — and said only while relations are stored: with them
-   * off nothing is, which the relations line says, and relationsNow says
-   * distinct's state when they come back (review pass 2).
+   * What the run has said about what it stores: relations (084 and this
+   * role's grants) and, with them, distinct (100). The start says each part
+   * that is missing; storesNow takes both parts as a poll or a refusal finds
+   * them, and says the change from what was last said, whichever worker or
+   * poll sees it first. Distinct's line is said only while relations are
+   * stored — including as they come back, when it differs from the last one
+   * said — so a poll that sees both parts move says where they ended (review
+   * pass 3: two functions, each saying its own part, read each other's stale
+   * state, printing a false "distinct: stored" and leaving a stale "not stored").
    */
-  function distinctNow(has: boolean, when: string): void {
-    if (has === HAS_100) return;
+  let saidOff = RELATIONS_OFF;
+  // The start says distinct is missing unless the door is too: without 084 relations' note names it, and 100 needs 084 first.
+  let saidMissing = !HAS_100 && (RELATIONS_OFF === null || (await has084()));
+  function storesNow(off: string | null, has: boolean, when: string): void {
+    RELATIONS_OFF = off;
     HAS_100 = has;
-    if (RELATIONS_OFF === null) out(has ? `  distinct: stored ${when}` : `  distinct: not stored ${when} — ${NO_100}`);
+    if (off === null) RELATIONS_EVER_ON = true;
+    if (off !== saidOff) {
+      out(off === null ? `  relations: stored ${when}` : `  relations: not stored ${when} — ${off}`);
+      saidOff = off;
+    }
+    if (off === null && saidMissing === has) {
+      out(has ? `  distinct: stored ${when}` : `  distinct: not stored ${when} — ${NO_100}`);
+      saidMissing = !has;
+    }
   }
   /** The judge calls 079 saves over a set of thoughts (`ids` selects one `id` column; $1 is its parameter), and the set's size. */
   async function ticketCallsSaved(ids: string, param: string): Promise<{ n: number; t: number }> {
@@ -1299,7 +1308,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   if (CHECK) {
     // The relations note at the start too; each pass says it again whatever its banner, since grants or 084 may change between sleeps (review pass 1).
     if (RELATIONS_OFF) say(`  relations: not stored — ${RELATIONS_OFF}; a pass stores no relations then, counting its related, evolves, duplicate and unrelated verdicts only`);
-    else if (!HAS_100) say(`  distinct: not stored — ${NO_100}; a pass closes the edge of a pair it calls unrelated then, as before 100, unless that edge is a distinct`);
+    // Each missing part, so fixing the role does not reveal the migration only then (review pass 3).
+    if (saidMissing) say(RELATIONS_OFF ? `  distinct: not stored either — ${NO_100}` : `  distinct: not stored — ${NO_100}; a pass closes the edge of a pair it calls unrelated at the floor then, as before 100, unless that edge is a distinct`);
     if (startOut !== null) err(`  the provider is not answering at start (${startOut.slice(0, 200)}) — each pass waits for it at its own start`);
     opts.onStart?.({ ok: true, provider: startOut === null ? "up" : "out" });
     return 0;
@@ -1628,6 +1638,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // The floor on the mass of the three relation words (a distinct's on its own probability); the word's own probability is what the relation stores.
         const due = rv !== null && rs.mass >= MIN_CONFIDENCE ? rv : null;
         // A brain short of 100 refuses distinct: there the verdict closes the edge, as it did before 100, and is counted.
+        // The sentinel is read again before a distinct is given up, so 100 applied under a running pass — a
+        // one-shot run reads it nowhere else — is taken at the first pair that would lose one (review pass 3).
+        if (due === "distinct" && !HAS_100 && (await readHas100().catch(() => false))) storesNow(RELATIONS_OFF, true, "from this pair on");
         let write = due === "distinct" && !HAS_100 ? null : due;
         let apartLost = due === "distinct" && write === null;
         const writeRelation = async (w: string | null) => ((await sql`
@@ -1637,9 +1650,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // …unless the edge standing is a distinct, which the verdict agrees
         // with: a brain that had 100 and lost the word to a hand re-apply of
         // 084 keeps it, since the claim ends succeeded and re-applying 100
-        // would not bring a closed one back (review pass 2). A door that
-        // refuses distinct writes none, so none appears between this read and
-        // the close.
+        // would not bring a closed one back (review pass 2). The sentinel was
+        // just read (above, or by the refusal below): a door that refuses
+        // distinct writes none, so none appears between this read and the
+        // close unless 100 lands in that instant.
         const closeUnlessApart = async () => ((await sql`
             SELECT EXISTS (SELECT 1 FROM thought_facets
                             WHERE thought_id = ${row.id}::uuid AND kind = 'relation' AND valid_until IS NULL
@@ -1657,7 +1671,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             const code = (e as { code?: string; errno?: string }).errno ?? (e as { code?: string }).code;
             if (!(write === "distinct" && code === "22023" && /relation must be related, evolves, duplicate or NULL/.test((e as Error).message))) throw e;
             if (await readHas100().catch(() => true)) throw e;
-            distinctNow(false, "from this pair on");
+            storesNow(RELATIONS_OFF, false, "from this pair on");
             write = null;
             apartLost = true;
             r = await closeUnlessApart();
@@ -1677,7 +1691,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             // does not explain is still the thought's.
             const off = await relationsOff().catch(() => null);
             if (off === null) throw e;
-            relationsNow(off, "from this pair on");
+            storesNow(off, HAS_100, "from this pair on");
             r = { action: "none", unstored: true };
           } else if (code === "23503" || (code === "23514" && /is not a thought/.test((e as Error).message))) r = { action: "none", gone: true };
           else throw e;
@@ -2170,8 +2184,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // A verdict counted but not stored is lost to this key — its claim ends
   // succeeded — so the run says so first, not only in its summary (review pass 3).
   if (RELATIONS_OFF) out(`  relations: not stored this run — ${RELATIONS_OFF}; related, evolves, duplicate and unrelated verdicts are counted only, and a pair judged now gets no relation until its claim is cleared`);
-  // 100 (SMD-3117): the same for a distinct, whose verdict is lost to the key as well (review pass 1).
-  else if (!HAS_100) out(`  distinct: not stored this run — ${NO_100}; a pair judged unrelated now has its edge closed, as before 100, unless that edge is a distinct, and gets no new distinct until its claim is cleared`);
+  // 100 (SMD-3117): the same for a distinct, whose verdict is lost to the key as well (review pass 1) — said
+  // beside relations' note too, so fixing the role does not reveal the migration only then (review pass 3).
+  if (saidMissing) out(RELATIONS_OFF ? `  distinct: not stored either — ${NO_100}` : `  distinct: not stored this run — ${NO_100}; a pair judged unrelated at the floor now has its edge closed, as before 100, unless that edge is a distinct, and gets no new distinct until its claim is cleared`);
   let after = await followedPass();
   if (FOLLOW) {
     await stamper?.stamp(passOutcome);
@@ -2179,9 +2194,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       await sleepUnless(FOLLOW * 1000, onStop.signal);
       if (stopping) break;
       // A follower sees a migration or a grant applied while it runs — 100's sentinel too (SMD-3117),
-      // read first: relations coming back in the same poll then say whether distinct is stored with them (review pass 2).
-      distinctNow(await readHas100().catch(() => HAS_100), "from this poll on");
-      relationsNow(await relationsOff().catch(() => RELATIONS_OFF), "from this poll on");
+      // both read before either is said (review pass 3).
+      storesNow(await relationsOff().catch(() => RELATIONS_OFF), await readHas100().catch(() => HAS_100), "from this poll on");
       after = await followedPass();
       await stamper?.stamp(passOutcome);
     }
@@ -2227,10 +2241,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // 100, a distinct standing left as it was and any other edge in the closed
   // count, or counted while relations were not stored. The remedy only while
   // the brain still lacks 100 (review pass 2: a follower that saw it applied
-  // gave it at its stop).
+  // gave it at its stop), read again here, since 100 may have landed after
+  // the run's last lost distinct (review pass 3); not while the database is
+  // not answering.
   const ofThem = (n: number) => (n ? ` (${n} distinct)` : "");
+  const lacks100 = totals.distinctNo100 > 0 && !HAS_100 && after !== null ? !(await readHas100().catch(() => false)) : !HAS_100;
   const distinctTail =
-    (totals.distinctNo100 ? `; ${totals.distinctNo100} unrelated verdict(s) at the floor not stored as distinct${totals.distinctStands ? ` (${totals.distinctStands} on a pair whose distinct stands, left as it was)` : ""} — ${HAS_100 ? "judged while this brain lacked migration 100" : NO_100}` : "") +
+    (totals.distinctNo100 ? `; ${totals.distinctNo100} unrelated verdict(s) at the floor not stored as distinct${totals.distinctStands ? ` (${totals.distinctStands} on a pair whose distinct stands, left as it was)` : ""} — ${lacks100 ? NO_100 : "judged while this brain lacked migration 100"}` : "") +
     (totals.distinctUnstored ? `; ${totals.distinctUnstored} unrelated verdict(s) counted only, judged while relations were not stored` : "");
   out(RELATIONS_EVER_ON
     ? `  relations: ${totals.relationsAdded} added${ofThem(totals.distinctAdded)}, ${totals.relationsKept} kept${ofThem(totals.distinctKept)}, ${totals.relationsReplaced} replaced${ofThem(totals.distinctReplaced)}, ${totals.relationsClosed} closed${totals.relationsGone ? `, ${totals.relationsGone} skipped — a side deleted mid-pass` : ""}` +

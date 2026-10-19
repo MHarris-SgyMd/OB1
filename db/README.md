@@ -1699,20 +1699,23 @@ verbatim but the word list, and their comments and `thought_facets`' say so;
 084's set per pair stands (one standing relation per pair, a delete closing
 or dropping it, its lineage row with it). The door carries a sentinel,
 `ob1:relation-distinct`, which `consolidate.ts` reads at start, on every
-poll of a follower and when the door refuses the word mid-pass: 100 keeps
-084's signature, and on a brain short of it the pass sends no distinct,
-closing the pair's edge as before unless that edge is a distinct. It
-refuses to apply without 084; 084 re-applied takes the word away and 100
-after it puts it back. A pair judged unrelated before 100 has no distinct
-until the pass judges it again. test-schema [90] (the vocabulary, the door's
-set per pair with distinct in it, the deletes, the re-applies), test-live
-[16] (an unrelated verdict at the floor, under it, on its token, kept and
-replaced; on a brain short of 100 a follower's check, a distinct left
-standing, another edge closed, a side deleted mid-pass, a follower that sees
-100 applied, 084 put back under a running pass, a door that keeps the
-sentinel and refuses the word, and relations off; `--status` and `--list
-relations`) and [41] (a distinct pair never posted to the board),
-test-upgrade [20at].
+poll of a follower, when the door refuses the word mid-pass and before it
+gives a distinct up: 100 keeps 084's signature, and on a brain short of it
+the pass sends no distinct, an unrelated verdict at the floor closing the
+pair's edge as before unless that edge is a distinct. It refuses to apply
+without 084; 084 re-applied takes the word away and 100 after it puts it
+back. A pair judged unrelated before 100 has no distinct until the pass
+judges it again. test-schema [90] (the vocabulary, the door's set per pair
+with distinct in it, the deletes, the re-applies), test-live [16] (an
+unrelated verdict at the floor, under it, on its token, kept and replaced;
+on a brain short of 100 a follower's check, `--status` and `--dry-run`, a
+distinct left standing, another edge closed beside decoy distincts on each
+side's other pairs, a side deleted mid-pass, 100 applied under a one-shot
+run and after its last lost distinct, a follower that sees 100 applied, 084
+put back under a running pass, a door that keeps the sentinel and refuses
+the word, and relations off, coming back short of 100, going off as 100
+lands and coming back with it; `--status` and `--list relations`) and [41]
+(a distinct pair never posted to the board), test-upgrade [20at].
 
 ## What changed relative to the guide
 
@@ -2977,17 +2980,23 @@ distinct)`), and the readers keep it apart: `--status` counts the distinct
 pairs after the relations, `--list relations` leaves them out, brain_info
 counts them beside the relations and never as a board pair, and board
 findings never post one. On a brain short of 100 (084's door refuses the
-word) an unrelated verdict closes the pair's edge, as before, unless that
-edge is a distinct, which stands: the verdict agrees with it, and its claim
-ends succeeded, so a closed one would not come back with 100. The run says
-so at its start and in `--status`, with both remedies (`migrate.ts`, or
-`--reapply` where the ledger records 100 under a hand re-apply of 084), and
-its summary counts the verdicts at the floor it could not store, naming the
-remedy while the brain still lacks 100. The pass reads 100's sentinel in the
-door's body to know: at start, on every poll of a follower, and when the
-door refuses the word mid-pass (084 re-applied under it), where it stops
+word) an unrelated verdict at the floor closes the pair's edge, as before,
+unless that edge is a distinct, which stands: the verdict agrees with it,
+and its claim ends succeeded, so a closed one would not come back with 100.
+The run says so at its start — beside relations' note when a role stores
+none, so fixing the role does not reveal the migration only then — and in
+`--status` and `--dry-run`, with both remedies (`migrate.ts`, or `--reapply`
+where the ledger records 100 under a hand re-apply of 084), and its summary
+counts the verdicts at the floor it could not store, naming the remedy while
+the brain still lacks 100. The pass reads 100's sentinel in the door's body
+to know: at start, on every poll of a follower, before it gives a distinct
+up (so 100 applied under a running pass is taken at the next pair), and when
+the door refuses the word mid-pass (084 re-applied under it), where it stops
 sending the word instead of failing the thought; a door that keeps the
-sentinel and still refuses fails the thought, a defect to see. `--status` counts the relations standing and `--list relations`
+sentinel and still refuses fails the thought, a defect to see. What a run
+says it stores — relations, and distinct with them — is said as one state:
+each change once, distinct's line only while relations are stored or as
+they come back. `--status` counts the relations standing and `--list relations`
 lists them, an edge whose text moved since flagged `EDITED SINCE JUDGED`
 (until SMD-2726's `rebuild_derived` arm closes such an edge, clearing the
 newer thought's claim — `DELETE FROM thought_work_claims WHERE work_type =
@@ -4795,8 +4804,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2919 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1415 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 864 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1420 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 869 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 55 assertions: the shards SHARDS lists in test-live.ts, each its own job
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 264 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 235 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
