@@ -7280,6 +7280,10 @@ if (want("16")) {
           const roleCheck = await asRole({ follow: 1, check: true });
           assert(roleCheck.code === 0 && roleCheck.out.includes("  relations: not stored — this role lacks INSERT on thought_facets (the structure group)") && /^ {2}distinct: not stored either — this brain lacks migration 100: /m.test(roleCheck.out),
             `…and on a brain short of 100 a follower's check under it says distinct is not stored either, with the remedy (${roleCheck.out.split("\n").filter((l) => /distinct:|relations:/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
+          // Review pass 4: a run's own start says it too (its exit is the relic note's, failed on purpose above).
+          const roleRun = await asRole({});
+          assert(roleRun.out.includes("  relations: not stored this run — this role lacks INSERT on thought_facets (the structure group)") && /^ {2}distinct: not stored either — this brain lacks migration 100: /m.test(roleRun.out),
+            `…and so does a run's start under it (${roleRun.out.split("\n").filter((l) => /distinct:|relations:/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
         } finally {
           await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
         }

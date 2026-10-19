@@ -1246,7 +1246,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const groups = [capture && "capture", structure && "structure"].filter(Boolean).join(",");
     return `this role lacks ${what} — cd db && bun migrate.ts --url <owner's url> --grant ${g.role} --groups ${groups}${structure ? " (the structure group also writes source rows, links and citations: Postgres grants INSERT on thought_facets per table)" : ""}`;
   }
-  const relations = await atStart(async () => ({ off: await relationsOff() }));
+  // Whether 084's door exists rides the same start read, which waits out an outage (SMD-2752; review pass 4).
+  const relations = await atStart(async () => {
+    const off = await relationsOff();
+    return { off, door: off === null || (await has084()) };
+  });
   if (relations === null) return stoppedWaiting();
   let RELATIONS_OFF: string | null = relations.off;
   /** Whether relations were stored at any point of this run — the summary's counts are then real, beside what was counted only (review pass 4). */
@@ -1261,10 +1265,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * said — so a poll that sees both parts move says where they ended (review
    * pass 3: two functions, each saying its own part, read each other's stale
    * state, printing a false "distinct: stored" and leaving a stale "not stored").
+   * While relations are off nothing is stored, so a change in distinct waits
+   * for them: the start's "not stored either" stands until relations come
+   * back, and is corrected then if 100 landed meanwhile (review pass 4).
    */
   let saidOff = RELATIONS_OFF;
   // The start says distinct is missing unless the door is too: without 084 relations' note names it, and 100 needs 084 first.
-  let saidMissing = !HAS_100 && (RELATIONS_OFF === null || (await has084()));
+  let saidMissing = !HAS_100 && relations.door;
   function storesNow(off: string | null, has: boolean, when: string): void {
     RELATIONS_OFF = off;
     HAS_100 = has;
@@ -2241,11 +2248,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // 100, a distinct standing left as it was and any other edge in the closed
   // count, or counted while relations were not stored. The remedy only while
   // the brain still lacks 100 (review pass 2: a follower that saw it applied
-  // gave it at its stop), read again here, since 100 may have landed after
-  // the run's last lost distinct (review pass 3); not while the database is
-  // not answering.
+  // gave it at its stop), read again here, since 100 may have landed — or
+  // gone again — after the run's last reading (review passes 3–4); not while
+  // the database is not answering, nor for a pass that makes no summary
+  // queries (the scheduler's, SMD-2752).
   const ofThem = (n: number) => (n ? ` (${n} distinct)` : "");
-  const lacks100 = totals.distinctNo100 > 0 && !HAS_100 && after !== null ? !(await readHas100().catch(() => false)) : !HAS_100;
+  const lacks100 = totals.distinctNo100 > 0 && SUMMARY && after !== null ? !(await readHas100().catch(() => HAS_100)) : !HAS_100;
   const distinctTail =
     (totals.distinctNo100 ? `; ${totals.distinctNo100} unrelated verdict(s) at the floor not stored as distinct${totals.distinctStands ? ` (${totals.distinctStands} on a pair whose distinct stands, left as it was)` : ""} — ${lacks100 ? NO_100 : "judged while this brain lacked migration 100"}` : "") +
     (totals.distinctUnstored ? `; ${totals.distinctUnstored} unrelated verdict(s) counted only, judged while relations were not stored` : "");
