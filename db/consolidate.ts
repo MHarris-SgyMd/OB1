@@ -11,7 +11,9 @@
  * and the parsing rules), and an OUTDATES verdict (prompt 4, SMD-1873; p3's
  * CONFLICT) becomes a pending row in
  * `supersession_proposals`; a related, evolves or duplicate verdict is a
- * `relation` facet on the newer thought (084, SMD-1873 PR 2). Nothing here
+ * `relation` facet on the newer thought (084, SMD-1873 PR 2), and since 100
+ * an unrelated one is too, as `distinct`: two near neighbours judged apart
+ * (SMD-3117). Nothing here
  * writes `thoughts`. An operator — or a
  * review agent, SMD-950 — reads the queue and accepts or rejects one proposal
  * at a time; acceptance writes `thoughts.supersedes` through
@@ -28,7 +30,7 @@
  *   bun db/consolidate.ts --url … --dump verdicts.jsonl   # also append every verdict, for evals/eval-consolidate.ts
  *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # the queue, with both thoughts; lineage: the unreviewed rows standing on a lineage pair (070)
  *                                                                                         # each side's writer, and WRITER on a capture-only key's or lower-trust side to stand (094)
- *   bun db/consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate
+ *   bun db/consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate (a distinct, 100, is counted by --status, not listed)
  *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged, a stale row, a lineage pair (070), or a WRITER flag (094)
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90; at most 2000000, inside Postgres's timestamp range)
@@ -106,8 +108,9 @@
  * run first re-pools each stale row's newer thought under its own key (a pair
  * both sides of which have a vector, with no live or failed claim here — a
  * failed claim is --retry-failed's, 015's rule), then judges the thought's
- * pairs again — up to --k model calls per re-pooled thought, since its
- * unrelated, related and evolves pairs left no record, plus one per stale
+ * pairs again — up to --k model calls per re-pooled thought, since nothing
+ * lets it skip a pair it judged before (a standing relation or, since 100, a
+ * distinct is kept or replaced by the new verdict, not consulted), plus one per stale
  * pair the top-k left out that still meets the candidate rule, judged anyway.
  * An outdates at the floor REPLACES the row in place (063:
  * record_supersession_proposal, back to pending under this key); unrelated,
@@ -1022,7 +1025,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         JOIN thoughts n ON n.id = f.thought_id
         JOIN thoughts o ON o.id = (f.payload->>'target')::uuid
         LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = f.payload->>'judge_key'
-       WHERE f.kind = 'relation' AND f.valid_until IS NULL
+       -- A distinct (100) is a pair judged apart, not a relation to review: --status counts it (SMD-3117).
+       WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'relation' IS DISTINCT FROM 'distinct'
        ORDER BY f.created_at DESC, f.id
        LIMIT ${limit}`) as {
         id: string; relation: string; confidence: number | null; judge_key: string; created_at: Stamp;
@@ -1096,17 +1100,21 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         SELECT count(*) FILTER (WHERE f.payload->>'relation' = 'related')::int AS related,
                count(*) FILTER (WHERE f.payload->>'relation' = 'evolves')::int AS evolves,
                count(*) FILTER (WHERE f.payload->>'relation' = 'duplicate')::int AS duplicate,
-               count(*) FILTER (WHERE f.payload->>'judge_key' IS DISTINCT FROM ${JOB})::int AS other_key,
+               -- 100 (SMD-3117): a pair judged apart, counted on its own; the clauses after it are about the three.
+               count(*) FILTER (WHERE f.payload->>'relation' = 'distinct')::int AS distinct_pairs,
+               count(*) FILTER (WHERE f.payload->>'relation' IS DISTINCT FROM 'distinct' AND f.payload->>'judge_key' IS DISTINCT FROM ${JOB})::int AS other_key,
                -- --list relations' EDITED SINCE JUDGED, counted, over the listing's joins (review pass 4).
-               count(*) FILTER (WHERE d.id IS NOT NULL AND (content_fingerprint_of(o.content) IS DISTINCT FROM d.input_fingerprints[1]
+               count(*) FILTER (WHERE f.payload->>'relation' IS DISTINCT FROM 'distinct'
+                                  AND d.id IS NOT NULL AND (content_fingerprint_of(o.content) IS DISTINCT FROM d.input_fingerprints[1]
                                                             OR content_fingerprint_of(n.content) IS DISTINCT FROM d.input_fingerprints[2]))::int AS edited
           FROM thought_facets f
           JOIN thoughts n ON n.id = f.thought_id
           JOIN thoughts o ON o.id = (f.payload->>'target')::uuid
           LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = f.payload->>'judge_key'
-         WHERE f.kind = 'relation' AND f.valid_until IS NULL`) as { related: number; evolves: number; duplicate: number; other_key: number; edited: number }[];
+         WHERE f.kind = 'relation' AND f.valid_until IS NULL`) as { related: number; evolves: number; duplicate: number; distinct_pairs: number; other_key: number; edited: number }[];
       // A pair this key no longer reaches keeps the relation another key judged (review pass 3).
-      out(`  relations: ${r.related + r.evolves + r.duplicate} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate${r.other_key ? `; ${r.other_key} judged under another key, which this pass replaces only for the pairs it judges again` : ""}${r.edited ? `; ${r.edited} on a text edited since judged` : ""}) — --list relations shows them`);
+      out(`  relations: ${r.related + r.evolves + r.duplicate} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate${r.other_key ? `; ${r.other_key} judged under another key, which this pass replaces only for the pairs it judges again` : ""}${r.edited ? `; ${r.edited} on a text edited since judged` : ""}) — --list relations shows them` +
+        (r.distinct_pairs ? `; ${r.distinct_pairs} pair(s) judged distinct — near neighbours the judge called unrelated, kept apart (100)` : ""));
       // A thought this key judged before 084 was applied has no relations, and
       // nothing re-judges it on its own: said here, with the statement that
       // puts exactly those back in the pool (review pass 4). The ledger is
@@ -1180,6 +1188,19 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
            AND to_regprocedure('consolidation_linked_ticket_pairs_left_out(uuid, float)') IS NOT NULL AS has_079`) as { has_079: boolean }[])[0].has_079);
   if (has079 === null) return stoppedWaiting();
   const HAS_079 = has079;
+  /**
+   * 100 (SMD-3117): whether record_thought_relation takes distinct. 084's door
+   * refuses the word, so a pass that sent it to a brain short of 100 would
+   * fail every thought with an unrelated pair at the floor. Without it an
+   * unrelated verdict closes the pair's edge, as before 100, and the summary
+   * counts what was not stored. 100 keeps 084's signature, so its sentinel in
+   * the door's body is read (the 014 convention), once per run as 079's is.
+   */
+  const has100 = await atStart(async () => ((await sql`
+    SELECT COALESCE((SELECT prosrc LIKE '%ob1:relation-distinct%' FROM pg_proc
+                      WHERE oid = to_regprocedure('record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb)')), false) AS has_100`) as { has_100: boolean }[])[0].has_100);
+  if (has100 === null) return stoppedWaiting();
+  const HAS_100 = has100;
   /**
    * 084 (SMD-1873 PR 2): whether the pass stores its related, evolves and
    * duplicate verdicts as relations — the migration applied, and this role
@@ -1347,7 +1368,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   /** Rows that went to the judge — finished or not — so the pairs-per-thought ratio divides by the rows that cost pairs. */
   let judged = 0;
   let llmMs = 0;
-  const totals = { pairs: 0, unrelated: 0, related: 0, evolves: 0, duplicate: 0, outdates: 0, tokenScored: 0, statedScored: 0, relationsAdded: 0, relationsKept: 0, relationsReplaced: 0, relationsClosed: 0, relationsGone: 0, relationsUnstored: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
+  const totals = { pairs: 0, unrelated: 0, related: 0, evolves: 0, duplicate: 0, outdates: 0, tokenScored: 0, statedScored: 0, relationsAdded: 0, relationsKept: 0, relationsReplaced: 0, relationsClosed: 0, relationsGone: 0, relationsUnstored: 0, relationsDistinct: 0, distinctUnstored: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
     // 079 (SMD-2448): the judge calls fewer than 066's list would have cost at --k, and the claims whose read failed (counted 0).
     ticketCalls: 0, ticketCallsUnread: 0,
     // 067: the stale rows this run met — replaced in place (proposed again),
@@ -1570,15 +1591,18 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       }
       // 084 (SMD-1873 PR 2): a related, evolves or duplicate verdict at the
       // floor is a relation on the newer thought, at the fingerprints the
-      // judge was sent; any other answer closes the pair's relation, so a
+      // judge was sent, and since 100 an unrelated one is a distinct
+      // (SMD-3117); any other answer closes the pair's relation, so a
       // re-judge that no longer sees one retracts it. Nothing when the pair
       // has none and none is due — record_thought_relation answers "none".
       let relation: string | null = null;
       const rv = relationVerdict(j);
+      // A brain short of 100 refuses distinct: there the verdict closes the edge, as it did before 100.
+      const word = rv === "distinct" && !HAS_100 ? null : rv;
       if (RELATIONS_OFF === null) {
         const rs = relationConfidence(j);
-        // The floor on the mass of the three relation words; the word's own probability is what the relation stores.
-        const write = rv !== null && rs.mass >= MIN_CONFIDENCE ? rv : null;
+        // The floor on the mass of the three relation words (a distinct's on its own probability); the word's own probability is what the relation stores.
+        const write = word !== null && rs.mass >= MIN_CONFIDENCE ? word : null;
         let r: { action: string; gone?: boolean; unstored?: boolean };
         try {
           [{ r }] = (await sql`
@@ -1606,13 +1630,16 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           else throw e;
         }
         if (r.gone) totals.relationsGone++;
-        if (r.unstored && rv !== null) totals.relationsUnstored++;
+        // A distinct counts apart from the three words: the summary names each (SMD-3117).
+        if (r.unstored && rv !== null) totals[rv === "distinct" ? "distinctUnstored" : "relationsUnstored"]++;
+        else if (rv === "distinct" && word === null) totals.distinctUnstored++;
         relation = r.action;
         if (r.action === "added") totals.relationsAdded++;
         else if (r.action === "kept") totals.relationsKept++;
         else if (r.action === "replaced") totals.relationsReplaced++;
         else if (r.action === "closed") totals.relationsClosed++;
-      } else if (rv !== null) totals.relationsUnstored++;
+        if (write === "distinct" && (r.action === "added" || r.action === "kept" || r.action === "replaced")) totals.relationsDistinct++;
+      } else if (rv !== null) totals[rv === "distinct" ? "distinctUnstored" : "relationsUnstored"]++;
       if (DUMP) {
         appendFileSync(DUMP, JSON.stringify({
           newer: row.id, older: c.older_id, similarity: c.similarity, shared: c.shared_entities, key: JOB,
@@ -2132,10 +2159,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // and the verdicts judged while it could not beside them (review pass 4:
   // the summary read only the last state, hiding a relation the run added).
   const unstored = totals.relationsUnstored ? `${totals.relationsUnstored} related, evolves or duplicate verdict(s) counted only` : "";
+  // 100 (SMD-3117): the distincts this run recorded, and the unrelated verdicts it could not — a brain short of 100, or relations off.
+  const distinctTail =
+    (totals.relationsDistinct ? `; ${totals.relationsDistinct} recorded as distinct — an unrelated verdict, two near neighbours kept apart (100)` : "") +
+    (totals.distinctUnstored ? `; ${totals.distinctUnstored} unrelated verdict(s) not stored as distinct — ${!HAS_100 ? "this brain lacks migration 100 (cd db && bun migrate.ts --url <owner's url>)" : "judged while relations were not stored"}` : "");
   out(RELATIONS_EVER_ON
     ? `  relations: ${totals.relationsAdded} added, ${totals.relationsKept} kept, ${totals.relationsReplaced} replaced, ${totals.relationsClosed} closed${totals.relationsGone ? `, ${totals.relationsGone} skipped — a side deleted mid-pass` : ""}` +
-        `${unstored ? `; ${unstored}, judged while relations were not stored${RELATIONS_OFF ? ` — ${RELATIONS_OFF}` : ""}` : ""}`
-    : `  relations: not stored — ${RELATIONS_OFF} — ${unstored || "0 related, evolves or duplicate verdict(s) counted only"}`);
+        `${unstored ? `; ${unstored}, judged while relations were not stored${RELATIONS_OFF ? ` — ${RELATIONS_OFF}` : ""}` : ""}` + distinctTail
+    : `  relations: not stored — ${RELATIONS_OFF} — ${unstored || "0 related, evolves or duplicate verdict(s) counted only"}` + distinctTail);
   if (totals.pairs > 0) out(`  model time per pair: ${(llmMs / totals.pairs / 1000).toFixed(1)}s`);
   // 067: what became of the stale proposals this run met (a line only when it met one).
   {

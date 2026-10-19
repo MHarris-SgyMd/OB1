@@ -144,7 +144,9 @@ export interface DatabaseFacts {
   /**
    * The judged relations standing (084, SMD-2680): `relation` facets with no
    * valid_until, by word, and how many pair two tickets the board does not
-   * link, as `proposals` counts them. Nothing waits on them, so no row warns.
+   * link, as `proposals` counts them; since 100 the pairs judged distinct
+   * (SMD-3117) beside them, counted apart — not a relation a reader acts
+   * on, and never a board pair. Nothing waits on them, so no row warns.
    * Null when not read or not asked (`stats: false`); zero on a brain without
    * 084, which holds none.
    */
@@ -447,6 +449,8 @@ export interface StandingRelations {
   related: number;
   evolves: number;
   duplicate: number;
+  /** Pairs judged distinct (100, SMD-3117): near neighbours the judge called unrelated, kept apart. Not in the relations' total or the board pairs. */
+  distinct: number;
   /** Board pairs (the comment above PROPOSALS_SQL): 0 when there is nothing to count; null before 079, when its own read did not answer (`unread` names it), or when this field was not read. */
   boardPairs: number | null;
 }
@@ -493,11 +497,12 @@ const PROPOSALS_BOARD_SQL = (sql: SqlTag) => sql`
             JOIN thoughts n ON n.id = p.newer_id
            WHERE p.status = 'pending') x`;
 
-/** The standing relations by word. */
+/** The standing relations by word, and the pairs judged distinct (100) beside them. */
 const RELATIONS_SQL = (sql: SqlTag) => sql`
   SELECT count(*) FILTER (WHERE f.payload->>'relation' = 'related')::int AS related,
          count(*) FILTER (WHERE f.payload->>'relation' = 'evolves')::int AS evolves,
-         count(*) FILTER (WHERE f.payload->>'relation' = 'duplicate')::int AS duplicate
+         count(*) FILTER (WHERE f.payload->>'relation' = 'duplicate')::int AS duplicate,
+         count(*) FILTER (WHERE f.payload->>'relation' = 'distinct')::int AS "distinct"
     FROM thought_facets f
    WHERE f.kind = 'relation' AND f.valid_until IS NULL`;
 
@@ -506,7 +511,8 @@ const RELATIONS_SQL = (sql: SqlTag) => sql`
  * target is cast only on a relation row, whose target 084's trigger checked is
  * a thought's id — a link facet's target is an identity such as SMD-12. A
  * standing relation's target exists: 084 closes a relation when its target is
- * deleted.
+ * deleted. A distinct (100) is no board pair: two tickets judged apart are
+ * nothing to link (SMD-3117).
  */
 const RELATIONS_BOARD_SQL = (sql: SqlTag) => sql`
   SELECT count(*) FILTER (WHERE x.ka <> x.kb
@@ -519,7 +525,7 @@ const RELATIONS_BOARD_SQL = (sql: SqlTag) => sql`
             FROM thought_facets f
             JOIN thoughts h ON h.id = f.thought_id
             JOIN thoughts t ON t.id = CASE WHEN f.kind = 'relation' THEN (f.payload->>'target')::uuid END
-           WHERE f.kind = 'relation' AND f.valid_until IS NULL) x`;
+           WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'relation' IS DISTINCT FROM 'distinct') x`;
 
 /**
  * What a refusal names: `permission denied for table X` or `for function X`,
@@ -550,9 +556,9 @@ export function proposalsValue(row: { pending?: unknown; stale?: unknown; oldest
 }
 
 /** The standing relations as the record carries them. */
-export function relationsValue(row: { related?: unknown; evolves?: unknown; duplicate?: unknown } | undefined): StandingRelations {
+export function relationsValue(row: { related?: unknown; evolves?: unknown; duplicate?: unknown; distinct?: unknown } | undefined): StandingRelations {
   if (!row) throw new Error("the relations read answered no row");
-  return { related: countOf("relations", row.related), evolves: countOf("relations", row.evolves), duplicate: countOf("relations", row.duplicate), boardPairs: null };
+  return { related: countOf("relations", row.related), evolves: countOf("relations", row.evolves), duplicate: countOf("relations", row.duplicate), distinct: countOf("relations", row.distinct), boardPairs: null };
 }
 
 /** A board-pair read's answer: a count, or a read that did not answer. */
@@ -1330,9 +1336,11 @@ function relationsLine(db: DatabaseSummary): string {
   const r = db.relations;
   if (r === null) return "relations" in db.unread ? `? (${deniedObject(db.unread.relations.message)?.name ?? "thought_facets"} ${unreadWords(db.unread.relations)})` : "no table — migration 042 is not applied";
   const n = r.related + r.evolves + r.duplicate;
+  // 100 (SMD-3117): the pairs judged distinct, beside the relations and not in their count.
+  const apart = r.distinct ? `; ${r.distinct} pair${r.distinct === 1 ? "" : "s"} judged distinct` : "";
   // A brain short of 084 holds none because it cannot yet, not because none was found.
-  if (n === 0) return db.highestMigration !== null && db.highestMigration < 84 ? "none — migration 084 is not applied" : "none standing";
-  return `${n} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate${boardTail(r.boardPairs, db.unread["relations.boardPairs"])})`;
+  if (n === 0) return (db.highestMigration !== null && db.highestMigration < 84 ? "none — migration 084 is not applied" : "none standing") + apart;
+  return `${n} standing (${r.related} related, ${r.evolves} evolves, ${r.duplicate} duplicate${boardTail(r.boardPairs, db.unread["relations.boardPairs"])})${apart}`;
 }
 
 /**

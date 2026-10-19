@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2902 assertions: 2902 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports ninety-nine (99) migrations applied, and
+`bun test-schema.ts` prints `2919 assertions: 2919 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred (100) migrations applied, and
 `\d thoughts` shows eight columns and seven indexes — six of our own plus the
 primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3117).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1688,6 +1688,26 @@ test-schema [89] (the gate, 088's DDL verbatim, the lock held
 by each call that names `supersedes`), test-live [6j] (each order, the other
 side waiting), test-upgrade [20as].
 
+Migration 100 stores the consolidation judge's distinct (SMD-3117). Every
+pair the pass judges is a near neighbour (029's candidate rule), so an
+unrelated verdict says two look-alikes are about different subjects; 084
+closed the pair's edge on one and kept nothing, so nothing told a reader, a
+merge or a later judge, and SMD-3116 — the typed-label spike, which renamed
+unrelated to distinct — had no pool of such pairs to measure. 084's
+validator and `record_thought_relation` now take `distinct`, on 084's bodies
+verbatim but the word list, and their comments and `thought_facets`' say so;
+084's set per pair stands (one standing relation per pair, a delete closing
+or dropping it, its lineage row with it). The door carries a sentinel,
+`ob1:relation-distinct`, which `consolidate.ts` reads at start: 100 keeps
+084's signature, and on a brain short of it the pass sends no distinct. It
+refuses to apply without 084; 084 re-applied takes the word away and 100
+after it puts it back. A pair judged unrelated before 100 has no distinct
+until the pass judges it again. test-schema [90] (the vocabulary, the door's
+set per pair with distinct in it, the deletes, the re-applies), test-live
+[16] (an unrelated verdict at the floor, under it, on its token, and on a
+brain short of 100; `--status` and `--list relations`) and [41] (a distinct
+pair never posted to the board), test-upgrade [20at].
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -2935,10 +2955,22 @@ floor (else the written number does), its lineage row (`derivations`, kind
 written once and only closed, and since 084 no facet changes its kind.
 `record_thought_relation` keeps it when the pair is judged the same again,
 replaces it when judged another word, key or score, and closes it
-(`valid_until`) when a well-formed judgement sees none — unrelated, outdates,
-or under the floor (a malformed or timed-out pair leaves it standing); the other
+(`valid_until`) when a well-formed judgement sees none — outdates, or under
+the floor (a malformed or timed-out pair leaves it standing); the other
 thought's delete closes it too, and the newer thought's takes it and its
-lineage. `--status` counts the relations standing and `--list relations`
+lineage. Since 100 an unrelated verdict at the floor is a relation too, the
+word **distinct**: two near neighbours the judge called unrelated, kept apart
+(SMD-3117, the word SMD-3116 gave it). Its floor is its own probability (the
+token's, or under decide mode H2O's), not the relation words' mass, which a
+confident unrelated leaves near nothing; prompt 4 still asks for "unrelated",
+so no pass key moved. A distinct is one more word on the pair's one standing
+edge — a relation replaces it, and it a relation — and the readers keep it
+apart: `--status` counts the distinct pairs after the relations, `--list
+relations` leaves them out, brain_info counts them beside the relations and
+never as a board pair, and board findings never post one. On a brain short
+of 100 (084's door refuses the word) an unrelated verdict closes the pair's
+edge, as before, and the summary counts it; the pass reads 100's sentinel
+in the door's body to know. `--status` counts the relations standing and `--list relations`
 lists them, an edge whose text moved since flagged `EDITED SINCE JUDGED`
 (until SMD-2726's `rebuild_derived` arm closes such an edge, clearing the
 newer thought's claim — `DELETE FROM thought_work_claims WHERE work_type =
@@ -3029,7 +3061,7 @@ bun consolidate.ts --url … --status                # the pass, and the queue
 bun consolidate.ts --url … --dry-run               # what a run would do; writes nothing
 bun consolidate.ts --url … --retry-failed          # failed rows back into the pool first
 bun consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # lineage: unreviewed rows standing on a lineage pair (070)
-bun consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate, with both thoughts
+bun consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate, with both thoughts (a distinct, 100, is counted by --status, not listed)
 bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90; at most 2000000, inside Postgres's timestamp range)
@@ -4744,9 +4776,9 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2902 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1395 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 844 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
+bun test-schema.ts                          # 2919 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1400 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 849 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 55 assertions: the shards SHARDS lists in test-live.ts, each its own job
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 264 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 235 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)

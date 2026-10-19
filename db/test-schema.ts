@@ -7062,7 +7062,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)");
   assert(lastDefinerOf("record_thought_entities").startsWith("061") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 061, its last definer (056's body with the lineage row, [57]), keeps it ([52])");
   const validatorSrc = await src("thought_facets_validate()");
-  assert(lastDefinerOf("thought_facets_validate").startsWith("084") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, its last definer (053's body plus the relation kind, [74])");
+  assert(lastDefinerOf("thought_facets_validate").startsWith("100") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084 and 100, its last definer (053's body plus the relation kind, [74], with distinct, [90])");
   assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
     "the rule is spelled on the key prefix: a source: pass replaces its own rows, an extraction the rest, and both conflict clauses yield to source:");
   assert(/link \(migration 053\)/.test(validatorSrc) && /relation \(migration 084\)/.test(validatorSrc) && LINK_RELATIONS.every((r) => validatorSrc.includes(`'${r}'`)) && LINK_RELATIONS.length === 6, `the validator's hint names the new kind, and every relation the contract names it admits (${LINK_RELATIONS.join(", ")})`);
@@ -12586,7 +12586,7 @@ console.log("\n[74] Migration 084: the consolidation judge's relations — a `re
   assert(row.payload.origin === "judged" && row.payload.target === older && row.payload.confidence === 0.61, `origin is the validator's word, judged, and the target is stored lower-case (${JSON.stringify(row.payload)})`);
   const ghost = "00000000-0000-4000-8000-000000000084";
   const cases: [string, unknown, RegExp][] = [
-    ["a word outside the three", { ...ok, target: older, relation: "supersedes" }, /relation must be related, evolves or duplicate, got 'supersedes'/],
+    ["a word outside the four (100's)", { ...ok, target: older, relation: "supersedes" }, /relation must be related, evolves, duplicate or distinct, got 'supersedes'/],
     ["a target that is no thought id", { ...ok, target: "SMD-12" }, /target must be a thought id/],
     ["a target that is a number", { ...ok, target: 12 }, /target must be a thought id/],
     ["the thought itself", { ...ok, target: newer }, /not related to itself/],
@@ -12675,7 +12675,7 @@ console.log("\n[74] Migration 084: the consolidation judge's relations — a `re
     `closed: a NULL relation closes the pair's edge; with nothing active, none (${JSON.stringify([closed, none])})`);
   for (const [what, sql, params, re] of [
     ["one thought on both sides", `SELECT record_thought_relation($1::uuid, $1::uuid, 'related', 0.5, 'k', NULL, 'a', 'b', NULL)`, [newer], /two different thoughts/],
-    ["a word outside the three", `SELECT record_thought_relation($1::uuid, $2::uuid, 'outdates', 0.5, 'k', NULL, 'a', 'b', NULL)`, [newer, older], /relation must be related, evolves, duplicate or NULL/],
+    ["a word outside the four (100's)", `SELECT record_thought_relation($1::uuid, $2::uuid, 'outdates', 0.5, 'k', NULL, 'a', 'b', NULL)`, [newer, older], /relation must be related, evolves, duplicate, distinct or NULL/],
     ["no pass", `SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.5, ' ', NULL, 'a', 'b', NULL)`, [newer, older], /judge_key must name the pass/],
     ["a pass key past 200 characters, as a parameter error the pass does not mistake for a deleted side", `SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.5, repeat('k', 201), NULL, 'a', 'b', NULL)`, [newer, older], /in at most 200 characters/],
   ] as [string, string, unknown[], RegExp][]) {
@@ -12708,6 +12708,8 @@ console.log("\n[74] Migration 084: the consolidation judge's relations — a `re
       (SELECT count(*)::int FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL) AS edges,
       (SELECT count(*)::int FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%') AS chk`);
   assert(ra.trg === 2 && ra.edges === 1 && ra.chk === 1, `084 re-applied: one of each trigger, the edge standing, one CHECK on artifact_kind (${JSON.stringify(ra)})`);
+  // 084 re-applied holds 084's validator and door; 100 is their last definer, so the sections after run on its bodies.
+  await restoreShipped("thought_facets_validate", "record_thought_relation");
   await db.exec(`DELETE FROM thoughts`);
 }
 
@@ -14923,6 +14925,88 @@ console.log("\n[89] Migration 099: an unlink takes the review lock — update_th
 // outcome" and the Testing block). It used to be edited by hand and drifted;
 // this holds every count the README gives for test-schema.ts to what the suite
 // actually ran (SMD-1805). A doc check, so it does not move the number it reads.
+console.log("\n[90] Migration 100: the consolidation judge's distinct is stored — 084's relation vocabulary gains distinct: the validator and record_thought_relation take it, as one more word on the pair's one standing edge (added, kept, replaced by a relation and back, closed); a delete closes or drops it as 084's; the prompt's word, unrelated, is not a stored one; the sentinel the pass reads is in the door's body; 084 re-applied takes distinct away and the shipped definers put it back; a re-apply a no-op (SMD-3117)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const refused = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return (e as Error).message; } };
+  const RTR = "record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb)";
+  await restoreShipped("thought_facets_validate", "record_thought_relation");
+  await db.exec(`DELETE FROM thoughts`);
+  const thought = async (text: string) => (await one<{ r: { id: string } }>(`SELECT upsert_thought($1, '{}'::jsonb) AS r`, [text])).r.id;
+
+  // The shape: 100 the last definer of both, the sentinels, the comments.
+  const door = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('${RTR}')`)).s);
+  const validator = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
+  assert(lastDefinerOf("thought_facets_validate").startsWith("100") && lastDefinerOf("record_thought_relation").startsWith("100"),
+    `100 is the last definer of the validator and the door (${lastDefinerOf("thought_facets_validate")}, ${lastDefinerOf("record_thought_relation")})`);
+  assert(/ob1:relation-distinct/.test(door) && /ob1:relation-lineage-with-its-artifact/.test(door) && /ob1:relation-facet/.test(validator) && /ob1:link-facet/.test(validator),
+    "the sentinels: 100's in the door, which db/consolidate.ts reads to know whether to send distinct, and 084's and 053's kept");
+  const doorComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [RTR])).c ?? "";
+  const facets = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_facets"])).c ?? "";
+  const proposals = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["supersession_proposals"])).c ?? "";
+  assert(/distinct/.test(doorComment) && /100/.test(doorComment) && /SMD-3117/.test(doorComment) && /distinct/.test(facets) && /100/.test(facets) && /distinct/.test(proposals) && /outdates/.test(proposals),
+    "the comments say distinct: the door's, thought_facets', and supersession_proposals' (a pair called unrelated is a distinct relation, not a row there)");
+
+  // The validator takes distinct; the prompt's word is not a stored one.
+  const older = await thought("100: the older note on the boiler"), newer = await thought("100: the newer note on the kettle");
+  const insert = (p: unknown) => refused(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'relation', $2::jsonb)`, [newer, JSON.stringify(p)]);
+  assert((await insert({ relation: "distinct", target: older, judge_key: "consolidate:t@p4", confidence: 0.9 })) === "", "a distinct relation is admitted by the validator");
+  const [raw] = await q<{ payload: Record<string, unknown> }>(`SELECT payload FROM thought_facets WHERE kind = 'relation' AND thought_id = $1::uuid`, [newer]);
+  assert(raw.payload.relation === "distinct" && raw.payload.origin === "judged" && raw.payload.confidence === 0.9, `…as any relation: origin judged, its confidence kept (${JSON.stringify(raw.payload)})`);
+  await db.exec(`DELETE FROM thought_facets WHERE kind = 'relation'`);
+  assert(/relation must be related, evolves, duplicate or distinct, got 'unrelated'/.test(await insert({ relation: "unrelated", target: older, judge_key: "k" })),
+    "the prompt's word, unrelated, is not a stored one: the validator names the four");
+  assert(/relation must be related, evolves, duplicate, distinct or NULL/.test(await refused(`SELECT record_thought_relation($1::uuid, $2::uuid, 'unrelated', 0.5, 'k', NULL, 'a', 'b', NULL)`, [newer, older])),
+    "…and so does the door");
+
+  // The door: distinct is one more word in 084's set per pair.
+  const rec = async (rel: string | null, conf: number | null, fpOlder = "fo1", fpNewer = "fn1") =>
+    (await one<{ r: { ok: boolean; action: string; id?: string } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, $3::text, $4::numeric, 'consolidate:t@p4', NULL, $5, $6, '{"deterministic": false, "model": "t"}'::jsonb) AS r`,
+      [newer, older, rel, conf, fpOlder, fpNewer])).r;
+  const standing = async () => await q<{ relation: string; confidence: number | null }>(
+    `SELECT payload->>'relation' AS relation, (payload->>'confidence')::float AS confidence FROM thought_facets WHERE kind = 'relation' AND thought_id = $1::uuid AND valid_until IS NULL`, [newer]);
+  const lineageOf = async (id: string) => (await q<{ fps: string[] }>(`SELECT input_fingerprints AS fps FROM derivations WHERE artifact_kind = 'relation' AND artifact_id = $1::uuid`, [id]))[0]?.fps.join() ?? "";
+  const added = await rec("distinct", 0.871);
+  const s1 = await standing();
+  assert(added.action === "added" && s1.length === 1 && s1[0].relation === "distinct" && s1[0].confidence === 0.87 && (await lineageOf(added.id!)) === "fo1,fn1",
+    `added: one standing distinct at the confidence rounded to two places, its lineage row at the texts judged (${JSON.stringify([added, s1])})`);
+  const kept = await rec("distinct", 0.871, "fo2", "fn2");
+  assert(kept.action === "kept" && kept.id === added.id && (await lineageOf(added.id!)) === "fo2,fn2", `kept: the same distinct again keeps it, its lineage moved (${JSON.stringify(kept)})`);
+  const toRelated = await rec("related", 0.64);
+  const s2 = await standing();
+  assert(toRelated.action === "replaced" && s2.length === 1 && s2[0].relation === "related", `a re-judge that sees a relation replaces the distinct: one standing edge per pair (${JSON.stringify([toRelated, s2])})`);
+  const backApart = await rec("distinct", 0.7);
+  const s3 = await standing();
+  assert(backApart.action === "replaced" && s3.length === 1 && s3[0].relation === "distinct", `…and one that sees distinct replaces the relation (${JSON.stringify([backApart, s3])})`);
+  const closed = await rec(null, null);
+  assert(closed.action === "closed" && closed.id === backApart.id && (await standing()).length === 0, `a NULL closes the standing distinct, as any relation (${JSON.stringify(closed)})`);
+
+  // Deletes: 084's triggers close a distinct to a deleted target and drop the newer's with its lineage.
+  const third = await thought("100: a third note, judged apart from the older");
+  const apart = (await one<{ r: { id: string } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, 'distinct', 0.8, 'k', NULL, 'a', 'b', NULL) AS r`, [third, older])).r;
+  await db.query(`SELECT delete_thought($1::uuid)`, [older]);
+  const [afterTarget] = await q<{ active: number; total: number }>(`SELECT count(*) FILTER (WHERE valid_until IS NULL)::int AS active, count(*)::int AS total FROM thought_facets WHERE kind = 'relation' AND thought_id = $1::uuid`, [third]);
+  assert(afterTarget.active === 0 && afterTarget.total === 1, `the target deleted: the distinct naming it is closed and stays as history (${JSON.stringify(afterTarget)})`);
+  await db.query(`SELECT delete_thought($1::uuid)`, [third]);
+  const [afterNewer] = await q<{ f: number; d: number }>(`SELECT (SELECT count(*)::int FROM thought_facets WHERE id = $1::uuid) AS f, (SELECT count(*)::int FROM derivations WHERE artifact_kind = 'relation' AND artifact_id = $1::uuid) AS d`, [apart.id]);
+  assert(afterNewer.f === 0 && afterNewer.d === 0, `the newer thought deleted: its distinct goes by the cascade, its lineage row with it (${JSON.stringify(afterNewer)})`);
+
+  // 084 re-applied takes distinct away (the vocabulary is the file's); the shipped definers put it back; 100 again moves nothing.
+  const a1 = await thought("100: re-apply older"), b1 = await thought("100: re-apply newer");
+  await db.query(`SELECT record_thought_relation($1::uuid, $2::uuid, 'distinct', 0.6, 'k', NULL, 'a', 'b', NULL)`, [b1, a1]);
+  await reapply("084");
+  const under084 = await refused(`SELECT record_thought_relation($1::uuid, $2::uuid, 'distinct', 0.7, 'k', NULL, 'a', 'b', NULL)`, [b1, a1]);
+  const sentinel084 = /ob1:relation-distinct/.test(String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('${RTR}')`)).s));
+  const restored = await restoreShipped("thought_facets_validate", "record_thought_relation");
+  await reapply("100");
+  const [ra] = await q<{ edges: number; apart: number }>(`SELECT count(*)::int AS edges, count(*) FILTER (WHERE payload->>'relation' = 'distinct')::int AS apart FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL`);
+  const again = (await one<{ r: { action: string } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, 'distinct', 0.6, 'k', NULL, 'a', 'b', NULL) AS r`, [b1, a1])).r;
+  assert(/relation must be related, evolves, duplicate or NULL/.test(under084) && !sentinel084 && restored.some((f) => f.startsWith("100")) && ra.edges === 1 && ra.apart === 1 && again.action === "kept",
+    `084 re-applied refuses distinct and drops the sentinel the pass reads; the shipped definers restore 100; 100 re-applied moves nothing (${JSON.stringify([under084.slice(0, 60), sentinel084, restored, ra, again])})`);
+  await db.exec(`DELETE FROM thoughts`);
+}
+
 console.log("\n[doc] db/README.md states this suite's own assertion total");
 {
   const readme = readFileSync(new URL("./README.md", import.meta.url), "utf8");

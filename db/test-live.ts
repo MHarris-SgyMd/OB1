@@ -6970,9 +6970,46 @@ if (want("16")) {
     const under = await rejudge("related", 0.3);
     assert(/relations: 0 added, 0 kept, 0 replaced, 1 closed/.test(under.out) && (await relOf()).every((r) => !r.active),
       `a relation verdict under the floor writes none and closes the standing edge (${under.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+    // SMD-3117 (100): judged unrelated at the floor, the pair is a distinct on
+    // the newer thought — two near neighbours judged apart, kept, not listed.
     const asUnrelated = await rejudge("unrelated");
-    assert(/relations: 0 added, 0 kept, 0 replaced, 0 closed/.test(asUnrelated.out) && (await relOf()).every((r) => !r.active),
-      "judged unrelated with no edge standing, nothing is closed — a retract with nothing to retract is none");
+    const ru = (await relOf()).filter((r) => r.active);
+    assert(/relations: 1 added, 0 kept, 0 replaced, 0 closed; 1 recorded as distinct/.test(asUnrelated.out) && ru.map((r) => `${r.relation}@${r.confidence}`).join() === "distinct@0.85" && ru[0]?.lineage === 1,
+      `judged unrelated at the floor, the pair is a distinct on the newer thought at the stated confidence, its lineage under the pass's key (${asUnrelated.out.split("\n").find((l) => /relations:/.test(l))?.trim()}; ${JSON.stringify(ru)})`);
+    const apartStatus = await consolidate("--status");
+    const apartList = await consolidate("--list", "relations");
+    // Every pair the stub calls unrelated is a distinct too, so --status counts this section's, not the rota's alone.
+    assert(/— --list relations shows them; \d+ pair\(s\) judged distinct — near neighbours the judge called unrelated, kept apart \(100\)/.test(apartStatus.out) && !/\] distinct/.test(apartList.out) && !apartList.out.includes(rotaNew),
+      `--status counts the distinct apart from the relations, and --list relations does not list it (${apartStatus.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+    const apartUnder = await rejudge("unrelated", 0.3);
+    assert(/relations: 0 added, 0 kept, 0 replaced, 1 closed/.test(apartUnder.out) && !/recorded as distinct/.test(apartUnder.out) && (await relOf()).every((r) => !r.active),
+      `judged unrelated under the floor, nothing is recorded and the standing distinct is closed (${apartUnder.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+    const apartNone = await rejudge("unrelated", 0.3);
+    assert(/relations: 0 added, 0 kept, 0 replaced, 0 closed/.test(apartNone.out) && (await relOf()).every((r) => !r.active),
+      "judged unrelated under the floor with no edge standing, nothing is closed — a retract with nothing to retract is none");
+    // The floor reads a distinct's own probability: unrelated at 0.45 by its
+    // token is under it though the relation words hold 0.55; at 0.8 it is recorded at 0.8.
+    // The stub's sampled token is the verdict's first three characters, "unr": named so among
+    // the alternatives, or valueDistribution counts it a second time beside them.
+    rotaTop = [["unr", 0.45], ["rel", 0.4], ["ev", 0.15]];
+    const apartSplit = await rejudge("unrelated", 0.9);
+    rotaTop = [["unr", 0.8], ["rel", 0.15], ["ev", 0.05]];
+    const apartSure = await rejudge("unrelated", 0.9);
+    rotaTop = null;
+    assert(/relations: 0 added, 0 kept, 0 replaced, 0 closed/.test(apartSplit.out) && /relations: 1 added, 0 kept, 0 replaced, 0 closed; 1 recorded as distinct/.test(apartSure.out) && (await relOf()).find((r) => r.active)?.confidence === 0.8,
+      `a distinct's floor is its own token probability, not the relation words' mass (${[apartSplit, apartSure].map((r) => r.out.split("\n").find((l) => /relations:/.test(l))?.trim()).join(" / ")})`);
+    // A brain short of 100 — 084's door, which refuses distinct: the verdict
+    // closes the pair's edge as before 100, and the run counts it, the thought not failed.
+    await sql.unsafe(readFileSync(join(HERE, "migrations", "084_judged_relations.sql"), "utf8"));
+    try {
+      const pre100 = await rejudge("unrelated");
+      // The run's exit is the relic note's (it fails on purpose, above); the rota's own claim says whether its thought failed.
+      const [rotaClaim] = await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+      assert(rotaClaim?.status === "succeeded" && /relations: 0 added, 0 kept, 0 replaced, 1 closed; 1 unrelated verdict\(s\) not stored as distinct — this brain lacks migration 100/.test(pre100.out) && (await relOf()).every((r) => !r.active),
+        `on a brain short of 100 an unrelated verdict closes the standing distinct and is counted, the thought not failed (${rotaClaim?.status}: ${pre100.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+    } finally {
+      await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
+    }
     // A brain without 084: the pass counts the verdicts and says relations are not stored.
     await sql.unsafe(`ALTER FUNCTION record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb) RENAME TO record_thought_relation_hidden`);
     try {
@@ -13044,6 +13081,9 @@ if (want("41")) {
     const z13 = await ticket(13, "closed a"), z14 = await ticket(14, "closed b");
     await relate(z14, z13, "evolves");
     await relate(z14, z13, null);
+    // A pair judged distinct (100, SMD-3117): two tickets the judge called unrelated are nothing to link.
+    const z19 = await ticket(19, "judged apart a"), z20 = await ticket(20, "judged apart b");
+    await relate(z20, z19, "distinct", 0.9);
     // Two words on one pair: one comment, two rows.
     const z15 = await ticket(15, "two words a"), z16 = await ticket(16, "two words b");
     const p1516 = await propose(z15, z16, "newer_supersedes_older", 0.6, "ZQ-16 restates ZQ-15");
@@ -13059,7 +13099,7 @@ if (want("41")) {
     const posted1 = posts();
     const on = posted1.map((o) => String(o.vars.issueId)).sort().join(",");
     assert(r1.posted.length === 3 && r1.found.length === 1 && r1.failed.length === 0 && on === "uuid-ZQ-16,uuid-ZQ-2,uuid-ZQ-3",
-      `the first run posts one comment per unlinked ticket pair, on the newer ticket — ZQ-2 (a proposal), ZQ-3 (a section row's relation), ZQ-16 (two words) — and nothing for the note, a change record, a lower-case identity, one ticket's two rows, the settled, the linked, a duplicate either side holds, the closed (${summaryLine(r1, 10, false).trim()}; on ${on})`);
+      `the first run posts one comment per unlinked ticket pair, on the newer ticket — ZQ-2 (a proposal), ZQ-3 (a section row's relation), ZQ-16 (two words) — and nothing for the note, a change record, a lower-case identity, one ticket's two rows, the settled, the linked, a duplicate either side holds, the closed, a pair judged distinct (${summaryLine(r1, 10, false).trim()}; on ${on})`);
     assert(opNames() === "BoardFindingComment,BoardFindingTicket", `the request log holds a ticket read and a comment, nothing else — no link, no status, no edit (${opNames()})`);
     const body2 = String(posted1.find((o) => o.vars.issueId === "uuid-ZQ-2")!.vars.body);
     assert(/\*\*ZQ-2 outdates ZQ-1\*\* \(confidence 0\.90\): `the newer ticket's plan replaces the older's`/.test(body2) && body2.includes(`bun consolidate.ts --accept ${pid}`) && body2.includes(`--reject ${pid}`)

@@ -696,8 +696,16 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   // SMD-1873 PR 2: what a judgement records as a relation (084), and at what confidence.
   assert(relationVerdict(jg("related", "unknown")) === "related" && relationVerdict(jg("evolves", "unknown")) === "evolves" && relationVerdict(jg("duplicate", "unknown")) === "duplicate",
          "related, evolves and duplicate are relations");
-  assert(relationVerdict(jg("unrelated", "unknown")) === null && relationVerdict(jg("outdates", "newer")) === null && relationVerdict({ ...jg("related", "unknown"), malformed: true }) === null,
-         "an unrelated pair, an outdates (a proposal's) and a malformed answer record no relation — the pass closes the pair's");
+  assert(relationVerdict(jg("outdates", "newer")) === null && relationVerdict({ ...jg("related", "unknown"), malformed: true }) === null && relationVerdict({ ...jg("unrelated", "unknown"), malformed: true }) === null,
+         "an outdates (a proposal's) and a malformed answer record no relation — the pass closes the pair's");
+  // SMD-3117 (migration 100): an unrelated verdict records distinct — two near neighbours judged apart — at the floor of its own probability.
+  assert(relationVerdict(jg("unrelated", "unknown")) === "distinct", "an unrelated verdict records distinct (100), the word SMD-3116 gave it");
+  const sure = { p: { unrelated: 0.8, related: 0.1, evolves: 0.05, duplicate: 0.03, outdates: 0.02 }, covered: 0.95 };
+  assert(JSON.stringify(relationConfidence(jg("unrelated", "unknown", { verdict: sure }))) === JSON.stringify({ confidence: 0.8, mass: 0.8, source: "token" })
+         && JSON.stringify(relationConfidence(jg("unrelated", "unknown", { verdict: dist }))) === JSON.stringify({ confidence: 0.05, mass: 0.05, source: "token" }),
+         "a distinct's floor is its own probability: unrelated at 0.8 clears it where the relation words' 0.18 would not, and at 0.05 it does not, where their 0.55 would");
+  assert(JSON.stringify(relationConfidence(jg("unrelated", "unknown"))) === JSON.stringify({ confidence: 0.8, mass: 0.8, source: "stated" }),
+         "…and without a distribution both are the number the model wrote");
   assert(JSON.stringify(relationConfidence(jg("duplicate", "unknown", { verdict: dist }))) === JSON.stringify({ confidence: 0.25, mass: 0.55, source: "token" })
          && JSON.stringify(relationConfidence(jg("related", "unknown", { verdict: dist }))) === JSON.stringify({ confidence: 0.2, mass: 0.55, source: "token" }),
          "a relation stores the token probability of its own word, and the floor reads the three relation words' mass together — related 0.2 is a relation the model holds at 0.55 (review pass 1)");
@@ -1696,7 +1704,8 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   const unchecked = decideJudgement(p, prop, false);
   assert(unchecked.verdict === "related" && /quotes did not check out/.test(unchecked.reason), "quotes that fail: no proposal, said");
   const noWriter = decideJudgement({ ...p, outdates: 0.05, unrelated: 0.55 }, null, false);
-  assert(noWriter.verdict === "unrelated" && noWriter.reason === "" && relationVerdict(noWriter) === null, "no writer asked: H2O's top verdict");
+  assert(noWriter.verdict === "unrelated" && noWriter.reason === "" && relationVerdict(noWriter) === "distinct", "no writer asked: H2O's top verdict, a distinct (SMD-3117)");
+  assert(JSON.stringify(relationConfidence(noWriter)) === JSON.stringify({ confidence: 0.55, mass: 0.55, source: "token" }), "…cut at H2O's P(unrelated) itself, not the relation words' mass");
   assert((judgedRecipe({ ...stood, decide: { top: "outdates" } }, "token").decide as { top?: string } | undefined)?.top === "outdates", "the recipe carries decide mode's note");
   const found = { similarity: 0.9, candidates: 5, minSimilarity: 0.7 };
   const decided = proposalRecipe({ judgeModel: "qwen3.8:27b", decider: "h2o-lightning-4b" }, found), judgedR = proposalRecipe({ judgeModel: "qwen2.5:7b", decider: "" }, found);
