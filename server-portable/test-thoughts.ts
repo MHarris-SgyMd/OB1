@@ -1704,26 +1704,26 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     "decide mode's lineage names the writer, the decider and its own prompt's hash");
   assert(judgedR.prompt_hash === promptHash(CONSOLIDATE_PROMPT) && !("decider" in judgedR) && !("decide_version" in judgedR), "…and the judge's names prompt 4's, as before");
 
-  // The writer's question: prompt 4's rendering of both thoughts, two-sided with the part rule and the record rule
-  // (decide version 2), as the pass runs it.
+  // The writer's question: prompt 4's rendering of both thoughts, two-sided with the part rule, as the pass runs it
+  // (decide version 1). Version 2's record rule is the eval's (`--record-rule`), not the pass's: shelved 2026-10-18.
   const older = { content: "the plan is to ship on Friday", createdAt: "2026-10-01T00:00:00Z" };
   const newer = { content: "we shipped on Monday instead of Friday", createdAt: "2026-10-03T00:00:00Z" };
   const msg = writerMessages({ older, newer }, PASS_WRITER.twoSided, PASS_WRITER.partRule, PASS_WRITER.recordRule)[0].content;
-  assert(msg.startsWith(WRITER_HEAD) && msg.includes("<thought_a>\nthe plan is to ship on Friday\n</thought_a>") && msg.includes('"stale": words copied') && msg.includes(PART_RULE.trim()) && msg.includes(RECORD_RULE.trim()),
-    "the pass's writer: both thoughts, the stale quote, the part rule and the record rule");
-  // Under the record rule the definition no longer counts a later summary of the same work, or one saying the other is
-  // done, as outdating it; without the rule the writer's text is SMD-3114's, unchanged.
+  assert(msg.startsWith(WRITER_HEAD) && msg.includes("<thought_a>\nthe plan is to ship on Friday\n</thought_a>") && msg.includes('"stale": words copied') && msg.includes(PART_RULE.trim()) && !msg.includes(RECORD_RULE.trim()),
+    "the pass's writer: both thoughts, the stale quote and the part rule, not the record rule");
+  // The pass asks version 1's text, SMD-3114's, word for word. Under the record rule (version 2, the eval's) the
+  // definition no longer counts a later summary of the same work, or one saying the other is done, as outdating it.
   const v1 = writerRules(true, true), v2 = writerRules(true, true, true);
-  assert(DECIDE_VERSION === 2 && v1.includes("a progress note or summary of some work and a later one of the same work") && v1.includes("or one saying the other is done, closed, obsolete or replaced") && !v1.includes(RECORD_RULE.trim())
+  assert(DECIDE_VERSION === 1 && DECIDE_PROMPT.endsWith(v1) && v1.includes("a progress note or summary of some work and a later one of the same work") && v1.includes("or one saying the other is done, closed, obsolete or replaced") && !v1.includes(RECORD_RULE.trim())
       && !v2.includes("a later one of the same work") && !v2.includes("one saying the other is done") && v2.includes("the two say different things about the same subject") && v2.includes("a status and a later status of something still open"),
-    "the record rule's definition drops a later summary and a report of done from what outdates; SMD-3114's text stands without it");
+    "the pass asks version 1's text; the record rule's definition drops a later summary and a report of done from what outdates");
   assert(stands(prop, older.content, newer.content, true) && !stands({ ...prop, stale: "Monday" }, older.content, newer.content, true), "both quotes checked, each in its own side");
-  // A quote shortened with "…" or "...": read piece by piece when the pass asks (decide version 2), every piece in its
-  // side and not every piece in the other; as SMD-3114 measured otherwise.
+  // A quote shortened with "…" or "...": read piece by piece under version 2's reading (the eval's `--v2-quotes`),
+  // every piece in its side and not every piece in the other; the pass keeps SMD-3114's whole-quote check.
   const shortened = { ...prop, evidence: "we shipped … instead of Friday", stale: "the plan is ... on Friday" };
   assert(quoteIn("we shipped … instead of Friday", newer.content, older.content) && quoteIn("the plan is ... on Friday", older.content, newer.content)
-      && stands(shortened, older.content, newer.content, true, true) && !stands(shortened, older.content, newer.content, true) && PASS_WRITER.v2Quotes,
-    "a shortened quote stands piece by piece when the pass reads it so, and not under SMD-3114's whole-quote check");
+      && stands(shortened, older.content, newer.content, true, true) && !stands(shortened, older.content, newer.content, true) && !PASS_WRITER.v2Quotes,
+    "a shortened quote stands piece by piece under version 2's reading, and not under SMD-3114's whole-quote check, which the pass keeps");
   assert(!quoteIn("we shipped … on Tuesday", newer.content, older.content) && !quoteIn("alpha beta … gamma delta", "alpha beta gamma delta", "alpha beta and gamma delta too")
       && quoteIn("alpha beta gamma delta", "alpha beta gamma delta", "alpha beta and gamma delta too") && quoteIn("we shipped on Monday …", newer.content, older.content),
     "…a piece missing from its side fails it, every piece also in the other fails it, and a trailing mark is read whole");
@@ -1774,15 +1774,16 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     const a = await decidePair(older, newer, cfg, jev);
     assert(a.verdict === "outdates" && a.supersedes === "newer" && a.decide.top === "outdates" && a.decide.writer?.stale_found === true && a.decide.decider.name === "h2o-test" && writerCalls === 1,
       "the tier's outdates asks the writer, and its standing proposal is the judgement");
-    assert(writerBody.model === "writer-test" && (writerBody.messages?.[0]?.content ?? "").includes(PART_RULE.trim()) && (writerBody.messages?.[0]?.content ?? "").includes(RECORD_RULE.trim()),
-      "the writer is the judge's model, asked the pass's question, the record rule in it");
+    assert(writerBody.model === "writer-test" && (writerBody.messages?.[0]?.content ?? "").includes(PART_RULE.trim()) && !(writerBody.messages?.[0]?.content ?? "").includes(RECORD_RULE.trim()),
+      "the writer is the judge's model, asked the pass's question, without the record rule");
     tierP = { ...p, outdates: 0.05, related: 0.75 };
     const b = await decidePair(older, newer, cfg, jev);
     assert(b.verdict === "related" && b.decide.writer === undefined && writerCalls === 1, "the tier's related: no writer call, the relation stands");
     tierP = p;
     writerAnswer = JSON.stringify({ current: "B", evidence: "we shipped … instead of Friday", stale: "the plan is ... on Friday", reason: "it shipped later" });
     const s = await decidePair(older, newer, cfg, jev);
-    assert(s.verdict === "outdates" && s.decide.writer?.evidence_found === true && s.decide.writer.stale_found === true, "a writer's quotes shortened with \"…\" stand in the pass, and its note says both were found");
+    assert(s.verdict === "related" && /quotes did not check out/.test(s.reason) && s.decide.writer?.evidence_found === false && s.decide.writer.stale_found === false,
+      "a writer's quotes shortened with \"…\" do not stand in the pass, which reads quotes whole (version 1), and its note says neither was found");
     writerAnswer = JSON.stringify({ current: "none", evidence: "", stale: "", reason: "both stay current" });
     const c = await decidePair(older, newer, cfg, jev);
     assert(c.verdict === "related" && c.decide.writer?.current === "none" && c.decide.writer.stale_found === false && c.decide.writer.evidence_found === false && proposalVerdict(c) === null,

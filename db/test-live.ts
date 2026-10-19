@@ -7246,7 +7246,8 @@ if (want("16")) {
         if (prompt === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
         writerCalls++;
         writerModels.add(String(body.model));
-        if (prompt.includes(PART_RULE.trim()) && prompt.includes(RECORD_RULE.trim())) writerPartRule++;
+        // The pass's writer (decide version 1): the part rule, and not the record rule, version 2's, shelved 2026-10-18.
+        if (prompt.includes(PART_RULE.trim()) && !prompt.includes(RECORD_RULE.trim())) writerPartRule++;
         const answer = /tenancy/.test(thoughtsIn(prompt)) ? { current: "B", evidence: "now runs 90 days", stale: "runs 30 days", reason: "the tenancy was extended" }
           : { current: "none", evidence: "", stale: "", reason: "both stay current" };
         return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }] });
@@ -7296,7 +7297,7 @@ if (want("16")) {
       assert(drels.length === 1 && drels[0].t === runNew && drels[0].target === runOld && drels[0].relation === "related" && drels[0].key === DKEY,
         `the tier's related is a relation under decide mode's key, and the writer's "none" leaves the cutover pair neither a proposal nor a relation, the relation words' mass under the floor (${JSON.stringify(drels)})`);
       assert(tierCalls === 3 && writerCalls === 2 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2,
-        `the tier was asked about each of the three pairs and the writer only about the two it called outdates, as the judge's model with the part rule and the record rule (tier ${tierCalls}, writer ${writerCalls}: ${[...writerModels].join(", ")})`);
+        `the tier was asked about each of the three pairs and the writer only about the two it called outdates, as the judge's model with the part rule and not the record rule (tier ${tierCalls}, writer ${writerCalls}: ${[...writerModels].join(", ")})`);
       const dclaims = Object.fromEntries(((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${DKEY} GROUP BY status`) as { status: string; c: number }[]).map((r) => [r.status, Number(r.c)]));
       assert(dclaims.succeeded === 6 && Object.keys(dclaims).length === 1, `every thought's claim succeeded under decide mode's key (${JSON.stringify(dclaims)})`);
 

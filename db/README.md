@@ -2986,19 +2986,21 @@ tier gives each pair's verdict, not the judge:
 - **The writer.** Only when the tier's top verdict is outdates is the judge's
   model asked, and only to write the proposal: which thought is current, the
   words in it that show the other is not, and the other's words that no
-  longer hold. Two rules hold it:
-  - **The part rule:** a part of some work finishing does not outdate the
-    whole.
-  - **The record rule** (decide version 2): a record of past understanding (a
-    done ticket, a session summary, a change record) is outdated only by a
-    later thought, from any source, that says something different about its
-    subject. Its work reported done never outdates it, and neither does a
-    later record that goes on with that work.
+  longer hold. **The part rule** holds it: a part of some work finishing does
+  not outdate the whole.
 - **Both quotes must check out** in the side each names and not in the other,
-  or the pair stays at the tier's best verdict that proposes nothing. Version
-  2 reads a quote shortened with "…" piece by piece. It also lets the stale
-  claim sit in the current thought where that thought only quotes it, as a
-  refutation quotes the claim it calls wrong.
+  or the pair stays at the tier's best verdict that proposes nothing.
+- **Version 1 is the pass's** (`@p4d1`), SMD-3114's writer, two-sided with the
+  part rule. Version 2 was measured on the canary's proposals and shelved
+  (2026-10-18), having missed its bar twice. It added:
+  - the record rule: a record of past understanding (a done ticket, a session
+    summary, a change record) is outdated only by a later thought that says
+    something different about its subject, never by its work reported done;
+  - a quote reading that takes a quote shortened with "…" piece by piece, and
+    lets a stale claim the current thought only quotes count.
+
+  Both stay for `evals/eval-judge-propose.ts` (`--record-rule`, `--v2-quotes`)
+  and SMD-3116's writers.
 - **The distribution is the tier's.** A proposal is recorded at its
   P(outdates) under the same floor, and a relation by the mass of the relation
   words.

@@ -126,18 +126,21 @@ pass's decide mode, to be reviewed on the canary. With
 `OB1_CONSOLIDATE_DECIDER=h2o-lightning-4b`, `db/consolidate.ts` asks this tier
 prompt 4's five verdicts as one choice for every pair. When the top verdict is
 outdates it asks `OB1_JUDGE_MODEL` only to write the proposal, two-sided with
-the part rule and the record rule, and both quotes must check out in the
-texts. Anything else leaves the pair at H2O's best verdict that proposes
+the part rule, and both quotes must check out in the texts. Anything else leaves the pair at H2O's best verdict that proposes
 nothing. A proposal records H2O's P(outdates) as its confidence, under the
 pass's usual floor of 0.5.
 
-**The record rule** (decide version 2) came from the canary's first proposals.
+**The record rule** (decide version 2, shelved 2026-10-18; the pass runs version
+1) came from the canary's first proposals.
 There, 38 of 48 outdated a Linear ticket, 35 of those tickets already said Done,
 and 23 gave the ticket's work being completed as the whole reason. The
 maintainer's model: a done ticket stands as a historical record of past
 understanding, and so does a session summary or a change record. Any later
 source can outdate what it understood, by saying something different about the
-same subject. Its work being reported done never does.
+same subject. Its work being reported done never does. Measured on the canary's
+proposals, version 2 missed its bar twice, so it stays in
+`evals/eval-judge-propose.ts` (`--record-rule`, `--v2-quotes`) for SMD-3116's
+writers and is not the pass's.
 
 For a brain on this Mac, serve the tier on the host and point the stack at it:
 
@@ -160,7 +163,7 @@ OB1_JEV_LOCAL=1
 - **An outage mid-pass** is handled like the judge's: a follower checks the
   writer's chat endpoint and then the tier's `/info` before it claims anything,
   and waits out an outage of either.
-- **The pass key** is `consolidate:h2o-lightning-4b+<writer>@p4d2`, so turning
+- **The pass key** is `consolidate:h2o-lightning-4b+<writer>@p4d1`, so turning
   decide mode on, or moving to a new decide version, starts a fresh pass over
   the pool. Proposals are reviewed as
   the judge's are (`bun db/consolidate.ts --list`, then `--accept` or

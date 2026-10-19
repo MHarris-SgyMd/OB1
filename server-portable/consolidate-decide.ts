@@ -112,10 +112,12 @@ export const writerMessages = (p: { older: PairSide; newer: PairSide }, twoSided
   [{ role: "user" as const, content: WRITER_HEAD + pairContext(p) + writerRules(twoSided, partRule, recordRule) }];
 
 /**
- * The writer the pass runs: two-sided with the part rule, SMD-3114's adopted one (decide version 1), and since
- * version 2 the record rule and version 2's quote reading (stands' `v2Quotes`). Its version is the key's.
+ * The writer the pass runs: two-sided with the part rule, SMD-3114's adopted one (decide version 1). Version 2's
+ * record rule and quote reading (RECORD_RULE, stands' `v2Quotes`) are not the pass's: measured on the canary's
+ * proposals they missed their bar twice, and the maintainer shelved them (2026-10-18). They stay for the eval
+ * (`--record-rule`, `--v2-quotes`) and SMD-3116's writers. Its version is the key's.
  */
-export const PASS_WRITER = { twoSided: true, partRule: true, recordRule: true, v2Quotes: true } as const;
+export const PASS_WRITER = { twoSided: true, partRule: true, recordRule: false, v2Quotes: false } as const;
 
 /** The fixed text decide mode asks with, the decider's question and definitions and the writer's head and rules, which a recipe's prompt_hash names (lineage.ts). */
 export const DECIDE_PROMPT = [RELATION_QUESTION, ...OFFERED.map((v) => DESCRIPTIONS[v]), WRITER_HEAD, writerRules(PASS_WRITER.twoSided, PASS_WRITER.partRule, PASS_WRITER.recordRule)].join("\n");
@@ -202,10 +204,12 @@ export function stands(p: Proposal, older: string, newer: string, twoSided: bool
 
 /**
  * Bumped when the decider's question, the writer's prompt or the rules between them change: a new pool. 1: SMD-3114's
- * writer, two-sided with the part rule. 2: the record rule added (RECORD_RULE), with version 2's quote reading: quotes
- * shortened with "…" read piece by piece (quoteIn), and a stale claim the current thought only quotes (onlyQuoted).
+ * writer, two-sided with the part rule, the pass's. Version 2 added the record rule (RECORD_RULE) and its quote
+ * reading: quotes shortened with "…" read piece by piece (quoteIn), and a stale claim the current thought only quotes
+ * (onlyQuoted). It was measured on the canary's proposals, missed its bar twice and is shelved, so the pass stays at
+ * 1 and its key at `@p4d1`; the eval still asks version 2 (`--record-rule`, `--v2-quotes`).
  */
-export const DECIDE_VERSION = 2;
+export const DECIDE_VERSION = 1;
 
 /**
  * Decide mode's pass key: the decider, the writer, and the two versions it reads the pair under, prompt 4's (both
