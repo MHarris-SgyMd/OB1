@@ -29,13 +29,13 @@ const core = createCore({ env, store: db, door: API_DOOR });
  * unless configured, and one check — one cached key set — per issuer and
  * audience, so a request costs a read of the key set only when its cache says.
  */
-let tokenCheck: { at: string; check: TokenCheck } | null = null;
+let remoteCheck: { at: string; check: TokenCheck } | null = null;
 function tokens(): TokenCheck | null {
   const settings = tokenSettings(env());
   if (!settings) return null;
   const at = `${settings.issuer} ${settings.audience}`;
-  if (tokenCheck?.at !== at) tokenCheck = { at, check: remoteChecker(settings) };
-  return tokenCheck.check;
+  if (remoteCheck?.at !== at) remoteCheck = { at, check: remoteChecker(settings) };
+  return remoteCheck.check;
 }
 
 /** The calls running — each request and each detached job run — counted for the stop (SMD-2250). */

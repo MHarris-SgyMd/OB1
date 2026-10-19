@@ -116,7 +116,7 @@ const SUBJECT = /^[A-Za-z0-9._~-]{1,128}$/;
  * cannot be read again yet. A key reader throws it so the check answers
  * unavailable (503), not invalid; any other failure of a reader is the same.
  */
-export class KeysUnavailable extends Error {}
+class KeysUnavailable extends Error {}
 
 /** A key reader that says KeysUnavailable for every failure but a key the set does not hold (or holds twice). */
 function guarded(keys: JWTVerifyGetKey): JWTVerifyGetKey {
@@ -180,6 +180,8 @@ export function cachedKeys(read: () => Promise<JSONWebKeySet>, now: () => number
       return true;
     } catch (e) {
       if (e instanceof jose.JWKSNoMatchingKey) return false;
+      // A doubled kid (JWKSMultipleMatchingKeys) is refused here, before the serving gate: jose has no retry over two
+      // keys of one kid, so that token is invalid whatever the set's age, and the authorization server always sets a kid.
       throw e;
     }
   };

@@ -23,6 +23,14 @@
  * - a third-party client (DCR or CIMD) may register for authorization code
  *   and refresh only. Without that rule, anyone could self-register for
  *   client credentials and hold an /mcp token no user ever approved;
+ * - the refresh policy (SMD-2286, layout.ts): every refresh rotates, a token
+ *   lasts 14 days unused within its grant's 30, a chain 30 days old rotates
+ *   no more, and a spent token presented again within 10 s rotates again
+ *   rather than revoking the grant (store.ts), since the MCP SDK refreshes
+ *   without a lock;
+ * - the brain's scopes are its key scopes, one to one (SMD-2286): scopes no
+ *   access key holds together (read with capture, no write) are refused at
+ *   the authorization request's interaction and at the exchange;
  * - URLs built from the configured origin, never the request's `Host`, so a
  *   spoofed `Host` cannot move the endpoints the metadata names;
  * - the `fetch` option (fetch-guard.ts): the library's own SSRF protection
