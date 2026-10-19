@@ -16,7 +16,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { DatabaseFacts, ReadOptions, ReadProgress } from "./brain-info.ts";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, normaliseTicketStatusInputs, ticketList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -680,11 +680,16 @@ export class PostgrestStore implements ThoughtStore {
     let rows: Record<string, unknown>[];
     try {
       const { data, error } = await this.client.rpc("ticket_status_inputs", { p_ids: valid, p_issues: keys });
-      if (error) return null;
+      if (error) {
+        labelReadFailed(String((error as { code?: unknown }).code ?? ""), String((error as { message?: unknown }).message ?? ""));
+        return null;
+      }
       rows = data as Record<string, unknown>[]; // the normaliser reads anything that is not a list as no rows
-    } catch {
+    } catch (e) {
+      labelReadFailed("", (e as Error)?.message ?? String(e));
       return null;
     }
+    labelReadOk();
     return normaliseTicketStatusInputs(rows);
   }
 

@@ -372,6 +372,41 @@ demotes; `evals/eval-supersession.ts` records what the demotion finds higher
 (the current version, the live ticket) and lower (the topical answer, a note
 under a finished ticket, a finished ticket looked up by its key).
 
+### Tickets that moved since a hit was written (migration 095)
+
+Both searches label, and never rank lower, a hit naming a ticket whose status
+type has moved since the hit was written (SMD-2540): `search_thoughts` prints
+`⚠ Moved since written: SMD-2306 In Progress → Done; …` after the superseded
+and demoted lines, every moved ticket by key, and lists them in each hit's
+`moved` (`{ticket, was, now}` in status types; the REST answer carries each
+status's name and type); `search` gives that result `moved`, in status types
+over REST as well, and over MCP starts its title `[moved since written: …]` —
+before the thought's own words, which could forge it at the end. A status prints as its type's word (Triage,
+Backlog, Todo, In Progress, Done, Canceled), never the board's name: any write
+key can write a ticket row's name, and it would print on other people's hits.
+A hit's first 50 keys, in the order it mentions them, are read; the rest are
+counted (`movedNotRead`; beside a move, `(+N more named past the first 50, not
+checked)`). Written is
+the session's end the hook's last line records, else the row's stored time,
+and a ticket that already held its current type an hour later is the writer's
+own move, not labelled — the reading `evals/eval-stated-status.ts` measured
+(`server-portable/stated-status.ts`).
+A superseded hit, a ticket row and a note filed under a ticket are not
+checked: their `moved` is null, as is every hit naming a ticket on a brain
+before 095; an empty one means checked and nothing moved. The inputs are one call to 095's
+`ticket_status_inputs`, made only when a hit names a ticket; a brain before
+095, or a role without `ob1_config`, labels nothing and searches as before.
+
+There is no switch: the label never moves a rank or refuses a search. A wrong
+label is a wrong reading of one ticket. Its status now is the ticket's head
+(`SELECT head_id, status, status_type FROM ob1_ticket_head WHERE issue =
+'SMD-…'`): a write key's ticket row with a later `linear_updated_at` takes
+it (SMD-3047), so `delete_thought` that row, or `update_thought` it with
+`metadata_patch: {"issue": null}` — an edit of its text alone leaves it the
+head — and board-sync's own row is read again. A list step can read a count as a ticket
+(`SMD-2306, 1006 summaries` names SMD-1006), labelled only if that ticket
+exists and moved.
+
 ## Steps
 
 ### 1. Install
