@@ -611,11 +611,12 @@ export type RelationWord = RelationVerdict | "distinct";
 /**
  * The relation a judgement records (SMD-1873 PR 2), or null when it records
  * none — an outdates (a proposal's), a malformed answer. An unrelated verdict
- * records distinct (SMD-3117). The pass writes it with record_thought_relation
- * (084, 100) on the newer thought, and for a well-formed judgement a null
- * closes the pair's edge, so a re-judge that no longer sees the relation
- * retracts it; a malformed, timed-out or refused pair never reaches the
- * write, and its edge stands.
+ * records distinct (SMD-3117), except under decide mode where H2O's top was
+ * another word and unrelated is the fallback. The pass writes it with
+ * record_thought_relation (084, 100) on the newer thought, and for a
+ * well-formed judgement a null closes the pair's edge, so a re-judge that no
+ * longer sees the relation retracts it; a malformed, timed-out or refused
+ * pair never reaches the write, and its edge stands.
  */
 export function relationVerdict(j: Judgement): RelationWord | null {
   if (j.malformed) return null;

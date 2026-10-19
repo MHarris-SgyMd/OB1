@@ -5826,8 +5826,9 @@ if (want("16")) {
   let rotaConfidence = 0.85;
   /** Token alternatives for the rota answer's verdict, when set (review pass 1: the floor on the relation words' mass). */
   let rotaTop: [string, number][] | null = null;
-  // SMD-3117 review pass 1: when set, the stub puts 084's door back as it answers the rota pair — a hand re-apply under a running pass.
-  let swapDoorOnRota = false;
+  // SMD-3117 review pass 1: when set, the stub applies this SQL as it answers the rota pair — 084's door put back by hand under a running pass,
+  // or (review pass 2) a door that keeps 100's sentinel and refuses the word.
+  let swapDoorOnRota: string | null = null;
   const judge = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -5860,9 +5861,10 @@ if (want("16")) {
       else if (/rota/.test(a) && /rota/.test(b)) answer = { verdict: rotaAnswer, supersedes: "unknown", confidence: rotaConfidence, reason: "the same rota" };
       else if (/deploy/.test(a) && /deploy/.test(b)) answer = { verdict: "evolves", supersedes: "unknown", confidence: 0.8, reason: "the later deploy note follows the earlier" };
       else answer = { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
-      if (swapDoorOnRota && /rota/.test(a) && /rota/.test(b)) {
-        swapDoorOnRota = false;
-        await sql.unsafe(readFileSync(join(HERE, "migrations", "084_judged_relations.sql"), "utf8"));
+      if (swapDoorOnRota !== null && /rota/.test(a) && /rota/.test(b)) {
+        const door = swapDoorOnRota;
+        swapDoorOnRota = null;
+        await sql.unsafe(door);
       }
       const content = JSON.stringify(answer);
       // SMD-1873: two answers come with token probabilities when the pass asks —
@@ -6982,6 +6984,10 @@ if (want("16")) {
     const ru = (await relOf()).filter((r) => r.active);
     assert(/relations: 1 added \(1 distinct\), 0 kept, 0 replaced, 0 closed/.test(asUnrelated.out) && ru.map((r) => `${r.relation}@${r.confidence}`).join() === "distinct@0.85" && ru[0]?.lineage === 1,
       `judged unrelated at the floor, the pair is a distinct on the newer thought at the stated confidence, its lineage under the pass's key (${asUnrelated.out.split("\n").find((l) => /relations:/.test(l))?.trim()}; ${JSON.stringify(ru)})`);
+    // Review pass 2: each action says its distincts — kept here, replaced below.
+    const apartKept = await rejudge("unrelated");
+    assert(/relations: 0 added, 1 kept \(1 distinct\), 0 replaced, 0 closed/.test(apartKept.out) && (await relOf()).filter((r) => r.active).map((r) => r.id).join() === ru[0]?.id,
+      `judged unrelated again by the same pass at the same confidence, the distinct is kept and said so (${apartKept.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
     const apartStatus = await consolidate("--status");
     const apartList = await consolidate("--list", "relations");
     // Every pair the stub calls unrelated is a distinct too, so --status counts this section's, not the rota's alone.
@@ -7004,58 +7010,124 @@ if (want("16")) {
     rotaTop = null;
     assert(/relations: 0 added, 0 kept, 0 replaced, 0 closed/.test(apartSplit.out) && /relations: 1 added \(1 distinct\), 0 kept, 0 replaced, 0 closed/.test(apartSure.out) && (await relOf()).find((r) => r.active)?.confidence === 0.8,
       `a distinct's floor is its own token probability, not the relation words' mass (${[apartSplit, apartSure].map((r) => r.out.split("\n").find((l) => /relations:/.test(l))?.trim()).join(" / ")})`);
+    // At another confidence (stated now, without the token probabilities) it is replaced, and said so.
+    const apartReplaced = await rejudge("unrelated");
+    const standingApart = (await relOf()).filter((r) => r.active);
+    assert(/relations: 0 added, 0 kept, 1 replaced \(1 distinct\), 0 closed/.test(apartReplaced.out) && standingApart.map((r) => `${r.relation}@${r.confidence}`).join() === "distinct@0.85",
+      `judged unrelated at another confidence, the distinct is replaced and said so (${apartReplaced.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
     // A brain short of 100 — 084's door, which refuses distinct: the verdict
-    // closes the pair's edge as before 100, and the run counts it, the thought not failed.
+    // closes the pair's edge as before 100 unless that edge is a distinct, and
+    // the run counts it, the thought not failed.
     await sql.unsafe(readFileSync(join(HERE, "migrations", "084_judged_relations.sql"), "utf8"));
+    const BOTH = /this brain lacks migration 100: apply it \(cd db && bun migrate\.ts --url <owner's url>\), or, where the ledger already records 100 and 084 was re-applied by hand over it, re-apply \(add --reapply\)/;
+    const relationsLine = (out: string) => out.split("\n").find((l) => /^ {2}relations:/.test(l)) ?? "";
     try {
+      // Review pass 2: a follower's start says it too.
+      const checked = await consolidateInProcess({ follow: 1, check: true });
+      assert(checked.code === 0 && /^ {2}distinct: not stored — this brain lacks migration 100: .*; a pass closes the edge of a pair it calls unrelated then, as before 100, unless that edge is a distinct$/m.test(checked.stdout) && BOTH.test(checked.stdout),
+        `a follower's check on a brain short of 100 says a pass stores no distinct, with both remedies (exit ${checked.code}: ${checked.stdout.split("\n").find((l) => /distinct:/.test(l))?.trim().slice(0, 120)})`);
+      // Review pass 2: the distinct standing is the verdict's own — left as it
+      // was, not closed: its claim ends succeeded, and 100 re-applied would not bring it back.
       const pre100 = await rejudge("unrelated");
       // The run's exit is the relic note's (it fails on purpose, above); the rota's own claim says whether its thought failed.
       const [rotaClaim] = await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
-      const BOTH = /this brain lacks migration 100: apply it \(cd db && bun migrate\.ts --url <owner's url>\), or, where the ledger already records 100 and 084 was re-applied by hand over it, re-apply \(add --reapply\)/;
-      assert(rotaClaim?.status === "succeeded" && /relations: 0 added, 0 kept, 0 replaced, 1 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct, the edge closed as before 100 — this brain lacks migration 100/.test(pre100.out)
-          && BOTH.test(pre100.out) && /distinct: not stored this run — this brain lacks migration 100/.test(pre100.out) && (await relOf()).every((r) => !r.active),
-        `on a brain short of 100 an unrelated verdict closes the standing distinct and is counted, the run saying so first with both remedies, the thought not failed (${rotaClaim?.status}: ${pre100.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+      assert(rotaClaim?.status === "succeeded"
+          && /relations: 0 added, 0 kept, 0 replaced, 0 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct \(1 on a pair whose distinct stands, left as it was\) — this brain lacks migration 100/.test(relationsLine(pre100.out))
+          && BOTH.test(relationsLine(pre100.out)) && /distinct: not stored this run — this brain lacks migration 100/.test(pre100.out) && (pre100.out.match(/this brain lacks migration 100/g) ?? []).length === 2
+          && (await relOf()).filter((r) => r.active).map((r) => r.id).join() === standingApart[0]?.id,
+        `on a brain short of 100 an unrelated verdict leaves the distinct standing as it was and is counted, the run saying so at its start and on its relations line with both remedies, not a third time in its queue, the thought not failed (${rotaClaim?.status}: ${relationsLine(pre100.out).trim()})`);
+      // Any other edge is closed, as before 100.
+      const pre100Related = await rejudge("related");
+      const pre100Close = await rejudge("unrelated");
+      assert(/relations: 0 added, 0 kept, 1 replaced, 0 closed/.test(pre100Related.out)
+          && /relations: 0 added, 0 kept, 0 replaced, 1 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct — this brain lacks migration 100/.test(relationsLine(pre100Close.out)) && (await relOf()).every((r) => !r.active),
+        `…and closes a related edge, as before 100 (${relationsLine(pre100Close.out).trim()})`);
       const under100 = await rejudge("unrelated", 0.3);
       assert(/relations: 0 added, 0 kept, 0 replaced, 0 closed/.test(under100.out) && !/not stored as distinct/.test(under100.out),
         "…and one under the floor, which 100 would not store either, is not counted as lost (review pass 1)");
       const status100 = await consolidate("--status");
       assert(/^ {2}distinct: not stored — this brain lacks migration 100/m.test(status100.out) && BOTH.test(status100.out), `--status says a brain short of 100 stores no distinct, with both remedies (${status100.out.split("\n").find((l) => /distinct:/.test(l))?.trim()})`);
+      // Review pass 2: an unrelated pair whose older side is deleted during the
+      // call is a pair skipped, not a distinct lost.
+      const gammaOld = await seed("The gamma note, the first.", 13, 4, ["gamma"]);
+      const gammaNew = await seed("The gamma note, the second.", 13, 0, ["gamma"]);
+      onJudge = async () => {
+        if (!/gamma/.test(seen.at(-1)?.a ?? "")) return;
+        onJudge = null;
+        await sql`DELETE FROM thoughts WHERE id = ${gammaOld}::uuid`;
+      };
+      try {
+        const gone100 = await consolidate();
+        assert(onJudge === null && /relations: 0 added, 0 kept, 0 replaced, 0 closed, 1 skipped — a side deleted mid-pass/.test(relationsLine(gone100.out)) && !/not stored as distinct/.test(gone100.out),
+          `on a brain short of 100, an unrelated pair whose older side is deleted mid-pass is skipped, not counted as a distinct lost (${relationsLine(gone100.out).trim()})`);
+      } finally {
+        onJudge = null;
+        await sql`DELETE FROM thoughts WHERE id IN (${gammaOld}::uuid, ${gammaNew}::uuid)`;
+      }
       // Review pass 1: a follower started short of 100 reads the sentinel on every
       // poll — 100 applied under it, its next unrelated verdict is a distinct.
+      // Review pass 2: each step waits on the follower's own line or row, not a
+      // clock; its first verdict is judged short of 100, so its summary counts
+      // one lost, without the remedy for a brain that has 100 again.
       rotaAnswer = "unrelated";
       rotaConfidence = 0.85;
-      const follower = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", URL_!, "--follow", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+      const rotaJudged = async () => (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`)[0]?.status === "succeeded";
+      const followLines: string[] = [];
+      const ac = new AbortController();
+      const following = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, signal: ac.signal, writer: { out: (l) => followLines.push(l), err: (l) => followLines.push(l) } })
+        .catch((e: Error) => { followLines.push(`rejected: ${e.message}`); return -1; });
+      const said = (re: RegExp) => pollUntil(async () => followLines.some((l) => re.test(l)), 20_000);
       let followApart = false;
       try {
-        await Bun.sleep(2500);
+        const startSaid = await said(/distinct: not stored this run — this brain lacks migration 100/);
+        const judgedShort = startSaid && (await pollUntil(rotaJudged, 20_000));
         await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
-        await Bun.sleep(2000);
+        const pollSaid = judgedShort && (await said(/distinct: stored from this poll on/));
         await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
-        for (let i = 0; i < 80 && !followApart; i++) {
-          await Bun.sleep(250);
-          followApart = (await relOf()).some((r) => r.active && r.relation === "distinct");
-        }
+        followApart = pollSaid && (await pollUntil(async () => (await relOf()).some((r) => r.active && r.relation === "distinct"), 20_000));
       } finally {
-        follower.kill("SIGINT");
+        ac.abort();
+        await following;
       }
-      const followOut = (await new Response(follower.stdout).text()) + (await new Response(follower.stderr).text());
-      await follower.exited;
-      assert(followApart && /distinct: not stored this run — this brain lacks migration 100/.test(followOut) && /distinct: stored from this poll on/.test(followOut),
-        `a follower started short of 100 says so at its start, reads the sentinel again on its next poll once 100 is applied, and records the next unrelated verdict as a distinct (${followOut.split("\n").filter((l) => /distinct:|relations:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 300)})`);
+      const followSummary = relationsLine(followLines.join("\n"));
+      assert(followApart && /relations: 1 added \(1 distinct\), 0 kept, 0 replaced, 0 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct — judged while this brain lacked migration 100$/.test(followSummary),
+        `a follower started short of 100 says so at its start, reads the sentinel again on its next poll once 100 is applied, records the next unrelated verdict as a distinct, and its summary counts the one judged short of 100 without the remedy (${followLines.filter((l) => /distinct:|relations:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 400)})`);
     } finally {
       await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
     }
     // Review pass 1: 084's door put back under a running pass refuses distinct by
-    // name; the pass reads the sentinel again and closes the edge instead of failing the thought.
-    swapDoorOnRota = true;
+    // name; the pass reads the sentinel again and stops sending the word
+    // instead of failing the thought. Review pass 2: the distinct the follower
+    // left is the verdict's own, so it stands.
+    const followerApart = (await relOf()).filter((r) => r.active).map((r) => r.id).join();
+    const door084 = readFileSync(join(HERE, "migrations", "084_judged_relations.sql"), "utf8");
+    swapDoorOnRota = door084;
     try {
       const swapped = await rejudge("unrelated");
       const [swapClaim] = await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
-      assert(!swapDoorOnRota && swapClaim?.status === "succeeded" && /distinct: not stored from this pair on — this brain lacks migration 100/.test(swapped.out)
-          && /relations: 0 added, 0 kept, 0 replaced, 1 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct/.test(swapped.out) && (await relOf()).every((r) => !r.active),
-        `084's door under a running pass: the distinct the follower left is closed, the verdict counted, the thought not failed (${swapClaim?.status}: ${swapped.out.split("\n").filter((l) => /distinct:|relations:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 300)})`);
+      assert(swapDoorOnRota === null && swapClaim?.status === "succeeded" && /distinct: not stored from this pair on — this brain lacks migration 100/.test(swapped.out)
+          && /relations: 0 added, 0 kept, 0 replaced, 0 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct \(1 on a pair whose distinct stands, left as it was\) — this brain lacks migration 100/.test(relationsLine(swapped.out))
+          && followerApart !== "" && (await relOf()).filter((r) => r.active).map((r) => r.id).join() === followerApart,
+        `084's door under a running pass: the distinct the follower left stands, the verdict counted, the thought not failed (${swapClaim?.status}: ${swapped.out.split("\n").filter((l) => /distinct:|relations:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 300)})`);
     } finally {
-      swapDoorOnRota = false;
+      swapDoorOnRota = null;
+      await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
+    }
+    // Review pass 2: a door that carries 100's sentinel yet refuses the word is
+    // a defect to see — the pass reads the sentinel again, finds it, and the
+    // thought fails on the refusal rather than the word being dropped quietly.
+    const sentinelAnchor = "  IF p_relation IS NOT NULL AND p_relation NOT IN ('related', 'evolves', 'duplicate') THEN";
+    assert(door084.split(sentinelAnchor).length === 2, "084's door holds the line the doctored door's sentinel goes above, once");
+    swapDoorOnRota = door084.replace(sentinelAnchor, `  -- ob1:relation-distinct (a test's door that claims the word and refuses it)\n${sentinelAnchor}`);
+    try {
+      const claimed = await rejudge("unrelated");
+      const [claimedRow] = await sql`SELECT status, last_error FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+      assert(swapDoorOnRota === null && claimedRow?.status === "failed" && /relation must be related, evolves, duplicate or NULL/.test(String(claimedRow.last_error)) && !/distinct: not stored/.test(claimed.out)
+          && (await relOf()).filter((r) => r.active).map((r) => r.id).join() === followerApart,
+        `a door that keeps 100's sentinel but refuses distinct fails the thought on its refusal, the distinct standing untouched (${claimedRow?.status}: ${String(claimedRow?.last_error).slice(0, 160)})`);
+    } finally {
+      swapDoorOnRota = null;
       await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
     }
     // A brain without 084: the pass counts the verdicts and says relations are not stored.
@@ -7148,11 +7220,28 @@ if (want("16")) {
           assert(offFirst === "succeeded" && startSaid && (await standing()).every((r) => r.key !== KEY),
             `a follower under that role says at its start that it stores none, and judges the pair without storing it (${offFirst}; ${JSON.stringify(await standing())})`);
 
-          const more = await migrateInProcess({ grant: RROLE, groups: "structure" });
+          // SMD-3117 review pass 2: distinct's state follows relations'. 084's door
+          // is put back and the grant given while the judge holds a call, so the
+          // next poll reads both: nothing says distinct's change while relations
+          // are off, and their coming back says distinct is not stored with them.
+          let moreCode = -1;
+          onJudge = async () => {
+            onJudge = null;
+            await sql.unsafe(readFileSync(join(HERE, "migrations", "084_judged_relations.sql"), "utf8"));
+            moreCode = (await migrateInProcess({ grant: RROLE, groups: "structure" })).code;
+          };
+          await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
+          await waitFor(() => lines.includes("  relations: stored from this poll on"));
           await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
           await waitFor(async () => (await standing()).some((r) => r.key === KEY));
-          assert(more.code === 0 && lines.includes("  relations: stored from this poll on") && JSON.stringify(await standing()) === JSON.stringify([{ relation: "related", key: KEY }]),
+          const onAt = lines.indexOf("  relations: stored from this poll on");
+          assert(moreCode === 0 && onAt >= 0 && JSON.stringify(await standing()) === JSON.stringify([{ relation: "related", key: KEY }]),
             `granted the structure group, the follower stores relations from its next poll (${JSON.stringify(await standing())})`);
+          assert(/^ {2}distinct: not stored — this brain lacks migration 100: /.test(lines[onAt + 1] ?? "") && !lines.some((l) => /^ {2}distinct: (not )?stored from this poll on/.test(l)),
+            `…on a brain short of 100 it says distinct is not stored with them, and said nothing of distinct while relations were off (${lines.filter((l) => /distinct:|relations:/.test(l)).map((l) => l.trim().slice(0, 80)).join(" | ")})`);
+          await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
+          await waitFor(() => lines.includes("  distinct: stored from this poll on"));
+          assert(lines.includes("  distinct: stored from this poll on"), "…and 100 applied again, the follower says distinct is stored from its next poll");
 
           // The revoke lands while the judge holds the call: the write is refused.
           rotaAnswer = "duplicate";
@@ -7167,9 +7256,10 @@ if (want("16")) {
           onJudge = null;
           ac.abort();
           await Promise.race([following, Bun.sleep(10_000)]);
+          await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
         }
         const summary = lines.find((l) => /^ {2}relations: \d+ added/.test(l)) ?? "";
-        assert(/^ {2}relations: 0 added, 0 kept, 1 replaced, 0 closed; 2 related, evolves or duplicate verdict\(s\) counted only, judged while relations were not stored — this role lacks INSERT on thought_facets/.test(summary),
+        assert(/^ {2}relations: 0 added, 0 kept, 1 replaced, 0 closed; 3 related, evolves or duplicate verdict\(s\) counted only, judged while relations were not stored — this role lacks INSERT on thought_facets/.test(summary),
           `the summary of a run that stored relations for part of it gives what it stored and what it counted only (${summary.trim().slice(0, 200)})`);
 
         // The remedy names only what the role lacks; an UPDATE granted on a column is enough.
