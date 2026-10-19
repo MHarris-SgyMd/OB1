@@ -21,6 +21,11 @@ import type { AgentOutcome } from "./agents.ts";
 import { ROUTES, pathFields } from "./rest/routes.ts";
 import { createRestApp, inputFromQuery, headerKeys, REFUSAL_STATUS } from "./rest/app.ts";
 import { openApiDocument } from "./rest/openapi.ts";
+import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
+import { setSystemTime } from "bun:test";
+import { keyScopeOf as authKeyScopeOf, SCOPES as authScopes } from "../deploy/auth/layout.ts";
+import { OAUTH_SCOPES } from "./oauth-edge.ts";
+import { AUTH_JWKS_URL, cachedKeys, checkerOver, JWKS_CACHE_MAX_AGE_MS, JWKS_COOLDOWN_MS, keyScopeOf, remoteChecker, subjectHash, tokenSettings, type TokenCheck } from "./oauth-token.ts";
 
 const { assert, report } = createAssert();
 type Op = { operationId: string; "x-ob1-scope"?: string; parameters?: { name: string; in: string; required?: boolean; schema: { type?: string; items?: { type?: string } } }[]; requestBody?: { content: { "application/json": { schema: { properties?: Record<string, unknown> } } } } };
@@ -346,6 +351,348 @@ console.log("\n[5c] A keyed /health answers the brain's record on the health sur
   release();
   resolveGate = null;
   assert(r.status === 200 && same(r.body, live) && took >= 2_400 && took < 4_000, `a registry silent past the deadline: liveness, at it (${Math.round(took)} ms)`);
+  answer = async () => ok({});
+}
+
+console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audience, ES256 at+jwt, scopes one to one, `oauth:<sub>`, act; unconfigured none; no keys a 503");
+{
+  const ORIGIN = "https://brain.example.test";
+  const settings = tokenSettings({ COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: ORIGIN })!;
+  assert(same(settings, { issuer: `${ORIGIN}/auth`, audience: `${ORIGIN}/api` }), `configured: issuer <origin>/auth, audience <origin>/api (${JSON.stringify(settings)})`);
+  assert(tokenSettings({ OB1_PUBLIC_ORIGIN: ORIGIN }) === null && tokenSettings({ COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: "http://brain.example.test" }) === null,
+    "not configured, or an unsound origin: no settings, so no token is accepted");
+  for (const [scope, want] of [
+    ["brain:write", "write"], ["brain:read brain:write brain:capture", "write"], ["brain:read", "read"], ["brain:capture", "capture"],
+    ["openid offline_access brain:read", "read"], ["brain:read brain:capture", null], ["", null], ["openid", null], [undefined, null], [42, null],
+  ] as const) assert(keyScopeOf(scope) === want, `keyScopeOf(${JSON.stringify(scope)}) → ${want} (${keyScopeOf(scope)})`);
+  // The authorization server issues by the same rule (deploy/auth/layout.ts keyScopeOf): every set of its scopes, read alike.
+  const offered = [...authScopes, "openid", "offline_access"];
+  const subsets = Array.from({ length: 1 << offered.length }, (_, m) => offered.filter((_, i) => m & (1 << i)));
+  const differ = subsets.filter((s) => keyScopeOf(s.join(" ")) !== authKeyScopeOf(s));
+  assert(differ.length === 0 && same([...authScopes], [...OAUTH_SCOPES]), `the REST core and the authorization server read all ${subsets.length} sets of scopes alike, over the same three brain scopes${differ.length ? ` (differ: ${differ.map((s) => s.join("+")).join(", ")})` : ""}`);
+
+  const { publicKey, privateKey } = await generateKeyPair("ES256", { extractable: true });
+  const kid = "ob1-test";
+  const jwks = { keys: [{ ...(await exportJWK(publicKey)), kid, alg: "ES256", use: "sig" }] };
+  const other = await generateKeyPair("ES256");
+  type Claims = Record<string, unknown>;
+  const mint = (claims: Claims = {}, opt: { key?: CryptoKey; kid?: string; typ?: string; exp?: string | number } = {}) =>
+    new SignJWT({ scope: "brain:write", ...claims })
+      .setProtectedHeader({ alg: "ES256", typ: opt.typ ?? "at+jwt", kid: opt.kid ?? kid })
+      .setIssuer(String(claims.iss ?? settings.issuer)).setAudience((claims.aud as string | string[]) ?? settings.audience)
+      .setSubject(String(claims.sub ?? "operator")).setIssuedAt().setExpirationTime(opt.exp ?? "10m")
+      .sign(opt.key ?? privateKey);
+  let check: TokenCheck | null = checkerOver(settings, createLocalJWKSet(jwks));
+  const tokenApp = createRestApp({
+    core,
+    init: () => {},
+    keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")},f:forward:${hashKey("fwd-raw")}` }),
+    tokens: () => check,
+    resolve: async (p) => { resolvedNames.push(p.name); return p.scope === "forward" ? carrierIdentity : identity; },
+    track: (run) => run(),
+    log: () => {},
+  });
+  const call = (path: string, token: string, init: RequestInit & { headers?: Record<string, string> } = {}) =>
+    tokenApp.fetch(new Request(`http://api${path}`, { ...init, headers: { authorization: `Bearer ${token}`, ...(init.body ? { "content-type": "application/json" } : {}), ...init.headers } }));
+  identity = { status: "ok", agentId: "agent-o" };
+  answer = async () => ok({});
+
+  let r = await json(await call("/v1/whoami", await mint()));
+  assert(r.status === 200 && r.body.name === "oauth:operator" && r.body.scope === "write" && r.body.agentId === "agent-o" && !("act" in r.body),
+    `a write token: the caller is oauth:operator, write scope, its agent id resolved (${JSON.stringify(r.body).slice(0, 120)})`);
+  calls.length = 0;
+  await call("/v1/stats", await mint());
+  const p = calls[0]?.principal;
+  assert(p?.name === "oauth:operator" && p.keyHash === subjectHash(settings.issuer, "operator") && /^[0-9a-f]{64}$/.test(p.keyHash),
+    `the operation runs as oauth:operator, its keyHash the subject's fixed digest (64 hex, the registry's CHECK) (${p?.name} ${p?.keyHash})`);
+  assert(subjectHash(settings.issuer, "operator") !== subjectHash("https://other.example.test/auth", "operator") && subjectHash(settings.issuer, "operator") !== hashKey("operator"),
+    "…a digest of issuer and subject: not another issuer's, nor a key's");
+
+  const read = await mint({ scope: "brain:read" });
+  r = await json(await call("/v1/stats", read));
+  assert(r.status === 200, `a read token reads (${r.status})`);
+  calls.length = 0;
+  r = await json(await call("/v1/thoughts", read, { method: "POST", body: JSON.stringify({ content: "x" }) }));
+  assert(r.status === 403 && r.body.code === "FORBIDDEN" && r.body.needs === "capture" && calls.length === 0, `a read token cannot capture: 403 needs capture, nothing ran (${r.status} ${JSON.stringify(r.body)})`);
+  r = await json(await call("/v1/thoughts/00000000-0000-4000-8000-000000000000", read, { method: "DELETE" }));
+  assert(r.status === 403 && r.body.needs === "write", `…nor delete (${r.status})`);
+  const cap = await mint({ scope: "brain:capture" });
+  r = await json(await call("/v1/stats", cap));
+  assert(r.status === 403 && r.body.needs === "read", `a capture token cannot read (${r.status})`);
+  r = await json(await call("/v1/whoami", cap));
+  assert(r.status === 200 && r.body.scope === "capture" && same(r.body.operations, CAPTURE_TOOL_NAMES), `…its operations are a capture key's (${JSON.stringify(r.body.operations)})`);
+
+  // A valid token whose scopes name no key scope reaches no operation: 403 as a token, RFC 6750's insufficient_scope.
+  for (const [label, scope] of [["brain:read with brain:capture, no key's scope", "brain:read brain:capture"], ["no brain scope", "openid offline_access"]] as const) {
+    calls.length = 0;
+    const res = await call("/v1/stats", await mint({ scope }));
+    const body = await res.json() as Record<string, unknown>;
+    assert(res.status === 403 && body.code === "FORBIDDEN" && body.credential === "token" && res.headers.get("www-authenticate") === 'Bearer error="insufficient_scope"' && calls.length === 0,
+      `${label}: 403 FORBIDDEN credential token, insufficient_scope, nothing run (${res.status} ${JSON.stringify(body)} ${res.headers.get("www-authenticate")})`);
+  }
+  r = await json(await call("/v1/whoami", await mint({ aud: [settings.audience] })));
+  assert(r.status === 200, `an audience list holding this REST core alone is accepted (${r.status})`);
+
+  // Every token this server does not accept: 401 as a token, RFC 6750's invalid_token, and nothing runs.
+  const refused: [string, Promise<string>][] = [
+    ["the /mcp audience (Verify: the MCP-audience token sent straight to the REST core)", mint({ aud: `${ORIGIN}/mcp` })],
+    ["an audience list naming this REST core and the /mcp resource", mint({ aud: [settings.audience, `${ORIGIN}/mcp`] })],
+    ["another tier's REST core", mint({ aud: `${ORIGIN}/canary/api` })],
+    ["another issuer", mint({ iss: "https://elsewhere.example.test/auth" })],
+    ["expired", mint({}, { exp: Math.floor(Date.now() / 1000) - 60 })],
+    ["no expiry at all", new SignJWT({ scope: "brain:write" }).setProtectedHeader({ alg: "ES256", typ: "at+jwt", kid }).setIssuer(settings.issuer).setAudience(settings.audience).setSubject("operator").setIssuedAt().sign(privateKey)],
+    ["typ JWT, not at+jwt (an ID token's shape)", mint({}, { typ: "JWT" })],
+    ["signed by another key under the server's kid", mint({}, { key: other.privateKey })],
+    ["a kid the key set does not hold", mint({}, { kid: "ob1-unknown", key: other.privateKey })],
+    ["HS256", new SignJWT({ scope: "brain:write" }).setProtectedHeader({ alg: "HS256", typ: "at+jwt", kid }).setIssuer(settings.issuer).setAudience(settings.audience).setSubject("operator").setIssuedAt().setExpirationTime("10m").sign(new TextEncoder().encode("x".repeat(32)))],
+    ["a subject holding a character a log or egress term cannot carry", mint({ sub: "oper ator" })],
+    ["an act naming no actor", mint({ act: { client: "mcp" } })],
+    ["unsigned (alg none)", Promise.resolve(`${btoa(JSON.stringify({ alg: "none", typ: "at+jwt" })).replace(/=+$/, "")}.${btoa(JSON.stringify({ iss: settings.issuer, aud: settings.audience, sub: "operator", scope: "brain:write", exp: Math.floor(Date.now() / 1000) + 600 })).replace(/=+$/, "")}.`)],
+  ];
+  for (const [label, made] of refused) {
+    calls.length = 0;
+    const res = await call("/v1/stats", await made);
+    const body = await res.json() as Record<string, unknown>;
+    assert(res.status === 401 && body.code === "UNAUTHORIZED" && body.credential === "token" && res.headers.get("www-authenticate") === 'Bearer error="invalid_token"' && calls.length === 0,
+      `refused, ${label}: 401 UNAUTHORIZED credential token, invalid_token (${res.status} ${JSON.stringify(body)} ${res.headers.get("www-authenticate")})`);
+  }
+
+  // An exchanged token names the MCP service as act, signed; a forwarder slot beside it is checked and does not replace it.
+  const exchanged = await mint({ scope: "brain:read", act: { sub: "mcp" } });
+  r = await json(await call("/v1/whoami", exchanged));
+  assert(r.status === 200 && r.body.name === "oauth:operator" && same(r.body.act, { name: "oauth:mcp" }), `an exchanged token: the subject, act oauth:<the MCP client> (${JSON.stringify(r.body).slice(0, 120)})`);
+  r = await json(await call("/v1/whoami", exchanged, { headers: { "x-brain-forwarder": "fwd-raw" } }));
+  assert(r.status === 200 && same(r.body.act, { name: "oauth:mcp" }), `…beside a forwarder's key, the token's own act stands (${JSON.stringify(r.body.act)})`);
+  r = await json(await call("/v1/whoami", exchanged, { headers: { "x-brain-forwarder": "read-raw" } }));
+  assert(r.status === 401 && r.body.credential === "forwarder", `…and a slot holding no forwarder's key is refused all the same (${r.status} ${JSON.stringify(r.body)})`);
+  r = await json(await call("/v1/whoami", await mint(), { headers: { "x-brain-forwarder": "fwd-raw" } }));
+  assert(r.status === 200 && same(r.body.act, { name: "f", agentId: "agent-f" }), `a token naming no act, carried by a forwarder: the forwarder is act, as for a key (${JSON.stringify(r.body.act)})`);
+  // A service's client-credentials token: the authorization server's `sub` is the client id.
+  r = await json(await call("/v1/whoami", await mint({ sub: "runner", scope: "brain:capture" })));
+  assert(r.status === 200 && r.body.name === "oauth:runner", `a service's token: oauth:<its client id> (${r.body.name})`);
+
+  // The registry's word holds for a token as for a key.
+  identity = { status: "revoked", agentId: "agent-o", revokedAt: "2026-10-16T00:00:00Z", reason: null };
+  r = await json(await call("/v1/stats", await mint()));
+  assert(r.status === 401 && r.body.code === "REVOKED", `a subject the registry revoked → 401 REVOKED (${r.status} ${r.body.code})`);
+  identity = { status: "ok", agentId: "agent-o" };
+
+  // A key beside a token is the caller: keys first, as before.
+  r = await json(await tokenApp.fetch(new Request("http://api/v1/whoami", { headers: { "x-brain-key": "read-raw", authorization: `Bearer ${await mint()}` } })));
+  assert(r.status === 200 && r.body.name === "r", `a key beside a token: the key is the caller (${r.body.name})`);
+  // A bearer that is no JWT's shape is a key, never handed to the check.
+  let checked = 0;
+  const counted = check;
+  check = async (t) => { checked++; return counted!(t); };
+  r = await json(await call("/v1/whoami", "not-a-jwt"));
+  assert(r.status === 401 && !("credential" in r.body) && checked === 0, `a wrong key as Bearer: an unknown key, the token check not asked (${r.status} ${JSON.stringify(r.body)} ${checked})`);
+  // A key reader that fails any other way (a bug, a library's own throw) is no keys to check with: 503, never 401.
+  check = checkerOver(settings, async () => { throw new Error("a reader's own failure"); });
+  r = await json(await call("/v1/whoami", await mint()));
+  assert(r.status === 503 && r.body.code === "BUSY" && r.body.credential === "token", `a key reader that throws: 503 BUSY credential token (${r.status} ${JSON.stringify(r.body)})`);
+  // Unconfigured (no check): a token is an unknown key, as before SMD-2286.
+  check = null;
+  r = await json(await call("/v1/whoami", await mint()));
+  assert(r.status === 401 && r.body.code === "UNAUTHORIZED" && !("credential" in r.body), `not configured: a valid token is an unknown key (${r.status} ${JSON.stringify(r.body)})`);
+  const plainApp = await json(await app.fetch(new Request("http://api/v1/whoami", { headers: { authorization: `Bearer ${await mint()}` } })));
+  assert(plainApp.status === 401 && !("credential" in plainApp.body), `…and a REST app given no token check accepts none (${plainApp.status})`);
+
+  // The key set on the network (remoteChecker, cachedKeys), on a clock of the suite's own (ms): read once and kept
+  // 600 s; when a read fails, the keys read last serve 600 s from that first failure and no read is tried for 30 s;
+  // past that, or never read, a token is a 503 with the 30 s wait, not a 401. A key the set lacks is read for, at
+  // most once in 30 s: right after a read it is the token's fault (401), within the 30 s it is a 503.
+  let served = 0;
+  let failing = false;
+  const k2 = await generateKeyPair("ES256", { extractable: true });
+  let serving: { keys: unknown[] } = jwks;
+  const jwksServer = Bun.serve({ port: 0, fetch: (req) => (new URL(req.url).pathname === "/auth/jwks" ? (served++, failing ? new Response("down", { status: 503 }) : Response.json(serving)) : new Response("no", { status: 404 })) });
+  const at = `http://127.0.0.1:${jwksServer.port}/auth/jwks`;
+  let T = 0;
+  const S = 1000;
+  const clock = () => T;
+  const status = async (token?: string) => (await call("/v1/whoami", token ?? await mint())).status;
+  const step = async (label: string, t: number, want: number, reads: number, token?: string) => {
+    T = t * S;
+    const got = await status(token);
+    assert(got === want && served === reads, `${label} (t=${t} s): ${want}, ${reads} read(s) so far (${got}, ${served})`);
+  };
+  check = remoteChecker(settings, at, clock);
+  await step("the remote key set: read at the first token", 0, 200, 1);
+  await step("…kept: no read for the next", 100, 200, 1);
+  failing = true;
+  await step("…the authorization server failing, a set under 600 s old serves without a read", 599, 200, 1);
+  await step("a stale set: a read is tried, fails, and the keys read last serve", 601, 200, 2);
+  await step("…no read tried again within 30 s of the failure", 610, 200, 2);
+  await step("…tried again after 30 s, failing still: the keys read last serve, 600 s from the first failure", 632, 200, 3);
+  await step("…past 600 s from the first failure (every token issued before it has expired): 503", 1202, 503, 4);
+  failing = false;
+  await step("the server back: read again after 30 s, and served", 1240, 200, 5);
+  serving = { keys: [...jwks.keys, { ...(await exportJWK(k2.publicKey)), kid: "ob1-k2", alg: "ES256", use: "sig" }] };
+  const byK2 = await mint({}, { kid: "ob1-k2", key: k2.privateKey });
+  await step("a new signing key 10 s after a read: 503 while the set cannot be read again, not a 401 that would send its client to sign in", 1250, 503, 5, byK2);
+  await step("…after 30 s it is read for, and served", 1271, 200, 6, byK2);
+  const byNone = await mint({}, { kid: "ob1-nowhere", key: k2.privateKey });
+  await step("a kid the authorization server does not hold, read for: 401, the token's fault", 1302, 401, 7, byNone);
+  await step("…again within 30 s: 503, no read", 1303, 503, 7, byNone);
+  failing = true;
+  check = remoteChecker(settings, at, clock);
+  T = 2000 * S;
+  const down = await call("/v1/whoami", await mint());
+  const downBody = await down.json() as Record<string, unknown>;
+  assert(down.status === 503 && downBody.code === "BUSY" && downBody.credential === "token" && down.headers.get("retry-after") === "30" && served === 8,
+    `a key set never read, the server answering 503: the token is 503 BUSY credential token, Retry-After 30 — not refused (${down.status} ${JSON.stringify(downBody)} ${down.headers.get("retry-after")})`);
+  await step("…and no read again within 30 s", 2010, 503, 8);
+  jwksServer.stop(true);
+  check = remoteChecker(settings, at, clock);
+  const gone = await call("/v1/whoami", await mint());
+  assert(gone.status === 503 && gone.headers.get("retry-after") === "30", `…nothing listening: 503 all the same (${gone.status})`);
+  // The cells review pass 2 enumerated, on a reader of the suite's own (no HTTP): concurrency, a blip while
+  // fresh, a long idle, recovery, the exact boundaries, and a reader that throws at once.
+  {
+    let reads = 0;
+    let mode: "ok" | "fail" | "sync" = "ok";
+    let gate: Promise<void> | null = null;
+    let C = 0;
+    const read = () => {
+      reads++;
+      if (mode === "sync") throw new Error("thrown at once");
+      return (async () => {
+        if (gate) await gate;
+        if (mode === "fail") throw new Error("down");
+        return jwks as never;
+      })();
+    };
+    const fresh = () => checkerOver(settings, cachedKeys(read, () => C * S));
+    const ok = async (k: TokenCheck, token?: string) => (await k(token ?? await mint())).status;
+    const tok = await mint();
+    // 20 first requests at once: one read, all served.
+    let k = fresh();
+    let open: () => void = () => {};
+    gate = new Promise<void>((done) => { open = done; });
+    const burst = Array.from({ length: 20 }, () => k(tok));
+    open();
+    gate = null;
+    const outs = await Promise.all(burst);
+    assert(reads === 1 && outs.every((o) => o.status === "ok"), `20 first requests at once: one read, all served (${reads} read(s), ${outs.filter((o) => o.status === "ok").length} ok)`);
+    // A stale set being read again: a request arriving during that read joins it, and is served (not a 503).
+    C = 600;
+    gate = new Promise<void>((done) => { open = done; });
+    const first = k(tok);
+    await Bun.sleep(5);
+    const second = k(tok);
+    open();
+    gate = null;
+    const [a, b] = await Promise.all([first, second]);
+    assert(reads === 2 && a.status === "ok" && b.status === "ok", `a request arriving while the stale set is read again joins that read: both served, one read (${a.status} ${b.status}, ${reads})`);
+    assert(C * S - 600 * S === 0, "…the set is stale at exactly 600 s (read again at the boundary)");
+    // A blip while the set is fresh (a missing kid's read fails at 660), then a real outage once stale (1201):
+    // the old keys serve 600 s from 1201, not from the blip.
+    const stranger = await mint({}, { kid: "ob1-stranger", key: k2.privateKey });
+    mode = "fail";
+    C = 660;
+    assert((await ok(k, stranger)) === "unavailable" && reads === 3, `a blip while fresh: the missing kid's read fails, 503 (${reads})`);
+    C = 1201;
+    assert((await ok(k)) === "ok" && reads === 4, `stale at 1200 and failing: the old keys serve (${reads})`);
+    C = 1700;
+    assert((await ok(k)) === "ok", "…500 s into the outage, still served: counted from when stale and failing met, not from the blip");
+    C = 1800;
+    assert((await ok(k)) === "ok", "…599 s into it, served");
+    C = 1801;
+    assert((await ok(k)) === "unavailable", "…600 s into it (exactly), 503");
+    // Recovery ends the outage; a second one, after the set goes stale again, gets its own 600 s.
+    mode = "ok";
+    C = 1830;
+    assert((await ok(k)) === "ok", "the server back: read, served");
+    mode = "fail";
+    C = 2430;
+    assert((await ok(k)) === "ok", "a second outage once stale again: the keys read at recovery serve");
+    C = 3029;
+    assert((await ok(k)) === "ok", "…599 s into the second outage, still served");
+    // A long idle: read at 0, nothing asked until 3600, when the server is down: served 600 s from 3600.
+    mode = "ok";
+    C = 0;
+    k = fresh();
+    await ok(k);
+    mode = "fail";
+    C = 3600;
+    assert((await ok(k)) === "ok", "idle for an hour, then the server down: the old keys serve from the first request that found it so");
+    C = 4199;
+    assert((await ok(k)) === "ok", "…599 s later, still served");
+    // The cooldown boundary: a read tried exactly 30 s after the last one.
+    const before = reads;
+    C = 4229;
+    await ok(k, stranger);
+    C = 4259;
+    await ok(k, stranger);
+    assert(reads === before + 2, `a read is tried again at exactly 30 s (${reads - before} reads at 4229 and 4259)`);
+    // A reader that throws at once does not wedge the set: the next read, 30 s on, is made and served.
+    mode = "sync";
+    C = 0;
+    k = fresh();
+    const r1 = await ok(k);
+    mode = "ok";
+    C = 30;
+    const r2 = await ok(k);
+    assert(r1 === "unavailable" && r2 === "ok", `a reader that throws at once: 503, then a read 30 s on serves (${r1}, ${r2})`);
+  }
+  // Review pass 3: the deploy's path (remoteChecker with no clock) is monotonic; a foreign token is a 401 even with no
+  // keys; an empty key set is no answer.
+  {
+    let hits = 0;
+    let body: unknown = jwks;
+    let status = 200;
+    const srv = Bun.serve({ port: 0, fetch: () => (hits++, status === 200 ? Response.json(body) : new Response("down", { status })) });
+    const url = `http://127.0.0.1:${srv.port}/auth/jwks`;
+    const k = remoteChecker(settings, url);
+    assert((await k(await mint())).status === "ok" && hits === 1, `the deploy's checker reads once (${hits})`);
+    // The engine's own clock moved (setSystemTime), as an operating system's step moves it: a captured Date.now moves too.
+    setSystemTime(new Date(Date.now() + 700_000));
+    let jumped: string;
+    try {
+      jumped = (await k(await mint())).status;
+    } finally {
+      setSystemTime();
+    }
+    assert(jumped === "ok" && hits === 1, `…the wall clock jumping 700 s ahead does not make its set stale: its clock is monotonic (${jumped}, ${hits} read(s))`);
+    status = 503;
+    const cold = remoteChecker(settings, url, () => 0);
+    for (const [label, made] of [
+      ["the /mcp audience", mint({ aud: `${ORIGIN}/mcp` })],
+      ["another issuer", mint({ iss: "https://elsewhere.example.test/auth" })],
+    ] as const) {
+      const before = hits;
+      const got = await cold(await made);
+      assert(got.status === "invalid" && hits === before, `no keys to be had, ${label}: 401 on its claims, no key read for it (${got.status}, ${hits - before})`);
+    }
+    for (const [label, made] of [
+      ["expired", mint({}, { exp: Math.floor(Date.now() / 1000) - 60 })],
+      ["no exp", new SignJWT({ scope: "brain:write" }).setProtectedHeader({ alg: "ES256", typ: "at+jwt", kid: "ob1-nowhere" }).setIssuer(settings.issuer).setAudience(settings.audience).setSubject("operator").setIssuedAt().sign(privateKey)],
+    ] as const) {
+      const before = hits;
+      const got = await cold(await made);
+      assert(got.status === "invalid" && hits === before, `no keys to be had, a token ${label}: 401 on its claims, no key read (${got.status}, ${hits - before})`);
+    }
+    assert((await cold(await mint())).status === "unavailable", "…while this REST core's own live token is a 503 there");
+    status = 200;
+    body = { keys: [] };
+    let C3 = 0;
+    const emptied = remoteChecker(settings, url, () => C3 * S);
+    assert((await emptied(await mint())).status === "unavailable", "a key set answered with no keys is no answer: 503, not a 401 that sends clients to sign in");
+    body = jwks;
+    C3 = 30;
+    assert((await emptied(await mint())).status === "ok", "…and the next read, 30 s on, serves");
+    srv.stop(true);
+    // A token's subject revoked in the registry: REVOKED, said as a token's.
+    check = checkerOver(settings, createLocalJWKSet(jwks));
+    identity = { status: "revoked", agentId: "agent-o", revokedAt: "2026-10-16T00:00:00Z", reason: null };
+    const rv = await json(await call("/v1/whoami", await mint()));
+    identity = { status: "ok", agentId: "agent-o" };
+    assert(rv.status === 401 && rv.body.code === "REVOKED" && rv.body.credential === "token", `a revoked subject's token: 401 REVOKED, credential token (${rv.status} ${JSON.stringify(rv.body)})`);
+    const rk = await (async () => { identity = { status: "revoked", agentId: "agent-1", revokedAt: "2026-10-16T00:00:00Z", reason: null }; const out = await json(await app.fetch(new Request("http://api/v1/whoami", { headers: { "x-brain-key": "read-raw" } }))); identity = { status: "ok", agentId: "agent-o" }; return out; })();
+    assert(rk.status === 401 && rk.body.code === "REVOKED" && !("credential" in rk.body), `…while a revoked key's refusal carries no credential, as before (${JSON.stringify(rk.body)})`);
+  }
+  assert(AUTH_JWKS_URL === "http://auth.ob1.internal.:3000/auth/jwks" && JWKS_CACHE_MAX_AGE_MS === 600_000 && JWKS_COOLDOWN_MS === 30_000,
+    "a deploy reads the authorization server's key set on the mesh, kept for the access tokens' 600 s, with 30 s between reads");
   answer = async () => ok({});
 }
 
