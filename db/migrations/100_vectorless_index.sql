@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 098: the thoughts with no vector, by an index of their own — the
+-- Migration 100: the thoughts with no vector, by an index of their own — the
 --                vector mender's page and brain_info's vectorless count read
 --                it, not the whole table (SMD-3056)
 -- =============================================================================
@@ -65,13 +65,13 @@ BEGIN
     CREATE INDEX thoughts_vectorless_idx ON thoughts (id) WHERE embedding IS NULL;
     v_oid := (SELECT oid FROM pg_class WHERE relname = 'thoughts_vectorless_idx' AND relnamespace = v_ns);
   ELSIF v_kind <> 'i' OR v_on <> 'thoughts'::regclass OR v_def !~ '^CREATE INDEX thoughts_vectorless_idx ON .+ USING btree \(id\) WHERE \(embedding IS NULL\)$' THEN
-    RAISE EXCEPTION 'migration 098: thoughts_vectorless_idx exists but is not a btree on thoughts (id) WHERE embedding IS NULL — %. Drop it (an index: DROP INDEX CONCURRENTLY, which leaves writes to thoughts running) and re-run: the file builds it.', COALESCE(v_def, 'a relation of kind ' || v_kind::text)
+    RAISE EXCEPTION 'migration 100: thoughts_vectorless_idx exists but is not a btree on thoughts (id) WHERE embedding IS NULL — %. Drop it (an index: DROP INDEX CONCURRENTLY, which leaves writes to thoughts running) and re-run: the file builds it.', COALESCE(v_def, 'a relation of kind ' || v_kind::text)
       USING ERRCODE = 'object_not_in_prerequisite_state';
   ELSIF NOT v_valid THEN
-    RAISE EXCEPTION 'migration 098: thoughts_vectorless_idx exists but is INVALID — a CONCURRENTLY build or drop that did not finish, or a build still running (pg_stat_progress_create_index lists a running one); the planner reads nothing from it. Once no build is running, finish it with REINDEX INDEX CONCURRENTLY thoughts_vectorless_idx, or DROP INDEX CONCURRENTLY thoughts_vectorless_idx, and re-run.'
+    RAISE EXCEPTION 'migration 100: thoughts_vectorless_idx exists but is INVALID — a CONCURRENTLY build or drop that did not finish, or a build still running (pg_stat_progress_create_index lists a running one); the planner reads nothing from it. Once no build is running, finish it with REINDEX INDEX CONCURRENTLY thoughts_vectorless_idx, or DROP INDEX CONCURRENTLY thoughts_vectorless_idx, and re-run.'
       USING ERRCODE = 'object_not_in_prerequisite_state';
   END IF;
   EXECUTE format('COMMENT ON INDEX %s IS %L', v_oid::regclass,
-    'The thoughts with no vector, in id order: the vector mender''s page (listVectorless, both forms) and brain_info''s vectorless count read it. Migration 098 / SMD-3056.');
+    'The thoughts with no vector, in id order: the vector mender''s page (listVectorless, both forms) and brain_info''s vectorless count read it. Migration 100 / SMD-3056.');
 END
 $vectorless$;

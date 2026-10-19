@@ -257,14 +257,16 @@ instance. The alternative is one Ollama on the host that every instance names
 ## Several brains behind one edge
 
 The edge proxy (SMD-2876) puts several brains behind one port, each at a host
-of its own: `http://<name>.localhost:8090/mcp`. curl, Bun and browsers resolve
-`*.localhost` to loopback themselves, and macOS and systemd-resolved do too.
-On another Linux resolver, give each name a hosts line (`127.0.0.1
-stable.localhost`). The edge is a compose project of its own,
-`ob1-edge` (`deploy/edge/`). It reaches each brain through the brain's
-published port, as any client on the host does, and joins no brain's network.
-Because each brain is served at the root of its own host, its `/mcp`, its
-discovery documents and its authorization server stay its own.
+of its own: `http://<name>.localhost:8090/mcp`, or `<name>.<domain>` with the
+registry's `edge.domain`, a name under `localhost`. curl and browsers resolve
+`*.localhost` to loopback themselves. Bun and most other programs ask the
+system's resolver, which answers it on macOS and under systemd-resolved. On
+another Linux resolver, give each name a hosts line (`127.0.0.1
+stable.localhost`), or the name goes to upstream DNS. The edge is a compose
+project of its own, `ob1-edge` (`deploy/edge/`). It reaches each brain
+through the brain's published port, as any client on the host does, and
+joins no brain's network. Each brain is served at the root of a host of its
+own. Access keys pass through; sign-in waits for TLS at the edge (below).
 
 ```bash
 cp deploy/edge/brains.example.yaml deploy/edge/brains.local.yaml   # ignored by git
@@ -272,6 +274,8 @@ cp deploy/edge/brains.example.yaml deploy/edge/brains.local.yaml   # ignored by 
 bun --no-env-file deploy/edge/edge.ts check  # the shape, what publishes each brain's port, the URLs; starts nothing
 bun --no-env-file deploy/edge/edge.ts up     # renders the table, picks the shape, starts the edge
 bun --no-env-file deploy/edge/edge.ts down
+# a client of one brain through the edge, with that brain's own key:
+claude mcp add --transport http stable http://stable.localhost:8090/mcp --header "x-brain-key: <stable's key>"
 ```
 
 A brain's port is its env file's `SERVER_PORT`: 8000 unless set, or 8010
@@ -289,17 +293,33 @@ there.
   such as while its server restarts. An unknown host gets the edge's 404.
 - **The edge deletes `X-Brain-Forwarder` and `X-OB1-Legacy-Route`** from each
   request. A brain's proxy treats both as its own.
+- **Sign-in (OAuth) is not served through the edge yet. Keys are.** Each
+  brain's host on the edge would be its origin, with its challenge, its
+  discovery documents and its authorization server its own. But MCP SDK v2
+  and Claude Code send a token request over plain HTTP only to exactly
+  `localhost`, `127.0.0.1` or `::1`, never to a name under `localhost`. This
+  was measured on MCP SDK v2, and the same rule is read in Claude Code
+  2.1.301's bundle. Sign-in at `<name>.localhost` therefore needs
+  TLS at the edge (SMD-3053), and a token is accepted at `/mcp` only after
+  SMD-2286; the brain's origin will then be its host on the edge.
+
+  Until then, a brain running the `auth` profile keeps its
+  `OB1_PUBLIC_ORIGIN`. Since the edge's host is not its origin's, through the
+  edge its `/mcp` answers keys alone: a call with no key gets the server's
+  refusal (JSON-RPC -32001), not a sign-in. Its `/auth` paths still answer
+  through the edge, by path, naming its own origin.
 - **The authorization server's per-address limits see the edge's address**
   for every client that comes through the edge. One client's failed
-  sign-ins therefore lock out every client behind the edge for the
-  lockout's length.
+  authentications at a brain's `/auth` through the edge therefore lock out
+  every client behind the edge for the lockout's length.
 - **The domain is `localhost` or a name under it.** The edge listens on
   loopback alone. Under that domain, the resolvers that follow RFC 6761 answer
   loopback themselves, where a public name would send a client's key off the
   machine over plain HTTP. A Linux resolver that doesn't follow it needs the
   hosts lines above.
 - **Two shapes**, because no one binding reaches a brain's loopback port from
-  a container on both runtimes (measured; [`docs/one-brain-per-stack.md`](../docs/one-brain-per-stack.md)):
+  a container on both runtimes (measured;
+  [`docs/one-brain-per-stack.md`](../docs/one-brain-per-stack.md)):
   - **Under a rootful podman machine** (`podman machine inspect --format
     '{{.Rootful}}'`), the edge is a container that publishes
     `127.0.0.1:<port>` and dials each brain at `host.containers.internal`.
@@ -470,7 +490,7 @@ paths today:
 | `/hooks` and everything under it | the proxy's bodiless 404 by default. With `compose.hooks-public.yaml` named ("Plugins' webhooks" below), `api` — the REST core — path kept: `/hooks/<plugin>/<name>` is a plugin's inbound webhook, served only for a plugin `OB1_HOOKS` names (SMD-2310) |
 | `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
 | `/grafana` and everything under it | the proxy's bodiless 404 by default. With `compose.grafana-public.yaml` named ("The observability profile" below), `lgtm` (`--profile observability`), as `lgtm.ob1.internal` on the `mesh` network — its Grafana, serving from `/grafana`, path kept, behind its own sign-in. With the profile off, or the container stopped or still starting, the proxy's bodiless 404 too, and so is a 502 of Grafana's own (a data source it cannot reach) |
-| `/canary/mcp`, `/working/mcp` and everything under each | that tier's MCP server, as `mcp.canary.ob1.internal` or `mcp.working.ob1.internal` on the `mesh` network: a tier run as a compose project of its own joins this stack's mesh under that name and none of this stack's (`deploy/canary.sh` did, SMD-2294 to SMD-2874). One that brought this stack's own names along (`mcp.ob1.internal`, `api.ob1.internal` and, with `--profile auth`, `auth.ob1.internal` or, with `--profile observability`, `lgtm.ob1.internal`, which `compose.yaml` gives its services on the `mesh` key) would share this stack's traffic with it, sign-ins and telemetry included. `GET /canary/mcp/health` is its liveness and, with a read key, its record. With no such tier, or one stopped or still starting, the proxy's bodiless 404. A tier's protected-resource path is not routed, so a tier is reached with keys |
+| `/canary/mcp`, `/working/mcp` and everything under each | deprecated (SMD-3057): v2.0.0 removes both routes from this file's proxy (the three-brain stack's are its own tiers, and stay), and until then every answer carries a `Deprecation` header and a `Link` to "A canary beside the stack" below, where a canary answers on a port of its own since SMD-2874 and the three-brain stack (`compose.tiers.yaml`) routes its own canary and working tiers. That tier's MCP server, as `mcp.canary.ob1.internal` or `mcp.working.ob1.internal` on the `mesh` network: a tier run as a compose project of its own joins this stack's mesh under that name and none of this stack's (`deploy/canary.sh` did, SMD-2294 to SMD-2874). One that brought this stack's own names along (`mcp.ob1.internal`, `api.ob1.internal` and, with `--profile auth`, `auth.ob1.internal` or, with `--profile observability`, `lgtm.ob1.internal`, which `compose.yaml` gives its services on the `mesh` key) would share this stack's traffic with it, sign-ins and telemetry included. `GET /canary/mcp/health` is its liveness and, with a read key, its record. With no such tier, or one stopped or still starting, the proxy's bodiless 404. A tier's protected-resource path is not routed, so a tier is reached with keys |
 | any other path starting with `/canary` or `/working`, in any letter case | the proxy's bodiless 404, so a client given a tier's URL with anything changed after the prefix (`/canary`, `/CANARY/mcp`, `/canary%2Fmcp`, an invisible space pasted after `canary`) never reaches this stack's server by the legacy route, where the same key would write to this brain. A typo of the prefix itself (`/canry/mcp`) still does, until SMD-2532 closes the legacy route |
 | `GET`/`HEAD`/`OPTIONS /health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key; OPTIONS for a browser's CORS preflight |
 | `/.well-known/oauth-protected-resource/mcp` | `server` — the MCP server's protected-resource document while it advertises OAuth: the `auth` profile on, the request at the origin's `Host`, and the authorization server answering the server's probe on the mesh. Otherwise the server's 404, and a server that is down is the proxy's 404, never a 502 (SMD-2382). A claude.ai connector at `https://host/mcp` asks this at the origin root before it uses its key, and proceeds on the key only on a 404 (SMD-1246) |
@@ -511,7 +531,9 @@ file provider reads), so a release's `compose.yaml` carries them and there is no
 second file to fetch; an overlay may add a file beside it, as
 `compose.api-public.yaml` does. Such a file is a `ROUTE_FILES` entry with its
 table built in `scripts/check-fork-consistency.ts` (check 28); no compose
-file defines a config that is not a route table (SMD-2658). Every overlay is
+file defines a config that is not a route table (SMD-2658) but compose.yaml's
+forwarder script and the observability profile's dashboard and its provider
+(check 28's `BASE_CONFIGS`, check 37). Every overlay is
 an `OVERLAYS` entry there, naming the keys it sets on each service, and a
 combination in CI's "The proxy loads only the held route tables", whose
 `declared()` names the paths it may change in a render: that step holds each
@@ -1480,9 +1502,9 @@ What it holds, from the two servers (the workers send nothing, SMD-2910):
   block read and write seconds for the 100 statements that took the most time
   (of those above the tenth percentile of total time: the exporter's own query
   leaves out the rest), each by `queryid`, `user` and `datname`, with
-  `pg_stat_statements_query_id` naming each `queryid`'s normalized text cut to
-  120 characters (constants are `$1`, `$2`; `SELECT count(*)::int AS c FROM
-  match_thoughts($1 ::vector, …)`, measured); connections by state,
+  `pg_stat_statements_query_id_total` naming each `queryid`'s normalized text
+  cut to 120 characters (constants are `$1`, `$2`; `SELECT count(*)::int AS c
+  FROM match_thoughts($1 ::vector, …)`, measured); connections by state,
   `pg_stat_activity_count` by database and state — the servers' pool among
   them, which their client cannot count — and the exporter's default
   collectors (`pg_up`, locks, database sizes, the WAL). The statements are the
@@ -1516,6 +1538,74 @@ What it holds, from the two servers (the workers send nothing, SMD-2910):
   credentials its caller names — so a caller on `telemetry` (lgtm, or a data
   source its admin adds) can try passwords against Postgres through it, each
   failure in Postgres's log.
+
+Grafana opens on the stack's own dashboard, **Open Brain**, provisioned at
+each start as `/grafana/d/ob1` in a folder of that name (its home page is the
+same file, at `/grafana/d/default-home-dashboard/open-brain`; the image's own
+dashboards are under Dashboards) from `deploy/observability/dashboard.json`,
+which compose.yaml carries inline as the `grafana-dashboard` config (check 37
+holds the copy to the file, and every Prometheus name and label its queries
+read to one the stack writes; CI's "The observability profile's dashboard
+reads every series it names" runs each query on the pinned images). `lgtm`
+carries the file's sha256 as a label, so an `up -d` after the dashboard
+changed recreates it: compose recreates a container for a changed label, not
+for a changed inline config alone, and recreating it restarts Prometheus, Loki
+and Tempo, which replay their write-ahead logs while the servers' sends fail
+for those seconds. Grafana's home is the dashboard only where no user or
+organisation has picked a home of its own. Prometheus ingests a zero at the
+start of each of the servers' series (`created-timestamp-zero-ingestion`):
+their counters are born at their first count, which a rate otherwise never
+counts, so one failure would read 0 (measured); series already stored are as
+they were. The series the collector scrapes — pg-exporter's and its own — get
+no such zero, so its losses have totals beside their rate. Its rows, each
+panel saying what it counts:
+- **Requests**, both servers: per second by door and the tool each ran (an
+  MCP tool call's, a REST route's operation, a mirror's; a keyed `/health` is
+  `brain_info`'s), latency p50 and p99 by tool, by outcome, the share the
+  server failed (`error`, `stalled`, `cut`; a refusal is the caller's), and
+  those failures by fault code or outcome.
+- **Model provider**: calls per second by model, latency p50 and p99 by
+  operation, and failures by status or kind.
+- **Store**: operations per second and p99 by the store's method, and its
+  errors split into refusals (SQLSTATE classes 22, 23, P0 and the brain's own
+  OB), faults (every other code: the database's, and the driver's or the
+  network's where the store cannot reach it) and operations a stop cut. A
+  method (`matchThoughts`) is not a statement, so this row and Postgres's are
+  read side by side, not joined.
+- **Jobs**: by kind, with their error type and p99.
+- **Postgres**, this stack's own whatever the tier: the statements that took
+  the most time over the range, with their text, calls and mean — among the
+  100 the exporter reads, those with the most time since Postgres's statistics
+  were reset, so one that grew costly lately but is not among them is missing;
+  the brain's own SQL functions' mean time per call (`match_thoughts` beside
+  the bench numbers); connections by role and state, the servers' pools among
+  them; the buffer cache's hit ratio, the databases' sizes, and whether the
+  collector reaches pg-exporter and it Postgres.
+- **Requests not ok, and the telemetry itself**: the request records whose
+  outcome was not ok and the traces that ended in error, by server alone (a
+  path-mode canary's are among them whatever the tier), and the spans, points
+  and records the collector refused or could not store, per second and in
+  total since `lgtm` started.
+
+Its variables pick the server (`open-brain`, `open-brain-api`, each server's
+own `service.name`), a pipeline tier (for the request, provider, store and job
+rows; a stack that is no tier sends none, so All takes a path-mode canary's
+beside stable's and stable alone cannot be picked) and the database (All takes
+every one but Postgres's templates, the brain's being `openbrain`). Grafana
+will not save a change made to it — it is provisioned (measured) — so save a
+copy to keep one; to change the stack's own, export the copy's JSON (not "for
+sharing externally", which writes `${DS_…}` placeholders) over
+`deploy/observability/dashboard.json`, put back its uid `ob1`, its title `Open
+Brain` and `"editable": false` (a saved copy has its own of each; check 37
+says so), and run `bun scripts/inline-dashboard.ts`, which writes
+compose.yaml's inline copy and `lgtm`'s labels. Loki refused every record with
+the disk under `lgtm-data` 92% full (measured on a podman machine; its
+write-ahead log's threshold is 90%), answering the collector "Ingester is
+shutting down": only `lgtm`'s own log and the dashboard's last two panels say
+so. The records sent meanwhile are lost; free room (`compose exec lgtm sh -c
+'du -sh /data/*'` says what each backend holds), then `compose restart lgtm`
+(whether Loki takes records again by itself once under 90% is unmeasured).
+Nothing on the dashboard shows the disk itself.
 
 The servers send Pyroscope no profiles; it keeps about 70 MB of its own state.
 All of it is in one volume, `lgtm-data`: Prometheus keeps 15 days, Tempo 14
@@ -1553,7 +1643,7 @@ too, through the port's network — on Docker Desktop and a podman machine by
 `host.docker.internal`, its loopback ports included (a host Ollama, Postgres's
 port with the host-ports file); on Linux the host's other listeners, by the
 network's gateway. The image's own sample dashboards (RED metrics, JVM) read
-other names; this stack's dashboard is PR 3c's.
+other names; this stack's is Open Brain, above.
 
 A canary (`deploy/canary.sh`) is not on stable's `mesh` (SMD-2874), and its
 env file is made from stable's at its first `up`: with the endpoint in

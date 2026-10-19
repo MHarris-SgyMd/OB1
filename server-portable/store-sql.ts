@@ -28,7 +28,7 @@ import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgr
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, normaliseTicketStatusInputs, ticketList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -361,7 +361,7 @@ export class SqlStore implements ThoughtStore {
   }
 
   async listVectorless(opts: { limit: number; after: string | null }): Promise<VectorlessRow[]> {
-    // Through 098's partial index on (id) WHERE embedding IS NULL, both forms:
+    // Through 100's partial index on (id) WHERE embedding IS NULL, both forms:
     // the page is the index's first rows from where it starts, 0.005-0.04 ms
     // at 100,000 thoughts with 0, 1 or 10% waiting (SMD-3056; before it, a scan
     // of every row whenever none waited past the cursor, 2-4 ms there).
@@ -942,9 +942,13 @@ export class SqlStore implements ThoughtStore {
       rows = await this.sql`
         SELECT kind, thought_id::text AS thought_id, issue, status, status_type, history
           FROM ticket_status_inputs(${this.sql.array(valid, "TEXT")}::uuid[], ${this.sql.array(keys, "TEXT")}::text[])`;
-    } catch {
+    } catch (e) {
+      // Said once (labelReadFailed): a lock 098 gave up on, a grant, a timeout — not a brain before 095.
+      // errno is the SQLSTATE; a client-side failure (refused, closed) carries Bun's code instead, as db/ reads it.
+      labelReadFailed(String((e as { errno?: unknown; code?: unknown })?.errno ?? (e as { code?: unknown })?.code ?? ""), (e as Error)?.message ?? String(e));
       return null;
     }
+    labelReadOk();
     return normaliseTicketStatusInputs(rows);
   }
 

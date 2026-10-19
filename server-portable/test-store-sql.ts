@@ -1567,7 +1567,7 @@ console.log("\n[17] ticketStatusInputs: migration 095's one call — the hits wi
   await raw.close();
 }
 
-console.log("\n[18] The vector mender's page, both forms, and brain_info's vectorless count are read through migration 098's partial index, each reading only its own rows' entries (SMD-3056)");
+console.log("\n[18] The vector mender's page, both forms, and brain_info's vectorless count are read through migration 100's partial index, each reading only its own rows' entries (SMD-3056)");
 {
   // One connection, so the statistics flushed below are the reads' own.
   const one = new SqlStore(URL_, { max: 1 });
