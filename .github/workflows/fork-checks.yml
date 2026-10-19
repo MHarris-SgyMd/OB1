@@ -346,6 +346,14 @@ jobs:
         working-directory: evals
         run: bun eval-judge.ts --self-check
 
+      # The consolidation judge's cascade spike (SMD-3058): the settle rules
+      # (never `outdates`; an abstention or the middle band goes to the
+      # judge), the pair read as prompt 4 renders it, and the scoring, where a
+      # supersession settled away counts as lost. No decider, no model.
+      - name: Judge cascade rules
+        working-directory: evals
+        run: bun eval-judge-decide.ts --self-check
+
       # The projection-replay spike's rules (SMD-1998): the snapshot key per
       # projection, the replay rule branch by branch, the five scenarios on a
       # hand-known corpus, the sample, the cost arithmetic, the verdict against
