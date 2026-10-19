@@ -14808,7 +14808,7 @@ console.log("\n[87] Migration 097: one walk for 082's lapse — ob1_lapse_walk i
   await db.exec(`DELETE FROM thoughts`);
 }
 
-console.log("\n[88] Migration 098: the thoughts with no vector by an index of their own — a btree on thoughts (id), partial on embedding IS NULL, its comment naming it; a re-apply a no-op (SMD-3056)");
+console.log("\n[88] Migration 098: the thoughts with no vector by an index of their own — a btree on thoughts (id), partial on embedding IS NULL, its comment naming it; a re-apply a no-op; anything else under the name in thoughts' schema refused by name, another schema's never taken for it (SMD-3056)");
 {
   const def = async () => (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('thoughts_vectorless_idx')) AS d`)).rows[0].d ?? "";
   const d = await def();

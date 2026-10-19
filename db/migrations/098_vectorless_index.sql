@@ -32,13 +32,13 @@
 --   it (SHARE): one read of the heap, entries for the vectorless ones only
 --   — 64-86 ms at a million thoughts, measured (340 MB of heap; the null
 --   test reads no vector's TOAST), so about a second at ten million. A
---   brain past that can build it by hand first, CONCURRENTLY under this name and
---   in this shape, and the file then keeps it. Anything else under the name
---   in thoughts' schema is refused, naming it and the statement that clears
---   it, rather than recorded as applied: IF NOT EXISTS
---   alone would accept an INVALID index (an interrupted CONCURRENTLY build,
---   which the planner ignores) or one of another shape, and the mender
---   would go on reading every row with nothing saying so (review pass 1).
+--   brain past that can build it by hand first, CONCURRENTLY under this
+--   name and in this shape, and the file then keeps it. Anything else under
+--   the name in thoughts' schema is refused, naming it and the statement
+--   that clears it, rather than recorded as applied: IF NOT EXISTS alone
+--   would accept an INVALID index (an interrupted CONCURRENTLY build, which
+--   the planner ignores) or one of another shape, and the mender would go
+--   on reading every row with nothing saying so (review pass 1).
 --
 --   Needs nothing past 001 (thoughts, its embedding). Re-applied, the index
 --   is found in its shape and kept: a no-op.
@@ -51,21 +51,19 @@ DECLARE
   v_def   text;
   v_valid boolean;
   v_on    oid;
+  v_ns    oid := (SELECT relnamespace FROM pg_class WHERE oid = 'thoughts'::regclass);
 BEGIN
   -- By name in thoughts' own schema, never the search path's first match: a
   -- brain without the index would otherwise find another schema's under the
   -- name, keep it, and be recorded with none on thoughts (review pass 2).
+  -- Kept only on thoughts by its oid, the rest by its text: the schema as
+  -- pg_get_indexdef prints it is never read, a quoted one included (pass 3).
   SELECT c.oid, c.relkind, pg_get_indexdef(c.oid), i.indisvalid, i.indrelid INTO v_oid, v_kind, v_def, v_valid, v_on
     FROM pg_class c LEFT JOIN pg_index i ON i.indexrelid = c.oid
-   WHERE c.relname = 'thoughts_vectorless_idx'
-     AND c.relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = 'thoughts'::regclass);
+   WHERE c.relname = 'thoughts_vectorless_idx' AND c.relnamespace = v_ns;
   IF v_oid IS NULL THEN
     CREATE INDEX thoughts_vectorless_idx ON thoughts (id) WHERE embedding IS NULL;
-    v_oid := (SELECT c.oid FROM pg_class c WHERE c.relname = 'thoughts_vectorless_idx'
-                AND c.relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = 'thoughts'::regclass));
-  -- On thoughts by its oid, the rest by its text: the schema as
-  -- pg_get_indexdef prints it is never read, a quoted one included (review
-  -- pass 3).
+    v_oid := (SELECT oid FROM pg_class WHERE relname = 'thoughts_vectorless_idx' AND relnamespace = v_ns);
   ELSIF v_kind <> 'i' OR v_on <> 'thoughts'::regclass OR v_def !~ '^CREATE INDEX thoughts_vectorless_idx ON .+ USING btree \(id\) WHERE \(embedding IS NULL\)$' THEN
     RAISE EXCEPTION 'migration 098: thoughts_vectorless_idx exists but is not a btree on thoughts (id) WHERE embedding IS NULL — %. Drop it (an index: DROP INDEX CONCURRENTLY, which leaves writes to thoughts running) and re-run: the file builds it.', COALESCE(v_def, 'a relation of kind ' || v_kind::text)
       USING ERRCODE = 'object_not_in_prerequisite_state';
