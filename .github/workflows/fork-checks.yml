@@ -3191,6 +3191,40 @@ jobs:
           [ "$(sed -n 's/^OB1_CANARY_KEY=//p' .env.canary.local | tr -d "\"'")" = "$CANARY_KEY" ] || { echo "the canary's key changed" >&2; exit 1; }
           grep -F 'connector open-brain-canary still points at http://127.0.0.1:8012/mcp?…, a port this canary no longer answers on' /tmp/canary-edited.out
           [ "$(docker compose -p open-brain-canary -f compose.yaml port forwarder 8000)" = 127.0.0.1:8013 ] || { echo "the canary's forwarder did not move to the edited port, 127.0.0.1:8013" >&2; exit 1; }
+          # SMD-3154: up --no-refresh brings the canary level in place. A row
+          # only the canary holds (a key in its ob1_config, which a refresh's
+          # restore replaces) survives it, no tier half runs, and its ledger is
+          # current. A running sleep worker (a stand-in carrying compose's
+          # labels for the service; --init, so a stop does not wait out its
+          # grace) is stopped before the canary's Postgres is touched, and
+          # comes back from compose.yaml's definition after the smoke, unless
+          # the env file holds no OB1_WORKER_KEY, as this canary's does not:
+          # then it is left stopped and up exits 1, said.
+          cq "INSERT INTO ob1_config (key, value) VALUES ('ci_canary_only', 'kept') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+          standin() { docker rm -f open-brain-canary-sleep-1 > /dev/null 2>&1 || true
+            docker run -d --init --name open-brain-canary-sleep-1 --label com.docker.compose.project=open-brain-canary --label com.docker.compose.service=sleep \
+              --label com.docker.compose.oneoff=False --label com.docker.compose.container-number=1 --entrypoint sleep docker.io/oven/bun:1.4.3-alpine 600; }
+          standin > /dev/null
+          rc=0; FAKE_URL='http://127.0.0.1:8013/mcp?key=x' ./canary.sh up --no-refresh --no-smoke > /tmp/canary-nokey.out 2>&1 || rc=$?
+          { [ "$rc" = 1 ] && grep -qF 'canary sleep worker LEFT STOPPED' /tmp/canary-nokey.out && grep -qF 'migrated in place (its own rows kept)' /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with a worker and no OB1_WORKER_KEY exited $rc, not 1 with the worker left stopped" >&2; exit 1; }
+          if [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=sleep)" ]; then echo "up --no-refresh started a worker with no OB1_WORKER_KEY" >&2; exit 1; fi
+          printf 'OB1_WORKER_KEY=ci-canary-worker-key-not-stables\n' >> .env.canary.local
+          standin_id="$(standin)"
+          FAKE_URL='http://127.0.0.1:8013/mcp?key=x' ./canary.sh up --no-refresh --no-smoke | tee /tmp/canary-norefresh.out
+          grep -F 'migrate open-brain-canary-postgres-1 in place' /tmp/canary-norefresh.out
+          grep -F 'canary sleep worker stopped for the migration' /tmp/canary-norefresh.out
+          grep -F 'canary sleep worker, on the new build' /tmp/canary-norefresh.out
+          grep -F 'migrated in place (its own rows kept)' /tmp/canary-norefresh.out
+          if grep -F 'refresh open-brain-postgres-1' /tmp/canary-norefresh.out; then echo "up --no-refresh ran the refresh" >&2; exit 1; fi
+          [ "$(cq "SELECT value FROM ob1_config WHERE key = 'ci_canary_only'")" = kept ] || { echo "up --no-refresh lost the canary's own row" >&2; exit 1; }
+          [ "$(curl -s --max-time 5 http://127.0.0.1:8013/mcp/health)" = ok ] || { echo "the canary does not answer at 8013 after up --no-refresh" >&2; exit 1; }
+          worker="$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=sleep --no-trunc)"
+          { [ -n "$worker" ] && [ "$worker" != "$standin_id" ] && [ "$(docker inspect -f '{{join .Config.Cmd " "}}' "$worker")" != 600 ]; } || { echo "up --no-refresh did not replace the sleep stand-in with compose's worker (${worker:-none})" >&2; exit 1; }
+          migs=(../db/migrations/*.sql)
+          [ "$(cq "SELECT max(name) FROM schema_migrations")" = "${migs[-1]##*/}" ] || { echo "the canary's ledger is not at the highest migration (${migs[-1]##*/}) after up --no-refresh" >&2; exit 1; }
+          docker rm -f open-brain-canary-sleep-1 > /dev/null
+          sed -i '/^OB1_WORKER_KEY=ci-canary-worker-key-not-stables$/d' .env.canary.local
+          cq "DELETE FROM ob1_config WHERE key = 'ci_canary_only'"
           cq "UPDATE ob1_config SET value = 'working' WHERE key = 'tier'"
           cq "ALTER DATABASE openbrain RESET ob1.refresh_target"
           refused 'refusing to delete its volume' down --volumes
@@ -3202,8 +3236,17 @@ jobs:
           if docker network inspect open-brain-canary_default > /dev/null 2>&1; then echo "down left the canary's network from before SMD-2583" >&2; exit 1; fi
           ! grep -F 'mcp remove' /tmp/fake-claude.log || { echo "down removed another connector" >&2; exit 1; }
           docker compose -p open-brain-canary -f compose.yaml up -d --wait postgres
+          # SMD-3154: a canary volume whose database holds nothing is no canary
+          # to keep: up --no-refresh exits 1 and migrates nothing into it.
+          rc=0; ./canary.sh up --no-refresh --no-smoke > /tmp/canary-emptydb.out 2>&1 || rc=$?
+          { [ "$rc" = 1 ] && grep -qF 'holds no relations' /tmp/canary-emptydb.out; } || { cat /tmp/canary-emptydb.out >&2; echo "up --no-refresh on an empty canary database exited $rc, not 1" >&2; exit 1; }
           ./canary.sh down --volumes | tee /tmp/canary-down-empty.out
           grep -F 'canary down, its database deleted' /tmp/canary-down-empty.out
+          # SMD-3154: with no database to keep, up --no-refresh is refused and
+          # changes nothing: no volume made, no container started.
+          rc=0; ./canary.sh --port 8011 up --no-refresh > /tmp/canary-nodb.out 2>&1 || rc=$?
+          { [ "$rc" = 2 ] && grep -qF -- "--no-refresh keeps the canary's database, and open-brain-canary has none" /tmp/canary-nodb.out; } || { cat /tmp/canary-nodb.out >&2; echo "up --no-refresh with no canary database exited $rc, not refused" >&2; exit 1; }
+          if docker volume inspect open-brain-canary_pgdata > /dev/null 2>&1; then echo "the refused up --no-refresh made the canary's volume" >&2; exit 1; fi
           FAKE_SCOPE="Local config (private to you in this project)" FAKE_URL=http://127.0.0.1:8013/mcp ./canary.sh down --volumes | tee /tmp/canary-down2.out
           grep -F 'nothing to delete' /tmp/canary-down2.out
           grep -F 'is in local scope, not user — left as it is' /tmp/canary-down2.out
