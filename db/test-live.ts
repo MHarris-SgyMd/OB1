@@ -11314,7 +11314,7 @@ if (want("38")) {
         return handle(text, () => Reflect.apply(t as unknown as (...a: unknown[]) => unknown, self, args));
       },
     }) as unknown as SQL;
-  /** The suite's client with `before` run ahead of each statement: a database starting up, or a stop landing mid-read. */
+  /** The suite's client with `before` run ahead of each statement: a database starting up, or a stop during a start read. */
   const around = (before: () => void): SQL => intercept((_, run) => { before(); return run(); });
   // The outage schedule starts at 1 s in this section (SMD-3048), but for
   // the refusal retried and its reset, which read the real 5 s and 10 s.
