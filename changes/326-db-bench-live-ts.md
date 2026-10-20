@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-3024]
-migrations: []
----
-
-## Changelog
-
-`db/bench-live.ts` measures what a background pass costs a live call: search and capture latency end to end through a brain's MCP endpoint, beside the model calls they are made of, so the sleep scheduler's yield can be weighed against numbers (SMD-3024).
-
-## FORK
-
-db/bench-live.ts — what a running pass costs a live call, measured end to end and per model call (SMD-3024)
+# 326. db/bench-live.ts — what a running pass costs a live call, measured end to end and per model call (SMD-3024)
 
 **What changed.**
 - **What it times.** `db/bench-live.ts` times `search_thoughts` and `capture_thought` end to end through a brain's MCP endpoint, with one client in a closed loop. It also times a query embedding and a capture's metadata call directly, through the server's own `getEmbedding` and `extractMetadata`, against the same provider.

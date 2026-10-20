@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2286]
-migrations: []
----
-
-## Changelog
-
-With the `auth` profile on, the REST core accepts the authorization server's access tokens beside access keys. A token must be issued for the REST core itself (`<origin>/api`); a token for `/mcp` is refused there. Its scopes act as the access key that holds the same: `brain:write` as a write key, `brain:read` as a read key, `brain:capture` as a capture key. The caller is `oauth:operator` for a sign-in, or `oauth:<id>` for a service client, and that is the name egress terms, the actor filter and the audit row see. A token holding none of the brain's scopes, or `brain:read` with `brain:capture` and no `brain:write` (which no access key holds), is answered 403 `insufficient_scope`. With the authorization server down, the signing keys the REST core read last go on serving for ten minutes, so a token issued before the outage is served to its end; a token it has no keys for gets a 503, never a pass. Refresh tokens now rotate on every use and last 14 days unused within their 30-day grant. A spent one presented again within 10 s is honoured each time, since MCP clients refresh several times at once; later, it revokes the grant. A stolen token replayed inside those 10 s forks the chain undetected, the price of the window. The authorization server refuses `brain:read` with `brain:capture` and no `brain:write` where a request asks for it, and its consent page says what each scope allows. A service client may not be named `operator`, and names its scope in each token request. Revoking `oauth:operator` in the agent registry bans it until the public origin changes, since no sign-in changes its identity; a leaked token is answered at the authorization server. **Upgrading:** a service in `OB1_AUTH_SERVICES` with `brain:read+brain:capture` and no `brain:write`, or named `operator`, now stops the authorization server starting; change it first (SMD-2286).
-
-## FORK
-
-The REST core accepts the authorization server's tokens — a sign-in's or a service's token acts as the access key scope it names, and refresh tokens rotate within a 10 s reuse grace (SMD-2286)
+# 337. The REST core accepts the authorization server's tokens — a sign-in's or a service's token acts as the access key scope it names, and refresh tokens rotate within a 10 s reuse grace (SMD-2286)
 
 **What changed.**
 - **`server-portable/oauth-token.ts`** (new; `auth.ts`, byte-synced into the vendored servers, is untouched):

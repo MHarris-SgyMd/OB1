@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2287]
-migrations: []
----
-
-## Changelog
-
-The brain's MCP server as a client of its REST core, `mcp-server/`: MCP on SDK v2, every tool a call to the REST core with the caller's key forwarded, every answer worded as server-portable words it, its own request lines and spans (a tool call and the operation it ran one trace), and test-server's, test-auth's and test-e2e-sql's assertions held to it. The REST core's `/health` answers a key that may read it the brain's record on the health surface (SMD-2287).
-
-## FORK
-
-The MCP server as a client of the REST core, and the REST core's keyed /health — PR 3a of SMD-2287 (SMD-2287)
+# 316. The MCP server as a client of the REST core, and the REST core's keyed /health — PR 3a of SMD-2287 (SMD-2287)
 
 **What changed.**
 - **`mcp-server/`**, a top-level package (the maintainer's choice of SMD-2287's plan) on `@modelcontextprotocol/server` 2.1.0, pinned with hono and zod at server-portable's versions. `extensions/test-auth.ts`'s guard holds it to the v2 stack as it holds server-portable.

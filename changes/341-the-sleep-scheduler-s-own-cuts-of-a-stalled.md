@@ -1,17 +1,4 @@
----
-type: fixed
-bump: minor
-tickets: [SMD-3060]
-migrations: ["101"]
----
-
-## Changelog
-
-The sleep scheduler's own stops of a thought it holds back — setting extraction aside, among others — are counted as cuts, apart from the stops, which now say the wakes (migration 101), so through a judge outage of hours preflight's `sleep` row no longer reads hundreds of wakes, and the cuts no longer decide which held thoughts it names (SMD-3060). The row and `--status` say both counts. After migrating, restart the sleep service; counts made before stay as they were.
-
-## FORK
-
-The sleep scheduler's own cuts of a stalled thought are counted apart from its stops, so the held word says the wakes and orders by them (SMD-3060)
+# 341. The sleep scheduler's own cuts of a stalled thought are counted apart from its stops, so the held word says the wakes and orders by them (SMD-3060)
 
 **What changed.**
 - **Migration 101, `extraction_cuts`:**

@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-3056]
-migrations: ["100"]
----
-
-## Changelog
-
-The vector mender's page read and brain_info's count of thoughts waiting for a vector now go through an index that holds only those rows, so they no longer read every thought: migration 100 (SMD-3056). At 100,000 thoughts a page takes under 0.05 ms and the count under one (0.6 ms with 9,830 waiting).
-
-## FORK
-
-The thoughts with no vector by an index of their own — the vector mender's page and the vectorless count stop reading every thought (SMD-3056)
+# 339. The thoughts with no vector by an index of their own — the vector mender's page and the vectorless count stop reading every thought (SMD-3056)
 
 **What changed** (migration 100).
 - **`thoughts_vectorless_idx`**: a btree on `thoughts (id)`, partial on `embedding IS NULL`. It carries the page's order and its predicate together:

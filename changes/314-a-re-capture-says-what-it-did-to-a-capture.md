@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2898]
-migrations: ["090"]
----
-
-## Changelog
-
-`capture_thought` now says what a re-capture did to a capture-only key's label: that the text landed on an existing thought, whether its label moved to the caller's key or was kept, whether the thought is now settled against other keys, and, unless the label is the caller's own or was not weighed, that the operator's `reset_capture_stamp` puts a moved label back or reopens a kept one. Before, only `thought_changes` said so. REST's capture body carries the same as `label` (SMD-2898).
-
-## FORK
-
-A re-capture says what it did to a capture-only key's label (SMD-2898)
+# 314. A re-capture says what it did to a capture-only key's label (SMD-2898)
 
 **What changed.**
 - **The weighing that answers** (migration 090, `ob1_weigh_recapture(id, fingerprint, actor, declared)`). It holds 086's `ob1_restamp_recapture` body unchanged — its guards, row lock, reads, events and sentinels — and answers what each branch found, from inside the call with the row locked:

@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2930]
-migrations: []
----
-
-## Changelog
-
-A finding comment on the board no longer repeats or contradicts itself: a relation the consolidation judge found between several rows of the same two tickets (a ticket and its dated sections) is one line per word, in its best finding's direction, saying how many row pairs back it and how many read it the other way round, where it was one line per row pair (SMD-2930).
-
-## FORK
-
-A board-finding comment says each relation word once, in its best finding's direction, with how many row pairs back it and how many read it the other way (SMD-2930)
+# 315. A board-finding comment says each relation word once, in its best finding's direction, with how many row pairs back it and how many read it the other way (SMD-2930)
 
 **What changed.**
 - **`db/board-findings.ts`'s `findingLines` (new)** gives a group's bullets in rank order:
@@ -50,4 +37,3 @@ A board-finding comment says each relation word once, in its best finding's dire
 - **A pair carrying both `related` and `evolves` gets two bullets with the same instruction.** They are separate words, recorded and marked separately; this was already so before SMD-2930.
 - **Two proposals with the same verdict on one pair print the same headline.** Each has its own id and is its own decision.
 - **A count of 2 when the judge wrote both directions on the same two rows.** That would need the pass to swap newer and older on one pair of rows.
-
