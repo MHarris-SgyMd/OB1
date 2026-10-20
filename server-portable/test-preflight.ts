@@ -1726,6 +1726,20 @@ else {
   assert(/Finish it: cd db && OB1_JUDGE_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL; OB1_JUDGE_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL --status shows where it stands\./.test(consMid.out),
          "…and the remedy runs the worker under the key's own judge model — the judge's knob, so the extractor stays put (SMD-1901) — since another shell would pool under another key");
   assert(!/OB1_METADATA_MODEL=other-judge/.test(consMid.out), "…and not by moving the metadata model");
+  // Decide mode (SMD-3115): under a decider, the judge's key's remedy clears it, the judge's model being this
+  // server's own, and a decide key's names its decider and writer, each the configuration that pools under that
+  // key; a decide key of this server's own models needs neither.
+  const DCONS = "consolidate:h2o-x+writer-y@p4d1";
+  await claims.unsafe(`SELECT enqueue_thoughts('${DCONS}', ARRAY['${ids[0]}', '${ids[1]}']::uuid[])`);
+  const consDecide = await run({ ...SQL_ENV, OB1_CONSOLIDATE_DECIDER: "h2o-z", OB1_JUDGE_MODEL: "other-judge" });
+  const consDecideOwn = await run({ ...SQL_ENV, OB1_CONSOLIDATE_DECIDER: "h2o-x", OB1_JUDGE_MODEL: "writer-y" });
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${DCONS}`;
+  const finishes = (out: string) => out.split("\n").filter((l) => /Finish it/.test(l)).map((l) => l.trim().slice(0, 110)).join(" | ");
+  assert(/Finish it: cd db && OB1_CONSOLIDATE_DECIDER= OB1_JUDGE_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL;/.test(consDecide.out)
+      && /Finish it: cd db && OB1_CONSOLIDATE_DECIDER=h2o-x OB1_JUDGE_MODEL=writer-y bun consolidate\.ts --url \$DATABASE_URL;/.test(consDecide.out),
+         `under a decider the judge's key's remedy clears it, though its model is this server's judge, and a decide key's names its decider and writer (${finishes(consDecide.out)})`);
+  assert(/Finish it: cd db && bun consolidate\.ts --url \$DATABASE_URL;/.test(consDecideOwn.out) && /Finish it: cd db && OB1_CONSOLIDATE_DECIDER= OB1_JUDGE_MODEL=other-judge bun/.test(consDecideOwn.out),
+         `…and a decide key of this server's own decider and writer needs no knob (${finishes(consDecideOwn.out)})`);
   const consJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
   assert(consJson.ok === true && consJson.checks.some((c) => c.name === "consolidate pass" && c.status === "warn"), "--json carries it as a warning, under ok:true");
   // A worker holding the pending row's live lease: running, ok, no remedy, the
@@ -4545,6 +4559,24 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   const wrongModel = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "semif" });
   assert(/✗\s+jev tier\s+.* serves verdict-v1\.4 .*, and OB1_JEV_MODEL expects semif/.test(wrongModel.out) && /→ Point OB1_JEV_BASE_URL at the tier serving semif, or set OB1_JEV_MODEL=verdict-v1\.4\./.test(wrongModel.out),
          "a tier serving another model than OB1_JEV_MODEL fails, naming both");
+  // Consolidation's decide mode (SMD-3115): its own row says what the pass needs, and the decider is the model the
+  // tier is held to when OB1_JEV_MODEL names none. Warnings: the server never judges, and only the pass refuses.
+  const decideNoTier = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" });
+  assert(/!\s+consolidate decide mode\s+OB1_CONSOLIDATE_DECIDER is verdict-v1\.4 and OB1_JEV_BASE_URL is unset — db\/consolidate\.ts refuses to start; capture is unaffected/.test(decideNoTier.out)
+      && /→ Point OB1_JEV_BASE_URL at the typed-decision tier serving verdict-v1\.4 \(jev\/h2o\/README\.md\), or unset OB1_CONSOLIDATE_DECIDER for the judge\./.test(fix(decideNoTier.out, "consolidate decide mode")),
+         `decide mode with no tier warns, naming both knobs (${row(decideNoTier.out, "consolidate decide mode").trim().slice(0, 160)})`);
+  const decideUp = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" });
+  assert(/✓\s+consolidate decide mode\s+verdict-v1\.4 gives each verdict through the tier; \S+ only writes the proposals it calls \(OB1_CONSOLIDATE_DECIDER, pass key consolidate:verdict-v1\.4\+\S+@p\d+d\d+\)/.test(decideUp.out)
+      && /✓\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+ serves verdict-v1\.4 .* \(OB1_CONSOLIDATE_DECIDER\)\s*$/.test(row(decideUp.out, "jev tier")),
+         `a tier serving the decider: decide mode's row names the pass key, and the tier row the knob that held it (${row(decideUp.out, "consolidate decide mode").trim().slice(0, 200)})`);
+  const decideElse = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" });
+  assert(/!\s+jev tier\s+.* serves verdict-v1\.4 .*, and OB1_CONSOLIDATE_DECIDER expects h2o-lightning-4b — db\/consolidate\.ts refuses to start; capture is unaffected/.test(row(decideElse.out, "jev tier"))
+      && /→ Point OB1_JEV_BASE_URL at the tier serving h2o-lightning-4b, or set OB1_CONSOLIDATE_DECIDER=verdict-v1\.4 \(a new pass key\)\./.test(fix(decideElse.out, "jev tier")),
+         `a tier serving another model than the decider warns, naming the decider's knob (${row(decideElse.out, "jev tier").trim().slice(0, 200)})`);
+  const decideHeld = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "verdict-v1.4", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" });
+  assert(/!\s+consolidate decide mode\s+OB1_JEV_MODEL is verdict-v1\.4 and OB1_CONSOLIDATE_DECIDER is h2o-lightning-4b — db\/consolidate\.ts refuses to start; capture is unaffected/.test(decideHeld.out)
+      && /✓\s+jev tier\s+.* serves verdict-v1\.4 .* \(OB1_JEV_MODEL\)\s*$/.test(row(decideHeld.out, "jev tier")),
+         "OB1_JEV_MODEL and the decider naming two models warns on decide mode's row, the tier held to OB1_JEV_MODEL");
 
   const notJev = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://127.0.0.1:${other.port}`, OB1_JEV_LOCAL: "1" });
   assert(/✗\s+jev tier\s+.*speaks undefined, not ob1-jev\/1/.test(notJev.out), "a URL that answers but is not the tier (an Ollama, say) fails as not the contract");

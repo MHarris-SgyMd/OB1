@@ -36,6 +36,7 @@ import { CHUNK_CONTEXT_PROMPTS, CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs"
 import type { EmbedConfig, EmbeddedCapture } from "./embed.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, type Extraction } from "./entities.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, CONTENT_LIMIT_CHARS } from "./consolidate.ts";
+import { DECIDE_PROMPT, DECIDE_VERSION } from "./consolidate-decide.ts";
 import { METADATA_PROMPT, METADATA_PROMPT_VERSION, TAG_KEYS } from "./metadata.ts";
 
 /** A recipe as `derivations.recipe` holds it: `deterministic` required, the rest the producer's. */
@@ -142,14 +143,17 @@ export function structuredRecipe(system: string): Recipe {
  * walk measured, the neighbourhood size and floor, the text bound the judge
  * read within. Since p4 (SMD-1873), what the judge said beside the verdict
  * 029 records — its own verdict word, where the confidence came from, and
- * whether its quote was found — when the caller has a judgement.
+ * whether its quote was found — when the caller has a judgement. In decide
+ * mode (SMD-3115) `model` is the writer, `decider` the tier's model, and the
+ * hash is decide mode's prompt, read with prompt 4's rendering of the pair.
  */
-export function proposalRecipe(cfg: Pick<EmbedConfig, "judgeModel">, found: { similarity: number; candidates: number; minSimilarity: number }, judged?: Record<string, unknown>): Recipe {
+export function proposalRecipe(cfg: Pick<EmbedConfig, "judgeModel"> & Partial<Pick<EmbedConfig, "decider">>, found: { similarity: number; candidates: number; minSimilarity: number }, judged?: Record<string, unknown>): Recipe {
   return {
     deterministic: false,
     model: cfg.judgeModel,
+    ...(cfg.decider ? { decider: cfg.decider, decide_version: DECIDE_VERSION } : {}),
     prompt_version: CONSOLIDATE_PROMPT_VERSION,
-    prompt_hash: promptHash(CONSOLIDATE_PROMPT),
+    prompt_hash: promptHash(cfg.decider ? DECIDE_PROMPT : CONSOLIDATE_PROMPT),
     key_prefix: CONSOLIDATE_KEY_PREFIX,
     similarity: found.similarity,
     candidates: found.candidates,

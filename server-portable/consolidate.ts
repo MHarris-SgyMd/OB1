@@ -141,6 +141,11 @@ export type Judgement = {
    * absent otherwise. `confidence` stays the number the model wrote.
    */
   probabilities?: JudgeProbabilities;
+  /**
+   * Decide mode's note (consolidate-decide.ts, SMD-3115): the decider, its top verdict and what the writer wrote,
+   * recorded in the recipe as it came. Absent from the judge's answers.
+   */
+  decide?: Record<string, unknown>;
 };
 
 /**
@@ -658,11 +663,12 @@ export const JUDGE_LOGPROBS = 10;
  * stated number, whether the quote naming the current side was found in it,
  * and the token distributions themselves with their coverage.
  */
-export function judgedRecipe(j: Judgement, source: "token" | "stated"): { verdict: Verdict; confidence_source: "token" | "stated"; stated_confidence: number; evidence_found?: boolean; probabilities?: JudgeProbabilities } {
+export function judgedRecipe(j: Judgement, source: "token" | "stated"): { verdict: Verdict; confidence_source: "token" | "stated"; stated_confidence: number; evidence_found?: boolean; probabilities?: JudgeProbabilities; decide?: Record<string, unknown> } {
   return {
     verdict: j.verdict, confidence_source: source, stated_confidence: j.confidence,
     ...(j.evidenceFound !== undefined ? { evidence_found: j.evidenceFound } : {}),
     ...(j.probabilities ? { probabilities: j.probabilities } : {}),
+    ...(j.decide ? { decide: j.decide } : {}),
   };
 }
 

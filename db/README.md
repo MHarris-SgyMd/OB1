@@ -3045,6 +3045,44 @@ a pair that has one. `evals/eval-judge.ts` measures all of this on a
 brain's own labels. The worker's agent id rides along as 016's mentions carry
 theirs.
 
+**Decide mode** (SMD-3115, measured by SMD-3114). With `OB1_CONSOLIDATE_DECIDER`
+naming the typed-decision tier's model (H2O-Lightning-4B, `jev/h2o`), the
+tier gives each pair's verdict, not the judge:
+- **The tier's question** is prompt 4's five verdicts as one choice, over
+  prompt 4's own rendering of the pair.
+- **The writer.** Only when the tier's top verdict is outdates is the judge's
+  model asked, and only to write the proposal: which thought is current, the
+  words in it that show the other is not, and the other's words that no
+  longer hold. **The part rule** holds it: a part of some work finishing does
+  not outdate the whole.
+- **Both quotes must check out** in the side each names and not in the other,
+  or the pair stays at the tier's best verdict that proposes nothing.
+- **Version 1 is the pass's** (`@p4d1`), SMD-3114's writer, two-sided with the
+  part rule. Version 2 was measured on the canary's proposals and shelved
+  (2026-10-18), having missed its bar twice. It added:
+  - the record rule: a record of past understanding (a done ticket, a session
+    summary, a change record) is outdated only by a later thought that says
+    something different about its subject, never by its work reported done;
+  - a quote reading that takes a quote shortened with "…" piece by piece, and
+    lets a stale claim the current thought only quotes count.
+
+  Both stay for `evals/eval-judge-propose.ts` (`--record-rule`, `--v2-quotes`)
+  and SMD-3116's writers.
+- **The distribution is the tier's.** A proposal is recorded at its
+  P(outdates) under the same floor, and a relation by the mass of the relation
+  words.
+- **Gating:** both rows are gated for both endpoints before any request.
+- **The key** is `consolidate:<decider>+<writer>@p4d<version>`, so turning it
+  on starts a fresh pass.
+- **Refused at start:** the run refuses without `OB1_JEV_BASE_URL`, or with
+  `OB1_JEV_MODEL` naming another model.
+- **Probes:** a follower probes the tier's `/info` after the writer's endpoint,
+  so a tier serving another model is refused at start and an outage of either
+  is waited out.
+- **Lineage:** each proposal and relation names the writer, the decider,
+  `decide_version` and decide mode's prompt hash, and its recipe carries what
+  the tier and the writer said (`judged.decide`).
+
 **Staleness**, the same pass's second output: `stale_entities(window)` names
 the entities nothing has mentioned within the window, quietest first, each
 with its newest capture.
@@ -4782,8 +4820,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2929 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1397 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 835 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1406 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 844 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 55 assertions: the shards SHARDS lists in test-live.ts, each its own job
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 275 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 235 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
