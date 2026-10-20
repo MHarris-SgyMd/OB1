@@ -22,6 +22,14 @@
  * request to `/mcp` or any other route on the origin (SMD-1846 PR 2). The
  * password comes from the environment `exec -e` hands it; the container is
  * given only the hash.
+ *
+ *   compose exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --tokens 'brain:read'
+ *
+ * `--tokens <scope>` (SMD-2286) registers a public client, signs the operator
+ * in, allows the consent, takes the code for an `/mcp` token with that scope,
+ * and exchanges it as the MCP service (`mcp`, its secret from the container's
+ * environment) for a REST-core token, as the MCP server does at the hop. It
+ * prints both as JSON `{ mcp, api }`, for CI to present to the REST core.
  */
 import { createHash, randomBytes } from "node:crypto";
 
@@ -105,7 +113,80 @@ if (process.argv.includes("--register")) {
   }
   console.error("the sign-in set no session cookie in 10 steps");
   process.exit(1);
+} else if (process.argv.includes("--tokens")) {
+  const scope = process.argv[process.argv.indexOf("--tokens") + 1] ?? "";
+  const password = process.env.OB1_AUTH_OPERATOR_PASSWORD ?? "";
+  const origin = process.env.OB1_PUBLIC_ORIGIN ?? "";
+  const mcpSecret = process.env.OB1_AUTH_SECRET_MCP ?? "";
+  if (!scope || !password || !origin || !mcpSecret) {
+    console.error("--tokens <scope> needs OB1_AUTH_OPERATOR_PASSWORD (exec -e), and OB1_PUBLIC_ORIGIN and OB1_AUTH_SECRET_MCP in its environment");
+    process.exit(2);
+  }
+  const fail = (why: string): never => {
+    console.error(why);
+    process.exit(1);
+  };
+  const redirect = "https://client.example/callback";
+  const reg = await fetch(`${BASE}/reg`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ client_name: "token-check", redirect_uris: [redirect], grant_types: ["authorization_code"], response_types: ["code"], token_endpoint_auth_method: "none" }),
+  });
+  const { client_id } = (await reg.json()) as { client_id?: string };
+  if (reg.status !== 201 || !client_id) fail(`registration answered ${reg.status}`);
+  const verifier = randomBytes(32).toString("base64url");
+  const query = new URLSearchParams({
+    client_id: client_id!,
+    response_type: "code",
+    redirect_uri: redirect,
+    scope,
+    state: "token-check",
+    code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+    code_challenge_method: "S256",
+    resource: `${origin}/mcp`,
+  });
+  const local = (href: string) => new URL(href.startsWith(origin) ? `http://127.0.0.1:3000${href.slice(origin.length)}` : href, BASE);
+  const jar = new Map<string, string>();
+  let url = new URL(`${BASE}/authorize?${query}`);
+  let init: RequestInit = {};
+  let code = "";
+  // The sign-in page takes the password, the consent page its Allow (its first form); the code comes back to the client.
+  for (let step = 0; step < 16 && !code; step++) {
+    const r = await fetch(url, { ...init, redirect: "manual", headers: { ...(init.headers as Record<string, string>), cookie: [...jar].map(([n, v]) => `${n}=${v}`).join("; ") } });
+    for (const line of r.headers.getSetCookie()) {
+      const pair = line.split(";")[0].trim();
+      jar.set(pair.slice(0, pair.indexOf("=")), pair.slice(pair.indexOf("=") + 1));
+    }
+    if (r.status >= 300 && r.status < 400) {
+      const location = r.headers.get("location") ?? "";
+      if (location.startsWith(redirect)) {
+        const back = new URL(location).searchParams;
+        code = back.get("code") ?? fail(`the authorization request came back with no code: ${back.get("error")} ${back.get("error_description")}`);
+        break;
+      }
+      url = local(location);
+      init = {};
+      continue;
+    }
+    const page = await r.text();
+    const prompt = /data-prompt="([a-z]+)"/.exec(page)?.[1];
+    const action = /<form method="post" action="([^"]+)"/.exec(page)?.[1];
+    if (r.status !== 200 || (prompt !== "login" && prompt !== "consent") || !action) fail(`the sign-in stopped at ${url.pathname}: HTTP ${r.status} ${page.slice(0, 200).replace(/\s+/g, " ")}`);
+    url = local(action!.replace(/&#(\d+);/g, (_, c) => String.fromCharCode(Number(c))));
+    init = { method: "POST", body: new URLSearchParams(prompt === "login" ? { password } : {}), headers: { origin, "content-type": "application/x-www-form-urlencoded" } };
+  }
+  if (!code) fail("the sign-in and consent gave no code in 16 steps");
+  const form = (body: Record<string, string>, basic?: string) =>
+    fetch(`${BASE}/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", ...(basic ? { authorization: `Basic ${btoa(basic)}` } : {}) }, body: new URLSearchParams(body) }).then(async (r) => ({ status: r.status, body: (await r.json()) as Record<string, string> }));
+  const mcp = await form({ grant_type: "authorization_code", code, redirect_uri: redirect, code_verifier: verifier, client_id: client_id!, resource: `${origin}/mcp` });
+  if (mcp.status !== 200 || !mcp.body.access_token) fail(`the code answered ${mcp.status} ${mcp.body.error ?? ""}`);
+  const api = await form(
+    { grant_type: "urn:ietf:params:oauth:grant-type:token-exchange", subject_token: mcp.body.access_token, subject_token_type: "urn:ietf:params:oauth:token-type:access_token", resource: `${origin}/api` },
+    `mcp:${mcpSecret}`,
+  );
+  if (api.status !== 200 || !api.body.access_token) fail(`the exchange answered ${api.status} ${api.body.error ?? ""}`);
+  console.log(JSON.stringify({ mcp: mcp.body.access_token, api: api.body.access_token }));
 } else {
-  console.error("usage: bun restart-check.ts --register | --read | --session-cookie");
+  console.error("usage: bun restart-check.ts --register | --read | --session-cookie | --tokens <scope>");
   process.exit(2);
 }
