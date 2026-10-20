@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-2875]
-migrations: []
----
-
-## Changelog
-
-`db/tier.ts --replay` and `--diff` reach the two brains over HTTP, each at its own MCP URL or connector name with its own key, and `deploy/tier.sh` runs `--refresh` and `--promote` as two halves, each in a container on one brain's data network with that brain's password alone: no container joins both brains or holds both passwords. A script must change: `tier.sh --replay`/`--diff`, a `--network` list and `tier.ts --diff --from postgres://…` exit 2; the diff is `OB1_COMPARE_KEY=<read key> bun --no-env-file db/tier.ts --diff --from <stable> --to <canary>`, against a stable with `OB1_QUERY_LOG=on`; tier.sh no longer joins `egress`, and runs from a git checkout (SMD-2875).
-
-## FORK
-
-Tier tools without joining another brain's networks — replay and diff over HTTP, refresh and promote one half per brain (SMD-2875)
+# 327. Tier tools without joining another brain's networks — replay and diff over HTTP, refresh and promote one half per brain (SMD-2875)
 
 **What changed: replay and diff over HTTP (PR 1).**
 - `db/tier.ts --replay` / `--diff` take `--from <stable>` and `--to <canary>` as each brain's MCP URL or Claude Code connector name. A key is `--from-key`/`--to-key`, else the connector's header or the URL's `?key=`, else `OB1_COMPARE_KEY`, which then goes to both brains. `db/brain-compare.ts`'s `runTierReplay` replays stable's logged searches (`list_logged_searches`: at most a page of the most recent, after `--since` if given), each on the arm that ran it and each (query, arm) once, on both brains, and diffs the ids. The report is `--compare`'s, then the window, the counts and the verdict.

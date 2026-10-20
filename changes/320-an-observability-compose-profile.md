@@ -1,19 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-1849]
-migrations: ["096"]
----
-
-## Changelog
-
-`--profile observability` runs two more containers and a one-shot: Grafana's otel-lgtm image pinned by digest: an OpenTelemetry collector and Prometheus, Tempo, Loki, Pyroscope and Grafana on the stack's own machine, which the MCP server and the REST core send their spans, metrics and log records to once `deploy/.env` names it. Grafana is behind its own sign-in, anonymous access off, on a loopback port of its own with the new `compose.grafana-port.yaml`, or at `/grafana` on the stack's origin with the new `compose.grafana-public.yaml`, both release assets. The two servers now take the standard `OTEL_*` settings from `deploy/.env`, a pipeline tier's brain names its tier on its telemetry, and a request the server did not accept sends its span and log record within 60 a minute per server. Postgres now starts with `pg_stat_statements` on every stack and tier (migration 096 creates it where offered), and the profile's `pg-exporter` reads each statement's calls and times, and the connections in use, into the collector as a role of its own. Grafana opens on the profile's own dashboard, provisioned: requests by tool, latency, outcomes and failures, the provider's calls, the store's operations and SQLSTATEs, jobs, Postgres's costliest statements and connections, and the telemetry the collector could not store (SMD-1849).
-
-Upgrading without the profile: the servers now read the standard `OTEL_*` settings from `deploy/.env` and the shell compose runs in, so an `OTEL_EXPORTER_OTLP_ENDPOINT` already exported there starts sending; a stack already sending to its own collector has requests the server did not accept held to that budget; `/grafana` is a 404; Postgres restarts once, to load `pg_stat_statements`, its command now outranking a `shared_preload_libraries` of your own, which goes in `POSTGRES_PRELOAD_LIBRARIES`, and turning `track_io_timing` on (SMD-1849).
-
-## FORK
-
-An `observability` compose profile — a collector, Prometheus, Tempo, Loki, Pyroscope and Grafana on the stack's machine, Grafana opt-in at `/grafana`, and requests the server did not accept traced within a budget, Postgres's own numbers from pg_stat_statements, and a provisioned dashboard (SMD-1849)
+# 320. An `observability` compose profile — a collector, Prometheus, Tempo, Loki, Pyroscope and Grafana on the stack's machine, Grafana opt-in at `/grafana`, and requests the server did not accept traced within a budget, Postgres's own numbers from pg_stat_statements, and a provisioned dashboard (SMD-1849)
 
 **PR 3a: the collector.** PR 2's spans, metrics and log records had nowhere to go in the stack: the servers' compose environments took no `OTEL_*` variable, and an operator had to bring a collector and a second `-f` file. Now:
 - **`lgtm`** (`deploy/compose.yaml`, `--profile observability`): `docker.io/grafana/otel-lgtm:0.36.0` by its multi-arch digest — Grafana 13.2.3, Prometheus 3.15.0, Tempo 3.1.0, Loki 3.7.8, Pyroscope 2.3.1, collector 0.162.0 — on the internal `mesh` (and, since PR 3b, `telemetry`) as `lgtm.ob1.internal`, one named volume (`lgtm-data`), `unless-stopped`, `init`, no capability and no new privileges (measured: it starts on a fresh volume so), its health each backend's own ready URL beside the image's ready file, five minutes to start (a backend that dies leaves it unhealthy; neither Docker nor Podman restarts that by default).

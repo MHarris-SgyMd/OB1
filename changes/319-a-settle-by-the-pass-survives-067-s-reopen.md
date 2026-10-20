@@ -1,17 +1,4 @@
----
-type: fixed
-bump: minor
-tickets: [SMD-2913]
-migrations: ["091"]
----
-
-## Changelog
-
-A board finding the consolidation pass took back within the 30-day window now stays withdrawn when a later ticket edit reopens its proposal and the pass settles it again, instead of reading open and then unanswered. A re-judge that finds the conflict again, or a relation said again, still reads as the judge asserting it once more. Migration 091 keeps every settle by the pass on its proposal (SMD-2913).
-
-## FORK
-
-A settle by the pass survives 067's reopen — migration 091 keeps every settle, and a posted finding reads by what the judge last asserted (SMD-2913)
+# 319. A settle by the pass survives 067's reopen — migration 091 keeps every settle, and a posted finding reads by what the judge last asserted (SMD-2913)
 
 **What changed.**
 - **Migration 091.** `supersession_proposals.pass_settled_at timestamptz[]` holds each time the pass settled the row (067's `settled by the pass:` rejection) since the judge last asserted it, oldest first. Its one writer is the BEFORE INSERT OR UPDATE trigger `supersession_proposals_keep_settles`; a value a caller writes is replaced. The trigger:

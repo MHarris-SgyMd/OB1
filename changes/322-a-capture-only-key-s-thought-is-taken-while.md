@@ -1,17 +1,4 @@
----
-type: fixed
-bump: minor
-tickets: [SMD-2708]
-migrations: ["092"]
----
-
-## Changelog
-
-A capture-only key's thought is now no longer its own once a reviewer's accepted supersession, or another key's pointer, makes it current over another key's thought — directly or through a chain of the key's own thoughts. The key can no longer point new text at it, and so cannot pass that standing on to text no one reviewed; a pointer it had already written onto it is cleared. A write key linking two of the key's own thoughts — the session-capture recipe's repair — takes nothing, and a rejected accept gives the thought back (SMD-2708).
-
-## FORK
-
-A capture-only key's thought is taken while its supersedes chain reaches another's (SMD-2708)
+# 322. A capture-only key's thought is taken while its supersedes chain reaches another's (SMD-2708)
 
 **What changed** (migration 092).
 - **The taken read** (`ob1_thought_taken`). 082's log read — now by name, `ob1_capture_taken_by_log`, over 082's unchanged rule `ob1_takes_thought` — or `ob1_chain_reaches_outside`: the thought's current `supersedes` pointers walked down reach a thought its capturer did not capture (its first capture row's agent, none included) or one 082's log took. The walk is cycle-safe and bounded at 1,000 steps; past the bound the taken read says taken (a refused pointer is safe). Read from the current pointers: an accept or another key's link onto another's thought takes the row, through any number of links of the key's own; a pointer between two of the key's own thoughts takes neither; a reject clearing the accept's pointer gives the row back; an accept made before 092 counts from 092 on.

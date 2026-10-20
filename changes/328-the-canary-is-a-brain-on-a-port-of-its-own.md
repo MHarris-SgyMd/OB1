@@ -1,17 +1,4 @@
----
-type: removed
-bump: patch
-tickets: [SMD-2874, SMD-3032]
-migrations: []
----
-
-## Changelog
-
-The canary is a brain of its own on a port of its own: `deploy/canary.sh` no longer stands it at `/canary/mcp` on stable's origin with its servers on stable's mesh, and `deploy/compose.canary.yaml` is gone. `up` takes the canary's port from `--port` the first time and from the canary's env file after, which now holds the canary's own port, loopback address, tier and profiles; a `--port` that differs is written there, as are the canary's own settings into a file made before this, and stable's port is refused. A canary standing on stable's origin moves to its port at its next `up --port N`, on the same volume. Its access keys are its own: `up` mints a write key, its hash alone in `MCP_ACCESS_KEYS`, smokes and registers the connector with it, and leaves stable's keys, webhook secrets and plugin role password out, giving the plugin role a password of its own (SMD-2874, SMD-3032).
-
-## FORK
-
-The canary is a brain on a port of its own with keys of its own — path mode and `compose.canary.yaml` retired, stable's keys left out (SMD-2874 / 3032)
+# 328. The canary is a brain on a port of its own with keys of its own — path mode and `compose.canary.yaml` retired, stable's keys left out (SMD-2874 / 3032)
 
 **What changed.**
 - `deploy/canary.sh`:

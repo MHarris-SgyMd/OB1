@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-3115]
-migrations: []
----
-
-## Changelog
-
-`OB1_CONSOLIDATE_DECIDER` turns on consolidation's decide mode. The typed-decision tier's model gives each pair's verdict, and `OB1_JUDGE_MODEL` only writes the proposals it calls outdates, with both of its quotes checked in the texts. The pass key names both models (SMD-3115).
-
-## FORK
-
-Consolidation's decide mode: the typed-decision tier gives each pair's verdict and the judge's model writes only the proposals it calls outdates, adopted from SMD-3114's measurement for review on the canary (SMD-3115)
+# 342. Consolidation's decide mode: the typed-decision tier gives each pair's verdict and the judge's model writes only the proposals it calls outdates, adopted from SMD-3114's measurement for review on the canary (SMD-3115)
 
 **What changed.**
 - **`server-portable/consolidate-decide.ts`** (new) holds what SMD-3114 measured, moved out of its eval, which imports it back:

@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-3008]
-migrations: []
----
-
-## Changelog
-
-A capture made during a sleep — a sync write, which does not wake the brain — is no longer stuck behind a thought whose window outlasts every sleep: the sleep scheduler dates the stopped thoughts ahead of the sleep's own captures, and restarts extraction when one lands while such a thought is in hand, so the capture is extracted and consolidation joins past the stalled thought in the same sleep. While consolidation waits for a judge that does not answer, extraction takes the newer work instead of nothing, the stalled thought still waiting for consolidation (SMD-3008).
-
-## FORK
-
-A capture made during a sleep goes ahead of the stalled thought — dated after it, it waited out the window in hand, and with one worker held the join back for the sleep — and a judge that does not answer no longer leaves extraction idle (SMD-3008)
+# 329. A capture made during a sleep goes ahead of the stalled thought — dated after it, it waited out the window in hand, and with one worker held the join back for the sleep — and a judge that does not answer no longer leaves extraction idle (SMD-3008)
 
 **What changed** (PR 1).
 - **`db/sleep.ts`, the stopped thoughts dated forward:** as each sleep begins they are dated 30 days ahead (`FORWARD_DAYS`), not now, still the least stalled first. A capture made during the sleep is enqueued at its own `now()` by 016's trigger, so it goes ahead of them. `claim_thoughts` orders by `enqueued_at` and reads no clock, so the date is an order, not a delay. A wake's tail move dates the thought(s) in hand now; the next sleep dates every stopped thought forward again.
