@@ -46,33 +46,40 @@
 --         review lock (099), so the chain only shortens under it;
 --      c. the tree, its own statement;
 --      d. before any clear, every clear's links — from its pointer's target
---         down to the event's row, to a cleared row 082's log took (where
---         the walk went on whatever that row's pointer), or to a link
---         already held — locked FOR SHARE from the lowest up, each WHERE its
---         pointer still names the row below: a link moved since the walk
---         (the lock waited for its writer and read the row again) is
---         broken, and the clears above it are left (moved out). All of
---         them first: a clear projects its pointer and takes 068's
---         node-state bucket locks, held to the commit, and a lapse that
---         waited on a link while holding one deadlocked against a re-point
---         out of the tree, which needs the same bucket when its own event
---         projects (the first live run of the race table).
+--         down to the event's row, to a row an earlier clear names (the walk
+--         lists clears above a cleared row only when 082's log took it, and
+--         went on from it whatever that row's pointer), or to a link already
+--         held — locked FOR SHARE from the lowest up, each WHERE its pointer
+--         still names the row below: a link moved since the walk (the lock
+--         waited for its writer and read the row again) is broken, and the
+--         clears above it are left (moved out). Then that clear's own row,
+--         by its id, FOR NO KEY UPDATE. Every row the lapse waits on is
+--         waited on here, bottom-up, before any clear: a clear projects its
+--         pointer and takes 068's node-state bucket locks, held to the
+--         commit, and a lapse waiting on a row while holding one deadlocked
+--         against a re-point out of the tree, which needs the same bucket
+--         when its own event projects (the race table's first live run);
+--         and a lapse holding a link while waiting on the row above it
+--         crossed a delete of that row (its cascade needs the link) and a
+--         transaction that edited the row and then moved the link (review
+--         pass 2).
 --      e. then 097's clears, unchanged, those whose links held.
 --
 -- Lock order
 --   A taker holds its row FOR NO KEY UPDATE and no review lock; inside its
---   lapse it locks only rows of its own tree — every link FOR SHARE,
---   bottom-up, before any clear, then the pointers it clears FOR NO KEY
---   UPDATE (and with them 068's buckets). A pointer writer holds the
---   review lock and its row, and its lapse locks its target's chain FOR
---   SHARE, bottom-up, then its own tree as a taker would. No cycle:
+--   lapse it locks only rows of its own tree, bottom-up — each clear's links
+--   FOR SHARE, then its row FOR NO KEY UPDATE — before any clear, and takes
+--   068's buckets only in its clears, waiting on nothing after. A pointer
+--   writer holds the review lock and its row, and its lapse locks its
+--   target's chain FOR SHARE, bottom-up, then its own tree as a taker would.
+--   No cycle, measured (review pass 2: some 13,000 races, natural timing
+--   and jittered, against six takers):
 --     * an unlink locks no chain; a taker reaching the unlinked row waits for
 --       it before holding anything above it;
---     * a re-point out of the tree: the new target's chain holds no row of
---       the tree, or the target would be in it, and the taker waits on the
---       re-pointed link before any clear, holding no node-state bucket;
 --     * delete_thought's cascade locks only rows above the deleted one; the
---       taker waits at the deleted row (top-down path locks deadlock here);
+--       taker waits at the deleted row, holding nothing above it (top-down
+--       path locks, or a cleared row locked after the links above it,
+--       deadlock here);
 --     * an accept writes onto a NULL pointer — the accepted row is in no
 --       tree; 092's capture check locks bottom-up and waits at the taken row;
 --     * two takers on one tree: the lower waits at the higher's row, and the
@@ -80,25 +87,37 @@
 --     * a page render is a taker; a page write racing a delete of the page
 --       takes the review lock in the delete alone (test-live [32]);
 --     * a pointer moved in: its writer waits on the taker's row, and the
---       taker never wants the writer's row — the writer's target chain is
---       locked bottom-up, so a target the taker clears is reached only after
---       the taker's row (top-down would hold it and deadlock).
---   One cycle remains, named: a pointer writer re-points a row of a taker's
---   tree onto a target inside that same tree, between the taking's row lock
---   and its path locks. Its chain lock waits on the taker; the taker's path
---   lock waits on the re-pointed row. Postgres breaks it with 40P01, one
---   side rolls back whole, and a retry succeeds. An unlink and an accept
---   cannot meet it. 099's multi-call class stands outside the order too —
---   a transaction that holds a row and then asks for the review lock — and
---   since an accept's lapse now waits on its links, the class meets an
---   accept on a link that transaction edited first (the race table: the
---   accept, a metadata edit of X, then an unlink in the same transaction).
+--       taker never wants the writer's row — the target chain is locked
+--       bottom-up, so a target the taker clears is reached only after the
+--       taker's row (top-down would hold it and deadlock);
+--     * a transaction that edits a row the lapse clears and then moves a
+--       link under it: the lapse waits on that row holding nothing above it.
+--   One cycle remains, named: a pointer write whose new target's chain (to
+--   1,000 rows) reaches the taken row, while the row it moves is one the
+--   taking will lock — a link of the tree or a row it clears, re-pointed
+--   onto the taken row, onto a row above it, or onto a row outside the tree
+--   whose chain runs through a cleared row the walk did not go on from. The
+--   writer holds its row and its chain lock waits on the taker; the taker's
+--   lock waits on that row. Postgres breaks it with 40P01, one side rolls
+--   back whole. It is not narrow: whenever such a write overlaps a taking
+--   it fires (review pass 2: 395 of 400 overlapping races), the pointer
+--   writer the usual victim, and nothing in the server retries it — the
+--   caller gets the error, and a retry of the call succeeds. An unlink and
+--   an accept cannot meet it. 099's multi-call class stands outside the
+--   order too (a transaction that holds a row and then asks for the review
+--   lock): it meets an accept, whose lapse now waits on its links.
 --
 -- Cost
 --   A lapse that clears: one FOR SHARE per distinct link on its clears'
---   paths, at most 1,001. A pointer onto a thought: its chain locked FOR
---   SHARE, at most 1,001 rows and usually one to three, even when nothing
---   lapses — and so it also waits for a plain edit of a chain row.
+--   paths and one FOR NO KEY UPDATE per clear, at most 1,001 each — each
+--   FOR SHARE writes the row's header. Measured against 097 (review pass
+--   2, before the membership sets): a lapse over 200 rows about +8%, over
+--   1,000 about +22-60%; a pointer onto the end
+--   of a 1,000-row chain about +17%, onto a short chain +0.3 ms. A pointer
+--   onto a thought locks its chain even when nothing lapses — usually one
+--   to three rows — and so waits for a plain edit of a chain row while it
+--   holds the review lock, which every other pointer write, delete and
+--   accept then waits behind.
 --
 -- NOT HERE
 --   * A raw write, which locks nothing of anyone's.
@@ -259,10 +278,10 @@ DECLARE
   v_chain    uuid[];
   v_cur      uuid;
   v_below    jsonb := '{}'::jsonb;
-  v_anchor   uuid[] := '{}';
-  v_held     uuid[] := '{}';
-  v_broken   uuid[] := '{}';
-  v_skip     uuid[] := '{}';
+  v_anchor   jsonb := '{}'::jsonb;
+  v_held     jsonb := '{}'::jsonb;
+  v_broken   jsonb := '{}'::jsonb;
+  v_skip     jsonb := '{}'::jsonb;
   v_path     uuid[];
   v_ok       boolean;
   v_steps    int;
@@ -329,11 +348,13 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(v_tree) AS a(x) WHERE NOT a.x ? 'stays') THEN
     RETURN NULL;
   END IF;
-  -- Every clear's links locked first, before any clear: a clear projects
-  -- its pointer and takes 068's node-state bucket locks, held to the
-  -- commit, and a lapse waiting on a link while holding one deadlocked
-  -- against a re-point out of the tree, which needs the same bucket when
-  -- its own event projects (the first live run of the race table).
+  -- Every clear's links, and its row, locked first, before any clear: a
+  -- clear projects its pointer and takes 068's node-state bucket locks,
+  -- held to the commit, and a lapse waiting on a row while holding one
+  -- deadlocked against a re-point out of the tree, which needs the same
+  -- bucket when its own event projects (the first live run of the race
+  -- table); a bucket shared by hash with a writer of a later clear's row
+  -- crossed the same way (097 had that one too).
   FOR e IN SELECT (x->>'id')::uuid AS id, (x->>'onto')::uuid AS onto, x ? 'stays' AS stays
              FROM jsonb_array_elements(v_tree) WITH ORDINALITY AS a(x, i) ORDER BY i
   LOOP
@@ -342,15 +363,16 @@ BEGIN
       CONTINUE;
     END IF;
     -- The links from this pointer's target down to the event's row, to a
-    -- cleared row 082's log took (the walk went on from it whatever its own
-    -- pointer — every clear the walk listed before this one is such a row,
-    -- or no clear above it would be listed), or to a link already held.
+    -- row an earlier clear names (the walk lists clears above a cleared row
+    -- only when 082's log took it, and went on from it whatever its own
+    -- pointer; each row has one pointer, so it is listed once), or to a link
+    -- already held.
     v_path := '{}';
     v_cur := e.onto;
     v_ok := true;
     v_steps := 0;
-    WHILE NOT (v_cur = NEW.thought_id OR v_cur = ANY(v_anchor) OR v_cur = ANY(v_held)) LOOP
-      IF v_cur = ANY(v_broken) OR NOT (v_below ? v_cur::text) OR v_steps > 1001 THEN
+    WHILE NOT (v_cur = NEW.thought_id OR v_anchor ? v_cur::text OR v_held ? v_cur::text) LOOP
+      IF v_broken ? v_cur::text OR NOT (v_below ? v_cur::text) OR v_steps > 1001 THEN
         v_ok := false;
         EXIT;
       END IF;
@@ -358,9 +380,9 @@ BEGIN
       v_cur := (v_below->>v_cur::text)::uuid;
       v_steps := v_steps + 1;
     END LOOP;
-    v_anchor := v_anchor || e.id;
+    v_anchor := v_anchor || jsonb_build_object(e.id::text, true);
     IF NOT v_ok THEN
-      v_skip := v_skip || e.id;
+      v_skip := v_skip || jsonb_build_object(e.id::text, true);
       CONTINUE;
     END IF;
     -- Locked FOR SHARE from the lowest up, each where its pointer still
@@ -372,22 +394,31 @@ BEGIN
        WHERE id = v_path[k] AND supersedes = (v_below->>v_path[k]::text)::uuid
          FOR SHARE;
       IF NOT FOUND THEN
-        v_broken := v_broken || v_path[k];
+        v_broken := v_broken || jsonb_build_object(v_path[k]::text, true);
         v_ok := false;
         EXIT;
       END IF;
-      v_held := v_held || v_path[k];
+      v_held := v_held || jsonb_build_object(v_path[k]::text, true);
     END LOOP;
     IF NOT v_ok THEN
-      v_skip := v_skip || e.id;
+      v_skip := v_skip || jsonb_build_object(e.id::text, true);
+      CONTINUE;
     END IF;
+    -- And the row this clear writes, by its id, right after the links under
+    -- it — so every row the lapse waits on is waited on here, before any
+    -- clear, holding nothing above it: a writer holding a clear row and then
+    -- moving a link under it (a transaction of several calls), and a delete
+    -- of a cleared row the walk went on from (its cascade needs the link
+    -- above it), both crossed a lapse that held the link and waited on the
+    -- row in its clear (review pass 2).
+    PERFORM 1 FROM thoughts WHERE id = e.id FOR NO KEY UPDATE;
   END LOOP;
   -- Then the clears, in the walk's order, those whose links held.
   FOR e IN SELECT (x->>'id')::uuid AS id, (x->>'onto')::uuid AS onto
              FROM jsonb_array_elements(v_tree) WITH ORDINALITY AS a(x, i)
             WHERE NOT x ? 'stays' ORDER BY i
   LOOP
-    CONTINUE WHEN e.id = ANY(v_skip);
+    CONTINUE WHEN v_skip ? e.id::text;
     -- Locked, upward along each path as the walk read it, and read again:
     -- a pointer moved since the walk read it is left (review pass 1)...
     SELECT t.metadata INTO v_meta FROM thoughts t

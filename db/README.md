@@ -1630,9 +1630,9 @@ lock the accept holds. Two writes still take none and move nothing out: a
 first capture naming supersedes (a new row, nothing above it), and another
 taker's own lapse clears, which clear nothing the accept's walk read as
 staying. Since 101 the lapse locks its own tree, so a link moved by any
-writer — under any taking, a write key's re-capture, a text move,
-board-sync's adoption and a page render among them — is waited for or read
-again (092 had the window one level wide; SMD-3046). No signature
+writer under any taking is waited for or read again — but for one named
+40P01, a pointer write onto the taken tree overlapping the taking (092 had
+the window one level wide; SMD-3046). No signature
 changes; the listings read the same. It refuses to apply without 092 or 094;
 092 or 094 re-applied puts its own body back and 097 after it the walk, so
 after an older tree's `--reapply` over a 097 brain run this tree's
@@ -1733,24 +1733,34 @@ walk, unchanged, also listing each link it went on through, and
 `ob1_lapse_walk` its clears (097's output, which the listing and the CLI
 read unchanged). The trigger locks the event's row; for a pointer onto a
 thought, that thought's chain FOR SHARE from its deepest row up before the
-walk, so a taking in flight below is waited for and then read taken; and
-every clear's links FOR SHARE from the taken row up before any clear, each
-where it still names the row below, so a link moved since the walk leaves
-the clears above it (all before any clear: a clear takes 068's node-state
-bucket locks, and a lapse waiting on a link while holding one deadlocked
-against a re-point out of the tree). Bottom-up both ways, so no writer pair cycles but one,
-named: a re-point of a link in a taking's tree onto a row inside that same
-tree, between the taking's row lock and its path locks, which Postgres
-breaks with 40P01 (a retry succeeds); and 099's multi-call class (a
-transaction holding a row, then asking for the review lock) now meets an
-accept too, whose lapse waits on links. A lapse that clears takes one FOR
-SHARE per path link; a pointer onto a thought locks its chain even when
-nothing lapses, usually one to three rows. It refuses to apply without 097;
+walk, so a taking in flight below is waited for and then read taken; and,
+before any clear, each clear's links FOR SHARE from the taken row up, each
+where it still names the row below — a link moved since the walk leaves the
+clears above it — then that clear's own row. Every row the lapse waits on
+is waited on before any clear and holding nothing above it: a clear takes
+068's node-state bucket locks, and a lapse that waited on a row holding one
+deadlocked against a re-point out of the tree; one that held a link and
+then waited on the row above it crossed a delete of that row and a
+transaction that edited the row and then moved the link. One cycle
+remains, named: a pointer write whose new target's chain reaches the taken
+row, moving a row the taking will lock (a link of its tree, or a row it
+clears) — Postgres breaks it with 40P01. It is not narrow: an overlap of
+such a write with a taking nearly always meets it (review pass 2: 395 of
+400 overlapping races), the pointer writer the usual victim, and nothing
+in the server retries it; the caller gets the error, and a retry succeeds.
+099's multi-call class (a transaction holding a row, then asking for the
+review lock) now meets an accept too. A lapse that clears takes one FOR
+SHARE per path link and one row lock per clear (about +8% over 200 rows and
++22–60% over 1,000 against 097, measured before the membership sets); a pointer onto a thought locks its chain
+even when nothing lapses, usually one to three rows, while it holds the
+review lock. It refuses to apply without 097;
 097 re-applied puts back its own walk and the lockless trigger and 101
 after it the tree and the locks. test-schema [91] (the tree beside 097's
 walk, a link moved out made deterministic, the walk-on anchor),
-test-live [6k] (moved out, moved in in either order, the lock orders, the
-named residual, page writes racing a delete), test-upgrade [20at].
+test-live [6k] (moved out, moved in in either order, the lock orders, a
+held cleared row edited or deleted under the lapse, a re-point out of the
+tree, the named residual, page writes racing a delete), test-upgrade
+[20at].
 
 ## What changed relative to the guide
 
@@ -4773,8 +4783,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2925 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1402 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 851 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1406 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 855 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 55 assertions: the shards SHARDS lists in test-live.ts, each its own job
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 264 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 235 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)

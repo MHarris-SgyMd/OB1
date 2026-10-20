@@ -2273,6 +2273,38 @@ if (want("6k")) {
       assert(dead(r.a, r.b) && !(r.a.error && r.b.error),
         `the named residual: a re-point of a link within the taking's tree onto a row inside it, between the taking and its locks, deadlocks — one side rolls back with 40P01, the other completes (A: ${r.a.error?.slice(0, 40) ?? "ok"}; B: ${r.b.error?.slice(0, 40) ?? "ok"})`);
     }
+    // A row the lapse clears, held by a transaction of several calls that
+    // then moves a link under it or deletes it: the lapse locks each
+    // clear's row right after the links under it, so it waits on that row
+    // holding nothing above it, and the second call goes through. Holding
+    // the link above and waiting on the row in its clear crossed both
+    // (review pass 2): the unlink of X waited on the link the lapse held,
+    // and the delete's cascade on the link above the deleted row.
+    {
+      const { s, first, x, y } = await fixture();
+      const edit = (tx: SQL) => tx`SELECT update_thought(p_id := ${first}::uuid, p_content := ${"[6k] first, the hook's own word edited"}::text, p_actor := ${HOOK}::jsonb) AS r`.then((r) => r[0].r as { ok: boolean });
+      const r = await paused(note(s, true), [edit, point(x, null)], { releaseAfterFirst: true });
+      assert(!dead(r.a, r.b) && r.a.result === true && (await pointerOf(first)) === null && (await pointerOf(x)) === null && (await pointerOf(y)) === x,
+        `a transaction edits first (a row the lapse clears) and then unlinks X under it: the lapse waits on first holding nothing above it, the unlink goes through; no deadlock, first lapsed, Y left on the moved X (${r.a.error ?? r.b.error ?? "ok"}; Y→${(await pointerOf(y)) === x ? "X" : await pointerOf(y)})`);
+    }
+    {
+      // h, the hook's pointer onto S, taken by the write key's re-capture; r
+      // the hook's, linked onto h by the write key; h3 the hook's onto r,
+      // planted after h was taken (082's check refuses it then, as a brain
+      // from before 082 holds one). Taking S clears h and, from it, h3.
+      const s = await cap("S, the hook's", HOOK), h = await cap("h, onto S", HOOK, s), rr = await cap("r, the hook's", HOOK);
+      assert((await linkNow(rr, h)).ok, "[6k] setup: the write key's r→h");
+      await sql`SELECT ob1_note_recapture(${h}::uuid, ${OPER}::jsonb)`;
+      await sql`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_check_capture_pointer`;
+      let h3 = "";
+      try { h3 = await cap("h3, onto r", HOOK, rr); } finally { await sql`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_check_capture_pointer`; }
+      const touchH = (tx: SQL) => tx`SELECT update_thought(p_id := ${h}::uuid, p_metadata_patch := ${{ touched: true }}::jsonb, p_actor := ${OPER}::jsonb) AS r`.then((q) => q[0].r as { ok: boolean });
+      const del = (tx: SQL) => tx`SELECT delete_thought(${h}::uuid, NULL::jsonb) AS r`.then((q) => q[0].r as { ok: boolean });
+      const r = await paused(note(s, true), [touchH, del], { releaseAfterFirst: true });
+      const gone = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${h}::uuid`)[0].c) === 0;
+      assert(!dead(r.a, r.b) && r.a.result === true && (r.b.result as { ok?: boolean } | undefined)?.ok === true && gone && (await pointerOf(rr)) === null && (await pointerOf(h3)) === rr,
+        `a transaction holds h (a cleared row the walk went on from) and then deletes it: the lapse waits on h holding nothing above it, the delete's cascade unlinks r; no deadlock, and h3 left on r — no longer under the taken row (${r.a.error ?? r.b.error ?? "ok"}; r→${await pointerOf(rr)}, h3→${(await pointerOf(h3)) === rr ? "r" : await pointerOf(h3)})`);
+    }
     // A re-point out of the tree with both lapses paused after their walks:
     // the taking released first locks its links before any clear, so it
     // waits on X — which the re-point holds — holding no node-state bucket;
