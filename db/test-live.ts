@@ -11230,8 +11230,8 @@ if (want("38")) {
   let unavailable = false;
   /** Extraction calls only, the probe answered: the provider refuses the request itself (a 400) — the engines' configError, mid-pass. */
   let badRequest = false;
-  /** Probes only: held this long before the answer — a pass waiting at its start (SMD-2752). */
-  let probeHold = 0;
+  /** Probes the stub answered: a case reads whether a pass got as far as its own (SMD-3106). */
+  let probes = 0;
   /** Every request naming this model, probes too: not served (a 404 naming it) — the judge's own, say (SMD-2752). */
   let missingModel: string | null = null;
   const stub = Bun.serve({
@@ -11242,7 +11242,7 @@ if (want("38")) {
       if (missing || (missingModel !== null && body.model === missingModel)) return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
       if (unavailable) return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       if (body.messages?.[0]?.content === PROBE_PROMPT) {
-        if (probeHold) await Bun.sleep(probeHold);
+        probes++;
         return Response.json({ choices: [{ message: { content: "OK" } }] });
       }
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
@@ -11907,33 +11907,50 @@ if (want("38")) {
         `a stop while a start statement waits on the database ends the pass with 130, before it began, at each of the six (${JSON.stringify(stoppedIn)})`);
     }
 
-    // A stop that lands while the scheduler reads, with a pass waiting at its
-    // start (its probe held): the pass settles at once (130) and the read then
-    // returns. The stop wins — 0, the row ended stopped — not a pass "ended by
-    // itself", 130 and the row failed (review pass 1). A probe held 4 s, 8 s
-    // until SMD-3048, which the start's check paid twice. The stop lands at
-    // the sleep's first wake read: at 8 s as at 4 s no probe was held then
-    // (SMD-3048 PR 2's review pass 1 counted), so the hold paces the start's
-    // check and not the race (SMD-3106).
-    try {
-      probeHold = 4000;
+    // A stop that lands while the scheduler reads, with a pass in its start's
+    // first statement: once that returns, the pass ends at the check before
+    // its probe (130, stopped before it began), and the read then returns.
+    // The stop wins — 0, the row ended stopped — not a pass "ended by
+    // itself", 130 and the row failed (review pass 1). The stop lands at the
+    // sleep's first wake read, issued just after extraction is started; no
+    // probe after the sleep began says the pass never reached its own. Until
+    // SMD-3106 the case held every probe (8 s, then 4 s) for a pass waiting
+    // in its probe, but none was held when the stop landed, and the bug
+    // needs only a pass that settles in the read.
+    {
       lines.length = 0;
       await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
       const acRace = new AbortController();
       let landed = false;
-      /** The scheduler's client: its first wake read once asleep aborts the run's signal, then answers 300 ms later. */
+      /**
+       * The probes answered by the time the sleep began (its start's check's),
+       * and at the stop, for the message: the count only rises, so the same
+       * count after the run says the pass reached no probe, at the stop or after.
+       */
+      let probesAsleep = -1;
+      let probesAtStop = -1;
+      const push = (l: string) => {
+        if (probesAsleep < 0 && /asleep:/.test(l)) probesAsleep = probes;
+        lines.push(l);
+      };
+      /**
+       * The scheduler's client: its first wake read once asleep aborts the run's
+       * signal, then answers 1 s later. The pass's first statement, on a new
+       * connection, has that long to return: a pass still running when the
+       * scheduler looks has not settled, and the case passes with review
+       * pass 1's fix or without it.
+       */
       const stopMidRead = intercept((text, run) => {
-        if (landed || !/FROM thought_audit WHERE created_at > /.test(text) || !lines.some((l) => /asleep:/.test(l))) return run();
+        if (landed || !/FROM thought_audit WHERE created_at > /.test(text) || probesAsleep < 0) return run();
         landed = true;
+        probesAtStop = probes;
         acRace.abort();
-        return Bun.sleep(300).then(run);
+        return Bun.sleep(1000).then(run);
       });
-      const raceCode = await bounded(sleepRun({ sql: stopMidRead, follow: true, minStampEveryS: 1, signal: acRace.signal }), acRace);
+      const raceCode = await bounded(sleepRun({ sql: stopMidRead, follow: true, minStampEveryS: 1, signal: acRace.signal, writer: { out: push, err: push } }), acRace);
       const raceBeat = await beat();
-      assert(landed && raceCode === 0 && raceBeat?.ended === true && raceBeat.outcome === "stopped" && !lines.some((l) => /ended by itself/.test(l)),
-        `a stop landing mid-read with a pass waiting at its start is a stop: 0, the row ended stopped (exit ${raceCode}; landed ${landed}; ${JSON.stringify(raceBeat)}; ${lines.filter((l) => /ended by itself|stopping/.test(l)).join(" | ").trim()})`);
-    } finally {
-      probeHold = 0;
+      assert(landed && probes === probesAsleep && raceCode === 0 && raceBeat?.ended === true && raceBeat.outcome === "stopped" && !lines.some((l) => /ended by itself/.test(l)),
+        `a stop landing mid-read with a pass in its start, before its probe, is a stop: 0, the row ended stopped (probes answered: ${probesAsleep} as the sleep began, ${probesAtStop} at the stop, ${probes} after; exit ${raceCode}; landed ${landed}; ${JSON.stringify(raceBeat)}; ${lines.filter((l) => /ended by itself|stopping/.test(l)).join(" | ").trim()})`);
     }
 
     // …and a soft stop that lands in the poll that finds a follower outside
