@@ -698,13 +698,21 @@ export const MIN_COVERED = 0.5;
  * none, or only the first token's), or when the alternatives naming a verdict
  * held under half the token's mass (`covered`, so what the normalised share
  * stands for is not the model's choice), it is the written number. Rounded to
- * 029's numeric(3,2).
+ * 029's numeric(3,2), by outdatesConfidence.
  */
 export function proposalConfidence(j: Judgement): { confidence: number; source: "token" | "stated" } {
   const d = j.probabilities?.verdict;
   if (!d || d.covered < MIN_COVERED) return { confidence: j.confidence, source: "stated" };
-  const p = d.p;
-  return { confidence: Math.round(p.outdates * 100) / 100, source: "token" };
+  return { confidence: outdatesConfidence(d.p), source: "token" };
+}
+
+/**
+ * The mass on "outdates" as a proposal records it and the pass holds it to its floor: rounded to 029's
+ * numeric(3,2). Decide mode's writer gate reads it too, so a pair the writer is not asked about is one whose
+ * proposal the pass would not record (SMD-3151).
+ */
+export function outdatesConfidence(p: Record<Verdict, number>): number {
+  return Math.round(p.outdates * 100) / 100;
 }
 
 /** How many alternatives per token the pass asks for: enough that the five verdicts' first tokens are all among them. */

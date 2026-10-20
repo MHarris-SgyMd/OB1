@@ -128,10 +128,13 @@ prompt 4's five verdicts as one choice for every pair. When the top verdict is
 outdates it asks `OB1_JUDGE_MODEL` only to write the proposal, two-sided with
 the part rule, and both quotes must check out in the texts. Anything else leaves the pair at H2O's best verdict that proposes
 nothing. A proposal records H2O's P(outdates) as its confidence, under the
-pass's usual floor of 0.5.
+pass's usual floor of 0.5. Since version 3 (SMD-3151) the writer is asked only
+when that P(outdates) clears the floor: under it a proposal could not be
+recorded, and the pair keeps H2O's relation.
 
 **The record rule** (decide version 2, shelved 2026-10-18; the pass runs version
-3, version 1's writer with its quotes read without markdown, SMD-3151) came from
+3, version 1's writer with its quotes read without markdown and asked only at
+the floor, SMD-3151) came from
 the canary's first proposals.
 There, 38 of 48 outdated a Linear ticket, 35 of those tickets already said Done,
 and 23 gave the ticket's work being completed as the whole reason. The

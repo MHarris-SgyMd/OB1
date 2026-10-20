@@ -542,7 +542,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // value the resolver treats as unset (empty, or the metadata model's own name)
   // is the metadata model here too, however it was spelled.
   if (!REVIEW_ONLY) say(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== cfg.metadataModel ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}; outdates recorded at confidence >= ${MIN_CONFIDENCE}, the token probability where the endpoint returns one`);
-  if (jev) say(`  decide: ${cfg.decider} through the typed-decision tier at ${jev.endpoint.base} gives each verdict, its P(outdates) the confidence; ${cfg.judgeModel} only writes the proposals it calls, two-sided with the part rule (OB1_CONSOLIDATE_DECIDER, SMD-3115)`);
+  if (jev) say(`  decide: ${cfg.decider} through the typed-decision tier at ${jev.endpoint.base} gives each verdict, its P(outdates) the confidence; ${cfg.judgeModel} only writes the proposals it calls at >= ${MIN_CONFIDENCE}, two-sided with the part rule, its quotes read without markdown (OB1_CONSOLIDATE_DECIDER, SMD-3115, SMD-3151)`);
   // What may leave the box (SMD-1903): a pair either row of which the gate
   // refuses is not judged, and the thought's claim fails naming the rule.
   if (!REVIEW_ONLY) say(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
@@ -1340,7 +1340,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       const todo = c.pending + c.unpooled + restale + (RETRY_FAILED ? c.failed : 0);
       out(
         `\n  would: ${RETRY_FAILED ? `return ${c.failed} failed rows to the pool; ` : ""}` +
-          `add ${c.unpooled} thoughts to the pool${restale ? ` and re-pool ${restale} for stale proposals` : ""}; judge ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) against up to ${K} older neighbour(s) each with ${cfg.judgeModel} ` +
+          `add ${c.unpooled} thoughts to the pool${restale ? ` and re-pool ${restale} for stale proposals` : ""}; judge ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) against up to ${K} older neighbour(s) each with ${jev ? `${cfg.decider} through the tier, ${cfg.judgeModel} writing the proposals it calls at >= ${MIN_CONFIDENCE},` : cfg.judgeModel} ` +
           `and ${WORKERS} worker(s), ${TTL} s leases renewed every ${HEARTBEAT} s. Nothing was written.`
       );
     }
@@ -1557,9 +1557,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         const olderSide = { content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined, writer: actorKindOf(older.metadata) };
         const newerSide = { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined, writer: actorKindOf(row.metadata) };
         const callSignal = AbortSignal.any([AbortSignal.timeout(TIMEOUT_S * 1000), onHardStop.signal]);
-        // Decide mode (SMD-3115): the tier's verdict, the judge's model writing only a proposal it calls; one
-        // deadline for both calls, as for the judge's one.
-        j = jev ? await decidePair(olderSide, newerSide, cfg, jev, callSignal, keyName)
+        // Decide mode (SMD-3115): the tier's verdict, the judge's model writing only a proposal it calls at this
+        // pass's floor, which it would record (SMD-3151); one deadline for both calls, as for the judge's one.
+        j = jev ? await decidePair(olderSide, newerSide, cfg, jev, MIN_CONFIDENCE, callSignal, keyName)
                 : await judgePair(olderSide, newerSide, cfg, callSignal, keyName, { logprobs: JUDGE_LOGPROBS });
       } catch (e) {
         llmMs += Date.now() - t0;

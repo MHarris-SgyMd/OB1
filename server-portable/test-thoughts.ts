@@ -23,7 +23,7 @@ import { MEND_BATCH, MEND_SCAN, MENDER_ACTOR, mendIntervalFrom, mendOnce, newMen
 import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
-import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, evidenceIn, judgedRecipe, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
+import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
 import { consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, onlyQuoted, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe } from "./lineage.ts";
@@ -1809,6 +1809,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
 
   // decidePair end to end, against an in-process tier and writer.
   const MODEL = { name: "h2o-test", source: "stub", revision: "r1", weights_sha256: "w1", calibrator_sha256: "c1", rules: "x1" };
+  const FLOOR = DEFAULT_MIN_CONFIDENCE;
   let tierP: Record<string, number> = p, tierStatus = 200, tierCalls = 0;
   const tier = Bun.serve({
     port: 0,
@@ -1838,53 +1839,78 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   try {
     const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${writer.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "writer-test", OB1_CONSOLIDATE_DECIDER: "h2o-test" });
     const jev = resolveJevConfig({ OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "h2o-test" })!;
-    const a = await decidePair(older, newer, cfg, jev);
+    const a = await decidePair(older, newer, cfg, jev, FLOOR);
     assert(a.verdict === "outdates" && a.supersedes === "newer" && a.decide.top === "outdates" && a.decide.writer?.stale_found === true && a.decide.decider.name === "h2o-test" && writerCalls === 1,
       "the tier's outdates asks the writer, and its standing proposal is the judgement");
+    assert(a.decide.writer?.evidence === "shipped on Monday" && a.decide.writer.stale === "ship on Friday" && a.decide.floor === undefined,
+      "the writer's note keeps both quotes, so a recorded proposal can be checked again under another quote rule (version 3)");
     assert(writerBody.model === "writer-test" && (writerBody.messages?.[0]?.content ?? "").includes(PART_RULE.trim()) && !(writerBody.messages?.[0]?.content ?? "").includes(RECORD_RULE.trim()),
       "the writer is the judge's model, asked the pass's question, without the record rule");
     tierP = { ...p, outdates: 0.05, related: 0.75 };
-    const b = await decidePair(older, newer, cfg, jev);
+    const b = await decidePair(older, newer, cfg, jev, FLOOR);
     assert(b.verdict === "related" && b.decide.writer === undefined && writerCalls === 1, "the tier's related: no writer call, the relation stands");
     tierP = p;
     writerAnswer = JSON.stringify({ current: "B", evidence: "we shipped … instead of Friday", stale: "the plan is ... on Friday", reason: "it shipped later" });
-    const s = await decidePair(older, newer, cfg, jev);
+    const s = await decidePair(older, newer, cfg, jev, FLOOR);
     assert(s.verdict === "related" && /quotes did not check out/.test(s.reason) && s.decide.writer?.evidence_found === false && s.decide.writer.stale_found === false,
-      "a writer's quotes shortened with \"…\" do not stand in the pass, which reads quotes whole (version 1), and its note says neither was found");
+      "a writer's quotes shortened with \"…\" do not stand in the pass, which reads quotes whole (version 3, as version 1 did), and its note says neither was found");
     writerAnswer = JSON.stringify({ current: "none", evidence: "", stale: "", reason: "both stay current" });
-    const c = await decidePair(older, newer, cfg, jev);
+    const c = await decidePair(older, newer, cfg, jev, FLOOR);
     assert(c.verdict === "related" && c.decide.writer?.current === "none" && c.decide.writer.stale_found === false && c.decide.writer.evidence_found === false && proposalVerdict(c) === null,
       "a writer's none: H2O's best verdict that proposes nothing, its note checking no quote");
     writerAnswer = "not json";
-    const d = await decidePair(older, newer, cfg, jev);
+    const d = await decidePair(older, newer, cfg, jev, FLOOR);
     assert(d.verdict === "related" && d.decide.writer?.current === "unparsed" && !d.malformed, "a writer's answer that does not parse is a decline, not a malformed judgement");
     writerStatus = 503;
-    const e = await decidePair(older, newer, cfg, jev).then(() => null, (x: Error & { status?: number }) => x);
+    const e = await decidePair(older, newer, cfg, jev, FLOOR).then(() => null, (x: Error & { status?: number }) => x);
     assert(e?.status === 503 && /Writer request/.test(e.message), "a writer's 503 throws with its status, for the pass to classify");
     writerStatus = 200;
     tierStatus = 500;
-    const f = await decidePair(older, newer, cfg, jev).then(() => null, (x: Error & { status?: number }) => x);
+    const f = await decidePair(older, newer, cfg, jev, FLOOR).then(() => null, (x: Error & { status?: number }) => x);
     assert(f !== null && f.status === 500, "a tier's 500 throws with its status, for the pass to classify");
     tierStatus = 200;
     const other = resolveJevConfig({ OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "another" })!;
-    const g = await decidePair(older, newer, cfg, other).then(() => null, (x: Error) => x);
+    const g = await decidePair(older, newer, cfg, other, FLOOR).then(() => null, (x: Error) => x);
     assert(g !== null && /another/.test(g.message), "an answer from a model the decider does not name is refused");
+
+    // Version 3 (SMD-3151 review pass 3): the writer is asked only at the pass's floor, read as the pass reads a proposal's
+    // confidence; under it a standing proposal would record nothing and close the pair's relation, so the pair takes
+    // H2O's best verdict that proposes nothing, as a quote that fails does, and the note names the floor.
+    const answered = writerAnswer;
+    writerAnswer = JSON.stringify({ current: "B", evidence: "shipped on Monday", stale: "ship on Friday", reason: "it shipped later" });
+    const w0 = writerCalls;
+    tierP = { unrelated: 0.05, related: 0.3, evolves: 0.2, duplicate: 0.05, outdates: 0.4 };
+    const u = await decidePair(older, newer, cfg, jev, FLOOR);
+    assert(u.verdict === "related" && u.decide.top === "outdates" && u.decide.floor === FLOOR && u.decide.writer === undefined && writerCalls === w0
+        && proposalVerdict(u) === null && relationVerdict(u) === "related" && relationConfidence(u).mass === 0.55,
+      "H2O's outdates under the floor: no writer call, and the pair keeps H2O's relation at the relation words' mass, its note naming the floor");
+    tierP = { unrelated: 0.05, related: 0.3, evolves: 0.1049, duplicate: 0.05, outdates: 0.4951 };
+    const atFloor = await decidePair(older, newer, cfg, jev, FLOOR);
+    tierP = { unrelated: 0.05, related: 0.3, evolves: 0.1051, duplicate: 0.05, outdates: 0.4949 };
+    const underFloor = await decidePair(older, newer, cfg, jev, FLOOR);
+    assert(atFloor.verdict === "outdates" && atFloor.decide.floor === undefined && underFloor.decide.floor === FLOOR && writerCalls === w0 + 1
+        && outdatesConfidence(atFloor.probabilities?.verdict?.p ?? p) === FLOOR && proposalConfidence(atFloor).confidence === FLOOR,
+      "the gate reads P(outdates) as the pass holds a proposal to its floor, rounded to two places: 0.4951 asks the writer and is recorded, 0.4949 does neither");
+    tierP = p;
+    const higher = await decidePair(older, newer, cfg, jev, 0.6);
+    assert(higher.decide.floor === 0.6 && higher.decide.writer === undefined && writerCalls === w0 + 1, "the floor is the pass's: at --min-confidence 0.6, H2O's 0.55 asks no writer");
+    writerAnswer = answered;
 
     // The egress gate, before any request, as judgePair's: a remote writer endpoint under the default policy refuses
     // the pair, and so does an older side the policy keeps from a remote tier, though the newer side alone would pass
     // the gate the tier's client applies to the call.
     const before = { tier: tierCalls, writer: writerCalls };
     const remoteWriter = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${writer.port}/v1`, OB1_JUDGE_MODEL: "writer-test", OB1_CONSOLIDATE_DECIDER: "h2o-test" });
-    const h = await decidePair(older, newer, remoteWriter, jev).then(() => null, (x: unknown) => x);
+    const h = await decidePair(older, newer, remoteWriter, jev, FLOOR).then(() => null, (x: unknown) => x);
     assert(h instanceof ProviderError && h.kind === "egress" && /^Writer request to /.test(h.message) && tierCalls === before.tier && writerCalls === before.writer,
       "a writer endpoint the gate refuses: the pair refused before the tier is asked");
     const allowAll = { OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "source:private-notes" };
     const localWriter = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${writer.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "writer-test", OB1_CONSOLIDATE_DECIDER: "h2o-test", ...allowAll });
     const remoteTier = resolveJevConfig({ OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_MODEL: "h2o-test", ...allowAll })!;
-    const i = await decidePair({ ...older, metadata: { source: "private-notes" } }, newer, localWriter, remoteTier).then(() => null, (x: unknown) => x);
+    const i = await decidePair({ ...older, metadata: { source: "private-notes" } }, newer, localWriter, remoteTier, FLOOR).then(() => null, (x: unknown) => x);
     assert(i instanceof ProviderError && i.kind === "egress" && /^Decision request to /.test(i.message) && tierCalls === before.tier,
       "an older side the policy keeps from a remote tier: the pair refused before the tier is asked");
-    assert((await decidePair(older, newer, localWriter, remoteTier)).verdict === "related" && tierCalls === before.tier + 1, "…while the same pair without it is decided");
+    assert((await decidePair(older, newer, localWriter, remoteTier, FLOOR)).verdict === "related" && tierCalls === before.tier + 1, "…while the same pair without it is decided");
 
     // The follower's probe of the tier: up when it serves the decider, missing when another, out when nothing answers.
     assert((await probeTier(jev, "h2o-test", 2000)).state === "up", "probeTier: the tier serving the decider is up");
