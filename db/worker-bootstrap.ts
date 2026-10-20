@@ -19,6 +19,7 @@
 
 import { describeEgress, refusesEverything, type EgressPolicy, type EgressUnit } from "../server-portable/egress.ts";
 import { refusesLength, type ProviderEndpoint } from "../server-portable/embed.ts";
+import { jevInfo, type JevConfig } from "../server-portable/jev.ts";
 // ProviderEndpoint's `headers` are what probeChat sends, as the workers' own calls do.
 import { CLIENT_SCOPES, hashKey, parseKeyRecords } from "../server-portable/auth.ts";
 import { SqlStore } from "../server-portable/store-sql.ts";
@@ -384,7 +385,7 @@ export const PROBE_PROMPT = "Reply with the word OK.";
  * the model. `refused`: a 401, 402 or 403 (the key), or a 404 naming no model
  * (the base URL).
  */
-export type Probe = { state: "up" } | { state: "out" | "missing" | "refused"; why: string };
+export type Probe = { state: "up" } | { state: "out" | "missing" | "refused"; why: string; /** The typed-decision tier's probe found it (probeTier), not the chat endpoint's. */ tier?: true };
 
 /**
  * One chat call of one token to `model` at `endpoint` (SMD-2599): the check a
@@ -427,6 +428,25 @@ export async function probeChat(endpoint: Pick<ProviderEndpoint, "base" | "heade
   if (modelMissing({ status: r.status, body: words })) return { state: "missing", why };
   if (r.status === 404 || r.status === 401 || r.status === 402 || r.status === 403) return { state: "refused", why };
   return { state: "up" };
+}
+
+/**
+ * The typed-decision tier's probe, for consolidate's decide mode (SMD-3115): its /info, which sends no text.
+ * `up` when it serves `model`; `missing` when it serves another (the pass key names the decider, so another
+ * model's verdicts would be recorded under the wrong name); `out` when it does not answer (no answer, a timeout,
+ * a 5xx); `refused` when the address answers as something else (a 4xx, or not ob1-jev/1).
+ */
+export async function probeTier(jev: JevConfig, model: string, timeoutMs: number, wake?: AbortSignal): Promise<Probe> {
+  try {
+    const info = await jevInfo(jev, { timeoutMs, ...(wake ? { signal: wake } : {}) });
+    return info.model.name === model ? { state: "up" } : { state: "missing", why: `the tier at ${jev.endpoint.base} serves ${info.model.name}, not ${model}`, tier: true };
+  } catch (e) {
+    if (wake?.aborted) return { state: "out", why: "the probe was stopped", tier: true };
+    const why = `the tier at ${jev.endpoint.base}: ${((e as Error).message ?? "").slice(0, 200)}`;
+    const err = e as { kind?: string; status?: number };
+    const answeredAsOther = err.kind === "body" || (err.status !== undefined && err.status >= 400 && err.status < 500 && err.status !== 429);
+    return { state: answeredAsOther ? "refused" : "out", why, tier: true };
+  }
 }
 
 /**
@@ -550,13 +570,16 @@ export class ProviderOutage {
   }
 }
 
-/** The wait between a follower's checks during an outage: 5 s, doubling, at most 5 min. */
-export const OUTAGE_FIRST_MS = 5_000;
-export const OUTAGE_MAX_MS = 300_000;
+/**
+ * The wait between a follower's checks during an outage: 5 s, doubling, at
+ * most 5 min. Read as it runs, as TRANSIENT_PAUSES_MS is, so the live suite
+ * shortens `first` in its own process; a spawned worker keeps these (SMD-3048).
+ */
+export const OUTAGE_MS = { first: 5_000, max: 300_000 };
 
 /** The wait before check `step` (0 first) of an outage. */
 export function outageWait(step: number): number {
-  return Math.min(OUTAGE_MAX_MS, OUTAGE_FIRST_MS * 2 ** Math.min(step, 16));
+  return Math.min(OUTAGE_MS.max, OUTAGE_MS.first * 2 ** Math.min(step, 16));
 }
 
 /**

@@ -4056,6 +4056,206 @@ Caveats:
   gate then failed its confirmation. 60 of the 62 true supersessions are pointer
   pairs, and the candidates have no label, so H2O's precision there is unknown.
 
+## H2O decides supersession, an LLM writes only the proposal (SMD-3114)
+
+`eval-judge-propose.ts`. SMD-3058 found that the consolidation judge proposes
+few of the true supersessions in its 444 pairs: the 7B proposes 2 of 62 and the
+27B 23. H2O-Lightning-4B's one-pass verdict answers outdates on 52. A classifier
+can't write the proposal prompt 4 asks for, which is the current thought and a
+quote from it that `evidenceIn` checks.
+
+So this asks an LLM only for that, on the pairs H2O flags: which thought is
+current, and the words in it that show the other no longer is, or that neither
+does. It does not re-judge the relation. A decline, or a quote the check fails,
+leaves the pair at H2O's best verdict that proposes nothing. There are two
+writers:
+
+* **one-sided:** prompt 4's quote;
+* **two-sided:** also the other thought's claim that no longer holds, checked in
+  that thought and not in the current one (SMD-2938).
+
+```bash
+OB1_LLM_BASE_URL=http://127.0.0.1:11434/v1 OB1_LLM_LOCAL=1 OB1_JUDGE_MODEL=qwen2.5:7b … \
+  bun eval-judge-propose.ts --pairs /private/tmp/judge-pairs.jsonl --decider /private/tmp/h2o.jsonl --out /private/tmp/writer-7b.jsonl --two-sided
+bun eval-judge-propose.ts --pairs … --decider … --writer 7b-two=/private/tmp/writer-7b.jsonl --judge 7b=… --judge 27b=…
+```
+
+**The rule**, fixed on SMD-3114 before the run, with H2O's top verdict
+(outdates) as the flag. A writer on a model is adopted if it meets all four:
+
+* it proposes at least as many true supersessions naming the right thought as
+  the 27B alone (18);
+* it makes no more false proposals than the 27B alone (17);
+* it is right on at least as many labelled pairs as the 7B alone (239);
+* it costs less model time a candidate than the 7B alone (3.76 s).
+
+**On SMD-3058's 444 pairs** (2026-10-17; the flag raises 93):
+
+| | right (of 324) | true proposed (right thought) | false proposals | candidates proposed (of 120) | s a candidate | the rule |
+|---|---|---|---|---|---|---|
+| 7B judge alone | 239 | 2 (2) | 3 | 0 | 3.76 | — |
+| 27B judge alone | 263 | 23 (18) | 17 | 5 | 11.30 | — |
+| H2O alone | 259 | 52 (—) | 32 | 9 | 1.41 | — |
+| writer 7B, one-sided | 252 | 40 (40) | 27 | 9 | 1.61 | misses: false proposals |
+| writer 7B, two-sided | 254 | 28 (27) | 13 | 9 | 1.67 | meets |
+| writer 27B, one-sided | 263 | 45 (41) | 21 | 8 | 2.12 | misses: false proposals |
+| writer 27B, two-sided | 265 | 41 (37) | 15 | 8 | 2.16 | meets |
+
+* **The 27B two-sided writer beats the 27B judge on every measure.** It
+  proposes twice the true supersessions on the right side, makes fewer false
+  proposals and is right more often. It costs a fifth of the judge's time, and
+  less than the 7B judge.
+* **The 7B never answers "none,"** so its precision comes from the two-sided
+  quote check. Of the 22 rejected proposals H2O flags, the one-sided 7B leaves a
+  standing proposal on 19 and the two-sided on 9. The 27B declines 11 of the 93
+  pairs it is asked about.
+* **The quote check alone is a weak gate on two different texts.** It was built
+  to catch an invented quote, and any phrase one side holds and the other
+  doesn't passes it. The second quote fails more often on the false proposals
+  than on the true ones: it cuts the 7B's false proposals from 27 to 13, and
+  its true ones from 40 to 28.
+* **The first prompt had a format bug.** It showed the keys as a template
+  (`"current": "A|B|none"`), and the 7B copied `B|none` back on 11 of the 93
+  pairs. The keys are now listed instead, and every run above uses the fixed
+  prompt. The first run's one-sided 7B writer also missed the rule on false
+  proposals (25).
+
+**The confirmation** runs the same rule on pairs neither spike has seen: 533
+exported read-only from stable on 2026-10-17 (179 true supersessions, 234 board
+links and 120 candidates). The 129 reviewed proposals were all in the first set,
+so this one has none. It tests recall, and false proposals on links, but not the
+rejected proposals that made most of the false proposals above. The flag
+raises 146 of the 533.
+
+| | right (of 413) | true proposed (right thought) | false proposals | candidates proposed (of 120) | s a candidate | the rule |
+|---|---|---|---|---|---|---|
+| 7B judge alone | 194 | 0 (0) | 0 | 0 | 2.86 | — |
+| 27B judge alone | 291 | 68 (67) | 0 | 0 | 11.54 | — |
+| H2O alone | 302 | 127 (—) | 9 | 10 | 1.44 | — |
+| writer 7B, two-sided | 249 | 71 (71) | 5 | 6 | 1.73 | misses: false proposals |
+| writer 27B, two-sided | 287 | 109 (107) | 5 | 2 | 2.28 | misses: false proposals |
+
+* **Both writers miss the rule here, on false proposals alone.** The 27B judge
+  makes none on these pairs, and each writer makes 5, all on board links. On
+  everything else both pass: they find more true supersessions on the right
+  side than the 27B judge (71 and 107, against 67), are right more often than
+  the 7B, and cost less time than the 7B.
+* **The false proposals are one pattern.** In every one, a ticket marked done
+  sits against the larger or blocked ticket it belongs to, and the writer reads
+  it as that ticket's later state. Prompt 4 counts a part split out as
+  "evolves", so the labels are right.
+* **The 7B judge proposes none of the 179 true supersessions.**
+* **The 27B writer declines 18 of the 146 pairs it is asked about,** 6 of them
+  among the 10 flagged candidates. It proposes on 2 of the 120 candidates, and
+  the 7B writer on 6.
+* **Across both sets,** the 27B two-sided writer proposes 150 true
+  supersessions, 144 of them naming the right thought, with 20 false proposals.
+  The 27B judge proposes 91 (85), with 17 false. That puts the writer's
+  precision at 88%, against the judge's 84%. But the rule counts false
+  proposals, not precision, and it is applied to each set alone.
+
+So, by the rule fixed before the run, neither writer is adopted: the
+confirmation fails on false proposals. Whether 5 false proposals on 234 board
+links are worth 40 more supersessions found, at a fifth of the 27B judge's time,
+is the maintainer's call. A writer told that a part finishing does not outdate
+the whole might remove the pattern. That is tuning after the result, and it
+would need a third set of pairs neither run has seen.
+
+**The part rule, on a third set** (2026-10-18, at the maintainer's word). The
+fix tells the writer that a part finishing does not outdate the whole
+(`--part-rule`, `PART_RULE`). It was tested on a third set, fixed on SMD-3114
+beforehand, that no earlier run had seen.
+
+A full read-only export of stable showed that the earlier per-relation caps
+had hidden most of its labels: it has 1,933 relates_to links, 188 child_of, 143
+blocks and 358 pointer pairs. The 485 pairs take every unseen pointer pair
+(119) and every unseen child_of and blocks link (96). They also take the first
+150 relates_to links and the first 120 candidates in md5 order.
+
+| | right (of 365) | true proposed (right thought) | false proposals | candidates proposed (of 120) | s a candidate | the rule |
+|---|---|---|---|---|---|---|
+| 7B judge alone | 182 | 0 (0) | 0 | 0 | 2.95 | — |
+| 27B judge alone | 293 | 55 (54) | 0 | 5 | 11.25 | — |
+| H2O alone | 261 | 95 (—) | 14 | 10 | 1.45 | — |
+| writer 27B, two-sided, part rule | 250 | 73 (72) | 3 | 5 | 2.34 | misses: false proposals |
+| writer 7B, two-sided, part rule | 220 | 46 (45) | 6 | 7 | 1.73 | misses: right side, false proposals |
+| writer 27B, two-sided (reported) | 254 | 80 (79) | 6 | 3 | 2.37 | — |
+| writer 7B, two-sided (reported) | 219 | 46 (44) | 7 | 8 | 1.73 | — |
+
+* **The part rule halves the 27B writer's false proposals,** from 6 to 3, and
+  costs it 7 true supersessions (79 to 72). With the rule it declines 29 of the
+  119 pairs it is asked about, against 17 without. The 7B, which almost never
+  declines, barely moves.
+* **The 3 that remain are the same pattern,** a completed sub-ticket against its
+  parent. On one, the writer's own reason says the parent's work goes on, and
+  it proposes anyway.
+* **The 27B judge again makes no false proposal,** so neither fixed writer meets
+  the rule. SMD-3114's writers are not adopted by it, after three sets: met on
+  the first, missed on the other two.
+* **The pass never judges the pairs behind these false proposals.** Every false
+  proposal in the confirmation and the third set is on a pair of tickets that
+  Linear links as child_of or blocks. Migration 079 keeps exactly those pairs
+  out of the consolidation candidates; here they serve as labelled negatives.
+  On the candidates the pass does judge, nothing labels the writers' 2 to 9
+  proposals in 120.
+* **The 7B judge proposes none of the 119 true supersessions here,** as it
+  proposed none of the 179 in the confirmation. It is the judge the dogfood
+  brains run.
+
+Caveats:
+
+* All but 2 of the true supersessions in both sets are pointer pairs: a writer's
+  own `supersedes`, mostly the session hook's later summary of the same session.
+* Neither writer's precision on the candidates is known. They propose on 2 to 9
+  of the 120 candidates in each set, and nothing labels those.
+* A proposal still goes to review. The writer is the precision gate only in
+  the sense that it decides which pairs reach the queue.
+
+**Adopted anyway, for review on the canary (SMD-3115).** The maintainer adopted
+H2O with the 27B two-sided writer and the part rule on 2026-10-18, the rule
+notwithstanding. The reason: the misses are on pairs migration 079 keeps out of
+the pass, and only the canary's review queue can say what the writer proposes
+on the candidates the pass does judge. It is the pass's decide mode
+(`OB1_CONSOLIDATE_DECIDER`, `server-portable/consolidate-decide.ts`): the
+question, the writer's prompt and the quote checks are the ones measured here,
+moved out of this eval, which imports them back. The pass adds one floor that
+this eval did not apply: a proposal is recorded at H2O's P(outdates) and only at
+0.5 or more. On the third set that drops 5 of the adopted writer's 81 proposals:
+3 true supersessions, 1 false proposal and 1 unlabelled candidate. The writer
+without the part rule would lose 8 of 64 on the first set and 5 of 116 on the
+confirmation.
+
+**The record rule (decide version 2).** The canary's first decide-mode
+proposals answered the question these sets could not: what the writer proposes
+on the candidates the pass judges.
+- Of the first 48, 38 outdated a Linear ticket. 35 of those tickets already
+  said Done, and 23 gave the ticket's work being completed as the whole reason,
+  some quoting the ticket's own status line as the claim that no longer holds.
+- The maintainer's model: a done ticket stands as a historical record of past
+  understanding, as a session summary or a change record does. Any later
+  source can outdate what it understood, by saying something different about
+  the same subject, but never by reporting its work done.
+- `--record-rule` adds that to the writer (`RECORD_RULE`), and decide mode
+  runs it from version 2.
+- **The first measurement**, with the bar fixed first, was on the canary's 54
+  proposals, labelled before the run. The rule kept 6 of 10 true and 6 of 40
+  false, where the writer without it kept all 54. That missed the bar of 8
+  true, and 3 of the 4 true it lost failed the quote check, not the judgment.
+- **Version 2's quote reading** (`--v2-quotes` when scoring) reads a quote
+  shortened with "…" piece by piece. It lets the stale claim sit in the
+  current thought where that thought only quotes it, between quotation marks,
+  as a refutation does.
+- **The second measurement** was on 41 proposals made after the first, again
+  with the bar and the labels fixed before the run. Version 2 kept 3 of 5
+  true and 12 of 28 false, missing on both, and the quote reading changed
+  nothing there. The false it kept are mostly a record's own status line (a
+  session summary's "the PR needs a review") read as the status of open work,
+  and a plan read as outdated by its implementation. Version 2 is not
+  deployed.
+- These sets can't measure it: nearly all their true supersessions are pointer
+  pairs, mostly the session hook's later summary of the same session, which
+  the pass never judges. The canary's proposals are its test set.
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline

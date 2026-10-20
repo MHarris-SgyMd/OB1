@@ -49,6 +49,7 @@ chat only, beside Ollama:
 | `OB1_EMBEDDING_MODEL` / `OB1_EMBEDDING_DIM` | `openai/text-embedding-3-small` / 1536 | Must match the column; permanent once there is data |
 | `OB1_METADATA_MODEL` | `openai/gpt-4o-mini` | No schema dependency — safe to change anytime |
 | `OB1_JUDGE_MODEL` | the metadata model | The supersession judge's model (`db/consolidate.ts`), for running the judge — the harder task — on a stronger model than every capture's tagging; a model the chat endpoint serves. The pass key carries it, so a change starts a fresh pass (SMD-1901) |
+| `OB1_CONSOLIDATE_DECIDER` | unset (the judge decides) | Consolidation's decide mode: the typed-decision tier's model (`OB1_JEV_BASE_URL`) gives each pair's verdict, and `OB1_JUDGE_MODEL` only writes the proposals it calls outdates, both quotes checked in the texts. The pass key names both models, so turning it on starts a fresh pass; preflight fails it without the tier, or with `OB1_JEV_MODEL` naming another model (SMD-3115) |
 | `OB1_LLM_LOCAL` / `OB1_CHAT_LOCAL` | unset (remote) | `1` declares the embeddings / chat endpoint on this machine or its private network, so the egress gate does not apply to it. Declared, never guessed from the address: a loopback URL with the flag unset is remote to the gate. A chat endpoint at the same base is the same box: either knob declares it (SMD-1903) |
 | `OB1_EGRESS_POLICY` | `deny` | What may leave the box for an endpoint not declared local: `deny` (only what an `OB1_EGRESS_ALLOW` term names), `allow` (everything but what an `OB1_EGRESS_DENY` term names), `off`. A knob that does not parse fails preflight and closes the gate |
 | `OB1_EGRESS_ALLOW` / `OB1_EGRESS_DENY` | none | Comma-separated `unit:value` terms — `actor` (the access key's name), `source`, `type`, `topic` (a row's metadata), `marker` (a literal in the text) — read under `deny` and `allow` respectively |
@@ -556,6 +557,9 @@ and preflight's `proposals` row warns once the oldest has waited past
 (084) by word, with their board pairs counted the same way; nothing waits on
 one, so nothing warns (`consolidate.ts --list relations` shows them); `none
 standing` when there is none, `none — migration 084 is not applied` before 084.
+Since 102 the pairs judged distinct follow, `; N pairs judged distinct`: near
+neighbours the judge called unrelated, kept apart (SMD-3117) — not in the
+relations' count, never a board pair, and not said when there is none.
 A board count counts rows — proposals, relation facets — not distinct pairs of
 tickets: five proposals between two tickets' thoughts count five, and a pair
 can be in both counts; `board pairs ?` says the count was not read. Each reads `?` when its read did not
@@ -594,7 +598,7 @@ database's facts (the ledger as `{ present, readable }`, not its names; the
 watermark as `boardSync`, an ISO instant or null; the long-running workers'
 heartbeats as `workers`, `{ heartbeats, ignored }`, SMD-2261; the queue as
 `proposals`, `{ pending, stale, oldestPendingS, boardPairs }`, and the standing
-relations as `relations`, `{ related, evolves, duplicate, boardPairs }`; what
+relations as `relations`, `{ related, evolves, duplicate, distinct, boardPairs }` (`distinct` since SMD-3117: the pairs judged apart, outside the three and the board pairs); what
 became of the findings posted as `findings`, `{ posted, comments, found,
 accepted, rejected, withdrawn, open, unanswered, windowDays, medianAnswerS }`,
 SMD-2682; each null when not read or absent; each `boardPairs` is a read of its own, last,

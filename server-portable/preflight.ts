@@ -31,6 +31,7 @@ import { resolveEmbedConfig, resolveProviderEndpoints, shownBase, stringOr, type
 import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { statusType, withProviderSpan } from "./spans.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
+import { consolidatePassKey } from "./consolidate-decide.ts";
 import { ago, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readDatabaseFacts, SLEEP_STALLED_JOIN } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
@@ -526,6 +527,15 @@ add("metadata model", "ok", metaModel);
 add("judge model", "ok", env.OB1_JUDGE_MODEL
     ? `${judgeModel} (OB1_JUDGE_MODEL)${judgeModel === metaModel ? " — the same as the metadata model" : ""}`
     : `${judgeModel} — the metadata model; OB1_JUDGE_MODEL gives the judge its own`);
+// Decide mode (SMD-3115): the tier's model gives the pass's verdict and the judge's model only writes proposals.
+// What it needs is said here; whether the tier answers, and with which model, is the jev tier row's. A warning,
+// not a failure: the server never judges, and a pass's knob must not stop the server starting (the pass refuses).
+if (resolvedEmbed.decider) {
+  const tierCfg = resolveJevConfig(env);
+  if (!tierCfg) add("consolidate decide mode", "warn", `OB1_CONSOLIDATE_DECIDER is ${resolvedEmbed.decider} and OB1_JEV_BASE_URL is unset — db/consolidate.ts refuses to start; capture is unaffected`, `Point OB1_JEV_BASE_URL at the typed-decision tier serving ${resolvedEmbed.decider} (jev/h2o/README.md), or unset OB1_CONSOLIDATE_DECIDER for the judge.`);
+  else if (tierCfg.model && tierCfg.model !== resolvedEmbed.decider) add("consolidate decide mode", "warn", `OB1_JEV_MODEL is ${tierCfg.model} and OB1_CONSOLIDATE_DECIDER is ${resolvedEmbed.decider} — db/consolidate.ts refuses to start; capture is unaffected`, "Set the two to the same model.");
+  else add("consolidate decide mode", "ok", `${resolvedEmbed.decider} gives each verdict through the tier; ${judgeModel} only writes the proposals it calls (OB1_CONSOLIDATE_DECIDER, pass key ${consolidatePassKey(resolvedEmbed)})`);
+}
 
 /**
  * One credential row per endpoint. A hosted endpoint with no key and no
@@ -4251,12 +4261,20 @@ if (configFailed) {
               unfinished++;
               const [{ n: unpooled }] = await sql`SELECT count(*)::int AS n FROM consolidation_pool(${key})`;
               c.unpooled = Number(unpooled);
-              // The key names the judge model between the prefix and the
-              // prompt version; the command has to run under that model, or
-              // consolidate.ts pools under another key. The judge's own knob
-              // since SMD-1901, so the remedy leaves the extractor where it is.
-              const model = /^(.+)@p\d+$/.exec(key.slice(CONSOLIDATE_KEY_PREFIX.length))?.[1];
-              const envPrefix = model && model !== judgeModel ? `OB1_JUDGE_MODEL=${model} ` : "";
+              // The key names who judged: the judge's model before the prompt
+              // version, `<model>@p<n>`, or decide mode's decider and writer,
+              // `<decider>+<writer>@p<n>d<m>` (SMD-3115). The command has to run
+              // under that configuration, or consolidate.ts pools under another
+              // key; the judge's own knobs since SMD-1901, so the remedy leaves
+              // the extractor where it is. A key of this server's own models
+              // needs none, whatever its versions, as before decide mode.
+              const rest = key.slice(CONSOLIDATE_KEY_PREFIX.length);
+              const decided = /^(.+)\+(.+)@p\d+d\d+$/.exec(rest);
+              const judged = decided ? undefined : /^(.+)@p\d+$/.exec(rest)?.[1];
+              const ownKey = resolvedEmbed.decider ? decided?.[1] === resolvedEmbed.decider && decided[2] === judgeModel : judged === judgeModel;
+              const envPrefix = ownKey ? ""
+                : decided ? `OB1_CONSOLIDATE_DECIDER=${decided[1]} OB1_JUDGE_MODEL=${decided[2]} `
+                : judged ? `${resolvedEmbed.decider ? "OB1_CONSOLIDATE_DECIDER= " : ""}OB1_JUDGE_MODEL=${judged} ` : "";
               const counts = formatPassCounts(c).replace(/ thoughts — /, " thoughts with entities — ");
               // Running: a worker holds a live lease, or the key's follower
               // stamped a fresh heartbeat and has not ended — between its polls
@@ -4265,11 +4283,11 @@ if (configFailed) {
               const l = leases.get(key) ?? NO_LEASES;
               const beat = facts.workers?.heartbeats.find((h) => h.worker === "consolidate" && h.job === key);
               const follower = beat && !beat.stale && !beat.ended ? beat : undefined;
-              // The sleep scheduler, fresh, on this server's judge's key
-              // (SMD-1794): heartbeat:sleep carries no job, so the key is matched
-              // to this server's judge (SMD-2678's own row can match the
-              // scheduler's), and a key whose model does not parse is not its.
-              const sleeping = model !== undefined && envPrefix === ""
+              // The sleep scheduler, fresh, on this server's own key (SMD-1794):
+              // heartbeat:sleep carries no job, so only the key this server's
+              // configuration names can be its (SMD-2678's own row can match
+              // the scheduler's), decide mode's included (SMD-3115).
+              const sleeping = ownKey
                 ? facts.workers?.heartbeats.find((h) => h.worker === "sleep" && !h.stale && !h.ended)
                 : undefined;
               // A follower killed outright leaves its claims' leases live until
@@ -4974,11 +4992,15 @@ if (!jevCfg) {
   } else try {
     const info = await jevInfo(jevCfg, { timeoutMs: LOCAL_PROBE_TIMEOUT_MS });
     const pins = `${info.model.name} (${info.model.source}@${info.model.revision.slice(0, 8)}, weights ${info.model.weights_sha256.slice(0, 12)}…)`;
-    if (jevCfg.model && info.model.name !== jevCfg.model) {
-      add("jev tier", "fail", `${at} serves ${pins}, and OB1_JEV_MODEL expects ${jevCfg.model}`,
-          `Point OB1_JEV_BASE_URL at the tier serving ${jevCfg.model}, or set OB1_JEV_MODEL=${info.model.name}.`);
+    // The model it is held to: OB1_JEV_MODEL, else decide mode's decider (SMD-3115), whose name the pass key
+    // carries. Another than the decider is a warning, as the decide mode row's are: only the pass refuses it.
+    const want = jevCfg.model ?? (resolvedEmbed.decider || undefined);
+    const knob = jevCfg.model ? "OB1_JEV_MODEL" : "OB1_CONSOLIDATE_DECIDER";
+    if (want && info.model.name !== want) {
+      add("jev tier", jevCfg.model ? "fail" : "warn", `${at} serves ${pins}, and ${knob} expects ${want}${jevCfg.model ? "" : " — db/consolidate.ts refuses to start; capture is unaffected"}`,
+          `Point OB1_JEV_BASE_URL at the tier serving ${want}, or set ${knob}=${info.model.name}${jevCfg.model ? "" : " (a new pass key)"}.`);
     } else {
-      add("jev tier", "ok", `${at} serves ${pins} — ${info.contract}, ${info.kinds.join(" and ")} decisions, up to ${info.max_options} options, ${info.max_tokens} tokens${jevCfg.model ? " (OB1_JEV_MODEL)" : ""}`);
+      add("jev tier", "ok", `${at} serves ${pins} — ${info.contract}, ${info.kinds.join(" and ")} decisions, up to ${info.max_options} options, ${info.max_tokens} tokens${want ? ` (${knob})` : ""}`);
     }
   } catch (e) {
     // Four answers, worded as the provider rows word them (fifth review pass):
