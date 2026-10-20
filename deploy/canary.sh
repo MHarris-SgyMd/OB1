@@ -1260,11 +1260,15 @@ if [ -n "$(container_of "$CANARY" api)" ]; then
   STOPPED_API=1
 fi
 # A sleep worker writes as it runs, so it stops too, and comes back on the
-# new build below (SMD-3154).
+# new build below (SMD-3154). Stopped as the container it is, by name, with
+# the service's 120 s grace: compose's own stop finds only a container this
+# compose file made, and a canary's worker may come from another (a path-mode
+# canary's, from compose.canary.yaml beside it; CI's caught one left running).
 STOPPED_SLEEP=""
-if [ -n "$(container_of "$CANARY" sleep)" ]; then
+SLEEP_CT="$(container_of "$CANARY" sleep)"
+if [ -n "$SLEEP_CT" ]; then
   say "canary sleep worker stopped for $FOR"
-  canary_compose --profile sleep stop sleep >/dev/null
+  "$RUNTIME" stop -t 120 "$SLEEP_CT" >/dev/null
   STOPPED_SLEEP=1
   SLEEP_PENDING=1
 fi
@@ -1478,6 +1482,9 @@ SLEEP_LEFT=""
 if [ -n "$STOPPED_SLEEP" ]; then
   if [ -n "$(env_file value "$CANARY_ENV" OB1_WORKER_KEY)" ]; then
     say "canary sleep worker, on the new build"
+    # The stopped container goes first, so compose makes its own under the
+    # name rather than colliding with one it did not make.
+    "$RUNTIME" rm "$SLEEP_CT" >/dev/null
     canary_compose --profile sleep up -d --no-deps --force-recreate sleep
     SLEEP_PENDING=""
   else
