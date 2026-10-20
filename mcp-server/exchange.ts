@@ -19,15 +19,19 @@
 // - Answers: the exchanged token; `invalid` (the client should refresh or
 //   sign in: invalid_grant); `scope` (the token's scopes name no key scope:
 //   invalid_scope); `unavailable` (the authorization server did not answer
-//   in time, answered a 200 with no token in it, or limited us: retry).
+//   in time, its answer stalled, it answered a 200 with no token in it, or
+//   limited us: retry).
 //   Anything that says this server is misconfigured (its client refused, a
 //   target or request the server will not take) throws ExchangeMisconfigured,
 //   which the route answers as a fault.
-// - A trade is the authorization server's word on the grant when it is made:
-//   a grant revoked there afterwards is seen at the next trade, when the
-//   entry lapses (at most the exchanged token's lifetime, 600 s; the access
-//   token the client holds lives no longer). A key revoked in the registry is
-//   seen at once, as the REST core checks every call.
+// - The authorization server's exchange checks the subject token, not its
+//   grant: a grant revoked there is refused once the client's access token
+//   expires (at most 600 s), when its refresh fails and it signs in again;
+//   a trade kept here lives no longer than that token (review pass 2,
+//   measured against deploy/auth). A subject revoked in the registry is
+//   refused at the next call, as the REST core checks every one.
+// - The endpoint is plain HTTP by its mesh name: inside the stack's network,
+//   as the authorization server's health probe is, and nowhere else.
 
 import { createHash } from "node:crypto";
 
@@ -48,10 +52,17 @@ export type ExchangeSettings = { tokenUrl: string; clientId: string; secret: str
 export type Exchanged = { status: "ok"; token: string } | { status: "invalid" } | { status: "scope" } | { status: "unavailable" };
 export type Exchanger = { exchange(token: string): Promise<Exchanged>; size(): number };
 
-/** This server's own settings refused by the authorization server: a fault for the log, never a client's refusal. */
+const EXCHANGE_HINT = "set OB1_AUTH_SECRET_MCP to the `mcp` client's secret in deploy/.env (deploy/auth/provision.ts --init writes it), and run the authorization server from this release's deploy/auth, whose `mcp` client may trade for the REST core";
+
+/** This stack's settings refusing the exchange — the authorization server's or the REST core's: a fault for the log with its fix, never a client's refusal. */
 export class ExchangeMisconfigured extends Error {
-  readonly hint = "set OB1_AUTH_SECRET_MCP to the `mcp` client's secret in deploy/.env (deploy/auth/provision.ts --init writes it), and run the authorization server from this release's deploy/auth, whose `mcp` client may trade for the REST core";
+  constructor(message: string, readonly hint: string = EXCHANGE_HINT) {
+    super(message);
+  }
 }
+
+/** An upstream's error code for a log line: a code's characters, or nothing (review pass 2: a body that echoed a token printed it). */
+export const codeWord = (code: unknown): string => (typeof code === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(code) ? code : "");
 
 /** The settings on a configured stack with a sound origin and the `mcp` client's secret, else null: no token is traded. */
 export function exchangeSettings(origin: string | null, secret: string | undefined, tokenUrl: string = AUTH_TOKEN_URL): ExchangeSettings | null {
@@ -112,15 +123,22 @@ export function createExchanger(s: ExchangeSettings, opts: { fetch?: (req: Reque
     } catch {
       return { status: "unavailable" };
     }
-    const body = (await r.json().catch(() => null)) as { access_token?: unknown; expires_in?: unknown; error?: unknown } | null;
+    // A body that stalls past the timeout, at any status, is the authorization server not answering, never this server's
+    // settings (review passes 1 and 2); one that cannot be read as JSON is read as no answer of its.
+    let stalled = false;
+    const body = (await r.json().catch((e: unknown) => {
+      stalled = (e as Error)?.name === "TimeoutError" || (e as Error)?.name === "AbortError";
+      return null;
+    })) as { access_token?: unknown; expires_in?: unknown; error?: unknown } | null;
+    if (stalled) return { status: "unavailable" };
     if (r.status === 200 && typeof body?.access_token === "string") {
       keep(digest, body.access_token, typeof body.expires_in === "number" ? body.expires_in : 0);
       return { status: "ok", token: body.access_token };
     }
-    // A 200 whose body stalled past the timeout or came cut short says nothing of this server's settings (review pass 1).
+    // A 200 cut short or with no token says nothing of this server's settings (review pass 1).
     if (r.status === 200) return { status: "unavailable" };
     if (r.status === 429 || r.status >= 500) return { status: "unavailable" };
-    const error = typeof body?.error === "string" ? body.error : "";
+    const error = codeWord(body?.error);
     if (error === "invalid_grant") return { status: "invalid" };
     if (error === "invalid_scope") return { status: "scope" };
     throw new ExchangeMisconfigured(`the authorization server refused this server's token exchange (${r.status} ${error || "no error code"})`);

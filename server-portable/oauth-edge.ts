@@ -140,7 +140,9 @@ export function challengeHeader(origin: string, refusedToken: boolean): string {
  * while a key keygen.ts mints is hex and has no dots, so a bearer value of
  * this shape is an OAuth client's token, not a key sent as
  * `Authorization: Bearer`. A legacy raw MCP_ACCESS_KEY written with two dots
- * would read as a token too; keygen.ts never mints one.
+ * would read as a token too, sent as a bearer on a stack with a public
+ * origin; keygen.ts never mints one. In a key form, or on a stack with no
+ * origin, mcp-server/ sends it on as a key (app.ts keysToSend).
  */
 export const JWT_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/;
 

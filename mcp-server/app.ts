@@ -10,7 +10,7 @@
 
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono, type Context } from "hono";
-import { presentedKeys } from "../server-portable/auth.ts";
+import { presentedKeys, queryOf } from "../server-portable/auth.ts";
 import { FORK_VERSION } from "../server-portable/version.ts";
 import { SPECS, type Input } from "../server-portable/core/schemas.ts";
 import type { ToolName } from "../server-portable/tools.ts";
@@ -22,7 +22,7 @@ import { abandonedRequestLine, labelPart, requestLabel, SSE_KEEPALIVE_MAX_MS, SS
 import { beginRequest, endsWithStream, outcomeOf as outcomeOfStatus, traceOf, withToolSpan, type RequestOutcome, type ToolSpan } from "../server-portable/telemetry.ts";
 import type { CallCount } from "../server-portable/shutdown.ts";
 import { atOriginHost, authReachability, edgeSettings, edgeView, forPublicDocument, forPublicResource, JWT_SHAPE, PRM_PATH, presentedKind, protectedResourceDocument, refusalAt, type EdgeSettings } from "../server-portable/oauth-edge.ts";
-import { ExchangeMisconfigured, type Exchanger } from "./exchange.ts";
+import { codeWord, ExchangeMisconfigured, type Exchanger } from "./exchange.ts";
 import {
   BUSY_MESSAGE, challengeResponse, corsHeaders, cutByStopLine, edgeRefusal, HEALTH_METHOD_NOT_ALLOWED_HEADERS, HEALTH_PATH, JSON_RPC_BUSY_CODE, JSON_RPC_UNAUTHORIZED_CODE, MCP_METHODS,
   METHOD_NOT_ALLOWED_HEADERS, MIRROR_INPUT, MIRROR_WORDS, nameRoute, notCleared, noteLegacyRoute, notificationRefusedResponse, parsedBody,
@@ -105,17 +105,22 @@ export type Standing =
   | { kind: "token-scope" } // a token whose scopes name no key scope
   | { kind: "token-unavailable" }; // the authorization server did not answer, or the REST core has no keys to check with
 
+const REST_TOKENS_HINT = "run the REST core from this release with the auth profile and this server's OB1_PUBLIC_ORIGIN, so it checks the tokens this server trades for it";
+
 /** What a caller's calls on the REST core carry: its key, or the exchanged token as a bearer. */
 export const credOf = (caller: Extract<Standing, { kind: "caller" }>): { key: string } | { token: string } => (caller.via === "token" ? { token: caller.key } : { key: caller.key });
 
 /**
- * Where this server trades a request's token: its exchange, the public origin,
- * and which of that origin's requests take one: the MCP endpoint exactly
- * `/mcp` (forPublicResource, the default), the keyed routes the proxy hands
- * this server under it at the origin's `Host` (atOriginHost: a scan's job
- * links, the mirrors).
+ * A stack with a public origin, where a bearer of a JWT's shape is an OAuth
+ * token: its exchange (null where this server trades none, or not on this
+ * route), the origin, and which of that origin's requests take one: the MCP
+ * endpoint exactly `/mcp` (forPublicResource, the default), the keyed routes
+ * the proxy hands this server under it at the origin's `Host` (atOriginHost:
+ * a scan's job links, the mirrors). With no route — no origin, so no OAuth —
+ * such a bearer is a key, as server-portable reads it (review pass 2: a
+ * dotted raw key sent as a bearer was refused on a stack with no OAuth).
  */
-export type TokenRoute = { exchanger: Exchanger; origin: string; admits?: (req: Request, origin: string) => boolean };
+export type TokenRoute = { exchanger: Exchanger | null; origin: string; admits?: (req: Request, origin: string) => boolean };
 
 /**
  * A traded token refused, by the authorization server (an expired, revoked or
@@ -132,11 +137,46 @@ export function tokenRefusedResponse(origin: string, target: RefusalTarget): Res
  * naming `scope="brain:read"`, the least that reaches an operation. An MCP
  * client steps up to its scope joined with the challenge's (the SDK's
  * scope-challenge handling): with no scope named, that join is the token's
- * own, so it only refreshes into the same 403 and never asks the user to sign
- * in again (review pass 1, measured on MCP SDK v2).
+ * own, so a token with no brain scope only refreshed into the same 403 and
+ * never asked the user to sign in again (review pass 1, measured on MCP SDK
+ * v2). For read with capture the join adds nothing: its client refreshes,
+ * and is mended only if the refresh widens to the grant's scope (review
+ * pass 2).
  */
 export function tokenScopeResponse(origin: string, target: RefusalTarget): Response {
   return edgeRefusal(403, { "WWW-Authenticate": `Bearer resource_metadata="${origin}${PRM_PATH}", error="insufficient_scope", scope="brain:read", error_description="this token's scopes reach no operation: brain:write, brain:read or brain:capture"` }, target, JSON_RPC_UNAUTHORIZED_CODE, "Forbidden: the OAuth token's scopes reach no operation; sign in for brain:write, brain:read or brain:capture.");
+}
+
+/**
+ * A traded token refused, answered as OAuth answers it, at /mcp and at the
+ * keyed routes alike: 401 `invalid_token`, 403 `insufficient_scope`, or 503
+ * with Retry-After — a 401 too while the authorization server does not
+ * answer, since the refresh it starts cannot finish and a client then falls
+ * back to an interactive sign-in (review pass 2, measured on MCP SDK v2: an
+ * expired token with the server away opened one).
+ */
+export async function tokenRefusal(kind: "token-invalid" | "token-scope" | "token-unavailable", origin: string, target: RefusalTarget, reachable: () => Promise<boolean>): Promise<{ response: Response; code: string }> {
+  if (kind === "token-unavailable" || (kind === "token-invalid" && !(await reachable()))) return { response: unavailableResponse(target), code: "AUTH_UNREACHABLE" };
+  if (kind === "token-scope") return { response: tokenScopeResponse(origin, target), code: "FORBIDDEN" };
+  return { response: tokenRefusedResponse(origin, target), code: "UNAUTHORIZED" };
+}
+
+/**
+ * The keys a request presents to send on as keys (auth.ts presentedKeys),
+ * less, on a stack with OAuth (`tokens`), a bearer of a JWT's shape that no
+ * key form also carries: an OAuth token beside an empty `?key=` or an unknown
+ * key is still a token, never a key (review pass 1). A dotted value in
+ * `x-brain-key`, `x-access-key` or `?key=` stays a key: an operator's raw
+ * `MCP_ACCESS_KEY` may have dots, and the REST core takes it (review pass 2:
+ * every form of it was refused).
+ */
+export function keysToSend(req: Request, tokens: boolean): string[] {
+  const keys = presentedKeys(req);
+  if (!tokens) return keys;
+  const bearer = req.headers.get("authorization")?.match(/^Bearer\s+(\S+)\s*$/i)?.[1];
+  if (!bearer || !JWT_SHAPE.test(bearer)) return keys;
+  const inForm = [req.headers.get("x-brain-key"), req.headers.get("x-access-key"), queryOf(req.url).get("key")].includes(bearer);
+  return inForm ? keys : keys.filter((key) => key !== bearer);
 }
 
 /**
@@ -149,13 +189,14 @@ export function tokenScopeResponse(origin: string, target: RefusalTarget): Respo
  * and the request is a fault, never a caller's refusal.
  */
 export async function standingOf(rest: RestClient, req: Request, signal?: AbortSignal, onUnknown?: (key: string) => void, token?: TokenRoute | null): Promise<Standing> {
-  // A bearer of a JWT's shape with no key form beside it is an OAuth client's
-  // token (oauth-edge.ts presentedKind), and is never sent to the REST core as
-  // a key: that is the passthrough the MCP spec forbids. It is traded at the
-  // public resource of a stack that trades (SMD-2286), and anywhere else is no
-  // caller (at any other Host, hosts reach the brain with keys).
-  if (presentedKind(req) === "token") {
-    if (!token || !(token.admits ?? forPublicResource)(req, token.origin)) return { kind: "none" };
+  // On a stack with a public origin, a bearer of a JWT's shape with no key
+  // form beside it is an OAuth client's token (oauth-edge.ts presentedKind),
+  // and is never sent to the REST core as a key: that is the passthrough the
+  // MCP spec forbids. It is traded at the public resource of a stack that
+  // trades (SMD-2286), and anywhere else is no caller (at any other Host,
+  // hosts reach the brain with keys).
+  if (token && presentedKind(req) === "token") {
+    if (!token.exchanger || !(token.admits ?? forPublicResource)(req, token.origin)) return { kind: "none" };
     const bearer = req.headers.get("authorization")?.match(/^Bearer\s+(\S+)\s*$/i)?.[1] ?? "";
     const traded = await token.exchanger.exchange(bearer);
     if (traded.status === "invalid") return { kind: "token-invalid" };
@@ -169,16 +210,17 @@ export async function standingOf(rest: RestClient, req: Request, signal?: AbortS
     if (a.status === 200) return { kind: "caller", via: "token", key: traded.token, name: String(body.name), scope: String(body.scope), operations: new Set(body.operations ?? []) };
     // A subject the registry revoked: refused as a revoked key is, a JSON-RPC refusal, not a 401 that would send the client to a sign-in no token escapes.
     if (a.status === 401 && body.code === "REVOKED") return { kind: "revoked", ...named };
-    if (a.status === 401) return { kind: "token-invalid" };
+    if (a.status === 401 && body.credential === "token") return { kind: "token-invalid" };
+    // A token minted for the REST core a moment ago, refused as no token at all: the REST core checks none (its auth
+    // profile off, another origin, older than SMD-2286 PR 1), a misconfiguration, never the client's to refresh out of
+    // (review pass 2: a 401 sent the client round sign-in for ever).
+    if (a.status === 401) throw new ExchangeMisconfigured("the REST core checks no OAuth token (whoami answered an exchanged token 401 with no token credential)", REST_TOKENS_HINT);
     if (a.status === 403) return { kind: "token-scope" };
     if (a.status === 503 && body.credential === "token") return { kind: "token-unavailable" };
     if (a.status === 503) return { kind: "busy", ...named };
-    throw new Error(`the REST core answered whoami for a token ${a.status} ${body.code ?? ""}`.trim());
+    throw new Error(`the REST core answered whoami for a token ${a.status} ${codeWord(body.code)}`.trim());
   }
-  for (const key of presentedKeys(req)) {
-    // A token beside a key form (an empty `?key=`, an unknown key) is still an OAuth token, never a key to send on:
-    // keygen.ts's keys are hex and have no dots, so nothing of a JWT's shape is one (review pass 1).
-    if (JWT_SHAPE.test(key)) continue;
+  for (const key of keysToSend(req, token != null)) {
     const a = await rest.call("whoami" as never, {} as never, { key, signal });
     const body = (a.body ?? {}) as { code?: string; credential?: string; name?: string; scope?: string; operations?: string[] };
     // This server's own key in the forwarder slot: busy is the registry's, as for a caller's key (review pass 3: it read
@@ -190,7 +232,7 @@ export async function standingOf(rest: RestClient, req: Request, signal?: AbortS
     if (a.status === 200) return { kind: "caller", via: "key", key, name: String(body.name), scope: String(body.scope), operations: new Set(body.operations ?? []) };
     if (a.status === 401 && body.code === "REVOKED") return { kind: "revoked", ...named };
     if (a.status === 503) return { kind: "busy", ...named };
-    if (a.status !== 401) throw new Error(`the REST core answered whoami ${a.status} ${body.code ?? ""}`.trim());
+    if (a.status !== 401) throw new Error(`the REST core answered whoami ${a.status} ${codeWord(body.code)}`.trim());
     // A key the REST core does not know: the next decides, if one does.
     onUnknown?.(key);
   }
@@ -481,20 +523,22 @@ export function createMcpApp(deps: McpDeps): Hono {
    * With `tokens`, an OAuth token is traded too, at the origin's Host, so a
    * token client's job links and mirrors answer it as they answer its key
    * (review pass 1 of SMD-2286 PR 2: a scan's job link refused the client
-   * that started it); a token refused is shown nothing, as an unknown key is.
-   * /health asks without: the REST core's record is a key's (rest/app.ts).
+   * that started it). A token refused there is answered as at /mcp, never
+   * shown `ok`, which a poller would read for ever without refreshing
+   * (review pass 2). /health asks without: the REST core's record is a key's
+   * (rest/app.ts). A first trade slower than the deadline is shown nothing,
+   * and the next request is answered from the trade, kept.
    */
   type Found = Standing | { kind: "fault"; err: unknown };
-  const keyedTokenRoute = (): TokenRoute | null => {
+  const keyedTokenRoute = (tokens: boolean): TokenRoute | null => {
     const origin = edgeHere().origin;
-    const exchanger = origin ? deps.exchanger?.() ?? null : null;
-    return exchanger && origin ? { exchanger, origin, admits: atOriginHost } : null;
+    return origin ? { exchanger: tokens ? deps.exchanger?.() ?? null : null, origin, admits: atOriginHost } : null;
   };
   const standingInTime = async (req: Request, budget: AbortSignal, onUnknown?: (key: string) => void, tokens = true): Promise<Found> => {
     if (budget.aborted) return { kind: "none" };
     let onAbort: () => void = () => {};
     const standing = await Promise.race([
-      standingOf(deps.rest, req, budget, onUnknown, tokens ? keyedTokenRoute() : null).catch((err): Found => {
+      standingOf(deps.rest, req, budget, onUnknown, keyedTokenRoute(tokens)).catch((err): Found => {
         // The deadline's own abort is the registry's silence, shown nothing; any other throw is this server's fault (review pass 1 of PR 4b).
         if (budget.aborted) return { kind: "none" };
         sayOnce(err);
@@ -527,6 +571,11 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (standing.kind === "revoked" || standing.kind === "busy") {
       if (trace && standing.name) trace.agent = standing.name;
       return notCleared(c, trace, { status: standing.kind });
+    }
+    if (standing.kind === "token-invalid" || standing.kind === "token-scope" || standing.kind === "token-unavailable") {
+      const { response, code } = await tokenRefusal(standing.kind, edgeHere().origin!, { expectsReply: false, id: null }, () => authReachability().reachable());
+      if (trace) { trace.outcome = "refused"; trace.refusedAtKey = true; trace.code = code; }
+      return response;
     }
     // The REST core away, this server's forwarder refused, a whoami that threw: shown `ok` as before, its line
     // `error` FAILED, not a key refused (review pass 1 of PR 4b: an outage read as every key turned away).
@@ -585,7 +634,7 @@ export function createMcpApp(deps: McpDeps): Hono {
     const signal = AbortSignal.any([budget, early.signal]);
     // The record is a key's: a token is shown liveness, never traded here and never read with as a key (standingOf
     // passes over one; review pass 1 of SMD-2286 PR 2: the client's own token went to the REST core as a key).
-    const keys = presentedKeys(c.req.raw).filter((key) => !JWT_SHAPE.test(key));
+    const keys = keysToSend(c.req.raw, edgeHere().origin !== null);
     const reads = new Map<string, Promise<Read>>();
     const ask = (key: string | undefined) => {
       if (key === undefined || reads.has(key)) return;
@@ -782,17 +831,15 @@ export function createMcpApp(deps: McpDeps): Hono {
     }
     async function answer(): Promise<Response> {
       const origin = edgeHere().origin;
-      const exchanger = origin ? deps.exchanger?.() ?? null : null;
-      const standing = await standingOf(deps.rest, c.req.raw, signal, undefined, exchanger && origin ? { exchanger, origin } : null);
+      const standing = await standingOf(deps.rest, c.req.raw, signal, undefined, origin ? { exchanger: deps.exchanger?.() ?? null, origin } : null);
       // A traded token refused (SMD-2286): RFC 6750's answers at the public resource, the protected-resource document named.
       if (standing.kind === "token-invalid" || standing.kind === "token-scope" || standing.kind === "token-unavailable") {
         const bodyText = await readBodyText(c.req.raw, REFUSAL_BODY_LIMIT);
         const target = refusalTarget(bodyText);
         read(bodyText);
         settled = true;
-        if (standing.kind === "token-unavailable") return refused(unavailableResponse(target), "AUTH_UNREACHABLE");
-        if (standing.kind === "token-scope") return refused(tokenScopeResponse(origin!, target), "FORBIDDEN");
-        return refused(tokenRefusedResponse(origin!, target), "UNAUTHORIZED");
+        const { response, code } = await tokenRefusal(standing.kind, origin!, target, () => authReachability().reachable());
+        return refused(response, code);
       }
       if (standing.kind === "none") {
         const edgeAnswer = await refusalAt(edgeHere(), c.req.raw, () => authReachability().reachable());
