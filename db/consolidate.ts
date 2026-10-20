@@ -1597,7 +1597,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       totals[j.verdict]++;
       const verdict = proposalVerdict(j);
       // Decide version 3 (SMD-3151): the tier's outdates under the floor asked no writer. It is an outdates under the
-      // floor here, as a standing proposal under it was, though the pair takes the relation H2O's distribution gives.
+      // floor here, as a standing proposal under it was, though the pair takes the relation H2O's distribution gives at
+      // the floor, else its edge is closed, as a quote that fails does.
       const gated = j.decide?.floor !== undefined;
       if (j.decide) {
         const writer = j.decide.writer as { current?: string } | undefined;

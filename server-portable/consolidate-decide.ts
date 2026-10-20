@@ -5,10 +5,10 @@
  * brains run proposes almost no true supersession: on three sets of stable's pairs qwen2.5:7b proposed 2 of 62, 0 of
  * 179 and 0 of 119 (evals/README.md). Decide mode splits the work. H2O-Lightning-4B, through the typed-decision tier
  * (ob1-jev/1, jev/h2o), answers prompt 4's five verdicts as one choice over prompt 4's own rendering of the pair.
- * When its top verdict is outdates, an LLM, the judge's model, is asked only to write the proposal: which thought is
- * current, the words in it that show the other no longer is, and the other's words that no longer hold (SMD-2938),
- * or that neither is current. Both quotes must pass evidenceIn; a decline or a failed quote leaves the pair at H2O's
- * best verdict that proposes nothing.
+ * When its top verdict is outdates at the pass's floor (SMD-3151), an LLM, the judge's model, is asked only to write
+ * the proposal: which thought is current, the words in it that show the other no longer is, and the other's words that
+ * no longer hold (SMD-2938), or that neither is current. Both quotes must pass evidenceIn; a decline, a failed quote or
+ * an outdates under the floor leaves the pair at H2O's best verdict that proposes nothing.
  *
  * The answer is a Judgement whose verdict probabilities are H2O's distribution, so the pass records proposals and
  * relations as it records the judge's, under the same floors. Off unless OB1_CONSOLIDATE_DECIDER names the tier's
@@ -112,8 +112,8 @@ export const writerMessages = (p: { older: PairSide; newer: PairSide }, twoSided
   [{ role: "user" as const, content: WRITER_HEAD + pairContext(p) + writerRules(twoSided, partRule, recordRule) }];
 
 /**
- * The writer the pass runs: two-sided with the part rule, SMD-3114's adopted one (decide version 1's, which version 3
- * keeps; version 3 moved only the quote check, SMD-3151). Version 2's
+ * The writer the pass runs: two-sided with the part rule, SMD-3114's adopted one (decide version 1's prompt, which
+ * version 3 keeps, reading its quotes without markdown and asking it only at the floor, SMD-3151). Version 2's
  * record rule and quote reading (RECORD_RULE, stands' `v2Quotes`) are not the pass's: measured on the canary's
  * proposals they missed their bar twice, and the maintainer shelved them (2026-10-18). They stay for the eval
  * (`--record-rule`, `--v2-quotes`) and SMD-3116's writers. Its version is the key's.
@@ -191,7 +191,8 @@ export function onlyQuoted(quote: string, text: string): boolean {
  * A proposal stands when it names a side, its quote is in that side and not the other, and, two-sided, its stale
  * quote is in the other side and not the current one. With `v2Quotes`, decide version 2's reading: a quote shortened
  * with "…" is read piece by piece (quoteIn), and the stale claim may also sit in the current thought where it only
- * quotes it (onlyQuoted); without it, as SMD-3114 measured.
+ * quotes it (onlyQuoted); without it, the whole-quote check SMD-3114 measured, its quotes read without markdown since
+ * version 3 (evidenceIn, SMD-3151).
  */
 export function stands(p: Proposal, older: string, newer: string, twoSided: boolean, v2Quotes = false): boolean {
   if (p.malformed || p.current === "none") return false;
@@ -212,9 +213,10 @@ export function stands(p: Proposal, older: string, newer: string, twoSided: bool
  * markdown (evidenceIn, SMD-3151), asked only when H2O's P(outdates) clears the pass's floor. The writer quotes the
  * words it reads: on SMD-3116's writer test the quote check refused 11 of the 18 proposals it wrote on settling pairs,
  * and 10 of the 12 quotes it missed there are in the text once markdown is read away. Under the floor a standing
- * proposal records nothing and closes the pair's relation, so once more quotes stand, every relation the canary held
- * for a pair whose quotes had failed (P(outdates) 0.35 to 0.49, all 67) would close for no proposal: under the floor
- * the writer is not asked, and the pair takes H2O's best verdict that proposes nothing, as a quote that fails did.
+ * proposal records nothing and closes the pair's relation. Every relation the canary held for a pair whose quotes had
+ * failed sat under it (P(outdates) 0.35 to 0.49, all 67), so once more quotes stand, about 50 of them, those whose
+ * quotes now check out, would close for no proposal. Under the floor the writer is not asked, and the pair takes
+ * H2O's best verdict that proposes nothing, as a quote that fails did: its relation at the floor, else a closed edge.
  * Both decide which judgements become proposals, so they are rules between the two and move the key.
  */
 export const DECIDE_VERSION = 3;
@@ -253,7 +255,7 @@ const best = (p: Record<string, number>, vs: readonly Verdict[]): Verdict => vs.
 /**
  * The judgement H2O's distribution and the writer's answer come to. `p` is H2O's probability per verdict (the tier's
  * own option, insufficient evidence, left out and the rest renormalised); `proposal` the writer's parsed answer when
- * H2O's top was outdates, and `standing` whether its quotes passed. A standing proposal is an outdates in the side it
+ * H2O's top was outdates at the floor (null when the writer was not asked), and `standing` whether its quotes passed. A standing proposal is an outdates in the side it
  * names, its quote the evidence; anything else is H2O's best verdict that proposes nothing. Either way the verdict
  * probabilities are H2O's, so proposalConfidence reads P(outdates) and relationConfidence the relation words' mass (P(unrelated) for a distinct, SMD-3117).
  */

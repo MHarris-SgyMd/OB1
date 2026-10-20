@@ -7695,7 +7695,7 @@ if (want("16")) {
                                   AND thought_id IN (SELECT id FROM thoughts WHERE content LIKE '[16d]%')`) as { t: string; target: string; relation: string; key: string }[];
       const rel = (t: string, target: string) => drels.find((r) => r.t === t && r.target === target && r.relation === "related" && r.key === DKEY);
       assert(drels.length === 2 && rel(runNew, runOld) !== undefined && rel(migNew, migOld) !== undefined,
-        `the tier's related is a relation under decide mode's key, its outdates under the floor keeps the tier's relation, and the writer's "none" leaves the cutover pair neither a proposal nor a relation, the relation words' mass under the floor (${JSON.stringify(drels)})`);
+        `the tier's related is a relation under decide mode's key, its outdates under the floor takes the tier's relation, and the writer's "none" leaves the cutover pair neither a proposal nor a relation, the relation words' mass under the floor (${JSON.stringify(drels)})`);
       // Decide version 3 (SMD-3151 review pass 3): under the floor the writer is not asked, since a standing proposal
       // would record nothing and close the pair's relation; the relation's note names the pass's floor.
       type RelNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; floor?: number; writer?: unknown } } } };

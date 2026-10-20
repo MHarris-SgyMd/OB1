@@ -3041,7 +3041,8 @@ word **distinct**: two near neighbours the judge called unrelated, kept apart
 (SMD-3117, the word SMD-3116 gave it). Its floor is its own probability (the
 token's, or under decide mode H2O's), not the relation words' mass, which a
 confident unrelated leaves near nothing; under decide mode only H2O's own top
-unrelated records one, not one taken after a proposal failed. Prompt 4 still
+unrelated records one, not one taken after a proposal failed or under the
+floor (SMD-3151). Prompt 4 still
 asks for "unrelated", so no pass key moved. A distinct is one more word on the
 pair's one standing edge — a relation replaces it, and it a relation. The run
 summary says how many of each action's writes were distinct (`1 added (1
@@ -3118,16 +3119,18 @@ tier gives each pair's verdict, not the judge:
   a part of some work finishing does not outdate the whole. Under the floor a
   proposal could not be recorded, so the writer is not asked (SMD-3151): the
   pair takes the relation the tier's distribution gives at the floor, as a
-  quote that fails does, else its edge is closed. The pass counts it as an
-  outdates under the floor, settles a stale proposal on it as one, and a
-  relation it writes carries the floor in its note. The run's summary counts
-  the writer's calls by what came back.
+  quote that fails does, else its edge is closed. The pass counts it under
+  confidence and as a proposing verdict (its verdicts line counts the
+  relation word it takes, as for a failed quote), settles a stale proposal
+  on it as an outdates under the floor, and a relation it writes carries the
+  floor in its note. The run's summary counts the writer's calls by what came
+  back.
 - **Both quotes must check out** in the side each names and not in the other,
   or the pair stays at the tier's best verdict that proposes nothing. They are
   read without their markdown (SMD-3151), in quote and text alike: asterisks,
   backticks, brackets, escapes' backslashes, underscores at a word's edge and
-  a `#` or `>` run opening a word go, an inline link keeps its text and loses
-  its target, and struck text goes with its `~~`, read as withdrawn.
+  a `#` or `>` run opening a word go (not `#433`, whose hashes need a space,
+  nor `>=`), an inline link keeps its text and loses its target, and struck text goes with its `~~`, read as withdrawn.
 - **Version 3 is the pass's** (`@p4d3`): version 1's writer, SMD-3114's,
   two-sided with the part rule, its quotes read without markdown and asked
   only at the floor (SMD-3151). The writer quotes the words it reads, and on
@@ -3135,8 +3138,9 @@ tier gives each pair's verdict, not the judge:
   settling pairs, 10 of the 12 missed quotes there over markup. Under version
   1 a standing proposal under the floor recorded nothing and closed the pair's
   relation, and every relation the canary held for a pair whose quotes had
-  failed sat under it, so reading more quotes without the floor's gate would
-  have closed them for no proposal. Version 2 was measured on the canary's
+  failed sat under it (all 67), so reading more quotes without the floor's
+  gate would have closed about 50 of them, those whose quotes now check out,
+  for no proposal. Version 2 was measured on the canary's
   proposals and shelved (2026-10-18), having missed its bar twice. It added:
   - the record rule: a record of past understanding (a done ticket, a session
     summary, a change record) is outdated only by a later thought that says

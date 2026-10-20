@@ -667,7 +667,7 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   const worst = ["[".repeat(6000), "[a](".repeat(1500), "[a](" + " ".repeat(5996), "[a](" + "\n".repeat(5996), "[a" + "\n a".repeat(2999), "~~a".repeat(2000), "`a".repeat(3000), "a" + "_".repeat(5998) + "b"];
   const t1 = performance.now();
   for (let i = 0; i < 20; i++) for (const s of worst) withoutMarkdown(s);
-  assert(performance.now() - t1 < 200, `twenty readings each of six thousand brackets, an unclosed link run, a link opened onto six thousand spaces or line breaks, a link's text across three thousand, runs of tildes and backticks, and an underscore run take ${(performance.now() - t1).toFixed(0)} ms: every run is bounded and tried from its start alone (review passes 1 and 2)`);
+  assert(performance.now() - t1 < 200, `twenty readings each of six thousand brackets, an unclosed link run, a link opened onto six thousand spaces or line breaks, a link's text across three thousand, runs of tildes and backticks, and an underscore run take ${(performance.now() - t1).toFixed(0)} ms: every run is bounded or tried from its start alone (review passes 1 and 2)`);
   assert(parseJudgement("I cannot say.").malformed && parseJudgement("").malformed, "prose and an empty answer are malformed");
   const long = parseJudgement(`{"verdict":"outdates","supersedes":"unknown","confidence":0.6,"reason":"${"x\u001b[2K ".repeat(200)}"}`);
   assert(long.reason.length <= 400 && !long.reason.includes("\u001b"), "the reason is clipped to 400 characters with control characters stripped");
@@ -1723,7 +1723,7 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
 
 // ── 15. Decide mode: the tier decides, the judge's model writes the proposal ──
 
-console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal written only on its outdates and only when both quotes check, a pass key naming both, and the pass's readers taking it as a judgement");
+console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal written only on its outdates at the floor and only when both quotes check, a pass key naming both, and the pass's readers taking it as a judgement");
 {
   // The key: decide mode's names the decider, the writer and the mode's version; with no decider the judge's stands.
   assert(consolidatePassKey({ judgeModel: "qwen2.5:7b", decider: "" }) === consolidateKey("qwen2.5:7b"), "no decider: the judge's key");
@@ -1768,7 +1768,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   const msg = writerMessages({ older, newer }, PASS_WRITER.twoSided, PASS_WRITER.partRule, PASS_WRITER.recordRule)[0].content;
   assert(msg.startsWith(WRITER_HEAD) && msg.includes("<thought_a>\nthe plan is to ship on Friday\n</thought_a>") && msg.includes('"stale": words copied') && msg.includes(PART_RULE.trim()) && !msg.includes(RECORD_RULE.trim()),
     "the pass's writer: both thoughts, the stale quote and the part rule, not the record rule");
-  // The pass asks version 1's text, SMD-3114's, word for word (version 3 moved only the quote check). Under the record
+  // The pass asks version 1's text, SMD-3114's, word for word (version 3 moved the quote check and when the writer is asked, not its prompt). Under the record
   // rule (version 2, the eval's) the definition no longer counts a later summary of the same work, or one saying the
   // other is done, as outdating it.
   const v1 = writerRules(true, true), v2 = writerRules(true, true, true);
@@ -1883,7 +1883,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     const u = await decidePair(older, newer, cfg, jev, FLOOR);
     assert(u.verdict === "related" && u.decide.top === "outdates" && u.decide.floor === FLOOR && u.decide.writer === undefined && writerCalls === w0
         && proposalVerdict(u) === null && relationVerdict(u) === "related" && relationConfidence(u).mass === 0.55,
-      "H2O's outdates under the floor: no writer call, and the pair keeps H2O's relation at the relation words' mass, its note naming the floor");
+      "H2O's outdates under the floor: no writer call, and the pair takes H2O's relation at the relation words' mass, its note naming the floor");
     tierP = { unrelated: 0.05, related: 0.3, evolves: 0.1049, duplicate: 0.05, outdates: 0.4951 };
     const atFloor = await decidePair(older, newer, cfg, jev, FLOOR);
     tierP = { unrelated: 0.05, related: 0.3, evolves: 0.1051, duplicate: 0.05, outdates: 0.4949 };

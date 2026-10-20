@@ -4217,8 +4217,9 @@ notwithstanding. The reason: the misses are on pairs migration 079 keeps out of
 the pass, and only the canary's review queue can say what the writer proposes
 on the candidates the pass does judge. It is the pass's decide mode
 (`OB1_CONSOLIDATE_DECIDER`, `server-portable/consolidate-decide.ts`): the
-question, the writer's prompt and the quote checks are the ones measured here,
-moved out of this eval, which imports them back. The pass adds one floor that
+question, the writer's prompt and the quote checks were the ones measured here,
+moved out of this eval, which imports them back (decide version 3 has changed
+the quote checks since, below). The pass adds one floor that
 this eval did not apply: a proposal is recorded at H2O's P(outdates) and only at
 0.5 or more. On the third set that drops 5 of the adopted writer's 81 proposals:
 3 true supersessions, 1 false proposal and 1 unlabelled candidate. The writer

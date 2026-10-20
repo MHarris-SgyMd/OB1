@@ -396,12 +396,13 @@ const forQuote = (t: string) => plainText(t).replace(/^[\s"'`.]+|[\s"'`.,;:]+$/g
  * inline link or image, `[text](target)`, keeps its text and loses its target; a bare URL or an autolink stays. Struck
  * text goes with its `~~`, read as withdrawn, by GFM's rule: the markers flank the words and never sit in a code span,
  * so a stray `~~` opens nothing. A heading's `#`s and a `>` run that opens a word go, a comparison's `>` among them
- * (`p95 > 200` reads `p95 200`), but not `>=`. An escape loses its backslash. A bracket after a letter or digit reads
- * as a space (`argv[2]`, a footnote's `[1]`), so the words either side stay apart. Asterisks, backticks, any bracket or
- * `~~` left over and an underscore run at a word's edge go; one inside a word (`snake_case`, `a__b`) stays. Every run
- * a rule may take is bounded (a link's text 200 characters, its target 1,000 and the space around it 16; a strike or a
- * code span 1,000) and is tried from its start alone, so each costs a bounded scan: a run of spaces three parts of a
- * link could each take (review pass 1) and an underscore run tried from each of its characters (pass 2) were quadratic.
+ * (`p95 > 200` reads `p95 200`), but not `>=`. An escape loses its backslash. An opening bracket after a letter or
+ * digit reads as a space (`argv[2]`, a footnote's `[1]`), so the words either side stay apart. Asterisks, backticks,
+ * any bracket or `~~` left over and an underscore run at a word's edge go; one inside a word (`snake_case`, `a__b`)
+ * stays. Every run a rule may take is bounded (a link's text 200 characters, its target 1,000 and the space around it
+ * 16; a strike or a code span 1,000) or, a single character repeated, tried from its start alone, so each costs a
+ * linear scan: a run of spaces three parts of a link could each take (review pass 1) and an underscore run tried from
+ * each of its characters (pass 2) were quadratic.
  */
 export function withoutMarkdown(t: string): string {
   return t
