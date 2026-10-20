@@ -2089,7 +2089,7 @@ if (want("6j")) {
 }
 
 if (want("6k")) {
-  console.log("\n[6k] The lapse locks its own tree: a link moved out under a taking's lapse waits or is read again and leaves the pointers above it, a link moved in waits for the taking and lapses the pointer above it, in either order; the path locked bottom-up and a pointer's target chain bottom-up, so neither deadlocks — but for the one named residual, a pointer write whose target chain reaches a row the taking holds, moving a row it will lock; page writes never deadlock (migration 101, SMD-3046)");
+  console.log("\n[6k] The lapse locks its own tree: a link moved out under a taking's lapse waits or is read again and leaves the pointers above it, a link moved in waits for the taking and lapses the pointer above it, in either order; the path locked bottom-up and a pointer's target chain bottom-up, so neither deadlocks — but for the one named residual, a pointer write whose target chain reaches a row the taking holds, moving a row it will lock; page writes never deadlock (migration 103, SMD-3046)");
   await sql`DELETE FROM thoughts`;
   // S is the hook's, its capture pointer `first` onto S; a write key's
   // re-capture note on S takes S (082), and its lapse clears `first` and
@@ -2282,7 +2282,7 @@ if (want("6k")) {
     // crossed both (review pass 2): the unlink of X waited on the link the
     // lapse held, and the delete's cascade on the link above the deleted
     // row. (A link on the held row's own path is still locked before the row
-    // — a delete's cascade needs that order — the multi-call class 101's
+    // — a delete's cascade needs that order — the multi-call class 103's
     // header names.)
     {
       const { s, first, x, y } = await fixture();

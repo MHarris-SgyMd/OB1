@@ -14053,9 +14053,9 @@ console.log("\n[82] Migration 092: a capture-only key's thought is taken while i
       && /ob1:capture-chain-reaches-outside/.test(await src("ob1_chain_reaches_outside(uuid, uuid, uuid, uuid)"))
       && /ob1:capture-pointer-lapses/.test(await src("ob1_lapse_capture_pointers()")) && /ob1:capture-pointer-checked-at-write/.test(await src("ob1_check_capture_pointer()"))
       && ["ob1_thought_taken", "ob1_check_capture_pointer", "ob1_note_recapture", "ob1_chain_reaches_outside", "ob1_capture_taken_by_log"].every((f) => lastDefinerOf(f).startsWith("092"))
-      && lastDefinerOf("ob1_lapse_capture_pointers").startsWith("101")
+      && lastDefinerOf("ob1_lapse_capture_pointers").startsWith("103")
       && lastDefinerOf("ob1_takes_thought").startsWith("082") && /'supersedes'/.test(trg?.d ?? ""),
-    `092's chain, its log read, the taken read and the check, the lapse (101's since SMD-3046, on 097's), each its comment and sentinel, 082's rule unchanged, the lapse's WHEN naming supersedes (${trg?.d})`);
+    `092's chain, its log read, the taken read and the check, the lapse (103's since SMD-3046, on 097's), each its comment and sentinel, 082's rule unchanged, the lapse's WHEN naming supersedes (${trg?.d})`);
 
   const HOOK = { name: "hook-82", agent_id: await agent("7", "hook-82", "capture"), via: "test-door", scope: "capture" };
   const NO_AGENT = { name: "hook-82", via: "test-door", scope: "capture" };
@@ -14670,11 +14670,11 @@ console.log("\n[87] Migration 097: one walk for 082's lapse — ob1_lapse_walk i
   const comment = async (sig: string) => (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? "";
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
   const vol = (await one<{ v: string }>(`SELECT provolatile::text AS v FROM pg_proc WHERE oid = $1::regprocedure`, [WALK])).v;
-  // 101 (SMD-3046) moved the walk's body into ob1_lapse_tree, the walk its
+  // 103 (SMD-3046) moved the walk's body into ob1_lapse_tree, the walk its
   // clears, and the trigger reads the tree; this section re-applies 097 on
   // purpose, so either form is 097's one walk.
   const TREE = "ob1_lapse_tree(uuid, uuid)";
-  const shape = async () => ["ob1_lapse_walk", "ob1_lapse_capture_pointers", "ob1_lapse_tree"].every((f) => lastDefinerOf(f).startsWith("101")) && lastDefinerOf("ob1_accept_lapses").startsWith("097")
+  const shape = async () => ["ob1_lapse_walk", "ob1_lapse_capture_pointers", "ob1_lapse_tree"].every((f) => lastDefinerOf(f).startsWith("103")) && lastDefinerOf("ob1_accept_lapses").startsWith("097")
     && /ob1:lapse-walk/.test(await src(WALK)) && /ob1:capture-pointer-lapses/.test(await src(LAPSE)) && /ob1:accept-lapses-read/.test(await src(READ))
     && /ob1_lapse_(?:walk|tree)\(NEW\.thought_id, v_to\)/.test(await src(LAPSE)) && /RETURN ob1_lapse_walk\(p_side, p_other\)/.test(await src(READ))
     && /ob1_accept_takes\(p_row, p_onto\)/.test((await src(WALK)) + (await src(TREE)));
@@ -14682,7 +14682,7 @@ console.log("\n[87] Migration 097: one walk for 082's lapse — ob1_lapse_walk i
       && (await functionsNamed("ob1_lapse_walk")) === 1 && (await functionsNamed("ob1_accept_lapses")) === 1 && (await functionsNamed("ob1_lapse_capture_pointers")) === 1
       && /097 \/ SMD-3035/.test(await comment(WALK)) && /097 \/ SMD-3035/.test(await comment(LAPSE)) && /097 \/ SMD-3035/.test(await comment(READ)) && /097 \/ SMD-3035/.test(await comment(TAKES))
       && lastDefinerOf("ob1_accept_takes").startsWith("094"),
-    "097 defines the walk (STABLE) and redefines the lapse and the read as calls of it — since 101 through ob1_lapse_tree — each its comment and sentinel; the walk's gate is 094's ob1_accept_takes, its comment saying so");
+    "097 defines the walk (STABLE) and redefines the lapse and the read as calls of it — since 103 through ob1_lapse_tree — each its comment and sentinel; the walk's gate is 094's ob1_accept_takes, its comment saying so");
 
   // The trigger clears what the read returned, in its order. The hook's side
   // S carries two of its capture-scoped pointers (082's check allows one: the
@@ -14815,7 +14815,7 @@ console.log("\n[87] Migration 097: one walk for 082's lapse — ob1_lapse_walk i
   const own = !/ob1_lapse_walk/.test(await src(LAPSE)) && !/ob1_lapse_walk/.test(await src(READ));
   await reapply("097");
   assert(own && (await shape()), "092 and 094 re-applied put their own lapse and read back; 097 re-applied after them, the walk");
-  // 097 re-applied put its own walk and lockless trigger back over 101's.
+  // 097 re-applied put its own walk and lockless trigger back over 103's.
   await restoreShipped("ob1_lapse_walk", "ob1_lapse_capture_pointers", "ob1_lapse_tree");
   await db.exec(`DELETE FROM thoughts`);
 }
@@ -14987,7 +14987,7 @@ console.log("\n[90] Migration 100: the thoughts with no vector by an index of th
   await db.exec(`UPDATE pg_index SET indisvalid = true WHERE indexrelid = 'thoughts_vectorless_idx'::regclass`);
 }
 
-console.log("\n[91] Migration 101: the lapse locks its own tree — ob1_lapse_tree is 097's walk with the links it went on through, ob1_lapse_walk its clears (097's output unchanged); the trigger locks a pointer's target chain before the walk and each clear's links before it clears, so a link moved since the walk leaves the clears above it, and a cleared row the log took still anchors the clears above it; a re-apply a no-op (SMD-3046)");
+console.log("\n[93] Migration 103: the lapse locks its own tree — ob1_lapse_tree is 097's walk with the links it went on through, ob1_lapse_walk its clears (097's output unchanged); the trigger locks a pointer's target chain before the walk and each clear's links before it clears, so a link moved since the walk leaves the clears above it, and a cleared row the log took still anchors the clears above it; a re-apply a no-op (SMD-3046)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -15000,7 +15000,7 @@ console.log("\n[91] Migration 101: the lapse locks its own tree — ob1_lapse_tr
   let serial = 0;
   const cap = async (label: string, actor: Record<string, unknown>, supersedes?: string) =>
     (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`,
-      [`[91] ${label} ${++serial}`, JSON.stringify({ metadata: { source: "codex" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }), unit(91)])).r.id;
+      [`[93] ${label} ${++serial}`, JSON.stringify({ metadata: { source: "codex" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }), unit(91)])).r.id;
   const unchecked = async <T>(body: () => Promise<T>) => {
     await db.exec(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_check_capture_pointer`);
     try { return await body(); } finally { await db.exec(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_check_capture_pointer`); }
@@ -15016,12 +15016,12 @@ console.log("\n[91] Migration 101: the lapse locks its own tree — ob1_lapse_tr
   const meta = await one<{ v: string; l: string }>(`SELECT p.provolatile::text AS v, l.lanname AS l FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang WHERE p.oid = $1::regprocedure`, [WALK]);
   const trg = await src(LAPSE);
   assert((await functionsNamed("ob1_lapse_tree")) === 1 && (await functionsNamed("ob1_lapse_walk")) === 1 && (await functionsNamed("ob1_lapse_capture_pointers")) === 1
-      && ["ob1_lapse_tree", "ob1_lapse_walk", "ob1_lapse_capture_pointers"].every((f) => lastDefinerOf(f).startsWith("101"))
+      && ["ob1_lapse_tree", "ob1_lapse_walk", "ob1_lapse_capture_pointers"].every((f) => lastDefinerOf(f).startsWith("103"))
       && /ob1:lapse-tree/.test(await src(TREE)) && /ob1_accept_takes\(p_row, p_onto\)/.test(await src(TREE)) && meta.v === "s" && meta.l === "sql" && /ob1:lapse-walk/.test(await src(WALK)) && /ob1_lapse_tree\(p_row, p_onto\)/.test(await src(WALK))
       && /ob1:lapse-locks-its-tree/.test(trg) && /v_tree := ob1_lapse_tree\(NEW\.thought_id, v_to\)/.test(trg)
       && trg.indexOf("FOR k IN REVERSE array_length(v_chain, 1)..1 LOOP") > 0 && trg.indexOf("FOR k IN REVERSE array_length(v_chain, 1)..1 LOOP") < trg.indexOf("v_tree := ob1_lapse_tree") && /AND supersedes = \(v_below->>v_path\[k\]::text\)::uuid\s+FOR SHARE/.test(trg)
-      && /101 \/ SMD-3046/.test(await comment(TREE)) && /101 \/ SMD-3046/.test(await comment(WALK)) && /101 \/ SMD-3046/.test(await comment(LAPSE)),
-    "101 defines the tree (STABLE, the walk's gate and sentinel) and redefines the walk as SQL over it and the trigger to lock a pointer's target chain before the walk and each clear's links before its clear; each comment names 101");
+      && /103 \/ SMD-3046/.test(await comment(TREE)) && /103 \/ SMD-3046/.test(await comment(WALK)) && /103 \/ SMD-3046/.test(await comment(LAPSE)),
+    "103 defines the tree (STABLE, the walk's gate and sentinel) and redefines the walk as SQL over it and the trigger to lock a pointer's target chain before the walk and each clear's links before its clear; each comment names 103");
 
   // The tree for the race's fixture: the hook's S, its capture pointer first
   // onto S, the hook's X linked onto S by the write key, the hook's Y onto X.
@@ -15079,7 +15079,7 @@ console.log("\n[91] Migration 101: the lapse locks its own tree — ob1_lapse_tr
     PERFORM set_config('ob1.t91_move', '', false);
   END IF;
 `;
-  assert(shipped.includes(AFTER_TREE), "[91] setup: the shipped trigger calls the tree where the scratch copy hooks in");
+  assert(shipped.includes(AFTER_TREE), "[93] setup: the shipped trigger calls the tree where the scratch copy hooks in");
   const moved = async (row: string, taking: () => Promise<unknown>) => {
     await db.exec(shipped.replace(AFTER_TREE, AFTER_TREE + MOVE));
     try {
@@ -15107,24 +15107,24 @@ console.log("\n[91] Migration 101: the lapse locks its own tree — ob1_lapse_tr
   const s3 = await cap("S, the hook's", HOOK), h = await cap("h, onto S", HOOK, s3);
   await note(h);
   const kRow = await unchecked(() => cap("K, onto h", HOOK, h));
-  assert((await pointerOf(h)) === s3 && (await pointerOf(kRow)) === h, "[91] setup: h onto S, taken by the write key's re-capture; K onto h");
+  assert((await pointerOf(h)) === s3 && (await pointerOf(kRow)) === h, "[93] setup: h onto S, taken by the write key's re-capture; K onto h");
   await moved(h, () => note(s3));
   assert((await pointerOf(h)) === null && (await pointerOf(kRow)) === null,
     `a cleared row the log took anchors the clears above it: h's pointer moved after the walk, and K onto h is still cleared (h→${await pointerOf(h)}, K→${await pointerOf(kRow)})`);
 
-  // Re-apply: 101 again moves nothing; 097 re-applied puts its walk and the
-  // lockless trigger back, and the restore (101 last) the locks.
+  // Re-apply: 103 again moves nothing; 097 re-applied puts its walk and the
+  // lockless trigger back, and the restore (103 last) the locks.
   const rows = async () => JSON.stringify(await q(`SELECT id, supersedes, updated_at FROM thoughts ORDER BY id`));
   const events = async () => (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n;
   const rowsBefore = await rows(), eventsBefore = await events();
-  await reapply("101");
+  await reapply("103");
   assert((await rows()) === rowsBefore && (await events()) === eventsBefore && /ob1:lapse-locks-its-tree/.test(await src(LAPSE)) && (await functionsNamed("ob1_lapse_tree")) === 1,
-    "101 re-applied: the tree, the walk and the locking trigger in place, no row and no event moved");
+    "103 re-applied: the tree, the walk and the locking trigger in place, no row and no event moved");
   await reapply("097");
   const lockless = !/ob1:lapse-locks-its-tree/.test(await src(LAPSE)) && !/ob1_lapse_tree/.test(await src(WALK));
   await restoreShipped("ob1_lapse_walk", "ob1_lapse_capture_pointers", "ob1_lapse_tree");
   assert(lockless && /ob1:lapse-locks-its-tree/.test(await src(LAPSE)) && /ob1_lapse_tree\(p_row, p_onto\)/.test(await src(WALK)),
-    "097 re-applied puts its own walk and lockless trigger back; 101 restored after it, the tree and the locks");
+    "097 re-applied puts its own walk and lockless trigger back; 103 restored after it, the tree and the locks");
   await db.exec(`DELETE FROM thoughts`);
 }
 

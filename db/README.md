@@ -259,7 +259,7 @@ guards against the accident (`plugins/README.md`).
 ## Expected outcome
 
 `bun test-schema.ts` prints `2925 assertions: 2925 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and one (101) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and three (103) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3046).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 103 SMD-3046).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1629,7 +1629,7 @@ write function moves one out since 099: every pointer write through
 lock the accept holds. Two writes still take none and move nothing out: a
 first capture naming supersedes (a new row, nothing above it), and another
 taker's own lapse clears, which clear nothing the accept's walk read as
-staying. Since 101 the lapse locks its own tree, so a link moved by any
+staying. Since 103 the lapse locks its own tree, so a link moved by any
 writer under any taking is waited for or read again — but for one named
 40P01, a pointer write whose target chain reaches a row the taking holds,
 overlapping it, and a transaction of several calls crossing its locks (092
@@ -1717,7 +1717,7 @@ schema's index), test-store-sql [18] (the store's two page statements and
 the count read through it, each reading only its own rows' entries; the
 page's LIMIT).
 
-Migration 101 has the lapse lock its own tree (SMD-3046). The lapse reads
+Migration 103 has the lapse lock its own tree (SMD-3046). The lapse reads
 the tree above a taken row in one snapshot and then locks and clears what
 it found, so a link moved between the two was missed: one moved out still
 had the capture-only pointers above it cleared, one moved in onto the taken
@@ -1760,13 +1760,13 @@ lock per clear — against 097, about +10% over 200 rows and +12–35% over
 the listing's read pays too; a pointer onto a thought locks its chain even
 when nothing lapses, usually one to three rows, while it holds the review
 lock. It refuses to apply without 097;
-097 re-applied puts back its own walk and the lockless trigger and 101
-after it the tree and the locks. test-schema [91] (the tree beside 097's
+097 re-applied puts back its own walk and the lockless trigger and 103
+after it the tree and the locks. test-schema [93] (the tree beside 097's
 walk, a link moved out made deterministic, the walk-on anchor),
 test-live [6k] (moved out, moved in in either order, the lock orders, a
 held cleared row edited or deleted under the lapse, a re-point out of the
 tree, the named residual, page writes racing a delete), test-upgrade
-[20at].
+[20av].
 
 ## What changed relative to the guide
 
