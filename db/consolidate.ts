@@ -1600,6 +1600,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // floor here, as a standing proposal under it was, though the pair takes the relation H2O's distribution gives at
       // the floor, else its edge is closed, as a quote that fails does.
       const gated = j.decide?.floor !== undefined;
+      // A proposing verdict: the writer's standing outdates, or the tier's outdates the gate left.
+      const proposing = verdict !== null || gated;
       if (j.decide) {
         const writer = j.decide.writer as { current?: string } | undefined;
         if (gated) totals.gated++;
@@ -1614,12 +1616,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // SMD-1873: the token probability of a proposing verdict when the
       // endpoint returned one, else the number the model wrote.
       const scored = proposalConfidence(j);
-      if (verdict !== null || gated) totals[scored.source === "token" ? "tokenScored" : "statedScored"]++;
+      if (proposing) totals[scored.source === "token" ? "tokenScored" : "statedScored"]++;
       let proposalId: string | null = null;
       let recorded: "proposed" | "under-confidence" | "already" | "replaced" | "settled" | null = null;
       if (verdict === null || scored.confidence < MIN_CONFIDENCE) {
-        const under = verdict !== null || gated;
-        if (under) {
+        if (proposing) {
           totals.underConfidence++;
           recorded = "under-confidence";
         }
@@ -1628,7 +1629,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // (The older's fingerprint from the read the judge was sent, not the
         // stale read before the candidates — a move between the two would
         // record a text the judge did not see; first review pass, cold read.)
-        if (staleRow && await settleStale(staleRow, !under ? `judged again after a text moved — ${j.verdict}` : `judged again after a text moved — ${gated ? "outdates" : j.verdict} at confidence ${scored.confidence.toFixed(2)} (${scored.source === "token" ? "token probability" : "the number the model wrote"}), under the floor ${MIN_CONFIDENCE}${gated ? ", the writer not asked" : ""}`, older.fingerprint, row.fingerprint, under ? "under-confidence" : j.verdict)) {
+        if (staleRow && await settleStale(staleRow, !proposing ? `judged again after a text moved — ${j.verdict}` : `judged again after a text moved — ${gated ? "outdates" : j.verdict} at confidence ${scored.confidence.toFixed(2)} (${scored.source === "token" ? "token probability" : "the number the model wrote"}), under the floor ${MIN_CONFIDENCE}${gated ? ", the writer not asked" : ""}`, older.fingerprint, row.fingerprint, proposing ? "under-confidence" : j.verdict)) {
           staleMet.settled.add(staleRow.id);
           recorded = "settled";
         }
