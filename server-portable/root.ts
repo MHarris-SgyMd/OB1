@@ -147,6 +147,12 @@ export type Env = {
   /** The supersession judge's model (db/consolidate.ts), when it is not OB1_METADATA_MODEL; the server never judges, but embed.ts reads one Env (SMD-1901). */
   OB1_JUDGE_MODEL?: string;
   /**
+   * Consolidation's decide mode (SMD-3115): the typed-decision tier's model that gives each verdict, the judge's
+   * model then writing only the proposals it calls. Unset, the judge decides. The server never judges; preflight
+   * reads it to name the pass key and to check the tier serves it.
+   */
+  OB1_CONSOLIDATE_DECIDER?: string;
+  /**
    * The typed-decision tier (jev.ts, SMD-2050): where it is served, the model
    * the caller expects, and 1/on when that endpoint is on this box (declared,
    * as OB1_LLM_LOCAL is). The server never decides; preflight, which runs in

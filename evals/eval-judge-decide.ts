@@ -43,52 +43,27 @@
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { loadEnv } from "./env.ts";
-import { buildJudgeMessages, type Verdict } from "../server-portable/consolidate.ts";
-import { jevDecideMany, resolveJevConfig, type JevConfig, type JevDecision, type JevEnv, type JevOption, type JevResult } from "../server-portable/jev.ts";
+import { type Verdict } from "../server-portable/consolidate.ts";
+// The question, the definitions and the pair's rendering are the pass's own (SMD-3115's decide mode asks C).
+import { DESCRIPTIONS, OFFERED, offered, pairContext, RELATION_QUESTION } from "../server-portable/consolidate-decide.ts";
+import { jevDecideMany, resolveJevConfig, type JevConfig, type JevDecision, type JevEnv, type JevResult } from "../server-portable/jev.ts";
 import { proposes, rightFor, type AnswerLine, type PairLine } from "./eval-judge.ts";
+
+export { DESCRIPTIONS, pairContext, RELATION_QUESTION };
 
 // ── The questions ─────────────────────────────────────────────────────────────
 
 /** The two-pass framing's first question, the proposition its binary decision weighs. */
 export const SAME_SUBJECT = "THOUGHT A and THOUGHT B are about the same subject";
-/** The choices' question. */
-export const RELATION_QUESTION = "How do THOUGHT A and THOUGHT B relate?";
-
-/** Prompt 4's verdict definitions (CONSOLIDATE_PROMPT), worded to follow the adapter's "It is …". */
-export const DESCRIPTIONS: Record<Verdict, string> = {
-  unrelated: "unrelated: the two are about different subjects, whatever names, systems or files they share",
-  duplicate: "duplicate: the two state the same claims, so deleting either would lose nothing the other says",
-  outdates:
-    "outdates: the two describe the same thing at different moments, or in ways that cannot both hold, so one of them is no longer current, " +
-    "such as a progress note and a later one of the same work, a status and a later status, a plan and the plan that replaced it, " +
-    "a decision and its reversal, or one saying the other is done or replaced",
-  evolves: "evolves: one continues the other and both stay current, such as a follow-up, a next step, a part split out, or a fix for what the other reported",
-  related: "related: the same subject and compatible, neither continuing nor outdating the other; one may restate, summarise or add detail to the other",
-};
 export const FOUR: readonly Verdict[] = ["related", "evolves", "duplicate", "outdates"];
-export const FIVE: readonly Verdict[] = ["unrelated", "related", "evolves", "duplicate", "outdates"];
-const options = (vs: readonly Verdict[]): JevOption[] => vs.map((v) => ({ id: v, description: DESCRIPTIONS[v] }));
-
-/**
- * The two thoughts as the judge reads them: prompt 4's own rendering, from "THOUGHT A, captured" to the rules after
- * thought B. With `clip`, each thought is cut to its first `clip` characters first, the decider reading less than
- * the judge does.
- */
-export function pairContext(p: Pick<PairLine, "older" | "newer">, clip?: number): string {
-  const cut = <S extends { content: string }>(s: S): S => (clip ? { ...s, content: s.content.slice(0, clip) } : s);
-  const msg = buildJudgeMessages(cut(p.older), cut(p.newer))[0].content;
-  const start = msg.indexOf("THOUGHT A, captured");
-  const end = msg.lastIndexOf("\n\nReturn strict JSON");
-  if (start < 0 || end <= start) throw new Error('prompt 4\'s layout moved: no span from "THOUGHT A, captured" to "Return strict JSON"');
-  return msg.slice(start, end);
-}
+export const FIVE: readonly Verdict[] = OFFERED;
 
 /** The three decisions every pair is asked. */
 export function decisionsFor(context: string): Record<Ask, JevDecision> {
   return {
     S: { id: "S", kind: "binary", proposition: SAME_SUBJECT, context },
-    T: { id: "T", kind: "choice", question: RELATION_QUESTION, options: options(FOUR), context },
-    C: { id: "C", kind: "choice", question: RELATION_QUESTION, options: options(FIVE), context },
+    T: { id: "T", kind: "choice", question: RELATION_QUESTION, options: offered(FOUR), context },
+    C: { id: "C", kind: "choice", question: RELATION_QUESTION, options: offered(FIVE), context },
   };
 }
 

@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2929 assertions: 2929 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and one (101) migrations applied, and
+`bun test-schema.ts` prints `2946 assertions: 2946 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and two (102) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1752,6 +1752,37 @@ this tree's `--reapply` (a plain run skips 101, recorded as applied).
 test-schema [83] and [91], test-upgrade [20at], test-live [10g] and [38b],
 test-preflight.
 
+Migration 102 stores the consolidation judge's distinct (SMD-3117). Every
+pair the pass judges is a near neighbour (029's candidate rule), so an
+unrelated verdict says two look-alikes are about different subjects; 084
+closed the pair's edge on one and kept nothing, so nothing told a reader, a
+merge or a later judge, and SMD-3116 — the typed-label spike, which renamed
+unrelated to distinct — had no pool of such pairs to measure. 084's
+validator and `record_thought_relation` now take `distinct`, on 084's bodies
+verbatim but the word list, and their comments and `thought_facets`' say so;
+084's set per pair stands (one standing relation per pair, a delete closing
+or dropping it, its lineage row with it). The door carries a sentinel,
+`ob1:relation-distinct`, which `consolidate.ts` reads at start, on every
+poll of a follower, when the door refuses the word mid-pass, before it
+gives a distinct up and for its summary's remedy: 102 keeps 084's
+signature, and on a brain short of it
+the pass sends no distinct, an unrelated verdict at the floor closing the
+pair's edge as before unless that edge is a distinct. It refuses to apply
+without 084; 084 re-applied takes the word away and 102 after it puts it
+back. A pair judged unrelated before 102 has no distinct until the pass
+judges it again. test-schema [92] (the vocabulary, the door's set per pair
+with distinct in it, the deletes, the re-applies), test-live [16] (an
+unrelated verdict at the floor, under it, on its token, kept and replaced;
+on a brain short of 102 a follower's check, `--status` and `--dry-run`, a
+distinct left standing, another edge closed beside decoy distincts on each
+side's other pairs, a side deleted mid-pass, 102 applied under a one-shot
+run and after its last lost distinct, a follower that sees 102 applied, 084
+put back under a running pass, a door that keeps the sentinel and refuses
+the word, and relations off, coming back short of 102, going off as 102
+lands and coming back with it, a check and a run under a role without the
+structure group; `--status` and `--list relations`) and [41]
+(a distinct pair never posted to the board), test-upgrade [20au].
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -3002,10 +3033,40 @@ floor (else the written number does), its lineage row (`derivations`, kind
 written once and only closed, and since 084 no facet changes its kind.
 `record_thought_relation` keeps it when the pair is judged the same again,
 replaces it when judged another word, key or score, and closes it
-(`valid_until`) when a well-formed judgement sees none — unrelated, outdates,
-or under the floor (a malformed or timed-out pair leaves it standing); the other
+(`valid_until`) when a well-formed judgement sees none — outdates, or under
+the floor (a malformed or timed-out pair leaves it standing); the other
 thought's delete closes it too, and the newer thought's takes it and its
-lineage. `--status` counts the relations standing and `--list relations`
+lineage. Since 102 an unrelated verdict at the floor is a relation too, the
+word **distinct**: two near neighbours the judge called unrelated, kept apart
+(SMD-3117, the word SMD-3116 gave it). Its floor is its own probability (the
+token's, or under decide mode H2O's), not the relation words' mass, which a
+confident unrelated leaves near nothing; under decide mode only H2O's own top
+unrelated records one, not one taken after a proposal failed. Prompt 4 still
+asks for "unrelated", so no pass key moved. A distinct is one more word on the
+pair's one standing edge — a relation replaces it, and it a relation. The run
+summary says how many of each action's writes were distinct (`1 added (1
+distinct)`), and the readers keep it apart: `--status` counts the distinct
+pairs after the relations, `--list relations` leaves them out, brain_info
+counts them beside the relations and never as a board pair, and board
+findings never post one. On a brain short of 102 (084's door refuses the
+word) an unrelated verdict at the floor closes the pair's edge, as before,
+unless that edge is a distinct, which stands: the verdict agrees with it,
+and its claim ends succeeded, so a closed one would not come back with 102.
+The run says so at its start — beside relations' note when a role stores
+none, so fixing the role does not reveal the migration only then — and in
+`--status` and `--dry-run`, with both remedies (`migrate.ts`, or `--reapply`
+where the ledger records 102 under a hand re-apply of 084), and its summary
+counts the verdicts at the floor it could not store, naming the remedy while
+the brain still lacks 102. The pass reads 102's sentinel in the door's body
+to know: at start, on every poll of a follower, before it gives a distinct
+up (so 102 applied under a running pass is taken at the next pair that would
+lose one), for its summary's remedy, and when the door refuses the word
+mid-pass (084 re-applied under it), where it stops
+sending the word instead of failing the thought; a door that keeps the
+sentinel and still refuses fails the thought, a defect to see. What a run
+says it stores — relations, and distinct with them — is said as one state:
+each change once, distinct's line only while relations are stored or as
+they come back. `--status` counts the relations standing and `--list relations`
 lists them, an edge whose text moved since flagged `EDITED SINCE JUDGED`
 (until SMD-2726's `rebuild_derived` arm closes such an edge, clearing the
 newer thought's claim — `DELETE FROM thought_work_claims WHERE work_type =
@@ -3045,6 +3106,44 @@ a pair that has one. `evals/eval-judge.ts` measures all of this on a
 brain's own labels. The worker's agent id rides along as 016's mentions carry
 theirs.
 
+**Decide mode** (SMD-3115, measured by SMD-3114). With `OB1_CONSOLIDATE_DECIDER`
+naming the typed-decision tier's model (H2O-Lightning-4B, `jev/h2o`), the
+tier gives each pair's verdict, not the judge:
+- **The tier's question** is prompt 4's five verdicts as one choice, over
+  prompt 4's own rendering of the pair.
+- **The writer.** Only when the tier's top verdict is outdates is the judge's
+  model asked, and only to write the proposal: which thought is current, the
+  words in it that show the other is not, and the other's words that no
+  longer hold. **The part rule** holds it: a part of some work finishing does
+  not outdate the whole.
+- **Both quotes must check out** in the side each names and not in the other,
+  or the pair stays at the tier's best verdict that proposes nothing.
+- **Version 1 is the pass's** (`@p4d1`), SMD-3114's writer, two-sided with the
+  part rule. Version 2 was measured on the canary's proposals and shelved
+  (2026-10-18), having missed its bar twice. It added:
+  - the record rule: a record of past understanding (a done ticket, a session
+    summary, a change record) is outdated only by a later thought that says
+    something different about its subject, never by its work reported done;
+  - a quote reading that takes a quote shortened with "…" piece by piece, and
+    lets a stale claim the current thought only quotes count.
+
+  Both stay for `evals/eval-judge-propose.ts` (`--record-rule`, `--v2-quotes`)
+  and SMD-3116's writers.
+- **The distribution is the tier's.** A proposal is recorded at its
+  P(outdates) under the same floor, and a relation by the mass of the relation
+  words.
+- **Gating:** both rows are gated for both endpoints before any request.
+- **The key** is `consolidate:<decider>+<writer>@p4d<version>`, so turning it
+  on starts a fresh pass.
+- **Refused at start:** the run refuses without `OB1_JEV_BASE_URL`, or with
+  `OB1_JEV_MODEL` naming another model.
+- **Probes:** a follower probes the tier's `/info` after the writer's endpoint,
+  so a tier serving another model is refused at start and an outage of either
+  is waited out.
+- **Lineage:** each proposal and relation names the writer, the decider,
+  `decide_version` and decide mode's prompt hash, and its recipe carries what
+  the tier and the writer said (`judged.decide`).
+
 **Staleness**, the same pass's second output: `stale_entities(window)` names
 the entities nothing has mentioned within the window, quietest first, each
 with its newest capture.
@@ -3060,7 +3159,7 @@ bun consolidate.ts --url … --status                # the pass, and the queue
 bun consolidate.ts --url … --dry-run               # what a run would do; writes nothing
 bun consolidate.ts --url … --retry-failed          # failed rows back into the pool first
 bun consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # lineage: unreviewed rows standing on a lineage pair (070)
-bun consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate, with both thoughts
+bun consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate, with both thoughts (a distinct, 102, is counted by --status, not listed)
 bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90; at most 2000000, inside Postgres's timestamp range)
@@ -3123,8 +3222,9 @@ row is the next pass's work whatever key wrote it: every run re-pools each
 stale row's newer thought under its own key (a pair both sides of which have a
 vector, with no live or failed claim there — a failed claim is
 `--retry-failed`'s), judges the thought's pairs
-again — up to `--k` model calls per re-pooled thought, since its unrelated,
-related and evolves pairs left no record, plus one per stale pair the top-k left out
+again — up to `--k` model calls per re-pooled thought, since nothing lets it
+skip a pair it judged before (a standing relation, or since 102 a distinct, is kept
+or replaced by the new verdict, not consulted), plus one per stale pair the top-k left out
 that still meets the candidate rule, judged anyway — and either **replaces** the
 row in place (an outdates at
 the floor: `record_supersession_proposal`, back to pending under this key) or
@@ -4784,9 +4884,9 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2929 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1397 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 835 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
+bun test-schema.ts                          # 2946 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1432 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 870 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 55 assertions: the shards SHARDS lists in test-live.ts, each its own job
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 275 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 235 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
