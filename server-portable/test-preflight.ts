@@ -4597,6 +4597,8 @@ console.log("\n[11] --deep's provider probes are each a span and a point where a
     `…the collector got a span and one point per probe, each marked a probe, the chat probe's 503 its error.type, as open-brain-preflight (${posted.map((p) => p.path).join(", ")})`);
   assert(!JSON.stringify(posted).includes("s3cret-2d") && !JSON.stringify(posted).includes("Reply with only") && !JSON.stringify(posted).includes('"input"') && !sent.out.includes("s3cret-2d"),
     "…and no base's userinfo, and no probe's text, in what was sent or printed");
+  // A run that sends once and exits sends no uptime gauge: the silent-server rule would read its one point as a server gone for a day (SMD-3050 review pass 1).
+  assert(metrics.includes('"gen_ai.client.operation.duration"') && !metrics.includes('"process.uptime"'), `…and no process.uptime among its points, as a one-shot (${metrics.includes('"process.uptime"') ? "process.uptime sent" : "none sent"})`);
 
   posted.length = 0;
   const plain = await run({ ...ENV, OTEL_EXPORTER_OTLP_ENDPOINT: COLLECTOR });

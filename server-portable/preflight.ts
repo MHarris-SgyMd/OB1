@@ -4795,7 +4795,8 @@ const telemetry = deep ? await import("./telemetry.ts") : undefined;
 const telemetrySaid: string[] = [];
 /** The provider probes made, for the telemetry row: a flush that found nothing left is no proof none ran (the span batch may have sent them). */
 let probes = 0;
-const telemetryStarted = telemetry ? await telemetry.startTelemetry(PREFLIGHT_SERVICE, (line) => telemetrySaid.push(line)) : false;
+// One export and exit: no uptime gauge, which the observability profile's silent-server rule would read as a server gone (SMD-3050).
+const telemetryStarted = telemetry ? await telemetry.startTelemetry(PREFLIGHT_SERVICE, (line) => telemetrySaid.push(line), undefined, { oneShot: true }) : false;
 
 /**
  * A probe as a provider call's span and point, marked `ob1.probe` so a backend

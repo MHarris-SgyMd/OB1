@@ -1,0 +1,132 @@
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: Open Brain
+    folder: Open Brain
+    interval: 30s
+    rules:
+      - uid: ob1-server-silent
+        title: A server stopped sending metrics
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: { from: 86400, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: group by (service_name, deployment_environment_name) (group by (service_name, deployment_environment_name) (max_over_time(process_uptime_seconds[1d])) unless group by (service_name, deployment_environment_name) (max_over_time(process_uptime_seconds[10m])))
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: "{{ $labels.service_name }} sent metrics in the last day and none in the last 10 minutes"
+          description: "A running server sends process.uptime at every export from its start, so it has stopped, or cannot reach the collector. Stopped or renamed on purpose, it clears a day later. deploy/README.md, The observability profile, Alerts."
+      - uid: ob1-server-failures
+        title: The server failed requests
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: max by (service_name, deployment_environment_name) ((sum by (service_name, deployment_environment_name) (rate(http_server_request_duration_seconds_count{ob1_outcome=~"error|stalled|cut"}[10m])) / sum by (service_name, deployment_environment_name) (rate(http_server_request_duration_seconds_count[10m]))) and on (service_name, deployment_environment_name) (sum by (service_name, deployment_environment_name) (increase(http_server_request_duration_seconds_count{ob1_outcome=~"error|stalled|cut"}[10m])) > 2.5))
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.05] }
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: "{{ $labels.service_name }} failed {{ humanizePercentage $values.A.Value }} of its requests over the last 10 minutes"
+          description: "Outcomes error, stalled and cut: the dashboard's Server failures, by error type says which. deploy/README.md, The observability profile, Alerts."
+      - uid: ob1-provider-failures
+        title: The model provider failed calls
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum by (service_name, deployment_environment_name, gen_ai_operation_name, error_type) (increase(gen_ai_client_operation_duration_seconds_count{error_type!="", ob1_probe=""}[10m]))
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [2.5] }
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: "{{ $labels.service_name }}'s {{ $labels.gen_ai_operation_name }} calls failed with {{ $labels.error_type }} about {{ humanize $values.A.Value }} times in 10 minutes"
+          description: "An HTTP status, a timeout or another kind, as the dashboard's Provider failures, by error type shows. deploy/README.md, The observability profile, Alerts."
+      - uid: ob1-postgres-unreached
+        title: The exporter does not reach Postgres
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: min (min(up{job="postgres"}) * (min(pg_up{job="postgres"}) or on () vector(0)))
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        noDataState: Alerting
+        execErrState: Error
+        for: 1m
+        annotations:
+          summary: "The collector does not reach pg-exporter, or pg-exporter does not reach Postgres"
+          description: "The dashboard's Exporter reaching Postgres reads 0; no series at all means the collector is scraping nothing. deploy/README.md, The observability profile, Alerts."
+      - uid: ob1-telemetry-lost
+        title: The collector is losing telemetry
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum ((sum(rate(otelcol_exporter_send_failed_spans_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_send_failed_metric_points_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_send_failed_log_records_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_enqueue_failed_spans_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_enqueue_failed_metric_points_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_enqueue_failed_log_records_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_refused_spans_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_refused_metric_points_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_refused_log_records_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_failed_spans_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_failed_metric_points_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_failed_log_records_total[5m])) or vector(0)))
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        annotations:
+          summary: "The collector has refused, failed to queue or could not store telemetry for 10 minutes ({{ humanize $values.A.Value }} items a second)"
+          description: "Loki refuses every record once the disk under lgtm-data passes 90% full. The dashboard's Telemetry the collector could not store says which signal. deploy/README.md, The observability profile, Alerts."

@@ -415,8 +415,8 @@ const SEVERITY = { INFO: 9, WARN: 13, ERROR: 17 } as const;
 
 /** A suite's: each signal into an exporter of its own, each span and log record handed over as it ends, the metrics at a flush. */
 type InMemory = { exporter: SpanExporter; metrics?: PushMetricExporter; logs?: LogRecordExporter };
-/** A server's: each signal with a URL over OTLP/HTTP, batched, what is not sent said through `report`. */
-type Collector = { report: Omit<Reporting, "origin" | "noun">; urls: Partial<Record<Signal, string>> };
+/** A server's: each signal with a URL over OTLP/HTTP, batched, what is not sent said through `report`; `oneShot` where the process sends once and exits (preflight --deep), so it sends no uptime gauge. */
+type Collector = { report: Omit<Reporting, "origin" | "noun">; urls: Partial<Record<Signal, string>>; oneShot?: boolean };
 
 /** The resource's tier, where OB1_TIER names a pipeline tier (root.ts reads it trimmed and refuses any other at start); none for a plain brain. */
 function tierAttribute(): Attributes {
@@ -513,6 +513,12 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
         selectAggregation: metricExporter.selectAggregation?.bind(metricExporter),
       }) : metricExporter;
       const provider = new SdkMeterProvider({ resource, readers: [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: times.interval, exportTimeoutMillis: times.timeout })] });
+      // The uptime gauge (SMD-3050): the conventions' process.uptime, read at each export, so a running server sends a
+      // series from its start — its request histogram has none until a request it records, and the keyless liveness
+      // probe records none. The observability profile's "A server stopped sending metrics" rule reads it, so a process
+      // that sends once and exits (preflight --deep) sends none: its one point would read as a server gone silent for a
+      // day (review pass 1).
+      if (!collector?.oneShot) provider.getMeter("ob1").createObservableGauge("process.uptime", { unit: "s", description: "How long the server's process has run" }).addCallback((reading) => reading.observe(process.uptime()));
       shutdowns.push(() => provider.shutdown().catch(() => {}));
       registers.push(() => metrics.setGlobalMeterProvider(provider));
       flushes.push(watched ? () => flushSignal(provider, watched) : async () => {
