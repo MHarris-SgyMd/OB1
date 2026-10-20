@@ -221,11 +221,17 @@
  *      specifier-shaped string naming the package (bare, `npm:`, `jsr:`, an
  *      esm.sh URL, a subpath), comments blanked, in any code file under the
  *      seven category directories and docs/: every vendored server reaches the
- *      brain through compat/supabase-sql, and supabase-js stays only in
- *      server-portable's Workers store (server/index.ts, the Edge Function
+ *      brain through compat/supabase-sql, and supabase-js left the server
+ *      with its PostgREST store (SMD-3152; server/index.ts, the Edge Function
  *      build that also held it, left with SMD-1800); counted per-file
- *      exceptions as 7's — the dashboard's type-only import (SMD-1801's)
- *      (SMD-1798)
+ *      exceptions as 7's — none today (SMD-1798)
+ * 22b. the retired Cloudflare Workers target stays retired (SMD-3152): no
+ *      server-portable/wrangler.toml or store-postgrest.ts, no wrangler or
+ *      supabase-js in server-portable/package.json, and no file outside the
+ *      history (changes/, CHANGELOG.md, FORK.md) and dashboards/ (whose Next
+ *      dashboard has a Cloudflare build of its own) that names `wrangler`, or
+ *      — outside code, where the refusal is spelled — sets OB1_STORE to
+ *      postgrest; probes for both patterns
  *  23. every workflow under .github/workflows/ names its runner image — no
  *      `-latest` label in any case or size, no expression — and pins every
  *      `uses:` (a step's, or a job's reusable workflow) to a full commit SHA
@@ -2943,7 +2949,7 @@ const NOT_FORWARDED: Record<string, string> = {
   OB1_OTEL_TRUST_TRACEPARENT: "trusting a caller's traceparent (SMD-1849 PR 2b) is a proxy deployment's to say, by an operator's own -f file outside deploy/, not any stack here: forwarded by the server, it would be one setting in deploy/.env from continuing every caller's trace",
   OB1_HOOKS: "the plugins whose webhooks the REST core serves (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook",
   OB1_HOOK_SECRETS: "the plugins' webhook secrets (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook, so it is not handed the secrets",
-  OB1_STORE: "the SQL store is the server's default (FORK.md change 97) and this stack is the deployment that proves it — forwarding it would let the default drift back to PostgREST with nothing in CI noticing",
+  OB1_STORE: "the SQL store is the server's only store (FORK.md change 97; the PostgREST store retired in SMD-3152) — forwarding it would only carry a value the server refuses",
   OB1_GIT_SHA: "the commit the image was built from, baked by server-portable/Dockerfile from the build arg of the same name (compose's `build.args`) — a runtime forward would override the baked value with whatever deploy/.env names, a commit the image need not have been built from (SMD-2041)",
 };
 
@@ -3336,8 +3342,8 @@ function checkServerEnvForwarded() {
       else if (/\.ts$/.test(f) && !/^test-/.test(f)) sources.push(srcRel);
     }
   };
-  walk("server-portable"); // subdirectories too (shims/) — the fifth pass found the walk flat
-  if (!sources.includes("server-portable/shims/bun-unavailable.ts")) fail(SELF, `check 14's read scan no longer reaches server-portable/shims/ (bun-unavailable.ts is not in its list) — a knob read in a subdirectory would go undeclared unseen (SMD-1843)`);
+  walk("server-portable"); // subdirectories too (core/, rest/) — the fifth pass found the walk flat
+  if (!sources.includes("server-portable/core/context.ts")) fail(SELF, `check 14's read scan no longer reaches server-portable/core/ (context.ts is not in its list) — a knob read in a subdirectory would go undeclared unseen (SMD-1843)`);
   sources.push("db/config.mjs");
   const readSomewhere = new Set();
   for (const srcRel of sources) {
@@ -4046,7 +4052,7 @@ checkSchemaVersion();
 /**
  * 17e: server-portable/version.ts is generated (SMD-2041) — the version, the
  * release range and the tree's last migration the server reports, in a module
- * the Workers build can bundle (db/version.mjs is node-only). It must be
+ * with no imports (the image carries no db/migrations/ to read). It must be
  * exactly what scripts/gen-version.ts renders, so a migration added or a cut
  * made without regenerating it fails here rather than a brain reporting the
  * previous tree. Bun-only, like the tools.json round-trip.
@@ -4739,9 +4745,9 @@ checkDestructiveSql();
 // SMD-1798 (the third of SMD-1795's seven). Every vendored MCP server, API,
 // worker and script reaches the brain through compat/supabase-sql — Bun's
 // Postgres client in supabase-js's shape — so running any of them needs no
-// Supabase project, PostgREST or service key; supabase-js stays in the tree in
-// server-portable/store-postgrest.ts alone, for the Cloudflare Workers target
-// (SMD-1847), outside this scan (the shim's own suite writes its PostgREST
+// Supabase project, PostgREST or service key; supabase-js left the server with
+// its PostgREST store and the Cloudflare Workers target (SMD-3152, check 22b),
+// which were outside this scan (the shim's own suite writes its PostgREST
 // expectations by hand and loads no oracle; server/index.ts, the Edge Function
 // build that also held it, left with SMD-1800). This is what keeps the next rebase, or
 // the next vendored file, from bringing a PostgREST client back: a
@@ -4832,12 +4838,79 @@ function checkSupabaseJsImports() {
       continue;
     }
     for (const line of lines) {
-      fail(`${rel}:${line}`, `imports @supabase/supabase-js at runtime — every vendored server reaches the brain through compat/supabase-sql since SMD-1798 (\`bun scripts/migrate-to-sql-shim.ts --apply ${rel}\`; the shim's README says what it still refuses); supabase-js stays only in server-portable's Workers store`);
+      fail(`${rel}:${line}`, `imports @supabase/supabase-js at runtime — every vendored server reaches the brain through compat/supabase-sql since SMD-1798 (\`bun scripts/migrate-to-sql-shim.ts --apply ${rel}\`; the shim's README says what it still refuses); the server dropped it with its PostgREST store (SMD-3152)`);
     }
   }
   for (const rel of SUPABASE_JS_EXCEPTIONS.keys()) if (!seen.has(rel)) fail(rel, "check 22's exception names a file the scan does not reach — stale, or the file is gone");
 }
 checkSupabaseJsImports();
+
+// ── 22b: the retired Workers target stays retired (SMD-3152) ─────────────────
+//
+// The PostgREST store was kept for one target, Cloudflare Workers
+// (server-portable/wrangler.toml pinned OB1_STORE=postgrest), and no brain ran
+// it: stable and canary run the compose stack on the SQL store. SMD-3152
+// removed the store, the target, their CI steps and their docs. This keeps a
+// rebase, a revert or a copied guide from bringing either back unseen: the two
+// files stay gone, server-portable's package.json names neither wrangler nor
+// supabase-js, and no live file names `wrangler` or sets OB1_STORE to
+// postgrest. A code file is exempt from the second pattern alone: the refusal
+// and its tests spell the selection they refuse. The history (changes/,
+// CHANGELOG.md, FORK.md) records what was; dashboards/ is exempt from both,
+// since open-brain-dashboard-next deploys to Cloudflare with wrangler of its
+// own, which is not the brain server.
+/** `wrangler` as a word, any case. */
+const WRANGLER_WORD = /\bwrangler\b/i;
+/**
+ * OB1_STORE set to postgrest on one line — an env line, a YAML, TOML or JSON
+ * key, a shell assignment, a Dockerfile `ENV` with its space, a compose
+ * default (`${OB1_STORE:-postgrest}`) — any case, quoted or not. A value on a
+ * line of its own (Kubernetes' `name:`/`value:` pair) is not read: structure
+ * across lines is a parser's job, and the runtime refuses the selection anyway.
+ */
+const POSTGREST_SELECTED = /\bOB1_STORE["']?(?:\s*[=:]\s*|\s+)(?:\$\{OB1_STORE:?-)?["']?postgrest\b/i;
+/** [text, wrangler?, postgrest selected?] — what 22b must catch, and the neighbours it must not reach. */
+const RETIRED_TARGET_PROBES: [string, boolean, boolean][] = [
+  ["bunx wrangler deploy --dry-run --outdir=.cf-out", true, false],
+  ['"wrangler": "4.127.1"', true, false],
+  ["Wrangler dev serves it", true, false],
+  ["OB1_STORE=postgrest", false, true],
+  ['OB1_STORE = "postgrest"', false, true],
+  ["      OB1_STORE: postgrest", false, true],
+  ["export OB1_STORE='PostgREST'", false, true],
+  ['"OB1_STORE": "postgrest"', false, true],
+  ["ENV OB1_STORE postgrest", false, true],
+  ["      OB1_STORE: ${OB1_STORE:-postgrest}", false, true],
+  ["OB1_STORE=sql", false, false],
+  ["      OB1_STORE: ${OB1_STORE:-sql}", false, false],
+  ["OB1_STORE is unset; postgrest is refused", false, false],
+  ["the PostgREST store, retired", false, false],
+  ["wranglers' wrangling", false, false],
+];
+const RETIRED_FILES = ["server-portable/wrangler.toml", "server-portable/wrangler.json", "server-portable/wrangler.jsonc", "server-portable/store-postgrest.ts", "server-portable/test-store-postgrest.ts"];
+const isHistory = (rel: string) => rel.startsWith("changes/") || rel === "CHANGELOG.md" || rel === "FORK.md";
+function checkRetiredTarget() {
+  for (const [probe, wrangler, selected] of RETIRED_TARGET_PROBES) {
+    if (WRANGLER_WORD.test(probe) !== wrangler) fail(SELF, `check 22b's wrangler pattern ${wrangler ? "misses" : "catches"} its probe ${JSON.stringify(probe)} (its own probe)`);
+    if (POSTGREST_SELECTED.test(probe) !== selected) fail(SELF, `check 22b's OB1_STORE pattern ${selected ? "misses" : "catches"} its probe ${JSON.stringify(probe)} (its own probe)`);
+  }
+  for (const rel of RETIRED_FILES) if (existsSync(join(ROOT, rel))) fail(rel, "the retired Workers target's file is back (SMD-3152): the PostgREST store and wrangler.toml served no brain — delete it");
+  const pkg = JSON.parse(readFileSync(join(ROOT, "server-portable/package.json"), "utf8")) as Record<string, Record<string, string> | undefined>;
+  for (const dep of ["wrangler", "@supabase/supabase-js"]) {
+    if (pkg.dependencies?.[dep] || pkg.devDependencies?.[dep]) fail("server-portable/package.json", `names ${dep}, which only the retired Workers target and PostgREST store needed (SMD-3152)`);
+  }
+  const files = citationFiles().filter((rel) => !isHistory(rel) && !rel.startsWith("dashboards/"));
+  if (!files.includes("SETUP.md")) fail(SELF, "check 22b's listing does not reach SETUP.md — the listing is broken, not the tree clean");
+  for (const rel of files) {
+    const text = readFileSync(join(ROOT, rel), "utf8");
+    const code = CODE_FILE.test(rel);
+    text.split("\n").forEach((line, i) => {
+      if (WRANGLER_WORD.test(line)) fail(`${rel}:${i + 1}`, "names wrangler — the Cloudflare Workers target was retired (SMD-3152); the brain deploys as the compose stack");
+      if (!code && POSTGREST_SELECTED.test(line)) fail(`${rel}:${i + 1}`, "sets OB1_STORE to postgrest — the PostgREST store was retired (SMD-3152) and the server refuses the selection; leave OB1_STORE unset");
+    });
+  }
+}
+checkRetiredTarget();
 
 // ── 23: a workflow names its runner image and pins every action to a commit (SMD-2093) ──
 /**
@@ -5422,8 +5495,8 @@ const EDGE_ROLE: TransportRole = {
 };
 const ROOT_ROLE: TransportRole = {
   imports: new Map<string, "*" | ReadonlySet<string>>([
-    // The factory, for db() alone (STORE_WIRING); a notice, the store's kind and its type.
-    ["./store.ts", new Set(["createStore", "postgrestOnBunNotice", "storeKind", "ThoughtStore"])],
+    // The factory, for db() alone (STORE_WIRING), and the store's type.
+    ["./store.ts", new Set(["createStore", "ThoughtStore"])],
     ["../db/config.mjs", new Set(["tierProblem", "trimmedEnv"])],
     ["./agents.ts", "*"],
     ["./jobs.ts", new Set(["setJobSink"])],
@@ -5647,7 +5720,9 @@ const TRANSPORT_PROBES: [string, boolean, TransportRole?][] = [
   ['import { createCore, SPECS } from "./core/index.ts";\n', false],
   ['import type { ToolName } from "./tools.ts";\nexport { parseFilter } from "./core/filter.ts";\n', false],
   ['import { HEALTH_DEADLINE_MS } from "./core/reads.ts";\nexport { HEALTH_DEADLINE_MS, BRAIN_INFO_TOOL_DEADLINE_MS } from "./core/reads.ts";\n', false],
-  ['import { createStore, postgrestOnBunNotice, storeKind, type ThoughtStore } from "./store.ts";\n', false, ROOT_ROLE],
+  ['import { createStore, type ThoughtStore } from "./store.ts";\n', false, ROOT_ROLE],
+  // The PostgREST store's notice and the kind left with it (SMD-3152): the root names neither.
+  ['import { createStore, postgrestOnBunNotice, type ThoughtStore } from "./store.ts";\n', true, ROOT_ROLE],
   ['// import { decideCalls } from "./egress.ts";\n', false],
   ["const msg = \"copied from './egress.ts' once\";\nconst t = `moved from \"./x.ts\"`;\n", false],
   ["let _store: Promise<ThoughtStore> | null = null;\nexport function db(): Promise<ThoughtStore> {\n  if (!_store) _store = createStore(env());\n  void _store.then((s) => s.jobSink(serving));\n  return _store;\n}\n", false, ROOT_ROLE],
@@ -5655,7 +5730,7 @@ const TRANSPORT_PROBES: [string, boolean, TransportRole?][] = [
   ["const identity = await agents().resolve(db(), principal);\n", false],
   ["const core = createCore({ env, store: db, door: SERVER_NAME });\n", false],
   ["const core = createCore({\n  env,\n  store: db,\n  door: SERVER_NAME,\n});\n", false],
-  ['import {\n  createStore,\n  storeKind,\n  type ThoughtStore,\n} from "./store.ts";\n', false, ROOT_ROLE],
+  ['import {\n  createStore,\n  type ThoughtStore,\n} from "./store.ts";\n', false, ROOT_ROLE],
   ['return c.json({ db: "up", store: "sql" });\n', false],
   ["function closeStore(): Promise<{ closed: boolean }> {\n  return _store ? _store.then(() => ({ closed: true })) : Promise.resolve({ closed: false });\n}\n", false, ROOT_ROLE],
   ["export default { port, fetch: app.fetch };\nconst r = await app.fetch(req);\n", false],
@@ -5908,13 +5983,11 @@ const routeRouter = (name: string, rule: string, priority: number, mw: string, s
 const routeErrors = (name: string, status: string) =>
   `    ${name}:\n      errors:\n        status: ["${status}"]\n        service: noop@internal\n        statusRewrites:\n          "${status}": 404\n`;
 const routeService = (name: string, url: string) => `    ${name}:\n      loadBalancer:\n        servers:\n          - url: "${url}"\n`;
-/** Each origin's canary and working routers, with the given middlewares, and the 404 for the rest of their prefixes. */
-const routeTierPaths = (mw: string) => TIERS.filter((t) => t !== "stable").map((t) => routeRouter(t, `Path(\`/${t}/mcp\`) || PathPrefix(\`/${t}/mcp/\`)`, 30, mw, t)).join("")
-  + routeRouter("tier-off", "PathRegexp(`(?i)^/(canary|working)`)", 25, "not-served", "noop@internal");
-/** compose.tiers.yaml's: its tiers are its own, and stay. */
-const ROUTE_TIER_PATHS = routeTierPaths("not-legacy, tier-absent");
-/** compose.yaml's routes to a tier on its mesh, deprecated (SMD-3057): v2.0.0 removes them (SMD-2874), and until then every answer says so. */
-const ROUTE_TIER_DEPRECATED = "    tier-deprecated:\n      headers:\n        customResponseHeaders:\n          Deprecation: \"@1792108800\"\n          Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#a-canary-beside-the-stack>; rel=\"deprecation\"; type=\"text/html\"'\n";
+/** The 404 for every path under /canary or /working, in compose.yaml's table until SMD-2532 removes the legacy route (SMD-2874), and in compose.tiers.yaml's after its tier routers. */
+const ROUTE_TIER_OFF = routeRouter("tier-off", "PathRegexp(`(?i)^/(canary|working)`)", 25, "not-served", "noop@internal");
+/** compose.tiers.yaml's canary and working routers, and the 404 for the rest of their prefixes: the three-brain stack's alone since SMD-2874 took them out of compose.yaml's (SMD-2878 decides that stack's future). */
+const ROUTE_TIER_PATHS = TIERS.filter((t) => t !== "stable").map((t) => routeRouter(t, `Path(\`/${t}/mcp\`) || PathPrefix(\`/${t}/mcp/\`)`, 30, "not-legacy, tier-absent", t)).join("")
+  + ROUTE_TIER_OFF;
 const routeHealth = (service: string) => routeRouter("health", "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))", 20, "not-legacy", service);
 const ROUTE_NOT_LEGACY = "    not-legacy:\n      headers:\n        customRequestHeaders:\n          X-OB1-Legacy-Route: \"\"\n";
 /** compose.tiers.yaml's route table, byte for byte, as Bun.YAML reads the block. */
@@ -6216,12 +6289,12 @@ const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("hooks-off", "Path(`/hooks`) || PathPrefix(`/hooks/`)", 35, "not-served", "noop@internal")
   + routeRouter("grafana-off", "Path(`/grafana`) || PathPrefix(`/grafana/`)", 35, "not-served", "noop@internal")
   + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "not-legacy", "server")
-  + routeTierPaths("not-legacy, tier-deprecated, tier-absent") + routeHealth("server")
+  + ROUTE_TIER_OFF + routeHealth("server")
   + routeRouter("legacy", "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))", 1, "legacy-window", "server")
   + "  middlewares:\n"
   + "    legacy-window:\n      headers:\n        customRequestHeaders:\n          X-OB1-Legacy-Route: \"1\"\n        customResponseHeaders:\n          Deprecation: \"@1790899200\"\n          Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#moving-a-client-to-mcp>; rel=\"deprecation\"; type=\"text/html\"'\n"
-  + ROUTE_NOT_LEGACY + routeErrors("auth-absent", "502") + routeErrors("tier-absent", "502") + ROUTE_TIER_DEPRECATED + routeErrors("api-off", "418") + routeErrors("not-served", "418")
-  + "  services:\n" + TIERS.map((t) => routeService(t === "stable" ? "server" : t, `http://${tierMeshName("mcp", t)}.:8000`)).join("")
+  + ROUTE_NOT_LEGACY + routeErrors("auth-absent", "502") + routeErrors("api-off", "418") + routeErrors("not-served", "418")
+  + "  services:\n" + routeService("server", `http://${tierMeshName("mcp", "stable")}.:8000`)
   + routeService("auth", "http://auth.ob1.internal.:3000");
 /** compose.api-public.yaml's route table, byte for byte, as Bun.YAML reads the block. */
 const API_ROUTE_TABLE = "http:\n  routers:\n"

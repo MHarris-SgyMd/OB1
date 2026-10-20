@@ -2,9 +2,10 @@
 /**
  * test-store-sql.ts — the SQL store against a real Postgres server.
  *
- * The point of Phase 2 is that swapping PostgREST for SQL changes *nothing* the
- * tools can observe. That is only credible if the replacement is exercised against
- * a real server with real pgvector, so this suite requires one.
+ * The point of Phase 2 was that swapping PostgREST for SQL changes *nothing* the
+ * tools can observe. That is only credible if the store is exercised against a
+ * real server with real pgvector, so this suite requires one. (The PostgREST
+ * store it replaced was retired in SMD-3152.)
  *
  *   ../db/with-postgres.sh bun test-store-sql.ts
  *   DATABASE_URL=… bun test-store-sql.ts
@@ -78,9 +79,13 @@ console.log("[1] The factory selects and validates");
   }
   assert(/Unknown OB1_STORE/.test(threw), "an unknown store name is rejected, not defaulted");
 
-  const p = await createStore({ OB1_STORE: "postgrest", SUPABASE_URL: "https://x.invalid", SUPABASE_SERVICE_ROLE_KEY: "k" });
-  assert(p.kind === "postgrest", "postgrest remains the other option");
-  await p.close();
+  threw = "";
+  try {
+    await createStore({ OB1_STORE: "postgrest", SUPABASE_URL: "https://x.invalid" });
+  } catch (e) {
+    threw = (e as Error).message;
+  }
+  assert(/retired/.test(threw) && /SMD-3152/.test(threw), "postgrest is refused as retired, not built (SMD-3152)");
 }
 
 console.log("\n[2] captureThought writes content, metadata and vector atomically");
@@ -211,7 +216,7 @@ console.log("\n[3c] hybridThoughts fuses the two, and maps the fused row's shape
   // Migration 020: the store passes the recency blend's two inputs (defaults
   // 0 and 90) and maps the new `score` column, which equals similarity at
   // weight 0. Age the exact row two years and weight age fully: it drops from
-  // first, its reported similarity unchanged; both stores must reorder alike.
+  // first, its reported similarity unchanged.
   assert(vector.every((r) => typeof r.score === "number" && r.score === r.similarity), "matchThoughts maps score, equal to similarity at weight 0");
   const exact = vector[0]; // the row nearest the query, "exact"
   const aged = new SQL({ url: URL_, max: 1 });
@@ -261,7 +266,7 @@ console.log("\n[3c] hybridThoughts fuses the two, and maps the fused row's shape
   }
 }
 
-console.log("\n[4] listThoughts reproduces the PostgREST filters");
+console.log("\n[4] listThoughts' filters (jsonb containment, as the PostgREST store's were)");
 {
   const all = await store.listThoughts({ limit: 10 });
   assert(all.length === 3, `unfiltered returns everything (got ${all.length})`);
@@ -1222,7 +1227,7 @@ console.log("\n[9] Provenance: capture writes it, the read methods walk it, and 
   // (a) supersededAmong's id tiebreak. Two thoughts supersede one id; force
   // their created_at equal (a batch import in one transaction does this via
   // now()), and the winner must be the higher id — deterministically, and the
-  // same one the PostgREST store's (created_at, id) DESC order picks.
+  // same one a (created_at, id) DESC order picks.
   const admin3 = new SQL({ url: URL_, max: 1 });
   const old = await store.captureThought({ content: "tiebreak: the superseded original", payload: { metadata: {} }, embedding: unit(0) });
   const newA = await store.captureThought({ content: "tiebreak: replacement A", payload: { metadata: {} }, embedding: unit(1), supersedes: old.id });

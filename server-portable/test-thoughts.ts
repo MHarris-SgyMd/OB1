@@ -1603,13 +1603,6 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
       await sleep(300);
       loop5.stop();
       assert(loop5.ticks() - atHeal >= 4, `after the database answers again the ticks return to the interval (${loop5.ticks() - atHeal} in 300 ms at 30 ms)`);
-      // The PostgREST store: no mender, said once.
-      const said6: string[] = [];
-      const pgrst = createContext({ env: () => ({ OB1_EMBEDDING_DIM: "4", ...local() }), store: async () => ({ kind: "postgrest", listVectorless: async () => [] }) as never, door: "t" });
-      const loop6 = startVectorMender(pgrst, { intervalS: 0.03, firstDelayMs: 0, log: (l) => said6.push(l) });
-      await sleep(200);
-      loop6.stop();
-      assert(loop6.ticks() === 0 && said6.length === 1 && /not started — the PostgREST store/.test(said6[0]), `over PostgREST: not started, said once (${said6.join(" / ")})`);
       // A lock the session did not let go: said once, not per tick.
       const said7: string[] = [];
       const kept = createContext({ env: () => ({ OB1_EMBEDDING_DIM: "4", ...local() }), store: async () => ({ mendLock: async () => async () => false, listVectorless: async () => [] }) as never, door: "t" });

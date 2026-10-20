@@ -59,8 +59,8 @@ export type Trust = (typeof TRUST)[number];
 
 /**
  * The words at or above `min` on the ladder — what list_thoughts keeps
- * `metadata->>'trust'` to, since a PostgREST filter cannot call
- * ob1_trust_rank. test-e2e-sql holds this to the function, word for word.
+ * `metadata->>'trust'` to (a word list, from when a PostgREST filter could not
+ * call ob1_trust_rank). test-e2e-sql holds this to the function, word for word.
  */
 export function trustAtOrAbove(min: Trust): Trust[] {
   return TRUST.slice(0, TRUST.indexOf(min) + 1);

@@ -38,10 +38,9 @@ COPY evals/linear-corpus.ts /app/evals/
 COPY deploy/orchestration/runner.ts /app/deploy/orchestration/
 # A module the graph gained and this file does not copy, or an npm package (the
 # image installs none), fails the build here, not the first run: every import
-# resolved, then the runner's own rules. The one package named external is
-# server-portable/store-postgrest.ts's, a store the pipeline never loads (it is
-# imported lazily, for Workers); the bundler follows it anyway.
-RUN bun build db/ingest-records.ts db/reembed.ts db/weekly-digest.ts deploy/orchestration/runner.ts --target=bun --external @supabase/supabase-js --outdir=/tmp/resolve \
+# resolved, then the runner's own rules. No package is named external: the one
+# that was, supabase-js, left with the PostgREST store (SMD-3152).
+RUN bun build db/ingest-records.ts db/reembed.ts db/weekly-digest.ts deploy/orchestration/runner.ts --target=bun --outdir=/tmp/resolve \
  && rm -rf /tmp/resolve \
  && bun deploy/orchestration/runner.ts --self-check
 # pipelines.json in a layer of its own, after the self-check, so an allowlist
