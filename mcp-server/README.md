@@ -209,8 +209,19 @@ forward`, and its hash goes in the REST core's `MCP_ACCESS_KEYS`. With no
 `OB1_FORWARDER_KEY` the entry exits 2. To trade OAuth tokens it reads what the REST
 core reads, `COMPOSE_PROFILES` naming `auth` and a sound `OB1_PUBLIC_ORIGIN`, the
 same values, and also needs `OB1_AUTH_SECRET_MCP`, the authorization server's `mcp` client secret from
-`deploy/.env`, to trade OAuth tokens. The compose service, its forwarder key and that
-secret from `deploy/.env`, and the canary tier's route are SMD-2287 PR 5.
+`deploy/.env`, to trade OAuth tokens.
+
+The server image (`server-portable/Dockerfile`) carries this directory and
+`rest-client/`, each with its own lockfile's packages (PR 5a). It runs there past
+the image's preflight, which needs a database this server never opens:
+
+```bash
+docker run --entrypoint bun -e OB1_FORWARDER_KEY=<key> -e OB1_REST_URL=<the REST core> <server image> ../mcp-server/index.ts
+```
+
+`deploy/canary.sh` mints a canary's own forwarder key. The compose service, which
+routes `/mcp` here and hands it `OB1_FORWARDER_KEY` and `OB1_AUTH_SECRET_MCP` from
+`deploy/.env`, is PR 5b.
 
 ## Test
 

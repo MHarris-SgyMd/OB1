@@ -31,7 +31,10 @@
 # mints, named for the canary's project, and none of stable's, so no key of
 # stable's opens it and its key opens nothing of stable's. The raw key is the
 # file's OB1_CANARY_KEY, which `up` smokes and registers the connector with,
-# and which no container is handed. Mint another for a client with
+# and which no container is handed. Beside it `up` mints a forward key, named
+# <project>-forwarder, its raw key in OB1_FORWARDER_KEY: the MCP server's own
+# for its calls on the REST core (SMD-2287), which grants nothing as a caller.
+# Mint another for a client with
 # server-portable/keygen.ts and add its line to the file's MCP_ACCESS_KEYS. A
 # file made before this holds stable's keys: `up` takes them out, mints the
 # canary's, clears a raw key or webhook secret of stable's, and gives the
@@ -440,7 +443,9 @@ CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_GIT_SHA'
 #                               CANARY_SET (SERVER_PORT $CANARY_PORT), no
 #                               access key of STABLE's in MCP_ACCESS_KEYS and a
 #                               write key of its own (minted when it has none,
-#                               the raw key in OB1_CANARY_KEY), no raw key or
+#                               the raw key in OB1_CANARY_KEY) and a forward key
+#                               of its own for the MCP server (likewise, in
+#                               OB1_FORWARDER_KEY; SMD-2287), no raw key or
 #                               webhook secret of STABLE's, and a plugin role
 #                               password of its own when STABLE sets one
 #                               (SMD-2874, SMD-3032). Empty values when OUT
@@ -609,23 +614,38 @@ if mode == "own-fix":
     own_ok = bool(raw) and sha(raw) not in stable_digests and any(d == sha(raw) and scope == "write" for _, _, scope, d in kept)
     if len(kept) < len(have):
         said.append("removed %d of stable'"'"'s access keys from MCP_ACCESS_KEYS" % (len(have) - len(kept)))
+    def unused(base):
+        # A name no kept entry holds (parseKeyRecords refuses one twice): an
+        # operator'"'"'s own entry under the canary'"'"'s name stays (code review).
+        taken = {x[1] for x in kept}
+        name, n = base, 2
+        while name in taken:
+            name = "%s-%d" % (base, n)
+            n += 1
+        return name
     if not own_ok:
         raw = secrets.token_hex(32)
-        # Under a name no kept entry holds (parseKeyRecords refuses one twice):
-        # an operator'"'"'s own entry under the canary'"'"'s name stays (code review).
-        taken = {x[1] for x in kept}
-        name = os.environ["OWN_PROJECT"]
-        n = 2
-        while name in taken:
-            name = "%s-%d" % (os.environ["OWN_PROJECT"], n)
-            n += 1
+        name = unused(os.environ["OWN_PROJECT"])
         kept = kept + [("%s:write:%s" % (name, sha(raw)), name, "write", sha(raw))]
         fix["OB1_CANARY_KEY"] = raw
         said.append("minted the canary'"'"'s own write key, %s (its hash in MCP_ACCESS_KEYS, the raw key in OB1_CANARY_KEY)" % name)
-    if len(kept) < len(have) or not own_ok:
+    # Its forward key (SMD-2287): the MCP server calls the REST core with it
+    # beside each client'"'"'s key, and refuses to start without one. Minted as
+    # the write key is, in place of stable'"'"'s, which the canary'"'"'s REST core
+    # does not take.
+    fwd = c["OB1_FORWARDER_KEY"] or ""
+    fwd_stable = bool(fwd) and (sha(fwd) in stable_digests or fwd == s.get("OB1_FORWARDER_KEY"))
+    fwd_ok = bool(fwd) and not fwd_stable and any(d == sha(fwd) and scope == "forward" for _, _, scope, d in kept)
+    if not fwd_ok:
+        fwd = secrets.token_hex(32)
+        name = unused(os.environ["OWN_PROJECT"] + "-forwarder")
+        kept = kept + [("%s:forward:%s" % (name, sha(fwd)), name, "forward", sha(fwd))]
+        fix["OB1_FORWARDER_KEY"] = fwd
+        said.append("minted the canary'"'"'s own forward key, %s (its hash in MCP_ACCESS_KEYS, the raw key in OB1_FORWARDER_KEY%s)" % (name, ", in place of stable'"'"'s" if fwd_stable else ""))
+    if len(kept) < len(have) or not own_ok or not fwd_ok:
         fix["MCP_ACCESS_KEYS"] = ",".join(e for e, _, _, _ in kept)
     # Raw keys and secrets of stable'"'"'s the canary never needs.
-    for n in ("MCP_ACCESS_KEY", "OB1_WORKER_KEY", "OB1_FORWARDER_KEY"):
+    for n in ("MCP_ACCESS_KEY", "OB1_WORKER_KEY"):
         if c[n] and (sha(c[n]) in stable_digests or c[n] == s.get(n)):
             fix[n] = ""
             said.append("cleared %s (a key of stable'"'"'s)%s" % (n, "; a canary worker needs one of its own: bun server-portable/keygen.ts --name canary-workers --scope capture, its line in MCP_ACCESS_KEYS and its key here" if n == "OB1_WORKER_KEY" else ""))

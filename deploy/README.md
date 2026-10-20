@@ -2451,7 +2451,11 @@ of the canary's opens stable. Its `MCP_ACCESS_KEYS` holds a write key `up`
 mints, named for the canary's project (`open-brain-canary:write:<sha256>`,
 or `open-brain-canary-2` and on when an entry of the canary's holds that name),
 and the raw key is the file's `OB1_CANARY_KEY`, which `up` smokes and
-registers the connector with and which no container is handed. For another
+registers the connector with and which no container is handed. Beside it
+`up` mints a forward key, `open-brain-canary-forwarder:forward:<sha256>`, the
+raw key in the file's `OB1_FORWARDER_KEY`: the MCP server's own for its calls
+on the canary's REST core (SMD-2287), never stable's, and refused as a caller
+like any forward key. For another
 client, mint a key with `bun server-portable/keygen.ts --name <client>
 --scope read|write` and add the line it prints to the canary's
 `MCP_ACCESS_KEYS`; `up` keeps any entry that is not stable's. A refresh copies

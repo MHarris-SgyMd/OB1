@@ -3023,12 +3023,16 @@ jobs:
           grep -q '^GRAFANA_ADMIN_PASSWORD=' .env || { echo "no GRAFANA_ADMIN_PASSWORD line in .env to leave out" >&2; exit 1; }
           grep -q '^OB1_MONITOR_DB_PASSWORD=' .env || { echo "no OB1_MONITOR_DB_PASSWORD line in .env to leave out" >&2; exit 1; }
           if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_|OB1_MONITOR_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
-          # SMD-2874 PR 2: the canary's own write key, minted, its hash alone in
+          # SMD-2874 PR 2: the canary's own write key, minted, and (SMD-2287)
+          # its own forward key for the MCP server, their hashes alone in
           # MCP_ACCESS_KEYS; no key hash of stable's anywhere in the file; a
           # plugin role password of its own; no webhook secret of stable's.
           CANARY_KEY="$(sed -n 's/^OB1_CANARY_KEY=//p' .env.canary.local | tr -d "\"'")"
           [ "${#CANARY_KEY}" = 64 ] || { echo "the canary's env file holds no minted OB1_CANARY_KEY" >&2; exit 1; }
-          [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "open-brain-canary:write:$(printf '%s' "$CANARY_KEY" | shasum -a 256 | cut -d' ' -f1)" ] || { echo "the canary's MCP_ACCESS_KEYS is not its own key alone" >&2; exit 1; }
+          CANARY_FORWARD="$(sed -n 's/^OB1_FORWARDER_KEY=//p' .env.canary.local | tr -d "\"'")"
+          [ "${#CANARY_FORWARD}" = 64 ] || { echo "the canary's env file holds no minted OB1_FORWARDER_KEY" >&2; exit 1; }
+          [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "open-brain-canary:write:$(printf '%s' "$CANARY_KEY" | shasum -a 256 | cut -d' ' -f1),open-brain-canary-forwarder:forward:$(printf '%s' "$CANARY_FORWARD" | shasum -a 256 | cut -d' ' -f1)" ] || { echo "the canary's MCP_ACCESS_KEYS is not its own two keys alone" >&2; exit 1; }
+          grep -F "minted the canary's own forward key, open-brain-canary-forwarder" /tmp/canary-up.out
           for h in $(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'" | tr ',' '\n' | cut -d: -f3); do
             if grep -qF "$h" .env.canary.local; then echo "the canary's env file holds a key hash of stable's" >&2; exit 1; fi
           done
@@ -3337,6 +3341,37 @@ jobs:
       # .github/ci/full-stack-up.sh's, with why each is as it is (SMD-3051).
       - name: Bring up the compose stack
         run: .github/ci/full-stack-up.sh
+
+      # SMD-2287 PR 5a: the server image just built carries the MCP server as a
+      # REST client (mcp-server/) and its client (rest-client/), each with its
+      # own lockfile's packages, run with `bun` as the entrypoint, past
+      # preflight, since it reads no store. Without a forward key it stops at
+      # once in its own words, exit 2, after every import has loaded; with one
+      # it answers keyless liveness, refuses a keyless initialize on its own
+      # request line, and stops on SIGTERM, exit 0. The REST core it names is
+      # an address nothing answers, and none of this calls it. With no network:
+      # Bun installs a package itself, from the registry, for a directory with
+      # no node_modules (SMD-2978), and an image missing mcp-server/'s passed
+      # this step that way (a mutant, measured).
+      - name: The server image runs the MCP server as a REST client
+        run: |
+          IMG=open-brain-server
+          if out=$(docker run --rm --network none --entrypoint bun "$IMG" ../mcp-server/index.ts 2>&1); then code=0; else code=$?; fi
+          echo "$out"
+          if [ "$code" != 2 ] || ! grep -q '^OB1_FORWARDER_KEY is not set' <<< "$out"; then echo "expected exit 2 naming the missing forward key; exit $code" >&2; exit 1; fi
+          docker run -d --name ob1-mcp-image --network none --entrypoint bun -e "OB1_FORWARDER_KEY=$(openssl rand -hex 32)" -e OB1_REST_URL=http://127.0.0.1:9 "$IMG" ../mcp-server/index.ts > /dev/null
+          up=""
+          for _ in $(seq 1 40); do [ "$(docker exec ob1-mcp-image wget -qO- http://127.0.0.1:8000/health 2> /dev/null)" = ok ] && { up=1; break; }; sleep 0.25; done
+          docker exec ob1-mcp-image wget -qO- --header 'Content-Type: application/json' --header 'Accept: application/json, text/event-stream' \
+            --post-data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' http://127.0.0.1:8000/mcp > /dev/null 2>&1 || true
+          docker stop ob1-mcp-image > /dev/null
+          code=$(docker inspect -f '{{.State.ExitCode}}' ob1-mcp-image)
+          log=$(docker logs ob1-mcp-image 2>&1)
+          docker rm -f ob1-mcp-image > /dev/null
+          echo "$log"
+          [ -n "$up" ] || { echo "the MCP server never answered keyless /health with ok" >&2; exit 1; }
+          grep -q '"door":"mcp".*"rpc":"initialize".*"code":"UNAUTHORIZED"' <<< "$log" || { echo "the keyless initialize was not refused on the MCP server's own request line" >&2; exit 1; }
+          if [ "$code" != 0 ] || ! grep -q '^SIGTERM: stopped in ' <<< "$log"; then echo "expected the server's own stop line and exit 0; exit $code" >&2; exit 1; fi
 
       # SMD-2212: the import runner's image copies the ingestion pipeline's
       # import graph file by file, and its build resolves every import. So a
