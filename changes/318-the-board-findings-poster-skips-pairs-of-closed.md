@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-2932]
-migrations: []
----
-
-## Changelog
-
-The board-findings poster no longer spends its daily cap on pairs of finished tickets: a pair whose tickets are both closed (Done, Canceled or Duplicate) is not posted until one reopens, and when only one is closed the comment goes on the open one (SMD-2932).
-
-## FORK
-
-The board-findings poster skips pairs of closed tickets and comments on the open side (SMD-2932)
+# 318. The board-findings poster skips pairs of closed tickets and comments on the open side (SMD-2932)
 
 **What changed.**
 - **`db/board-findings.ts` selection.** It reads each side's current status from 068's `ob1_ticket_head`, through its key `md5(issue)::uuid`. A ticket is closed when its head's `status_type` is `completed`, `canceled` or `duplicate`; Linear gives Duplicate a type of its own, so `canceled` alone missed it. When the head carries no status (a hand capture superseding the Linear row becomes the head under 068's rule), the ticket's newest Linear row decides; a ticket with no status anywhere counts as open, and an unknown never reads as NULL. A pair of closed tickets is left out of the pair rule, so it is not posted until either ticket reopens.

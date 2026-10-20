@@ -1,17 +1,4 @@
----
-type: fixed
-bump: minor
-tickets: [SMD-2694]
-migrations: ["093"]
----
-
-## Changelog
-
-A long thought's extraction windows survive a hard stop: migration 093's `extraction_progress` keeps each window as it parses, so the next claim of the same text sends only the windows still to do, and the stop is counted on the thought; the sleep scheduler lets consolidation join past a thought whose single window outlasts every sleep, and preflight's `sleep` row names the thoughts its wakes hold back (SMD-2694).
-
-## FORK
-
-A long thought's answered windows survive a stop — a document longer than every sleep advances by its windows at each, where it started again at its first (SMD-2694)
+# 324. A long thought's answered windows survive a stop — a document longer than every sleep advances by its windows at each, where it started again at its first (SMD-2694)
 
 **What changed** (PR 1).
 - **Migration 093, `extraction_progress`:** one row per extraction claim a worker took and did not finish.
@@ -125,4 +112,3 @@ A long thought's answered windows survive a stop — a document longer than ever
 **Not taken.**
 - **A trigger that deletes the row when its claim finishes or is requeued.** Under 016 the editing role runs the requeue, so every content edit would have needed grants on this table. The row is read beside its fingerprint instead, so a stale one is replaced, never reused.
 - **A soft stop for a long window** (the ticket's option 2). It trades the yield for progress on a one-slot model, where a live capture's metadata call would queue behind the window.
-

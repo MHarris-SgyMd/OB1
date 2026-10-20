@@ -1,18 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-3048]
-migrations: []
----
-
-## Changelog
-
-`db/test-live.ts` runs in shards: `OB1_LIVE_SHARD=sleep|long|extract|rest` runs one shard's sections, and Fork Checks runs the four side by side, one job each, where one job ran them all (SMD-3048).
-`db/test-live.ts`'s cases in [10], [16] and [38] that wait out an outage in its own process do so on a schedule starting at 1 s, not 5 s, and [38]'s sleep passes look for work every second, not every 15 s. The cases that check the shipped schedule keep it (SMD-3048).
-
-## FORK
-
-Fork Checks' live suite in four shards, one job each: "Schema against real Postgres" was the run's critical path (SMD-3048)
+# 335. Fork Checks' live suite in four shards, one job each: "Schema against real Postgres" was the run's critical path (SMD-3048)
 
 **What changed.**
 - **`db/test-live.ts`** reads `OB1_LIVE_SHARD`. Its `SHARDS` table names three shards by the sections each runs; every section it does not list is `rest`'s, so a new section runs in CI unless someone moves it. Unset, the run is every section, as before. An unknown name, or a section listed in two shards, exits 2.
