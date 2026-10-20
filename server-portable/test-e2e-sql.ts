@@ -197,7 +197,7 @@ const result = async (name: string, args: Record<string, unknown> = {}) => {
   return { text: res.content.map((c) => c.text).join("\n"), isError: res.isError === true, sc: res.structuredContent };
 };
 
-console.log(`  store: OB1_STORE unset (sql, the default), SUPABASE_URL unset\n`);
+console.log(`  store: OB1_STORE unset (sql, the only store), SUPABASE_URL unset\n`);
 
 console.log("[1] The server runs with no Supabase configuration at all");
 {
@@ -2546,6 +2546,8 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     await relate(t[3], t[0], "duplicate");
     await relate(t[4], t[0], "related");
     await sql`UPDATE thought_facets SET valid_until = now() WHERE kind = 'relation' AND thought_id = ${t[4]}::uuid AND payload->>'target' = ${t[0]}`;
+    // 102 (SMD-3117): a pair judged distinct — counted apart, and never a board pair, though its two tickets are unlinked.
+    await relate(t[2], t[0], "distinct");
 
     // The count by hand: every row read, the rule applied here.
     // A ticket is metadata.ticket, else metadata.issue; whether Linear links
@@ -2570,8 +2572,9 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     };
     const facets = (await sql`SELECT thought_id::text AS h, payload, valid_until FROM thought_facets WHERE kind = 'relation'`).filter((f: { valid_until: unknown }) => f.valid_until === null);
     const byWord = (w: string) => facets.filter((f: { payload: { relation: string } }) => f.payload.relation === w).length;
-    const wantRel = { related: byWord("related"), evolves: byWord("evolves"), duplicate: byWord("duplicate"), boardPairs: facets.filter((f: { h: string; payload: { target: string } }) => boardPair(f.h, f.payload.target)).length };
-    assert(want.pending === 4 && want.stale === 1 && want.board === 2 && wantRel.related === 2 && wantRel.evolves === 1 && wantRel.duplicate === 1 && wantRel.boardPairs === 2,
+    const relationPairs = () => facets.filter((f: { h: string; payload: { target: string; relation: string } }) => f.payload.relation !== "distinct" && boardPair(f.h, f.payload.target)).length;
+    const wantRel = { related: byWord("related"), evolves: byWord("evolves"), duplicate: byWord("duplicate"), distinct: byWord("distinct"), boardPairs: relationPairs() };
+    assert(want.pending === 4 && want.stale === 1 && want.board === 2 && wantRel.related === 2 && wantRel.evolves === 1 && wantRel.duplicate === 1 && wantRel.distinct === 1 && boardPair(t[2], t[0]) && wantRel.boardPairs === 2,
       `the fixture is what the comment says (${JSON.stringify(want)}, ${JSON.stringify(wantRel)})`);
     assert(before.proposals?.boardPairs === want.board && before.relations?.boardPairs === wantRel.boardPairs,
       `before any link, a ticket row and another ticket's section count as a board pair (${before.proposals?.boardPairs}, ${before.relations?.boardPairs})`);
@@ -2580,7 +2583,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${t[0]}::uuid, 'link', ${{ relation: "relates_to", system: "linear", target: "SMD-7002" }}::jsonb)`;
     await readLinks();
     want.board = pend.filter((r: { o: string; n: string }) => boardPair(r.o, r.n)).length;
-    wantRel.boardPairs = facets.filter((f: { h: string; payload: { target: string } }) => boardPair(f.h, f.payload.target)).length;
+    wantRel.boardPairs = relationPairs();
     assert(want.board === 1 && wantRel.boardPairs === 1, `…the link takes t0–t1 out of both counts by hand (${want.board}, ${wantRel.boardPairs})`);
     // What became of a finding posted (SMD-2682): t1→t0's relation was posted
     // three days before that link, which answers it.
@@ -2593,12 +2596,12 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     assert(q.pending === want.pending && q.stale === want.stale && q.boardPairs === want.board && Math.abs(q.oldestPendingS - want.oldest) <= 2 && q.oldestPendingS >= 5 * 86400,
       `keyed /health's proposals are the queue counted by hand: pending, stale, the oldest's age, the board pairs — not one ticket's two rows, not a row with no ticket, not a stale or rejected row (${JSON.stringify(q)} vs ${JSON.stringify(want)})`);
     assert(JSON.stringify(found.relations) === JSON.stringify(wantRel),
-      `…and its relations the standing ones by word, the closed one not counted, the board pairs as the queue's (${JSON.stringify(found.relations)} vs ${JSON.stringify(wantRel)})`);
+      `…and its relations the standing ones by word, the closed one not counted, the distinct counted apart and never a board pair, the board pairs as the queue's (${JSON.stringify(found.relations)} vs ${JSON.stringify(wantRel)})`);
     assert(Object.keys(found.unread ?? {}).length === 0, `every read answered (${JSON.stringify(found.unread)})`);
     const table = await call("brain_info");
     const pRow = table.split("\n").find((l) => l.startsWith("Proposals"));
     const rRow = table.split("\n").find((l) => l.startsWith("Relations"));
-    assert(/^Proposals: +4 pending \(the oldest judged 5 d ago; 1 pair two tickets the board does not link\); 1 stale$/.test(pRow ?? "") && /^Relations: +4 standing \(2 related, 1 evolves, 1 duplicate; 1 pair two tickets the board does not link\)$/.test(rRow ?? ""),
+    assert(/^Proposals: +4 pending \(the oldest judged 5 d ago; 1 pair two tickets the board does not link\); 1 stale$/.test(pRow ?? "") && /^Relations: +4 standing \(2 related, 1 evolves, 1 duplicate; 1 pair two tickets the board does not link\); 1 pair judged distinct$/.test(rRow ?? ""),
       `the tool's table carries the same counts (${pRow} / ${rRow})`);
     const fRow = table.split("\n").find((l) => l.startsWith("Findings"));
     assert(before.findings?.posted === 0 && found.findings?.posted === 1 && found.findings?.accepted === 1 && found.findings?.medianAnswerS >= 3 * 86400 - 60
@@ -3276,9 +3279,7 @@ console.log("\n[17] Every worker action answers its result beside the text, and 
   }
 
   // A fault: the claim table is away, so the store throws. Each action keeps
-  // its lead, FAILED beside it with no retryable — on a PostgREST deploy the
-  // store throws the SQL-only reason, which a retry does not mend — and each
-  // POST answers the reason as a 200 {error}, as /worker-status does. Put the
+  // its lead, FAILED beside it with no retryable — and each POST answers the reason as a 200 {error}, as /worker-status does. Put the
   // table back whatever the assertions do; a lock held elsewhere fails the
   // rename within seconds rather than hanging the suite.
   const sql = new SQL({ url: URL_, max: 1 });

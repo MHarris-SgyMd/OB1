@@ -1,0 +1,33 @@
+# 344. [38]'s mid-read stop is named and checked for where its pass is: in its start, before its probe; it no longer holds each probe 4 s (SMD-3106)
+
+**What changed.**
+- **The case** is now "a stop landing mid-read with a pass in its start, before its probe, is a stop: 0, the row ended stopped". It was "with a pass waiting at its start", and its comment said the pass's probe was held.
+  - It records the probes the stub has answered when the sleep begins (the start's check's), at the stop and after the run. The count after the run must equal the first. It only rises, so the pass reached no probe of its own, at the stop or after.
+  - The stop lands where it did, at the sleep's first wake read once a line says `asleep:`. That read now returns 1 s late, not 300 ms: the pass's first statement has to return inside it.
+- **The stub's `probeHold`** (every probe held this long) is gone; this case was its only user. A `probes` counter takes its place, as [10]'s and [16]'s stubs have.
+
+**Why.** SMD-3048 PR 2's review pass 1 counted the probes in flight when this case's stop landed: 0, with the 8 s hold and with 4 s. The extraction pass is started just before the scheduler's first wake read. When the stop lands it is waiting on its start's first statement, the tables count (`extract-entities.ts`); once that returns, the check before its probe ends it with 130 ("stopped before the pass began"). That pass settles during the held read just as one waiting in its probe would. So review pass 1's bug (the stop read as a pass "ended by itself", 130, the row failed) shows without the hold, and the hold only made the start's check wait twice (2 × 4 s).
+
+**Tests.** `db/test-live.ts` [38]: the one case, rewritten; the assertion count is unchanged (sleep shard 55, full run 1432 after main d8b81b80 merged in).
+
+**Mutants:** 2, both killed, each failing this case alone (54 of 55):
+- review pass 1's bug restored (`if (stopping) return stopped();` after the reads dropped): exit 130, the row failed, "extract ended by itself (exit 130)". With main's case and its hold, the same mutant fails it the same way, with no probe held (0 held, no probe after the start check's two).
+- the stop moved to the fourth wake read, so the pass gets past its probe: exit 0 and the row stopped, which every conjunct but the probe count passes; the probe count fails it (41 as the sleep began, 43 at the stop and after).
+
+**Measured.** The sleep shard took 107 s on main and 98 s with the change, back to back on this Mac, before review pass 2 added 0.7 s to the held read. Six runs, three at a time, all passed, each with equal probe counts.
+
+**Review pass.**
+
+| Pass | Finding | Caught | Fix |
+|---|---|---|---|
+| 1 | the count at the stop, asserted equal to the first, could not fail when the count after the run (also asserted) did not: counts only rise | cold read | dropped from the assertion; the message keeps it |
+| 1 | nothing in the run shows a pass was started before the stop: a scheduler that started none until after its first wake read would pass the case | cold read | not changed: the review-pass-1 mutant is the witness ("extract ended by itself (exit 130)"), and a run-time one needs a hook in `sleep.ts` (Not taken) |
+| 2 | the mutant is caught only while the pass settles inside the 300 ms held read: on a loaded runner, a new connection and its first statement taking longer leave the pass running when the scheduler looks, and the case passes with the fix or without it, never red | walkthrough | the read is held 1 s |
+| 2 | the comments and this record said each start statement checks the signal; the pass waits on its first (the tables count) and is ended by the check before its probe. The FORK line said 8 s, the hold on main is 4 s | cold read | reworded |
+| 3 | the second mutant was said to pass "the old case", which held every probe 4 s and so would have met a different race; only the conjuncts it shares were shown to pass | cold read | reworded |
+
+**Tidied after the last pass.** [38]'s `around` helper said it served "a stop landing mid-read"; its users are a database starting up and a stop during a start read, and the mid-read case uses `intercept`.
+
+**Not taken.**
+- **A hook on `runSleep` reporting the passes it starts,** so the case could assert a pass was in flight when the stop landed. It would add an option to the scheduler for one test; the pass's own lines are hushed by the stop, and its start's statements run on a connection of its own.
+- **Making the stop wait for a held probe** (the ticket's second branch). The bug it fixed shows without one, and a stop timed to a probe in flight would add a hold back to pace it.

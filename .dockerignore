@@ -35,10 +35,7 @@ supabase
 **/test-*.mjs
 **/*.test.ts
 **/tsconfig.json
-**/wrangler.toml
 **/README.md
-**/.dev.vars
-**/.cf-out
 **/*.log
 
 # db/: the server image copies config.mjs, version.mjs and their types; the

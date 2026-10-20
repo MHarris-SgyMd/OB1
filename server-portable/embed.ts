@@ -15,8 +15,7 @@
  * environment record by `resolveEmbedConfig`, with the defaulting rules index.ts
  * used to hold, so the two cannot disagree about what an unset variable means
  * either. core/context.ts passes `() => resolveEmbedConfig(env())` because the
- * server reads its environment lazily (Cloudflare Workers bindings arrive per
- * request);
+ * server reads its environment lazily (root.ts initEnv seeds it before the first read);
  * reembed.ts passes process.env once.
  *
  * Nothing in here imports a database client or a framework, so it builds for
@@ -78,6 +77,8 @@ export type EmbedEnv = {
   OB1_EXTRACT_MAX_WINDOWS?: string;
   /** The supersession judge's model, when it is not the metadata model (SMD-1901). */
   OB1_JUDGE_MODEL?: string;
+  /** The typed-decision tier's model that gives the consolidation pass's verdict, the judge's model then only writing proposals (SMD-3115); unset, the judge decides. */
+  OB1_CONSOLIDATE_DECIDER?: string;
   /** A larger local model a runaway extraction call escalates to instead of the penalised retry (SMD-2000); unset keeps the same-model retry. */
   OB1_EXTRACT_ESCALATE_MODEL?: string;
   OB1_METADATA_TEMPERATURE?: string;
@@ -574,6 +575,12 @@ export type EmbedConfig = {
    * so a change starts a fresh pass rather than mixing judgements (SMD-1901).
    */
   judgeModel: string;
+  /**
+   * Decide mode (SMD-3115): OB1_CONSOLIDATE_DECIDER, the typed-decision tier's model that gives the pass's verdict,
+   * the judge's model then only writing the proposals it calls (consolidate-decide.ts); "" when the judge decides.
+   * The pass key names it with the judge's model (consolidatePassKey), so turning it on starts a fresh pass.
+   */
+  decider: string;
   metadataTemperature: number;
   /** Extra chat-completion fields controlling reasoning; see metadataReasoning. */
   metadataReasoning: Record<string, unknown>;
@@ -677,6 +684,7 @@ export function resolveEmbedConfig(env: EmbedEnv): EmbedConfig {
     // Trimmed like its sibling (SMD-1843): the judge's own knob, else the
     // metadata model as resolved above.
     judgeModel: stringOr(env.OB1_JUDGE_MODEL, metadataModel),
+    decider: stringOr(env.OB1_CONSOLIDATE_DECIDER, ""),
     // Deterministic by default; overridable for anyone who wants variety.
     metadataTemperature: numberOr(env.OB1_METADATA_TEMPERATURE, 0, "non-negative"),
     metadataReasoning: metadataReasoning(env.OB1_METADATA_REASONING),

@@ -148,6 +148,21 @@ console.log("\n[4] The caller's key, the forwarder slot and the extra headers ri
   seen.length = 0;
   await bare.call("thought_stats", {});
   assert(seen[0] && !seen[0].headers.has("x-brain-key"), "…and a call with no key sends none");
+  // An access token (SMD-2286: the MCP server's exchanged token) rides Authorization: Bearer; a key beside it wins.
+  seen.length = 0;
+  await client.call("thought_stats", {}, { token: "tok.en.value" });
+  assert(seen[0]?.headers.get("authorization") === "Bearer tok.en.value" && !seen[0]?.headers.has("x-brain-key") && seen[0]?.headers.get(FORWARDER_HEADER) === "fwd-raw",
+    `a token in Authorization: Bearer, no x-brain-key, the forwarder beside it (${seen[0]?.headers.get("authorization")})`);
+  seen.length = 0;
+  await client.call("thought_stats", {}, { key: "write-raw", token: "tok.en.value" });
+  assert(seen[0]?.headers.get("x-brain-key") === "write-raw" && !seen[0]?.headers.has("authorization"), "…a key and a token both given: the key alone is sent");
+  seen.length = 0;
+  const unsafe = await client.call("thought_stats", {}, { token: "tok\nen" });
+  const unsafeStream = await client.stream("job-1", { token: " tok" });
+  assert(unsafe.status === 401 && !unsafe.sent && unsafeStream.status === 401 && seen.length === 0, `a token no header can carry as given is refused here, nothing sent, by call and by stream (${unsafe.status} ${unsafeStream.status}, ${seen.length} sent)`);
+  seen.length = 0;
+  await client.stream("job-1", { token: "tok.en.value" });
+  assert(seen[0]?.headers.get("authorization") === "Bearer tok.en.value", "…and a job's stream carries the token as a bearer too");
 }
 
 console.log("\n[5] Any status is an answer: a refusal's JSON, a key's 401, a fault; a forwarded refusal carries itself whole");

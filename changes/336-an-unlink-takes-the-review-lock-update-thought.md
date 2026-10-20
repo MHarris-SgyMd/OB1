@@ -1,0 +1,52 @@
+# 336. An unlink takes the review lock: `update_thought` takes `ob1:supersession-review` whenever its envelope names `supersedes`, a clear included (SMD-3045)
+
+**What changed** (migration 099).
+- **`update_thought`** is 088's body under 088's signature with one change. The supersession advisory lock is taken whenever `p_provenance` names `supersedes` (`v_set_supersedes`): a thought's uuid, as before, or a JSON null that clears it, now too. It is taken before the fingerprint lock and the row, 033's order, whatever the row's pointer is: that is read under the row lock, after this one, and an unlocked read to skip the lock would reopen the race. A new sentinel `ob1:pointer-write-takes-review-lock` sits at the gate, and the function's comment says it. Nothing else moves: the same answers, refusals and writes, and the grants kept.
+
+**Why.** `review_supersession_proposal` holds the review lock for the whole accept. Its lapse (097's `ob1_lapse_walk`, then the clears) reads the tree above the accepted row and then clears the capture-only pointers it found. A re-point onto a thought and `delete_thought` wait on that lock, but an unlink took none. SMD-3035's review pass 2 raced it on a real Postgres with a sleep between the walk and the clears. B's unlink of X (a write key's link X→S) returned during the sleep, and the accept then cleared the hook's pointer Y→X, although X was no longer under S. The same pass found a 40P01 with the same cause: one transaction unlinked a row (row lock, no review lock) and then re-pointed it (waiting on the review lock), while the accept's clear waited on that row.
+
+**Lock order.**
+- An unlink now takes supersession lock → (fingerprint lock) → row, as a re-point and `delete_thought` (036) do, so the 40P01 above has no crossing left.
+- Outside the order, as before: a transaction of several calls that holds a row (a content edit, say) and then takes the review lock by any call (a pointer write, a clear now too, a delete, a citation, `rebuild_derived`, an accept) waits on the lock while a holder of it waits on something the transaction holds (a row, or an advisory lock taken after the review lock, such as a fingerprint lock or a node-state bucket), and Postgres breaks that with 40P01. Since 099 that holder can be a single-call unlink: under 088 it waited and then passed, while a single-call re-point as the holder closed the same cycle under both. Review pass 1 raced it on the row, with the transaction's later call each of `record_citation`, `delete_thought`, `rebuild_derived`, an accept and a re-point: 3 of 3 deadlocked for each under 099, 0 of 3 for each under 088. No shipped caller makes such a transaction (each store call is its own); taking the lock first (it is re-entrant) keeps one in the order.
+
+**Not here.**
+- 097's NOT HERE says that under an accept "only an unlink (which takes none, 088) moves one". Since 099 no write function moves a link out from under it. Two writes still take no review lock and move nothing out: a first capture naming supersedes (a new row; 092's check refuses or waits on a capture-only pointer onto the tree) and another taker's own lapse clears (nothing the accept's walk read as staying: a pointer it would clear too, which its re-read under the row lock then skips, or one above its frontier it never read). 097 is not edited, because migrations are append-only (`migrate.ts` checks each file's sha256), so db/README's 097 paragraph says what now holds.
+- A taker that holds no review lock (a write key's re-capture, a text move, board-sync's adoption) still has the window between the walk's read and its clears: SMD-3046.
+
+**Operators.** `099` applied after a by-hand re-apply of 088, 061 or 073 restores `update_thought` alone; `bun migrate.ts --reapply` restores every body. Preflight does not read the gate, so an 088 re-applied by hand over 099 passes its edit-signature check (073 re-applied over 088 did too): SMD-1227 has preflight read the gate, and SMD-3065 makes its printed remedies restore what they name, in the order printed.
+
+**Tests.**
+- test-schema [89]:
+  - the shape: one `update_thought`, 099 its last definer, the gate and its sentinel, the comment naming 099 beside 088, the order supersession lock < fingerprint lock < row;
+  - 099's DDL equals 088's but for the gate and the comment's one sentence;
+  - inside a transaction, the review lock is held, exclusive and not past the transaction, after a re-point, an unlink, an unlink of an unlinked row, and an unlink with a change of text, a patch, the stale-read guard or an actor; and not after a patch, a `derived_from` alone or a change of text;
+  - re-apply a no-op; 088 re-applied, an unlink holds no lock; restored, it holds one again.
+- test-live [6j], two connections, each order fixed by holding one side's transaction open:
+  - the unlink first: the accept waits on the review lock, then accepts and leaves the hook's pointer standing;
+  - the accept first: the unlink waits, then unlinks after the lapse cleared the pointer;
+  - neither deadlocks.
+- test-upgrade [20as]: refused without 073; onto a populated brain at 098 an unlink holds no review lock, after 099 it holds one, exclusive, until its transaction ends; an edit answers as 088's did; no row or audit row moved; a re-apply is a no-op.
+- The ticket's live Verify, on a throwaway Postgres: SMD-3035 pass 2's race table (26 rows, the delete races included), with a 1.5 s sleep injected after the lapse's walk on a firing that has pointers to clear, run once under 088's gate (the control) and once under 099's.
+  - The unlink during an accept: under 088 it returned at 420 ms in this Verify's control run (404 ms in SMD-3035's pass 2), inside the window, and the accept still cleared the hook's pointer above it. Under 099 it waits for the accept's commit (1,536 ms), and the result is the order the two committed in.
+  - The unlink first, held open: under 088 the accept ran through it and cleared the pointer. Under 099 the accept waits for the unlink's commit, and the hook's pointer stands.
+  - SMD-3035's 40P01 (an unlink, then a re-point, in one transaction): a deadlock under 088, none under 099.
+  - The class this joins, measured: a content edit then a re-point in one transaction deadlocks against an accept under both, and a content edit then an unlink now does too (under 088 it passed). Every other row comes out the same under both.
+- The last-definer asserts that named 088 for `update_thought` name 099, test-schema's `CARRIES` carries 073 for 099, and [79] restores the shipped body after its re-apply of 088. Preflight's remedies name 099 as `update_thought`'s last definer.
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+|---|---|---|---|
+| 1 | the multi-call deadlock was named for a pointer write against an accept; it is any review-lock taker after a held row, against any holder waiting on the row, a single-call unlink now among them | run-it (raced live) | named whole |
+| 1 | "under an accept nothing moves a link" left out a first capture naming supersedes and another taker's lapse clears (neither moves one out) | cold read | scoped to write functions; both named |
+| 1 | "re-applying 060 puts an older gate back": 060's 10-argument form lands beside 099's | cold read | 061 and 073 named alone |
+| 1 | a gate skipped when content arrives passed every behaviour cell | mutant | [89]: an unlink with new text holds the lock |
+| 2 | preflight does not read the gate: an 088 re-applied by hand over 099 passes it, and 099 applied after an older file restores `update_thought` alone | walkthrough | said, with `--reapply` as the remedy; SMD-1227, SMD-3065 |
+| 2 | another taker's lapse can clear a pointer above the accept's frontier, which "only what the accept's walk would" denied (harmless: never one the walk read as staying) | cold read | reworded |
+| 2 | the deadlock's holder can wait on a fingerprint lock or a node-state bucket as well as the row | cold read | named |
+| 3 | no behaviour cell held the lock's mode or its end: a shared lock (two re-points then close a loop, raced live) or a session-level one passed [89]'s behaviour cells, [6j] and [20as] | mutant | [89] and [20as] count the exclusive lock in the transaction and none after it |
+| 3 | an unlink beside a patch, the stale-read guard or an actor had no behaviour cell, so a gate skipped for any of them passed | mutant | three [89] cells |
+| 3 | "as an older file over 088 did" (061 over 088 warns), "it walks on only from a row the log took" (it walks on through every pointer that stays) | cold read | made exact |
+| 4 | an unlink left open in a caller's own transaction now holds the brain's one supersession lock, every delete, accept and pointer write waiting behind it (measured: both 55P03 at a 2 s lock_timeout); no shipped path holds it past one statement (3–29 ms) | run-it (availability) | said: commit before slow work |
+
+**Tidied after the last pass.** test-schema's `CARRIES` drops 088, which no longer last defines anything; [89] drops a text reset no cell needed; and preflight's 080-and-099 remedy names the unlink's review lock among what 073 alone takes back.

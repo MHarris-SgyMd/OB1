@@ -2,9 +2,9 @@
 // provider call, a store operation, a job's body and a webhook's deferred work
 // run under, the points their histograms get, and the stop's cut of whatever
 // is still open. telemetry.ts installs it (useTracing) as a server, or
-// preflight under --deep, loads it, and builds its tool spans on it. Only the API comes in here,
-// which the Workers bundle carries; the SDK is otel-setup.ts's, loaded by
-// startTelemetry, and until then every span and point here is the API's no-op.
+// preflight under --deep, loads it, and builds its tool spans on it. Only the API comes in here;
+// the SDK is otel-setup.ts's, loaded by startTelemetry, and until then every
+// span and point here is the API's no-op.
 
 import * as otel from "@opentelemetry/api";
 import { faultOf, NO_SPAN, type HistogramSpec, type SpanAttributes, type SpanRequest, type Tracing, type WorkSpan } from "./spans.ts";

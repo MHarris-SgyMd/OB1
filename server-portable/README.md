@@ -4,15 +4,16 @@ A runtime-neutral build of the Open Brain MCP server. Same tools, same wire
 behaviour as upstream's Edge Function build (`server/index.ts`, in this fork
 until SMD-1800), with no dependency on Deno or on Supabase's function host.
 
-This exists so the runtime decision in the Supabase migration can be made last,
-and changed later. One file targets four runtimes.
+This exists so the runtime decision in the Supabase migration could be made
+last. It was: the brain runs on Bun, as the compose stack (`SETUP.md`). The
+Cloudflare Workers target and the PostgREST store it needed were retired in
+SMD-3152 — no brain ran them.
 
 ## Prerequisites
 
 - [Bun](https://bun.sh) 1.4+ (used for tests and the container image)
 - A Postgres with pgvector and the core Open Brain schema — `db/migrations/`
   applies it; [`SETUP.md`](../SETUP.md) brings up the whole stack
-- For the Cloudflare target: a Cloudflare account and `wrangler` (a dev dependency here)
 
 ## What differs from upstream's Edge Function build
 
@@ -20,15 +21,15 @@ Three changes.
 
 1. **No Deno globals.** `Deno.env.get(…)` and `Deno.serve(…)` are gone, and the
    `jsr:@supabase/functions-js/edge-runtime.d.ts` type import is removed.
-2. **Env is read lazily.** Cloudflare Workers has no module scope for secrets —
-   bindings arrive on the request context — so the import-time env reads and the
-   eager client became an `initEnv`/`env()`/`db()` shim, seeded by the first
-   middleware. On Deno, Bun and Node it falls back to `process.env`.
-3. **The data layer is swappable.** Every database call goes through the
-   `ThoughtStore` interface in `store.ts`, with two implementations.
+2. **Env is read lazily.** The import-time env reads and the eager client
+   became an `initEnv`/`env()`/`db()` shim, seeded by the first middleware (it
+   was written for Cloudflare Workers, whose bindings arrive on the request).
+   It reads `process.env`.
+3. **The data layer is an interface.** Every database call goes through the
+   `ThoughtStore` interface in `store.ts`; the SQL store is its implementation.
 
-The second change is what makes the file portable and testable; the third is
-Phase 2 of the migration.
+The second change is what makes the file testable; the third is Phase 2 of the
+migration.
 
 ## Choosing a model provider
 
@@ -49,6 +50,7 @@ chat only, beside Ollama:
 | `OB1_EMBEDDING_MODEL` / `OB1_EMBEDDING_DIM` | `openai/text-embedding-3-small` / 1536 | Must match the column; permanent once there is data |
 | `OB1_METADATA_MODEL` | `openai/gpt-4o-mini` | No schema dependency — safe to change anytime |
 | `OB1_JUDGE_MODEL` | the metadata model | The supersession judge's model (`db/consolidate.ts`), for running the judge — the harder task — on a stronger model than every capture's tagging; a model the chat endpoint serves. The pass key carries it, so a change starts a fresh pass (SMD-1901) |
+| `OB1_CONSOLIDATE_DECIDER` | unset (the judge decides) | Consolidation's decide mode: the typed-decision tier's model (`OB1_JEV_BASE_URL`) gives each pair's verdict, and `OB1_JUDGE_MODEL` only writes the proposals it calls outdates, both quotes checked in the texts. The pass key names both models, so turning it on starts a fresh pass; preflight fails it without the tier, or with `OB1_JEV_MODEL` naming another model (SMD-3115) |
 | `OB1_LLM_LOCAL` / `OB1_CHAT_LOCAL` | unset (remote) | `1` declares the embeddings / chat endpoint on this machine or its private network, so the egress gate does not apply to it. Declared, never guessed from the address: a loopback URL with the flag unset is remote to the gate. A chat endpoint at the same base is the same box: either knob declares it (SMD-1903) |
 | `OB1_EGRESS_POLICY` | `deny` | What may leave the box for an endpoint not declared local: `deny` (only what an `OB1_EGRESS_ALLOW` term names), `allow` (everything but what an `OB1_EGRESS_DENY` term names), `off`. A knob that does not parse fails preflight and closes the gate |
 | `OB1_EGRESS_ALLOW` / `OB1_EGRESS_DENY` | none | Comma-separated `unit:value` terms — `actor` (the access key's name), `source`, `type`, `topic` (a row's metadata), `marker` (a literal in the text) — read under `deny` and `allow` respectively |
@@ -142,11 +144,8 @@ for the next sweep (`STALE_READ`). `brain_info` (its `Vectors` row) and a keyed
 `/health` (`database.vectorless`) count the thoughts that wait. The cost lands
 as rows do: an import written bare for a later `db/reembed.ts`, or a backlog
 after an outage, is embedded on the configured provider — a hosted one's bill
-included — unless the knob is off. No mender runs over the PostgREST store —
-Cloudflare Workers has no process to hold the timer, and on Bun the servers say
-once that they start none — where the replies' "the server embeds it by
-itself" does not hold. `db/reembed.ts` stays the tool for a model change or a
-whole brain at once.
+included — unless the knob is off. `db/reembed.ts` stays the tool for a model
+change or a whole brain at once.
 
 A call the **egress gate** refuses is neither (`egress.ts`, SMD-1903). The
 server asks the gate before either call and makes only the ones it allows: a
@@ -270,41 +269,17 @@ against `work_mem`, and a generic-plan walk's over the whole heap. A lossy
 routing count costs little under its LIMIT, and whether `match_thoughts` takes
 a generic plan is SMD-1464's to settle, so it recommends nothing.
 `db/config.mjs`'s `memorySizing` holds the arithmetic.
-Over PostgREST every
-direct-connection check — this one included — prints a row: six are probed
-through the store's own calls (`filtered search`, `keyword search`, `hybrid
-search`, `search signatures`, `edit signature`, `delete signature`), five say
-what catalog fact they would have read, and the catalog-only ones say
-they have no PostgREST form (change 97's first review pass; before it those
-printed nothing on that path).
 
 ## Choosing a data layer
 
-| `OB1_STORE` | Talks to | Needs | Runs on |
-| --- | --- | --- | --- |
-| `sql` *(the default — leave `OB1_STORE` unset)* | Postgres directly, via `Bun.sql` | `DATABASE_URL` (or `SUPABASE_URL` holding a `postgres://` URL) | Bun: the container, a bare `bun index.ts` |
-| `postgrest` | PostgREST over HTTP, via `supabase-js` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | Cloudflare Workers, where `wrangler.toml` selects it |
-
-The SQL store is the default (FORK.md change 97, SMD-1797): it is what `SETUP.md`'s
-container runs, what every CI job against real Postgres drives, and the one that
-needs no Supabase project. The PostgREST store is kept for one reason — Cloudflare
-Workers cannot hold a Postgres connection, so the Bun client `store-sql.ts`
-imports does not run there — and `wrangler.toml` pins `OB1_STORE=postgrest` for
-that target as a `[vars]` binding, a property of the target rather than a secret.
-Selected anywhere Bun runs, the PostgREST store is reported as retired: `preflight.ts`
-warns under `store selection`, and the server logs the same line once when it
-builds the store. Whether the SQL store can run on Workers through a driver that
-runs there (Hyperdrive in front of `postgres` or `pg` over `connect()`) is
-SMD-1847's measurement; until it lands, Workers is PostgREST-only.
-
-`store-sql.ts` is imported **dynamically**, so a Workers build never pulls in the
-Postgres client. Wrangler's bundler still resolves the specifier statically, so
-`wrangler.toml` aliases `bun` to `shims/bun-unavailable.ts` — a stub that throws
-with an explanation if a Workers deployment somehow selects the SQL store (by
-setting `OB1_STORE=sql`, or by losing the `[vars]` binding and getting the
-default) and has a connection string for it to open. Without one, the factory
-refuses first on the missing `DATABASE_URL`, naming `OB1_STORE=postgrest` as the
-way out, and the stub is never imported.
+One store: `store-sql.ts`, Postgres directly through `Bun.sql`. It needs
+`DATABASE_URL` (or `SUPABASE_URL` holding a `postgres://` URL), and `OB1_STORE`
+stays unset (or `sql`). It became the default in FORK.md change 97 (SMD-1797)
+and the only store in SMD-3152, which retired the PostgREST store beside it and
+the Cloudflare Workers target that store was kept for: no brain ran either, and
+stable and canary run the compose stack. An `OB1_STORE` of `postgrest` is
+refused at start and by preflight's `store selection` row, naming the fix (unset
+it, set `DATABASE_URL`).
 
 ### Two behaviours the SQL port had to preserve exactly
 
@@ -323,7 +298,7 @@ by meaning alone, exactly as before; at 0.2 a thought's age counts gently
 against its similarity (half-life 90 days); at 1 the thoughts above the
 threshold come newest first. The threshold still gates the raw similarity, so a
 weight reorders relevant thoughts and cannot surface irrelevant recent ones, and
-the `% match` shown is always the cosine. Both stores send `recency_weight` and
+the `% match` shown is always the cosine. The store sends `recency_weight` and
 `half_life_days` on every call — the function forms from before 020 no longer
 exist, and preflight's `search signatures` check fails a database that still
 has them, or has an old form re-created beside 020's. The ChatGPT `search` tool
@@ -426,7 +401,6 @@ both in the same commit.**
 | --- | --- | --- |
 | Bun, locally | `bun index.ts` | Serves on `PORT`, default 8000 |
 | Container | `docker build -t ob1-mcp .` | Alpine + Bun; see `Dockerfile` |
-| Cloudflare Workers | `bun run cf:build` then `wrangler deploy` | ~281 KiB gzipped |
 | Node | `bun run --bun index.ts`, or wrap with `@hono/node-server` | Same shim |
 
 ### 3. Provide configuration
@@ -439,32 +413,23 @@ DATABASE_URL                 the brain's postgres:// connection string — the S
 OPENROUTER_API_KEY           embeddings, and metadata extraction unless OB1_CHAT_BASE_URL gives chat its own endpoint — then OB1_CHAT_API_KEY (neither needed for a local endpoint)
 ```
 
-On Cloudflare Workers, where `wrangler.toml` selects the PostgREST store,
-`SUPABASE_URL` (the PostgREST base URL) and `SUPABASE_SERVICE_ROLE_KEY` replace
-`DATABASE_URL`. A box that also runs a vendored server migrated onto
-`compat/supabase-sql` — which reads a `postgres://` URL from `SUPABASE_URL` — may
-set that one name for both: this server reads a `postgres://` `SUPABASE_URL` as
-`DATABASE_URL` when the latter is unset (`store.ts:databaseUrl`), and preflight
-says which variable supplied the string. An `https://` `SUPABASE_URL` with no
-`OB1_STORE` — the deployment the old default served — is refused by preflight and
-by the store's first use with both ways out named: set `DATABASE_URL`, or set
-`OB1_STORE=postgrest` to keep reaching the brain through PostgREST. The mirror
-slip — `OB1_STORE=postgrest` kept beside a `SUPABASE_URL` that holds a
-`postgres://` string — is refused by name too, the string masked, rather than
-handed to supabase-js as a base URL.
+A box that also runs a vendored server migrated onto `compat/supabase-sql` —
+which reads a `postgres://` URL from `SUPABASE_URL` — may set that one name for
+both: this server reads a `postgres://` `SUPABASE_URL` as `DATABASE_URL` when
+the latter is unset (`store.ts:databaseUrl`), and preflight says which variable
+supplied the string. An `https://` `SUPABASE_URL` is not a connection string,
+and preflight and the store's first use say so.
 
 Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, and on Bun `OB1_STOP_GRACE` (the platform's grace period for a stop, in whole seconds with no unit; default 10 — see Caveats) and `OB1_VECTOR_MEND_INTERVAL` (seconds between the vector mender's ticks, 1 to 86400; default 60, `0` or `off` for none — see "The vector mender" above).
 
-On a container these are ordinary environment variables. On Workers use
-`wrangler secret put NAME` — **never** put them in `wrangler.toml`, which is
-committed. For `wrangler dev`, copy `.dev.vars.example` to `.dev.vars`
-(gitignored).
+On a container these are ordinary environment variables.
 
 ### 4. Apply the migrations
 
 `../db/migrations/004_upsert_thought_with_embedding.sql` is still required for
-the atomic capture path. Without it, capture falls back to the two-step write and
-logs a warning.
+the atomic capture path: the store writes content, metadata and vector in one
+`upsert_thought` call and has no two-step fallback (that was the retired
+PostgREST store's).
 
 Migration 014 matters here too. The guide's `match_thoughts` applies a metadata
 filter *after* choosing its candidates, so a selective filter silently returns
@@ -556,6 +521,9 @@ and preflight's `proposals` row warns once the oldest has waited past
 (084) by word, with their board pairs counted the same way; nothing waits on
 one, so nothing warns (`consolidate.ts --list relations` shows them); `none
 standing` when there is none, `none — migration 084 is not applied` before 084.
+Since 102 the pairs judged distinct follow, `; N pairs judged distinct`: near
+neighbours the judge called unrelated, kept apart (SMD-3117) — not in the
+relations' count, never a board pair, and not said when there is none.
 A board count counts rows — proposals, relation facets — not distinct pairs of
 tickets: five proposals between two tickets' thoughts count five, and a pair
 can be in both counts; `board pairs ?` says the count was not read. Each reads `?` when its read did not
@@ -594,7 +562,7 @@ database's facts (the ledger as `{ present, readable }`, not its names; the
 watermark as `boardSync`, an ISO instant or null; the long-running workers'
 heartbeats as `workers`, `{ heartbeats, ignored }`, SMD-2261; the queue as
 `proposals`, `{ pending, stale, oldestPendingS, boardPairs }`, and the standing
-relations as `relations`, `{ related, evolves, duplicate, boardPairs }`; what
+relations as `relations`, `{ related, evolves, duplicate, distinct, boardPairs }` (`distinct` since SMD-3117: the pairs judged apart, outside the three and the board pairs); what
 became of the findings posted as `findings`, `{ posted, comments, found,
 accepted, rejected, withdrawn, open, unanswered, windowDays, medianAnswerS }`,
 SMD-2682; each null when not read or absent; each `boardPairs` is a read of its own, last,
@@ -626,8 +594,7 @@ is retried for up to 2 s, 250 ms apart with no connection held — a brief
 migration lock is waited out, as before the cap — after which the key is
 **busy**: the MCP route refuses it with JSON-RPC error `-32003` ("retry in a
 few seconds"), since the registry could still say revoked. More cold keys
-than the pool holds queue for it, in rounds of about the cap. On Workers the
-cap is the PostgREST role's `statement_timeout`, where it has one. A
+than the pool holds queue for it, in rounds of about the cap. A
 revocation this process has already read stands through any failure until
 the registry answers that the key is not revoked (SMD-2072). Since migration
 054 a key used in the last five minutes and presenting its recorded scope
@@ -644,13 +611,11 @@ platform's liveness probe at the keyless form. `deploy/smoke.sh`'s check 10
 reads the keyed body.
 
 Where each fact comes from: the version, its release range and the tree's last
-migration are generated into `version.ts` by `scripts/gen-version.ts` (the Workers
-build cannot import the node-only `db/version.mjs`, and neither a Worker nor the
-image carries `db/migrations/`; check-fork's 17e round-trips the file, and in a
+migration are generated into `version.ts` by `scripts/gen-version.ts` (the
+image carries no `db/migrations/` for the server to read; check-fork's 17e round-trips the file, and in a
 checkout preflight's `version module` row compares it with `db/migrations/`, so
 rerun the script after adding a migration). The commit is the image's
-`OB1_GIT_SHA` build arg (`deploy/README.md`), `unknown` when unset — and always
-on Workers, which has no build arg. The database's
+`OB1_GIT_SHA` build arg (`deploy/README.md`), `unknown` when unset. The database's
 half is `brain-info.ts`'s `readDatabaseFacts`, the same read preflight's
 `vector extension`, `migration ledger` and `schema version` rows make, so the gate
 and the tool cannot disagree (preflight skips the counts and size, which it does
@@ -659,9 +624,7 @@ a role without `SELECT` on, say, `ob1_entities` or `schema_migrations` gets that
 field as unread, named on a `Not read:` line, and the rest still answers; a table
 that exists where the role cannot resolve it (off its search path, or no USAGE on
 its schema) is `invisible`, never "no table". The tool's statements are capped at
-5 s and its whole read at 15 s. Over the PostgREST store (Workers) the
-database's half is not read — PostgREST exposes no catalog reads — and the table
-says so; see Caveats.
+5 s and its whole read at 15 s.
 
 ## Other read surfaces
 
@@ -677,8 +640,7 @@ discovers through `tools/list` (a capture-only key sees none of them):
   INCLUDING stale) / succeeded / failed, how many thoughts are unpooled, the corpus
   total, the stale-lease count with its oldest lease's time and holder, and whether the
   pool is the active one (`ob1_config.entity_extraction_key` or `reembed:<model>@<dim>`;
-  `null` for consolidate). Read-only; SQL backend only — `thought_work_claims` is not
-  published to PostgREST (migration 015), so the shim answers that it needs the SQL store.
+  `null` for consolidate). Read-only.
 
 `worker_status` also has a keyed **`GET /worker-status`** — the same authentication as
 `/health` (a read or write key gets the JSON array, a capture/wrong/no/revoked key or a
@@ -716,8 +678,7 @@ dry-run preview mutates nothing, so it stamps none:
 Each is mirrored by a keyed **`POST`** — `POST /worker-retry-failed`,
 `POST /worker-release-leases` and `POST /worker-run` — with the args in the JSON body,
 gated by a **write** key (stricter than the read routes; a read/capture/no key gets the
-bodiless `ok`). Like `worker_status`, all are SQL-backend only — the PostgREST shim
-answers that it needs the SQL store.
+bodiless `ok`).
 
 ## The operator's label reset (SMD-2744)
 
@@ -819,10 +780,9 @@ MCP tools do rather than a copy of it:
   so a span there is nothing until `telemetry.ts` installs **`tracing.ts`**, the
   OpenTelemetry API's spans, as a server, or preflight under `--deep`, loads it.
 - **`otel-setup.ts`** — the OpenTelemetry SDK for traces, metrics and log
-  records, loaded only then and only on Bun: an OTLP/HTTP exporter for each
-  signal with a URL, spans and log records batched, the AsyncLocalStorage
-  context manager and the W3C propagator. `wrangler.toml` aliases it to
-  `shims/otel-unavailable.ts`, so the Worker carries the API alone.
+  records, loaded only then: an OTLP/HTTP exporter for each signal with a URL,
+  spans and log records batched, the AsyncLocalStorage context manager and the
+  W3C propagator.
 
 `scripts/check-fork-consistency.ts` check 25 is a tripwire on `index.ts`, `mcp-edge.ts`
 and `root.ts` for what a move would leave behind: an import outside the file's list, a
@@ -967,7 +927,7 @@ stripped (`X-Forwarded-Prefix`).
   (SMD-2287). It is the refusal as the operation made it for that caller, the
   existence-oracle rule applied: what `render.ts` has always been handed, and
   bounds into its text. A
-  save whose vector did not attach (the PostgREST two-step) is a 201 with
+  save whose vector did not attach (the retired PostgREST store's two-step; no producer since SMD-3152, SMD-3153 removes it) is a 201 with
   `embeddingAttached: false`, not a refusal, so a client does not capture again
   (forwarded, its `refusal` beside it). A refused input is a 400 `REFUSED_INPUT`
   naming each field and zod's reason. A fault is a 500 `FAILED` with its message, as the MCP tool's text
@@ -1014,18 +974,17 @@ word any refusal as this one does.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1097 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace; the same 1097 with OB1_MCP_UNDER_TEST=client, through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
+bun test-server.ts        # 1141 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace; the same 1141 with OB1_MCP_UNDER_TEST=client, through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
 bun test-auth.ts          # 191 — scoped, hashed, named keys; the same 191 with OB1_MCP_UNDER_TEST=client, against the MCP server as a REST client (mcp-server/, SMD-2287)
-bun test-rest.ts          # 380 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, and `bun api.ts` stopped mid-request
+bun test-rest.ts          # 470 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, and `bun api.ts` stopped mid-request
 bun test-plugins.ts       # 283 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's; the same 283 with OB1_MCP_UNDER_TEST=client (mcp-server/, SMD-2287)
 bun test-thoughts.ts      # 330 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 225 — fully local provider, no credential
 bun run test:sql          # 262 — store conformance, real Postgres in a container
-bun run test:e2e          # 599 — the whole server over MCP with no Supabase at all, OB1_STORE unset; the same 599 with OB1_MCP_UNDER_TEST=client, through the MCP server as a REST client (mcp-server/, SMD-2287)
-../db/with-postgres.sh bun test-rest-sql.ts  # 202 — the REST core beside the MCP server on one database: every operation through both, every refusal's words from the forwarded answer
+bun run test:e2e          # 630 — the whole server over MCP with no Supabase at all, OB1_STORE unset; the same 630 with OB1_MCP_UNDER_TEST=client, through the MCP server as a REST client (mcp-server/, SMD-2287)
+../db/with-postgres.sh bun test-rest-sql.ts  # 210 — the REST core beside the MCP server on one database: every operation through both, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 107 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row; the same 107 with OB1_MCP_UNDER_TEST=client
-bun run cf:build          # ~356 KiB gzipped (measured 2026-10-02, SMD-2284 PR 1 on 1.5.0; the PostgREST store and supabase-js are in it)
 ```
 
 `test:sql`, `test:e2e`, `test-rest-sql.ts` and `test-plugins-sql.ts` need podman or docker; they use `../db/with-postgres.sh`
@@ -1070,14 +1029,6 @@ stored in the same write").
 
 ## Caveats
 
-- **`brain_info` on Workers reports the server, not the database.** The
-  PostgREST store has no catalog reads: the version, commit (`unknown`, no build
-  arg), store and embedding answer; the database's versions, ledger, counts and
-  indexes do not. A container or Bun deployment on the SQL store reports them.
-- **Workers cannot pool Postgres connections.** `wrangler.toml` pins
-  `OB1_STORE=postgrest` there; the SQL store, selected by hand or by a lost
-  binding, fails loudly via the shim. Whether Hyperdrive and a Workers-capable
-  driver let the SQL store run there is SMD-1847 — measured before promised.
 - **The SQL store's pool is bounded** at `OB1_PG_POOL` (default 10). PostgREST was
   stateless HTTP, so nothing upstream limits concurrency any more — an unbounded
   pool would let a burst of captures exhaust the server's connection slots. Each
@@ -1085,10 +1036,6 @@ stored in the same write").
   call (SMD-2310), so what a plugin's SQL leaves on a session never meets a core
   query: a server's budget is `OB1_PG_POOL` plus two per such plugin, and the
   stack runs two servers.
-- **A live `workerd` request has not been exercised.** The Cloudflare build is
-  verified with the real bundler; `wrangler dev` could not be reached from the
-  authoring sandbox, and a hello-world worker failed identically there, so the gap
-  is environmental. Smoke-test a real deploy before trusting it.
 - **Auth is unchanged**, which means it is still a single shared key accepted from
   a header or a `?key=` query parameter. Moving runtimes does not improve that; see
   [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
@@ -1103,7 +1050,7 @@ stored in the same write").
   tool runs — up to ten minutes (`SSE_KEEPALIVE_MAX_MS`), past which the frames
   stop, one line says `request still running after N s: …` and, on Bun, the
   idle timeout reaps the stream (not logged again as a client leaving); on Node
-  or Workers it stays open until the client or a proxy gives up. A provider
+  it stays open until the client or a proxy gives up. A provider
   call is bounded by `OB1_LLM_TIMEOUT`, so a call that long is stuck in the
   database. The idle timeout itself stays at the runtime's default, which is
   the right reaper for a dead socket, and the two intervals are constants, not
@@ -1138,8 +1085,8 @@ stored in the same write").
   period and was killed (exit 137), cutting off any call in flight. Run with
   an init as PID 1 (`docker run --init`, compose's `init: true`, Fly), under
   systemd or in a terminal, Bun died at the signal at once; it now drains the
-  same way, and Ctrl-C exits 0. Only when `index.ts` is Bun's entry: Workers
-  has no signals, and a suite that imports the module keeps its own. What the
+  same way, and Ctrl-C exits 0. Only when `index.ts` is Bun's entry: a suite
+  that imports the module keeps its own. What the
   container's exit code says:
 
   | Exit | Meaning |

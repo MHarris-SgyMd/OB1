@@ -239,7 +239,9 @@ def question_of(dd):
 def result_of(dd, ids, typ, raw, probs, tokens, truncated, temperature):
     probabilities = {i: p for i, p in zip(ids, probs)}
     probabilities[INSUFFICIENT] = 0.0
-    res = {"id": dd.get("id"), "kind": dd["kind"], "probabilities": probabilities,
+    # The decision's id only when it has one: the contract's `id` is an optional string, and the client reads a
+    # null beside an absent id as another decision's result (SMD-3115, every canary pair failed on it).
+    res = {**({"id": dd["id"]} if dd.get("id") is not None else {}), "kind": dd["kind"], "probabilities": probabilities,
            "selected": ids[probs.index(max(probs))], "abstained": False, "p_insufficient": 0.0,
            "logits": raw + [NO_ABSTAIN_LOGIT], "temperature": temperature, "tokens": tokens, "truncated": truncated}
     if dd["kind"] == "binary": res["p_true"] = probabilities["true"]

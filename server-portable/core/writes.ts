@@ -217,8 +217,8 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
         // the hook told the two apart by the sentence's wording).
         const why = String((e as Error).message ?? e).slice(0, 120);
         // The grant remedy only for a privilege error (42501, on `errno` where
-        // Bun's SQL puts the SQLSTATE, as agents.ts reads it; `code` for a
-        // PostgREST error); a dropped connection or a timeout gets the store's
+        // Bun's SQL puts the SQLSTATE, as agents.ts reads it; `code` where an
+        // error carries it there); a dropped connection or a timeout gets the store's
         // own words, since `--grant` would change nothing there (sixth review pass).
         const { errno, code } = e as { errno?: unknown; code?: unknown };
         const noPrivilege = String(errno ?? code ?? "") === "42501" || /permission denied/i.test(why);
@@ -306,10 +306,9 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // overwritten by the classification (SMD-2323).
     const payload = { metadata: { ...clientMetadata, ...metadata, source: origin, genre: genre.genre } };
 
-    // Atomicity is the store's problem now: the SQL path writes content,
-    // metadata and vector in one statement, while the PostgREST path keeps the
-    // 3-arg RPC with its two-step fallback. Either way a row committed without
-    // its embedding is reported, never silently accepted.
+    // Atomicity is the store's: it writes content, metadata and vector in one
+    // statement, so a row is never committed without the embedding it was
+    // given.
     // A source deleted between the trim above and this write — the one path
     // left to 025's refusal for a key that cannot read — is met by trimming
     // once more and writing again, so the summary keeps its live sources;

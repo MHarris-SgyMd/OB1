@@ -33,16 +33,14 @@ import { mcpTarget, mcpUnderTest, servedAsNamed } from "./test-support.ts";
 const { assert, report } = createAssert();
 
 // Seed env before importing: the module itself no longer reads it at import
-// time, but the first request will, and Workers-style bindings are absent here.
+// time, but the first request will, and request bindings are absent here.
 // No store configuration, on purpose (change 97, SMD-1797): nothing below calls
 // a tool, so the server never builds a store — [14] exercises the factory
 // directly — and a section that did reach one would surface the SQL store's
-// own "DATABASE_URL is not set" refusal inside a tool error, not a request to
-// a stub PostgREST that no SETUP.md deployment runs.
+// own "DATABASE_URL is not set" refusal inside a tool error.
 delete process.env.OB1_STORE;
 delete process.env.DATABASE_URL;
 delete process.env.SUPABASE_URL;
-delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 process.env.OPENROUTER_API_KEY = "stub-openrouter";
 process.env.MCP_ACCESS_KEY = "test-key-xyz";
 
@@ -180,25 +178,25 @@ const AUTH = { ...H, "x-brain-key": KEY };
 
 console.log("[1] The module is importable at all");
 {
-  assert(typeof worker.fetch === "function", "default export exposes fetch (Workers + Bun shape)");
+  assert(typeof worker.fetch === "function", "default export exposes fetch (the shape Bun serves)");
   assert(PORT > 0, `serves on an ephemeral port (:${PORT})`);
 }
 
 console.log("\n[2] Runtime neutrality");
 {
   const src = await Bun.file(new URL("./index.ts", import.meta.url)).text();
-  // The process root the server builds on and its stream keepalive (SMD-2284) run on Workers too.
+  // The process root the server builds on and its stream keepalive (SMD-2284) stay runtime-neutral too.
   const rootSrc = await Bun.file(new URL("./root.ts", import.meta.url)).text();
   const sseSrc = await Bun.file(new URL("./sse.ts", import.meta.url)).text();
-  // The endpoint's HTTP edge, out of index.ts since SMD-2287 PR 2, is the Worker's as much as index.ts is.
+  // The endpoint's HTTP edge, out of index.ts since SMD-2287 PR 2, as index.ts is.
   const edgeSrc = await Bun.file(new URL("./mcp-edge.ts", import.meta.url)).text();
   for (const [file, text] of [["index.ts", src], ["root.ts", rootSrc], ["sse.ts", sseSrc], ["mcp-edge.ts", edgeSrc]]) {
     assert(!/\bDeno\./.test(text), `${file}: no Deno.* references`);
     assert(!/\bBun\./.test(text), `${file}: no Bun.* references`);
     assert(!/jsr:/.test(text), `${file}: no jsr: imports`);
   }
-  assert(/initEnv\(c\.env/.test(src), "seeds env from the request context (Workers path)");
-  // initEnv is the in-process guard (Workers has no preflight entrypoint): a bad
+  assert(/initEnv\(c\.env/.test(src), "seeds env from the request context");
+  // initEnv is the in-process guard (a direct `bun index.ts` runs no preflight): a bad
   // OB1_TIER throws here at the env-freeze boundary, so it never reaches the
   // best-effort log write that would silently drop every query_log row (SMD-1953).
   // The throw must come BEFORE `ENV = candidate`: the `if (ENV) return` at the top
@@ -721,7 +719,7 @@ console.log("\n[11b] At the public origin, configured (SMD-2382): the document a
   const note = await at("/mcp", { method: "POST", headers: H, body: NOTE });
   assert(note.status === 401 && note.headers.get("www-authenticate") !== null && (await note.text()) === "", `a keyless notification gets the bodyless 401 with the challenge (${note.status})`);
   const token = await at("/mcp", { method: "POST", headers: { ...H, authorization: `Bearer ${JWT}` }, body: INIT });
-  assert(token.status === 401 && /error="invalid_token"/.test(token.headers.get("www-authenticate") ?? ""), `a token is refused invalid_token until SMD-2286 accepts one (${token.status})`);
+  assert(token.status === 401 && /error="invalid_token"/.test(token.headers.get("www-authenticate") ?? ""), `a token is refused invalid_token here: mcp-server/ trades one (SMD-2286) (${token.status})`);
   const wrongKey = await at("/mcp?key=wrong", { method: "POST", headers: H, body: INIT });
   assert(wrongKey.status === 200 && wrongKey.headers.get("www-authenticate") === null && (await wrongKey.json())?.error?.code === -32001, `a wrong ?key= is a key client's: today's 200 and -32001, never sent to sign in (${wrongKey.status})`);
   // Through the real listener, as the proxy delivers it: the runtime builds
@@ -956,7 +954,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   let catalogLinked = true;
   let boardTimeout = false;
   let lockFacets = false;
-  let relationsAnswer: Record<string, unknown> = { related: 9, evolves: 4, duplicate: 1 };
+  let relationsAnswer: Record<string, unknown> = { related: 9, evolves: 4, duplicate: 1, distinct: 3 };
   // 087's table: absent from the catalog unless a case puts it there (SMD-2682).
   let catalogFindings = false;
   let findingsRefused = false;
@@ -1034,13 +1032,13 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   // statement is sent, so a refusal of 079's predicate cannot speak for them
   // (run-it, review pass 4).
   proposalsAnswer = { pending: 0, stale: 2, oldest_s: null, board_pairs: 4 };
-  relationsAnswer = { related: 0, evolves: 0, duplicate: 0 };
+  relationsAnswer = { related: 0, evolves: 0, duplicate: 0, distinct: 0 };
   boardTimeout = true;
   statements.length = 0;
   const emptyQueue = await readDatabaseFacts(fake);
   boardTimeout = false;
   proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
-  relationsAnswer = { related: 9, evolves: 4, duplicate: 1 };
+  relationsAnswer = { related: 9, evolves: 4, duplicate: 1, distinct: 3 };
   assert(emptyQueue.proposals?.boardPairs === 0 && emptyQueue.relations?.boardPairs === 0 && !Object.keys(emptyQueue.unread).some((k) => /boardPairs/.test(k)) && !statements.some((t) => /NOT consolidation_tickets_linked/.test(t)),
     `an empty queue and no relation send no board statement and count none (${JSON.stringify(emptyQueue.proposals)}, ${JSON.stringify(emptyQueue.unread)})`);
   // …and under a refused lock on thoughts, or at a deadline, an empty queue
@@ -1053,14 +1051,14 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
   // At a deadline in the queue's board read, with no relation standing, the
   // snapshot names the queue's board count and settles the relations' to 0.
-  relationsAnswer = { related: 0, evolves: 0, duplicate: 0 };
+  relationsAnswer = { related: 0, evolves: 0, duplicate: 0, distinct: 0 };
   hang.add("NOT consolidation_tickets_linked");
   const dlProgress = newProgress();
   void readDatabaseFacts(fake, {}, dlProgress);
   await Bun.sleep(200);
   const dl = snapshotFacts(dlProgress)!;
   hang.delete("NOT consolidation_tickets_linked");
-  relationsAnswer = { related: 9, evolves: 4, duplicate: 1 };
+  relationsAnswer = { related: 9, evolves: 4, duplicate: 1, distinct: 3 };
   proposalsAnswer = { pending: 1, stale: "x", oldest_s: 1, board_pairs: 0 };
   const parentLost = await readDatabaseFacts(fake);
   proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
@@ -1079,7 +1077,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   statements.length = 0;
   const leanFindings = await readDatabaseFacts(fake, { stats: false });
   assert(JSON.stringify(facts.proposals) === JSON.stringify({ pending: 6, stale: 2, oldestPendingS: 259207, boardPairs: 4 }) && JSON.stringify(leanFindings.proposals) === JSON.stringify(facts.proposals)
-      && JSON.stringify(facts.relations) === JSON.stringify({ related: 9, evolves: 4, duplicate: 1, boardPairs: 11 }) && leanFindings.relations === null && !statements.some((t) => /FROM thought_facets f\b/.test(t)),
+      && JSON.stringify(facts.relations) === JSON.stringify({ related: 9, evolves: 4, duplicate: 1, distinct: 3, boardPairs: 11 }) && leanFindings.relations === null && !statements.some((t) => /FROM thought_facets f\b/.test(t)),
     `the queue is read with or without the stats, the relations with them only (${JSON.stringify(leanFindings.proposals)}, ${JSON.stringify(leanFindings.relations)})`);
   // What became of the findings posted to the board (SMD-2682): a stats read
   // where 087's table resolves, each (pair, word) by its outcome, the found
@@ -1158,10 +1156,10 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   ].map((r) => { try { return JSON.stringify(proposalsValue(r)); } catch { return "threw"; } });
   assert(qShapes.join("|") === '{"pending":0,"stale":0,"oldestPendingS":null,"boardPairs":null}|{"pending":3,"stale":0,"oldestPendingS":13,"boardPairs":null}|{"pending":0,"stale":1,"oldestPendingS":null,"boardPairs":null}|{"pending":1,"stale":0,"oldestPendingS":0,"boardPairs":null}|threw|threw|threw|threw|threw',
     `the queue's counts are counts and its age whole seconds, or the read did not answer (${qShapes.join("|")})`);
-  const rShapes = [{ related: 1, evolves: 0, duplicate: 0 }, { related: 1, evolves: null, duplicate: 0 }, { related: "1; DROP", evolves: 0, duplicate: 0 }, undefined]
+  const rShapes = [{ related: 1, evolves: 0, duplicate: 0, distinct: 2 }, { related: 1, evolves: null, duplicate: 0, distinct: 0 }, { related: "1; DROP", evolves: 0, duplicate: 0, distinct: 0 }, { related: 1, evolves: 0, duplicate: 0 }, { related: 1, evolves: 0, duplicate: 0, distinct: -1 }, undefined]
     .map((r) => { try { return JSON.stringify(relationsValue(r)); } catch { return "threw"; } });
   const bShapes = [{ n: 4 }, { n: "4" }, { n: -1 }, { n: null }, {}, undefined].map((r) => { try { return String(boardPairsValue("x", r)); } catch { return "threw"; } });
-  assert(rShapes.join("|") === '{"related":1,"evolves":0,"duplicate":0,"boardPairs":null}|threw|threw|threw' && bShapes.join("|") === "4|4|threw|threw|threw|threw",
+  assert(rShapes.join("|") === '{"related":1,"evolves":0,"duplicate":0,"distinct":2,"boardPairs":null}|threw|threw|threw|threw|threw' && bShapes.join("|") === "4|4|threw|threw|threw|threw",
     `the relations' and the board pairs' counts are counts, or the read did not answer (${rShapes.join("|")} / ${bShapes.join("|")})`);
   proposalsAnswer = { pending: 1, stale: "two", oldest_s: 1, board_pairs: 0 };
   const oddQueue = await readDatabaseFacts(fake);
@@ -1341,19 +1339,23 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   assert(/^Board sync: +2026-09-24T12:00:00\.000Z$/m.test(readText) && /^Board sync: +none — no thought carries a usable Linear watermark$/m.test(noBoard) && /^Board sync: +\?$/m.test(lostBoard),
     `the table's board-sync row: the watermark, none, or ? when not read (${[readText, noBoard, lostBoard].map((t) => t.split("\n").find((l) => l.startsWith("Board sync"))).join(" / ")})`);
   // The findings rows (SMD-2680): the queue and the relations, none, ? when not read, and no table.
-  const quiet = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 0, oldestPendingS: null, boardPairs: 0 }, relations: { related: 0, evolves: 0, duplicate: 0, boardPairs: 0 } }), 1000));
-  const staleOnly = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 3, oldestPendingS: null, boardPairs: 0 }, relations: { related: 2, evolves: 0, duplicate: 0, boardPairs: 0 } }), 1000));
+  const quiet = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 0, oldestPendingS: null, boardPairs: 0 }, relations: { related: 0, evolves: 0, duplicate: 0, distinct: 0, boardPairs: 0 } }), 1000));
+  const staleOnly = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 3, oldestPendingS: null, boardPairs: 0 }, relations: { related: 2, evolves: 0, duplicate: 0, distinct: 0, boardPairs: 0 } }), 1000));
+  // 102 (SMD-3117): the pairs judged distinct, beside the relations and outside their count — with relations, alone, and one.
+  const withApart = renderBrainInfo(await brainInfo(server, async () => planted(100, { relations: { related: 2, evolves: 0, duplicate: 0, distinct: 5, boardPairs: 0 } }), 1000));
+  const onlyApart = renderBrainInfo(await brainInfo(server, async () => planted(100, { relations: { related: 0, evolves: 0, duplicate: 0, distinct: 1, boardPairs: 0 } }), 1000));
   const lostFindings = renderBrainInfo(await brainInfo(server, async () => planted(52, { proposals: null, relations: null, unread: { proposals: { reason: "refused", message: "permission denied for table supersession_proposals" }, relations: { reason: "timeout", message: "canceling statement due to statement timeout" } } }), 1000));
   const boardLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { unread: { "proposals.boardPairs": { reason: "timeout", message: "canceling statement due to statement timeout" } }, proposals: { pending: 6, stale: 0, oldestPendingS: 60, boardPairs: null } }), 1000));
   const execLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { unread: { "proposals.boardPairs": { reason: "refused", message: "permission denied for function consolidation_tickets_linked" } }, proposals: { pending: 6, stale: 0, oldestPendingS: 60, boardPairs: null } }), 1000));
-  const relBoardLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { relations: { related: 2, evolves: 0, duplicate: 0, boardPairs: null }, unread: { "relations.boardPairs": { reason: "timeout", message: "x" } } }), 1000));
+  const relBoardLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { relations: { related: 2, evolves: 0, duplicate: 0, distinct: 0, boardPairs: null }, unread: { "relations.boardPairs": { reason: "timeout", message: "x" } } }), 1000));
   const pre079 = renderBrainInfo(await brainInfo(server, async () => planted(78, { proposals: { pending: 2, stale: 0, oldestPendingS: 60, boardPairs: null } }), 1000));
   const denied = [deniedObject("permission denied for table thoughts"), deniedObject("permission denied for function consolidation_tickets_linked"), deniedObject("canceling statement due to lock timeout")];
   assert(JSON.stringify(denied) === '[{"kind":"table","name":"thoughts"},{"kind":"function","name":"consolidation_tickets_linked"},null]', `a refusal names its table or function (${JSON.stringify(denied)})`);
   const noTables = renderBrainInfo(await brainInfo(server, async () => planted(52, { proposals: null, relations: null }), 1000));
-  const pre084 = renderBrainInfo(await brainInfo(server, async () => planted(83, { relations: { related: 0, evolves: 0, duplicate: 0, boardPairs: 0 } }), 1000));
+  const pre084 = renderBrainInfo(await brainInfo(server, async () => planted(83, { relations: { related: 0, evolves: 0, duplicate: 0, distinct: 0, boardPairs: 0 } }), 1000));
   const line = (t: string, label: string) => t.split("\n").find((l) => l.startsWith(label)) ?? "";
-  assert(/^Proposals: +6 pending \(the oldest judged 3 d ago; 4 pair two tickets the board does not link\); 2 stale$/m.test(readText) && /^Relations: +14 standing \(9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link\)$/m.test(readText)
+  assert(/^Proposals: +6 pending \(the oldest judged 3 d ago; 4 pair two tickets the board does not link\); 2 stale$/m.test(readText) && /^Relations: +14 standing \(9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link\); 3 pairs judged distinct$/m.test(readText)
+      && /^Relations: +2 standing \(2 related, 0 evolves, 0 duplicate\); 5 pairs judged distinct$/m.test(withApart) && /^Relations: +none standing; 1 pair judged distinct$/m.test(onlyApart)
       && /^Relations: +none — migration 084 is not applied$/m.test(pre084)
       && /^Proposals: +none pending$/m.test(quiet) && /^Relations: +none standing$/m.test(quiet)
       && /^Proposals: +none pending; 3 stale$/m.test(staleOnly) && /^Relations: +2 standing \(2 related, 0 evolves, 0 duplicate\)$/m.test(staleOnly)
@@ -1601,8 +1603,9 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   const busy = start();
   // A malformed grace period: said, and read as the default (8 s of drain).
   const idle = start({ OB1_STOP_GRACE: "soon" });
-  // On the PostgREST store, which holds no pool: its stop must not say it closed one (review pass 2).
-  const ctrlC = start({ OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "k" });
+  // With no connection string its store never builds, so it holds no pool: its stop must not say it closed one
+  // (review pass 2; this child ran the PostgREST store, which held none, until SMD-3152 retired it).
+  const ctrlC = start({ DATABASE_URL: "" });
   const cutter = start();
   // OB1_STOP_GRACE=3: the drain's bound is 1 s, so the real bound cuts on real Bun in a second.
   const graced = start({ OB1_STOP_GRACE: "3" });
@@ -1653,7 +1656,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     const intCode = await exited(ctrlC.proc, 3_000);
     const intLog = await ctrlC.out;
     assert(intCode === 0 && /SIGINT: stopped in [\d.]+ s; no database pool was opened; exit 0/.test(intLog),
-      `SIGINT stops it the same way, and a PostgREST store is not said to have a pool closed (${intCode}: ${intLog.split("\n").filter((l) => l.startsWith("SIGINT: stopped")).join("")})`);
+      `SIGINT stops it the same way, and a store that never built is not said to have a pool closed (${intCode}: ${intLog.split("\n").filter((l) => l.startsWith("SIGINT: stopped")).join("")})`);
 
     // A keyed call that stalls before its response — the registry lookup, on
     // the database that never replies — and two SIGTERMs: the second cuts the
@@ -1952,40 +1955,37 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     embedDelayMs = 0;
   }
 
-  assert(isStoppable({ stop: () => Promise.resolve(), pendingRequests: 0 }) && !isStoppable({ OB1_STORE: "postgrest" }) && !isStoppable(undefined) && !isStoppable(null),
-    "isStoppable: Bun's server shape, not a Workers env, not nothing");
+  assert(isStoppable({ stop: () => Promise.resolve(), pendingRequests: 0 }) && !isStoppable({ OB1_STORE: "sql" }) && !isStoppable(undefined) && !isStoppable(null),
+    "isStoppable: Bun's server shape, not an env record, not nothing");
 }
 
-console.log("\n[14] OB1_STORE unset selects the SQL store; PostgREST stays selectable and is said to be retired here (SMD-1797)");
+console.log("\n[14] OB1_STORE unset selects the SQL store, the only one; postgrest is refused by name (SMD-1797, SMD-3152)");
 {
-  const { createStore, databaseUrl, DEFAULT_STORE, isPostgresUrl, maskUrl, missingDatabaseUrl, postgrestOnBunNotice, postgrestOverPostgresUrl, storeKind } = await import("./store.ts");
+  const { createStore, databaseUrl, DEFAULT_STORE, isPostgresUrl, maskUrl, missingDatabaseUrl, POSTGREST_RETIRED, storeKind } = await import("./store.ts");
   assert(DEFAULT_STORE === "sql" && storeKind({}) === "sql", "an empty env selects sql");
   assert(storeKind({ OB1_STORE: "PostgREST" }) === "postgrest", "the name is read case-insensitively");
 
-  // No connection string at all: refused as the SQL store, naming DATABASE_URL —
-  // not as the PostgREST store asking for SUPABASE_URL, which the old default did.
+  // No connection string at all: refused as the SQL store, naming DATABASE_URL.
   /** The factory's refusal for an env, or "" when it builds — every case below is a refusal. */
   const refusal = async (env: Parameters<typeof createStore>[0]) => { try { await createStore(env); return ""; } catch (e) { return (e as Error).message; } };
   let msg = await refusal({});
   assert(/OB1_STORE is unset, which selects the SQL store, and DATABASE_URL is not set/.test(msg) && /Set DATABASE_URL to the brain's postgres:\/\/ connection string/.test(msg),
          `…and without DATABASE_URL is refused as the SQL store, with the fix (${msg.slice(0, 48)}…)`);
-  assert(!/requires SUPABASE_URL/.test(msg), "…not as the PostgREST store");
 
-  // The deployment the old default served — an https:// SUPABASE_URL and no
-  // OB1_STORE — is told both ways out: a connection string, or the explicit selection.
-  msg = await refusal({ SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k" });
-  assert(/SUPABASE_URL holds a non-postgres:\/\/ URL, the PostgREST store's base URL/.test(msg) && /set OB1_STORE=postgrest/.test(msg),
-         "an https:// SUPABASE_URL under the default names OB1_STORE=postgrest as the way to keep it");
-  msg = await refusal({ SUPABASE_URL: "http://localhost:3000", SUPABASE_SERVICE_ROLE_KEY: "k" });
+  // An https:// SUPABASE_URL (the retired PostgREST store's base URL) is said
+  // not to be a connection string, and no other store is offered.
+  msg = await refusal({ SUPABASE_URL: "https://x.supabase.co" });
+  assert(/SUPABASE_URL holds a non-postgres:\/\/ URL, not a connection string/.test(msg) && !/OB1_STORE=postgrest/.test(msg),
+         "an https:// SUPABASE_URL is named as no connection string, and postgrest is not offered as the way out");
+  msg = await refusal({ SUPABASE_URL: "http://localhost:3000" });
   assert(/non-postgres:\/\/ URL/.test(msg) && !/https:\/\/ URL/.test(msg), "…and a self-hosted http:// one is not called https");
 
-  // The mirror slip: the PostgREST store selected while SUPABASE_URL holds a
-  // connection string. Refused by name before supabase-js sees the string.
-  msg = await refusal({ OB1_STORE: "postgrest", SUPABASE_URL: "postgres://u:p@127.0.0.1:1/x", SUPABASE_SERVICE_ROLE_KEY: "k" });
-  assert(/SUPABASE_URL holds a postgres:\/\/ connection string, which PostgREST cannot dial/.test(msg) && /Unset OB1_STORE/.test(msg),
-         "OB1_STORE=postgrest with a postgres:// SUPABASE_URL is refused naming the SQL store as the reader of that URL");
-  assert(postgrestOverPostgresUrl({ OB1_STORE: "postgrest", SUPABASE_URL: "https://x.supabase.co" }) === null && postgrestOverPostgresUrl({ SUPABASE_URL: "postgres://u:p@h/x" }) === null,
-         "…and neither a PostgREST base URL under postgrest nor a postgres:// URL under the default is a mismatch");
+  // The PostgREST selection: refused by name, whatever SUPABASE_URL holds.
+  for (const url of ["https://x.supabase.co", "postgres://u:p@127.0.0.1:1/x"]) {
+    msg = await refusal({ OB1_STORE: "postgrest", SUPABASE_URL: url });
+    assert(msg === POSTGREST_RETIRED && /retired/.test(msg) && /SMD-3152/.test(msg) && /Unset OB1_STORE and set DATABASE_URL/.test(msg),
+           `OB1_STORE=postgrest is refused as retired, naming the fix, with SUPABASE_URL ${url.split(":")[0]}:// (${msg.slice(0, 60)}…)`);
+  }
   assert(maskUrl("postgres://u:hunter2@h:5432/x") === "postgres://***@h:5432/x" && maskUrl("https://x.supabase.co") === "https://x.supabase.co", "maskUrl blanks the credentials of a URL that has them and leaves one without alone");
   assert(maskUrl("postgres://u:p@ss@h/x") === "postgres://***@h/x" && maskUrl("postgres://u:p@[::1]:5432/x") === "postgres://***@[::1]:5432/x" && maskUrl("postgres://u:p@h") === "postgres://***@h",
          "…a raw @ inside the password goes with it, an IPv6 host and a path-less URL are kept");
@@ -2003,25 +2003,14 @@ console.log("\n[14] OB1_STORE unset selects the SQL store; PostgREST stays selec
   assert(viaAlias.kind === "sql", "createStore builds the SQL store from it (Bun's client connects on first use; nothing is dialled here)");
   await viaAlias.close();
 
-  // PostgREST is still selectable, explicitly — the Workers path.
-  const pg = await createStore({ OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "k" });
-  assert(pg.kind === "postgrest", "OB1_STORE=postgrest still builds the PostgREST store");
-  await pg.close();
-
-  // The retired notice: for postgrest, on a runtime that has Bun, and nowhere else.
-  const notice = postgrestOnBunNotice("postgrest");
-  assert(typeof notice === "string" && /Cloudflare Workers only/.test(notice) && /runs on Bun/.test(notice), "selecting postgrest on Bun earns the notice, naming Workers and Bun");
-  assert(postgrestOnBunNotice("postgrest", false) === null, "…not on a runtime without Bun (Workers)");
-  assert(postgrestOnBunNotice("sql") === null && postgrestOnBunNotice("sql", true) === null, "…and sql never does");
-
-  // An unknown name is refused naming the default; an explicit sql selection is named as such.
+  // An unknown name is refused naming sql as the only store; an explicit sql selection is named as such.
   msg = await refusal({ OB1_STORE: "typo" });
-  assert(/"sql" \(the default\)/.test(msg) && /"postgrest" \(Cloudflare Workers\)/.test(msg), "an unknown OB1_STORE is refused naming sql as the default and postgrest as the Workers store");
+  assert(/Unknown OB1_STORE "typo"/.test(msg) && /"sql" \(the only store/.test(msg) && !/postgrest/i.test(msg), "an unknown OB1_STORE is refused naming sql as the only store, and no other");
   const { problem, fix } = missingDatabaseUrl({ OB1_STORE: "sql" });
   assert(/^OB1_STORE=sql selects the SQL store, and DATABASE_URL is not set$/.test(problem) && /^Set DATABASE_URL/.test(fix), "an explicit sql selection without DATABASE_URL is named as such, problem and fix apart");
 }
 
-console.log("\n[15] The server says once, when it builds the store, that PostgREST is retired on Bun (SMD-1797)");
+console.log("\n[15] A server with OB1_STORE=postgrest refuses at its store's build, by store.ts's line (SMD-3152)");
 {
   // A second process root: root.ts seeds its env once and builds its store
   // once, so the root the server above uses — which never built one — cannot
@@ -2029,27 +2018,23 @@ console.log("\n[15] The server says once, when it builds the store, that PostgRE
   // string yields a fresh module with its own env and store, and the process
   // env it copies is the one set here. The root is where the store is built
   // (SMD-2284), so it is driven directly: two reads of the store, one build.
+  // (Until SMD-3152 this row held the "retired on Bun" notice the PostgREST
+  // store earned here; the store is gone and the selection is a refusal.)
   process.env.OB1_STORE = "postgrest";
   process.env.SUPABASE_URL = "https://stub.invalid";
-  process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
-  const freshSpecifier = "./root.ts?postgrest-notice"; // a variable, so tsc does not try to resolve the query string as a module
+  const freshSpecifier = "./root.ts?postgrest-refused"; // a variable, so tsc does not try to resolve the query string as a module
   const fresh = (await import(freshSpecifier)) as { initEnv: () => void; db: () => Promise<unknown> };
-  const warned: string[] = [];
-  const realWarn = console.warn;
-  console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+  const reasons: string[] = [];
   try {
     fresh.initEnv();
-    for (let i = 0; i < 2; i++) await fresh.db().catch(() => null);
+    for (let i = 0; i < 2; i++) await fresh.db().then(() => reasons.push("built"), (e: Error) => reasons.push(e.message));
   } finally {
-    console.warn = realWarn;
     delete process.env.OB1_STORE;
     delete process.env.SUPABASE_URL;
-    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
   }
-  const notices = warned.filter((w) => /keeps for Cloudflare Workers only/.test(w));
-  assert(notices.length === 1, `the retired notice is logged exactly once across two reads of the store (${notices.length} of ${warned.length} warnings)`);
-  const { postgrestOnBunNotice: noticeOf } = await import("./store.ts");
-  assert(notices[0] === noticeOf("postgrest"), "…and it is store.ts's line itself, byte for byte — not a copy carrying the same phrases");
+  const { POSTGREST_RETIRED } = await import("./store.ts");
+  assert(reasons.length === 2 && reasons.every((r) => r === POSTGREST_RETIRED),
+    `both reads of the store are refused with store.ts's line itself, byte for byte (${reasons.map((r) => r.slice(0, 40)).join(" | ")})`);
 }
 
 console.log("\n[16] parseFilter bounds and normalises a metadata filter at the tool boundary (SMD-1490)");
@@ -2158,7 +2143,7 @@ console.log("\n[16c] prefer_current's row line, header note and error hint rende
   const none = currentNote([{ window: { rows: 40, known: 40, demoted: 40, syncedAt: null, exact: false } }]) ?? "";
   assert(capped.endsWith("may have been missed — the window is capped at 100.") && !capped.includes("raise limit") && none.includes("No current match was in the top 40, so every row here is a demoted one"),
     `a window of 100 is already capped, so the note says so rather than to raise the limit (the window's size decides, not the limit as sent: second review pass); a window with no current row says so (first review pass) (${capped})`);
-  assert(/migration 059 .* is not applied, or PostgREST has not reloaded/.test(currentSearchHint('function search_thoughts_current(vector, unknown) does not exist'))
+  assert(/migration 059 .* is not applied; search without prefer_current/.test(currentSearchHint('function search_thoughts_current(vector, unknown) does not exist'))
       && /migration 059 .* is not applied/.test(currentSearchHint("Could not find the function public.search_thoughts_current(filter, half_life_days, match_count, match_threshold, query_embedding, query_text, recency_weight) in the schema cache"))
       && /before migration 068, and after it wherever PostgreSQL checks a removed join's tables, the server's role needs SELECT on thought_sources .* the server group/.test(currentSearchHint("permission denied for table thought_sources"))
       && /projection \(migration 068\).* grants on ob1_ticket_head and ob1_superseded_by/.test(currentSearchHint("permission denied for table ob1_superseded_by"))
@@ -2183,7 +2168,7 @@ console.log("\n[16d] A fault an operation throws is said as it always was, typed
 
   // No verdict, every one: the fault is unclassified until SMD-2461's one
   // classifier (review pass 3 cut pass 2's — a third list, whole SQLSTATE
-  // classes, blind on the PostgREST store; pass 4 took back the `false` that
+  // classes, blind on the retired PostgREST store; pass 4 took back the `false` that
   // called a restarting database final).
   const pg = (errno: string) => Object.assign(new Error("x"), { name: "PostgresError", code: "ERR_POSTGRES_SERVER_ERROR", errno });
   const faults = [pg("57P01"), pg("42883"), Object.assign(new Error("x"), { name: "PostgresError", code: "ERR_POSTGRES_CONNECTION_CLOSED" }), "boom", null];
@@ -4784,8 +4769,8 @@ console.log("\n[26] A provider call, a store operation and a job's body under sp
       `each operation one point on db.client.operation.duration, none for a plugin's transaction, whose time is the plugin's own code (${JSON.stringify(storePoints.map((p) => [p.attributes, p.value.count]))})`);
     // The store's kind is the store's own.
     spans.reset();
-    await tracedStore(Object.assign(new FakeStore(), { kind: "postgrest" }) as unknown as import("./store.ts").ThoughtStore).countThoughts();
-    assert(attrs(named("countThoughts"))["ob1.store"] === "postgrest", `a span's store kind is the store's (${JSON.stringify(attrs(named("countThoughts")))})`);
+    await tracedStore(Object.assign(new FakeStore(), { kind: "another-kind" }) as unknown as import("./store.ts").ThoughtStore).countThoughts();
+    assert(attrs(named("countThoughts"))["ob1.store"] === "another-kind", `a span's store kind is the store's (${JSON.stringify(attrs(named("countThoughts")))})`);
     // The configured store is the wrapped one: an operation on a database that is not there is a span that failed.
     spans.reset();
     const real = await createStore({ DATABASE_URL: "postgres://u:pw@127.0.0.1:1/x" });

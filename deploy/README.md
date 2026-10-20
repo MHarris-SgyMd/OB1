@@ -300,8 +300,9 @@ there.
   `localhost`, `127.0.0.1` or `::1`, never to a name under `localhost`. This
   was measured on MCP SDK v2, and the same rule is read in Claude Code
   2.1.301's bundle. Sign-in at `<name>.localhost` therefore needs
-  TLS at the edge (SMD-3053), and a token is accepted at `/mcp` only after
-  SMD-2286; the brain's origin will then be its host on the edge.
+  TLS at the edge (SMD-3053), and a token is accepted at `/mcp` only once
+  `mcp-server/`, which trades tokens (SMD-2286), serves it (SMD-2287 PR 5);
+  the brain's origin will then be its host on the edge.
 
   Until then, a brain running the `auth` profile keeps its
   `OB1_PUBLIC_ORIGIN`. Since the edge's host is not its origin's, through the
@@ -624,8 +625,8 @@ is the defence: mint it with `keygen.ts`, and never hash a chosen word into
 strong the key was. A raw `MCP_ACCESS_KEY`, the one key it sees in plain, is
 refused under 32 characters by preflight, the image's entrypoint. Compose
 passes the server no raw key, so this is for the image run on its own
-(`docker run`, Kubernetes); a Workers deployment and the vendored servers run
-no preflight, so give them a 32-byte key yourself. The REST core
+(`docker run`, Kubernetes); the vendored servers run no preflight, so give
+them a 32-byte key yourself. The REST core
 (`server-portable/rest/`, SMD-2284) checks the same keys, from headers alone,
 and refuses a wrong one before reading the body; it takes the same position,
 and the proxy does not route `/api` yet. The proxy
@@ -825,8 +826,9 @@ public origin and the `auth` profile on (SMD-2382):
   the authorization server answers. So a `?key=` connector at `/mcp` opens an
   OAuth sign-in first — the operator's, at `/auth`. Once through, its key
   still rides the URL and authenticates before the token, so it is served as
-  before. A connector with no key cannot get past the sign-in until SMD-2286
-  accepts the token. The server itself never sends a key client to sign in: a
+  before. A connector with no key cannot get past the sign-in until `/mcp`
+  is served by `mcp-server/`, which trades its token (SMD-2286), with
+  SMD-2287 PR 5. The server itself never sends a key client to sign in: a
   bad key, in any form, still gets the 200 carrying a JSON-RPC refusal.
 - **Changing the public origin later costs a re-enrolment.** Every passkey has
   to be enrolled again and every connector registered again.
@@ -875,8 +877,7 @@ command that builds — not in `deploy/.env`, where a value written once is bake
 into every later build — with `--dirty`, so an image built from uncommitted
 changes says so. Compose never forwards it at runtime; a runtime variable of that
 name set some other way (`docker run -e`, a Kubernetes `env:` entry) overrides the
-baked one, so set none. Unset at build, the image reports `unknown`; a Worker
-always does (wrangler has no build arg). Rebuild with it:
+baked one, so set none. Unset at build, the image reports `unknown`. Rebuild with it:
 
 ```bash
 OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --build server proxy forwarder
@@ -1297,9 +1298,7 @@ and a point on `db.client.operation.duration` labelled with the same, on
 bounds finer than the conventions advise and on to 60 s. On the SQL store a
 fault's SQLSTATE is its `error.type` and `db.response.status_code`
 (any other fault's code or kind its `error.type`), and its time includes the
-pool's wait; the PostgREST store's faults are plain errors, `Error` — but for
-the key's registry lookup, which carries its SQLSTATE — and its time is an
-HTTP call's. No query or parameter is on either. A plugin's transaction is an
+pool's wait. No query or parameter is on it. A plugin's transaction is an
 internal span, `pluginTx`, with `ob1.plugin`, and no point: its time is the
 plugin's own code and SQL, and the operations it calls are spans and points
 of their own. The key's registry lookup (`resolveAgent`) runs before
@@ -1393,8 +1392,7 @@ second, about 5 MB; with it, Loki took 28 KB for the same 5,000 and Tempo held
 accepted, or a delivery its plugin accepted, is never held to it. A keyed
 client can still fill a batch's queue (a 100-call batch, 101 spans), and while
 the collector lags what is past it is dropped — said as `queue full` — though
-every line is still written. Cloudflare Workers runs the API's no-ops alone —
-`wrangler.toml` keeps the SDK out of the Worker, and CI holds that.
+every line is still written.
 
 ### The observability profile
 
@@ -1916,7 +1914,9 @@ current, an accept needs `--direction newer` or `--direction older`.
 
 Since migration 084 the pass also stores its related, evolves and duplicate
 verdicts as `relation` facets on the newer thought — edges, not proposals,
-nothing to review (`--list relations` lists them). The service connects as the
+nothing to review (`--list relations` lists them) — and since 102 a pair it
+calls unrelated as a `distinct` one, two near neighbours kept apart (`--status`
+counts them; SMD-3117). The service connects as the
 superuser, so it stores them. A brain that ran the pass before 084 has none for
 the thoughts judged then: `--status` counts them and prints the `DELETE FROM
 thought_work_claims …` that has the next pass judge exactly those again (their
@@ -2334,8 +2334,25 @@ record. `canary.sh` stands the canary beside it, and takes it down again
 # the canary mints its own key: no key of stable's is needed, or opens it
 deploy/canary.sh --env-file ~/OB1/deploy/.env --port 8011 up --connect   # the first up names its port
 deploy/canary.sh --env-file ~/OB1/deploy/.env up                         # later ones read it from its env file
+deploy/canary.sh --env-file ~/OB1/deploy/.env up --no-refresh            # bring it level in place, keeping its own rows
 deploy/canary.sh --env-file ~/OB1/deploy/.env down --volumes
 ```
+
+Every `up` refreshes the canary from stable, unless `--no-refresh` says not to
+(SMD-3154). A canary that holds rows stable does not, its own ingests or its
+own passes' proposals, keeps them that way: `up --no-refresh` mends its env
+file and keys as `up` does, runs this checkout's `migrate` on the canary's own
+database, and recreates the servers, its proxy and forwarder on its own
+networks. It is refused on a canary with no database to keep: no volume
+(changing nothing), or one whose database holds no relations. Either form
+builds its images while the canary serves, then stops its writers before its
+Postgres is touched, its servers and a running `sleep` worker, and brings the
+worker back on the new build once the smoke has passed, unless its env file
+holds no `OB1_WORKER_KEY` (then it stays stopped, `up` says how to start it,
+and exits 1). A run that fails after the stop says what it left stopped and
+how to go on. A running writer of another profile (the workers, board-sync,
+the import runner) is refused before anything changes: stop it first. A plain `up` still refreshes a canary holding rows of its own; SMD-3155
+is the guard.
 
 The canary is `compose.yaml` again under the project `<stable>-canary` (SMD-2873):
 `open-brain-canary` beside the default stable, `ob1b-canary` beside a brain whose
@@ -3119,9 +3136,10 @@ OAuth for the brain (SMD-2285; `../docs/operator-surface-tiers.md`, decisions
 `auth` profile runs it. It publishes no port: the proxy routes `/auth` and
 the three discovery paths outside it to it while it answers, and answers them
 404 itself while it does not ("One origin", above). The REST core accepts
-its tokens (SMD-2286, "Tokens at the REST core" below). The MCP server
-becomes its client with SMD-2286's exchange in `mcp-server/`, live with
-SMD-2287, and the GUI with SMD-2280. The
+its tokens (SMD-2286, "Tokens at the REST core" below). `mcp-server/` is
+its client: it trades each OAuth token sent to `/mcp` for the REST core's,
+as the `mcp` client (SMD-2286), and serves `/mcp` once SMD-2287 PR 5 gives
+it a compose service; the GUI becomes one with SMD-2280. The
 MCP server already sends clients to it (SMD-2382), a preview: at the public origin, while
 this server answers its probe on the mesh, it serves the protected-resource
 document and answers a keyless `/mcp` with the 401 challenge naming it.
@@ -3399,18 +3417,20 @@ re-runs the proof of concept against the new image
 (`bun evals/eval-auth.ts --up oidc-provider`, then `--verify`); CI's auth-poc
 job does the same.
 
-**A preview until SMD-2286.** With the profile on, the MCP server
+**A preview until SMD-2287 PR 5.** With the profile on, the MCP server
 advertises OAuth at the public origin, and a claude.ai connector at `/mcp`
 is asked to sign in here, `?key=` ones included. A `?key=` connector is
 served once through, since its key authenticates before the token; one with
-no key is not, since the MCP server accepts no token yet: it answers
-`invalid_token`, and the client signs in again. Only the operator can sign
+no key is not, since the MCP server serving `/mcp` today (server-portable's)
+accepts no token: it answers `invalid_token`, and the client signs in again.
+`mcp-server/`, which trades each token at the hop (SMD-2286), serves `/mcp`
+with SMD-2287 PR 5; it needs `OB1_AUTH_SECRET_MCP` in its environment. Only the operator can sign
 in today, so leave the profile off where others' claude.ai connectors must
 keep working; turning it off again makes the document a 404, and they
 proceed on the key.
 Not yet: passkey sign-in, which needs the public origin (SMD-2382,
-SMD-2286), and the MCP server and the GUI as this server's clients (SMD-2286's exchange with
-SMD-2287; SMD-2280). The release overlay does not pin an image for it yet,
+SMD-2286), `/mcp` served by `mcp-server/` (SMD-2287 PR 5), and the GUI as
+this server's client (SMD-2280). The release overlay does not pin an image for it yet,
 so the profile builds from a checkout.
 
 ## What this does not cover
