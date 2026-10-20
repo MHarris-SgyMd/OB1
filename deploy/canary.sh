@@ -100,11 +100,15 @@
 #      refresh copies stable's database settings, 014's HNSW bounds among them
 #      (SMD-2037), and migrates the copy with this checkout. With
 #      --no-refresh it does not: a canary holding rows stable does not (its
-#      own ingests, its own passes' proposals) is brought level in place, its
-#      servers and a standing sleep worker stopped and this checkout's
-#      migrate run on its own database, the worker recreated on the new build
-#      once the servers answer (SMD-3154). It is refused, before anything
-#      changes, on a canary with no database to keep;
+#      own ingests, its own passes' proposals) is brought level in place,
+#      this checkout's migrate run on its own database (SMD-3154). It is
+#      refused, before anything changes, on a canary with no database to
+#      keep. Either way the canary's writers are stopped first, before its
+#      Postgres is touched: its servers and a running sleep worker, which
+#      comes back on the new build once the servers answer, unless its env
+#      file holds no OB1_WORKER_KEY (then it is left stopped and `up` exits
+#      1, said). A running service of another profile (the workers,
+#      board-sync) is refused before anything changes: stop it first;
 #   4. builds the server from this checkout and (re)creates it and the REST
 #      core, which runs the server's image, so their pools open on the
 #      refreshed database. Standing servers are stopped before the refresh, so
@@ -244,6 +248,10 @@ is_port() { case "$1" in ""|*[!0-9]*|0*) return 1 ;; esac; [ "$1" -le 65535 ]; }
 [ -z "$PORT" ] || is_port "$PORT" || { echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2; }
 [ "$CMD" = up ] || { [ $CONNECT = 0 ] && [ $SMOKE = 1 ] && [ $REFRESH = 1 ]; } || { echo "--connect, --no-smoke and --no-refresh go with up." >&2; exit 2; }
 [ "$CMD" = down ] || [ $VOLUMES = 0 ] || { echo "--volumes goes with down." >&2; exit 2; }
+# What a failed run tells the operator to run again: its own form, so advice
+# after a failed --no-refresh never sends them into the refresh (SMD-3154).
+RERUN="up"
+[ $REFRESH = 1 ] || RERUN="up --no-refresh"
 [ -f "$ENV_FILE" ] || { echo "no env file at $ENV_FILE — name the running stack's with --env-file (deploy/.env is gitignored, so a worktree has none)." >&2; exit 2; }
 ENV_FILE="$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")"
 # The canary's own env file (SMD-2583) is placed once stable's project is
@@ -747,7 +755,7 @@ set_canary_own() {
   if ! apply_own "$CANARY_TMP"; then
     rm -f "$CANARY_TMP"
     CANARY_TMP=""
-    echo "could not give the canary's env file, $CANARY_ENV, its own keys and settings: $(head -c 300 <<<"$OWN_WHY") — set them there yourself (its own SERVER_PORT, SERVER_BIND, OB1_TIER, COMPOSE_PROFILES, and an MCP_ACCESS_KEYS holding none of stable's keys), and re-run up." >&2
+    echo "could not give the canary's env file, $CANARY_ENV, its own keys and settings: $(head -c 300 <<<"$OWN_WHY") — set them there yourself (its own SERVER_PORT, SERVER_BIND, OB1_TIER, COMPOSE_PROFILES, and an MCP_ACCESS_KEYS holding none of stable's keys), and re-run ${RERUN:-up}." >&2
     exit 2
   fi
   if [ -z "$OWN_SAID" ]; then rm -f "$CANARY_TMP"; CANARY_TMP=""; return 0; fi
@@ -1113,8 +1121,14 @@ if [ $REFRESH = 0 ] && ! "$RUNTIME" volume inspect "${CANARY}_pgdata" >/dev/null
   echo "--no-refresh keeps the canary's database, and $CANARY has none (no volume ${CANARY}_pgdata) — run up without it, which refreshes one from stable." >&2
   exit 2
 fi
+# The writers `up` stops are its servers and a sleep worker; one of another
+# profile (the workers, board-sync) would write through the refresh or the
+# migration, so it is refused here, before anything changes (SMD-3154).
+others="$("$RUNTIME" ps --filter "label=com.docker.compose.project=$CANARY" --format '{{.Label "com.docker.compose.service"}}' \
+  | grep -vxE 'postgres|server|api|proxy|forwarder|sleep|migrate' | sort -u | tr '\n' ' ')" || others=""
+[ -z "${others// /}" ] || { echo "the canary runs ${others% }, which would write while up changes its database — stop it first ($RUNTIME compose -p $CANARY stop ${others% }), then re-run $RERUN." >&2; exit 2; }
 STABLE_DB_NET="$(db_network_of "$STABLE_PG" "$STABLE")"
-[ -n "$STABLE_DB_NET" ] || { echo "$STABLE_PG is on neither ${STABLE}_data nor ${STABLE}_default, so the refresh could not reach it — recreate stable's Postgres (compose up -d postgres)." >&2; exit 2; }
+[ -n "$STABLE_DB_NET" ] || [ $REFRESH = 0 ] || { echo "$STABLE_PG is on neither ${STABLE}_data nor ${STABLE}_default, so the refresh could not reach it — recreate stable's Postgres (compose up -d postgres)." >&2; exit 2; }
 
 # The port is the canary's or free: a container of another project on it
 # would take the canary proxy's place.
@@ -1196,14 +1210,13 @@ if [ -n "$stable_server" ] && ! "$RUNTIME" inspect -f '{{range .Config.Env}}{{pr
   say "note: $stable_server runs without OB1_TIER=stable — set it in $ENV_FILE and recreate the servers (up -d server api), so its query log says which tier answered"
 fi
 
-say "canary Postgres"
-canary_compose up -d --wait postgres
-CANARY_PG="$(container_of "$CANARY" postgres)"
-
 # A standing canary's servers would serve the copy mid-restore (through the
 # registered connector, stamped stable by the restore until the refresh
 # stamps it), and write rows the restore then collides with; both are
-# recreated below either way.
+# recreated below either way. They, and a running sleep worker, stop before
+# the canary's Postgres is touched: compose recreates it when its own
+# configuration changed, and a writer's transaction then dies mid-flight
+# (SMD-3154).
 FOR="the refresh"
 [ $REFRESH = 1 ] || FOR="the migration"
 STOPPED_SERVER=""
@@ -1218,22 +1231,32 @@ if [ -n "$(container_of "$CANARY" api)" ]; then
   canary_compose stop api >/dev/null
   STOPPED_API=1
 fi
-# A sleep worker writes as it runs, so a migration in place stops it too, and
-# brings it back on the new build below (SMD-3154). The refresh leaves it to
-# the operator, as before.
+# A sleep worker writes as it runs, so it stops too, and comes back on the
+# new build below (SMD-3154).
 STOPPED_SLEEP=""
-if [ $REFRESH = 0 ] && [ -n "$(container_of "$CANARY" sleep)" ]; then
+if [ -n "$(container_of "$CANARY" sleep)" ]; then
   say "canary sleep worker stopped for $FOR"
   canary_compose --profile sleep stop sleep >/dev/null
   STOPPED_SLEEP=1
 fi
+SLEEP_START="$RUNTIME compose -p $CANARY --env-file $CANARY_ENV -f $HERE/compose.yaml --profile sleep up -d --no-deps sleep"
+SLEEP_SAID=""
+[ -z "$STOPPED_SLEEP" ] || SLEEP_SAID=" The sleep worker is stopped too: start it with $SLEEP_START, or re-run $RERUN."
+
+say "canary Postgres"
+canary_compose up -d --wait postgres
+CANARY_PG="$(container_of "$CANARY" postgres)"
 # With its servers stopped, the canary's database takes its env file's
 # password; they come back below on that file.
 set_canary_password "$CANARY_PG"
 # Whether stable holds a thought the probe could use (a vector from the
 # brain's model), read before the refresh: a canary with none after it is a
 # migration that emptied them or a model switch, not an empty brain.
-stable_vectors="$(psql_in "$STABLE_PG" "SELECT count(*) FROM (SELECT 1 FROM thoughts WHERE embedding IS NOT NULL
+# In place, the canary's own vectors before its migration stand in for
+# stable's (SMD-3154).
+VECTORS_FROM="$STABLE_PG"
+[ $REFRESH = 1 ] || VECTORS_FROM="$CANARY_PG"
+stable_vectors="$(psql_in "$VECTORS_FROM" "SELECT count(*) FROM (SELECT 1 FROM thoughts WHERE embedding IS NOT NULL
   AND coalesce(embedding_model = (SELECT value FROM ob1_config WHERE key = 'embedding_model'), true) LIMIT 1) t")"
 if [ $REFRESH = 1 ]; then
   say "refresh $STABLE_PG → $CANARY_PG"
@@ -1246,7 +1269,7 @@ if [ $REFRESH = 1 ]; then
   if [ "$refresh_rc" != 0 ]; then
     # tier.sh's own usage errors exit 2, which from here would read as "refused
     # before anything changed" — stable may be stamped by now, a server stopped.
-    [ -z "$STOPPED_SERVER$STOPPED_API" ] || echo "the canary's servers are stopped (for the refresh), so a connector registered for it answers nothing until \`up\` succeeds." >&2
+    [ -z "$STOPPED_SERVER$STOPPED_API" ] || echo "the canary's servers are stopped (for the refresh), so a connector registered for it answers nothing until \`up\` succeeds.$SLEEP_SAID" >&2
     echo "the refresh failed (tier.sh exit $refresh_rc). Re-run up once that is fixed: the canary carries the refresh mark, so the retry resets it." >&2
     exit 1
   fi
@@ -1257,9 +1280,7 @@ else
   migrate_rc=0
   { canary_compose build migrate && canary_compose run --rm --no-deps migrate; } || migrate_rc=$?
   if [ "$migrate_rc" != 0 ]; then
-    stopped="its servers"
-    [ -z "$STOPPED_SLEEP" ] || stopped="its servers and sleep worker"
-    echo "the canary's migration failed (exit $migrate_rc), and $stopped are stopped: fix the cause above and re-run up --no-refresh." >&2
+    echo "the canary's migration failed (exit $migrate_rc), and its servers are stopped: fix the cause above and re-run $RERUN.$SLEEP_SAID" >&2
     exit 1
   fi
 fi
@@ -1290,12 +1311,24 @@ if [ "$(curl -s --max-time 2 "$BASE/health" || true)" != ok ]; then
   # of times a minute under podman), and a registered connector points at it.
   # The REST core, recreated above on the same image and environment, would too.
   canary_compose stop server api >/dev/null 2>&1 || true
-  echo "the canary's server and REST core are stopped; fix the cause above and re-run up." >&2
+  echo "the canary's server and REST core are stopped; fix the cause above and re-run $RERUN.$SLEEP_SAID" >&2
   exit 1
 fi
+SLEEP_LEFT=""
 if [ -n "$STOPPED_SLEEP" ]; then
-  say "canary sleep worker, on the new build"
-  canary_compose --profile sleep up -d --no-deps --force-recreate sleep
+  if [ -n "$(env_file value "$CANARY_ENV" OB1_WORKER_KEY)" ]; then
+    say "canary sleep worker, on the new build"
+    canary_compose --profile sleep up -d --no-deps --force-recreate sleep
+  else
+    # Started with no key it exits 2 three times and stays down (on-failure:3),
+    # so it is left stopped and the run says so at its end (SMD-3154).
+    SLEEP_LEFT=1
+    say "canary sleep worker LEFT STOPPED: $CANARY_ENV holds no OB1_WORKER_KEY (this up cleared stable's) — mint one (cd server-portable && bun keygen.ts --name canary-sleep --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY, then: $SLEEP_START"
+  fi
+elif [ -n "$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=sleep" --filter status=exited | head -n 1)" ]; then
+  # A worker an earlier run stopped and did not bring back (it failed after
+  # the stop) is not running now, so this run does not restart it: said.
+  say "note: the canary's sleep worker is stopped — start it with $SLEEP_START"
 fi
 
 if [ $SMOKE = 1 ]; then
@@ -1396,7 +1429,11 @@ except Exception as e:
   canary_vectors="$(psql_in "$CANARY_PG" "SELECT count(*) FROM (SELECT 1 FROM thoughts WHERE embedding IS NOT NULL
     AND coalesce(embedding_model = (SELECT value FROM ob1_config WHERE key = 'embedding_model'), true) LIMIT 1) t")"
   if [ "$tried" = 0 ] && [ "$stable_vectors" = 1 ] && [ "$canary_vectors" = 0 ]; then
-    echo "  ✗  stable holds thoughts with vectors from the brain's model and the canary none after the refresh: a migration emptied them, or the model changed without a reembed" >&2
+    if [ $REFRESH = 1 ]; then
+      echo "  ✗  stable holds thoughts with vectors from the brain's model and the canary none after the refresh: a migration emptied them, or the model changed without a reembed" >&2
+    else
+      echo "  ✗  the canary held thoughts with vectors from the brain's model before its migration and none after it: the migration emptied them, or the model changed without a reembed" >&2
+    fi
     exit 1
   elif [ "$tried" = 0 ]; then
     say "vector search not checked: no recent thought has a vector from the brain's model, an opening of its own, and text left once its literals are out"
@@ -1464,3 +1501,4 @@ if [ $REFRESH = 1 ]; then
 else
   say "canary up: $BASE, tier canary, migrated in place (its own rows kept)"
 fi
+[ -z "$SLEEP_LEFT" ] || { echo "the canary's sleep worker is left stopped: it has no OB1_WORKER_KEY (above)." >&2; exit 1; }

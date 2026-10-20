@@ -3230,8 +3230,8 @@ jobs:
           # labels for the service, is stopped across the migration and
           # recreated from compose.yaml's definition.
           cq "INSERT INTO ob1_config (key, value) VALUES ('ci_canary_only', 'kept') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
-          docker run -d --name open-brain-canary-sleep-1 --label com.docker.compose.project=open-brain-canary --label com.docker.compose.service=sleep \
-            --label com.docker.compose.oneoff=False --label com.docker.compose.container-number=1 --entrypoint sleep docker.io/oven/bun:1.4.3-alpine 600 > /dev/null
+          standin="$(docker run -d --name open-brain-canary-sleep-1 --label com.docker.compose.project=open-brain-canary --label com.docker.compose.service=sleep \
+            --label com.docker.compose.oneoff=False --label com.docker.compose.container-number=1 --entrypoint sleep docker.io/oven/bun:1.4.3-alpine 600)"
           FAKE_URL='http://127.0.0.1:8013/mcp?key=x' ./canary.sh up --no-refresh --no-smoke | tee /tmp/canary-norefresh.out
           grep -F 'migrate open-brain-canary-postgres-1 in place' /tmp/canary-norefresh.out
           grep -F 'canary sleep worker stopped for the migration' /tmp/canary-norefresh.out
@@ -3240,7 +3240,10 @@ jobs:
           if grep -F 'refresh open-brain-postgres-1' /tmp/canary-norefresh.out; then echo "up --no-refresh ran the refresh" >&2; exit 1; fi
           [ "$(cq "SELECT value FROM ob1_config WHERE key = 'ci_canary_only'")" = kept ] || { echo "up --no-refresh lost the canary's own row" >&2; exit 1; }
           [ "$(curl -s --max-time 5 http://127.0.0.1:8013/mcp/health)" = ok ] || { echo "the canary does not answer at 8013 after up --no-refresh" >&2; exit 1; }
-          [ "$(docker inspect -f '{{join .Config.Cmd " "}}' open-brain-canary-sleep-1)" != 600 ] || { echo "up --no-refresh left the sleep stand-in where compose's worker should be" >&2; exit 1; }
+          worker="$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=sleep --no-trunc)"
+          { [ -n "$worker" ] && [ "$worker" != "$standin" ] && [ "$(docker inspect -f '{{join .Config.Cmd " "}}' "$worker")" != 600 ]; } || { echo "up --no-refresh did not replace the sleep stand-in with compose's worker (${worker:-none})" >&2; exit 1; }
+          migs=(../db/migrations/*.sql)
+          [ "$(cq "SELECT max(name) FROM schema_migrations")" = "${migs[-1]##*/}" ] || { echo "the canary's ledger is not at the highest migration (${migs[-1]##*/}) after up --no-refresh" >&2; exit 1; }
           docker rm -f open-brain-canary-sleep-1 > /dev/null
           cq "DELETE FROM ob1_config WHERE key = 'ci_canary_only'"
           cq "UPDATE ob1_config SET value = 'working' WHERE key = 'tier'"
