@@ -1713,17 +1713,17 @@ the one kept is on `thoughts` by its oid. Needs nothing past 001; a re-apply
 is a no-op. test-schema [90] (the definition, the five refusals, another
 schema's index), test-store-sql [18] (the store's two page statements and
 the count read through it, each reading only its own rows' entries; the
-page's LIMIT). Once the ledger records 100, preflight's `thought indexes` row
-warns while the index is missing, INVALID or of another shape — the file is
-not re-run, so a drop, a `--baseline` adoption or an unfinished `CONCURRENTLY`
-build would otherwise pass unsaid — with the statement that mends it, or the
-pid to wait for while a build, reindex or drop of it runs (`--reapply` for
-an index whose migration's other objects are absent too); the row reads
-074's `thoughts_trust_rank_idx` and the other indexes on `thoughts` a read is
-planned around the same way (the fingerprint's unique index among them), and
-names an INVALID index left on `thoughts` under another name — a cancelled
-REINDEX's copy to drop, anyone's index to rebuild (SMD-3146, test-preflight
-[12]).
+page's LIMIT). Preflight's `thought indexes` row warns while the index is
+INVALID or of another shape, and — once the ledger records 100 — missing: the
+file is not re-run, so a drop, a `--baseline` adoption or an unfinished
+`CONCURRENTLY` build would otherwise pass unsaid. It prints the statement
+that mends it, or the pid to wait for while an index operation on `thoughts`
+runs (`--reapply` for an index whose migration's other objects are absent
+too); it reads 074's `thoughts_trust_rank_idx` and the other indexes on
+`thoughts` a read is planned around the same way (the fingerprint's unique
+index among them, with any text held twice to resolve first), and names an
+INVALID index left on `thoughts` under another name — a cancelled REINDEX's
+copy to drop, anyone's index to rebuild (SMD-3146, test-preflight [12]).
 
 ## What changed relative to the guide
 
