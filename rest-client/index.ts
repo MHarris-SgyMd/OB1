@@ -29,9 +29,15 @@ export interface RestClientOptions {
   timeoutMs?: number;
 }
 
-/** What one call sends beside its input: the caller's key, and a signal that ends the call early. */
+/**
+ * What one call sends beside its input: the caller's key (`x-brain-key`), or
+ * an access token the authorization server issued for the REST core
+ * (`Authorization: Bearer`, SMD-2286: the MCP server's exchanged token), and
+ * a signal that ends the call early. A key wins where both are given.
+ */
 export interface CallInit {
   key?: string;
+  token?: string;
   signal?: AbortSignal;
 }
 
@@ -294,11 +300,15 @@ export function createRestClient(opts: RestClientOptions): RestClient {
       return request;
     },
   });
-  const keyed = (init: CallInit): Record<string, string> => (init.key == null ? {} : { "x-brain-key": init.key });
+  const keyed = (init: CallInit): Record<string, string> =>
+    init.key != null ? { "x-brain-key": init.key } : init.token != null ? { authorization: `Bearer ${init.token}` } : {};
+  /** A credential no header can carry as given: a key or token that is not a string, or that headerSafe refuses. */
+  const unfitCredential = (init: CallInit): boolean =>
+    (init.key != null && (typeof init.key !== "string" || !headerSafe(init.key))) || (init.key == null && init.token != null && (typeof init.token !== "string" || !headerSafe(init.token)));
 
   /** One operation by its method and route: the path's fields fill the path, the rest rides the query string or the body. */
   const invoke = async (method: Method, path: string, input: Record<string, unknown>, init: CallInit): Promise<Answer> => {
-    if (init.key != null && (typeof init.key !== "string" || !headerSafe(init.key))) return unauthorizedHere();
+    if (unfitCredential(init)) return unauthorizedHere();
     const rest: Record<string, unknown> = { ...input };
     const pathParams: Record<string, string> = {};
     for (const field of fieldsOf(path)) {
@@ -342,7 +352,7 @@ export function createRestClient(opts: RestClientOptions): RestClient {
       return invoke(method, path, input ?? {}, init);
     },
     async stream(jobId, init = {}) {
-      if (init.key != null && (typeof init.key !== "string" || !headerSafe(init.key))) return asResponse(unauthorizedHere());
+      if (unfitCredential(init)) return asResponse(unauthorizedHere());
       const unfit = unfitForPath(jobId);
       if (unfit) return asResponse(refusedHere("job_id", unfit));
       // Sent here, not through openapi-fetch, which reads a refusal's body

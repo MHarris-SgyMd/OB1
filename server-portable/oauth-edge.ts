@@ -31,10 +31,11 @@
  * configured stack a `?key=` connector is asked to sign in once; its key
  * still authenticates first, so it is served after: SMD-2286's to settle.)
  *
- * The MCP server accepts no OAuth token yet: the REST core checks the
- * authorization server's tokens (SMD-2286 PR 1, oauth-token.ts), and the MCP
- * server will exchange each at the hop (PR 2, in mcp-server/). Until then a
- * token is answered 401 `invalid_token` here.
+ * This server (server-portable's /mcp) accepts no OAuth token: one is
+ * answered 401 `invalid_token` here. The REST core checks the authorization
+ * server's tokens (SMD-2286 PR 1, oauth-token.ts), and mcp-server/ trades
+ * each at the hop (PR 2, mcp-server/exchange.ts), serving /mcp with SMD-2287
+ * PR 5.
  */
 
 import { queryOf } from "./auth.ts";

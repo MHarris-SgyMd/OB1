@@ -31,6 +31,8 @@ import { REVOKED_MESSAGE, BUSY_MESSAGE, MIRROR_WORDS } from "../server-portable/
 import type { AgentOutcome } from "../server-portable/agents.ts";
 import { createRestClient } from "../rest-client/index.ts";
 import { argumentsById, createMcpApp } from "./app.ts";
+import { createExchanger, exchangeSettings, MAX_ENTRIES } from "./exchange.ts";
+import { checkerOver, tokenSettings } from "../server-portable/oauth-token.ts";
 import { loadPlugins, runOperation } from "../server-portable/core/plugins.ts";
 import { definePlugin, ok as pluginOk, operation, refuse as pluginRefuse, z } from "../server-portable/plugin-sdk.ts";
 
@@ -893,6 +895,175 @@ console.log("\n[9] The method guard, the preflight and discovery, as index.ts an
   assert(r.status === 200 && r.headers.get("access-control-allow-origin") === "*", "OPTIONS: the CORS preflight");
   r = await app.fetch(new Request("http://mcp/.well-known/oauth-protected-resource/mcp"));
   assert(r.status === 404, "an unconfigured stack's protected-resource path: 404");
+}
+
+console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth token traded for the REST core's, cached by its digest, never sent as a key; its refusals RFC 6750's");
+{
+  const ORIGIN = "https://brain.example.test";
+  const ISSUER = `${ORIGIN}/auth`;
+  // ES256 by WebCrypto (its signature is JWS's r||s): the authorization server's key, and a JWT minted with it.
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]) as CryptoKeyPair;
+  const b64 = (v: unknown) => Buffer.from(typeof v === "string" ? v : JSON.stringify(v)).toString("base64url");
+  const mint = async (claims: Record<string, unknown>) => {
+    const head = `${b64({ alg: "ES256", typ: "at+jwt", kid: "t" })}.${b64({ iss: ISSUER, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 600, ...claims })}`;
+    const sig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, new TextEncoder().encode(head)));
+    return `${head}.${Buffer.from(sig).toString("base64url")}`;
+  };
+  const claimsOf = (t: string) => JSON.parse(Buffer.from(t.split(".")[1], "base64url").toString()) as Record<string, unknown>;
+  // The authorization server's token endpoint, as deploy/auth/server.ts's grant answers: the `mcp` client's secret, the
+  // subject's /mcp audience, the same subject and scope, `act: {sub: "mcp"}`, the REST core's audience.
+  let asMode: "ok" | "down" | "busy" | "invalid_grant" | "invalid_scope" | "invalid_client" = "ok";
+  let trades = 0;
+  let lastForm: URLSearchParams | null = null;
+  const asFetch = async (req: Request): Promise<Response> => {
+    trades++;
+    if (asMode === "down") throw new TypeError("fetch failed: connection refused");
+    if (asMode === "busy") return new Response("busy", { status: 503 });
+    const form = new URLSearchParams(await req.text());
+    lastForm = form;
+    const okClient = req.headers.get("authorization") === `Basic ${Buffer.from("mcp:mcp-secret").toString("base64")}`;
+    if (asMode === "invalid_client" || !okClient) return Response.json({ error: "invalid_client" }, { status: 401 });
+    if (asMode !== "ok") return Response.json({ error: asMode }, { status: 400 });
+    const subject = claimsOf(form.get("subject_token") ?? "");
+    const exchanged = await mint({ sub: subject.sub, scope: subject.scope, aud: form.get("resource"), act: { sub: "mcp" }, exp: subject.exp, client_id: "mcp" });
+    return Response.json({ access_token: exchanged, issued_token_type: "urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer", expires_in: (subject.exp as number) - Math.floor(Date.now() / 1000), scope: subject.scope });
+  };
+  let clock = Date.now();
+  const exchanger = createExchanger(exchangeSettings(ORIGIN, "mcp-secret")!, { fetch: asFetch, now: () => clock });
+  // The REST core checking its own tokens (server-portable/oauth-token.ts), over the stub core above.
+  const restWithTokens = createRestApp({
+    core, init: () => {}, track: (run) => run(), log: () => {},
+    keys: () => ({ MCP_ACCESS_KEYS: [`laptop:write:${hashKey("write-raw")}`, `mcp:forward:${hashKey("fwd-raw")}`].join(",") }),
+    tokens: () => checkerOver(tokenSettings({ COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: ORIGIN })!, async () => pair.publicKey),
+    resolve: async (p) => (p.scope === "forward" ? { status: "ok", agentId: "agent-f" } : identity),
+  });
+  const restCalls: { key: string | null; bearer: string | null }[] = [];
+  let tokenRestDown = false;
+  const tokenRest = createRestClient({
+    baseUrl: "http://api.ob1.internal",
+    fetch: async (req) => {
+      restCalls.push({ key: req.headers.get("x-brain-key"), bearer: req.headers.get("authorization") });
+      if (tokenRestDown) throw new TypeError("fetch failed: connection refused");
+      return restWithTokens.fetch(req);
+    },
+    forwarderKey: "fwd-raw",
+  });
+  let trading: boolean = true;
+  const tokenApp = createMcpApp({ rest: tokenRest, edge: () => ({ configured: true, origin: ORIGIN }), exchanger: () => (trading ? exchanger : null), warn: () => {} });
+  const ask = async (token: string | null, opts: { method?: string; params?: unknown; host?: string; key?: string } = {}) => {
+    const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+    if (token) headers.authorization = `Bearer ${token}`;
+    if (opts.key) headers["x-brain-key"] = opts.key;
+    const r = await tokenApp.fetch(new Request(`${opts.host ?? ORIGIN}/mcp`, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: opts.method ?? "tools/list", params: opts.params ?? {} }) }));
+    const text = await r.text();
+    const line = text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
+    return { status: r.status, headers: r.headers, body: line ? JSON.parse(line) as Record<string, unknown> : null };
+  };
+  const toolNames = (r: { body: Record<string, unknown> | null }) => (((r.body?.result as { tools?: { name: string }[] } | undefined)?.tools) ?? []).map((t) => t.name).sort();
+  identity = { status: "ok", agentId: "agent-o" };
+
+  // A write connector: traded once, then from the cache; its calls carry the exchanged token, never the client's.
+  const write = await mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/mcp` });
+  trades = 0;
+  restCalls.length = 0;
+  let r = await ask(write);
+  assert(r.status === 200 && same(toolNames(r), [...visibleToolNames({ scope: "write" })].sort()) && trades === 1, `a write token: traded once, a write key's tools (${r.status}, ${toolNames(r).length} tools, ${trades} trade)`);
+  const sent = lastForm as URLSearchParams | null;
+  assert(sent?.get("grant_type") === "urn:ietf:params:oauth:grant-type:token-exchange" && sent?.get("resource") === `${ORIGIN}/api` && sent?.get("subject_token") === write, "…by RFC 8693, for the REST core's resource, as the `mcp` client");
+  assert(restCalls.every((c) => c.key === null && c.bearer !== `Bearer ${write}` && c.bearer?.startsWith("Bearer ")), "…and the REST core is sent the exchanged token as a bearer, never the client's token, never as a key");
+  r = await ask(write);
+  assert(r.status === 200 && trades === 1, `the same token again: from the cache, no second trade (${trades})`);
+  calls.length = 0;
+  answer = () => ok({ id: "t1", reader: false, tags: {}, chunks: 0, contextFailures: 0, headWindow: null, recapture: null, embeddings: { allowed: true, reason: "allowed" }, chat: { allowed: true, reason: "allowed", base: "http://x/v1" } });
+  r = await ask(write, { method: "tools/call", params: { name: "capture_thought", arguments: { content: "a token's thought" } } });
+  const p = calls.find((c) => c.name === "capture")?.principal as Principal | undefined;
+  assert(p?.name === "oauth:operator" && p.scope === "write" && same(p.act, { name: "oauth:mcp" }), `a capture runs at the REST core as oauth:operator, act the MCP service (${JSON.stringify(p && { name: p.name, scope: p.scope, act: p.act })})`);
+  answer = () => ok({});
+
+  // Verify: a read connector and a write connector of the same subject — the read one's calls never carry write.
+  const read = await mint({ sub: "operator", scope: "brain:read", aud: `${ORIGIN}/mcp` });
+  r = await ask(read);
+  assert(same(toolNames(r), [...visibleToolNames({ scope: "read" })].sort()), `a read token of the same subject, the write one cached: a read key's tools (${toolNames(r).length})`);
+  calls.length = 0;
+  r = await ask(read, { method: "tools/call", params: { name: "capture_thought", arguments: { content: "x" } } });
+  const readCapture = (r.body?.result as { isError?: boolean } | undefined)?.isError === true || (r.body?.error !== undefined);
+  assert(readCapture && !calls.some((c) => c.name === "capture"), "…and its capture is refused, the core never asked: the cache keys by the token, not the subject");
+  const both = await Promise.all([ask(write), ask(read)]);
+  assert(same(toolNames(both[0]), [...visibleToolNames({ scope: "write" })].sort()) && same(toolNames(both[1]), [...visibleToolNames({ scope: "read" })].sort()), "…both at once: each its own scope");
+
+  // One trade at a time per token; the entry lives until 5 s before the exchanged token's expiry.
+  const fresh = await mint({ sub: "operator", scope: "brain:read", aud: `${ORIGIN}/mcp` });
+  trades = 0;
+  await Promise.all(Array.from({ length: 10 }, () => ask(fresh)));
+  assert(trades === 1, `ten requests at once with a new token: one trade (${trades})`);
+  clock += (600 - 6) * 1000;
+  await ask(fresh);
+  assert(trades === 1, `594 s on: still from the cache (${trades})`);
+  clock += 2000;
+  await ask(fresh);
+  assert(trades === 2, `596 s on, inside the 5 s margin: traded again (${trades})`);
+  clock = Date.now();
+
+  // Refused before any trade, on the claims: expired, another audience, another issuer, no JWT.
+  trades = 0;
+  for (const [label, made] of [
+    ["expired", mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/mcp`, exp: Math.floor(Date.now() / 1000) - 5 })],
+    ["the REST core's audience", mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/api` })],
+    ["another issuer", mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/mcp`, iss: "https://elsewhere.example.test/auth" })],
+  ] as const) {
+    r = await ask(await made);
+    assert(r.status === 401 && (r.headers.get("www-authenticate") ?? "").includes('error="invalid_token"') && (r.headers.get("www-authenticate") ?? "").includes(`resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource/mcp"`), `${label}: 401 invalid_token naming the document (${r.status} ${r.headers.get("www-authenticate")})`);
+  }
+  assert(trades === 0, `…none of them traded (${trades})`);
+
+  // The authorization server's answers to a trade.
+  const live = async () => mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/mcp`, jti: crypto.randomUUID() });
+  asMode = "invalid_grant";
+  r = await ask(await live());
+  assert(r.status === 401 && (r.headers.get("www-authenticate") ?? "").includes('error="invalid_token"'), `the authorization server refuses the subject token (invalid_grant): 401 invalid_token, so the client refreshes (${r.status})`);
+  asMode = "invalid_scope";
+  r = await ask(await live());
+  assert(r.status === 403 && (r.headers.get("www-authenticate") ?? "").includes('error="insufficient_scope"'), `its scopes name no key scope (invalid_scope): 403 insufficient_scope (${r.status} ${r.headers.get("www-authenticate")})`);
+  for (const mode of ["down", "busy"] as const) {
+    asMode = mode;
+    r = await ask(await live());
+    assert(r.status === 503 && r.headers.get("retry-after") === "30", `the authorization server ${mode === "down" ? "away" : "answering 503"}: 503, retry in 30 s — not a 401 that restarts a sign-in (${r.status} ${r.headers.get("retry-after")})`);
+  }
+  asMode = "invalid_client";
+  r = await ask(await live());
+  assert(r.status === 500, `this server's own client refused (invalid_client): a fault, not the caller's refusal (${r.status})`);
+  asMode = "ok";
+
+  // The REST core's word on the exchanged token: a revoked subject is refused as a revoked key is (no sign-in loop).
+  identity = { status: "revoked", agentId: "agent-o", revokedAt: "2026-10-19T00:00:00Z", reason: null };
+  r = await ask(await live());
+  const revokedMessage = ((r.body?.error as { message?: string } | undefined)?.message ?? "");
+  assert(r.status !== 401 && revokedMessage === REVOKED_MESSAGE, `the subject revoked in the registry: the revoked key's refusal, not a 401 challenge (${r.status} ${revokedMessage.slice(0, 40)})`);
+  identity = { status: "ok", agentId: "agent-o" };
+
+  // Where no token is traded: at another Host, or a server given no exchange — and a token is never sent as a key.
+  trades = 0;
+  restCalls.length = 0;
+  r = await ask(write, { host: "http://127.0.0.1:8000" });
+  assert(trades === 0 && r.status === 200 && (r.body?.error as { code?: number } | undefined)?.code === -32001, `a token at a loopback Host: today's refusal, no trade (${r.status}, ${trades})`);
+  trading = false;
+  r = await ask(write);
+  // No caller, so the edge answers a token as before: its challenge while the authorization server answers its probe, 503 while it does not (as here).
+  assert(trades === 0 && r.status === 503 && r.headers.get("retry-after") === "30", `a server given no exchange (no secret): the token is no caller, the edge's answer as before (${r.status})`);
+  assert(restCalls.every((c) => c.key !== write && c.bearer !== `Bearer ${write}`), "…and in neither case is the client's token sent to the REST core, as a key or a bearer");
+  trading = true;
+
+  // Verify (step 4's half): a key client goes on working with the authorization server away.
+  asMode = "down";
+  r = await ask(null, { key: "write-raw" });
+  assert(r.status === 200 && same(toolNames(r), [...visibleToolNames({ scope: "write" })].sort()), `a key client with the authorization server away: served as ever (${r.status})`);
+  asMode = "ok";
+
+  // The cache is bounded.
+  const bounded = createExchanger(exchangeSettings(ORIGIN, "mcp-secret")!, { fetch: asFetch });
+  for (let i = 0; i < MAX_ENTRIES + 20; i++) await bounded.exchange(await mint({ sub: "operator", scope: "brain:read", aud: `${ORIGIN}/mcp`, jti: `j${i}` }));
+  assert(bounded.size() === MAX_ENTRIES, `${MAX_ENTRIES + 20} distinct tokens: the cache holds ${MAX_ENTRIES} (${bounded.size()})`);
+  void tokenRestDown;
 }
 
 report();
