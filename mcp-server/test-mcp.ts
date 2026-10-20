@@ -912,13 +912,16 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   const claimsOf = (t: string) => JSON.parse(Buffer.from(t.split(".")[1], "base64url").toString()) as Record<string, unknown>;
   // The authorization server's token endpoint, as deploy/auth/server.ts's grant answers: the `mcp` client's secret, the
   // subject's /mcp audience, the same subject and scope, `act: {sub: "mcp"}`, the REST core's audience.
-  let asMode: "ok" | "down" | "busy" | "invalid_grant" | "invalid_scope" | "invalid_client" = "ok";
+  let asMode: "ok" | "down" | "busy" | "limited" | "truncated" | "invalid_grant" | "invalid_scope" | "invalid_client" = "ok";
   let trades = 0;
   let lastForm: URLSearchParams | null = null;
   const asFetch = async (req: Request): Promise<Response> => {
     trades++;
     if (asMode === "down") throw new TypeError("fetch failed: connection refused");
     if (asMode === "busy") return new Response("busy", { status: 503 });
+    if (asMode === "limited") return Response.json({ error: "slow_down" }, { status: 429 });
+    // A 200 cut short, as a body that stalled past the timeout reads.
+    if (asMode === "truncated") return new Response('{"access_token":"ey', { status: 200, headers: { "content-type": "application/json" } });
     const form = new URLSearchParams(await req.text());
     lastForm = form;
     const okClient = req.headers.get("authorization") === `Basic ${Buffer.from("mcp:mcp-secret").toString("base64")}`;
@@ -929,36 +932,40 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
     return Response.json({ access_token: exchanged, issued_token_type: "urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer", expires_in: (subject.exp as number) - Math.floor(Date.now() / 1000), scope: subject.scope });
   };
   let clock = Date.now();
+  let keysDown = false;
   const exchanger = createExchanger(exchangeSettings(ORIGIN, "mcp-secret")!, { fetch: asFetch, now: () => clock });
   // The REST core checking its own tokens (server-portable/oauth-token.ts), over the stub core above.
   const restWithTokens = createRestApp({
     core, init: () => {}, track: (run) => run(), log: () => {},
     keys: () => ({ MCP_ACCESS_KEYS: [`laptop:write:${hashKey("write-raw")}`, `mcp:forward:${hashKey("fwd-raw")}`].join(",") }),
-    tokens: () => checkerOver(tokenSettings({ COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: ORIGIN })!, async () => pair.publicKey),
+    tokens: () => checkerOver(tokenSettings({ COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: ORIGIN })!, async () => {
+      if (keysDown) throw new TypeError("fetch failed: the key set could not be read");
+      return pair.publicKey;
+    }),
     resolve: async (p) => (p.scope === "forward" ? { status: "ok", agentId: "agent-f" } : identity),
   });
   const restCalls: { key: string | null; bearer: string | null }[] = [];
-  let tokenRestDown = false;
   const tokenRest = createRestClient({
     baseUrl: "http://api.ob1.internal",
     fetch: async (req) => {
       restCalls.push({ key: req.headers.get("x-brain-key"), bearer: req.headers.get("authorization") });
-      if (tokenRestDown) throw new TypeError("fetch failed: connection refused");
       return restWithTokens.fetch(req);
     },
     forwarderKey: "fwd-raw",
   });
   let trading: boolean = true;
-  const tokenApp = createMcpApp({ rest: tokenRest, edge: () => ({ configured: true, origin: ORIGIN }), exchanger: () => (trading ? exchanger : null), warn: () => {} });
-  const ask = async (token: string | null, opts: { method?: string; params?: unknown; host?: string; key?: string } = {}) => {
+  const tokenApp = createMcpApp({ rest: tokenRest, edge: () => ({ configured: true, origin: ORIGIN }), exchanger: () => (trading ? exchanger : null), warn: (line) => warned.push(line) });
+  const warned: string[] = [];
+  const ask = async (token: string | null, opts: { method?: string; params?: unknown; host?: string; key?: string; path?: string } = {}) => {
     const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json, text/event-stream" };
     if (token) headers.authorization = `Bearer ${token}`;
     if (opts.key) headers["x-brain-key"] = opts.key;
-    const r = await tokenApp.fetch(new Request(`${opts.host ?? ORIGIN}/mcp`, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: opts.method ?? "tools/list", params: opts.params ?? {} }) }));
+    const r = await tokenApp.fetch(new Request(`${opts.host ?? ORIGIN}${opts.path ?? "/mcp"}`, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: opts.method ?? "tools/list", params: opts.params ?? {} }) }));
     const text = await r.text();
     const line = text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
     return { status: r.status, headers: r.headers, body: line ? JSON.parse(line) as Record<string, unknown> : null };
   };
+  const www = (r: { headers: Headers }) => r.headers.get("www-authenticate") ?? "";
   const toolNames = (r: { body: Record<string, unknown> | null }) => (((r.body?.result as { tools?: { name: string }[] } | undefined)?.tools) ?? []).map((t) => t.name).sort();
   identity = { status: "ok", agentId: "agent-o" };
 
@@ -1004,12 +1011,14 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   assert(trades === 2, `596 s on, inside the 5 s margin: traded again (${trades})`);
   clock = Date.now();
 
-  // Refused before any trade, on the claims: expired, another audience, another issuer, no JWT.
+  // Refused before any trade, on the claims: expired, another audience, another issuer, more audiences than /mcp, no expiry.
   trades = 0;
   for (const [label, made] of [
     ["expired", mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/mcp`, exp: Math.floor(Date.now() / 1000) - 5 })],
     ["the REST core's audience", mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/api` })],
     ["another issuer", mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/mcp`, iss: "https://elsewhere.example.test/auth" })],
+    ["an audience list naming /mcp and the REST core", mint({ sub: "operator", scope: "brain:write", aud: [`${ORIGIN}/mcp`, `${ORIGIN}/api`] })],
+    ["no expiry", mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/mcp`, exp: undefined })],
   ] as const) {
     r = await ask(await made);
     assert(r.status === 401 && (r.headers.get("www-authenticate") ?? "").includes('error="invalid_token"') && (r.headers.get("www-authenticate") ?? "").includes(`resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource/mcp"`), `${label}: 401 invalid_token naming the document (${r.status} ${r.headers.get("www-authenticate")})`);
@@ -1023,15 +1032,17 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   assert(r.status === 401 && (r.headers.get("www-authenticate") ?? "").includes('error="invalid_token"'), `the authorization server refuses the subject token (invalid_grant): 401 invalid_token, so the client refreshes (${r.status})`);
   asMode = "invalid_scope";
   r = await ask(await live());
-  assert(r.status === 403 && (r.headers.get("www-authenticate") ?? "").includes('error="insufficient_scope"'), `its scopes name no key scope (invalid_scope): 403 insufficient_scope (${r.status} ${r.headers.get("www-authenticate")})`);
-  for (const mode of ["down", "busy"] as const) {
+  assert(r.status === 403 && www(r).includes('error="insufficient_scope"') && www(r).includes('scope="brain:read"'), `its scopes name no key scope (invalid_scope): 403 insufficient_scope, naming brain:read to step up to (${r.status} ${www(r)})`);
+  for (const [mode, label] of [["down", "away"], ["busy", "answering 503"], ["limited", "limiting this server (429)"], ["truncated", "answering a 200 cut short"]] as const) {
     asMode = mode;
     r = await ask(await live());
-    assert(r.status === 503 && r.headers.get("retry-after") === "30", `the authorization server ${mode === "down" ? "away" : "answering 503"}: 503, retry in 30 s — not a 401 that restarts a sign-in (${r.status} ${r.headers.get("retry-after")})`);
+    assert(r.status === 503 && r.headers.get("retry-after") === "30", `the authorization server ${label}: 503, retry in 30 s — not a 401 that restarts a sign-in (${r.status} ${r.headers.get("retry-after")})`);
   }
   asMode = "invalid_client";
+  warned.length = 0;
   r = await ask(await live());
   assert(r.status === 500, `this server's own client refused (invalid_client): a fault, not the caller's refusal (${r.status})`);
+  assert(warned.some((l) => l.includes("this server is misconfigured") && l.includes("OB1_AUTH_SECRET_MCP")), `…said as this server's misconfiguration, with its fix (${warned.join(" | ")})`);
   asMode = "ok";
 
   // The REST core's word on the exchanged token: a revoked subject is refused as a revoked key is (no sign-in loop).
@@ -1040,6 +1051,43 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   const revokedMessage = ((r.body?.error as { message?: string } | undefined)?.message ?? "");
   assert(r.status !== 401 && revokedMessage === REVOKED_MESSAGE, `the subject revoked in the registry: the revoked key's refusal, not a 401 challenge (${r.status} ${revokedMessage.slice(0, 40)})`);
   identity = { status: "ok", agentId: "agent-o" };
+  // Its scopes reaching no operation there (brain:read with brain:capture): 403, as the authorization server's invalid_scope.
+  r = await ask(await mint({ sub: "operator", scope: "brain:read brain:capture", aud: `${ORIGIN}/mcp`, jti: crypto.randomUUID() }));
+  assert(r.status === 403 && www(r).includes('error="insufficient_scope"'), `the REST core finds the exchanged token's scopes reach nothing: 403 insufficient_scope (${r.status} ${www(r)})`);
+  // Its key set unreadable there: 503, retry — never a 401 sign-in, never a busy registry's JSON-RPC refusal.
+  keysDown = true;
+  r = await ask(await live());
+  keysDown = false;
+  assert(r.status === 503 && r.headers.get("retry-after") === "30", `the REST core cannot read the authorization server's keys: 503, retry in 30 s (${r.status} ${r.headers.get("retry-after")})`);
+
+  // The keyed routes at the origin's Host take a token as they take a key: a scan's job links, the mirrors; /health's record is a key's.
+  answer = (n) => (n === "workerStatus" ? ok({ pools: [{ workType: "w", pending: 1 }] }) : n === "jobStatus" ? ok({ jobId: "job-7", kind: "scan", status: "succeeded" }) : { version: "1.0.0", store: "sql" });
+  const keyedGet = async (path: string, token: string, host = ORIGIN) => {
+    const k = await tokenApp.fetch(new Request(`${host}${path}`, { headers: { authorization: `Bearer ${token}` } }));
+    return { status: k.status, text: await k.text() };
+  };
+  restCalls.length = 0;
+  let k = await keyedGet("/mcp/jobs/job-7", read);
+  assert(k.status === 200 && k.text.includes('"status":"succeeded"'), `a read token at a job link under the origin: the job (${k.status} ${k.text.slice(0, 60)})`);
+  k = await keyedGet("/mcp/worker-status", read);
+  assert(k.status === 200 && k.text === JSON.stringify([{ workType: "w", pending: 1 }]), `…at a keyed mirror: the rows (${k.text.slice(0, 60)})`);
+  assert(restCalls.length > 0 && restCalls.every((c) => c.key === null && c.bearer?.startsWith("Bearer ") && c.bearer !== `Bearer ${read}`), "…each read with the exchanged token, the client's never sent");
+  trades = 0;
+  restCalls.length = 0;
+  k = await keyedGet("/mcp/health", read);
+  assert(k.text === "ok" && trades === 0 && restCalls.length === 0, `…at /health: liveness, no trade, nothing sent (the REST core's record is a key's) (${k.text.slice(0, 40)}, ${trades}, ${restCalls.length})`);
+  k = await keyedGet("/mcp/worker-status", read, "http://127.0.0.1:8000");
+  assert(k.text === "ok", `…and at a loopback Host, no trade: shown nothing (${k.text.slice(0, 40)})`);
+  k = await keyedGet("/mcp/worker-status", await mint({ sub: "operator", scope: "brain:read", aud: `${ORIGIN}/api` }));
+  assert(k.text === "ok", `a token refused at a keyed route: shown nothing, as an unknown key (${k.text.slice(0, 40)})`);
+  answer = () => ok({});
+
+  // A token beside a key form is a key client's, and is still never sent on as a key.
+  restCalls.length = 0;
+  await ask(write, { key: "unknown-raw" });
+  await ask(write, { path: "/mcp?key=" });
+  await tokenApp.fetch(new Request(`${ORIGIN}/mcp/health`, { headers: { authorization: `Bearer ${write}`, "x-brain-key": "unknown-raw" } }));
+  assert(restCalls.length > 0 && restCalls.every((c) => c.key !== write && c.bearer !== `Bearer ${write}`), `a token beside an unknown key or an empty ?key=: never sent to the REST core (${restCalls.length} calls)`);
 
   // Where no token is traded: at another Host, or a server given no exchange — and a token is never sent as a key.
   trades = 0;
@@ -1063,7 +1111,10 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   const bounded = createExchanger(exchangeSettings(ORIGIN, "mcp-secret")!, { fetch: asFetch });
   for (let i = 0; i < MAX_ENTRIES + 20; i++) await bounded.exchange(await mint({ sub: "operator", scope: "brain:read", aud: `${ORIGIN}/mcp`, jti: `j${i}` }));
   assert(bounded.size() === MAX_ENTRIES, `${MAX_ENTRIES + 20} distinct tokens: the cache holds ${MAX_ENTRIES} (${bounded.size()})`);
-  void tokenRestDown;
+  // A token that lapses inside the margin is used once and never kept.
+  const brief = createExchanger(exchangeSettings(ORIGIN, "mcp-secret")!, { fetch: asFetch });
+  const once = await brief.exchange(await mint({ sub: "operator", scope: "brain:read", aud: `${ORIGIN}/mcp`, exp: Math.floor(Date.now() / 1000) + 3 }));
+  assert(once.status === "ok" && brief.size() === 0, `a token 3 s from expiry: traded, not kept (${once.status}, ${brief.size()})`);
 }
 
 report();

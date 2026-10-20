@@ -21,8 +21,8 @@ import * as say from "../server-portable/render.ts";
 import { abandonedRequestLine, labelPart, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, withSseKeepalive } from "../server-portable/sse.ts";
 import { beginRequest, endsWithStream, outcomeOf as outcomeOfStatus, traceOf, withToolSpan, type RequestOutcome, type ToolSpan } from "../server-portable/telemetry.ts";
 import type { CallCount } from "../server-portable/shutdown.ts";
-import { authReachability, edgeSettings, edgeView, forPublicDocument, forPublicResource, PRM_PATH, presentedKind, protectedResourceDocument, refusalAt, type EdgeSettings } from "../server-portable/oauth-edge.ts";
-import type { Exchanger } from "./exchange.ts";
+import { atOriginHost, authReachability, edgeSettings, edgeView, forPublicDocument, forPublicResource, JWT_SHAPE, PRM_PATH, presentedKind, protectedResourceDocument, refusalAt, type EdgeSettings } from "../server-portable/oauth-edge.ts";
+import { ExchangeMisconfigured, type Exchanger } from "./exchange.ts";
 import {
   BUSY_MESSAGE, challengeResponse, corsHeaders, cutByStopLine, edgeRefusal, HEALTH_METHOD_NOT_ALLOWED_HEADERS, HEALTH_PATH, JSON_RPC_BUSY_CODE, JSON_RPC_UNAUTHORIZED_CODE, MCP_METHODS,
   METHOD_NOT_ALLOWED_HEADERS, MIRROR_INPUT, MIRROR_WORDS, nameRoute, notCleared, noteLegacyRoute, notificationRefusedResponse, parsedBody,
@@ -108,8 +108,14 @@ export type Standing =
 /** What a caller's calls on the REST core carry: its key, or the exchanged token as a bearer. */
 export const credOf = (caller: Extract<Standing, { kind: "caller" }>): { key: string } | { token: string } => (caller.via === "token" ? { token: caller.key } : { key: caller.key });
 
-/** Where this server trades a request's token: its exchange, and the public origin a token's request must be for. */
-export type TokenRoute = { exchanger: Exchanger; origin: string };
+/**
+ * Where this server trades a request's token: its exchange, the public origin,
+ * and which of that origin's requests take one: the MCP endpoint exactly
+ * `/mcp` (forPublicResource, the default), the keyed routes the proxy hands
+ * this server under it at the origin's `Host` (atOriginHost: a scan's job
+ * links, the mirrors).
+ */
+export type TokenRoute = { exchanger: Exchanger; origin: string; admits?: (req: Request, origin: string) => boolean };
 
 /**
  * A traded token refused, by the authorization server (an expired, revoked or
@@ -122,10 +128,15 @@ export function tokenRefusedResponse(origin: string, target: RefusalTarget): Res
 
 /**
  * A token whose scopes name no access key's (none of the brain's, or
- * brain:read with brain:capture and no brain:write): 403 `insufficient_scope`.
+ * brain:read with brain:capture and no brain:write): 403 `insufficient_scope`,
+ * naming `scope="brain:read"`, the least that reaches an operation. An MCP
+ * client steps up to its scope joined with the challenge's (the SDK's
+ * scope-challenge handling): with no scope named, that join is the token's
+ * own, so it only refreshes into the same 403 and never asks the user to sign
+ * in again (review pass 1, measured on MCP SDK v2).
  */
 export function tokenScopeResponse(origin: string, target: RefusalTarget): Response {
-  return edgeRefusal(403, { "WWW-Authenticate": `Bearer resource_metadata="${origin}${PRM_PATH}", error="insufficient_scope", error_description="this token's scopes reach no operation: brain:write, brain:read or brain:capture"` }, target, JSON_RPC_UNAUTHORIZED_CODE, "Forbidden: the OAuth token's scopes reach no operation; sign in for brain:write, brain:read or brain:capture.");
+  return edgeRefusal(403, { "WWW-Authenticate": `Bearer resource_metadata="${origin}${PRM_PATH}", error="insufficient_scope", scope="brain:read", error_description="this token's scopes reach no operation: brain:write, brain:read or brain:capture"` }, target, JSON_RPC_UNAUTHORIZED_CODE, "Forbidden: the OAuth token's scopes reach no operation; sign in for brain:write, brain:read or brain:capture.");
 }
 
 /**
@@ -144,7 +155,7 @@ export async function standingOf(rest: RestClient, req: Request, signal?: AbortS
   // public resource of a stack that trades (SMD-2286), and anywhere else is no
   // caller (at any other Host, hosts reach the brain with keys).
   if (presentedKind(req) === "token") {
-    if (!token || !forPublicResource(req, token.origin)) return { kind: "none" };
+    if (!token || !(token.admits ?? forPublicResource)(req, token.origin)) return { kind: "none" };
     const bearer = req.headers.get("authorization")?.match(/^Bearer\s+(\S+)\s*$/i)?.[1] ?? "";
     const traded = await token.exchanger.exchange(bearer);
     if (traded.status === "invalid") return { kind: "token-invalid" };
@@ -165,6 +176,9 @@ export async function standingOf(rest: RestClient, req: Request, signal?: AbortS
     throw new Error(`the REST core answered whoami for a token ${a.status} ${body.code ?? ""}`.trim());
   }
   for (const key of presentedKeys(req)) {
+    // A token beside a key form (an empty `?key=`, an unknown key) is still an OAuth token, never a key to send on:
+    // keygen.ts's keys are hex and have no dots, so nothing of a JWT's shape is one (review pass 1).
+    if (JWT_SHAPE.test(key)) continue;
     const a = await rest.call("whoami" as never, {} as never, { key, signal });
     const body = (a.body ?? {}) as { code?: string; credential?: string; name?: string; scope?: string; operations?: string[] };
     // This server's own key in the forwarder slot: busy is the registry's, as for a caller's key (review pass 3: it read
@@ -443,9 +457,11 @@ export function createMcpApp(deps: McpDeps): Hono {
    */
   const lastSaid = new Map<string, number>();
   const sayOnce = (err: unknown, lead = "the caller could not be found") => {
-    // This server's forwarder refused is one misconfiguration, said in one line whichever route met it (review pass 6).
-    const said = err instanceof ForwarderRefused ? "this server is misconfigured" : lead;
-    const hint = err instanceof ForwarderRefused ? `: ${err.hint}` : "";
+    // This server's forwarder refused, or its token exchange, is one misconfiguration, said in one line whichever
+    // route met it (review pass 6; SMD-2286 PR 2 review pass 1: the exchange's said no fix).
+    const misconfigured = err instanceof ForwarderRefused || err instanceof ExchangeMisconfigured;
+    const said = misconfigured ? "this server is misconfigured" : lead;
+    const hint = misconfigured ? `: ${err.hint}` : "";
     const line = `mcp-server: ${said}${deps.restUrl ? ` (REST core at ${deps.restUrl})` : ""}: ${(err as Error)?.message ?? String(err)}${hint}`;
     const now = Date.now();
     if (now - (lastSaid.get(line) ?? -Infinity) < 60_000) return;
@@ -462,13 +478,23 @@ export function createMcpApp(deps: McpDeps): Hono {
    * HEALTH_DEADLINE_MS, as index.ts races the registry against it: a
    * standing not had by then — the registry's tables locked — is none, and
    * the route shows `ok` (review pass 1: it waited out the REST timeout).
+   * With `tokens`, an OAuth token is traded too, at the origin's Host, so a
+   * token client's job links and mirrors answer it as they answer its key
+   * (review pass 1 of SMD-2286 PR 2: a scan's job link refused the client
+   * that started it); a token refused is shown nothing, as an unknown key is.
+   * /health asks without: the REST core's record is a key's (rest/app.ts).
    */
   type Found = Standing | { kind: "fault"; err: unknown };
-  const standingInTime = async (req: Request, budget: AbortSignal, onUnknown?: (key: string) => void): Promise<Found> => {
+  const keyedTokenRoute = (): TokenRoute | null => {
+    const origin = edgeHere().origin;
+    const exchanger = origin ? deps.exchanger?.() ?? null : null;
+    return exchanger && origin ? { exchanger, origin, admits: atOriginHost } : null;
+  };
+  const standingInTime = async (req: Request, budget: AbortSignal, onUnknown?: (key: string) => void, tokens = true): Promise<Found> => {
     if (budget.aborted) return { kind: "none" };
     let onAbort: () => void = () => {};
     const standing = await Promise.race([
-      standingOf(deps.rest, req, budget, onUnknown).catch((err): Found => {
+      standingOf(deps.rest, req, budget, onUnknown, tokens ? keyedTokenRoute() : null).catch((err): Found => {
         // The deadline's own abort is the registry's silence, shown nothing; any other throw is this server's fault (review pass 1 of PR 4b).
         if (budget.aborted) return { kind: "none" };
         sayOnce(err);
@@ -491,9 +517,9 @@ export function createMcpApp(deps: McpDeps): Hono {
    * said which (mcp-edge.ts shownNothing, notCleared).
    */
   type Caller = Extract<Standing, { kind: "caller" }>;
-  const keyedCaller = async (c: Context, route: string, tool: ToolName, budget: AbortSignal = AbortSignal.timeout(HEALTH_DEADLINE_MS), onUnknown?: (key: string) => void): Promise<Caller | Response> => {
+  const keyedCaller = async (c: Context, route: string, tool: ToolName, budget: AbortSignal = AbortSignal.timeout(HEALTH_DEADLINE_MS), onUnknown?: (key: string) => void, tokens = true): Promise<Caller | Response> => {
     const trace = nameRoute(c, route, tool);
-    const standing = await standingInTime(c.req.raw, budget, onUnknown);
+    const standing = await standingInTime(c.req.raw, budget, onUnknown, tokens);
     if (standing.kind === "caller" && standing.operations.has(tool)) {
       if (trace) trace.agent = standing.name;
       return standing;
@@ -557,7 +583,9 @@ export function createMcpApp(deps: McpDeps): Hono {
     type Read = { a: Answer | null; fault: unknown };
     const early = new AbortController();
     const signal = AbortSignal.any([budget, early.signal]);
-    const keys = presentedKeys(c.req.raw);
+    // The record is a key's: a token is shown liveness, never traded here and never read with as a key (standingOf
+    // passes over one; review pass 1 of SMD-2286 PR 2: the client's own token went to the REST core as a key).
+    const keys = presentedKeys(c.req.raw).filter((key) => !JWT_SHAPE.test(key));
     const reads = new Map<string, Promise<Read>>();
     const ask = (key: string | undefined) => {
       if (key === undefined || reads.has(key)) return;
@@ -565,7 +593,7 @@ export function createMcpApp(deps: McpDeps): Hono {
     };
     ask(keys[0]);
     const oauth = edgeView(edgeHere(), () => authReachability().reachable());
-    const caller = await keyedCaller(c, "/health", "brain_info", budget, (key) => ask(keys[keys.indexOf(key) + 1]));
+    const caller = await keyedCaller(c, "/health", "brain_info", budget, (key) => ask(keys[keys.indexOf(key) + 1]), false);
     if (caller instanceof Response) {
       early.abort();
       return caller;

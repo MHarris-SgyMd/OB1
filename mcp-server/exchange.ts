@@ -18,10 +18,16 @@
 //   expiry, one trade at a time per token, at most MAX_ENTRIES of them.
 // - Answers: the exchanged token; `invalid` (the client should refresh or
 //   sign in: invalid_grant); `scope` (the token's scopes name no key scope:
-//   invalid_scope); `unavailable` (the authorization server did not answer,
-//   or limited us: retry). Anything that says this server is misconfigured
-//   (its client refused, a target or request the server will not take)
-//   throws ExchangeMisconfigured, which the route answers as a fault.
+//   invalid_scope); `unavailable` (the authorization server did not answer
+//   in time, answered a 200 with no token in it, or limited us: retry).
+//   Anything that says this server is misconfigured (its client refused, a
+//   target or request the server will not take) throws ExchangeMisconfigured,
+//   which the route answers as a fault.
+// - A trade is the authorization server's word on the grant when it is made:
+//   a grant revoked there afterwards is seen at the next trade, when the
+//   entry lapses (at most the exchanged token's lifetime, 600 s; the access
+//   token the client holds lives no longer). A key revoked in the registry is
+//   seen at once, as the REST core checks every call.
 
 import { createHash } from "node:crypto";
 
@@ -44,7 +50,7 @@ export type Exchanger = { exchange(token: string): Promise<Exchanged>; size(): n
 
 /** This server's own settings refused by the authorization server: a fault for the log, never a client's refusal. */
 export class ExchangeMisconfigured extends Error {
-  readonly hint = "set OB1_AUTH_SECRET_MCP to the `mcp` client's secret in deploy/.env (deploy/auth/provision.ts --init writes it)";
+  readonly hint = "set OB1_AUTH_SECRET_MCP to the `mcp` client's secret in deploy/.env (deploy/auth/provision.ts --init writes it), and run the authorization server from this release's deploy/auth, whose `mcp` client may trade for the REST core";
 }
 
 /** The settings on a configured stack with a sound origin and the `mcp` client's secret, else null: no token is traded. */
@@ -111,6 +117,8 @@ export function createExchanger(s: ExchangeSettings, opts: { fetch?: (req: Reque
       keep(digest, body.access_token, typeof body.expires_in === "number" ? body.expires_in : 0);
       return { status: "ok", token: body.access_token };
     }
+    // A 200 whose body stalled past the timeout or came cut short says nothing of this server's settings (review pass 1).
+    if (r.status === 200) return { status: "unavailable" };
     if (r.status === 429 || r.status >= 500) return { status: "unavailable" };
     const error = typeof body?.error === "string" ? body.error : "";
     if (error === "invalid_grant") return { status: "invalid" };

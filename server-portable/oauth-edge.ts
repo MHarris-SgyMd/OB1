@@ -190,6 +190,15 @@ function atOrigin(req: Request, origin: string): URL | null {
   return host.host === o.host ? url : null;
 }
 
+/**
+ * Whether a request's `Host` is the origin's, whatever its path: the routes
+ * the proxy hands the MCP server under the public resource (`/mcp/jobs/…`,
+ * the keyed mirrors), where mcp-server/ takes a token too (SMD-2286 PR 2).
+ */
+export function atOriginHost(req: Request, origin: string): boolean {
+  return atOrigin(req, origin) !== null;
+}
+
 /** Whether a request is for the public resource: the origin's host, and exactly the resource's path. */
 export function forPublicResource(req: Request, origin: string): boolean {
   return atOrigin(req, origin)?.pathname === RESOURCE_PATH;
