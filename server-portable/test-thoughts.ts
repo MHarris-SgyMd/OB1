@@ -23,7 +23,7 @@ import { MEND_BATCH, MEND_SCAN, MENDER_ACTOR, mendIntervalFrom, mendOnce, newMen
 import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
-import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, evidenceIn, judgedRecipe, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
+import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, evidenceIn, judgedRecipe, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
 import { consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, onlyQuoted, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe } from "./lineage.ts";
@@ -625,6 +625,36 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   const t0 = performance.now();
   for (let i = 0; i < 20; i++) evidenceIn("contents" + ".".repeat(60) + " x", dots, dots);
   assert(performance.now() - t0 < 200, `twenty quotes over text holding a run of four thousand dots take ${(performance.now() - t0).toFixed(0)} ms, not the seconds an alternation that matches a dot two ways backtracks for`);
+  // SMD-3151: a model quotes the words it reads, not the markdown around them, so quote and texts are read without it.
+  assert(evidenceIn("the monthly plan is withdrawn", "The **monthly plan** is withdrawn.") && evidenceIn("it is not shipped", "it is _not_ shipped")
+      && evidenceIn("it is not shipped", "it is __not__ shipped"), "a quote across bold and emphasis underscores is found, a doubled underscore gone whole");
+  assert(evidenceIn("Release target: ~~Friday~~ Monday", "Release target: ~~Friday~~ Monday.") && evidenceIn("Release target: Monday", "Release target: ~~Friday~~ Monday, not ~~Tuesday~~.")
+      && !evidenceIn("Friday Monday", "~~Friday~~ Monday"), "struck text goes with its markers, each span alone: a reader takes it as withdrawn, so a quote reading it as stated is not found");
+  assert(evidenceIn("the **monthly plan** is withdrawn", "The **monthly plan** is withdrawn.") && evidenceIn("the **monthly plan** is withdrawn", "The monthly plan is withdrawn."),
+    "…and a quote that copied the markup is read without it too, so it matches with the markup in the text or without");
+  assert(evidenceIn("run bun db/consolidate.ts --status first", "Run `bun db/consolidate.ts --status` first.") && evidenceIn("`bun db/consolidate.ts --status`", "Run `bun db/consolidate.ts --status` first."),
+    "…across a code span, whether or not the quote keeps its backticks");
+  const linked = "Blocked by [SMD-1806](https://linear.app/siggymd/issue/SMD-1806/three-brains) and [the ADR](<https://github.com/o/r/blob/main/docs/a.md>) until both land.";
+  assert(evidenceIn("blocked by SMD-1806 and the ADR until both land", linked) && evidenceIn("diagram shows the flow", "![diagram](img/flow.png) shows the flow"),
+    "…across a link's text and an image's, their targets dropped");
+  assert(!evidenceIn("linear.app/siggymd/issue", linked) && !evidenceIn("three-brains", linked) && !evidenceIn("docs/a.md", linked),
+    "a quote found only inside a link's target is not found: a URL is not text the reader sees");
+  assert(evidenceIn("db/test-live.ts [6g] arm 1 races 40 accepts", "`db/test-live.ts` \\[6g\\] arm 1 races 40 accepts") && evidenceIn("Problem The stack fails", "## Problem\nThe stack fails")
+      && evidenceIn("intro the gate denies by default", "intro\n> the gate denies\nby default"), "…through an escape's backslash, a heading's hashes and a blockquote's marker");
+  assert(evidenceIn("Blocked by [SMD-1806]", linked) && evidenceIn("intro > the gate denies > by default", "intro\n> the gate denies\n> by default") && evidenceIn("Done. ## Next steps", "Done.\n## Next steps"),
+    "…and a quote keeping part of the markup is found too: a link's brackets without its target, or a marker that opened a line, mid-quote once the quote is one line (review pass 1)");
+  assert(evidenceIn("record_thought_relation writes it", "`record_thought_relation` writes it") && !evidenceIn("record thought relation", "`record_thought_relation` writes it")
+      && withoutMarkdown("record_thought_relation") === "record_thought_relation" && withoutMarkdown("a__b") === "a__b" && withoutMarkdown("#433 merged") === "#433 merged" && withoutMarkdown("a * b") === "a  b",
+    "an underscore inside a word is text and stays; a hash that opens no heading stays, and every asterisk goes");
+  assert(!evidenceIn("done", "The plan was aban**done**d.") && evidenceIn("plan is done", "The plan is **done**."), "the whole-word rule holds over folded markdown: a word markup split is one word again");
+  assert(!evidenceIn("the plan shipped", "the **plan** shipped", "the plan shipped late") && evidenceIn("the plan shipped", "the **plan** shipped", "the plan was late")
+      && !evidenceIn("the plan shipped", "the plan shipped", "the `plan` shipped late"), "a phrase both sides hold once folded is evidence for neither, whichever side carried the markup");
+  assert(!evidenceIn("tail", "*".repeat(5999) + " tail") && evidenceIn("tail", "*".repeat(5990) + " tail"),
+    "the text is cut to what the model was sent before it is folded: folded first, the asterisks would pull a word past the cut into reach");
+  const worst = ["[".repeat(6000), "[a](".repeat(1500), "[a](" + " ".repeat(5996), "[a](" + "\n".repeat(5996), "~~a".repeat(2000)];
+  const t1 = performance.now();
+  for (let i = 0; i < 20; i++) for (const s of worst) withoutMarkdown(s);
+  assert(performance.now() - t1 < 200, `twenty readings each of six thousand brackets, an unclosed link run, a link opened onto six thousand spaces or line breaks, and a run of tildes take ${(performance.now() - t1).toFixed(0)} ms: every run a link may hold is bounded (review pass 1)`);
   assert(parseJudgement("I cannot say.").malformed && parseJudgement("").malformed, "prose and an empty answer are malformed");
   const long = parseJudgement(`{"verdict":"outdates","supersedes":"unknown","confidence":0.6,"reason":"${"x\u001b[2K ".repeat(200)}"}`);
   assert(long.reason.length <= 400 && !long.reason.includes("\u001b"), "the reason is clipped to 400 characters with control characters stripped");
@@ -1718,19 +1748,30 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   assert(judgedR.prompt_hash === promptHash(CONSOLIDATE_PROMPT) && !("decider" in judgedR) && !("decide_version" in judgedR), "…and the judge's names prompt 4's, as before");
 
   // The writer's question: prompt 4's rendering of both thoughts, two-sided with the part rule, as the pass runs it
-  // (decide version 1). Version 2's record rule is the eval's (`--record-rule`), not the pass's: shelved 2026-10-18.
+  // (decide version 3: version 1's writer, its quotes read without markdown, SMD-3151). Version 2's record rule is the
+  // eval's (`--record-rule`), not the pass's: shelved 2026-10-18.
   const older = { content: "the plan is to ship on Friday", createdAt: "2026-10-01T00:00:00Z" };
   const newer = { content: "we shipped on Monday instead of Friday", createdAt: "2026-10-03T00:00:00Z" };
   const msg = writerMessages({ older, newer }, PASS_WRITER.twoSided, PASS_WRITER.partRule, PASS_WRITER.recordRule)[0].content;
   assert(msg.startsWith(WRITER_HEAD) && msg.includes("<thought_a>\nthe plan is to ship on Friday\n</thought_a>") && msg.includes('"stale": words copied') && msg.includes(PART_RULE.trim()) && !msg.includes(RECORD_RULE.trim()),
     "the pass's writer: both thoughts, the stale quote and the part rule, not the record rule");
-  // The pass asks version 1's text, SMD-3114's, word for word. Under the record rule (version 2, the eval's) the
-  // definition no longer counts a later summary of the same work, or one saying the other is done, as outdating it.
+  // The pass asks version 1's text, SMD-3114's, word for word (version 3 moved only the quote check). Under the record
+  // rule (version 2, the eval's) the definition no longer counts a later summary of the same work, or one saying the
+  // other is done, as outdating it.
   const v1 = writerRules(true, true), v2 = writerRules(true, true, true);
-  assert(DECIDE_VERSION === 1 && DECIDE_PROMPT.endsWith(v1) && v1.includes("a progress note or summary of some work and a later one of the same work") && v1.includes("or one saying the other is done, closed, obsolete or replaced") && !v1.includes(RECORD_RULE.trim())
+  assert(DECIDE_VERSION === 3 && DECIDE_PROMPT.endsWith(v1) && v1.includes("a progress note or summary of some work and a later one of the same work") && v1.includes("or one saying the other is done, closed, obsolete or replaced") && !v1.includes(RECORD_RULE.trim())
       && !v2.includes("a later one of the same work") && !v2.includes("one saying the other is done") && v2.includes("the two say different things about the same subject") && v2.includes("a status and a later status of something still open"),
     "the pass asks version 1's text; the record rule's definition drops a later summary and a report of done from what outdates");
   assert(stands(prop, older.content, newer.content, true) && !stands({ ...prop, stale: "Monday" }, older.content, newer.content, true), "both quotes checked, each in its own side");
+  // SMD-3151 (version 3): the writer quotes the words it reads, so markdown around them in either thought does not fail
+  // the check — the pass's whole-quote check, not version 2's reading.
+  const markedOlder = "The plan is to **ship on `Friday`**, see [the board](https://e.com/b).", markedNewer = "We _shipped_ on **Monday** instead.";
+  const bothHold = "We **shipped** on Monday too; the plan was to ship on Friday.";
+  assert(stands(prop, markedOlder, markedNewer, true) && !stands({ ...prop, stale: "https://e.com/b" }, markedOlder, newer.content, true)
+      && stands(prop, "the plan was to ship on Friday.", markedNewer, true) && !stands(prop, bothHold, newer.content, true),
+    "quotes across bold, a code span, emphasis and a link stand; a quote reaching into a link's target does not, nor evidence both sides hold once folded");
+  assert(stands({ ...prop, evidence: "Release target: ~~Friday~~ Monday", stale: "Release target: Friday" }, "Release target: Friday.", "Release target: ~~Friday~~ Monday, after the review.", true),
+    "a stale claim the current thought strikes through is withdrawn there, not stated, so the proposal stands (review pass 1)");
   // A quote shortened with "…" or "...": read piece by piece under version 2's reading (the eval's `--v2-quotes`),
   // every piece in its side and not every piece in the other; the pass keeps SMD-3114's whole-quote check.
   const shortened = { ...prop, evidence: "we shipped … instead of Friday", stale: "the plan is ... on Friday" };

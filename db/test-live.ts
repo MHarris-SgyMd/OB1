@@ -7636,7 +7636,7 @@ if (want("16")) {
         if (prompt === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
         writerCalls++;
         writerModels.add(String(body.model));
-        // The pass's writer (decide version 1): the part rule, and not the record rule, version 2's, shelved 2026-10-18.
+        // The pass's writer (decide version 1's, kept by version 3): the part rule, and not the record rule, version 2's, shelved 2026-10-18.
         if (prompt.includes(PART_RULE.trim()) && !prompt.includes(RECORD_RULE.trim())) writerPartRule++;
         const answer = /tenancy/.test(thoughtsIn(prompt)) ? { current: "B", evidence: "now runs 90 days", stale: "runs 30 days", reason: "the tenancy was extended" }
           : { current: "none", evidence: "", stale: "", reason: "both stay current" };

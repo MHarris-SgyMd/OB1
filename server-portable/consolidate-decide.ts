@@ -112,7 +112,8 @@ export const writerMessages = (p: { older: PairSide; newer: PairSide }, twoSided
   [{ role: "user" as const, content: WRITER_HEAD + pairContext(p) + writerRules(twoSided, partRule, recordRule) }];
 
 /**
- * The writer the pass runs: two-sided with the part rule, SMD-3114's adopted one (decide version 1). Version 2's
+ * The writer the pass runs: two-sided with the part rule, SMD-3114's adopted one (decide version 1's, which version 3
+ * keeps; version 3 moved only the quote check, SMD-3151). Version 2's
  * record rule and quote reading (RECORD_RULE, stands' `v2Quotes`) are not the pass's: measured on the canary's
  * proposals they missed their bar twice, and the maintainer shelved them (2026-10-18). They stay for the eval
  * (`--record-rule`, `--v2-quotes`) and SMD-3116's writers. Its version is the key's.
@@ -204,12 +205,16 @@ export function stands(p: Proposal, older: string, newer: string, twoSided: bool
 
 /**
  * Bumped when the decider's question, the writer's prompt or the rules between them change: a new pool. 1: SMD-3114's
- * writer, two-sided with the part rule, the pass's. Version 2 added the record rule (RECORD_RULE) and its quote
- * reading: quotes shortened with "…" read piece by piece (quoteIn), and a stale claim the current thought only quotes
- * (onlyQuoted). It was measured on the canary's proposals, missed its bar twice and is shelved, so the pass stays at
- * 1 and its key at `@p4d1`; the eval still asks version 2 (`--record-rule`, `--v2-quotes`).
+ * writer, two-sided with the part rule. Version 2 added the record rule (RECORD_RULE) and its quote reading: quotes
+ * shortened with "…" read piece by piece (quoteIn), and a stale claim the current thought only quotes (onlyQuoted). It
+ * was measured on the canary's proposals, missed its bar twice and is shelved; the eval still asks it
+ * (`--record-rule`, `--v2-quotes`). 3, the pass's (key `@p4d3`): version 1's writer, its quotes read without their
+ * markdown (evidenceIn, SMD-3151). The writer quotes the words it reads: on SMD-3116's writer test the quote check
+ * refused 11 of the 18 proposals it wrote on settling pairs, and 10 of the 12 quotes it missed there are in the text
+ * once markdown is read away. That check decides which judgements become proposals, so it is a rule between the two
+ * and moves the key.
  */
-export const DECIDE_VERSION = 1;
+export const DECIDE_VERSION = 3;
 
 /**
  * Decide mode's pass key: the decider, the writer, and the two versions it reads the pair under, prompt 4's (both

@@ -388,6 +388,28 @@ const plainText = (t: string) => oneLine(t).toLowerCase()
  */
 const forQuote = (t: string) => plainText(t).replace(/^[\s"'`.]+|[\s"'`.,;:]+$/g, "");
 
+/**
+ * Text as a reader sees it, its markdown folded away (SMD-3151). A model quoting a thought copies the words it reads,
+ * not the markup around them, so a quote across `**bold**`, a code span or a link must still be found. An inline link
+ * or image, `[text](target)`, keeps its text and loses its target; a bare URL or an autolink stays, as a reader sees
+ * it. Struck text goes with its `~~`: a reader takes it as withdrawn, not stated. Emphasis and code markers go, so
+ * does any bracket left over and the backslash of an escape, and a heading's `#`s or a blockquote's `>` that open a
+ * word, not only a line: a quote arrives on one line (oneLine), so a marker that opened a line in the text sits
+ * mid-quote. An underscore inside a word stays (snake_case is text, and so is `a__b`); a run at a word's edge is
+ * emphasis and goes. Applied to the quote and to the text alike, before plainText. Every run a link may hold is
+ * bounded — its text (no bracket, 200 characters), its target (1,000), the space around them (16) — so each `[`
+ * costs a bounded scan: unbounded, a run of spaces three parts could each take was quadratic (review pass 1).
+ */
+export function withoutMarkdown(t: string): string {
+  return t
+    .replace(/!?\[([^[\]\n]{0,200})\]\(\s{0,16}<?[^\s()<>]{0,1000}>?(?:\s{1,16}"[^"\n]{0,200}")?\s{0,16}\)/g, "$1")
+    .replace(/~~[^~\n]{0,1000}~~/g, "")
+    .replace(/(^|\s)(?:#{1,6}(?=\s|$)|>+)/g, "$1")
+    .replace(/\\([\\`*_{}[\]()#+\-.!|>~])/g, "$1")
+    .replace(/`+|\*+|~~|[[\]]/g, "")
+    .replace(/(?<![\p{L}\p{N}_])_+|_+(?![\p{L}\p{N}_])/gu, "");
+}
+
 /** Whether `q` occurs in `text` as whole words: no letter or digit on either side of it. */
 function holdsWords(text: string, q: string): boolean {
   const word = /[\p{L}\p{N}]/u;
@@ -404,12 +426,15 @@ function holdsWords(text: string, q: string): boolean {
  * Compared as whole words after plainText, so a line break, a capital or a
  * curly quote the model normalised does not fail it, and "done" is not found
  * in "abandoned"; anything shorter than three characters proves nothing and
- * is not found.
+ * is not found. Quote and texts are read without their markdown (SMD-3151):
+ * the model quotes the words it reads, not `**`, backticks or link syntax. A
+ * text is cut to what the model was sent before it is folded.
  */
 export function evidenceIn(evidence: string, content: string, other?: string): boolean {
-  const q = forQuote(evidence);
-  if (q.length < 3 || !holdsWords(plainText(content.slice(0, CONTENT_LIMIT_CHARS)), q)) return false;
-  return other === undefined || !holdsWords(plainText(other.slice(0, CONTENT_LIMIT_CHARS)), q);
+  const q = forQuote(withoutMarkdown(evidence));
+  const read = (t: string) => plainText(withoutMarkdown(t.slice(0, CONTENT_LIMIT_CHARS)));
+  if (q.length < 3 || !holdsWords(read(content), q)) return false;
+  return other === undefined || !holdsWords(read(other), q);
 }
 
 /**
