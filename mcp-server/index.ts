@@ -19,6 +19,7 @@ import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stopp
 import { cutOpenRequests, flushTelemetry, knowTools, outgoingTraceparent, startTelemetry } from "../server-portable/telemetry.ts";
 import { createMcpApp, edgeFrom, REST_TIMEOUT_MS } from "./app.ts";
 import { createExchanger, exchangeSettings } from "./exchange.ts";
+import { originProblem } from "../server-portable/oauth-edge.ts";
 
 /** Where the REST core answers on the mesh unless OB1_REST_URL says otherwise. */
 export const DEFAULT_REST_URL = "http://api.ob1.internal.:8000";
@@ -73,6 +74,11 @@ const edge = edgeFrom({ COMPOSE_PROFILES: env.COMPOSE_PROFILES, OB1_PUBLIC_ORIGI
 // no caller (refused as before), said once at the start rather than on every OAuth client's request.
 const exchange = exchangeSettings(edge.origin, env.OB1_AUTH_SECRET_MCP);
 if (import.meta.main && edge.origin && !exchange) console.warn("OB1_AUTH_SECRET_MCP is not set: this configured stack's OAuth tokens are refused here (the `mcp` client's secret, from deploy/.env, which deploy/auth/provision.ts --init writes).");
+// The secret given where nothing trades: the stack is not configured or its origin unsound, said once, since tokens
+// are then no caller and the start was otherwise silent (review pass 3: an operator setting only the secret saw nothing).
+if (import.meta.main && !edge.origin && env.OB1_AUTH_SECRET_MCP?.trim()) {
+  console.warn(`OB1_AUTH_SECRET_MCP is set, but no OAuth token is traded: ${edge.configured ? originProblem(env.OB1_PUBLIC_ORIGIN) : "COMPOSE_PROFILES does not name auth"} (set COMPOSE_PROFILES and OB1_PUBLIC_ORIGIN as the REST core has them).`);
+}
 const exchanger = exchange ? createExchanger(exchange) : null;
 const app = createMcpApp({ rest, plugins: () => plugins, toolCalls, stop, restUrl: baseUrl.replace(/\/\/[^/@]*@/, "//…@"), edge: () => edge, exchanger: () => exchanger });
 

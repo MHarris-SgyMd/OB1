@@ -913,7 +913,9 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   const claimsOf = (t: string) => JSON.parse(Buffer.from(t.split(".")[1], "base64url").toString()) as Record<string, unknown>;
   // The authorization server's token endpoint, as deploy/auth/server.ts's grant answers: the `mcp` client's secret, the
   // subject's /mcp audience, the same subject and scope, `act: {sub: "mcp"}`, the REST core's audience.
-  let asMode: "ok" | "down" | "busy" | "limited" | "truncated" | "stalled" | "echo" | "invalid_grant" | "invalid_scope" | "invalid_client" = "ok";
+  let asMode: "ok" | "down" | "busy" | "limited" | "truncated" | "stalled" | "echo" | "echo-hex" | "slow" | "invalid_grant" | "invalid_scope" | "invalid_client" = "ok";
+  // A bare 64-hex value, the shape of OB1_AUTH_SECRET_MCP and of a keygen key, starting with a letter.
+  const HEX64 = `f${"0123456789abcdef".repeat(4).slice(1)}`;
   // The authorization server's health, as the edge's probe reads it: asked every time (no TTL), so a step flips it.
   let asUp = true;
   useAuthReachability(new AuthReachability("http://auth.test/healthz", 0, 500, (async () => new Response(null, { status: asUp ? 200 : 503 })) as unknown as typeof fetch));
@@ -922,6 +924,8 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   const asFetch = async (req: Request): Promise<Response> => {
     trades++;
     if (asMode === "down") throw new TypeError("fetch failed: connection refused");
+    // Slower than the keyed routes' 2.5 s deadline, within the trade's 5 s.
+    if (asMode === "slow") await new Promise((done) => setTimeout(done, 3_000));
     if (asMode === "busy") return new Response("busy", { status: 503 });
     if (asMode === "limited") return Response.json({ error: "slow_down" }, { status: 429 });
     // A 200 cut short, as a body that stalled past the timeout reads.
@@ -933,6 +937,7 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
     const okClient = req.headers.get("authorization") === `Basic ${Buffer.from("mcp:mcp-secret").toString("base64")}`;
     if (asMode === "invalid_client" || !okClient) return Response.json({ error: "invalid_client" }, { status: 401 });
     // An authorization server that echoes what it was sent in `error`: none of it may reach the log.
+    if (asMode === "echo-hex") return Response.json({ error: HEX64 }, { status: 400 });
     if (asMode === "echo") return Response.json({ error: `invalid_request ${form.get("subject_token")} ${req.headers.get("authorization")}` }, { status: 400 });
     if (asMode !== "ok") return Response.json({ error: asMode }, { status: 400 });
     const subject = claimsOf(form.get("subject_token") ?? "");
@@ -953,10 +958,18 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
     resolve: async (p) => (p.scope === "forward" ? { status: "ok", agentId: "agent-f" } : identity),
   });
   const restCalls: { key: string | null; bearer: string | null }[] = [];
+  // A REST core echoing a secret in its code — at whoami, as the forwarder's refusal, at an operation: never printed whole.
+  let whoamiEcho = false;
+  let forwarderEcho = false;
+  let opEcho = false;
   const tokenRest = createRestClient({
     baseUrl: "http://api.ob1.internal",
     fetch: async (req) => {
       restCalls.push({ key: req.headers.get("x-brain-key"), bearer: req.headers.get("authorization") });
+      const atWhoami = new URL(req.url).pathname.endsWith("/whoami");
+      if (whoamiEcho && atWhoami) return Response.json({ code: HEX64 }, { status: 500 });
+      if (forwarderEcho && atWhoami) return Response.json({ code: HEX64, credential: "forwarder" }, { status: 401 });
+      if (opEcho && !atWhoami) return Response.json({ code: HEX64 }, { status: 409 });
       return restWithTokens.fetch(req);
     },
     forwarderKey: "fwd-raw",
@@ -964,10 +977,11 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   let trading: boolean = true;
   const tokenApp = createMcpApp({ rest: tokenRest, edge: () => ({ configured: true, origin: ORIGIN }), exchanger: () => (trading ? exchanger : null), warn: (line) => warned.push(line) });
   const warned: string[] = [];
-  const ask = async (token: string | null, opts: { method?: string; params?: unknown; host?: string; key?: string; path?: string } = {}) => {
+  const ask = async (token: string | null, opts: { method?: string; params?: unknown; host?: string; key?: string; access?: string; path?: string } = {}) => {
     const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json, text/event-stream" };
     if (token) headers.authorization = `Bearer ${token}`;
     if (opts.key) headers["x-brain-key"] = opts.key;
+    if (opts.access) headers["x-access-key"] = opts.access;
     const r = await tokenApp.fetch(new Request(`${opts.host ?? ORIGIN}${opts.path ?? "/mcp"}`, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: opts.method ?? "tools/list", params: opts.params ?? {} }) }));
     const text = await r.text();
     const line = text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
@@ -1047,11 +1061,13 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   asMode = "invalid_scope";
   r = await ask(await live());
   assert(r.status === 403 && www(r).includes('error="insufficient_scope"') && www(r).includes('scope="brain:read"'), `its scopes name no key scope (invalid_scope): 403 insufficient_scope, naming brain:read to step up to (${r.status} ${www(r)})`);
+  warned.length = 0;
   for (const [mode, label] of [["down", "away"], ["busy", "answering 503"], ["limited", "limiting this server (429)"], ["truncated", "answering a 200 cut short"], ["stalled", "stalling a refusal's body"]] as const) {
     asMode = mode;
     r = await ask(await live());
     assert(r.status === 503 && r.headers.get("retry-after") === "30", `the authorization server ${label}: 503, retry in 30 s — not a 401 that restarts a sign-in (${r.status} ${r.headers.get("retry-after")})`);
   }
+  assert(warned.some((l) => l.includes("an OAuth token could not be checked") && l.includes("it could not be reached")) && warned.some((l) => l.includes("rate-limited")), `…each said in the log, why in this server's own words (${warned.length} lines: ${warned.join(" | ").slice(0, 160)})`);
   asMode = "invalid_client";
   warned.length = 0;
   r = await ask(await live());
@@ -1062,7 +1078,27 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   const echoed = await live();
   r = await ask(echoed);
   assert(r.status === 500 && warned.length === 1 && !warned[0].includes(echoed.slice(-20)) && !warned[0].includes("Basic") && warned[0].includes("no error code"), `an error code echoing the token and the client's secret: a fault, neither printed (${warned.join(" | ").slice(0, 160)})`);
+  // Asked of the exchange itself: the log says a line once a minute, and the echo above said this one.
+  asMode = "echo-hex";
+  const hexSaid = await exchanger.exchange(await live()).then((x) => `no throw: ${x.status}`, (e: Error) => e.message);
+  assert(hexSaid.includes("no error code") && !hexSaid.includes(HEX64), `an error that is a bare 64-hex value, a secret's shape: never printed (${hexSaid.slice(0, 120)})`);
   asMode = "ok";
+  whoamiEcho = true;
+  warned.length = 0;
+  await ask(await live());
+  await ask(null, { key: "write-raw" });
+  whoamiEcho = false;
+  assert(warned.length === 2 && warned.every((l) => !l.includes(HEX64)), `a whoami code echoing a secret, for a token and for a key: never printed (${warned.join(" | ").slice(0, 160)})`);
+  forwarderEcho = true;
+  warned.length = 0;
+  await ask(null, { key: "write-raw" });
+  forwarderEcho = false;
+  assert(warned.length === 1 && warned[0].includes("forwarder key") && !warned[0].includes(HEX64), `…as the forwarder's refusal: never printed (${warned.join(" | ").slice(0, 120)})`);
+  opEcho = true;
+  r = await ask(null, { key: "write-raw", method: "tools/call", params: { name: "thought_stats", arguments: {} } });
+  opEcho = false;
+  const opText = JSON.stringify(r.body ?? {});
+  assert(opText.includes("the REST core answered 409") && !opText.includes(HEX64), `…at an operation: the tool's fault names the status, never the code (${opText.slice(0, 120)})`);
 
   // The REST core's word on the exchanged token: a revoked subject is refused as a revoked key is (no sign-in loop).
   identity = { status: "revoked", agentId: "agent-o", revokedAt: "2026-10-19T00:00:00Z", reason: null };
@@ -1120,6 +1156,28 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   kh = await keyedHead("/mcp/jobs/job-7", lapsed);
   asUp = true;
   assert(kh.status === 503 && kh.retry === "30", `…an expired token at a job link with the authorization server away: 503, retry in 30 s (${kh.status} ${kh.retry})`);
+  {
+    const { useRequestLog } = await import("../server-portable/telemetry.ts");
+    const lines: Record<string, unknown>[] = [];
+    const before = useRequestLog((l) => lines.push(JSON.parse(l) as Record<string, unknown>));
+    await keyedHead("/mcp/jobs/job-7", lapsed);
+    asUp = false;
+    await keyedHead("/mcp/jobs/job-7", lapsed);
+    asUp = true;
+    useRequestLog(before);
+    const ours = lines.filter((l) => l.door === "mcp" && l.route === "/jobs/:id");
+    assert(ours.length === 2 && ours[0].outcome === "refused" && ours[0].code === "UNAUTHORIZED" && ours[0].status === 401 && ours[1].outcome === "refused" && ours[1].code === "AUTH_UNREACHABLE" && ours[1].status === 503, `…its line \`refused\`, the code beside it (${JSON.stringify(ours.map((l) => [l.status, l.outcome, l.code]))})`);
+  }
+  // A trade slower than the keyed routes' deadline: 503, retry, never \`ok\`; the next poll is answered from the kept trade.
+  asMode = "slow";
+  warned.length = 0;
+  const slowToken = await live();
+  kh = await keyedHead("/mcp/jobs/job-7", slowToken);
+  assert(kh.status === 503 && kh.retry === "30" && warned.some((l) => l.includes("an OAuth token could not be checked")), `a trade past a job link's deadline: 503, retry in 30 s, said in the log (${kh.status} ${kh.retry})`);
+  await new Promise((done) => setTimeout(done, 700));
+  asMode = "ok";
+  const after = await keyedGet("/mcp/jobs/job-7", slowToken);
+  assert(after.status === 200 && after.text.includes('"status":"succeeded"'), `…and the next poll, the trade kept: the job (${after.status} ${after.text.slice(0, 40)})`);
   answer = () => ok({});
 
   // A token beside a key form is a key client's, and is still never sent on as a key.
@@ -1134,8 +1192,13 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   assert(r.status === 200 && same(toolNames(r), [...visibleToolNames({ scope: "read" })].sort()), `a dotted raw key as x-brain-key: a read key's tools (${r.status}, ${toolNames(r).length})`);
   r = await ask(null, { path: "/mcp?key=team.alice.k2026" });
   assert(r.status === 200 && same(toolNames(r), [...visibleToolNames({ scope: "read" })].sort()), `…as ?key=: the same (${r.status}, ${toolNames(r).length})`);
-  r = await ask("team.alice.k2026", { key: "team.alice.k2026" });
-  assert(r.status === 200 && same(toolNames(r), [...visibleToolNames({ scope: "read" })].sort()), `…as x-brain-key and the bearer both: the same (${r.status}, ${toolNames(r).length})`);
+  for (const [form, opts] of [["x-brain-key", { key: "team.alice.k2026" }], ["x-access-key", { access: "team.alice.k2026" }], ["?key=", { path: "/mcp?key=team.alice.k2026" }]] as const) {
+    r = await ask("team.alice.k2026", opts);
+    assert(r.status === 200 && same(toolNames(r), [...visibleToolNames({ scope: "read" })].sort()), `…as ${form} and the bearer both: the same (${r.status}, ${toolNames(r).length})`);
+  }
+  // A keygen key (hex, no dots) as a bearer on a stack with OAuth: a key, as ever.
+  r = await ask("write-raw");
+  assert(r.status === 200 && same(toolNames(r), [...visibleToolNames({ scope: "write" })].sort()), `a key with no dots as a bearer on a stack with OAuth: a key's tools (${r.status}, ${toolNames(r).length})`);
   // A stack with no public origin has no OAuth: a bearer of any shape is a key there, as server-portable reads it.
   const noOAuth = createMcpApp({ rest: tokenRest, edge: () => ({ configured: false, origin: null }), exchanger: () => exchanger, warn: () => {} });
   const lone = await noOAuth.fetch(new Request(`${ORIGIN}/mcp`, { method: "POST", headers: { authorization: "Bearer team.alice.k2026", "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/list", params: {} }) }));
@@ -1158,7 +1221,19 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   const plainApp = createMcpApp({ rest: createRestClient({ baseUrl: "http://api.ob1.internal", fetch: async (req) => restPlain.fetch(req), forwarderKey: "fwd-raw" }), edge: () => ({ configured: true, origin: ORIGIN }), exchanger: () => exchanger, warn: (line) => plainWarned.push(line) });
   const plain = await plainApp.fetch(new Request(`${ORIGIN}/mcp`, { method: "POST", headers: { authorization: `Bearer ${await live()}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/list", params: {} }) }));
   await plain.text();
-  assert(plain.status === 500 && plainWarned.some((l) => l.includes("checks no OAuth token") && l.includes("auth profile")), `a REST core that checks no token: a fault, logged with its fix (${plain.status} ${plainWarned.join(" | ").slice(0, 120)})`);
+  assert(plain.status === 500 && plainWarned.some((l) => l.includes("refused a token traded for it") && l.includes("checking no token") && l.includes("auth profile")), `a REST core that checks no token: a fault, logged with its fix (${plain.status} ${plainWarned.join(" | ").slice(0, 120)})`);
+  // One checking another origin's tokens refuses this one on its claims, credential token: the same misconfiguration, never invalid_token.
+  const restElsewhere = createRestApp({
+    core, init: () => {}, track: (run) => run(), log: () => {},
+    keys: () => ({ MCP_ACCESS_KEYS: `mcp:forward:${hashKey("fwd-raw")}` }),
+    tokens: () => checkerOver(tokenSettings({ COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: "https://elsewhere.example.test" })!, async () => pair.publicKey),
+    resolve: async (p) => (p.scope === "forward" ? { status: "ok", agentId: "agent-f" } : identity),
+  });
+  const elsewhereWarned: string[] = [];
+  const elsewhereApp = createMcpApp({ rest: createRestClient({ baseUrl: "http://api.ob1.internal", fetch: async (req) => restElsewhere.fetch(req), forwarderKey: "fwd-raw" }), edge: () => ({ configured: true, origin: ORIGIN }), exchanger: () => exchanger, warn: (line) => elsewhereWarned.push(line) });
+  const elsewhere = await elsewhereApp.fetch(new Request(`${ORIGIN}/mcp`, { method: "POST", headers: { authorization: `Bearer ${await live()}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/list", params: {} }) }));
+  await elsewhere.text();
+  assert(elsewhere.status === 500 && elsewhereWarned.some((l) => l.includes("refused a token traded for it") && !l.includes("checking no token") && l.includes("OB1_PUBLIC_ORIGIN")), `a REST core on another origin: a fault, logged with its fix, never a sign-in loop (${elsewhere.status} ${elsewhereWarned.join(" | ").slice(0, 120)})`);
 
   // Where no token is traded: at another Host, or a server given no exchange — and a token is never sent as a key.
   trades = 0;

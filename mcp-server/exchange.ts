@@ -49,7 +49,8 @@ export const EXPIRY_MARGIN_S = 5;
 export const MAX_ENTRIES = 1_024;
 
 export type ExchangeSettings = { tokenUrl: string; clientId: string; secret: string; issuer: string; mcpAudience: string; apiResource: string };
-export type Exchanged = { status: "ok"; token: string } | { status: "invalid" } | { status: "scope" } | { status: "unavailable" };
+/** `why` is for the log alone, built from this server's own words and a status, never the answer's text. */
+export type Exchanged = { status: "ok"; token: string } | { status: "invalid" } | { status: "scope" } | { status: "unavailable"; why: string };
 export type Exchanger = { exchange(token: string): Promise<Exchanged>; size(): number };
 
 const EXCHANGE_HINT = "set OB1_AUTH_SECRET_MCP to the `mcp` client's secret in deploy/.env (deploy/auth/provision.ts --init writes it), and run the authorization server from this release's deploy/auth, whose `mcp` client may trade for the REST core";
@@ -61,8 +62,13 @@ export class ExchangeMisconfigured extends Error {
   }
 }
 
-/** An upstream's error code for a log line: a code's characters, or nothing (review pass 2: a body that echoed a token printed it). */
-export const codeWord = (code: unknown): string => (typeof code === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(code) ? code : "");
+/**
+ * An upstream's error code for a log line: letters and underscores, as every
+ * code the authorization server and the REST core send is, else nothing.
+ * No digit, so no hex secret or key passes whole (review passes 2 and 3: a
+ * body that echoed a token printed it; a bare 64-hex secret still passed).
+ */
+export const codeWord = (code: unknown): string => (typeof code === "string" && /^[A-Za-z_]{1,64}$/.test(code) ? code : "");
 
 /** The settings on a configured stack with a sound origin and the `mcp` client's secret, else null: no token is traded. */
 export function exchangeSettings(origin: string | null, secret: string | undefined, tokenUrl: string = AUTH_TOKEN_URL): ExchangeSettings | null {
@@ -120,8 +126,8 @@ export function createExchanger(s: ExchangeSettings, opts: { fetch?: (req: Reque
         redirect: "manual",
         signal: AbortSignal.timeout(EXCHANGE_TIMEOUT_MS),
       }));
-    } catch {
-      return { status: "unavailable" };
+    } catch (e) {
+      return { status: "unavailable", why: (e as Error)?.name === "TimeoutError" ? `no answer within ${EXCHANGE_TIMEOUT_MS} ms` : "it could not be reached" };
     }
     // A body that stalls past the timeout, at any status, is the authorization server not answering, never this server's
     // settings (review passes 1 and 2); one that cannot be read as JSON is read as no answer of its.
@@ -130,14 +136,14 @@ export function createExchanger(s: ExchangeSettings, opts: { fetch?: (req: Reque
       stalled = (e as Error)?.name === "TimeoutError" || (e as Error)?.name === "AbortError";
       return null;
     })) as { access_token?: unknown; expires_in?: unknown; error?: unknown } | null;
-    if (stalled) return { status: "unavailable" };
+    if (stalled) return { status: "unavailable", why: `its ${r.status} answer stalled past ${EXCHANGE_TIMEOUT_MS} ms` };
     if (r.status === 200 && typeof body?.access_token === "string") {
       keep(digest, body.access_token, typeof body.expires_in === "number" ? body.expires_in : 0);
       return { status: "ok", token: body.access_token };
     }
     // A 200 cut short or with no token says nothing of this server's settings (review pass 1).
-    if (r.status === 200) return { status: "unavailable" };
-    if (r.status === 429 || r.status >= 500) return { status: "unavailable" };
+    if (r.status === 200) return { status: "unavailable", why: "it answered 200 with no token" };
+    if (r.status === 429 || r.status >= 500) return { status: "unavailable", why: `it answered ${r.status}${r.status === 429 ? " (rate-limited: after repeated invalid_client refusals, as a wrong OB1_AUTH_SECRET_MCP draws, the `mcp` client is locked out for a while)" : ""}` };
     const error = codeWord(body?.error);
     if (error === "invalid_grant") return { status: "invalid" };
     if (error === "invalid_scope") return { status: "scope" };
