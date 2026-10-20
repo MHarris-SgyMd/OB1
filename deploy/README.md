@@ -2345,13 +2345,15 @@ Every `up` refreshes the canary from stable, unless `--no-refresh` says not to
 own passes' proposals, keeps them that way: `up --no-refresh` mends its env
 file and keys as `up` does, runs this checkout's `migrate` on the canary's own
 database, and recreates the servers, its proxy and forwarder on its own
-networks. It is refused, changing nothing, on a canary with no database to
-keep. Either form stops the canary's writers before its Postgres is touched,
-its servers and a running `sleep` worker, and brings the worker back on the
-new build, unless its env file holds no `OB1_WORKER_KEY` (then it stays
-stopped, `up` says how to start it, and exits 1). A running service of another
-profile, the workers or board-sync, is refused before anything changes: stop it
-first. A plain `up` still refreshes a canary holding rows of its own; SMD-3155
+networks. It is refused on a canary with no database to keep: no volume
+(changing nothing), or one whose database holds no relations. Either form
+builds its images while the canary serves, then stops its writers before its
+Postgres is touched, its servers and a running `sleep` worker, and brings the
+worker back on the new build once the smoke has passed, unless its env file
+holds no `OB1_WORKER_KEY` (then it stays stopped, `up` says how to start it,
+and exits 1). A run that fails after the stop says what it left stopped and
+how to go on. A running writer of another profile (the workers, board-sync,
+the import runner) is refused before anything changes: stop it first. A plain `up` still refreshes a canary holding rows of its own; SMD-3155
 is the guard.
 
 The canary is `compose.yaml` again under the project `<stable>-canary` (SMD-2873):
