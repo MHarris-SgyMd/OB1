@@ -600,7 +600,7 @@ export function proposalVerdict(j: Judgement): "newer_supersedes_older" | "older
 export const RELATION_VERDICTS = ["related", "evolves", "duplicate"] as const;
 export type RelationVerdict = (typeof RELATION_VERDICTS)[number];
 /**
- * What a relation facet says: a relation verdict's own word, or since 100
+ * What a relation facet says: a relation verdict's own word, or since 102
  * `distinct` — the judge's unrelated, which on a candidate pair (two near
  * neighbours, 029's rule) says two look-alikes are about different subjects
  * and are kept apart (SMD-3117; SMD-3116 renamed the word). Prompt 4 still
@@ -613,7 +613,7 @@ export type RelationWord = RelationVerdict | "distinct";
  * none — an outdates (a proposal's), a malformed answer. An unrelated verdict
  * records distinct (SMD-3117), except under decide mode where H2O's top was
  * another word and unrelated is the fallback. The pass writes it with
- * record_thought_relation (084, 100) on the newer thought, and for a
+ * record_thought_relation (084, 102) on the newer thought, and for a
  * well-formed judgement a null closes the pair's edge, so a re-judge that no
  * longer sees the relation retracts it; a malformed, timed-out or refused
  * pair never reaches the write, and its edge stands.

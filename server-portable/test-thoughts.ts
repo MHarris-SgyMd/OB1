@@ -698,8 +698,8 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
          "related, evolves and duplicate are relations");
   assert(relationVerdict(jg("outdates", "newer")) === null && relationVerdict({ ...jg("related", "unknown"), malformed: true }) === null && relationVerdict({ ...jg("unrelated", "unknown"), malformed: true }) === null,
          "an outdates (a proposal's) and a malformed answer record no relation — the pass closes the pair's");
-  // SMD-3117 (migration 100): an unrelated verdict records distinct — two near neighbours judged apart — at the floor of its own probability.
-  assert(relationVerdict(jg("unrelated", "unknown")) === "distinct", "an unrelated verdict records distinct (100), the word SMD-3116 gave it");
+  // SMD-3117 (migration 102): an unrelated verdict records distinct — two near neighbours judged apart — at the floor of its own probability.
+  assert(relationVerdict(jg("unrelated", "unknown")) === "distinct", "an unrelated verdict records distinct (102), the word SMD-3116 gave it");
   const sure = { p: { unrelated: 0.8, related: 0.1, evolves: 0.05, duplicate: 0.03, outdates: 0.02 }, covered: 0.95 };
   assert(JSON.stringify(relationConfidence(jg("unrelated", "unknown", { verdict: sure }))) === JSON.stringify({ confidence: 0.8, mass: 0.8, source: "token" })
          && JSON.stringify(relationConfidence(jg("unrelated", "unknown", { verdict: dist }))) === JSON.stringify({ confidence: 0.05, mass: 0.05, source: "token" }),

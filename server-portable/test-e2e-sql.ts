@@ -2546,7 +2546,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     await relate(t[3], t[0], "duplicate");
     await relate(t[4], t[0], "related");
     await sql`UPDATE thought_facets SET valid_until = now() WHERE kind = 'relation' AND thought_id = ${t[4]}::uuid AND payload->>'target' = ${t[0]}`;
-    // 100 (SMD-3117): a pair judged distinct — counted apart, and never a board pair, though its two tickets are unlinked.
+    // 102 (SMD-3117): a pair judged distinct — counted apart, and never a board pair, though its two tickets are unlinked.
     await relate(t[2], t[0], "distinct");
 
     // The count by hand: every row read, the rule applied here.

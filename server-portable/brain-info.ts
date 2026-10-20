@@ -144,7 +144,7 @@ export interface DatabaseFacts {
   /**
    * The judged relations standing (084, SMD-2680): `relation` facets with no
    * valid_until, by word, and how many pair two tickets the board does not
-   * link, as `proposals` counts them; since 100 the pairs judged distinct
+   * link, as `proposals` counts them; since 102 the pairs judged distinct
    * (SMD-3117) beside them, counted apart — not a relation a reader acts
    * on, and never a board pair. Nothing waits on them, so no row warns.
    * Null when not read or not asked (`stats: false`); zero on a brain without
@@ -201,14 +201,16 @@ export interface WorkerHeartbeat {
    * The thoughts extraction holds back across the sleep scheduler's wakes —
    * pending or in flight with a hard stop counted on them (migration 093,
    * SMD-2694): how many, and up to three, the most stalled first, each with
-   * its stops, the latest of them in a row that gained no window, and its
-   * windows kept of how many. Absent while none is, and for the other workers.
+   * its stops, the latest of them in a row that gained no window, its
+   * windows kept of how many, and the scheduler's own cuts of it, which are
+   * not stops (migration 101, SMD-3060; absent from an earlier scheduler's
+   * row). Absent while none is, and for the other workers.
    */
   held?: SleepHeld;
 }
 
 /** A thought the sleep scheduler's wakes hold back (WorkerHeartbeat.held). */
-export type HeldThought = { id: string; stops: number; stalled: number; kept: number; windows: number | null };
+export type HeldThought = { id: string; stops: number; stalled: number; kept: number; windows: number | null; cuts?: number };
 export type SleepHeld = { total: number; thoughts: HeldThought[] };
 
 /**
@@ -223,10 +225,15 @@ export const SLEEP_STALLED_JOIN = 3;
 export const SLEEP_HELD_NAMED = 3;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** A held thought in words, the scheduler's and preflight's: "<id>, 7 of 24 window(s) kept over 3 stop(s), the last 2 with none gained". */
+/**
+ * A held thought in words, the scheduler's and preflight's: "<id>, 7 of 24
+ * window(s) kept over 3 stop(s), the last 2 with none gained", and ", and 41
+ * cut(s) of the scheduler's own" where it set extraction aside from the
+ * thought (SMD-3060) — no ";", which joins the thoughts.
+ */
 export function heldWords(t: HeldThought): string {
   const kept = t.kept ? `${t.kept}${t.windows ? ` of ${t.windows}` : ""} window(s) kept` : "no window kept";
-  return `${t.id}, ${kept} over ${t.stops} stop(s)${t.stalled ? `, the last ${t.stalled} with none gained` : ""}`;
+  return `${t.id}, ${kept} over ${t.stops} stop(s)${t.stalled ? `, the last ${t.stalled} with none gained` : ""}${t.cuts ? `, and ${t.cuts} cut(s) of the scheduler's own` : ""}`;
 }
 
 /** A `held` value as db/sleep.ts writes it, or undefined: every thought of the shape, at most SLEEP_HELD_NAMED and no more than the total. */
@@ -239,7 +246,9 @@ function parseHeld(h: unknown): SleepHeld | undefined {
     if (t === null || typeof t !== "object" || typeof t.id !== "string" || !UUID.test(t.id)) return undefined;
     if (!count(t.stops) || (t.stops as number) < 1 || !count(t.stalled, t.stops as number) || !count(t.kept)) return undefined;
     if (!(t.windows === null || (count(t.windows) && (t.windows as number) > 1 && (t.kept as number) <= (t.windows as number)))) return undefined;
-    out.push({ id: t.id, stops: t.stops as number, stalled: t.stalled as number, kept: t.kept as number, windows: t.windows as number | null });
+    // Absent from a scheduler before SMD-3060's.
+    if (t.cuts !== undefined && !count(t.cuts)) return undefined;
+    out.push({ id: t.id, stops: t.stops as number, stalled: t.stalled as number, kept: t.kept as number, windows: t.windows as number | null, ...(t.cuts === undefined ? {} : { cuts: t.cuts as number }) });
   }
   return { total: total as number, thoughts: out };
 }
@@ -449,7 +458,7 @@ export interface StandingRelations {
   related: number;
   evolves: number;
   duplicate: number;
-  /** Pairs judged distinct (100, SMD-3117): near neighbours the judge called unrelated, kept apart. Not in the relations' total or the board pairs. */
+  /** Pairs judged distinct (102, SMD-3117): near neighbours the judge called unrelated, kept apart. Not in the relations' total or the board pairs. */
   distinct: number;
   /** Board pairs (the comment above PROPOSALS_SQL): 0 when there is nothing to count; null before 079, when its own read did not answer (`unread` names it), or when this field was not read. */
   boardPairs: number | null;
@@ -497,7 +506,7 @@ const PROPOSALS_BOARD_SQL = (sql: SqlTag) => sql`
             JOIN thoughts n ON n.id = p.newer_id
            WHERE p.status = 'pending') x`;
 
-/** The standing relations by word, and the pairs judged distinct (100) beside them. */
+/** The standing relations by word, and the pairs judged distinct (102) beside them. */
 const RELATIONS_SQL = (sql: SqlTag) => sql`
   SELECT count(*) FILTER (WHERE f.payload->>'relation' = 'related')::int AS related,
          count(*) FILTER (WHERE f.payload->>'relation' = 'evolves')::int AS evolves,
@@ -511,7 +520,7 @@ const RELATIONS_SQL = (sql: SqlTag) => sql`
  * target is cast only on a relation row, whose target 084's trigger checked is
  * a thought's id — a link facet's target is an identity such as SMD-12. A
  * standing relation's target exists: 084 closes a relation when its target is
- * deleted. A distinct (100) is no board pair: two tickets judged apart are
+ * deleted. A distinct (102) is no board pair: two tickets judged apart are
  * nothing to link (SMD-3117).
  */
 const RELATIONS_BOARD_SQL = (sql: SqlTag) => sql`
@@ -1009,7 +1018,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       ...(stats
         ? [
             ...COUNTED_TABLES.map((t): Guarded => ({ field: `counts.${t}`, table: t, read: async (sp) => { facts.counts![t] = Number((await COUNT_SQL[t](sp))[0].n); }, clear: () => { facts.counts![t] = null; } })),
-            // A sequential scan, as listVectorless's page is: no index reads `embedding IS NULL` (SMD-2889).
+            // 100's partial index alone, as listVectorless's page is (SMD-3056): an index-only scan of the rows that wait.
             { field: "vectorless", table: "thoughts" as const, read: async (sp: SqlTag) => { facts.vectorless = Number((await sp`SELECT count(*)::float8 AS n FROM thoughts WHERE embedding IS NULL`)[0].n); }, clear: () => { facts.vectorless = null; } },
             { field: "databaseBytes", read: async (sp: SqlTag) => { facts.databaseBytes = Number((await sp`SELECT pg_database_size(current_database())::float8 AS n`)[0].n); }, clear: () => { facts.databaseBytes = null; } },
             { field: "boardSync", table: "thoughts" as const, read: async (sp: SqlTag) => { facts.boardSync = boardSyncValue((await BOARD_SYNC_SQL(sp))[0]?.w); }, clear: () => { facts.boardSync = null; } },
@@ -1336,7 +1345,7 @@ function relationsLine(db: DatabaseSummary): string {
   const r = db.relations;
   if (r === null) return "relations" in db.unread ? `? (${deniedObject(db.unread.relations.message)?.name ?? "thought_facets"} ${unreadWords(db.unread.relations)})` : "no table — migration 042 is not applied";
   const n = r.related + r.evolves + r.duplicate;
-  // 100 (SMD-3117): the pairs judged distinct, beside the relations and not in their count.
+  // 102 (SMD-3117): the pairs judged distinct, beside the relations and not in their count.
   const apart = r.distinct ? `; ${r.distinct} pair${r.distinct === 1 ? "" : "s"} judged distinct` : "";
   // A brain short of 084 holds none because it cannot yet, not because none was found.
   if (n === 0) return (db.highestMigration !== null && db.highestMigration < 84 ? "none — migration 084 is not applied" : "none standing") + apart;

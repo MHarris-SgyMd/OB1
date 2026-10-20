@@ -40,10 +40,10 @@ import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBE
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostname, tmpdir } from "node:os";
-import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
-import { PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
+import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
@@ -142,6 +142,19 @@ function shortenPauses(): () => void {
   const saved = [...TRANSIENT_PAUSES_MS];
   TRANSIENT_PAUSES_MS.splice(0, saved.length, 100, 100, 100);
   return () => { TRANSIENT_PAUSES_MS.splice(0, TRANSIENT_PAUSES_MS.length, ...saved); };
+}
+
+/**
+ * Cut the first wait of a follower's outage schedule to `firstMs` in this
+ * process, still doubling (SMD-3048): the worker reads OUTAGE_MS as it runs.
+ * A case that spawns its worker keeps the real 5 s, so the shipped schedule
+ * stays held ([10]'s and [16]'s database cuts, [38]'s CLI). Returns the
+ * restore, for the case's finally.
+ */
+function shortenOutage(firstMs = 1000): () => void {
+  const saved = OUTAGE_MS.first;
+  OUTAGE_MS.first = firstMs;
+  return () => { OUTAGE_MS.first = saved; };
 }
 
 /** Run migrate.ts as a subprocess so its real exit code and output are observed. */
@@ -3640,6 +3653,8 @@ if (want("10")) {
   let downUntil = 0;
   let down: "503" | "404" | "hang" = "503";
   let probes = 0;
+  /** An outage paced by probes, not the clock (SMD-3048): `down` answers each request while it lasts. */
+  const outage = probePacedOutage();
   /** The models a probe or a call named, whatever the answer: the escalation model's start check must load nothing (review pass 3). */
   const modelsNamed: string[] = [];
   const model = Bun.serve({
@@ -3649,13 +3664,14 @@ if (want("10")) {
       if (req.method === "GET") return Response.json({ object: "list", data: [{ id: "stub-meta" }, { id: "stub-escalate:latest" }] });
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
       modelsNamed.push(body.model ?? "");
-      if (Date.now() < downUntil) {
+      const isProbe = body.messages?.[0]?.content === PROBE_PROMPT;
+      if (outage.down(isProbe) || Date.now() < downUntil) {
         if (down === "hang") return neverAnswers();
         return down === "404"
           ? new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 })
           : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       }
-      if (body.messages?.[0]?.content === PROBE_PROMPT) {
+      if (isProbe) {
         probes++;
         if (body.model === "absent-model") return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found, try pulling it first` } }), { status: 404 });
         return Response.json({ choices: [{ message: { content: "OK" } }] });
@@ -3969,9 +3985,13 @@ if (want("10")) {
   // read, not "stopped while the database was not answering" (review pass 1):
   // the pass runs again at once. In this process, the relay cut during the
   // poll sleep and restored after the first check; the stop sent as the
-  // "answers again" line is written.
+  // "answers again" line is written. The outage schedule starts at 1 s here
+  // (SMD-3048): the poll at 2 s fails, the check at 3 s finds it still cut,
+  // and a later one finds it back. Bounded, so a cut no poll meets fails the
+  // case rather than hanging the suite.
   {
     const relay = await cuttableRelay(URL_!);
+    const restoreOutage = shortenOutage();
     const lines: string[] = [];
     const ac = new AbortController();
     const write = (l: string) => {
@@ -3984,13 +4004,15 @@ if (want("10")) {
       await relay.cut();
       await Bun.sleep(4000);
       await relay.restore();
-      const code = await running;
+      const code = await Promise.race([running, Bun.sleep(30_000).then(() => -1)]);
       assert(code === 0 && lines.some((l) => /the database answers again/.test(l)) && !lines.some((l) => /stopped while the database was not answering/.test(l)) && lines.some((l) => /^  after: \d+ thoughts/.test(l)),
              `a follower stopped just after the database answers again reads its counts and exits 0 (exit ${code}; ${lines.filter((l) => /answers again|stopped while|after:/.test(l)).map((l) => l.trim().slice(0, 70)).join(" | ")})`);
     } finally {
+      // The relay closed first: a statement stuck on its connection ends with it, so the wait below ends too.
       ac.abort();
-      await running.catch(() => 0);
       await relay.close();
+      await running.catch(() => 0);
+      restoreOutage();
     }
   }
 
@@ -4058,17 +4080,20 @@ if (want("10")) {
   // A follower's --limit counts the thoughts it takes and does not hand back
   // (review pass 3): a follower of --limit 1 whose thought a database cut
   // hands back unfinished claims it again when the database answers,
-  // extracts it, and ends there.
+  // extracts it, and ends there. The outage schedule starts at 1 s here
+  // (SMD-3048).
   {
     const relay = await cuttableRelay(URL_!);
+    const restoreOutage = shortenOutage();
     const lines: string[] = [];
     const ac = new AbortController();
     let code = -1;
     let target = "";
+    let running: Promise<void> = Promise.resolve();
     try {
       slowMs = 2500;
       target = await seed("Ari tuned the grafana pager while the database was away.");
-      const running = runExtract({ url: relay.url, env, workers: 1, follow: 1, limit: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } }).then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
+      running = runExtract({ url: relay.url, env, workers: 1, follow: 1, limit: 1, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } }).then((c) => { code = c; }, (e) => { code = -2; lines.push(`rejected: ${(e as Error).message}`); });
       await pollUntil(async () => (await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${target}::uuid AND work_type = ${KEY}`)[0]?.status === "claimed", 5000);
       await relay.cut();
       await Bun.sleep(4000);
@@ -4080,9 +4105,12 @@ if (want("10")) {
       assert(ended && (await extractedNow(target)) && lines.some((l) => new RegExp(`recording nothing for ${target}`).test(l)),
              `a follower of --limit 1 whose thought a database cut handed back extracts it once the database answers, and ends (ended ${ended}, exit ${code}, extracted ${await extractedNow(target)})`);
     } finally {
+      // The follower ended before the schedule goes back: it reads OUTAGE_MS as it waits.
       slowMs = 0;
       ac.abort();
       await relay.close();
+      await running;
+      restoreOutage();
       if (target) await sql`SELECT delete_thought(${target}::uuid, NULL::jsonb)`;
     }
   }
@@ -4096,9 +4124,11 @@ if (want("10")) {
   // failed and the follower still running; the fourth ends failed, once a
   // probe has answered. Then a start that finds the model unserved is
   // refused with exit 2, and a run without --follow records the failure as
-  // before.
+  // before. The outage schedule starts at 1 s, not 5 s, in this process
+  // (SMD-3048).
   {
     const restorePauses = shortenPauses();
+    const restoreOutage = shortenOutage();
     const claimRow = async (id: string) => (await sql`SELECT status, attempt_count, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; attempt_count: number; last_error: string | null } | undefined;
     const created: string[] = [];
     try {
@@ -4106,36 +4136,40 @@ if (want("10")) {
       const ac = new AbortController();
       let settled = false;
       let followCode = -1;
-      // Deadlines past the waits: a 503 for 8 s is probed at 5 s and 15 s.
+      // Each outage is paced by probes (probePacedOutage): down until the follower's
+      // probes have found it down that many times, however slow the runner.
       const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 2, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
         .then((c) => { settled = true; followCode = c; }, (e) => { settled = true; lines.push(`rejected: ${(e as Error).message}`); });
       try {
         await pollUntil(async () => probes >= 1, 10_000);
         await Bun.sleep(500);
         const startProbes = probes;
+        const startRefused = outage.refused;
         // A 503 past the pauses.
         down = "503";
-        downUntil = Date.now() + 8000;
+        outage.arm(1);
         const busy = await seed("Tess wired the outage pager into grafana.");
         created.push(busy);
         const pooled = await pollUntil(async () => lines.some((l) => /the provider is not answering \(Extraction request to [^)]*503/.test(l)) && (await claimRow(busy))?.status === "pending", 6000);
         const during = await claimRow(busy);
         const busyDone = await pollUntil(async () => (await claimRow(busy))?.status === "succeeded" && (await extractedNow(busy)), 25_000);
         assert(startProbes >= 1 && pooled && during?.attempt_count === 0 && during.last_error === null && busyDone && (await claimRow(busy))?.status === "succeeded" && !settled,
-               `a 503 past the pauses: the thought goes back to the pool (pending, attempt ${during?.attempt_count}, no error), the follower waits, and extracts it when the provider answers — still running (pooled ${pooled}, extracted ${busyDone}, ${probes - startProbes} probe(s) answered)`);
-        assert(lines.some((l) => /the follower calls stub-meta at http:\/\/127\.0\.0\.1:\d+\/v1 for one token after 5 s and then twice as long each time, up to 5 min/.test(l)) && lines.some((l) => /the provider answers again after \d+ s; polling resumes/.test(l)),
+               `a 503 past the pauses: the thought goes back to the pool (pending, attempt ${during?.attempt_count}, no error), the follower waits, and extracts it when the provider answers — still running (pooled ${pooled}, extracted ${busyDone}, ${outage.refused - startRefused} probe(s) refused, ${probes - startProbes} answered)`);
+        assert(lines.some((l) => /the follower calls stub-meta at http:\/\/127\.0\.0\.1:\d+\/v1 for one token after 1 s and then twice as long each time, up to 5 min/.test(l)) && lines.some((l) => /the provider answers again after \d+ s; polling resumes/.test(l)),
                "…and says when the provider stopped answering, how it waits, and when it answered again");
         // The model missing, as while Ollama pulls it: no pauses, an outage at once.
         down = "404";
-        downUntil = Date.now() + 3000;
+        outage.arm(1);
         const pulled = await seed("Uma rebuilt the grafana alerts after the model was pulled again.");
         created.push(pulled);
         const pulledDone = await pollUntil(async () => (await claimRow(pulled))?.status === "succeeded" && (await extractedNow(pulled)), 20_000);
         assert(pulledDone && (await claimRow(pulled))?.status === "succeeded" && !settled && lines.some((l) => /the provider is not answering \([^)]*404 \{"error":\{"message":"model \\"stub-meta\\" not found/.test(l)),
                `the model missing mid-run is an outage, not the provider's refusal: no exit, and the thought is extracted once the model answers (extracted ${pulledDone}, settled ${settled})`);
-        // A hung provider: the call times out at 2 s, and the probe gets no answer either.
+        // A hung provider: the call times out at 2 s, and the probe gets no
+        // answer either. Two probes hang: the one after the timeout, and the
+        // outage's first; the next answers.
         down = "hang";
-        downUntil = Date.now() + 6000;
+        outage.arm(2);
         const hung = await seed("Vic moved the grafana panels while the provider hung.");
         created.push(hung);
         const hungDone = await pollUntil(async () => (await claimRow(hung))?.status === "succeeded" && (await extractedNow(hung)), 25_000);
@@ -4152,6 +4186,7 @@ if (want("10")) {
         assert(failedOthers === 0, `…and none of the outages' thoughts is failed (${failedOthers})`);
       } finally {
         downUntil = 0;
+        outage.clear();
         ac.abort();
         await running;
       }
@@ -4200,13 +4235,12 @@ if (want("10")) {
       // refused there rather than waited on for ever (review pass 2).
       {
         down = "503";
-        downUntil = Date.now() + 3000;
+        outage.arm(1);
         const lateOut: string[] = [];
         const stopLate = new AbortController();
         const lateGuard = setTimeout(() => stopLate.abort(), 20_000);
-        const lateCode = await runExtract({ url: URL_!, env: { ...env, OB1_METADATA_MODEL: "absent-model" }, job: KEY, workers: 1, follow: 1, signal: stopLate.signal, writer: { out: (l) => lateOut.push(l), err: (l) => lateOut.push(l) } });
-        clearTimeout(lateGuard);
-        downUntil = 0;
+        const lateCode = await runExtract({ url: URL_!, env: { ...env, OB1_METADATA_MODEL: "absent-model" }, job: KEY, workers: 1, follow: 1, signal: stopLate.signal, writer: { out: (l) => lateOut.push(l), err: (l) => lateOut.push(l) } })
+          .finally(() => { clearTimeout(lateGuard); outage.clear(); });
         assert(lateCode === 2 && lateOut.some((l) => /the provider is not answering at start \(503 [^)]*\) — the follower claims nothing until it does/.test(l)) && lateOut.some((l) => /does not serve absent-model, OB1_METADATA_MODEL, at start \(404 /.test(l)),
                `a follower whose provider was down at start and then answers that it does not serve the model is refused, exit 2 (exit ${lateCode}: ${lateOut.filter((l) => /at start/.test(l)).map((l) => l.trim().slice(0, 70)).join(" | ")})`);
       }
@@ -4219,18 +4253,21 @@ if (want("10")) {
         const limitLines: string[] = [];
         const stopLimited = new AbortController();
         let limitedCode = -1;
+        const limitProbes = probes;
         const limited = runExtract({ url: URL_!, env, workers: 1, follow: 1, limit: 1, signal: stopLimited.signal, writer: { out: (l) => limitLines.push(l), err: (l) => limitLines.push(l) } }).then((c) => { limitedCode = c; });
         try {
-          await Bun.sleep(1000);
+          // Armed once its start probe has answered, so the start never meets the outage.
+          await pollUntil(async () => probes > limitProbes, 10_000);
+          await Bun.sleep(500);
           down = "404";
-          downUntil = Date.now() + 3000;
+          outage.arm(1);
           const counted = await seed("Xan paged the on-call while the model was pulled.");
           created.push(counted);
           const ended = await pollUntil(async () => limitedCode !== -1, 20_000);
           assert(ended && (await claimRow(counted))?.status === "succeeded" && limitLines.some((l) => /the provider answers again/.test(l)),
                  `a follower of --limit 1 whose thought an outage returned extracts it once the provider answers, and ends there (ended ${ended}, exit ${limitedCode}, claim ${(await claimRow(counted))?.status})`);
         } finally {
-          downUntil = 0;
+          outage.clear();
           stopLimited.abort();
           await limited;
         }
@@ -4279,6 +4316,8 @@ if (want("10")) {
              `a run without --follow still records the thought failed after the pauses and exits 1 (exit ${oneShotCode}: ${oneShotRow?.status}, ${oneShotRow?.last_error?.slice(0, 60)})`);
     } finally {
       downUntil = 0;
+      outage.clear();
+      restoreOutage();
       restorePauses();
       for (const id of created) await sql`SELECT delete_thought(${id}::uuid, NULL::jsonb)`;
     }
@@ -4291,9 +4330,11 @@ if (want("10")) {
   // and still a running follower's while it probes, so preflight reads it
   // alive, not stale. Once the provider is back, the pass that extracts the
   // thought stamps ok. (SMD-2261 had the worker record the thought failed
-  // and stop; SMD-2599 waits instead.)
+  // and stop; SMD-2599 waits instead.) The outage schedule starts at 1 s here
+  // (SMD-3048), so the probe that finds the provider back comes within seconds.
   {
     const restorePauses = shortenPauses();
+    const restoreOutage = shortenOutage();
     const beatOf = async () => JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
     let downNote = "";
     const ac2 = new AbortController();
@@ -4318,6 +4359,7 @@ if (want("10")) {
       downUntil = 0;
       ac2.abort();
       await downRun;
+      restoreOutage();
       restorePauses();
       if (downNote) await sql`SELECT delete_thought(${downNote}::uuid, NULL::jsonb)`;
     }
@@ -5100,7 +5142,7 @@ if (want("10g")) {
     `…the two windows answered before the stop are kept, and the stop is counted on the row, not stalled (${JSON.stringify(kept)})`);
 
   const status = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--status"], { env: env as Record<string, string>, cwd: HERE });
-  assert(status.code === 0 && status.out.includes(`windows kept or stops counted on a claim that did not finish (1 of 1)`) && status.out.includes(`${atlas}  pending, 2 of ${windows} window(s) kept, 1 stop(s)\n`),
+  assert(status.code === 0 && status.out.includes(`windows kept, or stops or the scheduler's cuts counted, on a claim that did not finish (1 of 1)`) && status.out.includes(`${atlas}  pending, 2 of ${windows} window(s) kept, 1 stop(s)\n`),
     `--status names the thought, its windows kept and its stop (${status.out.split("\n").filter((l) => /kept/.test(l)).join(" | ")})`);
 
   // The second run resumes: only the windows still to do are sent, and the
@@ -5351,6 +5393,43 @@ if (want("10g")) {
   const rewindowed = (await statusOf()).includes(brief);
   assert(listed && !rewindowed, `--status lists a stopped thought's row, and leaves it out under another windowing (listed ${listed}, after ${rewindowed})`);
   await sql`DELETE FROM thoughts WHERE id = ${brief}::uuid`;
+
+  // The sleep scheduler's own hard stop (PassStop's `cut`): counted as a cut,
+  // apart from the stops, and listed so; on a brain before 101 counted not at
+  // all, said once, and never as a stop instead (SMD-3060).
+  const cutOne = ((await sql`SELECT upsert_thought(${"A short cut note."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const cutBrief = async (workers = 1) => {
+    sent.length = 0;
+    slowMs = 3000;
+    let s: PassStop | undefined;
+    const r = inProcess({ workers, onPass: (x) => { s = x; } });
+    for (let i = 0; i < 200 && sent.length < workers; i++) await Bun.sleep(25);
+    await Bun.sleep(100);
+    s?.();
+    await s?.({ cut: true });
+    const run = await r;
+    slowMs = 0;
+    const [row] = (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${cutOne}::uuid AND work_type = ${KEY}`) as { stops: number; stalled: number; cuts: number }[];
+    return { row, out: run.out };
+  };
+  const cutOnce = await cutBrief();
+  const cutListed = (await statusOf()).includes(`${cutOne}  pending, no window kept, 0 stop(s), and 1 cut(s) of the scheduler's own`);
+  assert(cutOnce.row?.cuts === 1 && cutOnce.row.stops === 0 && cutOnce.row.stalled === 0 && cutListed,
+    `the scheduler's hard stop counts a cut, no stop and no stall, and --status lists it (${JSON.stringify(cutOnce.row)}, listed ${cutListed})`);
+  // Two workers in hand, each trying the count at once: said once (run-it review).
+  const cutTwo = ((await sql`SELECT upsert_thought(${"A second short cut note."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  await sql`ALTER FUNCTION note_extraction_cut(uuid, text, text, text, text) RENAME TO note_extraction_cut_away`;
+  const cutAway = await cutBrief(2).finally(() => sql`ALTER FUNCTION note_extraction_cut_away(uuid, text, text, text, text) RENAME TO note_extraction_cut`);
+  const saidCut = cutAway.out.split("\n").filter((l) => /could not count the scheduler's cut of a long thought .* — its cuts go uncounted this run, its stops and kept windows as before: that needs migration 101/.test(l)).length;
+  const [twoRow] = (await sql`SELECT stops, cuts FROM extraction_progress WHERE thought_id = ${cutTwo}::uuid AND work_type = ${KEY}`) as { stops: number; cuts: number }[];
+  assert(cutAway.row?.cuts === 1 && cutAway.row.stops === 0 && (twoRow === undefined || twoRow.stops === 0) && saidCut === 1 && !/no window is kept across a stop/.test(cutAway.out),
+    `before 101 the cut is counted not at all — never as a stop — and said once though two workers had a thought in hand, the windows still kept (said ${saidCut} time(s); ${JSON.stringify(cutAway.row)}, ${JSON.stringify(twoRow)}; ${cutAway.out.split("\n").filter((l) => /could not/.test(l)).join(" | ").trim()})`);
+  // Its --status on a brain with 093's table and no cuts: listed, no cuts said, no error (run-it review).
+  await sql`ALTER TABLE extraction_progress RENAME COLUMN cuts TO cuts_away`;
+  const cutlessStatus = await statusOf().finally(() => sql`ALTER TABLE extraction_progress RENAME COLUMN cuts_away TO cuts`);
+  assert(cutlessStatus.includes(`${cutOne}  pending, no window kept, 0 stop(s)\n`),
+    `before 101 --status lists the row with no cuts, and reads no column that is not there (${cutlessStatus.split("\n").filter((l) => l.includes(cutOne) || /column|error/i.test(l)).join(" | ").trim()})`);
+  await sql`DELETE FROM thoughts WHERE id IN (${cutOne}::uuid, ${cutTwo}::uuid)`;
 
   // A kept window of another shape is asked again, not merged (review pass 1's
   // guard): the stop keeps two windows, the first is planted with entities
@@ -5818,25 +5897,32 @@ if (want("16")) {
   let judgeUnavailable = 0;
   /** How long such a 503 takes to come back: a stop can land while the call is in hand (SMD-2401). */
   let judgeUnavailableMs = 0;
-  /** Until this time the judge, and a follower's probe, answer `judgeDown`: a 503, or nothing at all (SMD-2599). */
-  let judgeDownUntil = 0;
+  /** What the judge, and a follower's probe, answer in an outage: a 503, or nothing at all (SMD-2599). */
   let judgeDown: "503" | "hang" = "503";
+  /** An outage paced by probes, as [10]'s (SMD-3048): judgeDown answers each request while it lasts. */
+  const judgeOutage = probePacedOutage();
+  /** The probes answered, as [10]'s `probes`: a case arms its outage after a follower's start probe. */
+  let judgeProbes = 0;
   /** What the stub answers for the rota pair — a duplicate first; SMD-1873 PR 2's block below changes it to drive a relation's replace and close. */
   let rotaAnswer = "duplicate";
   let rotaConfidence = 0.85;
   /** Token alternatives for the rota answer's verdict, when set (review pass 1: the floor on the relation words' mass). */
   let rotaTop: [string, number][] | null = null;
   // SMD-3117 review pass 1: when set, the stub applies this SQL as it answers the rota pair — 084's door put back by hand under a running pass,
-  // or (review pass 2) a door that keeps 100's sentinel and refuses the word.
+  // or (review pass 2) a door that keeps 102's sentinel and refuses the word.
   let swapDoorOnRota: string | null = null;
   const judge = Bun.serve({
     port: 0,
     async fetch(req) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string; logprobs?: boolean };
-      // Until judgeDownUntil every request, a follower's probe too, answers judgeDown (SMD-2599).
-      if (Date.now() < judgeDownUntil) return judgeDown === "hang" ? neverAnswers() : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      const isProbe = body.messages?.[0]?.content === PROBE_PROMPT;
+      // In an outage every request, a follower's probe too, answers judgeDown (SMD-2599).
+      if (judgeOutage.down(isProbe)) return judgeDown === "hang" ? neverAnswers() : new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
       // A follower's one-token probe, answered apart: no judge call counted.
-      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      if (isProbe) {
+        judgeProbes++;
+        return Response.json({ choices: [{ message: { content: "OK" } }] });
+      }
       calls++;
       modelsSeen.add(String(body.model));
       const prompt = body.messages?.find((m) => m.role === "user")?.content ?? "";
@@ -6711,7 +6797,9 @@ if (want("16")) {
     // pool, its heartbeat a running follower's while it probes. The 503s
     // answer judge calls only, so the start's probe answers (down mode would
     // hold the follower at its start) and so does the first outage probe,
-    // 5 s in, once the 503s have stopped; the pauses are cut to 100 ms.
+    // 5 s in, once the 503s have stopped; the pauses are cut to 100 ms. The
+    // outage schedule stays the real one here (SMD-3048): its probes answer,
+    // so a 1 s first wait ends the wait the 1.5 s hold reads the row in.
     {
       const beatOf = async () => JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
       // One thought back in the pool, one with a candidate the judge is asked
@@ -6867,21 +6955,27 @@ if (want("16")) {
   }
 
   // A consolidate follower outlasts its provider going away (SMD-2599), as
-  // extract's does in [10]: in this process, the pauses cut to 100 ms, the
-  // judge answering 503 for 8 s while a newer thought of a pair is judged,
-  // then hanging for 6 s past a 2 s --timeout while another is.
+  // extract's does in [10]: in this process, the pauses cut to 100 ms and the
+  // outage schedule to 1 s first (SMD-3048), the judge answering 503 while a
+  // newer thought of a pair is judged, then hanging past a 2 s --timeout while
+  // another is, each until the follower's probes have found it down
+  // (judgeOutage), however slow the runner.
   {
     const restorePauses = shortenPauses();
+    const restoreOutage = shortenOutage();
     const lines: string[] = [];
     const ac = new AbortController();
     let settled = false;
     let followCode = -1;
+    const startJudgeProbes = judgeProbes;
     const running = runConsolidate({ url: URL_!, env, workers: 1, follow: 1, timeout: 2, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
       .then((c) => { settled = true; followCode = c; }, (e) => { settled = true; lines.push(`rejected: ${(e as Error).message}`); });
     const claimOf = async (id: string) => (await sql`SELECT status, attempt_count, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${KEY}`)[0] as { status: string; attempt_count: number; last_error: string | null } | undefined;
     try {
-      await Bun.sleep(1000);
-      judgeDownUntil = Date.now() + 8000;
+      // Armed once the follower's start probe has answered, so the start never takes the outage's refusal.
+      await pollUntil(async () => judgeProbes > startJudgeProbes, 10_000);
+      await Bun.sleep(500);
+      judgeOutage.arm(1);
       await seed("The outage runbook pages the on-call by phone.", 9, 3, ["outage-runbook"]);
       const newer = await seed("The outage runbook pages the on-call by chat now.", 9, 0, ["outage-runbook"]);
       const pooled = await pollUntil(async () => lines.some((l) => /the provider is not answering \(Judge request to [^)]*503/.test(l)) && (await claimOf(newer))?.status === "pending", 8000);
@@ -6890,8 +6984,9 @@ if (want("16")) {
       assert(pooled && during?.attempt_count === 0 && during.last_error === null && judgedAfter && !settled && lines.some((l) => /the provider answers again after \d+ s; polling resumes/.test(l)),
              `a consolidate follower: a 503 past the pauses returns the thought to the pool unrecorded, and it is judged once the judge answers — the follower still running (pooled ${pooled}, judged ${judgedAfter})`);
       // A hung judge: the pair's call times out, and the probe gets no answer either.
+      // Two probes hang, as [10]'s: the one after the timeout, and the outage's first.
       judgeDown = "hang";
-      judgeDownUntil = Date.now() + 6000;
+      judgeOutage.arm(2);
       await seed("The status page lists the outage runbook's owner.", 10, 3, ["status-page"]);
       const hungNewer = await seed("The status page lists the outage runbook's new owner.", 10, 0, ["status-page"]);
       const hungJudged = await pollUntil(async () => (await claimOf(hungNewer))?.status === "succeeded", 25_000);
@@ -6900,9 +6995,10 @@ if (want("16")) {
              `a consolidate follower: a pair's timeout the probe cannot get past either is an outage, and the thought is judged once the judge answers, not failed (${hungRow?.status}: ${hungRow?.last_error?.slice(0, 80)})`);
     } finally {
       judgeDown = "503";
-      judgeDownUntil = 0;
+      judgeOutage.clear();
       ac.abort();
       await running;
+      restoreOutage();
       restorePauses();
     }
     assert(followCode === 0, `…and exits 0 when stopped (exit ${followCode}; ${lines.filter((l) => /rejected|refuses/.test(l)).join(" | ").slice(0, 200)})`);
@@ -6978,7 +7074,7 @@ if (want("16")) {
     const under = await rejudge("related", 0.3);
     assert(/relations: 0 added, 0 kept, 0 replaced, 1 closed/.test(under.out) && (await relOf()).every((r) => !r.active),
       `a relation verdict under the floor writes none and closes the standing edge (${under.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
-    // SMD-3117 (100): judged unrelated at the floor, the pair is a distinct on
+    // SMD-3117 (102): judged unrelated at the floor, the pair is a distinct on
     // the newer thought — two near neighbours judged apart, kept, not listed.
     const asUnrelated = await rejudge("unrelated");
     const ru = (await relOf()).filter((r) => r.active);
@@ -6991,9 +7087,9 @@ if (want("16")) {
     const apartStatus = await consolidate("--status");
     const apartList = await consolidate("--list", "relations");
     // Every pair the stub calls unrelated is a distinct too, so --status counts this section's, not the rota's alone.
-    assert(/— --list relations shows them; \d+ pair\(s\) judged distinct — near neighbours the judge called unrelated, kept apart \(100\)/.test(apartStatus.out) && !/\] distinct/.test(apartList.out) && !apartList.out.includes(rotaNew)
+    assert(/— --list relations shows them; \d+ pair\(s\) judged distinct — near neighbours the judge called unrelated, kept apart \(102\)/.test(apartStatus.out) && !/\] distinct/.test(apartList.out) && !apartList.out.includes(rotaNew)
         && !/distinct: not stored/.test(apartStatus.out),
-      `--status counts the distinct apart from the relations, says nothing of 100 on a brain that has it, and --list relations does not list it (${apartStatus.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+      `--status counts the distinct apart from the relations, says nothing of 102 on a brain that has it, and --list relations does not list it (${apartStatus.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
     const apartUnder = await rejudge("unrelated", 0.3);
     assert(/relations: 0 added, 0 kept, 0 replaced, 1 closed/.test(apartUnder.out) && !/\(\d+ distinct\)/.test(apartUnder.out) && (await relOf()).every((r) => !r.active),
       `judged unrelated under the floor, nothing is recorded and the standing distinct is closed (${apartUnder.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
@@ -7025,40 +7121,40 @@ if (want("16")) {
     const decoyNewer = await decoyThought("A note on the office printer, judged apart from the on-call note.");
     await sql`SELECT record_thought_relation(${rotaNew}::uuid, ${decoyOlder}::uuid, 'distinct', 0.7, 'consolidate:other-model@p4', NULL, 'a', 'b', NULL)`;
     await sql`SELECT record_thought_relation(${decoyNewer}::uuid, ${rotaOld}::uuid, 'distinct', 0.7, 'consolidate:other-model@p4', NULL, 'a', 'b', NULL)`;
-    // A brain short of 100 — 084's door, which refuses distinct: the verdict
-    // closes the pair's edge as before 100 unless that edge is a distinct, and
+    // A brain short of 102 — 084's door, which refuses distinct: the verdict
+    // closes the pair's edge as before 102 unless that edge is a distinct, and
     // the run counts it, the thought not failed.
     await sql.unsafe(readFileSync(join(HERE, "migrations", "084_judged_relations.sql"), "utf8"));
-    const BOTH = /this brain lacks migration 100: apply it \(cd db && bun migrate\.ts --url <owner's url>\), or, where the ledger already records 100 and 084 was re-applied by hand over it, re-apply \(add --reapply\)/;
+    const BOTH = /this brain lacks migration 102: apply it \(cd db && bun migrate\.ts --url <owner's url>\), or, where the ledger already records 102 and 084 was re-applied by hand over it, re-apply \(add --reapply\)/;
     const relationsLine = (out: string) => out.split("\n").find((l) => /^ {2}relations:/.test(l)) ?? "";
     try {
       // Review pass 2: a follower's start says it too.
       const checked = await consolidateInProcess({ follow: 1, check: true });
-      assert(checked.code === 0 && /^ {2}distinct: not stored — this brain lacks migration 100: .*; a pass closes the edge of a pair it calls unrelated at the floor then, as before 100, unless that edge is a distinct$/m.test(checked.stdout) && BOTH.test(checked.stdout),
-        `a follower's check on a brain short of 100 says a pass stores no distinct, with both remedies (exit ${checked.code}: ${checked.stdout.split("\n").find((l) => /distinct:/.test(l))?.trim().slice(0, 120)})`);
+      assert(checked.code === 0 && /^ {2}distinct: not stored — this brain lacks migration 102: .*; a pass closes the edge of a pair it calls unrelated at the floor then, as before 102, unless that edge is a distinct$/m.test(checked.stdout) && BOTH.test(checked.stdout),
+        `a follower's check on a brain short of 102 says a pass stores no distinct, with both remedies (exit ${checked.code}: ${checked.stdout.split("\n").find((l) => /distinct:/.test(l))?.trim().slice(0, 120)})`);
       // Review pass 2: the distinct standing is the verdict's own — left as it
-      // was, not closed: its claim ends succeeded, and 100 re-applied would not bring it back.
-      const pre100 = await rejudge("unrelated");
+      // was, not closed: its claim ends succeeded, and 102 re-applied would not bring it back.
+      const pre102 = await rejudge("unrelated");
       // The run's exit is the relic note's (it fails on purpose, above); the rota's own claim says whether its thought failed.
       const [rotaClaim] = await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
       assert(rotaClaim?.status === "succeeded"
-          && /relations: 0 added, 0 kept, 0 replaced, 0 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct \(1 on a pair whose distinct stands, left as it was\) — this brain lacks migration 100/.test(relationsLine(pre100.out))
-          && BOTH.test(relationsLine(pre100.out)) && /distinct: not stored this run — this brain lacks migration 100/.test(pre100.out) && (pre100.out.match(/this brain lacks migration 100/g) ?? []).length === 2
+          && /relations: 0 added, 0 kept, 0 replaced, 0 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct \(1 on a pair whose distinct stands, left as it was\) — this brain lacks migration 102/.test(relationsLine(pre102.out))
+          && BOTH.test(relationsLine(pre102.out)) && /distinct: not stored this run — this brain lacks migration 102/.test(pre102.out) && (pre102.out.match(/this brain lacks migration 102/g) ?? []).length === 2
           && (await relOf()).filter((r) => r.active).map((r) => r.id).join() === standingApart[0]?.id,
-        `on a brain short of 100 an unrelated verdict leaves the distinct standing as it was and is counted, the run saying so at its start and on its relations line with both remedies, not a third time in its queue, the thought not failed (${rotaClaim?.status}: ${relationsLine(pre100.out).trim()})`);
-      // Any other edge is closed, as before 100.
+        `on a brain short of 102 an unrelated verdict leaves the distinct standing as it was and is counted, the run saying so at its start and on its relations line with both remedies, not a third time in its queue, the thought not failed (${rotaClaim?.status}: ${relationsLine(pre102.out).trim()})`);
+      // Any other edge is closed, as before 102.
       const pre100Related = await rejudge("related");
       const pre100Close = await rejudge("unrelated");
       assert(/relations: 0 added, 0 kept, 1 replaced, 0 closed/.test(pre100Related.out)
-          && /relations: 0 added, 0 kept, 0 replaced, 1 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct — this brain lacks migration 100/.test(relationsLine(pre100Close.out)) && (await relOf()).every((r) => !r.active),
-        `…and closes a related edge, as before 100, the decoy distincts on each side's other pairs not read as the pair's (${relationsLine(pre100Close.out).trim()})`);
-      const under100 = await rejudge("unrelated", 0.3);
-      assert(/relations: 0 added, 0 kept, 0 replaced, 0 closed/.test(under100.out) && !/not stored as distinct/.test(under100.out),
-        "…and one under the floor, which 100 would not store either, is not counted as lost (review pass 1)");
-      const status100 = await consolidate("--status");
-      assert(/^ {2}distinct: not stored — this brain lacks migration 100/m.test(status100.out) && BOTH.test(status100.out), `--status says a brain short of 100 stores no distinct, with both remedies (${status100.out.split("\n").find((l) => /distinct:/.test(l))?.trim()})`);
-      const dry100 = await consolidate("--dry-run");
-      assert(/^ {2}distinct: not stored — this brain lacks migration 100/m.test(dry100.out) && BOTH.test(dry100.out), `…and so does --dry-run (review pass 3) (${dry100.out.split("\n").find((l) => /distinct:/.test(l))?.trim().slice(0, 100)})`);
+          && /relations: 0 added, 0 kept, 0 replaced, 1 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct — this brain lacks migration 102/.test(relationsLine(pre100Close.out)) && (await relOf()).every((r) => !r.active),
+        `…and closes a related edge, as before 102, the decoy distincts on each side's other pairs not read as the pair's (${relationsLine(pre100Close.out).trim()})`);
+      const under102 = await rejudge("unrelated", 0.3);
+      assert(/relations: 0 added, 0 kept, 0 replaced, 0 closed/.test(under102.out) && !/not stored as distinct/.test(under102.out),
+        "…and one under the floor, which 102 would not store either, is not counted as lost (review pass 1)");
+      const status102 = await consolidate("--status");
+      assert(/^ {2}distinct: not stored — this brain lacks migration 102/m.test(status102.out) && BOTH.test(status102.out), `--status says a brain short of 102 stores no distinct, with both remedies (${status102.out.split("\n").find((l) => /distinct:/.test(l))?.trim()})`);
+      const dry102 = await consolidate("--dry-run");
+      assert(/^ {2}distinct: not stored — this brain lacks migration 102/m.test(dry102.out) && BOTH.test(dry102.out), `…and so does --dry-run (review pass 3) (${dry102.out.split("\n").find((l) => /distinct:/.test(l))?.trim().slice(0, 102)})`);
       // Review pass 2: an unrelated pair whose older side is deleted during the
       // call is a pair skipped, not a distinct lost.
       const gammaOld = await seed("The gamma note, the first.", 13, 4, ["gamma"]);
@@ -7069,18 +7165,18 @@ if (want("16")) {
         await sql`DELETE FROM thoughts WHERE id = ${gammaOld}::uuid`;
       };
       try {
-        const gone100 = await consolidate();
-        assert(onJudge === null && /relations: 0 added, 0 kept, 0 replaced, 0 closed, 1 skipped — a side deleted mid-pass/.test(relationsLine(gone100.out)) && !/not stored as distinct/.test(gone100.out),
-          `on a brain short of 100, an unrelated pair whose older side is deleted mid-pass is skipped, not counted as a distinct lost (${relationsLine(gone100.out).trim()})`);
+        const gone102 = await consolidate();
+        assert(onJudge === null && /relations: 0 added, 0 kept, 0 replaced, 0 closed, 1 skipped — a side deleted mid-pass/.test(relationsLine(gone102.out)) && !/not stored as distinct/.test(gone102.out),
+          `on a brain short of 102, an unrelated pair whose older side is deleted mid-pass is skipped, not counted as a distinct lost (${relationsLine(gone102.out).trim()})`);
       } finally {
         onJudge = null;
         await sql`DELETE FROM thoughts WHERE id IN (${gammaOld}::uuid, ${gammaNew}::uuid)`;
       }
-      // Review pass 3: 100 applied after a one-shot run's last lost distinct
+      // Review pass 3: 102 applied after a one-shot run's last lost distinct
       // leaves the run's own reading behind, so the summary reads the sentinel
       // again for its remedy. One thought, two neighbours judged nearest first:
-      // the first unrelated (lost, short of 100), the second an evolves, whose
-      // call applies 100. The two neighbours sit under 0.6 of each other, so
+      // the first unrelated (lost, short of 102), the second an evolves, whose
+      // call applies 102. The two neighbours sit under 0.6 of each other, so
       // neither is judged against the other.
       const zetaVec = (near: number, axis: number) => {
         const v = new Array(EMBEDDING_DIM).fill(0);
@@ -7100,22 +7196,22 @@ if (want("16")) {
       onJudge = async () => {
         if (!/an older one/.test(`${seen.at(-1)?.a ?? ""} ${seen.at(-1)?.b ?? ""}`)) return;
         onJudge = null;
-        await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
+        await sql.unsafe(readFileSync(join(HERE, "migrations", "102_judged_distinct.sql"), "utf8"));
       };
       try {
-        const late100 = await consolidate();
-        assert(onJudge === null && /relations: 1 added, 0 kept, 0 replaced, 0 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct — judged while this brain lacked migration 100$/.test(relationsLine(late100.out)),
-          `100 applied after a run's last lost distinct: the summary counts it without the remedy, read again at the end (${relationsLine(late100.out).trim()})`);
+        const late102 = await consolidate();
+        assert(onJudge === null && /relations: 1 added, 0 kept, 0 replaced, 0 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct — judged while this brain lacked migration 102$/.test(relationsLine(late102.out)),
+          `102 applied after a run's last lost distinct: the summary counts it without the remedy, read again at the end (${relationsLine(late102.out).trim()})`);
       } finally {
         onJudge = null;
         await sql`DELETE FROM thoughts WHERE id IN (${zetaOld}::uuid, ${zetaMid}::uuid, ${zetaNew}::uuid)`;
         await sql.unsafe(readFileSync(join(HERE, "migrations", "084_judged_relations.sql"), "utf8"));
       }
-      // Review pass 1: a follower started short of 100 reads the sentinel on every
-      // poll — 100 applied under it, its next unrelated verdict is a distinct.
+      // Review pass 1: a follower started short of 102 reads the sentinel on every
+      // poll — 102 applied under it, its next unrelated verdict is a distinct.
       // Review pass 2: each step waits on the follower's own line or row, not a
-      // clock; its first verdict is judged short of 100, so its summary counts
-      // one lost, without the remedy for a brain that has 100 again.
+      // clock; its first verdict is judged short of 102, so its summary counts
+      // one lost, without the remedy for a brain that has 102 again.
       rotaAnswer = "unrelated";
       rotaConfidence = 0.85;
       await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
@@ -7127,9 +7223,9 @@ if (want("16")) {
       const said = (re: RegExp) => pollUntil(async () => followLines.some((l) => re.test(l)), 20_000);
       let followApart = false;
       try {
-        const startSaid = await said(/distinct: not stored this run — this brain lacks migration 100/);
+        const startSaid = await said(/distinct: not stored this run — this brain lacks migration 102/);
         const judgedShort = startSaid && (await pollUntil(rotaJudged, 20_000));
-        await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
+        await sql.unsafe(readFileSync(join(HERE, "migrations", "102_judged_distinct.sql"), "utf8"));
         const pollSaid = judgedShort && (await said(/distinct: stored from this poll on/));
         await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
         followApart = pollSaid && (await pollUntil(async () => (await relOf()).some((r) => r.active && r.relation === "distinct"), 20_000));
@@ -7138,13 +7234,13 @@ if (want("16")) {
         await following;
       }
       const followSummary = relationsLine(followLines.join("\n"));
-      assert(followApart && /relations: 1 added \(1 distinct\), 0 kept, 0 replaced, 0 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct — judged while this brain lacked migration 100$/.test(followSummary),
-        `a follower started short of 100 says so at its start, reads the sentinel again on its next poll once 100 is applied, records the next unrelated verdict as a distinct, and its summary counts the one judged short of 100 without the remedy (${followLines.filter((l) => /distinct:|relations:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 400)})`);
+      assert(followApart && /relations: 1 added \(1 distinct\), 0 kept, 0 replaced, 0 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct — judged while this brain lacked migration 102$/.test(followSummary),
+        `a follower started short of 102 says so at its start, reads the sentinel again on its next poll once 102 is applied, records the next unrelated verdict as a distinct, and its summary counts the one judged short of 102 without the remedy (${followLines.filter((l) => /distinct:|relations:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 400)})`);
     } finally {
-      await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
+      await sql.unsafe(readFileSync(join(HERE, "migrations", "102_judged_distinct.sql"), "utf8"));
       await sql`DELETE FROM thoughts WHERE id IN (${decoyOlder}::uuid, ${decoyNewer}::uuid)`;
     }
-    // Review pass 3: 100 applied under a one-shot run — during the rota pair's
+    // Review pass 3: 102 applied under a one-shot run — during the rota pair's
     // call, on a brain short of it — is taken at that pair: the sentinel is
     // read again before a distinct is given up. The follower's distinct is
     // judged again at its confidence, so it is kept.
@@ -7152,16 +7248,16 @@ if (want("16")) {
     onJudge = async () => {
       if (!/rota/.test(seen.at(-1)?.a ?? "")) return;
       onJudge = null;
-      await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
+      await sql.unsafe(readFileSync(join(HERE, "migrations", "102_judged_distinct.sql"), "utf8"));
     };
     try {
       const landed = await rejudge("unrelated");
-      assert(onJudge === null && /distinct: not stored this run — this brain lacks migration 100/.test(landed.out) && /^ {2}distinct: stored from this pair on$/m.test(landed.out)
+      assert(onJudge === null && /distinct: not stored this run — this brain lacks migration 102/.test(landed.out) && /^ {2}distinct: stored from this pair on$/m.test(landed.out)
           && /relations: 0 added, 1 kept \(1 distinct\), 0 replaced, 0 closed$/.test(relationsLine(landed.out)),
-        `100 applied under a one-shot run is taken at the first pair that would lose a distinct (${relationsLine(landed.out).trim()})`);
+        `102 applied under a one-shot run is taken at the first pair that would lose a distinct (${relationsLine(landed.out).trim()})`);
     } finally {
       onJudge = null;
-      await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
+      await sql.unsafe(readFileSync(join(HERE, "migrations", "102_judged_distinct.sql"), "utf8"));
     }
     // Review pass 1: 084's door put back under a running pass refuses distinct by
     // name; the pass reads the sentinel again and stops sending the word
@@ -7173,15 +7269,15 @@ if (want("16")) {
     try {
       const swapped = await rejudge("unrelated");
       const [swapClaim] = await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
-      assert(swapDoorOnRota === null && swapClaim?.status === "succeeded" && /distinct: not stored from this pair on — this brain lacks migration 100/.test(swapped.out)
-          && /relations: 0 added, 0 kept, 0 replaced, 0 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct \(1 on a pair whose distinct stands, left as it was\) — this brain lacks migration 100/.test(relationsLine(swapped.out))
+      assert(swapDoorOnRota === null && swapClaim?.status === "succeeded" && /distinct: not stored from this pair on — this brain lacks migration 102/.test(swapped.out)
+          && /relations: 0 added, 0 kept, 0 replaced, 0 closed; 1 unrelated verdict\(s\) at the floor not stored as distinct \(1 on a pair whose distinct stands, left as it was\) — this brain lacks migration 102/.test(relationsLine(swapped.out))
           && followerApart !== "" && (await relOf()).filter((r) => r.active).map((r) => r.id).join() === followerApart,
         `084's door under a running pass: the distinct the follower left stands, the verdict counted, the thought not failed (${swapClaim?.status}: ${swapped.out.split("\n").filter((l) => /distinct:|relations:/.test(l)).map((l) => l.trim()).join(" | ").slice(0, 300)})`);
     } finally {
       swapDoorOnRota = null;
-      await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
+      await sql.unsafe(readFileSync(join(HERE, "migrations", "102_judged_distinct.sql"), "utf8"));
     }
-    // Review pass 2: a door that carries 100's sentinel yet refuses the word is
+    // Review pass 2: a door that carries 102's sentinel yet refuses the word is
     // a defect to see — the pass reads the sentinel again, finds it, and the
     // thought fails on the refusal rather than the word being dropped quietly.
     const sentinelAnchor = "  IF p_relation IS NOT NULL AND p_relation NOT IN ('related', 'evolves', 'duplicate') THEN";
@@ -7192,10 +7288,10 @@ if (want("16")) {
       const [claimedRow] = await sql`SELECT status, last_error FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
       assert(swapDoorOnRota === null && claimedRow?.status === "failed" && /relation must be related, evolves, duplicate or NULL/.test(String(claimedRow.last_error)) && !/distinct: not stored/.test(claimed.out)
           && (await relOf()).filter((r) => r.active).map((r) => r.id).join() === followerApart,
-        `a door that keeps 100's sentinel but refuses distinct fails the thought on its refusal, the distinct standing untouched (${claimedRow?.status}: ${String(claimedRow?.last_error).slice(0, 160)})`);
+        `a door that keeps 102's sentinel but refuses distinct fails the thought on its refusal, the distinct standing untouched (${claimedRow?.status}: ${String(claimedRow?.last_error).slice(0, 160)})`);
     } finally {
       swapDoorOnRota = null;
-      await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
+      await sql.unsafe(readFileSync(join(HERE, "migrations", "102_judged_distinct.sql"), "utf8"));
     }
     // A brain without 084: the pass counts the verdicts and says relations are not stored.
     await sql.unsafe(`ALTER FUNCTION record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb) RENAME TO record_thought_relation_hidden`);
@@ -7205,8 +7301,8 @@ if (want("16")) {
       assert(/relations: not stored — this brain lacks migration 084 \(cd db && bun migrate\.ts --url <owner's url>\) — 1 related, evolves or duplicate verdict\(s\) counted only/.test(without.out) && noList.code === 1 && /--list relations needs migration 084/.test(noList.out),
         `without 084 the pass counts the verdict and says relations are not stored, and --list relations names the migration (${without.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
       const withoutApart = await rejudge("unrelated");
-      assert(/relations: not stored — this brain lacks migration 084 \(cd db && bun migrate\.ts --url <owner's url>\) — 0 related, evolves or duplicate verdict\(s\) counted only; 1 unrelated verdict\(s\) counted only, judged while relations were not stored/.test(withoutApart.out) && !/lacks migration 100/.test(withoutApart.out),
-        `without 084 an unrelated verdict is counted only, beside the three words and not blamed on 100 (${withoutApart.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
+      assert(/relations: not stored — this brain lacks migration 084 \(cd db && bun migrate\.ts --url <owner's url>\) — 0 related, evolves or duplicate verdict\(s\) counted only; 1 unrelated verdict\(s\) counted only, judged while relations were not stored/.test(withoutApart.out) && !/lacks migration 102/.test(withoutApart.out),
+        `without 084 an unrelated verdict is counted only, beside the three words and not blamed on 102 (${withoutApart.out.split("\n").find((l) => /relations:/.test(l))?.trim()})`);
     } finally {
       await sql.unsafe(`ALTER FUNCTION record_thought_relation_hidden(uuid, uuid, text, numeric, text, uuid, text, text, jsonb) RENAME TO record_thought_relation`);
     }
@@ -7273,19 +7369,19 @@ if (want("16")) {
         const roleStatus = await asRole({ status: true });
         assert(roleStatus.code === 0 && roleStatus.out.includes(`relations: a run under this role would store none — this role lacks INSERT on thought_facets (the structure group) — cd db && bun migrate.ts --url <owner's url> --grant ${RROLE} --groups structure (`),
           `--status under a role without the structure group says a run would store none, naming the group and the role (${roleStatus.out.split("\n").find((l) => /would store none/.test(l))?.trim().slice(0, 220)})`);
-        // SMD-3117 review pass 3: on a brain short of 100 as well, a start under
+        // SMD-3117 review pass 3: on a brain short of 102 as well, a start under
         // the role says both, so fixing the role does not reveal the migration only then.
         await sql.unsafe(readFileSync(join(HERE, "migrations", "084_judged_relations.sql"), "utf8"));
         try {
           const roleCheck = await asRole({ follow: 1, check: true });
-          assert(roleCheck.code === 0 && roleCheck.out.includes("  relations: not stored — this role lacks INSERT on thought_facets (the structure group)") && /^ {2}distinct: not stored either — this brain lacks migration 100: /m.test(roleCheck.out),
-            `…and on a brain short of 100 a follower's check under it says distinct is not stored either, with the remedy (${roleCheck.out.split("\n").filter((l) => /distinct:|relations:/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
+          assert(roleCheck.code === 0 && roleCheck.out.includes("  relations: not stored — this role lacks INSERT on thought_facets (the structure group)") && /^ {2}distinct: not stored either — this brain lacks migration 102: /m.test(roleCheck.out),
+            `…and on a brain short of 102 a follower's check under it says distinct is not stored either, with the remedy (${roleCheck.out.split("\n").filter((l) => /distinct:|relations:/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
           // Review pass 4: a run's own start says it too (its exit is the relic note's, failed on purpose above).
           const roleRun = await asRole({});
-          assert(roleRun.out.includes("  relations: not stored this run — this role lacks INSERT on thought_facets (the structure group)") && /^ {2}distinct: not stored either — this brain lacks migration 100: /m.test(roleRun.out),
+          assert(roleRun.out.includes("  relations: not stored this run — this role lacks INSERT on thought_facets (the structure group)") && /^ {2}distinct: not stored either — this brain lacks migration 102: /m.test(roleRun.out),
             `…and so does a run's start under it (${roleRun.out.split("\n").filter((l) => /distinct:|relations:/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
         } finally {
-          await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
+          await sql.unsafe(readFileSync(join(HERE, "migrations", "102_judged_distinct.sql"), "utf8"));
         }
 
         rotaAnswer = "related";
@@ -7320,30 +7416,30 @@ if (want("16")) {
           const onAt = lines.indexOf("  relations: stored from this poll on");
           assert(moreCode === 0 && onAt >= 0 && JSON.stringify(await standing()) === JSON.stringify([{ relation: "related", key: KEY }]),
             `granted the structure group, the follower stores relations from its next poll (${JSON.stringify(await standing())})`);
-          assert(/^ {2}distinct: not stored from this poll on — this brain lacks migration 100: /.test(lines[onAt + 1] ?? "") && !lines.slice(0, onAt).some((l) => /^ {2}distinct:/.test(l)),
-            `…on a brain short of 100 it says distinct is not stored with them, and said nothing of distinct while relations were off (${said(0)})`);
-          // Review pass 3: relations going off in the poll that sees 100 applied
+          assert(/^ {2}distinct: not stored from this poll on — this brain lacks migration 102: /.test(lines[onAt + 1] ?? "") && !lines.slice(0, onAt).some((l) => /^ {2}distinct:/.test(l)),
+            `…on a brain short of 102 it says distinct is not stored with them, and said nothing of distinct while relations were off (${said(0)})`);
+          // Review pass 3: relations going off in the poll that sees 102 applied
           // — both while the judge holds a call, the pair's edge kept so no write
           // is refused — say relations stop and nothing of distinct; relations
-          // coming back with 100 there say distinct is stored with them,
+          // coming back with 102 there say distinct is stored with them,
           // correcting the follower's last distinct line.
           const offFrom = lines.length;
           onJudge = async () => {
             onJudge = null;
-            await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
+            await sql.unsafe(readFileSync(join(HERE, "migrations", "102_judged_distinct.sql"), "utf8"));
             await sql.unsafe(`REVOKE INSERT ON thought_facets FROM ${RROLE}`);
           };
           await sql`DELETE FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${rotaNew}::uuid`;
           await waitFor(() => lines.slice(offFrom).some((l) => l.startsWith("  relations: not stored from this poll on — this role lacks INSERT on thought_facets")));
           assert(onJudge === null && lines.slice(offFrom).some((l) => l.startsWith("  relations: not stored from this poll on — this role lacks INSERT on thought_facets"))
               && !lines.slice(offFrom).some((l) => /^ {2}distinct:/.test(l)) && JSON.stringify(await standing()) === JSON.stringify([{ relation: "related", key: KEY }]),
-            `relations going off in the poll that sees 100 applied say relations stop, and nothing of distinct (${said(offFrom)})`);
+            `relations going off in the poll that sees 102 applied say relations stop, and nothing of distinct (${said(offFrom)})`);
           const backFrom = lines.length;
           await sql.unsafe(`GRANT INSERT ON thought_facets TO ${RROLE}`);
           await waitFor(() => lines.slice(backFrom).includes("  relations: stored from this poll on"));
           const backAt = lines.indexOf("  relations: stored from this poll on", backFrom);
           assert(backAt >= 0 && lines[backAt + 1] === "  distinct: stored from this poll on",
-            `…and relations coming back with 100 there say distinct is stored with them (${said(backFrom)})`);
+            `…and relations coming back with 102 there say distinct is stored with them (${said(backFrom)})`);
 
           // The revoke lands while the judge holds the call: the write is refused.
           rotaAnswer = "duplicate";
@@ -7358,7 +7454,7 @@ if (want("16")) {
           onJudge = null;
           ac.abort();
           await Promise.race([following, Bun.sleep(10_000)]);
-          await sql.unsafe(readFileSync(join(HERE, "migrations", "100_judged_distinct.sql"), "utf8"));
+          await sql.unsafe(readFileSync(join(HERE, "migrations", "102_judged_distinct.sql"), "utf8"));
         }
         const summary = lines.find((l) => /^ {2}relations: \d+ added/.test(l)) ?? "";
         assert(/^ {2}relations: 0 added, 1 kept, 1 replaced, 0 closed; 3 related, evolves or duplicate verdict\(s\) counted only, judged while relations were not stored — this role lacks INSERT on thought_facets/.test(summary),
@@ -11575,6 +11671,8 @@ if (want("38")) {
   let slowExtract = 0;
   /** Judge calls only: a wake with a judgement in hand. */
   let slowJudge = 0;
+  /** Judge calls slowJudge holds now, a call's hold ending with its client's abort: the case reads its claim once one is (SMD-3048). */
+  let judgesHeld = 0;
   /** Every request, probes too: the model not served (a 404 naming it) — a refusal at a pass's start. */
   let missing = false;
   /** Every request, probes too: the provider unavailable (503) — an outage a follower waits out. */
@@ -11602,7 +11700,11 @@ if (want("38")) {
       modelCalls.push({ kind: judging ? "judge" : "extract", at: Date.now() });
       if (slow) await Bun.sleep(slow);
       if (!judging && slowExtract) await Bun.sleep(slowExtract);
-      if (judging && slowJudge) await Bun.sleep(slowJudge);
+      if (judging && slowJudge) {
+        judgesHeld++;
+        await Promise.race([Bun.sleep(slowJudge), new Promise<void>((r) => req.signal.addEventListener("abort", () => r(), { once: true }))]);
+        judgesHeld--;
+      }
       if (judging) {
         const a = /<thought_a>\n([\s\S]*?)\n<\/thought_a>/.exec(prompt)?.[1] ?? "";
         const b = /<thought_b>\n([\s\S]*?)\n<\/thought_b>/.exec(prompt)?.[1] ?? "";
@@ -11633,8 +11735,10 @@ if (want("38")) {
     return r ? JSON.parse(r.value) as { running: boolean; outcome: string | null; ended?: boolean; every_s: number; slept?: { from: string; to: string | null }; reads?: string } : null;
   };
   const lines: string[] = [];
+  // The passes look for new work every second, not every 15 s (SMD-3048);
+  // the CLI case below keeps the shipped 15.
   const sleepRun = (o: Partial<Parameters<typeof runSleep>[0]> = {}) =>
-    runSleep({ url: URL_!, env, quiet: 1, poll: 1, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) }, ...o });
+    runSleep({ url: URL_!, env, quiet: 1, poll: 1, passFollowS: 1, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) }, ...o });
   /**
    * A run's exit code, or -1 when it has not returned in 20 s — then stopped
    * and awaited, so a regression that never returns fails its assertion
@@ -11661,6 +11765,9 @@ if (want("38")) {
     }) as unknown as SQL;
   /** The suite's client with `before` run ahead of each statement: a database starting up, or a stop landing mid-read. */
   const around = (before: () => void): SQL => intercept((_, run) => { before(); return run(); });
+  // The outage schedule starts at 1 s in this section (SMD-3048), but for
+  // the refusal retried and its reset, which read the real 5 s and 10 s.
+  let restoreOutage = shortenOutage();
   try {
     const older = await capture("We bill monthly, decided in March.", "op-sleep", 3);
     const newer = await capture("We bill annually now; the monthly plan is withdrawn.", "op-sleep");
@@ -11979,7 +12086,10 @@ if (want("38")) {
 
     // The same refusal after the pass has run in this process — a model
     // re-pulled, a credit top-up — is retried on the outage schedule, the row
-    // failed meanwhile, and the next sleep that runs puts it back to ok.
+    // failed meanwhile, and the next sleep that runs puts it back to ok. The
+    // real schedule here: its 5 s, its doubling and its reset are read from
+    // the lines, and the row is re-stamped 4 s into a 10 s wait.
+    restoreOutage();
     lines.length = 0;
     // Two synced notes beside the March billing note: consolidation has pairs
     // to judge once extraction drains, and a slow judge holds one in hand.
@@ -11989,15 +12099,26 @@ if (want("38")) {
     let retryDone = false;
     const retrying = sleepRun({ follow: true, signal: ac3.signal, minStampEveryS: 1 }).finally(() => { retryDone = true; });
     await pollUntil(async () => lines.some((l) => /extraction drained/.test(l)), 20_000);
-    await pollUntil(async () => (await claims(CO)).claimed === 1, 40_000);
-    const [judgedInHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'claimed'`;
+    // The claim read once its judge call is held, not at the first claim seen:
+    // under load that was a thought with no pair (finished at once), or one
+    // whose call had not begun when the model went, so the wake had nothing in
+    // hand to move (SMD-3048 PR 2's review pass 4; on main too, 2 runs in 10
+    // under a loaded machine).
+    // Read in the poll that sees the call held, and held still after the read, so the two are one moment.
+    let judgedInHand: { id: string } | undefined;
+    const held = await pollUntil(async () => {
+      if (judgesHeld === 0) return false;
+      const rows = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'claimed'`) as { id: string }[];
+      judgedInHand = rows.length === 1 && judgesHeld > 0 ? rows[0] : undefined;
+      return judgedInHand !== undefined;
+    }, 40_000);
     missing = true;
     await capture("A note that wakes it before the model goes.", "op-sleep", 0, 5);
     const refusedLater = await pollUntil(async () => lines.some((l) => /tries it again in 5 s/.test(l)), 20_000);
     slowJudge = 0;
     const coOrder = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'pending' ORDER BY enqueued_at, thought_id`).map((r: { id: string }) => r.id);
     assert(judgedInHand?.id !== undefined && coOrder.at(-1) === judgedInHand.id && !(await claims(CO)).claimed,
-      `a wake with a judgement in hand returns it and moves it to the back of consolidation's queue too (${coOrder.indexOf(judgedInHand?.id)} of ${coOrder.length})`);
+      `a wake with a judgement in hand returns it and moves it to the back of consolidation's queue too (${coOrder.indexOf(judgedInHand?.id as string)} of ${coOrder.length}${held ? "" : "; no judge call was held within 40 s"})`);
     const laterBeat = await beat();
     // Still refused at the next try: the wait doubles (5 s, then 10 s).
     const backedOff = await pollUntil(async () => lines.some((l) => /tries it again in 10 s/.test(l)), 30_000);
@@ -12030,6 +12151,7 @@ if (want("38")) {
     const at3 = lines.length;
     const recoveredAgain = await pollUntil(async () => lines.slice(at3).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 30_000);
     // Failed once in a full run under PR 3 (no retry line in 20 s) and passed in the harness since: the scheduler's lines say why next time.
+    restoreOutage = shortenOutage();
     assert(resetWait && firstWaitAgain === "5" && recoveredAgain, `…and a sleep that ran resets the wait: the next refusal waits 5 s again (${firstWaitAgain} s; recovered ${recoveredAgain}${resetWait && firstWaitAgain === "5" ? "" : `; its lines since the capture: ${lines.slice(at2, at2 + 12).join(" | ").trim()}`})`);
 
     // A provider outage mid-sleep: the follower waits it out (SMD-2599), the
@@ -12128,7 +12250,8 @@ if (want("38")) {
     // check and its extraction key's read and write, consolidate's tables
     // check, 079's check and the relations grant read — waits each out and
     // reaches its pass, nothing recorded failed. The worker key's lookup is
-    // test-worker-bootstrap.ts's. Both at once: each wait is 5 s.
+    // test-worker-bootstrap.ts's. Both at once: each wait is the shortened
+    // schedule's 1 s (SMD-3048).
     {
       /** The suite's client, whose statements matching each pattern fail once, in any order — or every time — as a database starting up. */
       const downOnceAt = (patterns: RegExp[], always = false): { sql: SQL; hit: string[] } => {
@@ -12236,9 +12359,13 @@ if (want("38")) {
     // A stop that lands while the scheduler reads, with a pass waiting at its
     // start (its probe held): the pass settles at once (130) and the read then
     // returns. The stop wins — 0, the row ended stopped — not a pass "ended by
-    // itself", 130 and the row failed (review pass 1).
+    // itself", 130 and the row failed (review pass 1). A probe held 4 s, 8 s
+    // until SMD-3048, which the start's check paid twice. The stop lands at
+    // the sleep's first wake read: at 8 s as at 4 s no probe was held then
+    // (SMD-3048 PR 2's review pass 1 counted), so the hold paces the start's
+    // check and not the race (SMD-3106).
     try {
-      probeHold = 8000;
+      probeHold = 4000;
       lines.length = 0;
       await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
       const acRace = new AbortController();
@@ -12461,7 +12588,8 @@ if (want("38")) {
       unavailable = true;
       const wokenRun = followRun({ quiet: 2, minStampEveryS: 60 });
       try {
-        await pollUntil(async () => ((await beat()) as { waiting?: string[] } | null)?.waiting?.length === 1, 15_000);
+        // Both passes wait here, extraction having no work: > 0, where `=== 1` waited out its 15 s every run (SMD-3048).
+        await pollUntil(async () => (((await beat()) as { waiting?: string[] } | null)?.waiting?.length ?? 0) > 0, 15_000);
         await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake while the pass waits')`;
         let wokenBeat = null as { running?: boolean; outcome?: string | null; waiting?: string[] } | null;
         await pollUntil(async () => (wokenBeat = (await beat()) as typeof wokenBeat) !== null && wokenBeat.running === false, 15_000);
@@ -12499,6 +12627,7 @@ if (want("38")) {
       await setKey(EX);
     }
   } finally {
+    restoreOutage();
     stub.stop(true);
     await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await sql`DELETE FROM query_log`;
@@ -12507,7 +12636,7 @@ if (want("38")) {
 }
 
 if (want("38b")) {
-  console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 3.5 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694); a capture made during a sleep goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same sleep; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008)");
+  console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 3.5 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694); a capture made during a sleep goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same sleep; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008); the scheduler's own cuts counted apart from the stops, which say the wakes and order the held word (SMD-3060)");
   const sql = new SQL({ url: URL_, max: 4 });
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM query_log`;
@@ -12525,6 +12654,8 @@ if (want("38b")) {
   /** A judge on its own model (OB1_JUDGE_MODEL), its probes answering 500 while `judgeProbeDown` and its judgements 404 "not found" while `judgeMissing` (SMD-3008). */
   const JUDGE = "stub-judge";
   let judgeProbeDown = false, judgeMissing = false;
+  /** Run as the judge's probe arrives: an answer of its own, or null for the stub's (SMD-3060). */
+  let judgeProbeHook: (() => Promise<Response | null>) | null = null;
   /** Run as each judgement arrives, before its answer. */
   let onJudge: (() => void) | null = null;
   const judged: number[] = [];
@@ -12552,6 +12683,7 @@ if (want("38b")) {
       if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }, { id: JUDGE }] });
       const body = (await req.json()) as { model?: string; messages?: { role: string; content: string }[] };
       if (body.messages?.[0]?.content === PROBE_PROMPT) {
+        if (body.model === JUDGE && judgeProbeHook) { const r = await judgeProbeHook(); if (r) return r; }
         if (body.model === JUDGE && judgeProbeDown) return new Response("the judge is down", { status: 500 });
         return Response.json({ choices: [{ message: { content: "OK" } }] });
       }
@@ -12591,6 +12723,8 @@ if (want("38b")) {
     return id;
   };
   const status = async (id: string) => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${EX}`)[0] as { status: string } | undefined)?.status;
+  /** A thought's kept row's counts: the stops (the wakes), its stall, and the scheduler's own cuts (SMD-3060). */
+  const counts = async (id: string) => (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${id}::uuid AND work_type = ${EX}`)[0] as { stops: number; stalled: number; cuts: number } | undefined;
   const beat = async () => {
     const [r] = await sql`SELECT value FROM ob1_config WHERE key = 'heartbeat:sleep'`;
     return r ? JSON.parse(r.value) as { held?: { total: number; thoughts: { id: string; stops: number; stalled: number; kept: number; windows: number | null }[] } } : null;
@@ -12820,12 +12954,18 @@ if (want("38b")) {
       held3At = await status(held3);
       return true;
     }, 45_000);
+    // The restart's cut and the join's, each of the stalled thought in hand,
+    // read before the suite's own hard stop below, which is a stop (SMD-3060).
+    let prog3: { stops: number; stalled: number; cuts: number } | undefined;
+    await pollUntil(async () => {
+      prog3 = await counts(held3);
+      return Number(prog3?.cuts) >= 2;
+    }, 5_000);
     // Stopped hard: a soft stop would let the stalled thought in hand finish.
     (stopMid as PassStop | null)?.();
     await (stopMid as PassStop | null)?.();
     await Promise.race([midRun, Bun.sleep(15_000)]);
     onExtract = null;
-    const [prog3] = (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${held3}::uuid AND work_type = ${EX}`) as ({ stops: number; stalled: number } | undefined)[];
     const firstAt = (m: string) => extracts.find((e) => e.marker === m)?.at ?? Infinity;
     // The first call for the stalled window, start to end: an abort ends it before its eight seconds.
     const [firstStuck0, firstStuckEnd] = stuckCalls[0] ?? [Infinity, Infinity];
@@ -12839,8 +12979,86 @@ if (want("38b")) {
     const readsRestarted = wakeReads.filter((t) => t > restartAt && t < joinAtMid).length;
     assert(midJoined && mid2 !== "" && firstStuckEnd - firstStuck0 < 7000 && restartAt <= firstAt("mid2") && firstAt("mid2") < secondStuck && secondStuck < joinAtMid && joinAtMid > restartAt && held3At !== "succeeded" && readsRestarted <= 4,
       `one pending beside the stalled thought in hand restarts extraction: the window in hand is cut short, the note extracted next, the stalled thought taken again, and consolidation joins past it in the same sleep, polling at its pace (${readsRestarted} wake reads between the restart and the join; joined ${midJoined}; window ${midRel(firstStuck0)} to ${midRel(firstStuckEnd)}, restart ${midRel(restartAt)}, note ${midRel(firstAt("mid2"))}, stalled again ${midRel(secondStuck)}, join ${midRel(joinAtMid)}; the stalled thought ${held3At}; lines ${midLines.filter((x) => /asleep:|restarts|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => x.l.trim().slice(0, 40)).join(" | ")})`);
-    assert(Number(prog3?.stalled) === 3 && Number(prog3?.stops) >= 4,
-      `…the restart's stop counted, no stall — the hold under the floor (stops ${prog3?.stops}, stalled ${prog3?.stalled})`);
+    assert(Number(prog3?.stalled) === 3 && Number(prog3?.stops) === 3 && Number(prog3?.cuts) === 2,
+      `…the restart's stop and the join's set-aside each counted as the scheduler's cut, apart from the stops, which say the wakes — none here — and no stall (SMD-3060) (stops ${prog3?.stops}, stalled ${prog3?.stalled}, cuts ${prog3?.cuts})`);
+
+    // The operator's second signal on the scheduler is a stop, not a cut: the
+    // stops say the wakes and the operator's hand (SMD-3060).
+    await sql`DELETE FROM thoughts`;
+    stuckStarts.length = 0;
+    const handHeld = await capture("The stuckdoc note, in hand as the operator stops the scheduler twice.", 0, 23);
+    /** A scheduler that does not end as the case expects is stopped all the same, so it claims nothing of the cases after. */
+    const ended = async (run: Promise<unknown>, ac: AbortController) => {
+      ac.abort();
+      await Promise.race([run.catch(() => {}), Bun.sleep(15_000)]);
+    };
+    let stopHand: PassStop | null = null;
+    const handAc = new AbortController();
+    const handRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, signal: handAc.signal, onPass: (st) => { stopHand = st; }, writer: { out: () => {}, err: () => {} } });
+    const handInHand = await pollUntil(async () => stuckStarts.length > 0, 30_000);
+    (stopHand as PassStop | null)?.();
+    await (stopHand as PassStop | null)?.();
+    await Promise.race([handRun, Bun.sleep(15_000)]);
+    await ended(handRun, handAc);
+    const handRow = await counts(handHeld);
+    assert(handInHand && handRow?.stops === 1 && handRow.cuts === 0,
+      `the operator's second signal, the thought in hand, counts a stop and no cut (${JSON.stringify(handRow)})`);
+    // A follower found outside mid-sleep: the scheduler stops its passes for a
+    // reason of its own, a cut and no stop.
+    stuckStarts.length = 0;
+    const outsideAc = new AbortController();
+    const outsideRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, signal: outsideAc.signal, writer: { out: () => {}, err: () => {} } });
+    const outsideInHand = await pollUntil(async () => stuckStarts.length > 0, 30_000);
+    await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:outside@p2', ${JSON.stringify({ v: 1, job: "extract:outside@p2", every_s: 60, running: false, outcome: "ok" })})`;
+    const outsideCode = await Promise.race([outsideRun, Bun.sleep(15_000).then(() => "hung")]);
+    await ended(outsideRun, outsideAc);
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:extract:outside@p2'`;
+    const outsideRow = await counts(handHeld);
+    assert(outsideInHand && outsideCode === 2 && outsideRow?.stops === 1 && outsideRow.cuts === 1,
+      `a follower found outside, the thought in hand: the scheduler's stop of its passes counts a cut, the stops as they were (exit ${outsideCode}, ${JSON.stringify(outsideRow)})`);
+    // The sleep throwing — a table it reads gone, no outage — with a thought
+    // in hand: its stop of the passes on the way out is a cut (review pass 2).
+    stuckStarts.length = 0;
+    const throwAc = new AbortController();
+    const throwRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, signal: throwAc.signal, writer: { out: () => {}, err: () => {} } });
+    const throwInHand = await pollUntil(async () => stuckStarts.length > 0, 30_000);
+    await sql`ALTER TABLE query_log RENAME TO query_log_away`;
+    const thrown = await Promise.race([throwRun.then((c) => `code ${c}`, (e: Error) => `threw ${e.message}`), Bun.sleep(15_000).then(() => "hung")])
+      .finally(() => sql`ALTER TABLE query_log_away RENAME TO query_log`);
+    await ended(throwRun, throwAc);
+    const throwRow = await counts(handHeld);
+    assert(throwInHand && /^threw .*query_log/.test(thrown) && throwRow?.stops === 1 && throwRow.cuts === 2,
+      `the sleep throwing, the thought in hand: its stop of the passes counts a cut, the stops as they were (${thrown.slice(0, 80)}; ${JSON.stringify(throwRow)})`);
+    // A pass that ends by itself — consolidation's start refused, its key
+    // turned away — while extraction has a thought in hand: a cut. Read as the
+    // line lands: under --follow the refusal is tried again, and the next
+    // sleep finishes the thought, its row with it (review pass 2).
+    await sql`DELETE FROM thoughts`;
+    stuckStarts.length = 0;
+    const byItself: string[] = [];
+    let consolidatingBeside = false;
+    judgeProbeHook = async () => {
+      if (!consolidatingBeside) return null;
+      judgeProbeHook = null;
+      await pollUntil(async () => stuckStarts.length > 0, 25_000);
+      return new Response("the key is refused", { status: 401 });
+    };
+    const byItselfSay = (l: string) => { byItself.push(l); if (/extraction drained — consolidating beside it/.test(l)) consolidatingBeside = true; };
+    const byItselfAc = new AbortController();
+    const byItselfRun = runSleep({ url: URL_!, env: { ...env, OB1_JUDGE_MODEL: JUDGE }, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, signal: byItselfAc.signal, writer: { out: byItselfSay, err: byItselfSay } });
+    let byItselfRow: { stops: number; stalled: number; cuts: number } | undefined;
+    try {
+      const besideSeen = await pollUntil(async () => consolidatingBeside, 30_000);
+      const byItselfNote = await syncNote("The stuckdoc note, in hand as consolidation ends by itself.", 24);
+      const byItselfInHand = await pollUntil(async () => stuckStarts.length > 0, 30_000);
+      const endedSeen = await pollUntil(async () => byItself.some((l) => /consolidate ended by itself/.test(l)), 30_000);
+      byItselfRow = await counts(byItselfNote);
+      assert(besideSeen && byItselfInHand && endedSeen && byItselfRow?.cuts === 1 && byItselfRow.stops === 0,
+        `a pass that ends by itself, the thought in hand: the scheduler's stop of the others counts a cut and no stop (${JSON.stringify(byItselfRow)}; ${byItself.filter((l) => /ended by itself|refused/.test(l)).map((l) => l.trim().slice(0, 60)).join(" | ")})`);
+    } finally {
+      judgeProbeHook = null;
+      await ended(byItselfRun, byItselfAc);
+    }
 
     // While consolidation waits for a judge that does not answer, extraction
     // takes the newer work and leaves the stalled thought to wait for it: the
@@ -12896,8 +13114,19 @@ if (want("38b")) {
       const waitLine = mid ? /\[consolidate\].*the provider is not answering/ : /consolidating first/;
       await pollUntil(async () => seen(waitLine) < Infinity && (mid || seen(/\[consolidate\]/) < Infinity), 40_000);
       if (!mid) await Bun.sleep(1500);
+      // The stalled thought's cuts so far (the join's, mid-pass): the let-out's set-aside adds its own.
+      const cutsBefore = Number((await counts(stalledJ))?.cuts);
       const note = await syncNote(`The judgenote, written by a sync while the judge does not answer (${mid ? "mid-pass" : "at its start"}).`, 19);
-      const noteDone = await pollUntil(async () => (await status(note)) === "succeeded" && seen(/set aside again until consolidation drains/) < Infinity, 30_000);
+      // The set-aside that reaches the stalled thought, the one that cuts it (review pass 2: one that found nothing in hand cut nothing).
+      const noteDone = await pollUntil(async () => (await status(note)) === "succeeded" && seen(/has reached the stalled thought\(s\) — set aside again until consolidation drains/) < Infinity, 30_000);
+      // The let-out's set-aside cut the stalled thought: counted as the
+      // scheduler's own, its stops — the wakes, none here — as planted (SMD-3060).
+      // Its line is said before the cut lands: polled until the cut is.
+      let progJ: { stops: number; stalled: number; cuts: number } | undefined;
+      await pollUntil(async () => {
+        progJ = await counts(stalledJ);
+        return Number(progJ?.cuts) > cutsBefore;
+      }, 5_000);
       // A second note: at its start, while the judge is still down — let out
       // at most once a minute, it waits for consolidation; mid-pass, once the
       // judge answers — the wait over, it is not let out (review pass 1).
@@ -12930,6 +13159,8 @@ if (want("38b")) {
         `${mid ? "mid-pass" : "at its start"}, consolidation waiting for its judge: a note written then is extracted before the judge answers, and extraction is set aside again (join, then unpark ${rel(unparkJ)}, note ${rel(noteCall)}, set aside ${rel(reparkJ)}, judge back ${rel(flipAt)}; lines ${jl.filter((x) => /consolidating first|waits for its provider|set aside again|consolidation drained|not answering|answers again/.test(x.l)).map((x) => `${rel(x.at)} ${x.l.trim().slice(0, 44)}`).join(" | ")})`);
       assert(noteB !== "" && letOuts === 1 && noteBCall > resumeJ,
         `…a second note ${mid ? "written once the judge answers" : "written while the judge is still down"} is not let out — ${mid ? "the wait is over" : "at most once a minute"} — and is extracted once consolidation drains (${letOuts} let-out(s); the note ${rel(noteBCall)}, resumed ${rel(resumeJ)})`);
+      assert(Number(progJ?.stops) === 3 && Number(progJ?.stalled) === 3 && Number(progJ?.cuts) > cutsBefore,
+        `…the let-out's set-aside of the stalled thought counted as the scheduler's cut, not a stop: its stops say the wakes, as planted (stops ${progJ?.stops}, stalled ${progJ?.stalled}, cuts ${cutsBefore} → ${progJ?.cuts})`);
       assert(stuckAside === 0 && resumed && judged[0] > flipAt && resumeJ > judged[0],
         `…the stalled thought waits for consolidation: claimed after the note${mid ? "" : " (two workers, one let out)"}, its call is cut within a poll and none begins again while the judge is down; extraction resumes once the judge answers and consolidation drains (${stuckAside} stalled call(s) let run; calls ${stuckCalls.map(([a, b]) => `[${rel(a)},${rel(b)}]`).join(" ")}; judged ${rel(judged[0] ?? Infinity)}, resumed ${rel(resumeJ)})`);
     };
@@ -13015,6 +13246,21 @@ if (want("38b")) {
     const two = await gate(fp, sig);
     assert(two.joins && new RegExp(`held back across wakes \\(2 of 2\\): ${planted2}, no window kept over 5 stop\\(s\\), the last 5 with none gained; ${planted}`).test(two.text),
       `two held: the more stalled named first (${two.text.split("\n").filter((l) => /held/.test(l)).join(" | ").trim()})`);
+    // Stalled alike, the more stopped first: by the wakes, the scheduler's own
+    // cuts said and never counted — a judge outage's let-outs cut the one it
+    // reached forty times (SMD-3060).
+    await sql`UPDATE extraction_progress SET stops = 4, stalled = 3 WHERE thought_id = ${planted2}::uuid AND work_type = ${EX}`;
+    await sql`UPDATE extraction_progress SET cuts = 40 WHERE thought_id = ${planted}::uuid AND work_type = ${EX}`;
+    const cut = await gate(fp, sig);
+    assert(new RegExp(`held back across wakes \\(2 of 2\\): ${planted2}, no window kept over 4 stop\\(s\\), the last 3 with none gained; ${planted}, no window kept over 3 stop\\(s\\), the last 3 with none gained, and 40 cut\\(s\\) of the scheduler's own$`, "m").test(cut.text),
+      `stalled alike, the more stopped is named first, the other's forty cuts said and not counted (${cut.text.split("\n").filter((l) => /held/.test(l)).join(" | ").trim()})`);
+    // A brain with 093's table and no cuts: the scheduler names them with none said (run-it review).
+    await sql`ALTER TABLE extraction_progress RENAME COLUMN cuts TO cuts_away`;
+    const cutless = await gate(fp, sig).finally(() => sql`ALTER TABLE extraction_progress RENAME COLUMN cuts_away TO cuts`);
+    assert(new RegExp(`held back across wakes \\(2 of 2\\): ${planted2}, no window kept over 4 stop\\(s\\), the last 3 with none gained; ${planted}, no window kept over 3 stop\\(s\\), the last 3 with none gained$`, "m").test(cutless.text),
+      `before 101 the held thoughts are named with no cuts, and no column that is not there is read (${cutless.text.split("\n").filter((l) => /held|column|error/i.test(l)).join(" | ").trim()})`);
+    await sql`UPDATE extraction_progress SET stops = 5, stalled = 5 WHERE thought_id = ${planted2}::uuid AND work_type = ${EX}`;
+    await sql`UPDATE extraction_progress SET cuts = 0 WHERE thought_id = ${planted}::uuid AND work_type = ${EX}`;
     // As a sleep begins the stopped thoughts go behind new captures, the least
     // stalled first, then in the order they had: dated alike, claim_thoughts'
     // tie fell the same way every sleep (review pass 6). The more stalled one
@@ -13339,7 +13585,7 @@ if (want("41")) {
     const z13 = await ticket(13, "closed a"), z14 = await ticket(14, "closed b");
     await relate(z14, z13, "evolves");
     await relate(z14, z13, null);
-    // A pair judged distinct (100, SMD-3117): two tickets the judge called unrelated are nothing to link.
+    // A pair judged distinct (102, SMD-3117): two tickets the judge called unrelated are nothing to link.
     const z19 = await ticket(19, "judged apart a"), z20 = await ticket(20, "judged apart b");
     await relate(z20, z19, "distinct", 0.9);
     // Two words on one pair: one comment, two rows.

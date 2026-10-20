@@ -258,10 +258,10 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2919 assertions: 2919 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred (100) migrations applied, and
-`\d thoughts` shows eight columns and seven indexes — six of our own plus the
-primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
+`bun test-schema.ts` prints `2946 assertions: 2946 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and two (102) migrations applied, and
+`\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
+the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
 
 ## The migrations
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3117).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1688,7 +1688,71 @@ test-schema [89] (the gate, 088's DDL verbatim, the lock held
 by each call that names `supersedes`), test-live [6j] (each order, the other
 side waiting), test-upgrade [20as].
 
-Migration 100 stores the consolidation judge's distinct (SMD-3117). Every
+Migration 100 gives the thoughts with no vector an index of their own
+(SMD-3056): `thoughts_vectorless_idx`, a btree on `thoughts (id)` partial on
+`embedding IS NULL`. SMD-2889's vector mender reads a page of those rows in
+id order every tick, from each server, and brain_info's `vectorless` count
+(keyed `/health` among its readers) counts them. The count read every row,
+and so did the page whenever none waited past its cursor — a healthy brain's
+every tick, and each sweep's tail (2–4 ms at 100,000 thoughts). Both of the page's
+forms (no cursor; `id > cursor`, generic plan included) now read the index
+from where they start, 0.005–0.04 ms on 100,000 thoughts with 0, 1 or 10%
+waiting, and the count is an index-only scan of the rows that wait (0.004 ms
+at none, 0.6 ms at 9,830). The index holds only those rows, so it stays a
+page or two on a healthy brain; HOT updates are unchanged, since `embedding`
+was already an indexed column (the HNSW index's). It is built inside the
+migrator's transaction, writes to `thoughts` waiting for it (SHARE) — one
+read of the heap, 64–86 ms at a million thoughts, about a second at ten
+million; a brain past that can build it by hand first, `CONCURRENTLY` under this name and in this shape, and the
+file keeps it. Anything else under the name in `thoughts`' schema — an
+INVALID index (a `CONCURRENTLY` build that did not finish, which the planner
+ignores), one of another shape, a relation that is not an index — is refused
+by name, with the statement that clears it, rather than recorded as applied
+over it; another schema's index under the name is never taken for it, and
+the one kept is on `thoughts` by its oid. Needs nothing past 001; a re-apply
+is a no-op. test-schema [90] (the definition, the five refusals, another
+schema's index), test-store-sql [18] (the store's two page statements and
+the count read through it, each reading only its own rows' entries; the
+page's LIMIT).
+
+Migration 101 counts the sleep scheduler's own cuts of a claimed thought
+apart from its stops (SMD-3060). 093's `stops` counted every hard stop that
+took the claim, and the scheduler's own are the same call as a wake's:
+extraction set aside while consolidation joins past a stalled thought
+(SMD-2694), restarted for work behind one in hand and set aside again once
+let out while consolidation waits for its judge (SMD-3008), and its passes
+stopped when one ends by itself, a follower is found outside or the sleep
+throws. Through a judge outage of hours the let-out cut a stalled thought
+about once a minute, and the `held` word preflight passes on read those cuts
+as wakes, its order (the most stalled, then the most stopped) letting them
+pick the three thoughts named. `extraction_progress.cuts` counts them,
+written by `note_extraction_cut` under 093's holder rule: cuts + 1 and
+nothing else moved, since a cut is no wake — it neither stalls the thought
+nor ends its gaining. `stops` now counts the wakes and the operator's second
+signal. 093's `note_extraction_stop` and `save_extraction_window` are
+redefined to set `cuts` back to 0 where either replaces a row of other text
+or windowing, as they do the stops. The scheduler's hard stop says it is its
+own (`PassStop`'s `cut`), extraction counts it so, and a brain before 101
+counts it not at all — never as a stop — and each extraction run says so
+once (a scheduler's set-aside starts a run of its own, so through an outage
+about once a minute until 101 is applied). The held word and `--status` say
+both, reading `cuts` only where the column is there — the scheduler checks
+once at its start. So after applying 101, restart the sleep service on this
+tree: a scheduler of an earlier tree still counts its own stops as stops,
+and one of this tree started before 101 names the held thoughts without
+their cuts (its extraction runs count them at once). Counts made before 101
+stay as they were. A set-aside cuts a thought the scheduler reads stalled,
+though a worker's claim between that read and the stop can put a fresh
+capture in hand, which gets a cut and no stop, so it is neither named nor
+dated behind the next sleep's captures; the scheduler's other stops cut
+whatever is in hand. It refuses to apply
+without 093; 093 re-applied puts back its own functions, which leave `cuts`
+on a replaced row, so after an older tree's `--reapply` over a 101 brain run
+this tree's `--reapply` (a plain run skips 101, recorded as applied).
+test-schema [83] and [91], test-upgrade [20at], test-live [10g] and [38b],
+test-preflight.
+
+Migration 102 stores the consolidation judge's distinct (SMD-3117). Every
 pair the pass judges is a near neighbour (029's candidate rule), so an
 unrelated verdict says two look-alikes are about different subjects; 084
 closed the pair's edge on one and kept nothing, so nothing told a reader, a
@@ -1700,24 +1764,24 @@ verbatim but the word list, and their comments and `thought_facets`' say so;
 or dropping it, its lineage row with it). The door carries a sentinel,
 `ob1:relation-distinct`, which `consolidate.ts` reads at start, on every
 poll of a follower, when the door refuses the word mid-pass, before it
-gives a distinct up and for its summary's remedy: 100 keeps 084's
+gives a distinct up and for its summary's remedy: 102 keeps 084's
 signature, and on a brain short of it
 the pass sends no distinct, an unrelated verdict at the floor closing the
 pair's edge as before unless that edge is a distinct. It refuses to apply
-without 084; 084 re-applied takes the word away and 100 after it puts it
-back. A pair judged unrelated before 100 has no distinct until the pass
-judges it again. test-schema [90] (the vocabulary, the door's set per pair
+without 084; 084 re-applied takes the word away and 102 after it puts it
+back. A pair judged unrelated before 102 has no distinct until the pass
+judges it again. test-schema [92] (the vocabulary, the door's set per pair
 with distinct in it, the deletes, the re-applies), test-live [16] (an
 unrelated verdict at the floor, under it, on its token, kept and replaced;
-on a brain short of 100 a follower's check, `--status` and `--dry-run`, a
+on a brain short of 102 a follower's check, `--status` and `--dry-run`, a
 distinct left standing, another edge closed beside decoy distincts on each
-side's other pairs, a side deleted mid-pass, 100 applied under a one-shot
-run and after its last lost distinct, a follower that sees 100 applied, 084
+side's other pairs, a side deleted mid-pass, 102 applied under a one-shot
+run and after its last lost distinct, a follower that sees 102 applied, 084
 put back under a running pass, a door that keeps the sentinel and refuses
-the word, and relations off, coming back short of 100, going off as 100
+the word, and relations off, coming back short of 102, going off as 102
 lands and coming back with it, a check and a run under a role without the
 structure group; `--status` and `--list relations`) and [41]
-(a distinct pair never posted to the board), test-upgrade [20at].
+(a distinct pair never posted to the board), test-upgrade [20au].
 
 ## What changed relative to the guide
 
@@ -2584,8 +2648,11 @@ thought in hand before its lease goes back, waiting at most 1.5 s for the
 count (`stops`, and `stalled`, the latest long stops in a row with no window
 saved between — a stop is long when the thought had been in hand a minute,
 provider pauses aside, so a busy day's sleeps of seconds stall nothing), once
-however many hard calls land, and `--status` lists the
-thoughts with windows kept or stops counted, of the text in force. The
+however many hard calls land — the sleep scheduler's own hard stop (setting
+extraction aside, or ending its passes for a reason of its own) as a cut
+(`cuts`, migration 101, SMD-3060), apart from the stops and stalling
+nothing — and `--status` lists the thoughts with windows kept, or stops or
+cuts counted, of the text in force. The
 worker's own release waits for the stop's count, which another worker's
 release would otherwise beat. A succeeded release deletes the row in the
 same statement; a failed one keeps it, so `--retry-failed` resumes a thought
@@ -2969,7 +3036,7 @@ replaces it when judged another word, key or score, and closes it
 (`valid_until`) when a well-formed judgement sees none — outdates, or under
 the floor (a malformed or timed-out pair leaves it standing); the other
 thought's delete closes it too, and the newer thought's takes it and its
-lineage. Since 100 an unrelated verdict at the floor is a relation too, the
+lineage. Since 102 an unrelated verdict at the floor is a relation too, the
 word **distinct**: two near neighbours the judge called unrelated, kept apart
 (SMD-3117, the word SMD-3116 gave it). Its floor is its own probability (the
 token's, or under decide mode H2O's), not the relation words' mass, which a
@@ -2981,18 +3048,18 @@ summary says how many of each action's writes were distinct (`1 added (1
 distinct)`), and the readers keep it apart: `--status` counts the distinct
 pairs after the relations, `--list relations` leaves them out, brain_info
 counts them beside the relations and never as a board pair, and board
-findings never post one. On a brain short of 100 (084's door refuses the
+findings never post one. On a brain short of 102 (084's door refuses the
 word) an unrelated verdict at the floor closes the pair's edge, as before,
 unless that edge is a distinct, which stands: the verdict agrees with it,
-and its claim ends succeeded, so a closed one would not come back with 100.
+and its claim ends succeeded, so a closed one would not come back with 102.
 The run says so at its start — beside relations' note when a role stores
 none, so fixing the role does not reveal the migration only then — and in
 `--status` and `--dry-run`, with both remedies (`migrate.ts`, or `--reapply`
-where the ledger records 100 under a hand re-apply of 084), and its summary
+where the ledger records 102 under a hand re-apply of 084), and its summary
 counts the verdicts at the floor it could not store, naming the remedy while
-the brain still lacks 100. The pass reads 100's sentinel in the door's body
+the brain still lacks 102. The pass reads 102's sentinel in the door's body
 to know: at start, on every poll of a follower, before it gives a distinct
-up (so 100 applied under a running pass is taken at the next pair that would
+up (so 102 applied under a running pass is taken at the next pair that would
 lose one), for its summary's remedy, and when the door refuses the word
 mid-pass (084 re-applied under it), where it stops
 sending the word instead of failing the thought; a door that keeps the
@@ -3092,7 +3159,7 @@ bun consolidate.ts --url … --status                # the pass, and the queue
 bun consolidate.ts --url … --dry-run               # what a run would do; writes nothing
 bun consolidate.ts --url … --retry-failed          # failed rows back into the pool first
 bun consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # lineage: unreviewed rows standing on a lineage pair (070)
-bun consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate, with both thoughts (a distinct, 100, is counted by --status, not listed)
+bun consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate, with both thoughts (a distinct, 102, is counted by --status, not listed)
 bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90; at most 2000000, inside Postgres's timestamp range)
@@ -3156,7 +3223,7 @@ stale row's newer thought under its own key (a pair both sides of which have a
 vector, with no live or failed claim there — a failed claim is
 `--retry-failed`'s), judges the thought's pairs
 again — up to `--k` model calls per re-pooled thought, since nothing lets it
-skip a pair it judged before (a standing relation, or since 100 a distinct, is kept
+skip a pair it judged before (a standing relation, or since 102 a distinct, is kept
 or replaced by the new verdict, not consulted), plus one per stale pair the top-k left out
 that still meets the candidate rule, judged anyway — and either **replaces** the
 row in place (an outdates at
@@ -3363,9 +3430,12 @@ which wait for consolidation, so the judge, on the same chat endpoint, does
 not queue behind their window when it answers (SMD-3008); the let-out runs
 one worker, its claims read by this process's worker ids since this run
 began so a lease another left, or this container before a restart, does not
-count, and each stalled thought it reaches is stopped, a stop
-counted on it. If the judge answers and consolidation drains while it is
-out, it goes on with one worker under `--workers 1`, and with more it is
+count, and each stalled thought it reaches is stopped. These stops of the
+scheduler's own — the join's set-aside, the restart, the let-out's — are
+counted on the thought as cuts, apart from its stops, which say the wakes
+(migration 101, SMD-3060): a cut stalls nothing, and an outage's cuts
+neither read as wakes on the held word nor pick the thoughts it names. If
+the judge answers and consolidation drains while it is out, it goes on with one worker under `--workers 1`, and with more it is
 set aside once it holds nothing, so the drain's resume starts them all. A
 judge model missing at the start is refused, as before. Each sleep's move
 also dates now a forward-dated row that is no longer a stopped thought (one
@@ -3419,8 +3489,11 @@ words, and the `sleep` row says each:
 
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
 the wakes (a hard stop counted on them, 093): how many, and the three most
-stalled with their stops and windows kept — stalled as the scheduler reads it,
-0 once a window is saved since the last stop — read at its first stamp awake
+stalled, then most stopped, with their stops and windows kept — stalled as
+the scheduler reads it, 0 once a window is saved since the last stop — and
+since SMD-3060 the scheduler's own cuts of each, said apart from the stops
+and ordering nothing ("…, and 41 cut(s) of the scheduler's own"; none before
+101) — read at its first stamp awake
 or poll asleep, after each wake, at least every minute and before the row
 ends (but on a second signal, whose exit it would delay, or a failure), so a thought finished in
 a long sleep leaves the row then, not at the next live call. The `sleep` row
@@ -4808,11 +4881,11 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2919 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1421 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2946 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1432 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 870 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 55 assertions: the shards SHARDS lists in test-live.ts, each its own job
-OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 264 assertions
+OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 275 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 235 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database

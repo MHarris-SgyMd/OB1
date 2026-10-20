@@ -570,13 +570,16 @@ export class ProviderOutage {
   }
 }
 
-/** The wait between a follower's checks during an outage: 5 s, doubling, at most 5 min. */
-export const OUTAGE_FIRST_MS = 5_000;
-export const OUTAGE_MAX_MS = 300_000;
+/**
+ * The wait between a follower's checks during an outage: 5 s, doubling, at
+ * most 5 min. Read as it runs, as TRANSIENT_PAUSES_MS is, so the live suite
+ * shortens `first` in its own process; a spawned worker keeps these (SMD-3048).
+ */
+export const OUTAGE_MS = { first: 5_000, max: 300_000 };
 
 /** The wait before check `step` (0 first) of an outage. */
 export function outageWait(step: number): number {
-  return Math.min(OUTAGE_MAX_MS, OUTAGE_FIRST_MS * 2 ** Math.min(step, 16));
+  return Math.min(OUTAGE_MS.max, OUTAGE_MS.first * 2 ** Math.min(step, 16));
 }
 
 /**

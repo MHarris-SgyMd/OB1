@@ -84,9 +84,16 @@
  * nothing newer is left; the stalled thought(s) wait for consolidation
  * (SMD-3008): the judge model failing while the extraction model serves, as
  * both are on the one chat endpoint. A judge model missing at the start is
- * refused, as before. The thought is tried in every
- * sleep once consolidation's pool drains, and finished by the first sleep
- * long enough for both. A brain before 093, or a role that cannot read it,
+ * refused, as before. Each of these stops of the scheduler's own — the join's
+ * set-aside (SMD-2694), the restart, the let-out's — and its hard stop of the
+ * passes when one ends by itself, a follower is found outside or the sleep
+ * throws, is counted on the thought in hand as a cut, apart from its stops,
+ * which say the wakes and the operator's second signal (migration 101's
+ * `cuts`, SMD-3060): a cut stalls nothing, and a long outage's cuts no
+ * longer read as wakes nor decide which held thoughts are named; read on
+ * the row once the scheduler is restarted after 101. A stalled thought is
+ * tried in every sleep once consolidation's pool drains, and finished by
+ * the first sleep long enough for both. A brain before 093, or a role that cannot read it,
  * joins once extraction is drained alone, and the start says so; granted
  * later, the scheduler takes it up once restarted.
  * A failed row stays failed — the operator's --retry-failed.
@@ -160,7 +167,8 @@
  * refusal that ended it, so preflight's `sleep` row says each — not "its
  * passes running", nor "start it again", which would only refuse again
  * (SMD-2752); `held`, the thoughts extraction holds back across the wakes —
- * how many, and the three most stalled with their stops and windows kept,
+ * how many, and the three most stalled with their stops, windows kept and
+ * the scheduler's own cuts (101; read as none before it),
  * read at the first stamp awake or poll asleep, after each wake, at least
  * every minute and before the row ends — so the row names a thought the
  * sleeps cannot finish (SMD-2694). The passes stamp through it, not their
@@ -263,6 +271,8 @@ export interface SleepOptions {
   stallFloorMs?: number;
   /** The least time between two restarts or let-outs of extraction (RESTART_EVERY_MS) unless a test drives it faster. */
   restartEveryMs?: number;
+  /** The passes' own poll for new work, in seconds (PASS_FOLLOW_S) unless a test drives it faster (SMD-3048). */
+  passFollowS?: number;
 }
 
 /**
@@ -362,14 +372,17 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
 /**
  * The thoughts extraction holds back across the wakes: pending or in flight,
  * a hard stop counted on them (093), of the text and windowing in force —
- * how many, and the SLEEP_HELD_NAMED most stalled, then most stopped.
+ * how many, and the SLEEP_HELD_NAMED most stalled, then most stopped: by the
+ * wakes, the scheduler's own cuts counted apart (101, SMD-3060) and only said —
+ * none where `cuts` is not there to read (a brain before 101).
  */
-async function heldBack(sql: SQL, job: string, sig: string): Promise<SleepHeld> {
+async function heldBack(sql: SQL, job: string, sig: string, cuts: boolean): Promise<SleepHeld> {
   const rows = (await sql`
-    SELECT e.thought_id::text AS id, e.stops, CASE WHEN e.gained > 0 THEN 0 ELSE e.stalled END AS stalled, (SELECT count(*)::int FROM jsonb_object_keys(e.parts)) AS kept, e.windows, count(*) OVER ()::int AS total
+    SELECT e.thought_id::text AS id, e.stops, CASE WHEN e.gained > 0 THEN 0 ELSE e.stalled END AS stalled, (SELECT count(*)::int FROM jsonb_object_keys(e.parts)) AS kept, e.windows,
+           ${cuts ? sql`e.cuts` : sql`0`} AS cuts, count(*) OVER ()::int AS total
       FROM extraction_progress e JOIN thought_work_claims c USING (thought_id, work_type) JOIN thoughts t ON t.id = c.thought_id
      WHERE e.work_type = ${job} AND c.status IN ('pending', 'claimed') AND e.stops > 0 AND ${currentProgress(sql, sig)}
-     ORDER BY 3 DESC, e.stops DESC, e.thought_id LIMIT ${SLEEP_HELD_NAMED}`) as { id: string; stops: number; stalled: number; kept: number; windows: number | null; total: number }[];
+     ORDER BY 3 DESC, e.stops DESC, e.thought_id LIMIT ${SLEEP_HELD_NAMED}`) as { id: string; stops: number; stalled: number; kept: number; windows: number | null; cuts: number; total: number }[];
   return { total: rows[0]?.total ?? 0, thoughts: rows.map(({ total: _t, ...r }) => ({ ...r, windows: r.windows ?? null })) };
 }
 
@@ -508,6 +521,10 @@ export async function run(opts: SleepOptions): Promise<number> {
     err(settled);
     return 2;
   }
+  // A caller's, not an operator's, so thrown: 0 would hand the passes no
+  // --follow at all. The rule the flags' numbers keep (SMD-3048).
+  const followProblem = opts.passFollowS === undefined ? null : numberProblem("passFollowS", opts.passFollowS, { min: 1 });
+  if (followProblem !== null) throw new RangeError(followProblem);
   if (opts.signal?.aborted && !opts.dryRun) {
     err(STOPPED_EARLY);
     return 130;
@@ -609,10 +626,17 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
   // names the held thoughts only then. Read once, as the query log's state is;
   // a brain before 093, or a role without the extraction group's grant on it,
   // joins once extraction is drained, as before, and is told so once.
-  const progressState = await atStart(async () => (await sql`
+  // With it, whether 101's `cuts` is there to read (SMD-3060) — probed as the
+  // held read resolves the table, unqualified: another schema's first on the
+  // path lacks it too (review pass 3; board-findings.ts's rule).
+  const progressRead = await atStart(async () => (await sql`
     SELECT CASE WHEN to_regclass('public.extraction_progress') IS NULL THEN 'missing'
-                WHEN has_table_privilege('public.extraction_progress', 'SELECT') THEN 'yes' ELSE 'denied' END AS s`)[0].s as "yes" | "missing" | "denied");
-  if (progressState === null) { err(STOPPED_EARLY); return 130; }
+                WHEN has_table_privilege('public.extraction_progress', 'SELECT') THEN 'yes' ELSE 'denied' END AS s,
+           EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('extraction_progress') AND attname = 'cuts' AND NOT attisdropped) AS cuts`)[0] as { s: "yes" | "missing" | "denied"; cuts: boolean });
+  if (progressRead === null) { err(STOPPED_EARLY); return 130; }
+  const progressState = progressRead.s;
+  /** Whether the held thoughts carry the scheduler's cuts: none read on a brain before 101, until a restart after it. */
+  const CUTS = progressRead.cuts;
   /** The windowing extraction runs under, which a kept row must match to speak for the thought: set only when the rows are readable. */
   const SIG = progressState === "yes" ? JSON.stringify(windowingFor(cfg)) : undefined;
   if (progressState !== "yes") err(`  extraction_progress: ${progressState === "missing" ? "no such table (migration 093 not applied)" : "this role cannot read it (the extraction group's grant)"} — consolidation joins only once extraction is drained, and a thought the wakes hold back goes unnamed; a running scheduler takes it up once restarted`);
@@ -634,7 +658,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       out(`  ${pass} (${JOBS[pass]}): ${p.claimed} in flight, ${p.pending} pending, ${p.unpooled} not yet in the pool, ${p.failed} failed${drained(p) ? " — drained" : joinsPast(p) ? ` — only ${p.stalled} stalled thought(s), which consolidation would join past` : ""}`);
     }
     if (SIG !== undefined) {
-      const held = await heldBack(sql, JOBS.extract, SIG);
+      const held = await heldBack(sql, JOBS.extract, SIG, CUTS);
       if (held.total) out(`  held back across wakes (${held.thoughts.length} of ${held.total}): ${held.thoughts.map(heldWords).join("; ")}`);
     }
     return 0;
@@ -670,7 +694,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     // failed before it propagates, as a pass that throws at a sleep does in
     // the loop below, rather than leave the last process's row (review pass 3).
     const code = await (pass === "extract" ? runExtract : runConsolidate)({
-      url, env, workers: WORKERS, follow: PASS_FOLLOW_S, signal: opts.signal, check: true,
+      url, env, workers: WORKERS, follow: opts.passFollowS ?? PASS_FOLLOW_S, signal: opts.signal, check: true,
       onStart: (r) => { result = r; }, writer: tagged(pass, () => false),
     }).catch(async (e: unknown) => {
       await endAtStart().catch(() => {});
@@ -725,7 +749,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     if (SIG === undefined || !FOLLOW) return;
     heldAt = Date.now();
     try {
-      stamper.held?.(await heldBack(sql, JOBS.extract, SIG));
+      stamper.held?.(await heldBack(sql, JOBS.extract, SIG, CUTS));
       // A later failure is said again (review pass 2).
       saidHeld = false;
     } catch (e) {
@@ -803,11 +827,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     p.hushed = true;
     if (!p.settled) p.abort.abort();
   };
-  const hardStop = async (p: Running): Promise<void> => {
+  /** `cut`: the scheduler's own (setAside, or stopPasses for a reason of its own), counted on the thought in hand apart from its stops, which say the wakes (101, SMD-3060). */
+  const hardStop = async (p: Running, cut = false): Promise<void> => {
     p.hushed = true;
     if (p.settled) return;
     p.abort.abort();
-    await p.stop?.();
+    await p.stop?.(cut ? { cut } : undefined);
   };
   const stop: PassStop = () => {
     if (finished) return null;
@@ -819,7 +844,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       // The row's end directly: the CLI exits 3 s after this signal, and the
       // held read would spend that (review pass 2); the row reads stopped,
       // and preflight names a stopped scheduler's held thoughts at its last word.
-      return Promise.all(running.map(hardStop)).then(() => stamper.end("stopped", malformed ?? undefined));
+      return Promise.all(running.map((p) => hardStop(p))).then(() => stamper.end("stopped", malformed ?? undefined));
     }
     stopping = true;
     onStop.abort();
@@ -854,7 +879,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     // would wait for at a wake (SMD-2752). Its start is reported, so a
     // refusal is told apart.
     const common = {
-      url, env, workers, follow: PASS_FOLLOW_S, signal: abort.signal, stamper: through(name),
+      url, env, workers, follow: opts.passFollowS ?? PASS_FOLLOW_S, signal: abort.signal, stamper: through(name),
       banner: false, summary: false,
       onStart: (r: StartResult) => { p.start = r; },
       onPass: (s: PassStop) => { p.stop = s; begun.add(name); },
@@ -881,9 +906,15 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     return p;
   };
 
-  /** Stop every pass — hard, a wake; soft, a sleep done — and wait for each to return. A pass that threw rejects here, once the others have stopped. */
-  const stopPasses = async (hard: boolean): Promise<void> => {
-    if (hard) await Promise.all(running.map(hardStop));
+  /**
+   * Stop every pass — hard, a wake; soft, a sleep done — and wait for each to
+   * return. A pass that threw rejects here, once the others have stopped.
+   * `cut`: a hard stop of the scheduler's own, not a wake's nor the
+   * operator's — a pass ended by itself, a follower found outside, an error —
+   * counted on the thought in hand as a cut (101, SMD-3060).
+   */
+  const stopPasses = async (hard: boolean, cut = false): Promise<void> => {
+    if (hard) await Promise.all(running.map((p) => hardStop(p, cut)));
     else for (const p of running) softStop(p);
     const results = await Promise.allSettled(running.map((p) => p.done));
     running.length = 0;
@@ -1070,7 +1101,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     const judgeWaits = (): boolean => waitingAtStart.has("consolidate") || waitingMidPass.has("consolidate");
     /**
      * Extraction stopped hard and taken out of the sleep's passes, for the
-     * join, the restart, the let-out's set-aside and the drain's alike. True
+     * join, the restart, the let-out's set-aside and the drain's alike — a
+     * cut of the scheduler's own, counted apart from the stops (101). True
      * when a stop landed while it settled: no
      * pass starts after it, nor stamps a row a second signal has ended (review
      * pass 6).
@@ -1078,7 +1110,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     const setAside = async (): Promise<boolean> => {
       const ex = running.find((r) => r.name === "extract");
       if (ex) {
-        await hardStop(ex);
+        await hardStop(ex, true);
         await ex.done.catch(() => {});
         running.splice(running.indexOf(ex), 1);
         // Its settling aborted the sleep's pass-ended signal, which the poll
@@ -1114,7 +1146,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       if (await outsideNow()) {
         // A soft stop that landed during the reads keeps its own: the thought
         // in hand finished, not abandoned (review pass 2).
-        await stopPasses(hardStopped || !stopping);
+        await stopPasses(hardStopped || !stopping, !hardStopped);
         return "outside";
       }
       // A stop that landed during the reads wins: the passes it stopped have
@@ -1128,7 +1160,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       if (ended) {
         // A pass that threw rejects out of stopPasses, after the others stop,
         // so past it the pass returned a code; a 0 unasked is no success.
-        await stopPasses(true);
+        await stopPasses(true, true);
         const code = ended.code || 1;
         err(`  ${ended.name} ended by itself (exit ${ended.code}) — the sleep stops`);
         return { pass: ended.name, code, started: ended.stop !== null, refused: ended.start && !ended.start.ok ? ended.start.refused : undefined };
@@ -1233,7 +1265,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           // misses its pair with one of them, as consolidate.ts's header says
           // of an unextracted neighbour. Extraction, in hand with one of them,
           // is stopped and set aside until consolidation drains (review pass
-          // 5); the stop counts on the thought as any hard stop does.
+          // 5); the stop counts on the thought as a cut (101, SMD-3060).
           out(`  extraction holds only ${pools.extract.stalled} thought(s) that ${SLEEP_STALLED_JOIN} or more long hard stops in a row took with no window gained — consolidating first; extraction resumes once its pool drains`);
           if (await setAside()) return stopped();
           start("consolidate");
@@ -1246,8 +1278,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
           // would move before the window in hand ends or the brain wakes
           // (SMD-3008). Not once consolidation has joined: the stalled thought
           // has its turn then, and such a capture goes first next sleep. The
-          // stop counts on the thought as any hard stop does — a stall only
-          // past the floor (093), and this one is stalled already.
+          // stop counts on the thought as a cut, not a stop: it stalls
+          // nothing, and this one is stalled already (101, SMD-3060).
           out(`  extraction has only stalled thought(s) in hand, and ${newerWork(pools.extract)} newer thought(s) wait behind — extraction restarts, the stalled thought(s) after them`);
           if (await setAside()) return stopped();
           behindPolls = 0;
@@ -1356,7 +1388,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     await endRow("stopped", malformed ?? undefined);
     return FOLLOW && !hardStopped ? 0 : 130;
   } catch (e) {
-    await stopPasses(true).catch(() => {});
+    await stopPasses(true, true).catch(() => {});
     // Directly: the database may be what threw, and the held read would wait
     // out its connect timeout before the end did again (review pass 4).
     await stamper.end("failed", malformed ?? undefined);

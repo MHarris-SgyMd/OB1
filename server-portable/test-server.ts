@@ -1343,7 +1343,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   // The findings rows (SMD-2680): the queue and the relations, none, ? when not read, and no table.
   const quiet = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 0, oldestPendingS: null, boardPairs: 0 }, relations: { related: 0, evolves: 0, duplicate: 0, distinct: 0, boardPairs: 0 } }), 1000));
   const staleOnly = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 3, oldestPendingS: null, boardPairs: 0 }, relations: { related: 2, evolves: 0, duplicate: 0, distinct: 0, boardPairs: 0 } }), 1000));
-  // 100 (SMD-3117): the pairs judged distinct, beside the relations and outside their count — with relations, alone, and one.
+  // 102 (SMD-3117): the pairs judged distinct, beside the relations and outside their count — with relations, alone, and one.
   const withApart = renderBrainInfo(await brainInfo(server, async () => planted(100, { relations: { related: 2, evolves: 0, duplicate: 0, distinct: 5, boardPairs: 0 } }), 1000));
   const onlyApart = renderBrainInfo(await brainInfo(server, async () => planted(100, { relations: { related: 0, evolves: 0, duplicate: 0, distinct: 1, boardPairs: 0 } }), 1000));
   const lostFindings = renderBrainInfo(await brainInfo(server, async () => planted(52, { proposals: null, relations: null, unread: { proposals: { reason: "refused", message: "permission denied for table supersession_proposals" }, relations: { reason: "timeout", message: "canceling statement due to statement timeout" } } }), 1000));

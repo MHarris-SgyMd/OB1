@@ -30,15 +30,15 @@ const codesAt = (status: number): string => Object.entries(REFUSAL_STATUS).filte
 /** The answers every keyed operation may give besides its success: the caller's standing, the input, a refusal by its status, a fault. */
 const KEYED_ANSWERS = {
   "400": refusal(`The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: ${codesAt(400)}.`),
-  "401": refusal("No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: \"forwarder\"`, the forwarder slot held something other than a forward-scope key, or a revoked one."),
-  "403": refusal(`The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs); or a rule: ${codesAt(403)}.`),
+  "401": refusal("No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: \"forwarder\"`, the forwarder slot held something other than a forward-scope key, or a revoked one; with `credential: \"token\"` (and `WWW-Authenticate: Bearer error=\"invalid_token\"`), a bearer token that is not one the authorization server issued for this REST core (SMD-2286); and REVOKED with `credential: \"token\"`, a token whose subject the agent registry revoked, which no new sign-in clears."),
+  "403": refusal(`The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with \`credential: "token"\`, \`WWW-Authenticate: Bearer error="insufficient_scope"\`); or a rule: ${codesAt(403)}.`),
   "404": refusal(`Nothing there: ${codesAt(404)}.`),
   "409": refusal(`The state conflicts: ${codesAt(409)}.`),
   "422": refusal(`A reference to nothing, or a refusal the store named: ${codesAt(422)}.`),
   "405": refusal("A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does."),
   "500": refusal("A fault (FAILED, with its message; no retryable until SMD-2461)."),
   "501": refusal(`A mode not built: ${codesAt(501)}.`),
-  "503": { ...refusal(`Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as \`name\` to a forwarder; with \`credential: "forwarder"\` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), or ${codesAt(503)}.`), headers: { "Retry-After": { description: "Seconds to wait before retrying.", schema: { type: "integer" } } } },
+  "503": { ...refusal(`Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as \`name\` to a forwarder; with \`credential: "forwarder"\` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with \`credential: "token"\`, Retry-After 30), or ${codesAt(503)}.`), headers: { "Retry-After": { description: "Seconds to wait before retrying.", schema: { type: "integer" } } } },
 };
 /** A keyed operation's answers: every one of KEYED_ANSWERS but 501, which only an operation with a mode not built (run_worker's drain) gives. */
 const answersFor = (name: ToolName) => {
@@ -57,7 +57,7 @@ function jsonSchemaOf(schema: z.ZodType, io: "input" | "output"): Json {
 const PLUGIN_ANSWERS = {
   "400": refusal("The input does not fit the schema (REFUSED_INPUT), or the plugin's own refusal."),
   "401": KEYED_ANSWERS["401"],
-  "403": refusal("The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or the plugin's own refusal."),
+  "403": refusal("The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), a bearer token's scopes name no key scope (FORBIDDEN with `credential: \"token\"`), or the plugin's own refusal."),
   "404": refusal("The plugin's own refusal: nothing there."),
   "405": KEYED_ANSWERS["405"],
   "409": refusal("The plugin's own refusal: the state conflicts."),
@@ -127,11 +127,11 @@ export function openApiDocument(plugins: readonly LoadedOp[] = []): Json {
       security: KEYED,
     };
   }
-  paths["/v1/whoami"] = { get: { operationId: "whoami", summary: "Who is calling", description: "The key's name, its scope, its stable agent id and the operations it may call; forwarded, `act` names who carried it (the forwarder key's name and agent id).", responses: { "200": { description: "The caller.", content: { "application/json": { schema: { type: "object" } } } }, "401": KEYED_ANSWERS["401"], "405": KEYED_ANSWERS["405"], "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
+  paths["/v1/whoami"] = { get: { operationId: "whoami", summary: "Who is calling", description: "The key's name, its scope, its stable agent id and the operations it may call; forwarded, `act` names who carried it (the forwarder key's name and agent id).", responses: { "200": { description: "The caller.", content: { "application/json": { schema: { type: "object" } } } }, "401": KEYED_ANSWERS["401"], "403": refusal("A bearer token whose scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`)."), "405": KEYED_ANSWERS["405"], "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
   // The enabled plugins, for the operator GUI's nav (SMD-2310).
   const page = { type: "object", required: ["path", "label"], properties: { path: { type: "string" }, label: { type: "string" } } };
   const plugin = { type: "object", required: ["name", "title", "description", "pages", "operations"], properties: { name: { type: "string" }, title: { type: "string" }, description: { type: "string" }, pages: { type: "array", items: page }, operations: { type: "array", items: { type: "string" } } } };
-  paths["/v1/plugins"] = { get: { operationId: "plugins", summary: "The enabled plugins", description: "Each enabled plugin: its name, title and description, its GUI pages (a path under the plugin's and a nav label) and the operations of it this key may call — what the operator GUI's nav reads.", responses: { "200": { description: "The enabled plugins.", content: { "application/json": { schema: { type: "object", required: ["plugins"], properties: { plugins: { type: "array", items: plugin } } } } } }, "401": KEYED_ANSWERS["401"], "405": KEYED_ANSWERS["405"], "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
+  paths["/v1/plugins"] = { get: { operationId: "plugins", summary: "The enabled plugins", description: "Each enabled plugin: its name, title and description, its GUI pages (a path under the plugin's and a nav label) and the operations of it this key may call — what the operator GUI's nav reads.", responses: { "200": { description: "The enabled plugins.", content: { "application/json": { schema: { type: "object", required: ["plugins"], properties: { plugins: { type: "array", items: plugin } } } } } }, "401": KEYED_ANSWERS["401"], "403": refusal("A bearer token whose scopes name no key scope (FORBIDDEN with `credential: \"token\"`, `WWW-Authenticate: Bearer error=\"insufficient_scope\"`)."), "405": KEYED_ANSWERS["405"], "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
   paths["/v1/jobs/{job_id}/stream"] = { get: { operationId: "job_stream", summary: "A job's events", description: "The job's progress and its end as server-sent events, for the key that started it.", parameters: [{ name: "job_id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "An event stream.", content: { "text/event-stream": {} } }, "401": KEYED_ANSWERS["401"], "403": KEYED_ANSWERS["403"], "404": refusal("No such job for this key."), "405": KEYED_ANSWERS["405"], "500": KEYED_ANSWERS["500"], "503": KEYED_ANSWERS["503"] }, security: KEYED } };
   paths["/health"] = { get: { operationId: "health", summary: "Liveness, and the brain's record for a key that may read it", description: "Internal only: the process is serving, `{ status: \"ok\" }`. With a key that may read brain_info, which the agent registry clears within the deadline, the brain's record on the health surface instead — what the MCP server's public /health shows (SMD-2287). Any other key is answered liveness, as no key is: this route refuses no one.", responses: { "200": { description: "Serving: `{ status: \"ok\" }`, or the brain's record.", content: { "application/json": { schema: { type: "object" } } } }, "405": KEYED_ANSWERS["405"] }, security: [{}, ...CALLER_FORMS] } };
   return {
@@ -142,7 +142,7 @@ export function openApiDocument(plugins: readonly LoadedOp[] = []): Json {
       securitySchemes: {
         brainKey: { type: "apiKey", in: "header", name: "x-brain-key" },
         accessKey: { type: "apiKey", in: "header", name: "x-access-key" },
-        bearer: { type: "http", scheme: "bearer" },
+        bearer: { type: "http", scheme: "bearer", description: "A caller's key, or, on a stack configured with the authorization server, an access token it issued for this REST core (`<origin>/api`): the key scope its `brain:` scopes name, the caller `oauth:<sub>` (SMD-2286)." },
         // Beside a caller's key, never alone: the MCP server's forward-scope key, recorded as the request's `act` (SMD-2284).
         forwarder: { type: "apiKey", in: "header", name: "x-brain-forwarder", description: "A forward-scope key, beside a caller's: names who carried the request (recorded as act); grants nothing — but a request it carries is answered its refusals and its captures whole, the words the MCP server says them in, so it is the MCP server's alone. Read only inside the stack: the public /api route deletes it." },
       },

@@ -7062,7 +7062,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)");
   assert(lastDefinerOf("record_thought_entities").startsWith("061") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 061, its last definer (056's body with the lineage row, [57]), keeps it ([52])");
   const validatorSrc = await src("thought_facets_validate()");
-  assert(lastDefinerOf("thought_facets_validate").startsWith("100") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084 and 100, its last definer (053's body plus the relation kind, [74], with distinct, [90])");
+  assert(lastDefinerOf("thought_facets_validate").startsWith("102") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084 and 102, its last definer (053's body plus the relation kind, [74], with distinct, [92])");
   assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
     "the rule is spelled on the key prefix: a source: pass replaces its own rows, an extraction the rest, and both conflict clauses yield to source:");
   assert(/link \(migration 053\)/.test(validatorSrc) && /relation \(migration 084\)/.test(validatorSrc) && LINK_RELATIONS.every((r) => validatorSrc.includes(`'${r}'`)) && LINK_RELATIONS.length === 6, `the validator's hint names the new kind, and every relation the contract names it admits (${LINK_RELATIONS.join(", ")})`);
@@ -12586,7 +12586,7 @@ console.log("\n[74] Migration 084: the consolidation judge's relations — a `re
   assert(row.payload.origin === "judged" && row.payload.target === older && row.payload.confidence === 0.61, `origin is the validator's word, judged, and the target is stored lower-case (${JSON.stringify(row.payload)})`);
   const ghost = "00000000-0000-4000-8000-000000000084";
   const cases: [string, unknown, RegExp][] = [
-    ["a word outside the four (100's)", { ...ok, target: older, relation: "supersedes" }, /relation must be related, evolves, duplicate or distinct, got 'supersedes'/],
+    ["a word outside the four (102's)", { ...ok, target: older, relation: "supersedes" }, /relation must be related, evolves, duplicate or distinct, got 'supersedes'/],
     ["a target that is no thought id", { ...ok, target: "SMD-12" }, /target must be a thought id/],
     ["a target that is a number", { ...ok, target: 12 }, /target must be a thought id/],
     ["the thought itself", { ...ok, target: newer }, /not related to itself/],
@@ -12675,7 +12675,7 @@ console.log("\n[74] Migration 084: the consolidation judge's relations — a `re
     `closed: a NULL relation closes the pair's edge; with nothing active, none (${JSON.stringify([closed, none])})`);
   for (const [what, sql, params, re] of [
     ["one thought on both sides", `SELECT record_thought_relation($1::uuid, $1::uuid, 'related', 0.5, 'k', NULL, 'a', 'b', NULL)`, [newer], /two different thoughts/],
-    ["a word outside the four (100's)", `SELECT record_thought_relation($1::uuid, $2::uuid, 'outdates', 0.5, 'k', NULL, 'a', 'b', NULL)`, [newer, older], /relation must be related, evolves, duplicate, distinct or NULL/],
+    ["a word outside the four (102's)", `SELECT record_thought_relation($1::uuid, $2::uuid, 'outdates', 0.5, 'k', NULL, 'a', 'b', NULL)`, [newer, older], /relation must be related, evolves, duplicate, distinct or NULL/],
     ["no pass", `SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.5, ' ', NULL, 'a', 'b', NULL)`, [newer, older], /judge_key must name the pass/],
     ["a pass key past 200 characters, as a parameter error the pass does not mistake for a deleted side", `SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.5, repeat('k', 201), NULL, 'a', 'b', NULL)`, [newer, older], /in at most 200 characters/],
   ] as [string, string, unknown[], RegExp][]) {
@@ -12708,7 +12708,7 @@ console.log("\n[74] Migration 084: the consolidation judge's relations — a `re
       (SELECT count(*)::int FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL) AS edges,
       (SELECT count(*)::int FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%') AS chk`);
   assert(ra.trg === 2 && ra.edges === 1 && ra.chk === 1, `084 re-applied: one of each trigger, the edge standing, one CHECK on artifact_kind (${JSON.stringify(ra)})`);
-  // 084 re-applied holds 084's validator and door; 100 is their last definer, so the sections after run on its bodies.
+  // 084 re-applied holds 084's validator and door; 102 is their last definer, so the sections after run on its bodies.
   await restoreShipped("thought_facets_validate", "record_thought_relation");
   await db.exec(`DELETE FROM thoughts`);
 }
@@ -14227,8 +14227,8 @@ console.log("\n[83] Migration 093: extraction_progress — a long thought's wind
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
   const cols = (await q<{ c: string; t: string; n: boolean }>(`SELECT column_name AS c, data_type AS t, is_nullable = 'YES' AS n FROM information_schema.columns WHERE table_name = 'extraction_progress' ORDER BY ordinal_position`))
     .map((r) => `${r.c}:${r.t}${r.n ? "?" : ""}`).join(" ");
-  assert(cols === "thought_id:uuid work_type:text fingerprint:text windowing:text windows:integer? parts:jsonb stops:integer stalled:integer gained:integer updated_at:timestamp with time zone",
-    `the table's columns, only windows nullable (${cols})`);
+  assert(cols === "thought_id:uuid work_type:text fingerprint:text windowing:text windows:integer? parts:jsonb stops:integer stalled:integer gained:integer updated_at:timestamp with time zone cuts:integer",
+    `the table's columns, only windows nullable — cuts added by 101 (${cols})`);
   const fk = (await one<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'extraction_progress_claim'`))?.d ?? "";
   assert(/FOREIGN KEY \(thought_id, work_type\) REFERENCES thought_work_claims\(thought_id, work_type\) ON DELETE CASCADE/.test(fk), `the row hangs off its claim, and goes with it (${fk})`);
   const tc = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["extraction_progress"])).c ?? "";
@@ -14921,7 +14921,122 @@ console.log("\n[89] Migration 099: an unlink takes the review lock — update_th
   await db.exec(`DELETE FROM thoughts`);
 }
 
-console.log("\n[90] Migration 100: the consolidation judge's distinct is stored — 084's relation vocabulary gains distinct: the validator and record_thought_relation take it, as one more word on the pair's one standing edge (added, kept, replaced by a relation and back, closed); a delete closes or drops it as 084's; the prompt's word, unrelated, is not a stored one; the sentinel the pass reads is in the door's body; 084 re-applied takes distinct away and the shipped definers put it back; a re-apply a no-op (SMD-3117)");
+console.log("\n[90] Migration 100: the thoughts with no vector by an index of their own — a btree on thoughts (id), partial on embedding IS NULL, its comment naming it; a re-apply a no-op; anything else under the name in thoughts' schema refused by name, another schema's never taken for it (SMD-3056)");
+{
+  const def = async () => (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('thoughts_vectorless_idx')) AS d`)).rows[0].d ?? "";
+  const d = await def();
+  assert(/^CREATE INDEX thoughts_vectorless_idx ON public\.thoughts USING btree \(id\) WHERE \(embedding IS NULL\)$/.test(d), `thoughts_vectorless_idx is a btree on thoughts (id), partial on embedding IS NULL — the mender's page order and its predicate (${d || "absent"})`);
+  const c = (await db.query<{ c: string | null }>(`SELECT obj_description(to_regclass('thoughts_vectorless_idx'), 'pg_class') AS c`)).rows[0].c ?? "";
+  assert(/Migration 100 \/ SMD-3056/.test(c), `…its comment naming the migration (${c.slice(0, 60)})`);
+  // By name, not number: main may take the number.
+  const file = files.find((f) => f.endsWith("_vectorless_index.sql")) ?? "no _vectorless_index.sql";
+  let again: string;
+  try { again = await reapply(file); } catch (e) { again = `threw: ${(e as Error).message}`; }
+  const n = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_indexes WHERE tablename = 'thoughts' AND indexdef LIKE '%WHERE (embedding IS NULL)%'`)).rows[0].n;
+  assert(again.endsWith("_vectorless_index.sql") && n === 1 && (await def()) === d, `100 applied again changes nothing: one such index, the same definition (${again.slice(0, 80)}, ${n})`);
+  // Anything else under the name is refused, never recorded as applied over
+  // it: IF NOT EXISTS alone kept each of the five below, and the mender read
+  // every row (review pass 1).
+  const refusal = async () => { try { await reapply(file); return "applied"; } catch (e) { return (e as Error).message; } };
+  await db.exec(`DROP INDEX thoughts_vectorless_idx; CREATE INDEX thoughts_vectorless_idx ON thoughts (id)`);
+  const wrong = await refusal();
+  assert(/migration 100: thoughts_vectorless_idx exists but is not a btree on thoughts \(id\) WHERE embedding IS NULL — CREATE INDEX thoughts_vectorless_idx ON public\.thoughts USING btree \(id\)\. Drop it \(an index: DROP INDEX CONCURRENTLY, which leaves writes to thoughts running\) and re-run/.test(wrong),
+    `an index of another shape under the name (no WHERE): refused, naming what it is and what to do (${wrong.slice(0, 120)})`);
+  // The predicate right, the column or the table wrong (review pass 3: a
+  // shape check reading any column passed every cell above).
+  await db.exec(`DROP INDEX thoughts_vectorless_idx; CREATE INDEX thoughts_vectorless_idx ON thoughts (created_at) WHERE embedding IS NULL`);
+  const column = await refusal();
+  assert(/migration 100: thoughts_vectorless_idx exists but is not a btree on thoughts \(id\) WHERE embedding IS NULL — CREATE INDEX thoughts_vectorless_idx ON public\.thoughts USING btree \(created_at\) WHERE \(embedding IS NULL\)\./.test(column),
+    `the predicate on another column: refused, naming it (${column.slice(0, 120)})`);
+  await db.exec(`DROP INDEX thoughts_vectorless_idx; CREATE TABLE tu_other (id uuid, embedding vector(3)); CREATE INDEX thoughts_vectorless_idx ON tu_other (id) WHERE embedding IS NULL`);
+  const other = await refusal();
+  assert(/migration 100: thoughts_vectorless_idx exists but is not a btree on thoughts \(id\) WHERE embedding IS NULL — CREATE INDEX thoughts_vectorless_idx ON public\.tu_other USING btree \(id\) WHERE \(embedding IS NULL\)\./.test(other),
+    `the same shape on another table: refused, naming it (${other.slice(0, 120)})`);
+  await db.exec(`DROP TABLE tu_other; CREATE TABLE thoughts_vectorless_idx (x int)`);
+  const table = await refusal();
+  assert(/migration 100: thoughts_vectorless_idx exists but is not a btree on thoughts \(id\) WHERE embedding IS NULL — a relation of kind r\./.test(table),
+    `a table under the name: refused, naming its kind (${table.slice(0, 120)})`);
+  await db.exec(`DROP TABLE thoughts_vectorless_idx`);
+  await reapply(file);
+  assert((await def()) === d, "dropped, the file builds it again in its shape");
+  // Another schema's index under the name, behind public on the path as the
+  // migrator sets it: a lookup by the path's first match found that one on a
+  // brain without its own, kept it, and recorded 100 with no index on
+  // thoughts (review pass 2). By name in thoughts' schema, it builds its own.
+  const path = (await db.query<{ p: string }>(`SELECT current_setting('search_path') AS p`)).rows[0].p;
+  await db.exec(`DROP INDEX thoughts_vectorless_idx; CREATE SCHEMA tu_ahead; CREATE TABLE tu_ahead.thoughts (id uuid PRIMARY KEY, embedding vector(3));
+                 CREATE INDEX thoughts_vectorless_idx ON tu_ahead.thoughts (id) WHERE embedding IS NULL; SET search_path = public, tu_ahead`);
+  let aheadRun: string;
+  try { aheadRun = await reapply(file); } catch (e) { aheadRun = `threw: ${(e as Error).message}`; }
+  const both = (await db.query<{ s: string; d: string; c: string | null }>(`SELECT n.nspname AS s, pg_get_indexdef(c.oid) AS d, obj_description(c.oid, 'pg_class') AS c
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relname = 'thoughts_vectorless_idx' ORDER BY 1`)).rows;
+  // The suite's own path back, not RESET's: PGlite's session default is pg_catalog.
+  await db.query(`SELECT set_config('search_path', $1, false)`, [path]);
+  await db.exec(`DROP SCHEMA tu_ahead CASCADE`);
+  assert(aheadRun.endsWith("_vectorless_index.sql") && both.length === 2 && both[0].s === "public" && both[0].d === d && /Migration 100 \/ SMD-3056/.test(both[0].c ?? "") && both[1].s === "tu_ahead" && both[1].c === null,
+    `another schema's index under the name, on the path behind public: 100 builds thoughts' own and comments it, the other left as it was (${aheadRun.slice(0, 60)}; ${JSON.stringify(both.map((r) => [r.s, r.c !== null]))})`);
+  // Last, and put back in place: a DROP after this catalog write fails inside PGlite.
+  await db.exec(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'thoughts_vectorless_idx'::regclass`);
+  const invalid = await refusal();
+  assert(/migration 100: thoughts_vectorless_idx exists but is INVALID — a CONCURRENTLY build or drop that did not finish, or a build still running/.test(invalid),
+    `an INVALID index in the shape (an interrupted CONCURRENTLY build): refused, naming it (${invalid.slice(0, 120)})`);
+  await db.exec(`UPDATE pg_index SET indisvalid = true WHERE indexrelid = 'thoughts_vectorless_idx'::regclass`);
+}
+
+console.log("\n[91] Migration 101: the sleep scheduler's own cuts counted apart from the stops — note_extraction_cut counts for the claim's holder only and moves no stop, stall, gain or window; a row of other text replaced by the cut, and the cuts gone with a row the stop or the save replaces; a re-apply a no-op (SMD-3060)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  // [83] re-applied 093, whose stop and save leave the cuts on a replaced row.
+  await restoreShipped("note_extraction_stop", "save_extraction_window", "note_extraction_cut");
+  const ck = (await one<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'extraction_progress_cuts'`))?.d ?? "";
+  assert(/CHECK \(\(?cuts >= 0\)?\)/.test(ck), `the cuts are a count (${ck})`);
+  const cc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["note_extraction_cut(uuid, text, text, text, text)"])).c ?? "";
+  const colc = (await one<{ c: string | null }>(`SELECT col_description('extraction_progress'::regclass, attnum) AS c FROM pg_attribute WHERE attrelid = 'extraction_progress'::regclass AND attname = 'stops'`)).c ?? "";
+  assert(/Migration 101 \/ SMD-3060/.test(cc) && /holds the claim/.test(cc) && /cuts aside/.test(colc), `the cut's comment names 101, the ticket and the holder rule, and the stops' says the cuts are apart (${colc})`);
+  const lockCfg = (await one<{ c: string[] | null }>(`SELECT proconfig AS c FROM pg_proc WHERE proname = 'note_extraction_cut'`))?.c ?? [];
+  assert(lockCfg.join(",") === "lock_timeout=1s", `the cut gives up a lock wait after a second, as the stop does (${lockCfg})`);
+
+  await db.exec(`DELETE FROM thoughts`);
+  const JOB = "extract:stub-88@p2";
+  const id = (await one<{ id: string }>(`INSERT INTO thoughts (content) VALUES ('[91] a long document') RETURNING id`)).id;
+  await q(`SELECT enqueue_thoughts($1, ARRAY[$2::uuid])`, [JOB, id]);
+  await q(`SELECT claim_thoughts($1, 'w-88', 1, 900)`, [JOB]);
+  const part = (i: number) => JSON.stringify({ index: i, tokens: 10, ms: 1, entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false, h: `h${i}` });
+  const save = (fp: string, i: number, windows = 4) =>
+    one<{ ok: boolean }>(`SELECT save_extraction_window($1::uuid, $2, 'w-88', $3, 'winA', $6, $4, $5::jsonb) AS ok`, [id, JOB, fp, i, part(i), windows]).then((r) => r.ok);
+  const stop = (fp: string) => one<{ ok: boolean }>(`SELECT note_extraction_stop($1::uuid, $2, 'w-88', $3, 'winA', true) AS ok`, [id, JOB, fp]).then((r) => r.ok);
+  const cut = (fp: string, worker = "w-88", win = "winA") => one<{ ok: boolean }>(`SELECT note_extraction_cut($1::uuid, $2, $3, $4, $5) AS ok`, [id, JOB, worker, fp, win]).then((r) => r.ok);
+  const row = async () => await one<{ keys: string | null; windows: number | null; stops: number; stalled: number; gained: number; cuts: number }>(
+    `SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys, windows, stops, stalled, gained, cuts FROM extraction_progress WHERE thought_id = $1::uuid AND work_type = $2`, [id, JOB]);
+
+  let r = (await cut("fpA")) && await row();
+  assert(r && r.cuts === 1 && r.stops === 0 && r.stalled === 0 && r.keys === null, `a cut with no row makes one, one cut and no stop (${JSON.stringify(r)})`);
+  r = (await save("fpA", 0)) && (await stop("fpA")) && (await stop("fpA")) && (await save("fpA", 1)) && (await cut("fpA")) && await row();
+  assert(r && r.cuts === 2 && r.stops === 2 && r.stalled === 1 && r.gained === 1 && r.keys === "0,1" && r.windows === 4,
+    `a cut moves no stop, stall, gain or window: no wake, it neither stalls the thought nor ends its gaining (${JSON.stringify(r)})`);
+  assert((await cut("fpA", "w-other")) === false && (await row())?.cuts === 2, "a cut counted by a worker that does not hold the claim counts nothing");
+  r = (await stop("fpA")) && await row();
+  assert(r && r.stops === 3 && r.stalled === 0 && r.cuts === 2, `a stop after it counts as before, the cuts kept (${JSON.stringify(r)})`);
+  r = (await save("fpA", 0, 5)) && await row();
+  assert(r && r.windows === 5 && r.keys === "0" && r.stops === 3 && r.cuts === 2, `a window under another window count keeps the cuts, as it keeps the stops (${JSON.stringify(r)})`);
+  r = (await save("fpB", 0)) && await row();
+  assert(r && r.stops === 0 && r.cuts === 0 && r.keys === "0", `a window of other text replaces the row, its cuts with its stops (${JSON.stringify(r)})`);
+  r = (await cut("fpB")) && (await stop("fpC")) && await row();
+  assert(r && r.stops === 1 && r.cuts === 0 && r.keys === null, `a stop of other text replaces the row, its cuts too (${JSON.stringify(r)})`);
+  r = (await cut("fpC")) && (await cut("fpC", "w-88", "winB")) && await row();
+  assert(r && r.cuts === 1 && r.stops === 0 && r.stalled === 0, `a cut under another windowing replaces the row, this cut its first (${JSON.stringify(r)})`);
+  await q(`SELECT release_claims_for_worker($1, 'w-88')`, [JOB]);
+  assert((await cut("fpC", "w-88", "winB")) === false && (await row())?.cuts === 1, "once the lease is returned the old holder's cut writes nothing");
+
+  const before = JSON.stringify(await q(`SELECT * FROM extraction_progress ORDER BY thought_id`));
+  // By name, not number: main may take the number, and "101" would then re-apply its file.
+  const again = await reapply(files.find((f) => f.endsWith("_extraction_cuts.sql")) ?? "no _extraction_cuts.sql");
+  assert(again.endsWith("_extraction_cuts.sql") && JSON.stringify(await q(`SELECT * FROM extraction_progress ORDER BY thought_id`)) === before, "101 re-applied: the rows and their cuts stand");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[92] Migration 102: the consolidation judge's distinct is stored — 084's relation vocabulary gains distinct: the validator and record_thought_relation take it, as one more word on the pair's one standing edge (added, kept, replaced by a relation and back, closed); a delete closes or drops it as 084's; the prompt's word, unrelated, is not a stored one; the sentinel the pass reads is in the door's body; 084 re-applied takes distinct away and the shipped definers put it back; a re-apply a no-op (SMD-3117)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -14931,21 +15046,21 @@ console.log("\n[90] Migration 100: the consolidation judge's distinct is stored 
   await db.exec(`DELETE FROM thoughts`);
   const thought = async (text: string) => (await one<{ r: { id: string } }>(`SELECT upsert_thought($1, '{}'::jsonb) AS r`, [text])).r.id;
 
-  // The shape: 100 the last definer of both, the sentinels, the comments.
+  // The shape: 102 the last definer of both, the sentinels, the comments.
   const door = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('${RTR}')`)).s);
   const validator = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
-  assert(lastDefinerOf("thought_facets_validate").startsWith("100") && lastDefinerOf("record_thought_relation").startsWith("100"),
-    `100 is the last definer of the validator and the door (${lastDefinerOf("thought_facets_validate")}, ${lastDefinerOf("record_thought_relation")})`);
+  assert(lastDefinerOf("thought_facets_validate").startsWith("102") && lastDefinerOf("record_thought_relation").startsWith("102"),
+    `102 is the last definer of the validator and the door (${lastDefinerOf("thought_facets_validate")}, ${lastDefinerOf("record_thought_relation")})`);
   assert(/ob1:relation-distinct/.test(door) && /ob1:relation-lineage-with-its-artifact/.test(door) && /ob1:relation-facet/.test(validator) && /ob1:link-facet/.test(validator),
-    "the sentinels: 100's in the door, which db/consolidate.ts reads to know whether to send distinct, and 084's and 053's kept");
+    "the sentinels: 102's in the door, which db/consolidate.ts reads to know whether to send distinct, and 084's and 053's kept");
   const doorComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [RTR])).c ?? "";
   const facets = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_facets"])).c ?? "";
   const proposals = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["supersession_proposals"])).c ?? "";
-  assert(/distinct/.test(doorComment) && /100/.test(doorComment) && /SMD-3117/.test(doorComment) && /distinct/.test(facets) && /100/.test(facets) && /distinct/.test(proposals) && /outdates/.test(proposals),
+  assert(/distinct/.test(doorComment) && /102/.test(doorComment) && /SMD-3117/.test(doorComment) && /distinct/.test(facets) && /102/.test(facets) && /distinct/.test(proposals) && /outdates/.test(proposals),
     "the comments say distinct: the door's, thought_facets', and supersession_proposals' (a pair called unrelated is a distinct relation, not a row there)");
 
   // The validator takes distinct; the prompt's word is not a stored one.
-  const older = await thought("100: the older note on the boiler"), newer = await thought("100: the newer note on the kettle");
+  const older = await thought("102: the older note on the boiler"), newer = await thought("102: the newer note on the kettle");
   const insert = (p: unknown) => refused(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'relation', $2::jsonb)`, [newer, JSON.stringify(p)]);
   assert((await insert({ relation: "distinct", target: older, judge_key: "consolidate:t@p4", confidence: 0.9 })) === "", "a distinct relation is admitted by the validator");
   const [raw] = await q<{ payload: Record<string, unknown> }>(`SELECT payload FROM thought_facets WHERE kind = 'relation' AND thought_id = $1::uuid`, [newer]);
@@ -14979,7 +15094,7 @@ console.log("\n[90] Migration 100: the consolidation judge's distinct is stored 
   assert(closed.action === "closed" && closed.id === backApart.id && (await standing()).length === 0, `a NULL closes the standing distinct, as any relation (${JSON.stringify(closed)})`);
 
   // Deletes: 084's triggers close a distinct to a deleted target and drop the newer's with its lineage.
-  const third = await thought("100: a third note, judged apart from the older");
+  const third = await thought("102: a third note, judged apart from the older");
   const apart = (await one<{ r: { id: string } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, 'distinct', 0.8, 'k', NULL, 'a', 'b', NULL) AS r`, [third, older])).r;
   await db.query(`SELECT delete_thought($1::uuid)`, [older]);
   const [afterTarget] = await q<{ active: number; total: number }>(`SELECT count(*) FILTER (WHERE valid_until IS NULL)::int AS active, count(*)::int AS total FROM thought_facets WHERE kind = 'relation' AND thought_id = $1::uuid`, [third]);
@@ -14988,18 +15103,18 @@ console.log("\n[90] Migration 100: the consolidation judge's distinct is stored 
   const [afterNewer] = await q<{ f: number; d: number }>(`SELECT (SELECT count(*)::int FROM thought_facets WHERE id = $1::uuid) AS f, (SELECT count(*)::int FROM derivations WHERE artifact_kind = 'relation' AND artifact_id = $1::uuid) AS d`, [apart.id]);
   assert(afterNewer.f === 0 && afterNewer.d === 0, `the newer thought deleted: its distinct goes by the cascade, its lineage row with it (${JSON.stringify(afterNewer)})`);
 
-  // 084 re-applied takes distinct away (the vocabulary is the file's); the shipped definers put it back; 100 again moves nothing.
-  const a1 = await thought("100: re-apply older"), b1 = await thought("100: re-apply newer");
+  // 084 re-applied takes distinct away (the vocabulary is the file's); the shipped definers put it back; 102 again moves nothing.
+  const a1 = await thought("102: re-apply older"), b1 = await thought("102: re-apply newer");
   await db.query(`SELECT record_thought_relation($1::uuid, $2::uuid, 'distinct', 0.6, 'k', NULL, 'a', 'b', NULL)`, [b1, a1]);
   await reapply("084");
   const under084 = await refused(`SELECT record_thought_relation($1::uuid, $2::uuid, 'distinct', 0.7, 'k', NULL, 'a', 'b', NULL)`, [b1, a1]);
   const sentinel084 = /ob1:relation-distinct/.test(String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('${RTR}')`)).s));
   const restored = await restoreShipped("thought_facets_validate", "record_thought_relation");
-  await reapply("100");
+  await reapply("102");
   const [ra] = await q<{ edges: number; apart: number }>(`SELECT count(*)::int AS edges, count(*) FILTER (WHERE payload->>'relation' = 'distinct')::int AS apart FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL`);
   const again = (await one<{ r: { action: string } }>(`SELECT record_thought_relation($1::uuid, $2::uuid, 'distinct', 0.6, 'k', NULL, 'a', 'b', NULL) AS r`, [b1, a1])).r;
-  assert(/relation must be related, evolves, duplicate or NULL/.test(under084) && !sentinel084 && restored.some((f) => f.startsWith("100")) && ra.edges === 1 && ra.apart === 1 && again.action === "kept",
-    `084 re-applied refuses distinct and drops the sentinel the pass reads; the shipped definers restore 100; 100 re-applied moves nothing (${JSON.stringify([under084.slice(0, 60), sentinel084, restored, ra, again])})`);
+  assert(/relation must be related, evolves, duplicate or NULL/.test(under084) && !sentinel084 && restored.some((f) => f.startsWith("102")) && ra.edges === 1 && ra.apart === 1 && again.action === "kept",
+    `084 re-applied refuses distinct and drops the sentinel the pass reads; the shipped definers restore 102; 102 re-applied moves nothing (${JSON.stringify([under084.slice(0, 60), sentinel084, restored, ra, again])})`);
   await db.exec(`DELETE FROM thoughts`);
 }
 

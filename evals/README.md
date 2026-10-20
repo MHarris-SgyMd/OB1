@@ -7315,6 +7315,16 @@ The checks, by criterion:
 | A1–A8 | 2, resource indicators | Every token checked has one audience. A `/mcp` token is refused by the REST core, by canary `/mcp` and by the canary REST core, and a REST-core token is refused by `/mcp`. Also refused: an unknown resource; two resources at once from a client allowed both, whether by authorization code (named at the token endpoint, or granted at authorization and redeemed naming none) or by client credentials from a service linked to both tiers' REST cores (`runner-tiers`); a DCR client asking for the REST core; and a third-party client registering for client credentials (by DCR and by a metadata document), for the implicit grant (by DCR), or with `grant_types` as a string. A `backchannel_logout_uri` is refused or dropped. A request naming no scope, from an operator already signed in and consented, asked twice, and one naming an empty scope, get no code (each candidate's refusal pinned). A request that names no resource gets no token: at the authorization endpoint it is refused before any page, and a POST to that endpoint from a signed-in, consented browser gets no code either (POST is off on both: 404 on the winner, 405 on the runner-up). Every token issued for a resource with no brain scope is refused where it is presented, with `insufficient_scope`; `EXPECT` names which each candidate issues (the winner: `/mcp` and the REST core, for `openid` alone; the runner-up: `/mcp`, for `offline_access` alone). |
 | X1–X4 | 1, token exchange | Through `/mcp`, the REST core sees subject `oauth:operator`, actor `mcp`, audience `/api`. Done directly, the exchange keeps `sub`, adds `act: {sub: "mcp"}`, narrows scope on request, and ends no later than the subject token. Ten cases are refused, each with its expected error and its own cause (a subject token of the wrong audience is `ERR_JWT_CLAIM_VALIDATION_FAILED aud`, a tampered one `ERR_JWS_SIGNATURE_VERIFICATION_FAILED`). The cases: across tiers, for another tier's target, to the GUI client, with a wrong secret, for a wider scope, a tampered, already-exchanged or REST-core subject token, an `actor_token`, and a missing token type. The exchanged token works at its own REST core only. |
 
+The winner also runs four rows of the deploy's own policy (SMD-2286), which
+are not criteria of the comparison and are not in the 32:
+
+| Row | What it checks |
+| --- | --- |
+| G5r | Every refresh rotates. Two refreshes at once with one token both succeed with distinct tokens, inside the 10 s reuse grace (the MCP SDK refreshes without a lock), and the chain goes on after them. The consent page words `brain:read` as a read key. |
+| P1 | A confidential client's refresh token rotates too, which the library's default would leave alone: rotation is the server's setting. |
+| P2 | `brain:read` with `brain:capture`, which no access key holds, is refused `invalid_scope` at the authorization request, before any page. |
+| P3 | The exchange refuses a narrowing to `brain:read brain:capture`. |
+
 Two rows stay manual, because they need a public origin: a claude.ai connector
 (claude.ai refuses private and CGNAT hosts), and whether Claude Code 2.1.275
 accepts the bare-path document, whose `issuer` carries `/auth`
