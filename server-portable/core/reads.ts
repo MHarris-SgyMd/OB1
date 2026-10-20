@@ -320,7 +320,7 @@ export type ListThoughtsResult = { thoughts: ListedThought[] };
 
 export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, type, topic, person, days, said_by, actor, min_trust }: Input<"list_thoughts">): Promise<Outcome<ListThoughtsResult>> {
   // min_trust (SMD-1724) as the ladder's words at or above it: a containment
-  // clause's sibling, which either store can run (no ob1_trust_rank call).
+  // clause's sibling (no ob1_trust_rank call).
   const data = await (await ctx.store()).listThoughts({ limit, type, topic, person, days, saidBy: said_by, actor, trustIn: min_trust === undefined ? undefined : trustAtOrAbove(min_trust) });
   if (!data.length) return ok({ thoughts: [] });
   // 025 (SMD-1253): mark the listed thoughts a newer thought supersedes,
@@ -339,11 +339,9 @@ export async function listSupersessionProposals(ctx: Ctx, _principal: Principal,
 // ── thought_stats and thought_changes ────────────────────────────────────────
 
 export async function thoughtStats(ctx: Ctx, _principal: Principal, _input: Input<"thought_stats">): Promise<Outcome<ThoughtStats>> {
-  // The store aggregates. On the SQL path that is migration 024's
-  // thought_stats_summary() over the whole corpus in one statement; on
-  // PostgREST it is the capped page walk. Either way we get the total, the
-  // date range, and the count maps, plus how many rows the breakdowns
-  // actually cover. (See store.ts:ThoughtStats.)
+  // The store aggregates: migration 024's thought_stats_summary() over the
+  // whole corpus in one statement — the total, the date range, and the count
+  // maps, plus how many rows the breakdowns cover. (See store.ts:ThoughtStats.)
   return ok(await (await ctx.store()).statsSummary());
 }
 
@@ -506,9 +504,6 @@ export function brainInfoReader(ctx: Ctx): (surface: BrainInfoSurface) => Promis
   return async (surface) => {
     const { deadlineMs, opts } = SURFACES[surface];
     const read = () => readBrain(serverFacts(ctx), async (progress) => (await ctx.store()).databaseFacts(opts, progress), deadlineMs);
-    // Not shared on Workers (the PostgREST store): its read is a refusal with no
-    // I/O to share, and a promise from one request is not another's to await.
-    if (storeKind(ctx.env()) !== "sql") return read();
     const store = await ctx.store().catch(() => null);
     if (!store) return read();
     const inflight = INFLIGHT.get(store) ?? new Map<BrainInfoSurface, Promise<BrainInfo>>();

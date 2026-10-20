@@ -530,8 +530,8 @@ holds the two to one answer.
 Migration 058 is `node_state` (SMD-2074): one read of a thought's lifecycle,
 blockers and supersession, for every surface that ranks by them. Until it,
 `graph-centrality.ts` held those rules as SQL private to the script, and the
-server — which cannot import a `db/` script, and whose PostgREST store reaches
-only RPCs — could not share them. Five functions, all `LANGUAGE sql`, SECURITY
+server — which cannot import a `db/` script, and whose PostgREST store (retired
+in SMD-3152) reached only RPCs — could not share them. Five functions, all `LANGUAGE sql`, SECURITY
 INVOKER, no SET, not STRICT, so a caller's planner inlines them:
 `node_lifecycle_types()` and `node_settled_types()` (the six status types this
 schema knows, and the two that settle a node); `node_lifecycle()` (per thought:
@@ -1303,7 +1303,7 @@ reset since 086 (below). The settled rows are those with a decline in the log �
 reads a restamp as "re-captured … the label moved to this key" and a decline
 as "re-captured … the label kept". It refuses to apply
 without 055, 060, 073 or 074. test-schema [75], test-upgrade [20ag],
-test-store-sql and test-store-postgrest [8d], test-e2e-sql [13f].
+test-store-sql [8d], test-e2e-sql [13f].
 
 Migration 086 is the operator's way out of a label 085 settled or moved
 (SMD-2744). Under 085 the first classified key that can read to re-capture a
@@ -1341,8 +1341,7 @@ agent key landing in between is weighed first. `ob1_restamp_recapture` is
 `backfill_thought_actors` 085's body with a reset among its candidate rows:
 a restamp with a reset after it is no writer, and the capture is the writer
 again. It refuses to apply without 046 or 085. test-schema [77],
-test-upgrade [20ah], test-store-sql [8e], test-store-postgrest [8g],
-test-e2e-sql [13g].
+test-upgrade [20ah], test-store-sql [8e], test-e2e-sql [13g].
 
 Migration 087 adds `board_findings_posted`, what board-sync's findings step
 posted to the Linear board (SMD-2681): one row per ticket pair and word —
@@ -1409,8 +1408,8 @@ the label is the caller's own or was not weighed — the operator's
 the structured content carries the outcome and, after a restamp, `labelMine`.
 It refuses
 to apply without 085 and 086. test-schema [80], test-upgrade [20ak],
-server-portable/test-server.ts [29], test-e2e-sql [13h], test-store-sql and
-test-store-postgrest [8d], test-rest-sql [3].
+server-portable/test-server.ts [29], test-e2e-sql [13h], test-store-sql
+[8d], test-rest-sql [3].
 
 Migration 091 keeps every time the consolidation pass settled a proposal,
 since the judge last asserted it, on its row (SMD-2913). 067's `rebuild_derived` reopens a settled row on a later
@@ -1465,8 +1464,7 @@ written before 092 onto a thought an earlier accept took stays until an event
 below it fires the lapse (no sweep; SMD-2934); a lapsed pointer is not put back by a reject (SMD-2933); a thought
 the key wrote with no agent id counts as another's. It refuses to apply
 without 082. test-schema [72] and [82], test-upgrade [20am], test-store-sql
-[8c] and [8f] (the chain locks on two connections), test-store-postgrest [8c],
-test-e2e-sql [13e].
+[8c] and [8f] (the chain locks on two connections), test-e2e-sql [13e].
 
 Migration 093 adds `extraction_progress`, a long thought's extraction
 windows kept across a claim that does not finish (SMD-2694). A hard stop
@@ -1540,7 +1538,7 @@ cleared, read off its own transaction's events. A brain short of 094 lists
 without the writers and says so, and an accept there says the writer check did
 not run. It refuses to apply without
 016, 025, 029, 082 or 092. test-schema [84], test-upgrade [20ao], test-live
-[16], test-store-sql and test-store-postgrest [10], test-e2e-sql [13i],
+[16], test-store-sql [10], test-e2e-sql [13i],
 test-server [16l].
 
 Migration 095 gives the stated-status label its inputs in one call
@@ -1565,7 +1563,7 @@ the server's role reads `thoughts`, `thought_audit`, `ob1_ticket_head` and
 no label rather than a failed search (`node_state`'s `thought_sources` is not
 read when only `open` is). It refuses to apply without 068 or 060. test-schema
 [85], test-live [43] (the plans), test-upgrade [20ap], server-portable's
-test-store-sql and test-store-postgrest [17].
+test-store-sql [17].
 
 Migration 096 creates `pg_stat_statements` where the server offers it
 (SMD-1849 PR 3b): each SQL statement's calls, times, rows and blocks, which
@@ -3281,8 +3279,8 @@ the one write, the review path's states and refusals with the audit row, the
 queue and staleness against PGlite; `test-live.ts` [16] runs the worker end to
 end against a stub judge — the audited accept under the key's name, the reject
 that clears, a cleared claim table not re-proposing a decided pair, the pool
-picking up a thought extracted since. `test-store-sql`/`-postgrest` [10] cover
-the tool's read on both stores; `test-preflight` the line.
+picking up a thought extracted since. `test-store-sql` [10] covers the tool's
+read; `test-preflight` the line.
 
 ## Rebuilding derived artifacts (SMD-1732)
 

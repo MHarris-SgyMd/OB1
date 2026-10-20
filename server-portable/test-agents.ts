@@ -498,13 +498,10 @@ console.log("\n[13b] A registry that cannot answer this server is misconfigured,
     for (const errno of ["42883", "42501", "42501"]) await one.resolve(failing(errno), principal("laptop", H("a")));
     assert(warnings.length === 2 && /search_path/.test(warnings[0]) && /--grant/.test(warnings[1]),
       `a change of SQLSTATE is said with its own remedy, a repeat is not (${warnings.length} warning(s): ${warnings.map((w) => w.slice(60, 140)).join(" | ")})`);
-    // PostgREST says PGRST202 while its schema cache is stale after a migration,
-    // which heals on reload: a retry may answer (review pass 1).
-    for (const errno of ["08006", "PGRST202"]) {
-      warnings.length = 0;
-      const out = await new AgentResolver(0, () => 0).resolve(failing(errno), principal("laptop", H("a")));
-      assert(out.status === "ok" && out.unresolved === "unreachable" && /`supersedes` gets a retry/.test(warnings[0] ?? ""), `…while ${errno} stays unreachable, its warning saying a capture key's supersedes gets a retry (${JSON.stringify(out)}; ${warnings[0]?.slice(0, 120)})`);
-    }
+    // A connection failure: a retry may answer (review pass 1).
+    warnings.length = 0;
+    const lost = await new AgentResolver(0, () => 0).resolve(failing("08006"), principal("laptop", H("a")));
+    assert(lost.status === "ok" && lost.unresolved === "unreachable" && /`supersedes` gets a retry/.test(warnings[0] ?? ""), `…while 08006 stays unreachable, its warning saying a capture key's supersedes gets a retry (${JSON.stringify(lost)}; ${warnings[0]?.slice(0, 120)})`);
     // `refused`: the registry answered and refused the argument, so the pointer
     // goes, and the line says so (review pass 4: no test held the wording).
     warnings.length = 0;
@@ -548,23 +545,17 @@ console.log("\n[14] A definitive revocation IS enforced, cached or not");
   assert(out2.status === "ok" && out2.agentId === undefined, "an unusable answer serves without an id");
 }
 
-console.log("\n[15] Concurrent requests of a key share one lookup — on the SQL store, not on Workers (SMD-2041)");
+console.log("\n[15] Concurrent requests of a key share one lookup (SMD-2041)");
 {
   // resolve_agent can wait on a lock, up to its cap (SMD-2072):
   // five concurrent requests of a cold key are one lookup, one connection.
-  // On Workers a fetch belongs to the request that started it, so there each
-  // request makes its own.
+  // (Sharing was off on the Workers target, retired in SMD-3152.)
   const slow = (onCall: () => void) => fakeStore(async () => { await Bun.sleep(50); return { ok: true, agentId: "agent-1" } as AgentResolution; }, onCall);
   let shared = 0;
   const pooled = new AgentResolver(0, () => 0);
   const store = slow(() => shared++);
   const outs = await Promise.all(Array.from({ length: 5 }, () => pooled.resolve(store, principal("laptop", H("s")))));
   assert(shared === 1 && outs.every((o) => o.status === "ok" && o.agentId === "agent-1"), `five concurrent requests of one key, one lookup (${shared})`);
-  let apart = 0;
-  const workers = new AgentResolver(0, () => 0, false);
-  const store2 = slow(() => apart++);
-  await Promise.all(Array.from({ length: 5 }, () => workers.resolve(store2, principal("laptop", H("s")))));
-  assert(apart === 5, `with sharing off (Workers), each request its own lookup (${apart})`);
 }
 
 console.log("\n[16] A lookup that times out on a lock, or fails to serialize, is retried, then busy, and a revocation this process has read stands through any failure (SMD-2072, SMD-2090)");
@@ -587,7 +578,7 @@ console.log("\n[16] A lookup that times out on a lock, or fails to serialize, is
   // TTL 0, so each step below is a lookup; no retries, so each is one (the
   // retry has its own case below).
   const once = { attempts: 1, budgetMs: 0, pauseMs: 0 };
-  const r = new AgentResolver(0, () => 0, true, once);
+  const r = new AgentResolver(0, () => 0, once);
   const p = principal("laptop", H("9"));
 
   // A key the registry answered for is busy when it times out: that answer
@@ -598,7 +589,7 @@ console.log("\n[16] A lookup that times out on a lock, or fails to serialize, is
   const timed = await r.resolve(store, p);
   assert(timed.status === "busy", `a key answered ok before is busy when its lookup times out on a lock (${JSON.stringify(timed)})`);
   const never = principal("desk", H("8"));
-  for (const [code, what] of [["55P03", "lock_timeout's 55P03"], ["57014", "statement_timeout's 57014 (a role's cap, as on Workers)"], ["40P01", "a deadlock's 40P01"], ["40001", "a serialization failure's 40001 (resolve_agent's write under a REPEATABLE READ default, a revocation committed during its wait — SMD-2090)"]] as const) {
+  for (const [code, what] of [["55P03", "lock_timeout's 55P03"], ["57014", "statement_timeout's 57014 (a role's cap)"], ["40P01", "a deadlock's 40P01"], ["40001", "a serialization failure's 40001 (resolve_agent's write under a REPEATABLE READ default, a revocation committed during its wait — SMD-2090)"]] as const) {
     answer = failing(code, what);
     const o = await r.resolve(store, p);
     const n = await r.resolve(store, never);
@@ -662,7 +653,7 @@ console.log("\n[16] A lookup that times out on a lock, or fails to serialize, is
     let calls = 0;
     let fails = 2;
     const clearing = fakeStore(async () => { if (fails-- > 0) throw Object.assign(new Error("lock timeout"), { errno: "55P03" }); return { ok: true, agentId: "agent-5" } as AgentResolution; }, () => calls++);
-    const retrying = new AgentResolver(0, () => 0, true, { attempts: 5, budgetMs: 2000, pauseMs: 40 });
+    const retrying = new AgentResolver(0, () => 0, { attempts: 5, budgetMs: 2000, pauseMs: 40 });
     const t0 = performance.now();
     const served = await retrying.resolve(clearing, principal("retry", H("5")));
     const took = performance.now() - t0;
@@ -675,12 +666,12 @@ console.log("\n[16] A lookup that times out on a lock, or fails to serialize, is
     assert(exhausted.status === "busy" && tries === 5, `…and one that does not is busy after its attempts (${exhausted.status}, ${tries} lookups)`);
     let slowTries = 0;
     const slow = fakeStore(async () => { await Bun.sleep(300); throw Object.assign(new Error("statement timeout"), { errno: "57014" }); }, () => slowTries++);
-    const budgeted = await new AgentResolver(0, () => 0, true, { attempts: 5, budgetMs: 500, pauseMs: 40 }).resolve(slow, principal("retry-slow", H("3")));
+    const budgeted = await new AgentResolver(0, () => 0, { attempts: 5, budgetMs: 500, pauseMs: 40 }).resolve(slow, principal("retry-slow", H("3")));
     assert(budgeted.status === "busy" && slowTries === 2, `…within the budget in real time: 300 ms lookups against 500 ms are tried twice (${slowTries})`);
     let outageTries = 0;
     await retrying.resolve(fakeStore(refusedConn, () => outageTries++), principal("retry-down", H("2")));
     let revokedTries = 0;
-    const known = new AgentResolver(0, () => 0, true, { attempts: 5, budgetMs: 2000, pauseMs: 40 });
+    const known = new AgentResolver(0, () => 0, { attempts: 5, budgetMs: 2000, pauseMs: 40 });
     let first = true;
     const revokedThenLocked = fakeStore(async () => { if (first) { first = false; return revokedAnswer(); } throw Object.assign(new Error("lock timeout"), { errno: "55P03" }); }, () => revokedTries++);
     await known.resolve(revokedThenLocked, principal("retry-revoked", H("1")));
@@ -704,7 +695,7 @@ console.log("\n[16] A lookup that times out on a lock, or fails to serialize, is
   let now = 0;
   answer = async () => ({ ok: false, error: "REVOKED", agentId: "agent-7", revokedAt: "2026-09-24T00:00:00Z", reason: null } as AgentResolution);
   const counted = fakeStore(() => answer(), () => n++);
-  const ttl = new AgentResolver(60000, () => now, true, once);
+  const ttl = new AgentResolver(60000, () => now, once);
   const q = principal("tablet", H("7"));
   await ttl.resolve(counted, q);
   now += 20000; // past the revocation's 10 s failure TTL

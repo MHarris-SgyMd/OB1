@@ -15,8 +15,7 @@
  * environment record by `resolveEmbedConfig`, with the defaulting rules index.ts
  * used to hold, so the two cannot disagree about what an unset variable means
  * either. core/context.ts passes `() => resolveEmbedConfig(env())` because the
- * server reads its environment lazily (Cloudflare Workers bindings arrive per
- * request);
+ * server reads its environment lazily (root.ts initEnv seeds it before the first read);
  * reembed.ts passes process.env once.
  *
  * Nothing in here imports a database client or a framework, so it builds for

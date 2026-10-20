@@ -26,8 +26,8 @@ export { cutByStopLine, legacyRouteLine, recordCall, REFUSAL_BODY_LIMIT, type Ca
 // The core (SMD-2283): every tool's logic over the store and the model
 // provider, as functions of a principal and a typed input (core/index.ts). Built
 // once, at import; it reads the environment and the store through root.ts's
-// two lazy readers, so Cloudflare Workers bindings — which arrive per
-// request — still apply. The model provider is anything speaking the OpenAI
+// two lazy readers, so the environment seeded before the first read applies.
+// The model provider is anything speaking the OpenAI
 // /embeddings and /chat/completions shapes, which includes OpenRouter, OpenAI
 // itself, and Ollama's compatibility layer — so a fully local brain is a URL
 // change, not a code change.
@@ -187,7 +187,7 @@ function buildServer(principal: Principal, endpoint = "", record: CallRecord = {
   // cheap cross-brain id-set diff (db/tier.ts --compare) that the prose read tools
   // cannot give (they page content, capped). One JSON object per page,
   // {total, digest, ids, cursor}: total and the whole-corpus md5 digest ride the
-  // first page (SQL store; the PostgREST shim leaves digest null), and `after` =
+  // first page, and `after` =
   // the previous page's `cursor` pages on until it is null. Read-only, ids only —
   // no content, no vectors. Gated like the other read tools, so a capture-only key
   // never sees it.
@@ -205,8 +205,8 @@ function buildServer(principal: Principal, endpoint = "", record: CallRecord = {
   // Tool 3b-iv: the background-work queues (SMD-2131) — per work_type, what is
   // pending / in flight / done / failed / stalled over thought_work_claims, so an
   // operator or agent can ask a running brain about its queues without shelling into
-  // Postgres (SMD-1844 closed the host port). Read-only, aggregated in SQL; SQL
-  // backend only (the table is not on PostgREST). Gated like the other read tools.
+  // Postgres (SMD-1844 closed the host port). Read-only, aggregated in SQL.
+  // Gated like the other read tools.
   readTool("worker_status", async (input) => say.renderWorkerStatus(await core.workerStatus(principal, input)));
 
   // Tool 3c: what this brain is (SMD-2041) — version, commit, store, tier, the
@@ -259,9 +259,7 @@ function buildServer(principal: Principal, endpoint = "", record: CallRecord = {
   // like update/delete: none is registered for a read or capture key. The two
   // mutating actions stamp the calling key into the action log, one row per
   // affected thought; the preview mutates nothing and writes none. A fault keeps
-  // the tool's lead, `<tool> failed:`, FAILED beside it — on a PostgREST
-  // (Workers) deploy the store throws the SQL-only reason, which is permanent,
-  // not the transient STORE_UNAVAILABLE capture's implies. The keyed REST mirror
+  // the tool's lead, `<tool> failed:`, FAILED beside it. The keyed REST mirror
   // is the app.post guard below, over the same operations.
   registerOp("retry_failed",
     async (input) => say.renderRetryFailed(await core.retryFailed(principal, input)),
@@ -372,8 +370,9 @@ app.use("*", async (c, next) => {
   trace.end({ status: c.res.status, outcome, code }, at);
 });
 
-// Must run before anything reads env(). On Workers c.env carries the bindings;
-// elsewhere it is undefined and initEnv falls back to process.env.
+// Must run before anything reads env(). c.env is undefined under Bun, so
+// initEnv reads process.env (it carried Workers' bindings, a target retired in
+// SMD-3152).
 app.use("*", async (c, next) => {
   initEnv(c.env as unknown as Record<string, unknown>);
   await next();
@@ -516,7 +515,7 @@ app.get("*", async (c, next) => {
     const status = await core.workerStatus(principal, {});
     return c.json(status.ok ? status.value.pools : [], 200, corsHeaders);
   } catch (e) {
-    // SQL-only: a PostgREST (Workers) deployment cannot serve this — a reason, not a bare 500.
+    // A store failure: a reason, not a bare 500.
     // Its line says `error`, whatever the 200 (review pass 4: it read `ok`); its span the throw's kind and code (PR 2c).
     if (trace) { trace.outcome = "error"; trace.code = "FAILED"; trace.fault(e); }
     return c.json({ error: (e as Error).message }, 200, corsHeaders);
@@ -531,8 +530,8 @@ app.get("*", async (c, next) => {
 // there. Gated as the tool each mirrors (mayCall: write scope today) — stricter than /worker-status's read mirror; a
 // read/capture/no/wrong/revoked key is shown and does nothing (plain "ok",
 // parity with /health and /worker-status). Args ride the JSON body; the
-// refusals-as-values are the tool's, as a 400 carrying the same code, and the
-// SQL-only reason (the PostgREST shim throws) is a 200 body as the read mirror's.
+// refusals-as-values are the tool's, as a 400 carrying the same code, and a
+// store failure is a 200 body as the read mirror's.
 const WORKER_RETRY_PATH = /(^|\/)worker-retry-failed\/?$/;
 const WORKER_RELEASE_PATH = /(^|\/)worker-release-leases\/?$/;
 const WORKER_RUN_PATH = /(^|\/)worker-run\/?$/;
@@ -577,7 +576,7 @@ app.post("*", async (c, next) => {
     if (isRun) return said(await core.runWorker(caller, MIRROR_INPUT.run_worker(args)), MIRROR_WORDS.run_worker);
     return said(await core.releaseStaleLeases(caller, MIRROR_INPUT.release_stale_leases(args)), MIRROR_WORDS.release_stale_leases);
   } catch (e) {
-    // SQL-only (the PostgREST shim throws), or a store failure: a reason, not a bare 500 (parity with /worker-status).
+    // A store failure: a reason, not a bare 500 (parity with /worker-status).
     if (trace) { trace.outcome = "error"; trace.code = "FAILED"; trace.fault(e); }
     return c.json({ error: (e as Error).message }, 200, corsHeaders);
   }
@@ -871,15 +870,14 @@ app.notFound((c) => {
 // why the image needs it). Bun serves the default export below itself and
 // hands the server to no one but the fetch handler, as its second argument, so
 // the first request passes it on; before that nothing can be in flight. Only
-// when this module is Bun's entry: never on Workers, whose second argument is
-// its bindings, nor in a suite that imports the module.
+// when this module is Bun's entry: never in a suite that imports the module.
 const SERVES_ON_BUN = typeof Bun !== "undefined" && import.meta.main === true;
 let bunServer: Stoppable | undefined;
 /** Set once the stop closes what is still in flight at its bound, so the route's close line names the stop, not the client. */
 let cutByStop = false;
 if (SERVES_ON_BUN) {
   serveHere(SERVER_NAME); // builds the store now and wires the durable job store for this server (root.ts)
-  // Spans to a collector, where one is named (OTEL_EXPORTER_OTLP_ENDPOINT): never on Workers (telemetry.ts).
+  // Spans to a collector, where one is named (OTEL_EXPORTER_OTLP_ENDPOINT; telemetry.ts).
   void startTelemetry(SERVER_NAME);
   const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);
   if (grace.problem) console.warn(grace.problem);
@@ -927,7 +925,7 @@ if (SERVES_ON_BUN) {
 }
 
 export default {
-  // Workers reads `fetch`; Bun also reads `port`. Node uses @hono/node-server.
+  // Bun reads `fetch` and `port`; the suites call `fetch`. Node uses @hono/node-server.
   // No `idleTimeout`: a tool call outlives the default by the keepalive (sse.ts),
   // and the default is the right reaper for a dead socket (SMD-1864).
   // An empty PORT is unset, not port 0 (a random port, silently) — `||`, the rule the vendored servers' tails share (SMD-1799).

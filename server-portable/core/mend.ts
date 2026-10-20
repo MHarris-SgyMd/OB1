@@ -417,8 +417,6 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
  * `intervalS`, never two at once. A tick that throws — the database away —
  * doubles the wait, up to MAX_TICK_BACKOFF times, and a tick that runs resets
  * it; a failing row is the row's to wait out (mendOnce), never the loop's.
- * Over the PostgREST store it starts nothing: no session holds the lock there
- * and no capture row says a row's writer (said once).
  *
  * Says a line when a tick mended something, when the provider stops
  * answering and when it answers again, at a sweep's end when the rows it left
@@ -436,7 +434,6 @@ export function startVectorMender(ctx: Ctx, opts: { intervalS: number; log?: (li
   let threw = "";
   let lockSaid = false;
   let refusedSaid = false;
-  let kindChecked = false;
   let saidDown = false;
   let sweep = { refused: 0, failed: 0, held: 0, firstError: null as string | null };
   let lastSweep = "0/0";
@@ -448,12 +445,6 @@ export function startVectorMender(ctx: Ctx, opts: { intervalS: number; log?: (li
   };
   const run = async () => {
     try {
-      if (!kindChecked && (await ctx.store()).kind === "postgrest") {
-        log("vector mender: not started — the PostgREST store holds no session for the leader lock and no capture row to say a row's writer; a thought saved without a vector waits for db/reembed.ts");
-        stopped = true;
-        return;
-      }
-      kindChecked = true;
       const t = await mendOnce(ctx, state, () => stopped);
       ticks++;
       backoff = 1;
