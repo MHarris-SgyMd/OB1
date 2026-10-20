@@ -539,8 +539,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // reads, SMD-2540), 096 (pg_stat_statements where the server offers
   // it, SMD-1849), 097 (one walk for 082's lapse, SMD-3035), 098 (the
   // stated-status label's read bounded, SMD-2540), 099 (an unlink
-  // takes the review lock, SMD-3045) and 100 (the thoughts with no vector
-  // by an index of their own, SMD-3056)
+  // takes the review lock, SMD-3045), 100 (the thoughts with no vector
+  // by an index of their own, SMD-3056) and 101 (the lapse locks its own
+  // tree, SMD-3046)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -668,13 +669,15 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // name without 092 or 094 ([20aq]); 098 redefines 095's read over its own
   // signature, refusing by name without 095 ([20ar]); 099 redefines 088's
   // update_thought, refusing by name without 073 ([20as]); 100 adds a partial index on
-  // thoughts, needing nothing past 001 — all
+  // thoughts, needing nothing past 001; 101 adds the lapse's tree and
+  // redefines 097's walk over it and its trigger to lock it, refusing by
+  // name without 097 ([20at]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 71, `030 is among the last seventy-one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 72, `030 is among the last seventy-two migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4341,6 +4344,50 @@ console.log("\n[20as] Migration 099: refused by name without 073; onto a populat
   const rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the099 });
   assert((await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 099 is a no-op: no row or audit row moved");
+  await sql.close();
+}
+
+console.log("\n[20at] Migration 101: refused by name without 097; onto a populated brain at the file before it — a pending proposal's lapses read the same after it, the accept clears what the read said through the locking trigger, no row and no audit row moved by the file; a re-apply a no-op (SMD-3046)");
+{
+  const the101 = MIGRATIONS.find((f) => f.endsWith("_lapse_locks_its_tree.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "097" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the101 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 101 needs 097 (ob1_lapse_walk, ob1_lapse_capture_pointers); this schema lacks it",
+    `101 on a schema stopped before 097 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the101 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = `[${Array.from({ length: OPTS.dim }, (_, i) => (i === 1 ? 1 : 0)).join(",")}]`;
+  const agentOf = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
+  // [20aq]'s two keys, as it made them.
+  const HOOK = { name: "hook-key", agent_id: await agentOf("5", "hook-key", "capture"), via: "open-brain", scope: "capture" };
+  const WRITER = { name: "writer-key", agent_id: await agentOf("4", "writer-key", "write"), via: "open-brain" };
+  const REVIEWER = { name: "consolidate", via: "consolidate", session: "job-20at" };
+  const cap = async (content: string, actor: Record<string, unknown>, supersedes?: string) =>
+    ((await sql`SELECT upsert_thought(${content}::text, ${{ metadata: { source: "mcp" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }}::jsonb, ${vec}::vector) AS r`)[0].r as { id: string }).id;
+  const W = await cap("upgrade 101: the writer's rota, weekly", WRITER);
+  const C = await cap("upgrade 101: the hook's rota, daily", HOOK);
+  const N = await cap("upgrade 101: the hook's next word on the rota", HOOK, C);
+  const pid = ((await sql`SELECT record_supersession_proposal(${W}::uuid, ${C}::uuid, 'newer_supersedes_older', 0.9, '[20at]', 0.9, 'consolidate:stub@p95') AS id`)[0] as { id: string }).id;
+  const lapses = async () => JSON.stringify((await sql`SELECT ob1_accept_lapses(${C}::uuid, ${W}::uuid) AS l`)[0].l);
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, supersedes, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const before = await rows(), auditBefore = await audits(), lapsesBefore = await lapses();
+  assert(lapsesBefore === JSON.stringify([{ id: N, onto: C }]) && (await sql`SELECT to_regprocedure('ob1_lapse_tree(uuid, uuid)') AS f`)[0].f === null,
+    `[20at] setup: at 100 the read names the hook's pointer, and there is no tree (${lapsesBefore})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the101 });
+  const [fn] = await sql`SELECT (SELECT prosrc FROM pg_proc WHERE proname = 'ob1_lapse_capture_pointers') AS lapse, to_regprocedure('ob1_lapse_tree(uuid, uuid)') IS NOT NULL AS tree`;
+  assert(fn?.tree === true && /ob1:lapse-locks-its-tree/.test(String(fn?.lapse)) && (await rows()) === before && (await audits()) === auditBefore && (await lapses()) === lapsesBefore,
+    "101 applied: the tree, and the trigger locking it; no row or audit row moved, and the pending proposal's lapses read the same");
+  // A re-apply moves nothing.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the101 });
+  assert((await rows()) === before && (await audits()) === auditBefore && (await lapses()) === lapsesBefore, "a re-apply of 101 is a no-op");
+  // The accept after it clears what the read said, through the locking trigger.
+  const [{ r }] = await sql`SELECT review_supersession_proposal(${pid}::uuid, 'accept', NULL, NULL, ${REVIEWER}::jsonb, false) AS r`;
+  const [{ s: left }] = await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${N}::uuid`;
+  assert((r as { ok: boolean }).ok === true && left === null, `the accept after it lapses the hook's pointer the read named (${JSON.stringify(r)}, ${left})`);
   await sql.close();
 }
 

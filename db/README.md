@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2914 assertions: 2914 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred (100) migrations applied, and
+`bun test-schema.ts` prints `2925 assertions: 2925 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and one (101) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3046).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1629,9 +1629,10 @@ write function moves one out since 099: every pointer write through
 lock the accept holds. Two writes still take none and move nothing out: a
 first capture naming supersedes (a new row, nothing above it), and another
 taker's own lapse clears, which clear nothing the accept's walk read as
-staying. A taker that holds none — a
-write key's re-capture, a text move, board-sync's adoption — still has the
-window (092 had it one level wide; SMD-3046). No signature
+staying. Since 101 the lapse locks its own tree, so a link moved by any
+writer — under any taking, a write key's re-capture, a text move,
+board-sync's adoption and a page render among them — is waited for or read
+again (092 had the window one level wide; SMD-3046). No signature
 changes; the listings read the same. It refuses to apply without 092 or 094;
 092 or 094 re-applied puts its own body back and 097 after it the walk, so
 after an older tree's `--reapply` over a 097 brain run this tree's
@@ -1714,6 +1715,42 @@ is a no-op. test-schema [90] (the definition, the five refusals, another
 schema's index), test-store-sql [18] (the store's two page statements and
 the count read through it, each reading only its own rows' entries; the
 page's LIMIT).
+
+Migration 101 has the lapse lock its own tree (SMD-3046). The lapse reads
+the tree above a taken row in one snapshot and then locks and clears what
+it found, so a link moved between the two was missed: one moved out still
+had the capture-only pointers above it cleared, one moved in onto the taken
+row missed its own (its writer's lapse read the row untaken). 099 closed
+that under an accept, which holds the review lock every pointer write
+waits on; any other taking — a write key's re-capture note, a text move,
+board-sync's adoption by an edit or a capture's merge, a page render — held
+none, and SMD-3045's Verify measured both races open. Writer-side locks
+were tried and dropped (a page render holds its row before it writes, so
+page writes deadlocked against a delete of the page, and a capture's merge
+was a taker missed); the locks are taken in the lapse trigger instead,
+which every taking passes through. `ob1_lapse_tree(row, onto)` is 097's
+walk, unchanged, also listing each link it went on through, and
+`ob1_lapse_walk` its clears (097's output, which the listing and the CLI
+read unchanged). The trigger locks the event's row; for a pointer onto a
+thought, that thought's chain FOR SHARE from its deepest row up before the
+walk, so a taking in flight below is waited for and then read taken; and
+every clear's links FOR SHARE from the taken row up before any clear, each
+where it still names the row below, so a link moved since the walk leaves
+the clears above it (all before any clear: a clear takes 068's node-state
+bucket locks, and a lapse waiting on a link while holding one deadlocked
+against a re-point out of the tree). Bottom-up both ways, so no writer pair cycles but one,
+named: a re-point of a link in a taking's tree onto a row inside that same
+tree, between the taking's row lock and its path locks, which Postgres
+breaks with 40P01 (a retry succeeds); and 099's multi-call class (a
+transaction holding a row, then asking for the review lock) now meets an
+accept too, whose lapse waits on links. A lapse that clears takes one FOR
+SHARE per path link; a pointer onto a thought locks its chain even when
+nothing lapses, usually one to three rows. It refuses to apply without 097;
+097 re-applied puts back its own walk and the lockless trigger and 101
+after it the tree and the locks. test-schema [91] (the tree beside 097's
+walk, a link moved out made deterministic, the walk-on anchor),
+test-live [6k] (moved out, moved in in either order, the lock orders, the
+named residual, page writes racing a delete), test-upgrade [20at].
 
 ## What changed relative to the guide
 
@@ -4735,9 +4772,9 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2914 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1386 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 835 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
+bun test-schema.ts                          # 2925 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1402 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 851 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 55 assertions: the shards SHARDS lists in test-live.ts, each its own job
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 264 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 235 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
