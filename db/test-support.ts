@@ -877,6 +877,36 @@ export function neverAnswers(): Promise<never> {
   return new Promise<never>(() => {});
 }
 
+/**
+ * A stub provider's outage paced by probes, not the clock (SMD-3048): armed
+ * with `n`, every request is down and each probe counts one off, and the
+ * probe after the last is answered, which ends it. However slow the runner,
+ * the outage is probed `n` times while down, and calls stay down until a
+ * probe answers. The stub asks `down(isProbe)` of each request; `refused`
+ * counts the probes it turned away, for a case's message.
+ */
+export function probePacedOutage(): { arm(n: number): void; clear(): void; down(isProbe: boolean): boolean; readonly refused: number } {
+  let left: number | null = null;
+  let refused = 0;
+  return {
+    arm(n) { left = n; },
+    clear() { left = null; },
+    down(isProbe) {
+      if (left === null) return false;
+      if (isProbe && left === 0) {
+        left = null;
+        return false;
+      }
+      if (isProbe) {
+        left--;
+        refused++;
+      }
+      return true;
+    },
+    get refused() { return refused; },
+  };
+}
+
 /** Poll `cond` every 250 ms for up to `ms`: true as soon as it holds, else its last answer. */
 export async function pollUntil(cond: () => Promise<boolean>, ms: number): Promise<boolean> {
   for (const until = Date.now() + ms; Date.now() < until;) {

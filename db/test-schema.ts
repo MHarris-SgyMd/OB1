@@ -14919,6 +14919,68 @@ console.log("\n[89] Migration 099: an unlink takes the review lock — update_th
   await db.exec(`DELETE FROM thoughts`);
 }
 
+console.log("\n[90] Migration 100: the thoughts with no vector by an index of their own — a btree on thoughts (id), partial on embedding IS NULL, its comment naming it; a re-apply a no-op; anything else under the name in thoughts' schema refused by name, another schema's never taken for it (SMD-3056)");
+{
+  const def = async () => (await db.query<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('thoughts_vectorless_idx')) AS d`)).rows[0].d ?? "";
+  const d = await def();
+  assert(/^CREATE INDEX thoughts_vectorless_idx ON public\.thoughts USING btree \(id\) WHERE \(embedding IS NULL\)$/.test(d), `thoughts_vectorless_idx is a btree on thoughts (id), partial on embedding IS NULL — the mender's page order and its predicate (${d || "absent"})`);
+  const c = (await db.query<{ c: string | null }>(`SELECT obj_description(to_regclass('thoughts_vectorless_idx'), 'pg_class') AS c`)).rows[0].c ?? "";
+  assert(/Migration 100 \/ SMD-3056/.test(c), `…its comment naming the migration (${c.slice(0, 60)})`);
+  // By name, not number: main may take the number.
+  const file = files.find((f) => f.endsWith("_vectorless_index.sql")) ?? "no _vectorless_index.sql";
+  let again: string;
+  try { again = await reapply(file); } catch (e) { again = `threw: ${(e as Error).message}`; }
+  const n = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_indexes WHERE tablename = 'thoughts' AND indexdef LIKE '%WHERE (embedding IS NULL)%'`)).rows[0].n;
+  assert(again.endsWith("_vectorless_index.sql") && n === 1 && (await def()) === d, `100 applied again changes nothing: one such index, the same definition (${again.slice(0, 80)}, ${n})`);
+  // Anything else under the name is refused, never recorded as applied over
+  // it: IF NOT EXISTS alone kept each of the five below, and the mender read
+  // every row (review pass 1).
+  const refusal = async () => { try { await reapply(file); return "applied"; } catch (e) { return (e as Error).message; } };
+  await db.exec(`DROP INDEX thoughts_vectorless_idx; CREATE INDEX thoughts_vectorless_idx ON thoughts (id)`);
+  const wrong = await refusal();
+  assert(/migration 100: thoughts_vectorless_idx exists but is not a btree on thoughts \(id\) WHERE embedding IS NULL — CREATE INDEX thoughts_vectorless_idx ON public\.thoughts USING btree \(id\)\. Drop it \(an index: DROP INDEX CONCURRENTLY, which leaves writes to thoughts running\) and re-run/.test(wrong),
+    `an index of another shape under the name (no WHERE): refused, naming what it is and what to do (${wrong.slice(0, 120)})`);
+  // The predicate right, the column or the table wrong (review pass 3: a
+  // shape check reading any column passed every cell above).
+  await db.exec(`DROP INDEX thoughts_vectorless_idx; CREATE INDEX thoughts_vectorless_idx ON thoughts (created_at) WHERE embedding IS NULL`);
+  const column = await refusal();
+  assert(/migration 100: thoughts_vectorless_idx exists but is not a btree on thoughts \(id\) WHERE embedding IS NULL — CREATE INDEX thoughts_vectorless_idx ON public\.thoughts USING btree \(created_at\) WHERE \(embedding IS NULL\)\./.test(column),
+    `the predicate on another column: refused, naming it (${column.slice(0, 120)})`);
+  await db.exec(`DROP INDEX thoughts_vectorless_idx; CREATE TABLE tu_other (id uuid, embedding vector(3)); CREATE INDEX thoughts_vectorless_idx ON tu_other (id) WHERE embedding IS NULL`);
+  const other = await refusal();
+  assert(/migration 100: thoughts_vectorless_idx exists but is not a btree on thoughts \(id\) WHERE embedding IS NULL — CREATE INDEX thoughts_vectorless_idx ON public\.tu_other USING btree \(id\) WHERE \(embedding IS NULL\)\./.test(other),
+    `the same shape on another table: refused, naming it (${other.slice(0, 120)})`);
+  await db.exec(`DROP TABLE tu_other; CREATE TABLE thoughts_vectorless_idx (x int)`);
+  const table = await refusal();
+  assert(/migration 100: thoughts_vectorless_idx exists but is not a btree on thoughts \(id\) WHERE embedding IS NULL — a relation of kind r\./.test(table),
+    `a table under the name: refused, naming its kind (${table.slice(0, 120)})`);
+  await db.exec(`DROP TABLE thoughts_vectorless_idx`);
+  await reapply(file);
+  assert((await def()) === d, "dropped, the file builds it again in its shape");
+  // Another schema's index under the name, behind public on the path as the
+  // migrator sets it: a lookup by the path's first match found that one on a
+  // brain without its own, kept it, and recorded 100 with no index on
+  // thoughts (review pass 2). By name in thoughts' schema, it builds its own.
+  const path = (await db.query<{ p: string }>(`SELECT current_setting('search_path') AS p`)).rows[0].p;
+  await db.exec(`DROP INDEX thoughts_vectorless_idx; CREATE SCHEMA tu_ahead; CREATE TABLE tu_ahead.thoughts (id uuid PRIMARY KEY, embedding vector(3));
+                 CREATE INDEX thoughts_vectorless_idx ON tu_ahead.thoughts (id) WHERE embedding IS NULL; SET search_path = public, tu_ahead`);
+  let aheadRun: string;
+  try { aheadRun = await reapply(file); } catch (e) { aheadRun = `threw: ${(e as Error).message}`; }
+  const both = (await db.query<{ s: string; d: string; c: string | null }>(`SELECT n.nspname AS s, pg_get_indexdef(c.oid) AS d, obj_description(c.oid, 'pg_class') AS c
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relname = 'thoughts_vectorless_idx' ORDER BY 1`)).rows;
+  // The suite's own path back, not RESET's: PGlite's session default is pg_catalog.
+  await db.query(`SELECT set_config('search_path', $1, false)`, [path]);
+  await db.exec(`DROP SCHEMA tu_ahead CASCADE`);
+  assert(aheadRun.endsWith("_vectorless_index.sql") && both.length === 2 && both[0].s === "public" && both[0].d === d && /Migration 100 \/ SMD-3056/.test(both[0].c ?? "") && both[1].s === "tu_ahead" && both[1].c === null,
+    `another schema's index under the name, on the path behind public: 100 builds thoughts' own and comments it, the other left as it was (${aheadRun.slice(0, 60)}; ${JSON.stringify(both.map((r) => [r.s, r.c !== null]))})`);
+  // Last, and put back in place: a DROP after this catalog write fails inside PGlite.
+  await db.exec(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'thoughts_vectorless_idx'::regclass`);
+  const invalid = await refusal();
+  assert(/migration 100: thoughts_vectorless_idx exists but is INVALID — a CONCURRENTLY build or drop that did not finish, or a build still running/.test(invalid),
+    `an INVALID index in the shape (an interrupted CONCURRENTLY build): refused, naming it (${invalid.slice(0, 120)})`);
+  await db.exec(`UPDATE pg_index SET indisvalid = true WHERE indexrelid = 'thoughts_vectorless_idx'::regclass`);
+}
+
 // db/README.md quotes this suite's assertion total in two places ("Expected
 // outcome" and the Testing block). It used to be edited by hand and drifted;
 // this holds every count the README gives for test-schema.ts to what the suite

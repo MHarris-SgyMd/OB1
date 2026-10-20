@@ -12,6 +12,7 @@ import { createCore, mendIntervalFrom } from "./core/index.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { markRunningLost } from "./jobs.ts";
 import { createRestApp } from "./rest/app.ts";
+import { remoteChecker, tokenSettings, type TokenCheck } from "./oauth-token.ts";
 import { cutOpenRequests, flushTelemetry, startTelemetry } from "./telemetry.ts";
 
 /**
@@ -23,6 +24,20 @@ export const API_DOOR = "open-brain-api";
 
 const core = createCore({ env, store: db, door: API_DOOR });
 
+/**
+ * The token check for the stack's settings (oauth-token.ts, SMD-2286): null
+ * unless configured, and one check — one cached key set — per issuer and
+ * audience, so a request costs a read of the key set only when its cache says.
+ */
+let remoteCheck: { at: string; check: TokenCheck } | null = null;
+function tokens(): TokenCheck | null {
+  const settings = tokenSettings(env());
+  if (!settings) return null;
+  const at = `${settings.issuer} ${settings.audience}`;
+  if (remoteCheck?.at !== at) remoteCheck = { at, check: remoteChecker(settings) };
+  return remoteCheck.check;
+}
+
 /** The calls running — each request and each detached job run — counted for the stop (SMD-2250). */
 const calls = createCallCount();
 
@@ -30,13 +45,16 @@ const calls = createCallCount();
  * The REST app over this core: its request lines to `log` where given, else
  * the request log (telemetry.ts). mcp-server/stack.ts gives one, so in a
  * suite the REST core's lines are apart from the MCP server's in front of it,
- * as two processes' are (SMD-2287 PR 4b).
+ * as two processes' are (SMD-2287 PR 4b). `tokenCheck` stands in for the
+ * authorization server's key set on the mesh, for a suite that signs its own
+ * tokens (test-rest-sql.ts, SMD-2286); a deploy gives none.
  */
-export function restApp(log?: (line: string) => void) {
+export function restApp(log?: (line: string) => void, tokenCheck?: () => TokenCheck | null) {
   return createRestApp({
     core,
     init: () => initEnv(),
     keys: () => ({ MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS, MCP_ACCESS_KEY: env().MCP_ACCESS_KEY }),
+    tokens: tokenCheck ?? tokens,
     resolve: (principal) => agents().resolve(db(), principal),
     track: calls.track,
     plugins,

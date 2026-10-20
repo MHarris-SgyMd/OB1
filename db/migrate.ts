@@ -1020,9 +1020,11 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   }
 
   // ── Judged before any SQL runs ──────────────────────────────────────────────
-  // Every refusal, in one list with one tail — both modes, "would refuse" under
-  // --dry-run — so a green dry run is never followed by a red run and every
-  // refusal is reported, not the first. What 021's shadow needs: a temp table,
+  // Every refusal judged here, in one list with one tail — both modes, "would
+  // refuse" under --dry-run — so a green dry run is never followed by a red
+  // run on these, and every one is reported, not the first. A file's own
+  // refusals inside its body (097's prerequisites, 100's index under its
+  // name) run only with the file: a dry run reads no body. What 021's shadow needs: a temp table,
   // which a hardened database may deny the role (023's backfill call needs one
   // too, and orders after 021, so a fresh upgrade meets the need here first).
   // Then the re-run's own judgements, below.

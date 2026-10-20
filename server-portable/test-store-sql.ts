@@ -1567,6 +1567,71 @@ console.log("\n[17] ticketStatusInputs: migration 095's one call — the hits wi
   await raw.close();
 }
 
+console.log("\n[18] The vector mender's page, both forms, and brain_info's vectorless count are read through migration 100's partial index, each reading only its own rows' entries (SMD-3056)");
+{
+  // One connection, so the statistics flushed below are the reads' own.
+  const one = new SqlStore(URL_, { max: 1 });
+  const conn = (one as unknown as { sql: SQL }).sql;
+  const raw = new SQL({ url: URL_, max: 1 });
+  try {
+    // A thousand thoughts with a vector and three without: enough heap that a
+    // read of every row costs the planner more than the index's one page.
+    await raw.unsafe(`INSERT INTO thoughts (content, metadata, embedding)
+      SELECT 'store-sql 3056 vectored ' || g, '{}'::jsonb,
+             (SELECT array_agg(CASE WHEN i = (g % ${EMBEDDING_DIM}) + 1 THEN 1 ELSE 0 END ORDER BY i)::vector FROM generate_series(1, ${EMBEDDING_DIM}) i)
+        FROM generate_series(1, 1000) g`);
+    await raw.unsafe(`INSERT INTO thoughts (content, metadata) SELECT 'store-sql 3056 vectorless ' || g, '{}'::jsonb FROM generate_series(1, 3) g`);
+    await raw.unsafe("VACUUM ANALYZE thoughts");
+    // Read on the reads' own connection, before the first count: its scan of
+    // the index is flushed by that count's, never inside a window (review
+    // pass 1). Nothing else in this suite reads the index — listVectorless
+    // and readDatabaseFacts run here alone — so no other backend's held
+    // statistics (PG 16 holds an idle one's up to 10 s) move its counters;
+    // a scan of thoughts' heap is not counted for that reason (review pass 2).
+    const waiting = (await conn`SELECT id FROM thoughts WHERE embedding IS NULL AND content LIKE 'store-sql 3056 %' ORDER BY id`).map((r: { id: string }) => r.id);
+    // The page's own bound: two of the three (review pass 3: a page of eight
+    // over three never tested the LIMIT).
+    const two = await one.listVectorless({ limit: 2, after: null });
+    assert(two.map((r) => r.id).join() === waiting.slice(0, 2).join(), `a page of two over three waiting: the first two in id order (${two.length})`);
+    const scans = async () => {
+      await conn`SELECT pg_stat_force_next_flush()`;
+      await conn`SELECT 1`;
+      await raw`SELECT pg_stat_clear_snapshot()`;
+      const [r] = await raw`SELECT i.idx_scan::int AS idx, i.idx_tup_read::int AS read
+        FROM (SELECT 1) one LEFT JOIN pg_stat_user_indexes i ON i.indexrelname = 'thoughts_vectorless_idx'`;
+      return { idx: r.idx as number | null, read: r.read as number };
+    };
+    const s0 = await scans();
+    const first = await one.listVectorless({ limit: 8, after: null });
+    const s1 = await scans();
+    const next = await one.listVectorless({ limit: 8, after: waiting[0] });
+    const s2 = await scans();
+    // The cursor page again under a generic plan, as a prepared statement's
+    // sixth run gets: a cursor the plan cannot seek to walks the index from
+    // its start (SMD-2889 pass 3's regression shape), the same scan count,
+    // more entries read (review pass 1).
+    await conn`SET plan_cache_mode = force_generic_plan`;
+    const nextGeneric = await one.listVectorless({ limit: 8, after: waiting[0] });
+    await conn`RESET plan_cache_mode`;
+    const s2g = await scans();
+    const facts = await (await import("./brain-info.ts")).readDatabaseFacts(conn);
+    const s3 = await scans();
+    const reads = [s1.read - s0.read, s2.read - s1.read, s2g.read - s2.read];
+    assert(waiting.length === 3 && first.map((r) => r.id).join() === waiting.join() && next.map((r) => r.id).join() === waiting.slice(1).join(),
+      `the page reads the three that wait in id order, and from a cursor the two after it (${first.length}, ${next.length})`);
+    assert(s0.idx !== null && s1.idx! - s0.idx >= 1 && s2.idx! - s1.idx! >= 1 && s2g.idx! - s2.idx! >= 1,
+      `both page forms through thoughts_vectorless_idx, the cursor's under a generic plan too (${s0.idx === null ? "no such index" : `${s1.idx! - s0.idx}, ${s2.idx! - s1.idx!} and ${s2g.idx! - s2.idx!} scans`})`);
+    assert(nextGeneric.map((r) => r.id).join() === waiting.slice(1).join() && reads.join() === "3,2,2",
+      `…each reading only its own rows' entries: three from the start, two from the cursor under either plan — a walk from the index's start would read three (${reads.join(", ")})`);
+    assert(facts.vectorless === 3 && s3.idx! - s2g.idx! >= 1,
+      `brain_info's vectorless count is 3, read through the index (${s3.idx === null ? "no such index" : `${s3.idx! - s2g.idx!} scans`})`);
+  } finally {
+    await raw`DELETE FROM thoughts WHERE content LIKE 'store-sql 3056 %'`;
+    await one.close();
+    await raw.close();
+  }
+}
+
 await store.close();
 
 report();
