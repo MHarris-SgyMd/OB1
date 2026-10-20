@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-3106]
-migrations: []
----
-
-## Changelog
-
-`db/test-live.ts` [38]'s case of a stop landing mid-read now asserts the state it names: the stop lands while a pass is still in its start, before its probe. It no longer holds every probe 4 s for a pass waiting in its probe, a state the case never reached (SMD-3106).
-
-## FORK
-
-[38]'s mid-read stop is named and checked for where its pass is: in its start, before its probe; it no longer holds each probe 4 s (SMD-3106)
+# 344. [38]'s mid-read stop is named and checked for where its pass is: in its start, before its probe; it no longer holds each probe 4 s (SMD-3106)
 
 **What changed.**
 - **The case** is now "a stop landing mid-read with a pass in its start, before its probe, is a stop: 0, the row ended stopped". It was "with a pass waiting at its start", and its comment said the pass's probe was held.

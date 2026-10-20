@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-2873]
-migrations: []
----
-
-## Changelog
-
-One env file is one brain: `deploy/README.md` says how to run a second brain beside the first from its own env file — `COMPOSE_PROJECT_NAME`, its own secrets, and each host port it publishes — and how local models are shared or not. `deploy/canary.sh` reads stable's project from stable's env file, as compose does, instead of assuming `open-brain`: the canary is `<stable>-canary`, its connector the same, and its env file `.env.<stable>-canary.local` (the dogfood canary's stays `.env.canary.local`), which now names the canary's own project; `canary.sh names` prints them. `deploy/tier.sh` gains `--project`, and its `--network` default is the project's `data` and `egress` networks, the project read from `--env-file` the same way. A tracked env file of any name but an `.example` now fails the fork's checks. `bun --no-env-file deploy/instance.ts check`, run before an `up` with the same env files, files and profiles, refuses an env file whose project was made from other env files, and says for each host port the brain would publish whether it is free, the same service's own, or held by another brain's container (stopped ones included), another of its own services, a second mapping of its own or a process on the host, naming the setting to change (SMD-2873).
-
-## FORK
-
-One env file is one brain: the scripts take the instance's project, not `open-brain` (SMD-2873)
+# 317. One env file is one brain: the scripts take the instance's project, not `open-brain` (SMD-2873)
 
 **What changed.**
 - `deploy/canary.sh`:

@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2888]
-migrations: []
----
-
-## Changelog
-
-A capture made while the model provider is down (stopped, unreachable, timing out, or answering 5xx, 408 or 429) is now saved without its vector instead of failing with "Unable to connect" and being lost. The reply says the provider was unavailable, keyword search finds the thought at once, and the same text captured again once the provider answers takes its vector. An outage now records the tagging failure alone, with no placeholder topics or type, so re-capturing a thought during an outage no longer replaces its tags. A misconfigured provider (a 4xx, a vector of the wrong width) still fails the capture (SMD-2888).
-
-## FORK
-
-A capture survives its provider's outage — saved without its vector, said, and marked on the audit row (SMD-2888)
+# 323. A capture survives its provider's outage — saved without its vector, said, and marked on the audit row (SMD-2888)
 
 **What changed.**
 - **`embed.ts` `providerDown(e)`:** one rule for "the provider did not answer". It covers:

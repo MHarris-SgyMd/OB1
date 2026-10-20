@@ -1,17 +1,4 @@
----
-type: fixed
-bump: minor
-tickets: [SMD-3045]
-migrations: ["099"]
----
-
-## Changelog
-
-Unlinking a thought (`update_thought` with `{"supersedes": null}`) now waits for a supersession accept in progress, as re-pointing one already did (SMD-3045). Before, an unlink could commit while an accept was running, and the accept then cleared a capture-only key's pointer above a link that was no longer under the accepted thought.
-
-## FORK
-
-An unlink takes the review lock: `update_thought` takes `ob1:supersession-review` whenever its envelope names `supersedes`, a clear included (SMD-3045)
+# 336. An unlink takes the review lock: `update_thought` takes `ob1:supersession-review` whenever its envelope names `supersedes`, a clear included (SMD-3045)
 
 **What changed** (migration 099).
 - **`update_thought`** is 088's body under 088's signature with one change. The supersession advisory lock is taken whenever `p_provenance` names `supersedes` (`v_set_supersedes`): a thought's uuid, as before, or a JSON null that clears it, now too. It is taken before the fingerprint lock and the row, 033's order, whatever the row's pointer is: that is read under the row lock, after this one, and an unlocked read to skip the lock would reopen the race. A new sentinel `ob1:pointer-write-takes-review-lock` sits at the gate, and the function's comment says it. Nothing else moves: the same answers, refusals and writes, and the grants kept.

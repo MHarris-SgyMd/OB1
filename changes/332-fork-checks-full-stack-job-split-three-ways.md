@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-3051]
-migrations: []
----
-
-## Changelog
-
-Fork Checks' full-stack job is three jobs, each on a stack of its own: the stack's own checks, a second brain with the tier refresh and the canary, and the import runner with the authorization server; the bring-up they share is `.github/ci/full-stack-up.sh` (SMD-3051).
-
-## FORK
-
-Fork Checks' full-stack job split three ways by what each group of steps stands up — every step kept, each on a stack of its own (SMD-3051)
+# 332. Fork Checks' full-stack job split three ways by what each group of steps stands up — every step kept, each on a stack of its own (SMD-3051)
 
 **What changed.**
 - **The bring-up** ("Bring up the compose stack": four scoped keys into `$GITHUB_ENV`, the provider stub on the runner's :11434, `deploy/.env`, compose's up) moved into `.github/ci/full-stack-up.sh`, which each job runs. Its code is unchanged; its comments name the job each later step is in.

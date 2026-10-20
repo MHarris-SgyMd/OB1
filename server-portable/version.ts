@@ -4,10 +4,10 @@
 // Workers build bundles it, and a Worker has none of those files to read.
 
 /** db/version.mjs's FORK_VERSION — the version this server reports. */
-export const FORK_VERSION = "1.8.0+upstream.9543c29";
+export const FORK_VERSION = "1.9.0+upstream.9543c29";
 
 /** The migration range releases.json records for FORK_VERSION, or null when it records none (a version bumped and not yet cut). */
-export const RELEASE_RANGE: readonly [number, number] | null = [84, 89];
+export const RELEASE_RANGE: readonly [number, number] | null = [90, 103];
 
 /** The highest migration file in the tree this server was built from — what a brain migrated for it has applied. */
-export const LATEST_MIGRATION = 103;
+export const LATEST_MIGRATION = 104;

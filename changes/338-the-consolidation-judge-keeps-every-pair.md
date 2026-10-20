@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-3058]
-migrations: []
----
-
-## Changelog
-
-The decider-4b adapter (`jev/decider/serve.py`) reads a context's whole 32,768-token window. Before, it read only the first 1,536 tokens and reported nothing cut. With `DECIDER_PACK=1` it answers several decisions over one context in a single call. `jev/h2o/serve.py` serves H2O-Lightning-4B behind the same contract. And `evals/eval-judge-decide.ts` measures a typed-decision model in front of the consolidation judge. Both models are declined: H2O-Lightning-4B, gated on P(outdates), met the rule on the first pairs and failed its confirmation on fresh ones (SMD-3058).
-
-## FORK
-
-The consolidation judge keeps every pair — neither decider-4b nor H2O-Lightning-4B in front of it holds the 7B's accuracy on the pairs it would settle, H2O failing its confirmation on fresh pairs; decider's adapter now reads past 1,536 tokens (SMD-3058)
+# 338. The consolidation judge keeps every pair — neither decider-4b nor H2O-Lightning-4B in front of it holds the 7B's accuracy on the pairs it would settle, H2O failing its confirmation on fresh pairs; decider's adapter now reads past 1,536 tokens (SMD-3058)
 
 **What changed.**
 - **`evals/eval-judge-decide.ts`** (new) asks a typed-decision model three questions of every pair in `eval-judge.ts`'s export, read as prompt 4 renders the two thoughts:

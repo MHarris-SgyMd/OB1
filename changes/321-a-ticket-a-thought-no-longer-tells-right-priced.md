@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2540]
-migrations: ["095", "098"]
----
-
-## Changelog
-
-`evals/eval-stated-status.ts` prices how search should label a ticket a thought no longer tells right, on the dogfood brain against blind-graded labels: the reading it picks is `moved-session-settled` (the ticket's status when the session ended against now, no label when the writer's own move reached the brain within the hour), held out 29 of 30 right and 0.976 pooled; migration 095's `ticket_status_inputs` gives that reading its inputs in one call and `server-portable/stated-status.ts` ships it, held to the measured code; both searches now say so on such a hit — `search_thoughts` a `⚠ Moved since written` line and a `moved` field, `search` its title and a `moved` field — without moving its rank; migration 098 bounds the read: a lock waited for at most 200 ms, no JIT, each event's diff read once (SMD-2540).
-
-## FORK
-
-A ticket a thought no longer tells right, priced, given its inputs, then labelled on both searches: the eval, its verdict, migration 095 and the label (SMD-2540)
+# 321. A ticket a thought no longer tells right, priced, given its inputs, then labelled on both searches: the eval, its verdict, migration 095 and the label (SMD-2540)
 
 **What changed.** PR 1 of SMD-2540 is the measurement, PR 2a the label's inputs, PR 2b the label.
 - `evals/stated-status.ts` — the pure readings: the tickets a thought names

@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-3114]
-migrations: []
----
-
-## Changelog
-
-`evals/eval-judge-propose.ts` measures H2O-Lightning-4B deciding supersession while an LLM writes only the proposal, the current thought and a quote from it, or declines. Two-sided, the writers find more true supersessions than the 27B judge at less model time than the 7B judge. They meet the rule fixed before the run on the first 444 pairs, and miss it on two fresh sets on false proposals, even with `--part-rule` halving them (SMD-3114).
-
-## FORK
-
-H2O decides supersession and an LLM writes only the proposal — two-sided, the writers find more true supersessions than the 27B judge at less model time than the 7B judge, but on two fresh sets they make a few false proposals where the 27B judge makes none (SMD-3114)
+# 340. H2O decides supersession and an LLM writes only the proposal — two-sided, the writers find more true supersessions than the 27B judge at less model time than the 7B judge, but on two fresh sets they make a few false proposals where the 27B judge makes none (SMD-3114)
 
 **What changed.**
 - **`evals/eval-judge-propose.ts`** (new). For every pair H2O's one-pass verdict flags as outdates, it asks a writer LLM only which thought is current and the words in it that show the other is no longer current, or that neither is. The writer does not re-judge the relation.

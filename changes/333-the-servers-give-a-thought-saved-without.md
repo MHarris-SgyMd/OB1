@@ -1,17 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-2889]
-migrations: []
----
-
-## Changelog
-
-A thought saved without a vector — captured while the model provider was down, refused by the egress gate, or imported bare — now gets its vector by itself: the servers embed such thoughts once the provider answers and the gate allows the call (a policy change takes a restart), 8 a tick per server (`OB1_VECTOR_MEND_INTERVAL`, every 60 seconds unless set; `off` for none). Before, only re-capturing the same text or a hand-run `db/reembed.ts` gave one a vector, and a session summary saved during an outage stayed out of semantic search. The cost lands as the rows do: a backlog after an outage, or an import written bare for a later `db/reembed.ts`, is embedded on the configured provider, a hosted one's bill included, unless the knob is off. `brain_info` and a keyed `/health` say how many thoughts wait for a vector, and preflight says the knob (SMD-2889).
-
-## FORK
-
-The servers give a thought saved without a vector its vector, by themselves — the vector mender (SMD-2889)
+# 333. The servers give a thought saved without a vector its vector, by themselves — the vector mender (SMD-2889)
 
 **What changed.**
 - **`core/mend.ts` (new), `mendOnce`:** one tick, under the store's leader lock (`store.mendLock`: `pg_try_advisory_lock(hashtext('ob1:vector-mender'))` on a client of one connection of its own, beyond `OB1_PG_POOL`; another holder makes the tick a skip; a release the database says did not let go, on a session still open, is reported).

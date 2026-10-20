@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-3117]
-migrations: ["102"]
----
-
-## Changelog
-
-The consolidation pass now records a pair it judges unrelated, as a `distinct` relation on the newer thought: two near neighbours about different subjects, kept apart (SMD-3117). Before, an unrelated verdict only closed the pair's relation and kept nothing, so nothing could tell the two had been judged apart. `consolidate.ts --status` and `brain_info` count the distinct pairs beside the relations, and board findings never post one.
-
-## FORK
-
-The consolidation judge's distinct is stored: 084's relation vocabulary gains `distinct`, so a pair the judge calls unrelated is a standing relation on the newer thought (SMD-3117)
+# 343. The consolidation judge's distinct is stored: 084's relation vocabulary gains `distinct`, so a pair the judge calls unrelated is a standing relation on the newer thought (SMD-3117)
 
 **Why.** Every pair the pass judges is a near neighbour (029's candidate rule), so an unrelated verdict says two look-alikes are about different subjects. 084 closed the pair's edge on one and kept nothing. Nothing told a reader, a merge or a later judge that the two were judged apart, and SMD-3116 — the typed-label spike, which renamed unrelated to distinct (differentiation: look-alikes kept apart, never merged) — had no pool of such pairs to measure. The maintainer decided on 2026-10-19 that the pass records it.
 
