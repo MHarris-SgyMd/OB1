@@ -102,8 +102,10 @@ def result_from(dd, ids, probs_list):
     probabilities = {i: p for i, p in zip(ids, probs)}
     sel_i = max(range(len(probs)), key=lambda k: probs[k])
     selected = ids[sel_i]
+    # The decision's id only when it has one: the contract's `id` is an optional string, and the client reads a
+    # null beside an absent id as another decision's result (SMD-3115, found on jev/h2o/serve.py, which had it too).
     res = {
-        "id": dd.get("id"), "kind": dd["kind"], "probabilities": probabilities,
+        **({"id": dd["id"]} if dd.get("id") is not None else {}), "kind": dd["kind"], "probabilities": probabilities,
         "selected": selected, "abstained": selected == INSUFFICIENT,
         "p_insufficient": probabilities.get(INSUFFICIENT, 0.0),
         "logits": logits, "temperature": 1.0,
