@@ -183,6 +183,7 @@ main() {
   nodb evals              eval-write-path.ts --self-check
   nodb evals              eval-judge.ts --self-check
   nodb evals              eval-judge-decide.ts --self-check
+  nodb evals              eval-judge-propose.ts --self-check
   nodb evals              eval-projection-replay.ts --self-check
   nodb evals              eval-jev-gate.ts --self-check
   nodb evals              eval-transitive-freshness.ts --self-check
