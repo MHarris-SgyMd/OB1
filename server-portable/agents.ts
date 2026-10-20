@@ -179,8 +179,11 @@ function cacheKey(keyHash: string, label: string): string {
  * sent none (054's COALESCE), so a digest re-listed as a forwarder keeps the
  * scope it last had — mint a forwarder fresh, as keygen.ts does.
  */
-function recordedScope(principal: Principal): string | undefined {
-  return principal.scope === "forward" ? undefined : principal.scope;
+export function recordedScope(principal: Principal): string | undefined {
+  // An authorization server's subject (`oauth:<sub>`, SMD-2286) is one row whatever scope each of its tokens holds, so
+  // recording each token's would rewrite the row on every change of scope, a write per request between two clients of
+  // one subject, and the column would show churn, not a privilege change. Recorded NULL, as a forwarder's is.
+  return principal.scope === "forward" || principal.name.startsWith("oauth:") ? undefined : principal.scope;
 }
 
 export class AgentResolver {
@@ -189,6 +192,9 @@ export class AgentResolver {
    * authentication succeeds, so a key must already be in MCP_ACCESS_KEYS to
    * create an entry. The key space is the configured key set, not anything a
    * caller controls, and an expired entry is overwritten rather than added to.
+   * A token the REST core accepts (oauth-token.ts, SMD-2286) adds one entry
+   * per subject the authorization server signs for — its one account and its
+   * configured service clients — so that space is the configuration's too.
    */
   private cache = new Map<string, Entry>();
 

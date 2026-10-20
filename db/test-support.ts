@@ -142,6 +142,7 @@ const FUNCTIONS = [
   "renew_claims(text, text, int)",
   "save_extraction_window(uuid, text, text, text, text, int, int, jsonb)",
   "note_extraction_stop(uuid, text, text, text, text, boolean)",
+  "note_extraction_cut(uuid, text, text, text, text)",
   "normalize_entity_name(text)",
   "content_fingerprint_of(text)",
   "backfill_content_fingerprints(integer)",
@@ -875,6 +876,36 @@ export async function pendingSettled(server: { pendingRequests: number }): Promi
  */
 export function neverAnswers(): Promise<never> {
   return new Promise<never>(() => {});
+}
+
+/**
+ * A stub provider's outage paced by probes, not the clock (SMD-3048): armed
+ * with `n`, every request is down and each probe counts one off, and the
+ * probe after the last is answered, which ends it. However slow the runner,
+ * the outage is probed `n` times while down, and calls stay down until a
+ * probe answers. The stub asks `down(isProbe)` of each request; `refused`
+ * counts the probes it turned away, for a case's message.
+ */
+export function probePacedOutage(): { arm(n: number): void; clear(): void; down(isProbe: boolean): boolean; readonly refused: number } {
+  let left: number | null = null;
+  let refused = 0;
+  return {
+    arm(n) { left = n; },
+    clear() { left = null; },
+    down(isProbe) {
+      if (left === null) return false;
+      if (isProbe && left === 0) {
+        left = null;
+        return false;
+      }
+      if (isProbe) {
+        left--;
+        refused++;
+      }
+      return true;
+    },
+    get refused() { return refused; },
+  };
 }
 
 /** Poll `cond` every 250 ms for up to `ms`: true as soon as it holds, else its last answer. */

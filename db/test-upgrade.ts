@@ -538,8 +538,10 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // who wrote each side, SMD-2707), 095 (what the stated-status label
   // reads, SMD-2540), 096 (pg_stat_statements where the server offers
   // it, SMD-1849), 097 (one walk for 082's lapse, SMD-3035), 098 (the
-  // stated-status label's read bounded, SMD-2540) and 099 (an unlink
-  // takes the review lock, SMD-3045)
+  // stated-status label's read bounded, SMD-2540), 099 (an unlink
+  // takes the review lock, SMD-3045), 100 (the thoughts with no vector
+  // by an index of their own, SMD-3056) and 101 (the sleep scheduler's
+  // cuts counted apart from the stops, SMD-3060)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -666,13 +668,16 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // and redefines 092's lapse and 094's read as calls of it, refusing by
   // name without 092 or 094 ([20aq]); 098 redefines 095's read over its own
   // signature, refusing by name without 095 ([20ar]); 099 redefines 088's
-  // update_thought, refusing by name without 073 ([20as]) — all
+  // update_thought, refusing by name without 073 ([20as]); 100 adds a partial index on
+  // thoughts, needing nothing past 001; 101 adds a column and a function
+  // to 093's table and redefines its two, refusing by name without 093
+  // ([20at]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 70, `030 is among the last seventy migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 72, `030 is among the last seventy-two migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4339,6 +4344,45 @@ console.log("\n[20as] Migration 099: refused by name without 073; onto a populat
   const rowsBeforeReapply = await rows(), auditsBeforeReapply = await audits();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the099 });
   assert((await rows()) === rowsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 099 is a no-op: no row or audit row moved");
+  await sql.close();
+}
+
+console.log("\n[20at] Migration 101: refused by name without 093; onto a populated brain at the file before it, a claim in flight with its stops counted — the column at 0 on the row, no thought, claim or kept window moved; the holder's cut counted apart from its stops, and a stop under other text resetting it; a re-apply a no-op that keeps it (SMD-3060)");
+{
+  await dropSchema(URL_);
+  const sql = new SQL({ url: URL_, max: 1 });
+  const the101 = MIGRATIONS.find((f) => f.endsWith("_extraction_cuts.sql"))!;  // by name: renumbered when main takes its number
+  const the093 = MIGRATIONS.find((f) => f.endsWith("_extraction_progress.sql"))!;
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the093 });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the101 }).then(() => "applied", (e: Error) => e.message);
+  assert(/^migration \d{3} needs 093 \(extraction_progress\); this schema lacks it$/.test(refused), `101 on a schema before 093 is refused up front, naming what it needs (${refused})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f >= the093 && f < the101 });
+  const [{ id }] = await sql`INSERT INTO thoughts (content) VALUES ('upgrade 101: a long document') RETURNING id`;
+  await sql`SELECT enqueue_thoughts('extract:stub@p2', ARRAY[${id}::uuid])`;
+  await sql`SELECT * FROM claim_thoughts('extract:stub@p2', 'w-upgrade', 1, 900)`;
+  await sql`SELECT save_extraction_window(${id}::uuid, 'extract:stub@p2', 'w-upgrade', 'fp', 'win', 3, 0, ${{ index: 0, h: "h0" }}::jsonb)`;
+  await sql`SELECT note_extraction_stop(${id}::uuid, 'extract:stub@p2', 'w-upgrade', 'fp', 'win', true)`;
+  await sql`SELECT note_extraction_stop(${id}::uuid, 'extract:stub@p2', 'w-upgrade', 'fp', 'win', true)`;
+  const state = async () => JSON.stringify(await sql`SELECT t.id, t.content, t.updated_at, c.status, c.worker_id, c.enqueued_at, c.attempt_count FROM thoughts t JOIN thought_work_claims c ON c.thought_id = t.id ORDER BY t.id`);
+  const kept = async () => JSON.stringify(await sql`SELECT thought_id, work_type, fingerprint, windowing, windows, parts, stops, stalled, gained, updated_at FROM extraction_progress ORDER BY thought_id`);
+  const before = await state();
+  const keptBefore = await kept();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the101 });
+  const [shape] = await sql`SELECT (SELECT cuts FROM extraction_progress WHERE thought_id = ${id}::uuid) AS cuts,
+    to_regprocedure('note_extraction_cut(uuid, text, text, text, text)') IS NOT NULL AS c`;
+  assert(shape.cuts === 0 && shape.c && (await state()) === before && (await kept()) === keptBefore,
+    `101 onto the populated brain: the row's cuts at 0, the cut's function, and no thought, claim or kept window moved (${JSON.stringify(shape)})`);
+  const [{ ok }] = await sql`SELECT note_extraction_cut(${id}::uuid, 'extract:stub@p2', 'w-upgrade', 'fp', 'win') AS ok`;
+  const progress = async () => (await sql`SELECT stops, stalled, cuts, (SELECT count(*)::int FROM jsonb_object_keys(parts)) AS kept FROM extraction_progress WHERE thought_id = ${id}::uuid`)[0] as { stops: number; stalled: number; cuts: number; kept: number };
+  const cut = await progress();
+  assert(ok === true && cut.stops === 2 && cut.stalled === 1 && cut.cuts === 1 && cut.kept === 1,
+    `the claim in flight across the upgrade: its holder's cut counted apart, its stops, stall and window as they were (${JSON.stringify(cut)})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the101 });
+  assert((await progress()).cuts === 1 && (await state()) === before, "a re-apply of 101 is a no-op: the cut stands, no thought or claim moved");
+  // The stop redefined: a row of other text is replaced, its cuts with it.
+  await sql`SELECT note_extraction_stop(${id}::uuid, 'extract:stub@p2', 'w-upgrade', 'fp-edited', 'win', false)`;
+  const edited = await progress();
+  assert(edited.stops === 1 && edited.cuts === 0 && edited.kept === 0, `after 101 a stop under other text replaces the row, its cuts too (${JSON.stringify(edited)})`);
   await sql.close();
 }
 

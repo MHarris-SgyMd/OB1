@@ -19,7 +19,19 @@ JEV_PORT=8021 <venv>/bin/python jev/decider/serve.py    # serves ob1-jev/1 on 12
 ```
 
 Knobs: `JEV_HOST` (127.0.0.1), `JEV_PORT` (8021, beside Verdict's 8020),
-`DECIDER_MODEL` (`Mapika/decider-4b`), `DECIDER_DEVICE` (`mps`).
+`DECIDER_MODEL` (`Mapika/decider-4b`), `DECIDER_DEVICE` (`mps`), and
+`DECIDER_PACK` (off).
+
+**`DECIDER_PACK=1`** answers the decisions of one request that share a context in
+one call: the context is read once, and the questions follow it in one row
+(decider's multi-question layout). Reading the context is most of a decision's
+cost, about 1 ms a token on the dogfood Mac. So two questions over a median
+2,200-token pair took 1.97 s instead of 4.38 s (SMD-3058, 444 pairs). It changes
+answers, though, since each question sees the ones before it. In SMD-3058's
+run, the first of two questions kept its answer on 95% of pairs and the second
+on 63%. In a trial, a third question close to the second in wording kept its
+answer on 5 of 10. Pack only questions that belong together, and measure what
+it moves.
 
 It serves the identical contract as `jev/serve.ts` — `GET /health`, `GET /info`,
 `POST /decide` (binary + choice, the tier's `__insufficient_evidence__` added to
@@ -33,8 +45,11 @@ alone.
   not expose raw pre-temperature logits, so the adapter reports `logits = ln(p)`
   with `temperature = 1.0` (still recalibratable: divide by a new T, softmax).
 - `weights_sha256` pins the safetensors **index** (multi-file model), not one file.
-- `tokens` is reported `0` / `truncated=false`; the contract's ≤20,000-char fields
-  never approach decider's 32k-token window, so truncation does not arise here.
+- `tokens` is the context's token count as decider encodes it, and `truncated` says
+  whether it passed the 32,768-token window. The adapter passes that window on every
+  call: decider's `decide()` reads only the first 1,536 tokens of a context unless told
+  otherwise, and until SMD-3058 the adapter did not tell it, so a longer context (two
+  thoughts side by side) lost its end without a word.
 
 ## Comparison — decider-4b vs Verdict through `ob1-jev/1`
 
