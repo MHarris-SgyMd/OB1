@@ -1,8 +1,8 @@
 // What every operation runs against (SMD-2283): the store, the model provider's
 // settings and the embedder over them, and the opt-in query log. Built once by
 // a server's composition root — index.ts today, the REST core (SMD-2284) next —
-// from two readers it owns: the environment, read lazily because Workers
-// bindings arrive per request, and the store, built on first use.
+// from two readers it owns: the environment, read lazily because root.ts's
+// initEnv seeds it before the first read, and the store, built on first use.
 
 import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedEnv, type Embedder } from "../embed.ts";
 import type { JevEnv } from "../jev.ts";
@@ -67,7 +67,7 @@ export function citeRows(writer: string, pointers: { derived_from?: string[]; su
 export function createContext(deps: CoreDeps): Ctx {
   // How each provider-side setting is resolved from the environment lives in
   // embed.ts (resolveEmbedConfig), because db/reembed.ts must resolve them the
-  // same way; this reader is lazy so Cloudflare Workers bindings still apply.
+  // same way; this reader is lazy so the seeded environment applies.
   const embedConfig = () => resolveEmbedConfig(deps.env());
   // The pipeline tier this server runs as (SMD-1806), stamped on every
   // query_log row so the canary — which replays stable's log — can tell a
@@ -82,14 +82,10 @@ export function createContext(deps: CoreDeps): Ctx {
   // Nothing here reads the log back — the export tool does, offline.
   //   The write is awaited on the request's hot path, deliberately (SMD-1492).
   // Fire-and-forget or an in-process queue would shave a local INSERT off the
-  // latency, but either can drop a row when the isolate is torn down or the
-  // process dies — and SMD-1806 replays this log to build the canary, where a
+  // latency, but either can drop a row when the process dies — and SMD-1806 replays this log to build the canary, where a
   // dropped row is a lost replay. The added cost is measured in db/bench-querylog.ts
   // and kept; a cheaper insert path (a BRIN prune index in place of 047's btree)
-  // is the follow-up (SMD-1950), not a durability trade here. On Workers, executionCtx
-  // .waitUntil would keep the write durable and off the response path, but it is
-  // not plumbed to the handlers today and the dogfood runs Bun, which has no
-  // equivalent (deferred).
+  // is the follow-up (SMD-1950), not a durability trade here.
   const logSearch: Ctx["logSearch"] = async (principal, tool, args, data) => {
     if (!queryLogEnabled(deps.env())) return;
     try {

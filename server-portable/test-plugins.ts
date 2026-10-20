@@ -541,11 +541,6 @@ console.log("\n[8] Preflight: a name in OB1_PLUGINS that is no plugin fails the 
   assert(served?.status === "ok" && !served.detail.includes("abc"), `a served plugin with its secret: ok, and the secret never printed (${JSON.stringify(served)})`);
   const good = run("example");
   assert(good.row?.status === "ok" && /example — enabled/.test(good.row.detail), `a sound name is reported enabled (${JSON.stringify(good.row)})`);
-  // A plugin with tables on the PostgREST store: its operations would fail at their first call.
-  const p = Bun.spawnSync(["bun", "--no-env-file", "preflight.ts", "--json"], { cwd: import.meta.dir, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", OB1_PLUGINS: "example", OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "stub" }, stdout: "pipe", stderr: "pipe" });
-  const parsed = JSON.parse(p.stdout.toString() || "{}") as { checks?: { name: string; status: string; detail: string }[] } | { name: string; status: string; detail: string }[];
-  const postgrest = (Array.isArray(parsed) ? parsed : parsed.checks ?? []).find((c) => c.name === "plugins");
-  assert(postgrest?.status === "fail" && /example keeps tables, which need the SQL store/.test(postgrest.detail), `a plugin with tables on the PostgREST store fails the plugins row (${JSON.stringify(postgrest)})`);
 }
 
 console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alone, the body bounded, the handler's verification and its capture as the hook's own caller");

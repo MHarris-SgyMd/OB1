@@ -27,10 +27,7 @@
  * still readable with its result, and a running one is reconciled to `lost` at
  * startup (`reconcileDurableJobsLost`) rather than becoming `not found`. Left
  * unset, the registry is pure in-memory (the SMD-2273 behaviour), and a poll for
- * a job the Map no longer holds gets `not found`. On Workers there is no
- * long-lived process to hold the Map or run the detached body past the response,
- * so no sink is set and job handles are a Bun-server feature; the REST routes
- * still answer, they just never hold a running job. A `worker_status`-style
+ * a job the Map no longer holds gets `not found`. A `worker_status`-style
  * listing over the durable table, and a second replica, remain fast-follows.
  */
 
@@ -120,8 +117,8 @@ export interface JobRow {
 /**
  * A durable backing store for the registry (SMD-2318, migration 069's `jobs`
  * table). root.ts injects the SQL implementation in the serving process; left unset,
- * the registry is pure in-memory — the SMD-2273 behaviour, which is what Workers
- * (no long-lived process) and any suite without a database run. The live SSE
+ * the registry is pure in-memory — the SMD-2273 behaviour, which is what any
+ * suite without a database runs. The live SSE
  * fan-out and the detached runner always stay in this process; the sink holds
  * only the record, so a job survives a restart. Every write is best-effort from
  * the registry's side (fire-and-forget, its failure swallowed so it can never
@@ -141,7 +138,7 @@ export interface JobSink {
   reconcileRunningLost(): Promise<number>;
 }
 
-/** The injected durable store, or null for the pure in-memory registry (Workers, no-DB suites). */
+/** The injected durable store, or null for the pure in-memory registry (no-DB suites). */
 let sink: JobSink | null = null;
 
 /** How often a running job's progress is written through to the sink; the running-transition and every terminal state are always written. */

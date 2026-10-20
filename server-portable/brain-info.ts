@@ -18,8 +18,8 @@
 // deadline keeps what was read and names the rest. (A transaction per read,
 // each with its own budget, added past one deadline and lost every fact at it.)
 //
-// No imports: the Workers build bundles this (index.ts imports it), and the SQL
-// client is taken structurally rather than from "bun".
+// No imports: the SQL client is taken structurally rather than from "bun", so a
+// suite can hand it a fake.
 
 /** A tagged-template SQL client — Bun's `SQL`, structurally. */
 export type SqlTag = (strings: TemplateStringsArray, ...values: unknown[]) => Promise<any[]>;

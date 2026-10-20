@@ -758,10 +758,10 @@ services:
     # sits under an extension key, which compose ignores, so the server's
     # `environment` below can add the plugin knobs no worker takes.
     x-env: &server-env
-      # No OB1_STORE on purpose: the SQL store is the server's default (FORK.md
-      # change 97), and this stack — the "Full stack, no Supabase" CI job — is
-      # the deployment that proves it. Setting it here would let the default
-      # drift back to PostgREST with nothing in CI noticing.
+      # No OB1_STORE on purpose: the SQL store is the server's only store (FORK.md
+      # change 97 made it the default; SMD-3152 retired the PostgREST store), and
+      # this stack — the "Full stack, no Supabase" CI job — runs it. A value set
+      # here could only be one the server refuses.
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain
       MCP_ACCESS_KEYS: ${MCP_ACCESS_KEYS:?set MCP_ACCESS_KEYS in deploy/.env — mint with server-portable/keygen.ts}
       # Not required when OB1_LLM_BASE_URL points at a local provider; preflight

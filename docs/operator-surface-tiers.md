@@ -261,7 +261,7 @@ Which vendored integrations become plugins and which retire was decided on 2026-
 | `dashboards/open-brain-dashboard-next`, `-pro` | SMD-2280's harvest list is recorded. They are deployed nowhere. |
 | `integrations/open-brain-rest`, `integrations/rest-api` | Every route has a disposition against the REST core (SMD-1931). **Met and retired** (SMD-1931 PR 3). |
 | server-portable's MCP registration | The MCP server passes parity and the stable tier's `/mcp` routes to it (SMD-2287) |
-| The Cloudflare Workers target and the PostgREST store it selects | After SMD-2287's cutover (SMD-2288) |
+| The Cloudflare Workers target and the PostgREST store it selects | **Retired** ahead of SMD-2287's cutover, since no brain ran them (SMD-3152, SMD-2288's step 1) |
 | `dashboards/open-brain-dashboard` (current SvelteKit) | The REST core and MCP server are stable (decision 2) |
 
 ## What this reverses or amends
