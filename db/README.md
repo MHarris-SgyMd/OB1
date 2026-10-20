@@ -1717,9 +1717,9 @@ page's LIMIT). Preflight's `thought indexes` row warns while the index is
 INVALID or of another shape, and — once the ledger records 100 — missing: the
 file is not re-run, so a drop, a `--baseline` adoption or an unfinished
 `CONCURRENTLY` build would otherwise pass unsaid. It prints the statement
-that mends it, or the pid to wait for while an index operation on `thoughts`
-runs (`--reapply` for an index whose migration's other objects are absent
-too); it reads 074's `thoughts_trust_rank_idx` and the other indexes on
+that mends it (`--reapply` for an index whose migration's other objects are
+absent too), or — for an INVALID one — the pid of the index operation it
+waits behind; it reads 074's `thoughts_trust_rank_idx` and the other indexes on
 `thoughts` a read is planned around the same way (the fingerprint's unique
 index among them, with any text held twice to resolve first), and names an
 INVALID index left on `thoughts` under another name — a cancelled REINDEX's
