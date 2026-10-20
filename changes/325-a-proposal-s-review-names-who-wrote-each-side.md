@@ -1,19 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2707, SMD-2480]
-migrations: ["094"]
----
-
-## Changelog
-
-A supersession proposal's review now names who wrote each side: `db/consolidate.ts --list` and the `list_supersession_proposals` tool show each side's writer and trust, whether its text is a capture-only key's, the ingested notice, and the later captures an accept would un-supersede (SMD-2707, and SMD-2480's proposals half).
-A proposal whose side to stand is a capture-only key's text, or of a recorded trust below the other's, is flagged WRITER, and `--accept` refuses it without `--force`; an accept names each later capture it un-supersedes.
-On a brain that has not applied migration 094 the listings say they cannot name the writers, and an accept goes ahead without the writer check, saying so.
-
-## FORK
-
-A proposal's review names who wrote each side, and flags a capture-only key's or lower-trust side proposed to stand (SMD-2707 / 2480)
+# 325. A proposal's review names who wrote each side, and flags a capture-only key's or lower-trust side proposed to stand (SMD-2707 / 2480)
 
 **What changed** (migration 094).
 - **`ob1_capture_only_text(id)`**: the first capture was under a capture-only key and 082's log has not taken it (no re-capture by a key that can read, no text move, no adoption). An accept's taking leaves it true: the text is still the key's.

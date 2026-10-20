@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-3035]
-migrations: ["097"]
----
-
-## Changelog
-
-What a supersession proposal's review says an accept would clear is now the same walk the accept's lapse runs, not a copy of it kept in step by hand (SMD-3035). The listings read as before, and an accept's `lapsed:` lines now come in the order the listing named them. The lapse itself changes only on cycles a raw write closed and past its 1,001-row bound.
-
-## FORK
-
-One definition for 082's lapse: the trigger clears what `ob1_lapse_walk` returns, and the review listing's read returns it (SMD-3035)
+# 331. One definition for 082's lapse: the trigger clears what `ob1_lapse_walk` returns, and the review listing's read returns it (SMD-3035)
 
 **What changed** (migration 097).
 - **`ob1_lapse_walk(row, onto)`**: the pointers 082's lapse clears for an event that leaves the row's pointer at `onto`, as `[{id, onto}]` in the order they are cleared. None unless the row is taken now (094's `ob1_accept_takes`: 092's read). Otherwise it walks up from the row: each row's capturer's capture-scoped pointers onto it that no update has re-pointed (never the row's own); on through the pointers that stay; and on from a cleared row 082's log had already taken; up to 1,000 rows above.

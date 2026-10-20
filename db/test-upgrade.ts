@@ -542,8 +542,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // takes the review lock, SMD-3045), 100 (the thoughts with no vector
   // by an index of their own, SMD-3056), 101 (the sleep scheduler's
   // cuts counted apart from the stops, SMD-3060), 102 (the
-  // consolidation judge's distinct stored, SMD-3117) and 104 (Linear's
-  // duplicate status type known and settled, SMD-2935)
+  // consolidation judge's distinct stored, SMD-3117), 103 (the 1.9.0
+  // cut's schema_version, SMD-1804) and 104 (Linear's duplicate status
+  // type known and settled, SMD-2935)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -674,9 +675,10 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // thoughts, needing nothing past 001; 101 adds a column and a function
   // to 093's table and redefines its two, refusing by name without 093
   // ([20at]); 102 redefines 084's validator and record_thought_relation on
-  // their own bodies, refusing by name without 084 ([20au]); 104 redefines 058's two
-  // status sets and rebuilds 071's mirror, refusing by name without 058
-  // or 071 ([20av]) — all
+  // their own bodies, refusing by name without 084 ([20au]); 103 upserts
+  // ob1_config.schema_version for the 1.9.0 cut, needing only 006's table;
+  // 104 redefines 058's two status sets and rebuilds 071's mirror, refusing
+  // by name without 058 or 071 ([20av]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point

@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-2876]
-migrations: []
----
-
-## Changelog
-
-An edge proxy puts several brains behind one port, each at a host of its own (`http://<name>.localhost:8090/mcp`). Clients that send an access key work through the edge; sign-in through it waits for TLS at the edge, since MCP clients refuse a plain-HTTP token endpoint at `<name>.localhost`. `deploy/edge/` is its own compose project, `ob1-edge`, and reaches each brain through the brain's published port, never its networks. Run it with `bun --no-env-file deploy/edge/edge.ts up`, after naming the brains and their ports in `deploy/edge/brains.local.yaml` (copy `brains.example.yaml`). The edge holds no key: a client's own passes through. Under podman machine the edge is a container that publishes its port; on Docker Engine on Linux it runs on the host's network; other runtimes need `--shape` (SMD-2876).
-
-## FORK
-
-The edge proxy, its own project in front of several brains: routed by host, reaching each brain's published port, in one shape per runtime (SMD-2876)
+# 330. The edge proxy, its own project in front of several brains: routed by host, reaching each brain's published port, in one shape per runtime (SMD-2876)
 
 **What changed.**
 - **`deploy/edge/compose.yaml`**, project `ob1-edge`:

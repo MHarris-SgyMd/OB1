@@ -1,17 +1,4 @@
----
-type: deprecated
-bump: minor
-tickets: [SMD-3057]
-migrations: []
----
-
-## Changelog
-
-The `/canary/mcp` and `/working/mcp` routes of `deploy/compose.yaml`'s proxy, which reach a tier on the stack's mesh, are deprecated (the three-brain stack's, `compose.tiers.yaml`, are its own tiers and stay): every answer through them carries a `Deprecation` header and a `Link` to `deploy/README.md`'s "A canary beside the stack", where a canary answers on a port of its own and the three-brain stack routes its own tiers. They answer until **v2.0.0**, and no sooner than two weeks after this release. The session-capture hook's `--check` warns on a url at either route and says to set the tier itself, a canary's own port or the three-brain stack's route, never stable's `/mcp` (SMD-3057).
-
-## FORK
-
-Stable's tier routes deprecated before v2.0.0 removes them (SMD-3057)
+# 334. Stable's tier routes deprecated before v2.0.0 removes them (SMD-3057)
 
 **What changed.**
 - `deploy/compose.yaml`: the route table's `canary` and `working` routers gain the `tier-deprecated` middleware, outermost after `not-legacy`, which adds `Deprecation: @1792108800` (2026-10-16, RFC 9745) and `Link: <…/deploy/README.md#a-canary-beside-the-stack>; rel="deprecation"; type="text/html"` to every answer, as `legacy-window` does for the root. The table's comment says so.
