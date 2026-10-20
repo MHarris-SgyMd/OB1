@@ -54,26 +54,29 @@
 --         waited for its writer and read the row again) is broken, and the
 --         clears above it are left (moved out). Then that clear's own row,
 --         by its id, FOR NO KEY UPDATE. Every row the lapse waits on is
---         waited on here, bottom-up, before any clear: a clear projects its
---         pointer and takes 068's node-state bucket locks, held to the
---         commit, and a lapse waiting on a row while holding one deadlocked
---         against a re-point out of the tree, which needs the same bucket
---         when its own event projects (the race table's first live run);
---         and a lapse holding a link while waiting on the row above it
---         crossed a delete of that row (its cascade needs the link) and a
---         transaction that edited the row and then moved the link (review
---         pass 2).
+--         waited on here, bottom-up along each path, before any clear: a
+--         clear projects its pointer and takes 068's node-state bucket
+--         locks, held to the commit, and a lapse waiting on a row while
+--         holding one deadlocked against a re-point out of the tree, which
+--         needs the same bucket when its own event projects (the race
+--         table's first live run); and a lapse that held a link while
+--         waiting, in its clear, on a cleared row below it or on another
+--         branch crossed a delete of that row (its cascade needs the link)
+--         and a transaction that edited a cleared row on another branch and
+--         then moved the link (review pass 2).
 --      e. then 097's clears, unchanged, those whose links held.
 --
 -- Lock order
 --   A taker holds its row FOR NO KEY UPDATE and no review lock; inside its
---   lapse it locks only rows of its own tree, bottom-up — each clear's links
---   FOR SHARE, then its row FOR NO KEY UPDATE — before any clear, and takes
+--   lapse it locks only rows of its own tree, bottom-up along each path —
+--   each clear's links FOR SHARE, then its row FOR NO KEY UPDATE — before
+--   any clear, and takes
 --   068's buckets only in its clears, waiting on nothing after. A pointer
 --   writer holds the review lock and its row, and its lapse locks its
 --   target's chain FOR SHARE, bottom-up, then its own tree as a taker would.
---   No cycle, measured (review pass 2: some 13,000 races, natural timing
---   and jittered, against six takers):
+--   No cycle for a single call, measured (review passes 2 and 3: some
+--   21,000 races, natural timing, jittered and with sleeps injected, against
+--   six takers and 227 writer pairs):
 --     * an unlink locks no chain; a taker reaching the unlinked row waits for
 --       it before holding anything above it;
 --     * delete_thought's cascade locks only rows above the deleted one; the
@@ -90,30 +93,41 @@
 --       taker never wants the writer's row — the target chain is locked
 --       bottom-up, so a target the taker clears is reached only after the
 --       taker's row (top-down would hold it and deadlock);
---     * a transaction that edits a row the lapse clears and then moves a
---       link under it: the lapse waits on that row holding nothing above it.
---   One cycle remains, named: a pointer write whose new target's chain (to
---   1,000 rows) reaches the taken row, while the row it moves is one the
---   taking will lock — a link of the tree or a row it clears, re-pointed
---   onto the taken row, onto a row above it, or onto a row outside the tree
---   whose chain runs through a cleared row the walk did not go on from. The
---   writer holds its row and its chain lock waits on the taker; the taker's
---   lock waits on that row. Postgres breaks it with 40P01, one side rolls
---   back whole. It is not narrow: whenever such a write overlaps a taking
---   it fires (review pass 2: 395 of 400 overlapping races), the pointer
---   writer the usual victim, and nothing in the server retries it — the
---   caller gets the error, and a retry of the call succeeds. An unlink and
---   an accept cannot meet it. 099's multi-call class stands outside the
---   order too (a transaction that holds a row and then asks for the review
---   lock): it meets an accept, whose lapse now waits on its links.
+--   One single-call cycle remains, named: a pointer write whose new
+--   target's chain (to 1,000 rows) reaches a row the taking holds FOR NO
+--   KEY UPDATE — the taken row, or a cleared row it has locked — while the
+--   row it moves is one the taking will lock: a link of the tree or a row it
+--   clears, re-pointed onto the taken row, onto a row above it, or onto a
+--   row outside the tree whose chain runs through a cleared row the walk
+--   did not go on from (or past the walk's bound). The writer holds its row
+--   and its chain lock waits on the taker; the taker's lock waits on that
+--   row. Postgres breaks it with 40P01, one side rolls back whole. It is not
+--   narrow: an overlap of such a write with a taking nearly always meets it
+--   (review pass 2: 395 of 400 overlapping races), the pointer writer the
+--   usual victim, and nothing in the server retries it — the caller gets
+--   the error, and a retry of the call succeeds. An unlink and an accept
+--   cannot meet it.
+--   Outside the order, as 099 named for its own: a transaction of several
+--   calls that holds a row of the tree and then locks a row the lapse holds
+--   — or holds a row the lapse will wait on and then asks for one the lapse
+--   has locked — can deadlock against any taking, and against an accept,
+--   whose lapse now waits on its links. Any fixed order leaves one of the
+--   two orders open; the lapse locks each path bottom-up, as a delete's
+--   cascade requires. Measured (review pass 3): an edit of X then of
+--   `first`, an edit of a cleared row then an unlink on its path, an edit of
+--   a link then a delete of a row it leads to. No shipped caller makes such
+--   a transaction (each store call is a transaction of its own).
 --
 -- Cost
 --   A lapse that clears: one FOR SHARE per distinct link on its clears'
 --   paths and one FOR NO KEY UPDATE per clear, at most 1,001 each — each
 --   FOR SHARE writes the row's header. Measured against 097 (review pass
---   2, before the membership sets): a lapse over 200 rows about +8%, over
---   1,000 about +22-60%; a pointer onto the end
---   of a 1,000-row chain about +17%, onto a short chain +0.3 ms. A pointer
+--   3): a lapse over 200 rows about +10%, over 1,000 about +12-35% (the wide
+--   shape the most); about a third of it the locks, the rest the tree's
+--   links built alongside the clears — and the listing's read, which reads
+--   the walk through the tree, pays that part too (+28-37% at 1,000 rows).
+--   A pointer onto the end of a 1,000-row chain about +17%, onto a short
+--   chain +0.3 ms. A pointer
 --   onto a thought locks its chain even when nothing lapses — usually one
 --   to three rows — and so waits for a plain edit of a chain row while it
 --   holds the review lock, which every other pointer write, delete and
@@ -406,11 +420,14 @@ BEGIN
     END IF;
     -- And the row this clear writes, by its id, right after the links under
     -- it — so every row the lapse waits on is waited on here, before any
-    -- clear, holding nothing above it: a writer holding a clear row and then
-    -- moving a link under it (a transaction of several calls), and a delete
-    -- of a cleared row the walk went on from (its cascade needs the link
-    -- above it), both crossed a lapse that held the link and waited on the
-    -- row in its clear (review pass 2).
+    -- clear, holding nothing above it on its path: a delete of a cleared row
+    -- the walk went on from (its cascade needs the link above it), and a
+    -- transaction holding a cleared row on another branch and then moving a
+    -- link, both crossed a lapse that held the link and waited on the row in
+    -- its clear (review pass 2). A transaction holding a cleared row and then
+    -- moving a link on that row's own path still crosses it — the links are
+    -- locked before the row above them, as a delete's cascade requires: the
+    -- multi-call class the header names.
     PERFORM 1 FROM thoughts WHERE id = e.id FOR NO KEY UPDATE;
   END LOOP;
   -- Then the clears, in the walk's order, those whose links held.

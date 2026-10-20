@@ -15019,7 +15019,7 @@ console.log("\n[91] Migration 101: the lapse locks its own tree — ob1_lapse_tr
       && ["ob1_lapse_tree", "ob1_lapse_walk", "ob1_lapse_capture_pointers"].every((f) => lastDefinerOf(f).startsWith("101"))
       && /ob1:lapse-tree/.test(await src(TREE)) && /ob1_accept_takes\(p_row, p_onto\)/.test(await src(TREE)) && meta.v === "s" && meta.l === "sql" && /ob1:lapse-walk/.test(await src(WALK)) && /ob1_lapse_tree\(p_row, p_onto\)/.test(await src(WALK))
       && /ob1:lapse-locks-its-tree/.test(trg) && /v_tree := ob1_lapse_tree\(NEW\.thought_id, v_to\)/.test(trg)
-      && trg.indexOf("FOR SHARE") < trg.indexOf("v_tree := ob1_lapse_tree") && /AND supersedes = \(v_below->>v_path\[k\]::text\)::uuid\s+FOR SHARE/.test(trg)
+      && trg.indexOf("FOR k IN REVERSE array_length(v_chain, 1)..1 LOOP") > 0 && trg.indexOf("FOR k IN REVERSE array_length(v_chain, 1)..1 LOOP") < trg.indexOf("v_tree := ob1_lapse_tree") && /AND supersedes = \(v_below->>v_path\[k\]::text\)::uuid\s+FOR SHARE/.test(trg)
       && /101 \/ SMD-3046/.test(await comment(TREE)) && /101 \/ SMD-3046/.test(await comment(WALK)) && /101 \/ SMD-3046/.test(await comment(LAPSE)),
     "101 defines the tree (STABLE, the walk's gate and sentinel) and redefines the walk as SQL over it and the trigger to lock a pointer's target chain before the walk and each clear's links before its clear; each comment names 101");
 

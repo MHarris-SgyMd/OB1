@@ -1631,8 +1631,9 @@ first capture naming supersedes (a new row, nothing above it), and another
 taker's own lapse clears, which clear nothing the accept's walk read as
 staying. Since 101 the lapse locks its own tree, so a link moved by any
 writer under any taking is waited for or read again — but for one named
-40P01, a pointer write onto the taken tree overlapping the taking (092 had
-the window one level wide; SMD-3046). No signature
+40P01, a pointer write whose target chain reaches a row the taking holds,
+overlapping it, and a transaction of several calls crossing its locks (092
+had the window one level wide; SMD-3046). No signature
 changes; the listings read the same. It refuses to apply without 092 or 094;
 092 or 094 re-applied puts its own body back and 097 after it the walk, so
 after an older tree's `--reapply` over a 097 brain run this tree's
@@ -1737,23 +1738,28 @@ walk, so a taking in flight below is waited for and then read taken; and,
 before any clear, each clear's links FOR SHARE from the taken row up, each
 where it still names the row below — a link moved since the walk leaves the
 clears above it — then that clear's own row. Every row the lapse waits on
-is waited on before any clear and holding nothing above it: a clear takes
+is waited on before any clear, bottom-up along each path: a clear takes
 068's node-state bucket locks, and a lapse that waited on a row holding one
 deadlocked against a re-point out of the tree; one that held a link and
-then waited on the row above it crossed a delete of that row and a
-transaction that edited the row and then moved the link. One cycle
-remains, named: a pointer write whose new target's chain reaches the taken
-row, moving a row the taking will lock (a link of its tree, or a row it
-clears) — Postgres breaks it with 40P01. It is not narrow: an overlap of
+then waited on a cleared row below it or on another branch crossed a
+delete of that row and a transaction that edited a cleared row on another
+branch and then moved the link. One single-call cycle remains, named: a
+pointer write whose new target's chain reaches a row the taking holds (the
+taken row, or a cleared row it has locked), moving a row the taking will
+lock (a link of its tree, or a row it clears) — Postgres breaks it with
+40P01. It is not narrow: an overlap of
 such a write with a taking nearly always meets it (review pass 2: 395 of
 400 overlapping races), the pointer writer the usual victim, and nothing
 in the server retries it; the caller gets the error, and a retry succeeds.
-099's multi-call class (a transaction holding a row, then asking for the
-review lock) now meets an accept too. A lapse that clears takes one FOR
-SHARE per path link and one row lock per clear (about +8% over 200 rows and
-+22–60% over 1,000 against 097, measured before the membership sets); a pointer onto a thought locks its chain
-even when nothing lapses, usually one to three rows, while it holds the
-review lock. It refuses to apply without 097;
+A transaction of several calls that holds a row of the tree and then locks
+a row the lapse holds, or the reverse, can deadlock against any taking and
+an accept (any fixed order leaves one order open; no shipped caller makes
+one). A lapse that clears takes one FOR SHARE per path link and one row
+lock per clear — against 097, about +10% over 200 rows and +12–35% over
+1,000, about a third of it the locks and the rest the tree's links, which
+the listing's read pays too; a pointer onto a thought locks its chain even
+when nothing lapses, usually one to three rows, while it holds the review
+lock. It refuses to apply without 097;
 097 re-applied puts back its own walk and the lockless trigger and 101
 after it the tree and the locks. test-schema [91] (the tree beside 097's
 walk, a link moved out made deterministic, the walk-on anchor),

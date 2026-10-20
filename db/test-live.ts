@@ -2089,7 +2089,7 @@ if (want("6j")) {
 }
 
 if (want("6k")) {
-  console.log("\n[6k] The lapse locks its own tree: a link moved out under a taking's lapse waits or is read again and leaves the pointers above it, a link moved in waits for the taking and lapses the pointer above it, in either order; the path locked bottom-up and a pointer's target chain bottom-up, so neither deadlocks — but for the one named residual, a re-point within the tree; page writes never deadlock (migration 101, SMD-3046)");
+  console.log("\n[6k] The lapse locks its own tree: a link moved out under a taking's lapse waits or is read again and leaves the pointers above it, a link moved in waits for the taking and lapses the pointer above it, in either order; the path locked bottom-up and a pointer's target chain bottom-up, so neither deadlocks — but for the one named residual, a pointer write whose target chain reaches a row the taking holds, moving a row it will lock; page writes never deadlock (migration 101, SMD-3046)");
   await sql`DELETE FROM thoughts`;
   // S is the hook's, its capture pointer `first` onto S; a write key's
   // re-capture note on S takes S (082), and its lapse clears `first` and
@@ -2263,29 +2263,33 @@ if (want("6k")) {
         `chain order: B's link onto first waits at S for the paused taking, never holding first; no deadlock, first lapsed, Z on it (${r.bWaited ? "waited" : "did not wait"}; ${r.a.error ?? r.b.error ?? "ok"})`);
     }
 
-    // The named residual: B re-points X — a link of A's tree — onto first, a
-    // row inside the same tree, while A is paused. B's chain lock waits on
-    // A's row; A's path lock then waits on X, which B holds: Postgres breaks
-    // the cycle with 40P01 in one of the two, and the other completes.
+    // The named residual, one instance: B re-points X — a link of A's tree —
+    // onto first, whose chain reaches A's row, while A is paused. B's chain
+    // lock waits on A's row; A's path lock then waits on X, which B holds:
+    // Postgres breaks the cycle with 40P01 in one of the two, and the other
+    // completes.
     {
       const { s, x } = await fixture();
       const r = await paused(note(s, true), [point(x, (await sql`SELECT id FROM thoughts WHERE supersedes = ${s}::uuid AND id <> ${x}::uuid`)[0].id as string)]);
       assert(dead(r.a, r.b) && !(r.a.error && r.b.error),
-        `the named residual: a re-point of a link within the taking's tree onto a row inside it, between the taking and its locks, deadlocks — one side rolls back with 40P01, the other completes (A: ${r.a.error?.slice(0, 40) ?? "ok"}; B: ${r.b.error?.slice(0, 40) ?? "ok"})`);
+        `the named residual: a re-point of a link of the taking's tree onto a row whose chain reaches the taken row, overlapping the taking, deadlocks — one side rolls back with 40P01, the other completes (A: ${r.a.error?.slice(0, 40) ?? "ok"}; B: ${r.b.error?.slice(0, 40) ?? "ok"})`);
     }
     // A row the lapse clears, held by a transaction of several calls that
-    // then moves a link under it or deletes it: the lapse locks each
-    // clear's row right after the links under it, so it waits on that row
-    // holding nothing above it, and the second call goes through. Holding
-    // the link above and waiting on the row in its clear crossed both
-    // (review pass 2): the unlink of X waited on the link the lapse held,
-    // and the delete's cascade on the link above the deleted row.
+    // then moves a link on another branch, or deletes the row: the lapse
+    // locks each clear's row right after the links under it, so it waits on
+    // that row holding nothing on its path above it, and the second call
+    // goes through. Holding a link and waiting on the row in its clear
+    // crossed both (review pass 2): the unlink of X waited on the link the
+    // lapse held, and the delete's cascade on the link above the deleted
+    // row. (A link on the held row's own path is still locked before the row
+    // — a delete's cascade needs that order — the multi-call class 101's
+    // header names.)
     {
       const { s, first, x, y } = await fixture();
       const edit = (tx: SQL) => tx`SELECT update_thought(p_id := ${first}::uuid, p_content := ${"[6k] first, the hook's own word edited"}::text, p_actor := ${HOOK}::jsonb) AS r`.then((r) => r[0].r as { ok: boolean });
       const r = await paused(note(s, true), [edit, point(x, null)], { releaseAfterFirst: true });
       assert(!dead(r.a, r.b) && r.a.result === true && (await pointerOf(first)) === null && (await pointerOf(x)) === null && (await pointerOf(y)) === x,
-        `a transaction edits first (a row the lapse clears) and then unlinks X under it: the lapse waits on first holding nothing above it, the unlink goes through; no deadlock, first lapsed, Y left on the moved X (${r.a.error ?? r.b.error ?? "ok"}; Y→${(await pointerOf(y)) === x ? "X" : await pointerOf(y)})`);
+        `a transaction edits first (a row the lapse clears) and then unlinks X, on another branch: the lapse waits on first holding nothing on its path, the unlink goes through; no deadlock, first lapsed, Y left on the moved X (${r.a.error ?? r.b.error ?? "ok"}; Y→${(await pointerOf(y)) === x ? "X" : await pointerOf(y)})`);
     }
     {
       // h, the hook's pointer onto S, taken by the write key's re-capture; r
