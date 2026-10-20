@@ -3976,11 +3976,10 @@ if (configFailed) {
             add("thought indexes", "skip", "not checked — public.thoughts is not there (the schema row says so)");
           } else {
             const [have] = (await sql`
-              SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('public.thoughts') AND attname = 'content_fingerprint' AND attnum > 0 AND NOT attisdropped) AS fingerprint,
-                     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('public.thoughts') AND attname = 'derived_from' AND attnum > 0 AND NOT attisdropped) AS derived_from,
-                     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('public.thoughts') AND attname = 'supersedes' AND attnum > 0 AND NOT attisdropped) AS supersedes,
+              SELECT 'content_fingerprint' = ANY (a.cols) AS fingerprint, 'derived_from' = ANY (a.cols) AS derived_from, 'supersedes' = ANY (a.cols) AS supersedes,
                      to_regclass('public.ob1_ticket_head') IS NOT NULL AS ticket_head,
-                     to_regprocedure('public.ob1_trust_rank(text)') IS NOT NULL AS trust_rank`) as Record<NonNullable<(typeof THOUGHT_INDEXES)[number]["needs"]>, boolean>[];
+                     to_regprocedure('public.ob1_trust_rank(text)') IS NOT NULL AS trust_rank
+                FROM (SELECT array_agg(attname::text) AS cols FROM pg_attribute WHERE attrelid = to_regclass('public.thoughts') AND attnum > 0 AND NOT attisdropped) a`) as Record<NonNullable<(typeof THOUGHT_INDEXES)[number]["needs"]>, boolean>[];
             type Run = { pid: number; by: number[] };
             // Constants only: the names below are this file's.
             const named = (await sql.unsafe(`${BUSY_CTE}
@@ -4004,7 +4003,6 @@ if (configFailed) {
             const unrecorded: typeof THOUGHT_INDEXES = [];
             const unledgered: typeof THOUGHT_INDEXES = [];
             const waited = new Set<number>();
-            const twins = new Set<string>();
             let checked = 0;
             let resolveFirst = false;
             let slower = false;
@@ -4034,9 +4032,8 @@ if (configFailed) {
               const recorded = ledgerRead && ledger.has(x.migration);
               // A twin: valid and of the shape under another name, or one
               // being built of it right now (waited for, then renamed in).
-              const shapedHere = needsOk ? onThoughts.filter((o) => !ours.has(o.name) && !twins.has(o.name) && indexBody(o.def) === x.body) : [];
+              const shapedHere = needsOk ? onThoughts.filter((o) => !ours.has(o.name) && indexBody(o.def) === x.body) : [];
               const twin = shapedHere.find((o) => o.valid) ?? shapedHere.find((o) => o.runs);
-              if (twin) twins.add(twin.name);
               const state = !at ? "missing"
                 : !isIndex ? `a relation of kind ${at.kind}`
                 : !at.on_thoughts ? `an index on ${at.of_table}`
