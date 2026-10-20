@@ -3844,14 +3844,20 @@ else {
       // More held than named: the rest counted.
       await sleeping({ total: 5, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 7, windows: 24 }] });
       assert(/held back across its wakes — 11111111-1111-4111-8111-111111111111, 7 of 24 window\(s\) kept over 3 stop\(s\); and 4 more$/.test(row((await run(LOG_ON)).out, "sleep")), "more held than named: the rest are counted");
+      // The scheduler's own cuts, said apart from the stops, which say the
+      // wakes — a judge outage's let-outs are no wakes (SMD-3060).
+      await sleeping({ total: 1, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null, cuts: 41 }] });
+      const cutOut = await run(LOG_ON);
+      assert(/held back across its wakes — 22222222-2222-4222-8222-222222222222, no window kept over 4 stop\(s\), the last 3 with none gained, and 41 cut\(s\) of the scheduler's own$/.test(row(cutOut.out, "sleep")),
+        `the scheduler's cuts are said apart from the stops (${row(cutOut.out, "sleep")})`);
       // A scheduler stopped says what it held at its last word, and warns of none:
       // a hand run may have finished it since (review pass 1).
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, reads: "yes", held: { total: 1, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }] } }), 30);
       const endedHeld = await run(LOG_ON);
       assert(/at its last word, 1 thought\(s\) held back across its wakes — 22222222/.test(row(endedHeld.out, "sleep")) && !/long hard stops in a row have taken/.test(fix(endedHeld.out, "sleep")),
         `a stopped scheduler's held thought is named at its last word, with no stalled warning (${fix(endedHeld.out, "sleep")})`);
-      // A held word out of its bounds is left off: more thoughts than its total, or more windows kept than sent.
-      for (const bad of [{ total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 1, windows: 4 }, { id: ID2, stops: 3, stalled: 0, kept: 1, windows: 4 }] }, { total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 9, windows: 4 }] }]) {
+      // A held word out of its bounds is left off: more thoughts than its total, more windows kept than sent, or cuts that are no count.
+      for (const bad of [{ total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 1, windows: 4 }, { id: ID2, stops: 3, stalled: 0, kept: 1, windows: 4 }] }, { total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 9, windows: 4 }] }, { total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 1, windows: 4, cuts: -1 }] }]) {
         await sleeping(bad);
         assert(!/held back/.test(row((await run(LOG_ON)).out, "sleep")), `a held word out of its bounds is left off (${JSON.stringify(bad)})`);
       }

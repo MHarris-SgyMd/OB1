@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2914 assertions: 2914 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred (100) migrations applied, and
+`bun test-schema.ts` prints `2929 assertions: 2929 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and one (101) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1715,6 +1715,43 @@ schema's index), test-store-sql [18] (the store's two page statements and
 the count read through it, each reading only its own rows' entries; the
 page's LIMIT).
 
+Migration 101 counts the sleep scheduler's own cuts of a claimed thought
+apart from its stops (SMD-3060). 093's `stops` counted every hard stop that
+took the claim, and the scheduler's own are the same call as a wake's:
+extraction set aside while consolidation joins past a stalled thought
+(SMD-2694), restarted for work behind one in hand and set aside again once
+let out while consolidation waits for its judge (SMD-3008), and its passes
+stopped when one ends by itself, a follower is found outside or the sleep
+throws. Through a judge outage of hours the let-out cut a stalled thought
+about once a minute, and the `held` word preflight passes on read those cuts
+as wakes, its order (the most stalled, then the most stopped) letting them
+pick the three thoughts named. `extraction_progress.cuts` counts them,
+written by `note_extraction_cut` under 093's holder rule: cuts + 1 and
+nothing else moved, since a cut is no wake — it neither stalls the thought
+nor ends its gaining. `stops` now counts the wakes and the operator's second
+signal. 093's `note_extraction_stop` and `save_extraction_window` are
+redefined to set `cuts` back to 0 where either replaces a row of other text
+or windowing, as they do the stops. The scheduler's hard stop says it is its
+own (`PassStop`'s `cut`), extraction counts it so, and a brain before 101
+counts it not at all — never as a stop — and each extraction run says so
+once (a scheduler's set-aside starts a run of its own, so through an outage
+about once a minute until 101 is applied). The held word and `--status` say
+both, reading `cuts` only where the column is there — the scheduler checks
+once at its start. So after applying 101, restart the sleep service on this
+tree: a scheduler of an earlier tree still counts its own stops as stops,
+and one of this tree started before 101 names the held thoughts without
+their cuts (its extraction runs count them at once). Counts made before 101
+stay as they were. A set-aside cuts a thought the scheduler reads stalled,
+though a worker's claim between that read and the stop can put a fresh
+capture in hand, which gets a cut and no stop, so it is neither named nor
+dated behind the next sleep's captures; the scheduler's other stops cut
+whatever is in hand. It refuses to apply
+without 093; 093 re-applied puts back its own functions, which leave `cuts`
+on a replaced row, so after an older tree's `--reapply` over a 101 brain run
+this tree's `--reapply` (a plain run skips 101, recorded as applied).
+test-schema [83] and [91], test-upgrade [20at], test-live [10g] and [38b],
+test-preflight.
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -2580,8 +2617,11 @@ thought in hand before its lease goes back, waiting at most 1.5 s for the
 count (`stops`, and `stalled`, the latest long stops in a row with no window
 saved between — a stop is long when the thought had been in hand a minute,
 provider pauses aside, so a busy day's sleeps of seconds stall nothing), once
-however many hard calls land, and `--status` lists the
-thoughts with windows kept or stops counted, of the text in force. The
+however many hard calls land — the sleep scheduler's own hard stop (setting
+extraction aside, or ending its passes for a reason of its own) as a cut
+(`cuts`, migration 101, SMD-3060), apart from the stops and stalling
+nothing — and `--status` lists the thoughts with windows kept, or stops or
+cuts counted, of the text in force. The
 worker's own release waits for the stop's count, which another worker's
 release would otherwise beat. A succeeded release deletes the row in the
 same statement; a failed one keeps it, so `--retry-failed` resumes a thought
@@ -3290,9 +3330,12 @@ which wait for consolidation, so the judge, on the same chat endpoint, does
 not queue behind their window when it answers (SMD-3008); the let-out runs
 one worker, its claims read by this process's worker ids since this run
 began so a lease another left, or this container before a restart, does not
-count, and each stalled thought it reaches is stopped, a stop
-counted on it. If the judge answers and consolidation drains while it is
-out, it goes on with one worker under `--workers 1`, and with more it is
+count, and each stalled thought it reaches is stopped. These stops of the
+scheduler's own — the join's set-aside, the restart, the let-out's — are
+counted on the thought as cuts, apart from its stops, which say the wakes
+(migration 101, SMD-3060): a cut stalls nothing, and an outage's cuts
+neither read as wakes on the held word nor pick the thoughts it names. If
+the judge answers and consolidation drains while it is out, it goes on with one worker under `--workers 1`, and with more it is
 set aside once it holds nothing, so the drain's resume starts them all. A
 judge model missing at the start is refused, as before. Each sleep's move
 also dates now a forward-dated row that is no longer a stopped thought (one
@@ -3346,8 +3389,11 @@ words, and the `sleep` row says each:
 
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
 the wakes (a hard stop counted on them, 093): how many, and the three most
-stalled with their stops and windows kept — stalled as the scheduler reads it,
-0 once a window is saved since the last stop — read at its first stamp awake
+stalled, then most stopped, with their stops and windows kept — stalled as
+the scheduler reads it, 0 once a window is saved since the last stop — and
+since SMD-3060 the scheduler's own cuts of each, said apart from the stops
+and ordering nothing ("…, and 41 cut(s) of the scheduler's own"; none before
+101) — read at its first stamp awake
 or poll asleep, after each wake, at least every minute and before the row
 ends (but on a second signal, whose exit it would delay, or a failure), so a thought finished in
 a long sleep leaves the row then, not at the next live call. The `sleep` row
@@ -4735,11 +4781,11 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2914 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1386 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2929 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1397 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 835 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 55 assertions: the shards SHARDS lists in test-live.ts, each its own job
-OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 264 assertions
+OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 275 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 235 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
