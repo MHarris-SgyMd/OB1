@@ -321,24 +321,32 @@ const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_
 const APPLY_074 = "Apply db/migrations/074_min_trust.sql.";
 /**
  * The indexes on thoughts a read is planned around, by the migration that
- * builds each (SMD-3146): the body pg_get_indexdef prints after `ON <table> `,
- * the statement's tail that builds it, and what scans every thought without it.
- * The HNSW pair has the walk index row, the trigram index its own;
- * idx_thoughts_fingerprint is a capture's ON CONFLICT arbiter, its absence
- * an error rather than a slower read, and ob1_fp_backfill_idx serves only
- * 023's backfill.
+ * builds each (SMD-3146): the definition pg_get_indexdef prints after the
+ * index's name and table (UNIQUE kept: a unique index refuses writes this one
+ * takes), the statement's tail that builds it, what reads slower without it,
+ * and — for a migration that brings more than the index — the object of its
+ * schema the reads are, so a brain whose ledger records the migration over a
+ * schema without it (--baseline) is told to re-apply, not handed a CREATE
+ * that names a column or function that is not there. The HNSW pair has the
+ * walk index row, the trigram index its own; idx_thoughts_fingerprint is a
+ * capture's ON CONFLICT arbiter, its absence an error rather than a slower
+ * read, and ob1_fp_backfill_idx serves only 023's backfill.
  */
-const THOUGHT_INDEXES: { name: string; migration: string; body: string; build: string; without: string }[] = [
-  { name: "thoughts_created_at_idx", migration: "001", body: "USING btree (created_at DESC)", build: "(created_at DESC)", without: "list_thoughts' newest-first page reads and sorts every thought" },
-  { name: "thoughts_metadata_idx", migration: "001", body: "USING gin (metadata)", build: "USING gin (metadata)", without: "list_thoughts' filters and match_thoughts' narrow-filter branch (014) scan every thought" },
-  { name: "idx_thoughts_derived_from", migration: "025", body: "USING gin (derived_from)", build: "USING gin (derived_from)", without: "find_derivatives scans every thought" },
-  { name: "idx_thoughts_supersedes", migration: "025", body: "USING btree (supersedes) WHERE (supersedes IS NOT NULL)", build: "(supersedes) WHERE supersedes IS NOT NULL", without: "every search scans every thought for its hits' superseded-by label" },
-  { name: "thoughts_issue_key_idx", migration: "068", body: "USING btree (((md5((metadata ->> 'issue'::text)))::uuid)) WHERE (metadata ? 'issue'::text)", build: "((md5(metadata->>'issue')::uuid)) WHERE metadata ? 'issue'", without: "each write of a ticket's row scans every thought in the node projection's triggers" },
-  { name: "thoughts_trust_rank_idx", migration: "074", body: "USING btree (ob1_trust_rank((metadata ->> 'trust'::text)))", build: "(ob1_trust_rank(metadata->>'trust'))", without: "match_thoughts' min_trust scans every thought for its rank" },
-  { name: "thoughts_vectorless_idx", migration: "100", body: "USING btree (id) WHERE (embedding IS NULL)", build: "(id) WHERE embedding IS NULL", without: "the vector mender's page (every tick, on each server) and brain_info's vectorless count scan every thought" },
+const THOUGHT_INDEXES: { name: string; migration: string; body: string; build: string; without: string; needs?: "derived_from" | "supersedes" | "ticket_head" | "trust_rank" }[] = [
+  { name: "thoughts_created_at_idx", migration: "001", body: "USING btree (created_at DESC)", build: "(created_at DESC)", without: "list_thoughts' newest-first page can read and sort every thought" },
+  { name: "thoughts_metadata_idx", migration: "001", body: "USING gin (metadata)", build: "USING gin (metadata)", without: "list_thoughts' filters and match_thoughts' narrow-filter branch (014) can scan every thought" },
+  { name: "idx_thoughts_derived_from", migration: "025", body: "USING gin (derived_from)", build: "USING gin (derived_from)", without: "find_derivatives scans every thought", needs: "derived_from" },
+  { name: "idx_thoughts_supersedes", migration: "025", body: "USING btree (supersedes) WHERE (supersedes IS NOT NULL)", build: "(supersedes) WHERE supersedes IS NOT NULL", without: "every search's superseded-by label and the node projection's triggers scan every thought", needs: "supersedes" },
+  { name: "thoughts_issue_key_idx", migration: "068", body: "USING btree (((md5((metadata ->> 'issue'::text)))::uuid)) WHERE (metadata ? 'issue'::text)", build: "((md5(metadata->>'issue')::uuid)) WHERE metadata ? 'issue'", without: "ticket_status_inputs (each search whose hits name a ticket) and the node projection's triggers (each write of a ticket's row) read every ticket's rows, not the one ticket's", needs: "ticket_head" },
+  { name: "thoughts_trust_rank_idx", migration: "074", body: "USING btree (ob1_trust_rank((metadata ->> 'trust'::text)))", build: "(ob1_trust_rank(metadata->>'trust'))", without: "match_thoughts' min_trust can scan every thought for its rank", needs: "trust_rank" },
+  { name: "thoughts_vectorless_idx", migration: "100", body: "USING btree (id) WHERE (embedding IS NULL)", build: "(id) WHERE embedding IS NULL", without: "the vector mender's page (every tick, on each server) and brain_info's vectorless count can scan every thought" },
 ];
-/** An index definition's body, after `ON <table> ` — schema-qualified names (an off-path public) read as bare. */
-const indexBody = (def: string): string => def.replace(/^CREATE (UNIQUE )?INDEX \S+ ON \S+ /, "").replace(/\bpublic\./g, "");
+/** What each `needs` names, in a remedy. */
+const NEEDS_WHAT = { derived_from: "thoughts.derived_from", supersedes: "thoughts.supersedes", ticket_head: "ob1_ticket_head", trust_rank: "ob1_trust_rank(text)" } as const;
+/** The two names the walk index row reads, whatever their state. */
+const WALK_INDEX_NAMES = ["thoughts_embedding_idx", "thoughts_embedding_halfvec_idx"];
+/** An index definition after its name and table — `UNIQUE ` kept in front; schema-qualified names (an off-path public) read as bare. */
+const indexBody = (def: string): string => def.replace(/^CREATE (UNIQUE )?INDEX \S+ ON \S+ /, "$1").replace(/\bpublic\./g, "");
 // 075 also re-creates search_thoughts_current's 8-argument form; 077 last
 // defines its body (SMD-2271), so a hand apply of 075 is followed by 077's.
 const APPLY_075 = "Apply db/migrations/075_min_trust_hybrid.sql, then 077_references_settled.sql (077 last defines search_thoughts_current's 8-argument body).";
@@ -3889,74 +3897,136 @@ if (configFailed) {
          * index the ledger records can still be gone — --baseline over a
          * hand-built schema, a CONCURRENTLY build or drop that did not finish
          * (INVALID, which the planner ignores and an IF NOT EXISTS re-run
-         * keeps), a drop or rename by hand — and then each read scans every
-         * thought, answers right, and nothing says so. Looked up by name in
-         * thoughts' schema, as 100 looks for its own; a migration the ledger
-         * does not record yet is not looked for (the ledger row says what is
-         * pending). A WARNING: the brain answers, only slower.
+         * keeps), a drop or rename by hand — and then each read is slower,
+         * answers right, and nothing says so. Looked up by name in thoughts'
+         * schema, as 100 looks for its own. Not looked for: an index whose
+         * migration the ledger does not record (a plain run applies it — a
+         * hole too, which the ledger row, reading the highest number, does
+         * not show), or, with no ledger to read, one whose migration's schema
+         * is not here. A build, reindex or drop of it running now (its
+         * progress row, or a lock only those take) is waited for, not mended;
+         * an INVALID index on thoughts under any other name is what one that
+         * did not finish leaves (a cancelled REINDEX's _ccnew copy), served
+         * by no read and, while ready, still written. A WARNING: the brain
+         * answers, only slower.
          */
         try {
           const [{ present }] = (await sql`SELECT to_regclass('public.thoughts') IS NOT NULL AS present`) as { present: boolean }[];
           if (!present) {
             add("thought indexes", "skip", "not checked — public.thoughts is not there (the schema row says so)");
           } else {
-            const looked = THOUGHT_INDEXES.filter((x) => !ledgerRead || ledger.has(x.migration));
-            const pending = THOUGHT_INDEXES.filter((x) => !looked.includes(x));
-            const named = !looked.length ? [] : (await sql`
+            const [have] = (await sql`
+              SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('public.thoughts') AND attname = 'derived_from' AND attnum > 0 AND NOT attisdropped) AS derived_from,
+                     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('public.thoughts') AND attname = 'supersedes' AND attnum > 0 AND NOT attisdropped) AS supersedes,
+                     to_regclass('public.ob1_ticket_head') IS NOT NULL AS ticket_head,
+                     to_regprocedure('public.ob1_trust_rank(text)') IS NOT NULL AS trust_rank`) as Record<NonNullable<(typeof THOUGHT_INDEXES)[number]["needs"]>, boolean>[];
+            const unledgered = ledgerRead ? [] : THOUGHT_INDEXES.filter((x) => x.needs && !have[x.needs]);
+            const looked = THOUGHT_INDEXES.filter((x) => (!ledgerRead || ledger.has(x.migration)) && !unledgered.includes(x));
+            const unrecorded = THOUGHT_INDEXES.filter((x) => ledgerRead && !ledger.has(x.migration));
+            // `busy`: the pids running a build, reindex or drop of the relation
+            // — its progress row (CREATE INDEX, REINDEX), or a lock on it only a
+            // CONCURRENTLY build, reindex or drop takes (a reader takes ACCESS
+            // SHARE on an index, a writer ROW EXCLUSIVE).
+            type Rel = { name: string; kind: string; on_thoughts: boolean | null; valid: boolean | null; def: string | null; on_table: string | null; busy: string | null };
+            const named = (!looked.length ? [] : await sql`
               SELECT c.relname AS name, c.relkind::text AS kind, i.indrelid = to_regclass('public.thoughts') AS on_thoughts,
-                     i.indisvalid AS valid, pg_get_indexdef(c.oid) AS def, i.indrelid::regclass::text AS on_table
+                     i.indisvalid AS valid, pg_get_indexdef(c.oid) AS def, i.indrelid::regclass::text AS on_table, (SELECT string_agg(DISTINCT p::text, ', ') FROM (
+                                SELECT pid AS p FROM pg_stat_progress_create_index WHERE index_relid = c.oid
+                                UNION SELECT pid FROM pg_locks WHERE relation = c.oid AND mode IN ('ShareUpdateExclusiveLock', 'AccessExclusiveLock') AND pid <> pg_backend_pid()) b) AS busy
                 FROM pg_class c LEFT JOIN pg_index i ON i.indexrelid = c.oid
-               WHERE c.relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = to_regclass('public.thoughts')) AND c.relname IN ${sql(looked.map((x) => x.name))}`) as { name: string; kind: string; on_thoughts: boolean | null; valid: boolean | null; def: string | null; on_table: string | null }[];
-            // Every valid index on thoughts, for one of the shape under
-            // another name (renamed: the reads take it, nothing need be built).
-            const others = (await sql`
-              SELECT c.relname AS name, pg_get_indexdef(i.indexrelid) AS def
+               WHERE c.relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = to_regclass('public.thoughts')) AND c.relname IN ${sql(looked.map((x) => x.name))}`) as Rel[];
+            // Every index on thoughts: one of a shape under another name (the
+            // reads take it, nothing need be built), and the INVALID ones.
+            const onThoughts = (await sql`
+              SELECT c.relname AS name, pg_get_indexdef(c.oid) AS def, i.indisvalid AS valid, (SELECT string_agg(DISTINCT p::text, ', ') FROM (
+                                SELECT pid AS p FROM pg_stat_progress_create_index WHERE index_relid = c.oid
+                                UNION SELECT pid FROM pg_locks WHERE relation = c.oid AND mode IN ('ShareUpdateExclusiveLock', 'AccessExclusiveLock') AND pid <> pg_backend_pid()) b) AS busy
                 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
-               WHERE i.indrelid = to_regclass('public.thoughts') AND i.indisvalid`) as { name: string; def: string }[];
+               WHERE i.indrelid = to_regclass('public.thoughts')`) as { name: string; def: string; valid: boolean; busy: string | null }[];
+            const ours = new Set([...THOUGHT_INDEXES.map((x) => x.name), ...WALK_INDEX_NAMES]);
             const problems: string[] = [];
             const steps: string[] = [];
+            const older: string[] = [];
+            const waited = new Set<string>();
+            const twins = new Set<string>();
             let slower = false;
+            const wait = (pids: string) => {
+              waited.add(pids);
+              steps.push(`wait for pid ${pids} to finish (a build or reindex shows in pg_stat_progress_create_index, a drop only in pg_locks), then run preflight again`);
+            };
             for (const x of looked) {
               const at = named.find((r) => r.name === x.name);
+              const isIndex = at !== undefined && (at.kind === "i" || at.kind === "I");
+              const shaped = isIndex && at.on_thoughts === true && indexBody(at.def ?? "") === x.body;
+              if (shaped && at.valid !== false) continue;
+              if (!at && x.needs && !have[x.needs]) {
+                problems.push(`${x.name} (${x.migration}) is missing, and so is ${NEEDS_WHAT[x.needs]}, which ${x.migration} also brings — the ledger records ${x.migration} over a schema from before it`);
+                older.push(x.migration);
+                continue;
+              }
+              const state = !at ? "missing"
+                : !isIndex ? `a relation of kind ${at.kind}`
+                : !at.on_thoughts ? `an index on ${at.on_table}`
+                : shaped ? "INVALID — a CONCURRENTLY build or drop that did not finish — which the planner ignores"
+                : `of another shape (${at.def}${at.valid === false ? ", and INVALID" : ""})`;
+              if (at?.busy) {
+                problems.push(`${x.name} (${x.migration}) is ${state}, while a CONCURRENTLY build, reindex or drop of it runs now (pid ${at.busy}), so ${x.without}`);
+                wait(at.busy);
+                slower = true;
+                continue;
+              }
               const build = `CREATE INDEX CONCURRENTLY ${x.name} ON thoughts ${x.build};`;
-              if (!at) {
-                const twin = others.find((o) => o.name !== x.name && indexBody(o.def) === x.body && !THOUGHT_INDEXES.some((y) => y.name === o.name));
-                if (twin) {
-                  problems.push(`${x.name} (${x.migration}) is missing, but ${twin.name} is of its shape — the reads take it; the name is what the migrations and this check look for`);
-                  steps.push(`\`ALTER INDEX ${twin.name} RENAME TO ${x.name};\``);
-                } else {
-                  problems.push(`${x.name} (${x.migration}) is missing, so ${x.without}`);
-                  slower = true;
-                  steps.push(`\`${build}\`${ledgerRead ? "" : ` (if migration ${x.migration} has not run here, apply it instead: it builds the index)`}`);
-                }
-              } else if (!at.on_thoughts || indexBody(at.def ?? "") !== x.body) {
-                // Not this index under its name: another shape, another
-                // table's index, or a relation that is no index (no pg_index
-                // row, so not on thoughts) — the last two someone else's,
-                // renamed out of the way rather than dropped.
-                const what = at.kind !== "i" ? `a relation of kind ${at.kind}` : !at.on_thoughts ? `an index on ${at.on_table}` : `of another shape (${at.def})`;
-                problems.push(`${x.name} (${x.migration}) is ${what}, so ${x.without}`);
-                slower = true;
-                steps.push(at.kind === "i" && at.on_thoughts
-                  ? `\`DROP INDEX CONCURRENTLY ${x.name};\` then \`${build}\``
-                  : `rename it out of the way (\`ALTER ${at.kind === "i" ? "INDEX" : "TABLE"} ${x.name} RENAME TO …;\`), then \`${build}\``);
-              } else if (at.valid === false) {
-                problems.push(`${x.name} (${x.migration}) is INVALID — a CONCURRENTLY build or drop that did not finish, or a build still running — which the planner ignores, so ${x.without}`);
-                slower = true;
-                steps.push(`once pg_stat_progress_create_index lists no build of it, \`REINDEX INDEX CONCURRENTLY ${x.name};\` (or \`DROP INDEX CONCURRENTLY ${x.name};\` then \`${build}\`) — ${x.migration === "100" ? "100's file refuses an INVALID one, so a re-apply stops there until this is done" : `re-applying ${x.migration} does not mend it: its IF NOT EXISTS keeps an INVALID one`}`);
+              // What holds the name, cleared first: thoughts' own index
+              // dropped; another table's index or a relation that is no index
+              // someone else's, renamed out of the way.
+              const clear = !at ? "" : isIndex && at.on_thoughts ? `\`DROP INDEX CONCURRENTLY ${x.name};\``
+                : `\`ALTER ${at.kind === "c" ? "TYPE" : isIndex ? "INDEX" : "TABLE"} ${x.name} RENAME TO ${x.name}_moved;\``;
+              const twin = onThoughts.find((o) => o.valid && !o.busy && !ours.has(o.name) && !twins.has(o.name) && indexBody(o.def) === x.body);
+              if (twin) {
+                twins.add(twin.name);
+                problems.push(`${x.name} (${x.migration}) is ${state}, but ${twin.name} is of its shape — the reads take it; the name is what the migrations and this check look for`);
+                steps.push(`${clear ? `${clear} then ` : ""}\`ALTER INDEX ${twin.name} RENAME TO ${x.name};\``);
+                continue;
+              }
+              slower = true;
+              if (shaped) {
+                problems.push(`${x.name} (${x.migration}) is ${state}, so ${x.without}`);
+                steps.push(`\`REINDEX INDEX CONCURRENTLY ${x.name};\` (or \`DROP INDEX CONCURRENTLY ${x.name};\` then \`${build}\`) — ${x.migration === "100" ? "100's file refuses an INVALID one, so a re-apply stops there until this is done" : `re-applying ${x.migration} does not mend it: its IF NOT EXISTS keeps an INVALID one`}`);
+              } else {
+                problems.push(at && isIndex && at.on_thoughts
+                  ? `${x.name} (${x.migration}) is ${state}, which the reads may not take — without it, ${x.without}`
+                  : `${x.name} (${x.migration}) is ${state}, so ${x.without}`);
+                steps.push(`${clear ? `${clear} then ` : ""}\`${build}\`${!at && !ledgerRead ? ` (if migration ${x.migration} has not run here, apply it instead: it builds the index)` : ""}`);
               }
             }
-            const notLooked = pending.length ? `; not looked for, the ledger not recording their migration yet: ${pending.map((x) => `${x.name} (${x.migration})`).join(", ")}` : "";
+            for (const o of onThoughts) {
+              if (o.valid || ours.has(o.name)) continue;
+              if (o.busy) {
+                if (waited.has(o.busy)) continue;
+                problems.push(`${o.name} is an INVALID index on thoughts while a CONCURRENTLY build, reindex or drop runs now (pid ${o.busy})`);
+                wait(o.busy);
+              } else {
+                problems.push(`${o.name} is an INVALID index on thoughts — what a CONCURRENTLY build, reindex or drop that did not finish leaves (a cancelled REINDEX leaves <name>_ccnew) — which no read takes, though while it is ready every write to thoughts still updates it`);
+                steps.push(`\`DROP INDEX CONCURRENTLY ${o.name};\``);
+              }
+            }
+            const list = (xs: typeof THOUGHT_INDEXES) => xs.map((x) => `${x.name} (${x.migration})`).join(", ");
+            const notLooked = [
+              unrecorded.length ? `not looked for, the ledger not recording their migration (a plain migrate run applies it): ${list(unrecorded)}` : "",
+              unledgered.length ? `not looked for, their migration's schema not here and no ledger to say it ran: ${list(unledgered)}` : "",
+            ].filter(Boolean).join("; ");
             if (!problems.length) {
-              add("thought indexes", "ok", `${looked.length === THOUGHT_INDEXES.length ? "all" : `${looked.length} of`} ${THOUGHT_INDEXES.length} indexes thoughts' reads are planned around are present, valid and of their migrations' shape${notLooked}`);
+              const checked = looked.length ? `${looked.length === THOUGHT_INDEXES.length ? "all" : `${looked.length} of`} ${THOUGHT_INDEXES.length} indexes thoughts' reads are planned around are present, valid and of their migrations' shape` : "";
+              add("thought indexes", "ok", [checked, notLooked].filter(Boolean).join("; "));
             } else {
               add("thought indexes", "warn",
-                  `${problems.join("; ")}${slower ? " — the reads answer right, only slower" : ""}${notLooked}`,
-                  `Run in psql against the brain's database, as thoughts' owner, one statement at a time (CONCURRENTLY refuses a transaction block, and leaves writes to thoughts running): ${steps.map((s, k) => `${k + 1}) ${s}`).join(" ")}`);
+                  `${problems.join("; ")}${slower ? " — the reads answer right, only slower" : ""}${notLooked ? `; ${notLooked}` : ""}`,
+                  [steps.length ? `Run in psql against the brain's database, as thoughts' owner, one statement at a time (CONCURRENTLY refuses a transaction block, and leaves writes to thoughts running): ${steps.map((st, k) => `${k + 1}) ${st}`).join(" ")}` : "",
+                   older.length ? REAPPLY : ""].filter(Boolean).join(" "));
             }
           }
         } catch (e) {
-          add("thought indexes", "warn", `could not verify: ${(e as Error).message}`, "The catalog reads behind this check need SELECT on pg_class and pg_index.");
+          add("thought indexes", "warn", `could not verify: ${(e as Error).message}`, "The catalog reads behind this check need USAGE on thoughts' schema and SELECT on pg_class, pg_index, pg_attribute and pg_locks.");
         }
         // ob1_config records the width and model the schema was created with.
         // A same-width model from a different family produces numerically valid,

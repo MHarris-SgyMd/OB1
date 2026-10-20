@@ -4685,7 +4685,7 @@ console.log("\n[11] --deep's provider probes are each a span and a point where a
   provider.stop(true);
 }
 
-console.log("\n[12] The indexes thoughts' reads are planned around: each missing, INVALID or of another shape is named with its remedy, the remedy followed as printed mends it, and a migration the ledger does not record is not looked for (SMD-3146)");
+console.log("\n[12] The indexes thoughts' reads are planned around: each missing, INVALID or of another shape is named with its remedy, the remedy followed as printed mends it; a build or drop running is waited for, a leftover INVALID index named, a schema older than the ledger sent to the re-apply, and a migration the ledger does not record not looked for (SMD-3146)");
 if (!LIVE) { skip("thought indexes: missing, INVALID, another shape"); }
 else {
   const { SQL } = await import("bun");
@@ -4696,31 +4696,32 @@ else {
     ["thoughts_issue_key_idx", "068"], ["thoughts_trust_rank_idx", "074"], ["thoughts_vectorless_idx", "100"],
   ];
   const SQL_ENV = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE };
-  await dropSchema(LIVE);
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
-  const db = new SQL({ url: LIVE, max: 1 });
   const files = readdirSync(join(HERE, "..", "db", "migrations")).filter((n) => /^\d{3}_.*\.sql$/.test(n));
-  await db.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
-  for (const n of files) await db.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('${n}', 'test')`);
-  /**
-   * The fix line's statements, run one at a time as it says: each numbered
-   * step's backticked statements in order — a step offering REINDEX takes
-   * that, not its drop-and-build alternative — and a rename "out of the way"
-   * given a name of this suite's.
-   */
+  await dropSchema(LIVE);
+  const db = new SQL({ url: LIVE, max: 1 });
+  const ledgerAll = async () => {
+    await db.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
+    for (const n of files) await db.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('${n}', 'test')`);
+  };
+  /** The fix line's statements, run one at a time as it says: each numbered step's backticked statements in order — a step offering REINDEX takes that, not its drop-and-build alternative. */
   const follow = async (out: string) => {
     const steps = fix(out, "thought indexes").split(/ \d+\) /).slice(1);
-    let moved = 0;
     for (const step of steps) {
       const spans = [...step.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
-      for (const s of spans.some((x) => x.startsWith("REINDEX")) ? spans.filter((x) => x.startsWith("REINDEX")) : spans) {
-        await db.unsafe(s.includes("RENAME TO …") ? s.replace("RENAME TO …", `RENAME TO pf_moved_${++moved}`) : s);
-      }
+      for (const st of spans.some((x) => x.startsWith("REINDEX")) ? spans.filter((x) => x.startsWith("REINDEX")) : spans) await db.unsafe(st);
     }
     return steps.length;
   };
   const okRow = /✓\s+thought indexes\s+all 7 indexes thoughts' reads are planned around are present, valid and of their migrations' shape$/;
+  const rowOf = async () => row((await run(SQL_ENV)).out, "thought indexes");
+  let holder: InstanceType<typeof SQL> | null = null;
   try {
+    // No thoughts at all: nothing to look at, said as a skip.
+    const empty = await run(SQL_ENV);
+    assert(/·\s+thought indexes\s+not checked — public\.thoughts is not there/.test(row(empty.out, "thought indexes")), `an un-migrated database: the row skips, naming the missing table (${row(empty.out, "thought indexes").trim()})`);
+
+    await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
+    await ledgerAll();
     const healthy = await run(SQL_ENV);
     assert(okRow.test(row(healthy.out, "thought indexes")) && fix(healthy.out, "thought indexes") === "", `a brain with every migration recorded and applied: the row is ok, no remedy (${row(healthy.out, "thought indexes").trim()})`);
     // public off the connection's path: pg_get_indexdef then qualifies 074's
@@ -4728,79 +4729,193 @@ else {
     const offPath = await run({ ...SQL_ENV, DATABASE_URL: `${LIVE}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere` });
     assert(/✓\s+thought indexes\s+all 7 indexes/.test(row(offPath.out, "thought indexes")), `…and read with public off the connection's path, still ok: a qualified function in a definition is the same shape (${row(offPath.out, "thought indexes").trim()})`);
 
-    // Each of the seven missing: named with what scans, the remedy its
+    // Each of the seven missing: named with what is slower, the remedy its
     // CONCURRENTLY build — and followed as printed, the row is ok again.
     for (const [name] of SEVEN) await db.unsafe(`DROP INDEX ${name}`);
     const missing = await run(SQL_ENV);
     const missingRow = row(missing.out, "thought indexes"), missingFix = fix(missing.out, "thought indexes");
-    assert(missing.code === 0 && /^\s*!\s+thought indexes/.test(missingRow), "all seven missing: a warning, not a refusal to start");
+    assert(missing.code === 0 && /^\s*!\s+thought indexes/.test(missingRow) && / — the reads answer right, only slower$/.test(missingRow), "all seven missing: a warning, not a refusal to start, saying the reads are only slower");
     for (const [name, m] of SEVEN) {
-      assert(new RegExp(`${name} \\(${m}\\) is missing, so [^;]*every thought`).test(missingRow) && missingFix.includes(`\`CREATE INDEX CONCURRENTLY ${name} ON thoughts `),
-             `…${name} (${m}) named missing, with what scans without it, and its CONCURRENTLY build`);
+      assert(missingRow.includes(`${name} (${m}) is missing, so `) && missingFix.includes(`\`CREATE INDEX CONCURRENTLY ${name} ON thoughts `),
+             `…${name} (${m}) named missing, with what is slower without it, and its CONCURRENTLY build`);
     }
-    assert(/thoughts_vectorless_idx \(100\) is missing, so the vector mender's page \(every tick, on each server\) and brain_info's vectorless count scan every thought/.test(missingRow),
+    assert(missingRow.includes("thoughts_vectorless_idx (100) is missing, so the vector mender's page (every tick, on each server) and brain_info's vectorless count can scan every thought"),
            "…the vectorless index's warning names the mender's page and brain_info's count (SMD-3056)");
-    assert(/thoughts_trust_rank_idx \(074\) is missing, so match_thoughts' min_trust scans every thought/.test(missingRow), "…and the trust index's, min_trust (SMD-1724)");
+    assert(missingRow.includes("thoughts_trust_rank_idx (074) is missing, so match_thoughts' min_trust can scan every thought for its rank")
+           && missingRow.includes("thoughts_issue_key_idx (068) is missing, so ticket_status_inputs (each search whose hits name a ticket) and the node projection's triggers (each write of a ticket's row) read every ticket's rows"),
+           "…the trust index's, min_trust (SMD-1724); the issue key's, ticket_status_inputs and the triggers");
     assert(missingFix.includes("Run in psql against the brain's database, as thoughts' owner, one statement at a time (CONCURRENTLY refuses a transaction block, and leaves writes to thoughts running): 1) ")
-           && !/apply it instead/.test(missingFix), "…the remedy says where and how to run it, and with a ledger read names no migration to apply");
-    assert(await follow(missing.out) === 7 && okRow.test(row((await run(SQL_ENV)).out, "thought indexes")), "…and followed as printed, the seven statements, the row is ok again");
+           && !/apply it instead|--reapply/.test(missingFix), "…the remedy says where and how to run it, and with a ledger read names no migration to apply");
+    assert(await follow(missing.out) === 7 && okRow.test(await rowOf()), "…and followed as printed, the seven statements, the row is ok again");
 
     // Each of the seven INVALID — what an unfinished CONCURRENTLY build
     // leaves, made by flipping the catalog flag as test-upgrade [16] does.
     for (const [name] of SEVEN) await db.unsafe(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('public.${name}')`);
     const invalid = await run(SQL_ENV);
     const invalidRow = row(invalid.out, "thought indexes"), invalidFix = fix(invalid.out, "thought indexes");
+    assert(/ — the reads answer right, only slower$/.test(invalidRow), "all seven INVALID: the reads said only slower");
     for (const [name, m] of SEVEN) {
-      assert(new RegExp(`${name} \\(${m}\\) is INVALID — a CONCURRENTLY build or drop that did not finish, or a build still running — which the planner ignores, so `).test(invalidRow)
-             && invalidFix.includes(`once pg_stat_progress_create_index lists no build of it, \`REINDEX INDEX CONCURRENTLY ${name};\` (or \`DROP INDEX CONCURRENTLY ${name};\` then \`CREATE INDEX CONCURRENTLY ${name} ON thoughts `),
+      assert(invalidRow.includes(`${name} (${m}) is INVALID — a CONCURRENTLY build or drop that did not finish — which the planner ignores, so `)
+             && invalidFix.includes(`\`REINDEX INDEX CONCURRENTLY ${name};\` (or \`DROP INDEX CONCURRENTLY ${name};\` then \`CREATE INDEX CONCURRENTLY ${name} ON thoughts `),
              `…${name} named INVALID, its remedy REINDEX CONCURRENTLY or a drop and build`);
     }
     assert(invalidFix.includes("re-applying 074 does not mend it: its IF NOT EXISTS keeps an INVALID one") && invalidFix.includes("100's file refuses an INVALID one, so a re-apply stops there until this is done"),
            "…and each says what its file does with an INVALID one: 074's IF NOT EXISTS keeps it, 100's refuses it");
-    assert(await follow(invalid.out) === 7 && okRow.test(row((await run(SQL_ENV)).out, "thought indexes")), "…and the seven REINDEXes, as printed, make the row ok again");
+    assert(await follow(invalid.out) === 7 && okRow.test(await rowOf()), "…and the seven REINDEXes, as printed, make the row ok again");
 
-    // Each of the seven of another shape: one column, no predicate, btree.
-    for (const [name] of SEVEN) await db.unsafe(`DROP INDEX ${name}; CREATE INDEX ${name} ON thoughts (created_at)`);
+    // Each of the seven of another shape: one column, no predicate, btree —
+    // and the vectorless index as (id) without its WHERE.
+    for (const [name] of SEVEN) await db.unsafe(`DROP INDEX ${name}; CREATE INDEX ${name} ON thoughts (${name === "thoughts_vectorless_idx" ? "id" : "created_at"})`);
     const shape = await run(SQL_ENV);
     const shapeRow = row(shape.out, "thought indexes"), shapeFix = fix(shape.out, "thought indexes");
     for (const [name, m] of SEVEN) {
-      assert(shapeRow.includes(`${name} (${m}) is of another shape (CREATE INDEX ${name} ON public.thoughts USING btree (created_at)), so `)
+      assert(shapeRow.includes(`${name} (${m}) is of another shape (CREATE INDEX ${name} ON public.thoughts USING btree (${name === "thoughts_vectorless_idx" ? "id" : "created_at"})), which the reads may not take — without it, `)
              && shapeFix.includes(`\`DROP INDEX CONCURRENTLY ${name};\` then \`CREATE INDEX CONCURRENTLY ${name} ON thoughts `),
              `…${name} named of another shape, with its definition, its remedy a drop and a build`);
     }
-    assert(await follow(shape.out) === 7 && okRow.test(row((await run(SQL_ENV)).out, "thought indexes")), "…and the drops and builds, as printed, make the row ok again");
+    assert(await follow(shape.out) === 7 && okRow.test(await rowOf()), "…and the drops and builds, as printed, make the row ok again");
 
     // The name held by something that is not thoughts' index — another
-    // table's index, a table — and an index of the shape under another name.
+    // table's index, a table, a composite type — and an index of the shape
+    // under another name.
     await db.unsafe(`DROP INDEX idx_thoughts_derived_from; CREATE TABLE pf_other (derived_from jsonb); CREATE INDEX idx_thoughts_derived_from ON pf_other USING gin (derived_from)`);
     await db.unsafe(`DROP INDEX idx_thoughts_supersedes; CREATE TABLE idx_thoughts_supersedes (x int)`);
+    await db.unsafe(`DROP INDEX thoughts_issue_key_idx; CREATE TYPE thoughts_issue_key_idx AS (x int)`);
+    await db.unsafe(`DROP INDEX thoughts_metadata_idx; CREATE TABLE pf_part (x int) PARTITION BY RANGE (x); CREATE INDEX thoughts_metadata_idx ON pf_part (x)`);
     await db.unsafe(`ALTER INDEX thoughts_created_at_idx RENAME TO pf_created_at`);
     const held = await run(SQL_ENV);
     const heldRow = row(held.out, "thought indexes"), heldFix = fix(held.out, "thought indexes");
     assert(heldRow.includes("idx_thoughts_derived_from (025) is an index on pf_other, so find_derivatives scans every thought")
-           && heldFix.includes("rename it out of the way (`ALTER INDEX idx_thoughts_derived_from RENAME TO …;`), then `CREATE INDEX CONCURRENTLY idx_thoughts_derived_from ON thoughts USING gin (derived_from);`"),
+           && heldFix.includes("`ALTER INDEX idx_thoughts_derived_from RENAME TO idx_thoughts_derived_from_moved;` then `CREATE INDEX CONCURRENTLY idx_thoughts_derived_from ON thoughts USING gin (derived_from);`"),
            "another table's index under the name: named with its table, renamed out of the way — never dropped — then built");
-    assert(heldRow.includes("idx_thoughts_supersedes (025) is a relation of kind r, so every search scans every thought for its hits' superseded-by label")
-           && heldFix.includes("rename it out of the way (`ALTER TABLE idx_thoughts_supersedes RENAME TO …;`), then `CREATE INDEX CONCURRENTLY idx_thoughts_supersedes ON thoughts (supersedes) WHERE supersedes IS NOT NULL;`"),
+    assert(heldRow.includes("idx_thoughts_supersedes (025) is a relation of kind r, so every search's superseded-by label and the node projection's triggers scan every thought")
+           && heldFix.includes("`ALTER TABLE idx_thoughts_supersedes RENAME TO idx_thoughts_supersedes_moved;` then `CREATE INDEX CONCURRENTLY idx_thoughts_supersedes ON thoughts (supersedes) WHERE supersedes IS NOT NULL;`"),
            "…a table under the name: named by its kind, renamed out of the way, then built");
+    assert(heldRow.includes("thoughts_issue_key_idx (068) is a relation of kind c") && heldFix.includes("`ALTER TYPE thoughts_issue_key_idx RENAME TO thoughts_issue_key_idx_moved;`"),
+           "…a composite type under the name: renamed with ALTER TYPE, which ALTER TABLE refuses for one");
+    assert(heldRow.includes("thoughts_metadata_idx (001) is an index on pf_part, so ") && heldFix.includes("`ALTER INDEX thoughts_metadata_idx RENAME TO thoughts_metadata_idx_moved;`"),
+           "…a partitioned table's index under the name: an index, on its table, renamed out of the way");
     assert(heldRow.includes("thoughts_created_at_idx (001) is missing, but pf_created_at is of its shape — the reads take it") && heldFix.includes("`ALTER INDEX pf_created_at RENAME TO thoughts_created_at_idx;`")
            && !heldFix.includes("CREATE INDEX CONCURRENTLY thoughts_created_at_idx"),
            "…one of the shape under another name: the rename back, and no second build");
-    assert(/only slower/.test(heldRow), "…and the two that scan say the reads are only slower");
-    assert(await follow(held.out) === 3 && okRow.test(row((await run(SQL_ENV)).out, "thought indexes")), "…and the three steps, as printed, make the row ok again");
-    // The rename alone: nothing scans, so nothing says slower.
+    assert(/only slower/.test(heldRow), "…and the four that are slower say so");
+    assert(await follow(held.out) === 5 && okRow.test(await rowOf()), "…and the five steps, as printed, make the row ok again");
+    // The rename alone: nothing slower, so nothing says it.
     await db.unsafe(`ALTER INDEX thoughts_created_at_idx RENAME TO pf_created_at`);
     const renamedOnly = await run(SQL_ENV);
     assert(/!\s+thought indexes\s+thoughts_created_at_idx \(001\) is missing, but pf_created_at is of its shape — the reads take it; the name is what the migrations and this check look for$/.test(row(renamedOnly.out, "thought indexes")),
            `…an index of the shape under another name, alone: a warning that says the reads take it, and nothing of slower reads (${row(renamedOnly.out, "thought indexes").trim()})`);
-    assert(await follow(renamedOnly.out) === 1 && okRow.test(row((await run(SQL_ENV)).out, "thought indexes")), "…and the rename back makes the row ok");
+    assert(await follow(renamedOnly.out) === 1 && okRow.test(await rowOf()), "…and the rename back makes the row ok");
+    // Another schema's thoughts with its own index under the name: never
+    // taken for public's, which is missing.
+    await db.unsafe(`DROP INDEX thoughts_vectorless_idx; CREATE SCHEMA pf_bk; CREATE TABLE pf_bk.thoughts (id uuid, embedding vector(3)); CREATE INDEX thoughts_vectorless_idx ON pf_bk.thoughts (id) WHERE embedding IS NULL`);
+    try {
+      const elsewhere = await run(SQL_ENV);
+      assert(row(elsewhere.out, "thought indexes").includes("thoughts_vectorless_idx (100) is missing, so ") && !/pf_bk/.test(elsewhere.out),
+             `…another schema's index under the name is not public's: missing, its build the remedy (${row(elsewhere.out, "thought indexes").trim()})`);
+      assert(await follow(elsewhere.out) === 1 && okRow.test(await rowOf()), "…and the build, as printed, makes the row ok");
+    } finally {
+      await db.unsafe(`DROP SCHEMA pf_bk CASCADE`);
+    }
 
-    // A ledger that does not record 100 yet: its index is not looked for.
-    await db.unsafe(`DROP INDEX thoughts_vectorless_idx`);
-    await db.unsafe(`DELETE FROM schema_migrations WHERE name LIKE '100\\_%'`);
-    const before100 = await run(SQL_ENV);
-    assert(/✓\s+thought indexes\s+6 of 7 indexes thoughts' reads are planned around are present, valid and of their migrations' shape; not looked for, the ledger not recording their migration yet: thoughts_vectorless_idx \(100\)$/.test(row(before100.out, "thought indexes")),
-           `a ledger that predates 100: its index missing is no warning, and is said not looked for (${row(before100.out, "thought indexes").trim()})`);
+    // What a shape check by text alone would pass, and the twin's limits: a
+    // UNIQUE index of the shape (it refuses two thoughts at one instant); an
+    // INVALID index beside a valid one of its shape (the reads take that);
+    // a renamed copy that is INVALID (no twin: a leftover); and one of the
+    // seven rebuilt in another's shape (never taken as that one's twin).
+    await db.unsafe(`DROP INDEX thoughts_created_at_idx; CREATE UNIQUE INDEX thoughts_created_at_idx ON thoughts (created_at DESC)`);
+    await db.unsafe(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'thoughts_trust_rank_idx'::regclass; CREATE INDEX pf_trust ON thoughts (ob1_trust_rank(metadata->>'trust'))`);
+    await db.unsafe(`ALTER INDEX thoughts_metadata_idx RENAME TO pf_meta; UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'pf_meta'::regclass`);
+    await db.unsafe(`DROP INDEX idx_thoughts_supersedes; DROP INDEX thoughts_issue_key_idx; CREATE INDEX thoughts_issue_key_idx ON thoughts (supersedes) WHERE supersedes IS NOT NULL`);
+    const odd = await run(SQL_ENV);
+    const oddRow = row(odd.out, "thought indexes"), oddFix = fix(odd.out, "thought indexes");
+    assert(oddRow.includes("thoughts_created_at_idx (001) is of another shape (CREATE UNIQUE INDEX thoughts_created_at_idx ON public.thoughts USING btree (created_at DESC))"), "a UNIQUE index of the shape is of another shape");
+    assert(oddRow.includes("thoughts_trust_rank_idx (074) is INVALID — a CONCURRENTLY build or drop that did not finish — which the planner ignores, but pf_trust is of its shape — the reads take it")
+           && oddFix.includes("`DROP INDEX CONCURRENTLY thoughts_trust_rank_idx;` then `ALTER INDEX pf_trust RENAME TO thoughts_trust_rank_idx;`"),
+           "…an INVALID index beside a valid one of its shape: the reads take that one; drop the INVALID, rename the twin");
+    assert(oddRow.includes("thoughts_metadata_idx (001) is missing, so ") && oddRow.includes("pf_meta is an INVALID index on thoughts — what a CONCURRENTLY build, reindex or drop that did not finish leaves")
+           && oddFix.includes("`DROP INDEX CONCURRENTLY pf_meta;`") && oddFix.includes("`CREATE INDEX CONCURRENTLY thoughts_metadata_idx ON thoughts USING gin (metadata);`"),
+           "…a renamed copy that is INVALID is no twin: the index built, the copy dropped");
+    assert(oddRow.includes("idx_thoughts_supersedes (025) is missing, so ") && oddRow.includes("thoughts_issue_key_idx (068) is of another shape")
+           && !oddFix.includes("ALTER INDEX thoughts_issue_key_idx RENAME"),
+           "…one of the seven in another's shape is never that one's twin: each mended under its own name");
+    assert(await follow(odd.out) === 6 && okRow.test(await rowOf()), "…and the six steps, as printed, make the row ok again");
+
+    // A REINDEX of the remedy's, cancelled for real (a snapshot held open in
+    // another session, the REINDEX given half a second): its _ccnew copy,
+    // INVALID, named and dropped — and a DROP INDEX CONCURRENTLY waiting on a
+    // reader, waited for rather than mended (a REINDEX would queue behind it).
+    holder = new SQL({ url: LIVE, max: 1 });
+    await holder.unsafe("BEGIN ISOLATION LEVEL REPEATABLE READ");
+    await holder.unsafe("SELECT count(*) FROM thoughts");
+    await db.unsafe("SET statement_timeout = '500ms'");
+    const cancelled = await db.unsafe("REINDEX INDEX CONCURRENTLY thoughts_vectorless_idx").then(() => "ran", (e: Error) => e.message);
+    await db.unsafe("RESET statement_timeout");
+    const ccnew = await run(SQL_ENV);
+    assert(/canceling statement/.test(cancelled) && row(ccnew.out, "thought indexes").includes("thoughts_vectorless_idx_ccnew is an INVALID index on thoughts") && fix(ccnew.out, "thought indexes").includes("`DROP INDEX CONCURRENTLY thoughts_vectorless_idx_ccnew;`"),
+           `a cancelled REINDEX CONCURRENTLY's copy is named, with its drop (${cancelled})`);
+    // A REINDEX CONCURRENTLY of an INVALID index waiting on that reader:
+    // the index (its lock) and the copy (its progress row) are one run, one
+    // pid, waited for once.
+    await holder.unsafe("COMMIT");
+    await db.unsafe(`DROP INDEX CONCURRENTLY thoughts_vectorless_idx_ccnew`);
+    await holder.unsafe("BEGIN ISOLATION LEVEL REPEATABLE READ");
+    await holder.unsafe("SELECT count(*) FROM thoughts");
+    await db.unsafe(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'thoughts_created_at_idx'::regclass`);
+    const reindexer = new SQL({ url: LIVE, max: 1 });
+    const [{ pid: reindexPid }] = await reindexer.unsafe("SELECT pg_backend_pid() AS pid");
+    const reindexing = reindexer.unsafe("REINDEX INDEX CONCURRENTLY thoughts_created_at_idx").then(() => "reindexed", (e: Error) => e.message);
+    await Bun.sleep(500);
+    const rebuilding = await run(SQL_ENV);
+    const rebuildingRow = row(rebuilding.out, "thought indexes"), rebuildingFix = fix(rebuilding.out, "thought indexes");
+    assert(rebuildingRow.includes(`thoughts_created_at_idx (001) is INVALID — a CONCURRENTLY build or drop that did not finish — which the planner ignores, while a CONCURRENTLY build, reindex or drop of it runs now (pid ${reindexPid})`)
+           && rebuildingFix.split("wait for pid").length === 2 && !/_ccnew is an INVALID index/.test(rebuildingRow),
+           `…a REINDEX CONCURRENTLY of an INVALID index running: the index named running, its copy not named apart, one wait (${rebuildingFix.trim()})`);
+    await holder.unsafe("COMMIT");
+    assert(await reindexing === "reindexed", "…and once the reader ends, the REINDEX finishes");
+    await reindexer.close();
+    await holder.unsafe("BEGIN ISOLATION LEVEL REPEATABLE READ");
+    await holder.unsafe("SELECT count(*) FROM thoughts");
+    // A CREATE INDEX CONCURRENTLY waiting on that reader: INVALID in the
+    // catalog from its start, named running with its pid, never "drop it".
+    const builder = new SQL({ url: LIVE, max: 1 });
+    const [{ pid: buildPid }] = await builder.unsafe("SELECT pg_backend_pid() AS pid");
+    const building = builder.unsafe("CREATE INDEX CONCURRENTLY pf_building ON thoughts (created_at)").then(() => "built", (e: Error) => e.message);
+    await Bun.sleep(500);
+    const built = await run(SQL_ENV);
+    assert(row(built.out, "thought indexes").includes(`pf_building is an INVALID index on thoughts while a CONCURRENTLY build, reindex or drop runs now (pid ${buildPid})`)
+           && !fix(built.out, "thought indexes").includes("DROP INDEX CONCURRENTLY pf_building"),
+           `…a CREATE INDEX CONCURRENTLY running: named running with its pid, not dropped (${row(built.out, "thought indexes").trim()})`);
+    await holder.unsafe("COMMIT");
+    assert(await building === "built", "…and once the reader ends, the build finishes");
+    await builder.close();
+    await db.unsafe("DROP INDEX pf_building");
+    await holder.unsafe("BEGIN ISOLATION LEVEL REPEATABLE READ");
+    await holder.unsafe("SELECT count(*) FROM thoughts");
+    const dropper = new SQL({ url: LIVE, max: 1 });
+    const [{ pid: dropPid }] = await dropper.unsafe("SELECT pg_backend_pid() AS pid");
+    const dropping = dropper.unsafe("DROP INDEX CONCURRENTLY thoughts_trust_rank_idx").then(() => "dropped", (e: Error) => e.message);
+    await Bun.sleep(500);
+    const waiting = await run(SQL_ENV);
+    const waitingRow = row(waiting.out, "thought indexes"), waitingFix = fix(waiting.out, "thought indexes");
+    assert(waitingRow.includes(`thoughts_trust_rank_idx (074) is INVALID — a CONCURRENTLY build or drop that did not finish — which the planner ignores, while a CONCURRENTLY build, reindex or drop of it runs now (pid ${dropPid})`)
+           && waitingFix.includes(`wait for pid ${dropPid} to finish`) && !waitingFix.includes("REINDEX INDEX CONCURRENTLY thoughts_trust_rank_idx"),
+           `…a DROP INDEX CONCURRENTLY waiting on a reader: named running, with its pid, and waited for — no REINDEX to queue behind it (${waitingRow.trim()})`);
+    await holder.unsafe("COMMIT");
+    await holder.close();
+    holder = null;
+    assert(await dropping === "dropped", "…and once the reader ends, the drop finishes");
+    await dropper.close();
+    const afterDrop = await run(SQL_ENV);
+    assert(await follow(afterDrop.out) === 1 && okRow.test(await rowOf()), "…and then the remedy as printed — the index built — makes the row ok");
+
+    // A ledger that does not record 100, and one with a hole at 068: their
+    // indexes are not looked for (a plain run applies each).
+    await db.unsafe(`DROP INDEX thoughts_vectorless_idx; DROP INDEX thoughts_issue_key_idx`);
+    await db.unsafe(`DELETE FROM schema_migrations WHERE name LIKE '100\\_%' OR name LIKE '068\\_%'`);
+    const holed = await rowOf();
+    assert(/✓\s+thought indexes\s+5 of 7 indexes thoughts' reads are planned around are present, valid and of their migrations' shape; not looked for, the ledger not recording their migration \(a plain migrate run applies it\): thoughts_issue_key_idx \(068\), thoughts_vectorless_idx \(100\)$/.test(holed),
+           `a ledger without 100, and with a hole at 068: those two missing are no warning, and are said not looked for (${holed.trim()})`);
     // No ledger at all: looked for, and the remedy says a migration that has
     // not run builds it.
     await db.unsafe(`DROP TABLE schema_migrations`);
@@ -4808,8 +4923,43 @@ else {
     assert(/thoughts_vectorless_idx \(100\) is missing/.test(row(unledgered.out, "thought indexes"))
            && fix(unledgered.out, "thought indexes").includes("`CREATE INDEX CONCURRENTLY thoughts_vectorless_idx ON thoughts (id) WHERE embedding IS NULL;` (if migration 100 has not run here, apply it instead: it builds the index)"),
            "…with no ledger, every index is looked for, and a missing one's remedy names its migration as the other way");
+
+    // A role that cannot see into public: the catalog read's grant named.
+    await db.unsafe(`DROP ROLE IF EXISTS pf_idx_reader; CREATE ROLE pf_idx_reader LOGIN PASSWORD 'idx'`);
+    await db.unsafe(`REVOKE USAGE ON SCHEMA public FROM PUBLIC`);
+    try {
+      const blind = await run({ ...SQL_ENV, DATABASE_URL: LIVE.replace(/\/\/[^@]*@/, "//pf_idx_reader:idx@") });
+      assert(/!\s+thought indexes\s+could not verify: permission denied for schema public/.test(blind.out) && fix(blind.out, "thought indexes").includes("USAGE on thoughts' schema"),
+             `a role with no USAGE on public: could not verify, the remedy naming USAGE (${row(blind.out, "thought indexes").trim()})`);
+    } finally {
+      await db.unsafe(`GRANT USAGE ON SCHEMA public TO PUBLIC; DROP OWNED BY pf_idx_reader; DROP ROLE pf_idx_reader`);
+    }
+
+    // A schema older than its ledger — 001 to 024 applied, every file
+    // recorded (--baseline over a hand-built schema): 025's, 068's and 074's
+    // indexes missing with the columns, table and function they need, sent
+    // to the re-apply, never a CREATE naming what is not there.
+    await dropSchema(LIVE);
+    await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f < "025" });
+    await ledgerAll();
+    const older = await run(SQL_ENV);
+    const olderRow = row(older.out, "thought indexes"), olderFix = fix(older.out, "thought indexes");
+    assert(olderRow.includes("idx_thoughts_derived_from (025) is missing, and so is thoughts.derived_from, which 025 also brings — the ledger records 025 over a schema from before it")
+           && olderRow.includes("thoughts_issue_key_idx (068) is missing, and so is ob1_ticket_head") && olderRow.includes("thoughts_trust_rank_idx (074) is missing, and so is ob1_trust_rank(text)")
+           && olderRow.includes("thoughts_vectorless_idx (100) is missing, so "),
+           `a schema older than its ledger: the indexes whose migration brings more named with what else is missing (${olderRow.trim()})`);
+    assert(olderFix.includes("--reapply") && olderFix.includes("`CREATE INDEX CONCURRENTLY thoughts_vectorless_idx ON thoughts (id) WHERE embedding IS NULL;`")
+           && !/CREATE INDEX CONCURRENTLY (idx_thoughts_derived_from|idx_thoughts_supersedes|thoughts_issue_key_idx|thoughts_trust_rank_idx)/.test(olderFix),
+           "…the re-apply for those, a CREATE only for the index whose migration brings nothing else");
+    await db.unsafe(`DROP TABLE schema_migrations`);
+    const olderUnledgered = await rowOf();
+    assert(olderUnledgered.includes("not looked for, their migration's schema not here and no ledger to say it ran: idx_thoughts_derived_from (025), idx_thoughts_supersedes (025), thoughts_issue_key_idx (068), thoughts_trust_rank_idx (074)")
+           && !/derived_from \(025\) is missing/.test(olderUnledgered),
+           `…and with no ledger, those are not looked for: their migration has not run here (${olderUnledgered.trim()})`);
   } finally {
-    await db.unsafe(`DROP TABLE IF EXISTS pf_other, pf_moved_2, schema_migrations`);
+    if (holder) { await holder.unsafe("ROLLBACK").catch(() => {}); await holder.close(); }
+    await db.unsafe(`DROP TABLE IF EXISTS pf_other, pf_part, idx_thoughts_supersedes_moved, schema_migrations`).catch(() => {});
+    await db.unsafe(`DROP TYPE IF EXISTS thoughts_issue_key_idx_moved`).catch(() => {});
     await db.close();
   }
 }

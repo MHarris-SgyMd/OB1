@@ -1716,9 +1716,12 @@ the count read through it, each reading only its own rows' entries; the
 page's LIMIT). Once the ledger records 100, preflight's `thought indexes` row
 warns while the index is missing, INVALID or of another shape — the file is
 not re-run, so a drop, a `--baseline` adoption or an unfinished `CONCURRENTLY`
-build would otherwise pass unsaid — with the statement that mends it; the row
-reads 074's `thoughts_trust_rank_idx` and the other indexes on `thoughts` a
-read is planned around the same way (SMD-3146, test-preflight [12]).
+build would otherwise pass unsaid — with the statement that mends it, or the
+pid to wait for while a build, reindex or drop of it runs (`--reapply` for
+an index whose migration's other objects are absent too); the row reads
+074's `thoughts_trust_rank_idx` and the other indexes on `thoughts` a read is
+planned around the same way, and names an INVALID index left on `thoughts`
+under any other name (SMD-3146, test-preflight [12]).
 
 ## What changed relative to the guide
 
