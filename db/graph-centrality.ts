@@ -1042,10 +1042,10 @@ export function parseArgs(argv: readonly string[]): Parsed | { error: string } {
   if (positional.some((p) => p.trim() === "")) return { error: "the subject is empty; leave it out for the whole graph" };
   // Counted, not repeated: a URL given without --url is a positional too (cli.ts's rule).
   if (positional.length > 1) return { error: `one subject at a time; got ${positional.length} — quote a name with spaces` };
-  // Decay weighs the completed and canceled thoughts; a filter other than
+  // Decay weighs the settled thoughts; a filter other than
   // `all` drops them or keeps only them, so the two are two answers to one
   // question — and under `done` a uniform weight would change nothing.
-  if (opts.decayDone && opts.status !== "all") return { error: `--decay-done weighs the completed and canceled thoughts at ${DONE_WEIGHT}; --status ${opts.status} already decides them — pass one or the other` };
+  if (opts.decayDone && opts.status !== "all") return { error: `--decay-done weighs the completed, canceled and duplicate thoughts at ${DONE_WEIGHT}; --status ${opts.status} already decides them — pass one or the other` };
   // Likewise the blocked thoughts: the filter drops them, the decay sinks them.
   if (opts.startable && opts.decayBlocked) return { error: `--decay-blocked weighs the blocked thoughts at ${BLOCKED_WEIGHT}; --startable already drops them — pass one or the other` };
   return { url, subject: positional[0] ?? null, opts, json };

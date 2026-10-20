@@ -24,19 +24,21 @@
 --   * node_lifecycle_types(): the seven, `duplicate` after `canceled`, as
 --     Linear's board lists it. node_settled_types(): {completed, canceled,
 --     duplicate}. Same signatures, IMMUTABLE as before; CREATE OR REPLACE.
---   * Every function in their schema whose body names either set is altered
---     to the volatility it has — a no-op that invalidates every session's
---     plans built on it. CREATE OR REPLACE alone does not reach a plan that
---     folded the set through a function inlined into another: on PG 16 a
---     session that had called search_thoughts_current (plpgsql) six times,
---     its generic plan cached, kept demoting by the six after 103 while a
---     fresh session did not (review pass 1, run-it). A running server's
---     pooled connections are such sessions; test-upgrade [20av] holds one.
+--   * Every function outside the system schemas that names either set (in
+--     its body, or by dependency) is altered to the volatility it has — a
+--     no-op that invalidates every session's plans built on it; one this
+--     role cannot alter is named in a NOTICE and left. CREATE OR REPLACE alone did not reach every cached
+--     plan: on PG 16 a session that had called search_thoughts_current
+--     (plpgsql) six times, its generic plan cached, kept demoting by 058's
+--     sets after 103 while a fresh session did not (review pass 1, run-it);
+--     a statement naming a set directly read the new one. A running
+--     server's pooled connections are such sessions. test-upgrade [20av]
+--     holds one, and that every such function was altered.
 --   * ob1_rebuild_source_gate() after them: 071's mirror stores, per source
 --     row, whether its thought's status_type is in node_lifecycle_types(),
 --     and says a migration that changes the set runs it (stable: 16 rows
 --     false → true). Its locks are SHARE on thoughts and thought_sources,
---     held to this file's commit. No other stored row is computed from the
+--     held to this file's commit (under --reapply, to the whole run's). No other stored row is computed from the
 --     sets: ob1_ticket_head stores the head's status_type as written.
 --   * graph-centrality.ts's LIFECYCLE_TYPES and LIFECYCLE_FILTERS.done,
 --     board-findings.ts's closed(), the search reply's demotion words
@@ -109,25 +111,43 @@ COMMENT ON FUNCTION node_settled_types() IS
   'The status types that settle a node: a settled blocker blocks nothing and a settled thought is not blocked. graph-centrality.ts''s LIFECYCLE_FILTERS.done must equal it, and db/board-findings.ts reads it for a closed ticket. Migration 058 / SMD-2074; duplicate since migration 103 / SMD-2935.';
 
 -- Every reader's cached plans, in every session: a no-op ALTER of each
--- function whose body names a set (node_state, ticket_references_settled,
+-- function that names a set (node_state, ticket_references_settled,
 -- ticket_status_inputs, 071's gate, …) invalidates the plans that inlined it,
 -- and so those of its callers. Read from the catalog, not listed: a reader a
--- later migration adds is covered by its own CREATE OR REPLACE.
+-- later migration adds is covered by its own CREATE OR REPLACE. A reader is a
+-- function in any schema but the system's whose body names a set — in any
+-- case, quoted or not — or that depends on one (a BEGIN ATOMIC body has no
+-- text to read). A procedure has no volatility to restate and is left; so is
+-- a function this role cannot alter, said by name: refreshing plans is not
+-- worth failing the sets over (review pass 2).
 DO $touch$
 DECLARE
   r record;
+  v_left text[] := '{}';
 BEGIN
   FOR r IN
-    SELECT p.oid::regprocedure AS fn,
+    SELECT p.oid::regprocedure AS fn, pg_has_role(p.proowner, 'USAGE') AS may,
            CASE p.provolatile WHEN 'i' THEN 'IMMUTABLE' WHEN 's' THEN 'STABLE' ELSE 'VOLATILE' END AS vol
       FROM pg_proc p
-     WHERE p.pronamespace = (SELECT pronamespace FROM pg_proc WHERE oid = 'node_settled_types()'::regprocedure)
-       AND p.prosrc ~ 'node_(lifecycle|settled)_types[[:space:]]*[(]'
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE p.prokind IN ('f', 'w')
+       AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
+       AND (p.prosrc ~* 'node_(lifecycle|settled)_types"?[[:space:]]*[(]'
+            OR EXISTS (SELECT 1 FROM pg_depend d
+                        WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.refclassid = 'pg_proc'::regclass
+                          AND d.refobjid IN ('node_lifecycle_types()'::regprocedure, 'node_settled_types()'::regprocedure)))
        AND p.oid NOT IN ('node_lifecycle_types()'::regprocedure, 'node_settled_types()'::regprocedure)
        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
   LOOP
-    EXECUTE format('ALTER FUNCTION %s %s', r.fn, r.vol);
+    IF r.may THEN
+      EXECUTE format('ALTER FUNCTION %s %s', r.fn, r.vol);
+    ELSE
+      v_left := v_left || r.fn::text;
+    END IF;
   END LOOP;
+  IF cardinality(v_left) > 0 THEN
+    RAISE NOTICE 'migration 103: this role cannot alter %, so a session that cached a plan through it keeps 058''s sets until it reconnects (restart the server and workers)', array_to_string(v_left, ', ');
+  END IF;
 END
 $touch$;
 

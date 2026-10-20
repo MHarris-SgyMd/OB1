@@ -1795,10 +1795,12 @@ gains `duplicate` after `canceled` and `node_settled_types()` becomes
 `ob1_rebuild_source_gate()`, as 071 asks of any migration that changes the
 known set (071's mirror stores, per source row, whether its status is a
 known one: 16 rows on stable flip). Nothing else stored is computed from the
-sets. It also alters every function whose body names a set to the
-volatility it has, a no-op that invalidates the plans built on it in every
-session: replacing the sets alone left a server's pooled connection, once it
-had searched with `prefer_current` six times, demoting by the six (review
+sets. It also alters every function outside the system schemas that names
+a set (in its text, in any case, or by dependency) to the volatility it has,
+a no-op that invalidates the plans built on it in every session — a
+procedure is left, and one the migrating role cannot alter is named in a
+NOTICE and left: replacing the sets alone left a server's pooled connection, once it
+had searched with `prefer_current` six times, demoting by 058's sets (review
 pass 1). graph-centrality's `LIFECYCLE_TYPES` and `--status done` follow (its
 equality check refuses a brain before 103), `board-findings.ts`'s `closed()`
 reads `node_settled_types()` and refuses to post on a brain without 103 (said
