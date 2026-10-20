@@ -12219,6 +12219,8 @@ if (want("38b")) {
     return id;
   };
   const status = async (id: string) => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${EX}`)[0] as { status: string } | undefined)?.status;
+  /** A thought's kept row's counts: the stops (the wakes), its stall, and the scheduler's own cuts (SMD-3060). */
+  const counts = async (id: string) => (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${id}::uuid AND work_type = ${EX}`)[0] as { stops: number; stalled: number; cuts: number } | undefined;
   const beat = async () => {
     const [r] = await sql`SELECT value FROM ob1_config WHERE key = 'heartbeat:sleep'`;
     return r ? JSON.parse(r.value) as { held?: { total: number; thoughts: { id: string; stops: number; stalled: number; kept: number; windows: number | null }[] } } : null;
@@ -12452,7 +12454,7 @@ if (want("38b")) {
     // read before the suite's own hard stop below, which is a stop (SMD-3060).
     let prog3: { stops: number; stalled: number; cuts: number } | undefined;
     await pollUntil(async () => {
-      [prog3] = (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${held3}::uuid AND work_type = ${EX}`) as typeof prog3[];
+      prog3 = await counts(held3);
       return Number(prog3?.cuts) >= 2;
     }, 5_000);
     // Stopped hard: a soft stop would let the stalled thought in hand finish.
@@ -12494,7 +12496,7 @@ if (want("38b")) {
     await (stopHand as PassStop | null)?.();
     await Promise.race([handRun, Bun.sleep(15_000)]);
     await ended(handRun, handAc);
-    const [handRow] = (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${handHeld}::uuid AND work_type = ${EX}`) as ({ stops: number; stalled: number; cuts: number } | undefined)[];
+    const handRow = await counts(handHeld);
     assert(handInHand && handRow?.stops === 1 && handRow.cuts === 0,
       `the operator's second signal, the thought in hand, counts a stop and no cut (${JSON.stringify(handRow)})`);
     // A follower found outside mid-sleep: the scheduler stops its passes for a
@@ -12507,7 +12509,7 @@ if (want("38b")) {
     const outsideCode = await Promise.race([outsideRun, Bun.sleep(15_000).then(() => "hung")]);
     await ended(outsideRun, outsideAc);
     await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:extract:outside@p2'`;
-    const [outsideRow] = (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${handHeld}::uuid AND work_type = ${EX}`) as ({ stops: number; stalled: number; cuts: number } | undefined)[];
+    const outsideRow = await counts(handHeld);
     assert(outsideInHand && outsideCode === 2 && outsideRow?.stops === 1 && outsideRow.cuts === 1,
       `a follower found outside, the thought in hand: the scheduler's stop of its passes counts a cut, the stops as they were (exit ${outsideCode}, ${JSON.stringify(outsideRow)})`);
     // The sleep throwing — a table it reads gone, no outage — with a thought
@@ -12520,7 +12522,7 @@ if (want("38b")) {
     const thrown = await Promise.race([throwRun.then((c) => `code ${c}`, (e: Error) => `threw ${e.message}`), Bun.sleep(15_000).then(() => "hung")])
       .finally(() => sql`ALTER TABLE query_log_away RENAME TO query_log`);
     await ended(throwRun, throwAc);
-    const [throwRow] = (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${handHeld}::uuid AND work_type = ${EX}`) as ({ stops: number; stalled: number; cuts: number } | undefined)[];
+    const throwRow = await counts(handHeld);
     assert(throwInHand && /^threw .*query_log/.test(thrown) && throwRow?.stops === 1 && throwRow.cuts === 2,
       `the sleep throwing, the thought in hand: its stop of the passes counts a cut, the stops as they were (${thrown.slice(0, 80)}; ${JSON.stringify(throwRow)})`);
     // A pass that ends by itself — consolidation's start refused, its key
@@ -12546,7 +12548,7 @@ if (want("38b")) {
       const byItselfNote = await syncNote("The stuckdoc note, in hand as consolidation ends by itself.", 24);
       const byItselfInHand = await pollUntil(async () => stuckStarts.length > 0, 30_000);
       const endedSeen = await pollUntil(async () => byItself.some((l) => /consolidate ended by itself/.test(l)), 30_000);
-      [byItselfRow] = (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${byItselfNote}::uuid AND work_type = ${EX}`) as typeof byItselfRow[];
+      byItselfRow = await counts(byItselfNote);
       assert(besideSeen && byItselfInHand && endedSeen && byItselfRow?.cuts === 1 && byItselfRow.stops === 0,
         `a pass that ends by itself, the thought in hand: the scheduler's stop of the others counts a cut and no stop (${JSON.stringify(byItselfRow)}; ${byItself.filter((l) => /ended by itself|refused/.test(l)).map((l) => l.trim().slice(0, 60)).join(" | ")})`);
     } finally {
@@ -12609,16 +12611,16 @@ if (want("38b")) {
       await pollUntil(async () => seen(waitLine) < Infinity && (mid || seen(/\[consolidate\]/) < Infinity), 40_000);
       if (!mid) await Bun.sleep(1500);
       // The stalled thought's cuts so far (the join's, mid-pass): the let-out's set-aside adds its own.
-      const cutsOf = async () => Number(((await sql`SELECT cuts FROM extraction_progress WHERE thought_id = ${stalledJ}::uuid AND work_type = ${EX}`)[0] as { cuts: number } | undefined)?.cuts);
-      const cutsBefore = await cutsOf();
+      const cutsBefore = Number((await counts(stalledJ))?.cuts);
       const note = await syncNote(`The judgenote, written by a sync while the judge does not answer (${mid ? "mid-pass" : "at its start"}).`, 19);
-      const noteDone = await pollUntil(async () => (await status(note)) === "succeeded" && seen(/set aside again until consolidation drains/) < Infinity, 30_000);
+      // The set-aside that reaches the stalled thought, the one that cuts it (review pass 2: one that found nothing in hand cut nothing).
+      const noteDone = await pollUntil(async () => (await status(note)) === "succeeded" && seen(/has reached the stalled thought\(s\) — set aside again until consolidation drains/) < Infinity, 30_000);
       // The let-out's set-aside cut the stalled thought: counted as the
       // scheduler's own, its stops — the wakes, none here — as planted (SMD-3060).
       // Its line is said before the cut lands: polled until the cut is.
       let progJ: { stops: number; stalled: number; cuts: number } | undefined;
       await pollUntil(async () => {
-        [progJ] = (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${stalledJ}::uuid AND work_type = ${EX}`) as typeof progJ[];
+        progJ = await counts(stalledJ);
         return Number(progJ?.cuts) > cutsBefore;
       }, 5_000);
       // A second note: at its start, while the judge is still down — let out
