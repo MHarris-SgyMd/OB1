@@ -29,8 +29,8 @@
 // continues where the operator trusts it (OB1_OTEL_TRUST_TRACEPARENT=1) or the
 // REST core's forwarder carried it (SMD-2287).
 //
-// Workers never loads this: wrangler.toml aliases it to
-// shims/otel-unavailable.ts, so the Worker's bundle holds the API alone.
+// Loaded only by startTelemetry, where a collector is named; every other
+// process holds the API alone.
 
 import { context, createNoopMeter, diag, DiagLogLevel, metrics, propagation, trace, TraceFlags, type Attributes, type Context, type MeterProvider } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";

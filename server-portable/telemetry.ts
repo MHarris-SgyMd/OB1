@@ -640,9 +640,9 @@ export function planTelemetry(env: Record<string, string | undefined> = process.
 }
 
 /**
- * Sets up the OpenTelemetry SDK where an operator names a collector — on Bun
- * only: a server calls it where it serves on Bun, and Workers' bundle aliases
- * otel-setup.ts to a stub (wrangler.toml). Each signal goes where
+ * Sets up the OpenTelemetry SDK where an operator names a collector — a server
+ * calls it where it serves, and the SDK (otel-setup.ts) is loaded only then, so
+ * a process that names no collector never loads it. Each signal goes where
  * planTelemetry says, and what goes nowhere is said, by planTelemetry's lines.
  * Says where the rest go — the variable and the endpoint's origin alone, so a
  * credential in it stays out of the log — or that its SDK could not be loaded

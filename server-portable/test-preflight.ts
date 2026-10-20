@@ -23,7 +23,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
-import { DIRECT_CHECK_SKIP_OVER_POSTGREST } from "./store.ts";
+import { POSTGREST_RETIRED } from "./store.ts";
 import { pathFix, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
 import { ACCEPTED_CAVEAT_PREFIX, bytesText, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
@@ -86,7 +86,7 @@ async function migrate(args: string[], env: Record<string, string | undefined> =
   return runScript(["bun", join(HERE, "..", "db", "migrate.ts"), ...args], { env: clean, cwd: join(HERE, "..", "db") });
 }
 
-const NO_DB = { DATABASE_URL: undefined, SUPABASE_URL: undefined, SUPABASE_SERVICE_ROLE_KEY: undefined };
+const NO_DB = { DATABASE_URL: undefined, SUPABASE_URL: undefined };
 
 console.log("[1] Missing configuration fails, with an actionable fix");
 {
@@ -94,29 +94,26 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   assert(r.code === 1, "OB1_STORE=sql without DATABASE_URL exits 1");
   assert(/DATABASE_URL/.test(r.out) && /→/.test(r.out), "…names the variable and suggests a fix");
 
-  const p = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "postgrest" });
-  assert(p.code === 1, "OB1_STORE=postgrest without SUPABASE_URL exits 1");
-
   const k = await run({ ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://x/y", OPENROUTER_API_KEY: "z", MCP_ACCESS_KEY: undefined });
   assert(k.code === 1, "a missing MCP_ACCESS_KEY exits 1");
 
   const b = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "typo" });
   assert(b.code === 1, "an unrecognised OB1_STORE exits 1 rather than defaulting");
-  assert(/"sql" \(the default/.test(b.out), "…naming sql as the default");
+  assert(/"sql" is the only store/.test(b.out) && !/postgrest/i.test(b.out), "…naming sql as the only store, and no other");
 
   // Change 97 (SMD-1797): unset selects the SQL store, and every line says so.
   const d = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined });
   assert(d.code === 1, "OB1_STORE unset without DATABASE_URL exits 1");
-  assert(/store selection\s+OB1_STORE unset — sql, the default/.test(d.out), "…the store selection line says unset means sql");
+  assert(/store selection\s+OB1_STORE unset — sql, the only store/.test(d.out), "…the store selection line says unset means sql, the only store");
   assert(/DATABASE_URL\s+OB1_STORE is unset, which selects the SQL store, and DATABASE_URL is not set/.test(d.out), "…the DATABASE_URL line says which selection wants it");
   assert(!/SUPABASE_URL\s+not set/.test(d.out), "…and SUPABASE_URL is not asked for");
 
-  // The deployment the old default served — an https:// SUPABASE_URL, no
-  // OB1_STORE — is told both ways out rather than asked for a DATABASE_URL alone.
-  const h = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined, SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k" });
+  // An https:// SUPABASE_URL (the retired PostgREST store's base URL) is said
+  // not to be a connection string; no other store is offered (SMD-3152).
+  const h = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined, SUPABASE_URL: "https://x.supabase.co" });
   assert(h.code === 1, "an https:// SUPABASE_URL under the default exits 1");
-  assert(/the PostgREST store's base URL/.test(h.out) && /set OB1_STORE=postgrest/.test(h.out), "…naming OB1_STORE=postgrest as the way to keep reaching the brain through it");
-  assert(!/set but unused/.test(h.out), "…and does not, two lines later, tell the operator to remove the variables that way out needs");
+  assert(/SUPABASE_URL holds a non-postgres:\/\/ URL, not a connection string/.test(h.out) && !/OB1_STORE=postgrest/.test(h.out), "…said to be no connection string, with no other store offered");
+  assert(!/set but unused/.test(h.out), "…and not, two lines later, called unused beside the fail line it is part of");
 
   // SUPABASE_URL holding a postgres:// URL is the connection string: the
   // configuration passes, masked and attributed, and the run fails only at the
@@ -136,49 +133,16 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   // version — the block is skipped whole and this line is absent.
   assert(/vector extension\s+could not verify/.test(a.out), "…and the direct-connection block dialled it too (vector extension carries the refused connection)");
 
-  // The mirror slip: OB1_STORE=postgrest kept beside a SUPABASE_URL that holds a
-  // postgres:// string. Refused by name, the password masked — the first version
-  // printed the URL raw and then blamed network reachability (first review pass).
-  const m = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "postgrest", SUPABASE_URL: "postgres://u:hunter2@127.0.0.1:1/x", SUPABASE_SERVICE_ROLE_KEY: "k" });
-  assert(m.code === 1, "OB1_STORE=postgrest with a postgres:// SUPABASE_URL exits 1");
-  assert(/✗\s+SUPABASE_URL\s+holds a postgres:\/\/ connection string \(postgres:\/\/\*\*\*@127\.0\.0\.1:1\/x\), which the PostgREST store cannot dial/.test(m.out), "…refused by name, with the string masked");
-  assert(!/hunter2/.test(m.out), "…and the password appears nowhere in the report");
-  assert(/→ .*Unset OB1_STORE — the SQL store reads that URL/.test(m.out), "…with the fix naming the SQL store as the reader of that URL");
-  assert(/data layer\s+skipped — fix the configuration/.test(m.out) && !/protocol must be/.test(m.out), "…and the store is never built on it, so supabase-js's protocol error never appears");
-
-  // PostgREST stays selectable. On Bun the selection is a WARNING that names
-  // Workers and carries the notice as its fix line — not a failure of the config.
-  const w = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "k", OB1_CHUNK_CONTEXT: undefined });
-  assert(/!\s+store selection\s+OB1_STORE=postgrest — the PostgREST store, kept for Cloudflare Workers/.test(w.out), "OB1_STORE=postgrest is a warning naming Workers");
-  assert(/→ OB1_STORE=postgrest selects the PostgREST store, which this fork keeps for Cloudflare Workers only: this process runs on Bun/.test(w.out), "…with the retired notice as its fix line");
-  assert(/✓\s+SUPABASE_URL\s+https:\/\/stub\.invalid/.test(w.out), "…and its own configuration still passes");
-  // Over PostgREST with the schema check failed, every direct-connection check
-  // still prints — the file's own rule. Before the first review pass `edit
-  // signature` was silent on this path, and sixteen SQL-only checks were silent
-  // on every PostgREST run (pre-existing; by-catch).
-  assert(/edit signature\s+not probed — the schema check above failed first/.test(w.out), "edit signature reports when the schema check failed over PostgREST");
-  // Every name in DIRECT_CHECKS, read from the source as [4] does, exactly ONCE
-  // as a report row — the loop that fills the gaps must neither miss a name nor
-  // double one already reported by hand (second review pass: a four-name sample
-  // could not see the loop moved above the hand-written skips, which then printed
-  // twice). The row shape is the glyph, the name, whitespace.
-  const listedNames = [...readFileSync(join(HERE, "preflight.ts"), "utf8").match(/const DIRECT_CHECKS = \[([\s\S]*?)\];/)![1].matchAll(/"([^"]+)"/g)].map((mm) => mm[1]);
-  assert(listedNames.length >= 20, `DIRECT_CHECKS parsed from the source (${listedNames.length} names)`);
-  /** A report row for `name`: the glyph, the name, whitespace (fix lines start with →, so they never match). */
-  const rowRe = (name: string, flags = "") => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`, flags);
-  const rowCounts = listedNames.map((name) => [name, (w.out.match(rowRe(name, "gm")) ?? []).length] as const);
-  assert(rowCounts.every(([, n]) => n === 1), `over PostgREST every direct-connection check prints exactly one row (${rowCounts.filter(([, n]) => n !== 1).map(([name, n]) => `${name}×${n}`).join(", ") || "all once"})`);
-  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 26, "…twenty-six of them as the catalog-only skip (061's lineage, the workers' and the sleep scheduler's heartbeats, the proposal queue, the plugin tables and the two memory rows among them), the rest by their own hand-written rows");
-  // And nothing else: every row between `data layer` and the provider section is
-  // `schema` or one of the listed names. A hand-written PostgREST row under a
-  // misspelt name would print beside the loop's correctly named skip with every
-  // count above intact (third review pass); this total sees it.
-  const lines = w.out.split("\n");
-  const rowOf = (name: string) => lines.findIndex((l) => rowRe(name).test(l));
-  const fromRow = rowOf("data layer"), toRow = rowOf("embedding provider");
-  const rows = lines.slice(fromRow + 1, toRow).filter((l) => /^\s*[✓✗!·]\s+\S/.test(l));
-  assert(fromRow > 0 && toRow > fromRow && rows.length === listedNames.length + 1,
-         `…and nothing else prints between the data layer and the provider: schema plus the ${listedNames.length} names (${rows.length} rows)`);
+  // The PostgREST store is retired (SMD-3152): its selection fails the
+  // configuration by name, with store.ts's refusal as the fix, whatever
+  // SUPABASE_URL holds, and the store is never built.
+  for (const url of ["https://stub.invalid", "postgres://u:hunter2@127.0.0.1:1/x"]) {
+    const m = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "postgrest", SUPABASE_URL: url });
+    assert(m.code === 1 && /✗\s+store selection\s+OB1_STORE=postgrest — the PostgREST store, retired/.test(m.out),
+           `OB1_STORE=postgrest fails the store selection row, exit 1, with SUPABASE_URL ${url.split(":")[0]}:// (${row(m.out, "store selection").trim()})`);
+    assert(fix(m.out, "store selection").trim() === `→ ${POSTGREST_RETIRED}`, `…with store.ts's refusal as its fix line (${fix(m.out, "store selection").trim().slice(0, 80)})`);
+    assert(/data layer\s+skipped — fix the configuration/.test(m.out) && !/hunter2/.test(m.out), "…the store never built, and no password printed");
+  }
 }
 
 console.log("\n[2] A short raw access key is refused (SMD-2309)");
@@ -346,7 +310,7 @@ console.log("\n[4] Unreachable database fails rather than hanging");
   // else would (a renamed or added check would otherwise be blamed or silent).
   const src = readFileSync(join(HERE, "preflight.ts"), "utf8");
   const listed = [...src.match(/const DIRECT_CHECKS = \[([\s\S]*?)\];/)![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-  const from = src.indexOf('if (built.kind === "sql" && conn) {'), to = src.indexOf("const missing = DIRECT_CHECKS.filter");
+  const from = src.indexOf("// Every schema check below reads the catalog over a direct connection.\n    if (conn) {"), to = src.indexOf("const missing = DIRECT_CHECKS.filter");
   assert(from > 0 && to > from, "the block's two anchors are found in preflight.ts");
   const block = src.slice(from, to);
   // First appearance in the source is the order the block reports in, and the
@@ -629,8 +593,7 @@ else {
    * Migration 017, the same shape of check on a bigger surface: search and
    * search_thoughts call search_thoughts_hybrid unconditionally, so a database
    * without it serves the two most-used tools broken while the handshake and
-   * every other tool look fine. The PostgREST branch probes by RPC and cannot
-   * be exercised here; this holds the SQL branch's message and remedy.
+   * every other tool look fine. This holds the check's message and remedy.
    */
   const noHybrid = new SQL({ url: LIVE, max: 1 });
   // Both forms since 075: the 7-argument one the servers call and min_trust's 8.
@@ -1726,6 +1689,20 @@ else {
   assert(/Finish it: cd db && OB1_JUDGE_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL; OB1_JUDGE_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL --status shows where it stands\./.test(consMid.out),
          "…and the remedy runs the worker under the key's own judge model — the judge's knob, so the extractor stays put (SMD-1901) — since another shell would pool under another key");
   assert(!/OB1_METADATA_MODEL=other-judge/.test(consMid.out), "…and not by moving the metadata model");
+  // Decide mode (SMD-3115): under a decider, the judge's key's remedy clears it, the judge's model being this
+  // server's own, and a decide key's names its decider and writer, each the configuration that pools under that
+  // key; a decide key of this server's own models needs neither.
+  const DCONS = "consolidate:h2o-x+writer-y@p4d1";
+  await claims.unsafe(`SELECT enqueue_thoughts('${DCONS}', ARRAY['${ids[0]}', '${ids[1]}']::uuid[])`);
+  const consDecide = await run({ ...SQL_ENV, OB1_CONSOLIDATE_DECIDER: "h2o-z", OB1_JUDGE_MODEL: "other-judge" });
+  const consDecideOwn = await run({ ...SQL_ENV, OB1_CONSOLIDATE_DECIDER: "h2o-x", OB1_JUDGE_MODEL: "writer-y" });
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${DCONS}`;
+  const finishes = (out: string) => out.split("\n").filter((l) => /Finish it/.test(l)).map((l) => l.trim().slice(0, 110)).join(" | ");
+  assert(/Finish it: cd db && OB1_CONSOLIDATE_DECIDER= OB1_JUDGE_MODEL=other-judge bun consolidate\.ts --url \$DATABASE_URL;/.test(consDecide.out)
+      && /Finish it: cd db && OB1_CONSOLIDATE_DECIDER=h2o-x OB1_JUDGE_MODEL=writer-y bun consolidate\.ts --url \$DATABASE_URL;/.test(consDecide.out),
+         `under a decider the judge's key's remedy clears it, though its model is this server's judge, and a decide key's names its decider and writer (${finishes(consDecide.out)})`);
+  assert(/Finish it: cd db && bun consolidate\.ts --url \$DATABASE_URL;/.test(consDecideOwn.out) && /Finish it: cd db && OB1_CONSOLIDATE_DECIDER= OB1_JUDGE_MODEL=other-judge bun/.test(consDecideOwn.out),
+         `…and a decide key of this server's own decider and writer needs no knob (${finishes(consDecideOwn.out)})`);
   const consJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
   assert(consJson.ok === true && consJson.checks.some((c) => c.name === "consolidate pass" && c.status === "warn"), "--json carries it as a warning, under ok:true");
   // A worker holding the pending row's live lease: running, ok, no remedy, the
@@ -2245,9 +2222,9 @@ else {
          "…and 060's 10-argument update_thought stands beside 061's eleven: the start is refused naming it with its DROP");
   assert(/!  lineage\s+every derived row has its lineage row, but a producer is missing or stands in two forms \(7 bodies where 061 leaves six — an earlier file re-applied by hand beside 061's\): its next write records no lineage \(SMD-1731\)/.test(pre061.out) && /Apply db\/migrations\/061_derivations\.sql\. Then apply db\/migrations\/073_thought_trust_on_the_row\.sql, db\/migrations\/080_recapture_keep\.sql and db\/migrations\/099_unlink_takes_review_lock\.sql — 099 last defines update_thought \(on 088's body, and so 073's\) and 080 upsert_thought/.test(pre061.out),
          "…while the lineage census itself is clean, the check warns on the bodies: 060's 10-argument update_thought stands beside 061's, seven bodies where 061 leaves six (pass 2's cold read: the probe read two of the six)");
-  // 061's form dropped as well — a brain at 060 under this server: the SQL
-  // store sends eleven positional arguments and the PostgREST store names
-  // p_lineage, so every edit fails on the 10-argument form; a refusal naming
+  // 061's form dropped as well — a brain at 060 under this server: the store
+  // sends eleven positional arguments, so every edit fails on the
+  // 10-argument form; a refusal naming
   // 061, not the "every edit resolves" warning 046's 9-argument form earned
   // when the servers sent nine (cold read, third review pass). The lineage
   // row says the bodies are older, not that a producer is missing: six
@@ -3844,14 +3821,20 @@ else {
       // More held than named: the rest counted.
       await sleeping({ total: 5, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 7, windows: 24 }] });
       assert(/held back across its wakes — 11111111-1111-4111-8111-111111111111, 7 of 24 window\(s\) kept over 3 stop\(s\); and 4 more$/.test(row((await run(LOG_ON)).out, "sleep")), "more held than named: the rest are counted");
+      // The scheduler's own cuts, said apart from the stops, which say the
+      // wakes — a judge outage's let-outs are no wakes (SMD-3060).
+      await sleeping({ total: 1, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null, cuts: 41 }] });
+      const cutOut = await run(LOG_ON);
+      assert(/held back across its wakes — 22222222-2222-4222-8222-222222222222, no window kept over 4 stop\(s\), the last 3 with none gained, and 41 cut\(s\) of the scheduler's own$/.test(row(cutOut.out, "sleep")),
+        `the scheduler's cuts are said apart from the stops (${row(cutOut.out, "sleep")})`);
       // A scheduler stopped says what it held at its last word, and warns of none:
       // a hand run may have finished it since (review pass 1).
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, reads: "yes", held: { total: 1, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }] } }), 30);
       const endedHeld = await run(LOG_ON);
       assert(/at its last word, 1 thought\(s\) held back across its wakes — 22222222/.test(row(endedHeld.out, "sleep")) && !/long hard stops in a row have taken/.test(fix(endedHeld.out, "sleep")),
         `a stopped scheduler's held thought is named at its last word, with no stalled warning (${fix(endedHeld.out, "sleep")})`);
-      // A held word out of its bounds is left off: more thoughts than its total, or more windows kept than sent.
-      for (const bad of [{ total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 1, windows: 4 }, { id: ID2, stops: 3, stalled: 0, kept: 1, windows: 4 }] }, { total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 9, windows: 4 }] }]) {
+      // A held word out of its bounds is left off: more thoughts than its total, more windows kept than sent, or cuts that are no count.
+      for (const bad of [{ total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 1, windows: 4 }, { id: ID2, stops: 3, stalled: 0, kept: 1, windows: 4 }] }, { total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 9, windows: 4 }] }, { total: 1, thoughts: [{ id: ID1, stops: 3, stalled: 0, kept: 1, windows: 4, cuts: -1 }] }]) {
         await sleeping(bad);
         assert(!/held back/.test(row((await run(LOG_ON)).out, "sleep")), `a held word out of its bounds is left off (${JSON.stringify(bad)})`);
       }
@@ -4539,6 +4522,24 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   const wrongModel = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "semif" });
   assert(/✗\s+jev tier\s+.* serves verdict-v1\.4 .*, and OB1_JEV_MODEL expects semif/.test(wrongModel.out) && /→ Point OB1_JEV_BASE_URL at the tier serving semif, or set OB1_JEV_MODEL=verdict-v1\.4\./.test(wrongModel.out),
          "a tier serving another model than OB1_JEV_MODEL fails, naming both");
+  // Consolidation's decide mode (SMD-3115): its own row says what the pass needs, and the decider is the model the
+  // tier is held to when OB1_JEV_MODEL names none. Warnings: the server never judges, and only the pass refuses.
+  const decideNoTier = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" });
+  assert(/!\s+consolidate decide mode\s+OB1_CONSOLIDATE_DECIDER is verdict-v1\.4 and OB1_JEV_BASE_URL is unset — db\/consolidate\.ts refuses to start; capture is unaffected/.test(decideNoTier.out)
+      && /→ Point OB1_JEV_BASE_URL at the typed-decision tier serving verdict-v1\.4 \(jev\/h2o\/README\.md\), or unset OB1_CONSOLIDATE_DECIDER for the judge\./.test(fix(decideNoTier.out, "consolidate decide mode")),
+         `decide mode with no tier warns, naming both knobs (${row(decideNoTier.out, "consolidate decide mode").trim().slice(0, 160)})`);
+  const decideUp = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "verdict-v1.4" });
+  assert(/✓\s+consolidate decide mode\s+verdict-v1\.4 gives each verdict through the tier; \S+ only writes the proposals it calls \(OB1_CONSOLIDATE_DECIDER, pass key consolidate:verdict-v1\.4\+\S+@p\d+d\d+\)/.test(decideUp.out)
+      && /✓\s+jev tier\s+http:\/\/127\.0\.0\.1:\d+ serves verdict-v1\.4 .* \(OB1_CONSOLIDATE_DECIDER\)\s*$/.test(row(decideUp.out, "jev tier")),
+         `a tier serving the decider: decide mode's row names the pass key, and the tier row the knob that held it (${row(decideUp.out, "consolidate decide mode").trim().slice(0, 200)})`);
+  const decideElse = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" });
+  assert(/!\s+jev tier\s+.* serves verdict-v1\.4 .*, and OB1_CONSOLIDATE_DECIDER expects h2o-lightning-4b — db\/consolidate\.ts refuses to start; capture is unaffected/.test(row(decideElse.out, "jev tier"))
+      && /→ Point OB1_JEV_BASE_URL at the tier serving h2o-lightning-4b, or set OB1_CONSOLIDATE_DECIDER=verdict-v1\.4 \(a new pass key\)\./.test(fix(decideElse.out, "jev tier")),
+         `a tier serving another model than the decider warns, naming the decider's knob (${row(decideElse.out, "jev tier").trim().slice(0, 200)})`);
+  const decideHeld = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "verdict-v1.4", OB1_CONSOLIDATE_DECIDER: "h2o-lightning-4b" });
+  assert(/!\s+consolidate decide mode\s+OB1_JEV_MODEL is verdict-v1\.4 and OB1_CONSOLIDATE_DECIDER is h2o-lightning-4b — db\/consolidate\.ts refuses to start; capture is unaffected/.test(decideHeld.out)
+      && /✓\s+jev tier\s+.* serves verdict-v1\.4 .* \(OB1_JEV_MODEL\)\s*$/.test(row(decideHeld.out, "jev tier")),
+         "OB1_JEV_MODEL and the decider naming two models warns on decide mode's row, the tier held to OB1_JEV_MODEL");
 
   const notJev = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: `http://127.0.0.1:${other.port}`, OB1_JEV_LOCAL: "1" });
   assert(/✗\s+jev tier\s+.*speaks undefined, not ob1-jev\/1/.test(notJev.out), "a URL that answers but is not the tier (an Ollama, say) fails as not the contract");

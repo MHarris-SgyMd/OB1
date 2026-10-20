@@ -4,7 +4,7 @@
 // their core over the same wiring rather than two copies of it. Nothing here
 // answers a request; each entry registers its routes over these readers.
 
-import { createStore, postgrestOnBunNotice, storeKind, type ThoughtStore } from "./store.ts";
+import { createStore, type ThoughtStore } from "./store.ts";
 import { tierProblem, trimmedEnv } from "../db/config.mjs";
 import { AgentResolver, cacheTtlFromEnv } from "./agents.ts";
 import { setJobSink } from "./jobs.ts";
@@ -25,14 +25,10 @@ export type Env = {
   MCP_ACCESS_KEYS?: string;
   /** Legacy single raw key — full write access. See auth.ts. */
   MCP_ACCESS_KEY?: string;
-  /** Which data layer to use: "sql" (the default when unset) or "postgrest" (Cloudflare Workers). */
+  /** The data layer: "sql", the only one, or unset; "postgrest" is refused (SMD-3152). */
   OB1_STORE?: string;
-  /**
-   * Required when OB1_STORE=postgrest. Holding a postgres:// URL, SUPABASE_URL
-   * also serves as the SQL store's connection string (store.ts:databaseUrl).
-   */
+  /** Holding a postgres:// URL, the SQL store's connection string (store.ts:databaseUrl). */
   SUPABASE_URL?: string;
-  SUPABASE_SERVICE_ROLE_KEY?: string;
   /** The SQL store's connection string — required unless SUPABASE_URL holds one. */
   DATABASE_URL?: string;
   /** The SQL store's connection pool size (store-sql.ts); default 10. */
@@ -147,6 +143,12 @@ export type Env = {
   /** The supersession judge's model (db/consolidate.ts), when it is not OB1_METADATA_MODEL; the server never judges, but embed.ts reads one Env (SMD-1901). */
   OB1_JUDGE_MODEL?: string;
   /**
+   * Consolidation's decide mode (SMD-3115): the typed-decision tier's model that gives each verdict, the judge's
+   * model then writing only the proposals it calls. Unset, the judge decides. The server never judges; preflight
+   * reads it to name the pass key and to check the tier serves it.
+   */
+  OB1_CONSOLIDATE_DECIDER?: string;
+  /**
    * The typed-decision tier (jev.ts, SMD-2050): where it is served, the model
    * the caller expects, and 1/on when that endpoint is on this box (declared,
    * as OB1_LLM_LOCAL is). The server never decides; preflight, which runs in
@@ -250,7 +252,7 @@ export function initEnv(bindings?: Record<string, unknown>): void {
   // every query_log row and emptying SMD-1806's canary replay. Refuse it here,
   // at the one place the env is frozen, rather than lean on the DB CHECK. The
   // container also gates it earlier (preflight, the entrypoint's first command);
-  // this covers Workers and any direct `bun index.ts` (SMD-1953).
+  // this covers any direct `bun index.ts` (SMD-1953).
   //
   // Validate BEFORE assigning ENV: the `if (ENV) return` above means a value
   // assigned here sticks, so throwing after assignment would fire on the first
@@ -292,26 +294,19 @@ export function serveHere(door: string): void {
   void db().catch(() => {});
 }
 
-// Built once, on first use. createStore() dynamically imports whichever backend
-// is configured, so a Cloudflare build never pulls in the Postgres client. The
-// PostgREST store selected where the SQL store runs is said once, here, at the
-// moment the selection takes effect (change 97); preflight says it at the
-// entrypoint as well, so a container sees it before the first request.
+// Built once, on first use.
 let _store: Promise<ThoughtStore> | null = null;
 let jobStoreWired = false;
 export function db(): Promise<ThoughtStore> {
   if (!_store) {
-    const notice = postgrestOnBunNotice(storeKind(env()));
-    if (notice) console.warn(notice);
     _store = createStore(env());
     // Once, in the process that serves (serveHere) and the moment the store is
     // first built (env() is seeded by then): wire the durable job store (SMD-2318) and reconcile jobs a
     // prior process left running — a clean stop's `lost` write that did not land,
     // or a hard crash — so a poll after the restart sees a terminal answer, not a
     // live job with no runner. Detached and best-effort: the handle routes never
-    // gate on it, the SQL store returns a sink, the PostgREST store returns null
-    // (the registry stays in-memory), and a store that fails to build leaves it
-    // in-memory too. A suite drives the sink itself (it holds the store).
+    // gate on it, the SQL store returns a sink, and a store that fails to build
+    // leaves the registry in-memory. A suite drives the sink itself (it holds the store).
     const door = serving;
     if (door !== null && !jobStoreWired) {
       jobStoreWired = true;
@@ -335,21 +330,18 @@ export function db(): Promise<ThoughtStore> {
 /**
  * The stop's close: the pool the store opened — at a serving entry's start
  * (serveHere), or at the first request where nothing called that — while a
- * store that failed to build has none, and the PostgREST store holds no pooled
- * connection to close. True when a SQL pool was closed. Beside db(), so the
+ * store that failed to build has none. True when a SQL pool was closed. Beside db(), so the
  * store is named in these two bodies alone (check 25).
  */
 export function closeStore(): Promise<boolean> {
-  return _store ? _store.then(async (s) => { await s.close(); return s.kind === "sql"; }, () => false) : Promise.resolve(false);
+  return _store ? _store.then(async (s) => { await s.close(); return true; }, () => false) : Promise.resolve(false);
 }
 
 // Built on first use, for the same reason as the store: reading env() at module
 // scope runs before initEnv() has seeded it.
 let _agents: AgentResolver | null = null;
 export function agents(): AgentResolver {
-  // Lookups are shared across requests only on the SQL store: on Workers (the
-  // PostgREST store) a fetch belongs to the request that started it.
-  if (!_agents) _agents = new AgentResolver(cacheTtlFromEnv(env().OB1_AGENT_CACHE_TTL_MS), Date.now, storeKind(env()) === "sql");
+  if (!_agents) _agents = new AgentResolver(cacheTtlFromEnv(env().OB1_AGENT_CACHE_TTL_MS), Date.now);
   return _agents;
 }
 

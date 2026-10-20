@@ -1,5 +1,4 @@
 # Container target (EKS, ECS, Fly.io, Railway, Render).
-# Cloudflare Workers uses wrangler.toml instead; Deno Deploy needs neither.
 # Built from the REPO ROOT, not server-portable/ — see deploy/compose.yaml. The
 # server needs db/config.mjs, which a narrower context cannot reach.
 FROM oven/bun:1.4.3-alpine AS deps
@@ -21,7 +20,6 @@ COPY --from=deps /app/server-portable/node_modules ./node_modules
 # the image when auth.ts was added — the container crashlooped on a missing module.
 # .dockerignore keeps tests and tooling out.
 COPY server-portable/*.ts server-portable/package.json ./
-COPY server-portable/shims ./shims
 COPY server-portable/core ./core
 COPY server-portable/rest ./rest
 # Every plugin in the tree (SMD-2310): the registry imports each by name, and
@@ -56,10 +54,8 @@ ENV OB1_GIT_SHA=$OB1_GIT_SHA
 #   MCP_ACCESS_KEYS (or the legacy MCP_ACCESS_KEY), OPENROUTER_API_KEY or
 #                  OB1_LLM_API_KEY (and OB1_CHAT_API_KEY when OB1_CHAT_BASE_URL
 #                  names a hosted chat endpoint of its own)
-#   DATABASE_URL — the SQL store, which is the default (OB1_STORE unset or sql;
-#                  SUPABASE_URL holding a postgres:// URL is read as the same thing)
-#   OB1_STORE=postgrest → SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (kept for
-#                  Cloudflare Workers; preflight reports it as retired on Bun)
+#   DATABASE_URL — the SQL store, the only one (SUPABASE_URL holding a
+#                  postgres:// URL is read as the same thing)
 # Optional: OPEN_BRAIN_CITATION_BASE_URL, PORT (default 8000), OB1_PG_POOL,
 # OB1_STOP_GRACE (the platform's grace period for a stop, whole seconds 1–3600;
 # default 10)

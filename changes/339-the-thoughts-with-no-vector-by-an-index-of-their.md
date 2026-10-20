@@ -1,0 +1,77 @@
+# 339. The thoughts with no vector by an index of their own — the vector mender's page and the vectorless count stop reading every thought (SMD-3056)
+
+**What changed** (migration 100).
+- **`thoughts_vectorless_idx`**: a btree on `thoughts (id)`, partial on `embedding IS NULL`. It carries the page's order and its predicate together:
+  - both of `store-sql.ts` `listVectorless`'s statements (no cursor, and `id > cursor`) read it from where they start and stop at the page;
+  - brain_info's `vectorless` count, which keyed `/health` also reads, is an index-only scan of it.
+- **Anything else under the name in `thoughts`' schema is refused** (`object_not_in_prerequisite_state`), naming what it is and the statement that clears it (`REINDEX INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`), never recorded as applied over it:
+  - an INVALID index (a `CONCURRENTLY` build or drop that did not finish, or a build still running), which the planner ignores;
+  - an index of another shape, or a relation that is not an index.
+  - The file's own index, or one built by hand in its shape, is kept. `IF NOT EXISTS` alone took all of these, and the mender would have gone on reading every row with nothing saying so.
+  - The name is looked up in `thoughts`' schema, not as the search path's first match: another schema's index under it is never taken for this one. The kept index is on `thoughts` by its oid, and its definition is read from `USING` on, so a schema name that needs quotes is never read.
+- **Nothing else moves:**
+  - No column of `thoughts` changes, and no grant (the readers' SELECT on `thoughts` covers the index).
+  - No statement changes; only the two comments that said "a sequential scan" do.
+- **The write cost:** the index holds only the rows waiting for a vector.
+  - A capture with its vector never enters it. A mend writes a row version that leaves it.
+  - It stays a page or two on a healthy brain.
+  - HOT updates are unchanged: `embedding` was already an indexed column (the HNSW index's expression), and a column in an index's predicate counts the same.
+
+**Why.** SMD-2889's mender reads a page of `embedding IS NULL` in id order on every tick, from each server, and nothing indexed that predicate. The count read every row, and so did the page whenever none waited past its cursor: a healthy brain's every tick, and each sweep's tail. The cost was the thought count's, not the waiting rows':
+- 0.9 ms over stable's 2,023 thoughts;
+- 2–4 ms at 100,000 (the table below), on the way to the 1B horizon (SMD-2754, SMD-2758).
+
+Both servers pay it every tick, and each keyed `/health` call pays it again inside an 800 ms ceiling.
+
+**Held.**
+- **test-schema [90]:** the index's definition (`btree (id) WHERE (embedding IS NULL)`), its comment, a re-apply that changes nothing, the five refusals (no WHERE, the predicate on `created_at`, the shape on another table, a table, `indisvalid` false), each by its message, a rebuild once dropped, and another schema's index under the name behind `public` on the path: thoughts' own built and commented beside it.
+- **test-store-sql [18]**, real Postgres, 1,000 vectored thoughts and 3 without:
+  - the store's own two page statements and brain_info's count each add a scan to `thoughts_vectorless_idx` (read from `pg_stat_user_indexes` after a forced flush on the reads' one connection; nothing else in the suite reads the index);
+  - a page of two over three returns the first two (the LIMIT);
+  - each reads only its own rows' entries (`idx_tup_read`: 3 from the start, 2 from the cursor), the cursor page under a forced generic plan too. A walk from the index's start counts the same scans and reads 3.
+  - Mutants: the cursor as `id::text > …`, or SMD-2889 pass 3's `(id > $1 OR $1 IS NULL)` (wrong under a generic plan only), fails it; so does each statement's predicate as `embedding::text IS NULL` (the same rows, which the index's predicate no longer implies), and so does the index built without its WHERE. `IS NOT DISTINCT FROM NULL` is no such mutant: Postgres folds it to `IS NULL`, and the index still serves it.
+- **test-upgrade:** the window guard (seventy-one) and both enumerations name 100.
+
+**Measured after.** EXPLAIN (ANALYZE), 100,000 thoughts, pgvector 0.8.6 on PG 16. The page queries are verbatim `listVectorless`, with its `origin` subquery; the cursor form is also run as a prepared statement under `plan_cache_mode = force_generic_plan`. Before 100 → after:
+
+| Waiting | Page, no cursor | Page, cursor (literal / generic) | Count |
+|---|---|---|---|
+| 0 | 2.8 ms seq scan + sort → 0.016 ms | 2.8 / 2.8 ms seq scan → 0.006 / 0.005 ms | 3.2 ms seq scan → 0.004 ms index-only |
+| 1% (984) | 0.14 ms pkey + filter → 0.017 ms | 0.11 / 0.11 ms → 0.025 / 0.036 ms | 3.1 ms → 0.071 ms |
+| 10% (9,830) | 0.036 ms pkey + filter → 0.021 ms | 0.038 / 0.030 ms → 0.016 / 0.016 ms | 3.8 ms → 0.62 ms |
+
+Every after-plan names `thoughts_vectorless_idx`.
+- **The worst case before was a healthy brain:** no row waiting, and a full scan on every tick.
+- **The pkey + filter plan at 1% and 10%** was cheap only because the waiting rows were spread evenly by id. The tail of a sweep, past the last waiting id, walked the rest of the key.
+- **The count is now linear in the waiting rows**, not in every thought.
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+|---|---|---|---|
+| 1 | `IF NOT EXISTS` recorded 100 over an INVALID index or one of another shape, the mender then reading every row unsaid | cold read | refused by name; [90] three cells |
+| 1 | the refusal's own message failed to build (`'…' \|\| "char"` is ambiguous) | run-it | `::text` |
+| 1 | [18] passed a cursor page that walks the index from its start (`id::text >`, the generic-plan `OR $1 IS NULL`) | mutant | entries read, generic plan |
+| 1 | [18]'s ids read on another connection could flush an index scan into the window | cold read | read on the reads' connection, held flushes let land |
+| 1 | "a scan of every row", "linear", 5.3 ms at 20,000 against 2–4 ms at 100,000 | cold read | reworded to the measurements |
+| 1 | "seconds" to build: 64–86 ms at 1M | run-it | the measured time |
+| 2 | the name looked up as the search path's first match: a brain without the index kept another schema's, recorded 100 with none on `thoughts`, and commented that one | walkthrough | looked up in `thoughts`' schema, commented by oid; [90] cell |
+| 2 | the INVALID message's "build it again CONCURRENTLY" fails (42P07; `IF NOT EXISTS` leaves it INVALID) | walkthrough | `REINDEX INDEX CONCURRENTLY` or `DROP INDEX CONCURRENTLY` |
+| 2 | [18]'s 1.1 s wait rested on a 1 s flush hold; PG 16 holds an idle backend's up to 10 s | cold read | wait and heap-scan count dropped: no other reader of the index |
+| 3 | the shape check read any column and any schema: `btree (\w+)` and the index on another table passed every cell; a quoted schema refused the file's own | mutant | on `thoughts` by oid, the text from `USING`; two cells |
+| 3 | nothing tested the page's LIMIT (eight over three) | mutant | a page of two |
+
+**Tidied after the last pass.** 100's DO block resolves `thoughts`' schema once (`v_ns`) for both lookups, its two comments above the lookup they explain; the header reflowed; [90]'s title names the refusals and the other schema's index.
+
+**Not taken.**
+- **An index on `(created_at, id)`:** `listVectorless` pages by `id` alone, so `(id)` is the page's order.
+- **`CREATE INDEX CONCURRENTLY` in the file:** the migrator applies each file in a transaction, which CONCURRENTLY refuses. 074's index has the same shape. The build is 64–86 ms at a million thoughts (340 MB of heap, review pass 1), so about a second at ten million (it grows with the heap); a brain past that can build it by hand first, under this name and in this shape, and the file keeps it.
+- **100's refusals judged by `--dry-run`:** a dry run reads no file's body, so it says "would apply" where the file refuses, as for 097's prerequisite refusal; the migrator's comment now says its up-front list is its own judgements, not every file's.
+- **A preflight row for the index in this PR** (review pass 2): one for `thoughts_vectorless_idx` missing or INVALID on a brain recorded at 100 (`--baseline` over a hand-built schema), beside its HNSW validity rows — proposed as a follow-up, not filed.
+- **Two migrators at once:** one fails 100 on `pg_class_relname_nsp_index` (23505) and the other applies it, the end state right (review pass 3, five runs). migrate.ts takes no lock for a run, so any file's CREATE races the same way; a stack runs one `migrate`.
+- **Accepting harmless options on a hand-built index** (`WITH (fillfactor)`, `UNIQUE`): refused by the shape check, with a message that says how to clear it.
+- **A plan check in test-schema:** PGlite's planner on a few rows says nothing about a real brain's. test-store-sql [18] holds the store's own statements on a real Postgres instead.
+
+**Upgrading.** Apply 100 (`bun migrate.ts`). It needs nothing past 001 and moves no row. While it builds, writes to `thoughts` wait: one read of the heap, 64–86 ms at a million thoughts.
+
+**Upstream status.** Fork-only: upstream has no vector mender.
