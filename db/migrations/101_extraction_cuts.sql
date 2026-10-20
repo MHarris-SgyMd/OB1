@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 100: the sleep scheduler's own cuts of a claimed thought are
+-- Migration 101: the sleep scheduler's own cuts of a claimed thought are
 --                counted apart from its stops, so a thought's stops say the
 --                wakes that held it back and no more (SMD-3060)
 -- =============================================================================
@@ -53,7 +53,7 @@
 -- Idempotent: the column and its check added once; the functions and
 -- comments replaced. 093 re-applied after it puts back 093's functions,
 -- which leave `cuts` on a replaced row: after an older tree's --reapply over
--- a 100 brain, run this tree's --reapply (a plain run skips 100, recorded as
+-- a 101 brain, run this tree's --reapply (a plain run skips 101, recorded as
 -- applied).
 -- =============================================================================
 
@@ -61,7 +61,7 @@ DO $rc$
 BEGIN
   IF to_regclass('extraction_progress') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 100 needs 093 (extraction_progress); this schema lacks it',
+      MESSAGE = 'migration 101 needs 093 (extraction_progress); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -79,11 +79,11 @@ END
 $ck$;
 
 COMMENT ON TABLE extraction_progress IS
-  'A long thought''s extraction windows answered under a claim that did not finish, kept so the next claim of the same text and windowing resumes from them; the hard stops that took the claim, the sleep scheduler''s own cuts apart, the windows saved since the last stop, and how many long stops in a row saved none. Written by save_extraction_window, note_extraction_stop and note_extraction_cut for the claim''s holder only; deleted with the claim, or by the worker on a succeeded release. Migration 093 / SMD-2694; the cuts apart, migration 100 / SMD-3060.';
+  'A long thought''s extraction windows answered under a claim that did not finish, kept so the next claim of the same text and windowing resumes from them; the hard stops that took the claim, the sleep scheduler''s own cuts apart, the windows saved since the last stop, and how many long stops in a row saved none. Written by save_extraction_window, note_extraction_stop and note_extraction_cut for the claim''s holder only; deleted with the claim, or by the worker on a succeeded release. Migration 093 / SMD-2694; the cuts apart, migration 101 / SMD-3060.';
 COMMENT ON COLUMN extraction_progress.stops IS
-  'Hard stops that took the claim from a worker with this text in hand — a wake, the operator''s second signal — the sleep scheduler''s own cuts aside (cuts, migration 100).';
+  'Hard stops that took the claim from a worker with this text in hand — a wake, the operator''s second signal — the sleep scheduler''s own cuts aside (cuts, migration 101).';
 COMMENT ON COLUMN extraction_progress.cuts IS
-  'The sleep scheduler''s own hard stops that took the claim from a worker with this text in hand — extraction set aside or restarted around a stalled thought, or its passes stopped for a reason of its own (db/sleep.ts; SMD-2694, SMD-3008) — counted apart from stops, and moving neither stalled nor gained. Migration 100 / SMD-3060.';
+  'The sleep scheduler''s own hard stops that took the claim from a worker with this text in hand — extraction set aside or restarted around a stalled thought, or its passes stopped for a reason of its own (db/sleep.ts; SMD-2694, SMD-3008) — counted apart from stops, and moving neither stalled nor gained. Migration 101 / SMD-3060.';
 
 -- ---------------------------------------------------------------------------
 -- note_extraction_cut — count the scheduler's own cut for the claim's holder
@@ -130,7 +130,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION note_extraction_cut(uuid, text, text, text, text) IS
-  'Count the sleep scheduler''s own hard stop of a claimed thought, before the lease is returned (false and nothing written unless the caller holds the claim): cuts + 1, the stops, stalled, gained and windows as they were; a row of another fingerprint or windowing replaced. Migration 100 / SMD-3060.';
+  'Count the sleep scheduler''s own hard stop of a claimed thought, before the lease is returned (false and nothing written unless the caller holds the claim): cuts + 1, the stops, stalled, gained and windows as they were; a row of another fingerprint or windowing replaced. Migration 101 / SMD-3060.';
 
 -- ---------------------------------------------------------------------------
 -- save_extraction_window — 093's, with cuts back to 0 where it replaces a row
@@ -182,7 +182,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION save_extraction_window(uuid, text, text, text, text, int, int, jsonb) IS
-  'Keep one answered window of a claimed thought, for the claim''s holder only (false otherwise, nothing written): replaces a row of another fingerprint or windowing, the windows of one of another window count (its stops and cuts kept), and a window kept under the same index; counts the save in gained. Migration 093 / SMD-2694; the cuts, migration 100 / SMD-3060.';
+  'Keep one answered window of a claimed thought, for the claim''s holder only (false otherwise, nothing written): replaces a row of another fingerprint or windowing, the windows of one of another window count (its stops and cuts kept), and a window kept under the same index; counts the save in gained. Migration 093 / SMD-2694; the cuts, migration 101 / SMD-3060.';
 
 -- ---------------------------------------------------------------------------
 -- note_extraction_stop — 093's, with cuts back to 0 where it replaces a row
@@ -228,4 +228,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION note_extraction_stop(uuid, text, text, text, text, boolean) IS
-  'Count a hard stop that took a claimed thought from its holder, before the lease is returned (false and nothing written unless the caller holds the claim): stops + 1; stalled reset when a window was saved since the last stop, else + 1 on a long stop (p_long) and kept on a short one; gained back to 0; the sleep scheduler''s own cuts are note_extraction_cut''s. Migration 093 / SMD-2694; the cuts, migration 100 / SMD-3060.';
+  'Count a hard stop that took a claimed thought from its holder, before the lease is returned (false and nothing written unless the caller holds the claim): stops + 1; stalled reset when a window was saved since the last stop, else + 1 on a long stop (p_long) and kept on a short one; gained back to 0; the sleep scheduler''s own cuts are note_extraction_cut''s. Migration 093 / SMD-2694; the cuts, migration 101 / SMD-3060.';

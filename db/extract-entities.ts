@@ -83,7 +83,7 @@
  * the thought in hand before its lease goes back, a stall only when it had
  * held the thought at least STALL_FLOOR_MS, provider pauses aside — the sleep
  * scheduler's own cut (PassStop's `cut`) as a cut, apart from the stops and
- * stalling nothing (migration 100, SMD-3060). A first
+ * stalling nothing (migration 101, SMD-3060). A first
  * stop ends a windowed thought at its next window, those answered kept, not
  * after its last. Each run prunes the rows no reader can use. --status lists
  * them.
@@ -173,7 +173,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_FIRST_MS, OUTAGE_MAX_MS, probeChat, probeRefusal, probeUntil, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeUntil, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe } from "../server-portable/lineage.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
@@ -595,7 +595,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   /** Probe until the provider answers, saying when it stopped and when it answered; a stop ends the wait. */
   async function waitForProvider(wake: AbortSignal): Promise<void> {
     const down = Date.now();
-    err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${outageModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+    err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${outageModel} at ${cfg.chat.base} for one token after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
     if (await probeUntil(() => probe(undefined, wake, outageModel), wake, (p) => !isOut(p))) {
       outage.end();
       outageModel = cfg.metadataModel;
@@ -798,14 +798,14 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * first, each row of the text and windowing in force (one of earlier text is
    * replaced at the next claim, review pass 1) — each with how many windows
    * are kept and how many stops took it, the latest of them in a row with
-   * none gained, and how many of the sleep scheduler's own cuts (100,
+   * none gained, and how many of the sleep scheduler's own cuts (101,
    * SMD-3060; none before it). Nothing on a brain before 093, or under a role
    * that cannot read it.
    */
   async function printKept(limit = 10): Promise<void> {
     let rows: { thought_id: string; status: string; windows: number | null; kept: number; stops: number; stalled: number; cuts: number; total: number }[];
     try {
-      // A brain before 100 has no cuts to read: none said. Probed as the read
+      // A brain before 101 has no cuts to read: none said. Probed as the read
       // below resolves the table, unqualified (review pass 3).
       const [{ cuts }] = (await sql`SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('extraction_progress') AND attname = 'cuts' AND NOT attisdropped) AS cuts`) as { cuts: boolean }[];
       rows = (await sql`
@@ -890,7 +890,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // Before the CLI installs its handlers a signal ends the process; a caller's signal ends the wait.
     const wake = opts.signal ?? new AbortController().signal;
     const down = Date.now();
-    err(`  the provider is not answering at start (${startOut.slice(0, 200)}) — the follower claims nothing until it does; it calls ${cfg.metadataModel} at ${cfg.chat.base} for one token after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+    err(`  the provider is not answering at start (${startOut.slice(0, 200)}) — the follower claims nothing until it does; it calls ${cfg.metadataModel} at ${cfg.chat.base} for one token after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
     // Said through a caller's stamper while it lasts — the sleep scheduler's,
     // so heartbeat:sleep and preflight's row say a pass waits at its start for
     // the provider, not that its passes run (SMD-2752).
@@ -1159,9 +1159,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     }
   }
 
-  /** Whether the scheduler's cuts are counted: not on a brain before 100, said once a run — each set-aside's run its own — the windows still kept. */
+  /** Whether the scheduler's cuts are counted: not on a brain before 101, said once a run — each set-aside's run its own — the windows still kept. */
   let cutting = true;
-  /** The sleep scheduler's own cut of the thought in hand (100's note_extraction_cut), counted apart from its stops: no wake, so it stalls nothing. */
+  /** The sleep scheduler's own cut of the thought in hand (101's note_extraction_cut), counted apart from its stops: no wake, so it stalls nothing. */
   async function noteCut(workerId: string): Promise<void> {
     const t = inHand.get(workerId);
     if (!t || !keeping || !cutting) return;
@@ -1174,7 +1174,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       // Read after the call: every worker in hand tries at once (run-it review).
       if (!cutting) return;
       cutting = false;
-      errAside(`  could not count the scheduler's cut of a long thought (${(e as Error).message}) — its cuts go uncounted this run, its stops and kept windows as before: that needs migration 100, which the scheduler's next extraction run takes up, and its held word once the scheduler is restarted`);
+      errAside(`  could not count the scheduler's cut of a long thought (${(e as Error).message}) — its cuts go uncounted this run, its stops and kept windows as before: that needs migration 101, which the scheduler's next extraction run takes up, and its held word once the scheduler is restarted`);
     }
   }
 
@@ -1636,7 +1636,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       // Started before the line is written: a Writer that throws does not keep
       // the leases. Each thought in hand has its stop counted first, while its
       // claim is still the worker's (093, SMD-2694) — the scheduler's own cut
-      // as a cut, apart from its stops (100, SMD-3060).
+      // as a cut, apart from its stops (101, SMD-3060).
       const note = how?.cut ? noteCut : noteStop;
       const release = Promise.all([...activeWorkers].map((w) => {
         // Bounded: a count waiting on a lock held the release past the CLI's
@@ -1821,7 +1821,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       } catch (e) {
         if (!FOLLOW || !databaseUnavailable(e)) throw e;
         const down = Date.now();
-        err(`  the database is not answering (${(e as Error).message}) — the follower waits for it, checking after ${OUTAGE_FIRST_MS / 1000} s and then twice as long each time, up to ${OUTAGE_MAX_MS / 60_000} min`);
+        err(`  the database is not answering (${(e as Error).message}) — the follower waits for it, checking after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
         if (!(await waitOut({ check: () => sql`SELECT 1`, outage: databaseUnavailable, wake: onStop.signal }))) return null;
         out(`  the database answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
       }

@@ -315,7 +315,7 @@ export const MAX_TIMER_MS = 2147483647;
  * `cut` marks a hard stop as the caller's own — the sleep scheduler's, setting
  * extraction aside or ending its passes for a reason of its own — not a
  * wake's nor the operator's: extraction counts it
- * on the thought in hand apart from its stops (migration 100, SMD-3060); the
+ * on the thought in hand apart from its stops (migration 101, SMD-3060); the
  * other engines count no stop and read it not.
  */
 export type PassStop = (opts?: { cut?: boolean }) => Promise<unknown> | null;

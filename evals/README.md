@@ -3791,6 +3791,426 @@ Caveats:
   two accepted proposals. Recall on supersessions other writers would set is
   not measured here.
 
+## Settling the judge's easy pairs with the typed-decision tier: declined (SMD-3058)
+
+`eval-judge-decide.ts`. Every candidate pair costs the consolidation judge one
+LLM call with both thoughts' text, and nearly every pair ends unrelated,
+related, evolves or duplicate. The spike asked whether the typed-decision tier
+(behind `ob1-jev/1`, SMD-2050) could settle those pairs cheaply and send only
+the uncertain ones, and every possible `outdates`, to the LLM judge. It measured
+decider-4b, then H2O-Lightning-4B, a stronger model of the same size. Both are
+declined. H2O came closest: gated on whether a pair could be a supersession,
+rather than on its own confidence, it met the rule behind the 7B on the first
+444 pairs. It then failed the confirmation on 533 fresh ones.
+It asks three decisions of every pair in `eval-judge.ts`'s export, read as
+prompt 4 renders the two thoughts, so both framings score from one run:
+
+* **S**, binary: "THOUGHT A and THOUGHT B are about the same subject";
+* **T**, a choice among related, evolves, duplicate and outdates: the
+  two-pass framing's second question, used where S says same subject;
+* **C**, a choice among all five verdicts: the one-pass framing.
+
+The options carry prompt 4's verdict definitions. The decider never settles
+`outdates`, since a proposal needs the judge's direction and quote, so a
+cascade loses a supersession only by settling it as something else. The
+judges' answers are saved once (`eval-judge.ts --out`), and every cascade is
+scored from them.
+
+```bash
+JEV_PORT=8021 <venv>/bin/python ../jev/decider/serve.py      # decider-4b by hand: jev/decider/README.md (SMD-2265 deploys it)
+OB1_JEV_BASE_URL=http://127.0.0.1:8021 OB1_JEV_LOCAL=1 OB1_JEV_MODEL=decider-4b \
+  bun eval-judge-decide.ts --pairs /private/tmp/judge-pairs.jsonl --out /private/tmp/decider.jsonl
+# with DECIDER_PACK=1 on the server: S and T in one call (--packed); each thought cut to 600 characters (--clip 600)
+bun eval-judge-decide.ts --pairs … --out /private/tmp/decider-600.jsonl --packed --clip 600
+OB1_JUDGE_MODEL=qwen2.5:7b bun eval-judge.ts --pairs /private/tmp/judge-pairs.jsonl --out /private/tmp/answers-7b.jsonl --concurrency 1 --logprobs 10
+bun eval-judge-decide.ts --pairs … --decider /private/tmp/decider.jsonl --judge 7b=/private/tmp/answers-7b.jsonl --judge 27b=…
+# H2O-Lightning-4B: jev/h2o/README.md
+JEV_PORT=8022 <venv>/bin/python -I ../jev/h2o/serve.py
+OB1_JEV_BASE_URL=http://127.0.0.1:8022 OB1_JEV_LOCAL=1 OB1_JEV_MODEL=h2o-lightning-4b \
+  bun eval-judge-decide.ts --pairs /private/tmp/judge-pairs.jsonl --out /private/tmp/h2o.jsonl --packed
+```
+
+**The set** (dogfood stable, 2026-10-16): 127 rejected and 2 accepted
+proposals, 135 linked ticket pairs (16 duplicate_of, 40 child_of, 40 blocks,
+39 relates_to), 60 pointer pairs and 120 candidates: 444 pairs, 62 of them
+true supersessions. Each judge ran one pair at a time on this Mac (Ollama,
+temperature 0), and decider-4b on PyTorch over the GPU.
+
+**The judges.** qwen2.5:7b catches 2 of the 62 true supersessions, with 3
+false proposals, at 3.6 s a pair. qwen3.8:27b catches 23, with 17 false, at
+13.0 s. They give the same verdict on only 50% of the candidates; the most
+common split (32 of 120) is the 7B's "unrelated" against the 27B's "related".
+The linked pairs side with the 27B: on relates_to it is right on 34 of 39, and
+the 7B on 22.
+
+**What the decider says** at full length, by its one-pass verdict:
+
+| label | pairs | unrelated | related | evolves | duplicate | outdates | median P(same subject) |
+|---|---|---|---|---|---|---|---|
+| candidates | 120 | 86 | 4 | 17 | 0 | 13 | 0.05 |
+| pointer pairs (true supersessions) | 60 | 0 | 10 | 2 | 37 | 11 | 0.99 |
+| accepted proposals | 2 | 0 | 0 | 0 | 0 | 2 | 0.93 |
+| rejected proposals | 127 | 14 | 5 | 86 | 0 | 22 | 0.69 |
+| linked: relates_to | 39 | 27 | 3 | 9 | 0 | 0 | 0.04 |
+| linked: blocks, child_of, duplicate_of | 96 | 14 | 16 | 64 | 0 | 2 | 0.52–0.79 |
+
+**What a decision costs.** Reading the pair is nearly all of it, about 1 ms a
+token on this Mac, for decider-4b and the 7B alike. Ollama's own timing has the
+7B reading judge prompts at 0.84 ms a token (2,639 tokens in 2.2 s, then about
+1.4 s writing its answer). So at full length a decision costs about what the 7B
+spends reading the same pair. Two ways to make it cheaper were measured:
+
+* **Packing** (`DECIDER_PACK=1` on the server, `--packed` here): S and T in one
+  call, one read of the pair for both, which took 1.97 s against 4.38 s. S kept
+  its answer on 95% of pairs, and T, asked after S, on 63%. C is always asked
+  alone; packed after T, it kept its answer on 5 of 10 in a trial.
+* **Clipping** (`--clip N`): each thought cut to its first N characters before
+  the decider reads it.
+
+**The cascade, every variant.** Each band is picked from the data: no
+supersession the judge caught is lost, and the most candidates are settled.
+These are the two-pass bands: S at most 0.3 settles unrelated, and S at least
+0.6 asks T. The one-pass rows are in each run's report.
+
+| the decider reads (two-pass) | decider s per pair | behind 7B: model s per pair (alone 3.6) | settled pairs right: decider / 7B | behind 27B: model s per pair (alone 13.0) | settled pairs right: decider / 27B |
+|---|---|---|---|---|---|
+| full length, S and T apart | 2.1–4.4 | 4.7 | 110 / 144 of 187 | 9.4 | 78 / 128 of 143 |
+| full length, packed | 2.0 | 3.5 | 98 / 135 of 170 | 8.3 | 73 / 127 of 137 |
+| 1,500 characters, packed | 0.8 | 2.7 | 51 / 88 of 123 | 8.4 | 33 / 85 of 99 |
+| 600 characters, packed | 0.5 | 2.2 | 49 / 92 of 143 | 7.5 | 41 / 100 of 113 |
+| 300 characters, packed | 0.4 | 1.9 | 73 / 117 of 167 | 7.1 | 47 / 107 of 116 |
+
+"Settled pairs right" counts the labelled pairs the decider settles: how many
+its verdict gets right, and how many the judge it replaces got right on the
+same pairs. Picked on one half of the pairs and scored on the other, the bands
+lose up to one of the 7B's supersessions, and up to three of the 27B's at 300
+and 600 characters.
+
+**Why decider-4b is declined.** Packing and clipping make the cascade cheap. Behind the
+7B the cheapest variant needs about half the 7B's model time, and behind the
+27B the packed variants need 35–45% less. But on every variant, on the pairs it
+would settle, the decider is right less often than the judge it replaces would
+have been:
+
+* 18–30 points less than the 7B;
+* 35–53 points less than the 27B.
+
+Clipping widens the gap, since S, T and C all move off their full-length
+answers (at 600 characters, T keeps its answer on 48% of pairs). Its errors are
+of two kinds:
+
+* "unrelated" for pairs both judges and the board call related; at full length
+  it calls 27 of the 39 relates_to pairs unrelated;
+* "duplicate" for true supersessions: 37 of the 60 pointer pairs.
+
+A cheaper pass that writes wrong relations is no gain. Its "evolves" alone is
+reliable: it is right on every labelled pair it settles that way.
+
+**What would reopen it** (written after decider-4b): a decider whose "same
+subject" and relation calls match the judges' on the linked pairs, through a
+fine-tune or a framing this spike didn't try, measured with this harness.
+H2O-Lightning-4B, below, came close on the relation calls. Gated on whether a
+pair could be a supersession, not on its confidence, it met the rule behind the
+7B on the first pairs, then failed it on fresh ones, on relates_to links. A
+faster runtime won't do it
+alone: reading costs the 7B on llama.cpp 0.84 ms a token, so a 4B on the same
+runtime would read about twice as fast as now, and accuracy is the binding
+problem.
+
+**Found on the way.** The decider adapter (`jev/decider/serve.py`) cut every
+context to its first 1,536 tokens, the default of decider's `decide()`, while
+it advertised 32,768 tokens and reported `truncated: false`. 354 of these 444
+pairs (80%) are longer than that. A 2,730-token check whose one decisive
+sentence came last answered "insufficient evidence" (p 0.985) before the fix
+and the right answer (p 0.997) after. The adapter now passes its window and
+reports the real token count.
+
+**A stronger 4B: H2O-Lightning-4B** (2026-10-17). Newer open decision models
+score well above decider-4b on the public boards. The strongest of its size is
+H2O-Lightning-4B (Apache-2.0), on the same Qwen3.5-4B base. On Benchmark
+Heaven's open-weights board (JevBench v1.6.1) it ranks #5, with capability
+75.0, against decider-4b's 64.9 (#24).
+
+It runs through `jev/h2o/serve.py`, a port of H2O's shim to PyTorch MPS. On 302
+of H2O's published questions, its answers match H2O's own on all 302
+(`jev/h2o/README.md`). It reads at 0.69 ms a token, in float16 with decider's
+MPS kernels, and S and T share one read of the pair. It was run at full length,
+S and T in one request and C alone.
+
+The rule for reopening was fixed before the run. A band must be at least as
+accurate as the judge it replaces on the labelled pairs it settles (20 or more
+of them), lose no supersession, and cost less model time on the candidates than
+the judge alone. The report's "reopen rule" section sweeps 6,246 bands: the
+cascade's grid made finer, restricted to sets of verdicts, and with no cutoff
+at all, which is the outdates gate below. It also checks the widest passing
+band picked on one half of the pairs against the other.
+
+| label | pairs | unrelated | related | evolves | duplicate | outdates | median P(same subject) |
+|---|---|---|---|---|---|---|---|
+| candidates | 120 | 59 | 18 | 34 | 0 | 9 | 0.21 |
+| pointer pairs (true supersessions) | 60 | 0 | 1 | 0 | 8 | 51 | 0.72 |
+| accepted proposals | 2 | 0 | 0 | 1 | 0 | 1 | 0.78 |
+| rejected proposals | 127 | 5 | 17 | 83 | 0 | 22 | 0.50 |
+| linked: relates_to | 39 | 18 | 7 | 14 | 0 | 0 | 0.13 |
+| linked: blocks, child_of, duplicate_of | 96 | 5 | 23 | 58 | 0 | 10 | 0.29–0.60 |
+
+* **Gated on its confidence, it fails behind the 7B,** which both dogfood
+  brains run. A read costs 1.41 s a candidate against the 7B's 3.76, so a band
+  must settle about 38% of the candidates to save time. The bands that need H2O
+  to be confident settle at most 18% at the 7B's accuracy, and none is cheaper.
+* **Gated on P(outdates), it meets the rule behind the 7B on these pairs.** The outdates gate
+  settles a pair at H2O's top verdict, whatever its confidence, unless that
+  verdict is outdates or P(outdates) passes a ceiling. So the 7B reads only the
+  possible supersessions. Ceilings of 0.3, 0.4 and 0.5 meet the rule. At 0.5 the
+  gate settles 93% of the candidates and is right on 207 of the 240 labelled
+  pairs it settles, as the 7B is. It loses nothing, and it costs 1.69 s a
+  candidate against 3.76, 55% less.
+* **The gate joined the sweep after the run.** The maintainer asked whether the
+  cascade's order was inverted. The first sweep held only bands that need H2O
+  to be confident, the wrong question, since only a possible supersession needs
+  the judge.
+* **On held-out halves, the gate sits on the line.** Picked on one half, the
+  gate at 0.5 is one pair short on the other (97 against 98 right). The widest
+  band passing on the other half settles only evolves, related and duplicate;
+  scored on the first half, it meets the rule, saving 5%.
+* **Behind the 27B,** a gate settling only evolves, related and duplicate, at
+  outdates ≤ 0.3, meets the rule. It settles 38% of the candidates and is right
+  on 187 of 196, against the 27B's 185. It costs 8.30 s a candidate against
+  11.30, 27% less. Picked on one half, the widest passing band meets the rule on
+  the other; picked on that other half, it loses a supersession on the first.
+  The unrestricted gate is 14–18 pairs less accurate than the 27B.
+* **Its one-pass verdicts come close to the judges'.** The report's own pick,
+  one-pass at a top of 0.5, settles 60% of the candidates. On the 170 labelled
+  pairs it settles, H2O is right on 140, against the 7B's 143 and the 27B's 156.
+  decider-4b's one-pass pick was 10 and 32 points behind. H2O's misses are 21
+  pairs settled unrelated, and 9 true supersessions settled as duplicate (8) or
+  related (1).
+* **The two-pass framing fails, as it did for decider-4b.** S settles 93 pairs
+  unrelated and is right on 33.
+* **decider-4b still doesn't pass.** Only its 1,500-character run has bands
+  meeting the rule behind the 7B: two, saving 1%. Neither holds on the held-out
+  halves.
+
+**The confirmation fails.** It was fixed in advance: the gate at a ceiling of
+0.5, behind the 7B, on pairs neither spike had seen. Those were 533 pairs
+exported read-only from stable on 2026-10-17 for SMD-3114: 179 true
+supersessions, 234 board links, 120 candidates, and no reviewed proposals.
+
+* **The gate trails the 7B.** It settles 92% of the candidates and is right on
+  175 of the 277 labelled pairs it settles; the 7B is right on 185 of them. It
+  loses nothing, and costs 1.65 s a candidate against 2.86.
+* **Every ceiling misses.** From 0.2 to 0.5 the gate is 10 pairs behind, and
+  none of the 6,246 bands meets the rule on these pairs.
+* **The whole gap is relates_to links.** On the 78 the gate settles, H2O answers
+  unrelated on 46 and the 7B on 33. H2O is 3 ahead on child_of, and blocks tie.
+  The first set had 39 relates_to links, too few to show it.
+
+So the cascade is declined for both models. As a cheap first pass in front of
+the 7B, H2O is slightly less accurate on the pairs it would settle, and the
+loss sits in weak "related" pairs. The same run backs SMD-3114 instead. The 7B
+proposes none of the 179 fresh true supersessions, and H2O's top verdict
+proposes 127 of them, with 9 false proposals across the 234 links.
+
+**What H2O does beyond the cascade** (explored after the run, not the rule;
+the report's last section):
+
+* **As the judge itself.** Its top one-pass verdict on every pair is right on
+  259 of 324 labelled pairs; the 7B is right on 239 and the 27B on 263. It
+  proposes 52 of the 62 true supersessions, where the 7B proposes 2 and the
+  27B 23. It makes 32 false proposals (the 7B 3, the 27B 17) and proposes on 9
+  of the 120 candidates (0 and 5). It takes 1.41 s a candidate (3.76 and
+  11.30).
+* **It reads meaning, not wording.** On the 38 pointer pairs whose newer
+  thought names no supersession, it answers outdates on 36. ("Names" means a
+  match for supersed-, replac-, outdated, obsolete, no longer, deprecat-,
+  "instead of" or "updated to".) That wording on 60 candidates draws outdates on
+  3. This was checked by hand.
+* **As a flag.** At P(outdates) ≥ 0.3, it raises 53 of the 62 supersessions and
+  13% of the candidates, with a precision of 53% among the labelled pairs. A
+  judge that rereads the raised pairs, as the outdates gate has the 7B do,
+  proposes no more than it does alone. It judges each pair afresh, and misses
+  most of what H2O raises.
+
+SMD-3114 measures the other way round: H2O decides a supersession, and an LLM
+only writes the proposal (the current side and a quote from it) or declines
+when it can't. H2O's precision on the candidates, where no label says, is
+unmeasured.
+
+Caveats:
+
+* The labels are SMD-1873's: most rejected proposals are two tickets, and 44
+  proposal pairs have a side edited since they were judged.
+* The candidates have no label, so agreeing with a judge is not being right,
+  and the judges agree with each other on only half of them. Only the linked
+  pairs say which reading holds.
+* The bands are picked on the same 444 pairs; the held-out halves are the
+  guard.
+* The 27B's timings include a few minutes of stable's sleep working four new
+  captures on the same model server. The decider's own times vary by about 15%
+  between runs.
+* Only decider-4b and H2O-Lightning-4B, these three questions and these option
+  descriptions were measured. H2O was read through a port of its shim, checked
+  against its own answers. Its binary question was asked in a yes/no shape the
+  adapter chose (`jev/h2o/README.md`).
+* The outdates gate and H2O's exploration were chosen after its run, and the
+  gate then failed its confirmation. 60 of the 62 true supersessions are pointer
+  pairs, and the candidates have no label, so H2O's precision there is unknown.
+
+## H2O decides supersession, an LLM writes only the proposal (SMD-3114)
+
+`eval-judge-propose.ts`. SMD-3058 found that the consolidation judge proposes
+few of the true supersessions in its 444 pairs: the 7B proposes 2 of 62 and the
+27B 23. H2O-Lightning-4B's one-pass verdict answers outdates on 52. A classifier
+can't write the proposal prompt 4 asks for, which is the current thought and a
+quote from it that `evidenceIn` checks.
+
+So this asks an LLM only for that, on the pairs H2O flags: which thought is
+current, and the words in it that show the other no longer is, or that neither
+does. It does not re-judge the relation. A decline, or a quote the check fails,
+leaves the pair at H2O's best verdict that proposes nothing. There are two
+writers:
+
+* **one-sided:** prompt 4's quote;
+* **two-sided:** also the other thought's claim that no longer holds, checked in
+  that thought and not in the current one (SMD-2938).
+
+```bash
+OB1_LLM_BASE_URL=http://127.0.0.1:11434/v1 OB1_LLM_LOCAL=1 OB1_JUDGE_MODEL=qwen2.5:7b … \
+  bun eval-judge-propose.ts --pairs /private/tmp/judge-pairs.jsonl --decider /private/tmp/h2o.jsonl --out /private/tmp/writer-7b.jsonl --two-sided
+bun eval-judge-propose.ts --pairs … --decider … --writer 7b-two=/private/tmp/writer-7b.jsonl --judge 7b=… --judge 27b=…
+```
+
+**The rule**, fixed on SMD-3114 before the run, with H2O's top verdict
+(outdates) as the flag. A writer on a model is adopted if it meets all four:
+
+* it proposes at least as many true supersessions naming the right thought as
+  the 27B alone (18);
+* it makes no more false proposals than the 27B alone (17);
+* it is right on at least as many labelled pairs as the 7B alone (239);
+* it costs less model time a candidate than the 7B alone (3.76 s).
+
+**On SMD-3058's 444 pairs** (2026-10-17; the flag raises 93):
+
+| | right (of 324) | true proposed (right thought) | false proposals | candidates proposed (of 120) | s a candidate | the rule |
+|---|---|---|---|---|---|---|
+| 7B judge alone | 239 | 2 (2) | 3 | 0 | 3.76 | — |
+| 27B judge alone | 263 | 23 (18) | 17 | 5 | 11.30 | — |
+| H2O alone | 259 | 52 (—) | 32 | 9 | 1.41 | — |
+| writer 7B, one-sided | 252 | 40 (40) | 27 | 9 | 1.61 | misses: false proposals |
+| writer 7B, two-sided | 254 | 28 (27) | 13 | 9 | 1.67 | meets |
+| writer 27B, one-sided | 263 | 45 (41) | 21 | 8 | 2.12 | misses: false proposals |
+| writer 27B, two-sided | 265 | 41 (37) | 15 | 8 | 2.16 | meets |
+
+* **The 27B two-sided writer beats the 27B judge on every measure.** It
+  proposes twice the true supersessions on the right side, makes fewer false
+  proposals and is right more often. It costs a fifth of the judge's time, and
+  less than the 7B judge.
+* **The 7B never answers "none,"** so its precision comes from the two-sided
+  quote check. Of the 22 rejected proposals H2O flags, the one-sided 7B leaves a
+  standing proposal on 19 and the two-sided on 9. The 27B declines 11 of the 93
+  pairs it is asked about.
+* **The quote check alone is a weak gate on two different texts.** It was built
+  to catch an invented quote, and any phrase one side holds and the other
+  doesn't passes it. The second quote fails more often on the false proposals
+  than on the true ones: it cuts the 7B's false proposals from 27 to 13, and
+  its true ones from 40 to 28.
+* **The first prompt had a format bug.** It showed the keys as a template
+  (`"current": "A|B|none"`), and the 7B copied `B|none` back on 11 of the 93
+  pairs. The keys are now listed instead, and every run above uses the fixed
+  prompt. The first run's one-sided 7B writer also missed the rule on false
+  proposals (25).
+
+**The confirmation** runs the same rule on pairs neither spike has seen: 533
+exported read-only from stable on 2026-10-17 (179 true supersessions, 234 board
+links and 120 candidates). The 129 reviewed proposals were all in the first set,
+so this one has none. It tests recall, and false proposals on links, but not the
+rejected proposals that made most of the false proposals above. The flag
+raises 146 of the 533.
+
+| | right (of 413) | true proposed (right thought) | false proposals | candidates proposed (of 120) | s a candidate | the rule |
+|---|---|---|---|---|---|---|
+| 7B judge alone | 194 | 0 (0) | 0 | 0 | 2.86 | — |
+| 27B judge alone | 291 | 68 (67) | 0 | 0 | 11.54 | — |
+| H2O alone | 302 | 127 (—) | 9 | 10 | 1.44 | — |
+| writer 7B, two-sided | 249 | 71 (71) | 5 | 6 | 1.73 | misses: false proposals |
+| writer 27B, two-sided | 287 | 109 (107) | 5 | 2 | 2.28 | misses: false proposals |
+
+* **Both writers miss the rule here, on false proposals alone.** The 27B judge
+  makes none on these pairs, and each writer makes 5, all on board links. On
+  everything else both pass: they find more true supersessions on the right
+  side than the 27B judge (71 and 107, against 67), are right more often than
+  the 7B, and cost less time than the 7B.
+* **The false proposals are one pattern.** In every one, a ticket marked done
+  sits against the larger or blocked ticket it belongs to, and the writer reads
+  it as that ticket's later state. Prompt 4 counts a part split out as
+  "evolves", so the labels are right.
+* **The 7B judge proposes none of the 179 true supersessions.**
+* **The 27B writer declines 18 of the 146 pairs it is asked about,** 6 of them
+  among the 10 flagged candidates. It proposes on 2 of the 120 candidates, and
+  the 7B writer on 6.
+* **Across both sets,** the 27B two-sided writer proposes 150 true
+  supersessions, 144 of them naming the right thought, with 20 false proposals.
+  The 27B judge proposes 91 (85), with 17 false. That puts the writer's
+  precision at 88%, against the judge's 84%. But the rule counts false
+  proposals, not precision, and it is applied to each set alone.
+
+So, by the rule fixed before the run, neither writer is adopted: the
+confirmation fails on false proposals. Whether 5 false proposals on 234 board
+links are worth 40 more supersessions found, at a fifth of the 27B judge's time,
+is the maintainer's call. A writer told that a part finishing does not outdate
+the whole might remove the pattern. That is tuning after the result, and it
+would need a third set of pairs neither run has seen.
+
+**The part rule, on a third set** (2026-10-18, at the maintainer's word). The
+fix tells the writer that a part finishing does not outdate the whole
+(`--part-rule`, `PART_RULE`). It was tested on a third set, fixed on SMD-3114
+beforehand, that no earlier run had seen.
+
+A full read-only export of stable showed that the earlier per-relation caps
+had hidden most of its labels: it has 1,933 relates_to links, 188 child_of, 143
+blocks and 358 pointer pairs. The 485 pairs take every unseen pointer pair
+(119) and every unseen child_of and blocks link (96). They also take the first
+150 relates_to links and the first 120 candidates in md5 order.
+
+| | right (of 365) | true proposed (right thought) | false proposals | candidates proposed (of 120) | s a candidate | the rule |
+|---|---|---|---|---|---|---|
+| 7B judge alone | 182 | 0 (0) | 0 | 0 | 2.95 | — |
+| 27B judge alone | 293 | 55 (54) | 0 | 5 | 11.25 | — |
+| H2O alone | 261 | 95 (—) | 14 | 10 | 1.45 | — |
+| writer 27B, two-sided, part rule | 250 | 73 (72) | 3 | 5 | 2.34 | misses: false proposals |
+| writer 7B, two-sided, part rule | 220 | 46 (45) | 6 | 7 | 1.73 | misses: right side, false proposals |
+| writer 27B, two-sided (reported) | 254 | 80 (79) | 6 | 3 | 2.37 | — |
+| writer 7B, two-sided (reported) | 219 | 46 (44) | 7 | 8 | 1.73 | — |
+
+* **The part rule halves the 27B writer's false proposals,** from 6 to 3, and
+  costs it 7 true supersessions (79 to 72). With the rule it declines 29 of the
+  119 pairs it is asked about, against 17 without. The 7B, which almost never
+  declines, barely moves.
+* **The 3 that remain are the same pattern,** a completed sub-ticket against its
+  parent. On one, the writer's own reason says the parent's work goes on, and
+  it proposes anyway.
+* **The 27B judge again makes no false proposal,** so neither fixed writer meets
+  the rule. SMD-3114's writers are not adopted by it, after three sets: met on
+  the first, missed on the other two.
+* **The pass never judges the pairs behind these false proposals.** Every false
+  proposal in the confirmation and the third set is on a pair of tickets that
+  Linear links as child_of or blocks. Migration 079 keeps exactly those pairs
+  out of the consolidation candidates; here they serve as labelled negatives.
+  On the candidates the pass does judge, nothing labels the writers' 2 to 9
+  proposals in 120.
+* **The 7B judge proposes none of the 119 true supersessions here,** as it
+  proposed none of the 179 in the confirmation. It is the judge the dogfood
+  brains run.
+
+Caveats:
+
+* All but 2 of the true supersessions in both sets are pointer pairs: a writer's
+  own `supersedes`, mostly the session hook's later summary of the same session.
+* Neither writer's precision on the candidates is known. They propose on 2 to 9
+  of the 120 candidates in each set, and nothing labels those.
+* A proposal still goes to review. The writer is the precision gate only in
+  the sense that it decides which pairs reach the queue.
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline
@@ -6849,6 +7269,16 @@ The checks, by criterion:
 | G1–G8 | 4, grants | The GUI's confidential client runs code + PKCE for the REST core through sign-in and consent. `iss` and `state` round-trip, and the REST core sees `oauth:operator` with no actor. A missing challenge and `plain` are each refused for that reason, and so are a wrong verifier and a replayed code. The runner's client-credentials token names the runner, within `brain:capture`, and `/mcp` is refused to it. A third-party client with `offline_access` refreshes for its one granted resource, after a consent page that named its client id and redirect origin, and both listed and explained `offline_access`. The consent page shows a custom-scheme redirect (`com.evilapp://localhost:8020/mcp`, from a client calling itself "Open Brain dashboard") as "the app registered for com.evilapp:", not as the brain's own host, and names the resource of a request whose scope is none of the resource's (`openid` or `offline_access` alone); a library may instead refuse such a URI at registration, or such a request before any page, and `EXPECT` says which. A consent posted from another origin, with the operator signed in, issues nothing, and neither the sign-in nor the consent page may be framed (`X-Frame-Options: DENY`, `frame-ancestors 'none'`); a live sign-in page takes only GET and POST (a PUT is a 405). |
 | A1–A8 | 2, resource indicators | Every token checked has one audience. A `/mcp` token is refused by the REST core, by canary `/mcp` and by the canary REST core, and a REST-core token is refused by `/mcp`. Also refused: an unknown resource; two resources at once from a client allowed both, whether by authorization code (named at the token endpoint, or granted at authorization and redeemed naming none) or by client credentials from a service linked to both tiers' REST cores (`runner-tiers`); a DCR client asking for the REST core; and a third-party client registering for client credentials (by DCR and by a metadata document), for the implicit grant (by DCR), or with `grant_types` as a string. A `backchannel_logout_uri` is refused or dropped. A request naming no scope, from an operator already signed in and consented, asked twice, and one naming an empty scope, get no code (each candidate's refusal pinned). A request that names no resource gets no token: at the authorization endpoint it is refused before any page, and a POST to that endpoint from a signed-in, consented browser gets no code either (POST is off on both: 404 on the winner, 405 on the runner-up). Every token issued for a resource with no brain scope is refused where it is presented, with `insufficient_scope`; `EXPECT` names which each candidate issues (the winner: `/mcp` and the REST core, for `openid` alone; the runner-up: `/mcp`, for `offline_access` alone). |
 | X1–X4 | 1, token exchange | Through `/mcp`, the REST core sees subject `oauth:operator`, actor `mcp`, audience `/api`. Done directly, the exchange keeps `sub`, adds `act: {sub: "mcp"}`, narrows scope on request, and ends no later than the subject token. Ten cases are refused, each with its expected error and its own cause (a subject token of the wrong audience is `ERR_JWT_CLAIM_VALIDATION_FAILED aud`, a tampered one `ERR_JWS_SIGNATURE_VERIFICATION_FAILED`). The cases: across tiers, for another tier's target, to the GUI client, with a wrong secret, for a wider scope, a tampered, already-exchanged or REST-core subject token, an `actor_token`, and a missing token type. The exchanged token works at its own REST core only. |
+
+The winner also runs four rows of the deploy's own policy (SMD-2286), which
+are not criteria of the comparison and are not in the 32:
+
+| Row | What it checks |
+| --- | --- |
+| G5r | Every refresh rotates. Two refreshes at once with one token both succeed with distinct tokens, inside the 10 s reuse grace (the MCP SDK refreshes without a lock), and the chain goes on after them. The consent page words `brain:read` as a read key. |
+| P1 | A confidential client's refresh token rotates too, which the library's default would leave alone: rotation is the server's setting. |
+| P2 | `brain:read` with `brain:capture`, which no access key holds, is refused `invalid_scope` at the authorization request, before any page. |
+| P3 | The exchange refuses a narrowing to `brain:read brain:capture`. |
 
 Two rows stay manual, because they need a public origin: a claude.ai connector
 (claude.ai refuses private and CGNAT hosts), and whether Claude Code 2.1.275
