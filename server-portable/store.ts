@@ -216,9 +216,9 @@ export function isoTimestampOpt(v: unknown): string | undefined {
  * The row normalisers. One per row shape the store interface returns, so a
  * field's format or a column's name is decided once: a function answers its
  * snake_case columns, and a cast type-checks while delivering `undefined`
- * (`total_count` once) or the driver's own value (`created_at`, above). They
- * were shared by two stores until SMD-3152 retired the PostgREST one. Numeric columns go through
- * `Number` because a driver may hand a float8 or bigint back as a string.
+ * (`total_count` once) or the driver's own value (`created_at`, above).
+ * Numeric columns go through `Number` because a driver may hand a float8 or
+ * bigint back as a string.
  */
 export function normaliseMatchRow(r: Record<string, unknown>): ThoughtMatch {
   return {
@@ -391,11 +391,9 @@ export type ThoughtStats = {
  * A page of a brain's thought-id set (SMD-2244) — for a cheap cross-brain id-set
  * diff. `ids` are in id order; `cursor` is the last id when a full page was
  * returned (more may follow), else null. The first page (asked with `after`
- * null) also carries `total` (the whole corpus) and, where a store can compute it
- * server-side, a `digest` (an md5 of every id in id order) — so a caller can tell
- * two corpora apart without enumerating either. `digest` is null on an empty
- * corpus (and was on the PostgREST store, retired in SMD-3152, which could not
- * aggregate server-side).
+ * null) also carries `total` (the whole corpus) and a `digest` (an md5 of every
+ * id in id order, computed server-side) — so a caller can tell two corpora
+ * apart without enumerating either. `digest` is null on an empty corpus.
  */
 export type ThoughtIdPage = {
   ids: string[];
@@ -1008,7 +1006,7 @@ export type UpdateResult = MutationResult & {
 /**
  * Both SQL functions return the same {ok, id|error} envelope; this turns it into
  * the store's discriminated union, in one place so a refusal looks one way —
- * the class of bug the audit work hit twice, when two stores mapped it.
+ * the class of bug the audit work hit twice.
  */
 export function normaliseMutation(r: Record<string, unknown> | undefined): MutationEnvelope {
   if (!r) return { ok: false, error: "NOT_FOUND" };
@@ -1952,7 +1950,6 @@ export function tracedStore(store: ThoughtStore): ThoughtStore {
  * Build the configured store, each operation spanned (tracedStore). The SQL
  * implementation is imported here, not at the top: store-sql.ts imports this
  * file's normalisers, and a static import back would make the two a cycle.
- * (It was first dynamic for the retired Workers target, which had no Bun.)
  */
 export async function createStore(env: StoreEnv): Promise<ThoughtStore> {
   const kind = storeKind(env);

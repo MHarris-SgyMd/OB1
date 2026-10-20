@@ -499,11 +499,9 @@ console.log("\n[13b] A registry that cannot answer this server is misconfigured,
     assert(warnings.length === 2 && /search_path/.test(warnings[0]) && /--grant/.test(warnings[1]),
       `a change of SQLSTATE is said with its own remedy, a repeat is not (${warnings.length} warning(s): ${warnings.map((w) => w.slice(60, 140)).join(" | ")})`);
     // A connection failure: a retry may answer (review pass 1).
-    for (const errno of ["08006"]) {
-      warnings.length = 0;
-      const out = await new AgentResolver(0, () => 0).resolve(failing(errno), principal("laptop", H("a")));
-      assert(out.status === "ok" && out.unresolved === "unreachable" && /`supersedes` gets a retry/.test(warnings[0] ?? ""), `…while ${errno} stays unreachable, its warning saying a capture key's supersedes gets a retry (${JSON.stringify(out)}; ${warnings[0]?.slice(0, 120)})`);
-    }
+    warnings.length = 0;
+    const lost = await new AgentResolver(0, () => 0).resolve(failing("08006"), principal("laptop", H("a")));
+    assert(lost.status === "ok" && lost.unresolved === "unreachable" && /`supersedes` gets a retry/.test(warnings[0] ?? ""), `…while 08006 stays unreachable, its warning saying a capture key's supersedes gets a retry (${JSON.stringify(lost)}; ${warnings[0]?.slice(0, 120)})`);
     // `refused`: the registry answered and refused the argument, so the pointer
     // goes, and the line says so (review pass 4: no test held the wording).
     warnings.length = 0;
