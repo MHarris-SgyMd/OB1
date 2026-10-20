@@ -133,7 +133,8 @@ export function createExchanger(s: ExchangeSettings, opts: { fetch?: (req: Reque
     // settings (review passes 1 and 2); one that cannot be read as JSON is read as no answer of its.
     let stalled = false;
     const body = (await r.json().catch((e: unknown) => {
-      stalled = (e as Error)?.name === "TimeoutError" || (e as Error)?.name === "AbortError";
+      // The trade's own timeout ends a stalled body as a TimeoutError; nothing else aborts it.
+      stalled = (e as Error)?.name === "TimeoutError";
       return null;
     })) as { access_token?: unknown; expires_in?: unknown; error?: unknown } | null;
     if (stalled) return { status: "unavailable", why: `its ${r.status} answer stalled past ${EXCHANGE_TIMEOUT_MS} ms` };

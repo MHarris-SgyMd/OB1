@@ -163,6 +163,9 @@ export async function tokenRefusal(kind: "token-invalid" | "token-scope" | "toke
   return { response: tokenRefusedResponse(origin, target), code: "UNAUTHORIZED" };
 }
 
+/** The `Authorization: Bearer` value, read as auth.ts presentedKeys reads it. */
+const bearerOf = (req: Request): string | undefined => req.headers.get("authorization")?.match(/^Bearer\s+(\S+)\s*$/i)?.[1];
+
 /**
  * The keys a request presents to send on as keys (auth.ts presentedKeys),
  * less, on a stack with OAuth (`tokens`), a bearer of a JWT's shape that no
@@ -175,7 +178,7 @@ export async function tokenRefusal(kind: "token-invalid" | "token-scope" | "toke
 export function keysToSend(req: Request, tokens: boolean): string[] {
   const keys = presentedKeys(req);
   if (!tokens) return keys;
-  const bearer = req.headers.get("authorization")?.match(/^Bearer\s+(\S+)\s*$/i)?.[1];
+  const bearer = bearerOf(req);
   if (!bearer || !JWT_SHAPE.test(bearer)) return keys;
   const inForm = [req.headers.get("x-brain-key"), req.headers.get("x-access-key"), queryOf(req.url).get("key")].includes(bearer);
   return inForm ? keys : keys.filter((key) => key !== bearer);
@@ -199,8 +202,7 @@ export async function standingOf(rest: RestClient, req: Request, signal?: AbortS
   // hosts reach the brain with keys).
   if (token && presentedKind(req) === "token") {
     if (!token.exchanger || !(token.admits ?? forPublicResource)(req, token.origin)) return { kind: "none" };
-    const bearer = req.headers.get("authorization")?.match(/^Bearer\s+(\S+)\s*$/i)?.[1] ?? "";
-    const traded = await token.exchanger.exchange(bearer);
+    const traded = await token.exchanger.exchange(bearerOf(req) ?? "");
     if (traded.status === "invalid") return { kind: "token-invalid" };
     if (traded.status === "scope") return { kind: "token-scope" };
     if (traded.status === "unavailable") return { kind: "token-unavailable", why: `the authorization server did not trade it: ${traded.why}` };
@@ -534,14 +536,19 @@ export function createMcpApp(deps: McpDeps): Hono {
    * as index.ts shows it.
    */
   type Found = Standing | { kind: "fault"; err: unknown } | { kind: "late" };
-  /** Whether this request's token is traded at a keyed route: a lone JWT-shaped bearer, at the origin's Host, on a stack that trades. */
-  const tradesHere = (req: Request): boolean => {
-    const origin = edgeHere().origin;
-    return origin !== null && deps.exchanger?.() != null && presentedKind(req) === "token" && atOriginHost(req, origin);
-  };
   const keyedTokenRoute = (tokens: boolean): TokenRoute | null => {
     const origin = edgeHere().origin;
     return origin ? { exchanger: tokens ? deps.exchanger?.() ?? null : null, origin, admits: atOriginHost } : null;
+  };
+  /** Whether this request's token is traded at a keyed route: a lone JWT-shaped bearer, at the origin's Host, on a stack that trades. */
+  const tradesHere = (req: Request): boolean => {
+    const route = keyedTokenRoute(true);
+    return route?.exchanger != null && presentedKind(req) === "token" && atOriginHost(req, route.origin);
+  };
+  /** A refused token's answer, at /mcp and the keyed routes: an unanswered trade said in the log first. */
+  const answerToken = (standing: Extract<Standing, { kind: "token-invalid" | "token-scope" | "token-unavailable" }>, target: RefusalTarget) => {
+    if (standing.kind === "token-unavailable") sayOnce(new Error(standing.why), "an OAuth token could not be checked");
+    return tokenRefusal(standing.kind, edgeHere().origin!, target, () => authReachability().reachable());
   };
   const standingInTime = async (req: Request, budget: AbortSignal, onUnknown?: (key: string) => void, tokens = true): Promise<Found> => {
     if (budget.aborted) return { kind: "late" };
@@ -581,16 +588,17 @@ export function createMcpApp(deps: McpDeps): Hono {
       if (trace && standing.name) trace.agent = standing.name;
       return notCleared(c, trace, { status: standing.kind });
     }
-    if (standing.kind === "late" && tokens && tradesHere(c.req.raw)) {
-      sayOnce(new Error(`no standing within ${HEALTH_DEADLINE_MS} ms (the trade, or the REST core's whoami)`), "an OAuth token could not be checked");
-      if (trace) { trace.outcome = "refused"; trace.refusedAtKey = true; trace.code = "AUTH_UNREACHABLE"; }
-      return unavailableResponse({ expectsReply: false, id: null });
-    }
-    if (standing.kind === "token-invalid" || standing.kind === "token-scope" || standing.kind === "token-unavailable") {
-      if (standing.kind === "token-unavailable") sayOnce(new Error(standing.why), "an OAuth token could not be checked");
-      const { response, code } = await tokenRefusal(standing.kind, edgeHere().origin!, { expectsReply: false, id: null }, () => authReachability().reachable());
+    const tokenRefused = (response: Response, code: string) => {
       if (trace) { trace.outcome = "refused"; trace.refusedAtKey = true; trace.code = code; }
       return response;
+    };
+    if (standing.kind === "late" && tokens && tradesHere(c.req.raw)) {
+      sayOnce(new Error(`no standing within ${HEALTH_DEADLINE_MS} ms (the trade, or the REST core's whoami)`), "an OAuth token could not be checked");
+      return tokenRefused(unavailableResponse({ expectsReply: false, id: null }), "AUTH_UNREACHABLE");
+    }
+    if (standing.kind === "token-invalid" || standing.kind === "token-scope" || standing.kind === "token-unavailable") {
+      const { response, code } = await answerToken(standing, { expectsReply: false, id: null });
+      return tokenRefused(response, code);
     }
     // The REST core away, this server's forwarder refused, a whoami that threw: shown `ok` as before, its line
     // `error` FAILED, not a key refused (review pass 1 of PR 4b: an outage read as every key turned away).
@@ -853,8 +861,7 @@ export function createMcpApp(deps: McpDeps): Hono {
         const target = refusalTarget(bodyText);
         read(bodyText);
         settled = true;
-        if (standing.kind === "token-unavailable") sayOnce(new Error(standing.why), "an OAuth token could not be checked");
-        const { response, code } = await tokenRefusal(standing.kind, origin!, target, () => authReachability().reachable());
+        const { response, code } = await answerToken(standing, target);
         return refused(response, code);
       }
       if (standing.kind === "none") {

@@ -1199,11 +1199,15 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   // A keygen key (hex, no dots) as a bearer on a stack with OAuth: a key, as ever.
   r = await ask("write-raw");
   assert(r.status === 200 && same(toolNames(r), [...visibleToolNames({ scope: "write" })].sort()), `a key with no dots as a bearer on a stack with OAuth: a key's tools (${r.status}, ${toolNames(r).length})`);
+  /** tools/list to another app of this section, with a bearer: its status and its text. */
+  const listWith = async (app: ReturnType<typeof createMcpApp>, bearer: string) => {
+    const res = await app.fetch(new Request(`${ORIGIN}/mcp`, { method: "POST", headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/list", params: {} }) }));
+    return { status: res.status, text: await res.text() };
+  };
   // A stack with no public origin has no OAuth: a bearer of any shape is a key there, as server-portable reads it.
   const noOAuth = createMcpApp({ rest: tokenRest, edge: () => ({ configured: false, origin: null }), exchanger: () => exchanger, warn: () => {} });
-  const lone = await noOAuth.fetch(new Request(`${ORIGIN}/mcp`, { method: "POST", headers: { authorization: "Bearer team.alice.k2026", "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/list", params: {} }) }));
-  const loneText = await lone.text();
-  assert(lone.status === 200 && loneText.includes('"name":"search"') && !loneText.includes("capture_thought"), `…as a lone bearer on a stack with no OAuth: a read key's tools (${lone.status} ${loneText.slice(0, 50)})`);
+  const lone = await listWith(noOAuth, "team.alice.k2026");
+  assert(lone.status === 200 && lone.text.includes('"name":"search"') && !lone.text.includes("capture_thought"), `…as a lone bearer on a stack with no OAuth: a read key's tools (${lone.status} ${lone.text.slice(0, 50)})`);
   answer = (n) => (n === "workerStatus" ? ok({ pools: [{ workType: "w", pending: 1 }] }) : { version: "1.0.0", store: "sql" });
   const dotted = await tokenApp.fetch(new Request(`${ORIGIN}/mcp/worker-status`, { headers: { "x-brain-key": "team.alice.k2026" } }));
   const dottedHealth = await tokenApp.fetch(new Request(`${ORIGIN}/mcp/health`, { headers: { "x-brain-key": "team.alice.k2026" } }));
@@ -1211,28 +1215,23 @@ console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth toke
   assert((await dotted.text()) === JSON.stringify([{ workType: "w", pending: 1 }]) && dottedRecord.includes('"version":"1.0.0"'), `…at a mirror and /health: the rows and the record (${dottedRecord.slice(0, 40)})`);
   answer = () => ok({});
 
+  /** This section's MCP app at ORIGIN, trading, over a REST core of its own (the forwarder's key alone) checking tokens with `tokens`, its log kept in `warned`. */
+  const appOverRest = (tokens: (() => ReturnType<typeof checkerOver>) | undefined, warned: string[]) => {
+    const rest = createRestApp({
+      core, init: () => {}, track: (run) => run(), log: () => {},
+      keys: () => ({ MCP_ACCESS_KEYS: `mcp:forward:${hashKey("fwd-raw")}` }),
+      ...(tokens ? { tokens } : {}),
+      resolve: async (p) => (p.scope === "forward" ? { status: "ok", agentId: "agent-f" } : identity),
+    });
+    return createMcpApp({ rest: createRestClient({ baseUrl: "http://api.ob1.internal", fetch: async (req) => rest.fetch(req), forwarderKey: "fwd-raw" }), edge: () => ({ configured: true, origin: ORIGIN }), exchanger: () => exchanger, warn: (line) => warned.push(line) });
+  };
   // A REST core that checks no token: an exchanged token's 401 is this stack's misconfiguration, a fault with its fix, never invalid_token.
-  const restPlain = createRestApp({
-    core, init: () => {}, track: (run) => run(), log: () => {},
-    keys: () => ({ MCP_ACCESS_KEYS: `mcp:forward:${hashKey("fwd-raw")}` }),
-    resolve: async (p) => (p.scope === "forward" ? { status: "ok", agentId: "agent-f" } : identity),
-  });
   const plainWarned: string[] = [];
-  const plainApp = createMcpApp({ rest: createRestClient({ baseUrl: "http://api.ob1.internal", fetch: async (req) => restPlain.fetch(req), forwarderKey: "fwd-raw" }), edge: () => ({ configured: true, origin: ORIGIN }), exchanger: () => exchanger, warn: (line) => plainWarned.push(line) });
-  const plain = await plainApp.fetch(new Request(`${ORIGIN}/mcp`, { method: "POST", headers: { authorization: `Bearer ${await live()}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/list", params: {} }) }));
-  await plain.text();
+  const plain = await listWith(appOverRest(undefined, plainWarned), await live());
   assert(plain.status === 500 && plainWarned.some((l) => l.includes("refused a token traded for it") && l.includes("checking no token") && l.includes("auth profile")), `a REST core that checks no token: a fault, logged with its fix (${plain.status} ${plainWarned.join(" | ").slice(0, 120)})`);
   // One checking another origin's tokens refuses this one on its claims, credential token: the same misconfiguration, never invalid_token.
-  const restElsewhere = createRestApp({
-    core, init: () => {}, track: (run) => run(), log: () => {},
-    keys: () => ({ MCP_ACCESS_KEYS: `mcp:forward:${hashKey("fwd-raw")}` }),
-    tokens: () => checkerOver(tokenSettings({ COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: "https://elsewhere.example.test" })!, async () => pair.publicKey),
-    resolve: async (p) => (p.scope === "forward" ? { status: "ok", agentId: "agent-f" } : identity),
-  });
   const elsewhereWarned: string[] = [];
-  const elsewhereApp = createMcpApp({ rest: createRestClient({ baseUrl: "http://api.ob1.internal", fetch: async (req) => restElsewhere.fetch(req), forwarderKey: "fwd-raw" }), edge: () => ({ configured: true, origin: ORIGIN }), exchanger: () => exchanger, warn: (line) => elsewhereWarned.push(line) });
-  const elsewhere = await elsewhereApp.fetch(new Request(`${ORIGIN}/mcp`, { method: "POST", headers: { authorization: `Bearer ${await live()}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/list", params: {} }) }));
-  await elsewhere.text();
+  const elsewhere = await listWith(appOverRest(() => checkerOver(tokenSettings({ COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: "https://elsewhere.example.test" })!, async () => pair.publicKey), elsewhereWarned), await live());
   assert(elsewhere.status === 500 && elsewhereWarned.some((l) => l.includes("refused a token traded for it") && !l.includes("checking no token") && l.includes("OB1_PUBLIC_ORIGIN")), `a REST core on another origin: a fault, logged with its fix, never a sign-in loop (${elsewhere.status} ${elsewhereWarned.join(" | ").slice(0, 120)})`);
 
   // Where no token is traded: at another Host, or a server given no exchange — and a token is never sent as a key.
