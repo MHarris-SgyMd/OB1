@@ -98,7 +98,13 @@
 #      password alone, from stable's env file; the canary's half on the
 #      canary's `data` with the canary's password alone, from its own. The
 #      refresh copies stable's database settings, 014's HNSW bounds among them
-#      (SMD-2037), and migrates the copy with this checkout;
+#      (SMD-2037), and migrates the copy with this checkout. With
+#      --no-refresh it does not: a canary holding rows stable does not (its
+#      own ingests, its own passes' proposals) is brought level in place, its
+#      servers and a standing sleep worker stopped and this checkout's
+#      migrate run on its own database, the worker recreated on the new build
+#      once the servers answer (SMD-3154). It is refused, before anything
+#      changes, on a canary with no database to keep;
 #   4. builds the server from this checkout and (re)creates it and the REST
 #      core, which runs the server's image, so their pools open on the
 #      refreshed database. Standing servers are stopped before the refresh, so
@@ -155,6 +161,8 @@
 #                         and the canary's env file, and change nothing
 #   up --connect          register the connector (after the smoke, unless --no-smoke)
 #   up --no-smoke         skip step 5
+#   up --no-refresh       keep the canary's database: migrate it in place
+#                         instead of step 3's refresh (SMD-3154)
 #   down --volumes        delete the canary's database as well
 #
 # The server image is built from this checkout, as compose.yaml builds stable's,
@@ -205,6 +213,7 @@ NAME=""
 CMD=""
 CONNECT=0
 SMOKE=1
+REFRESH=1
 VOLUMES=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -221,6 +230,7 @@ while [ $# -gt 0 ]; do
       shift 2 ;;
     --connect) CONNECT=1; shift ;;
     --no-smoke) SMOKE=0; shift ;;
+    --no-refresh) REFRESH=0; shift ;;
     --volumes) VOLUMES=1; shift ;;
     up|down|names) [ -z "$CMD" ] || { echo "one command: up, down or names." >&2; exit 2; }; CMD="$1"; shift ;;
     -h|--help) usage ;;
@@ -232,7 +242,7 @@ done
 # SERVER_PORT must be.
 is_port() { case "$1" in ""|*[!0-9]*|0*) return 1 ;; esac; [ "$1" -le 65535 ]; }
 [ -z "$PORT" ] || is_port "$PORT" || { echo "--port takes a port number, 1-65535: $PORT" >&2; exit 2; }
-[ "$CMD" = up ] || { [ $CONNECT = 0 ] && [ $SMOKE = 1 ]; } || { echo "--connect and --no-smoke go with up." >&2; exit 2; }
+[ "$CMD" = up ] || { [ $CONNECT = 0 ] && [ $SMOKE = 1 ] && [ $REFRESH = 1 ]; } || { echo "--connect, --no-smoke and --no-refresh go with up." >&2; exit 2; }
 [ "$CMD" = down ] || [ $VOLUMES = 0 ] || { echo "--volumes goes with down." >&2; exit 2; }
 [ -f "$ENV_FILE" ] || { echo "no env file at $ENV_FILE — name the running stack's with --env-file (deploy/.env is gitignored, so a worktree has none)." >&2; exit 2; }
 ENV_FILE="$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")"
@@ -1097,6 +1107,12 @@ esac
 
 STABLE_PG="$(container_of "$STABLE" postgres)"
 [ -n "$STABLE_PG" ] || { echo "no running Postgres in compose project $STABLE ($FROM_WHERE) — start the stack first, or name it with --stable-project." >&2; exit 2; }
+# --no-refresh keeps the canary's database, so there must be one (SMD-3154):
+# compose's name for the file's `pgdata` volume, as `down --volumes` reads it.
+if [ $REFRESH = 0 ] && ! "$RUNTIME" volume inspect "${CANARY}_pgdata" >/dev/null 2>&1; then
+  echo "--no-refresh keeps the canary's database, and $CANARY has none (no volume ${CANARY}_pgdata) — run up without it, which refreshes one from stable." >&2
+  exit 2
+fi
 STABLE_DB_NET="$(db_network_of "$STABLE_PG" "$STABLE")"
 [ -n "$STABLE_DB_NET" ] || { echo "$STABLE_PG is on neither ${STABLE}_data nor ${STABLE}_default, so the refresh could not reach it — recreate stable's Postgres (compose up -d postgres)." >&2; exit 2; }
 
@@ -1188,17 +1204,28 @@ CANARY_PG="$(container_of "$CANARY" postgres)"
 # registered connector, stamped stable by the restore until the refresh
 # stamps it), and write rows the restore then collides with; both are
 # recreated below either way.
+FOR="the refresh"
+[ $REFRESH = 1 ] || FOR="the migration"
 STOPPED_SERVER=""
 if [ -n "$(container_of "$CANARY" server)" ]; then
-  say "canary server stopped for the refresh"
+  say "canary server stopped for $FOR"
   canary_compose stop server >/dev/null
   STOPPED_SERVER=1
 fi
 STOPPED_API=""
 if [ -n "$(container_of "$CANARY" api)" ]; then
-  say "canary REST core stopped for the refresh"
+  say "canary REST core stopped for $FOR"
   canary_compose stop api >/dev/null
   STOPPED_API=1
+fi
+# A sleep worker writes as it runs, so a migration in place stops it too, and
+# brings it back on the new build below (SMD-3154). The refresh leaves it to
+# the operator, as before.
+STOPPED_SLEEP=""
+if [ $REFRESH = 0 ] && [ -n "$(container_of "$CANARY" sleep)" ]; then
+  say "canary sleep worker stopped for $FOR"
+  canary_compose --profile sleep stop sleep >/dev/null
+  STOPPED_SLEEP=1
 fi
 # With its servers stopped, the canary's database takes its env file's
 # password; they come back below on that file.
@@ -1208,19 +1235,33 @@ set_canary_password "$CANARY_PG"
 # migration that emptied them or a model switch, not an empty brain.
 stable_vectors="$(psql_in "$STABLE_PG" "SELECT count(*) FROM (SELECT 1 FROM thoughts WHERE embedding IS NOT NULL
   AND coalesce(embedding_model = (SELECT value FROM ob1_config WHERE key = 'embedding_model'), true) LIMIT 1) t")"
-say "refresh $STABLE_PG → $CANARY_PG"
-refresh_rc=0
-# Each half on its own project's network (SMD-2875); the canary's project
-# names the image tier.sh builds, so stable's own tier runs keep theirs.
-"$HERE/tier.sh" --runtime "$RUNTIME" --env-file "$CANARY_ENV" --from-env-file "$ENV_FILE" \
-  --project "$CANARY" --network "${CANARY}_data" --from-network "$STABLE_DB_NET" \
-  --refresh --from "$STABLE_PG" --to "$CANARY_PG" --tier canary || refresh_rc=$?
-if [ "$refresh_rc" != 0 ]; then
-  # tier.sh's own usage errors exit 2, which from here would read as "refused
-  # before anything changed" — stable may be stamped by now, a server stopped.
-  [ -z "$STOPPED_SERVER$STOPPED_API" ] || echo "the canary's servers are stopped (for the refresh), so a connector registered for it answers nothing until \`up\` succeeds." >&2
-  echo "the refresh failed (tier.sh exit $refresh_rc). Re-run up once that is fixed: the canary carries the refresh mark, so the retry resets it." >&2
-  exit 1
+if [ $REFRESH = 1 ]; then
+  say "refresh $STABLE_PG → $CANARY_PG"
+  refresh_rc=0
+  # Each half on its own project's network (SMD-2875); the canary's project
+  # names the image tier.sh builds, so stable's own tier runs keep theirs.
+  "$HERE/tier.sh" --runtime "$RUNTIME" --env-file "$CANARY_ENV" --from-env-file "$ENV_FILE" \
+    --project "$CANARY" --network "${CANARY}_data" --from-network "$STABLE_DB_NET" \
+    --refresh --from "$STABLE_PG" --to "$CANARY_PG" --tier canary || refresh_rc=$?
+  if [ "$refresh_rc" != 0 ]; then
+    # tier.sh's own usage errors exit 2, which from here would read as "refused
+    # before anything changed" — stable may be stamped by now, a server stopped.
+    [ -z "$STOPPED_SERVER$STOPPED_API" ] || echo "the canary's servers are stopped (for the refresh), so a connector registered for it answers nothing until \`up\` succeeds." >&2
+    echo "the refresh failed (tier.sh exit $refresh_rc). Re-run up once that is fixed: the canary carries the refresh mark, so the retry resets it." >&2
+    exit 1
+  fi
+else
+  # In place (SMD-3154): this checkout's migrate on the canary's own database,
+  # its rows kept. A one-shot run, not `up`, which would stay attached.
+  say "migrate $CANARY_PG in place (commit $GIT_SHA): its rows kept, nothing copied from $STABLE_PG"
+  migrate_rc=0
+  { canary_compose build migrate && canary_compose run --rm --no-deps migrate; } || migrate_rc=$?
+  if [ "$migrate_rc" != 0 ]; then
+    stopped="its servers"
+    [ -z "$STOPPED_SLEEP" ] || stopped="its servers and sleep worker"
+    echo "the canary's migration failed (exit $migrate_rc), and $stopped are stopped: fix the cause above and re-run up --no-refresh." >&2
+    exit 1
+  fi
 fi
 
 say "canary servers, MCP and REST core (commit $GIT_SHA)"
@@ -1251,6 +1292,10 @@ if [ "$(curl -s --max-time 2 "$BASE/health" || true)" != ok ]; then
   canary_compose stop server api >/dev/null 2>&1 || true
   echo "the canary's server and REST core are stopped; fix the cause above and re-run up." >&2
   exit 1
+fi
+if [ -n "$STOPPED_SLEEP" ]; then
+  say "canary sleep worker, on the new build"
+  canary_compose --profile sleep up -d --no-deps --force-recreate sleep
 fi
 
 if [ $SMOKE = 1 ]; then
@@ -1414,4 +1459,8 @@ else
   fi
 fi
 
-say "canary up: $BASE, tier canary, refreshed from $STABLE_PG"
+if [ $REFRESH = 1 ]; then
+  say "canary up: $BASE, tier canary, refreshed from $STABLE_PG"
+else
+  say "canary up: $BASE, tier canary, migrated in place (its own rows kept)"
+fi

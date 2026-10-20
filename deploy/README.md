@@ -2336,8 +2336,18 @@ record. `canary.sh` stands the canary beside it, and takes it down again
 # the canary mints its own key: no key of stable's is needed, or opens it
 deploy/canary.sh --env-file ~/OB1/deploy/.env --port 8011 up --connect   # the first up names its port
 deploy/canary.sh --env-file ~/OB1/deploy/.env up                         # later ones read it from its env file
+deploy/canary.sh --env-file ~/OB1/deploy/.env up --no-refresh            # bring it level in place, keeping its own rows
 deploy/canary.sh --env-file ~/OB1/deploy/.env down --volumes
 ```
+
+Every `up` refreshes the canary from stable, unless `--no-refresh` says not to
+(SMD-3154). A canary that holds rows stable does not, its own ingests or its
+own passes' proposals, keeps them that way: `up --no-refresh` mends its env
+file and keys as `up` does, stops its servers and a running `sleep` worker,
+runs this checkout's `migrate` on the canary's own database, recreates the
+servers, its proxy and forwarder on its own networks, and brings the worker
+back on the new build. It is refused, changing nothing, on a canary with no
+database to keep.
 
 The canary is `compose.yaml` again under the project `<stable>-canary` (SMD-2873):
 `open-brain-canary` beside the default stable, `ob1b-canary` beside a brain whose
