@@ -5,7 +5,8 @@
  *
  * Board-sync reads the board into the brain; nothing went the other way. When
  * consolidation judged two ticket rows — a pending `outdates` proposal (029),
- * or a standing `related`, `evolves` or `duplicate` relation (084) — the
+ * or a standing `related`, `evolves` or `duplicate` relation (084; never a
+ * `distinct`, 102, which says the two are apart) — the
  * finding waited in the brain until someone read the queue (SMD-2680 counts
  * it in brain_info and preflight). This posts it where the people who decide
  * it look: one comment on the newer ticket, naming the other ticket, what the
@@ -470,7 +471,8 @@ SELECT 'relation' AS kind, x.id::text AS id, x.word, ko AS older, kn AS newer, l
           FROM thought_facets f
           JOIN thoughts h ON h.id = f.thought_id
           JOIN thoughts t ON t.id = CASE WHEN f.kind = 'relation' THEN (f.payload->>'target')::uuid END
-         WHERE f.kind = 'relation' AND f.valid_until IS NULL) x
+         -- A distinct (102) is two tickets judged apart: nothing to link, so never a finding (SMD-3117).
+         WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'relation' IS DISTINCT FROM 'distinct') x
  WHERE ${PAIR_RULE}`;
 
 /**

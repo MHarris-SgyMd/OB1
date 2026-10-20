@@ -956,7 +956,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   let catalogLinked = true;
   let boardTimeout = false;
   let lockFacets = false;
-  let relationsAnswer: Record<string, unknown> = { related: 9, evolves: 4, duplicate: 1 };
+  let relationsAnswer: Record<string, unknown> = { related: 9, evolves: 4, duplicate: 1, distinct: 3 };
   // 087's table: absent from the catalog unless a case puts it there (SMD-2682).
   let catalogFindings = false;
   let findingsRefused = false;
@@ -1034,13 +1034,13 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   // statement is sent, so a refusal of 079's predicate cannot speak for them
   // (run-it, review pass 4).
   proposalsAnswer = { pending: 0, stale: 2, oldest_s: null, board_pairs: 4 };
-  relationsAnswer = { related: 0, evolves: 0, duplicate: 0 };
+  relationsAnswer = { related: 0, evolves: 0, duplicate: 0, distinct: 0 };
   boardTimeout = true;
   statements.length = 0;
   const emptyQueue = await readDatabaseFacts(fake);
   boardTimeout = false;
   proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
-  relationsAnswer = { related: 9, evolves: 4, duplicate: 1 };
+  relationsAnswer = { related: 9, evolves: 4, duplicate: 1, distinct: 3 };
   assert(emptyQueue.proposals?.boardPairs === 0 && emptyQueue.relations?.boardPairs === 0 && !Object.keys(emptyQueue.unread).some((k) => /boardPairs/.test(k)) && !statements.some((t) => /NOT consolidation_tickets_linked/.test(t)),
     `an empty queue and no relation send no board statement and count none (${JSON.stringify(emptyQueue.proposals)}, ${JSON.stringify(emptyQueue.unread)})`);
   // …and under a refused lock on thoughts, or at a deadline, an empty queue
@@ -1053,14 +1053,14 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
   // At a deadline in the queue's board read, with no relation standing, the
   // snapshot names the queue's board count and settles the relations' to 0.
-  relationsAnswer = { related: 0, evolves: 0, duplicate: 0 };
+  relationsAnswer = { related: 0, evolves: 0, duplicate: 0, distinct: 0 };
   hang.add("NOT consolidation_tickets_linked");
   const dlProgress = newProgress();
   void readDatabaseFacts(fake, {}, dlProgress);
   await Bun.sleep(200);
   const dl = snapshotFacts(dlProgress)!;
   hang.delete("NOT consolidation_tickets_linked");
-  relationsAnswer = { related: 9, evolves: 4, duplicate: 1 };
+  relationsAnswer = { related: 9, evolves: 4, duplicate: 1, distinct: 3 };
   proposalsAnswer = { pending: 1, stale: "x", oldest_s: 1, board_pairs: 0 };
   const parentLost = await readDatabaseFacts(fake);
   proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
@@ -1079,7 +1079,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   statements.length = 0;
   const leanFindings = await readDatabaseFacts(fake, { stats: false });
   assert(JSON.stringify(facts.proposals) === JSON.stringify({ pending: 6, stale: 2, oldestPendingS: 259207, boardPairs: 4 }) && JSON.stringify(leanFindings.proposals) === JSON.stringify(facts.proposals)
-      && JSON.stringify(facts.relations) === JSON.stringify({ related: 9, evolves: 4, duplicate: 1, boardPairs: 11 }) && leanFindings.relations === null && !statements.some((t) => /FROM thought_facets f\b/.test(t)),
+      && JSON.stringify(facts.relations) === JSON.stringify({ related: 9, evolves: 4, duplicate: 1, distinct: 3, boardPairs: 11 }) && leanFindings.relations === null && !statements.some((t) => /FROM thought_facets f\b/.test(t)),
     `the queue is read with or without the stats, the relations with them only (${JSON.stringify(leanFindings.proposals)}, ${JSON.stringify(leanFindings.relations)})`);
   // What became of the findings posted to the board (SMD-2682): a stats read
   // where 087's table resolves, each (pair, word) by its outcome, the found
@@ -1158,10 +1158,10 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   ].map((r) => { try { return JSON.stringify(proposalsValue(r)); } catch { return "threw"; } });
   assert(qShapes.join("|") === '{"pending":0,"stale":0,"oldestPendingS":null,"boardPairs":null}|{"pending":3,"stale":0,"oldestPendingS":13,"boardPairs":null}|{"pending":0,"stale":1,"oldestPendingS":null,"boardPairs":null}|{"pending":1,"stale":0,"oldestPendingS":0,"boardPairs":null}|threw|threw|threw|threw|threw',
     `the queue's counts are counts and its age whole seconds, or the read did not answer (${qShapes.join("|")})`);
-  const rShapes = [{ related: 1, evolves: 0, duplicate: 0 }, { related: 1, evolves: null, duplicate: 0 }, { related: "1; DROP", evolves: 0, duplicate: 0 }, undefined]
+  const rShapes = [{ related: 1, evolves: 0, duplicate: 0, distinct: 2 }, { related: 1, evolves: null, duplicate: 0, distinct: 0 }, { related: "1; DROP", evolves: 0, duplicate: 0, distinct: 0 }, { related: 1, evolves: 0, duplicate: 0 }, { related: 1, evolves: 0, duplicate: 0, distinct: -1 }, undefined]
     .map((r) => { try { return JSON.stringify(relationsValue(r)); } catch { return "threw"; } });
   const bShapes = [{ n: 4 }, { n: "4" }, { n: -1 }, { n: null }, {}, undefined].map((r) => { try { return String(boardPairsValue("x", r)); } catch { return "threw"; } });
-  assert(rShapes.join("|") === '{"related":1,"evolves":0,"duplicate":0,"boardPairs":null}|threw|threw|threw' && bShapes.join("|") === "4|4|threw|threw|threw|threw",
+  assert(rShapes.join("|") === '{"related":1,"evolves":0,"duplicate":0,"distinct":2,"boardPairs":null}|threw|threw|threw|threw|threw' && bShapes.join("|") === "4|4|threw|threw|threw|threw",
     `the relations' and the board pairs' counts are counts, or the read did not answer (${rShapes.join("|")} / ${bShapes.join("|")})`);
   proposalsAnswer = { pending: 1, stale: "two", oldest_s: 1, board_pairs: 0 };
   const oddQueue = await readDatabaseFacts(fake);
@@ -1341,19 +1341,23 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   assert(/^Board sync: +2026-09-24T12:00:00\.000Z$/m.test(readText) && /^Board sync: +none — no thought carries a usable Linear watermark$/m.test(noBoard) && /^Board sync: +\?$/m.test(lostBoard),
     `the table's board-sync row: the watermark, none, or ? when not read (${[readText, noBoard, lostBoard].map((t) => t.split("\n").find((l) => l.startsWith("Board sync"))).join(" / ")})`);
   // The findings rows (SMD-2680): the queue and the relations, none, ? when not read, and no table.
-  const quiet = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 0, oldestPendingS: null, boardPairs: 0 }, relations: { related: 0, evolves: 0, duplicate: 0, boardPairs: 0 } }), 1000));
-  const staleOnly = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 3, oldestPendingS: null, boardPairs: 0 }, relations: { related: 2, evolves: 0, duplicate: 0, boardPairs: 0 } }), 1000));
+  const quiet = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 0, oldestPendingS: null, boardPairs: 0 }, relations: { related: 0, evolves: 0, duplicate: 0, distinct: 0, boardPairs: 0 } }), 1000));
+  const staleOnly = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 3, oldestPendingS: null, boardPairs: 0 }, relations: { related: 2, evolves: 0, duplicate: 0, distinct: 0, boardPairs: 0 } }), 1000));
+  // 102 (SMD-3117): the pairs judged distinct, beside the relations and outside their count — with relations, alone, and one.
+  const withApart = renderBrainInfo(await brainInfo(server, async () => planted(100, { relations: { related: 2, evolves: 0, duplicate: 0, distinct: 5, boardPairs: 0 } }), 1000));
+  const onlyApart = renderBrainInfo(await brainInfo(server, async () => planted(100, { relations: { related: 0, evolves: 0, duplicate: 0, distinct: 1, boardPairs: 0 } }), 1000));
   const lostFindings = renderBrainInfo(await brainInfo(server, async () => planted(52, { proposals: null, relations: null, unread: { proposals: { reason: "refused", message: "permission denied for table supersession_proposals" }, relations: { reason: "timeout", message: "canceling statement due to statement timeout" } } }), 1000));
   const boardLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { unread: { "proposals.boardPairs": { reason: "timeout", message: "canceling statement due to statement timeout" } }, proposals: { pending: 6, stale: 0, oldestPendingS: 60, boardPairs: null } }), 1000));
   const execLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { unread: { "proposals.boardPairs": { reason: "refused", message: "permission denied for function consolidation_tickets_linked" } }, proposals: { pending: 6, stale: 0, oldestPendingS: 60, boardPairs: null } }), 1000));
-  const relBoardLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { relations: { related: 2, evolves: 0, duplicate: 0, boardPairs: null }, unread: { "relations.boardPairs": { reason: "timeout", message: "x" } } }), 1000));
+  const relBoardLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { relations: { related: 2, evolves: 0, duplicate: 0, distinct: 0, boardPairs: null }, unread: { "relations.boardPairs": { reason: "timeout", message: "x" } } }), 1000));
   const pre079 = renderBrainInfo(await brainInfo(server, async () => planted(78, { proposals: { pending: 2, stale: 0, oldestPendingS: 60, boardPairs: null } }), 1000));
   const denied = [deniedObject("permission denied for table thoughts"), deniedObject("permission denied for function consolidation_tickets_linked"), deniedObject("canceling statement due to lock timeout")];
   assert(JSON.stringify(denied) === '[{"kind":"table","name":"thoughts"},{"kind":"function","name":"consolidation_tickets_linked"},null]', `a refusal names its table or function (${JSON.stringify(denied)})`);
   const noTables = renderBrainInfo(await brainInfo(server, async () => planted(52, { proposals: null, relations: null }), 1000));
-  const pre084 = renderBrainInfo(await brainInfo(server, async () => planted(83, { relations: { related: 0, evolves: 0, duplicate: 0, boardPairs: 0 } }), 1000));
+  const pre084 = renderBrainInfo(await brainInfo(server, async () => planted(83, { relations: { related: 0, evolves: 0, duplicate: 0, distinct: 0, boardPairs: 0 } }), 1000));
   const line = (t: string, label: string) => t.split("\n").find((l) => l.startsWith(label)) ?? "";
-  assert(/^Proposals: +6 pending \(the oldest judged 3 d ago; 4 pair two tickets the board does not link\); 2 stale$/m.test(readText) && /^Relations: +14 standing \(9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link\)$/m.test(readText)
+  assert(/^Proposals: +6 pending \(the oldest judged 3 d ago; 4 pair two tickets the board does not link\); 2 stale$/m.test(readText) && /^Relations: +14 standing \(9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link\); 3 pairs judged distinct$/m.test(readText)
+      && /^Relations: +2 standing \(2 related, 0 evolves, 0 duplicate\); 5 pairs judged distinct$/m.test(withApart) && /^Relations: +none standing; 1 pair judged distinct$/m.test(onlyApart)
       && /^Relations: +none — migration 084 is not applied$/m.test(pre084)
       && /^Proposals: +none pending$/m.test(quiet) && /^Relations: +none standing$/m.test(quiet)
       && /^Proposals: +none pending; 3 stale$/m.test(staleOnly) && /^Relations: +2 standing \(2 related, 0 evolves, 0 duplicate\)$/m.test(staleOnly)
