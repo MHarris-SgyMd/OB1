@@ -195,6 +195,12 @@ export interface WorkerHeartbeat {
   reads?: "yes" | "denied" | "missing";
   /** The sleep scheduler's passes waiting at their start for a provider that does not answer (SMD-2752); absent while none is, and for the other workers. */
   waiting?: ("extract" | "consolidate")[];
+  /**
+   * The passes waiting mid-pass for a provider that stopped answering
+   * (SMD-2905): the sleep scheduler's by name, a follower its own; absent
+   * while none is, and for board-sync.
+   */
+  waitingMidPass?: ("extract" | "consolidate")[];
   /** The start refusal that ended the sleep scheduler, one of db/worker-bootstrap.ts's START_REFUSALS (SMD-2752); absent otherwise, and for the other workers. */
   refused?: SleepRefusal;
   /**
@@ -334,6 +340,13 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     const waiting = Array.isArray(w) && w.length > 0 && new Set(w).size === w.length && w.every((p) => p === "extract" || p === "consolidate")
       ? (w as ("extract" | "consolidate")[])
       : undefined;
+    // Its passes waiting mid-pass (SMD-2905), left off when not of the shape:
+    // the scheduler's by name, each once; a follower's its own name alone.
+    const mid = worker === "sleep" || worker === "extract" || worker === "consolidate" ? v!.waitingMidPass : undefined;
+    const waitingMidPass = Array.isArray(mid) && mid.length > 0 && new Set(mid).size === mid.length
+        && mid.every((p) => p === "extract" || p === "consolidate") && (worker === "sleep" || (mid.length === 1 && mid[0] === worker))
+      ? (mid as ("extract" | "consolidate")[])
+      : undefined;
     const refused = worker === "sleep" && typeof v!.refused === "string" && (SLEEP_REFUSALS as readonly string[]).includes(v!.refused) ? (v!.refused as SleepRefusal) : undefined;
     // The thoughts its wakes hold back (SMD-2694), left off when not of the shape.
     const held = worker === "sleep" ? parseHeld(v!.held) : undefined;
@@ -352,6 +365,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ...(slept ? { slept } : {}),
       ...(reads ? { reads } : {}),
       ...(waiting ? { waiting } : {}),
+      ...(waitingMidPass ? { waitingMidPass } : {}),
       ...(refused ? { refused } : {}),
       ...(held ? { held } : {}),
     });
@@ -1303,8 +1317,10 @@ export function heartbeatState(h: WorkerHeartbeat): string {
   // Running says so, and a failed last pass still shows: a follower against a
   // down provider spends most of each pass in its pauses (review pass 3).
   // A pass the sleep scheduler started that waits at its start for the
-  // provider runs nothing: said so, not "running a pass" (SMD-2752 PR 3).
-  const state = h.running ? (h.waiting?.length ? "waiting for the provider at a pass's start" : "running a pass") : "alive";
+  // provider runs nothing: said so, not "running a pass" (SMD-2752 PR 3); nor
+  // does one waiting mid-pass for a provider that stopped answering (SMD-2905).
+  const at = h.waiting?.length ? (h.waitingMidPass?.length ? ", at a pass's start and mid-pass" : " at a pass's start") : h.waitingMidPass?.length ? " mid-pass" : null;
+  const state = h.running ? (at === null ? "running a pass" : `waiting for the provider${at}`) : "alive";
   return `${state}${h.outcome === "failed" ? ", its last pass failed" : ""} (${when})`;
 }
 

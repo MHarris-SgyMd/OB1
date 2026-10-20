@@ -3487,6 +3487,17 @@ words, and the `sleep` row says each:
   (key)", with that kind's remedy before the restart, where "start it again"
   alone would only refuse again.
 
+Since SMD-2905 it also carries `waitingMidPass`, the passes waiting mid-pass
+for a provider that stopped answering (past a worker's pauses for a 5xx, at
+once for a model gone missing or a call no probe answers): "asleep,
+consolidate waiting for the provider mid-pass", a warning naming the
+provider, where it read "its passes running" and "its log says which". The
+provider answering clears it, and so does a wake. A follower's own row
+(`heartbeat:extract:…`, `heartbeat:consolidate:…`) carries the word with its
+own name while it waits, and the `workers` and `consolidate pass` rows say
+it. A follower's start wait stays unsaid: its row does not exist until its
+first pass begins.
+
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
 the wakes (a hard stop counted on them, 093): how many, and the three most
 stalled, then most stopped, with their stops and windows kept — stalled as
@@ -3536,8 +3547,7 @@ used to end the scheduler (SMD-2752). A wake or a stop during that wait stops
 the pass before it began, and a stop is a stop however a pass then ends, unless one throws.
 
 Not yet here: a budget per pass and per sleep and the re-derive pass
-(SMD-2679); a `waiting` word for a pass waiting mid-pass for the provider,
-which reads "running a pass" — `waiting` is its start's alone (SMD-2905).
+(SMD-2679).
 test-live [38] drives it against a stub model.
 
 ## Extensions
@@ -4882,11 +4892,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2946 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1432 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 870 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 55 assertions: the shards SHARDS lists in test-live.ts, each its own job
-OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 275 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 235 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+./with-postgres.sh bun test-live.ts         # 1439 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 871 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 57 assertions: the shards SHARDS lists in test-live.ts, each its own job
+OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 237 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

@@ -4152,7 +4152,14 @@ if (want("10")) {
         created.push(busy);
         const pooled = await pollUntil(async () => lines.some((l) => /the provider is not answering \(Extraction request to [^)]*503/.test(l)) && (await claimRow(busy))?.status === "pending", 6000);
         const during = await claimRow(busy);
+        // Its own row says it waits mid-pass for the provider while it does, and not once it answers (SMD-2905).
+        const followerBeat = async () => ((await sql`SELECT value FROM ob1_config WHERE key = ${stampKey("extract", KEY)}`)[0] as { value: string } | undefined)?.value;
+        let waitBeat: string | undefined;
+        const waitSaid = await pollUntil(async () => /"waitingMidPass":\["extract"\]/.test((waitBeat = await followerBeat()) ?? ""), 6000);
         const busyDone = await pollUntil(async () => (await claimRow(busy))?.status === "succeeded" && (await extractedNow(busy)), 25_000);
+        const afterBeat = await followerBeat();
+        assert(waitSaid && /"running":true/.test(waitBeat ?? "") && afterBeat !== undefined && !/waitingMidPass/.test(afterBeat),
+               `…and its own row says it waits mid-pass for the provider, running, until the provider answers (${waitBeat?.slice(0, 160)} → ${afterBeat?.slice(0, 120)})`);
         assert(startProbes >= 1 && pooled && during?.attempt_count === 0 && during.last_error === null && busyDone && (await claimRow(busy))?.status === "succeeded" && !settled,
                `a 503 past the pauses: the thought goes back to the pool (pending, attempt ${during?.attempt_count}, no error), the follower waits, and extracts it when the provider answers — still running (pooled ${pooled}, extracted ${busyDone}, ${outage.refused - startRefused} probe(s) refused, ${probes - startProbes} answered)`);
         assert(lines.some((l) => /the follower calls stub-meta at http:\/\/127\.0\.0\.1:\d+\/v1 for one token after 1 s and then twice as long each time, up to 5 min/.test(l)) && lines.some((l) => /the provider answers again after \d+ s; polling resumes/.test(l)),
@@ -6980,7 +6987,14 @@ if (want("16")) {
       const newer = await seed("The outage runbook pages the on-call by chat now.", 9, 0, ["outage-runbook"]);
       const pooled = await pollUntil(async () => lines.some((l) => /the provider is not answering \(Judge request to [^)]*503/.test(l)) && (await claimOf(newer))?.status === "pending", 8000);
       const during = await claimOf(newer);
+      // Its own row says it waits mid-pass for the provider while it does, and not once it answers (SMD-2905).
+      const followerBeat = async () => ((await sql`SELECT value FROM ob1_config WHERE key = ${stampKey("consolidate", KEY)}`)[0] as { value: string } | undefined)?.value;
+      let waitBeat: string | undefined;
+      const waitSaid = await pollUntil(async () => /"waitingMidPass":\["consolidate"\]/.test((waitBeat = await followerBeat()) ?? ""), 8000);
       const judgedAfter = await pollUntil(async () => (await claimOf(newer))?.status === "succeeded", 25_000);
+      const afterBeat = await followerBeat();
+      assert(waitSaid && /"running":true/.test(waitBeat ?? "") && afterBeat !== undefined && !/waitingMidPass/.test(afterBeat),
+             `a consolidate follower's own row says it waits mid-pass for the provider, running, until it answers (${waitBeat?.slice(0, 160)} → ${afterBeat?.slice(0, 120)})`);
       assert(pooled && during?.attempt_count === 0 && during.last_error === null && judgedAfter && !settled && lines.some((l) => /the provider answers again after \d+ s; polling resumes/.test(l)),
              `a consolidate follower: a 503 past the pauses returns the thought to the pool unrecorded, and it is judged once the judge answers — the follower still running (pooled ${pooled}, judged ${judgedAfter})`);
       // A hung judge: the pair's call times out, and the probe gets no answer either.
@@ -11549,6 +11563,24 @@ if (want("37")) {
     let atStart: { running?: boolean } | null = null;
     await starting.during((async () => { await Bun.sleep(400); atStart = await row(starting.key); })());
     assert((atStart as { running?: boolean } | null)?.running === true, `a pass is stamped running as it starts (${JSON.stringify(atStart)})`);
+    // A follower waiting mid-pass for its provider says so on its own row, at
+    // once and running; the word goes when the wait ends, and with the row's end (SMD-2905).
+    const waiter = passStamper({ sql: hsql as never, worker: "extract", job: "extract:wait@p2", intervalS: 15 });
+    let waitingRow: { running?: boolean; waitingMidPass?: unknown } | null = null;
+    let doneRow: { running?: boolean; waitingMidPass?: unknown } | null = null;
+    await waiter.during((async () => {
+      await Bun.sleep(100);
+      await waiter.providerWait?.(true);
+      waitingRow = await row(waiter.key);
+      await waiter.providerWait?.(false);
+      doneRow = await row(waiter.key);
+    })());
+    await waiter.providerWait?.(true);
+    await waiter.end("stopped");
+    const endedRow = await row(waiter.key) as { waitingMidPass?: unknown } | null;
+    assert(JSON.stringify((waitingRow as { waitingMidPass?: unknown } | null)?.waitingMidPass) === JSON.stringify(["extract"]) && (waitingRow as { running?: boolean } | null)?.running === true
+           && doneRow !== null && !("waitingMidPass" in (doneRow as object)) && endedRow !== null && !("waitingMidPass" in endedRow),
+      `a follower's mid-pass wait is on its own row, its own name, running; gone when the wait ends and at the row's end (${JSON.stringify(waitingRow)} → ${JSON.stringify(doneRow)}; ended ${JSON.stringify(endedRow)})`);
     // An interval past what a timer holds is recorded at the cap, which the reader takes.
     const huge = passStamper({ sql: hsql as never, worker: "consolidate", job: "consolidate:huge@p3", intervalS: 3_000_000 });
     await huge.stamp("ok");
@@ -12082,6 +12114,42 @@ if (want("38")) {
         `a pass that throws rejects the scheduler with its error, and leaves no unhandled rejection (${thrownOutcome}; ${unhandled} unhandled)`);
     } finally {
       process.off("unhandledRejection", onUnhandled);
+    }
+
+    // A pass waiting mid-pass for its provider — the model gone missing past
+    // its first call, as while Ollama pulls it again — is said on the sleep's
+    // row while it waits: the provider answering clears the word, and so does
+    // a wake (SMD-2905).
+    lines.length = 0;
+    const midFrom = Date.now();
+    await capture("A first note the sleep extracts before the model goes.", "sync-sleep", 0, 10);
+    await capture("A second note it meets the model missing on.", "sync-sleep", 0, 11);
+    slowExtract = 1500;
+    const acMid = new AbortController();
+    const midRun = sleepRun({ follow: true, signal: acMid.signal, minStampEveryS: 1 });
+    const midPassOf = async () => ((await beat()) as { waitingMidPass?: unknown } | null)?.waitingMidPass;
+    try {
+      // Past the pass's start: its first call is in hand, so the next one meets the model missing mid-pass.
+      const firstCall = await pollUntil(async () => modelCalls.some((c) => c.kind === "extract" && c.at > midFrom), 20_000);
+      missing = true;
+      let midBeat: { running?: boolean; waitingMidPass?: unknown } | null = null;
+      const midSaid = await pollUntil(async () => JSON.stringify((midBeat = await beat() as typeof midBeat)?.waitingMidPass) === '["extract"]', 20_000);
+      missing = false;
+      const answered = await pollUntil(async () => lines.some((l) => /\[extract\].*the provider answers again/.test(l)) && (await midPassOf()) === undefined, 20_000);
+      assert(firstCall && midSaid && (midBeat as { running?: boolean } | null)?.running === true && answered,
+        `extraction waiting mid-pass for a provider whose model went missing is said on the sleep's row, running, and the word goes once the provider answers (${JSON.stringify(midBeat)}; answered ${answered})`);
+      // Cut again, and a live write wakes the scheduler while it waits.
+      missing = true;
+      await capture("A third note, met with the model missing again.", "sync-sleep", 0, 12);
+      const midAgain = await pollUntil(async () => JSON.stringify(await midPassOf()) === '["extract"]', 20_000);
+      await capture("A live note that wakes it while it waits.", "op-sleep", 0, 13);
+      const wokeCleared = await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)) && (await midPassOf()) === undefined, 15_000);
+      assert(midAgain && wokeCleared, `…and a wake while it waits stops the pass and clears the word (said again ${midAgain}, cleared at the wake ${wokeCleared})`);
+    } finally {
+      missing = false;
+      slowExtract = 0;
+      acMid.abort();
+      await Promise.race([midRun, Bun.sleep(20_000)]);
     }
 
     // The same refusal after the pass has run in this process — a model
@@ -13130,6 +13198,13 @@ if (want("38b")) {
       // The judge's wait begun, consolidation parked past the stalled thought: a sync writes a note.
       const waitLine = mid ? /\[consolidate\].*the provider is not answering/ : /consolidating first/;
       await pollUntil(async () => seen(waitLine) < Infinity && (mid || seen(/\[consolidate\]/) < Infinity), 40_000);
+      // The sleep's row names the wait: mid-pass, or at its start, one or the other (SMD-2905, SMD-2752).
+      let waitBeat = "";
+      const waitWord = await pollUntil(async () => {
+        waitBeat = JSON.stringify(await beat());
+        return mid ? /"waitingMidPass":\["consolidate"\]/.test(waitBeat) && !/"waiting":/.test(waitBeat) : /"waiting":\["consolidate"\]/.test(waitBeat) && !/waitingMidPass/.test(waitBeat);
+      }, 10_000);
+      assert(waitWord, `${mid ? "mid-pass" : "at its start"}, the sleep's row says consolidation waits for the provider ${mid ? "mid-pass" : "at its start"}, and not the other (${waitBeat.slice(0, 220)})`);
       if (!mid) await Bun.sleep(1500);
       // The stalled thought's cuts so far (the join's, mid-pass): the let-out's set-aside adds its own.
       const cutsBefore = Number((await counts(stalledJ))?.cuts);
