@@ -68,7 +68,7 @@
  *
  *   open    = triage, backlog, unstarted, started   (not settled)
  *   active  = unstarted, started                    (on the board and moving)
- *   done    = completed, canceled, duplicate        (settled; duplicate: 101)
+ *   done    = completed, canceled, duplicate        (settled; duplicate: 103)
  *
  * The status comes from migration 058: `node_lifecycle()` (`LIFECYCLE_CTE`), or
  * `node_state()` under a dependency flag (`STATE_CTE`) — below, "node_state".
@@ -143,9 +143,9 @@
  * blocks / blocked_by facets, active or closed, and whether each system
  * gates), `node_state()` (per thought, the lifecycle beside `open`,
  * `blocked`, `blockers`, `unknown_blockers`, `in_dependencies` and
- * `superseded_by`), and the two status sets (101 adds `duplicate` to both),
+ * `superseded_by`), and the two status sets (103 adds `duplicate` to both),
  * which must equal `LIFECYCLE_TYPES` and `LIFECYCLE_FILTERS.done` — a brain
- * whose sets differ, one before 101 among them, is refused (exit 2), as is
+ * whose sets differ, one before 103 among them, is refused (exit 2), as is
  * one without 058. This file is their first reader: without either dependency
  * flag the rows are `node_lifecycle()`'s,
  * which reads `thoughts` and, since 068, `ob1_ticket_head` (both the capture
@@ -1071,7 +1071,7 @@ export async function schemaProblem(run: Runner, opts: Pick<Options, "startable"
   const [{ known, settled }] = await run(`SELECT array_to_string(node_lifecycle_types(), ',') AS known, array_to_string(node_settled_types(), ',') AS settled`, []);
   const same = (sql: unknown, ts: readonly string[]) => String(sql).split(",").sort().join() === [...ts].sort().join();
   if (!same(known, LIFECYCLE_TYPES) || !same(settled, LIFECYCLE_FILTERS.done)) {
-    return `This script knows the status types ${LIFECYCLE_TYPES.join(",")} (settled: ${LIFECYCLE_FILTERS.done.join(",")}); this brain's node_lifecycle_types() and node_settled_types() (058, 101) hold ${known} (settled: ${settled}). Update whichever is behind: the brain with db/migrate.ts (101 adds duplicate; after an older tree's --reapply, this tree's --reapply), the script with a newer checkout.`;
+    return `This script knows the status types ${LIFECYCLE_TYPES.join(",")} (settled: ${LIFECYCLE_FILTERS.done.join(",")}); this brain's node_lifecycle_types() and node_settled_types() (058, 103) hold ${known} (settled: ${settled}). Update whichever is behind: the brain with db/migrate.ts (103 adds duplicate; after an older tree's --reapply, this tree's --reapply), the script with a newer checkout.`;
   }
   return null;
 }

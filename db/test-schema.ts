@@ -8299,7 +8299,7 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
 
   const [sets] = await q<{ known: string[]; settled: string[] }>(`SELECT node_lifecycle_types() AS known, node_settled_types() AS settled`);
   assert(sets.known.join() === LIFECYCLE_TYPES.join() && sets.settled.join() === LIFECYCLE_FILTERS.done.join() && sets.known.filter((t) => !sets.settled.includes(t)).join() === LIFECYCLE_FILTERS.open.join(),
-    `058's status sets, as 101 left them, are graph-centrality's: the seven known types in order, the three settled, and known less settled is --status open (${sets.known.join()} / ${sets.settled.join()})`);
+    `058's status sets, as 103 left them, are graph-centrality's: the seven known types in order, the three settled, and known less settled is --status open (${sets.known.join()} / ${sets.settled.join()})`);
 
   // The read on a thought of each shape, named or not.
   // Stamped as board-sync stamps (an UPDATE of the metadata), as [44] does.
@@ -8375,10 +8375,10 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   await db.exec(`DROP FUNCTION node_state(uuid[])`);
   const missing = await schemaProblem(run, DEFAULT_OPTIONS);
   const missingStart = await schemaProblem(run, startOpts);
-  // 058's sets alone are a brain before 101 (SMD-2935): six known, two settled.
+  // 058's sets alone are a brain before 103 (SMD-2935): six known, two settled.
   await reapply("058");
-  const before101 = await schemaProblem(run, DEFAULT_OPTIONS);
-  // Then each set apart from 101's: the known one alone, the settled one alone.
+  const before103 = await schemaProblem(run, DEFAULT_OPTIONS);
+  // Then each set apart from 103's: the known one alone, the settled one alone.
   await restoreShipped("node_lifecycle_types", "node_settled_types");
   await db.exec(`CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{triage,backlog,unstarted,started,completed,canceled,duplicate,weird}'::text[] $$`);
   const skewKnown = await schemaProblem(run, DEFAULT_OPTIONS);
@@ -8399,15 +8399,15 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   assert(fine === null && fineStart === null
       && missing === "graph-centrality reads a thought's lifecycle through node_state: migration 058 is not applied. Run db/migrate.ts."
       && missingStart === "graph-centrality reads a thought's lifecycle and its blockers through node_state: migration 058 is not applied. Run db/migrate.ts."
-      && (before101 ?? "").includes("this brain's node_lifecycle_types() and node_settled_types() (058, 101) hold triage,backlog,unstarted,started,completed,canceled (settled: completed,canceled). Update whichever is behind: the brain with db/migrate.ts (101 adds duplicate; after an older tree's --reapply, this tree's --reapply), the script with a newer checkout.")
+      && (before103 ?? "").includes("this brain's node_lifecycle_types() and node_settled_types() (058, 103) hold triage,backlog,unstarted,started,completed,canceled (settled: completed,canceled). Update whichever is behind: the brain with db/migrate.ts (103 adds duplicate; after an older tree's --reapply, this tree's --reapply), the script with a newer checkout.")
       && (skewKnown ?? "").includes("hold triage,backlog,unstarted,started,completed,canceled,duplicate,weird (settled: completed,canceled,duplicate)")
       && (skewSettled ?? "").includes("hold triage,backlog,unstarted,started,completed,canceled,duplicate (settled: completed,canceled)") && reordered === null,
-    `schemaProblem: nothing on a migrated brain; without node_state every mode is refused naming 058 (the dependency flags naming the blockers too); 058's sets alone (a brain before 101) are refused naming both sets and each remedy, as is a known set or a settled set that alone is not the script's, and the same members in another order are not (${JSON.stringify([fine, before101, skewKnown, skewSettled, reordered])})`);
+    `schemaProblem: nothing on a migrated brain; without node_state every mode is refused naming 058 (the dependency flags naming the blockers too); 058's sets alone (a brain before 103) are refused naming both sets and each remedy, as is a known set or a settled set that alone is not the script's, and the same members in another order are not (${JSON.stringify([fine, before103, skewKnown, skewSettled, reordered])})`);
   // The replays above left 058's bodies; 068 redefines two of them over its
   // projection and 071 two over its gate (node_state again, and
   // node_dependencies, which only 071 redefines), and the sections after read
   // the shipped ones — named both, as node_lifecycle's last definer is 068 and
-  // node_state's 071 — and 101's status sets.
+  // node_state's 071 — and 103's status sets.
   await restoreShipped("node_state", "node_lifecycle", "node_dependencies", "node_lifecycle_types", "node_settled_types");
 
   await db.exec(`DELETE FROM thoughts`);
@@ -14988,23 +14988,23 @@ console.log("\n[90] Migration 100: the thoughts with no vector by an index of th
   await db.exec(`UPDATE pg_index SET indisvalid = true WHERE indexrelid = 'thoughts_vectorless_idx'::regclass`);
 }
 
-console.log("\n[91] Migration 101: Linear's duplicate status type known and settled (SMD-2935) — the sets, a Duplicate ticket settled and a Duplicate blocker no longer blocking (under 058's sets: unknown, and blocking), the gate mirror rebuilt to the new set, a re-apply a no-op");
+console.log("\n[93] Migration 103: Linear's duplicate status type known and settled (SMD-2935) — the sets, a Duplicate ticket settled and a Duplicate blocker no longer blocking (under 058's sets: unknown, and blocking), the gate mirror rebuilt to the new set, a re-apply a no-op");
 {
   // By name, not number: main may take the number.
-  const the101 = files.find((f) => f.endsWith("_duplicate_settles.sql")) ?? "no _duplicate_settles.sql";
+  const the103 = files.find((f) => f.endsWith("_duplicate_settles.sql")) ?? "no _duplicate_settles.sql";
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const [sets] = await q<{ known: string[]; settled: string[]; kc: string; sc: string }>(
     `SELECT node_lifecycle_types() AS known, node_settled_types() AS settled, obj_description('node_lifecycle_types()'::regprocedure, 'pg_proc') AS kc, obj_description('node_settled_types()'::regprocedure, 'pg_proc') AS sc`);
   assert(sets.known.join() === "triage,backlog,unstarted,started,completed,canceled,duplicate" && sets.settled.join() === "completed,canceled,duplicate"
       && /SMD-2935/.test(sets.kc) && /SMD-2935/.test(sets.sc) && /board-findings\.ts reads it/.test(sets.sc),
-    `101's sets: seven known, duplicate after canceled; three settled; each comment naming SMD-2935 (${sets.known.join()} / ${sets.settled.join()})`);
+    `103's sets: seven known, duplicate after canceled; three settled; each comment naming SMD-2935 (${sets.known.join()} / ${sets.settled.join()})`);
 
   // A Duplicate blocker of an open ticket, a note filed under it; each ticket a sourced Linear row, as board-sync writes it.
   const row = async (content: string, metadata: Record<string, unknown>) =>
     (await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text AS id`, [content, JSON.stringify(metadata)]))[0].id;
-  const dup = await row("[91] DUP-2 — a duplicate", { source: "linear", issue: "DUP-2", status: "Duplicate", status_type: "duplicate", linear_updated_at: "2026-10-19T00:00:00.000Z" });
-  const open = await row("[91] DUP-1 — blocked by the duplicate", { source: "linear", issue: "DUP-1", status: "Todo", status_type: "unstarted", linear_updated_at: "2026-10-19T00:00:00.000Z" });
-  const note = await row("[91] a note filed under DUP-2", { ticket: "DUP-2" });
+  const dup = await row("[93] DUP-2 — a duplicate", { source: "linear", issue: "DUP-2", status: "Duplicate", status_type: "duplicate", linear_updated_at: "2026-10-19T00:00:00.000Z" });
+  const open = await row("[93] DUP-1 — blocked by the duplicate", { source: "linear", issue: "DUP-1", status: "Todo", status_type: "unstarted", linear_updated_at: "2026-10-19T00:00:00.000Z" });
+  const note = await row("[93] a note filed under DUP-2", { ticket: "DUP-2" });
   for (const [id, key] of [[dup, "DUP-2"], [open, "DUP-1"]]) await q(`SELECT record_thought_source($1::uuid, 'linear', $2, $2, 'text/markdown')`, [id, key]);
   await q(`SELECT record_source_links($1::uuid, 'linear', '[{"relation": "blocked_by", "target": "DUP-2"}]'::jsonb)`, [open]);
   type S = { id: string; open: boolean | null; blocked: boolean | null; blockers: string[] | null; unknown: string[] | null };
@@ -15016,23 +15016,23 @@ console.log("\n[91] Migration 101: Linear's duplicate status type known and sett
       && now.get(open)?.blockers === null && (now.get(open)?.unknown ?? []).length === 0 && (await gateOf()) === true && (await drift()) === 0,
     `a Duplicate ticket is settled, and so is a note filed under it; the open ticket it blocks is not blocked, its blocker neither open nor unknown; the mirror says the Duplicate's row gates, and nothing drifts (${JSON.stringify([...now.values()])})`);
 
-  // 058's sets, the mirror rebuilt to them: the brain before 101.
+  // 058's sets, the mirror rebuilt to them: the brain before 103.
   await db.exec(`CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{triage,backlog,unstarted,started,completed,canceled}'::text[] $$;
                  CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{completed,canceled}'::text[] $$`);
   const [rebuilt058] = await q<{ w: number }>(`SELECT written + deleted AS w FROM ob1_rebuild_source_gate()`);
   const old = await state();
   assert(old.get(dup)?.open === null && old.get(note)?.open === null && old.get(open)?.blocked === true && old.get(open)?.blockers?.join() === "DUP-2"
       && old.get(open)?.unknown?.join() === "DUP-2" && rebuilt058.w === 1 && (await gateOf()) === false,
-    `under 058's sets the Duplicate is an unknown status (open NULL), and it blocks — an unknown blocker — as on stable before 101; the mirror rebuilt to them flips its row (${rebuilt058.w}; ${JSON.stringify(old.get(open))})`);
+    `under 058's sets the Duplicate is an unknown status (open NULL), and it blocks — an unknown blocker — as on stable before 103; the mirror rebuilt to them flips its row (${rebuilt058.w}; ${JSON.stringify(old.get(open))})`);
 
-  // 101 over it: the sets, then its own rebuild — without it the Duplicate's
+  // 103 over it: the sets, then its own rebuild — without it the Duplicate's
   // row would still say it does not gate, which drift() names.
-  await reapply(the101);
+  await reapply(the103);
   const back = await state();
   assert(JSON.stringify([...back.values()]) === JSON.stringify([...now.values()]) && (await gateOf()) === true && (await drift()) === 0,
-    `101 applied over that brain: settled again, the blocker cleared, and its own rebuild leaves the mirror exact (${JSON.stringify(back.get(open))})`);
+    `103 applied over that brain: settled again, the blocker cleared, and its own rebuild leaves the mirror exact (${JSON.stringify(back.get(open))})`);
   const [clean] = await q<{ w: number }>(`SELECT written + deleted AS w FROM ob1_rebuild_source_gate()`);
-  await reapply(the101);
+  await reapply(the103);
   const [again] = await q<{ known: string[]; settled: string[] }>(`SELECT node_lifecycle_types() AS known, node_settled_types() AS settled`);
   assert(clean.w === 0 && again.known.join() === sets.known.join() && again.settled.join() === sets.settled.join() && (await drift()) === 0,
     `…a rebuild after it finds nothing to fix, and a re-apply changes nothing (${clean.w})`);
@@ -15041,7 +15041,7 @@ console.log("\n[91] Migration 101: Linear's duplicate status type known and sett
   const [refs] = await q<{ r: string[] | null }>(`SELECT ticket_references_settled('a session about it', '{"topics": ["DUP-2"]}'::jsonb) AS r`);
   assert(refs.r?.join() === "DUP-2", `077 counts a Duplicate among a thought's finished tickets (${JSON.stringify(refs.r)})`);
 
-  await db.query(`DELETE FROM thoughts WHERE content LIKE '[91]%'`);
+  await db.query(`DELETE FROM thoughts WHERE content LIKE '[93]%'`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

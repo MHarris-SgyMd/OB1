@@ -337,7 +337,7 @@ cannot take a parameter and sends a fixed weight; `db/migrations/020_*.sql` and
 and a superseded hit is only labelled (`⚠ Superseded by …`). On, it calls 059's
 `search_thoughts_current`: over the hybrid's top min(100, 4 × limit), a thought
 whose ticket is settled — completed, canceled or a duplicate, by 058's and
-101's `node_state`, so a
+103's `node_state`, so a
 note filed under a Done ticket counts — or that a newer thought supersedes has
 its score multiplied by 0.25. Under the hybrid's fusion that puts every current
 match in the window first, then the demoted ones in their own order (a demoted

@@ -13043,24 +13043,24 @@ if (want("41")) {
     // Closed is node_settled_types() (SMD-2935). Without the function the step
     // refuses naming 058 — its own statement, so the schema check is not a
     // parse error (review pass 1); with 058's set back, a Duplicate reads open,
-    // so it refuses naming 101; 101 re-applied, it runs. Put back in any case.
+    // so it refuses naming 103; 103 re-applied, it runs. Put back in any case.
     const SET058 = `CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{completed,canceled}'::text[] $$`;
-    const apply101 = () => applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_duplicate_settles.sql") });
-    let no058: string | null = "unread", before101: string | null = "unread", after101: string | null = "unread";
+    const apply103 = () => applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_duplicate_settles.sql") });
+    let no058: string | null = "unread", before103: string | null = "unread", after103: string | null = "unread";
     try {
       await bsql`DROP FUNCTION node_settled_types()`;
       no058 = await findingsSchemaProblem(bsql).catch((e: Error) => `threw: ${e.message}`);
       await bsql.unsafe(SET058);
-      before101 = await findingsSchemaProblem(bsql);
-      await apply101();
-      after101 = await findingsSchemaProblem(bsql);
+      before103 = await findingsSchemaProblem(bsql);
+      await apply103();
+      after103 = await findingsSchemaProblem(bsql);
     } finally {
-      if (after101 !== null) { await bsql.unsafe(SET058); await apply101(); }
+      if (after103 !== null) { await bsql.unsafe(SET058); await apply103(); }
     }
     assert(no058 === "migration 058 is not applied, so whether a ticket is closed cannot be asked (cd db && bun migrate.ts --url …)"
-        && before101 === "migration 101 is not applied, or an older tree's --reapply undid it, so a Duplicate ticket would read as open (cd db && bun migrate.ts --url …; after an older tree's --reapply, this tree's --reapply)"
-        && after101 === null,
-      `closed() reads node_settled_types(): without it the step refuses naming 058, on a brain whose set lacks duplicate it refuses naming 101 and the remedy after an older tree's --reapply, and runs once 101 is applied (${JSON.stringify([no058, before101, after101])})`);
+        && before103 === "migration 103 is not applied, or an older tree's --reapply undid it, so a Duplicate ticket would read as open (cd db && bun migrate.ts --url …; after an older tree's --reapply, this tree's --reapply)"
+        && after103 === null,
+      `closed() reads node_settled_types(): without it the step refuses naming 058, on a brain whose set lacks duplicate it refuses naming 103 and the remedy after an older tree's --reapply, and runs once 103 is applied (${JSON.stringify([no058, before103, after103])})`);
 
     // 4. The egress gate, a dry run, a failed post, then the post.
     const z30 = await ticket(30, "gated a"), z31 = await ticket(31, "gated b");

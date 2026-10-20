@@ -540,7 +540,7 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // it, SMD-1849), 097 (one walk for 082's lapse, SMD-3035), 098 (the
   // stated-status label's read bounded, SMD-2540), 099 (an unlink
   // takes the review lock, SMD-3045), 100 (the thoughts with no vector
-  // by an index of their own, SMD-3056) and 101 (Linear's duplicate
+  // by an index of their own, SMD-3056) and 103 (Linear's duplicate
   // status type known and settled, SMD-2935)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
@@ -669,14 +669,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // name without 092 or 094 ([20aq]); 098 redefines 095's read over its own
   // signature, refusing by name without 095 ([20ar]); 099 redefines 088's
   // update_thought, refusing by name without 073 ([20as]); 100 adds a partial index on
-  // thoughts, needing nothing past 001; 101 redefines 058's two status sets
-  // and rebuilds 071's mirror, refusing by name without 058 or 071 ([20at]) — all
+  // thoughts, needing nothing past 001; 103 redefines 058's two status sets
+  // and rebuilds 071's mirror, refusing by name without 058 or 071 ([20av]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 72, `030 is among the last seventy-two migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 74, `030 is among the last seventy-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4346,24 +4346,24 @@ console.log("\n[20as] Migration 099: refused by name without 073; onto a populat
   await sql.close();
 }
 
-console.log("\n[20at] Migration 101: refused by name without 058, then without 071; onto a populated brain at the file before it — a Duplicate ticket unknown and its blocker blocking there, settled and cleared after it, the gate mirror rebuilt with it; no thought or audit row moved by the file; a re-apply a no-op (SMD-2935)");
+console.log("\n[20av] Migration 103: refused by name without 058, then without 071; onto a populated brain at the file before it — a Duplicate ticket unknown and its blocker blocking there, settled and cleared after it, the gate mirror rebuilt with it; no thought or audit row moved by the file; a re-apply a no-op (SMD-2935)");
 {
-  const the101 = MIGRATIONS.find((f) => f.endsWith("_duplicate_settles.sql"))!;  // by name: renumbered when main takes its number
+  const the103 = MIGRATIONS.find((f) => f.endsWith("_duplicate_settles.sql"))!;  // by name: renumbered when main takes its number
   const refusal = async (before: string) => {
     await dropSchema(URL_);
     await applyMigrations(URL_, { ...OPTS, only: (f) => f < before });
-    return applyMigrations(URL_, { ...OPTS, only: (f) => f === the101 }).then(() => "applied", (e: Error) => e.message);
+    return applyMigrations(URL_, { ...OPTS, only: (f) => f === the103 }).then(() => "applied", (e: Error) => e.message);
   };
   const no058 = await refusal("058"), no071 = await refusal("071");
-  assert(no058 === "migration 101 needs 058 (node_lifecycle_types, node_settled_types); this schema lacks it" && no071 === "migration 101 needs 071 (ob1_source_gate, ob1_rebuild_source_gate); this schema lacks it",
-    `101 on a schema stopped before 058, or before 071, is refused up front, naming what it needs (${no058}; ${no071})`);
+  assert(no058 === "migration 103 needs 058 (node_lifecycle_types, node_settled_types); this schema lacks it" && no071 === "migration 103 needs 071 (ob1_source_gate, ob1_rebuild_source_gate); this schema lacks it",
+    `103 on a schema stopped before 058, or before 071, is refused up front, naming what it needs (${no058}; ${no071})`);
 
   await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the101 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the103 });
   const sql = new SQL({ url: URL_, max: 1 });
   const VEC = `[${Array.from({ length: OPTS.dim }, (_, i) => (i === 0 ? 1 : 0)).join(",")}]`;
   const ticket = async (key: string, status: string, type: string) =>
-    ((await sql`INSERT INTO thoughts (content, metadata, embedding) VALUES (${`upgrade 101: ${key}`}, ${{ source: "linear", issue: key, status, status_type: type, linear_updated_at: "2026-10-19T00:00:00.000Z" }}::jsonb, ${VEC}::vector) RETURNING id::text AS id`)[0] as { id: string }).id;
+    ((await sql`INSERT INTO thoughts (content, metadata, embedding) VALUES (${`upgrade 103: ${key}`}, ${{ source: "linear", issue: key, status, status_type: type, linear_updated_at: "2026-10-19T00:00:00.000Z" }}::jsonb, ${VEC}::vector) RETURNING id::text AS id`)[0] as { id: string }).id;
   const dup = await ticket("UPG-2", "Duplicate", "duplicate"), open = await ticket("UPG-1", "Todo", "unstarted");
   for (const [id, key] of [[dup, "UPG-2"], [open, "UPG-1"]]) await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${key}, ${key}, 'text/markdown')`;
   await sql`SELECT record_source_links(${open}::uuid, 'linear', '[{"relation": "blocked_by", "target": "UPG-2"}]'::jsonb)`;
@@ -4372,28 +4372,28 @@ console.log("\n[20at] Migration 101: refused by name without 058, then without 0
   const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, updated_at::text AS u FROM thoughts ORDER BY id`);
   const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   const [was] = await sql`SELECT (SELECT open FROM node_state(ARRAY[${dup}::uuid])) AS dup_open, (SELECT blocked FROM node_state(ARRAY[${open}::uuid])) AS blocked`;
-  assert(was.dup_open === null && was.blocked === true && (await gate()) === false, `[20at] setup: at the file before 101 a Duplicate is an unknown status and blocks what it blocks, and its row does not gate (${JSON.stringify(was)})`);
+  assert(was.dup_open === null && was.blocked === true && (await gate()) === false, `[20av] setup: at the file before 103 a Duplicate is an unknown status and blocks what it blocks, and its row does not gate (${JSON.stringify(was)})`);
   const before = await rows(), auditBefore = await audits();
   // A server's pooled connection: one session that has searched with
-  // prefer_current enough times for plpgsql to cache a generic plan. 101 must
+  // prefer_current enough times for plpgsql to cache a generic plan. 103 must
   // reach it — CREATE OR REPLACE of the sets alone did not (review pass 1).
   const warm = new SQL({ url: URL_, max: 1 });
-  const demotedFor = async () => (((await warm`SELECT demoted FROM search_thoughts_current(${VEC}::vector, 'upgrade 101', 0, 10, '{}'::jsonb, 0, 30, NULL) WHERE id = ${dup}::uuid`)[0] as { demoted: string[] | null } | undefined)?.demoted ?? null);
+  const demotedFor = async () => (((await warm`SELECT demoted FROM search_thoughts_current(${VEC}::vector, 'upgrade 103', 0, 10, '{}'::jsonb, 0, 30, NULL) WHERE id = ${dup}::uuid`)[0] as { demoted: string[] | null } | undefined)?.demoted ?? null);
   const warmBefore: (string[] | null)[] = [];
   for (let i = 0; i < 8; i++) warmBefore.push(await demotedFor());
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the101 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the103 });
   const warmAfter = await demotedFor();
   await warm.close();
   assert(warmBefore.every((d) => d === null) && warmAfter?.join() === "duplicate",
-    `a session that searched eight times before 101 (a cached generic plan) demotes the Duplicate after it, as a fresh one would (${JSON.stringify([warmBefore[0], warmAfter])})`);
+    `a session that searched eight times before 103 (a cached generic plan) demotes the Duplicate after it, as a fresh one would (${JSON.stringify([warmBefore[0], warmAfter])})`);
   const [now] = await sql`SELECT (SELECT open FROM node_state(ARRAY[${dup}::uuid])) AS dup_open, (SELECT blocked FROM node_state(ARRAY[${open}::uuid])) AS blocked,
                                  (SELECT unknown_blockers FROM node_state(ARRAY[${open}::uuid])) AS unknown, (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift`;
   assert(now.dup_open === false && now.blocked === false && (now.unknown ?? []).length === 0 && (await gate()) === true && now.drift === 0,
     `after it the Duplicate is settled, the ticket it blocked is not blocked, and the file's own rebuild leaves the mirror exact (${JSON.stringify(now)})`);
   assert((await rows()) === before && (await audits()) === auditBefore, "…no thought and no audit row moved");
   const stateBefore = await state();
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the101 });
-  assert((await state()) === stateBefore && (await rows()) === before && (await audits()) === auditBefore, "a re-apply of 101 is a no-op: no state, row or audit row moved");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the103 });
+  assert((await state()) === stateBefore && (await rows()) === before && (await audits()) === auditBefore, "a re-apply of 103 is a no-op: no state, row or audit row moved");
   await sql.close();
 }
 

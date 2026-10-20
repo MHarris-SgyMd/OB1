@@ -42,7 +42,7 @@
  *     none           — prefer_current as shipped (the control);
  *     central        — demote when it has ≥1 known central reference and every
  *                      one is settled (node_settled_types(): completed or
- *                      canceled when measured, duplicate too since 101);
+ *                      canceled when measured, duplicate too since 103);
  *     central-topics — the same without the header key (topics and action items
  *                      alone: the header parse couples to the session hook's
  *                      format, so its share of the effect is reported apart);
