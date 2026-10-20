@@ -31,10 +31,11 @@
  * configured stack a `?key=` connector is asked to sign in once; its key
  * still authenticates first, so it is served after: SMD-2286's to settle.)
  *
- * The MCP server accepts no OAuth token yet: the REST core checks the
- * authorization server's tokens (SMD-2286 PR 1, oauth-token.ts), and the MCP
- * server will exchange each at the hop (PR 2, in mcp-server/). Until then a
- * token is answered 401 `invalid_token` here.
+ * This server (server-portable's /mcp) accepts no OAuth token: one is
+ * answered 401 `invalid_token` here. The REST core checks the authorization
+ * server's tokens (SMD-2286 PR 1, oauth-token.ts), and mcp-server/ trades
+ * each at the hop (PR 2, mcp-server/exchange.ts), serving /mcp with SMD-2287
+ * PR 5.
  */
 
 import { queryOf } from "./auth.ts";
@@ -139,7 +140,9 @@ export function challengeHeader(origin: string, refusedToken: boolean): string {
  * while a key keygen.ts mints is hex and has no dots, so a bearer value of
  * this shape is an OAuth client's token, not a key sent as
  * `Authorization: Bearer`. A legacy raw MCP_ACCESS_KEY written with two dots
- * would read as a token too; keygen.ts never mints one.
+ * would read as a token too, sent as a bearer on a stack with a public
+ * origin; keygen.ts never mints one. In a key form, or on a stack with no
+ * origin, mcp-server/ sends it on as a key (app.ts keysToSend).
  */
 export const JWT_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/;
 
@@ -187,6 +190,15 @@ function atOrigin(req: Request, origin: string): URL | null {
   }
   if (host.username || host.password || host.pathname !== "/" || host.search || host.hash) return null;
   return host.host === o.host ? url : null;
+}
+
+/**
+ * Whether a request's `Host` is the origin's, whatever its path: the routes
+ * the proxy hands the MCP server under the public resource (`/mcp/jobs/…`,
+ * the keyed mirrors), where mcp-server/ takes a token too (SMD-2286 PR 2).
+ */
+export function atOriginHost(req: Request, origin: string): boolean {
+  return atOrigin(req, origin) !== null;
 }
 
 /** Whether a request is for the public resource: the origin's host, and exactly the resource's path. */
