@@ -1812,7 +1812,8 @@ after it (which fails at 064 on a brain holding a judged relation until
 SMD-3149). test-schema [93] (the sets, a Duplicate settled and its blocker
 cleared, both under 058's sets as before, the mirror rebuilt), test-upgrade
 [20av] (a session's cached plan reaching the new sets among it), test-live [41]
-(the poster's refusals without 058's set and before 104).
+(the poster's refusals without 058's set and before 104, and a Done and a
+Duplicate ticket a closed pair by 104's set alone).
 
 ## What changed relative to the guide
 

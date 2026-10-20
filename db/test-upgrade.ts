@@ -4508,6 +4508,30 @@ console.log("\n[20av] Migration 104: refused by name without 058, then without 0
       && plantedAfter.get("upg104.proc()") === plantedBefore.get("upg104.proc()"),
     `104 re-applied alters readers in any schema, named in any case or quoted, or by dependency (a BEGIN ATOMIC body), and leaves a procedure naming one rather than failing the file (${JSON.stringify([...plantedBefore.keys()])})`);
   await sql.unsafe(`DROP PROCEDURE upg104.proc(); DROP FUNCTION upg104.atomic(); DROP FUNCTION upg104.quoted(); DROP FUNCTION upg104.shouted(); DROP SCHEMA upg104`);
+  // A migrating role that owns the readers but not every function naming a
+  // set (a managed Postgres's owner, which is no superuser): the block alters
+  // what it owns and leaves the rest, rather than failing the file — a
+  // superuser, every suite's, takes the other branch only (review pass 4).
+  const touch = readFileSync(join(HERE, "migrations", the104), "utf8").match(/DO \$touch\$[\s\S]*?\$touch\$;/)?.[0] ?? "no touch block";
+  await sql.unsafe(`DO $r$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_mig104') THEN CREATE ROLE ob1_upgrade_mig104 NOLOGIN; END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_other104') THEN CREATE ROLE ob1_upgrade_other104 NOLOGIN; END IF; END $r$`);
+  const owned = [...readersBefore.keys()];
+  for (const f of owned) await sql.unsafe(`ALTER FUNCTION ${f} OWNER TO ob1_upgrade_mig104`);
+  await sql.unsafe(`CREATE FUNCTION upg104_foreign() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY(node_settled_types())';
+    ALTER FUNCTION upg104_foreign() OWNER TO ob1_upgrade_other104`);
+  const foreignXmin = async () => String(((await sql`SELECT xmin::text AS x FROM pg_proc WHERE oid = 'upg104_foreign()'::regprocedure`)[0] as { x: string }).x);
+  const ownedBefore = await readers(), foreignBefore = await foreignXmin();
+  let asOwner: string;
+  try {
+    await sql.begin(async (tx: SQL) => { await tx.unsafe(`SET LOCAL ROLE ob1_upgrade_mig104`); await tx.unsafe(touch); });
+    asOwner = "applied";
+  } catch (e) { asOwner = (e as Error).message; }
+  const ownedAfter = await readers(), foreignAfter = await foreignXmin();
+  for (const f of owned) await sql.unsafe(`ALTER FUNCTION ${f} OWNER TO CURRENT_USER`);
+  await sql.unsafe(`DROP FUNCTION upg104_foreign(); DROP ROLE ob1_upgrade_mig104; DROP ROLE ob1_upgrade_other104`);
+  assert(asOwner === "applied" && owned.length >= 5 && owned.every((f) => ownedAfter.get(f) !== ownedBefore.get(f)) && foreignAfter === foreignBefore,
+    `run by a role that owns the readers and not a function another role owns, the block alters its own and leaves that one, rather than failing (${asOwner.slice(0, 80)}; ${owned.length} owned)`);
   await sql.close();
 }
 
