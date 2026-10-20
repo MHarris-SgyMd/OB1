@@ -1003,7 +1003,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       ...(stats
         ? [
             ...COUNTED_TABLES.map((t): Guarded => ({ field: `counts.${t}`, table: t, read: async (sp) => { facts.counts![t] = Number((await COUNT_SQL[t](sp))[0].n); }, clear: () => { facts.counts![t] = null; } })),
-            // A sequential scan, as listVectorless's page is: no index reads `embedding IS NULL` (SMD-2889).
+            // 100's partial index alone, as listVectorless's page is (SMD-3056): an index-only scan of the rows that wait.
             { field: "vectorless", table: "thoughts" as const, read: async (sp: SqlTag) => { facts.vectorless = Number((await sp`SELECT count(*)::float8 AS n FROM thoughts WHERE embedding IS NULL`)[0].n); }, clear: () => { facts.vectorless = null; } },
             { field: "databaseBytes", read: async (sp: SqlTag) => { facts.databaseBytes = Number((await sp`SELECT pg_database_size(current_database())::float8 AS n`)[0].n); }, clear: () => { facts.databaseBytes = null; } },
             { field: "boardSync", table: "thoughts" as const, read: async (sp: SqlTag) => { facts.boardSync = boardSyncValue((await BOARD_SYNC_SQL(sp))[0]?.w); }, clear: () => { facts.boardSync = null; } },
