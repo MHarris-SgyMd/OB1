@@ -23,7 +23,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
-import { DIRECT_CHECK_SKIP_OVER_POSTGREST } from "./store.ts";
+import { POSTGREST_RETIRED } from "./store.ts";
 import { pathFix, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
 import { ACCEPTED_CAVEAT_PREFIX, bytesText, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
@@ -86,7 +86,7 @@ async function migrate(args: string[], env: Record<string, string | undefined> =
   return runScript(["bun", join(HERE, "..", "db", "migrate.ts"), ...args], { env: clean, cwd: join(HERE, "..", "db") });
 }
 
-const NO_DB = { DATABASE_URL: undefined, SUPABASE_URL: undefined, SUPABASE_SERVICE_ROLE_KEY: undefined };
+const NO_DB = { DATABASE_URL: undefined, SUPABASE_URL: undefined };
 
 console.log("[1] Missing configuration fails, with an actionable fix");
 {
@@ -94,29 +94,26 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   assert(r.code === 1, "OB1_STORE=sql without DATABASE_URL exits 1");
   assert(/DATABASE_URL/.test(r.out) && /→/.test(r.out), "…names the variable and suggests a fix");
 
-  const p = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "postgrest" });
-  assert(p.code === 1, "OB1_STORE=postgrest without SUPABASE_URL exits 1");
-
   const k = await run({ ...NO_DB, OB1_STORE: "sql", DATABASE_URL: "postgres://x/y", OPENROUTER_API_KEY: "z", MCP_ACCESS_KEY: undefined });
   assert(k.code === 1, "a missing MCP_ACCESS_KEY exits 1");
 
   const b = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "typo" });
   assert(b.code === 1, "an unrecognised OB1_STORE exits 1 rather than defaulting");
-  assert(/"sql" \(the default/.test(b.out), "…naming sql as the default");
+  assert(/"sql" is the only store/.test(b.out) && !/postgrest/i.test(b.out), "…naming sql as the only store, and no other");
 
   // Change 97 (SMD-1797): unset selects the SQL store, and every line says so.
   const d = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined });
   assert(d.code === 1, "OB1_STORE unset without DATABASE_URL exits 1");
-  assert(/store selection\s+OB1_STORE unset — sql, the default/.test(d.out), "…the store selection line says unset means sql");
+  assert(/store selection\s+OB1_STORE unset — sql, the only store/.test(d.out), "…the store selection line says unset means sql, the only store");
   assert(/DATABASE_URL\s+OB1_STORE is unset, which selects the SQL store, and DATABASE_URL is not set/.test(d.out), "…the DATABASE_URL line says which selection wants it");
   assert(!/SUPABASE_URL\s+not set/.test(d.out), "…and SUPABASE_URL is not asked for");
 
-  // The deployment the old default served — an https:// SUPABASE_URL, no
-  // OB1_STORE — is told both ways out rather than asked for a DATABASE_URL alone.
-  const h = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined, SUPABASE_URL: "https://x.supabase.co", SUPABASE_SERVICE_ROLE_KEY: "k" });
+  // An https:// SUPABASE_URL (the retired PostgREST store's base URL) is said
+  // not to be a connection string; no other store is offered (SMD-3152).
+  const h = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined, SUPABASE_URL: "https://x.supabase.co" });
   assert(h.code === 1, "an https:// SUPABASE_URL under the default exits 1");
-  assert(/the PostgREST store's base URL/.test(h.out) && /set OB1_STORE=postgrest/.test(h.out), "…naming OB1_STORE=postgrest as the way to keep reaching the brain through it");
-  assert(!/set but unused/.test(h.out), "…and does not, two lines later, tell the operator to remove the variables that way out needs");
+  assert(/SUPABASE_URL holds a non-postgres:\/\/ URL, not a connection string/.test(h.out) && !/OB1_STORE=postgrest/.test(h.out), "…said to be no connection string, with no other store offered");
+  assert(!/set but unused/.test(h.out), "…and not, two lines later, called unused beside the fail line it is part of");
 
   // SUPABASE_URL holding a postgres:// URL is the connection string: the
   // configuration passes, masked and attributed, and the run fails only at the
@@ -136,49 +133,16 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   // version — the block is skipped whole and this line is absent.
   assert(/vector extension\s+could not verify/.test(a.out), "…and the direct-connection block dialled it too (vector extension carries the refused connection)");
 
-  // The mirror slip: OB1_STORE=postgrest kept beside a SUPABASE_URL that holds a
-  // postgres:// string. Refused by name, the password masked — the first version
-  // printed the URL raw and then blamed network reachability (first review pass).
-  const m = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "postgrest", SUPABASE_URL: "postgres://u:hunter2@127.0.0.1:1/x", SUPABASE_SERVICE_ROLE_KEY: "k" });
-  assert(m.code === 1, "OB1_STORE=postgrest with a postgres:// SUPABASE_URL exits 1");
-  assert(/✗\s+SUPABASE_URL\s+holds a postgres:\/\/ connection string \(postgres:\/\/\*\*\*@127\.0\.0\.1:1\/x\), which the PostgREST store cannot dial/.test(m.out), "…refused by name, with the string masked");
-  assert(!/hunter2/.test(m.out), "…and the password appears nowhere in the report");
-  assert(/→ .*Unset OB1_STORE — the SQL store reads that URL/.test(m.out), "…with the fix naming the SQL store as the reader of that URL");
-  assert(/data layer\s+skipped — fix the configuration/.test(m.out) && !/protocol must be/.test(m.out), "…and the store is never built on it, so supabase-js's protocol error never appears");
-
-  // PostgREST stays selectable. On Bun the selection is a WARNING that names
-  // Workers and carries the notice as its fix line — not a failure of the config.
-  const w = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "k", OB1_CHUNK_CONTEXT: undefined });
-  assert(/!\s+store selection\s+OB1_STORE=postgrest — the PostgREST store, kept for Cloudflare Workers/.test(w.out), "OB1_STORE=postgrest is a warning naming Workers");
-  assert(/→ OB1_STORE=postgrest selects the PostgREST store, which this fork keeps for Cloudflare Workers only: this process runs on Bun/.test(w.out), "…with the retired notice as its fix line");
-  assert(/✓\s+SUPABASE_URL\s+https:\/\/stub\.invalid/.test(w.out), "…and its own configuration still passes");
-  // Over PostgREST with the schema check failed, every direct-connection check
-  // still prints — the file's own rule. Before the first review pass `edit
-  // signature` was silent on this path, and sixteen SQL-only checks were silent
-  // on every PostgREST run (pre-existing; by-catch).
-  assert(/edit signature\s+not probed — the schema check above failed first/.test(w.out), "edit signature reports when the schema check failed over PostgREST");
-  // Every name in DIRECT_CHECKS, read from the source as [4] does, exactly ONCE
-  // as a report row — the loop that fills the gaps must neither miss a name nor
-  // double one already reported by hand (second review pass: a four-name sample
-  // could not see the loop moved above the hand-written skips, which then printed
-  // twice). The row shape is the glyph, the name, whitespace.
-  const listedNames = [...readFileSync(join(HERE, "preflight.ts"), "utf8").match(/const DIRECT_CHECKS = \[([\s\S]*?)\];/)![1].matchAll(/"([^"]+)"/g)].map((mm) => mm[1]);
-  assert(listedNames.length >= 20, `DIRECT_CHECKS parsed from the source (${listedNames.length} names)`);
-  /** A report row for `name`: the glyph, the name, whitespace (fix lines start with →, so they never match). */
-  const rowRe = (name: string, flags = "") => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`, flags);
-  const rowCounts = listedNames.map((name) => [name, (w.out.match(rowRe(name, "gm")) ?? []).length] as const);
-  assert(rowCounts.every(([, n]) => n === 1), `over PostgREST every direct-connection check prints exactly one row (${rowCounts.filter(([, n]) => n !== 1).map(([name, n]) => `${name}×${n}`).join(", ") || "all once"})`);
-  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 26, "…twenty-six of them as the catalog-only skip (061's lineage, the workers' and the sleep scheduler's heartbeats, the proposal queue, the plugin tables and the two memory rows among them), the rest by their own hand-written rows");
-  // And nothing else: every row between `data layer` and the provider section is
-  // `schema` or one of the listed names. A hand-written PostgREST row under a
-  // misspelt name would print beside the loop's correctly named skip with every
-  // count above intact (third review pass); this total sees it.
-  const lines = w.out.split("\n");
-  const rowOf = (name: string) => lines.findIndex((l) => rowRe(name).test(l));
-  const fromRow = rowOf("data layer"), toRow = rowOf("embedding provider");
-  const rows = lines.slice(fromRow + 1, toRow).filter((l) => /^\s*[✓✗!·]\s+\S/.test(l));
-  assert(fromRow > 0 && toRow > fromRow && rows.length === listedNames.length + 1,
-         `…and nothing else prints between the data layer and the provider: schema plus the ${listedNames.length} names (${rows.length} rows)`);
+  // The PostgREST store is retired (SMD-3152): its selection fails the
+  // configuration by name, with store.ts's refusal as the fix, whatever
+  // SUPABASE_URL holds, and the store is never built.
+  for (const url of ["https://stub.invalid", "postgres://u:hunter2@127.0.0.1:1/x"]) {
+    const m = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "postgrest", SUPABASE_URL: url });
+    assert(m.code === 1 && /✗\s+store selection\s+OB1_STORE=postgrest — the PostgREST store, retired/.test(m.out),
+           `OB1_STORE=postgrest fails the store selection row, exit 1, with SUPABASE_URL ${url.split(":")[0]}:// (${row(m.out, "store selection").trim()})`);
+    assert(fix(m.out, "store selection").trim() === `→ ${POSTGREST_RETIRED}`, `…with store.ts's refusal as its fix line (${fix(m.out, "store selection").trim().slice(0, 80)})`);
+    assert(/data layer\s+skipped — fix the configuration/.test(m.out) && !/hunter2/.test(m.out), "…the store never built, and no password printed");
+  }
 }
 
 console.log("\n[2] A short raw access key is refused (SMD-2309)");
@@ -346,7 +310,7 @@ console.log("\n[4] Unreachable database fails rather than hanging");
   // else would (a renamed or added check would otherwise be blamed or silent).
   const src = readFileSync(join(HERE, "preflight.ts"), "utf8");
   const listed = [...src.match(/const DIRECT_CHECKS = \[([\s\S]*?)\];/)![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-  const from = src.indexOf('if (built.kind === "sql" && conn) {'), to = src.indexOf("const missing = DIRECT_CHECKS.filter");
+  const from = src.indexOf("// Every schema check below reads the catalog over a direct connection.\n    if (conn) {"), to = src.indexOf("const missing = DIRECT_CHECKS.filter");
   assert(from > 0 && to > from, "the block's two anchors are found in preflight.ts");
   const block = src.slice(from, to);
   // First appearance in the source is the order the block reports in, and the
@@ -629,8 +593,7 @@ else {
    * Migration 017, the same shape of check on a bigger surface: search and
    * search_thoughts call search_thoughts_hybrid unconditionally, so a database
    * without it serves the two most-used tools broken while the handshake and
-   * every other tool look fine. The PostgREST branch probes by RPC and cannot
-   * be exercised here; this holds the SQL branch's message and remedy.
+   * every other tool look fine. This holds the check's message and remedy.
    */
   const noHybrid = new SQL({ url: LIVE, max: 1 });
   // Both forms since 075: the 7-argument one the servers call and min_trust's 8.
@@ -2259,9 +2222,9 @@ else {
          "…and 060's 10-argument update_thought stands beside 061's eleven: the start is refused naming it with its DROP");
   assert(/!  lineage\s+every derived row has its lineage row, but a producer is missing or stands in two forms \(7 bodies where 061 leaves six — an earlier file re-applied by hand beside 061's\): its next write records no lineage \(SMD-1731\)/.test(pre061.out) && /Apply db\/migrations\/061_derivations\.sql\. Then apply db\/migrations\/073_thought_trust_on_the_row\.sql, db\/migrations\/080_recapture_keep\.sql and db\/migrations\/099_unlink_takes_review_lock\.sql — 099 last defines update_thought \(on 088's body, and so 073's\) and 080 upsert_thought/.test(pre061.out),
          "…while the lineage census itself is clean, the check warns on the bodies: 060's 10-argument update_thought stands beside 061's, seven bodies where 061 leaves six (pass 2's cold read: the probe read two of the six)");
-  // 061's form dropped as well — a brain at 060 under this server: the SQL
-  // store sends eleven positional arguments and the PostgREST store names
-  // p_lineage, so every edit fails on the 10-argument form; a refusal naming
+  // 061's form dropped as well — a brain at 060 under this server: the store
+  // sends eleven positional arguments, so every edit fails on the
+  // 10-argument form; a refusal naming
   // 061, not the "every edit resolves" warning 046's 9-argument form earned
   // when the servers sent nine (cold read, third review pass). The lineage
   // row says the bodies are older, not that a producer is missing: six

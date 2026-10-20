@@ -5570,11 +5570,10 @@ if (want("12")) {
       ('s4', '{"type":"new"}'::jsonb,                                      now() - interval '2 min'),
       ('s5', '{"type":"new","topics":"notarray","people":["Ada"]}'::jsonb, now() - interval '1 min')`);
 
-  // The application walk the PostgREST store runs (store-postgrest.ts) — page
+  // The application walk the PostgREST store ran (store-postgrest.ts, retired in SMD-3152) — page
   // metadata newest-first and tally, optionally stopping at a cap, with the same
   // null-element guard that store and migration 024 both apply. This is the
-  // reference the SQL function must reproduce, and it is faithful to the
-  // PostgREST path too, so [12] covers both stores' aggregation.
+  // reference the SQL function must reproduce.
   const walk = async (cap = Infinity) => {
     const types: Record<string, number> = {};
     const topics: Record<string, number> = {};

@@ -15,7 +15,7 @@
  *
  * Per scale: the median wall-clock of `SELECT thought_stats_summary()` against
  * the median wall-clock of the page walk (metadata paged 1,000 at a time and
- * tallied in TS, as store-postgrest.ts still does), the walk's round-trip count,
+ * tallied in TS, as the PostgREST store did until SMD-3152), the walk's round-trip count,
  * and the plan of the function's topic-unnest arm under EXPLAIN (ANALYZE,
  * BUFFERS). Rows are content-only (no vectors — stats never reads embedding), so
  * there is no HNSW build and this runs in seconds even at 100,000.
@@ -76,7 +76,7 @@ async function load(sql: SQL, n: number): Promise<void> {
 }
 
 /**
- * The page walk, faithful to store-postgrest.ts: page metadata newest-first and
+ * The page walk, faithful to the retired store-postgrest.ts: page metadata newest-first and
  * tally in TS, null array elements skipped as that store does. The maps are
  * intentionally built and discarded — the point is to time the same work the
  * real walk pays for, which is what makes the comparison honest.
