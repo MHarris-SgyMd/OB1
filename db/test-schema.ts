@@ -14997,10 +14997,10 @@ console.log("\n[91] Migration 101: the lapse locks its own tree — ob1_lapse_tr
   // [87]'s two keys, as it made them.
   const HOOK = { name: "hook-83", agent_id: await agent("8", "hook-83", "capture"), via: "test-door", scope: "capture" };
   const WRITER = { name: "writer-83", agent_id: await agent("5", "writer-83", "write"), via: "test-door" };
-  let k = 0;
+  let serial = 0;
   const cap = async (label: string, actor: Record<string, unknown>, supersedes?: string) =>
     (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`,
-      [`[91] ${label} ${++k}`, JSON.stringify({ metadata: { source: "codex" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }), unit(91)])).r.id;
+      [`[91] ${label} ${++serial}`, JSON.stringify({ metadata: { source: "codex" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }), unit(91)])).r.id;
   const unchecked = async <T>(body: () => Promise<T>) => {
     await db.exec(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_check_capture_pointer`);
     try { return await body(); } finally { await db.exec(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_check_capture_pointer`); }
@@ -15051,7 +15051,8 @@ console.log("\n[91] Migration 101: the lapse locks its own tree — ob1_lapse_tr
     await unchecked(async () => {
       for (let i = 0; i < 9; i++) ids.push(await cap(`forest ${forest} row ${i}`, HOOK, i > 0 && rnd(3) > 0 ? ids[rnd(i)] : undefined));
     });
-    for (let i = 0; i < 3; i++) await link(ids[1 + rnd(8)], ids[rnd(9)]).catch(() => null);
+    // A refusal (a loop) comes back as a value; anything thrown fails the cell.
+    for (let i = 0; i < 3; i++) await link(ids[1 + rnd(8)], ids[rnd(9)]);
     await note(ids[rnd(9)]);
     for (const r of ids) {
       for (const onto of [await pointerOf(r), w]) {
@@ -15105,11 +15106,11 @@ console.log("\n[91] Migration 101: the lapse locks its own tree — ob1_lapse_tr
   await db.exec(`DELETE FROM thoughts`);
   const s3 = await cap("S, the hook's", HOOK), h = await cap("h, onto S", HOOK, s3);
   await note(h);
-  const kk = await unchecked(() => cap("K, onto h", HOOK, h));
-  assert((await pointerOf(h)) === s3 && (await pointerOf(kk)) === h, "[91] setup: h onto S, taken by the write key's re-capture; K onto h");
+  const kRow = await unchecked(() => cap("K, onto h", HOOK, h));
+  assert((await pointerOf(h)) === s3 && (await pointerOf(kRow)) === h, "[91] setup: h onto S, taken by the write key's re-capture; K onto h");
   await moved(h, () => note(s3));
-  assert((await pointerOf(h)) === null && (await pointerOf(kk)) === null,
-    `a cleared row the log took anchors the clears above it: h's pointer moved after the walk, and K onto h is still cleared (h→${await pointerOf(h)}, K→${await pointerOf(kk)})`);
+  assert((await pointerOf(h)) === null && (await pointerOf(kRow)) === null,
+    `a cleared row the log took anchors the clears above it: h's pointer moved after the walk, and K onto h is still cleared (h→${await pointerOf(h)}, K→${await pointerOf(kRow)})`);
 
   // Re-apply: 101 again moves nothing; 097 re-applied puts its walk and the
   // lockless trigger back, and the restore (101 last) the locks.
