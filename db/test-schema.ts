@@ -14225,8 +14225,8 @@ console.log("\n[83] Migration 093: extraction_progress — a long thought's wind
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
   const cols = (await q<{ c: string; t: string; n: boolean }>(`SELECT column_name AS c, data_type AS t, is_nullable = 'YES' AS n FROM information_schema.columns WHERE table_name = 'extraction_progress' ORDER BY ordinal_position`))
     .map((r) => `${r.c}:${r.t}${r.n ? "?" : ""}`).join(" ");
-  assert(cols === "thought_id:uuid work_type:text fingerprint:text windowing:text windows:integer? parts:jsonb stops:integer stalled:integer gained:integer updated_at:timestamp with time zone",
-    `the table's columns, only windows nullable (${cols})`);
+  assert(cols === "thought_id:uuid work_type:text fingerprint:text windowing:text windows:integer? parts:jsonb stops:integer stalled:integer gained:integer updated_at:timestamp with time zone cuts:integer",
+    `the table's columns, only windows nullable — cuts added by 101 (${cols})`);
   const fk = (await one<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'extraction_progress_claim'`))?.d ?? "";
   assert(/FOREIGN KEY \(thought_id, work_type\) REFERENCES thought_work_claims\(thought_id, work_type\) ON DELETE CASCADE/.test(fk), `the row hangs off its claim, and goes with it (${fk})`);
   const tc = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["extraction_progress"])).c ?? "";
@@ -14979,6 +14979,59 @@ console.log("\n[90] Migration 100: the thoughts with no vector by an index of th
   assert(/migration 100: thoughts_vectorless_idx exists but is INVALID — a CONCURRENTLY build or drop that did not finish, or a build still running/.test(invalid),
     `an INVALID index in the shape (an interrupted CONCURRENTLY build): refused, naming it (${invalid.slice(0, 120)})`);
   await db.exec(`UPDATE pg_index SET indisvalid = true WHERE indexrelid = 'thoughts_vectorless_idx'::regclass`);
+}
+
+console.log("\n[91] Migration 101: the sleep scheduler's own cuts counted apart from the stops — note_extraction_cut counts for the claim's holder only and moves no stop, stall, gain or window; a row of other text replaced by the cut, and the cuts gone with a row the stop or the save replaces; a re-apply a no-op (SMD-3060)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  // [83] re-applied 093, whose stop and save leave the cuts on a replaced row.
+  await restoreShipped("note_extraction_stop", "save_extraction_window", "note_extraction_cut");
+  const ck = (await one<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'extraction_progress_cuts'`))?.d ?? "";
+  assert(/CHECK \(\(?cuts >= 0\)?\)/.test(ck), `the cuts are a count (${ck})`);
+  const cc = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["note_extraction_cut(uuid, text, text, text, text)"])).c ?? "";
+  const colc = (await one<{ c: string | null }>(`SELECT col_description('extraction_progress'::regclass, attnum) AS c FROM pg_attribute WHERE attrelid = 'extraction_progress'::regclass AND attname = 'stops'`)).c ?? "";
+  assert(/Migration 101 \/ SMD-3060/.test(cc) && /holds the claim/.test(cc) && /cuts aside/.test(colc), `the cut's comment names 101, the ticket and the holder rule, and the stops' says the cuts are apart (${colc})`);
+  const lockCfg = (await one<{ c: string[] | null }>(`SELECT proconfig AS c FROM pg_proc WHERE proname = 'note_extraction_cut'`))?.c ?? [];
+  assert(lockCfg.join(",") === "lock_timeout=1s", `the cut gives up a lock wait after a second, as the stop does (${lockCfg})`);
+
+  await db.exec(`DELETE FROM thoughts`);
+  const JOB = "extract:stub-88@p2";
+  const id = (await one<{ id: string }>(`INSERT INTO thoughts (content) VALUES ('[91] a long document') RETURNING id`)).id;
+  await q(`SELECT enqueue_thoughts($1, ARRAY[$2::uuid])`, [JOB, id]);
+  await q(`SELECT claim_thoughts($1, 'w-88', 1, 900)`, [JOB]);
+  const part = (i: number) => JSON.stringify({ index: i, tokens: 10, ms: 1, entities: [], relations: [], rejected: { entities: 0, relations: 0 }, malformed: false, h: `h${i}` });
+  const save = (fp: string, i: number, windows = 4) =>
+    one<{ ok: boolean }>(`SELECT save_extraction_window($1::uuid, $2, 'w-88', $3, 'winA', $6, $4, $5::jsonb) AS ok`, [id, JOB, fp, i, part(i), windows]).then((r) => r.ok);
+  const stop = (fp: string) => one<{ ok: boolean }>(`SELECT note_extraction_stop($1::uuid, $2, 'w-88', $3, 'winA', true) AS ok`, [id, JOB, fp]).then((r) => r.ok);
+  const cut = (fp: string, worker = "w-88", win = "winA") => one<{ ok: boolean }>(`SELECT note_extraction_cut($1::uuid, $2, $3, $4, $5) AS ok`, [id, JOB, worker, fp, win]).then((r) => r.ok);
+  const row = async () => await one<{ keys: string | null; windows: number | null; stops: number; stalled: number; gained: number; cuts: number }>(
+    `SELECT (SELECT string_agg(k, ',' ORDER BY k::int) FROM jsonb_object_keys(parts) k) AS keys, windows, stops, stalled, gained, cuts FROM extraction_progress WHERE thought_id = $1::uuid AND work_type = $2`, [id, JOB]);
+
+  let r = (await cut("fpA")) && await row();
+  assert(r && r.cuts === 1 && r.stops === 0 && r.stalled === 0 && r.keys === null, `a cut with no row makes one, one cut and no stop (${JSON.stringify(r)})`);
+  r = (await save("fpA", 0)) && (await stop("fpA")) && (await stop("fpA")) && (await save("fpA", 1)) && (await cut("fpA")) && await row();
+  assert(r && r.cuts === 2 && r.stops === 2 && r.stalled === 1 && r.gained === 1 && r.keys === "0,1" && r.windows === 4,
+    `a cut moves no stop, stall, gain or window: no wake, it neither stalls the thought nor ends its gaining (${JSON.stringify(r)})`);
+  assert((await cut("fpA", "w-other")) === false && (await row())?.cuts === 2, "a cut counted by a worker that does not hold the claim counts nothing");
+  r = (await stop("fpA")) && await row();
+  assert(r && r.stops === 3 && r.stalled === 0 && r.cuts === 2, `a stop after it counts as before, the cuts kept (${JSON.stringify(r)})`);
+  r = (await save("fpA", 0, 5)) && await row();
+  assert(r && r.windows === 5 && r.keys === "0" && r.stops === 3 && r.cuts === 2, `a window under another window count keeps the cuts, as it keeps the stops (${JSON.stringify(r)})`);
+  r = (await save("fpB", 0)) && await row();
+  assert(r && r.stops === 0 && r.cuts === 0 && r.keys === "0", `a window of other text replaces the row, its cuts with its stops (${JSON.stringify(r)})`);
+  r = (await cut("fpB")) && (await stop("fpC")) && await row();
+  assert(r && r.stops === 1 && r.cuts === 0 && r.keys === null, `a stop of other text replaces the row, its cuts too (${JSON.stringify(r)})`);
+  r = (await cut("fpC")) && (await cut("fpC", "w-88", "winB")) && await row();
+  assert(r && r.cuts === 1 && r.stops === 0 && r.stalled === 0, `a cut under another windowing replaces the row, this cut its first (${JSON.stringify(r)})`);
+  await q(`SELECT release_claims_for_worker($1, 'w-88')`, [JOB]);
+  assert((await cut("fpC", "w-88", "winB")) === false && (await row())?.cuts === 1, "once the lease is returned the old holder's cut writes nothing");
+
+  const before = JSON.stringify(await q(`SELECT * FROM extraction_progress ORDER BY thought_id`));
+  // By name, not number: main may take the number, and "101" would then re-apply its file.
+  const again = await reapply(files.find((f) => f.endsWith("_extraction_cuts.sql")) ?? "no _extraction_cuts.sql");
+  assert(again.endsWith("_extraction_cuts.sql") && JSON.stringify(await q(`SELECT * FROM extraction_progress ORDER BY thought_id`)) === before, "101 re-applied: the rows and their cuts stand");
+  await db.exec(`DELETE FROM thoughts`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected
