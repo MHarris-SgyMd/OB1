@@ -312,8 +312,13 @@ export const MAX_TIMER_MS = 2147483647;
  * nothing more nor releases the thought in hand (each still returns
  * its own leases as it ends), and the CLI ends the process when it settles
  * (stopOnSignals). A call after the run has returned does nothing.
+ * `cut` marks a hard stop as the caller's own — the sleep scheduler's, setting
+ * extraction aside or ending its passes for a reason of its own — not a
+ * wake's nor the operator's: extraction counts it
+ * on the thought in hand apart from its stops (migration 100, SMD-3060); the
+ * other engines count no stop and read it not.
  */
-export type PassStop = () => Promise<unknown> | null;
+export type PassStop = (opts?: { cut?: boolean }) => Promise<unknown> | null;
 
 /**
  * The CLI's signals for a claim worker's pass: SIGINT and SIGTERM call the

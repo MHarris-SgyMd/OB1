@@ -5099,7 +5099,7 @@ if (want("10g")) {
     `…the two windows answered before the stop are kept, and the stop is counted on the row, not stalled (${JSON.stringify(kept)})`);
 
   const status = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--status"], { env: env as Record<string, string>, cwd: HERE });
-  assert(status.code === 0 && status.out.includes(`windows kept or stops counted on a claim that did not finish (1 of 1)`) && status.out.includes(`${atlas}  pending, 2 of ${windows} window(s) kept, 1 stop(s)\n`),
+  assert(status.code === 0 && status.out.includes(`windows kept, or stops or the scheduler's cuts counted, on a claim that did not finish (1 of 1)`) && status.out.includes(`${atlas}  pending, 2 of ${windows} window(s) kept, 1 stop(s)\n`),
     `--status names the thought, its windows kept and its stop (${status.out.split("\n").filter((l) => /kept/.test(l)).join(" | ")})`);
 
   // The second run resumes: only the windows still to do are sent, and the
@@ -5350,6 +5350,43 @@ if (want("10g")) {
   const rewindowed = (await statusOf()).includes(brief);
   assert(listed && !rewindowed, `--status lists a stopped thought's row, and leaves it out under another windowing (listed ${listed}, after ${rewindowed})`);
   await sql`DELETE FROM thoughts WHERE id = ${brief}::uuid`;
+
+  // The sleep scheduler's own hard stop (PassStop's `cut`): counted as a cut,
+  // apart from the stops, and listed so; on a brain before 100 counted not at
+  // all, said once, and never as a stop instead (SMD-3060).
+  const cutOne = ((await sql`SELECT upsert_thought(${"A short cut note."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const cutBrief = async (workers = 1) => {
+    sent.length = 0;
+    slowMs = 3000;
+    let s: PassStop | undefined;
+    const r = inProcess({ workers, onPass: (x) => { s = x; } });
+    for (let i = 0; i < 200 && sent.length < workers; i++) await Bun.sleep(25);
+    await Bun.sleep(100);
+    s?.();
+    await s?.({ cut: true });
+    const run = await r;
+    slowMs = 0;
+    const [row] = (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${cutOne}::uuid AND work_type = ${KEY}`) as { stops: number; stalled: number; cuts: number }[];
+    return { row, out: run.out };
+  };
+  const cutOnce = await cutBrief();
+  const cutListed = (await statusOf()).includes(`${cutOne}  pending, no window kept, 0 stop(s), and 1 cut(s) of the scheduler's own`);
+  assert(cutOnce.row?.cuts === 1 && cutOnce.row.stops === 0 && cutOnce.row.stalled === 0 && cutListed,
+    `the scheduler's hard stop counts a cut, no stop and no stall, and --status lists it (${JSON.stringify(cutOnce.row)}, listed ${cutListed})`);
+  // Two workers in hand, each trying the count at once: said once (run-it review).
+  const cutTwo = ((await sql`SELECT upsert_thought(${"A second short cut note."}, ${{ metadata: {} }}::jsonb) AS r`)[0].r as { id: string }).id;
+  await sql`ALTER FUNCTION note_extraction_cut(uuid, text, text, text, text) RENAME TO note_extraction_cut_away`;
+  const cutAway = await cutBrief(2).finally(() => sql`ALTER FUNCTION note_extraction_cut_away(uuid, text, text, text, text) RENAME TO note_extraction_cut`);
+  const saidCut = cutAway.out.split("\n").filter((l) => /could not count the scheduler's cut of a long thought .* — its cuts go uncounted this run, its stops and kept windows as before: that needs migration 100/.test(l)).length;
+  const [twoRow] = (await sql`SELECT stops, cuts FROM extraction_progress WHERE thought_id = ${cutTwo}::uuid AND work_type = ${KEY}`) as { stops: number; cuts: number }[];
+  assert(cutAway.row?.cuts === 1 && cutAway.row.stops === 0 && (twoRow === undefined || twoRow.stops === 0) && saidCut === 1 && !/no window is kept across a stop/.test(cutAway.out),
+    `before 100 the cut is counted not at all — never as a stop — and said once though two workers had a thought in hand, the windows still kept (said ${saidCut} time(s); ${JSON.stringify(cutAway.row)}, ${JSON.stringify(twoRow)}; ${cutAway.out.split("\n").filter((l) => /could not/.test(l)).join(" | ").trim()})`);
+  // Its --status on a brain with 093's table and no cuts: listed, no cuts said, no error (run-it review).
+  await sql`ALTER TABLE extraction_progress RENAME COLUMN cuts TO cuts_away`;
+  const cutlessStatus = await statusOf().finally(() => sql`ALTER TABLE extraction_progress RENAME COLUMN cuts_away TO cuts`);
+  assert(cutlessStatus.includes(`${cutOne}  pending, no window kept, 0 stop(s)\n`),
+    `before 100 --status lists the row with no cuts, and reads no column that is not there (${cutlessStatus.split("\n").filter((l) => l.includes(cutOne) || /column|error/i.test(l)).join(" | ").trim()})`);
+  await sql`DELETE FROM thoughts WHERE id IN (${cutOne}::uuid, ${cutTwo}::uuid)`;
 
   // A kept window of another shape is asked again, not merged (review pass 1's
   // guard): the stop keeps two windows, the first is planted with entities
@@ -12095,7 +12132,7 @@ if (want("38")) {
 }
 
 if (want("38b")) {
-  console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 3.5 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694); a capture made during a sleep goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same sleep; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008)");
+  console.log("\n[38b] db/sleep.ts: a thought longer than every sleep, the brain waking 3.5 s into each — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every sleep is joined past after three stalled wakes and named on the row (SMD-2694); a capture made during a sleep goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same sleep; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008); the scheduler's own cuts counted apart from the stops, which say the wakes and order the held word (SMD-3060)");
   const sql = new SQL({ url: URL_, max: 4 });
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM query_log`;
@@ -12113,6 +12150,8 @@ if (want("38b")) {
   /** A judge on its own model (OB1_JUDGE_MODEL), its probes answering 500 while `judgeProbeDown` and its judgements 404 "not found" while `judgeMissing` (SMD-3008). */
   const JUDGE = "stub-judge";
   let judgeProbeDown = false, judgeMissing = false;
+  /** Run as the judge's probe arrives: an answer of its own, or null for the stub's (SMD-3060). */
+  let judgeProbeHook: (() => Promise<Response | null>) | null = null;
   /** Run as each judgement arrives, before its answer. */
   let onJudge: (() => void) | null = null;
   const judged: number[] = [];
@@ -12140,6 +12179,7 @@ if (want("38b")) {
       if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }, { id: JUDGE }] });
       const body = (await req.json()) as { model?: string; messages?: { role: string; content: string }[] };
       if (body.messages?.[0]?.content === PROBE_PROMPT) {
+        if (body.model === JUDGE && judgeProbeHook) { const r = await judgeProbeHook(); if (r) return r; }
         if (body.model === JUDGE && judgeProbeDown) return new Response("the judge is down", { status: 500 });
         return Response.json({ choices: [{ message: { content: "OK" } }] });
       }
@@ -12408,12 +12448,18 @@ if (want("38b")) {
       held3At = await status(held3);
       return true;
     }, 45_000);
+    // The restart's cut and the join's, each of the stalled thought in hand,
+    // read before the suite's own hard stop below, which is a stop (SMD-3060).
+    let prog3: { stops: number; stalled: number; cuts: number } | undefined;
+    await pollUntil(async () => {
+      [prog3] = (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${held3}::uuid AND work_type = ${EX}`) as typeof prog3[];
+      return Number(prog3?.cuts) >= 2;
+    }, 5_000);
     // Stopped hard: a soft stop would let the stalled thought in hand finish.
     (stopMid as PassStop | null)?.();
     await (stopMid as PassStop | null)?.();
     await Promise.race([midRun, Bun.sleep(15_000)]);
     onExtract = null;
-    const [prog3] = (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${held3}::uuid AND work_type = ${EX}`) as ({ stops: number; stalled: number } | undefined)[];
     const firstAt = (m: string) => extracts.find((e) => e.marker === m)?.at ?? Infinity;
     // The first call for the stalled window, start to end: an abort ends it before its eight seconds.
     const [firstStuck0, firstStuckEnd] = stuckCalls[0] ?? [Infinity, Infinity];
@@ -12427,8 +12473,86 @@ if (want("38b")) {
     const readsRestarted = wakeReads.filter((t) => t > restartAt && t < joinAtMid).length;
     assert(midJoined && mid2 !== "" && firstStuckEnd - firstStuck0 < 7000 && restartAt <= firstAt("mid2") && firstAt("mid2") < secondStuck && secondStuck < joinAtMid && joinAtMid > restartAt && held3At !== "succeeded" && readsRestarted <= 4,
       `one pending beside the stalled thought in hand restarts extraction: the window in hand is cut short, the note extracted next, the stalled thought taken again, and consolidation joins past it in the same sleep, polling at its pace (${readsRestarted} wake reads between the restart and the join; joined ${midJoined}; window ${midRel(firstStuck0)} to ${midRel(firstStuckEnd)}, restart ${midRel(restartAt)}, note ${midRel(firstAt("mid2"))}, stalled again ${midRel(secondStuck)}, join ${midRel(joinAtMid)}; the stalled thought ${held3At}; lines ${midLines.filter((x) => /asleep:|restarts|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => x.l.trim().slice(0, 40)).join(" | ")})`);
-    assert(Number(prog3?.stalled) === 3 && Number(prog3?.stops) >= 4,
-      `…the restart's stop counted, no stall — the hold under the floor (stops ${prog3?.stops}, stalled ${prog3?.stalled})`);
+    assert(Number(prog3?.stalled) === 3 && Number(prog3?.stops) === 3 && Number(prog3?.cuts) === 2,
+      `…the restart's stop and the join's set-aside each counted as the scheduler's cut, apart from the stops, which say the wakes — none here — and no stall (SMD-3060) (stops ${prog3?.stops}, stalled ${prog3?.stalled}, cuts ${prog3?.cuts})`);
+
+    // The operator's second signal on the scheduler is a stop, not a cut: the
+    // stops say the wakes and the operator's hand (SMD-3060).
+    await sql`DELETE FROM thoughts`;
+    stuckStarts.length = 0;
+    const handHeld = await capture("The stuckdoc note, in hand as the operator stops the scheduler twice.", 0, 23);
+    /** A scheduler that does not end as the case expects is stopped all the same, so it claims nothing of the cases after. */
+    const ended = async (run: Promise<unknown>, ac: AbortController) => {
+      ac.abort();
+      await Promise.race([run.catch(() => {}), Bun.sleep(15_000)]);
+    };
+    let stopHand: PassStop | null = null;
+    const handAc = new AbortController();
+    const handRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, signal: handAc.signal, onPass: (st) => { stopHand = st; }, writer: { out: () => {}, err: () => {} } });
+    const handInHand = await pollUntil(async () => stuckStarts.length > 0, 30_000);
+    (stopHand as PassStop | null)?.();
+    await (stopHand as PassStop | null)?.();
+    await Promise.race([handRun, Bun.sleep(15_000)]);
+    await ended(handRun, handAc);
+    const [handRow] = (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${handHeld}::uuid AND work_type = ${EX}`) as ({ stops: number; stalled: number; cuts: number } | undefined)[];
+    assert(handInHand && handRow?.stops === 1 && handRow.cuts === 0,
+      `the operator's second signal, the thought in hand, counts a stop and no cut (${JSON.stringify(handRow)})`);
+    // A follower found outside mid-sleep: the scheduler stops its passes for a
+    // reason of its own, a cut and no stop.
+    stuckStarts.length = 0;
+    const outsideAc = new AbortController();
+    const outsideRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, signal: outsideAc.signal, writer: { out: () => {}, err: () => {} } });
+    const outsideInHand = await pollUntil(async () => stuckStarts.length > 0, 30_000);
+    await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:outside@p2', ${JSON.stringify({ v: 1, job: "extract:outside@p2", every_s: 60, running: false, outcome: "ok" })})`;
+    const outsideCode = await Promise.race([outsideRun, Bun.sleep(15_000).then(() => "hung")]);
+    await ended(outsideRun, outsideAc);
+    await sql`DELETE FROM ob1_config WHERE key = 'heartbeat:extract:outside@p2'`;
+    const [outsideRow] = (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${handHeld}::uuid AND work_type = ${EX}`) as ({ stops: number; stalled: number; cuts: number } | undefined)[];
+    assert(outsideInHand && outsideCode === 2 && outsideRow?.stops === 1 && outsideRow.cuts === 1,
+      `a follower found outside, the thought in hand: the scheduler's stop of its passes counts a cut, the stops as they were (exit ${outsideCode}, ${JSON.stringify(outsideRow)})`);
+    // The sleep throwing — a table it reads gone, no outage — with a thought
+    // in hand: its stop of the passes on the way out is a cut (review pass 2).
+    stuckStarts.length = 0;
+    const throwAc = new AbortController();
+    const throwRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, signal: throwAc.signal, writer: { out: () => {}, err: () => {} } });
+    const throwInHand = await pollUntil(async () => stuckStarts.length > 0, 30_000);
+    await sql`ALTER TABLE query_log RENAME TO query_log_away`;
+    const thrown = await Promise.race([throwRun.then((c) => `code ${c}`, (e: Error) => `threw ${e.message}`), Bun.sleep(15_000).then(() => "hung")])
+      .finally(() => sql`ALTER TABLE query_log_away RENAME TO query_log`);
+    await ended(throwRun, throwAc);
+    const [throwRow] = (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${handHeld}::uuid AND work_type = ${EX}`) as ({ stops: number; stalled: number; cuts: number } | undefined)[];
+    assert(throwInHand && /^threw .*query_log/.test(thrown) && throwRow?.stops === 1 && throwRow.cuts === 2,
+      `the sleep throwing, the thought in hand: its stop of the passes counts a cut, the stops as they were (${thrown.slice(0, 80)}; ${JSON.stringify(throwRow)})`);
+    // A pass that ends by itself — consolidation's start refused, its key
+    // turned away — while extraction has a thought in hand: a cut. Read as the
+    // line lands: under --follow the refusal is tried again, and the next
+    // sleep finishes the thought, its row with it (review pass 2).
+    await sql`DELETE FROM thoughts`;
+    stuckStarts.length = 0;
+    const byItself: string[] = [];
+    let consolidatingBeside = false;
+    judgeProbeHook = async () => {
+      if (!consolidatingBeside) return null;
+      judgeProbeHook = null;
+      await pollUntil(async () => stuckStarts.length > 0, 25_000);
+      return new Response("the key is refused", { status: 401 });
+    };
+    const byItselfSay = (l: string) => { byItself.push(l); if (/extraction drained — consolidating beside it/.test(l)) consolidatingBeside = true; };
+    const byItselfAc = new AbortController();
+    const byItselfRun = runSleep({ url: URL_!, env: { ...env, OB1_JUDGE_MODEL: JUDGE }, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, signal: byItselfAc.signal, writer: { out: byItselfSay, err: byItselfSay } });
+    let byItselfRow: { stops: number; stalled: number; cuts: number } | undefined;
+    try {
+      const besideSeen = await pollUntil(async () => consolidatingBeside, 30_000);
+      const byItselfNote = await syncNote("The stuckdoc note, in hand as consolidation ends by itself.", 24);
+      const byItselfInHand = await pollUntil(async () => stuckStarts.length > 0, 30_000);
+      const endedSeen = await pollUntil(async () => byItself.some((l) => /consolidate ended by itself/.test(l)), 30_000);
+      [byItselfRow] = (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${byItselfNote}::uuid AND work_type = ${EX}`) as typeof byItselfRow[];
+      assert(besideSeen && byItselfInHand && endedSeen && byItselfRow?.cuts === 1 && byItselfRow.stops === 0,
+        `a pass that ends by itself, the thought in hand: the scheduler's stop of the others counts a cut and no stop (${JSON.stringify(byItselfRow)}; ${byItself.filter((l) => /ended by itself|refused/.test(l)).map((l) => l.trim().slice(0, 60)).join(" | ")})`);
+    } finally {
+      judgeProbeHook = null;
+      await ended(byItselfRun, byItselfAc);
+    }
 
     // While consolidation waits for a judge that does not answer, extraction
     // takes the newer work and leaves the stalled thought to wait for it: the
@@ -12484,8 +12608,19 @@ if (want("38b")) {
       const waitLine = mid ? /\[consolidate\].*the provider is not answering/ : /consolidating first/;
       await pollUntil(async () => seen(waitLine) < Infinity && (mid || seen(/\[consolidate\]/) < Infinity), 40_000);
       if (!mid) await Bun.sleep(1500);
+      // The stalled thought's cuts so far (the join's, mid-pass): the let-out's set-aside adds its own.
+      const cutsOf = async () => Number(((await sql`SELECT cuts FROM extraction_progress WHERE thought_id = ${stalledJ}::uuid AND work_type = ${EX}`)[0] as { cuts: number } | undefined)?.cuts);
+      const cutsBefore = await cutsOf();
       const note = await syncNote(`The judgenote, written by a sync while the judge does not answer (${mid ? "mid-pass" : "at its start"}).`, 19);
       const noteDone = await pollUntil(async () => (await status(note)) === "succeeded" && seen(/set aside again until consolidation drains/) < Infinity, 30_000);
+      // The let-out's set-aside cut the stalled thought: counted as the
+      // scheduler's own, its stops — the wakes, none here — as planted (SMD-3060).
+      // Its line is said before the cut lands: polled until the cut is.
+      let progJ: { stops: number; stalled: number; cuts: number } | undefined;
+      await pollUntil(async () => {
+        [progJ] = (await sql`SELECT stops, stalled, cuts FROM extraction_progress WHERE thought_id = ${stalledJ}::uuid AND work_type = ${EX}`) as typeof progJ[];
+        return Number(progJ?.cuts) > cutsBefore;
+      }, 5_000);
       // A second note: at its start, while the judge is still down — let out
       // at most once a minute, it waits for consolidation; mid-pass, once the
       // judge answers — the wait over, it is not let out (review pass 1).
@@ -12518,6 +12653,8 @@ if (want("38b")) {
         `${mid ? "mid-pass" : "at its start"}, consolidation waiting for its judge: a note written then is extracted before the judge answers, and extraction is set aside again (join, then unpark ${rel(unparkJ)}, note ${rel(noteCall)}, set aside ${rel(reparkJ)}, judge back ${rel(flipAt)}; lines ${jl.filter((x) => /consolidating first|waits for its provider|set aside again|consolidation drained|not answering|answers again/.test(x.l)).map((x) => `${rel(x.at)} ${x.l.trim().slice(0, 44)}`).join(" | ")})`);
       assert(noteB !== "" && letOuts === 1 && noteBCall > resumeJ,
         `…a second note ${mid ? "written once the judge answers" : "written while the judge is still down"} is not let out — ${mid ? "the wait is over" : "at most once a minute"} — and is extracted once consolidation drains (${letOuts} let-out(s); the note ${rel(noteBCall)}, resumed ${rel(resumeJ)})`);
+      assert(Number(progJ?.stops) === 3 && Number(progJ?.stalled) === 3 && Number(progJ?.cuts) > cutsBefore,
+        `…the let-out's set-aside of the stalled thought counted as the scheduler's cut, not a stop: its stops say the wakes, as planted (stops ${progJ?.stops}, stalled ${progJ?.stalled}, cuts ${cutsBefore} → ${progJ?.cuts})`);
       assert(stuckAside === 0 && resumed && judged[0] > flipAt && resumeJ > judged[0],
         `…the stalled thought waits for consolidation: claimed after the note${mid ? "" : " (two workers, one let out)"}, its call is cut within a poll and none begins again while the judge is down; extraction resumes once the judge answers and consolidation drains (${stuckAside} stalled call(s) let run; calls ${stuckCalls.map(([a, b]) => `[${rel(a)},${rel(b)}]`).join(" ")}; judged ${rel(judged[0] ?? Infinity)}, resumed ${rel(resumeJ)})`);
     };
@@ -12603,6 +12740,21 @@ if (want("38b")) {
     const two = await gate(fp, sig);
     assert(two.joins && new RegExp(`held back across wakes \\(2 of 2\\): ${planted2}, no window kept over 5 stop\\(s\\), the last 5 with none gained; ${planted}`).test(two.text),
       `two held: the more stalled named first (${two.text.split("\n").filter((l) => /held/.test(l)).join(" | ").trim()})`);
+    // Stalled alike, the more stopped first: by the wakes, the scheduler's own
+    // cuts said and never counted — a judge outage's let-outs cut the one it
+    // reached forty times (SMD-3060).
+    await sql`UPDATE extraction_progress SET stops = 4, stalled = 3 WHERE thought_id = ${planted2}::uuid AND work_type = ${EX}`;
+    await sql`UPDATE extraction_progress SET cuts = 40 WHERE thought_id = ${planted}::uuid AND work_type = ${EX}`;
+    const cut = await gate(fp, sig);
+    assert(new RegExp(`held back across wakes \\(2 of 2\\): ${planted2}, no window kept over 4 stop\\(s\\), the last 3 with none gained; ${planted}, no window kept over 3 stop\\(s\\), the last 3 with none gained, and 40 cut\\(s\\) of the scheduler's own$`, "m").test(cut.text),
+      `stalled alike, the more stopped is named first, the other's forty cuts said and not counted (${cut.text.split("\n").filter((l) => /held/.test(l)).join(" | ").trim()})`);
+    // A brain with 093's table and no cuts: the scheduler names them with none said (run-it review).
+    await sql`ALTER TABLE extraction_progress RENAME COLUMN cuts TO cuts_away`;
+    const cutless = await gate(fp, sig).finally(() => sql`ALTER TABLE extraction_progress RENAME COLUMN cuts_away TO cuts`);
+    assert(new RegExp(`held back across wakes \\(2 of 2\\): ${planted2}, no window kept over 4 stop\\(s\\), the last 3 with none gained; ${planted}, no window kept over 3 stop\\(s\\), the last 3 with none gained$`, "m").test(cutless.text),
+      `before 100 the held thoughts are named with no cuts, and no column that is not there is read (${cutless.text.split("\n").filter((l) => /held|column|error/i.test(l)).join(" | ").trim()})`);
+    await sql`UPDATE extraction_progress SET stops = 5, stalled = 5 WHERE thought_id = ${planted2}::uuid AND work_type = ${EX}`;
+    await sql`UPDATE extraction_progress SET cuts = 0 WHERE thought_id = ${planted}::uuid AND work_type = ${EX}`;
     // As a sleep begins the stopped thoughts go behind new captures, the least
     // stalled first, then in the order they had: dated alike, claim_thoughts'
     // tie fell the same way every sleep (review pass 6). The more stalled one

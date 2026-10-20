@@ -142,6 +142,7 @@ const FUNCTIONS = [
   "renew_claims(text, text, int)",
   "save_extraction_window(uuid, text, text, text, text, int, int, jsonb)",
   "note_extraction_stop(uuid, text, text, text, text, boolean)",
+  "note_extraction_cut(uuid, text, text, text, text)",
   "normalize_entity_name(text)",
   "content_fingerprint_of(text)",
   "backfill_content_fingerprints(integer)",

@@ -199,14 +199,16 @@ export interface WorkerHeartbeat {
    * The thoughts extraction holds back across the sleep scheduler's wakes —
    * pending or in flight with a hard stop counted on them (migration 093,
    * SMD-2694): how many, and up to three, the most stalled first, each with
-   * its stops, the latest of them in a row that gained no window, and its
-   * windows kept of how many. Absent while none is, and for the other workers.
+   * its stops, the latest of them in a row that gained no window, its
+   * windows kept of how many, and the scheduler's own cuts of it, which are
+   * not stops (migration 100, SMD-3060; absent from an earlier scheduler's
+   * row). Absent while none is, and for the other workers.
    */
   held?: SleepHeld;
 }
 
 /** A thought the sleep scheduler's wakes hold back (WorkerHeartbeat.held). */
-export type HeldThought = { id: string; stops: number; stalled: number; kept: number; windows: number | null };
+export type HeldThought = { id: string; stops: number; stalled: number; kept: number; windows: number | null; cuts?: number };
 export type SleepHeld = { total: number; thoughts: HeldThought[] };
 
 /**
@@ -221,10 +223,15 @@ export const SLEEP_STALLED_JOIN = 3;
 export const SLEEP_HELD_NAMED = 3;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** A held thought in words, the scheduler's and preflight's: "<id>, 7 of 24 window(s) kept over 3 stop(s), the last 2 with none gained". */
+/**
+ * A held thought in words, the scheduler's and preflight's: "<id>, 7 of 24
+ * window(s) kept over 3 stop(s), the last 2 with none gained", and ", and 41
+ * cut(s) of the scheduler's own" where it set extraction aside from the
+ * thought (SMD-3060) — no ";", which joins the thoughts.
+ */
 export function heldWords(t: HeldThought): string {
   const kept = t.kept ? `${t.kept}${t.windows ? ` of ${t.windows}` : ""} window(s) kept` : "no window kept";
-  return `${t.id}, ${kept} over ${t.stops} stop(s)${t.stalled ? `, the last ${t.stalled} with none gained` : ""}`;
+  return `${t.id}, ${kept} over ${t.stops} stop(s)${t.stalled ? `, the last ${t.stalled} with none gained` : ""}${t.cuts ? `, and ${t.cuts} cut(s) of the scheduler's own` : ""}`;
 }
 
 /** A `held` value as db/sleep.ts writes it, or undefined: every thought of the shape, at most SLEEP_HELD_NAMED and no more than the total. */
@@ -237,7 +244,9 @@ function parseHeld(h: unknown): SleepHeld | undefined {
     if (t === null || typeof t !== "object" || typeof t.id !== "string" || !UUID.test(t.id)) return undefined;
     if (!count(t.stops) || (t.stops as number) < 1 || !count(t.stalled, t.stops as number) || !count(t.kept)) return undefined;
     if (!(t.windows === null || (count(t.windows) && (t.windows as number) > 1 && (t.kept as number) <= (t.windows as number)))) return undefined;
-    out.push({ id: t.id, stops: t.stops as number, stalled: t.stalled as number, kept: t.kept as number, windows: t.windows as number | null });
+    // Absent from a scheduler before SMD-3060's.
+    if (t.cuts !== undefined && !count(t.cuts)) return undefined;
+    out.push({ id: t.id, stops: t.stops as number, stalled: t.stalled as number, kept: t.kept as number, windows: t.windows as number | null, ...(t.cuts === undefined ? {} : { cuts: t.cuts as number }) });
   }
   return { total: total as number, thoughts: out };
 }
