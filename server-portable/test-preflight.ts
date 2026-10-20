@@ -4754,7 +4754,7 @@ else {
     for (const [name] of EIGHT) await db.unsafe(`DROP INDEX ${name}`);
     const missing = await run(SQL_ENV);
     const missingRow = row(missing.out, "thought indexes"), missingFix = fix(missing.out, "thought indexes");
-    assert(missing.code === 0 && /^\s*!\s+thought indexes/.test(missingRow) && / — the reads answer right, only slower$/.test(missingRow), "all eight missing: a warning, not a refusal to start, saying the reads are only slower");
+    assert(missing.code === 0 && /^\s*!\s+thought indexes/.test(missingRow) && /thought indexes\s+the reads answer right, only slower: /.test(missingRow), "all eight missing: a warning, not a refusal to start, saying the reads are only slower");
     for (const [name, m] of EIGHT) {
       assert(missingRow.includes(`${name} (${m}) is missing, so `) && missingFix.includes(createOf(name)), `…${name} (${m}) named missing, with what is slower without it, and its CONCURRENTLY build`);
     }
@@ -4774,7 +4774,7 @@ else {
     for (const [name] of EIGHT) await db.unsafe(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('public.${name}')`);
     const invalid = await run(SQL_ENV);
     const invalidRow = row(invalid.out, "thought indexes"), invalidFix = fix(invalid.out, "thought indexes");
-    assert(/ — the reads answer right, only slower$/.test(invalidRow), "all eight INVALID: the reads said only slower");
+    assert(/thought indexes\s+the reads answer right, only slower: /.test(invalidRow), "all eight INVALID: the reads said only slower");
     for (const [name, m] of EIGHT) {
       assert(invalidRow.includes(`${name} (${m}) is INVALID — a CONCURRENTLY build or drop that did not finish${name === "idx_thoughts_fingerprint" ? ", or a unique build that met two rows of one fingerprint" : ""} — which the planner ignores, so `)
              && invalidFix.includes(`\`REINDEX INDEX CONCURRENTLY ${name};\` (or \`DROP INDEX CONCURRENTLY ${name};\` then ${createOf(name)}`),
@@ -4796,6 +4796,8 @@ else {
              && shapeFix.includes(`\`DROP INDEX CONCURRENTLY ${name};\` then ${createOf(name)}`),
              `…${name} named of another shape, with its definition, its remedy a drop and a build`);
     }
+    assert(shapeRow.includes("idx_thoughts_fingerprint (003) is of another shape (CREATE INDEX idx_thoughts_fingerprint ON public.thoughts USING btree (created_at)), which the reads may not take — without it, each capture's lookup of its own text scans every thought, and a record ingest or a raw write can add a second row of one text"),
+           "…the fingerprint's name on a non-unique index of another shape: nothing refuses a second row, said so");
     assert(await follow(shape.out) === 8 && okRow.test(await rowOf()), "…and the drops and builds, as printed, make the row ok again");
 
     // The name held by something that is not thoughts' index — another
@@ -4875,8 +4877,8 @@ else {
     await writer.unsafe("BEGIN");
     await writer.unsafe("LOCK TABLE thoughts IN SHARE UPDATE EXCLUSIVE MODE");
     // An update in place, which holds ROW EXCLUSIVE on each index it writes
-    // (a capture's row lands through the log, and a raw INSERT the trigger
-    // turns away opens none).
+    // (a capture's row is written through the log's projection, which this
+    // session's locks on the indexes did not show).
     await writer.unsafe(`UPDATE thoughts SET metadata = metadata || '{"pf": 1}'::jsonb WHERE content = 'pf 3146 writer'`);
     let others: { code: number; out: string };
     try { others = await run(SQL_ENV); } finally { await writer.unsafe("ROLLBACK"); await writer.close(); }
@@ -4927,12 +4929,12 @@ else {
     await db.unsafe(`INSERT INTO thoughts (content, content_fingerprint) SELECT content, content_fingerprint FROM thoughts WHERE content = 'pf 3146 writer'`);
     const twiceHeld = await run(SQL_ENV);
     const twiceRow = row(twiceHeld.out, "thought indexes"), twiceFix = fix(twiceHeld.out, "thought indexes");
-    assert(twiceRow.includes("1 fingerprint is held by more than one row (a record ingest or a raw write while idx_thoughts_fingerprint could not refuse it), so a unique build or REINDEX of it fails until each is held by one")
-           && /1\) resolve the fingerprints held twice first: `cd db && bun reembed\.ts --url … --status` lists each group by id[^]*2\) `CREATE UNIQUE INDEX CONCURRENTLY idx_thoughts_fingerprint/.test(twiceFix),
+    assert(twiceRow.includes("1 fingerprint is held by more than one row, so a unique build or REINDEX of idx_thoughts_fingerprint fails until each is held by one")
+           && /First resolve the fingerprints held twice: `cd db && bun reembed\.ts --url … --status` lists up to ten groups a run, by id[^]*Then run in psql[^]*1\) `CREATE UNIQUE INDEX CONCURRENTLY idx_thoughts_fingerprint/.test(twiceFix),
            `a fingerprint held twice: named and counted, resolved first, then the unique build (${twiceRow.trim()})`);
     const [{ n: twiceRows }] = await db.unsafe(`SELECT count(*)::int AS n FROM thoughts WHERE content = 'pf 3146 writer'`);
     await db.unsafe(`DELETE FROM thoughts WHERE id = (SELECT id FROM thoughts WHERE content = 'pf 3146 writer' ORDER BY created_at DESC, id DESC LIMIT 1)`);
-    assert(twiceRows === 2 && await follow(twiceHeld.out) === 2 && okRow.test(await rowOf()), "…and with the twin deleted, the build as printed makes the row ok");
+    assert(twiceRows === 2 && await follow(twiceHeld.out) === 1 && okRow.test(await rowOf()), "…and with the twin deleted, the build as printed makes the row ok");
 
     // A REINDEX of the remedy's, cancelled for real (a snapshot held open in
     // another session, the REINDEX given half a second): its _ccnew copy,
@@ -4964,8 +4966,8 @@ else {
     const rebuilding = await run(SQL_ENV);
     const rebuildingRow = row(rebuilding.out, "thought indexes"), rebuildingFix = fix(rebuilding.out, "thought indexes");
     assert(rebuildingRow.includes(`thoughts_created_at_idx (001) is INVALID — a CONCURRENTLY build or drop that did not finish — which the planner ignores, while another session builds, reindexes, alters or drops it now (pid ${reindex.pid}), so `)
-           && / — the reads answer right, only slower$/.test(rebuildingRow) && !/_ccnew/.test(rebuildingRow)
-           && rebuildingFix.split("wait for pid").length === 2 && rebuildingFix.includes(`First wait for pid ${reindex.pid} (itself waiting on pid ${holder.pid} — `) && !rebuildingFix.includes("Run in psql"),
+           && /thought indexes\s+the reads answer right, only slower: /.test(rebuildingRow) && !/_ccnew/.test(rebuildingRow)
+           && rebuildingFix.split("wait for pid").length === 2 && rebuildingFix.includes(`First wait for pid ${reindex.pid} (itself waiting on pid ${holder.pid} — as thoughts' owner or a role with pg_read_all_stats, `) && !rebuildingFix.includes("in psql") && rebuildingFix.endsWith("Then run preflight again: what was waited for has its own remedy once it ends."),
            `…a REINDEX CONCURRENTLY of an INVALID index running: named running, slower, its copy not named apart, one wait naming the session it waits on, nothing to run (${rebuildingFix.trim()})`);
     await release();
     assert(await reindex.done === "done", "…and once the reader ends, the REINDEX finishes");
@@ -4997,7 +4999,7 @@ else {
            && busyTwinFix.includes(`First wait for pid ${twinReindex.pid}`) && busyTwinFix.includes("`ALTER INDEX pf_created_at RENAME TO thoughts_created_at_idx;`") && !busyTwinFix.includes("CREATE INDEX CONCURRENTLY thoughts_created_at_idx"),
            `…its twin being rebuilt: the reads take the twin, wait, then rename — no second build (${busyTwinRow.trim()})`);
     await release();
-    assert(busyTwinFix.indexOf("First wait") < busyTwinFix.indexOf("Run in psql"), "…the wait said before the statement it comes before");
+    assert(busyTwinFix.indexOf("First wait") >= 0 && busyTwinFix.indexOf("First wait") < busyTwinFix.indexOf("Then run in psql"), "…the wait said before the statement it comes before");
     assert(await twinReindex.done === "done", "…and the twin's REINDEX finishes");
     assert(await follow(busyTwin.out) === 1 && okRow.test(await rowOf()), "…and then the rename, as printed, makes the row ok");
 
@@ -5034,7 +5036,7 @@ else {
     const replacement = await start("CREATE INDEX CONCURRENTLY pf_vl_new ON thoughts (id) WHERE embedding IS NULL");
     const pending = await run(SQL_ENV);
     const pendingRow = row(pending.out, "thought indexes"), pendingFix = fix(pending.out, "thought indexes");
-    assert(pendingRow.includes("thoughts_vectorless_idx (100) is missing, but pf_vl_new is of its shape") && pendingFix.includes(`First wait for pid ${replacement.pid}`)
+    assert(pendingRow.includes("thoughts_vectorless_idx (100) is missing, but pf_vl_new, of its shape, is being built now — the reads take it once it is valid, so meanwhile the vector mender's page") && /thought indexes\s+the reads answer right, only slower: /.test(pendingRow) && pendingFix.includes(`First wait for pid ${replacement.pid}`)
            && pendingFix.includes("`ALTER INDEX pf_vl_new RENAME TO thoughts_vectorless_idx;`") && !pendingFix.includes("CREATE INDEX CONCURRENTLY thoughts_vectorless_idx"),
            `…a replacement being built under another name: wait, then rename it — no second build (${pendingRow.trim()})`);
     await release();
@@ -5047,30 +5049,64 @@ else {
     holder = await hold();
     const trgReindex = await start("REINDEX INDEX CONCURRENTLY idx_thoughts_content_trgm");
     const trgBusy = await run(SQL_ENV);
-    assert(trgBusy.out.includes(`idx_thoughts_content_trgm is INVALID while another session builds, reindexes, alters or drops an index on thoughts now (pid ${trgReindex.pid})`) && fix(trgBusy.out, "trigram index").includes(`Wait for pid ${trgReindex.pid}`) && !fix(trgBusy.out, "trigram index").includes("REINDEX"),
+    assert(trgBusy.out.includes(`idx_thoughts_content_trgm is INVALID while an index operation on thoughts runs now (pid ${trgReindex.pid})`) && fix(trgBusy.out, "trigram index").includes(`Wait for pid ${trgReindex.pid}`) && !fix(trgBusy.out, "trigram index").includes("REINDEX"),
            "…the trigram index INVALID while its REINDEX runs: the trigram row waits for the pid, no REINDEX to queue");
     await release();
     assert(await trgReindex.done === "done", "…and the trigram REINDEX finishes");
 
-    // A role that cannot see a build's target (no pg_read_all_stats — the
-    // server's --grant role): the build is still seen, by the pid's lock on
-    // thoughts, and an INVALID index waits for it rather than REINDEX.
+    // An index build or reindex holding thoughts: every INVALID index on
+    // thoughts without an operation of its own waits for it (a REINDEX of it
+    // would queue behind) — the same for the owner and for a role that cannot
+    // see a build's target (no pg_read_all_stats: the server's --grant role),
+    // which knows the build only by its pid's lock on thoughts. A valid index
+    // of another shape is mended as ever; the trigram index waits too.
     await db.unsafe(`DROP ROLE IF EXISTS pf_idx_viewer; CREATE ROLE pf_idx_viewer LOGIN PASSWORD 'viewer'`);
-    await db.unsafe(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'thoughts_vectorless_idx'::regclass`);
+    const VIEWER = { ...SQL_ENV, DATABASE_URL: LIVE.replace(/\/\/[^@]*@/, "//pf_idx_viewer:viewer@") };
+    await db.unsafe(`UPDATE pg_index SET indisvalid = false WHERE indexrelid IN ('thoughts_vectorless_idx'::regclass, 'idx_thoughts_content_trgm'::regclass)`);
+    await db.unsafe(`DROP INDEX thoughts_issue_key_idx; CREATE INDEX thoughts_issue_key_idx ON thoughts (created_at)`);
+    await db.unsafe(`DROP INDEX idx_thoughts_derived_from; CREATE TABLE pf_other2 (derived_from jsonb); CREATE INDEX idx_thoughts_derived_from ON pf_other2 USING gin (derived_from); UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'idx_thoughts_derived_from'::regclass`);
     holder = await hold();
-    const hiddenBuild = await start("CREATE INDEX CONCURRENTLY pf_hidden ON thoughts (created_at)");
+    const tableBuild = await start("CREATE INDEX CONCURRENTLY pf_hidden ON thoughts (created_at)");
     try {
-      const viewer = await run({ ...SQL_ENV, DATABASE_URL: LIVE.replace(/\/\/[^@]*@/, "//pf_idx_viewer:viewer@") });
-      const viewerRow = row(viewer.out, "thought indexes"), viewerFix = fix(viewer.out, "thought indexes");
-      assert(viewerRow.includes(`thoughts_vectorless_idx (100) is INVALID — a CONCURRENTLY build or drop that did not finish — which the planner ignores, while another session builds, reindexes, alters or drops an index on thoughts this role cannot name (pg_read_all_stats would show which) now (pid ${hiddenBuild.pid})`)
-             && !/pf_hidden is INVALID/.test(viewerRow) && viewerFix.includes(`First wait for pid ${hiddenBuild.pid}`) && !viewerFix.includes("REINDEX"),
-             `…as a role that cannot see a build's target: the build seen by its lock, waited for, the routine build said not warned (${viewerRow.trim()})`);
+      for (const [who, env] of [["the owner", SQL_ENV], ["a role without pg_read_all_stats", VIEWER]] as const) {
+        const seen = await run(env);
+        const seenRow = row(seen.out, "thought indexes"), seenFix = fix(seen.out, "thought indexes");
+        assert(seenRow.includes(`thoughts_vectorless_idx (100) is INVALID — a CONCURRENTLY build or drop that did not finish — which the planner ignores, while an index build or reindex on thoughts, which a REINDEX of it would queue behind, runs now (pid ${tableBuild.pid})`)
+               && !/pf_hidden is INVALID/.test(seenRow) && seenFix.includes(`First wait for pid ${tableBuild.pid}`) && !seenFix.includes("REINDEX INDEX CONCURRENTLY thoughts_vectorless_idx"),
+               `…as ${who}: an INVALID index waits for the build holding thoughts, the build itself not warned of (${seenRow.trim()})`);
+        assert(seenRow.includes("thoughts_issue_key_idx (068) is of another shape") && seenFix.includes("`DROP INDEX CONCURRENTLY thoughts_issue_key_idx;` then `CREATE INDEX CONCURRENTLY thoughts_issue_key_idx"),
+               `…as ${who}: a valid index of another shape is mended as ever, not waited for`);
+        assert(seenRow.includes("idx_thoughts_derived_from (025) is an index on pf_other2, so find_derivatives scans every thought") && seenFix.includes("`ALTER INDEX idx_thoughts_derived_from RENAME TO idx_thoughts_derived_from_moved"),
+               `…as ${who}: another table's INVALID index under the name is not held by thoughts' build: renamed out of the way, as ever`);
+        assert(seen.out.includes(`idx_thoughts_content_trgm is INVALID while an index operation on thoughts runs now (pid ${tableBuild.pid})`) && fix(seen.out, "trigram index").includes(`Wait for pid ${tableBuild.pid}`),
+               `…as ${who}: the trigram row waits for it too`);
+      }
     } finally {
       await release();
-      await hiddenBuild.done;
-      await db.unsafe(`DROP INDEX pf_hidden; DROP OWNED BY pf_idx_viewer; DROP ROLE pf_idx_viewer`);
+      await tableBuild.done;
+    }
+    await db.unsafe(`DROP INDEX pf_hidden; DROP INDEX thoughts_issue_key_idx; DROP TABLE pf_other2`);
+    await db.unsafe(`CREATE INDEX CONCURRENTLY idx_thoughts_derived_from ON thoughts USING gin (derived_from)`);
+    await db.unsafe(`CREATE INDEX CONCURRENTLY thoughts_issue_key_idx ON thoughts ((md5(metadata->>'issue')::uuid)) WHERE metadata ? 'issue'`);
+    // A build on another table holds nothing on thoughts: the INVALID
+    // index is mended, not waited for, whoever reads.
+    await db.unsafe(`CREATE TABLE pf_big (x int)`);
+    holder = await hold();
+    const elsewhereBuild = await start("CREATE INDEX CONCURRENTLY pf_big_x ON pf_big (x)");
+    try {
+      for (const [who, env] of [["the owner", SQL_ENV], ["a role without pg_read_all_stats", VIEWER]] as const) {
+        const seen = await run(env);
+        assert(row(seen.out, "thought indexes").includes("thoughts_vectorless_idx (100) is INVALID — a CONCURRENTLY build or drop that did not finish — which the planner ignores, so ") && fix(seen.out, "thought indexes").includes("`REINDEX INDEX CONCURRENTLY thoughts_vectorless_idx;`") && !fix(seen.out, "thought indexes").includes("First wait"),
+               `…as ${who}, a build on another table is no wait: the INVALID index gets its REINDEX (${row(seen.out, "thought indexes").trim()})`);
+      }
+    } finally {
+      await release();
+      await elsewhereBuild.done;
+      await db.unsafe(`DROP TABLE pf_big; DROP OWNED BY pf_idx_viewer; DROP ROLE pf_idx_viewer`);
     }
     await db.unsafe("REINDEX INDEX CONCURRENTLY thoughts_vectorless_idx");
+    await db.unsafe("REINDEX INDEX CONCURRENTLY idx_thoughts_content_trgm");
+    assert(okRow.test(await rowOf()), "…and with both REINDEXed, the row is ok");
 
     holder = await hold();
     const drop = await start("DROP INDEX CONCURRENTLY thoughts_trust_rank_idx");
@@ -5114,11 +5150,13 @@ else {
     assert(await follow(refill.out) === 8 && okRow.test(await rowOf()), "…and with the ledger back, the eight builds as printed make the row ok");
     // No ledger at all: looked for, and the remedy says a migration that has
     // not run builds it.
-    await db.unsafe(`DROP INDEX thoughts_vectorless_idx; DROP TABLE schema_migrations`);
+    await db.unsafe(`DROP INDEX thoughts_vectorless_idx; DROP INDEX idx_thoughts_fingerprint; DROP TABLE schema_migrations`);
     const unledgered = await run(SQL_ENV);
     assert(/thoughts_vectorless_idx \(100\) is missing/.test(row(unledgered.out, "thought indexes"))
            && fix(unledgered.out, "thought indexes").includes("`CREATE INDEX CONCURRENTLY thoughts_vectorless_idx ON thoughts (id) WHERE embedding IS NULL;` (if migration 100 has not run here, apply it instead: it builds the index)"),
            "…with no ledger, every index is looked for, and a missing one's remedy names its migration as the other way");
+    assert(fix(unledgered.out, "thought indexes").includes("`CREATE UNIQUE INDEX CONCURRENTLY idx_thoughts_fingerprint ON thoughts (content_fingerprint) WHERE content_fingerprint IS NOT NULL;`") && !fix(unledgered.out, "thought indexes").includes("if migration 003 has not run here"),
+           "…but not for an index whose migration's other objects are here (003's column): that migration has run");
 
     // A role that cannot see into public: the catalog read's grant named.
     await db.unsafe(`DROP ROLE IF EXISTS pf_idx_reader; CREATE ROLE pf_idx_reader LOGIN PASSWORD 'idx'`);
@@ -5167,7 +5205,7 @@ else {
   } finally {
     await release().catch(() => {});
     // Whatever a cell that failed midway left under a name.
-    for (const st of ["DROP TABLE IF EXISTS pf_other, pf_part, pf_trg, idx_thoughts_supersedes_moved, idx_thoughts_supersedes_moved2, idx_thoughts_supersedes_moved4, schema_migrations", "DROP TYPE IF EXISTS idx_thoughts_supersedes_moved3", "DROP TABLE idx_thoughts_supersedes", "DROP TYPE IF EXISTS thoughts_issue_key_idx", "DROP TYPE IF EXISTS thoughts_issue_key_idx_moved", "DROP SCHEMA IF EXISTS pf_bk CASCADE", "DROP OWNED BY pf_idx_viewer", "DROP ROLE IF EXISTS pf_idx_viewer"]) {
+    for (const st of ["DROP TABLE IF EXISTS pf_other, pf_part, pf_trg, idx_thoughts_supersedes_moved, idx_thoughts_supersedes_moved2, idx_thoughts_supersedes_moved4, schema_migrations", "DROP TYPE IF EXISTS idx_thoughts_supersedes_moved3", "DROP TABLE idx_thoughts_supersedes", "DROP TYPE IF EXISTS thoughts_issue_key_idx", "DROP TYPE IF EXISTS thoughts_issue_key_idx_moved", "DROP SCHEMA IF EXISTS pf_bk CASCADE", "DROP TABLE IF EXISTS pf_big, pf_other2", "DROP INDEX IF EXISTS pf_trust, pf_created_at, my_base, report_ccnew, pf_building, pf_hidden, pf_vl_new, pf_vl, pf_ik", "DROP OWNED BY pf_idx_viewer", "DROP ROLE IF EXISTS pf_idx_viewer"]) {
       await db.unsafe(st).catch(() => {});
     }
     await db.close();
