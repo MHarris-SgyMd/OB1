@@ -875,8 +875,7 @@ command that builds — not in `deploy/.env`, where a value written once is bake
 into every later build — with `--dirty`, so an image built from uncommitted
 changes says so. Compose never forwards it at runtime; a runtime variable of that
 name set some other way (`docker run -e`, a Kubernetes `env:` entry) overrides the
-baked one, so set none. Unset at build, the image reports `unknown`; a Worker
-always does (wrangler has no build arg). Rebuild with it:
+baked one, so set none. Unset at build, the image reports `unknown`. Rebuild with it:
 
 ```bash
 OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --build server proxy forwarder
@@ -1297,9 +1296,7 @@ and a point on `db.client.operation.duration` labelled with the same, on
 bounds finer than the conventions advise and on to 60 s. On the SQL store a
 fault's SQLSTATE is its `error.type` and `db.response.status_code`
 (any other fault's code or kind its `error.type`), and its time includes the
-pool's wait; the PostgREST store's faults are plain errors, `Error` — but for
-the key's registry lookup, which carries its SQLSTATE — and its time is an
-HTTP call's. No query or parameter is on either. A plugin's transaction is an
+pool's wait. No query or parameter is on it. A plugin's transaction is an
 internal span, `pluginTx`, with `ob1.plugin`, and no point: its time is the
 plugin's own code and SQL, and the operations it calls are spans and points
 of their own. The key's registry lookup (`resolveAgent`) runs before
@@ -1393,8 +1390,7 @@ second, about 5 MB; with it, Loki took 28 KB for the same 5,000 and Tempo held
 accepted, or a delivery its plugin accepted, is never held to it. A keyed
 client can still fill a batch's queue (a 100-call batch, 101 spans), and while
 the collector lags what is past it is dropped — said as `queue full` — though
-every line is still written. Cloudflare Workers runs the API's no-ops alone —
-`wrangler.toml` keeps the SDK out of the Worker, and CI holds that.
+every line is still written.
 
 ### The observability profile
 

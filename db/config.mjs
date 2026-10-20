@@ -13,11 +13,10 @@
 
 /** Width of the `thoughts.embedding` column. */
 /**
- * Environment access that survives Cloudflare Workers, which has no `process`.
- * This module is imported by server-portable/embed.ts, which index.ts bundles for Workers,
- * so a bare `process.env` at module scope would throw at load. The values below
- * are defaults only; the server reads live configuration through its own lazy
- * `env()` so Workers bindings still apply.
+ * Environment access that survives a runtime with no `process` — written for
+ * the Cloudflare Workers build (retired in SMD-3152), which bundled this module
+ * through server-portable/embed.ts. The values below are defaults only; the
+ * server reads live configuration through its own lazy `env()`.
  */
 const RAW_ENV = /** @type {Record<string, string|undefined>} */ (
   globalThis.process?.env ?? {}
@@ -808,8 +807,7 @@ export function composeChunkForEmbedding(context, chunk) {
 /**
  * Resolve the truncation decision. A FUNCTION rather than only the constant
  * below, because the server (server-portable/root.ts) reads its environment
- * lazily so Cloudflare Workers bindings apply — it cannot use a value computed
- * at module load. Both it and preflight.ts call this, so the rule exists once.
+ * lazily — it cannot use a value computed at module load. Both it and preflight.ts call this, so the rule exists once.
  *
  * Getting that wrong is not theoretical: the auto-enable below was added here
  * while index.ts and preflight.ts kept their own copy of the old regex, and the

@@ -136,7 +136,8 @@
  * ── node_state (SMD-2074) ──────────────────────────────────────────────────
  * The rules above are not this file's alone: attention is not actionability
  * in search either, and the server — which cannot import a db/ script, and
- * whose PostgREST store reaches only RPCs — ranks by the same read. So they
+ * whose PostgREST store (retired in SMD-3152) reached only RPCs — ranks by the
+ * same read. So they
  * are SQL, migration 058's five functions: `node_lifecycle()` (a thought's
  * status, its ticket's head's, and its freshness), `node_dependencies()` (the
  * blocks / blocked_by facets, active or closed, and whether each system

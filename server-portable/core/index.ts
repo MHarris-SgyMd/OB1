@@ -49,7 +49,7 @@ export function createCore(deps: CoreDeps) {
     runWorker: bind(ctx, workers.runWorker),
     /**
      * A plugin's own tables (SMD-2310): a transaction as its role, in its
-     * schema (store-sql.ts's pluginTx). The store has none on PostgREST, and
+     * schema (store-sql.ts's pluginTx). A store without one (a suite's fake)
      * says so when a plugin asks.
      */
     pluginTx: async <T>(plugin: string, fn: (sql: PluginSql) => Promise<T>): Promise<T> => {

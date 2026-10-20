@@ -1,11 +1,12 @@
 /**
- * store-sql.ts — direct SQL. No PostgREST, no supabase-js.
+ * store-sql.ts — direct SQL, the brain's one store (SMD-3152 retired the
+ * PostgREST store it replaced).
  *
  * Phase 2 of the migration: the layer the plan calls "the real cost". Uses Bun's
  * built-in Postgres client, so it adds no driver dependency.
  *
  * ── Behaviour must not change ────────────────────────────────────────────────
- * Every query here reproduces what the PostgREST store asked for, including two
+ * Every query here reproduced what the PostgREST store asked for, including two
  * details that are easy to lose in translation and silent when lost:
  *
  *   1. `match_thoughts` compares `> match_threshold` STRICTLY. A row whose
@@ -16,10 +17,6 @@
  *      jsonb parameter as jsonb_typeof='string', and `p_payload->'metadata'` then
  *      returns NULL, so metadata is silently stored as {}. Migration 005 rejects
  *      that outright; this file never constructs the payload as a string.
- *
- * ── Not for Cloudflare Workers ───────────────────────────────────────────────
- * Workers cannot hold a connection pool. This module is imported dynamically by
- * store.ts precisely so a Workers build never pulls it in.
  */
 
 import { SQL } from "bun";
@@ -300,8 +297,7 @@ export class SqlStore implements ThoughtStore {
   }
 
   async listThoughts(f: ListFilters): Promise<ThoughtListItem[]> {
-    // PostgREST's .contains() is jsonb containment, `@>`. Reproduced exactly.
-    // Undefined filters are passed as NULL and short-circuited in SQL, which keeps
+    // Each filter is jsonb containment, `@>`. Undefined filters are passed as NULL and short-circuited in SQL, which keeps
     // this a single prepared statement instead of a concatenated query.
     const since = f.days ? new Date(Date.now() - f.days * 86_400_000).toISOString() : null;
     // The ladder's words (SMD-1724) as an array literal, toUuidArray's way: Bun
@@ -408,7 +404,7 @@ export class SqlStore implements ThoughtStore {
     // count query. query_log is opt-in (OB1_QUERY_LOG); when it was never on this
     // is simply empty.
     // "" is not a time: normalise it to null (no window) rather than cast it and
-    // fail, so a direct caller matches the PostgREST store, which treats it as falsy.
+    // fail.
     const since = opts.since || null;
     const rows = await this.sql`
       SELECT query, arm, tier, logged_at, match_count, threshold, recency_weight, filter
@@ -606,9 +602,7 @@ export class SqlStore implements ThoughtStore {
   async statsSummary(): Promise<ThoughtStats> {
     // Migration 024: the whole corpus aggregated in one statement. No page walk,
     // no cap — Postgres reads the table directly, so `aggregated` is the total
-    // and the tool never prints a truncation note on this path. (The PostgREST
-    // store still walks and can truncate; that is the divergence the interface
-    // documents.) jsonb comes back from Bun.sql already parsed into JS values.
+    // and the tool never prints a truncation note. jsonb comes back from Bun.sql already parsed into JS values.
     // One row, one jsonb, every key present — 024 builds the object with all
     // six, so no optional keys and no empty-object fallback: a missing key
     // would be a changed function, and isoTimestampOrNull throws on it.
@@ -634,10 +628,8 @@ export class SqlStore implements ThoughtStore {
   }
 
   async pageThoughtMeta(offset: number, limit: number): Promise<ThoughtMeta[]> {
-    // Note what is NOT here: the 1000-row cap. That was a PostgREST default, not a
-    // Postgres one. The paging loop upstream of this call is still correct and
-    // still worth keeping — it bounds memory and lets the tool report truncation —
-    // but the silent ceiling it was written to work around does not exist in SQL.
+    // No 1000-row cap: that was a PostgREST default, not a Postgres one. The
+    // caller's paging bounds memory; no silent ceiling stands behind it.
     const rows = await this.sql`
       SELECT metadata, created_at
       FROM thoughts
@@ -677,9 +669,9 @@ export class SqlStore implements ThoughtStore {
      * The actor rides in the payload envelope, which migration 008's
      * upsert_thought reads into a transaction-local setting for the audit
      * trigger. Doing it here rather than with an explicit `set_config` around
-     * the call means the SQL and PostgREST stores use one mechanism — an
-     * earlier version wrapped this in a transaction and left PostgREST
-     * unattributed.
+     * the call keeps attribution in the function, for every caller — an
+     * earlier version wrapped this in a transaction and left the PostgREST
+     * store (retired in SMD-3152) unattributed.
      */
     // The model rides the same way (021): upsert_thought writes
     // p_payload.embedding_model beside the vector, and an envelope without the
@@ -799,7 +791,7 @@ export class SqlStore implements ThoughtStore {
     detach?: boolean;
   }): Promise<DeleteResult> {
     // 042's third argument, always sent: the function's default is false, and
-    // spelling it keeps the call one signature on both stores.
+    // spelling it keeps the call to one signature.
     const rows = await this.sql`
       SELECT delete_thought(${opts.id}::uuid, ${actorPayload(opts.actor)}::jsonb, ${opts.detach === true}::boolean) AS r`;
     return normaliseMutation(rows[0]?.r as Record<string, unknown>);
@@ -969,8 +961,7 @@ export class SqlStore implements ThoughtStore {
   async logActions(rows: QueryActionLog[]): Promise<void> {
     if (rows.length === 0) return;
     // The batch's contract — absent agent → NULL, every id a uuid, refused by
-    // column before the statement — is normaliseActionRows (store.ts), the
-    // same call the PostgREST writer makes. One statement for one row or
+    // column before the statement — is normaliseActionRows (store.ts). One statement for one row or
     // forty: the tools, agents and targets as aligned arrays, unnested side by
     // side. The tool column binds through the driver's own sql.array (a quote,
     // a backslash, a comma and a brace carried intact — probed); the uuid

@@ -6,7 +6,7 @@
  *
  *   auth.ts and MCP_ACCESS_KEYS decide whether a key is VALID and what it may
  *   do. That answer needs no database, so `tools/list` still works against a
- *   dead Postgres and a Workers deployment authenticates without a round trip.
+ *   dead Postgres and a key authenticates without a round trip.
  *
  *   ob1_agents and ob1_agent_keys decide WHO the key belongs to, and hold the
  *   one veto the environment cannot express quickly: `revoked_at`.
@@ -78,8 +78,7 @@ export const DEFAULT_CACHE_TTL_MS = 60000;
  * is a migration, a transaction holding them, or 046's backfill holding
  * ob1_agents FOR SHARE against a rename. Each wait is capped; a table lock
  * ends the lookup at its first. Short, since a lookup holds a pool connection
- * while it waits. Workers' PostgREST store sets none; its role's
- * statement_timeout, where set, is the cap there.
+ * while it waits.
  */
 export const RESOLVE_LOCK_TIMEOUT_MS = 250;
 
@@ -90,8 +89,8 @@ export const RESOLVE_LOCK_TIMEOUT_MS = 250;
  * with no connection held. About two seconds waits out a migration's brief
  * lock (a CHECK added to a small table), which the uncapped wait used to, and
  * stays inside /health's 2.5 s deadline. Measured in real time, whatever clock
- * the cache reads; a lookup slower than the budget (Workers, whose cap is a
- * role's statement_timeout) is not retried at all.
+ * the cache reads; a lookup slower than the budget (a role's
+ * statement_timeout past it) is not retried at all.
  */
 export const BUSY_RETRY = { attempts: 5, budgetMs: 2_000, pauseMs: 250 };
 export type BusyRetry = typeof BUSY_RETRY;
@@ -99,7 +98,7 @@ export type BusyRetry = typeof BUSY_RETRY;
 /**
  * How long a `busy` answer is reused, bounded by the TTL like every non-success
  * answer (0 stays 0): long enough that a key's retries do not each spend the
- * retry budget again, on Workers above all, where lookups are not shared.
+ * retry budget again.
  */
 const BUSY_TTL_MS = 1000;
 
@@ -131,7 +130,7 @@ export type AgentOutcome =
   /**
    * Resolved, or resolvable later; `agentId` is undefined when the registry
    * could not answer — `unresolved` says why: `unreachable` (no connection,
-   * PostgREST's stale schema cache, or any failure not named below; a retry
+   * or any failure not named below; a retry
    * may answer), `misconfigured` (the registry cannot answer this server as it
    * is set up — no resolve_agent or registry table on its search_path, a CHECK
    * refusing the scope, the server role without the registry tables' grants —
@@ -201,14 +200,6 @@ export class AgentResolver {
   constructor(
     private readonly ttlMs: number = DEFAULT_CACHE_TTL_MS,
     private readonly now: () => number = Date.now,
-    /**
-     * Whether concurrent requests of one key share a lookup. Off on Cloudflare
-     * Workers (the PostgREST store): the runtime ties a fetch to the request
-     * that started it, so a second request awaiting the first's lookup can
-     * hang or see it cancelled when the first client goes (SMD-2041 review
-     * pass 5). The SQL store's pool is shared by every request, as the lookup is.
-     */
-    private readonly shareLookups: boolean = true,
     private readonly busyRetry: BusyRetry = BUSY_RETRY,
   ) {}
 
@@ -217,8 +208,7 @@ export class AgentResolver {
    *
    * `store` is passed per call rather than held: root.ts builds the store
    * lazily on first use, and a resolver that captured it at construction would
-   * force the connection open during startup — on Workers, before any request
-   * has arrived to justify it.
+   * force the connection open at construction.
    */
   async resolve(store: Promise<ThoughtStore>, principal: Principal): Promise<AgentOutcome> {
     const key = cacheKey(principal.keyHash, principal.name);
@@ -227,8 +217,9 @@ export class AgentResolver {
     // One lookup in flight per key: concurrent requests of a key the cache has
     // not got share it, retries included, so a burst of one key while the
     // registry is locked holds one pool connection for each capped wait, not
-    // one each.
-    if (!this.shareLookups) return this.lookup(store, principal, key);
+    // one each. (The SQL store's pool is shared by every request, as the
+    // lookup is; the Workers target that could not share one was retired in
+    // SMD-3152.)
     const shared = this.inflight.get(key);
     if (shared) return shared;
     const lookup = this.lookup(store, principal, key);
@@ -367,21 +358,20 @@ export class AgentResolver {
 /**
  * Whether a lookup failed in a way a fresh attempt can answer — it gave up on
  * a lock, or lost a serialization race: 55P03 (lock_timeout, the SQL store's
- * cap), 57014 (statement_timeout — a role's, as on Workers; or a cancel),
+ * cap), 57014 (statement_timeout — a role's; or a cancel),
  * 40P01 (a deadlock with a migration taking the two tables in the other
  * order) or 40001 (a serialization failure: under a REPEATABLE READ or
  * SERIALIZABLE default, resolve_agent's write of a row another transaction
  * changed after its snapshot — a revocation among them, or a key another
  * lookup registered — fails where READ COMMITTED would have re-read it;
- * SMD-2090). The SQLSTATE rides on `errno`: Bun's SQL sets it, and the
- * PostgREST store copies PostgREST's code there.
+ * SMD-2090). The SQLSTATE rides on `errno`, where Bun's SQL sets it.
  */
 function retryable(e: unknown): boolean {
   const state = sqlState(e);
   return state === "55P03" || state === "57014" || state === "40P01" || state === "40001";
 }
 
-/** A failed lookup's SQLSTATE, from `errno` (Bun's SQL; the PostgREST store copies its code there), or "". */
+/** A failed lookup's SQLSTATE, from `errno` (Bun's SQL), or "". */
 function sqlState(e: unknown): string {
   return String((e as { errno?: unknown })?.errno ?? "");
 }
@@ -397,9 +387,7 @@ function sqlState(e: unknown): string {
  * caller, so it is the tables that refuse; since 054 a known key's row is
  * written only when its last use is five minutes old, so this can first show
  * minutes after a clean start).
- * Not PostgREST's PGRST202: it says the same while its schema cache is stale
- * after a migration, which heals on reload, so it stays `unreachable` (review
- * pass 1). capture_thought offers a capture key's `supersedes` a retry only
+ * capture_thought offers a capture key's `supersedes` a retry only
  * when one can heal (SMD-2473).
  */
 function misconfigured(e: unknown): string | null {

@@ -3279,9 +3279,7 @@ console.log("\n[17] Every worker action answers its result beside the text, and 
   }
 
   // A fault: the claim table is away, so the store throws. Each action keeps
-  // its lead, FAILED beside it with no retryable — on a PostgREST deploy the
-  // store throws the SQL-only reason, which a retry does not mend — and each
-  // POST answers the reason as a 200 {error}, as /worker-status does. Put the
+  // its lead, FAILED beside it with no retryable — and each POST answers the reason as a 200 {error}, as /worker-status does. Put the
   // table back whatever the assertions do; a lock held elsewhere fails the
   // rename within seconds rather than hanging the suite.
   const sql = new SQL({ url: URL_, max: 1 });
