@@ -1594,7 +1594,8 @@ rows; a stack that is no tier sends none, so All takes a path-mode canary's
 beside stable's and stable alone cannot be picked) and the database (All takes
 every one but Postgres's templates, the brain's being `openbrain`). Grafana
 will not save a change made to it — it is provisioned (measured) — so save a
-copy to keep one; to change the stack's own, export the copy's JSON (not "for
+copy, in a folder of your own, to keep one (the removal under "Alerts" deletes
+the Open Brain folder's contents); to change the stack's own, export the copy's JSON (not "for
 sharing externally", which writes `${DS_…}` placeholders) over
 `deploy/observability/dashboard.json`, put back its uid `ob1`, its title `Open
 Brain` and `"editable": false` (a saved copy has its own of each; check 37
