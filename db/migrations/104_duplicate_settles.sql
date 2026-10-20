@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 103: Linear's `duplicate` status type is a lifecycle, and it
+-- Migration 104: Linear's `duplicate` status type is a lifecycle, and it
 --                settles — 058's two status sets gain it (SMD-2935)
 -- =============================================================================
 --
@@ -30,7 +30,7 @@
 --     cannot alter is named in a NOTICE and left. CREATE OR REPLACE alone did
 --     not reach every cached plan: on PG 16 a session that had called
 --     search_thoughts_current (plpgsql) six times, its generic plan cached,
---     kept demoting by 058's sets after 103 while a fresh session did not
+--     kept demoting by 058's sets after 104 while a fresh session did not
 --     (review pass 1, run-it); a statement naming a set directly read the new
 --     one. A running server's pooled connections are such sessions.
 --     test-upgrade [20av] holds one, and that every such function was
@@ -49,9 +49,9 @@
 --   No table, column, index or grant. MINOR under the version rules.
 --
 --   A --reapply runs 058's six, then this file's seven. An older tree's
---   --reapply over a 103 brain puts the six back (and its 071 rebuilds the
+--   --reapply over a 104 brain puts the six back (and its 071 rebuilds the
 --   mirror to them): run this tree's --reapply after it — a plain run skips
---   103, recorded as applied. (On a brain holding a judged relation every
+--   104, recorded as applied. (On a brain holding a judged relation every
 --   --reapply fails at 064 today, before reaching either: SMD-3149.)
 --
 -- NOT HERE
@@ -80,14 +80,14 @@ DO $g$
 BEGIN
   IF to_regprocedure('node_lifecycle_types()') IS NULL OR to_regprocedure('node_settled_types()') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 103 needs 058 (node_lifecycle_types, node_settled_types); this schema lacks it',
+      MESSAGE = 'migration 104 needs 058 (node_lifecycle_types, node_settled_types); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   IF to_regprocedure('ob1_rebuild_source_gate()') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 103 needs 071 (ob1_source_gate, ob1_rebuild_source_gate); this schema lacks it',
+      MESSAGE = 'migration 104 needs 071 (ob1_source_gate, ob1_rebuild_source_gate); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -101,7 +101,7 @@ IMMUTABLE
 AS $$ SELECT '{triage,backlog,unstarted,started,completed,canceled,duplicate}'::text[] $$;
 
 COMMENT ON FUNCTION node_lifecycle_types() IS
-  'The status types node_state knows — Linear''s seven state types, in board order. A status_type outside them is unknown: no lifecycle, no claim that a blocker is settled. graph-centrality.ts''s LIFECYCLE_TYPES must equal it. Migration 058 / SMD-2074; duplicate since migration 103 / SMD-2935.';
+  'The status types node_state knows — Linear''s seven state types, in board order. A status_type outside them is unknown: no lifecycle, no claim that a blocker is settled. graph-centrality.ts''s LIFECYCLE_TYPES must equal it. Migration 058 / SMD-2074; duplicate since migration 104 / SMD-2935.';
 
 CREATE OR REPLACE FUNCTION node_settled_types()
 RETURNS text[]
@@ -110,7 +110,7 @@ IMMUTABLE
 AS $$ SELECT '{completed,canceled,duplicate}'::text[] $$;
 
 COMMENT ON FUNCTION node_settled_types() IS
-  'The status types that settle a node: a settled blocker blocks nothing and a settled thought is not blocked. graph-centrality.ts''s LIFECYCLE_FILTERS.done must equal it, and db/board-findings.ts reads it for a closed ticket. Migration 058 / SMD-2074; duplicate since migration 103 / SMD-2935.';
+  'The status types that settle a node: a settled blocker blocks nothing and a settled thought is not blocked. graph-centrality.ts''s LIFECYCLE_FILTERS.done must equal it, and db/board-findings.ts reads it for a closed ticket. Migration 058 / SMD-2074; duplicate since migration 104 / SMD-2935.';
 
 -- Every reader's cached plans, in every session: a no-op ALTER of each
 -- function that names a set (node_state, ticket_references_settled,
@@ -148,7 +148,7 @@ BEGIN
     END IF;
   END LOOP;
   IF cardinality(v_left) > 0 THEN
-    RAISE NOTICE 'migration 103: this role cannot alter %, so a session that cached a plan through it keeps 058''s sets until it reconnects (restart the server and workers)', array_to_string(v_left, ', ');
+    RAISE NOTICE 'migration 104: this role cannot alter %, so a session that cached a plan through it keeps 058''s sets until it reconnects (restart the server and workers)', array_to_string(v_left, ', ');
   END IF;
 END
 $touch$;

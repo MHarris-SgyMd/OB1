@@ -259,7 +259,7 @@ guards against the accident (`plugins/README.md`).
 ## Expected outcome
 
 `bun test-schema.ts` prints `2954 assertions: 2954 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and three (103) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and four (104) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-2935).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 104 SMD-2935).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -533,7 +533,7 @@ server — which cannot import a `db/` script, and whose PostgREST store reaches
 only RPCs — could not share them. Five functions, all `LANGUAGE sql`, SECURITY
 INVOKER, no SET, not STRICT, so a caller's planner inlines them:
 `node_lifecycle_types()` and `node_settled_types()` (the six status types this
-schema knows, and the two that settle a node — seven and three since 103);
+schema knows, and the two that settle a node — seven and three since 104);
 `node_lifecycle()` (per thought: status, status_type, the source watermark
 `synced_at` and `created_at` — a row carrying `ticket` or `issue` reads its
 ticket's head; it read `thoughts` alone until 068 stored the heads);
@@ -1781,7 +1781,7 @@ lands and coming back with it, a check and a run under a role without the
 structure group; `--status` and `--list relations`) and [41]
 (a distinct pair never posted to the board), test-upgrade [20au].
 
-Migration 103 makes Linear's `duplicate` status type a lifecycle that settles
+Migration 104 makes Linear's `duplicate` status type a lifecycle that settles
 (SMD-2935). Linear's Duplicate status has a type of its own, not `canceled`,
 and 058's sets did not list it: to node_state a Duplicate ticket was an
 unknown status (`open` NULL — 18 rows on stable, its 16 Duplicate tickets
@@ -1800,18 +1800,18 @@ and one the migrating role cannot alter is named in a NOTICE and left: replacing
 the sets alone left a server's pooled connection, once it had searched with
 `prefer_current` six times, demoting by 058's sets (review pass 1).
 graph-centrality's `LIFECYCLE_TYPES` and `--status done` follow (its equality
-check refuses a brain before 103), `board-findings.ts`'s `closed()` reads
-`node_settled_types()` and refuses to post on a brain without 103 (said once, at
+check refuses a brain before 104), `board-findings.ts`'s `closed()` reads
+`node_settled_types()` and refuses to post on a brain without 104 (said once, at
 board-sync's start: after migrating, restart board-sync), a demoted Duplicate
 says `↓ Ranked ×0.25 — duplicate`, and the stated-status label prints its word,
 Duplicate. A Duplicate whose original is still open reads finished, as a cancel
 does. Refuses by name without 058 or 071; a re-apply is a no-op. An older tree's
-`--reapply` over a 103 brain puts 058's six back: run this tree's `--reapply`
+`--reapply` over a 104 brain puts 058's six back: run this tree's `--reapply`
 after it (which fails at 064 on a brain holding a judged relation until
 SMD-3149). test-schema [93] (the sets, a Duplicate settled and its blocker
 cleared, both under 058's sets as before, the mirror rebuilt), test-upgrade
 [20av] (a session's cached plan reaching the new sets among it), test-live [41]
-(the poster's refusals without 058's set and before 103).
+(the poster's refusals without 058's set and before 104).
 
 ## What changed relative to the guide
 
@@ -4765,7 +4765,7 @@ bun board-findings.ts --url … --cap 2     # the 24-hour ceiling this run appli
   posted.
 - **Not between two finished tickets.** A pair whose tickets are both closed
   — status type `completed`, `canceled` or `duplicate` (Linear gives Duplicate
-  a type of its own; node_state's `node_settled_types()` since 103), read
+  a type of its own; node_state's `node_settled_types()` since 104), read
   from 068's `ob1_ticket_head` — is not posted until
   one of them reopens: a comment asking to link two finished tickets is the
   least useful kind, and it spends the cap open work could use. When one is
