@@ -719,7 +719,7 @@ console.log("\n[11b] At the public origin, configured (SMD-2382): the document a
   const note = await at("/mcp", { method: "POST", headers: H, body: NOTE });
   assert(note.status === 401 && note.headers.get("www-authenticate") !== null && (await note.text()) === "", `a keyless notification gets the bodyless 401 with the challenge (${note.status})`);
   const token = await at("/mcp", { method: "POST", headers: { ...H, authorization: `Bearer ${JWT}` }, body: INIT });
-  assert(token.status === 401 && /error="invalid_token"/.test(token.headers.get("www-authenticate") ?? ""), `a token is refused invalid_token until SMD-2286 accepts one (${token.status})`);
+  assert(token.status === 401 && /error="invalid_token"/.test(token.headers.get("www-authenticate") ?? ""), `a token is refused invalid_token here: mcp-server/ trades one (SMD-2286) (${token.status})`);
   const wrongKey = await at("/mcp?key=wrong", { method: "POST", headers: H, body: INIT });
   assert(wrongKey.status === 200 && wrongKey.headers.get("www-authenticate") === null && (await wrongKey.json())?.error?.code === -32001, `a wrong ?key= is a key client's: today's 200 and -32001, never sent to sign in (${wrongKey.status})`);
   // Through the real listener, as the proxy delivers it: the runtime builds

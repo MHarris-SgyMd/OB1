@@ -1,0 +1,64 @@
+# 342. Consolidation's decide mode: the typed-decision tier gives each pair's verdict and the judge's model writes only the proposals it calls outdates, adopted from SMD-3114's measurement for review on the canary (SMD-3115)
+
+**What changed.**
+- **`server-portable/consolidate-decide.ts`** (new) holds what SMD-3114 measured, moved out of its eval, which imports it back:
+  - the tier's question, prompt 4's five verdicts as one choice over prompt 4's rendering of the pair;
+  - the writer's prompt, two-sided, with the part rule;
+  - the parse of the writer's answer, and both quote checks.
+- **Version 2, measured and shelved.** The record rule (`RECORD_RULE`) comes from the canary's first proposals. A done ticket, a session summary or a change record is outdated only by a later thought, from any source, that says something different about its subject; its work reported done never outdates it, and neither does a later record that goes on with that work. Version 2 also read quotes more fully (`v2Quotes`): a quote shortened with "…" piece by piece (`quoteIn`), and a stale claim the current thought only quotes, between quotation marks (`onlyQuoted`). Measured on the canary's proposals it missed its bar twice, and the maintainer shelved it on 2026-10-18.
+  - **The pass runs version 1** (`DECIDE_VERSION` 1, key `@p4d1`): SMD-3114's writer, two-sided with the part rule, its quotes checked whole. Its prompt hash is the one the canary has run under since 2026-10-18.
+  - **Version 2 stays for the eval** (`--record-rule`, `--v2-quotes` in `eval-judge-propose.ts`) and SMD-3116's writers.
+- **`decidePair`** asks the tier, and asks the writer only when the tier's top verdict is outdates.
+  - **A standing proposal** becomes an outdates judgement whose verdict distribution is H2O's. The pass records it at H2O's P(outdates) under its 0.5 floor, and relations by the relation words' mass, as for the judge.
+  - **A decline, a failed quote or an answer that does not parse** leaves the pair at H2O's best verdict that proposes nothing.
+  - **Gating:** both rows are gated for both endpoints before any request.
+- **`db/consolidate.ts`** runs decide mode when the knob is set:
+  - It refuses at start without `OB1_JEV_BASE_URL`, or with `OB1_JEV_MODEL` naming another model.
+  - The key is `consolidate:<decider>+<writer>@p4d1`, so turning decide mode on starts a fresh pass. The banner names the decider and the tier's egress.
+  - A follower probes the writer's endpoint and then the tier's `/info` (`probeTier`). It refuses at start when the tier serves another model, and waits out an outage of either.
+- **Lineage:** decide mode's proposals and relations name the writer, the decider, `decide_version` and decide mode's prompt hash, and the recipe carries what the tier and the writer said.
+- **`db/sleep.ts`** schedules the pass under its key.
+- **Preflight:**
+  - It names decide mode's key.
+  - It warns, not fails, when decide mode lacks the tier or the tier serves another model: the server never judges.
+  - It holds the tier row to the decider when `OB1_JEV_MODEL` is unset.
+  - It gives a decide key's unfinished pass both knobs in its remedy.
+- **The knob** reaches the workers through the server's environment block in compose.yaml. It is declared in `root.ts` and documented in `.env.example` and `server-portable/README.md`. `jev/h2o/README.md` says how to serve the tier for a brain.
+
+**Why.** SMD-3114 measured, on three sets of stable's pairs:
+- **The 7B judge** the dogfood brains run proposed 2, 0 and 0 of the true supersessions (of 62, 179 and 119), and the 27B judge 23, 68 and 55.
+- **The adopted writer** was measured on the third set: H2O with the 27B writer, two-sided, with the part rule, proposed 73 of the 119. It made 3 false proposals against the 27B judge's none, at 2.34 s a candidate against 11.25 s.
+- **The rule fixed before the run** was missed on false proposals alone. Every false proposal was on a pair of Linear-linked tickets, and migration 079 keeps those pairs out of the pass.
+- **The decision:** the maintainer adopted it for review on the canary, where the review queue measures what it proposes on the pairs the pass does judge.
+
+**Held.**
+- **`test-thoughts` [15]:**
+  - the key, the knob and H2O's distribution;
+  - each judgement path and the lineage;
+  - the writer's question;
+  - `decidePair` against an in-process tier and writer: an outdates asks the writer and a related does not; none and an answer that does not parse decline; a 503 or a 500 throws with its status; an answer from another model is refused; the gate refuses on either endpoint and either side, before any request;
+  - `probeTier`: up, missing, out.
+- **`test-live` [16]:** decide mode end to end on Postgres:
+  - refusals without the tier, or with another model;
+  - a dry run;
+  - a run with one proposal at the tier's P(outdates) and its lineage, a relation with no writer call, and no proposal where the writer answered none;
+  - every claim under decide mode's key;
+  - a follower refused when the tier serves another model.
+- **`test-preflight` [5], [10]:** the decide-mode rows, the tier row held to the decider, and the remedy for each key.
+- **Mutants:** 47, each undoing one of those, all killed:
+  - 34 on the decide code, the probe, the lineage and the knob. 13 of them, on the writer's prompt, parse and checks, are caught by `eval-judge-propose.ts --self-check` alone, as in SMD-3114;
+  - 8 on preflight;
+  - 5 on `db/consolidate.ts`. One first failed outside its block while three suites ran at once; run alone, its own assertion caught it.
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+|---|---|---|---|
+| build | the pass key left out prompt 4's version, though both questions carry prompt 4's rendering of the pair | cold read | `@p4d1` |
+| build | the lineage named prompt 4's hash for decide mode's proposals | cold read | the decider, `decide_version` and decide mode's prompt hash |
+| build | preflight failed the server on decide mode's knobs, which only the pass reads | cold read | warnings, as for the jev tier when only the decider holds it |
+| build | preflight's pass ownership compared whole keys, so a key of this server's judge at an older prompt version lost its sleep row | run-it | ownership by models, as before; decide keys by decider and writer |
+| canary | both Python tiers (`jev/h2o`, `jev/decider`) wrote `"id": null` for a decision sent without one, which the client reads as another decision's result, so the first 67 thoughts of the canary's pass failed. The stubs left the id out, as the contract types it, and SMD-3114's runs always sent one | run-it | each tier writes the id only when the decision has one; the 67 were retried |
+| canary | of the first 48 proposals, 38 outdated a Linear ticket, 35 of those tickets already said Done, and 23 gave completion alone as the reason: the writer read a record's work done as outdating the record | walkthrough | the record rule, decide version 2, from the maintainer's model of a done ticket as a historical record; session summaries likewise. On the canary's 54 d1 proposals, labelled before the run, it keeps 6 of 10 true and 6 of 40 false (v1 rerun: all 54), missing its bar of 8 true; 3 of the 4 true it loses fail the quote check |
+| canary | the quote check refused shortened quotes, and a refutation that quotes the claim it calls wrong, which put the claim's words in both thoughts | run-it | version 2's quote reading (`quoteIn`, `onlyQuoted`); on the first 54 it keeps 7 of 10 true and 7 of 40 false. On 41 fresh proposals, labelled before the run, it keeps 3 of 5 true and 12 of 28 false, missing its bar on both, with the quote reading changing nothing there; version 2 is not deployed |
+| canary | the branch made the shelved version 2 the pass's default, so merging it would start a fresh `@p4d2` pass judging the whole pool again with the record rule | cold read | version 1 is the default again (`PASS_WRITER`, `DECIDE_VERSION`), its key and prompt hash the canary's; version 2 stays for the eval |

@@ -174,7 +174,7 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 17 | `[fork] evals: choose the local models by measurement` | The local defaults were picked by size. `evals/` benchmarks retrieval and extraction against real Ollama; `nomic-embed-text` placed 5th of 7 and `llama3.2` reproduced its production faults. Defaults are now `embeddinggemma` + `qwen2.5:7b`. | **Unfiled** |
 
 <!-- changes-index:start — generated from changes/ by scripts/fork-index.ts; do not edit by hand -->
-**313 numbered changes** on top of the pin: 1–17 are the table above; 18–313 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
+**344 numbered changes** on top of the pin: 1–17 are the table above; 18–344 are one file each under [`changes/`](changes/README.md), newest last. A change's record is its file; the review-pass prose behind it is in the commits (`(caught: …)` tags, read by `scripts/mechanism-yield.ts`).
 
 | # | Change | Ticket |
 | --- | --- | --- |
@@ -474,6 +474,37 @@ and fails a "FORK.md change N" citation with no file behind it (SMD-1917).
 | 311 | [ci-parity.sh runs what CI runs, held to the workflow both ways by check 35](changes/311-ci-parity-sh-runs-what-ci-runs-held.md) | SMD-2903 |
 | 312 | [The REST core's typed client, and a forwarded refusal that carries its own words](changes/312-the-rest-core-s-typed-client-and-a-forwarded.md) | SMD-2287 |
 | 313 | [What became of each finding posted to the board, and the acceptance rate, from the brain alone](changes/313-what-became-of-each-finding-posted-to-the-board.md) | SMD-2682 |
+| 314 | [A re-capture says what it did to a capture-only key's label](changes/314-a-re-capture-says-what-it-did-to-a-capture.md) | SMD-2898 |
+| 315 | [A board-finding comment says each relation word once, in its best finding's direction, with how many row pairs back it and how many read it the other way](changes/315-a-board-finding-comment-says-each-relation-word.md) | SMD-2930 |
+| 316 | [The MCP server as a client of the REST core, and the REST core's keyed /health](changes/316-the-mcp-server-as-a-client-of-the-rest-core.md) | SMD-2287 |
+| 317 | [One env file is one brain: the scripts take the instance's project, not `open-brain`](changes/317-one-env-file-is-one-brain-the-scripts-take.md) | SMD-2873 |
+| 318 | [The board-findings poster skips pairs of closed tickets and comments on the open side](changes/318-the-board-findings-poster-skips-pairs-of-closed.md) | SMD-2932 |
+| 319 | [A settle by the pass survives 067's reopen](changes/319-a-settle-by-the-pass-survives-067-s-reopen.md) | SMD-2913 |
+| 320 | [An `observability` compose profile](changes/320-an-observability-compose-profile.md) | SMD-1849 |
+| 321 | [A ticket a thought no longer tells right, priced, given its inputs, then labelled on both searches: the eval, its verdict, migration 095 and the label](changes/321-a-ticket-a-thought-no-longer-tells-right-priced.md) | SMD-2540 |
+| 322 | [A capture-only key's thought is taken while its supersedes chain reaches another's](changes/322-a-capture-only-key-s-thought-is-taken-while.md) | SMD-2708 |
+| 323 | [A capture survives its provider's outage](changes/323-a-capture-survives-its-provider-s-outage.md) | SMD-2888 |
+| 324 | [A long thought's answered windows survive a stop](changes/324-a-long-thought-s-answered-windows-survive-a-stop.md) | SMD-2694 |
+| 325 | [A proposal's review names who wrote each side, and flags a capture-only key's or lower-trust side proposed to stand](changes/325-a-proposal-s-review-names-who-wrote-each-side.md) | SMD-2707, SMD-2480 |
+| 326 | [db/bench-live.ts](changes/326-db-bench-live-ts.md) | SMD-3024 |
+| 327 | [Tier tools without joining another brain's networks](changes/327-tier-tools-without-joining-another-brain.md) | SMD-2875 |
+| 328 | [The canary is a brain on a port of its own with keys of its own](changes/328-the-canary-is-a-brain-on-a-port-of-its-own.md) | SMD-2874, SMD-3032 |
+| 329 | [A capture made during a sleep goes ahead of the stalled thought](changes/329-a-capture-made-during-a-sleep-goes-ahead.md) | SMD-3008 |
+| 330 | [The edge proxy, its own project in front of several brains: routed by host, reaching each brain's published port, in one shape per runtime](changes/330-the-edge-proxy-its-own-project-in-front.md) | SMD-2876 |
+| 331 | [One definition for 082's lapse: the trigger clears what `ob1_lapse_walk` returns, and the review listing's read returns it](changes/331-one-definition-for-082-s-lapse-the-trigger.md) | SMD-3035 |
+| 332 | [Fork Checks' full-stack job split three ways by what each group of steps stands up](changes/332-fork-checks-full-stack-job-split-three-ways.md) | SMD-3051 |
+| 333 | [The servers give a thought saved without a vector its vector, by themselves](changes/333-the-servers-give-a-thought-saved-without.md) | SMD-2889 |
+| 334 | [Stable's tier routes deprecated before v2.0.0 removes them](changes/334-stable-s-tier-routes-deprecated-before-v2-0-0.md) | SMD-3057 |
+| 335 | [Fork Checks' live suite in four shards, one job each: "Schema against real Postgres" was the run's critical path](changes/335-fork-checks-live-suite-in-four-shards-one-job.md) | SMD-3048 |
+| 336 | [An unlink takes the review lock: `update_thought` takes `ob1:supersession-review` whenever its envelope names `supersedes`, a clear included](changes/336-an-unlink-takes-the-review-lock-update-thought.md) | SMD-3045 |
+| 337 | [The REST core accepts the authorization server's tokens](changes/337-the-rest-core-accepts-the-authorization-server.md) | SMD-2286 |
+| 338 | [The consolidation judge keeps every pair](changes/338-the-consolidation-judge-keeps-every-pair.md) | SMD-3058 |
+| 339 | [The thoughts with no vector by an index of their own](changes/339-the-thoughts-with-no-vector-by-an-index-of-their.md) | SMD-3056 |
+| 340 | [H2O decides supersession and an LLM writes only the proposal](changes/340-h2o-decides-supersession-and-an-llm-writes.md) | SMD-3114 |
+| 341 | [The sleep scheduler's own cuts of a stalled thought are counted apart from its stops, so the held word says the wakes and orders by them](changes/341-the-sleep-scheduler-s-own-cuts-of-a-stalled.md) | SMD-3060 |
+| 342 | [Consolidation's decide mode: the typed-decision tier gives each pair's verdict and the judge's model writes only the proposals it calls outdates, adopted from SMD-3114's measurement for review on the canary](changes/342-consolidation-s-decide-mode-the-typed-decision.md) | SMD-3115 |
+| 343 | [The consolidation judge's distinct is stored: 084's relation vocabulary gains `distinct`, so a pair the judge calls unrelated is a standing relation on the newer thought](changes/343-the-consolidation-judge-s-distinct-is-stored-084.md) | SMD-3117 |
+| 344 | [\[38\]'s mid-read stop is named and checked for where its pass is: in its start, before its probe; it no longer holds each probe 4 s](changes/344-38-s-mid-read-stop-is-named-and-checked.md) | SMD-3106 |
 
 Changes landed since the last release, if any, are the [`changes/smd-*.md`](changes/) files, numbered at the next cut (SMD-1804).
 <!-- changes-index:end -->
@@ -1033,7 +1064,8 @@ Deliberate. Recorded so nobody assumes they were missed.
   the upstream answer; the fork has its own OAuth path now. The `auth` profile runs
   an authorization server (SMD-2285), and on a stack configured with a stable
   public origin the MCP server advertises it at that origin (SMD-2382). It is a
-  preview until the MCP server accepts the token it issues (SMD-2286), and keys
+  preview until `mcp-server/`, which trades the token it issues (SMD-2286), serves
+  `/mcp` (SMD-2287 PR 5), and keys
   keep working beside it (a claude.ai connector at that origin is asked to sign
   in first). Change 42 is adjacent, not a substitute: it makes the claude.ai
   connector *reach* the key path at all (upstream
