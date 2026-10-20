@@ -13040,6 +13040,13 @@ if (want("41")) {
     const rc3 = await run();
     assert(head76 === null && rc3.posted.every((p) => p.on !== "ZQ-76" && p.on !== "ZQ-77") && (await rowsOf("ZQ-76", "ZQ-77")).length === 0 && !(await selectFindings(bsql)).some((f) => f.a === "ZQ-76"),
       `a ticket whose head is a hand capture with no status is still closed, read from its newest Linear row, so two closed tickets stay unposted (head ${head76}; ${summaryLine(rc3, 10, false).trim()})`);
+    // Closed is node_settled_types() (SMD-2935): with 058's set back, a Duplicate reads open, so the step refuses, naming 101; 101 re-applied, it runs.
+    await bsql`CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{completed,canceled}'::text[] $$`;
+    const before101 = await findingsSchemaProblem(bsql);
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_duplicate_settles.sql") });
+    const after101 = await findingsSchemaProblem(bsql);
+    assert(before101 === "migration 101 is not applied, so a Duplicate ticket would read as open (cd db && bun migrate.ts --url …)" && after101 === null,
+      `closed() reads node_settled_types(): on a brain whose set lacks duplicate the step refuses, naming 101, and runs once 101 is applied (${JSON.stringify([before101, after101])})`);
 
     // 4. The egress gate, a dry run, a failed post, then the post.
     const z30 = await ticket(30, "gated a"), z31 = await ticket(31, "gated b");

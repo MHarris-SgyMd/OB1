@@ -150,11 +150,12 @@ export function movedAmong(hits: readonly { id: string; content: string; created
  * ticket row — even one stamped agent or ingested — so printed beside another
  * thought's `By:` line, past the caller's min_trust, it would be words no one
  * vouched for; an allowlist leaves nothing to clean (the maintainer's call,
- * review pass 2). The six are node_lifecycle_types() (068), the only types 095
- * returns; a custom state reads as its type's word ("In Review" as In
- * Progress). The REST answer keeps each status's name for a caller that wants it.
+ * review pass 2). The seven are node_lifecycle_types() (058; `duplicate` since
+ * 101, SMD-2935), the only types 095 returns; a custom state reads as its
+ * type's word ("In Review" as In Progress). The REST answer keeps each
+ * status's name for a caller that wants it.
  */
-export const TYPE_WORDS: Readonly<Record<string, string>> = { triage: "Triage", backlog: "Backlog", unstarted: "Todo", started: "In Progress", completed: "Done", canceled: "Canceled" };
+export const TYPE_WORDS: Readonly<Record<string, string>> = { triage: "Triage", backlog: "Backlog", unstarted: "Todo", started: "In Progress", completed: "Done", canceled: "Canceled", duplicate: "Duplicate" };
 const word = (type: string) => TYPE_WORDS[type] ?? "?";
 
 /**

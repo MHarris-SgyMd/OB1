@@ -336,7 +336,8 @@ cannot take a parameter and sends a fixed weight; `db/migrations/020_*.sql` and
 `search_thoughts_hybrid` exactly as before, so the default ranking is unchanged
 and a superseded hit is only labelled (`⚠ Superseded by …`). On, it calls 059's
 `search_thoughts_current`: over the hybrid's top min(100, 4 × limit), a thought
-whose ticket is settled — completed or canceled, by 058's `node_state`, so a
+whose ticket is settled — completed, canceled or a duplicate, by 058's and
+101's `node_state`, so a
 note filed under a Done ticket counts — or that a newer thought supersedes has
 its score multiplied by 0.25. Under the hybrid's fusion that puts every current
 match in the window first, then the demoted ones in their own order (a demoted
@@ -344,10 +345,10 @@ exact hit keeps a quarter of its literal bonus, so on a query of literals only,
 or holding several of the query's literals, it can still outrank current rows —
 the header says when one does). Since migration 077 (SMD-2271) a thought with no
 ticket of its own is demoted too when every ticket it is about is finished:
-the keys in its topics, action items or session-summary header all Done or
-Canceled — or, naming none of those, three or more keys in its text, all
+the keys in its topics, action items or session-summary header all Done,
+Canceled or Duplicate — or, naming none of those, three or more keys in its text, all
 finished — and no open ticket named anywhere in it. Each
-demoted hit says `↓ Ranked ×0.25 — completed` (or `canceled`, `superseded`,
+demoted hit says `↓ Ranked ×0.25 — completed` (or `canceled`, `duplicate`, `superseded`,
 `references settled work (SMD-…)` with the deciding keys; the structured reply's
 `demoted` carries the token `references_settled`),
 and the header says how many of the window were demoted, how many carry a
@@ -382,7 +383,7 @@ and demoted lines, every moved ticket by key, and lists them in each hit's
 status's name and type); `search` gives that result `moved`, in status types
 over REST as well, and over MCP starts its title `[moved since written: …]` —
 before the thought's own words, which could forge it at the end. A status prints as its type's word (Triage,
-Backlog, Todo, In Progress, Done, Canceled), never the board's name: any write
+Backlog, Todo, In Progress, Done, Canceled, Duplicate), never the board's name: any write
 key can write a ticket row's name, and it would print on other people's hits.
 A hit's first 50 keys, in the order it mentions them, are read; the rest are
 counted (`movedNotRead`; beside a move, `(+N more named past the first 50, not

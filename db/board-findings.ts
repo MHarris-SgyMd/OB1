@@ -387,9 +387,13 @@ export function withoutFindingTerms(policy: EgressPolicy): EgressPolicy {
 export async function findingsSchemaProblem(sql: SQL, opts: { write?: boolean } = {}): Promise<string | null> {
   const write = opts.write ?? true;
   const [r] = await sql`SELECT to_regclass('board_findings_posted') IS NOT NULL AS posted,
-                               to_regprocedure('consolidation_tickets_linked(jsonb, jsonb)') IS NOT NULL AS linked`;
+                               to_regprocedure('consolidation_tickets_linked(jsonb, jsonb)') IS NOT NULL AS linked,
+                               'duplicate' = ANY(node_settled_types()) AS settles_duplicate`;
   if (!r.linked) return "migration 079 is not applied, so whether the board links two tickets cannot be asked (cd db && bun migrate.ts --url …)";
   if (!r.posted) return "migration 087 is not applied, so nothing posted could be recorded (cd db && bun migrate.ts --url …)";
+  // closed() reads node_settled_types(): before 101 a Duplicate ticket would
+  // read open, and a pair of finished tickets would be posted (SMD-2935).
+  if (!r.settles_duplicate) return "migration 101 is not applied, so a Duplicate ticket would read as open (cd db && bun migrate.ts --url …)";
   // 029's and 068's tables precede 087 in every tree, so they exist here.
   const [g] = await sql`SELECT has_table_privilege('board_findings_posted', 'SELECT') AS posted_read,
                                has_table_privilege('board_findings_posted', 'INSERT') AS posted_write,
@@ -413,16 +417,16 @@ export async function findingsSchemaProblem(sql: SQL, opts: { write?: boolean } 
 // with neither is open, and an unknown never reads as NULL, which would drop
 // the pair. A pair of closed tickets is not posted: a comment asking to link
 // two finished tickets is the least useful kind, and it spends the cap open
-// work could use (SMD-2932). Reopened, it is again. 058's
-// node_settled_types() lacks duplicate, so this set is its own until
-// SMD-2935 adds it there and this reads it.
+// work could use (SMD-2932). Reopened, it is again. Closed is settled:
+// node_settled_types(), which holds `duplicate` since 101 (SMD-2935) — one
+// definition, node_state's.
 const closed = (k: string) => `coalesce(coalesce(
     (SELECT th.status_type FROM ob1_ticket_head th WHERE th.issue_key = md5(${k})::uuid AND th.status_type IS NOT NULL),
     (SELECT t.metadata->>'status_type' FROM thoughts t
       WHERE t.metadata ? 'issue' AND md5(t.metadata->>'issue')::uuid = md5(${k})::uuid
         AND t.metadata->>'source' = 'linear' AND t.metadata->>'status_type' IS NOT NULL
       ORDER BY t.metadata->>'linear_updated_at' DESC NULLS LAST, t.created_at DESC, t.id DESC LIMIT 1)
-  ) IN ('completed', 'canceled', 'duplicate'), false)`;
+  ) = ANY(node_settled_types()), false)`;
 
 // Both sides are Linear rows (metadata.source = 'linear': board-sync's
 // tickets and their dated sections), and both identities are identifiers —
