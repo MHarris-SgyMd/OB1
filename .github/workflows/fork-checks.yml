@@ -87,7 +87,7 @@ jobs:
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 27, 28,
       # 29, 32, 33, 34 and 35 parse YAML with Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, and the edge proxy
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, and the edge proxy
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -151,7 +151,7 @@ jobs:
         run: bun deploy/test-tier-sh.ts
 
   portable-server:
-    name: Portable server (Bun + Workers)
+    name: Portable server
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -490,28 +490,6 @@ jobs:
       - name: Authorization server rules
         working-directory: deploy/auth
         run: bun store.ts --self-check && bun provision.ts --self-check && bun limits.ts --self-check && bun target.ts --self-check
-
-      # Proves the Cloudflare target still builds under the real Workers bundler.
-      # Catches a dependency pulling in a node: builtin Workers cannot provide.
-      - name: Cloudflare Workers build
-        working-directory: server-portable
-        run: bunx wrangler deploy --dry-run --outdir=.cf-out
-        env:
-          CLOUDFLARE_API_TOKEN: ""
-          WRANGLER_SEND_METRICS: "false"
-
-      # The Worker carries OpenTelemetry's API alone, whose spans are no-ops
-      # there: the SDK is loaded only on Bun, and wrangler.toml aliases its
-      # module to a stub, without which the bundler would put the whole SDK
-      # (its exporter, its context manager, async_hooks) in the Worker for
-      # code that never runs there (SMD-1849 PR 2b). The bundle names each
-      # module it holds by its path.
-      - name: The Worker bundles no OpenTelemetry SDK
-        working-directory: server-portable
-        run: |
-          bundled=$(grep -o 'node_modules/@opentelemetry/[a-z-]*' .cf-out/index.js | sort -u | tr '\n' ' ')
-          [ "$bundled" = "node_modules/@opentelemetry/api " ] \
-            || { echo "the Worker bundles more of OpenTelemetry than its API: $bundled" >&2; exit 1; }
 
       # Every vendored server is a consumer of this server's auth module — the
       # seven extensions (change 64) and the recipes' and integrations' MCP
@@ -933,8 +911,8 @@ jobs:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
       # The one that matters: the real MCP server, driven over JSON-RPC, with
-      # OB1_STORE unset — the SQL store is the default (change 97) and this is
-      # the job that proves it — and no Supabase configuration present at all.
+      # OB1_STORE unset — the SQL store, the only one (change 97, SMD-3152) —
+      # and no Supabase configuration present at all.
       - name: End-to-end over MCP with no Supabase
         working-directory: server-portable
         run: bun test-e2e-sql.ts
@@ -1071,15 +1049,6 @@ jobs:
       - name: Agent identity
         working-directory: server-portable
         run: bun test-agents.ts
-        env:
-          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-
-      # The PostgREST store — kept for Cloudflare Workers (change 97); every
-      # other suite runs the SQL store. Uses compat/supabase-sql as the fixture: real SQL against
-      # real Postgres, so a wrong RPC argument shape fails here as it would live.
-      - name: PostgREST store argument shapes
-        working-directory: server-portable
-        run: bun test-store-postgrest.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 

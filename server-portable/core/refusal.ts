@@ -32,7 +32,7 @@ export type Refusal =
   | { code: "SUPERSEDES_UNJUDGED"; retryable: true; cause: "registry_away" }  // a capture key's id is not to hand while the registry may answer — whatever the target (SMD-2473)
   | { code: "REFUSED_SUPERSEDES_UNKNOWN"; retryable: false }          // the supersedes names no thought
   | { code: "DERIVED_FROM_MISSING"; retryable: false; named: { position: number; id: string }[] } // derived_from entries that name no thought — empty for a key that cannot read (the existence-oracle rule)
-  | { code: "EMBEDDING_NOT_ATTACHED"; retryable: true; id: string; detail: string } // saved, but its vector did not attach (the PostgREST two-step)
+  | { code: "EMBEDDING_NOT_ATTACHED"; retryable: true; id: string; detail: string } // saved, but its vector did not attach (the retired PostgREST store's two-step; no producer since SMD-3152, removed by SMD-3153)
   // update_thought and delete_thought: the store's refusals (018, 032, 042).
   | { code: "REFUSED_NOTHING_TO_UPDATE"; retryable: false }           // none of content, metadata_patch, supersedes
   | { code: "REFUSED_STALE_READ"; retryable: false; id: string; currentUpdatedAt?: string } // changed since the if_unchanged_since passed
