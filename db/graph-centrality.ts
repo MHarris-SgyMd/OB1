@@ -48,10 +48,10 @@
  * 1; one it drops weighs 0; under `--decay-done` a completed, canceled or
  * duplicate thought weighs `DONE_WEIGHT` (0.25, pre-registered here, one
  * weight, exact in binary so the sums are too). A row's lifecycle is its
- * TICKET's: a row carrying a ticket
- * (`issue`) or derived from one (`ticket` — SMD-2059's dated sections) takes
- * the status of the ticket's head — of the rows carrying that `issue`, one
- * nothing supersedes before one superseded, the newest sync before an older,
+ * TICKET's: a row carrying a ticket (`issue`) or derived from one (`ticket` —
+ * SMD-2059's dated sections) takes the status of the ticket's head — of the
+ * rows carrying that `issue`, one nothing supersedes before one superseded,
+ * the newest sync before an older,
  * then the id — so a Done ticket's observations and its superseded earlier
  * rows are settled with it; a row with no ticket claim takes the status keys
  * on its own row, if any. A twin the sync chained under a head without an
@@ -85,9 +85,9 @@
  * Linear keeps a relation after a ticket completes — a Done ticket whose
  * blocker is still open is settled, not blocked, and weighs what its lifecycle
  * says. A blocker is open unless its own lifecycle, read through the
- * `lifecycle` rows above via `source_thought()` (053's resolver), is completed
- * or canceled: a settled blocker is not a blocker. Within a system that gates
- * (below: the board does), a blocker the brain does not hold, or one with no
+ * `lifecycle` rows above via `source_thought()` (053's resolver), is completed,
+ * canceled or duplicate: a settled blocker is not a blocker. Within a system
+ * that gates (below: the board does), a blocker the brain does not hold, or one with no
  * status_type this file knows, still blocks — the source said "blocked" and
  * nothing here says it is settled — and the output counts such blockers rather
  * than hiding them. A row derived from a ticket (`ticket`) or carrying one
@@ -122,7 +122,7 @@
  * writes `blocks` / `blocked_by` for any system it is given, and both flags
  * read them. A blocker is settled by its row's lifecycle, and a row of another
  * system states one only if its source said so (an `--items` file, in
- * `facets.status_type`, one of the six types above). So a system GATES only
+ * `facets.status_type`, one of the seven types above). So a system GATES only
  * when some source row of it states, on its own metadata, a status_type this
  * file knows — a status a row borrows through a Linear ticket claim does not
  * count (first review pass). Under that rule its links are read exactly as the
@@ -146,8 +146,8 @@
  * `superseded_by`), and the two status sets (101 adds `duplicate` to both),
  * which must equal `LIFECYCLE_TYPES` and `LIFECYCLE_FILTERS.done` — a brain
  * whose sets differ, one before 101 among them, is refused (exit 2), as is
- * one without 058. This file is their first
- * reader: without either dependency flag the rows are `node_lifecycle()`'s,
+ * one without 058. This file is their first reader: without either dependency
+ * flag the rows are `node_lifecycle()`'s,
  * which reads `thoughts` and, since 068, `ob1_ticket_head` (both the capture
  * group's), so a role without the `structure` group's `thought_sources` runs
  * every other mode; the flags read `node_state()`,
@@ -358,8 +358,7 @@ export const LIFECYCLE_CTE = `lifecycle AS (SELECT thought_id, status, status_ty
  * an unknown one kept), `blocked` the rule — blockers, and the thought not
  * completed, canceled or duplicate — `unknown_blockers` those no known
  * status settles, `in_dependencies` whether a gating link names its ticket at
- * all. The
- * lifecycle columns are node_lifecycle()'s, so every count reads one
+ * all. The lifecycle columns are node_lifecycle()'s, so every count reads one
  * lifecycle whichever of the two a run takes. The rules — which link blocks,
  * which system gates (SMD-2218), what settles a blocker — are the header's,
  * written once in 058.
@@ -401,9 +400,8 @@ export function weightsSql(opts: Pick<Options, "status" | "decayDone"> & Partial
   // blocked — so the factor passes a completed, canceled or duplicate row
   // untouched, and `--status done` or the decay read it as without the flag
   // (first review pass). `held` marks the rows the factor took from weight
-  // above 0 to 0, or
-  // to BLOCKED_WEIGHT of it under --decay-blocked — what the flag did in this
-  // run, which coverage counts.
+  // above 0 to 0, or to BLOCKED_WEIGHT of it under --decay-blocked — what the
+  // flag did in this run, which coverage counts.
   // Under --decay-blocked the factor is BLOCKED_WEIGHT, a constant written as
   // SQL text as DONE_WEIGHT is, and `blockers` is carried for the held rows
   // alone — a settled ticket's leftover relation holds nothing, so it names
@@ -1073,7 +1071,7 @@ export async function schemaProblem(run: Runner, opts: Pick<Options, "startable"
   const [{ known, settled }] = await run(`SELECT array_to_string(node_lifecycle_types(), ',') AS known, array_to_string(node_settled_types(), ',') AS settled`, []);
   const same = (sql: unknown, ts: readonly string[]) => String(sql).split(",").sort().join() === [...ts].sort().join();
   if (!same(known, LIFECYCLE_TYPES) || !same(settled, LIFECYCLE_FILTERS.done)) {
-    return `This script knows the status types ${LIFECYCLE_TYPES.join(",")} (settled: ${LIFECYCLE_FILTERS.done.join(",")}); this brain's migrations 058 and 101 know ${known} (settled: ${settled}). Update whichever is behind.`;
+    return `This script knows the status types ${LIFECYCLE_TYPES.join(",")} (settled: ${LIFECYCLE_FILTERS.done.join(",")}); this brain's node_lifecycle_types() and node_settled_types() (058, 101) hold ${known} (settled: ${settled}). Update whichever is behind: the brain with db/migrate.ts (101 adds duplicate; after an older tree's --reapply, this tree's --reapply), the script with a newer checkout.`;
   }
   return null;
 }

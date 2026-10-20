@@ -8377,6 +8377,10 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   const missingStart = await schemaProblem(run, startOpts);
   // 058's sets alone are a brain before 101 (SMD-2935): six known, two settled.
   await reapply("058");
+  const before101 = await schemaProblem(run, DEFAULT_OPTIONS);
+  // Then each set apart from 101's: the known one alone, the settled one alone.
+  await restoreShipped("node_lifecycle_types", "node_settled_types");
+  await db.exec(`CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{triage,backlog,unstarted,started,completed,canceled,duplicate,weird}'::text[] $$`);
   const skewKnown = await schemaProblem(run, DEFAULT_OPTIONS);
   await restoreShipped("node_lifecycle_types", "node_settled_types");
   await db.exec(`CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{completed,canceled}'::text[] $$`);
@@ -8395,9 +8399,10 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   assert(fine === null && fineStart === null
       && missing === "graph-centrality reads a thought's lifecycle through node_state: migration 058 is not applied. Run db/migrate.ts."
       && missingStart === "graph-centrality reads a thought's lifecycle and its blockers through node_state: migration 058 is not applied. Run db/migrate.ts."
-      && (skewKnown ?? "").includes("this brain's migrations 058 and 101 know triage,backlog,unstarted,started,completed,canceled (settled: completed,canceled). Update whichever is behind.")
-      && (skewSettled ?? "").includes("know triage,backlog,unstarted,started,completed,canceled,duplicate (settled: completed,canceled)") && reordered === null,
-    `schemaProblem: nothing on a migrated brain; without node_state every mode is refused naming 058 (the dependency flags naming the blockers too); a known or settled set that is not the script's — 058's alone, a brain before 101, among them — is refused naming both, and the same members in another order are not (${JSON.stringify([fine, skewKnown, skewSettled, reordered])})`);
+      && (before101 ?? "").includes("this brain's node_lifecycle_types() and node_settled_types() (058, 101) hold triage,backlog,unstarted,started,completed,canceled (settled: completed,canceled). Update whichever is behind: the brain with db/migrate.ts (101 adds duplicate; after an older tree's --reapply, this tree's --reapply), the script with a newer checkout.")
+      && (skewKnown ?? "").includes("hold triage,backlog,unstarted,started,completed,canceled,duplicate,weird (settled: completed,canceled,duplicate)")
+      && (skewSettled ?? "").includes("hold triage,backlog,unstarted,started,completed,canceled,duplicate (settled: completed,canceled)") && reordered === null,
+    `schemaProblem: nothing on a migrated brain; without node_state every mode is refused naming 058 (the dependency flags naming the blockers too); 058's sets alone (a brain before 101) are refused naming both sets and each remedy, as is a known set or a settled set that alone is not the script's, and the same members in another order are not (${JSON.stringify([fine, before101, skewKnown, skewSettled, reordered])})`);
   // The replays above left 058's bodies; 068 redefines two of them over its
   // projection and 071 two over its gate (node_state again, and
   // node_dependencies, which only 071 redefines), and the sections after read

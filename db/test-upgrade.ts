@@ -4361,8 +4361,9 @@ console.log("\n[20at] Migration 101: refused by name without 058, then without 0
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < the101 });
   const sql = new SQL({ url: URL_, max: 1 });
+  const VEC = `[${Array.from({ length: OPTS.dim }, (_, i) => (i === 0 ? 1 : 0)).join(",")}]`;
   const ticket = async (key: string, status: string, type: string) =>
-    ((await sql`INSERT INTO thoughts (content, metadata) VALUES (${`upgrade 101: ${key}`}, ${{ source: "linear", issue: key, status, status_type: type, linear_updated_at: "2026-10-19T00:00:00.000Z" }}::jsonb) RETURNING id::text AS id`)[0] as { id: string }).id;
+    ((await sql`INSERT INTO thoughts (content, metadata, embedding) VALUES (${`upgrade 101: ${key}`}, ${{ source: "linear", issue: key, status, status_type: type, linear_updated_at: "2026-10-19T00:00:00.000Z" }}::jsonb, ${VEC}::vector) RETURNING id::text AS id`)[0] as { id: string }).id;
   const dup = await ticket("UPG-2", "Duplicate", "duplicate"), open = await ticket("UPG-1", "Todo", "unstarted");
   for (const [id, key] of [[dup, "UPG-2"], [open, "UPG-1"]]) await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${key}, ${key}, 'text/markdown')`;
   await sql`SELECT record_source_links(${open}::uuid, 'linear', '[{"relation": "blocked_by", "target": "UPG-2"}]'::jsonb)`;
@@ -4373,7 +4374,18 @@ console.log("\n[20at] Migration 101: refused by name without 058, then without 0
   const [was] = await sql`SELECT (SELECT open FROM node_state(ARRAY[${dup}::uuid])) AS dup_open, (SELECT blocked FROM node_state(ARRAY[${open}::uuid])) AS blocked`;
   assert(was.dup_open === null && was.blocked === true && (await gate()) === false, `[20at] setup: at the file before 101 a Duplicate is an unknown status and blocks what it blocks, and its row does not gate (${JSON.stringify(was)})`);
   const before = await rows(), auditBefore = await audits();
+  // A server's pooled connection: one session that has searched with
+  // prefer_current enough times for plpgsql to cache a generic plan. 101 must
+  // reach it — CREATE OR REPLACE of the sets alone did not (review pass 1).
+  const warm = new SQL({ url: URL_, max: 1 });
+  const demotedFor = async () => (((await warm`SELECT demoted FROM search_thoughts_current(${VEC}::vector, 'upgrade 101', 0, 10, '{}'::jsonb, 0, 30, NULL) WHERE id = ${dup}::uuid`)[0] as { demoted: string[] | null } | undefined)?.demoted ?? null);
+  const warmBefore: (string[] | null)[] = [];
+  for (let i = 0; i < 8; i++) warmBefore.push(await demotedFor());
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the101 });
+  const warmAfter = await demotedFor();
+  await warm.close();
+  assert(warmBefore.every((d) => d === null) && warmAfter?.join() === "duplicate",
+    `a session that searched eight times before 101 (a cached generic plan) demotes the Duplicate after it, as a fresh one would (${JSON.stringify([warmBefore[0], warmAfter])})`);
   const [now] = await sql`SELECT (SELECT open FROM node_state(ARRAY[${dup}::uuid])) AS dup_open, (SELECT blocked FROM node_state(ARRAY[${open}::uuid])) AS blocked,
                                  (SELECT unknown_blockers FROM node_state(ARRAY[${open}::uuid])) AS unknown, (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift`;
   assert(now.dup_open === false && now.blocked === false && (now.unknown ?? []).length === 0 && (await gate()) === true && now.drift === 0,

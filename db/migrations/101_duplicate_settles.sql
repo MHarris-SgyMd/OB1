@@ -23,9 +23,15 @@
 -- WHAT
 --   * node_lifecycle_types(): the seven, `duplicate` after `canceled`, as
 --     Linear's board lists it. node_settled_types(): {completed, canceled,
---     duplicate}. Same signatures, IMMUTABLE as before; CREATE OR REPLACE,
---     so every caller's next plan reads them (a cached plan that inlined
---     them is invalidated with them).
+--     duplicate}. Same signatures, IMMUTABLE as before; CREATE OR REPLACE.
+--   * Every function in their schema whose body names either set is altered
+--     to the volatility it has — a no-op that invalidates every session's
+--     plans built on it. CREATE OR REPLACE alone does not reach a plan that
+--     folded the set through a function inlined into another: on PG 16 a
+--     session that had called search_thoughts_current (plpgsql) six times,
+--     its generic plan cached, kept demoting by the six after 101 while a
+--     fresh session did not (review pass 1, run-it). A running server's
+--     pooled connections are such sessions; test-upgrade [20at] holds one.
 --   * ob1_rebuild_source_gate() after them: 071's mirror stores, per source
 --     row, whether its thought's status_type is in node_lifecycle_types(),
 --     and says a migration that changes the set runs it (stable: 16 rows
@@ -41,7 +47,8 @@
 --   A --reapply runs 058's six, then this file's seven. An older tree's
 --   --reapply over a 101 brain puts the six back (and its 071 rebuilds the
 --   mirror to them): run this tree's --reapply after it — a plain run skips
---   101, recorded as applied.
+--   101, recorded as applied. (On a brain holding a judged relation every
+--   --reapply fails at 064 today, before reaching either: SMD-3149.)
 --
 -- NOT HERE
 --   * A Duplicate's target (Linear's duplicateOf): a duplicate settles as a
@@ -49,6 +56,11 @@
 --     facet), not a status.
 --   * graph-centrality's --status open and active: a Duplicate is not open,
 --     so they keep their four and two types.
+--   * A Duplicate whose original is still open reads finished, as a cancel
+--     does: a note filed under it is demoted, a summary naming only it is
+--     about finished work (077), and it no longer blocks. The work moved to
+--     the original, which is read for itself; following duplicate_of to it
+--     would be a rule of its own.
 --
 -- Expected outcome
 --   SELECT node_lifecycle_types(), node_settled_types();
@@ -95,6 +107,29 @@ AS $$ SELECT '{completed,canceled,duplicate}'::text[] $$;
 
 COMMENT ON FUNCTION node_settled_types() IS
   'The status types that settle a node: a settled blocker blocks nothing and a settled thought is not blocked. graph-centrality.ts''s LIFECYCLE_FILTERS.done must equal it, and db/board-findings.ts reads it for a closed ticket. Migration 058 / SMD-2074; duplicate since migration 101 / SMD-2935.';
+
+-- Every reader's cached plans, in every session: a no-op ALTER of each
+-- function whose body names a set (node_state, ticket_references_settled,
+-- ticket_status_inputs, 071's gate, …) invalidates the plans that inlined it,
+-- and so those of its callers. Read from the catalog, not listed: a reader a
+-- later migration adds is covered by its own CREATE OR REPLACE.
+DO $touch$
+DECLARE
+  r record;
+BEGIN
+  FOR r IN
+    SELECT p.oid::regprocedure AS fn,
+           CASE p.provolatile WHEN 'i' THEN 'IMMUTABLE' WHEN 's' THEN 'STABLE' ELSE 'VOLATILE' END AS vol
+      FROM pg_proc p
+     WHERE p.pronamespace = (SELECT pronamespace FROM pg_proc WHERE oid = 'node_settled_types()'::regprocedure)
+       AND p.prosrc ~ 'node_(lifecycle|settled)_types[[:space:]]*[(]'
+       AND p.oid NOT IN ('node_lifecycle_types()'::regprocedure, 'node_settled_types()'::regprocedure)
+       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+  LOOP
+    EXECUTE format('ALTER FUNCTION %s %s', r.fn, r.vol);
+  END LOOP;
+END
+$touch$;
 
 -- 071's mirror, to the new set (its own note: a migration that changes
 -- node_lifecycle_types() runs this after itself).

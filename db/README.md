@@ -1727,16 +1727,24 @@ gains `duplicate` after `canceled` and `node_settled_types()` becomes
 `ob1_rebuild_source_gate()`, as 071 asks of any migration that changes the
 known set (071's mirror stores, per source row, whether its status is a
 known one: 16 rows on stable flip). Nothing else stored is computed from the
-sets. graph-centrality's `LIFECYCLE_TYPES` and `--status done` follow (its
+sets. It also alters every function whose body names a set to the
+volatility it has, a no-op that invalidates the plans built on it in every
+session: replacing the sets alone left a server's pooled connection, once it
+had searched with `prefer_current` six times, demoting by the six (review
+pass 1). graph-centrality's `LIFECYCLE_TYPES` and `--status done` follow (its
 equality check refuses a brain before 101), `board-findings.ts`'s `closed()`
-reads `node_settled_types()` and refuses to post on a brain without 101, a
+reads `node_settled_types()` and refuses to post on a brain without 101 (said
+once, at board-sync's start: after migrating, restart board-sync), a
 demoted Duplicate says `↓ Ranked ×0.25 — duplicate`, and the stated-status
-label prints its word, Duplicate. Refuses by name without 058 or 071; a
+label prints its word, Duplicate. A Duplicate whose original is still open
+reads finished, as a cancel does. Refuses by name without 058 or 071; a
 re-apply is a no-op. An older tree's `--reapply` over a 101 brain puts 058's
-six back: run this tree's `--reapply` after it. test-schema [91] (the sets, a
+six back: run this tree's `--reapply` after it (which fails at 064 on a brain
+holding a judged relation until SMD-3149). test-schema [91] (the sets, a
 Duplicate settled and its blocker cleared, both under 058's sets as before,
-the mirror rebuilt), test-upgrade [20at], test-live [41] (the poster's
-refusal before 101).
+the mirror rebuilt), test-upgrade [20at] (a session's cached plan reaching
+the new sets among it), test-live [41] (the poster's
+refusals without 058's set and before 101).
 
 ## What changed relative to the guide
 
@@ -2864,7 +2872,7 @@ and is unchanged by it. The JSON's `options` gains `decayBlocked: false`.
 `ingest-records.ts --items` writes `blocks` / `blocked_by` for any system, and
 both flags read them. A blocker is settled by its row's lifecycle, which a row
 of another system has only if its source stated one (an items file, in
-`facets.status_type`, one of the six types). So a system gates only when some
+`facets.status_type`, one of the seven types). So a system gates only when some
 source row of it states a known status_type in its own metadata — a status a row
 borrows through a Linear ticket claim does not count — and is then read exactly
 as the board is, an unknown blocker blocking. A system that states none cannot

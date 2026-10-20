@@ -122,9 +122,9 @@ export type MovedInputs = { lifecycle: ReadonlySet<string>; heads: ReadonlyMap<s
  * and only the hits the measurement labelled: none `superseded` names (the
  * eval sampled no superseded thought) and none with a lifecycle of its own.
  * Nor a ticket row (`metadata.issue`) whose type gives it none: a duplicate's
- * row is lifecycle-less to node_state (16 of stable's 721 rows), so the
- * measurement labelled the tickets its body quotes, but a ticket row tells its
- * own status, never others'. Nor a hit with no written time: the session line
+ * row was lifecycle-less to node_state until 101 (16 of stable's 721 rows), so
+ * the measurement labelled the tickets its body quotes, but a ticket row tells
+ * its own status, never others' — and a custom type still has none. Nor a hit with no written time: the session line
  * when it has one, else its stored time. Every other hit is absent — not
  * checked, which the reply says as `moved: null` (the maintainer's call,
  * review pass 4). Every checked hit counts the keys past MOVED_READ: an empty

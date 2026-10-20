@@ -388,12 +388,16 @@ export async function findingsSchemaProblem(sql: SQL, opts: { write?: boolean } 
   const write = opts.write ?? true;
   const [r] = await sql`SELECT to_regclass('board_findings_posted') IS NOT NULL AS posted,
                                to_regprocedure('consolidation_tickets_linked(jsonb, jsonb)') IS NOT NULL AS linked,
-                               'duplicate' = ANY(node_settled_types()) AS settles_duplicate`;
+                               to_regprocedure('node_settled_types()') IS NOT NULL AS sets`;
   if (!r.linked) return "migration 079 is not applied, so whether the board links two tickets cannot be asked (cd db && bun migrate.ts --url …)";
   if (!r.posted) return "migration 087 is not applied, so nothing posted could be recorded (cd db && bun migrate.ts --url …)";
+  if (!r.sets) return "migration 058 is not applied, so whether a ticket is closed cannot be asked (cd db && bun migrate.ts --url …)";
   // closed() reads node_settled_types(): before 101 a Duplicate ticket would
-  // read open, and a pair of finished tickets would be posted (SMD-2935).
-  if (!r.settles_duplicate) return "migration 101 is not applied, so a Duplicate ticket would read as open (cd db && bun migrate.ts --url …)";
+  // read open, and a pair of finished tickets would be posted (SMD-2935). Its
+  // own statement: in the one above, a schema without 058 would fail to parse
+  // rather than be told so (review pass 1).
+  const [d] = await sql`SELECT 'duplicate' = ANY(node_settled_types()) AS settles`;
+  if (!d.settles) return "migration 101 is not applied, or an older tree's --reapply undid it, so a Duplicate ticket would read as open (cd db && bun migrate.ts --url …; after an older tree's --reapply, this tree's --reapply)";
   // 029's and 068's tables precede 087 in every tree, so they exist here.
   const [g] = await sql`SELECT has_table_privilege('board_findings_posted', 'SELECT') AS posted_read,
                                has_table_privilege('board_findings_posted', 'INSERT') AS posted_write,
