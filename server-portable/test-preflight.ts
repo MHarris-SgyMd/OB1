@@ -168,7 +168,7 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   const rowRe = (name: string, flags = "") => new RegExp(`^\\s*[✓✗!·]\\s+${name}\\s`, flags);
   const rowCounts = listedNames.map((name) => [name, (w.out.match(rowRe(name, "gm")) ?? []).length] as const);
   assert(rowCounts.every(([, n]) => n === 1), `over PostgREST every direct-connection check prints exactly one row (${rowCounts.filter(([, n]) => n !== 1).map(([name, n]) => `${name}×${n}`).join(", ") || "all once"})`);
-  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 26, "…twenty-six of them as the catalog-only skip (061's lineage, the workers' and the sleep scheduler's heartbeats, the proposal queue, the plugin tables and the two memory rows among them), the rest by their own hand-written rows");
+  assert(rowCounts.filter(([name]) => new RegExp(`·\\s+${name}\\s+${DIRECT_CHECK_SKIP_OVER_POSTGREST}`).test(w.out)).length === 27, "…twenty-seven of them as the catalog-only skip (061's lineage, the workers' and the sleep scheduler's heartbeats, the proposal queue, the plugin tables, the two memory rows and the thought indexes among them), the rest by their own hand-written rows");
   // And nothing else: every row between `data layer` and the provider section is
   // `schema` or one of the listed names. A hand-written PostgREST row under a
   // misspelt name would print beside the loop's correctly named skip with every
@@ -4683,6 +4683,135 @@ console.log("\n[11] --deep's provider probes are each a span and a point where a
   }
   collector.stop(true);
   provider.stop(true);
+}
+
+console.log("\n[12] The indexes thoughts' reads are planned around: each missing, INVALID or of another shape is named with its remedy, the remedy followed as printed mends it, and a migration the ledger does not record is not looked for (SMD-3146)");
+if (!LIVE) { skip("thought indexes: missing, INVALID, another shape"); }
+else {
+  const { SQL } = await import("bun");
+  // thoughts' seven, by the migration that builds each — the row's table,
+  // written out here so a name dropped from it fails this list.
+  const SEVEN: [string, string][] = [
+    ["thoughts_created_at_idx", "001"], ["thoughts_metadata_idx", "001"], ["idx_thoughts_derived_from", "025"], ["idx_thoughts_supersedes", "025"],
+    ["thoughts_issue_key_idx", "068"], ["thoughts_trust_rank_idx", "074"], ["thoughts_vectorless_idx", "100"],
+  ];
+  const SQL_ENV = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE };
+  await dropSchema(LIVE);
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
+  const db = new SQL({ url: LIVE, max: 1 });
+  const files = readdirSync(join(HERE, "..", "db", "migrations")).filter((n) => /^\d{3}_.*\.sql$/.test(n));
+  await db.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
+  for (const n of files) await db.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('${n}', 'test')`);
+  /**
+   * The fix line's statements, run one at a time as it says: each numbered
+   * step's backticked statements in order — a step offering REINDEX takes
+   * that, not its drop-and-build alternative — and a rename "out of the way"
+   * given a name of this suite's.
+   */
+  const follow = async (out: string) => {
+    const steps = fix(out, "thought indexes").split(/ \d+\) /).slice(1);
+    let moved = 0;
+    for (const step of steps) {
+      const spans = [...step.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+      for (const s of spans.some((x) => x.startsWith("REINDEX")) ? spans.filter((x) => x.startsWith("REINDEX")) : spans) {
+        await db.unsafe(s.includes("RENAME TO …") ? s.replace("RENAME TO …", `RENAME TO pf_moved_${++moved}`) : s);
+      }
+    }
+    return steps.length;
+  };
+  const okRow = /✓\s+thought indexes\s+all 7 indexes thoughts' reads are planned around are present, valid and of their migrations' shape$/;
+  try {
+    const healthy = await run(SQL_ENV);
+    assert(okRow.test(row(healthy.out, "thought indexes")) && fix(healthy.out, "thought indexes") === "", `a brain with every migration recorded and applied: the row is ok, no remedy (${row(healthy.out, "thought indexes").trim()})`);
+    // public off the connection's path: pg_get_indexdef then qualifies 074's
+    // function (public.ob1_trust_rank), which is the same index.
+    const offPath = await run({ ...SQL_ENV, DATABASE_URL: `${LIVE}${LIVE.includes("?") ? "&" : "?"}options=-csearch_path%3Dnowhere` });
+    assert(/✓\s+thought indexes\s+all 7 indexes/.test(row(offPath.out, "thought indexes")), `…and read with public off the connection's path, still ok: a qualified function in a definition is the same shape (${row(offPath.out, "thought indexes").trim()})`);
+
+    // Each of the seven missing: named with what scans, the remedy its
+    // CONCURRENTLY build — and followed as printed, the row is ok again.
+    for (const [name] of SEVEN) await db.unsafe(`DROP INDEX ${name}`);
+    const missing = await run(SQL_ENV);
+    const missingRow = row(missing.out, "thought indexes"), missingFix = fix(missing.out, "thought indexes");
+    assert(missing.code === 0 && /^\s*!\s+thought indexes/.test(missingRow), "all seven missing: a warning, not a refusal to start");
+    for (const [name, m] of SEVEN) {
+      assert(new RegExp(`${name} \\(${m}\\) is missing, so [^;]*every thought`).test(missingRow) && missingFix.includes(`\`CREATE INDEX CONCURRENTLY ${name} ON thoughts `),
+             `…${name} (${m}) named missing, with what scans without it, and its CONCURRENTLY build`);
+    }
+    assert(/thoughts_vectorless_idx \(100\) is missing, so the vector mender's page \(every tick, on each server\) and brain_info's vectorless count scan every thought/.test(missingRow),
+           "…the vectorless index's warning names the mender's page and brain_info's count (SMD-3056)");
+    assert(/thoughts_trust_rank_idx \(074\) is missing, so match_thoughts' min_trust scans every thought/.test(missingRow), "…and the trust index's, min_trust (SMD-1724)");
+    assert(missingFix.includes("Run in psql against the brain's database, as thoughts' owner, one statement at a time (CONCURRENTLY refuses a transaction block, and leaves writes to thoughts running): 1) ")
+           && !/apply it instead/.test(missingFix), "…the remedy says where and how to run it, and with a ledger read names no migration to apply");
+    assert(await follow(missing.out) === 7 && okRow.test(row((await run(SQL_ENV)).out, "thought indexes")), "…and followed as printed, the seven statements, the row is ok again");
+
+    // Each of the seven INVALID — what an unfinished CONCURRENTLY build
+    // leaves, made by flipping the catalog flag as test-upgrade [16] does.
+    for (const [name] of SEVEN) await db.unsafe(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass('public.${name}')`);
+    const invalid = await run(SQL_ENV);
+    const invalidRow = row(invalid.out, "thought indexes"), invalidFix = fix(invalid.out, "thought indexes");
+    for (const [name, m] of SEVEN) {
+      assert(new RegExp(`${name} \\(${m}\\) is INVALID — a CONCURRENTLY build or drop that did not finish, or a build still running — which the planner ignores, so `).test(invalidRow)
+             && invalidFix.includes(`once pg_stat_progress_create_index lists no build of it, \`REINDEX INDEX CONCURRENTLY ${name};\` (or \`DROP INDEX CONCURRENTLY ${name};\` then \`CREATE INDEX CONCURRENTLY ${name} ON thoughts `),
+             `…${name} named INVALID, its remedy REINDEX CONCURRENTLY or a drop and build`);
+    }
+    assert(invalidFix.includes("re-applying 074 does not mend it: its IF NOT EXISTS keeps an INVALID one") && invalidFix.includes("100's file refuses an INVALID one, so a re-apply stops there until this is done"),
+           "…and each says what its file does with an INVALID one: 074's IF NOT EXISTS keeps it, 100's refuses it");
+    assert(await follow(invalid.out) === 7 && okRow.test(row((await run(SQL_ENV)).out, "thought indexes")), "…and the seven REINDEXes, as printed, make the row ok again");
+
+    // Each of the seven of another shape: one column, no predicate, btree.
+    for (const [name] of SEVEN) await db.unsafe(`DROP INDEX ${name}; CREATE INDEX ${name} ON thoughts (created_at)`);
+    const shape = await run(SQL_ENV);
+    const shapeRow = row(shape.out, "thought indexes"), shapeFix = fix(shape.out, "thought indexes");
+    for (const [name, m] of SEVEN) {
+      assert(shapeRow.includes(`${name} (${m}) is of another shape (CREATE INDEX ${name} ON public.thoughts USING btree (created_at)), so `)
+             && shapeFix.includes(`\`DROP INDEX CONCURRENTLY ${name};\` then \`CREATE INDEX CONCURRENTLY ${name} ON thoughts `),
+             `…${name} named of another shape, with its definition, its remedy a drop and a build`);
+    }
+    assert(await follow(shape.out) === 7 && okRow.test(row((await run(SQL_ENV)).out, "thought indexes")), "…and the drops and builds, as printed, make the row ok again");
+
+    // The name held by something that is not thoughts' index — another
+    // table's index, a table — and an index of the shape under another name.
+    await db.unsafe(`DROP INDEX idx_thoughts_derived_from; CREATE TABLE pf_other (derived_from jsonb); CREATE INDEX idx_thoughts_derived_from ON pf_other USING gin (derived_from)`);
+    await db.unsafe(`DROP INDEX idx_thoughts_supersedes; CREATE TABLE idx_thoughts_supersedes (x int)`);
+    await db.unsafe(`ALTER INDEX thoughts_created_at_idx RENAME TO pf_created_at`);
+    const held = await run(SQL_ENV);
+    const heldRow = row(held.out, "thought indexes"), heldFix = fix(held.out, "thought indexes");
+    assert(heldRow.includes("idx_thoughts_derived_from (025) is an index on pf_other, so find_derivatives scans every thought")
+           && heldFix.includes("rename it out of the way (`ALTER INDEX idx_thoughts_derived_from RENAME TO …;`), then `CREATE INDEX CONCURRENTLY idx_thoughts_derived_from ON thoughts USING gin (derived_from);`"),
+           "another table's index under the name: named with its table, renamed out of the way — never dropped — then built");
+    assert(heldRow.includes("idx_thoughts_supersedes (025) is a relation of kind r, so every search scans every thought for its hits' superseded-by label")
+           && heldFix.includes("rename it out of the way (`ALTER TABLE idx_thoughts_supersedes RENAME TO …;`), then `CREATE INDEX CONCURRENTLY idx_thoughts_supersedes ON thoughts (supersedes) WHERE supersedes IS NOT NULL;`"),
+           "…a table under the name: named by its kind, renamed out of the way, then built");
+    assert(heldRow.includes("thoughts_created_at_idx (001) is missing, but pf_created_at is of its shape — the reads take it") && heldFix.includes("`ALTER INDEX pf_created_at RENAME TO thoughts_created_at_idx;`")
+           && !heldFix.includes("CREATE INDEX CONCURRENTLY thoughts_created_at_idx"),
+           "…one of the shape under another name: the rename back, and no second build");
+    assert(/only slower/.test(heldRow), "…and the two that scan say the reads are only slower");
+    assert(await follow(held.out) === 3 && okRow.test(row((await run(SQL_ENV)).out, "thought indexes")), "…and the three steps, as printed, make the row ok again");
+    // The rename alone: nothing scans, so nothing says slower.
+    await db.unsafe(`ALTER INDEX thoughts_created_at_idx RENAME TO pf_created_at`);
+    const renamedOnly = await run(SQL_ENV);
+    assert(/!\s+thought indexes\s+thoughts_created_at_idx \(001\) is missing, but pf_created_at is of its shape — the reads take it; the name is what the migrations and this check look for$/.test(row(renamedOnly.out, "thought indexes")),
+           `…an index of the shape under another name, alone: a warning that says the reads take it, and nothing of slower reads (${row(renamedOnly.out, "thought indexes").trim()})`);
+    assert(await follow(renamedOnly.out) === 1 && okRow.test(row((await run(SQL_ENV)).out, "thought indexes")), "…and the rename back makes the row ok");
+
+    // A ledger that does not record 100 yet: its index is not looked for.
+    await db.unsafe(`DROP INDEX thoughts_vectorless_idx`);
+    await db.unsafe(`DELETE FROM schema_migrations WHERE name LIKE '100\\_%'`);
+    const before100 = await run(SQL_ENV);
+    assert(/✓\s+thought indexes\s+6 of 7 indexes thoughts' reads are planned around are present, valid and of their migrations' shape; not looked for, the ledger not recording their migration yet: thoughts_vectorless_idx \(100\)$/.test(row(before100.out, "thought indexes")),
+           `a ledger that predates 100: its index missing is no warning, and is said not looked for (${row(before100.out, "thought indexes").trim()})`);
+    // No ledger at all: looked for, and the remedy says a migration that has
+    // not run builds it.
+    await db.unsafe(`DROP TABLE schema_migrations`);
+    const unledgered = await run(SQL_ENV);
+    assert(/thoughts_vectorless_idx \(100\) is missing/.test(row(unledgered.out, "thought indexes"))
+           && fix(unledgered.out, "thought indexes").includes("`CREATE INDEX CONCURRENTLY thoughts_vectorless_idx ON thoughts (id) WHERE embedding IS NULL;` (if migration 100 has not run here, apply it instead: it builds the index)"),
+           "…with no ledger, every index is looked for, and a missing one's remedy names its migration as the other way");
+  } finally {
+    await db.unsafe(`DROP TABLE IF EXISTS pf_other, pf_moved_2, schema_migrations`);
+    await db.close();
+  }
 }
 
 localStub.stop(true);
