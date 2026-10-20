@@ -7640,11 +7640,15 @@ if (want("16")) {
         writerModels.add(String(body.model));
         // The pass's writer (decide version 1's, kept by version 3): the part rule, and not the record rule, version 2's, shelved 2026-10-18.
         if (prompt.includes(PART_RULE.trim()) && !prompt.includes(RECORD_RULE.trim())) writerPartRule++;
+        // The migration pair's proposal would stand if the writer were asked: under the floor it must not be, or the
+        // standing outdates would record nothing and close the pair's relation (SMD-3151 review pass 4).
         const answer = /tenancy/.test(thoughtsIn(prompt)) ? { current: "B", evidence: "now runs 90 days", stale: "runs 30 days", reason: "the tenancy was extended" }
+          : /migration/.test(thoughtsIn(prompt)) ? { current: "B", evidence: "moved to the evening", stale: "opens at noon", reason: "the window moved" }
           : { current: "none", evidence: "", stale: "", reason: "both stay current" };
         return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }] });
       },
     });
+    const ddump = join(tmpdir(), `ob1-test-live-decide-${process.pid}.jsonl`);
     try {
       const tenOld = await seed("[16d] The tenancy runs 30 days.", 50, 3, ["tenancy"]);
       const tenNew = await seed("[16d] The tenancy now runs 90 days.", 50, 0, ["tenancy"]);
@@ -7674,7 +7678,7 @@ if (want("16")) {
         `a dry run names decide mode's key, its decider and the tier's egress, and asks neither model (exit ${ddry.code}: ${banner.join(" | ").trim().slice(0, 300)})`);
 
       // At --min-confidence 0.55, the pass's own floor, which decide version 3's writer gate reads (SMD-3151).
-      const drun = await decide(denv, "--min-confidence", "0.55");
+      const drun = await decide(denv, "--min-confidence", "0.55", "--dump", ddump);
       const dprops = (await sql`SELECT sp.older_id::text AS o, sp.newer_id::text AS n, sp.verdict, sp.confidence::float AS confidence, d.recipe
                                   FROM supersession_proposals sp LEFT JOIN derivations d ON d.artifact_kind = 'proposal' AND d.artifact_id = sp.id AND d.produced_by = ${DKEY}
                                  WHERE sp.judge_key = ${DKEY}`) as { o: string; n: string; verdict: string; confidence: number; recipe: Record<string, unknown> | null }[];
@@ -7694,14 +7698,37 @@ if (want("16")) {
         `the tier's related is a relation under decide mode's key, its outdates under the floor keeps the tier's relation, and the writer's "none" leaves the cutover pair neither a proposal nor a relation, the relation words' mass under the floor (${JSON.stringify(drels)})`);
       // Decide version 3 (SMD-3151 review pass 3): under the floor the writer is not asked, since a standing proposal
       // would record nothing and close the pair's relation; the relation's note names the pass's floor.
-      const [mig] = (await sql`SELECT d.recipe FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = ${DKEY}
-                                WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.thought_id = ${migNew}::uuid`) as { recipe: { judged?: { verdict?: string; decide?: { top?: string; floor?: number; writer?: unknown } } } }[];
-      assert(mig?.recipe.judged?.verdict === "related" && mig.recipe.judged.decide?.top === "outdates" && mig.recipe.judged.decide.floor === 0.55 && mig.recipe.judged.decide.writer === undefined,
-        `the tier's outdates under the pass's floor asks no writer: the relation's note names the floor, 0.55, and carries no writer (${JSON.stringify(mig?.recipe.judged ?? null).slice(0, 300)})`);
-      assert(tierCalls === 4 && writerCalls === 2 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2,
-        `the tier was asked about each of the four pairs and the writer only about the two it called outdates at the floor, as the judge's model with the part rule and not the record rule (tier ${tierCalls}, writer ${writerCalls}: ${[...writerModels].join(", ")})`);
+      type RelNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; floor?: number; writer?: unknown } } } };
+      const noteOf = async (t: string) => ((await sql`SELECT d.recipe FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = ${DKEY}
+                                                      WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.thought_id = ${t}::uuid`) as RelNote[])[0];
+      const [mig, run] = [await noteOf(migNew), await noteOf(runNew)];
+      const migDump = readFileSync(ddump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { newer: string; older: string; recorded: string | null; top?: string; floor?: number | null })
+        .find((l) => l.newer === migNew && l.older === migOld);
+      assert(mig?.recipe.judged?.verdict === "related" && mig.recipe.judged.decide?.top === "outdates" && mig.recipe.judged.decide.floor === 0.55 && mig.recipe.judged.decide.writer === undefined
+          && run?.recipe.judged?.decide?.top === "related" && run.recipe.judged.decide.floor === undefined
+          && migDump?.recorded === "under-confidence" && migDump.top === "outdates" && migDump.floor === 0.55,
+        `the tier's outdates under the pass's floor asks no writer: the relation's note names the floor, 0.55, and carries no writer, a related pair's names none, and the dump line records it under the floor (${JSON.stringify(mig?.recipe.judged ?? null).slice(0, 200)}; dump ${JSON.stringify(migDump ?? null)})`);
+      assert(tierCalls === 4 && writerCalls === 2 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2
+          && /1 under confidence 0\.55 not recorded/.test(drun.out)
+          && /decide: the writer asked on 2 pair\(s\) — 1 stood, 1 declined, 0 with quotes that did not check out, 0 unparsed; 1 outdates under the floor 0\.55, the writer not asked/.test(drun.out),
+        `the tier was asked about each of the four pairs and the writer only about the two it called outdates at the floor, as the judge's model with the part rule and not the record rule, and the run's summary counts both (tier ${tierCalls}, writer ${writerCalls}: ${[...writerModels].join(", ")}; ${drun.out.split("\n").find((l) => /^\s*decide: the writer/.test(l))?.trim() ?? "no decide line"})`);
       const dclaims = Object.fromEntries(((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${DKEY} GROUP BY status`) as { status: string; c: number }[]).map((r) => [r.status, Number(r.c)]));
       assert(dclaims.succeeded === 8 && Object.keys(dclaims).length === 1, `every thought's claim succeeded under decide mode's key (${JSON.stringify(dclaims)})`);
+
+      // SMD-3151 review pass 4: a stale proposal whose pair the tier calls outdates under the floor is settled as an
+      // outdates under the floor, the note naming the floor and that the writer was not asked, and the summary counts
+      // it — not as the related verdict the pair falls back to.
+      const [{ id: tenId }] = (await sql`SELECT id::text AS id FROM supersession_proposals WHERE judge_key = ${DKEY} AND older_id = ${tenOld}::uuid AND newer_id = ${tenNew}::uuid`) as { id: string }[];
+      const movedTenancy = "[16d] The tenancy now runs 90 days, signed in May.";
+      await sql`UPDATE thoughts SET content = ${movedTenancy}, content_fingerprint = content_fingerprint_of(${movedTenancy}) WHERE id = ${tenNew}::uuid`;
+      const [{ r: tenRebuilt }] = (await sql`SELECT rebuild_derived(${tenNew}::uuid, 'live: edit') AS r`) as { r: { stale_proposals: number } }[];
+      const askedBefore = writerCalls;
+      const resettle = await decide(denv, "--min-confidence", "0.85");
+      const [tenAfter] = (await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${tenId}::uuid`) as { status: string; review_note: string | null }[];
+      const underNote = passSettledNote("judged again after a text moved — outdates at confidence 0.80 (token probability), under the floor 0.85, the writer not asked", DKEY);
+      assert(tenRebuilt.stale_proposals === 1 && resettle.code === 0 && tenAfter?.status === "rejected" && tenAfter.review_note === underNote && writerCalls === askedBefore
+          && /1 under confidence 0\.85 not recorded/.test(resettle.out) && /decide: the writer asked on 0 pair\(s\) — .*; 1 outdates under the floor 0\.85, the writer not asked/.test(resettle.out),
+        `a stale proposal the tier calls outdates under the floor is settled as one, its note naming the floor and the writer not asked, and counted so (exit ${resettle.code}: ${JSON.stringify(tenAfter ?? null)}; ${resettle.out.split("\n").find((l) => /^\s*decide: the writer/.test(l))?.trim() ?? "no decide line"})`);
 
       // A follower checks the tier at start as it checks the chat endpoint: a
       // tier serving another model is refused before anything is claimed.
@@ -7711,11 +7738,12 @@ if (want("16")) {
       const [fo, fe] = await Promise.all([new Response(follower.stdout).text(), new Response(follower.stderr).text()]);
       const fcode = await follower.exited;
       clearTimeout(stopFollower);
-      assert(fcode === 2 && /the tier at http:\/\/127\.0\.0\.1:\d+ serves h2o-other, not h2o-stub at start/.test(fe) && /serve h2o-stub at OB1_JEV_BASE_URL/.test(fe) && tierCalls === 4,
+      assert(fcode === 2 && /the tier at http:\/\/127\.0\.0\.1:\d+ serves h2o-other, not h2o-stub at start/.test(fe) && /serve h2o-stub at OB1_JEV_BASE_URL/.test(fe) && tierCalls === 5,
         `a follower whose tier serves another model is refused at start, naming the remedy, and decides nothing (exit ${fcode}: ${last(fo + fe)})`);
     } finally {
       tier.stop(true);
       writer.stop(true);
+      try { unlinkSync(ddump); } catch { /* already gone */ }
     }
     await sql`DELETE FROM thoughts`;
     await sql`DELETE FROM ob1_entities`;

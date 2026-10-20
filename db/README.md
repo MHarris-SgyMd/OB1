@@ -3116,8 +3116,12 @@ tier gives each pair's verdict, not the judge:
   proposal: which thought is current, the words in it that show the other is
   not, and the other's words that no longer hold. **The part rule** holds it:
   a part of some work finishing does not outdate the whole. Under the floor a
-  proposal could not be recorded, so the writer is not asked and the pair
-  keeps the tier's relation; its note names the floor (SMD-3151).
+  proposal could not be recorded, so the writer is not asked (SMD-3151): the
+  pair takes the relation the tier's distribution gives at the floor, as a
+  quote that fails does, else its edge is closed. The pass counts it as an
+  outdates under the floor, settles a stale proposal on it as one, and a
+  relation it writes carries the floor in its note. The run's summary counts
+  the writer's calls by what came back.
 - **Both quotes must check out** in the side each names and not in the other,
   or the pair stays at the tier's best verdict that proposes nothing. They are
   read without their markdown (SMD-3151), in quote and text alike: asterisks,
@@ -4900,8 +4904,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2946 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1433 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 871 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1434 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 872 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 55 assertions: the shards SHARDS lists in test-live.ts, each its own job
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 275 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 235 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)

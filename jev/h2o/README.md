@@ -130,7 +130,8 @@ the part rule, and both quotes must check out in the texts. Anything else leaves
 nothing. A proposal records H2O's P(outdates) as its confidence, under the
 pass's usual floor of 0.5. Since version 3 (SMD-3151) the writer is asked only
 when that P(outdates) clears the floor: under it a proposal could not be
-recorded, and the pair keeps H2O's relation.
+recorded, and the pair takes the relation H2O's distribution gives, as a quote
+that fails does.
 
 **The record rule** (decide version 2, shelved 2026-10-18; the pass runs version
 3, version 1's writer with its quotes read without markdown and asked only at

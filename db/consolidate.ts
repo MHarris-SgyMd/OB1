@@ -1414,6 +1414,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const totals = { pairs: 0, unrelated: 0, related: 0, evolves: 0, duplicate: 0, outdates: 0, tokenScored: 0, statedScored: 0, relationsAdded: 0, relationsKept: 0, relationsReplaced: 0, relationsClosed: 0, relationsGone: 0, relationsUnstored: 0, distinctAdded: 0, distinctKept: 0, distinctReplaced: 0, distinctNo102: 0, distinctStands: 0, distinctUnstored: 0, proposed: 0, alreadyProposed: 0, underConfidence: 0, undirected: 0, malformed: 0, noCandidates: 0,
     // 079 (SMD-2448): the judge calls fewer than 066's list would have cost at --k, and the claims whose read failed (counted 0).
     ticketCalls: 0, ticketCallsUnread: 0,
+    // Decide mode (SMD-3151): the writer's calls by what came back, and the tier's outdates under the floor it was not asked about.
+    writerAsked: 0, writerStood: 0, writerDeclined: 0, writerQuotesFailed: 0, writerUnparsed: 0, gated: 0,
     // 067: the stale rows this run met — replaced in place (proposed again),
     // settled after a judgement that proposes nothing, settled because the
     // pair no longer meets the candidate rule, left waiting for a vector, or
@@ -1594,14 +1596,29 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       }
       totals[j.verdict]++;
       const verdict = proposalVerdict(j);
+      // Decide version 3 (SMD-3151): the tier's outdates under the floor asked no writer. It is an outdates under the
+      // floor here, as a standing proposal under it was, though the pair takes the relation H2O's distribution gives.
+      const gated = j.decide?.floor !== undefined;
+      if (j.decide) {
+        const writer = j.decide.writer as { current?: string } | undefined;
+        if (gated) totals.gated++;
+        else if (writer) {
+          totals.writerAsked++;
+          if (j.verdict === "outdates") totals.writerStood++;
+          else if (writer.current === "none") totals.writerDeclined++;
+          else if (writer.current === "unparsed") totals.writerUnparsed++;
+          else totals.writerQuotesFailed++;
+        }
+      }
       // SMD-1873: the token probability of a proposing verdict when the
       // endpoint returned one, else the number the model wrote.
       const scored = proposalConfidence(j);
-      if (verdict !== null) totals[scored.source === "token" ? "tokenScored" : "statedScored"]++;
+      if (verdict !== null || gated) totals[scored.source === "token" ? "tokenScored" : "statedScored"]++;
       let proposalId: string | null = null;
       let recorded: "proposed" | "under-confidence" | "already" | "replaced" | "settled" | null = null;
       if (verdict === null || scored.confidence < MIN_CONFIDENCE) {
-        if (verdict !== null) {
+        const under = verdict !== null || gated;
+        if (under) {
           totals.underConfidence++;
           recorded = "under-confidence";
         }
@@ -1610,7 +1627,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // (The older's fingerprint from the read the judge was sent, not the
         // stale read before the candidates — a move between the two would
         // record a text the judge did not see; first review pass, cold read.)
-        if (staleRow && await settleStale(staleRow, verdict === null ? `judged again after a text moved — ${j.verdict}` : `judged again after a text moved — ${j.verdict} at confidence ${scored.confidence.toFixed(2)} (${scored.source === "token" ? "token probability" : "the number the model wrote"}), under the floor ${MIN_CONFIDENCE}`, older.fingerprint, row.fingerprint, verdict === null ? j.verdict : "under-confidence")) {
+        if (staleRow && await settleStale(staleRow, !under ? `judged again after a text moved — ${j.verdict}` : `judged again after a text moved — ${gated ? "outdates" : j.verdict} at confidence ${scored.confidence.toFixed(2)} (${scored.source === "token" ? "token probability" : "the number the model wrote"}), under the floor ${MIN_CONFIDENCE}${gated ? ", the writer not asked" : ""}`, older.fingerprint, row.fingerprint, under ? "under-confidence" : j.verdict)) {
           staleMet.settled.add(staleRow.id);
           recorded = "settled";
         }
@@ -1724,6 +1741,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           newer: row.id, older: c.older_id, similarity: c.similarity, shared: c.shared_entities, key: JOB,
           verdict: j.verdict, supersedes: j.supersedes, confidence: j.confidence, score: scored.confidence, score_source: scored.source, reason: j.reason, evidence: j.evidence, evidence_found: j.evidenceFound ?? null,
           proposal: proposalId, recorded, relation,
+          // Decide mode: the tier's top and, when it asked no writer, the floor it was held to (SMD-3151).
+          ...(j.decide ? { top: j.decide.top ?? null, floor: j.decide.floor ?? null } : {}),
         }) + "\n");
       }
     }
@@ -2237,6 +2256,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // SMD-1873: which scale the floor cut on — the model's token probability or the number it wrote.
       `${totals.tokenScored + totals.statedScored ? `; of ${totals.tokenScored + totals.statedScored} proposing verdict(s), confidence from token probabilities on ${totals.tokenScored}, from the number the model wrote on ${totals.statedScored}` : ""}`
   );
+  // Decide mode (SMD-3151): what the writer was asked and what came back, and the tier's outdates under the floor it
+  // was not asked about, so a run's writer calls are read from its summary.
+  if (jev) {
+    out(
+      `  decide: the writer asked on ${totals.writerAsked} pair(s) — ${totals.writerStood} stood, ${totals.writerDeclined} declined, ${totals.writerQuotesFailed} with quotes that did not check out, ` +
+        `${totals.writerUnparsed} unparsed; ${totals.gated} outdates under the floor ${MIN_CONFIDENCE}, the writer not asked`
+    );
+  }
   // 084 (SMD-1873 PR 2): what the pass did to the relations it judged.
   // A run that stored relations for any part of it reports what it stored,
   // and the verdicts judged while it could not beside them (review pass 4:

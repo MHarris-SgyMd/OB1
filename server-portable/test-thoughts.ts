@@ -1848,7 +1848,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
       "the writer is the judge's model, asked the pass's question, without the record rule");
     tierP = { ...p, outdates: 0.05, related: 0.75 };
     const b = await decidePair(older, newer, cfg, jev, FLOOR);
-    assert(b.verdict === "related" && b.decide.writer === undefined && writerCalls === 1, "the tier's related: no writer call, the relation stands");
+    assert(b.verdict === "related" && b.decide.writer === undefined && b.decide.floor === undefined && writerCalls === 1, "the tier's related: no writer call, the relation stands, and its note names no floor, which only a gated outdates does");
     tierP = p;
     writerAnswer = JSON.stringify({ current: "B", evidence: "we shipped … instead of Friday", stale: "the plan is ... on Friday", reason: "it shipped later" });
     const s = await decidePair(older, newer, cfg, jev, FLOOR);
