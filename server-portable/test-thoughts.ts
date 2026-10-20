@@ -630,31 +630,44 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
       && evidenceIn("it is not shipped", "it is __not__ shipped"), "a quote across bold and emphasis underscores is found, a doubled underscore gone whole");
   assert(evidenceIn("Release target: ~~Friday~~ Monday", "Release target: ~~Friday~~ Monday.") && evidenceIn("Release target: Monday", "Release target: ~~Friday~~ Monday, not ~~Tuesday~~.")
       && !evidenceIn("Friday Monday", "~~Friday~~ Monday"), "struck text goes with its markers, each span alone: a reader takes it as withdrawn, so a quote reading it as stated is not found");
+  assert(evidenceIn("the plan ships Friday", "Use `a~~b` here, then the plan ships Friday, see `c~~d`.") && evidenceIn("the plan ships Friday", "Use `a\n~~b` here, then the plan ships Friday, see `c~~d`.")
+      && !evidenceIn("Friday Monday", "about ~~ 5 min. Plan: ~~Friday~~ Monday")
+      && evidenceIn("the tool", "~~`obsidian`~~ the tool") && evidenceIn("about 5 min", "about ~~5 min"),
+    "…by GFM's rule: no strike pairs across code spans, a `~~` before a space opens none, struck code is struck, and a stray `~~` goes (review pass 2)");
   assert(evidenceIn("the **monthly plan** is withdrawn", "The **monthly plan** is withdrawn.") && evidenceIn("the **monthly plan** is withdrawn", "The monthly plan is withdrawn."),
     "…and a quote that copied the markup is read without it too, so it matches with the markup in the text or without");
   assert(evidenceIn("run bun db/consolidate.ts --status first", "Run `bun db/consolidate.ts --status` first.") && evidenceIn("`bun db/consolidate.ts --status`", "Run `bun db/consolidate.ts --status` first."),
     "…across a code span, whether or not the quote keeps its backticks");
   const linked = "Blocked by [SMD-1806](https://linear.app/siggymd/issue/SMD-1806/three-brains) and [the ADR](<https://github.com/o/r/blob/main/docs/a.md>) until both land.";
-  assert(evidenceIn("blocked by SMD-1806 and the ADR until both land", linked) && evidenceIn("diagram shows the flow", "![diagram](img/flow.png) shows the flow"),
-    "…across a link's text and an image's, their targets dropped");
+  assert(evidenceIn("blocked by SMD-1806 and the ADR until both land", linked) && evidenceIn("see diagram shows the flow", "see ![diagram](img/flow.png) shows the flow")
+      && evidenceIn("see a here", 'see [a](u "t") here') && evidenceIn("see a here", "see [a]( u ) here") && evidenceIn("see the three brains plan here", "see [the three brains plan](u) here"),
+    "…across a link's text and an image's, their targets dropped, a title or space inside the parentheses too");
   assert(!evidenceIn("linear.app/siggymd/issue", linked) && !evidenceIn("three-brains", linked) && !evidenceIn("docs/a.md", linked),
     "a quote found only inside a link's target is not found: a URL is not text the reader sees");
   assert(evidenceIn("db/test-live.ts [6g] arm 1 races 40 accepts", "`db/test-live.ts` \\[6g\\] arm 1 races 40 accepts") && evidenceIn("Problem The stack fails", "## Problem\nThe stack fails")
       && evidenceIn("intro the gate denies by default", "intro\n> the gate denies\nby default"), "…through an escape's backslash, a heading's hashes and a blockquote's marker");
   assert(evidenceIn("Blocked by [SMD-1806]", linked) && evidenceIn("intro > the gate denies > by default", "intro\n> the gate denies\n> by default") && evidenceIn("Done. ## Next steps", "Done.\n## Next steps"),
     "…and a quote keeping part of the markup is found too: a link's brackets without its target, or a marker that opened a line, mid-quote once the quote is one line (review pass 1)");
+  const wrapped = "see [the\nboard](https://e.com/b) for more", wrappedStrike = "Plan: ~~ship on\nFriday~~ ship Monday";
+  assert(evidenceIn("Done. Next steps", "Done.\n## Next steps") && evidenceIn("intro deep", "intro\n>> deep") && evidenceIn("see the board for more", wrapped) && !evidenceIn("e.com/b", wrapped)
+      && evidenceIn("Plan: ~~ship on Friday~~ ship Monday", wrappedStrike) && !evidenceIn("ship on Friday", wrappedStrike) && evidenceIn("one two stays", "Plan ~~one\n\ntwo~~ stays")
+      && evidenceIn("e.com/b", "[notes\n\nsee](https://e.com/b)"),
+    "…and one the text wraps: a heading's hashes or a `>>` the quote skipped, a link's text or a strike across a line break, but never across a blank line (review pass 2)");
+  assert(evidenceIn("count >= 5", "the gate needs count >= 5", "the gate needs count = 5") && !evidenceIn("count = 5", "the gate needs count >= 5")
+      && evidenceIn("reads process.argv", "it reads process.argv[2] first") && evidenceIn("the plan shipped", "the plan shipped[1] on Monday") && evidenceIn("a_b_c is the key", "a\\_b\\_c is the key"),
+    "a comparison's `>=` stays, a bracket after a word keeps the words apart, and an escaped underscore inside a word is text (review pass 2)");
   assert(evidenceIn("record_thought_relation writes it", "`record_thought_relation` writes it") && !evidenceIn("record thought relation", "`record_thought_relation` writes it")
-      && withoutMarkdown("record_thought_relation") === "record_thought_relation" && withoutMarkdown("a__b") === "a__b" && withoutMarkdown("#433 merged") === "#433 merged" && withoutMarkdown("a * b") === "a  b",
+      && withoutMarkdown("record_thought_relation") === "record_thought_relation" && withoutMarkdown("a__b") === "a__b" && withoutMarkdown("#433 merged") === "#433 merged" && withoutMarkdown("####### x") === "####### x" && withoutMarkdown("a * b") === "a  b",
     "an underscore inside a word is text and stays; a hash that opens no heading stays, and every asterisk goes");
   assert(!evidenceIn("done", "The plan was aban**done**d.") && evidenceIn("plan is done", "The plan is **done**."), "the whole-word rule holds over folded markdown: a word markup split is one word again");
   assert(!evidenceIn("the plan shipped", "the **plan** shipped", "the plan shipped late") && evidenceIn("the plan shipped", "the **plan** shipped", "the plan was late")
       && !evidenceIn("the plan shipped", "the plan shipped", "the `plan` shipped late"), "a phrase both sides hold once folded is evidence for neither, whichever side carried the markup");
   assert(!evidenceIn("tail", "*".repeat(5999) + " tail") && evidenceIn("tail", "*".repeat(5990) + " tail"),
     "the text is cut to what the model was sent before it is folded: folded first, the asterisks would pull a word past the cut into reach");
-  const worst = ["[".repeat(6000), "[a](".repeat(1500), "[a](" + " ".repeat(5996), "[a](" + "\n".repeat(5996), "~~a".repeat(2000)];
+  const worst = ["[".repeat(6000), "[a](".repeat(1500), "[a](" + " ".repeat(5996), "[a](" + "\n".repeat(5996), "[a" + "\n a".repeat(2999), "~~a".repeat(2000), "`a".repeat(3000), "a" + "_".repeat(5998) + "b"];
   const t1 = performance.now();
   for (let i = 0; i < 20; i++) for (const s of worst) withoutMarkdown(s);
-  assert(performance.now() - t1 < 200, `twenty readings each of six thousand brackets, an unclosed link run, a link opened onto six thousand spaces or line breaks, and a run of tildes take ${(performance.now() - t1).toFixed(0)} ms: every run a link may hold is bounded (review pass 1)`);
+  assert(performance.now() - t1 < 200, `twenty readings each of six thousand brackets, an unclosed link run, a link opened onto six thousand spaces or line breaks, a link's text across three thousand, runs of tildes and backticks, and an underscore run take ${(performance.now() - t1).toFixed(0)} ms: every run is bounded and tried from its start alone (review passes 1 and 2)`);
   assert(parseJudgement("I cannot say.").malformed && parseJudgement("").malformed, "prose and an empty answer are malformed");
   const long = parseJudgement(`{"verdict":"outdates","supersedes":"unknown","confidence":0.6,"reason":"${"x\u001b[2K ".repeat(200)}"}`);
   assert(long.reason.length <= 400 && !long.reason.includes("\u001b"), "the reason is clipped to 400 characters with control characters stripped");

@@ -390,24 +390,28 @@ const forQuote = (t: string) => plainText(t).replace(/^[\s"'`.]+|[\s"'`.,;:]+$/g
 
 /**
  * Text as a reader sees it, its markdown folded away (SMD-3151). A model quoting a thought copies the words it reads,
- * not the markup around them, so a quote across `**bold**`, a code span or a link must still be found. An inline link
- * or image, `[text](target)`, keeps its text and loses its target; a bare URL or an autolink stays, as a reader sees
- * it. Struck text goes with its `~~`: a reader takes it as withdrawn, not stated. Emphasis and code markers go, so
- * does any bracket left over and the backslash of an escape, and a heading's `#`s or a blockquote's `>` that open a
- * word, not only a line: a quote arrives on one line (oneLine), so a marker that opened a line in the text sits
- * mid-quote. An underscore inside a word stays (snake_case is text, and so is `a__b`); a run at a word's edge is
- * emphasis and goes. Applied to the quote and to the text alike, before plainText. Every run a link may hold is
- * bounded — its text (no bracket, 200 characters), its target (1,000), the space around them (16) — so each `[`
- * costs a bounded scan: unbounded, a run of spaces three parts could each take was quadratic (review pass 1).
+ * not the markup around them, so a quote across `**bold**`, a code span or a link must still be found. Applied to the
+ * quote and to the text alike, before plainText. The quote arrives on one line (oneLine), so a link's text, a strike
+ * and a code span may cross one line break, never a blank line, and a marker that opened a line may sit mid-quote. An
+ * inline link or image, `[text](target)`, keeps its text and loses its target; a bare URL or an autolink stays. Struck
+ * text goes with its `~~`, read as withdrawn, by GFM's rule: the markers flank the words and never sit in a code span,
+ * so a stray `~~` opens nothing. A heading's `#`s and a `>` run that opens a word go, a comparison's `>` among them
+ * (`p95 > 200` reads `p95 200`), but not `>=`. An escape loses its backslash. A bracket after a letter or digit reads
+ * as a space (`argv[2]`, a footnote's `[1]`), so the words either side stay apart. Asterisks, backticks, any bracket or
+ * `~~` left over and an underscore run at a word's edge go; one inside a word (`snake_case`, `a__b`) stays. Every run
+ * a rule may take is bounded (a link's text 200 characters, its target 1,000 and the space around it 16; a strike or a
+ * code span 1,000) and is tried from its start alone, so each costs a bounded scan: a run of spaces three parts of a
+ * link could each take (review pass 1) and an underscore run tried from each of its characters (pass 2) were quadratic.
  */
 export function withoutMarkdown(t: string): string {
   return t
-    .replace(/!?\[([^[\]\n]{0,200})\]\(\s{0,16}<?[^\s()<>]{0,1000}>?(?:\s{1,16}"[^"\n]{0,200}")?\s{0,16}\)/g, "$1")
-    .replace(/~~[^~\n]{0,1000}~~/g, "")
-    .replace(/(^|\s)(?:#{1,6}(?=\s|$)|>+)/g, "$1")
+    .replace(/!?\[((?:[^[\]\n]|\n(?![ \t]*\n)){0,200})\]\(\s{0,16}<?[^\s()<>]{0,1000}>?(?:\s{1,16}"[^"\n]{0,200}")?\s{0,16}\)/g, "$1")
+    .replace(/`(?:[^`\n]|\n(?![ \t]*\n)){0,1000}`|~~(?=[^\s~])(?:[^~\n]|\n(?![ \t]*\n)){0,1000}(?<=[^\s~])~~/g, (m) => (m[0] === "~" ? "" : m))
+    .replace(/(^|\s)(?:#{1,6}(?=\s|$)|>+(?![=>]))/g, "$1")
     .replace(/\\([\\`*_{}[\]()#+\-.!|>~])/g, "$1")
+    .replace(/(?<=[\p{L}\p{N}])\[/gu, " ")
     .replace(/`+|\*+|~~|[[\]]/g, "")
-    .replace(/(?<![\p{L}\p{N}_])_+|_+(?![\p{L}\p{N}_])/gu, "");
+    .replace(/(?<![\p{L}\p{N}_])_+|(?<!_)_+(?![\p{L}\p{N}_])/gu, "");
 }
 
 /** Whether `q` occurs in `text` as whole words: no letter or digit on either side of it. */

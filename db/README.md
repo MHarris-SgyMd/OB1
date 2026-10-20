@@ -3118,10 +3118,10 @@ tier gives each pair's verdict, not the judge:
   not outdate the whole.
 - **Both quotes must check out** in the side each names and not in the other,
   or the pair stays at the tier's best verdict that proposes nothing. They are
-  read as a reader sees the text (SMD-3151), in quote and text alike: `**`,
-  backticks, brackets, escapes' backslashes and heading and blockquote markers
-  go, an inline link keeps its text and loses its target, and struck text goes
-  with its `~~`, read as withdrawn.
+  read without their markdown (SMD-3151), in quote and text alike: asterisks,
+  backticks, brackets, escapes' backslashes, underscores at a word's edge and
+  a `#` or `>` run opening a word go, an inline link keeps its text and loses
+  its target, and struck text goes with its `~~`, read as withdrawn.
 - **Version 3 is the pass's** (`@p4d3`): version 1's writer, SMD-3114's,
   two-sided with the part rule, its quotes read without markdown (SMD-3151).
   The writer quotes the words it reads, and on SMD-3116's writer test the
