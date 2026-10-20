@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 103: the lapse locks its own tree — the walk records the links it
+-- Migration 104: the lapse locks its own tree — the walk records the links it
 --                went on through, the trigger locks them FOR SHARE from the
 --                taken row up and reads each again before it clears above
 --                it, and a pointer's lapse locks its target's chain first
@@ -157,7 +157,7 @@ BEGIN
   IF to_regprocedure('ob1_lapse_walk(uuid, uuid)') IS NULL
      OR to_regprocedure('ob1_lapse_capture_pointers()') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 103 needs 097 (ob1_lapse_walk, ob1_lapse_capture_pointers); this schema lacks it',
+      MESSAGE = 'migration 104 needs 097 (ob1_lapse_walk, ob1_lapse_capture_pointers); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -165,7 +165,7 @@ BEGIN
   IF to_regprocedure('ob1_accept_takes(uuid, uuid)') IS NULL
      OR to_regprocedure('ob1_capture_taken_by_log(uuid)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 103 needs 094 and 092 (ob1_accept_takes, ob1_capture_taken_by_log); this schema lacks it',
+      MESSAGE = 'migration 104 needs 094 and 092 (ob1_accept_takes, ob1_capture_taken_by_log); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -193,7 +193,7 @@ DECLARE
 BEGIN
   -- ob1:lapse-tree — a CONTRACT SENTINEL, not prose (the 014 convention).
   -- 097's walk (ob1:lapse-walk), unchanged, with each link it goes on
-  -- through recorded for the trigger's path locks (103, SMD-3046).
+  -- through recorded for the trigger's path locks (104, SMD-3046).
   -- 082's lapse for an event that leaves p_row's pointer at p_onto: taken
   -- now (092's read, the bound untaken), then up from p_row — the one walk
   -- the trigger clears and the listing's read returns (SMD-3035).
@@ -238,7 +238,7 @@ BEGIN
     -- The rows still pointing at it once those are cleared — a write key's
     -- link, an accepted pointer — reach outside through it too.
     v_stay := ARRAY(SELECT t.id FROM thoughts t WHERE t.supersedes = v_x AND NOT (t.id = ANY(v_hit)) ORDER BY t.id);
-    -- 103 (SMD-3046): each such link, after this row's clears and before
+    -- 104 (SMD-3046): each such link, after this row's clears and before
     -- anything above it — never the event's own row, which a raw cycle
     -- could bring back.
     FOREACH v_h IN ARRAY v_stay LOOP
@@ -252,7 +252,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_lapse_tree(uuid, uuid) IS
-  'ob1_lapse_walk''s walk with the links it goes on through: the clears as [{id, onto}] in the order they are cleared, and for each row reached through a pointer that stays {id, onto, "stays": true} after that row''s clears and before anything above it (never p_row''s own). What ob1_lapse_capture_pointers reads and locks; ob1_lapse_walk returns its clears. Migration 103 / SMD-3046, on 097 / SMD-3035.';
+  'ob1_lapse_walk''s walk with the links it goes on through: the clears as [{id, onto}] in the order they are cleared, and for each row reached through a pointer that stays {id, onto, "stays": true} after that row''s clears and before anything above it (never p_row''s own). What ob1_lapse_capture_pointers reads and locks; ob1_lapse_walk returns its clears. Migration 104 / SMD-3046, on 097 / SMD-3035.';
 
 -- ---------------------------------------------------------------------------
 -- 2. The walk: the tree's clears.
@@ -272,7 +272,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION ob1_lapse_walk(uuid, uuid) IS
-  'The pointers 082''s lapse clears for an update event that leaves p_row''s pointer at p_onto, as [{id, onto}] in the order they are cleared: ob1_lapse_tree''s clears, its links left out — none unless the row is taken now (ob1_accept_takes); else, up from the row, each row''s capturer''s capture-scoped pointers onto it that no update has re-pointed (never p_row''s own), on through the pointers that stay and from a cleared row 082''s log had already taken, to 1,000 rows above it. The one walk ob1_lapse_capture_pointers clears and ob1_accept_lapses returns. Migration 097 / SMD-3035; the tree 103 / SMD-3046.';
+  'The pointers 082''s lapse clears for an update event that leaves p_row''s pointer at p_onto, as [{id, onto}] in the order they are cleared: ob1_lapse_tree''s clears, its links left out — none unless the row is taken now (ob1_accept_takes); else, up from the row, each row''s capturer''s capture-scoped pointers onto it that no update has re-pointed (never p_row''s own), on through the pointers that stay and from a cleared row 082''s log had already taken, to 1,000 rows above it. The one walk ob1_lapse_capture_pointers clears and ob1_accept_lapses returns. Migration 097 / SMD-3035; the tree 104 / SMD-3046.';
 
 -- ---------------------------------------------------------------------------
 -- 3. The trigger locks its tree, then clears.
@@ -286,7 +286,7 @@ DECLARE
   v_to       uuid;
   v_tree     jsonb;
   e          record;
-  -- 103: the chain under a pointer's target; the links read from the tree
+  -- 104: the chain under a pointer's target; the links read from the tree
   -- (row -> the row it points at), the rows that anchor a path, the links
   -- held and the ones found moved; one clear's path.
   v_chain    uuid[];
@@ -308,7 +308,7 @@ BEGIN
   -- update has re-pointed since. 092 (SMD-2708): taken by 082's rule or by
   -- T's chain reaching outside, and then T and every row above it through
   -- the pointers that stay. 097 (SMD-3035): what ob1_lapse_walk returns.
-  -- 103 (SMD-3046): its tree locked first, so no link moves under it.
+  -- 104 (SMD-3046): its tree locked first, so no link moves under it.
   -- The lapse's own clearing event, named before it was appended, its diff
   -- the clear and nothing else, from inside a trigger: the walk already
   -- went on from it. A write function's event fires at depth 1, so a flag
@@ -336,7 +336,7 @@ BEGIN
     v_to := (SELECT supersedes FROM thoughts WHERE id = NEW.thought_id);
   END IF;
   -- ob1:lapse-locks-its-tree — a CONTRACT SENTINEL, not prose (the 014
-  -- convention). 103 (SMD-3046): the event's row, held by the write that
+  -- convention). 104 (SMD-3046): the event's row, held by the write that
   -- appended this, held here too — the order below rests on it.
   PERFORM 1 FROM thoughts WHERE id = NEW.thought_id FOR NO KEY UPDATE;
   -- A pointer onto a thought: that thought's chain, it and 1,000 below,
@@ -465,4 +465,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_lapse_capture_pointers() IS
-  'The lapse (AFTER INSERT on thought_audit, update events): on one that takes its row by 082''s rule or writes its `supersedes`, clears what ob1_lapse_walk returns for the row''s pointer as the event leaves it — each pointer, re-read under a row lock and left when it moved or an update has written it since, an update event of its own under the current actor, appended and projected, in the walk''s order. Its own clearing events do not fire it again: each is named in ob1.lapse_clearing before it is appended, and only a firing from inside a trigger on an event that is that clear and nothing else reads it (a flag set by hand turns no write function''s lapse off); the walk went on from them. A pointer a write key set is never lapsed. Since 103 it locks its tree first: the event''s row; a pointer''s target chain FOR SHARE from the deepest row up, before the walk (ob1_lapse_tree), so a taking in flight below is waited for and read taken; and before each clear the links under it FOR SHARE from the taken row up, each where it still names the row below — a link moved since the walk leaves the clears above it. Migration 082 / SMD-2638; up the chain 092 / SMD-2708; the one walk 097 / SMD-3035; the locks 103 / SMD-3046.';
+  'The lapse (AFTER INSERT on thought_audit, update events): on one that takes its row by 082''s rule or writes its `supersedes`, clears what ob1_lapse_walk returns for the row''s pointer as the event leaves it — each pointer, re-read under a row lock and left when it moved or an update has written it since, an update event of its own under the current actor, appended and projected, in the walk''s order. Its own clearing events do not fire it again: each is named in ob1.lapse_clearing before it is appended, and only a firing from inside a trigger on an event that is that clear and nothing else reads it (a flag set by hand turns no write function''s lapse off); the walk went on from them. A pointer a write key set is never lapsed. Since 104 it locks its tree first: the event''s row; a pointer''s target chain FOR SHARE from the deepest row up, before the walk (ob1_lapse_tree), so a taking in flight below is waited for and read taken; and before each clear the links under it FOR SHARE from the taken row up, each where it still names the row below — a link moved since the walk leaves the clears above it. Migration 082 / SMD-2638; up the chain 092 / SMD-2708; the one walk 097 / SMD-3035; the locks 104 / SMD-3046.';

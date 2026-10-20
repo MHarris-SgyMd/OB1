@@ -1629,7 +1629,7 @@ write function moves one out since 099: every pointer write through
 lock the accept holds. Two writes still take none and move nothing out: a
 first capture naming supersedes (a new row, nothing above it), and another
 taker's own lapse clears, which clear nothing the accept's walk read as
-staying. Since 103 the lapse locks its own tree, so a link moved by any
+staying. Since 104 the lapse locks its own tree, so a link moved by any
 writer under any taking is waited for or read again — but for one named
 40P01, a pointer write whose target chain reaches a row the taking holds,
 overlapping it, and a transaction of several calls crossing its locks (092
@@ -1785,7 +1785,7 @@ lands and coming back with it, a check and a run under a role without the
 structure group; `--status` and `--list relations`) and [41]
 (a distinct pair never posted to the board), test-upgrade [20au].
 
-Migration 103 has the lapse lock its own tree (SMD-3046). The lapse reads
+Migration 104 has the lapse lock its own tree (SMD-3046). The lapse reads
 the tree above a taken row in one snapshot and then locks and clears what
 it found, so a link moved between the two was missed: one moved out still
 had the capture-only pointers above it cleared, one moved in onto the taken
@@ -1828,7 +1828,7 @@ lock per clear — against 097, about +10% over 200 rows and +12–35% over
 the listing's read pays too; a pointer onto a thought locks its chain even
 when nothing lapses, usually one to three rows, while it holds the review
 lock. It refuses to apply without 097;
-097 re-applied puts back its own walk and the lockless trigger and 103
+097 re-applied puts back its own walk and the lockless trigger and 104
 after it the tree and the locks. test-schema [93] (the tree beside 097's
 walk, a link moved out made deterministic, the walk-on anchor),
 test-live [6k] (moved out, moved in in either order, the lock orders, a

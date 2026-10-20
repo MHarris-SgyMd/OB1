@@ -4429,17 +4429,17 @@ console.log("\n[20au] Migration 102: refused by name without 084; onto a populat
   await sql.close();
 }
 
-console.log("\n[20av] Migration 103: refused by name without 097; onto a populated brain at the file before it — a pending proposal's lapses read the same after it, the accept clears what the read said through the locking trigger, no row and no audit row moved by the file; a re-apply a no-op (SMD-3046)");
+console.log("\n[20av] Migration 104: refused by name without 097; onto a populated brain at the file before it — a pending proposal's lapses read the same after it, the accept clears what the read said through the locking trigger, no row and no audit row moved by the file; a re-apply a no-op (SMD-3046)");
 {
-  const the101 = MIGRATIONS.find((f) => f.endsWith("_lapse_locks_its_tree.sql"))!;  // by name: renumbered when main takes its number
+  const theFile = MIGRATIONS.find((f) => f.endsWith("_lapse_locks_its_tree.sql"))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < "097" });
-  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the101 }).then(() => "applied", (e: Error) => e.message);
-  assert(refused === "migration 103 needs 097 (ob1_lapse_walk, ob1_lapse_capture_pointers); this schema lacks it",
-    `103 on a schema stopped before 097 is refused up front, naming what it needs (${refused})`);
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === theFile }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 104 needs 097 (ob1_lapse_walk, ob1_lapse_capture_pointers); this schema lacks it",
+    `104 on a schema stopped before 097 is refused up front, naming what it needs (${refused})`);
 
   await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the101 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < theFile });
   const sql = new SQL({ url: URL_, max: 1 });
   const vec = `[${Array.from({ length: OPTS.dim }, (_, i) => (i === 1 ? 1 : 0)).join(",")}]`;
   const agentOf = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
@@ -4449,23 +4449,23 @@ console.log("\n[20av] Migration 103: refused by name without 097; onto a populat
   const REVIEWER = { name: "consolidate", via: "consolidate", session: "job-20at" };
   const cap = async (content: string, actor: Record<string, unknown>, supersedes?: string) =>
     ((await sql`SELECT upsert_thought(${content}::text, ${{ metadata: { source: "mcp" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }}::jsonb, ${vec}::vector) AS r`)[0].r as { id: string }).id;
-  const W = await cap("upgrade 103: the writer's rota, weekly", WRITER);
-  const C = await cap("upgrade 103: the hook's rota, daily", HOOK);
-  const N = await cap("upgrade 103: the hook's next word on the rota", HOOK, C);
+  const W = await cap("upgrade 104: the writer's rota, weekly", WRITER);
+  const C = await cap("upgrade 104: the hook's rota, daily", HOOK);
+  const N = await cap("upgrade 104: the hook's next word on the rota", HOOK, C);
   const pid = ((await sql`SELECT record_supersession_proposal(${W}::uuid, ${C}::uuid, 'newer_supersedes_older', 0.9, '[20av]', 0.9, 'consolidate:stub@p95') AS id`)[0] as { id: string }).id;
   const lapses = async () => JSON.stringify((await sql`SELECT ob1_accept_lapses(${C}::uuid, ${W}::uuid) AS l`)[0].l);
   const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, supersedes, updated_at::text AS u FROM thoughts ORDER BY id`);
   const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   const before = await rows(), auditBefore = await audits(), lapsesBefore = await lapses();
   assert(lapsesBefore === JSON.stringify([{ id: N, onto: C }]) && (await sql`SELECT to_regprocedure('ob1_lapse_tree(uuid, uuid)') AS f`)[0].f === null,
-    `[20av] setup: at 102 the read names the hook's pointer, and there is no tree (${lapsesBefore})`);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the101 });
+    `[20av] setup: at 103 the read names the hook's pointer, and there is no tree (${lapsesBefore})`);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === theFile });
   const [fn] = await sql`SELECT (SELECT prosrc FROM pg_proc WHERE proname = 'ob1_lapse_capture_pointers') AS lapse, to_regprocedure('ob1_lapse_tree(uuid, uuid)') IS NOT NULL AS tree`;
   assert(fn?.tree === true && /ob1:lapse-locks-its-tree/.test(String(fn?.lapse)) && (await rows()) === before && (await audits()) === auditBefore && (await lapses()) === lapsesBefore,
-    "103 applied: the tree, and the trigger locking it; no row or audit row moved, and the pending proposal's lapses read the same");
+    "104 applied: the tree, and the trigger locking it; no row or audit row moved, and the pending proposal's lapses read the same");
   // A re-apply moves nothing.
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the101 });
-  assert((await rows()) === before && (await audits()) === auditBefore && (await lapses()) === lapsesBefore, "a re-apply of 103 is a no-op");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === theFile });
+  assert((await rows()) === before && (await audits()) === auditBefore && (await lapses()) === lapsesBefore, "a re-apply of 104 is a no-op");
   // The accept after it clears what the read said, through the locking trigger.
   const [{ r }] = await sql`SELECT review_supersession_proposal(${pid}::uuid, 'accept', NULL, NULL, ${REVIEWER}::jsonb, false) AS r`;
   const [{ s: left }] = await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${N}::uuid`;

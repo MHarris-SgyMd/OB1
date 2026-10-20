@@ -342,7 +342,7 @@ const FUNCTIONS = [
   "ticket_status_inputs(uuid[], text[])",
   // 097 (SMD-3035): the one walk 082's lapse clears and 094's read returns.
   "ob1_lapse_walk(uuid, uuid)",
-  // 103 (SMD-3046): the walk with its links, which the lapse locks.
+  // 104 (SMD-3046): the walk with its links, which the lapse locks.
   "ob1_lapse_tree(uuid, uuid)",
 ];
 
