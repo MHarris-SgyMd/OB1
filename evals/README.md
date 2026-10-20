@@ -3791,6 +3791,271 @@ Caveats:
   two accepted proposals. Recall on supersessions other writers would set is
   not measured here.
 
+## Settling the judge's easy pairs with the typed-decision tier: declined (SMD-3058)
+
+`eval-judge-decide.ts`. Every candidate pair costs the consolidation judge one
+LLM call with both thoughts' text, and nearly every pair ends unrelated,
+related, evolves or duplicate. The spike asked whether the typed-decision tier
+(behind `ob1-jev/1`, SMD-2050) could settle those pairs cheaply and send only
+the uncertain ones, and every possible `outdates`, to the LLM judge. It measured
+decider-4b, then H2O-Lightning-4B, a stronger model of the same size. Both are
+declined. H2O came closest: gated on whether a pair could be a supersession,
+rather than on its own confidence, it met the rule behind the 7B on the first
+444 pairs. It then failed the confirmation on 533 fresh ones.
+It asks three decisions of every pair in `eval-judge.ts`'s export, read as
+prompt 4 renders the two thoughts, so both framings score from one run:
+
+* **S**, binary: "THOUGHT A and THOUGHT B are about the same subject";
+* **T**, a choice among related, evolves, duplicate and outdates: the
+  two-pass framing's second question, used where S says same subject;
+* **C**, a choice among all five verdicts: the one-pass framing.
+
+The options carry prompt 4's verdict definitions. The decider never settles
+`outdates`, since a proposal needs the judge's direction and quote, so a
+cascade loses a supersession only by settling it as something else. The
+judges' answers are saved once (`eval-judge.ts --out`), and every cascade is
+scored from them.
+
+```bash
+JEV_PORT=8021 <venv>/bin/python ../jev/decider/serve.py      # decider-4b by hand: jev/decider/README.md (SMD-2265 deploys it)
+OB1_JEV_BASE_URL=http://127.0.0.1:8021 OB1_JEV_LOCAL=1 OB1_JEV_MODEL=decider-4b \
+  bun eval-judge-decide.ts --pairs /private/tmp/judge-pairs.jsonl --out /private/tmp/decider.jsonl
+# with DECIDER_PACK=1 on the server: S and T in one call (--packed); each thought cut to 600 characters (--clip 600)
+bun eval-judge-decide.ts --pairs … --out /private/tmp/decider-600.jsonl --packed --clip 600
+OB1_JUDGE_MODEL=qwen2.5:7b bun eval-judge.ts --pairs /private/tmp/judge-pairs.jsonl --out /private/tmp/answers-7b.jsonl --concurrency 1 --logprobs 10
+bun eval-judge-decide.ts --pairs … --decider /private/tmp/decider.jsonl --judge 7b=/private/tmp/answers-7b.jsonl --judge 27b=…
+# H2O-Lightning-4B: jev/h2o/README.md
+JEV_PORT=8022 <venv>/bin/python -I ../jev/h2o/serve.py
+OB1_JEV_BASE_URL=http://127.0.0.1:8022 OB1_JEV_LOCAL=1 OB1_JEV_MODEL=h2o-lightning-4b \
+  bun eval-judge-decide.ts --pairs /private/tmp/judge-pairs.jsonl --out /private/tmp/h2o.jsonl --packed
+```
+
+**The set** (dogfood stable, 2026-10-16): 127 rejected and 2 accepted
+proposals, 135 linked ticket pairs (16 duplicate_of, 40 child_of, 40 blocks,
+39 relates_to), 60 pointer pairs and 120 candidates: 444 pairs, 62 of them
+true supersessions. Each judge ran one pair at a time on this Mac (Ollama,
+temperature 0), and decider-4b on PyTorch over the GPU.
+
+**The judges.** qwen2.5:7b catches 2 of the 62 true supersessions, with 3
+false proposals, at 3.6 s a pair. qwen3.8:27b catches 23, with 17 false, at
+13.0 s. They give the same verdict on only 50% of the candidates; the most
+common split (32 of 120) is the 7B's "unrelated" against the 27B's "related".
+The linked pairs side with the 27B: on relates_to it is right on 34 of 39, and
+the 7B on 22.
+
+**What the decider says** at full length, by its one-pass verdict:
+
+| label | pairs | unrelated | related | evolves | duplicate | outdates | median P(same subject) |
+|---|---|---|---|---|---|---|---|
+| candidates | 120 | 86 | 4 | 17 | 0 | 13 | 0.05 |
+| pointer pairs (true supersessions) | 60 | 0 | 10 | 2 | 37 | 11 | 0.99 |
+| accepted proposals | 2 | 0 | 0 | 0 | 0 | 2 | 0.93 |
+| rejected proposals | 127 | 14 | 5 | 86 | 0 | 22 | 0.69 |
+| linked: relates_to | 39 | 27 | 3 | 9 | 0 | 0 | 0.04 |
+| linked: blocks, child_of, duplicate_of | 96 | 14 | 16 | 64 | 0 | 2 | 0.52–0.79 |
+
+**What a decision costs.** Reading the pair is nearly all of it, about 1 ms a
+token on this Mac, for decider-4b and the 7B alike. Ollama's own timing has the
+7B reading judge prompts at 0.84 ms a token (2,639 tokens in 2.2 s, then about
+1.4 s writing its answer). So at full length a decision costs about what the 7B
+spends reading the same pair. Two ways to make it cheaper were measured:
+
+* **Packing** (`DECIDER_PACK=1` on the server, `--packed` here): S and T in one
+  call, one read of the pair for both, which took 1.97 s against 4.38 s. S kept
+  its answer on 95% of pairs, and T, asked after S, on 63%. C is always asked
+  alone; packed after T, it kept its answer on 5 of 10 in a trial.
+* **Clipping** (`--clip N`): each thought cut to its first N characters before
+  the decider reads it.
+
+**The cascade, every variant.** Each band is picked from the data: no
+supersession the judge caught is lost, and the most candidates are settled.
+These are the two-pass bands: S at most 0.3 settles unrelated, and S at least
+0.6 asks T. The one-pass rows are in each run's report.
+
+| the decider reads (two-pass) | decider s per pair | behind 7B: model s per pair (alone 3.6) | settled pairs right: decider / 7B | behind 27B: model s per pair (alone 13.0) | settled pairs right: decider / 27B |
+|---|---|---|---|---|---|
+| full length, S and T apart | 2.1–4.4 | 4.7 | 110 / 144 of 187 | 9.4 | 78 / 128 of 143 |
+| full length, packed | 2.0 | 3.5 | 98 / 135 of 170 | 8.3 | 73 / 127 of 137 |
+| 1,500 characters, packed | 0.8 | 2.7 | 51 / 88 of 123 | 8.4 | 33 / 85 of 99 |
+| 600 characters, packed | 0.5 | 2.2 | 49 / 92 of 143 | 7.5 | 41 / 100 of 113 |
+| 300 characters, packed | 0.4 | 1.9 | 73 / 117 of 167 | 7.1 | 47 / 107 of 116 |
+
+"Settled pairs right" counts the labelled pairs the decider settles: how many
+its verdict gets right, and how many the judge it replaces got right on the
+same pairs. Picked on one half of the pairs and scored on the other, the bands
+lose up to one of the 7B's supersessions, and up to three of the 27B's at 300
+and 600 characters.
+
+**Why decider-4b is declined.** Packing and clipping make the cascade cheap. Behind the
+7B the cheapest variant needs about half the 7B's model time, and behind the
+27B the packed variants need 35–45% less. But on every variant, on the pairs it
+would settle, the decider is right less often than the judge it replaces would
+have been:
+
+* 18–30 points less than the 7B;
+* 35–53 points less than the 27B.
+
+Clipping widens the gap, since S, T and C all move off their full-length
+answers (at 600 characters, T keeps its answer on 48% of pairs). Its errors are
+of two kinds:
+
+* "unrelated" for pairs both judges and the board call related; at full length
+  it calls 27 of the 39 relates_to pairs unrelated;
+* "duplicate" for true supersessions: 37 of the 60 pointer pairs.
+
+A cheaper pass that writes wrong relations is no gain. Its "evolves" alone is
+reliable: it is right on every labelled pair it settles that way.
+
+**What would reopen it** (written after decider-4b): a decider whose "same
+subject" and relation calls match the judges' on the linked pairs, through a
+fine-tune or a framing this spike didn't try, measured with this harness.
+H2O-Lightning-4B, below, came close on the relation calls. Gated on whether a
+pair could be a supersession, not on its confidence, it met the rule behind the
+7B on the first pairs, then failed it on fresh ones, on relates_to links. A
+faster runtime won't do it
+alone: reading costs the 7B on llama.cpp 0.84 ms a token, so a 4B on the same
+runtime would read about twice as fast as now, and accuracy is the binding
+problem.
+
+**Found on the way.** The decider adapter (`jev/decider/serve.py`) cut every
+context to its first 1,536 tokens, the default of decider's `decide()`, while
+it advertised 32,768 tokens and reported `truncated: false`. 354 of these 444
+pairs (80%) are longer than that. A 2,730-token check whose one decisive
+sentence came last answered "insufficient evidence" (p 0.985) before the fix
+and the right answer (p 0.997) after. The adapter now passes its window and
+reports the real token count.
+
+**A stronger 4B: H2O-Lightning-4B** (2026-10-17). Newer open decision models
+score well above decider-4b on the public boards. The strongest of its size is
+H2O-Lightning-4B (Apache-2.0), on the same Qwen3.5-4B base. On Benchmark
+Heaven's open-weights board (JevBench v1.6.1) it ranks #5, with capability
+75.0, against decider-4b's 64.9 (#24).
+
+It runs through `jev/h2o/serve.py`, a port of H2O's shim to PyTorch MPS. On 302
+of H2O's published questions, its answers match H2O's own on all 302
+(`jev/h2o/README.md`). It reads at 0.69 ms a token, in float16 with decider's
+MPS kernels, and S and T share one read of the pair. It was run at full length,
+S and T in one request and C alone.
+
+The rule for reopening was fixed before the run. A band must be at least as
+accurate as the judge it replaces on the labelled pairs it settles (20 or more
+of them), lose no supersession, and cost less model time on the candidates than
+the judge alone. The report's "reopen rule" section sweeps 6,246 bands: the
+cascade's grid made finer, restricted to sets of verdicts, and with no cutoff
+at all, which is the outdates gate below. It also checks the widest passing
+band picked on one half of the pairs against the other.
+
+| label | pairs | unrelated | related | evolves | duplicate | outdates | median P(same subject) |
+|---|---|---|---|---|---|---|---|
+| candidates | 120 | 59 | 18 | 34 | 0 | 9 | 0.21 |
+| pointer pairs (true supersessions) | 60 | 0 | 1 | 0 | 8 | 51 | 0.72 |
+| accepted proposals | 2 | 0 | 0 | 1 | 0 | 1 | 0.78 |
+| rejected proposals | 127 | 5 | 17 | 83 | 0 | 22 | 0.50 |
+| linked: relates_to | 39 | 18 | 7 | 14 | 0 | 0 | 0.13 |
+| linked: blocks, child_of, duplicate_of | 96 | 5 | 23 | 58 | 0 | 10 | 0.29–0.60 |
+
+* **Gated on its confidence, it fails behind the 7B,** which both dogfood
+  brains run. A read costs 1.41 s a candidate against the 7B's 3.76, so a band
+  must settle about 38% of the candidates to save time. The bands that need H2O
+  to be confident settle at most 18% at the 7B's accuracy, and none is cheaper.
+* **Gated on P(outdates), it meets the rule behind the 7B on these pairs.** The outdates gate
+  settles a pair at H2O's top verdict, whatever its confidence, unless that
+  verdict is outdates or P(outdates) passes a ceiling. So the 7B reads only the
+  possible supersessions. Ceilings of 0.3, 0.4 and 0.5 meet the rule. At 0.5 the
+  gate settles 93% of the candidates and is right on 207 of the 240 labelled
+  pairs it settles, as the 7B is. It loses nothing, and it costs 1.69 s a
+  candidate against 3.76, 55% less.
+* **The gate joined the sweep after the run.** The maintainer asked whether the
+  cascade's order was inverted. The first sweep held only bands that need H2O
+  to be confident, the wrong question, since only a possible supersession needs
+  the judge.
+* **On held-out halves, the gate sits on the line.** Picked on one half, the
+  gate at 0.5 is one pair short on the other (97 against 98 right). The widest
+  band passing on the other half settles only evolves, related and duplicate;
+  scored on the first half, it meets the rule, saving 5%.
+* **Behind the 27B,** a gate settling only evolves, related and duplicate, at
+  outdates ≤ 0.3, meets the rule. It settles 38% of the candidates and is right
+  on 187 of 196, against the 27B's 185. It costs 8.30 s a candidate against
+  11.30, 27% less. Picked on one half, the widest passing band meets the rule on
+  the other; picked on that other half, it loses a supersession on the first.
+  The unrestricted gate is 14–18 pairs less accurate than the 27B.
+* **Its one-pass verdicts come close to the judges'.** The report's own pick,
+  one-pass at a top of 0.5, settles 60% of the candidates. On the 170 labelled
+  pairs it settles, H2O is right on 140, against the 7B's 143 and the 27B's 156.
+  decider-4b's one-pass pick was 10 and 32 points behind. H2O's misses are 21
+  pairs settled unrelated, and 9 true supersessions settled as duplicate (8) or
+  related (1).
+* **The two-pass framing fails, as it did for decider-4b.** S settles 93 pairs
+  unrelated and is right on 33.
+* **decider-4b still doesn't pass.** Only its 1,500-character run has bands
+  meeting the rule behind the 7B: two, saving 1%. Neither holds on the held-out
+  halves.
+
+**The confirmation fails.** It was fixed in advance: the gate at a ceiling of
+0.5, behind the 7B, on pairs neither spike had seen. Those were 533 pairs
+exported read-only from stable on 2026-10-17 for SMD-3114: 179 true
+supersessions, 234 board links, 120 candidates, and no reviewed proposals.
+
+* **The gate trails the 7B.** It settles 92% of the candidates and is right on
+  175 of the 277 labelled pairs it settles; the 7B is right on 185 of them. It
+  loses nothing, and costs 1.65 s a candidate against 2.86.
+* **Every ceiling misses.** From 0.2 to 0.5 the gate is 10 pairs behind, and
+  none of the 6,246 bands meets the rule on these pairs.
+* **The whole gap is relates_to links.** On the 78 the gate settles, H2O answers
+  unrelated on 46 and the 7B on 33. H2O is 3 ahead on child_of, and blocks tie.
+  The first set had 39 relates_to links, too few to show it.
+
+So the cascade is declined for both models. As a cheap first pass in front of
+the 7B, H2O is slightly less accurate on the pairs it would settle, and the
+loss sits in weak "related" pairs. The same run backs SMD-3114 instead. The 7B
+proposes none of the 179 fresh true supersessions, and H2O's top verdict
+proposes 127 of them, with 9 false proposals across the 234 links.
+
+**What H2O does beyond the cascade** (explored after the run, not the rule;
+the report's last section):
+
+* **As the judge itself.** Its top one-pass verdict on every pair is right on
+  259 of 324 labelled pairs; the 7B is right on 239 and the 27B on 263. It
+  proposes 52 of the 62 true supersessions, where the 7B proposes 2 and the
+  27B 23. It makes 32 false proposals (the 7B 3, the 27B 17) and proposes on 9
+  of the 120 candidates (0 and 5). It takes 1.41 s a candidate (3.76 and
+  11.30).
+* **It reads meaning, not wording.** On the 38 pointer pairs whose newer
+  thought names no supersession, it answers outdates on 36. ("Names" means a
+  match for supersed-, replac-, outdated, obsolete, no longer, deprecat-,
+  "instead of" or "updated to".) That wording on 60 candidates draws outdates on
+  3. This was checked by hand.
+* **As a flag.** At P(outdates) ≥ 0.3, it raises 53 of the 62 supersessions and
+  13% of the candidates, with a precision of 53% among the labelled pairs. A
+  judge that rereads the raised pairs, as the outdates gate has the 7B do,
+  proposes no more than it does alone. It judges each pair afresh, and misses
+  most of what H2O raises.
+
+SMD-3114 measures the other way round: H2O decides a supersession, and an LLM
+only writes the proposal (the current side and a quote from it) or declines
+when it can't. H2O's precision on the candidates, where no label says, is
+unmeasured.
+
+Caveats:
+
+* The labels are SMD-1873's: most rejected proposals are two tickets, and 44
+  proposal pairs have a side edited since they were judged.
+* The candidates have no label, so agreeing with a judge is not being right,
+  and the judges agree with each other on only half of them. Only the linked
+  pairs say which reading holds.
+* The bands are picked on the same 444 pairs; the held-out halves are the
+  guard.
+* The 27B's timings include a few minutes of stable's sleep working four new
+  captures on the same model server. The decider's own times vary by about 15%
+  between runs.
+* Only decider-4b and H2O-Lightning-4B, these three questions and these option
+  descriptions were measured. H2O was read through a port of its shim, checked
+  against its own answers. Its binary question was asked in a yes/no shape the
+  adapter chose (`jev/h2o/README.md`).
+* The outdates gate and H2O's exploration were chosen after its run, and the
+  gate then failed its confirmation. 60 of the 62 true supersessions are pointer
+  pairs, and the candidates have no label, so H2O's precision there is unknown.
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline
