@@ -557,6 +557,9 @@ and preflight's `proposals` row warns once the oldest has waited past
 (084) by word, with their board pairs counted the same way; nothing waits on
 one, so nothing warns (`consolidate.ts --list relations` shows them); `none
 standing` when there is none, `none — migration 084 is not applied` before 084.
+Since 102 the pairs judged distinct follow, `; N pairs judged distinct`: near
+neighbours the judge called unrelated, kept apart (SMD-3117) — not in the
+relations' count, never a board pair, and not said when there is none.
 A board count counts rows — proposals, relation facets — not distinct pairs of
 tickets: five proposals between two tickets' thoughts count five, and a pair
 can be in both counts; `board pairs ?` says the count was not read. Each reads `?` when its read did not
@@ -595,7 +598,7 @@ database's facts (the ledger as `{ present, readable }`, not its names; the
 watermark as `boardSync`, an ISO instant or null; the long-running workers'
 heartbeats as `workers`, `{ heartbeats, ignored }`, SMD-2261; the queue as
 `proposals`, `{ pending, stale, oldestPendingS, boardPairs }`, and the standing
-relations as `relations`, `{ related, evolves, duplicate, boardPairs }`; what
+relations as `relations`, `{ related, evolves, duplicate, distinct, boardPairs }` (`distinct` since SMD-3117: the pairs judged apart, outside the three and the board pairs); what
 became of the findings posted as `findings`, `{ posted, comments, found,
 accepted, rejected, withdrawn, open, unanswered, windowDays, medianAnswerS }`,
 SMD-2682; each null when not read or absent; each `boardPairs` is a read of its own, last,

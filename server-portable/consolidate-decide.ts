@@ -242,7 +242,7 @@ const best = (p: Record<string, number>, vs: readonly Verdict[]): Verdict => vs.
  * own option, insufficient evidence, left out and the rest renormalised); `proposal` the writer's parsed answer when
  * H2O's top was outdates, and `standing` whether its quotes passed. A standing proposal is an outdates in the side it
  * names, its quote the evidence; anything else is H2O's best verdict that proposes nothing. Either way the verdict
- * probabilities are H2O's, so proposalConfidence reads P(outdates) and relationConfidence the relation words' mass.
+ * probabilities are H2O's, so proposalConfidence reads P(outdates) and relationConfidence the relation words' mass (P(unrelated) for a distinct, SMD-3117).
  */
 export function decideJudgement(p: Record<Verdict, number>, proposal: Proposal | null, standing: boolean): Judgement {
   const probabilities = { verdict: { p, covered: 1 } };

@@ -540,8 +540,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // it, SMD-1849), 097 (one walk for 082's lapse, SMD-3035), 098 (the
   // stated-status label's read bounded, SMD-2540), 099 (an unlink
   // takes the review lock, SMD-3045), 100 (the thoughts with no vector
-  // by an index of their own, SMD-3056) and 101 (the sleep scheduler's
-  // cuts counted apart from the stops, SMD-3060)
+  // by an index of their own, SMD-3056), 101 (the sleep scheduler's
+  // cuts counted apart from the stops, SMD-3060) and 102 (the
+  // consolidation judge's distinct stored, SMD-3117)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -671,13 +672,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // update_thought, refusing by name without 073 ([20as]); 100 adds a partial index on
   // thoughts, needing nothing past 001; 101 adds a column and a function
   // to 093's table and redefines its two, refusing by name without 093
-  // ([20at]) — all
+  // ([20at]); 102 redefines 084's validator and record_thought_relation on
+  // their own bodies, refusing by name without 084 ([20au]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 72, `030 is among the last seventy-two migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 73, `030 is among the last seventy-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4383,6 +4385,44 @@ console.log("\n[20at] Migration 101: refused by name without 093; onto a populat
   await sql`SELECT note_extraction_stop(${id}::uuid, 'extract:stub@p2', 'w-upgrade', 'fp-edited', 'win', false)`;
   const edited = await progress();
   assert(edited.stops === 1 && edited.cuts === 0 && edited.kept === 0, `after 101 a stop under other text replaces the row, its cuts too (${JSON.stringify(edited)})`);
+  await sql.close();
+}
+
+console.log("\n[20au] Migration 102: refused by name without 084; onto a populated brain at the file before it — the door refuses distinct there and takes it after, a relation standing before stands after, the sentinel the pass reads is in; no row and no audit row moved by the file; a re-apply a no-op (SMD-3117)");
+{
+  const the102 = MIGRATIONS.find((f) => f.endsWith("_judged_distinct.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "084" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the102 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 102 needs 084 (thought_facets and record_thought_relation); this schema lacks them",
+    `102 on a schema stopped before 084 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the102 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  const made = async (content: string, axis: number) => ((await sql`SELECT upsert_thought(${content}::text, ${{ metadata: { source: "mcp" } }}::jsonb, ${vec(axis)}::vector) AS r`)[0].r as { id: string }).id;
+  const older = await made("upgrade 102: the older note", 1), newer = await made("upgrade 102: the newer note", 2), apart = await made("upgrade 102: a note about something else", 3);
+  const relate = (n: string, o: string, word: string) => sql`SELECT record_thought_relation(${n}::uuid, ${o}::uuid, ${word}, 0.7, 'consolidate:t@p4', NULL, 'a', 'b', NULL) AS r`;
+  await relate(newer, older, "related");
+  const atBefore = await relate(apart, older, "distinct").then(() => "taken", (e: Error) => e.message);
+  assert(/relation must be related, evolves, duplicate or NULL/.test(atBefore), `[20au] setup: at the file before it the door refuses distinct (${atBefore.slice(0, 80)})`);
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const facets = async () => JSON.stringify(await sql`SELECT id, thought_id, payload, valid_until IS NULL AS active FROM thought_facets WHERE kind = 'relation' ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const before = await rows(), facetsBefore = await facets(), auditBefore = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the102 });
+  const [door] = await sql`SELECT prosrc AS body FROM pg_proc WHERE oid = to_regprocedure('record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb)')`;
+  assert(/ob1:relation-distinct/.test(String(door?.body)) && (await rows()) === before && (await facets()) === facetsBefore && (await audits()) === auditBefore,
+    "102 applied: the door carries the sentinel the pass reads, and no thought, relation or audit row moved");
+  const taken = (await relate(apart, older, "distinct"))[0].r as { action: string };
+  const [standing] = await sql`SELECT count(*) FILTER (WHERE payload->>'relation' = 'related')::int AS related, count(*) FILTER (WHERE payload->>'relation' = 'distinct')::int AS apart
+                                 FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL`;
+  assert(taken.action === "added" && standing.related === 1 && standing.apart === 1, `after it the door takes distinct, and the relation standing before stands (${JSON.stringify([taken, standing])})`);
+  // A re-apply moves nothing.
+  const facetsBeforeReapply = await facets(), auditsBeforeReapply = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the102 });
+  assert((await facets()) === facetsBeforeReapply && (await audits()) === auditsBeforeReapply, "a re-apply of 102 is a no-op: no relation or audit row moved");
   await sql.close();
 }
 
