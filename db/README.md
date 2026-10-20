@@ -533,33 +533,31 @@ server — which cannot import a `db/` script, and whose PostgREST store reaches
 only RPCs — could not share them. Five functions, all `LANGUAGE sql`, SECURITY
 INVOKER, no SET, not STRICT, so a caller's planner inlines them:
 `node_lifecycle_types()` and `node_settled_types()` (the six status types this
-schema knows, and the two that settle a node — seven and three since 103); `node_lifecycle()` (per thought:
-status, status_type, the source watermark `synced_at` and `created_at` — a row
-carrying `ticket` or `issue` reads its ticket's head; it read `thoughts`
-alone until 068 stored the heads); `node_dependencies()` (one row per
-`blocks` / `blocked_by` link facet, active or closed, with whether its system
-gates — SMD-2218's rule); and
-`node_state(ids)` (every thought, or those named: the lifecycle beside `open`,
-`blocked`, `blockers`, `unknown_blockers`, `in_dependencies` and
-`superseded_by`). Coverage and freshness are columns — a node carries a
-lifecycle when `open` is not NULL; its freshness is `synced_at`, never
-`updated_at` — so each consumer counts over what it ranks. At 058 the ids
-narrowed the rows returned, not the work: the whole brain was computed and
-filtered last (068 stores the heads and superseders, below).
-`graph-centrality.ts` is the first reader, its reports byte for byte what they
-were; search is the second (`search_thoughts`' opt-in `prefer_current`, through
-059). `metadata.status_type` is a
-transitional, lossy scalar: when SMD-1997 folds the transitions `thought_audit`
-holds, the two reads of it change — `node_lifecycle()`'s body and
-`node_dependencies()`' gate — and no signature does. Reads only, no grant row
-(EXECUTE is PUBLIC): `node_lifecycle()` needs SELECT on `thoughts`;
-`node_dependencies()` and `node_state()` also need it on `thought_facets` (the
-capture group) and `thought_sources` (the `structure` group, and the `server`
-group since 059). The file drops
-its three table functions before creating them, so `--reapply` replays it over
-a later migration's reshape; the price is that a view of an operator's over
-`node_state()` (or any other object that records a dependency on one) stops
-that replay at 058, and a REVOKE on one is not kept.
+schema knows, and the two that settle a node — seven and three since 103);
+`node_lifecycle()` (per thought: status, status_type, the source watermark
+`synced_at` and `created_at` — a row carrying `ticket` or `issue` reads its
+ticket's head; it read `thoughts` alone until 068 stored the heads);
+`node_dependencies()` (one row per `blocks` / `blocked_by` link facet, active or
+closed, with whether its system gates — SMD-2218's rule); and `node_state(ids)`
+(every thought, or those named: the lifecycle beside `open`, `blocked`,
+`blockers`, `unknown_blockers`, `in_dependencies` and `superseded_by`). Coverage
+and freshness are columns — a node carries a lifecycle when `open` is not NULL;
+its freshness is `synced_at`, never `updated_at` — so each consumer counts over
+what it ranks. At 058 the ids narrowed the rows returned, not the work: the
+whole brain was computed and filtered last (068 stores the heads and
+superseders, below). `graph-centrality.ts` is the first reader, its reports byte
+for byte what they were; search is the second (`search_thoughts`' opt-in
+`prefer_current`, through 059). `metadata.status_type` is a transitional, lossy
+scalar: when SMD-1997 folds the transitions `thought_audit` holds, the two reads
+of it change — `node_lifecycle()`'s body and `node_dependencies()`' gate — and
+no signature does. Reads only, no grant row (EXECUTE is PUBLIC):
+`node_lifecycle()` needs SELECT on `thoughts`; `node_dependencies()` and
+`node_state()` also need it on `thought_facets` (the capture group) and
+`thought_sources` (the `structure` group, and the `server` group since 059). The
+file drops its three table functions before creating them, so `--reapply`
+replays it over a later migration's reshape; the price is that a view of an
+operator's over `node_state()` (or any other object that records a dependency on
+one) stops that replay at 058, and a REVOKE on one is not kept.
 
 Migration 059 is `search_thoughts_current` (SMD-2255, SMD-2074's second
 consumer): the hybrid search with settled and superseded thoughts ranked below
@@ -1795,26 +1793,25 @@ gains `duplicate` after `canceled` and `node_settled_types()` becomes
 `ob1_rebuild_source_gate()`, as 071 asks of any migration that changes the
 known set (071's mirror stores, per source row, whether its status is a
 known one: 16 rows on stable flip). Nothing else stored is computed from the
-sets. It also alters every function outside the system schemas that names
-a set (in its text, in any case, or by dependency) to the volatility it has,
-a no-op that invalidates the plans built on it in every session — a
-procedure is left, and one the migrating role cannot alter is named in a
-NOTICE and left: replacing the sets alone left a server's pooled connection, once it
-had searched with `prefer_current` six times, demoting by 058's sets (review
-pass 1). graph-centrality's `LIFECYCLE_TYPES` and `--status done` follow (its
-equality check refuses a brain before 103), `board-findings.ts`'s `closed()`
-reads `node_settled_types()` and refuses to post on a brain without 103 (said
-once, at board-sync's start: after migrating, restart board-sync), a
-demoted Duplicate says `↓ Ranked ×0.25 — duplicate`, and the stated-status
-label prints its word, Duplicate. A Duplicate whose original is still open
-reads finished, as a cancel does. Refuses by name without 058 or 071; a
-re-apply is a no-op. An older tree's `--reapply` over a 103 brain puts 058's
-six back: run this tree's `--reapply` after it (which fails at 064 on a brain
-holding a judged relation until SMD-3149). test-schema [93] (the sets, a
-Duplicate settled and its blocker cleared, both under 058's sets as before,
-the mirror rebuilt), test-upgrade [20av] (a session's cached plan reaching
-the new sets among it), test-live [41] (the poster's
-refusals without 058's set and before 103).
+sets. It also alters every function outside the system schemas that names a set
+(in its text, in any case, or by dependency) to the volatility it has, a no-op
+that invalidates the plans built on it in every session — a procedure is left,
+and one the migrating role cannot alter is named in a NOTICE and left: replacing
+the sets alone left a server's pooled connection, once it had searched with
+`prefer_current` six times, demoting by 058's sets (review pass 1).
+graph-centrality's `LIFECYCLE_TYPES` and `--status done` follow (its equality
+check refuses a brain before 103), `board-findings.ts`'s `closed()` reads
+`node_settled_types()` and refuses to post on a brain without 103 (said once, at
+board-sync's start: after migrating, restart board-sync), a demoted Duplicate
+says `↓ Ranked ×0.25 — duplicate`, and the stated-status label prints its word,
+Duplicate. A Duplicate whose original is still open reads finished, as a cancel
+does. Refuses by name without 058 or 071; a re-apply is a no-op. An older tree's
+`--reapply` over a 103 brain puts 058's six back: run this tree's `--reapply`
+after it (which fails at 064 on a brain holding a judged relation until
+SMD-3149). test-schema [93] (the sets, a Duplicate settled and its blocker
+cleared, both under 058's sets as before, the mirror rebuilt), test-upgrade
+[20av] (a session's cached plan reaching the new sets among it), test-live [41]
+(the poster's refusals without 058's set and before 103).
 
 ## What changed relative to the guide
 
@@ -2869,21 +2866,21 @@ mentions, support, co_mentions, the per-relation counts — is a sum of weights.
 `--status open|active|done` keeps the named lifecycles at 1 and weighs the
 other known ones 0 (`open` = not completed, canceled or duplicate; `active` =
 unstarted or started; `done` = completed, canceled or duplicate); `--decay-done`
-weighs a completed, canceled or duplicate thought `DONE_WEIGHT` = 0.25, pre-registered in the file, one value,
-exact in binary, refused beside a filter (they are two answers to one
-question). A row's lifecycle is its ticket's: a row carrying a ticket
-(`issue`) or derived from one (`ticket` — SMD-2059's dated sections) takes
-the status of the ticket's head — of the rows carrying that `issue`, one
-nothing supersedes before one superseded, the newest sync before an older —
-so a Done ticket's observations and its superseded earlier rows are settled
-with it; a twin the sync chained under a head without an `issue` of its own
-keeps its own lifecycle, which is none. A thought with no lifecycle — a hand capture, or a `status_type`
-the file does not know — weighs 1 under every flag: it passes every filter,
-and the output counts how many did rather than calling it open. Degree counts
-neighbours, not evidence, so a filter removes an edge with no live evidence
-and decay leaves it; a thought is listed when it weighs more than 0 and ranks
-by its weight times its score, with its status beside it. The default,
-`--status all` without decay, is every weight 1 — today's counts by
+weighs a completed, canceled or duplicate thought `DONE_WEIGHT` = 0.25,
+pre-registered in the file, one value, exact in binary, refused beside a filter
+(they are two answers to one question). A row's lifecycle is its ticket's: a row
+carrying a ticket (`issue`) or derived from one (`ticket` — SMD-2059's dated
+sections) takes the status of the ticket's head — of the rows carrying that
+`issue`, one nothing supersedes before one superseded, the newest sync before an
+older — so a Done ticket's observations and its superseded earlier rows are
+settled with it; a twin the sync chained under a head without an `issue` of its
+own keeps its own lifecycle, which is none. A thought with no lifecycle — a hand
+capture, or a `status_type` the file does not know — weighs 1 under every flag:
+it passes every filter, and the output counts how many did rather than calling
+it open. Degree counts neighbours, not evidence, so a filter removes an edge
+with no live evidence and decay leaves it; a thought is listed when it weighs
+more than 0 and ranks by its weight times its score, with its status beside it.
+The default, `--status all` without decay, is every weight 1 — today's counts by
 construction, so a Done ticket still counts as a live one until a flag says
 otherwise, and the lifecycle caveat says so with the run's numbers: how many
 thoughts carry a status, how many are settled, the latest `linear_updated_at`
@@ -2891,10 +2888,9 @@ thoughts carry a status, how many are settled, the latest `linear_updated_at`
 thoughts weighed in. The status, and every rule below, is migration 058's
 `node_state` (SMD-2074): `node_lifecycle()` without a dependency flag, which
 reads `thoughts` and, since 068, `ob1_ticket_head` (both the capture group's),
-and `node_state()` with one, which reads `thought_sources` too (the
-`structure` group); when SMD-1997 folds
-`thought_audit`'s transitions, the functions' bodies change and this script
-does not.
+and `node_state()` with one, which reads `thought_sources` too (the `structure`
+group); when SMD-1997 folds `thought_audit`'s transitions, the functions' bodies
+change and this script does not.
 
 **Startability** (SMD-2061). The lifecycle says a ticket is open, not that it
 can be started. Migration 053 (SMD-1867) stores the board's relations as `link`
@@ -4916,11 +4912,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2954 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1433 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1434 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 870 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 55 assertions: the shards SHARDS lists in test-live.ts, each its own job
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 275 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 236 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 237 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

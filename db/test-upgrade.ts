@@ -4457,6 +4457,13 @@ console.log("\n[20av] Migration 103: refused by name without 058, then without 0
   const [was] = await sql`SELECT (SELECT open FROM node_state(ARRAY[${dup}::uuid])) AS dup_open, (SELECT blocked FROM node_state(ARRAY[${open}::uuid])) AS blocked`;
   assert(was.dup_open === null && was.blocked === true && (await gate()) === false, `[20av] setup: at the file before 103 a Duplicate is an unknown status and blocks what it blocks, and its row does not gate (${JSON.stringify(was)})`);
   const before = await rows(), auditBefore = await audits();
+  // The warm session below reads node_state's path alone; every other
+  // reader of the sets is held by its catalog row: each one's xmin moves
+  // (review pass 2).
+  const readers = async () => new Map(((await sql`SELECT p.oid::regprocedure::text AS f, p.xmin::text AS x FROM pg_proc p
+      WHERE p.pronamespace = 'public'::regnamespace AND p.prosrc ~ 'node_(lifecycle|settled)_types[[:space:]]*[(]'
+        AND p.proname NOT IN ('node_lifecycle_types', 'node_settled_types')`) as { f: string; x: string }[]).map((r) => [r.f, r.x]));
+  const readersBefore = await readers();
   // A server's pooled connection: one session that has searched with
   // prefer_current enough times for plpgsql to cache a generic plan. 103 must
   // reach it — CREATE OR REPLACE of the sets alone did not (review pass 1).
@@ -4464,27 +4471,8 @@ console.log("\n[20av] Migration 103: refused by name without 058, then without 0
   const demotedFor = async () => (((await warm`SELECT demoted FROM search_thoughts_current(${VEC}::vector, 'upgrade 103', 0, 10, '{}'::jsonb, 0, 30, NULL) WHERE id = ${dup}::uuid`)[0] as { demoted: string[] | null } | undefined)?.demoted ?? null);
   const warmBefore: (string[] | null)[] = [];
   for (let i = 0; i < 8; i++) warmBefore.push(await demotedFor());
-  // The warm session reads node_state's path alone; every other reader of
-  // the sets is held by its catalog row: each one's xmin moves (review pass 2).
-  const readers = async () => new Map(((await sql`SELECT p.oid::regprocedure::text AS f, p.xmin::text AS x FROM pg_proc p
-      WHERE p.pronamespace = 'public'::regnamespace AND p.prosrc ~ 'node_(lifecycle|settled)_types[[:space:]]*[(]'
-        AND p.proname NOT IN ('node_lifecycle_types', 'node_settled_types')`) as { f: string; x: string }[]).map((r) => [r.f, r.x]));
-  const readersBefore = await readers();
-  // Readers the text match alone missed, and a procedure, which no ALTER
-  // FUNCTION takes and which once failed the file (review pass 2).
-  await sql.unsafe(`CREATE SCHEMA upg103;
-    CREATE FUNCTION upg103.shouted() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY(PUBLIC.NODE_SETTLED_TYPES())';
-    CREATE FUNCTION upg103.quoted() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY("node_settled_types"())';
-    CREATE FUNCTION upg103.atomic() RETURNS text[] LANGUAGE sql STABLE BEGIN ATOMIC SELECT node_settled_types(); END;
-    CREATE PROCEDURE upg103.proc() LANGUAGE plpgsql AS $$ BEGIN PERFORM node_settled_types(); END $$`);
-  const planted = async () => new Map(((await sql`SELECT p.oid::regprocedure::text AS f, p.xmin::text AS x FROM pg_proc p WHERE p.pronamespace = to_regnamespace('upg103')`) as { f: string; x: string }[]).map((r) => [r.f, r.x]));
-  const plantedBefore = await planted();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the103 });
-  const readersAfter = await readers(), plantedAfter = await planted();
-  assert(plantedBefore.size === 4 && ["upg103.shouted()", "upg103.quoted()", "upg103.atomic()"].every((f) => plantedAfter.get(f) !== plantedBefore.get(f))
-      && plantedAfter.get("upg103.proc()") === plantedBefore.get("upg103.proc()"),
-    `…in any schema, named in any case or quoted, or by dependency (a BEGIN ATOMIC body), and a procedure naming one is left rather than failing the file (${JSON.stringify([...plantedBefore.keys()])})`);
-  await sql.unsafe(`DROP PROCEDURE upg103.proc(); DROP FUNCTION upg103.atomic(); DROP FUNCTION upg103.quoted(); DROP FUNCTION upg103.shouted(); DROP SCHEMA upg103`);
+  const readersAfter = await readers();
   const unaltered = [...readersBefore].filter(([f, x]) => readersAfter.get(f) === x).map(([f]) => f);
   assert(readersBefore.size >= 5 && ["node_state(uuid[])", "ticket_references_settled(text,jsonb)", "ticket_status_inputs(uuid[],text[])"].every((f) => readersBefore.has(f)) && unaltered.length === 0,
     `103 alters every function whose body names a set, so each one's cached plans are dropped (${readersBefore.size} of them; unaltered: ${unaltered.join(", ") || "none"})`);
@@ -4500,6 +4488,24 @@ console.log("\n[20av] Migration 103: refused by name without 058, then without 0
   const stateBefore = await state();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the103 });
   assert((await state()) === stateBefore && (await rows()) === before && (await audits()) === auditBefore, "a re-apply of 103 is a no-op: no state, row or audit row moved");
+  // Readers the text match alone missed, and a procedure, which no ALTER
+  // FUNCTION takes and which once failed the file (review pass 2) — planted
+  // only now, for a re-apply: present beside the warm session above they
+  // dropped its plan by themselves, and its check passed without the ALTERs
+  // (review pass 3).
+  await sql.unsafe(`CREATE SCHEMA upg103;
+    CREATE FUNCTION upg103.shouted() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY(PUBLIC.NODE_SETTLED_TYPES())';
+    CREATE FUNCTION upg103.quoted() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY("node_settled_types"())';
+    CREATE FUNCTION upg103.atomic() RETURNS text[] LANGUAGE sql STABLE BEGIN ATOMIC SELECT node_settled_types(); END;
+    CREATE PROCEDURE upg103.proc() LANGUAGE plpgsql AS $$ BEGIN PERFORM node_settled_types(); END $$`);
+  const planted = async () => new Map(((await sql`SELECT p.oid::regprocedure::text AS f, p.xmin::text AS x FROM pg_proc p WHERE p.pronamespace = to_regnamespace('upg103')`) as { f: string; x: string }[]).map((r) => [r.f, r.x]));
+  const plantedBefore = await planted();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the103 });
+  const plantedAfter = await planted();
+  assert(plantedBefore.size === 4 && ["upg103.shouted()", "upg103.quoted()", "upg103.atomic()"].every((f) => plantedAfter.get(f) !== plantedBefore.get(f))
+      && plantedAfter.get("upg103.proc()") === plantedBefore.get("upg103.proc()"),
+    `103 re-applied alters readers in any schema, named in any case or quoted, or by dependency (a BEGIN ATOMIC body), and leaves a procedure naming one rather than failing the file (${JSON.stringify([...plantedBefore.keys()])})`);
+  await sql.unsafe(`DROP PROCEDURE upg103.proc(); DROP FUNCTION upg103.atomic(); DROP FUNCTION upg103.quoted(); DROP FUNCTION upg103.shouted(); DROP SCHEMA upg103`);
   await sql.close();
 }
 

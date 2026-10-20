@@ -24,22 +24,24 @@
 --   * node_lifecycle_types(): the seven, `duplicate` after `canceled`, as
 --     Linear's board lists it. node_settled_types(): {completed, canceled,
 --     duplicate}. Same signatures, IMMUTABLE as before; CREATE OR REPLACE.
---   * Every function outside the system schemas that names either set (in
---     its body, or by dependency) is altered to the volatility it has — a
---     no-op that invalidates every session's plans built on it; one this
---     role cannot alter is named in a NOTICE and left. CREATE OR REPLACE alone did not reach every cached
---     plan: on PG 16 a session that had called search_thoughts_current
---     (plpgsql) six times, its generic plan cached, kept demoting by 058's
---     sets after 103 while a fresh session did not (review pass 1, run-it);
---     a statement naming a set directly read the new one. A running
---     server's pooled connections are such sessions. test-upgrade [20av]
---     holds one, and that every such function was altered.
+--   * Every function outside the system schemas that names either set (in its
+--     body, or by dependency) is altered to the volatility it has — a no-op
+--     that invalidates every session's plans built on it; one this role
+--     cannot alter is named in a NOTICE and left. CREATE OR REPLACE alone did
+--     not reach every cached plan: on PG 16 a session that had called
+--     search_thoughts_current (plpgsql) six times, its generic plan cached,
+--     kept demoting by 058's sets after 103 while a fresh session did not
+--     (review pass 1, run-it); a statement naming a set directly read the new
+--     one. A running server's pooled connections are such sessions.
+--     test-upgrade [20av] holds one, and that every such function was
+--     altered.
 --   * ob1_rebuild_source_gate() after them: 071's mirror stores, per source
 --     row, whether its thought's status_type is in node_lifecycle_types(),
 --     and says a migration that changes the set runs it (stable: 16 rows
 --     false → true). Its locks are SHARE on thoughts and thought_sources,
---     held to this file's commit (under --reapply, to the whole run's). No other stored row is computed from the
---     sets: ob1_ticket_head stores the head's status_type as written.
+--     held to this file's commit (under --reapply, to the whole run's). No
+--     other stored row is computed from the sets: ob1_ticket_head stores the
+--     head's status_type as written.
 --   * graph-centrality.ts's LIFECYCLE_TYPES and LIFECYCLE_FILTERS.done,
 --     board-findings.ts's closed(), the search reply's demotion words
 --     (server-portable/render.ts) and the label's fixed words

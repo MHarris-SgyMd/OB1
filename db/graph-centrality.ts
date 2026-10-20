@@ -50,21 +50,21 @@
  * weight, exact in binary so the sums are too). A row's lifecycle is its
  * TICKET's: a row carrying a ticket (`issue`) or derived from one (`ticket` —
  * SMD-2059's dated sections) takes the status of the ticket's head — of the
- * rows carrying that `issue`, one nothing supersedes before one superseded,
- * the newest sync before an older,
- * then the id — so a Done ticket's observations and its superseded earlier
- * rows are settled with it; a row with no ticket claim takes the status keys
- * on its own row, if any. A twin the sync chained under a head without an
- * `issue` of its own (a hand paste adopted after the fact) is such a row: it
- * keeps its own lifecycle, which is none. A thought with no status — a hand
- * capture, a status_type this file does not know — weighs 1 whatever the flags
- * say: it passes every filter, and the output counts how many did rather than
- * calling it open. So mentions, support, co_mentions and the per-relation
- * counts are weighted sums (whole numbers unless decay is on); degree counts
- * NEIGHBOURS, not evidence, so a filter removes an edge with no live evidence
- * and decay leaves it. A thought is listed when it weighs more than 0 and
- * ranks by its weight times its score. Default `--status all` without decay is
- * every weight 1 — today's counts, by construction.
+ * rows carrying that `issue`, one nothing supersedes before one superseded, the
+ * newest sync before an older, then the id — so a Done ticket's observations
+ * and its superseded earlier rows are settled with it; a row with no ticket
+ * claim takes the status keys on its own row, if any. A twin the sync chained
+ * under a head without an `issue` of its own (a hand paste adopted after the
+ * fact) is such a row: it keeps its own lifecycle, which is none. A thought
+ * with no status — a hand capture, a status_type this file does not know —
+ * weighs 1 whatever the flags say: it passes every filter, and the output
+ * counts how many did rather than calling it open. So mentions, support,
+ * co_mentions and the per-relation counts are weighted sums (whole numbers
+ * unless decay is on); degree counts NEIGHBOURS, not evidence, so a filter
+ * removes an edge with no live evidence and decay leaves it. A thought is
+ * listed when it weighs more than 0 and ranks by its weight times its score.
+ * Default `--status all` without decay is every weight 1 — today's counts, by
+ * construction.
  *
  *   open    = triage, backlog, unstarted, started   (not settled)
  *   active  = unstarted, started                    (on the board and moving)
@@ -87,17 +87,17 @@
  * says. A blocker is open unless its own lifecycle, read through the
  * `lifecycle` rows above via `source_thought()` (053's resolver), is completed,
  * canceled or duplicate: a settled blocker is not a blocker. Within a system
- * that gates (below: the board does), a blocker the brain does not hold, or one with no
- * status_type this file knows, still blocks — the source said "blocked" and
- * nothing here says it is settled — and the output counts such blockers rather
- * than hiding them. A row derived from a ticket (`ticket`) or carrying one
- * (`issue`) takes its ticket's blockers, as it takes its ticket's status. Only
- * an active link counts (`valid_until` unset — 053 closes a relation the source
- * dropped), and only `blocks` / `blocked_by`: a parent is not blocked by its
- * children (`child_of`), nor a ticket by what it relates to. A thought whose
- * ticket no gating dependency names counts as unblocked, and the output states
- * how many one does name. Without the flag (or `--decay-blocked`, below) the
- * dependency read is not in the SQL at all, so every other mode renders
+ * that gates (below: the board does), a blocker the brain does not hold, or one
+ * with no status_type this file knows, still blocks — the source said "blocked"
+ * and nothing here says it is settled — and the output counts such blockers
+ * rather than hiding them. A row derived from a ticket (`ticket`) or carrying
+ * one (`issue`) takes its ticket's blockers, as it takes its ticket's status.
+ * Only an active link counts (`valid_until` unset — 053 closes a relation the
+ * source dropped), and only `blocks` / `blocked_by`: a parent is not blocked by
+ * its children (`child_of`), nor a ticket by what it relates to. A thought
+ * whose ticket no gating dependency names counts as unblocked, and the output
+ * states how many one does name. Without the flag (or `--decay-blocked`, below)
+ * the dependency read is not in the SQL at all, so every other mode renders
  * SMD-1994's report byte for byte (the JSON's `options` carries two more keys,
  * `startable` and `decayBlocked`, both false) and a role without
  * `thought_sources` runs it (below).

@@ -124,11 +124,12 @@ export type MovedInputs = { lifecycle: ReadonlySet<string>; heads: ReadonlyMap<s
  * Nor a ticket row (`metadata.issue`) whose type gives it none: a duplicate's
  * row was lifecycle-less to node_state until 103 (16 of stable's 721 rows), so
  * the measurement labelled the tickets its body quotes, but a ticket row tells
- * its own status, never others' — and a custom type still has none. Nor a hit with no written time: the session line
- * when it has one, else its stored time. Every other hit is absent — not
- * checked, which the reply says as `moved: null` (the maintainer's call,
- * review pass 4). Every checked hit counts the keys past MOVED_READ: an empty
- * list beside a count says nothing about those (review pass 5).
+ * its own status, never others' — and a custom type still has none. Nor a hit
+ * with no written time: the session line when it has one, else its stored time.
+ * Every other hit is absent — not checked, which the reply says as `moved:
+ * null` (the maintainer's call, review pass 4). Every checked hit counts the
+ * keys past MOVED_READ: an empty list beside a count says nothing about those
+ * (review pass 5).
  */
 export function movedAmong(hits: readonly { id: string; content: string; created_at: string | null; metadata?: Record<string, unknown> | null }[], superseded: Readonly<Record<string, string>>, inputs: MovedInputs): Record<string, MovedHit> {
   const out: Record<string, MovedHit> = {};
