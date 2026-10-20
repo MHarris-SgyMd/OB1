@@ -1,0 +1,134 @@
+# 335. Fork Checks' live suite in four shards, one job each: "Schema against real Postgres" was the run's critical path (SMD-3048)
+
+**What changed.**
+- **`db/test-live.ts`** reads `OB1_LIVE_SHARD`. Its `SHARDS` table names three shards by the sections each runs; every section it does not list is `rest`'s, so a new section runs in CI unless someone moves it. Unset, the run is every section, as before. An unknown name, or a section listed in two shards, exits 2.
+  - Each section's header is gated on its shard (`if (want("38")) {`); the code in a section is unchanged.
+  - **`[1]` is the rest's.** It applies the migrations while asserting on them; a shard without it applies them in the preamble, in-process and silent, and stops on a failure.
+  - **The one-connection pool** `[5b]` opened moved out of `[5b]`, to just above it, so every shard's later sections get the pool a full run gives them, opened after the migrations' database settings. Nothing in the three named shards reads the settings or the pool's size today: put back inside `[5b]`, they pass. It is there for a section a rebalance moves out of the rest. `[10]`'s "a one-connection client is refused" relied on the pool's size, and failed without it; it now opens a client of its own.
+  - **`[end]`, new:** after a run's last section, the node_state projection and the source gate are exact (`ob1_node_projection_drift()`, one assertion a run). `[33]` and `[35]` check it after the sections before them, which a shard no longer holds; `[end]` checks every shard, and in a full run the sections after `[35]`, `[38]` among them, which nothing checked.
+  - **`[doc]`** holds each shard's count, as it held the full run's. `db/README.md` states one count per shard and the full run's. Every run checks that the shard counts add up to the full run's (with `[end]` counted once), and that every section its shard lists ran. A run checks its own count, unless something was skipped.
+- **Fork Checks**: `db-live` ("Schema against real Postgres", the name kept) runs the rest and `test-search-path.ts`. Three new jobs run the others, each with its own Postgres service:
+  - `db-live-sleep`, "Schema against real Postgres: the sleep scheduler": [38].
+  - `db-live-long`, "Schema against real Postgres: long thoughts and the re-embed": [9], [10g] and [38b].
+  - `db-live-extract`, "Schema against real Postgres: extraction": [10], [10e], [10f] and [17], with four short sections of the rest's, each on its own client: [37], [39], [41] and [43].
+- **`db/ci-parity.sh`** runs the four shards in series, as check 35 requires.
+- **The ruleset record** requires the three new names (check 20), and FORK.md says sixteen jobs.
+
+**Why.** Fork Checks' median run went from 311 s to 682 s in ten days (2026-10-06 → 10-16). On main's run 38910919518, the live suite took 731 s of its job's 763 s. Most of that was six sections waiting out workers' real timers: [38] 189 s, [10] 139 s, [38b] 130 s, [16] 67 s, [9] 32 s, [10g] 25 s.
+
+**Order.** The ticket said to cut the waits first, then split. Cutting every outage wait in [10], [16] and [38] saves at most about 200 s of 731, which still leaves the job the critical path. So the split comes first. The waits are this ticket's second PR.
+
+**The cut**, by main's CI section times: sleep 189 s, long 187 s, extract 183 s, rest about 172 s plus `test-search-path.ts`. Each job adds about 30 s of setup. `[33]` and `[35]` stay in the rest, after the ticket and source writers they check.
+
+**Held.**
+- **Locally, each shard on its own throwaway Postgres**: rest 827, long 263, sleep 54 and extract 235 assertions, all passing. The rest ran apart from the others, since its [2] edits a migration file while it runs (review pass 2). Less the three extra `[end]`s, they add up to 1376: the full run's 1375 before the change, and `[end]`.
+- **ci-parity.sh's four lines, in its order on one database** (rest, sleep, long, extract): all four pass, as in CI's fresh databases (review pass 3).
+- **A full run with no shard set:** 1376/1376 and all four `[doc]` checks.
+- **After merging main at 958ec3c4**, which added one assertion to [38] and one to [38b]: sleep 55 and long 264, so the full run's count is 1378.
+- **An unknown or blank `OB1_LIVE_SHARD`** exits 2 before touching the database.
+- **Mutants:**
+  - A stale id in `SHARDS` (`sleep: ["38", "99"]`) fails `[doc]`, which names `[99]`.
+  - A section in two shards exits 2, naming it.
+  - A stray `ob1_ticket_head` row planted before `[end]` fails it, naming the row (`head MUT-1`).
+  - [39]'s header given [37]'s id fails `[doc]`, naming `[37]`.
+  - Check 35 fails without a shard's `ci-parity.sh` line, naming it.
+  - Check 20 fails without one of the three ruleset names, naming it.
+- **Tools:** actionlint 1.7.7, `check-fork-consistency` and `tsc --noEmit` in `db/` pass.
+- **One flake, not new:** [38]'s "a wake with a judgement in hand … moves it to the back of consolidation's queue too" failed once (0 of 3), with five suites sharing the machine. It passed in all three sleep-shard runs without that load, and in the full run. Its cause was found and fixed in PR 2 (review pass 4).
+
+**Measured after.** On the PR's first run (38935910316, all 16 jobs green first time), against the one job's 763 s on main's run 38910919518:
+
+| job | live step, s | job, s |
+|---|---|---|
+| Schema against real Postgres (rest, then `test-search-path.ts`) | 211 | 239 |
+| …: the sleep scheduler | 191 | 215 |
+| …: long thoughts and the re-embed | 191 | 214 |
+| …: extraction | 186 | 208 |
+
+- **Every shard is under the full-stack jobs** on this run: 250, 265 and 181 s.
+- **The whole run took 329 s**, against the ticket's 682 s median. The last job to finish was "SQL data layer against real Postgres": it started 68 s after the run did, and ended at 329 s.
+- **The rest** ran about 40 s over its estimate from main's section times. It is the longest shard, so the next section added there should be weighed against moving one out.
+- **Still owed** (the ticket's Verify): a week's median run on `main`.
+
+**PR 2: the waits.** The slow cases in [10], [16] and [38] waited out a follower's real outage schedule (5 s, then 10 s) and the sleep passes' 15 s poll for work, in the suite's own process.
+- **`db/worker-bootstrap.ts`**: the outage schedule is `OUTAGE_MS = { first, max }`, read as it runs, as `TRANSIENT_PAUSES_MS` is. Its numbers are unchanged; `extract-entities.ts` and `consolidate.ts` print them from it.
+- **`db/sleep.ts`**: `runSleep` takes `passFollowS`, the passes' poll (`PASS_FOLLOW_S`, 15 s), beside the suite's other knobs (`minStampEveryS`, `stallFloorMs`). The CLI has no flag for it.
+- **`db/test-live.ts`**: `shortenOutage()` sets the first wait to 1 s, still doubling, and restores it, as `shortenPauses()` does. A provider outage in [10] and [16] is paced by probes, not the clock: the stub answers down until the follower's probes have found it down once (twice for a hang: the probe after the timeout, then the outage's first), and the probe after that is answered. However slow the runner, each outage is probed while down. [38] runs its passes with `passFollowS: 1`. [38b] keeps 15 s: with passes polling every second, its dry run beside the scheduler once read the pool in another state than "only 1 stalled thought, which consolidation would join past", in a full run.
+- **The real numbers stay held:** the spawned followers ([10]'s and [16]'s database cuts, [10]'s alarm, [38]'s CLI), [38]'s refusal retried with its 5 s, doubling and reset, and [16]'s "judge stays down", whose probes answer, so a 1 s wait ends the wait it reads the row in. The provider-outage message's shipped "5 s" is held in two parts, not by one case: [10]'s 503 case reads "after 1 s" with the schedule shortened, so the message prints `OUTAGE_MS.first`; and `test-worker-bootstrap.ts` pins `OUTAGE_MS.first` at 5 s through `outageWait(0)`.
+- **Two fixes on the way:** [38]'s "a sleep woken while its pass waited" polled for `waiting.length === 1` while both passes wait, so it waited out its 15 s every run (now `> 0`). Its mid-read race held each probe 8 s, which the start's check paid twice. It holds 4 s now: a count found no probe held when the stop lands, at 8 s as at 4 s, so the hold paces only the check (SMD-3106).
+
+- **Boyscout, after six review passes:** the two stubs' probe-paced outages share `probePacedOutage()` in `db/test-support.ts`, where each stub had its own copy of the counter (three passes named it). `shortenWaits()`, pairing `shortenPauses()` and `shortenOutage()`, was not taken: three cases use both, and the rest one or the other.
+
+**PR 2 measured on CI** (run 39328862655, the PR's first, all 16 jobs green), against PR 1's first run (38935910316):
+
+| job | live step, s | job, s |
+|---|---|---|
+| rest, [16] in it (with main's [6j] and [45] since) | 211 → 155 | 239 → 187 |
+| sleep, [38] | 191 → 104 | 215 → 126 |
+| extract, [10] | 186 → 154 | 208 → 187 |
+| long, [38b] not changed | 191 → 194 | 214 → 226 |
+
+The long shard is the slowest live job now. The run took 314 s; its wall time is the full-stack jobs' (310 s for "Full stack, no Supabase" on this run).
+
+**PR 2 held:**
+- All four shards pass at PR 1's counts (sleep 55, long 264, extract 235, rest 827), and a full run passes 1378/1378 in 8.8 min.
+- **After merging main at 8acd917b** (#426, #429, #430), whose [6j] and [45] add 8 assertions to the rest: rest 835 and a full run of 1386, which passes in 8.9 min; the other three shards pass at their counts. Neither section reads a schedule or a stub this PR changed.
+- `test-worker-bootstrap.ts` (88), `test-engines.ts` (490) and `test-cli.ts` (443) pass.
+- **On Linux** (review pass 5): the extract and sleep shards pass in `oven/bun:1.4.3` against `pgvector/pgvector:0.8.6-pg16` under podman, two sleep shards at once included.
+- **Mutants**, each failing as it should:
+  - `probeUntil` settling on any probe, after review pass 1: six cases fail in the extract shard, among them [10]'s 503 and hang, which passed it when their outages were timed windows; and both of [16]'s outages in the rest.
+  - `waitOut` returning without its check fails "a follower stopped just after the database answers again" (extract shard).
+
+**Review passes.**
+
+| pass | finding | caught | fix |
+|---|---|---|---|
+| 1 | `[33]` and `[35]`'s projection checks moved to a shard with none of the ticket and source writers, and the rest kept no drift check | cold read | both back in the rest; `[end]` in every run |
+| 1 | `[10]`'s refusal of a one-connection client still leaned on the suite's pool size | cold read | its own client |
+| 1 | a section listed in two shards would count in both | cold read | exits 2 |
+| 1 | the workflow's step comments copied `SHARDS`' ids, which the next rebalance would leave stale | cold read | they point at `SHARDS` |
+| 2 | with [33] and [35] back, the rest (~196 s plus setup) was near the full-stack jobs (~232 s) again | cold read | [37], [39], [41] and [43] to extract: ~183 and ~172 s |
+| 2 | two shards started together from one checkout race [2]'s edit of a migration file | cold read | the header, README and record say one at a time per checkout |
+| 2 | two headers could share an id, taking a section to another shard unseen | cold read | [doc] checks every header's id is its own |
+| 2 | db-live's comment read "the three jobs below run the rest", the name of its own shard; ci-parity.sh's series run differs from CI's fresh databases unsaid | cold read | both reworded |
+| 3 | the moved pool reopen has no check behind it: put back inside [5b], the extract shard still passes | mutant | the comment and this record say nothing outside the rest reads it, and why it stays |
+| 3 | ci-parity.sh's comment said the last three shards meet what the rest left; dropSchema takes the rows | walkthrough | reworded, here too |
+| 3 | the sum check, failing because a section has no want(), would blame the README | walkthrough | its message names that cause |
+| 3 | the rest's "every section it lists ran" passed on an empty list every run | walkthrough | not printed for the rest |
+| PR 2, 1 | the shrunken windows (503 for 3 s, hang for 4.5 s) no longer forced a probe while down: with `probeUntil` settling on any probe, [10]'s 503 case (0 probes answered) and both of [16]'s outages still passed | mutant | outages paced by probes; [10]'s 503 asserts a probe answered |
+| PR 2, 1 | the same windows left 1.3 s of slack for the seed, a poll and a claim on a loaded runner | walkthrough | as above: no window left to miss |
+| PR 2, 1 | the relay cut shrank to 3 s against a 2 s poll, before an unbounded wait for the run | walkthrough | 4 s again, and the wait bounded |
+| PR 2, 1 | with a 3 s hold, a stop landing after the pass's probe answered would pass as a plain stop | walkthrough | 4 s; a count of probes in flight at the stop read 0 with main's 8 s too, so the case never raced a held probe: SMD-3106 |
+| PR 2, 1 | `shortenOutage()` ran before the relay's start in two cases, so a failed start left 1 s for every later case | cold read | after it |
+| PR 2, 2 | [16]'s 503 case and [10]'s `--limit 1` case armed their outage after a bare 1 s sleep, so a late start probe could take its one refusal (or, in [10], a 404 that ends the run) | walkthrough | each arms once the follower's start probe has answered |
+| PR 2, 2 | [10]'s added "a probe answered" could not fail on its own: calls stay down until one is | walkthrough | it counted the probes refused, which could not fail either (pass 3) |
+| PR 2, 2 | the late-start case reset its outage only on a return, and the block's finally never reset it, so a throw left every later [10] case down | cold read | reset in a finally, and in the block's |
+| PR 2, 2 | the relay case's finally awaited the run before closing the relay, so the 30 s bound could still end in a hang | cold read | the relay closes first |
+| PR 2, 2 | [16]'s `judgeDownUntil` was set by no case after pass 1 | cold read | removed: one outage mechanism in its stub |
+| PR 2, 3 | the "probes refused" conjunct pass 2 put in could not fail either: only a refused probe brings the outage to the probe that ends it | cold read | removed; the count stays in the message, and the stub's design is the check |
+| PR 2, 3 | the changelog line said only spawned workers keep the shipped numbers; three in-process cases do too | cold read | reworded |
+| PR 2, 3 | the provider-outage message's shipped "5 s" is no longer read by a case | cold read | the record says how it is held instead: the message reads `OUTAGE_MS`, which `test-worker-bootstrap.ts` pins |
+| PR 2, 3 | [10]'s `--limit 1` database cut restored the schedule before its follower ended | cold read | the follower awaited first |
+| PR 2, 3 | `passFollowS: 0` would hand the passes no --follow at all, with no error | cold read | `runSleep` throws a RangeError for anything but a whole number ≥ 1 (pass 6: through `numberProblem`) |
+| PR 2, 4 | [38]'s "a wake with a judgement in hand" read the first consolidation claim it saw as the slow judgement; under a loaded machine that was a thought with no pair, or one whose call had not begun when the model went. It failed 6 runs in 16 on the branch and 2 in 10 on main | run-it | the stub counts judge calls held; the case reads its claim once one is. 8/8 under the same load |
+| PR 2, 5 | pass 4's gate and its claim read were two moments, its result was dropped, and the stub's count stayed up after a client abort | cold read | one poll reads the claim while the call is held; a gate that never opens says so; the hold ends with the abort |
+| PR 2, 6 | after main's merge, the record still gave the pre-merge counts and no full run had put [6j] and [45] beside the shortened cases | cold read | a full run at the merge, and its counts here |
+| PR 2, 6 | `passFollowS` had a check of its own beside `numberProblem`, which keeps every other number in the file | cold read | `numberProblem`, thrown as a RangeError |
+
+**Not taken.**
+- **A `--shard` flag.** Check 35's readers take flags without values (`--x=1`, which `cli.ts` refuses), so `--shard sleep` would read as a bare `--shard` and hide which shard a step runs. An environment variable is held on both sides, as `OB1_MCP_UNDER_TEST` is.
+- **Four shards in one job,** against four databases on one service. It needs no ruleset change, but four timing-heavy suites would share one runner's CPUs, the load this PR's one flake came from.
+- **A matrix.** Check 20 needs every job's display name literal.
+- **An aggregator job** to sum the shards' counts. The README states each shard's count, and the arithmetic is checked in every run.
+- **A full run in CI.** No job runs every section in one process any more. Each shard is more isolated than before, so a section that leans on another's leftovers fails. But a section broken by another's leftover rows shows only in a full run, run locally: ci-parity.sh's series run drops the schema before each shard, so only cluster roles and unlisted tables carry over. A full-run job would add back the 12 minutes this PR removes.
+- **One README count fewer** (the full run's, derived from the shards'). The full-run line is what a developer runs. [doc]'s message gives both numbers to write.
+- **A parity check on the Postgres service image** across the four jobs. Its tag is already copied into the other database jobs with none; setup-bun's pin is held in every job already.
+- **An outage-schedule option on each engine** (PR 2's review pass 1), in place of the module's `OUTAGE_MS`. It would keep each case's schedule its own, but threads through every outage call site in three engines; `TRANSIENT_PAUSES_MS` is the same shape, and [38]'s one switch mid-run is commented.
+- **One entry file per shard** (review pass 3), importing a shared preamble. It would make the split structural and drop three `[doc]` checks, but it moves 13,600 lines and the helpers sections share. Nothing stops the rest from growing back into the critical path; the Verify's job times will show it.
+- **YAML anchors** for the four jobs' shared setup. actionlint is pinned at 1.7.7, which reads none (as SMD-3051 found). The step comments point at `SHARDS` rather than copy its ids.
+
+**Follow-ups.**
+- PR 1: the live ruleset was re-applied before it merged (#427), sixteen checks.
+- [38b]'s longest cases (27–29 s each) are paced by design: an 8 s stuck window against wakes 3.5 s into each sleep, four sleeps. Shortening them is a rewrite of the case, not a timer.
+- The ticket's Verify: a week's median Fork Checks run on `main`, against 682 s.
+- SMD-3106: [38]'s "a stop landing mid-read with a pass waiting at its start" never has a probe held when its stop lands.

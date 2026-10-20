@@ -1,0 +1,55 @@
+# 340. H2O decides supersession and an LLM writes only the proposal — two-sided, the writers find more true supersessions than the 27B judge at less model time than the 7B judge, but on two fresh sets they make a few false proposals where the 27B judge makes none (SMD-3114)
+
+**What changed.**
+- **`evals/eval-judge-propose.ts`** (new). For every pair H2O's one-pass verdict flags as outdates, it asks a writer LLM only which thought is current and the words in it that show the other is no longer current, or that neither is. The writer does not re-judge the relation.
+  - **One-sided:** prompt 4's quote, checked with `evidenceIn` in the side it names and not in the other.
+  - **Two-sided** (SMD-2938): also the other thought's claim that no longer holds, checked in that thought and not in the current one.
+  - **`--part-rule`** adds `PART_RULE`: a part of some work finishing does not outdate the larger work. It was added after the confirmation's false proposals.
+  - **The fallback:** a decline, or a quote the check fails, leaves the pair at H2O's best verdict that proposes nothing, as every unflagged pair is.
+  - **The report:** each judge alone, H2O alone, and H2O with each writer under both flags (the top verdict, decided on; P(outdates) ≥ 0.3, reported). Then the rule fixed on SMD-3114 before the run:
+    - at least the 27B alone's true supersessions naming the right thought;
+    - no more false proposals than the 27B;
+    - right at least as often as the 7B;
+    - less model time a candidate than the 7B.
+- **CI:** "Proposal writer rules" in fork-checks.yml and `db/ci-parity.sh` run its `--self-check`.
+
+**Why.** SMD-3058 measured the consolidation judge on 444 pairs from stable: the 7B proposes 2 of the 62 true supersessions and the 27B 23. H2O-Lightning-4B's verdict answers outdates on 52. But a classifier can't write a proposal, the current side and a quote from it, which is prompt 4's guard against invented supersessions. Any pass where the judge keeps the last word on supersession proposes at most what the judge does.
+
+**Measured.** Three sets, each with the flag on H2O's top verdict:
+- **SMD-3058's 444 pairs.** Both two-sided writers meet the rule.
+  - The 7B writer: right on 254 of 324, 28 true supersessions (27 naming the right thought), 13 false proposals, 1.67 s a candidate.
+  - The 27B writer: right on 265, 41 (37), 15 false, 2.16 s, which beats the 27B judge (263, 23 (18), 17 false, 11.30 s) on every measure.
+  - The one-sided writers miss on false proposals.
+- **533 fresh pairs** (179 true supersessions, 234 links, 120 candidates; no reviewed proposals). Both miss on false proposals alone: 5 each, where the 27B judge makes none.
+  - The 27B writer proposes 109 (107), against the judge's 68 (67), at 2.28 s against 11.54. The 7B judge proposes none of the 179.
+  - The false proposals are one pattern: a ticket marked done, read as the later state of the larger or blocked ticket it belongs to.
+- **485 more fresh pairs, with the part rule** (119 true supersessions, 246 links, 120 candidates; fixed on SMD-3114 in advance). Neither fixed writer meets the rule.
+  - The 27B writer with the rule: right on 250 of 365, 73 (72), 3 false, 2.34 s. The 27B judge: 293, 55 (54), 0 false, 11.25 s.
+  - The rule halves the 27B writer's false proposals (6 to 3) and costs it 7 true supersessions; the 3 left are the same pattern.
+  - The 7B writer with the rule misses on the right side (45) as well as on false proposals (6).
+  - The 7B judge proposes none of the 119.
+- **Context for the decision.** Every false proposal on the two fresh sets is on two tickets Linear links as child_of or blocks. Migration 079 keeps those pairs out of the consolidation candidates, so the pass never judges them. Nothing labels the writers' proposals on the candidates it does judge (2 to 9 in 120).
+- **The verdict:** not adopted by the rule. Adopting anyway is the maintainer's call. `evals/README.md` has the tables.
+
+**Held.**
+- `bun eval-judge-propose.ts --self-check` covers:
+  - the question: both thoughts in prompt 4's rendering, the stale key only two-sided, the part rule only when asked, the keys listed and never shown as a template, the injection guard;
+  - the answer's parse: A as the older thought, an answer outside A, B and none unparsed, none keeping no quote, a long quote cut at a word;
+  - the quote checks, both sides;
+  - the scoring: flags at their edges, a decline or failed quote settled at H2O's best non-proposing verdict, the writer's time charged, the right side checked, false proposals counted;
+  - the rule, each condition at its edge.
+- **Mutants:** twenty-six, each undoing one of those, all fail it.
+
+**Review passes.**
+
+| pass | finding | caught by | fix |
+|---|---|---|---|
+| first run | the prompt showed the keys as a template (`"current": "A|B|none"`), and the 7B copied `B|none` back on 11 of 93 pairs | run-it | the keys listed; all four runs redone |
+| commit | the commit message counted 27 mutants; the script holds 23 | cold read | message amended before push |
+
+**Not taken.**
+- **Changing `consolidate.ts`,** pending the maintainer's decision.
+- **The one-sided writers:** they make more false proposals than the 27B judge.
+- **Deciding on the P(outdates) ≥ 0.3 flag:** it raises more pairs and adds false proposals.
+
+**Follow-ups.** None filed. If the maintainer adopts a writer, the precision that matters is on the candidates the pass judges, and only a review of its proposals there can measure it.

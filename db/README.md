@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2946 assertions: 2946 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and two (102) migrations applied, and
+`bun test-schema.ts` prints `2948 assertions: 2948 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and three (103) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -314,7 +314,8 @@ that writes its version as the last file of the range it freezes: 048 writes
 `1.5.0+upstream.9543c29`, the sixth (`073..076`), and 081 writes
 `1.6.0+upstream.9543c29`, the seventh (`077..081`), and 083 writes
 `1.7.0+upstream.9543c29`, the eighth (`082..083`), and 089 writes
-`1.8.0+upstream.9543c29`, the ninth (`084..089`). `preflight` prints the
+`1.8.0+upstream.9543c29`, the ninth (`084..089`), and 103 writes
+`1.9.0+upstream.9543c29`, the tenth (`090..103`). `preflight` prints the
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
@@ -4891,7 +4892,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2946 assertions, PGlite, no container
+bun test-schema.ts                          # 2948 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1439 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 871 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 57 assertions: the shards SHARDS lists in test-live.ts, each its own job
