@@ -370,8 +370,9 @@ app.use("*", async (c, next) => {
   trace.end({ status: c.res.status, outcome, code }, at);
 });
 
-// Must run before anything reads env(). On Workers c.env carries the bindings;
-// elsewhere it is undefined and initEnv falls back to process.env.
+// Must run before anything reads env(). c.env is undefined under Bun, so
+// initEnv reads process.env (it carried Workers' bindings, a target retired in
+// SMD-3152).
 app.use("*", async (c, next) => {
   initEnv(c.env as unknown as Record<string, unknown>);
   await next();
@@ -869,8 +870,7 @@ app.notFound((c) => {
 // why the image needs it). Bun serves the default export below itself and
 // hands the server to no one but the fetch handler, as its second argument, so
 // the first request passes it on; before that nothing can be in flight. Only
-// when this module is Bun's entry: never on Workers, whose second argument is
-// its bindings, nor in a suite that imports the module.
+// when this module is Bun's entry: never in a suite that imports the module.
 const SERVES_ON_BUN = typeof Bun !== "undefined" && import.meta.main === true;
 let bunServer: Stoppable | undefined;
 /** Set once the stop closes what is still in flight at its bound, so the route's close line names the stop, not the client. */
@@ -925,7 +925,7 @@ if (SERVES_ON_BUN) {
 }
 
 export default {
-  // Workers reads `fetch`; Bun also reads `port`. Node uses @hono/node-server.
+  // Bun reads `fetch` and `port`; the suites call `fetch`. Node uses @hono/node-server.
   // No `idleTimeout`: a tool call outlives the default by the keepalive (sse.ts),
   // and the default is the right reaper for a dead socket (SMD-1864).
   // An empty PORT is unset, not port 0 (a random port, silently) — `||`, the rule the vendored servers' tails share (SMD-1799).

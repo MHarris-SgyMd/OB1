@@ -4838,7 +4838,7 @@ function checkSupabaseJsImports() {
       continue;
     }
     for (const line of lines) {
-      fail(`${rel}:${line}`, `imports @supabase/supabase-js at runtime — every vendored server reaches the brain through compat/supabase-sql since SMD-1798 (\`bun scripts/migrate-to-sql-shim.ts --apply ${rel}\`; the shim's README says what it still refuses); supabase-js stays only in server-portable's Workers store`);
+      fail(`${rel}:${line}`, `imports @supabase/supabase-js at runtime — every vendored server reaches the brain through compat/supabase-sql since SMD-1798 (\`bun scripts/migrate-to-sql-shim.ts --apply ${rel}\`; the shim's README says what it still refuses); the server dropped it with its PostgREST store (SMD-3152)`);
     }
   }
   for (const rel of SUPABASE_JS_EXCEPTIONS.keys()) if (!seen.has(rel)) fail(rel, "check 22's exception names a file the scan does not reach — stale, or the file is gone");
@@ -4861,8 +4861,14 @@ checkSupabaseJsImports();
 // own, which is not the brain server.
 /** `wrangler` as a word, any case. */
 const WRANGLER_WORD = /\bwrangler\b/i;
-/** OB1_STORE set to postgrest — an env line, a YAML or TOML key, a shell assignment — any case, quoted or not. */
-const POSTGREST_SELECTED = /\bOB1_STORE\s*[=:]\s*["']?postgrest\b/i;
+/**
+ * OB1_STORE set to postgrest on one line — an env line, a YAML, TOML or JSON
+ * key, a shell assignment, a Dockerfile `ENV` with its space, a compose
+ * default (`${OB1_STORE:-postgrest}`) — any case, quoted or not. A value on a
+ * line of its own (Kubernetes' `name:`/`value:` pair) is not read: structure
+ * across lines is a parser's job, and the runtime refuses the selection anyway.
+ */
+const POSTGREST_SELECTED = /\bOB1_STORE["']?(?:\s*[=:]\s*|\s+)(?:\$\{OB1_STORE:?-)?["']?postgrest\b/i;
 /** [text, wrangler?, postgrest selected?] — what 22b must catch, and the neighbours it must not reach. */
 const RETIRED_TARGET_PROBES: [string, boolean, boolean][] = [
   ["bunx wrangler deploy --dry-run --outdir=.cf-out", true, false],
@@ -4872,11 +4878,16 @@ const RETIRED_TARGET_PROBES: [string, boolean, boolean][] = [
   ['OB1_STORE = "postgrest"', false, true],
   ["      OB1_STORE: postgrest", false, true],
   ["export OB1_STORE='PostgREST'", false, true],
+  ['"OB1_STORE": "postgrest"', false, true],
+  ["ENV OB1_STORE postgrest", false, true],
+  ["      OB1_STORE: ${OB1_STORE:-postgrest}", false, true],
   ["OB1_STORE=sql", false, false],
+  ["      OB1_STORE: ${OB1_STORE:-sql}", false, false],
+  ["OB1_STORE is unset; postgrest is refused", false, false],
   ["the PostgREST store, retired", false, false],
   ["wranglers' wrangling", false, false],
 ];
-const RETIRED_FILES = ["server-portable/wrangler.toml", "server-portable/store-postgrest.ts", "server-portable/test-store-postgrest.ts"];
+const RETIRED_FILES = ["server-portable/wrangler.toml", "server-portable/wrangler.json", "server-portable/wrangler.jsonc", "server-portable/store-postgrest.ts", "server-portable/test-store-postgrest.ts"];
 const isHistory = (rel: string) => rel.startsWith("changes/") || rel === "CHANGELOG.md" || rel === "FORK.md";
 function checkRetiredTarget() {
   for (const [probe, wrangler, selected] of RETIRED_TARGET_PROBES) {

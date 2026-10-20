@@ -624,8 +624,8 @@ is the defence: mint it with `keygen.ts`, and never hash a chosen word into
 strong the key was. A raw `MCP_ACCESS_KEY`, the one key it sees in plain, is
 refused under 32 characters by preflight, the image's entrypoint. Compose
 passes the server no raw key, so this is for the image run on its own
-(`docker run`, Kubernetes); a Workers deployment and the vendored servers run
-no preflight, so give them a 32-byte key yourself. The REST core
+(`docker run`, Kubernetes); the vendored servers run no preflight, so give
+them a 32-byte key yourself. The REST core
 (`server-portable/rest/`, SMD-2284) checks the same keys, from headers alone,
 and refuses a wrong one before reading the body; it takes the same position,
 and the proxy does not route `/api` yet. The proxy

@@ -391,7 +391,7 @@ if (store === "postgrest") {
   add("store selection", "fail", `OB1_STORE="${store}" is not a known store`,
       `Unset OB1_STORE: "${DEFAULT_STORE}" is the only store.`);
 } else {
-  add("store selection", "ok", env.OB1_STORE === undefined ? `OB1_STORE unset — ${DEFAULT_STORE}, the default` : `OB1_STORE=${store}`);
+  add("store selection", "ok", env.OB1_STORE === undefined ? `OB1_STORE unset — ${DEFAULT_STORE}, the only store` : `OB1_STORE=${store}`);
 }
 
 // ── Model provider ──────────────────────────────────────────────────────────
@@ -1066,10 +1066,8 @@ if (configFailed) {
   if (built) {
     // countThoughts is the cheapest call that proves the connection works, the
     // table exists and the credentials are accepted.
-    let rowCount: number | null = null;
     try {
       const n = await built.countThoughts();
-      rowCount = n;
       add("schema", "ok", `thoughts table reachable, ${n} row(s)`);
     } catch (e) {
       const msg = (e as Error).message;
@@ -2814,7 +2812,7 @@ if (configFailed) {
         /**
          * Migration 020 changed both search functions' signatures — two
          * defaulted parameters, recency_weight and half_life_days — by DROPPING
-         * the earlier forms, and both stores send all the arguments. Two states
+         * the earlier forms, and the store sends all the arguments. Two states
          * break every search and neither shows in the presence checks above:
          *
          *   * the functions predate 020 (the ledger stops at 019, or a hand
@@ -2992,7 +2990,7 @@ if (configFailed) {
         /**
          * Migration 042 changed delete_thought the way 021 and 032 changed
          * update_thought: a defaulted third parameter (p_detach), the
-         * two-argument form dropped, both stores sending all three. The same
+         * two-argument form dropped, the store sending all three. The same
          * two states break every delete and neither shows in a presence
          * check: the function predates 042 (the call has no function to
          * resolve to — a server deployed ahead of the migration fails at the

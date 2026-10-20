@@ -2135,8 +2135,8 @@ export const SUPERSEDED_SIGNATURES = Object.freeze([
 /**
  * The functions the core migrations define, each with the file that last
  * defines it (SMD-1250). `files` is the migrations as [name, text] pairs in
- * apply order — read by the caller, since this module is imported by the
- * Workers build and cannot touch the filesystem. A statement at the start of
+ * apply order — read by the caller, since the server imports this module
+ * and it reads no file. A statement at the start of
  * a line, comments stripped first so a header quoting one is not it
  * (test-schema [10]'s rule). Read from the files, never typed: a list would
  * lag the next migration. scripts/check-fork-consistency.ts check 7 fails a

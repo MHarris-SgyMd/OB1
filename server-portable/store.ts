@@ -445,7 +445,7 @@ export function normaliseVectorlessRow(r: Record<string, unknown>): VectorlessRo
  * tier that logged it, when, and the search's own arguments. `result_ids` (the
  * historical answer) is left off — the compare replays each query FRESH against
  * both brains and diffs those, so the recorded ids are not needed, and a uuid
- * array would diverge across the two stores' drivers for no gain.
+ * array would diverge across drivers for no gain.
  */
 export type LoggedSearchRow = {
   query: string;
@@ -900,7 +900,7 @@ export function normaliseTicketStatusInputs(rows: unknown): TicketStatusInputs {
 
 const CHANGE_ACTIONS = new Set(["capture", "update", "delete"]);
 
-/** thought_changes's row → AuditChange; both stores map through here so neither drifts. */
+/** thought_changes's row → AuditChange. */
 export function normaliseChange(r: Record<string, unknown>): AuditChange {
   const action = String(r.action);
   // 008's CHECK admits only the three; a fourth word here is a changed function.

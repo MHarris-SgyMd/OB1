@@ -197,7 +197,7 @@ const result = async (name: string, args: Record<string, unknown> = {}) => {
   return { text: res.content.map((c) => c.text).join("\n"), isError: res.isError === true, sc: res.structuredContent };
 };
 
-console.log(`  store: OB1_STORE unset (sql, the default), SUPABASE_URL unset\n`);
+console.log(`  store: OB1_STORE unset (sql, the only store), SUPABASE_URL unset\n`);
 
 console.log("[1] The server runs with no Supabase configuration at all");
 {

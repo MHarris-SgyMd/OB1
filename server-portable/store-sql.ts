@@ -210,8 +210,8 @@ export class SqlStore implements ThoughtStore {
     preferCurrent?: boolean;
     minTrust?: string;
   } & RecencyOpts): Promise<ThoughtHybridMatch[]> {
-    // The function extracts the needles and does the fusion, so neither store
-    // has a copy of either rule to get out of step — the same reason the two
+    // The function extracts the needles and does the fusion, so the server
+    // has no copy of either rule to get out of step — the same reason the two
     // methods above call their functions rather than inlining them. Under
     // prefer_current the demotion is 059's function's too (SMD-2255); a tagged
     // template cannot bind a function name, so the two calls are two literals.

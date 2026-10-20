@@ -104,7 +104,7 @@ console.log("[1] Missing configuration fails, with an actionable fix");
   // Change 97 (SMD-1797): unset selects the SQL store, and every line says so.
   const d = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: undefined });
   assert(d.code === 1, "OB1_STORE unset without DATABASE_URL exits 1");
-  assert(/store selection\s+OB1_STORE unset — sql, the default/.test(d.out), "…the store selection line says unset means sql");
+  assert(/store selection\s+OB1_STORE unset — sql, the only store/.test(d.out), "…the store selection line says unset means sql, the only store");
   assert(/DATABASE_URL\s+OB1_STORE is unset, which selects the SQL store, and DATABASE_URL is not set/.test(d.out), "…the DATABASE_URL line says which selection wants it");
   assert(!/SUPABASE_URL\s+not set/.test(d.out), "…and SUPABASE_URL is not asked for");
 

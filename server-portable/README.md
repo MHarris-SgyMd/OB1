@@ -611,9 +611,8 @@ platform's liveness probe at the keyless form. `deploy/smoke.sh`'s check 10
 reads the keyed body.
 
 Where each fact comes from: the version, its release range and the tree's last
-migration are generated into `version.ts` by `scripts/gen-version.ts` (the Workers
-build cannot import the node-only `db/version.mjs`, and neither a Worker nor the
-image carries `db/migrations/`; check-fork's 17e round-trips the file, and in a
+migration are generated into `version.ts` by `scripts/gen-version.ts` (the
+image carries no `db/migrations/` for the server to read; check-fork's 17e round-trips the file, and in a
 checkout preflight's `version module` row compares it with `db/migrations/`, so
 rerun the script after adding a migration). The commit is the image's
 `OB1_GIT_SHA` build arg (`deploy/README.md`), `unknown` when unset. The database's
@@ -679,8 +678,7 @@ dry-run preview mutates nothing, so it stamps none:
 Each is mirrored by a keyed **`POST`** — `POST /worker-retry-failed`,
 `POST /worker-release-leases` and `POST /worker-run` — with the args in the JSON body,
 gated by a **write** key (stricter than the read routes; a read/capture/no key gets the
-bodiless `ok`). Like `worker_status`, all are SQL-backend only — the PostgREST shim
-answers that it needs the SQL store.
+bodiless `ok`).
 
 ## The operator's label reset (SMD-2744)
 

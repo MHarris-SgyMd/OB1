@@ -320,7 +320,7 @@ export type ListThoughtsResult = { thoughts: ListedThought[] };
 
 export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, type, topic, person, days, said_by, actor, min_trust }: Input<"list_thoughts">): Promise<Outcome<ListThoughtsResult>> {
   // min_trust (SMD-1724) as the ladder's words at or above it: a containment
-  // clause's sibling, which either store can run (no ob1_trust_rank call).
+  // clause's sibling (no ob1_trust_rank call).
   const data = await (await ctx.store()).listThoughts({ limit, type, topic, person, days, saidBy: said_by, actor, trustIn: min_trust === undefined ? undefined : trustAtOrAbove(min_trust) });
   if (!data.length) return ok({ thoughts: [] });
   // 025 (SMD-1253): mark the listed thoughts a newer thought supersedes,

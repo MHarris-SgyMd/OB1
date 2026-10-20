@@ -216,7 +216,7 @@ console.log("\n[3c] hybridThoughts fuses the two, and maps the fused row's shape
   // Migration 020: the store passes the recency blend's two inputs (defaults
   // 0 and 90) and maps the new `score` column, which equals similarity at
   // weight 0. Age the exact row two years and weight age fully: it drops from
-  // first, its reported similarity unchanged; both stores must reorder alike.
+  // first, its reported similarity unchanged.
   assert(vector.every((r) => typeof r.score === "number" && r.score === r.similarity), "matchThoughts maps score, equal to similarity at weight 0");
   const exact = vector[0]; // the row nearest the query, "exact"
   const aged = new SQL({ url: URL_, max: 1 });
