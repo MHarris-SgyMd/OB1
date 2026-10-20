@@ -141,6 +141,11 @@ export type Judgement = {
    * absent otherwise. `confidence` stays the number the model wrote.
    */
   probabilities?: JudgeProbabilities;
+  /**
+   * Decide mode's note (consolidate-decide.ts, SMD-3115): the decider, its top verdict and what the writer wrote,
+   * recorded in the recipe as it came. Absent from the judge's answers.
+   */
+  decide?: Record<string, unknown>;
 };
 
 /**
@@ -594,17 +599,36 @@ export function proposalVerdict(j: Judgement): "newer_supersedes_older" | "older
 /** The verdicts that relate two thoughts that both stand — a `relation` facet each (migration 084), never a proposal. */
 export const RELATION_VERDICTS = ["related", "evolves", "duplicate"] as const;
 export type RelationVerdict = (typeof RELATION_VERDICTS)[number];
+/**
+ * What a relation facet says: a relation verdict's own word, or since 102
+ * `distinct` — the judge's unrelated, which on a candidate pair (two near
+ * neighbours, 029's rule) says two look-alikes are about different subjects
+ * and are kept apart (SMD-3117; SMD-3116 renamed the word). Prompt 4 still
+ * asks for "unrelated": the stored word is distinct, the asked one is not moved.
+ */
+export type RelationWord = RelationVerdict | "distinct";
 
 /**
  * The relation a judgement records (SMD-1873 PR 2), or null when it records
- * none — an unrelated pair, an outdates (a proposal's), a malformed answer.
- * The pass writes it with record_thought_relation (084) on the newer thought,
- * and for a well-formed judgement a null closes the pair's edge, so a
- * re-judge that no longer sees the relation retracts it; a malformed,
- * timed-out or refused pair never reaches the write, and its edge stands.
+ * none — an outdates (a proposal's), a malformed answer. An unrelated verdict
+ * records distinct (SMD-3117), except under decide mode where H2O's top was
+ * another word and unrelated is the fallback. The pass writes it with
+ * record_thought_relation (084, 102) on the newer thought, and for a
+ * well-formed judgement a null closes the pair's edge, so a re-judge that no
+ * longer sees the relation retracts it; a malformed, timed-out or refused
+ * pair never reaches the write, and its edge stands.
  */
-export function relationVerdict(j: Judgement): RelationVerdict | null {
-  return !j.malformed && (RELATION_VERDICTS as readonly string[]).includes(j.verdict) ? (j.verdict as RelationVerdict) : null;
+export function relationVerdict(j: Judgement): RelationWord | null {
+  if (j.malformed) return null;
+  if (j.verdict === "unrelated") {
+    // Under decide mode the verdict may be a fallback: H2O's top said outdates, no
+    // proposal stood, and the best of the other four was taken. A distinct says
+    // the two are about different subjects, which a top of outdates denies, so
+    // only H2O's own top unrelated records one (SMD-3117 review pass 1).
+    const top = j.decide?.top;
+    return top !== undefined && top !== "unrelated" ? null : "distinct";
+  }
+  return (RELATION_VERDICTS as readonly string[]).includes(j.verdict) ? (j.verdict as RelationVerdict) : null;
 }
 
 /**
@@ -617,14 +641,19 @@ export function relationVerdict(j: Judgement): RelationVerdict | null {
  * with 0.98 on the three: floored on its own word, about 3.6% of the dogfood
  * brain's relation verdicts would have been dropped while the model was sure a
  * relation held (SMD-1873 PR 2 review pass 1). Without a distribution the
- * two are the written number.
+ * two are the written number. A distinct (an unrelated verdict, SMD-3117) is
+ * the one word that says no relation holds, so its floor is its own
+ * probability: the relation words' mass would cut a confident unrelated at
+ * nearly nothing.
  */
 export function relationConfidence(j: Judgement): { confidence: number; mass: number; source: "token" | "stated" } {
   const d = j.probabilities?.verdict;
   if (!d || d.covered < MIN_COVERED) return { confidence: j.confidence, mass: j.confidence, source: "stated" };
   const p = d.p as Record<string, number>;
   const r2 = (x: number) => Math.round(x * 100) / 100;
-  return { confidence: r2(p[j.verdict] ?? 0), mass: Math.min(1, r2(RELATION_VERDICTS.reduce((m, w) => m + (p[w] ?? 0), 0))), source: "token" };
+  const own = r2(p[j.verdict] ?? 0);
+  if (j.verdict === "unrelated") return { confidence: own, mass: Math.min(1, own), source: "token" };
+  return { confidence: own, mass: Math.min(1, r2(RELATION_VERDICTS.reduce((m, w) => m + (p[w] ?? 0), 0))), source: "token" };
 }
 
 /** proposalConfidence uses the token distribution only when the alternatives naming a verdict held at least this share of the token's mass. */
@@ -658,11 +687,12 @@ export const JUDGE_LOGPROBS = 10;
  * stated number, whether the quote naming the current side was found in it,
  * and the token distributions themselves with their coverage.
  */
-export function judgedRecipe(j: Judgement, source: "token" | "stated"): { verdict: Verdict; confidence_source: "token" | "stated"; stated_confidence: number; evidence_found?: boolean; probabilities?: JudgeProbabilities } {
+export function judgedRecipe(j: Judgement, source: "token" | "stated"): { verdict: Verdict; confidence_source: "token" | "stated"; stated_confidence: number; evidence_found?: boolean; probabilities?: JudgeProbabilities; decide?: Record<string, unknown> } {
   return {
     verdict: j.verdict, confidence_source: source, stated_confidence: j.confidence,
     ...(j.evidenceFound !== undefined ? { evidence_found: j.evidenceFound } : {}),
     ...(j.probabilities ? { probabilities: j.probabilities } : {}),
+    ...(j.decide ? { decide: j.decide } : {}),
   };
 }
 

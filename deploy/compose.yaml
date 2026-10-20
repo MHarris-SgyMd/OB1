@@ -859,6 +859,10 @@ services:
       OB1_JEV_BASE_URL: ${OB1_JEV_BASE_URL:-}
       OB1_JEV_MODEL: ${OB1_JEV_MODEL:-}
       OB1_JEV_LOCAL: ${OB1_JEV_LOCAL:-}
+      # Consolidation's decide mode (SMD-3115): the tier's model gives each
+      # verdict and OB1_JUDGE_MODEL writes only the proposals it calls. The
+      # workers inherit this block; preflight here names the pass key by it.
+      OB1_CONSOLIDATE_DECIDER: ${OB1_CONSOLIDATE_DECIDER:-}
       OB1_LLM_TIMEOUT: ${OB1_LLM_TIMEOUT:-}
       # What may leave the box (SMD-1903): whether a thought's text may reach
       # an endpoint not declared local — deny (the default), allow or off —
@@ -1390,7 +1394,8 @@ services:
     logging: *logging
 
   # Consolidation never applies a proposal; since 084 it stores related,
-  # evolves and duplicate verdicts as relation facets. Each proposal waits for review
+  # evolves and duplicate verdicts as relation facets, and since 102 an
+  # unrelated one as a distinct (SMD-3117). Each proposal waits for review
   # (`bun db/consolidate.ts --list`, then --accept or --reject; 029), but for
   # a stale one the next pass settles (067). Beside extraction: the pool holds
   # only thoughts with entities and a vector, and a candidate shares an
