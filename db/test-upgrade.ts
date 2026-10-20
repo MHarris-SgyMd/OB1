@@ -538,8 +538,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // who wrote each side, SMD-2707), 095 (what the stated-status label
   // reads, SMD-2540), 096 (pg_stat_statements where the server offers
   // it, SMD-1849), 097 (one walk for 082's lapse, SMD-3035), 098 (the
-  // stated-status label's read bounded, SMD-2540) and 099 (an unlink
-  // takes the review lock, SMD-3045)
+  // stated-status label's read bounded, SMD-2540), 099 (an unlink
+  // takes the review lock, SMD-3045) and 100 (the thoughts with no vector
+  // by an index of their own, SMD-3056)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -666,13 +667,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // and redefines 092's lapse and 094's read as calls of it, refusing by
   // name without 092 or 094 ([20aq]); 098 redefines 095's read over its own
   // signature, refusing by name without 095 ([20ar]); 099 redefines 088's
-  // update_thought, refusing by name without 073 ([20as]) — all
+  // update_thought, refusing by name without 073 ([20as]); 100 adds a partial index on
+  // thoughts, needing nothing past 001 — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 70, `030 is among the last seventy migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 71, `030 is among the last seventy-one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&

@@ -258,10 +258,10 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2902 assertions: 2902 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports ninety-nine (99) migrations applied, and
-`\d thoughts` shows eight columns and seven indexes — six of our own plus the
-primary key, which `\d` also lists. Six with `OB1_TRGM_INDEX=off`. `\d
+`bun test-schema.ts` prints `2914 assertions: 2914 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred (100) migrations applied, and
+`\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
+the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
 
 ## The migrations
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1687,6 +1687,33 @@ edit-signature check (SMD-1227); `bun migrate.ts --reapply` puts it back.
 test-schema [89] (the gate, 088's DDL verbatim, the lock held
 by each call that names `supersedes`), test-live [6j] (each order, the other
 side waiting), test-upgrade [20as].
+
+Migration 100 gives the thoughts with no vector an index of their own
+(SMD-3056): `thoughts_vectorless_idx`, a btree on `thoughts (id)` partial on
+`embedding IS NULL`. SMD-2889's vector mender reads a page of those rows in
+id order every tick, from each server, and brain_info's `vectorless` count
+(keyed `/health` among its readers) counts them. The count read every row,
+and so did the page whenever none waited past its cursor — a healthy brain's
+every tick, and each sweep's tail (2–4 ms at 100,000 thoughts). Both of the page's
+forms (no cursor; `id > cursor`, generic plan included) now read the index
+from where they start, 0.005–0.04 ms on 100,000 thoughts with 0, 1 or 10%
+waiting, and the count is an index-only scan of the rows that wait (0.004 ms
+at none, 0.6 ms at 9,830). The index holds only those rows, so it stays a
+page or two on a healthy brain; HOT updates are unchanged, since `embedding`
+was already an indexed column (the HNSW index's). It is built inside the
+migrator's transaction, writes to `thoughts` waiting for it (SHARE) — one
+read of the heap, 64–86 ms at a million thoughts, about a second at ten
+million; a brain past that can build it by hand first, `CONCURRENTLY` under this name and in this shape, and the
+file keeps it. Anything else under the name in `thoughts`' schema — an
+INVALID index (a `CONCURRENTLY` build that did not finish, which the planner
+ignores), one of another shape, a relation that is not an index — is refused
+by name, with the statement that clears it, rather than recorded as applied
+over it; another schema's index under the name is never taken for it, and
+the one kept is on `thoughts` by its oid. Needs nothing past 001; a re-apply
+is a no-op. test-schema [90] (the definition, the five refusals, another
+schema's index), test-store-sql [18] (the store's two page statements and
+the count read through it, each reading only its own rows' entries; the
+page's LIMIT).
 
 ## What changed relative to the guide
 
@@ -4708,7 +4735,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2902 assertions, PGlite, no container
+bun test-schema.ts                          # 2914 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1386 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 835 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 55 assertions: the shards SHARDS lists in test-live.ts, each its own job
