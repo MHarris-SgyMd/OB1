@@ -21,7 +21,9 @@
  * stderr), and for the sleep scheduler `slept`, its current or last sleep's
  * `from` and `to` (SleepMark), and `reads`, whether its role reads the query
  * log (LogReads, SMD-2678), and `held`, the thoughts its wakes hold back
- * (SleepHeld, SMD-2694). Each stamp writes the whole value: a restarted follower's first
+ * (SleepHeld, SMD-2694); and `waitingMidPass`, the passes waiting mid-pass for a
+ * provider that stopped answering — the sleep scheduler's by name, a
+ * follower's its own (SMD-2905). Each stamp writes the whole value: a restarted follower's first
  * stamp carries no block until it judges one. The time is the row's
  * updated_at — now() on the database, so a worker's clock is not read.
  * ob1_config is key/value, so no migration: the `worker` grant group already
@@ -118,6 +120,14 @@ export interface PassStamper {
    */
   waiting?(passes: readonly string[]): void;
   /**
+   * The sleep scheduler's mark of the passes waiting mid-pass for a provider
+   * that stopped answering (`waitingMidPass` in the value, left out while none
+   * is), as `waiting` is the start's: preflight's rows say the provider, not
+   * "running a pass" (SMD-2905). Only the scheduler sets it; a follower's own
+   * stamper writes its own name through providerWait.
+   */
+  waitingMidPass?(passes: readonly string[]): void;
+  /**
    * Which start refusal ended the row (`refused` in the value): one of
    * worker-bootstrap.ts's StartRefusal, set before the end that writes it, so
    * preflight names the cause and its remedy rather than "start it again",
@@ -136,10 +146,11 @@ export interface PassStamper {
    * A pass's word that it is waiting mid-pass for a provider that stopped
    * answering (true) — past its workers' pauses for a 5xx, at once for a
    * model gone missing or a call no probe answers — or no longer is (false):
-   * consolidate.ts says it through a caller's stamper, and the scheduler sets
-   * extraction to the newer work meanwhile (SMD-3008). Not on the row: the
-   * `waiting` word is the start's, and a mid-pass wait reads "running a pass"
-   * (SMD-2905).
+   * both engines say it through the stamper they stamp with — the sleep
+   * scheduler's per-pass one, which records it (extraction set to the newer
+   * work while the judge waits, SMD-3008) and stamps it on the sleep's row,
+   * or a follower's own, which writes `waitingMidPass` with its own name on
+   * its row — so preflight says the provider, not "running a pass" (SMD-2905).
    */
   providerWait?(on: boolean): Promise<void>;
   /**
@@ -187,6 +198,7 @@ export function passStamper(opts: {
   let slept: SleepMark | null = null;
   let reads: LogReads | null = null;
   let waiting: readonly string[] = [];
+  let waitingMidPass: readonly string[] = [];
   let refused: string | null = null;
   let held: SleepHeld | null = null;
   let failing = false;
@@ -194,7 +206,7 @@ export function passStamper(opts: {
   // the pass ends cannot land after the pass's own and undo it.
   let queue: Promise<void> = Promise.resolve();
   const send = async (running: boolean) => {
-    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(reads ? { reads } : {}), ...(waiting.length ? { waiting } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}) });
+    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(reads ? { reads } : {}), ...(waiting.length ? { waiting } : {}), ...(waitingMidPass.length ? { waitingMidPass } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}) });
     try {
       await opts.sql`INSERT INTO ob1_config (key, value) VALUES (${key}, ${value})
                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
@@ -227,8 +239,9 @@ export function passStamper(opts: {
     async end(o, m) {
       outcome = o;
       ended = true;
-      // An ended row waits on nothing (SMD-2752 PR 3, review pass 1).
+      // An ended row waits on nothing (SMD-2752 PR 3, review pass 1), mid-pass included (SMD-2905).
       waiting = [];
+      waitingMidPass = [];
       if (m !== undefined) malformed = m;
       await write(false);
     },
@@ -261,6 +274,16 @@ export function passStamper(opts: {
     },
     waiting(passes) {
       waiting = [...passes];
+    },
+    waitingMidPass(passes) {
+      waitingMidPass = [...passes];
+    },
+    // A follower's own: its row says it waits mid-pass for the provider, at
+    // once — inside `during`, so running (SMD-2905). The scheduler's per-pass
+    // stamper is its own and sets the sleep's row through waitingMidPass.
+    async providerWait(on) {
+      waitingMidPass = on ? [opts.worker] : [];
+      await live(inside);
     },
     refused(kind) {
       refused = kind;
