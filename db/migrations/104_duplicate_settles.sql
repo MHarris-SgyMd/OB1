@@ -128,12 +128,20 @@ COMMENT ON FUNCTION node_settled_types() IS
 -- a function this role cannot alter (review pass 2), and one whose lock
 -- another session holds past 200 ms — a role that may create a function in
 -- any schema scanned could otherwise hold one and fail the file (review
--- pass 5). Each is said by name: refreshing plans is not worth failing the
--- sets over. The migrator's own lock timeout is put back after.
+-- pass 5) — and after ten such waits the rest are left untried, so the
+-- block waits at most about 2 s: under --reapply every earlier file's locks
+-- are held through it (review pass 6). The brain's own readers (the sets'
+-- schema, this role's) are tried first, so held functions of another's
+-- never use up the waits before them. Each is said by name: refreshing
+-- plans is not worth failing the sets over. The migrator's own lock timeout
+-- is put back after. A holder that commits its DDL on a reader during the
+-- 200 ms fails the file (tuple concurrently updated), as any concurrent DDL
+-- on a migrated object does; a rerun applies it.
 DO $touch$
 DECLARE
   r record;
   v_left text[] := '{}';
+  v_waits int := 0;
   v_timeout text := current_setting('lock_timeout');
 BEGIN
   PERFORM set_config('lock_timeout', '200ms', true);
@@ -150,11 +158,15 @@ BEGIN
                           AND d.refobjid IN ('node_lifecycle_types()'::regprocedure, 'node_settled_types()'::regprocedure)))
        AND p.oid NOT IN ('node_lifecycle_types()'::regprocedure, 'node_settled_types()'::regprocedure)
        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+     ORDER BY p.pronamespace = (SELECT pronamespace FROM pg_proc WHERE oid = 'node_settled_types()'::regprocedure) DESC,
+              p.proowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) DESC,
+              p.oid
   LOOP
-    IF r.may THEN
+    IF r.may AND v_waits < 10 THEN
       BEGIN
         EXECUTE format('ALTER FUNCTION %s %s', r.fn, r.vol);
       EXCEPTION WHEN lock_not_available THEN
+        v_waits := v_waits + 1;
         v_left := v_left || r.fn::text;
       END;
     ELSE
@@ -163,7 +175,7 @@ BEGIN
   END LOOP;
   PERFORM set_config('lock_timeout', v_timeout, true);
   IF cardinality(v_left) > 0 THEN
-    RAISE NOTICE 'migration 104: % not altered (this role cannot, or another session holds its lock), so a session that cached a plan through it keeps 058''s sets until it reconnects (restart the server and workers)', array_to_string(v_left, ', ');
+    RAISE NOTICE 'migration 104: % not altered (this role cannot, another session holds its lock, or ten such waits came first), so a session that cached a plan through it keeps 058''s sets until it reconnects (restart the server and workers)', array_to_string(v_left, ', ');
   END IF;
 END
 $touch$;
