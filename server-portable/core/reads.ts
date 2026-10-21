@@ -117,22 +117,30 @@ const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
     // the maintainer's call; pass 5: whether or not it held a literal). Not
     // for a query too short or only common words (`the`, `AI`), a substring of
     // nearly every thought. The order is the keyword arm's; prefer_current
-    // ranks no text match, and the reply says so.
-    const { literals, textable } = await store.literalFacts(opts.query);
+    // ranks no text match, and the reply says so. The text is the query
+    // without the whitespace at its ends, which no reader sees and the hybrid
+    // never weighed (review pass 6: "deploy\n" was held by none of 176).
+    const text = opts.query.trim();
+    const { literals, textable } = await store.literalFacts(text);
     if (textable) {
       vectorFailed = { ...vectorFailed, matched: "text" };
-      const kw = await store.keywordThoughts({ query: opts.query, limit: opts.limit, offset: 0, filter: opts.filter, minTrust: opts.minTrust });
-      rows = kw.map((k) => textRow(k, opts.query));
+      const kw = await store.keywordThoughts({ query: text, limit: opts.limit, offset: 0, filter: opts.filter, minTrust: opts.minTrust });
+      // A literal too common to match exactly is why the text was asked; its rows say so (review pass 6).
+      const common = literals.filter((l) => l.common).map((l) => l.needle);
+      rows = kw.map((k) => textRow(k, text, common));
     } else if (literals.length === 0) vectorFailed = { ...vectorFailed, matched: "none" };
     if (rows.length === 0) {
-      // Why nothing: each literal absent or too common (unfiltered); with none,
-      // the text held by none, or only outside the search's scope.
-      if (literals.length > 0) facts = factsFromLiterals(literals);
-      else if (textable) {
-        const scoped = Object.keys(opts.filter).length > 0 || opts.minTrust !== undefined;
-        const held = scoped ? ((await store.keywordThoughts({ query: opts.query, limit: 1, offset: 0, filter: {} }))[0]?.totalCount ?? 0) : 0;
-        facts = { needles: [opts.query], needleCounts: [held], commonNeedles: [], literalOnly: null };
-      } else facts = { needles: [], needleCounts: [], commonNeedles: [], literalOnly: null };
+      // Why nothing. A text held only outside the search's scope is said so
+      // first, whatever its literals' rarity — "too common, page with
+      // search_thoughts_keyword" beside that tool's own empty match read false
+      // (review pass 6); then each literal absent or too common (unfiltered);
+      // then the text held by none.
+      const scoped = Object.keys(opts.filter).length > 0 || opts.minTrust !== undefined;
+      const outside = textable && scoped ? ((await store.keywordThoughts({ query: text, limit: 1, offset: 0, filter: {} }))[0]?.totalCount ?? 0) : 0;
+      if (outside > 0) facts = { needles: [text], needleCounts: [outside], commonNeedles: [], literalOnly: null };
+      else if (literals.length > 0) facts = factsFromLiterals(literals);
+      else if (textable) facts = { needles: [text], needleCounts: [0], commonNeedles: [], literalOnly: null };
+      else facts = { needles: [], needleCounts: [], commonNeedles: [], literalOnly: null };
     }
   }
   // A literal-only answer is logged as arm `literal` (104): it is neither arm a
@@ -142,9 +150,9 @@ const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
   return { rows, embedding, ...(vectorFailed ? { vectorFailed } : {}), ...(facts ? { facts } : {}) };
 }) as RunSearch;
 
-/** A keyword row as a hybrid one, the whole query its one literal (SMD-2891): no similarity, no score; the count the keyword arm's own. */
-function textRow(k: ThoughtKeywordMatch, query: string): ThoughtHybridMatch {
-  return { id: k.id, content: k.content, metadata: k.metadata, created_at: k.created_at, similarity: null, matchedNeedles: [query], needles: [query], needleCounts: [k.totalCount], commonNeedles: [], literalOnly: false, score: 0, fused: 0, demoted: [] };
+/** A keyword row as a hybrid one, the whole query its one literal (SMD-2891): no similarity, no score; the count the keyword arm's own, and the query's too-common literals beside it. */
+function textRow(k: ThoughtKeywordMatch, query: string, common: string[]): ThoughtHybridMatch {
+  return { id: k.id, content: k.content, metadata: k.metadata, created_at: k.created_at, similarity: null, matchedNeedles: [query], needles: [query], needleCounts: [k.totalCount], commonNeedles: common, literalOnly: false, score: 0, fused: 0, demoted: [] };
 }
 
 /** The filter a search tool was given, folded and bounded — or the refusal of it. */
@@ -393,7 +401,8 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
       matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
       supersededBy: superseded[t.id] ?? null, ...hitLabel(t.content, moved[t.id]),
     })),
-    facts: factsOf(data[0]),
+    // A text match has no literal-only reading: unknown, not false (review pass 6).
+    facts: r.vectorFailed?.matched === "text" ? { ...factsOf(data[0])!, literalOnly: null } : factsOf(data[0]),
     window: data[0].window ?? null,
     ...failed,
   });

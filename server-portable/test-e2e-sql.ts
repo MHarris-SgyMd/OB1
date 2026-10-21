@@ -3781,6 +3781,18 @@ console.log("\n[23] A search the provider does not answer for is answered by the
     const commonAlone = await result("search_thoughts", { query: "COMMON-2891" });
     assert(!commonAlone.isError && asText.test(commonAlone.text) && ((commonAlone.sc?.hits ?? []) as unknown[]).length === 10 && /It is in 120 thoughts; these are the first 10 — raise limit or page with search_thoughts_keyword\./.test(commonAlone.text),
       `a too-common identifier alone: its first ten holders as text, the 120 said (${commonAlone.text.slice(0, 400)})`);
+    // Text hits beside a too-common literal say why the text was asked; a text match has no literal-only reading (review pass 6).
+    const commonRow = await result("search_thoughts", { query: "COMMON-2891 row" });
+    assert(!commonRow.isError && ((commonRow.sc?.hits ?? []) as unknown[]).length === 10 && /Searched exactly for: COMMON-2891 row\. It is in 120 thoughts/.test(commonRow.text) && /Too common to match exactly .*: COMMON-2891\./.test(commonRow.text) && commonRow.sc?.literalOnly === null,
+      `a text match beside a too-common literal: the text's count and the literal too common, literalOnly unknown (${commonRow.text.slice(0, 400)})`);
+    // A too-common literal held only outside the filter: said held outside, not too common (review pass 6: it said "page with search_thoughts_keyword" beside that tool's own empty match).
+    const commonFiltered = await result("search_thoughts", { query: "COMMON-2891", filter: { type: "no-such-type" } });
+    assert(!commonFiltered.isError && /Held only by thoughts outside this search's filter, said_by, actor or min_trust: COMMON-2891 \(in 120 thoughts\)\./.test(commonFiltered.text) && !/Too common/.test(commonFiltered.text),
+      `a too-common literal outside the filter: held outside, in 120 (${commonFiltered.text.replace(/\n+/g, " / ").slice(-220)})`);
+    // Whitespace at the query's ends is no part of the text (review pass 6: "deploy\n" was held by none).
+    const padded = await result("search_thoughts", { query: "  alpha words\n" });
+    assert(!padded.isError && ((padded.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === plain) && /Contains: alpha words\n/.test(padded.text),
+      `a query with whitespace at its ends: the text without it (${padded.text.slice(0, 300)})`);
     // A literal too common to match exactly is said to be that, not absent (review pass 1: the probe has no row for it without a vector).
     const common = await result("search_thoughts", { query: "what about COMMON-2891" });
     assert(!common.isError && asText.test(common.text) && /Too common to match exactly \(more thoughts contain it than one keyword page returns\): COMMON-2891 — use search_thoughts_keyword to page through them\./.test(common.text) && !/No thought contains|Held only|has no identifier/.test(common.text) && JSON.stringify(common.sc?.literalOnly) === "null",
