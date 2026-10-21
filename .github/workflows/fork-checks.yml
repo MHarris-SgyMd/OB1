@@ -3119,7 +3119,7 @@ jobs:
           grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/?…, where this canary no longer answers: re-run with --connect' /tmp/canary-root.out
           root_code=$(curl -s --max-time 20 -D /tmp/canary-root-head -o /tmp/canary-root-body -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
-            http://127.0.0.1:8011/)
+            http://127.0.0.1:8011/) || root_code="no answer (curl exit $?)"
           { [ "$root_code" = 404 ] && [ "$(cat /tmp/canary-root-body)" = "404 page not found" ] && ! grep -qi '^deprecation:' /tmp/canary-root-head; } || { echo "the canary's root answered HTTP $root_code '$(head -c 80 /tmp/canary-root-body)', not the proxy's own 404 with no Deprecation" >&2; exit 1; }
           # Another port (SMD-2874): written to the canary's env file, where
           # compose reads it from then on, its old port freed, and a connector
@@ -3603,9 +3603,10 @@ jobs:
       #   form clients held before the proxy, `GET /`, /worker-status and
       #   /jobs at the root are the proxy's own 404 with no Deprecation header
       #   (smoke.sh check 11 holds the POST's too); no /mcp, /health or
-      #   OPTIONS /health answer carries one; and the server's log names no
-      #   key at the old root URL, not even the read key, whose marker it set
-      #   itself on /mcp and /health, which the proxy deletes;
+      #   OPTIONS /health answer carries one; and the server's log names the
+      #   read key nowhere, whose marker it set itself on /mcp and /health,
+      #   which the proxy deletes, once a marked request sent straight to the
+      #   server has shown its line is read (until PR 2);
       # - the access log never holds a query string or userinfo: after calls
       #   carrying the smoke key as `?key=`, `code=`, `state=` and as the user
       #   part of an absolute-form target, no log line carries it, and the
@@ -3638,6 +3639,7 @@ jobs:
           # SMD-2532: the root is the proxy's own 404 with no Deprecation; the
           # URL is shown without its query, so a key in it is never printed.
           rootgone() {
+            rm -f /tmp/proxy-head /tmp/proxy-body
             code=$(curl -s --max-time 10 -X "$1" -D /tmp/proxy-head -o /tmp/proxy-body -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' ${3:+-d "$3"} "$2") || code="no answer (curl exit $?)"
             if ! { [ "$code" = 404 ] && [ "$(cat /tmp/proxy-body)" = "404 page not found" ] && ! grep -qi '^deprecation:' /tmp/proxy-head; }; then echo "$1 ${2%%\?*} → HTTP $code '$(head -c 80 /tmp/proxy-body)', expected the proxy's own 404 with no Deprecation: the old root URL is retired (SMD-2532)" >&2; exit 1; fi
           }
@@ -3657,14 +3659,23 @@ jobs:
             -H "x-brain-key: $OB1_SMOKE_READ_KEY" -d '{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}' "$B/mcp")
           [ "$code" = 200 ] || { echo "the read key's tools/list at /mcp got HTTP $code, so the absence of its line proves nothing" >&2; exit 1; }
           [ "$(curl -s --max-time 10 -H 'X-OB1-Legacy-Route: 1' -H "x-brain-key: $OB1_SMOKE_READ_KEY" "$B/health" | head -c 1)" = "{" ] || { echo "the read key's GET /health got no record, so the absence of its line proves nothing" >&2; exit 1; }
-          # Read for 3 s, as docker copies the server's lines on its own time;
-          # "old root URL" is the phrase of the line test-server [19] holds.
-          for _ in 1 2 3 4 5 6; do
+          # The control: a marked request straight to the server on the mesh,
+          # the proxy bypassed, under the capture key's name, which the server
+          # logs; once its line is in the log (docker copies it on its own
+          # time), the read key's marker, set on /mcp and /health through the
+          # proxy, which deletes it, is judged by its absence. Until PR 2 drops
+          # the server's reading of the marker (SMD-2532).
+          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
+          docker run --rm --network open-brain_mesh --entrypoint bun -e KEY="$OB1_SMOKE_CAPTURE_KEY" "$IMAGE" \
+            -e 'const r = await fetch("http://mcp.ob1.internal.:8000/", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-ob1-legacy-route": "1", "x-brain-key": process.env.KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/list", params: {} }) }); process.exit(r.ok ? 0 : 1)' \
+            || { echo "the marked control request did not reach the server on the mesh" >&2; exit 1; }
+          for _ in $(seq 1 20); do
             SLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix server)"
-            grep -qF 'old root URL' <<<"$SLOG" && break
+            grep -qF 'key "ci-capture" reached the brain at the old root URL' <<<"$SLOG" && break
             sleep 0.5
           done
-          if grep -F 'old root URL' <<<"$SLOG" >&2; then echo "the server named a key at the old root URL (above): a request reached it there, or a marker a client set on /mcp or /health was not deleted" >&2; exit 1; fi
+          grep -qF 'key "ci-capture" reached the brain at the old root URL' <<<"$SLOG" || { echo "the server's log never showed the control's line, so the read key's absence below would prove nothing" >&2; exit 1; }
+          if grep -F 'key "ci-read" reached' <<<"$SLOG" >&2; then echo "a marker the client set on /mcp or /health reached the server and was logged (above): not-legacy did not delete it" >&2; exit 1; fi
           curl -s --max-time 10 -o /dev/null "$B/auth/callback?code=code-$OB1_SMOKE_KEY&state=state-$OB1_SMOKE_KEY"
           # The server's JSON lines for a thought_stats call so far (SMD-1849),
           # so the absolute-form probe's own line is counted below, not an

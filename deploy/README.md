@@ -555,11 +555,11 @@ needs `up -d --remove-orphans`, or the forwarder, an orphan, keeps the port.
 **Upgrading a stack from before SMD-1846** is one plain `compose up -d --build`
 (with the `-f` files and profiles it runs with): compose recreates the server
 without its port, then starts the proxy on it — about 1.5 s with no answer on
-the port, measured on podman. A client still configured at the root stops
-working there from v2.0.0: move it to `/mcp` first ("Moving a client to /mcp").
-The last
+the port, measured on podman. The last
 30–100 ms of it is the proxy's own 404, between its start and its routes
 loading; an SDK client connected across it saw one 404 and went on (measured).
+A client still configured at the root stops working there from v2.0.0: move it
+to `/mcp` first ("Moving a client to /mcp").
 On that first `up` name the proxy and the forwarder wherever you name the server
 (`up -d --build server proxy forwarder`): `up server` alone recreates the server
 without its port and never creates either. Once they run, recreating the server
@@ -801,9 +801,10 @@ is still on the root. The proxy's access log has a line for every such
 request, with `"RouterName":"legacy@file"`, the path, and the client's address
 but no key; a keyless request is only there. On podman for macOS that address
 is the VM's gateway, not the client. `smoke.sh` run with no URL probes the root
-without a key, so it adds no name. From v2.0.0 its check 11 expects the
-proxy's own 404 there instead, and a client still on the root reports that 404
-itself.
+without a key, so it adds no name: run that stack's own `smoke.sh`, from a
+v1.x checkout. A v2.0.0 checkout's check 11 expects the proxy's own 404 there
+and fails on an older stack's deprecated 200; on v2.0.0 a client still on the
+root reports that 404 itself.
 
 | Client | Before | After |
 | --- | --- | --- |

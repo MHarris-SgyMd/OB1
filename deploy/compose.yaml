@@ -1129,8 +1129,9 @@ services:
       # Loopback unless SERVER_BIND says otherwise: the one published port of
       # the stack without its opt-in profiles. The knobs keep the server's
       # names, which they were until SMD-1846, so a deploy/.env written
-      # before it publishes the same address and port and every client's URL
-      # still answers. A remote client — a claude.ai connector, another
+      # before it publishes the same address and port; a client's URL moves
+      # from the root to /mcp, the root the proxy's 404 since v2.0.0
+      # (SMD-2532). A remote client — a claude.ai connector, another
       # machine — goes through a TLS proxy or a tunnel; one on this host dials
       # 127.0.0.1 and needs no change here. `SERVER_BIND=0.0.0.0` is for a
       # proxy on another machine, and puts the key on the wire in clear on
