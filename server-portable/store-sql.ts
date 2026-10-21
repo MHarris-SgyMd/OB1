@@ -253,6 +253,16 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r: Record<string, unknown>) => normaliseHybridRow(r));
   }
 
+  async literalFacts(query: string): Promise<{ needle: string; count: number }[]> {
+    // 017's needles and search_thoughts_keyword's own count of each, as the
+    // hybrid function reads them: no copy of either rule here (SMD-2891).
+    const rows = await this.sql`
+      SELECT n.needle, COALESCE((SELECT k.total_count FROM search_thoughts_keyword(n.needle, 1, 0, '{}'::jsonb) k LIMIT 1), 0)::int AS count
+      FROM unnest(extract_search_needles(${query}::text)) WITH ORDINALITY AS n(needle, ord)
+      ORDER BY n.ord`;
+    return rows.map((r: { needle: string; count: number }) => ({ needle: String(r.needle), count: Number(r.count) }));
+  }
+
   /** hybridThoughts with min_trust: 075's 8-argument forms, the same columns as the 7's. */
   private async hybridAtTrust(opts: { query: string; embedding: number[] | null; threshold: number; limit: number; filter: Record<string, unknown>; preferCurrent?: boolean }, weight: number, halfLife: number, minTrust: string): Promise<ThoughtHybridMatch[]> {
     const rows = opts.preferCurrent === true

@@ -4676,6 +4676,7 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   assert(armOf(whole) === "search_thoughts k=5 thr=0.3 rw=0", `a real's float32 noise does not reach the arm name (${armOf(whole)})`);
   assert(armOf({ ...whole, arm: "current" }) === "search_thoughts k=5 thr=0.3 rw=0 current" && armOf({ ...whole, arm: "hybrid" }) === armOf(whole),
     "a prefer_current row (arm current, 059) is its own arm; a hybrid row's name is unchanged");
+  assert(armOf({ ...whole, arm: "literal" }) === "search_thoughts k=5 thr=0.3 rw=0 literal", "a row answered by exact literals alone while the provider was down (arm literal, 104) is its own arm too (SMD-2891)");
   const actDb = toActionRow({ agent_id: null, logged_at: t(1), at_us: "1789816860000000", tool: "fetch", target_id: A });
   assert(actDb.agentId === null && actDb.atUs === 1789816860000000, "an action row's NULL agent and at_us survive the coercion");
   const goldFx = goldFromFixture({ queries: [{ query: "first", relevant: `{${C},"${D}"}` }, { query: "second", relevant: [C] }] });

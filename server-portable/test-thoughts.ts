@@ -852,7 +852,7 @@ console.log("\n[12] Genre classify (SMD-2323): a metadata pre-signal decides wit
   assert(outage.genre === "other" && outage.source === "fallback", "a tier outage falls back to other and never throws");
 }
 
-console.log("\n[13] A provider that does not answer (SMD-2888): providerDown names an outage and nothing else, an outage's tags are the marker alone, a reset after a 200 is an outage, and the core's capture lands the row naming the embeddings endpoint");
+console.log("\n[13] A provider that does not answer (SMD-2888): providerDown names an outage and nothing else, an outage's tags are the marker alone, a reset after a 200 is an outage, and the core's capture lands the row naming the embeddings endpoint; a search answers by its literal arm, naming the endpoint masked (SMD-2891)");
 {
   // Bun 1.4.3's own errors, by their fields (measured: a closed port, an unresolved name).
   const refused = Object.assign(new TypeError("ECONNREFUSED: Unable to connect. Is the computer able to access the url?"), { code: "ECONNREFUSED" });
@@ -1039,6 +1039,29 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   } finally {
     plain.stop(true);
   }
+
+  // A search the provider does not answer for (SMD-2891): the store is asked
+  // for the literal arm alone (no vector), then — nothing matched — for the
+  // literals' own facts; the endpoint is named as a row prints it, its
+  // userinfo masked (review pass 1: SMD-2885's rule).
+  const asked: Record<string, unknown>[] = [];
+  const searchStore = {
+    hybridThoughts: async (o: Record<string, unknown>) => { asked.push(o); return []; },
+    literalFacts: async (q: string) => { asked.push({ literalFacts: q }); return [{ needle: "X-2891", count: 0 }]; },
+  };
+  const sctx = createContext({
+    env: () => ({ OB1_LLM_BASE_URL: `http://user:hunter2@127.0.0.1:${closedNow()}/v1`, OB1_LLM_LOCAL: "1" }),
+    store: async () => searchStore as never,
+    door: "test",
+  });
+  const { searchThoughts } = await import("./core/reads.ts");
+  const sr = await searchThoughts(sctx, { name: "reader", scope: "read", keyHash: "h" } as never, { query: "about X-2891", limit: 10, threshold: 0, recency_weight: 0, prefer_current: false } as never);
+  const sv = sr.ok ? sr.value : undefined;
+  assert(sv?.vectorFailed?.reason === "provider_unreachable" && sv.vectorFailed.base.includes("***@") && !sv.vectorFailed.base.includes("hunter2"),
+    `a search with the provider down: answered, the endpoint named with its userinfo masked (${JSON.stringify(sv?.vectorFailed)})`);
+  assert(asked.length === 3 && asked[0].embedding === null && asked[1].embedding === null && asked[1].threshold === -1 && JSON.stringify(asked[2]) === JSON.stringify({ literalFacts: "about X-2891" })
+      && JSON.stringify(sv?.facts) === JSON.stringify({ needles: ["X-2891"], needleCounts: [0], commonNeedles: [], literalOnly: null }),
+    `…the literal arm asked with no vector, the probe too, then the literals' facts, which the value carries (${JSON.stringify(asked)})`);
 }
 
 console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vector through update_thought with the stamp it read; two outages in a row stop the tick, and two such ticks running are the provider away; the gate is asked the question the row's writer asked; a failing row is held for doubling sweeps and holds back nothing; a tick acts only under the leader lock");

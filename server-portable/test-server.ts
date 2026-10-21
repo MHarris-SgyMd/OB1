@@ -5236,28 +5236,32 @@ console.log("\n[31] A search answered without a vector says so — search_though
 {
   const { renderSearchThoughts, renderSearch } = await import("./render.ts");
   const vf = { reason: "provider_unreachable", detail: "the connection was refused", base: "http://ollama:11434/v1" };
-  const lead = "Semantic search is unavailable: the embedding provider at http://ollama:11434/v1 did not answer (the connection was refused), so the query was matched only by its identifiers and quoted spans, exactly — not by meaning. ";
+  const lead = "Semantic search is unavailable — the embedding provider at http://ollama:11434/v1 failed: the connection was refused. So the query was matched only by its identifiers and quoted spans, exactly — not by meaning. ";
   const hit = { id: "dddddddd-0000-4000-8000-000000000001", content: "SMD-1 names it", metadata: {}, created_at: "2026-10-21T00:00:00.000Z", similarity: null, matchedNeedles: ["SMD-1"], score: 0.016, fused: 0.016, demoted: [], supersededBy: null, moved: [], movedNotRead: 0 };
   const facts = { needles: ["SMD-1"], needleCounts: [1], commonNeedles: [], literalOnly: true };
   const st = renderSearchThoughts({ ok: true, value: { query: "SMD-1", preferCurrent: false, hits: [hit], facts, window: null, vectorFailed: vf } } as never, false);
   const text = st.content[0].text;
-  assert(text.startsWith(`Found 1 thought(s): ${lead}search_thoughts_keyword finds any word or phrase a thought contains; semantic search returns once the provider answers. Searched exactly for: SMD-1.`) && !/similarity/.test(text) && /exact match, no vector/.test(text),
+  assert(text.startsWith(`Found 1 thought(s): ${lead}search_thoughts_keyword finds any word or phrase a thought contains; semantic search returns once the provider answers. Searched exactly for: SMD-1.`) && !/similarity/.test(text),
     `search_thoughts: the header leads with what the rows are, before the literals searched for, and no note ranks the rest by similarity (${text.slice(0, 200)})`);
+  assert(/--- Result 1 \(exact match\) ---/.test(text) && !/no vector/.test(text), "…and a hit is an exact match, not said to have no vector of its own: no query vector was made");
   assert((st.structuredContent as { vectorFailed?: unknown }).vectorFailed === "provider_unreachable", "…and the typed result carries the marker word alone");
-  const none = renderSearchThoughts({ ok: true, value: { query: "plain words", preferCurrent: false, hits: [], facts: null, window: null, vectorFailed: vf } } as never, false).content[0].text;
-  assert(none === `No thoughts found matching "plain words". ${lead}search_thoughts_keyword finds any word or phrase a thought contains; semantic search returns once the provider answers. No thought contains an identifier or quoted span of this query, if it has one.`,
-    `nothing found with no facts: why — no literal could be matched without a vector (${none})`);
+  const none = renderSearchThoughts({ ok: true, value: { query: "plain words", preferCurrent: false, hits: [], facts: { needles: [], needleCounts: [], commonNeedles: [], literalOnly: null }, window: null, vectorFailed: vf } } as never, false).content[0].text;
+  assert(none === `No thoughts found matching "plain words". ${lead}search_thoughts_keyword finds any word or phrase a thought contains; semantic search returns once the provider answers. The query has no identifier or quoted span, so nothing could be matched without a vector.`,
+    `nothing found, the query holding no literal: why — nothing could be matched without a vector (${none})`);
+  const common = renderSearchThoughts({ ok: true, value: { query: "COMMON-1", preferCurrent: false, hits: [], facts: { needles: ["COMMON-1"], needleCounts: [150], commonNeedles: ["COMMON-1"], literalOnly: null }, window: null, vectorFailed: vf } } as never, false);
+  assert(/Too common to match exactly \(more thoughts contain it than one keyword page returns\): COMMON-1 — use search_thoughts_keyword/.test(common.content[0].text) && !/No thought contains|has no identifier/.test(common.content[0].text) && (common.structuredContent as { literalOnly?: unknown }).literalOnly === null,
+    `nothing found, the literal too common: said so, not absent, and literalOnly unknown in the typed result (${common.content[0].text.slice(-160)})`);
   const absent = renderSearchThoughts({ ok: true, value: { query: "SMD-2", preferCurrent: false, hits: [], facts: { needles: ["SMD-2"], needleCounts: [0], commonNeedles: [], literalOnly: true }, window: null, vectorFailed: vf } } as never, false).content[0].text;
-  assert(absent.endsWith("No thought contains: SMD-2.") && !absent.includes("if it has one"), `nothing found with the facts: the literal no thought contains, by name (${absent})`);
+  assert(absent.endsWith("No thought contains: SMD-2.") && !absent.includes("has no identifier"), `nothing found with the facts: the literal no thought contains, by name (${absent})`);
   const withVector = renderSearchThoughts({ ok: true, value: { query: "SMD-1", preferCurrent: false, hits: [{ ...hit, similarity: 0.9 }], facts, window: null } } as never, false);
   assert(!withVector.content[0].text.includes("Semantic search is unavailable") && !("vectorFailed" in withVector.structuredContent) && /ranked first and the rest by similarity/.test(withVector.content[0].text),
     "an answer with a vector: no mark, no field, the similarity note as before");
 
   const compat = renderSearch({ ok: true, value: { results: [{ id: hit.id, title: "SMD-1 names it", url: "u1", trust: undefined }], vectorFailed: vf } } as never);
-  const v = JSON.parse(compat.content[0].text) as { results: Record<string, unknown>[]; vectorFailed: typeof vf; note: string };
-  assert(JSON.stringify(v.results) === JSON.stringify([{ id: hit.id, title: "SMD-1 names it", url: "u1" }]) && JSON.stringify(v.vectorFailed) === JSON.stringify(vf)
+  const v = JSON.parse(compat.content[0].text) as { results: Record<string, unknown>[]; vectorFailed: string; note: string };
+  assert(JSON.stringify(v.results) === JSON.stringify([{ id: hit.id, title: "[exact match — semantic search unavailable] SMD-1 names it", url: "u1" }]) && v.vectorFailed === "provider_unreachable"
       && v.note === `${lead}The brain's search_thoughts_keyword tool finds any word or phrase a thought contains; semantic search returns once the provider answers.` && compat.content[0].text === JSON.stringify(compat.structuredContent),
-    `search: ChatGPT's results exactly, beside them the field and a note naming the brain's keyword tool (${compat.content[0].text.slice(0, 200)})`);
+    `search: ChatGPT's results, each title marked (the field every surface hands the model), beside them the marker word and a note naming the brain's keyword tool (${compat.content[0].text.slice(0, 200)})`);
   const plainCompat = renderSearch({ ok: true, value: { results: [] } } as never);
   assert(plainCompat.content[0].text === '{"results":[]}', "…and with a vector, the shape exactly");
 }

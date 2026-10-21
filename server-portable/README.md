@@ -80,6 +80,17 @@ no vector is invisible to semantic search. An edit (`update_thought`) whose
 provider does not answer is refused whole, as before: nothing is lost, and
 storing the new text would clear a vector the thought had.
 
+A search whose query embedding the provider does not answer (the same
+`providerDown` outages) is answered by the hybrid's exact-literal arm alone —
+the identifiers and quoted spans in the query, through the same function with
+no vector (SMD-2891). `search_thoughts` says so first, names the endpoint and
+`search_thoughts_keyword`, and carries `vectorFailed`; with nothing found it
+says whether the query's literals are absent, too common to match exactly, or
+none. The compat `search` marks each title `[exact match — semantic search
+unavailable]` and adds `vectorFailed` and a `note`. The query log records the
+search as arm `literal` (migration 104). Any other embedding failure still
+fails the search.
+
 The **vector mender** (`core/mend.ts`, SMD-2889) is what gives a thought with
 no vector its vector, by itself — one the provider did not answer for, one the
 gate refused, or one an import wrote bare. Both servers run one (`index.ts` and

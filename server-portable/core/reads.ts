@@ -6,7 +6,7 @@
 
 import { thoughtTitle, thoughtUrl } from "../thoughts.ts";
 import { mayLeaveBox, type EgressSubject } from "../egress.ts";
-import { providerDown } from "../embed.ts";
+import { providerDown, shownBase } from "../embed.ts";
 import { storeKind, UUID_RE, type AuditChange, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
 import { keysInOrder, MOVED_READ, movedAmong, typesOf, type Moved, type MovedHit, type MovedType } from "../stated-status.ts";
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
@@ -90,7 +90,8 @@ const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
   const embedding = await ctx.embedder.getEmbedding(opts.query, q.subject, "query").catch((e: unknown) => {
     const down = providerDown(e);
     if (!down) throw e;
-    const base = ctx.embedConfig().embeddings.base;
+    // As a row prints an endpoint: userinfo masked (SMD-2885).
+    const base = shownBase(ctx.embedConfig().embeddings);
     console.error(`${opts.tool}: the embedding provider at ${base} was unavailable: ${down.detail}; answered by exact literals alone`);
     vectorFailed = { ...down, base };
     return null;
@@ -209,8 +210,12 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
 
 // ── search_thoughts and search_thoughts_keyword ──────────────────────────────
 
-/** What the query was taken to mean — every hybrid row carries the same four. */
-export type QueryFacts = Pick<ThoughtHybridMatch, "needles" | "needleCounts" | "commonNeedles" | "literalOnly">;
+/**
+ * What the query was taken to mean — every hybrid row carries the same four.
+ * literalOnly is null when the facts come from literalFacts, not a row: a
+ * search answered without a vector that matched nothing (SMD-2891).
+ */
+export type QueryFacts = Pick<ThoughtHybridMatch, "needles" | "needleCounts" | "commonNeedles"> & { literalOnly: boolean | null };
 /**
  * A hybrid hit, with the newer thought that supersedes it (025), if any, and
  * the tickets it names that moved since it was written (095, SMD-2540):
@@ -238,6 +243,12 @@ export type SearchThoughtsResult = {
 
 const factsOf = (r: ThoughtHybridMatch | undefined): QueryFacts | null =>
   r ? { needles: r.needles, needleCounts: r.needleCounts, commonNeedles: r.commonNeedles, literalOnly: r.literalOnly } : null;
+
+/** The query's facts when no row reports them and no vector was made (SMD-2891): each literal and its count; one held by any thought, unmatched, was too common. */
+async function literalFactsOf(store: Pick<ThoughtStore, "literalFacts">, query: string): Promise<QueryFacts> {
+  const lits = await store.literalFacts(query);
+  return { needles: lits.map((l) => l.needle), needleCounts: lits.map((l) => l.count), commonNeedles: lits.filter((l) => l.count > 0).map((l) => l.needle), literalOnly: null };
+}
 
 /**
  * The stated-status label (SMD-2540): per hit, the tickets it names whose
@@ -301,10 +312,16 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
     // the first version said "no thoughts found" about a literal that
     // 150 thoughts contained, because it was too common to match). Reuses
     // the arm's embedding, and stays unfiltered — no min_trust either — so
-    // the facts are the query's, not the filtered scope's. Without a vector
-    // (SMD-2891) the probe reports them only when a literal matched somewhere.
-    const probe = await (await ctx.store()).hybridThoughts({ query, embedding: r.embedding, threshold: -1, limit: 1, filter: {} });
-    return ok({ query, preferCurrent: prefer_current, hits: [], facts: factsOf(probe[0]), window: null, ...failed });
+    // the facts are the query's, not the filtered scope's.
+    const store = await ctx.store();
+    const probe = await store.hybridThoughts({ query, embedding: r.embedding, threshold: -1, limit: 1, filter: {} });
+    // Without a vector (SMD-2891) the probe has a row only where a literal
+    // matched, and none for one too common to match: the needles and their
+    // counts are read on their own then, so a literal more thoughts hold than
+    // one keyword page is said to be that, not absent (review pass 1). Unmatched
+    // with a count above zero is the rarity rule's refusal, whatever its bound.
+    const facts = factsOf(probe[0]) ?? (r.vectorFailed ? await literalFactsOf(store, query) : null);
+    return ok({ query, preferCurrent: prefer_current, hits: [], facts, window: null, ...failed });
   }
 
   // 025 (SMD-1253): which of these hits a newer thought has superseded,

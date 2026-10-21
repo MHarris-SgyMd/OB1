@@ -525,13 +525,14 @@ export const renderSearch = (o: Outcome<SearchResult>): Reply =>
   render(o.ok ? ok({ results: o.value.results.map(({ trust, moved, movedNotRead, ...r }) => {
     const words = movedWords(moved ?? [], movedNotRead ?? 0);
     // A prefix, as `[ingested]`: the title's tail is the thought's own first words, which could forge a label there (review pass 4).
-    const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${words ? `[moved since written: ${words}] ` : ""}${r.title}`;
+    // A provider that did not answer (SMD-2891): every result is a literal's exact match, and the title is what every surface hands the model.
+    const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${words ? `[moved since written: ${words}] ` : ""}${o.value.vectorFailed ? "[exact match — semantic search unavailable] " : ""}${r.title}`;
     return words ? { ...r, title, moved, ...(movedNotRead ? { movedNotRead } : {}) } : { ...r, title };
   }),
-  // A provider that did not answer (SMD-2891): the results are exact-literal
-  // matches alone, said in the shape's one place every surface reads beside
-  // the results — a note, with the typed field.
-  ...(o.value.vectorFailed ? { vectorFailed: o.value.vectorFailed, note: literalOnlyNote(o.value.vectorFailed, "search") } : {}) }) : o,
+  // …and the whole answer says so beside the results, for a surface that
+  // reads the shape and for an empty answer, which has no title to mark: the
+  // marker word, as search_thoughts' typed result carries it, and a note.
+  ...(o.value.vectorFailed ? { vectorFailed: o.value.vectorFailed.reason, note: literalOnlyNote(o.value.vectorFailed, "search") } : {}) }) : o,
     (v) => JSON.stringify(v), searchRefusal, AS_JSON);
 
 /**
@@ -541,7 +542,7 @@ export const renderSearch = (o: Outcome<SearchResult>): Reply =>
  * `search`'s caller may not have, so it is named there as the brain's.
  */
 export function literalOnlyNote(f: QueryVectorFailed, tool: "search" | "search_thoughts"): string {
-  return `Semantic search is unavailable: the embedding provider at ${f.base} did not answer (${f.detail}), so the query was matched only by its identifiers and quoted spans, exactly — not by meaning. ` +
+  return `Semantic search is unavailable — the embedding provider at ${f.base} failed: ${f.detail}. So the query was matched only by its identifiers and quoted spans, exactly — not by meaning. ` +
     `${tool === "search" ? "The brain's search_thoughts_keyword tool" : "search_thoughts_keyword"} finds any word or phrase a thought contains; semantic search returns once the provider answers.`;
 }
 
@@ -563,9 +564,8 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         const absent = facts.needles.filter((_, i) => facts.needleCounts[i] === 0);
         if (absent.length) why.push(`No thought contains: ${absent.join(", ")}.`);
         if (facts.commonNeedles.length) why.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${facts.commonNeedles.join(", ")} — use search_thoughts_keyword to page through them.`);
-      } else if (literal) {
-        // Without a vector the probe has a row only where a literal matched.
-        why.push("No thought contains an identifier or quoted span of this query, if it has one.");
+        // Without a vector only a literal can match (SMD-2891), and this query has none.
+        if (literal && facts.needles.length === 0) why.push("The query has no identifier or quoted span, so nothing could be matched without a vector.");
       }
       return `No thoughts found matching "${query}".${why.length ? ` ${why.join(" ")}` : ""}`;
     }
@@ -575,7 +575,8 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         const m = t.metadata || {};
         // A keyword hit with no vector has no similarity to report; it is
         // here because it contains the literal, and the header says which.
-        const match = t.similarity == null ? "exact match, no vector" : `${(t.similarity * 100).toFixed(1)}% match`;
+        // Without a query vector (SMD-2891) every hit is one, whether or not it has a vector of its own.
+        const match = t.similarity == null ? (literal ? "exact match" : "exact match, no vector") : `${(t.similarity * 100).toFixed(1)}% match`;
         const parts = [
           `--- Result ${i + 1} (${match}) ---`,
           // The id, so update_thought and delete_thought can be aimed at a hit

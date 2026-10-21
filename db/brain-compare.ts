@@ -225,6 +225,11 @@ export async function getBrainInfo(ep: BrainEndpoint): Promise<BrainInfo> {
  * tool's own error text.
  */
 export async function callTool(ep: BrainEndpoint, name: string, args: Record<string, unknown>): Promise<string> {
+  return (await callToolReply(ep, name, args)).text;
+}
+
+/** callTool's reply with its typed result beside the text, for a reader of a field (SMD-2891). */
+export async function callToolReply(ep: BrainEndpoint, name: string, args: Record<string, unknown>): Promise<{ text: string; structured: Record<string, unknown> | undefined }> {
   const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
   const r = await fetchOrThrow(ep, `${ep.base}/`, {
     method: "POST",
@@ -241,10 +246,10 @@ export async function callTool(ep: BrainEndpoint, name: string, args: Record<str
   if (msg.error) throw new Error(`${ep.label}: ${name} refused — ${msg.error.message ?? JSON.stringify(msg.error)}`);
   const result = msg.result;
   if (result?.isError) throw new Error(`${ep.label}: ${name} — ${textOf(result)}`);
-  return textOf(result);
+  return { text: textOf(result), structured: result?.structuredContent };
 }
 
-interface RpcReply { error?: { message?: string }; result?: { isError?: boolean; content?: { type: string; text?: string }[] } }
+interface RpcReply { error?: { message?: string }; result?: { isError?: boolean; content?: { type: string; text?: string }[]; structuredContent?: Record<string, unknown> } }
 
 /** A reply is raw JSON or an SSE stream; take the last `data:`-prefixed (or bare) JSON object. */
 export function unwrapRpc(raw: string): RpcReply | null {
@@ -392,10 +397,19 @@ export async function newestCapture(ep: BrainEndpoint): Promise<string | null> {
  */
 export type ReplayArm = "keyword" | "hybrid" | "current";
 
-/** The ids a brain returns for one query on one arm, in rank order (parsed from the `ID:` lines). */
+/**
+ * The ids a brain returns for one query on one arm, in rank order (parsed from
+ * the `ID:` lines). A search the brain answered by exact literals alone,
+ * because its embedding provider did not answer (its typed `vectorFailed`,
+ * SMD-2891), is that brain failing the search, as it was when such a search
+ * was an error: its ids are no ranking to compare, and two brains whose
+ * shared provider is down would otherwise read as unmoved (review pass 1).
+ */
 export async function searchIds(ep: BrainEndpoint, arm: ReplayArm, query: string): Promise<string[]> {
   const tool = arm === "keyword" ? "search_thoughts_keyword" : "search_thoughts";
-  const text = await callTool(ep, tool, arm === "current" ? { query, prefer_current: true } : { query });
+  const { text, structured } = await callToolReply(ep, tool, arm === "current" ? { query, prefer_current: true } : { query });
+  const failed = structured?.vectorFailed;
+  if (failed !== undefined && failed !== null) throw new Error(`${ep.label}: ${tool} was answered by exact literals alone — the brain's embedding provider did not answer (${String(failed)})`);
   return parseResultIds(text);
 }
 
@@ -1078,7 +1092,9 @@ export async function runTierReplay(args: TierReplayArgs): Promise<number> {
     const page = await fetchLoggedSearches(stable, args.since ?? null);
     opts = { fromLog: replayPlanFromLog(page.searches), source: `the log of ${stable.label}`, truncated: page.truncated };
     // Distinct, as the plan's own count is: one query logged a hundred times with no arm is one.
-    const distinct = (arm: string | null) => new Set(page.searches.filter((s) => s.arm === arm && typeof s.query === "string" && s.query.length > 0).map((s) => s.query)).size;
+    // A query the plan replays on another arm is replayed, not apart (review pass 1).
+    const replayed = new Set((opts.fromLog ?? []).map((p) => p.query));
+    const distinct = (arm: string | null) => new Set(page.searches.filter((s) => s.arm === arm && typeof s.query === "string" && s.query.length > 0 && !replayed.has(s.query)).map((s) => s.query)).size;
     noArm = distinct(null);
     literal = distinct("literal");
   } catch (e) {

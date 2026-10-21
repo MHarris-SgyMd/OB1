@@ -258,7 +258,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2950 assertions: 2950 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2951 assertions: 2951 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports one hundred and four (104) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
@@ -1797,8 +1797,11 @@ With the embedding provider down, `search_thoughts` and the compat `search`
 failed with the runtime's raw "Unable to connect", though the exact-literal
 arm they fuse needs no model. They now call the same hybrid function with no
 vector — `match_thoughts` finds nothing on NULL, so the rows are the
-identifiers and quoted spans the query names, matched exactly, with the
-needle facts as ever — and the reply says so. Such a search is logged as arm
+identifiers and quoted spans the query names, matched exactly — and the reply
+says so. The function reports its needle facts only on a row, so when nothing
+matched the server reads them on their own (`extract_search_needles` and each
+literal's `search_thoughts_keyword` count): a literal held by thoughts yet
+unmatched was too common, one held by none is absent. Such a search is logged as arm
 `literal`, which no replay takes: `hybrid` and `current` would replay with a
 vector, and `keyword` would replay the whole query as one substring. 104
 changes no function and rewrites no row; it refuses to apply without 045's
@@ -4915,7 +4918,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2950 assertions, PGlite, no container
+bun test-schema.ts                          # 2951 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1439 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 871 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 57 assertions: the shards SHARDS lists in test-live.ts, each its own job

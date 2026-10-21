@@ -447,7 +447,8 @@ export function normaliseVectorlessRow(r: Record<string, unknown>): VectorlessRo
  */
 export type LoggedSearchRow = {
   query: string;
-  arm: "hybrid" | "keyword" | null;
+  /** 045's arms, 059's current, 104's literal (SMD-2891); null before 045. */
+  arm: "hybrid" | "keyword" | "current" | "literal" | null;
   tier: string | null;
   loggedAt: string | null;
   matchCount: number | null;
@@ -1414,6 +1415,15 @@ export interface ThoughtStore {
   }): Promise<ThoughtKeywordMatch[]>;
 
   /**
+   * The literals 017's extract_search_needles takes from `query`, in its
+   * order, each with how many thoughts contain it (search_thoughts_keyword's
+   * total, unfiltered) — what a search answered without a vector reports when
+   * no literal was matched, since the hybrid function reports its facts only
+   * on a row (SMD-2891). One call; the rules stay the functions'.
+   */
+  literalFacts(query: string): Promise<{ needle: string; count: number }[]>;
+
+  /**
    * The two above fused (migration 017): rank on the vector arm, presence per
    * needle on the keyword arm. `query` is the text the needles are extracted
    * from, in SQL, so every caller extracts identically; `embedding` is of that
@@ -1912,7 +1922,7 @@ export function maskUrl(url: string): string {
  * not.
  */
 const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
-  matchThoughts: true, keywordThoughts: true, hybridThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
+  matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, traceProvenance: true,
