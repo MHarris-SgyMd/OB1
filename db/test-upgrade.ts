@@ -4490,94 +4490,65 @@ console.log("\n[20av] Migration 104: refused by name without 058, then without 0
   const stateBefore = await state();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the104 });
   assert((await state()) === stateBefore && (await rows()) === before && (await audits()) === auditBefore, "a re-apply of 104 is a no-op: no state, row or audit row moved");
-  // Readers the text match alone missed, and a procedure, which no ALTER
-  // FUNCTION takes and which once failed the file (review pass 2) — planted
-  // only now, for a re-apply: present beside the warm session above they
-  // dropped its plan by themselves, and its check passed without the ALTERs
-  // (review pass 3).
-  await sql.unsafe(`CREATE SCHEMA upg104;
-    CREATE FUNCTION upg104.shouted() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY(PUBLIC.NODE_SETTLED_TYPES())';
-    CREATE FUNCTION upg104.quoted() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY("node_settled_types"())';
-    CREATE FUNCTION upg104.atomic() RETURNS text[] LANGUAGE sql STABLE BEGIN ATOMIC SELECT node_settled_types(); END;
-    CREATE PROCEDURE upg104.proc() LANGUAGE plpgsql AS $$ BEGIN PERFORM node_settled_types(); END $$`);
-  const planted = async () => new Map(((await sql`SELECT p.oid::regprocedure::text AS f, p.xmin::text AS x FROM pg_proc p WHERE p.pronamespace = to_regnamespace('upg104')`) as { f: string; x: string }[]).map((r) => [r.f, r.x]));
+  // The brain's own readers the text match alone missed — named in upper
+  // case, quoted, or only by a BEGIN ATOMIC body's dependency — are altered;
+  // a procedure, a function in another schema and one another role owns are
+  // not, even with that role holding its lock (review passes 2, 5, 7).
+  // Planted only now, for a re-apply: present beside the warm session above
+  // they dropped its plan by themselves (review pass 3).
+  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_other104') THEN CREATE ROLE ob1_upgrade_other104 NOLOGIN; END IF; END $r$;
+    CREATE FUNCTION upg104_shouted() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY(PUBLIC.NODE_SETTLED_TYPES())';
+    CREATE FUNCTION upg104_quoted() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY("node_settled_types"())';
+    CREATE FUNCTION upg104_atomic() RETURNS text[] LANGUAGE sql STABLE BEGIN ATOMIC SELECT node_settled_types(); END;
+    CREATE PROCEDURE upg104_proc() LANGUAGE plpgsql AS $$ BEGIN PERFORM node_settled_types(); END $$;
+    CREATE SCHEMA upg104;
+    CREATE FUNCTION upg104.elsewhere() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY(public.node_settled_types())';
+    CREATE FUNCTION upg104_theirs() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY(node_settled_types())';
+    ALTER FUNCTION upg104_theirs() OWNER TO ob1_upgrade_other104`);
+  const PLANTED = ["upg104_shouted()", "upg104_quoted()", "upg104_atomic()", "upg104_proc()", "upg104.elsewhere()", "upg104_theirs()"];
+  const planted = async () => new Map(((await sql`SELECT p.oid::regprocedure::text AS f, p.xmin::text AS x FROM pg_proc p WHERE p.oid::regprocedure::text = ANY(${sql.array(PLANTED, "TEXT")}::text[])`) as { f: string; x: string }[]).map((r) => [r.f, r.x]));
   const plantedBefore = await planted();
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the104 });
-  const plantedAfter = await planted();
-  assert(plantedBefore.size === 4 && ["upg104.shouted()", "upg104.quoted()", "upg104.atomic()"].every((f) => plantedAfter.get(f) !== plantedBefore.get(f))
-      && plantedAfter.get("upg104.proc()") === plantedBefore.get("upg104.proc()"),
-    `104 re-applied alters readers in any schema, named in any case or quoted, or by dependency (a BEGIN ATOMIC body), and leaves a procedure naming one rather than failing the file (${JSON.stringify([...plantedBefore.keys()])})`);
-  await sql.unsafe(`DROP PROCEDURE upg104.proc(); DROP FUNCTION upg104.atomic(); DROP FUNCTION upg104.quoted(); DROP FUNCTION upg104.shouted(); DROP SCHEMA upg104`);
-  // A migrating role that owns the readers but not every function naming a
-  // set (a managed Postgres's owner, which is no superuser): the block alters
-  // what it owns and leaves the rest, rather than failing the file — a
-  // superuser, every suite's, takes the other branch only (review pass 4).
-  const touch = readFileSync(join(HERE, "migrations", the104), "utf8").match(/DO \$touch\$[\s\S]*?\$touch\$;/)?.[0] ?? "no touch block";
-  await sql.unsafe(`DO $r$ BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_mig104') THEN CREATE ROLE ob1_upgrade_mig104 NOLOGIN; END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_other104') THEN CREATE ROLE ob1_upgrade_other104 NOLOGIN; END IF; END $r$`);
-  const owned = [...readersBefore.keys()];
-  for (const f of owned) await sql.unsafe(`ALTER FUNCTION ${f} OWNER TO ob1_upgrade_mig104`);
-  await sql.unsafe(`CREATE FUNCTION upg104_foreign() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY(node_settled_types())';
-    ALTER FUNCTION upg104_foreign() OWNER TO ob1_upgrade_other104`);
-  const foreignXmin = async () => String(((await sql`SELECT xmin::text AS x FROM pg_proc WHERE oid = 'upg104_foreign()'::regprocedure`)[0] as { x: string }).x);
-  const ownedBefore = await readers(), foreignBefore = await foreignXmin();
-  let asOwner: string;
-  try {
-    await sql.begin(async (tx: SQL) => { await tx.unsafe(`SET LOCAL ROLE ob1_upgrade_mig104`); await tx.unsafe(touch); });
-    asOwner = "applied";
-  } catch (e) { asOwner = (e as Error).message; }
-  const ownedAfter = await readers(), foreignAfter = await foreignXmin();
-  for (const f of owned) await sql.unsafe(`ALTER FUNCTION ${f} OWNER TO CURRENT_USER`);
-  await sql.unsafe(`DROP FUNCTION upg104_foreign(); DROP ROLE ob1_upgrade_mig104; DROP ROLE ob1_upgrade_other104`);
-  // Readers whose locks another session holds — open ALTERs on functions of
-  // its own, as a role that may create them in a scanned schema can hold —
-  // are left, each within 200 ms and thirty within the block's ten waits
-  // (about 2 s; untried after), and the file applies (review passes 5, 6).
-  // Owned by another role, in another schema, they come after the brain's
-  // own readers, which are all altered however the catalog lays them out:
-  // without that order, held functions placed first in pg_proc used up the
-  // waits and left the tree's readers untried (pass 6, on a shared database).
-  const HELD = Array.from({ length: 30 }, (_, i) => `upg104h.held${i}()`);
-  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_holder104') THEN CREATE ROLE ob1_upgrade_holder104 NOLOGIN; END IF; END $r$;
-    CREATE SCHEMA upg104h AUTHORIZATION ob1_upgrade_holder104;
-    ${HELD.map((f) => `CREATE FUNCTION ${f} RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY(node_settled_types())'; ALTER FUNCTION ${f} OWNER TO ob1_upgrade_holder104`).join(";\n")}`);
-  const heldXmins = async () => JSON.stringify(await sql`SELECT oid::regprocedure::text AS f, xmin::text AS x FROM pg_proc WHERE pronamespace = to_regnamespace('upg104h') ORDER BY 1`);
-  const heldBefore = await heldXmins(), othersBefore = await readers();
+  // Another role's function held: an open ALTER on it, as a role that may
+  // create one in public (PG 14 and older) can hold. The block never waits on
+  // it, as it never touches it; bounded at 5 s in case it did.
   const holder = new SQL({ url: URL_, max: 1 });
-  let held: string, heldMs = 0;
+  let heldRun: string, heldMs = 0;
   try {
-    await holder.unsafe(`BEGIN; ${HELD.map((f) => `ALTER FUNCTION ${f} IMMUTABLE`).join("; ")}`);
+    await holder.unsafe(`BEGIN; ALTER FUNCTION upg104_theirs() IMMUTABLE; ALTER FUNCTION upg104.elsewhere() IMMUTABLE`);
     const t0 = performance.now();
-    // Bounded: the helper sets no lock timeout, so a block that waited would
-    // wait on this holder for ever; past 5 s the holder lets go, the apply
-    // finishes, and the time says it waited.
     const letGo = setTimeout(() => { holder.unsafe(`ROLLBACK`).catch(() => undefined); }, 5000);
-    held = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the104 }).then(() => "applied", (e: Error) => e.message);
+    heldRun = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the104 }).then(() => "applied", (e: Error) => e.message);
     clearTimeout(letGo);
     heldMs = performance.now() - t0;
   } finally {
     await holder.unsafe(`ROLLBACK`).catch(() => undefined);
     await holder.close();
   }
-  const heldAfter = await heldXmins(), othersAfter = await readers();
-  await sql.unsafe(`${HELD.map((f) => `DROP FUNCTION ${f}`).join("; ")}; DROP SCHEMA upg104h; DROP ROLE ob1_upgrade_holder104`);
-  assert(held === "applied" && heldMs < 4000 && heldAfter === heldBefore && othersBefore.size >= 5 && [...othersBefore].every(([f, x]) => othersAfter.get(f) !== x),
-    `thirty readers whose locks another session holds are left within the block's ten waits, and the file applies, the others altered (${held.slice(0, 80)}; ${Math.round(heldMs)} ms)`);
-  // The block's 200 ms is its own: the migrator's lock timeout holds again for
-  // the rebuild after it, which waits on writers for its SHARE locks.
-  const sessionTimeout = async () => String(((await sql`SELECT current_setting('lock_timeout') AS t`)[0] as { t: string }).t);
-  const sessionBefore = await sessionTimeout();
-  const timeoutAfter = await sql.begin(async (tx: SQL) => {
-    await tx.unsafe(`SET LOCAL lock_timeout = '7s'`);
-    await tx.unsafe(readFileSync(join(HERE, "migrations", the104), "utf8"));
-    return String(((await tx`SELECT current_setting('lock_timeout') AS t`)[0] as { t: string }).t);
-  });
-  const sessionAfter = await sessionTimeout();
-  assert(timeoutAfter === "7s" && sessionAfter === sessionBefore,
-    `the block puts the migrator's lock timeout back for the rest of the file, and leaves the session's as it was after (${timeoutAfter}; ${sessionBefore} → ${sessionAfter})`);
-  assert(asOwner === "applied" && owned.length >= 5 && owned.every((f) => ownedAfter.get(f) !== ownedBefore.get(f)) && foreignAfter === foreignBefore,
-    `run by a role that owns the readers and not a function another role owns, the block alters its own and leaves that one, rather than failing (${asOwner.slice(0, 80)}; ${owned.length} owned)`);
+  const plantedAfter = await planted();
+  const moved = (f: string) => plantedAfter.get(f) !== plantedBefore.get(f);
+  assert(plantedBefore.size === 6 && heldRun === "applied" && heldMs < 4000
+      && ["upg104_shouted()", "upg104_quoted()", "upg104_atomic()"].every(moved) && !["upg104_proc()", "upg104.elsewhere()", "upg104_theirs()"].some(moved),
+    `104 re-applied alters the brain's own readers named in upper case, quoted, or by a BEGIN ATOMIC body, and leaves a procedure, another schema's function and another role's — never waiting on that role's held lock (${heldRun.slice(0, 80)}; ${Math.round(heldMs)} ms)`);
+  await sql.unsafe(`DROP PROCEDURE upg104_proc(); DROP FUNCTION upg104_atomic(); DROP FUNCTION upg104_quoted(); DROP FUNCTION upg104_shouted();
+    DROP FUNCTION upg104.elsewhere(); DROP SCHEMA upg104; DROP FUNCTION upg104_theirs(); DROP ROLE ob1_upgrade_other104`);
+  // A brain whose owner is no superuser (a managed Postgres's): the sets and
+  // their readers owned by one role, the block run as it — it alters them all.
+  const touch = readFileSync(join(HERE, "migrations", the104), "utf8").match(/DO \$touch\$[\s\S]*?\$touch\$;/)?.[0] ?? "no touch block";
+  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_mig104') THEN CREATE ROLE ob1_upgrade_mig104 NOLOGIN; END IF; END $r$`);
+  const owned = [...readersBefore.keys()];
+  const brain = ["node_lifecycle_types()", "node_settled_types()", ...owned];
+  for (const f of brain) await sql.unsafe(`ALTER FUNCTION ${f} OWNER TO ob1_upgrade_mig104`);
+  const ownedBefore = await readers();
+  let asOwner: string;
+  try {
+    await sql.begin(async (tx: SQL) => { await tx.unsafe(`SET LOCAL ROLE ob1_upgrade_mig104`); await tx.unsafe(touch); });
+    asOwner = "applied";
+  } catch (e) { asOwner = (e as Error).message; }
+  const ownedAfter = await readers();
+  for (const f of brain) await sql.unsafe(`ALTER FUNCTION ${f} OWNER TO CURRENT_USER`);
+  await sql.unsafe(`DROP ROLE ob1_upgrade_mig104`);
+  assert(asOwner === "applied" && owned.length >= 5 && owned.every((f) => ownedAfter.get(f) !== ownedBefore.get(f)),
+    `run by a brain owner that is no superuser, the block alters every reader of its own (${asOwner.slice(0, 80)}; ${owned.length})`);
   await sql.close();
 }
 

@@ -24,18 +24,16 @@
 --   * node_lifecycle_types(): the seven, `duplicate` after `canceled`, as
 --     Linear's board lists it. node_settled_types(): {completed, canceled,
 --     duplicate}. Same signatures, IMMUTABLE as before; CREATE OR REPLACE.
---   * Every function outside the system schemas that names either set (in its
---     body, or by dependency) is altered to the volatility it has — a no-op
---     that invalidates every session's plans built on it; one this role
---     cannot alter, or whose lock another session holds past 200 ms, is
---     named in a NOTICE and left (psql shows it; migrate.ts prints no
---     notices, so restart the server and workers after 104 if any may have
---     been left). CREATE OR REPLACE alone did
---     not reach every cached plan: on PG 16 a session that had called
---     search_thoughts_current (plpgsql) six times, its generic plan cached,
---     kept demoting by 058's sets after 104 while a fresh session did not
---     (review pass 1, run-it); a statement naming a set directly read the new
---     one. A running server's pooled connections are such sessions.
+--   * The brain's own functions that name either set — in the sets' schema,
+--     with the sets' owner, by their text or by dependency — are altered to
+--     the volatility they have: a no-op that invalidates every session's
+--     plans built on them. Another schema's function is not touched (restart
+--     the server and workers after 104 to drop its plans). CREATE OR REPLACE
+--     alone did not reach every cached plan: on PG 16 a session that had
+--     called search_thoughts_current (plpgsql) six times, its generic plan
+--     cached, kept demoting by 058's sets after 104 while a fresh session did
+--     not (review pass 1, run-it); a statement naming a set directly read the
+--     new one. A running server's pooled connections are such sessions.
 --     test-upgrade [20av] holds one, and that every such function was
 --     altered.
 --   * ob1_rebuild_source_gate() after them: 071's mirror stores, per source
@@ -117,66 +115,44 @@ AS $$ SELECT '{completed,canceled,duplicate}'::text[] $$;
 COMMENT ON FUNCTION node_settled_types() IS
   'The status types that settle a node: a settled blocker blocks nothing and a settled thought is not blocked. graph-centrality.ts''s LIFECYCLE_FILTERS.done must equal it, and db/board-findings.ts reads it for a closed ticket. Migration 058 / SMD-2074; duplicate since migration 104 / SMD-2935.';
 
--- Every reader's cached plans, in every session: a no-op ALTER of each
--- function that names a set (node_state, ticket_references_settled,
--- ticket_status_inputs, 071's gate, …) invalidates the plans that inlined it,
--- and so those of its callers. Read from the catalog, not listed: a reader a
--- later migration adds is covered by its own CREATE OR REPLACE. A reader is a
--- function in any schema but the system's whose body names a set — in any
--- case, quoted or not — or that depends on one (a BEGIN ATOMIC body has no
--- text to read). A procedure has no volatility to restate and is left; so is
--- a function this role cannot alter (review pass 2), and one whose lock
--- another session holds past 200 ms — a role that may create a function in
--- any schema scanned could otherwise hold one and fail the file (review
--- pass 5) — and after ten such waits the rest are left untried, so the
--- block waits at most about 2 s: under --reapply every earlier file's locks
--- are held through it (review pass 6). The brain's own readers (the sets'
--- schema, this role's) are tried first, so held functions of another's
--- never use up the waits before them. Each is said by name: refreshing
--- plans is not worth failing the sets over. The migrator's own lock timeout
--- is put back after. A holder that commits its DDL on a reader during the
--- 200 ms fails the file (tuple concurrently updated), as any concurrent DDL
--- on a migrated object does; a rerun applies it.
+-- Every reader's cached plans, in every session: a no-op ALTER of each of
+-- the brain's own functions that names a set (node_state,
+-- ticket_references_settled, ticket_status_inputs, 071's gate, …) invalidates
+-- the plans that inlined it, and so those of its callers. Read from the
+-- catalog, not listed: a reader a later migration adds is covered by its own
+-- CREATE OR REPLACE. The brain's own are the functions in the sets' schema
+-- with the sets' owner whose text names a set — in any case, quoted or not —
+-- or that depend on one (a BEGIN ATOMIC body has no text to read); a
+-- procedure has no volatility to restate. A role that may replace the sets
+-- may alter every function of their owner, so none is refused. Another
+-- schema's function, a plugin's among them, or a reader another role came to
+-- own (a --reapply run by another role re-creates node_state), is not
+-- touched: restart the server and workers after 104 to drop its plans. A
+-- session holding a reader's row — an open GRANT or REVOKE EXECUTE, which any
+-- role holding EXECUTE may issue, rewrites it — fails the file at the run's
+-- lock timeout, as it would the sets' own CREATE OR REPLACE, and a rerun
+-- applies it. (Review pass 7: a block that scanned every schema drew a seam
+-- in each of passes 2, 4, 5 and 6 — other roles' functions, their locks, a
+-- wait cap and its order.)
 DO $touch$
 DECLARE
   r record;
-  v_left text[] := '{}';
-  v_waits int := 0;
-  v_timeout text := current_setting('lock_timeout');
 BEGIN
-  PERFORM set_config('lock_timeout', '200ms', true);
   FOR r IN
-    SELECT p.oid::regprocedure AS fn, pg_has_role(p.proowner, 'USAGE') AS may,
+    SELECT p.oid::regprocedure AS fn,
            CASE p.provolatile WHEN 'i' THEN 'IMMUTABLE' WHEN 's' THEN 'STABLE' ELSE 'VOLATILE' END AS vol
       FROM pg_proc p
-      JOIN pg_namespace n ON n.oid = p.pronamespace
-     WHERE p.prokind IN ('f', 'w')
-       AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
+      JOIN pg_proc s ON s.oid = 'node_settled_types()'::regprocedure
+     WHERE p.pronamespace = s.pronamespace AND p.proowner = s.proowner
+       AND p.prokind IN ('f', 'w')
        AND (p.prosrc ~* 'node_(lifecycle|settled)_types"?[[:space:]]*[(]'
             OR EXISTS (SELECT 1 FROM pg_depend d
                         WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.refclassid = 'pg_proc'::regclass
                           AND d.refobjid IN ('node_lifecycle_types()'::regprocedure, 'node_settled_types()'::regprocedure)))
        AND p.oid NOT IN ('node_lifecycle_types()'::regprocedure, 'node_settled_types()'::regprocedure)
-       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
-     ORDER BY p.pronamespace = (SELECT pronamespace FROM pg_proc WHERE oid = 'node_settled_types()'::regprocedure) DESC,
-              p.proowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) DESC,
-              p.oid
   LOOP
-    IF r.may AND v_waits < 10 THEN
-      BEGIN
-        EXECUTE format('ALTER FUNCTION %s %s', r.fn, r.vol);
-      EXCEPTION WHEN lock_not_available THEN
-        v_waits := v_waits + 1;
-        v_left := v_left || r.fn::text;
-      END;
-    ELSE
-      v_left := v_left || r.fn::text;
-    END IF;
+    EXECUTE format('ALTER FUNCTION %s %s', r.fn, r.vol);
   END LOOP;
-  PERFORM set_config('lock_timeout', v_timeout, true);
-  IF cardinality(v_left) > 0 THEN
-    RAISE NOTICE 'migration 104: % not altered (this role cannot, another session holds its lock, or ten such waits came first), so a session that cached a plan through it keeps 058''s sets until it reconnects (restart the server and workers)', array_to_string(v_left, ', ');
-  END IF;
 END
 $touch$;
 

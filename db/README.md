@@ -1783,40 +1783,39 @@ structure group; `--status` and `--list relations`) and [41]
 (a distinct pair never posted to the board), test-upgrade [20au].
 
 Migration 104 makes Linear's `duplicate` status type a lifecycle that settles
-(SMD-2935). Linear's Duplicate status has a type of its own, not `canceled`,
-and 058's sets did not list it: to node_state a Duplicate ticket was an
-unknown status (`open` NULL — 18 rows on stable, its 16 Duplicate tickets
-and two notes filed under them), a Duplicate blocker still blocked and
-counted among `unknown_blockers`, `prefer_current` never demoted one, and
-the findings poster kept a closed set of its own. `node_lifecycle_types()`
-gains `duplicate` after `canceled` and `node_settled_types()` becomes
-`{completed, canceled, duplicate}`; then the file runs
-`ob1_rebuild_source_gate()`, as 071 asks of any migration that changes the
-known set (071's mirror stores, per source row, whether its status is a
-known one: 16 rows on stable flip). Nothing else stored is computed from the
-sets. It also alters every function outside the system schemas that names a set
-(in its text, in any case, or by dependency) to the volatility it has, a no-op
-that invalidates the plans built on it in every session — a procedure is left,
-and one the migrating role cannot alter, or whose lock another session holds
-past 200 ms (ten such waits at most, the rest left untried, the brain's own
-readers tried first), is named in a NOTICE (which psql shows and `migrate.ts` does not
-print) and left: replacing
-the sets alone left a server's pooled connection, once it had searched with
-`prefer_current` six times, demoting by 058's sets (review pass 1).
-graph-centrality's `LIFECYCLE_TYPES` and `--status done` follow (its equality
-check refuses a brain before 104), `board-findings.ts`'s `closed()` reads
-`node_settled_types()` and refuses to post on a brain without 104 (said once, at
-board-sync's start: after migrating, restart board-sync), a demoted Duplicate
-says `↓ Ranked ×0.25 — duplicate`, and the stated-status label prints its word,
-Duplicate. A Duplicate whose original is still open reads finished, as a cancel
-does. Refuses by name without 058 or 071; a re-apply is a no-op. An older tree's
-`--reapply` over a 104 brain puts 058's six back: run this tree's `--reapply`
-after it (which fails at 064 on a brain holding a judged relation until
-SMD-3149). test-schema [93] (the sets, a Duplicate settled and its blocker
-cleared, both under 058's sets as before, the mirror rebuilt), test-upgrade
-[20av] (a session's cached plan reaching the new sets among it), test-live [41]
-(the poster's refusals without 058's set and before 104, and a Done and a
-Duplicate ticket a closed pair by 104's set alone).
+(SMD-2935). Linear's Duplicate status has a type of its own, not `canceled`, and
+058's sets did not list it: to node_state a Duplicate ticket was an unknown
+status (`open` NULL — 18 rows on stable, its 16 Duplicate tickets and two notes
+filed under them), a Duplicate blocker still blocked and counted among
+`unknown_blockers`, `prefer_current` never demoted one, and the findings poster
+kept a closed set of its own. `node_lifecycle_types()` gains `duplicate` after
+`canceled` and `node_settled_types()` becomes `{completed, canceled,
+duplicate}`; then the file runs `ob1_rebuild_source_gate()`, as 071 asks of any
+migration that changes the known set (071's mirror stores, per source row,
+whether its status is a known one: 16 rows on stable flip). Nothing else stored
+is computed from the sets. It also alters the brain's own functions that name a
+set (in the sets' schema, with the sets' owner, by their text in any case or by
+dependency) to the volatility they have, a no-op that invalidates the plans
+built on them in every session; another schema's function (a plugin's), or a
+reader another role came to own, is not touched — restart the server and workers
+after 104 — and a session holding a reader's row (an open GRANT or REVOKE
+EXECUTE) fails the file at the run's lock timeout, as it would the sets' own
+replacement, until a rerun. Replacing the sets alone left a server's pooled
+connection, once it had searched with `prefer_current` six times, demoting by
+058's sets (review pass 1). graph-centrality's `LIFECYCLE_TYPES` and `--status
+done` follow (its equality check refuses a brain before 104),
+`board-findings.ts`'s `closed()` reads `node_settled_types()` and refuses to
+post on a brain without 104 (said once, at board-sync's start: after migrating,
+restart board-sync), a demoted Duplicate says `↓ Ranked ×0.25 — duplicate`, and
+the stated-status label prints its word, Duplicate. A Duplicate whose original
+is still open reads finished, as a cancel does. Refuses by name without 058 or
+071; a re-apply is a no-op. An older tree's `--reapply` over a 104 brain puts
+058's six back: run this tree's `--reapply` after it (which fails at 064 on a
+brain holding a judged relation until SMD-3149). test-schema [93] (the sets, a
+Duplicate settled and its blocker cleared, both under 058's sets as before, the
+mirror rebuilt), test-upgrade [20av] (a session's cached plan reaching the new
+sets among it), test-live [41] (the poster's refusals without 058's set and
+before 104, and a Done and a Duplicate ticket a closed pair by 104's set alone).
 
 ## What changed relative to the guide
 
