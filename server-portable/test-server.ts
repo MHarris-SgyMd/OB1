@@ -2906,18 +2906,31 @@ console.log("\n[19] The legacy route's marker is read no more: a marked request 
   // Until v2.0.0 the proxy's legacy route marked what it forwarded with
   // X-OB1-Legacy-Route, and the server named each key on it once (SMD-2306).
   // The route went with v2.0.0, and the server stopped reading the marker: a
-  // marked call on the MCP endpoint or a keyed REST route logs no such line.
+  // marked call on the MCP endpoint or a keyed REST route (a read, a worker
+  // action, a job) warns nothing the same call unmarked does not, however a
+  // line came to be worded: each batch is sent unmarked first, then marked.
   const MARK = { "x-ob1-legacy-route": "1" };
   const warned: string[] = [];
   const realWarn = console.warn;
   console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
-  const send = (path: string, headers: Record<string, string>, method = "POST") =>
-    fetch(`${BASE}${path}`, { method, headers, body: method === "POST" ? INIT : undefined, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS * 5) }).then((r) => r.status).catch(() => 0);
+  const probe = { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS * 20) };
+  const status = (path: string, init: RequestInit) => fetch(`${BASE}${path}`, { ...probe, ...init }).then((r) => r.status).catch(() => 0);
+  const batch = async (mark: Record<string, string>) => {
+    const from = warned.length;
+    const codes = [
+      await status("/", { method: "POST", headers: { ...H, ...mark, "x-brain-key": namedKeyOf("agent") }, body: INIT }),
+      await status("/worker-status", { headers: { ...mark, "x-brain-key": namedKeyOf("script") } }),
+      await status("/worker-run", { method: "POST", headers: { ...mark, "x-brain-key": namedKeyOf("agent"), "content-type": "application/json" }, body: JSON.stringify({ work_type: "extraction" }) }),
+      await status(`/jobs/${crypto.randomUUID()}`, { headers: { ...mark, "x-brain-key": namedKeyOf("script") } }),
+    ];
+    return { codes, lines: warned.slice(from).map((w) => w.replace(/[0-9a-f-]{36}|\d+/g, "#")) };
+  };
   try {
-    const mcp = await send("/", { ...H, ...MARK, "x-brain-key": namedKeyOf("agent") });
-    const rest = await send("/worker-status", { ...MARK, "x-brain-key": namedKeyOf("script") }, "GET");
-    assert(mcp === 200 && rest === 200, `the marked calls were answered, so the absence below is of a line, not of a call (${mcp}, ${rest})`);
-    assert(!warned.some((w) => w.includes("old root URL") || w.includes("legacy route")), `a marked call names no key on the old root URL (${warned.join(" | ")})`);
+    const plain = await batch({});
+    const marked = await batch(MARK);
+    assert([plain, marked].every((b) => b.codes.join() === "200,200,400,404"), `the calls were answered, so the absence below is of a line, not of a call (${plain.codes}; marked ${marked.codes})`);
+    const extra = marked.lines.filter((l) => !plain.lines.includes(l));
+    assert(extra.length === 0, `a marked call warns nothing its unmarked twin does not (${extra.join(" | ")})`);
   } finally {
     console.warn = realWarn;
   }

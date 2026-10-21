@@ -292,7 +292,9 @@ there.
   brain that is down, and also a running brain whose own proxy answers 502,
   such as while its server restarts. An unknown host gets the edge's 404.
 - **The edge deletes `X-Brain-Forwarder` and `X-OB1-Legacy-Route`** from each
-  request. A brain's proxy treats both as its own.
+  request. A brain's proxy treats the first as its own, and a v1.x brain's
+  server read the second as its legacy route's (a v2.0.0 brain ignores it);
+  the edge deletes it for the older brains it can front.
 - **Sign-in (OAuth) is not served through the edge yet. Keys are.** Each
   brain's host on the edge would be its origin, with its challenge, its
   discovery documents and its authorization server its own. But MCP SDK v2
@@ -789,7 +791,7 @@ from an MCP client or a keyed REST call (`/worker-status`, the worker actions,
 key "session-hook" reached the brain at the old root URL (POST "/") through the proxy's legacy route — move its client to /mcp; …
 ```
 
-**Finding the clients still on the root.** Run
+**Finding the clients still on the root.** On such a stack, run
 `compose logs -t server | grep 'old root URL'` (with the `-f` files the stack
 runs with). Each line names a key from `MCP_ACCESS_KEYS`, which is where a key
 per client pays off: the single-key form, `MCP_ACCESS_KEY`, is named
@@ -803,7 +805,8 @@ but no key; a keyless request is only there. On podman for macOS that address
 is the VM's gateway, not the client. `smoke.sh` run with no URL probes the root
 without a key, so it adds no name: run that stack's own `smoke.sh`, from a
 v1.x checkout. A v2.0.0 checkout's check 11 expects the proxy's own 404 there
-and fails on an older stack's deprecated 200; on v2.0.0 a client still on the
+and fails on an older stack's deprecated 200. On v2.0.0 neither log has a
+line for them, no legacy router and no server line: a client still on the
 root reports that 404 itself.
 
 | Client | Before | After |
