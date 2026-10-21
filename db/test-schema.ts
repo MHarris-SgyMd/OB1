@@ -15354,7 +15354,8 @@ console.log("\n[95] Migration 106: a keyed rebuild of 071's gate mirror for a st
   await db.exec(`CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{${[...known, "kgweird"].join(",")}}'::text[] $$`);
   await q(`UPDATE ob1_source_gate SET gates = false WHERE thought_id = $1`, [d1]);
   const before = await drift();
-  const added = await keyed(["kgweird"]);
+  // The moved type second, behind one no row holds: every type given is read.
+  const added = await keyed(["kgnone", "kgweird"]);
   const g1 = await gates(), after = await drift();
   assert(before === 3 && added.written === 2 && added.deleted === 0 && g1.get(w1) === true && g1.get(w2) === true && g1.get(s1) === true && g1.get(d1) === false && after === 1,
     `a set change that adds a type: the keyed form reconciles that type's two rows and no other — the wrong row it was not asked about stays wrong, drift() still naming it (${before} → ${after}; ${JSON.stringify(added)})`);
