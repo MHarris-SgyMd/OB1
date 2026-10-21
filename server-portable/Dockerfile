@@ -5,12 +5,17 @@ FROM oven/bun:1.4.3-alpine AS deps
 WORKDIR /app/server-portable
 COPY server-portable/package.json server-portable/bun.lock ./
 RUN bun install --frozen-lockfile --production
+
 # The MCP server as a REST client and its REST client (SMD-2287), each from its
 # own lockfile, as in a checkout: mcp-server/ pins the MCP SDK v2 packages,
-# rest-client/ openapi-fetch.
+# rest-client/ openapi-fetch. A stage each, so a change to one lockfile
+# installs that one alone, and BuildKit runs the three at once.
+FROM oven/bun:1.4.3-alpine AS mcp-deps
 WORKDIR /app/mcp-server
 COPY mcp-server/package.json mcp-server/bun.lock ./
 RUN bun install --frozen-lockfile --production
+
+FROM oven/bun:1.4.3-alpine AS rest-client-deps
 WORKDIR /app/rest-client
 COPY rest-client/package.json rest-client/bun.lock ./
 RUN bun install --frozen-lockfile --production
@@ -26,8 +31,8 @@ FROM oven/bun:1.4.3-alpine
 WORKDIR /app/server-portable
 ENV NODE_ENV=production
 COPY --from=deps /app/server-portable/node_modules ./node_modules
-COPY --from=deps /app/mcp-server/node_modules /app/mcp-server/node_modules
-COPY --from=deps /app/rest-client/node_modules /app/rest-client/node_modules
+COPY --from=mcp-deps /app/mcp-server/node_modules /app/mcp-server/node_modules
+COPY --from=rest-client-deps /app/rest-client/node_modules /app/rest-client/node_modules
 # Copy every source file rather than naming them. An explicit list silently broke
 # the image when auth.ts was added — the container crashlooped on a missing module.
 # .dockerignore keeps tests and tooling out.
