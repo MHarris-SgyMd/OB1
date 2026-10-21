@@ -204,12 +204,12 @@ cd mcp-server && bun install
 OB1_REST_URL=http://api.ob1.internal.:8000 OB1_FORWARDER_KEY=<a forward-scope key> OB1_PLUGINS=<the REST core's> bun index.ts
 ```
 
-The forwarder key is minted with `cd server-portable && bun keygen.ts <name> --scope
+The forwarder key is minted with `cd server-portable && bun keygen.ts --name <name> --scope
 forward`, and its hash goes in the REST core's `MCP_ACCESS_KEYS`. With no
 `OB1_FORWARDER_KEY` the entry exits 2. To trade OAuth tokens it reads what the REST
 core reads, `COMPOSE_PROFILES` naming `auth` and a sound `OB1_PUBLIC_ORIGIN`, the
 same values, and also needs `OB1_AUTH_SECRET_MCP`, the authorization server's `mcp` client secret from
-`deploy/.env`, to trade OAuth tokens.
+`deploy/.env`.
 
 The server image (`server-portable/Dockerfile`) carries this directory and
 `rest-client/`, each with its own lockfile's packages (PR 5a). It runs there past

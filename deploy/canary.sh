@@ -632,16 +632,26 @@ if mode == "own-fix":
     # Its forward key (SMD-2287): the MCP server calls the REST core with it
     # beside each client'"'"'s key, and refuses to start without one. Minted as
     # the write key is, in place of stable'"'"'s, which the canary'"'"'s REST core
-    # does not take.
-    fwd = c["OB1_FORWARDER_KEY"] or ""
-    fwd_stable = bool(fwd) and (sha(fwd) in stable_digests or fwd == s.get("OB1_FORWARDER_KEY"))
+    # does not take, or of one no forward entry here holds. Trimmed, as the
+    # MCP server reads it (review pass 1).
+    fwd = (c["OB1_FORWARDER_KEY"] or "").strip()
+    fwd_stable = bool(fwd) and (sha(fwd) in stable_digests or fwd == (s.get("OB1_FORWARDER_KEY") or "").strip())
     fwd_ok = bool(fwd) and not fwd_stable and any(d == sha(fwd) and scope == "forward" for _, _, scope, d in kept)
     if not fwd_ok:
+        # The entries an earlier mint here made, whose raw key this file no
+        # longer holds, go with the one it replaces, and stable'"'"'s key with
+        # them where stable does not list it: a forward key opens the
+        # forwarder slot whoever holds it (review pass 1). Another name'"'"'s
+        # forward entry is the operator'"'"'s, and stays.
+        base = os.environ["OWN_PROJECT"] + "-forwarder"
+        minted_here = re.compile(re.escape(base) + r"(?:-[0-9]+)?")
+        kept = [x for x in kept if not (x[2] == "forward" and minted_here.fullmatch(x[1])) and not (fwd_stable and x[3] == sha(fwd))]
+        was = ", in place of stable'"'"'s" if fwd_stable else ", in place of one MCP_ACCESS_KEYS does not hold as a forward key" if fwd else ""
         fwd = secrets.token_hex(32)
-        name = unused(os.environ["OWN_PROJECT"] + "-forwarder")
+        name = unused(base)
         kept = kept + [("%s:forward:%s" % (name, sha(fwd)), name, "forward", sha(fwd))]
         fix["OB1_FORWARDER_KEY"] = fwd
-        said.append("minted the canary'"'"'s own forward key, %s (its hash in MCP_ACCESS_KEYS, the raw key in OB1_FORWARDER_KEY%s)" % (name, ", in place of stable'"'"'s" if fwd_stable else ""))
+        said.append("minted the canary'"'"'s own forward key, %s (its hash in MCP_ACCESS_KEYS, the raw key in OB1_FORWARDER_KEY%s)" % (name, was))
     if len(kept) < len(have) or not own_ok or not fwd_ok:
         fix["MCP_ACCESS_KEYS"] = ",".join(e for e, _, _, _ in kept)
     # Raw keys and secrets of stable'"'"'s the canary never needs.
@@ -1228,7 +1238,7 @@ esac
 # only), since a change to stable's no longer reaches the canary.
 if [ ! -f "$CANARY_ENV" ]; then
   make_canary_env
-  say "made the canary's env file, $CANARY_ENV, from $ENV_FILE: its database password, its port, $PORT, and its access key are its own — $OWN_SAID"
+  say "made the canary's env file, $CANARY_ENV, from $ENV_FILE: its database password, its port, $PORT, and its access keys are its own — $OWN_SAID"
 else
   drift="$(env_file drift "$ENV_FILE" "$CANARY_ENV" 2>/dev/null)" || drift=""
   [ -z "$drift" ] || say "note: the canary's env file ($CANARY_ENV) differs from stable's on $drift — it is the canary's own since its first up; edit it to carry a change across"
@@ -1563,7 +1573,7 @@ else
           *) say "connector $NAME sends a key this canary does not take (none in its MCP_ACCESS_KEYS): re-run $RECONNECT to give it OB1_CANARY_KEY" ;;
         esac
       else
-        case "$OWN_SAID" in *"minted the canary"*|*"of stable's access keys"*) say "connector $NAME may hold a key this canary no longer takes (this up gave it keys of its own): re-run $RECONNECT to give it OB1_CANARY_KEY" ;; esac
+        case "$OWN_SAID" in *"minted the canary's own write key"*|*"of stable's access keys"*) say "connector $NAME may hold a key this canary no longer takes (this up gave it keys of its own): re-run $RECONNECT to give it OB1_CANARY_KEY" ;; esac
       fi
     fi
   elif [ "${at#* }" = /canary/mcp ] && stable_port "${at%% *}"; then

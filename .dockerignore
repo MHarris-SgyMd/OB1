@@ -71,7 +71,7 @@ db/*.ts
 db/*.sh
 db/package.json
 db/bun.lock
-# The REST client's generator and the OpenAPI document it reads (SMD-2287):
+# The REST client's generator and the OpenAPI document it writes (SMD-2287):
 # tooling, run in a checkout, where its test fails on stale output. The image
 # needs only the client, its operations table and its types. And the MCP
 # server's in-process stack, which only its suites start.

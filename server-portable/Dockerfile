@@ -77,6 +77,10 @@ ENV OB1_GIT_SHA=$OB1_GIT_SHA
 # Optional: OPEN_BRAIN_CITATION_BASE_URL, PORT (default 8000), OB1_PG_POOL,
 # OB1_STOP_GRACE (the platform's grace period for a stop, whole seconds 1–3600;
 # default 10)
+# ../mcp-server/index.ts reads none of the above but PORT and OB1_STOP_GRACE:
+#   OB1_FORWARDER_KEY — its forward-scope key, its hash in the REST core's
+#                  MCP_ACCESS_KEYS; and OB1_AUTH_SECRET_MCP on a stack that
+#                  trades OAuth tokens (mcp-server/README.md)
 EXPOSE 8000
 USER bun
 

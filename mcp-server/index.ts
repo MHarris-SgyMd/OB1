@@ -34,7 +34,7 @@ export const SERVICE_NAME = "open-brain-mcp";
 const env = process.env;
 const forwarderKey = env.OB1_FORWARDER_KEY?.trim();
 if (import.meta.main && !forwarderKey) {
-  console.error("OB1_FORWARDER_KEY is not set: the MCP server forwards each caller's key to the REST core beside a forward-scope key of its own (`cd server-portable && bun keygen.ts <name> --scope forward`, its hash in MCP_ACCESS_KEYS).");
+  console.error("OB1_FORWARDER_KEY is not set: the MCP server forwards each caller's key to the REST core beside a forward-scope key of its own (`cd server-portable && bun keygen.ts --name <name> --scope forward`, its hash in MCP_ACCESS_KEYS).");
   process.exit(2);
 }
 
