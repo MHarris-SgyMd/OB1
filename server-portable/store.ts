@@ -103,7 +103,7 @@ export type ThoughtHybridMatch = {
   score: number;
   /** The hybrid's fused score before any weight; equal to `score` when nothing demoted the row. */
   fused: number;
-  /** Why prefer_current weighted the row: its ticket's status_type (completed, canceled) and/or "superseded". Empty when it did not (and always without the flag). */
+  /** Why prefer_current weighted the row: its ticket's status_type (completed, canceled, duplicate) and/or "superseded". Empty when it did not (and always without the flag). */
   demoted: string[];
   /**
    * Under prefer_current only (059, SMD-2255): the window the function re-ranked

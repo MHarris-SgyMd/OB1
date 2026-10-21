@@ -543,8 +543,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // by an index of their own, SMD-3056), 101 (the sleep scheduler's
   // cuts counted apart from the stops, SMD-3060), 102 (the
   // consolidation judge's distinct stored, SMD-3117), 103 (the 1.9.0 cut's
-  // schema_version, SMD-1804) and 104 (the lapse locks its own tree,
-  // SMD-3046)
+  // schema_version, SMD-1804), 104 (the lapse locks its own tree,
+  // SMD-3046) and 105 (Linear's duplicate status type known and
+  // settled, SMD-2935)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -678,13 +679,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // their own bodies, refusing by name without 084 ([20au]); 103 upserts
   // ob1_config.schema_version for the 1.9.0 cut, needing only 006's table;
   // 104 adds the lapse's tree and redefines 097's walk over it and its
-  // trigger to lock it, refusing by name without 097 ([20av]) — all
+  // trigger to lock it, refusing by name without 097 ([20av]); 105 redefines 058's two status sets and rebuilds 071's mirror,
+  // refusing by name without 058 or 071 ([20aw]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 75, `030 is among the last seventy-five migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 76, `030 is among the last seventy-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4472,6 +4474,127 @@ console.log("\n[20av] Migration 104: refused by name without 097; onto a populat
   const [{ r }] = await sql`SELECT review_supersession_proposal(${pid}::uuid, 'accept', NULL, NULL, ${REVIEWER}::jsonb, false) AS r`;
   const [{ s: left }] = await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${N}::uuid`;
   assert((r as { ok: boolean }).ok === true && left === null, `the accept after it lapses the hook's pointer the read named (${JSON.stringify(r)}, ${left})`);
+  await sql.close();
+}
+
+console.log("\n[20aw] Migration 105: refused by name without 058, then without 071; onto a populated brain at the file before it — a Duplicate ticket unknown and its blocker blocking there, settled and cleared after it, the gate mirror rebuilt with it, and every session's cached plans dropped through the brain's own readers, no other role's function touched; no thought or audit row moved by the file; a re-apply a no-op (SMD-2935)");
+{
+  const the105 = MIGRATIONS.find((f) => f.endsWith("_duplicate_settles.sql"))!;  // by name: renumbered when main takes its number
+  const refusal = async (before: string) => {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f < before });
+    return applyMigrations(URL_, { ...OPTS, only: (f) => f === the105 }).then(() => "applied", (e: Error) => e.message);
+  };
+  const no058 = await refusal("058"), no071 = await refusal("071");
+  assert(no058 === "migration 105 needs 058 (node_lifecycle_types, node_settled_types); this schema lacks it" && no071 === "migration 105 needs 071 (ob1_source_gate, ob1_rebuild_source_gate); this schema lacks it",
+    `105 on a schema stopped before 058, or before 071, is refused up front, naming what it needs (${no058}; ${no071})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the105 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const VEC = `[${Array.from({ length: OPTS.dim }, (_, i) => (i === 0 ? 1 : 0)).join(",")}]`;
+  const ticket = async (key: string, status: string, type: string) =>
+    ((await sql`INSERT INTO thoughts (content, metadata, embedding) VALUES (${`upgrade 105: ${key}`}, ${{ source: "linear", issue: key, status, status_type: type, linear_updated_at: "2026-10-19T00:00:00.000Z" }}::jsonb, ${VEC}::vector) RETURNING id::text AS id`)[0] as { id: string }).id;
+  const dup = await ticket("UPG-2", "Duplicate", "duplicate"), open = await ticket("UPG-1", "Todo", "unstarted");
+  for (const [id, key] of [[dup, "UPG-2"], [open, "UPG-1"]]) await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${key}, ${key}, 'text/markdown')`;
+  await sql`SELECT record_source_links(${open}::uuid, 'linear', '[{"relation": "blocked_by", "target": "UPG-2"}]'::jsonb)`;
+  const state = async () => JSON.stringify(await sql`SELECT thought_id::text AS id, open, blocked, blockers, unknown_blockers FROM node_state(${sql.array([dup, open], "TEXT")}::uuid[]) ORDER BY thought_id`);
+  const gate = async () => ((await sql`SELECT gates FROM ob1_source_gate WHERE thought_id = ${dup}::uuid`)[0] as { gates: boolean }).gates;
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const [was] = await sql`SELECT (SELECT open FROM node_state(ARRAY[${dup}::uuid])) AS dup_open, (SELECT blocked FROM node_state(ARRAY[${open}::uuid])) AS blocked`;
+  assert(was.dup_open === null && was.blocked === true && (await gate()) === false, `[20aw] setup: at the file before 105 a Duplicate is an unknown status and blocks what it blocks, and its row does not gate (${JSON.stringify(was)})`);
+  const before = await rows(), auditBefore = await audits();
+  // The warm session below reads node_state's path alone; every other
+  // reader of the sets is held by its catalog row: each one's xmin moves
+  // (review pass 2).
+  const readers = async () => new Map(((await sql`SELECT p.oid::regprocedure::text AS f, p.xmin::text AS x FROM pg_proc p
+      WHERE p.pronamespace = 'public'::regnamespace AND p.prosrc ~ 'node_(lifecycle|settled)_types[[:space:]]*[(]'
+        AND p.proname NOT IN ('node_lifecycle_types', 'node_settled_types')`) as { f: string; x: string }[]).map((r) => [r.f, r.x]));
+  const readersBefore = await readers();
+  // A server's pooled connection: one session that has searched with
+  // prefer_current enough times for plpgsql to cache a generic plan. 105 must
+  // reach it — CREATE OR REPLACE of the sets alone did not (review pass 1).
+  const warm = new SQL({ url: URL_, max: 1 });
+  const demotedFor = async () => (((await warm`SELECT demoted FROM search_thoughts_current(${VEC}::vector, 'upgrade 105', 0, 10, '{}'::jsonb, 0, 30, NULL) WHERE id = ${dup}::uuid`)[0] as { demoted: string[] | null } | undefined)?.demoted ?? null);
+  const warmBefore: (string[] | null)[] = [];
+  for (let i = 0; i < 8; i++) warmBefore.push(await demotedFor());
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the105 });
+  const readersAfter = await readers();
+  const unaltered = [...readersBefore].filter(([f, x]) => readersAfter.get(f) === x).map(([f]) => f);
+  assert(readersBefore.size >= 5 && ["node_state(uuid[])", "ticket_references_settled(text,jsonb)", "ticket_status_inputs(uuid[],text[])"].every((f) => readersBefore.has(f)) && unaltered.length === 0,
+    `105 alters every function whose body names a set, so each one's cached plans are dropped (${readersBefore.size} of them; unaltered: ${unaltered.join(", ") || "none"})`);
+  const warmAfter = await demotedFor();
+  await warm.close();
+  assert(warmBefore.every((d) => d === null) && warmAfter?.join() === "duplicate",
+    `a session that searched eight times before 105 (a cached generic plan) demotes the Duplicate after it, as a fresh one would (${JSON.stringify([warmBefore[0], warmAfter])})`);
+  const [now] = await sql`SELECT (SELECT open FROM node_state(ARRAY[${dup}::uuid])) AS dup_open, (SELECT blocked FROM node_state(ARRAY[${open}::uuid])) AS blocked,
+                                 (SELECT unknown_blockers FROM node_state(ARRAY[${open}::uuid])) AS unknown, (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift`;
+  assert(now.dup_open === false && now.blocked === false && (now.unknown ?? []).length === 0 && (await gate()) === true && now.drift === 0,
+    `after it the Duplicate is settled, the ticket it blocked is not blocked, and the file's own rebuild leaves the mirror exact (${JSON.stringify(now)})`);
+  assert((await rows()) === before && (await audits()) === auditBefore, "…no thought and no audit row moved");
+  const stateBefore = await state();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the105 });
+  assert((await state()) === stateBefore && (await rows()) === before && (await audits()) === auditBefore, "a re-apply of 105 is a no-op: no state, row or audit row moved");
+  // The brain's own readers the text match alone missed — named in upper
+  // case, quoted, or only by a BEGIN ATOMIC body's dependency — are altered;
+  // a procedure, a function in another schema and one another role owns are
+  // not, even with that role holding its lock (review passes 2, 5, 7).
+  // Planted only now, for a re-apply: present beside the warm session above
+  // they dropped its plan by themselves (review pass 3).
+  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_other105') THEN CREATE ROLE ob1_upgrade_other105 NOLOGIN; END IF; END $r$;
+    CREATE FUNCTION upg105_shouted() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY(PUBLIC.NODE_SETTLED_TYPES())';
+    CREATE FUNCTION upg105_quoted() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY("node_settled_types"())';
+    CREATE FUNCTION upg105_atomic() RETURNS text[] LANGUAGE sql STABLE BEGIN ATOMIC SELECT node_settled_types(); END;
+    CREATE PROCEDURE upg105_proc() LANGUAGE plpgsql AS $$ BEGIN PERFORM node_settled_types(); END $$;
+    CREATE SCHEMA upg105;
+    CREATE FUNCTION upg105.elsewhere() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY(public.node_settled_types())';
+    CREATE FUNCTION upg105_theirs() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY(node_settled_types())';
+    ALTER FUNCTION upg105_theirs() OWNER TO ob1_upgrade_other105`);
+  const PLANTED = ["upg105_shouted()", "upg105_quoted()", "upg105_atomic()", "upg105_proc()", "upg105.elsewhere()", "upg105_theirs()"];
+  const planted = async () => new Map(((await sql`SELECT p.oid::regprocedure::text AS f, p.xmin::text AS x FROM pg_proc p WHERE p.oid::regprocedure::text = ANY(${sql.array(PLANTED, "TEXT")}::text[])`) as { f: string; x: string }[]).map((r) => [r.f, r.x]));
+  const plantedBefore = await planted();
+  // Another role's function held: an open ALTER on it, as a role that may
+  // create one in public (PG 14 and older) can hold. The block never waits on
+  // it, as it never touches it; bounded at 5 s in case it did.
+  const holder = new SQL({ url: URL_, max: 1 });
+  let heldRun: string, heldMs = 0;
+  try {
+    await holder.unsafe(`BEGIN; ALTER FUNCTION upg105_theirs() IMMUTABLE; ALTER FUNCTION upg105.elsewhere() IMMUTABLE`);
+    const t0 = performance.now();
+    const letGo = setTimeout(() => { holder.unsafe(`ROLLBACK`).catch(() => undefined); }, 5000);
+    heldRun = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the105 }).then(() => "applied", (e: Error) => e.message);
+    clearTimeout(letGo);
+    heldMs = performance.now() - t0;
+  } finally {
+    await holder.unsafe(`ROLLBACK`).catch(() => undefined);
+    await holder.close();
+  }
+  const plantedAfter = await planted();
+  const moved = (f: string) => plantedAfter.get(f) !== plantedBefore.get(f);
+  assert(plantedBefore.size === 6 && heldRun === "applied" && heldMs < 4000
+      && ["upg105_shouted()", "upg105_quoted()", "upg105_atomic()"].every(moved) && !["upg105_proc()", "upg105.elsewhere()", "upg105_theirs()"].some(moved),
+    `105 re-applied alters the brain's own readers named in upper case, quoted, or by a BEGIN ATOMIC body, and leaves a procedure, another schema's function and another role's — never waiting on that role's held lock (${heldRun.slice(0, 80)}; ${Math.round(heldMs)} ms)`);
+  await sql.unsafe(`DROP PROCEDURE upg105_proc(); DROP FUNCTION upg105_atomic(); DROP FUNCTION upg105_quoted(); DROP FUNCTION upg105_shouted();
+    DROP FUNCTION upg105.elsewhere(); DROP SCHEMA upg105; DROP FUNCTION upg105_theirs(); DROP ROLE ob1_upgrade_other105`);
+  // A brain whose owner is no superuser (a managed Postgres's): the sets and
+  // their readers owned by one role, the block run as it — it alters them all.
+  const touch = readFileSync(join(HERE, "migrations", the105), "utf8").match(/DO \$touch\$[\s\S]*?\$touch\$;/)?.[0] ?? "no touch block";
+  await sql.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_upgrade_mig105') THEN CREATE ROLE ob1_upgrade_mig105 NOLOGIN; END IF; END $r$`);
+  const owned = [...readersBefore.keys()];
+  const brain = ["node_lifecycle_types()", "node_settled_types()", ...owned];
+  for (const f of brain) await sql.unsafe(`ALTER FUNCTION ${f} OWNER TO ob1_upgrade_mig105`);
+  const ownedBefore = await readers();
+  let asOwner: string;
+  try {
+    await sql.begin(async (tx: SQL) => { await tx.unsafe(`SET LOCAL ROLE ob1_upgrade_mig105`); await tx.unsafe(touch); });
+    asOwner = "applied";
+  } catch (e) { asOwner = (e as Error).message; }
+  const ownedAfter = await readers();
+  for (const f of brain) await sql.unsafe(`ALTER FUNCTION ${f} OWNER TO CURRENT_USER`);
+  await sql.unsafe(`DROP ROLE ob1_upgrade_mig105`);
+  assert(asOwner === "applied" && owned.length >= 5 && owned.every((f) => ownedAfter.get(f) !== ownedBefore.get(f)),
+    `run by a brain owner that is no superuser, the block alters every reader of its own (${asOwner.slice(0, 80)}; ${owned.length})`);
   await sql.close();
 }
 
