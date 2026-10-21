@@ -2011,8 +2011,6 @@ function scan(text: string, from: number, stringsToo: boolean, inExpression: boo
   }
   return { out, end: text.length };
 }
-/** The index of the `}` that closes a template expression opened at `start`; `text.length` when none does. */
-function expressionEnd(text: string, start: number): number { return scan(text, start, true, true).end; }
 
 /**
  * Every import (and export-from) statement's specifier, with the line it starts
