@@ -4431,7 +4431,7 @@ console.log("\n[20au] Migration 102: refused by name without 084; onto a populat
   await sql.close();
 }
 
-console.log("\n[20av] Migration 104: refused by name without 058, then without 071; onto a populated brain at the file before it — a Duplicate ticket unknown and its blocker blocking there, settled and cleared after it, the gate mirror rebuilt with it; no thought or audit row moved by the file; a re-apply a no-op (SMD-2935)");
+console.log("\n[20av] Migration 104: refused by name without 058, then without 071; onto a populated brain at the file before it — a Duplicate ticket unknown and its blocker blocking there, settled and cleared after it, the gate mirror rebuilt with it, and every session's cached plans dropped through the brain's own readers, no other role's function touched; no thought or audit row moved by the file; a re-apply a no-op (SMD-2935)");
 {
   const the104 = MIGRATIONS.find((f) => f.endsWith("_duplicate_settles.sql"))!;  // by name: renumbered when main takes its number
   const refusal = async (before: string) => {

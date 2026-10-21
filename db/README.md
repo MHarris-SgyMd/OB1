@@ -2863,38 +2863,38 @@ thoughts are in the graph, which the coverage line counts.
 
 **Lifecycle** (SMD-1994). board-sync (SMD-1954) stamps every synced ticket's
 `metadata` with Linear's `status`, `status_type` (triage / backlog / unstarted /
-started / completed / canceled / duplicate) and `linear_updated_at`, so a thought's
-lifecycle is on its row and the script reads it. One rule carries the filter
-and the decay: every thought has a **weight**, and every count of thoughts —
-mentions, support, co_mentions, the per-relation counts — is a sum of weights.
-`--status open|active|done` keeps the named lifecycles at 1 and weighs the
-other known ones 0 (`open` = not completed, canceled or duplicate; `active` =
-unstarted or started; `done` = completed, canceled or duplicate); `--decay-done`
-weighs a completed, canceled or duplicate thought `DONE_WEIGHT` = 0.25,
-pre-registered in the file, one value, exact in binary, refused beside a filter
-(they are two answers to one question). A row's lifecycle is its ticket's: a row
-carrying a ticket (`issue`) or derived from one (`ticket` — SMD-2059's dated
-sections) takes the status of the ticket's head — of the rows carrying that
-`issue`, one nothing supersedes before one superseded, the newest sync before an
-older — so a Done ticket's observations and its superseded earlier rows are
-settled with it; a twin the sync chained under a head without an `issue` of its
-own keeps its own lifecycle, which is none. A thought with no lifecycle — a hand
-capture, or a `status_type` the file does not know — weighs 1 under every flag:
-it passes every filter, and the output counts how many did rather than calling
-it open. Degree counts neighbours, not evidence, so a filter removes an edge
-with no live evidence and decay leaves it; a thought is listed when it weighs
-more than 0 and ranks by its weight times its score, with its status beside it.
-The default, `--status all` without decay, is every weight 1 — today's counts by
-construction, so a Done ticket still counts as a live one until a flag says
-otherwise, and the lifecycle caveat says so with the run's numbers: how many
-thoughts carry a status, how many are settled, the latest `linear_updated_at`
-(the status is as fresh as the last sync pass), and under a filter how many
-thoughts weighed in. The status, and every rule below, is migration 058's
-`node_state` (SMD-2074): `node_lifecycle()` without a dependency flag, which
-reads `thoughts` and, since 068, `ob1_ticket_head` (both the capture group's),
-and `node_state()` with one, which reads `thought_sources` too (the `structure`
-group); when SMD-1997 folds `thought_audit`'s transitions, the functions' bodies
-change and this script does not.
+started / completed / canceled / duplicate) and `linear_updated_at`, so a
+thought's lifecycle is on its row and the script reads it. One rule carries the
+filter and the decay: every thought has a **weight**, and every count of
+thoughts — mentions, support, co_mentions, the per-relation counts — is a sum of
+weights. `--status open|active|done` keeps the named lifecycles at 1 and weighs
+the other known ones 0 (`open` = not completed, canceled or duplicate; `active`
+= unstarted or started; `done` = completed, canceled or duplicate);
+`--decay-done` weighs a completed, canceled or duplicate thought `DONE_WEIGHT` =
+0.25, pre-registered in the file, one value, exact in binary, refused beside a
+filter (they are two answers to one question). A row's lifecycle is its
+ticket's: a row carrying a ticket (`issue`) or derived from one (`ticket` —
+SMD-2059's dated sections) takes the status of the ticket's head — of the rows
+carrying that `issue`, one nothing supersedes before one superseded, the newest
+sync before an older — so a Done ticket's observations and its superseded
+earlier rows are settled with it; a twin the sync chained under a head without
+an `issue` of its own keeps its own lifecycle, which is none. A thought with no
+lifecycle — a hand capture, or a `status_type` the file does not know — weighs 1
+under every flag: it passes every filter, and the output counts how many did
+rather than calling it open. Degree counts neighbours, not evidence, so a filter
+removes an edge with no live evidence and decay leaves it; a thought is listed
+when it weighs more than 0 and ranks by its weight times its score, with its
+status beside it. The default, `--status all` without decay, is every weight 1 —
+today's counts by construction, so a Done ticket still counts as a live one
+until a flag says otherwise, and the lifecycle caveat says so with the run's
+numbers: how many thoughts carry a status, how many are settled, the latest
+`linear_updated_at` (the status is as fresh as the last sync pass), and under a
+filter how many thoughts weighed in. The status, and every rule below, is
+migration 058's `node_state` (SMD-2074): `node_lifecycle()` without a dependency
+flag, which reads `thoughts` and, since 068, `ob1_ticket_head` (both the capture
+group's), and `node_state()` with one, which reads `thought_sources` too (the
+`structure` group); when SMD-1997 folds `thought_audit`'s transitions, the
+functions' bodies change and this script does not.
 
 **Startability** (SMD-2061). The lifecycle says a ticket is open, not that it
 can be started. Migration 053 (SMD-1867) stores the board's relations as `link`
