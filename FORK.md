@@ -58,7 +58,7 @@ remembered:
   table/column/index a client can see, changes the MCP tool surface
   incompatibly (a tool removed, an argument's meaning changed), or stops
   answering a URL or transport a configured client uses (the origin root the
-  proxy's `/mcp` replaced closes with 2.0.0: SMD-2306, SMD-2532). A client
+  proxy's `/mcp` replaced closed with 2.0.0: SMD-2306, SMD-2532). A client
   written against `N.x` keeps working on `N.y`; a URL it was given goes only
   after a release has said so on every answer, in a `Deprecation` header.
 - **MINOR** — an additive migration (a new function; a new column with
