@@ -596,10 +596,18 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   async function waitForProvider(wake: AbortSignal): Promise<void> {
     const down = Date.now();
     err(`  the provider is not answering (${(outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${outageModel} at ${cfg.chat.base} for one token after ${OUTAGE_MS.first / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`);
-    if (await probeUntil(() => probe(undefined, wake, outageModel), wake, (p) => !isOut(p))) {
-      outage.end();
-      outageModel = cfg.metadataModel;
-      out(`  the provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
+    // Said on the row it stamps — the sleep scheduler's, or this follower's
+    // own — so preflight names the provider, not "running a pass"; a stop
+    // wakes the probes, so the end is said before the pass settles (SMD-2905).
+    await stamper?.providerWait?.(true);
+    try {
+      if (await probeUntil(() => probe(undefined, wake, outageModel), wake, (p) => !isOut(p))) {
+        outage.end();
+        outageModel = cfg.metadataModel;
+        out(`  the provider answers again after ${Math.round((Date.now() - down) / 1000)} s; polling resumes`);
+      }
+    } finally {
+      await stamper?.providerWait?.(false);
     }
   }
   /** The start's refusal of what a probe found — a model unserved, or the endpoint refusing — or null. */
