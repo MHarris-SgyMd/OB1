@@ -1021,8 +1021,7 @@ function textFilesUnder(dirs: { dir: string; rel: string }[]) {
 //
 // Exceptions are per (file, function) and COUNTED, as check 6's are: the
 // files that CREATE a brain from the getting-started shape — the guide the
-// migrations were extracted from, a recipe's own Neon database, a Kubernetes
-// init script — define these functions because they are building the
+// migrations were extracted from, a recipe's own Neon database — define these functions because they are building the
 // database the migrations would otherwise build, and are excepted for exactly
 // the lines they have today with the reason beside them; one more line fails,
 // one fewer fails as stale. A sidecar that adds to an existing brain gets no
@@ -1089,12 +1088,6 @@ const CORE_FUNCTION_EXCEPTIONS = new Map<string, Record<string, CountedException
   }],
   ["recipes/vercel-neon-telegram/sql/001-create-thoughts.sql", { update_updated_at: one(NEON) }],
   ["recipes/vercel-neon-telegram/sql/002-match-thoughts.sql", { match_thoughts: one(NEON) }],
-  ["integrations/kubernetes-deployment/k8s/init.sql", {
-    match_thoughts: one("the init script of the deployment's own Postgres, run once on an empty database"),
-  }],
-  ["integrations/kubernetes-deployment/k8s/openbrain.yml", {
-    match_thoughts: one("the ConfigMap carrying k8s/init.sql, the deployment's own Postgres init, run once on an empty database"),
-  }],
 ]);
 
 /** Which of `owned`'s names a text names in a statement, by the rule the scan applies to the whole text. */
@@ -1745,7 +1738,7 @@ const THOUGHT_WRITE_PROBES = [
   // moved here); readwise-capture's, with the enhanced columns beside the vector; consolidation-bio's,
   // with the file's own fingerprint and no vector; the classification recipe's, content alone; the
   // Python client's dict; a list filled by append, sent by name; a list pushed, sent by name; an
-  // array literal; a bound array; the Kubernetes server's SQL with casts; the Neon recipe's template
+  // array literal; a bound array; a server's SQL with casts (the Kubernetes server's, retired with SMD-2288); the Neon recipe's template
   // over lines; quoted identifiers with a schema; an alias; INSERT … SELECT with a column list.
   'await supabase.from("thoughts").insert({ content, embedding, metadata });',
   'const { error } = await supabase.from("thoughts").insert({\n  content,\n  embedding,\n  source_type: "readwise",\n  type: "reference",\n  metadata: {\n    source: "readwise",\n    readwise_highlight_id: event.id,\n  },\n});',
@@ -1837,8 +1830,7 @@ const OWN_DATABASE = (what: string): CountedException => ({ why: `${what} — th
 const THOUGHT_WRITE_EXCEPTIONS = new Map([
   // The guide that shows upstream's upsert_thought body: the INSERT is the function's own (check 7 excepts the same lines).
   ["recipes/content-fingerprint-dedup/README.md", { why: "the INSERT inside the upsert_thought definition migration 003 was extracted from, kept as its record", lines: 1 }],
-  // Two deployments whose database is their own, built from the guide's shape.
-  ["integrations/kubernetes-deployment/index.ts", OWN_DATABASE("its own Postgres in the cluster, built by k8s/init.sql")],
+  // Two that own their database, built from the guide's shape.
   ["recipes/vercel-neon-telegram/src/lib/db.ts", OWN_DATABASE("its own Neon database, built by sql/001-create-thoughts.sql")],
   ["recipes/schema-aware-routing/index.ts", OWN_DATABASE("its own five-table project, built by its README's SQL (a `thoughts` with domain/status/source columns)")],
   // The fixture: a row as an older write left it — fingerprint and label by hand — for the writer under test to move.
@@ -6231,7 +6223,6 @@ const TRUST_EXCEPTIONS = new Map<string, CountedException>([
   ["recipes/email-history-import/pull-gmail.ts", { why: `${RAW_IMPORT("SMD-2021")}; the second line is the retry`, lines: 2 }],
   ["recipes/entity-wiki/generate-wiki.mjs", { why: "a rerun rewrites an existing dossier's text with a raw PATCH, and a failed upsert_thought call (any error, not only a missing function) falls back to a raw insert: both stamped from the key's kind, so a regenerated dossier reads as the key's and not `agent`; only the first capture's call declares (SMD-2143 moves the script onto the shim, through update_thought and upsert_thought)", lines: 2 }],
   ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", { why: RAW_FALLBACK, lines: 1 }],
-  ["integrations/kubernetes-deployment/index.ts", { why: RAW_OWN_DATABASE, lines: 1 }],
   ["recipes/vercel-neon-telegram/src/lib/db.ts", { why: RAW_OWN_DATABASE, lines: 1 }],
   ["recipes/schema-aware-routing/index.ts", { why: RAW_OWN_DATABASE, lines: 1 }],
   ["extensions/test-writes.ts", { why: "the fixture check 10 counts: rows planted as an older write left them — test rows, not captures", lines: 1 }],

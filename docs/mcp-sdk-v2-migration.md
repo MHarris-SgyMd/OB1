@@ -110,9 +110,9 @@ is green.
    three:** SMD-1931 retired `enhanced-mcp`, `delete-thought-mcp` and
    `update-thought-mcp`; `ob-graph` and `work-operating-model-activation`
    remain.
-3. **The self-pinned outliers.** `integrations/kubernetes-deployment` vendors its
-   own pinned SDK + `@hono/mcp` (its own `package.json`/`bun.lock`) — a self-
-   contained swap. `recipes/vercel-neon-telegram` is already on the v1
+3. **The self-pinned outliers.** `integrations/kubernetes-deployment`, which
+   vendored its own pinned SDK + `@hono/mcp`, retired with compose-only
+   (SMD-2288) rather than migrate. `recipes/vercel-neon-telegram` is already on the v1
    `WebStandardStreamableHTTPServerTransport` (from
    `@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js`, `^1.12.1`), so
    it moves by re-pointing the import to `@modelcontextprotocol/server` — the
@@ -138,9 +138,9 @@ servers, 20 SDK importers. The swap per site:
 | client `Client` + `StreamableHTTPClientTransport` from `.../sdk/client/*` | `@modelcontextprotocol/client` |
 
 Pin sites to touch: `server-portable/package.json`, `extensions/package.json`
-(lockstep), `integrations/kubernetes-deployment/package.json`, `evals/package.json`
-(client only), `recipes/vercel-neon-telegram/package.json`, and the three
-`bun.lock` files. The transitive tree shrinks: v1 pulled `express`, `raw-body`,
+(lockstep), `evals/package.json` (client only),
+`recipes/vercel-neon-telegram/package.json`, and their `bun.lock` files
+(`integrations/kubernetes-deployment`'s retired: SMD-2288). The transitive tree shrinks: v1 pulled `express`, `raw-body`,
 `cors`, `@hono/node-server`, `ajv`, `@cfworker/json-schema` (unused on the
 Workers path); v2 `@modelcontextprotocol/server` depends only on `zod` +
 `@modelcontextprotocol/core`, and `@modelcontextprotocol/hono` has zero runtime

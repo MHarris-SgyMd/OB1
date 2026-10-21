@@ -996,8 +996,8 @@ for (const sample of ["integrations/telegram-capture/README.md", "integrations/s
 // whichever server compared it; the arms above assert the one literal for every server driven, and this holds the
 // spelling at its source — the auth.ts copy the principal servers import (test-auth.ts holds the copies byte-identical).
 spells("integrations/_shared/auth.ts", /found = \{ name: "MCP_ACCESS_KEY", scope: "write"/, " names the legacy single key MCP_ACCESS_KEY");
-// The three that own their database say they bypass the functions, in the file and in the README.
-for (const [file, readme] of [["integrations/kubernetes-deployment/index.ts", "integrations/kubernetes-deployment/README.md"], ["recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/vercel-neon-telegram/README.md"], ["recipes/schema-aware-routing/index.ts", "recipes/schema-aware-routing/README.md"]]) {
+// The two that own their database say they bypass the functions, in the file and in the README.
+for (const [file, readme] of [["recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/vercel-neon-telegram/README.md"], ["recipes/schema-aware-routing/index.ts", "recipes/schema-aware-routing/README.md"]]) {
   spells(file, /ob1-fork \(SMD-1524\):[^\n]*raw (?:INSERT|insert), by design/, " says its raw insert is by design — a database of its own");
   spells(readme, /no content fingerprint/, " says what its rows lack");
 }
@@ -1008,7 +1008,7 @@ const DRIVEN = ["integrations/agent-memory-api/index.ts", "recipes/repo-learning
 const TEXT_ONLY = ["recipes/provenance-chains/mcp-tools.ts"];
 const DRIVEN_1524 = ["integrations/readwise-capture/index.ts", "recipes/editorial-policy/auditor/index.ts", BIO];
 const TEXT_ONLY_1524 = ["recipes/adaptive-capture-classification/capture-with-gating.ts"];
-const BYPASS_1524 = ["integrations/kubernetes-deployment/index.ts", "recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/schema-aware-routing/index.ts"];
+const BYPASS_1524 = ["recipes/vercel-neon-telegram/src/lib/db.ts", "recipes/schema-aware-routing/index.ts"];
 const DRIVEN_1544 = [BIO];
 const DRIVEN_1541 = ["integrations/agent-memory-api/index.ts",
   "integrations/smart-ingest/index.ts"]; // change 69's one remaining server that holds a key (five until SMD-1931 retired the two REST gateways and the two MCP servers) — and smart-ingest, which passes the actor since SMD-2128

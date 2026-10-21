@@ -392,17 +392,17 @@ bun install
 ```
 
 Runtime dependencies are pinned to the exact versions `../extensions/package.json`
-installs for the vendored servers, so every target runs identical library code;
+installs for the vendored servers, so this server and they run identical library code;
 `extensions/test-auth.ts` fails if the two drift. **If you bump one file, bump
 both in the same commit.**
 
-### 2. Pick a target
+### 2. Run it
 
-| Target | Command | Notes |
-| --- | --- | --- |
-| Bun, locally | `bun index.ts` | Serves on `PORT`, default 8000 |
-| Container | `docker build -t ob1-mcp .` | Alpine + Bun; see `Dockerfile` |
-| Node | `bun run --bun index.ts`, or wrap with `@hono/node-server` | Same shim |
+The brain deploys as the compose stack, and only that (SMD-2282's decision 6,
+SMD-2288): this server is its `server` service, built from `Dockerfile`, and
+[`SETUP.md`](../SETUP.md) and [`deploy/README.md`](../deploy/README.md) bring it
+up. `bun index.ts` serves the same app on `PORT` (default 8000) for this
+directory's tests and a local run against a database; it is not a deployment.
 
 ### 3. Provide configuration
 
@@ -1102,4 +1102,3 @@ stored in the same write").
 
 - `../deploy/` — the compose stack this server is the published port of
 - `../FORK.md` — what this fork changes and why
-- `../integrations/kubernetes-deployment/` — a raw-SQL port that drops PostgREST too
