@@ -5,10 +5,10 @@
  * brains run proposes almost no true supersession: on three sets of stable's pairs qwen2.5:7b proposed 2 of 62, 0 of
  * 179 and 0 of 119 (evals/README.md). Decide mode splits the work. H2O-Lightning-4B, through the typed-decision tier
  * (ob1-jev/1, jev/h2o), answers prompt 4's five verdicts as one choice over prompt 4's own rendering of the pair.
- * When its top verdict is outdates, an LLM, the judge's model, is asked only to write the proposal: which thought is
- * current, the words in it that show the other no longer is, and the other's words that no longer hold (SMD-2938),
- * or that neither is current. Both quotes must pass evidenceIn; a decline or a failed quote leaves the pair at H2O's
- * best verdict that proposes nothing.
+ * When its top verdict is outdates at the pass's floor (SMD-3151), an LLM, the judge's model, is asked only to write
+ * the proposal: which thought is current, the words in it that show the other no longer is, and the other's words that
+ * no longer hold (SMD-2938), or that neither is current. Both quotes must pass evidenceIn; a decline, a failed quote or
+ * an outdates under the floor leaves the pair at H2O's best verdict that proposes nothing.
  *
  * The answer is a Judgement whose verdict probabilities are H2O's distribution, so the pass records proposals and
  * relations as it records the judge's, under the same floors. Off unless OB1_CONSOLIDATE_DECIDER names the tier's
@@ -18,7 +18,7 @@
 
 import { refuseEgress, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox } from "./egress.ts";
-import { buildJudgeMessages, consolidateKey, CONSOLIDATE_PROMPT_VERSION, cutByCodePoint, evidenceIn, oneLine, REASON_MAX, VERDICTS, type Judgement, type PairSide, type Verdict } from "./consolidate.ts";
+import { buildJudgeMessages, consolidateKey, CONSOLIDATE_PROMPT_VERSION, cutByCodePoint, evidenceIn, oneLine, outdatesConfidence, REASON_MAX, VERDICTS, type Judgement, type PairSide, type Verdict } from "./consolidate.ts";
 import { jevChoose, type JevConfig, type JevModelInfo, type JevOption } from "./jev.ts";
 import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
 
@@ -112,7 +112,8 @@ export const writerMessages = (p: { older: PairSide; newer: PairSide }, twoSided
   [{ role: "user" as const, content: WRITER_HEAD + pairContext(p) + writerRules(twoSided, partRule, recordRule) }];
 
 /**
- * The writer the pass runs: two-sided with the part rule, SMD-3114's adopted one (decide version 1). Version 2's
+ * The writer the pass runs: two-sided with the part rule, SMD-3114's adopted one (decide version 1's prompt, which
+ * version 3 keeps, reading its quotes without markdown and asking it only at the floor, SMD-3151). Version 2's
  * record rule and quote reading (RECORD_RULE, stands' `v2Quotes`) are not the pass's: measured on the canary's
  * proposals they missed their bar twice, and the maintainer shelved them (2026-10-18). They stay for the eval
  * (`--record-rule`, `--v2-quotes`) and SMD-3116's writers. Its version is the key's.
@@ -190,7 +191,8 @@ export function onlyQuoted(quote: string, text: string): boolean {
  * A proposal stands when it names a side, its quote is in that side and not the other, and, two-sided, its stale
  * quote is in the other side and not the current one. With `v2Quotes`, decide version 2's reading: a quote shortened
  * with "…" is read piece by piece (quoteIn), and the stale claim may also sit in the current thought where it only
- * quotes it (onlyQuoted); without it, as SMD-3114 measured.
+ * quotes it (onlyQuoted); without it, the whole-quote check SMD-3114 measured, its quotes read without markdown since
+ * version 3 (evidenceIn, SMD-3151).
  */
 export function stands(p: Proposal, older: string, newer: string, twoSided: boolean, v2Quotes = false): boolean {
   if (p.malformed || p.current === "none") return false;
@@ -204,12 +206,20 @@ export function stands(p: Proposal, older: string, newer: string, twoSided: bool
 
 /**
  * Bumped when the decider's question, the writer's prompt or the rules between them change: a new pool. 1: SMD-3114's
- * writer, two-sided with the part rule, the pass's. Version 2 added the record rule (RECORD_RULE) and its quote
- * reading: quotes shortened with "…" read piece by piece (quoteIn), and a stale claim the current thought only quotes
- * (onlyQuoted). It was measured on the canary's proposals, missed its bar twice and is shelved, so the pass stays at
- * 1 and its key at `@p4d1`; the eval still asks version 2 (`--record-rule`, `--v2-quotes`).
+ * writer, two-sided with the part rule. Version 2 added the record rule (RECORD_RULE) and its quote reading: quotes
+ * shortened with "…" read piece by piece (quoteIn), and a stale claim the current thought only quotes (onlyQuoted). It
+ * was measured on the canary's proposals, missed its bar twice and is shelved; the eval still asks it
+ * (`--record-rule`, `--v2-quotes`). 3, the pass's (key `@p4d3`): version 1's writer, its quotes read without their
+ * markdown (evidenceIn, SMD-3151), asked only when H2O's P(outdates) clears the pass's floor. The writer quotes the
+ * words it reads: on SMD-3116's writer test the quote check refused 11 of the 18 proposals it wrote on settling pairs,
+ * and 10 of the 12 quotes it missed there are in the text once markdown is read away. Under the floor a standing
+ * proposal records nothing and closes the pair's relation. Every relation the canary held for a pair whose quotes had
+ * failed sat under it (P(outdates) 0.35 to 0.49, all 67), so once more quotes stand, about 50 of them, those whose
+ * quotes now check out, would close for no proposal. Under the floor the writer is not asked, and the pair takes
+ * H2O's best verdict that proposes nothing, as a quote that fails did: its relation at the floor, else a closed edge.
+ * Both decide which judgements become proposals, so they are rules between the two and move the key.
  */
-export const DECIDE_VERSION = 1;
+export const DECIDE_VERSION = 3;
 
 /**
  * Decide mode's pass key: the decider, the writer, and the two versions it reads the pair under, prompt 4's (both
@@ -228,10 +238,15 @@ export function consolidatePassKey(cfg: Pick<EmbedConfig, "judgeModel" | "decide
 export type DecideNote = {
   decider: Pick<JevModelInfo, "name" | "revision" | "weights_sha256" | "rules">;
   version: number;
-  /** H2O's top verdict, before the writer: outdates is what asks the writer. */
+  /** H2O's top verdict, before the writer: outdates at the pass's floor is what asks the writer. */
   top: Verdict;
-  /** When the writer was asked: its model, its answer and both quotes' checks. */
-  writer?: { model: string; current: Proposal["current"] | "unparsed"; evidence_found: boolean; stale: string; stale_found: boolean; reason: string };
+  /** The pass's floor, when H2O's top was outdates under it and the writer was not asked (version 3). */
+  floor?: number;
+  /**
+   * When the writer was asked: its model, its answer, both quotes and both quotes' checks. The evidence quote is kept
+   * beside the stale one since version 3, so a recorded proposal can be checked again under another quote rule.
+   */
+  writer?: { model: string; current: Proposal["current"] | "unparsed"; evidence: string; evidence_found: boolean; stale: string; stale_found: boolean; reason: string };
 };
 
 /** The best of the verdicts in `vs` by `p`, the first on a tie. */
@@ -240,7 +255,7 @@ const best = (p: Record<string, number>, vs: readonly Verdict[]): Verdict => vs.
 /**
  * The judgement H2O's distribution and the writer's answer come to. `p` is H2O's probability per verdict (the tier's
  * own option, insufficient evidence, left out and the rest renormalised); `proposal` the writer's parsed answer when
- * H2O's top was outdates, and `standing` whether its quotes passed. A standing proposal is an outdates in the side it
+ * H2O's top was outdates at the floor (null when the writer was not asked), and `standing` whether its quotes passed. A standing proposal is an outdates in the side it
  * names, its quote the evidence; anything else is H2O's best verdict that proposes nothing. Either way the verdict
  * probabilities are H2O's, so proposalConfidence reads P(outdates) and relationConfidence the relation words' mass (P(unrelated) for a distinct, SMD-3117).
  */
@@ -264,13 +279,14 @@ export function verdictDistribution(probabilities: Record<string, number>): Reco
 // ── The call ──────────────────────────────────────────────────────────────────
 
 /**
- * One pair in decide mode: H2O's verdict through the tier, then, when it is outdates, the writer's proposal through
- * the judge's chat endpoint. Refuses BEFORE any request when the egress gate says either row may not reach the chat
+ * One pair in decide mode: H2O's verdict through the tier, then, when it is outdates at `floor` (the pass's
+ * `--min-confidence`, read by outdatesConfidence as the pass reads a proposal's), the writer's proposal through the
+ * judge's chat endpoint. Refuses BEFORE any request when the egress gate says either row may not reach the chat
  * endpoint (the tier's client gates its own call), as judgePair does. Throws on a transport or provider error from
  * either, so the worker classifies them as it does the judge's; a writer's malformed answer is a decline, since H2O's
  * verdict still stands.
  */
-export async function decidePair(older: PairSide, newer: PairSide, cfg: EmbedConfig, jev: JevConfig, signal?: AbortSignal, actor?: string): Promise<Judgement & { decide: Record<string, unknown> & DecideNote }> {
+export async function decidePair(older: PairSide, newer: PairSide, cfg: EmbedConfig, jev: JevConfig, floor: number, signal?: AbortSignal, actor?: string): Promise<Judgement & { decide: Record<string, unknown> & DecideNote }> {
   // Both rows against both endpoints: the tier's client gates one subject, and a pair is two rows, the more
   // restricted of which decides for both (judgePair's rule).
   for (const side of [older, newer]) {
@@ -286,6 +302,9 @@ export async function decidePair(older: PairSide, newer: PairSide, cfg: EmbedCon
   const top = best(p, OFFERED);
   const note: DecideNote = { decider: { name: model.name, revision: model.revision, weights_sha256: model.weights_sha256, rules: model.rules }, version: DECIDE_VERSION, top };
   if (top !== "outdates") return { ...decideJudgement(p, null, false), decide: note };
+  // Under the floor a standing proposal would record nothing and close the pair's relation (SMD-3151 review pass 3),
+  // so the writer is not asked: the pair takes H2O's best verdict that proposes nothing, as a quote that fails does.
+  if (outdatesConfidence(p) < floor) return { ...decideJudgement(p, null, false), decide: { ...note, floor } };
   const r = await fetch(`${cfg.chat.base}/chat/completions`, {
     method: "POST",
     headers: cfg.chat.headers,
@@ -306,7 +325,7 @@ export async function decidePair(older: PairSide, newer: PairSide, cfg: EmbedCon
   const [current, other] = proposal.current === "newer" ? [newer.content, older.content] : [older.content, newer.content];
   const named = proposal.current !== "none" && !proposal.malformed;
   note.writer = {
-    model: cfg.judgeModel, current: proposal.malformed ? "unparsed" : proposal.current, stale: proposal.stale, reason: proposal.reason,
+    model: cfg.judgeModel, current: proposal.malformed ? "unparsed" : proposal.current, evidence: proposal.evidence, stale: proposal.stale, reason: proposal.reason,
     evidence_found: named && (PASS_WRITER.v2Quotes ? quoteIn : evidenceIn)(proposal.evidence, current, other),
     // The stale quote as stands reads it: in the other thought, and not in this one or only quoted here.
     stale_found: named && (PASS_WRITER.v2Quotes

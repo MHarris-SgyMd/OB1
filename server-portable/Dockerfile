@@ -6,9 +6,24 @@ WORKDIR /app/server-portable
 COPY server-portable/package.json server-portable/bun.lock ./
 RUN bun install --frozen-lockfile --production
 
+# The MCP server as a REST client and its REST client (SMD-2287), each from its
+# own lockfile, as in a checkout: mcp-server/ pins the MCP SDK v2 packages,
+# rest-client/ openapi-fetch. A stage each, so a change to one lockfile
+# installs that one alone, and BuildKit runs the three at once.
+FROM oven/bun:1.4.3-alpine AS mcp-deps
+WORKDIR /app/mcp-server
+COPY mcp-server/package.json mcp-server/bun.lock ./
+RUN bun install --frozen-lockfile --production
+
+FROM oven/bun:1.4.3-alpine AS rest-client-deps
+WORKDIR /app/rest-client
+COPY rest-client/package.json rest-client/bun.lock ./
+RUN bun install --frozen-lockfile --production
+
 # The image keeps the checkout's layout under /app — server-portable/, db/,
-# plugins/ and releases.json side by side — so every relative import resolves
-# as it does in a checkout: the server's ../db/config.mjs, and a plugin's
+# plugins/, mcp-server/, rest-client/ and releases.json side by side — so every
+# relative import resolves as it does in a checkout: the server's
+# ../db/config.mjs, the MCP server's ../server-portable/ modules, and a plugin's
 # ../../server-portable/plugin-sdk.ts, through which it reaches zod in
 # server-portable's node_modules (SMD-2310; before, the server sat at /app and
 # db/ at /db, which a plugin's import could not mirror).
@@ -16,12 +31,20 @@ FROM oven/bun:1.4.3-alpine
 WORKDIR /app/server-portable
 ENV NODE_ENV=production
 COPY --from=deps /app/server-portable/node_modules ./node_modules
+COPY --from=mcp-deps /app/mcp-server/node_modules /app/mcp-server/node_modules
+COPY --from=rest-client-deps /app/rest-client/node_modules /app/rest-client/node_modules
 # Copy every source file rather than naming them. An explicit list silently broke
 # the image when auth.ts was added — the container crashlooped on a missing module.
 # .dockerignore keeps tests and tooling out.
 COPY server-portable/*.ts server-portable/package.json ./
 COPY server-portable/core ./core
 COPY server-portable/rest ./rest
+# The MCP server as a REST client (SMD-2287) and the client it calls the REST
+# core through, beside server-portable/, whose modules the MCP server imports
+# as ../server-portable/ (.dockerignore keeps the client's generator and the
+# suites' in-process stack out).
+COPY mcp-server/*.ts mcp-server/package.json /app/mcp-server/
+COPY rest-client/*.ts rest-client/package.json /app/rest-client/
 # Every plugin in the tree (SMD-2310): the registry imports each by name, and
 # OB1_PLUGINS picks which run. Tests stay out (.dockerignore).
 COPY plugins /app/plugins
@@ -59,6 +82,11 @@ ENV OB1_GIT_SHA=$OB1_GIT_SHA
 # Optional: OPEN_BRAIN_CITATION_BASE_URL, PORT (default 8000), OB1_PG_POOL,
 # OB1_STOP_GRACE (the platform's grace period for a stop, whole seconds 1–3600;
 # default 10)
+# ../mcp-server/index.ts reads none of the above but PORT and OB1_STOP_GRACE:
+#   OB1_FORWARDER_KEY — its forward-scope key, its hash in the REST core's
+#                  MCP_ACCESS_KEYS; and OB1_AUTH_SECRET_MCP on a stack that
+#                  trades OAuth tokens. Its other settings (the REST core's
+#                  address, the plugins, the origin): mcp-server/README.md
 EXPOSE 8000
 USER bun
 
@@ -82,11 +110,14 @@ USER bun
 #
 # The entry is the command: index.ts, the MCP server, unless a service names
 # another — the REST core's `command: ["api.ts"]` in deploy/compose.yaml
-# (SMD-2284). One image, one preflight, two servers.
+# (SMD-2284): one image, one preflight, two servers. A third runs without
+# it, with `bun` as the entrypoint: ../mcp-server/index.ts (SMD-2287),
+# which reads no store and holds no key list — the REST core does both — and
+# whose own handlers answer a stop (shutdown.ts).
 ENTRYPOINT ["/bin/sh", "-c", "trap 'exit 143' TERM; trap 'exit 130' INT; bun preflight.ts & wait $! || exit $?; exec bun \"$@\"", "entry"]
 CMD ["index.ts"]
 
-# Liveness only: a keyless GET of /health, which both servers answer 200 with
+# Liveness only: a keyless GET of /health, which all three servers answer 200 with
 # no key, no store and nothing about the brain. Not a POST to the MCP
 # endpoint, as before: that was an unauthenticated request every 30 s, which
 # the server's request log (SMD-1849, telemetry.ts) would write as a refusal —

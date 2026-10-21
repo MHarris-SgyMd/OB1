@@ -245,7 +245,7 @@ Read against the tree on 2026-09-27.
 | `orchestration-runner` (#222) | A worker-class DB writer on the mesh and the egress network (as built, `data` and `egress`, where n8n reaches it; SMD-2583). Its per-uid egress rules (SMD-2289) are the container's own network namespace's, so they hold whichever networks it joins | SMD-2289 |
 | `integrations/kubernetes-deployment` | Retires under compose-only | SMD-1931, SMD-2288 |
 | Jev, the LLM env forwarding, the preflight entrypoint | Move from the `server` service to the REST core | SMD-2284 |
-| Release images and CI | `ob1-server` becomes one image per server; the full-stack job goes through the proxy; the Workers build retires | SMD-2296, SMD-2288 |
+| Release images and CI | `ob1-server` stays one image for the three servers: it carries the MCP server built on the REST core since SMD-2287 PR 5a, by the maintainer's choice (2026-10-20) over an image per server; the full-stack job goes through the proxy; the Workers build retires | SMD-2296, SMD-2287, SMD-2288 |
 | Docs and skills with the one-process `?key=` URL shape | One bring-up path and the new URLs | SMD-2288 |
 | `chrome-capture-extension`, `recipes/*` MCP callers, agent-memory plugins | New URLs; the extension is a client of `/api` (`POST /v1/thoughts`) since `open-brain-rest` retired | SMD-1931 |
 | Secrets in `deploy/.env` | The authorization server's signing key, its cookie keys, each static client's secret, and the operator's password (which the operator may remove once hashed) and its argon2id hash, written by `deploy/auth/provision.ts --init`, with the backup note (`deploy/README.md`, "Authorization server"). The container is given the hash, never the password | SMD-2285 |

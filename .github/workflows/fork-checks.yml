@@ -1635,7 +1635,8 @@ jobs:
           trap 'rm -f compose.release.yaml .bun-view.*.json' EXIT
           # What each render must hold: beside the tables, the forwarder's
           # script and, with lgtm in the render, the dashboard and its
-          # provider (SMD-1849 PR 3c), each compose.yaml's. Labels are held on
+          # provider (SMD-1849 PR 3c) and the alert rules (SMD-3050), each
+          # compose.yaml's. Labels are held on
           # the substituted render alone: --no-interpolate leaves two files' labels a list,
           # and their environment one too, which `env` reads as a mapping
           # (compose.grafana-port.yaml sets one key of lgtm's, SMD-1849 PR 3a).
@@ -1645,11 +1646,12 @@ jobs:
             def rest: del(.services.proxy, .configs) | (.services[]? |= (if has("environment") then .environment |= env else . end)) | delpaths($declared) | with_entries(select(.key | startswith("x-") | not));
             ($p | del(.configs, .labels, .depends_on)) == ($base | del(.configs, .labels, .depends_on))
             and $p.configs == [$want[] | {source, target}]
-            and (($r.configs // {}) | keys) == ([$want[].source, "forwarder", (if $r.services.lgtm then "grafana-dashboard", "grafana-dashboard-provider" else empty end)] | sort)
+            and (($r.configs // {}) | keys) == ([$want[].source, "forwarder", (if $r.services.lgtm then "grafana-dashboard", "grafana-dashboard-provider", "grafana-alert-rules" else empty end)] | sort)
             and all($want[]; ($r.configs[.source] | keys) == ["content", "name"])
             and $r.configs.forwarder == $alone.configs.forwarder
             and $r.configs["grafana-dashboard"] == $alone.configs["grafana-dashboard"]
             and $r.configs["grafana-dashboard-provider"] == $alone.configs["grafana-dashboard-provider"]
+            and $r.configs["grafana-alert-rules"] == $alone.configs["grafana-alert-rules"]
             and ($r | rest) == ($alone | rest)
             and ([$r.networks[].name] | length == (unique | length))
             and ([$r.services[].ports[]? | if type == "object" then [.host_ip, .published] else . end] | length == (unique | length))'
@@ -2035,6 +2037,12 @@ jobs:
       # line, which a collector would lengthen. A capture citing a thought
       # that is not there makes the store's refusals line read above 0, and
       # one tool called once proves Prometheus's zero at a series' start.
+      # SMD-3050: compose's render of the alert rules is
+      # deploy/observability/alert-rules.yaml, Grafana holds exactly its
+      # rules, provisioned from it, and after the traffic the provider rule is
+      # pending (the stub's 404s) and the other four normal and healthy; then
+      # pg-exporter stops and the Postgres rule must go pending (check 38
+      # holds the rules' names and labels without a running profile).
       - name: The observability profile's dashboard reads every series it names
         working-directory: deploy
         run: |
@@ -2042,8 +2050,11 @@ jobs:
           printf 'GRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\nOB1_MONITOR_DB_PASSWORD=ci-dummy-monitor-password-0123456789\nOTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm.ob1.internal.:4318\nOTEL_METRIC_EXPORT_INTERVAL=5000\n' >> .env
           # compose's render prints each `$` doubled again, as compose.yaml has it,
           # so it reads back as the file once undoubled (Grafana's mount has one).
-          docker compose -f compose.yaml --profile observability config --format json | jq -j '.configs["grafana-dashboard"].content | gsub("[$][$]"; "$")' | cmp - observability/dashboard.json \
+          docker compose -f compose.yaml --profile observability config --format json > /tmp/observability-render.json
+          jq -j '.configs["grafana-dashboard"].content | gsub("[$][$]"; "$")' /tmp/observability-render.json | cmp - observability/dashboard.json \
             || { echo "compose renders the grafana-dashboard config otherwise than deploy/observability/dashboard.json" >&2; exit 1; }
+          jq -j '.configs["grafana-alert-rules"].content | gsub("[$][$]"; "$")' /tmp/observability-render.json | cmp - observability/alert-rules.yaml \
+            || { echo "compose renders the grafana-alert-rules config otherwise than deploy/observability/alert-rules.yaml" >&2; exit 1; }
           # The disk read once lgtm's image (2.6 GB) is pulled and before Loki
           # starts on it: Loki refuses every record with the disk under lgtm-data
           # past 90% (PR 3c, measured), and the log query below would fail with
@@ -2161,6 +2172,57 @@ jobs:
             sleep 5
           done
           if ! { [[ "$born" =~ ^[0-9.]+$ ]] && awk -v b="$born" 'BEGIN { exit !(b > 0.5) }'; }; then said "worker_status, called once, increased by $born over 10 m: Prometheus no longer ingests a zero at a series' start (created-timestamp-zero-ingestion in compose.yaml's PROMETHEUS_EXTRA_ARGS), so a single failure reads 0 on every panel"; fi
+          # SMD-3050: the alert rules, as Grafana holds them — each of the
+          # file's, from the file (provisioned) — and their states, each rule's
+          # on a line: state, health, uid.
+          # shellcheck disable=SC2016 # as above
+          in_lgtm bash -c 'curl -fsS --max-time 10 -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/v1/provisioning/alert-rules' > /tmp/grafana-alert-rules.json || said "Grafana's alert rules did not answer"
+          rules_have=$(jq -r '[.[] | select(.provenance == "file") | .uid] | sort | join(" ")' /tmp/grafana-alert-rules.json)
+          rules_want=$({ grep -oP '^      - uid: \K\S+' observability/alert-rules.yaml || true; } | LC_ALL=C sort | paste -sd ' ')
+          # …in the dashboard's folder, not a second "Open Brain" beside it.
+          jq -e --slurpfile d /tmp/grafana-dashboard.json '. != [] and all(.[]; .folderUID == $d[0].meta.folderUid)' /tmp/grafana-alert-rules.json > /dev/null \
+            || said "Grafana's alert rules are not all in the dashboard's folder ($(jq -r '.meta.folderUid' /tmp/grafana-dashboard.json)): $(jq -c '[.[] | {uid, folderUID}]' /tmp/grafana-alert-rules.json)"
+          if [ -z "$rules_want" ] || [ "$rules_have" != "$rules_want" ]; then said "Grafana holds the provisioned alert rules '$rules_have' where deploy/observability/alert-rules.yaml has '${rules_want:-none (its uid lines were not read)}'"; fi
+          states() {
+            # shellcheck disable=SC2016 # as above
+            in_lgtm bash -c 'curl -fsS --max-time 10 -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/prometheus/grafana/api/v1/rules' \
+              | jq -r '.data.groups[] | select(.name == "Open Brain") | .rules[] | "\(.state) \(.health) \(.uid)"'
+          }
+          prom() { in_lgtm curl -s --max-time 10 -G http://127.0.0.1:9090/api/v1/query --data-urlencode "query=$1" | jq -c '[.data.result[]? | {m: .metric, v: .value[1]}]' || true; }
+          # Every rule judged on one read: the provider rule pending or firing
+          # — the stub's 404 for each capture's metadata call is a provider
+          # failure, and about three in 10 m make it pending (firing 5 m on) —
+          # and the other four normal and healthy, nothing here making their
+          # conditions. Rules are evaluated every 30 s; a read from before the
+          # exporter's first scrape may still hold the Postgres rule's NoData,
+          # so the wait is for all of it, 18 rounds (about two minutes).
+          judged() {
+            local uid
+            grep -qE '^(pending|firing) ok ob1-provider-failures$' <<<"$st" || return 1
+            for uid in $rules_want; do
+              [ "$uid" = ob1-provider-failures ] || grep -qx "inactive ok $uid" <<<"$st" || return 1
+            done
+          }
+          for _ in $(seq 18); do
+            st=$(states) || st=""
+            judged && break
+            traffic > /dev/null || true
+            sleep 5
+          done
+          echo "$st"
+          judged || said "the alert rules are not the provider rule pending (the stub's 404s) and the other four normal and healthy after 18 rounds: $(tr '\n' ';' <<<"$st"); Prometheus's failed provider calls over 10 m: $(prom 'sum by (gen_ai_operation_name, error_type) (increase(gen_ai_client_operation_duration_seconds_count{error_type!="", ob1_probe=""}[10m]))')"
+          # The ticket's forced condition: the exporter stopped, the collector's
+          # next scrape reads up 0 (within its 30 s), and the Postgres rule is
+          # pending at an evaluation after it (22–61 s from the stop over three
+          # fresh runs, measured), firing a minute on.
+          docker compose -f compose.yaml --profile observability stop pg-exporter
+          for _ in $(seq 36); do
+            st=$(states) || st=""
+            grep -qE '^(pending|firing) ok ob1-postgres-unreached$' <<<"$st" && break
+            sleep 5
+          done
+          grep -qE '^(pending|firing) ok ob1-postgres-unreached$' <<<"$st" || said "the Postgres rule did not go pending within 3 minutes of pg-exporter's stop: $(tr '\n' ';' <<<"$st"); Prometheus's up and pg_up for the exporter: $(prom 'up{job="postgres"}') $(prom 'pg_up{job="postgres"}')"
+          echo "the Postgres rule pending after pg-exporter's stop"
           cp /tmp/env-before-observability .env
           docker compose -f compose.yaml --profile observability rm -sf lgtm pg-exporter pg-monitor-role
           docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 server api
@@ -3016,16 +3078,24 @@ jobs:
           grep -q '^GRAFANA_ADMIN_PASSWORD=' .env || { echo "no GRAFANA_ADMIN_PASSWORD line in .env to leave out" >&2; exit 1; }
           grep -q '^OB1_MONITOR_DB_PASSWORD=' .env || { echo "no OB1_MONITOR_DB_PASSWORD line in .env to leave out" >&2; exit 1; }
           if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_|OB1_MONITOR_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
-          # SMD-2874 PR 2: the canary's own write key, minted, its hash alone in
+          # SMD-2874 PR 2: the canary's own write key, minted, and (SMD-2287)
+          # its own forward key for the MCP server, their hashes alone in
           # MCP_ACCESS_KEYS; no key hash of stable's anywhere in the file; a
           # plugin role password of its own; no webhook secret of stable's.
+          # The canary's forward key as the file holds it last, and the
+          # MCP_ACCESS_KEYS its write key and a given forward key make.
+          canary_forward() { sed -n 's/^OB1_FORWARDER_KEY=//p' .env.canary.local | tail -n 1 | tr -d "\"'"; }
+          own_keys_with() { printf 'open-brain-canary:write:%s,open-brain-canary-mcp-forwarder:forward:%s' "$(printf '%s' "$CANARY_KEY" | shasum -a 256 | cut -d' ' -f1)" "$(printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1)"; }
           CANARY_KEY="$(sed -n 's/^OB1_CANARY_KEY=//p' .env.canary.local | tr -d "\"'")"
           [ "${#CANARY_KEY}" = 64 ] || { echo "the canary's env file holds no minted OB1_CANARY_KEY" >&2; exit 1; }
-          [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "open-brain-canary:write:$(printf '%s' "$CANARY_KEY" | shasum -a 256 | cut -d' ' -f1)" ] || { echo "the canary's MCP_ACCESS_KEYS is not its own key alone" >&2; exit 1; }
+          CANARY_FORWARD="$(canary_forward)"
+          [ "${#CANARY_FORWARD}" = 64 ] || { echo "the canary's env file holds no minted OB1_FORWARDER_KEY" >&2; exit 1; }
+          [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "$(own_keys_with "$CANARY_FORWARD")" ] || { echo "the canary's MCP_ACCESS_KEYS is not its own two keys alone" >&2; exit 1; }
+          grep -F "minted the canary's own write key, open-brain-canary" /tmp/canary-up.out
+          grep -F "minted the canary's own forward key, open-brain-canary-mcp-forwarder" /tmp/canary-up.out
           for h in $(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'" | tr ',' '\n' | cut -d: -f3); do
             if grep -qF "$h" .env.canary.local; then echo "the canary's env file holds a key hash of stable's" >&2; exit 1; fi
           done
-          grep -F "minted the canary's own write key, open-brain-canary" /tmp/canary-up.out
           canary_plugin="$(sed -n 's/^OB1_PLUGIN_DB_PASSWORD=//p' .env.canary.local | tr -d "\"'")"
           if [ -z "$canary_plugin" ] || [ "$canary_plugin" = ci-dummy-plugin-password-0123456789 ]; then echo "the canary's plugin role password is not its own" >&2; exit 1; fi
           if grep -qF ci-dummy-hook-secret .env.canary.local; then echo "the canary's env file holds stable's webhook secret" >&2; exit 1; fi
@@ -3101,7 +3171,7 @@ jobs:
           plugin_login() { PGPASSWORD="$1" docker run --rm --network open-brain-canary_data -e PGPASSWORD pgvector/pgvector:0.8.6-pg16 psql -h postgres -U ob1_plugins -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1; }
           plugin_login "$canary_plugin" || { echo "the canary's plugin role does not take the canary's own password" >&2; exit 1; }
           if plugin_login ci-dummy-plugin-password-0123456789; then echo "the canary's plugin role still takes stable's password" >&2; exit 1; fi
-          if grep -qFf <(printf '%s\n' "$PG_CANARY" "$CANARY_KEY" "$canary_plugin") /tmp/canary-wrong.out /tmp/canary-up.out; then echo "canary.sh printed the canary's password (the lines are not shown here, so this log does not)" >&2; exit 1; fi
+          if grep -qFf <(printf '%s\n' "$PG_CANARY" "$CANARY_KEY" "$CANARY_FORWARD" "$canary_plugin") /tmp/canary-wrong.out /tmp/canary-up.out; then echo "canary.sh printed a key or password of the canary's (this check shows no line of it)" >&2; exit 1; fi
           [ "$rc" = 1 ] || { cat /tmp/canary-wrong.out >&2; echo "up passed its smoke under a provider serving another model (exit $rc)" >&2; exit 1; }
           grep -F "differs from stable's on OB1_QUERY_LOG_RETENTION_DAYS" /tmp/canary-wrong.out
           grep -F 'returned none of' /tmp/canary-wrong.out
@@ -3143,12 +3213,37 @@ jobs:
           echo 'SERVER_PORT="8013"' >> .env.canary.local
           # …with stable's keys beside the canary's, as a file made before
           # SMD-2874 PR 2 holds them: the up takes them out, by count, keeps the
-          # canary's own key, and leaves one MCP_ACCESS_KEYS line.
-          printf 'MCP_ACCESS_KEYS="%s,%s"\n' "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tail -n 1 | tr -d "\"'")" "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'")" >> .env.canary.local
+          # canary's own key, and leaves one MCP_ACCESS_KEYS line. Two forward
+          # keys of stable's are in play (SMD-2287):
+          #   - OB1_SMOKE_FORWARD_KEY, the ci-forwarder entry stable's
+          #     MCP_ACCESS_KEYS lists, copied in as the canary's
+          #     OB1_FORWARDER_KEY: replaced by a fresh key of the canary's,
+          #     under the base name, and the forward entry the first up minted
+          #     is removed (review pass 1);
+          #   - STABLE_FWD, stable's own OB1_FORWARDER_KEY, set in stable's file
+          #     with spaces around it and listed nowhere by stable: one of
+          #     stable's keys all the same, so the canary's read entry for it
+          #     goes with stable's, counted (review passes 3 and 4).
+          # The operator's two entries stay: a forward entry named -1, which no
+          # up mints and a prefix match would remove (passes 2 and 4), and a
+          # read entry under a minted name, since only forward entries go
+          # (pass 3).
+          OPS_FORWARD="open-brain-canary-mcp-forwarder-1:forward:$(openssl rand -hex 32 | tr -d '\n' | shasum -a 256 | cut -d' ' -f1)"
+          OPS_READ="open-brain-canary-mcp-forwarder-2:read:$(openssl rand -hex 32 | tr -d '\n' | shasum -a 256 | cut -d' ' -f1)"
+          STABLE_FWD="$(openssl rand -hex 32)"
+          printf 'OB1_FORWARDER_KEY=" %s "\n' "$STABLE_FWD" >> .env
+          printf 'MCP_ACCESS_KEYS="%s,%s,%s,%s,%s"\n' "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tail -n 1 | tr -d "\"'")" "$OPS_FORWARD" "$OPS_READ" "stable-mcp-copy:read:$(printf '%s' "$STABLE_FWD" | shasum -a 256 | cut -d' ' -f1)" "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'")" >> .env.canary.local
+          printf 'OB1_FORWARDER_KEY=%s\n' "$OB1_SMOKE_FORWARD_KEY" >> .env.canary.local
           stable_keys="$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'" | tr ',' '\n' | grep -c .)"
           FAKE_URL='http://127.0.0.1:8012/mcp?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-edited.out
-          grep -F "removed $stable_keys of stable's access keys from MCP_ACCESS_KEYS" /tmp/canary-edited.out
-          if grep -F 'minted' /tmp/canary-edited.out; then echo "the up minted a key where the canary had its own" >&2; exit 1; fi
+          sed -i '/^OB1_FORWARDER_KEY=/d' .env
+          grep -F "removed $((stable_keys + 1)) of stable's access keys from MCP_ACCESS_KEYS" /tmp/canary-edited.out
+          if grep -F "minted the canary's own write key" /tmp/canary-edited.out; then echo "the up minted a write key where the canary had its own" >&2; exit 1; fi
+          grep -F "minted the canary's own forward key, open-brain-canary-mcp-forwarder (its hash in MCP_ACCESS_KEYS, the raw key in OB1_FORWARDER_KEY, in place of stable's)" /tmp/canary-edited.out
+          grep -F "removed 1 forward entry an earlier up minted (open-brain-canary-mcp-forwarder, open-brain-canary-mcp-forwarder-2 and on) from MCP_ACCESS_KEYS" /tmp/canary-edited.out
+          FORWARD_2="$(canary_forward)"
+          { [ "${#FORWARD_2}" = 64 ] && [ "$FORWARD_2" != "$OB1_SMOKE_FORWARD_KEY" ] && [ "$FORWARD_2" != "$CANARY_FORWARD" ]; } || { echo "the canary's forward key is not a fresh one of its own" >&2; exit 1; }
+          [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "$(own_keys_with "$FORWARD_2" | sed "s|,|,$OPS_FORWARD,$OPS_READ,|")" ] || { echo "the canary's MCP_ACCESS_KEYS is not its write key, the operator's two entries and its fresh forward key" >&2; exit 1; }
           [ "$(grep -c '^MCP_ACCESS_KEYS=' .env.canary.local)" = 1 ] || { echo "the canary's env file holds more than one MCP_ACCESS_KEYS line" >&2; exit 1; }
           [ "$(sed -n 's/^OB1_CANARY_KEY=//p' .env.canary.local | tr -d "\"'")" = "$CANARY_KEY" ] || { echo "the canary's key changed" >&2; exit 1; }
           grep -F 'connector open-brain-canary still points at http://127.0.0.1:8012/mcp?…, a port this canary no longer answers on' /tmp/canary-edited.out
@@ -3171,8 +3266,21 @@ jobs:
           { [ "$rc" = 1 ] && grep -qF 'canary sleep worker LEFT STOPPED' /tmp/canary-nokey.out && grep -qF 'migrated in place (its own rows kept)' /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with a worker and no OB1_WORKER_KEY exited $rc, not 1 with the worker left stopped" >&2; exit 1; }
           if [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=sleep)" ]; then echo "up --no-refresh started a worker with no OB1_WORKER_KEY" >&2; exit 1; fi
           printf 'OB1_WORKER_KEY=ci-canary-worker-key-not-stables\n' >> .env.canary.local
+          # The file as a canary mended by SMD-2874 PR 2 holds it, the dogfood
+          # canary's next upgrade: its write key alone, no forward key. The up
+          # mints the forward key, adding its entry to MCP_ACCESS_KEYS beside
+          # the write key, which it keeps (SMD-2287 review pass 1: a mutant
+          # that wrote the raw key without its entry passed every up above).
+          sed -i '/^OB1_FORWARDER_KEY=/d; /^MCP_ACCESS_KEYS=/d' .env.canary.local
+          printf 'MCP_ACCESS_KEYS=open-brain-canary:write:%s\n' "$(printf '%s' "$CANARY_KEY" | shasum -a 256 | cut -d' ' -f1)" >> .env.canary.local
           standin_id="$(standin)"
           FAKE_URL='http://127.0.0.1:8013/mcp?key=x' ./canary.sh up --no-refresh --no-smoke | tee /tmp/canary-norefresh.out
+          grep -F "minted the canary's own forward key, open-brain-canary-mcp-forwarder (its hash in MCP_ACCESS_KEYS, the raw key in OB1_FORWARDER_KEY)" /tmp/canary-norefresh.out
+          if grep -F "minted the canary's own write key" /tmp/canary-norefresh.out; then echo "up --no-refresh minted a write key where the canary had its own" >&2; exit 1; fi
+          FORWARD_3="$(canary_forward)"
+          [ "${#FORWARD_3}" = 64 ] || { echo "up --no-refresh left the canary no forward key" >&2; exit 1; }
+          [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "$(own_keys_with "$FORWARD_3")" ] || { echo "up --no-refresh did not give the canary its forward key beside its write key" >&2; exit 1; }
+          if grep -qFf <(printf '%s\n' "$FORWARD_2" "$FORWARD_3" "$CANARY_KEY" "$CANARY_FORWARD" "$OB1_SMOKE_FORWARD_KEY" "$STABLE_FWD" "$PG_CANARY" "$canary_plugin") /tmp/canary-edited.out /tmp/canary-nokey.out /tmp/canary-norefresh.out; then echo "canary.sh printed a raw key, the canary's or stable's forward key" >&2; exit 1; fi
           grep -F 'migrate open-brain-canary-postgres-1 in place' /tmp/canary-norefresh.out
           grep -F 'canary sleep worker stopped for the migration' /tmp/canary-norefresh.out
           grep -F 'canary sleep worker, on the new build' /tmp/canary-norefresh.out
@@ -3330,6 +3438,38 @@ jobs:
       # .github/ci/full-stack-up.sh's, with why each is as it is (SMD-3051).
       - name: Bring up the compose stack
         run: .github/ci/full-stack-up.sh
+
+      # SMD-2287 PR 5a: the server image just built carries the MCP server as a
+      # REST client (mcp-server/) and its client (rest-client/), each with its
+      # own lockfile's packages, run with `bun` as the entrypoint, without the
+      # image's preflight, since it reads no store. Without a forward key it stops at
+      # once in its own words, exit 2, after every import has loaded; with one
+      # it answers keyless liveness, refuses a keyless initialize on its own
+      # request line, and stops on SIGTERM, exit 0. The REST core it names is
+      # an address nothing answers, and none of this calls it. With no network:
+      # Bun installs a package itself, from the registry, for a directory with
+      # no node_modules (SMD-2978), and an image missing mcp-server/'s passed
+      # this step that way (a mutant, measured).
+      - name: The server image runs the MCP server as a REST client
+        working-directory: deploy
+        run: |
+          IMG="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
+          if out=$(docker run --rm --network none --entrypoint bun "$IMG" ../mcp-server/index.ts 2>&1); then code=0; else code=$?; fi
+          echo "$out"
+          if [ "$code" != 2 ] || ! grep -q '^OB1_FORWARDER_KEY is not set' <<< "$out"; then echo "expected exit 2 naming the missing forward key; exit $code" >&2; exit 1; fi
+          docker run -d --name ob1-mcp-image --network none --entrypoint bun -e "OB1_FORWARDER_KEY=$(openssl rand -hex 32)" -e OB1_REST_URL=http://127.0.0.1:9 "$IMG" ../mcp-server/index.ts > /dev/null
+          up=""
+          for _ in $(seq 1 40); do [ "$(docker exec ob1-mcp-image wget -qO- http://127.0.0.1:8000/health 2> /dev/null)" = ok ] && { up=1; break; }; sleep 0.25; done
+          docker exec ob1-mcp-image wget -qO- --header 'Content-Type: application/json' --header 'Accept: application/json, text/event-stream' \
+            --post-data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' http://127.0.0.1:8000/mcp > /dev/null 2>&1 || true
+          docker stop ob1-mcp-image > /dev/null
+          code=$(docker inspect -f '{{.State.ExitCode}}' ob1-mcp-image)
+          log=$(docker logs ob1-mcp-image 2>&1)
+          docker rm -f ob1-mcp-image > /dev/null
+          echo "$log"
+          [ -n "$up" ] || { echo "the MCP server never answered keyless /health with ok" >&2; exit 1; }
+          grep -q '"door":"mcp".*"rpc":"initialize".*"code":"UNAUTHORIZED"' <<< "$log" || { echo "the keyless initialize was not refused on the MCP server's own request line" >&2; exit 1; }
+          if [ "$code" != 0 ] || ! grep -q '^SIGTERM: stopped in ' <<< "$log"; then echo "expected the server's own stop line and exit 0; exit $code" >&2; exit 1; fi
 
       # SMD-2212: the import runner's image copies the ingestion pipeline's
       # import graph file by file, and its build resolves every import. So a

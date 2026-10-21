@@ -50,7 +50,7 @@ chat only, beside Ollama:
 | `OB1_EMBEDDING_MODEL` / `OB1_EMBEDDING_DIM` | `openai/text-embedding-3-small` / 1536 | Must match the column; permanent once there is data |
 | `OB1_METADATA_MODEL` | `openai/gpt-4o-mini` | No schema dependency — safe to change anytime |
 | `OB1_JUDGE_MODEL` | the metadata model | The supersession judge's model (`db/consolidate.ts`), for running the judge — the harder task — on a stronger model than every capture's tagging; a model the chat endpoint serves. The pass key carries it, so a change starts a fresh pass (SMD-1901) |
-| `OB1_CONSOLIDATE_DECIDER` | unset (the judge decides) | Consolidation's decide mode: the typed-decision tier's model (`OB1_JEV_BASE_URL`) gives each pair's verdict, and `OB1_JUDGE_MODEL` only writes the proposals it calls outdates, both quotes checked in the texts. The pass key names both models, so turning it on starts a fresh pass; preflight fails it without the tier, or with `OB1_JEV_MODEL` naming another model (SMD-3115) |
+| `OB1_CONSOLIDATE_DECIDER` | unset (the judge decides) | Consolidation's decide mode: the typed-decision tier's model (`OB1_JEV_BASE_URL`) gives each pair's verdict, and `OB1_JUDGE_MODEL` only writes the proposals it calls outdates at the pass's floor, both quotes checked in the texts without their markdown (SMD-3151). The pass key names both models, so turning it on, or a new decide version, starts a fresh pass; preflight fails it without the tier, or with `OB1_JEV_MODEL` naming another model (SMD-3115) |
 | `OB1_LLM_LOCAL` / `OB1_CHAT_LOCAL` | unset (remote) | `1` declares the embeddings / chat endpoint on this machine or its private network, so the egress gate does not apply to it. Declared, never guessed from the address: a loopback URL with the flag unset is remote to the gate. A chat endpoint at the same base is the same box: either knob declares it (SMD-1903) |
 | `OB1_EGRESS_POLICY` | `deny` | What may leave the box for an endpoint not declared local: `deny` (only what an `OB1_EGRESS_ALLOW` term names), `allow` (everything but what an `OB1_EGRESS_DENY` term names), `off`. A knob that does not parse fails preflight and closes the gate |
 | `OB1_EGRESS_ALLOW` / `OB1_EGRESS_DENY` | none | Comma-separated `unit:value` terms — `actor` (the access key's name), `source`, `type`, `topic` (a row's metadata), `marker` (a literal in the text) — read under `deny` and `allow` respectively |
@@ -826,8 +826,7 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   `SUPERSEDES_UNJUDGED`; a capture-only key's `supersedes` it cannot prove its
   own is dropped, not refused, SMD-2473, and a thought another key or board-sync
   has since taken, or that something already supersedes, is not its own, a
-  pointer written before the taking lapsing, migration 082, SMD-2638), and
-  `EMBEDDING_NOT_ATTACHED` (saved without its vector; retryable, with the `id`). An
+  pointer written before the taking lapsing, migration 082, SMD-2638). An
   edit's and a delete's: `NOT_FOUND`, `REFUSED_NOTHING_TO_UPDATE`,
   `REFUSED_SUPERSEDES_SHAPE`, `REFUSED_STALE_READ` (with the row's
   `currentUpdatedAt`, to retry from without a re-read), `REFUSED_DUPLICATE_CONTENT`,
@@ -926,10 +925,7 @@ stripped (`X-Forwarded-Prefix`).
   store's or the egress gate's — so the MCP server says it as it always has
   (SMD-2287). It is the refusal as the operation made it for that caller, the
   existence-oracle rule applied: what `render.ts` has always been handed, and
-  bounds into its text. A
-  save whose vector did not attach (the retired PostgREST store's two-step; no producer since SMD-3152, SMD-3153 removes it) is a 201 with
-  `embeddingAttached: false`, not a refusal, so a client does not capture again
-  (forwarded, its `refusal` beside it). A refused input is a 400 `REFUSED_INPUT`
+  bounds into its text. A refused input is a 400 `REFUSED_INPUT`
   naming each field and zod's reason. A fault is a 500 `FAILED` with its message, as the MCP tool's text
   gives it, and no `retryable` until SMD-2461 — but capture's is a 503
   `STORE_UNAVAILABLE`, retryable, the verdict the session hook keys on. Every 503
@@ -974,11 +970,11 @@ word any refusal as this one does.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1141 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace; the same 1141 with OB1_MCP_UNDER_TEST=client, through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
+bun test-server.ts        # 1136 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050); the same 1136 with OB1_MCP_UNDER_TEST=client, through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
 bun test-auth.ts          # 191 — scoped, hashed, named keys; the same 191 with OB1_MCP_UNDER_TEST=client, against the MCP server as a REST client (mcp-server/, SMD-2287)
 bun test-rest.ts          # 470 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, and `bun api.ts` stopped mid-request
 bun test-plugins.ts       # 283 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's; the same 283 with OB1_MCP_UNDER_TEST=client (mcp-server/, SMD-2287)
-bun test-thoughts.ts      # 330 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
+bun test-thoughts.ts      # 518 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 225 — fully local provider, no credential
 bun run test:sql          # 262 — store conformance, real Postgres in a container

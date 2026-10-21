@@ -1092,7 +1092,7 @@ value that fails its rule is `?`, and a key with nothing to say is left out:
 | `tool` | the tool an MCP tool call names, a REST route runs or a mirror mirrors (the job routes' is `job_status`), from the manifest (`tools.ts`); a batch names none |
 | `agent` | the configured name of the key that authenticated — never the key; the single legacy `MCP_ACCESS_KEY` is named `MCP_ACCESS_KEY` |
 | `status` | the HTTP status (an MCP tool call is a 200 whatever the tool said). At the MCP endpoint, 0 when the client left before there was an answer — during the key check, the registry's answer, the body read or the transport's parse — and 408 when it was gone before the route ran; on an `abandoned` line from anywhere else, the status of the answer no one received (a REST body read the client cut off is the 500 it became), or 0 when the stop came before any answer |
-| `outcome` | on every line. A request the MCP server refuses at its key is `refused`, whatever its method and status — at its MCP endpoint with the refusal's code, at a keyed mirror (a 200 that shows the caller nothing — the keyless probe at `/health` aside, which is not logged) with `REVOKED` or `BUSY` where the registry said which, and none for a key missing, wrong or out of scope. An MCP tool call says the tool's: `ok`; `refused` (a refusal as a value); `error` (the tool threw, or the route did — a 500); `unrun` (a call that never ran to an end — the transport refused the request, the SDK its input, the key's scope does not hold the tool, or it was sent as a notification, with no `id`); a batch its worst call's (error, refused, unrun, ok). Any other request, and every REST request, says its answer's: `error` for a fault (a 5xx `FAILED` or `STORE_UNAVAILABLE`, or one with no code), `refused` for any other 4xx or 5xx (a 503 `BUSY` is a refusal for now, on both doors), else `ok` — so a JSON-RPC error inside a 200, an unknown method, is `ok`, and a capture saved without its vector is `refused` with `EMBEDDING_NOT_ATTACHED` on the MCP server and `ok` (a 201 whose body says so, which the line does not) on the REST core. A key whose scope lacks the tool, or an input the schema refuses, is `unrun` with no code on the MCP server, where the tool is not registered or the SDK refuses it, and `refused` with `FORBIDDEN` or `REFUSED_INPUT` on the REST core. `abandoned` is a client gone before a stream ended (an MCP answer, either job stream) — by its abort, or by letting go of the body — or before any other answer was handed over (one that leaves after keeps that answer's outcome); `cut` is a request the stop closed while its client was still there, on either server (status 0 where no answer had begun, 200 for a stream the server had begun — Bun sends its status line with the stream's first bytes, so a client cut before them received nothing), and one whose client had already left is `abandoned`; `stalled` a stream still running at the keepalive's ten minutes — written then, and its own end writes no second line. An abandoned or stalled call runs on to its end; whether a capture landed is `thought_audit`'s to say |
+| `outcome` | on every line. A request the MCP server refuses at its key is `refused`, whatever its method and status — at its MCP endpoint with the refusal's code, at a keyed mirror (a 200 that shows the caller nothing — the keyless probe at `/health` aside, which is not logged) with `REVOKED` or `BUSY` where the registry said which, and none for a key missing, wrong or out of scope. An MCP tool call says the tool's: `ok`; `refused` (a refusal as a value); `error` (the tool threw, or the route did — a 500); `unrun` (a call that never ran to an end — the transport refused the request, the SDK its input, the key's scope does not hold the tool, or it was sent as a notification, with no `id`); a batch its worst call's (error, refused, unrun, ok). Any other request, and every REST request, says its answer's: `error` for a fault (a 5xx `FAILED` or `STORE_UNAVAILABLE`, or one with no code), `refused` for any other 4xx or 5xx (a 503 `BUSY` is a refusal for now, on both doors), else `ok` — so a JSON-RPC error inside a 200, an unknown method, is `ok`. A key whose scope lacks the tool, or an input the schema refuses, is `unrun` with no code on the MCP server, where the tool is not registered or the SDK refuses it, and `refused` with `FORBIDDEN` or `REFUSED_INPUT` on the REST core. `abandoned` is a client gone before a stream ended (an MCP answer, either job stream) — by its abort, or by letting go of the body — or before any other answer was handed over (one that leaves after keeps that answer's outcome); `cut` is a request the stop closed while its client was still there, on either server (status 0 where no answer had begun, 200 for a stream the server had begun — Bun sends its status line with the stream's first bytes, so a client cut before them received nothing), and one whose client had already left is `abandoned`; `stalled` a stream still running at the keepalive's ten minutes — written then, and its own end writes no second line. An abandoned or stalled call runs on to its end; whether a capture landed is `thought_audit`'s to say |
 | `code` | a refusal's or a fault's code (`NOT_FOUND`, `FAILED`) — the MCP server's from the tool's reply, from a worker action's refusal (`RUN_WORKER_DRAIN_NOT_AVAILABLE`, `REFUSED_EMPTY_WORK_TYPE`), from a mirror's store fault (`FAILED`), or at the key, `UNAUTHORIZED`, `REVOKED`, `BUSY` or `AUTH_UNREACHABLE` (at a keyed mirror, `REVOKED` or `BUSY` where the registry said which); the REST core's from its 4xx or 5xx answer |
 | `ms` | milliseconds from arrival to the line: a stream (an MCP answer, either server's job stream) to its end, including the time a slow reader takes to drain it; any other answer to its handing over, before its body is sent |
 | `bytes` | the bytes of a stream that ran to its end — an MCP answer's, either server's job stream's — the server's own keepalive frames apart (the MCP SDK transport's, every 15 s of a long call, are in the stream it writes, and counted) |
@@ -1240,9 +1240,7 @@ has them, `ob1.rpc` only for what `mcp.method.name` cannot say (`batch`, or a
 method outside the schema's). No `url.*`: the path is a key's or an id's, and
 behind the proxy the scheme is not the server's to know. A tool call's span is
 `execute_tool <tool>` with `gen_ai.tool.name`, its outcome and its code — the
-operation's name is its request's alone, so a backend counts a single MCP call once (a REST operation's and a batch's calls carry none);
-a REST capture saved without its vector is an `ok` request (its 201) over a
-`refused` operation (`EMBEDDING_NOT_ATTACHED`), as the MCP tool says it. A
+operation's name is its request's alone, so a backend counts a single MCP call once (a REST operation's and a batch's calls carry none). A
 request's span is an ERROR for a 5xx it answered (a 503 `BUSY` refusal
 included, as the HTTP conventions have it) or an `error`, `stalled` or `cut`
 request, a tool call's for an `error` or a `cut`; `error.type` is its code, else
@@ -1596,11 +1594,12 @@ rows; a stack that is no tier sends none, so All takes a path-mode canary's
 beside stable's and stable alone cannot be picked) and the database (All takes
 every one but Postgres's templates, the brain's being `openbrain`). Grafana
 will not save a change made to it — it is provisioned (measured) — so save a
-copy to keep one; to change the stack's own, export the copy's JSON (not "for
+copy, in a folder of your own, to keep one (the removal under "Alerts" deletes
+the Open Brain folder's contents); to change the stack's own, export the copy's JSON (not "for
 sharing externally", which writes `${DS_…}` placeholders) over
 `deploy/observability/dashboard.json`, put back its uid `ob1`, its title `Open
 Brain` and `"editable": false` (a saved copy has its own of each; check 37
-says so), and run `bun scripts/inline-dashboard.ts`, which writes
+says so), and run `bun scripts/inline-grafana.ts`, which writes
 compose.yaml's inline copy and `lgtm`'s labels. Loki refused every record with
 the disk under `lgtm-data` 92% full (measured on a podman machine; its
 write-ahead log's threshold is 90%), answering the collector "Ingester is
@@ -1609,6 +1608,100 @@ so. The records sent meanwhile are lost; free room (`compose exec lgtm sh -c
 'du -sh /data/*'` says what each backend holds), then `compose restart lgtm`
 (whether Loki takes records again by itself once under 90% is unmeasured).
 Nothing on the dashboard shows the disk itself.
+
+**Alerts** (SMD-3050): Grafana also loads five alert rules from
+`deploy/observability/alert-rules.yaml` at each start, into the Open Brain
+folder, each evaluated every 30 s:
+- **A server stopped sending metrics**: a server that sent `process.uptime`
+  in the last day and nothing in the last 10 minutes, for 2 more minutes (a
+  host waking from sleep catches up inside them): stopped, or not reaching the
+  collector. The servers, and `mcp-server/` where it runs, send that gauge at
+  every metric export from their start, called or not; `preflight.ts --deep`
+  sends none. It reads a 10-minute window, so it needs
+  `OTEL_METRIC_EXPORT_INTERVAL` well under 10 minutes (the default is 60 s).
+  Until a day has passed it also fires for a server stopped on purpose (a
+  path-mode canary sending here, taken down, among them) and, under the old
+  name, for one whose `OTEL_SERVICE_NAME` or `deployment.environment.name` (in
+  `OTEL_RESOURCE_ATTRIBUTES`) changes. Measured: the REST core stopped, pending
+  10.5 minutes on and firing at 12.5; normal 30 s after it started again.
+- **The server failed requests**: over 5% of a server's requests over 10
+  minutes `error`, `stalled` or `cut`, about three or more of them, for 5
+  minutes. "About": Prometheus estimates a count over a window from its
+  samples, so this rule's and the next one's threshold, 2.5, is not an exact
+  line between two and three.
+- **The model provider failed calls**: about three or more of a server's
+  failed provider calls of one operation and error type over 10 minutes, for 5
+  minutes; `preflight.ts --deep`'s probes are not counted (it says how they
+  went itself).
+- **The exporter does not reach Postgres**: the collector reads pg-exporter
+  `up` 0, or pg-exporter reads Postgres `pg_up` 0, or either series is gone,
+  for a minute (measured: pg-exporter stopped, pending in 26 s and firing in
+  89 s; normal 27 s after it started again).
+- **The collector is losing telemetry**: spans, points or records refused,
+  dropped from a full queue or not stored (Loki refusing records past 90% full
+  among them), for 10 minutes. The collector retries an export for some
+  minutes before it counts it as failed, so this is pending about 7 minutes
+  after the loss begins and firing 10 after that (measured: Loki stopped, the
+  first failure counted 4.6 minutes on, the rule pending 2.7 minutes after
+  that).
+
+No contact point ships, so nothing leaves the machine: Grafana 13's default
+notification policy sends to `empty`, which has none, and a rule that fires
+shows only in Grafana's own lists (Alerting → Alert rules, and Alert groups).
+To be told, add one: Alerting → Notification configuration → Contact points →
+New contact point (a webhook, Slack or another chat needs only its own
+settings; email needs Grafana's SMTP settings, which this stack does not set),
+then the Notification policies tab → Default policy → ⋯ → Edit → Default
+contact point. Grafana keeps both in its database on `lgtm-data`, so they
+outlast an upgrade, and a secret the contact point holds — a webhook URL with
+its token — is in that volume. Each notification carries the following, and
+no key or thought's text (measured on a webhook's delivery):
+- the rule's title (as `alertname`), its uid, the folder (`grafana_folder`)
+  and Grafana's version;
+- the labels its result keeps — `service_name`, `deployment_environment_name`,
+  `gen_ai_operation_name`, `error_type` at most (check 38 holds each rule to
+  these) — or, where a rule has no data to read (the Postgres rule with no
+  `up` series), `datasource_uid` and `ref_id`. An `error_type` is an HTTP
+  status, a kind (`timeout`), or an error's code or name, never its message;
+  `service_name` and the tier are the servers' own names unless
+  `OTEL_SERVICE_NAME` or `OTEL_RESOURCE_ATTRIBUTES` sets them, and then carry
+  what you wrote there;
+- its annotations, the query's value, and links back to Grafana at its root
+  URL — `/grafana/` on `LGTM_ORIGIN`, which is the stack's own origin unless
+  `compose.grafana-port.yaml` gives Grafana its own.
+
+Where a rule's query fails (Prometheus down), Grafana sends a
+`DatasourceError` alert instead, naming the rule (`rulename`, with
+`datasource_uid` and `ref_id`) and carrying Grafana's error text, which names
+Prometheus's address inside `lgtm` (`127.0.0.1:9090`); its summary reads
+`[no value]` where it names a label (measured).
+
+The rules are provisioned: Grafana shows them so and will not save a change to
+one (measured). To change one, edit the file, run `bun scripts/inline-grafana.ts`
+(it writes compose.yaml's `grafana-alert-rules` copy and `lgtm`'s sha256
+label, as for the dashboard; check 38 holds the copy, and each query's names
+and labels as check 37 holds a panel's) and `compose up -d`, which recreates
+`lgtm`. A file Grafana cannot load stops `lgtm` at its start (measured: an
+interval of 15 s, a 41-character uid), so `compose ps lgtm` says whether it
+came up. A rule taken out of the file stays in Grafana, still evaluating and
+notifying, until the file names it under a top-level `deleteRules:`
+(`- orgId: 1` with `uid: <its uid>`); Grafana's rule API refuses to delete it
+(measured). Take the entry out once `up -d` has removed the rule: while it
+stands, a rule of that uid in the file loads nothing, without a word
+(measured; check 38 refuses both in one file).
+
+To remove every rule at once (rolling back, say), delete the dashboard's
+folder with its rules forced. That also deletes anything else saved in that
+folder, a copy of the dashboard among them, so move those out first. From
+`deploy/`, with the `-f` files the stack was started with, `podman compose`
+the same:
+
+```bash
+docker compose -f compose.yaml exec lgtm bash -c 'a="admin:$GF_SECURITY_ADMIN_PASSWORD"; g=http://127.0.0.1:3000/grafana; u=$(curl -fsS -u "$a" "$g/api/dashboards/uid/ob1" | grep -o "\"folderUid\":\"[^\"]*\"" | head -1 | cut -d\" -f4); test -n "$u" || { echo "no Open Brain dashboard, so no folder to delete" >&2; exit 1; }; curl -fsS -u "$a" -X DELETE "$g/api/folders/$u?forceDeleteRules=true"'
+```
+
+The dashboard is back within seconds, its provider reading the file again,
+and the rules still in the file come back at `lgtm`'s next start (measured).
 
 The servers send Pyroscope no profiles; it keeps about 70 MB of its own state.
 All of it is in one volume, `lgtm-data`: Prometheus keeps 15 days, Tempo 14
@@ -1670,10 +1763,16 @@ by its exact name
 when its data should go too, `docker volume rm <project>_lgtm-data` (never a
 prune), which takes Grafana's password with it: the next start reads
 `GRAFANA_ADMIN_PASSWORD` afresh, the way to start over from a forgotten one.
+Kept, the volume keeps any contact point too, so notifications resume at the
+profile's next start.
 **Rolling back** to a release from before it needs `up -d --remove-orphans`,
 or `lgtm` and `pg-exporter` run on as orphans, `lgtm` on `mesh` and its port,
 `pg-exporter` on `data` signed in to Postgres; `ob1_monitor` stays either way
-(`DROP ROLE ob1_monitor`, as above).
+(`DROP ROLE ob1_monitor`, as above). Rolling back to a release with the profile
+but before its alert rules (SMD-3050) leaves the five rules in `lgtm-data`,
+still evaluating and sending to any contact point, with no file to delete them
+from (measured): remove them first, or after, with the folder command under
+"Alerts" above.
 
 ## Keeping the board in the brain
 
@@ -2456,7 +2555,17 @@ of the canary's opens stable. Its `MCP_ACCESS_KEYS` holds a write key `up`
 mints, named for the canary's project (`open-brain-canary:write:<sha256>`,
 or `open-brain-canary-2` and on when an entry of the canary's holds that name),
 and the raw key is the file's `OB1_CANARY_KEY`, which `up` smokes and
-registers the connector with and which no container is handed. For another
+registers the connector with and which no container is handed. Beside it
+`up` mints a forward key, `open-brain-canary-mcp-forwarder:forward:<sha256>`, the
+raw key in the file's `OB1_FORWARDER_KEY`: the MCP server's own for its calls
+on the canary's REST core (SMD-2287), never stable's, and refused as a caller
+like any forward key. A canary made before it gets one at its next `up`, which
+rewrites `MCP_ACCESS_KEYS` for it once: its other entries kept, comments in it
+dropped, and one written across lines refused until it is on one line. Any
+entry of stable's forward key goes with stable's keys, listed in stable's
+`MCP_ACCESS_KEYS` or not, and a re-mint takes out the forward entries an
+earlier one made (`open-brain-canary-mcp-forwarder`, `-2` and on), whose raw
+key is gone. For another
 client, mint a key with `bun server-portable/keygen.ts --name <client>
 --scope read|write` and add the line it prints to the canary's
 `MCP_ACCESS_KEYS`; `up` keeps any entry that is not stable's. A refresh copies

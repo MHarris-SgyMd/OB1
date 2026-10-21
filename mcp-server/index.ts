@@ -2,7 +2,7 @@
 // as mcp.ob1.internal on the stack's mesh and at /mcp through the proxy once
 // SMD-2287 PR 5 gives it a compose service (server-portable's is there now).
 // It calls the REST core at OB1_REST_URL with OB1_FORWARDER_KEY — a
-// forward-scope key MCP_ACCESS_KEYS holds (`bun keygen.ts --scope forward`) —
+// forward-scope key MCP_ACCESS_KEYS holds (`bun keygen.ts --name <name> --scope forward`) —
 // beside each caller's key, and reads OB1_PLUGINS as the REST core does, for
 // the enabled plugins' tools. It reads no store and holds no key list: what a
 // key may do is the REST core's to say. Its spans, metrics and log records go
@@ -34,7 +34,7 @@ export const SERVICE_NAME = "open-brain-mcp";
 const env = process.env;
 const forwarderKey = env.OB1_FORWARDER_KEY?.trim();
 if (import.meta.main && !forwarderKey) {
-  console.error("OB1_FORWARDER_KEY is not set: the MCP server forwards each caller's key to the REST core beside a forward-scope key of its own (`cd server-portable && bun keygen.ts <name> --scope forward`, its hash in MCP_ACCESS_KEYS).");
+  console.error("OB1_FORWARDER_KEY is not set: the MCP server forwards each caller's key to the REST core beside a forward-scope key of its own (`cd server-portable && bun keygen.ts --name <name> --scope forward`, its hash in MCP_ACCESS_KEYS).");
   process.exit(2);
 }
 

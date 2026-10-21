@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2948 assertions: 2948 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and three (103) migrations applied, and
+`bun test-schema.ts` prints `2959 assertions: 2959 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and four (104) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1628,9 +1628,11 @@ write function moves one out since 099: every pointer write through
 lock the accept holds. Two writes still take none and move nothing out: a
 first capture naming supersedes (a new row, nothing above it), and another
 taker's own lapse clears, which clear nothing the accept's walk read as
-staying. A taker that holds none — a
-write key's re-capture, a text move, board-sync's adoption — still has the
-window (092 had it one level wide; SMD-3046). No signature
+staying. Since 104 the lapse locks its own tree, so a link moved by any
+writer under any taking is waited for or read again — but for one named
+40P01, a pointer write whose target chain reaches a row the taking holds,
+overlapping it, and a transaction of several calls crossing its locks (092
+had the window one level wide; SMD-3046). No signature
 changes; the listings read the same. It refuses to apply without 092 or 094;
 092 or 094 re-applied puts its own body back and 097 after it the walk, so
 after an older tree's `--reapply` over a 097 brain run this tree's
@@ -1712,7 +1714,17 @@ the one kept is on `thoughts` by its oid. Needs nothing past 001; a re-apply
 is a no-op. test-schema [90] (the definition, the five refusals, another
 schema's index), test-store-sql [18] (the store's two page statements and
 the count read through it, each reading only its own rows' entries; the
-page's LIMIT).
+page's LIMIT). Preflight's `thought indexes` row warns while the index is
+INVALID or of another shape, and — once the ledger records 100 — missing: the
+file is not re-run, so a drop, a `--baseline` adoption or an unfinished
+`CONCURRENTLY` build would otherwise pass unsaid. It prints the statement
+that mends it (`--reapply` for an index whose migration's other objects are
+absent too), or — for an INVALID one — the pid of the index operation it
+waits behind; it reads 074's `thoughts_trust_rank_idx` and the other indexes on
+`thoughts` a read is planned around the same way (the fingerprint's unique
+index among them, with any text held twice to resolve first), and names an
+INVALID index left on `thoughts` under another name — a cancelled REINDEX's
+copy to drop, anyone's index to rebuild (SMD-3146, test-preflight [12]).
 
 Migration 101 counts the sleep scheduler's own cuts of a claimed thought
 apart from its stops (SMD-3060). 093's `stops` counted every hard stop that
@@ -1781,6 +1793,57 @@ the word, and relations off, coming back short of 102, going off as 102
 lands and coming back with it, a check and a run under a role without the
 structure group; `--status` and `--list relations`) and [41]
 (a distinct pair never posted to the board), test-upgrade [20au].
+
+Migration 104 has the lapse lock its own tree (SMD-3046). The lapse reads
+the tree above a taken row in one snapshot and then locks and clears what
+it found, so a link moved between the two was missed: one moved out still
+had the capture-only pointers above it cleared, one moved in onto the taken
+row missed its own (its writer's lapse read the row untaken). 099 closed
+that under an accept, which holds the review lock every pointer write
+waits on; any other taking — a write key's re-capture note, a text move,
+board-sync's adoption by an edit or a capture's merge, a page render — held
+none, and SMD-3045's Verify measured both races open. Writer-side locks
+were tried and dropped (a page render holds its row before it writes, so
+page writes deadlocked against a delete of the page, and a capture's merge
+was a taker missed); the locks are taken in the lapse trigger instead,
+which every taking passes through. `ob1_lapse_tree(row, onto)` is 097's
+walk, unchanged, also listing each link it went on through, and
+`ob1_lapse_walk` its clears (097's output, which the listing and the CLI
+read unchanged). The trigger locks the event's row; for a pointer onto a
+thought, that thought's chain FOR SHARE from its deepest row up before the
+walk, so a taking in flight below is waited for and then read taken; and,
+before any clear, each clear's links FOR SHARE from the taken row up, each
+where it still names the row below — a link moved since the walk leaves the
+clears above it — then that clear's own row. Every row the lapse waits on
+is waited on before any clear, bottom-up along each path: a clear takes
+068's node-state bucket locks, and a lapse that waited on a row holding one
+deadlocked against a re-point out of the tree; one that held a link and
+then waited on a cleared row below it or on another branch crossed a
+delete of that row and a transaction that edited a cleared row on another
+branch and then moved the link. One single-call cycle remains, named: a
+pointer write whose new target's chain reaches a row the taking holds (the
+taken row, or a cleared row it has locked), moving a row the taking will
+lock (a link of its tree, or a row it clears) — Postgres breaks it with
+40P01. It is not narrow: an overlap of
+such a write with a taking nearly always meets it (review pass 2: 395 of
+400 overlapping races), the pointer writer the usual victim, and nothing
+in the server retries it; the caller gets the error, and a retry succeeds.
+A transaction of several calls that holds a row of the tree and then locks
+a row the lapse holds, or the reverse, can deadlock against any taking and
+an accept (any fixed order leaves one order open; no shipped caller makes
+one). A lapse that clears takes one FOR SHARE per path link and one row
+lock per clear — against 097, about +10% over 200 rows and +12–35% over
+1,000, about a third of it the locks and the rest the tree's links, which
+the listing's read pays too; a pointer onto a thought locks its chain even
+when nothing lapses, usually one to three rows, while it holds the review
+lock. It refuses to apply without 097;
+097 re-applied puts back its own walk and the lockless trigger and 104
+after it the tree and the locks. test-schema [93] (the tree beside 097's
+walk, a link moved out made deterministic, the walk-on anchor),
+test-live [6k] (moved out, moved in in either order, the lock orders, a
+held cleared row edited or deleted under the lapse, a re-point out of the
+tree, the named residual, page writes racing a delete), test-upgrade
+[20av].
 
 ## What changed relative to the guide
 
@@ -3040,7 +3103,8 @@ word **distinct**: two near neighbours the judge called unrelated, kept apart
 (SMD-3117, the word SMD-3116 gave it). Its floor is its own probability (the
 token's, or under decide mode H2O's), not the relation words' mass, which a
 confident unrelated leaves near nothing; under decide mode only H2O's own top
-unrelated records one, not one taken after a proposal failed. Prompt 4 still
+unrelated records one, not one taken after a proposal failed or under the
+floor (SMD-3151). Prompt 4 still
 asks for "unrelated", so no pass key moved. A distinct is one more word on the
 pair's one standing edge — a relation replaces it, and it a relation. The run
 summary says how many of each action's writes were distinct (`1 added (1
@@ -3110,16 +3174,36 @@ naming the typed-decision tier's model (H2O-Lightning-4B, `jev/h2o`), the
 tier gives each pair's verdict, not the judge:
 - **The tier's question** is prompt 4's five verdicts as one choice, over
   prompt 4's own rendering of the pair.
-- **The writer.** Only when the tier's top verdict is outdates is the judge's
-  model asked, and only to write the proposal: which thought is current, the
-  words in it that show the other is not, and the other's words that no
-  longer hold. **The part rule** holds it: a part of some work finishing does
-  not outdate the whole.
+- **The writer.** Only when the tier's top verdict is outdates, at the pass's
+  `--min-confidence` floor, is the judge's model asked, and only to write the
+  proposal: which thought is current, the words in it that show the other is
+  not, and the other's words that no longer hold. **The part rule** holds it:
+  a part of some work finishing does not outdate the whole. Under the floor a
+  proposal could not be recorded, so the writer is not asked (SMD-3151): the
+  pair takes the relation the tier's distribution gives at the floor, as a
+  quote that fails does, else its edge is closed. The pass counts it under
+  confidence and as a proposing verdict (its verdicts line counts the
+  relation word it takes, as for a failed quote), settles a stale proposal
+  on it as an outdates under the floor, and a relation it writes carries the
+  floor in its note. The run's summary counts the writer's calls by what came
+  back.
 - **Both quotes must check out** in the side each names and not in the other,
-  or the pair stays at the tier's best verdict that proposes nothing.
-- **Version 1 is the pass's** (`@p4d1`), SMD-3114's writer, two-sided with the
-  part rule. Version 2 was measured on the canary's proposals and shelved
-  (2026-10-18), having missed its bar twice. It added:
+  or the pair stays at the tier's best verdict that proposes nothing. They are
+  read without their markdown (SMD-3151), in quote and text alike: asterisks,
+  backticks, brackets, escapes' backslashes, underscores at a word's edge and
+  a `#` or `>` run opening a word go (not `#433`, whose hashes need a space,
+  nor `>=`), an inline link keeps its text and loses its target, and struck text goes with its `~~`, read as withdrawn.
+- **Version 3 is the pass's** (`@p4d3`): version 1's writer, SMD-3114's,
+  two-sided with the part rule, its quotes read without markdown and asked
+  only at the floor (SMD-3151). The writer quotes the words it reads, and on
+  SMD-3116's writer test the check refused 11 of the 18 proposals it wrote on
+  settling pairs, 10 of the 12 missed quotes there over markup. Under version
+  1 a standing proposal under the floor recorded nothing and closed the pair's
+  relation, and every relation the canary held for a pair whose quotes had
+  failed sat under it (all 67), so reading more quotes without the floor's
+  gate would have closed about 50 of them, those whose quotes now check out,
+  for no proposal. Version 2 was measured on the canary's
+  proposals and shelved (2026-10-18), having missed its bar twice. It added:
   - the record rule: a record of past understanding (a done ticket, a session
     summary, a change record) is outdated only by a later thought that says
     something different about its subject, never by its work reported done;
@@ -3133,7 +3217,10 @@ tier gives each pair's verdict, not the judge:
   words.
 - **Gating:** both rows are gated for both endpoints before any request.
 - **The key** is `consolidate:<decider>+<writer>@p4d<version>`, so turning it
-  on starts a fresh pass.
+  on, or a new decide version, starts a fresh pass: the tier again for every
+  pooled thought's candidates, and the writer for each outdates at the floor
+  not yet proposed. The canary's `@p4d1` pass took about 6 hours of sleep, at
+  about 3.8 s a pair.
 - **Refused at start:** the run refuses without `OB1_JEV_BASE_URL`, or with
   `OB1_JEV_MODEL` naming another model.
 - **Probes:** a follower probes the tier's `/info` after the writer's endpoint,
@@ -3141,7 +3228,9 @@ tier gives each pair's verdict, not the judge:
   is waited out.
 - **Lineage:** each proposal and relation names the writer, the decider,
   `decide_version` and decide mode's prompt hash, and its recipe carries what
-  the tier and the writer said (`judged.decide`).
+  the tier and the writer said (`judged.decide`): since version 3 both of the
+  writer's quotes, so a proposal can be checked again under another quote
+  rule, and the floor when the writer was not asked.
 
 **Staleness**, the same pass's second output: `stale_entities(window)` names
 the entities nothing has mentioned within the window, quietest first, each
@@ -4893,9 +4982,9 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2948 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1439 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 871 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
+bun test-schema.ts                          # 2959 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1461 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 893 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 57 assertions: the shards SHARDS lists in test-live.ts, each its own job
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 237 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
