@@ -5998,7 +5998,7 @@ const routeRouter = (name: string, rule: string, priority: number, mw: string, s
 const routeErrors = (name: string, status: string) =>
   `    ${name}:\n      errors:\n        status: ["${status}"]\n        service: noop@internal\n        statusRewrites:\n          "${status}": 404\n`;
 const routeService = (name: string, url: string) => `    ${name}:\n      loadBalancer:\n        servers:\n          - url: "${url}"\n`;
-/** The 404 for every path under /canary or /working, in compose.yaml's table until SMD-2532 removes the legacy route (SMD-2874), and in compose.tiers.yaml's after its tier routers. */
+/** The 404 for every path under /canary or /working, in compose.tiers.yaml's table after its tier routers; compose.yaml's carried it from SMD-2874 until SMD-2532 removed the legacy route it kept those paths off. */
 const ROUTE_TIER_OFF = routeRouter("tier-off", "PathRegexp(`(?i)^/(canary|working)`)", 25, "not-served", "noop@internal");
 /** compose.tiers.yaml's canary and working routers, and the 404 for the rest of their prefixes: the three-brain stack's alone since SMD-2874 took them out of compose.yaml's (SMD-2878 decides that stack's future). */
 const ROUTE_TIER_PATHS = TIERS.filter((t) => t !== "stable").map((t) => routeRouter(t, `Path(\`/${t}/mcp\`) || PathPrefix(\`/${t}/mcp/\`)`, 30, "not-legacy, tier-absent", t)).join("")
@@ -6304,10 +6304,8 @@ const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("hooks-off", "Path(`/hooks`) || PathPrefix(`/hooks/`)", 35, "not-served", "noop@internal")
   + routeRouter("grafana-off", "Path(`/grafana`) || PathPrefix(`/grafana/`)", 35, "not-served", "noop@internal")
   + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "not-legacy", "server")
-  + ROUTE_TIER_OFF + routeHealth("server")
-  + routeRouter("legacy", "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))", 1, "legacy-window", "server")
+  + routeHealth("server")
   + "  middlewares:\n"
-  + "    legacy-window:\n      headers:\n        customRequestHeaders:\n          X-OB1-Legacy-Route: \"1\"\n        customResponseHeaders:\n          Deprecation: \"@1790899200\"\n          Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#moving-a-client-to-mcp>; rel=\"deprecation\"; type=\"text/html\"'\n"
   + ROUTE_NOT_LEGACY + routeErrors("auth-absent", "502") + routeErrors("api-off", "418") + routeErrors("not-served", "418")
   + "  services:\n" + routeService("server", `http://${tierMeshName("mcp", "stable")}.:8000`)
   + routeService("auth", "http://auth.ob1.internal.:3000");
@@ -6699,8 +6697,8 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
 const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["a Go template on a comment line in compose.yaml's table, which Traefik renders as a catch-all router", "compose.yaml", "    routers:\n      auth:\n", "    routers:\n      # {{ \"\\n    all:\\n      rule: \\\"PathPrefix(`/`)\\\"\\n      priority: 100\\n      service: canary\" }}\n      auth:\n"],
   ["a catch-all router on a line led by a no-break space in compose.yaml's table, a key to YAML and a comment to a reader", "compose.yaml", "    routers:\n      auth:\n", "    routers:\n      \u00a0#all: {rule: \"PathPrefix(`/`)\", priority: 100, entryPoints: [web], service: canary}\n      auth:\n"],
-  ["a comment line in compose.yaml's table", "compose.yaml", "    middlewares:\n      legacy-window:\n", "    middlewares:\n      # a note\n      legacy-window:\n"],
-  ["the legacy router over /mcp", "compose.yaml", "        priority: 1\n", "        priority: 50\n"],
+  ["a comment line in compose.yaml's table", "compose.yaml", "      auth-absent:\n        errors:\n", "      # a note\n      auth-absent:\n        errors:\n"],
+  ["a catch-all router back under every unrouted path, as the legacy route was (SMD-2532)", "compose.yaml", "      health:\n        rule:", "      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [not-legacy]\n        service: server\n      health:\n        rule:"],
   ["Grafana's anonymous access on in the observability collector", "compose.yaml", "      GF_AUTH_ANONYMOUS_ENABLED: \"false\"\n", "      GF_AUTH_ANONYMOUS_ENABLED: \"true\"\n"],
   ["the proxy's label its own table", "compose.yaml", "      ob1.proxy-routes: *proxy-routes\n", "      ob1.proxy-routes: \"http: {}\"\n"],
   ["the mounted config its own table", "compose.yaml", "    content: *proxy-routes\n", "    content: \"http: {}\"\n"],
