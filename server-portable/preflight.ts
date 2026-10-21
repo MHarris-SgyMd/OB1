@@ -24,7 +24,7 @@
  * Exit codes: 0 all good, 1 something is wrong, 2 could not run the checks.
  */
 
-import { createStore, databaseUrl, DEFAULT_STORE, DIRECT_CHECK_SKIP_OVER_POSTGREST, maskUrl, missingDatabaseUrl, postgrestOnBunNotice, postgrestOverPostgresUrl, storeKind, type StoreEnv } from "./store.ts";
+import { createStore, databaseUrl, DEFAULT_STORE, maskUrl, missingDatabaseUrl, POSTGREST_RETIRED, storeKind, type StoreEnv } from "./store.ts";
 import { parseKeyRecords } from "./auth.ts";
 import { DEFAULT_MAX_TOKENS } from "./chunk.ts";
 import { resolveEmbedConfig, resolveProviderEndpoints, shownBase, stringOr, type ProviderEndpoint } from "./embed.ts";
@@ -224,16 +224,10 @@ function isLocalEndpoint(url: string): boolean {
 }
 const localEmbeddings = isLocalEndpoint(embEndpoint.base);
 const localChat = isLocalEndpoint(chatEndpoint.base);
-/**
- * Migration 014's exposure and remedy, once, for both store paths. The
- * PostgREST and SQL checks below used to each carry their own copy; the next
- * edit to either — say, when search_thoughts gains a filter input — would have
- * landed in one and left the two stores contradicting each other.
- */
+/** Migration 014's exposure and remedy, once for the checks below. */
 const EXPOSURE =
-  "a filtered match_thoughts call — direct SQL, a PostgREST RPC, or a community integration's metadata filter; the server's own search_thoughts sends no filter — silently returns fewer rows than match";
+  "a filtered match_thoughts call — direct SQL or a community integration's metadata filter; the server's own search_thoughts sends no filter — silently returns fewer rows than match";
 const APPLY_014 = "Apply the migrations through db/migrations/014_filtered_match_thoughts.sql.";
-const CATALOG_HINT = "run once as the SQL store (OB1_STORE unset, DATABASE_URL set) against the same database to read the catalog";
 
 // ── The pass rows' leases (SMD-2423) ────────────────────────────────────────
 /**
@@ -264,8 +258,11 @@ const runningWords = (l: Leases, c: PassCounts) =>
 /** A pass whose only claimed rows' leases expired: its worker died holding them. */
 const diedWords = (l: Leases) => `a worker died holding ${l.expired} of the claim(s) in flight, their leases expired`;
 const reclaim = (key: string) => `The next pass reclaims the expired claims (a row on its third expiry is marked failed); the release_stale_leases tool (work_type ${key}) returns them now. `;
-/** The sleep scheduler's passes waiting at their start for the provider, as its `sleep` and `consolidate pass` rows both say them (SMD-2752). */
-const providerWaitWords = (passes: readonly string[]) => `${passes.join(" and ")} waiting for the provider at ${passes.length > 1 ? "their" : "its"} start`;
+/** The sleep scheduler's passes waiting at their start for the provider (SMD-2752), or mid-pass for one that stopped answering (SMD-2905), as its `sleep` and `consolidate pass` rows both say them. */
+const providerWaitWords = (passes: readonly string[], midPass = false) => `${passes.join(" and ")} waiting for the provider ${midPass ? "mid-pass" : `at ${passes.length > 1 ? "their" : "its"} start`}`;
+/** Both waits a row can carry, the start's first: what a reader acts on (SMD-2905). */
+const allWaitWords = (start: readonly string[] | null, midPass: readonly string[] | null) =>
+  [start?.length ? providerWaitWords(start) : null, midPass?.length ? providerWaitWords(midPass, true) : null].filter((w) => w !== null).join(", and ");
 /**
  * A running pass's failed rows: a worker never retries them on its own (a
  * follower's --retry-failed runs once, before it follows), so a running row
@@ -304,7 +301,7 @@ const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "work claims", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
-  "candidate scan", "walk index", "chunk context", "trigram index", "embedding contract", "vector models",
+  "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep",
 ];
 /**
@@ -320,19 +317,73 @@ const DIRECT_CHECKS = [
  */
 const APPLY_020 = "Apply db/migrations/020_match_thoughts_recency.sql, then 027_search_thoughts_relative_floor.sql, 074_min_trust.sql, 075_min_trust_hybrid.sql and 077_references_settled.sql (075 and 074 the last definers of search_thoughts_hybrid and match_thoughts, 077 of search_thoughts_current's 8-argument body, 027's body the hybrid's).";
 const APPLY_074 = "Apply db/migrations/074_min_trust.sql.";
+/**
+ * The indexes on thoughts a read is planned around, by the migration that
+ * builds each (SMD-3146): the definition pg_get_indexdef prints after the
+ * index's name and table (UNIQUE kept: a unique index refuses writes another
+ * takes, and the fingerprint's refuses a second row of one text), the
+ * statement's tail that builds it, what reads slower without it, and — for a
+ * migration that brings more than the index — the object of its schema the
+ * reads are, so a brain whose ledger records the migration over a schema
+ * without it (--baseline) is sent to the re-apply, never handed a CREATE that
+ * names a column or function that is not there. The HNSW pair has the walk
+ * index row and the trigram index its own; ob1_fp_backfill_idx serves only
+ * 023's backfill.
+ */
+const THOUGHT_INDEXES: { name: string; migration: string; body: string; build: string; without: string; unique?: true; needs?: "fingerprint" | "derived_from" | "supersedes" | "ticket_head" | "trust_rank" }[] = [
+  { name: "thoughts_created_at_idx", migration: "001", body: "USING btree (created_at DESC)", build: "(created_at DESC)", without: "list_thoughts' newest-first page can read and sort every thought" },
+  { name: "thoughts_metadata_idx", migration: "001", body: "USING gin (metadata)", build: "USING gin (metadata)", without: "list_thoughts' filters and match_thoughts' narrow-filter branch (014) can scan every thought" },
+  { name: "idx_thoughts_fingerprint", migration: "003", body: "UNIQUE USING btree (content_fingerprint) WHERE (content_fingerprint IS NOT NULL)", build: "(content_fingerprint) WHERE content_fingerprint IS NOT NULL", unique: true, without: "each capture's lookup of its own text scans every thought", needs: "fingerprint" },
+  { name: "idx_thoughts_derived_from", migration: "025", body: "USING gin (derived_from)", build: "USING gin (derived_from)", without: "find_derivatives scans every thought", needs: "derived_from" },
+  { name: "idx_thoughts_supersedes", migration: "025", body: "USING btree (supersedes) WHERE (supersedes IS NOT NULL)", build: "(supersedes) WHERE supersedes IS NOT NULL", without: "every search's superseded-by label and the node projection's triggers scan every thought", needs: "supersedes" },
+  { name: "thoughts_issue_key_idx", migration: "068", body: "USING btree (((md5((metadata ->> 'issue'::text)))::uuid)) WHERE (metadata ? 'issue'::text)", build: "((md5(metadata->>'issue')::uuid)) WHERE metadata ? 'issue'", without: "ticket_status_inputs (each search whose hits name a ticket) and the node projection's triggers (each write of a ticket's row) read every ticket's rows, not the one ticket's", needs: "ticket_head" },
+  { name: "thoughts_trust_rank_idx", migration: "074", body: "USING btree (ob1_trust_rank((metadata ->> 'trust'::text)))", build: "(ob1_trust_rank(metadata->>'trust'))", without: "match_thoughts' min_trust can scan every thought for its rank", needs: "trust_rank" },
+  { name: "thoughts_vectorless_idx", migration: "100", body: "USING btree (id) WHERE (embedding IS NULL)", build: "(id) WHERE embedding IS NULL", without: "the vector mender's page (every tick, on each server) and brain_info's vectorless count can scan every thought" },
+];
+/** What each `needs` names, in a remedy. */
+const NEEDS_WHAT = { fingerprint: "thoughts.content_fingerprint", derived_from: "thoughts.derived_from", supersedes: "thoughts.supersedes", ticket_head: "ob1_ticket_head", trust_rank: "ob1_trust_rank(text)" } as const;
+/** Indexes on thoughts another row judges: the walk index row's two, the trigram index row's one. */
+const OTHER_ROWS_INDEXES = ["thoughts_embedding_idx", "thoughts_embedding_halfvec_idx", "idx_thoughts_content_trgm"];
+/** An index definition after its name and table — `UNIQUE ` kept in front; schema-qualified names (an off-path public) read as bare. */
+const indexBody = (def: string): string => def.replace(/^CREATE (UNIQUE )?INDEX \S+ ON \S+ /, "$1").replace(/\bpublic\./g, "");
+/**
+ * The sessions reindexing, altering or dropping each relation in this
+ * database: a lock on it only those take (SHARE UPDATE EXCLUSIVE or ACCESS
+ * EXCLUSIVE on an index; a reader takes ACCESS SHARE, a writer ROW
+ * EXCLUSIVE) — each with the pids it waits on. Read once, joined by oid.
+ * `table_runs`: the sessions running an index build or reindex while they
+ * hold thoughts (a progress row whose pid holds or awaits SHARE UPDATE
+ * EXCLUSIVE — a CONCURRENTLY one's — or SHARE — a plain CREATE INDEX's — on
+ * the table; autovacuum's has no such row), which a REINDEX of any index on
+ * thoughts would queue behind. A fresh CREATE INDEX CONCURRENTLY locks the
+ * table, not its index, and the progress view shows a role without
+ * pg_read_all_stats another backend's pid but not its target, so this is how
+ * every role sees a build. A VACUUM or ANALYZE has no progress row here: a
+ * REINDEX queues behind one unsaid. Catalog lookups by name only: the trigram index row
+ * reads this too, and to_regclass('public.…') raises without USAGE on public.
+ */
+const BUSY_CTE = `WITH here AS (SELECT oid FROM pg_database WHERE datname = current_database()),
+  thoughts_rel AS (SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = 'thoughts'),
+  running AS (
+    SELECT relation AS rel, pid FROM pg_locks WHERE database = (SELECT oid FROM here) AND relation IS NOT NULL
+       AND mode IN ('ShareUpdateExclusiveLock', 'AccessExclusiveLock') AND pid <> pg_backend_pid()),
+  busy AS (SELECT rel, json_agg(json_build_object('pid', pid, 'by', pg_blocking_pids(pid)) ORDER BY pid) AS runs FROM running GROUP BY rel),
+  table_runs AS (SELECT json_agg(json_build_object('pid', p.pid, 'by', pg_blocking_pids(p.pid)) ORDER BY p.pid) AS runs
+                   FROM pg_stat_progress_create_index p
+                  WHERE p.datid = (SELECT oid FROM here)
+                    AND EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid = p.pid AND l.relation = (SELECT oid FROM thoughts_rel) AND l.mode IN ('ShareUpdateExclusiveLock', 'ShareLock')))`;
+/**
+ * An INVALID index on thoughts with no operation of its own is held by
+ * table_runs (a REINDEX of it would queue behind them): `runs` takes those,
+ * and `on_table` says so — never for a valid index, or one on another table.
+ */
+const RUNS_COLUMNS = `COALESCE(b.runs, CASE WHEN i.indrelid = (SELECT oid FROM thoughts_rel) AND NOT i.indisvalid THEN (SELECT runs FROM table_runs) END) AS runs,
+       b.runs IS NULL AND i.indrelid = (SELECT oid FROM thoughts_rel) AND NOT i.indisvalid AND (SELECT runs FROM table_runs) IS NOT NULL AS on_table`;
+/** The duplicate fingerprints' remedy: the tool that lists them, and what to do. */
+const RESOLVE_TWICE = "`cd db && bun reembed.ts --url … --status` lists up to ten groups a run, by id; keep one row of each and delete_thought the rest (its text stays in the audit row)";
 // 075 also re-creates search_thoughts_current's 8-argument form; 077 last
 // defines its body (SMD-2271), so a hand apply of 075 is followed by 077's.
 const APPLY_075 = "Apply db/migrations/075_min_trust_hybrid.sql, then 077_references_settled.sql (077 last defines search_thoughts_current's 8-argument body).";
-/**
- * PostgREST answers a call it cannot resolve with PGRST202 both when the
- * function is missing and while its schema cache predates the migration that
- * added it — so a remedy that says only "apply" would send an operator who
- * has just applied it back to the migrator (first review pass of 021).
- */
-const RELOAD_HINT = "If the ledger already records it, PostgREST may not have reloaded its schema cache: NOTIFY pgrst, 'reload schema';";
-const APPLY_020_POSTGREST = `Apply the migrations through db/migrations/077_references_settled.sql against the project's direct connection (server-portable/README.md §4) — 020 gives both functions the forms the server sends; 075 and 074 last define search_thoughts_hybrid and match_thoughts, 077 search_thoughts_current's 8-argument body, and 042 delete_thought's three-argument form, which the next start checks too. ${RELOAD_HINT}`;
-/** An id no row has: the probes below call a function with it and read the NOT_FOUND it answers, writing nothing. */
-const NOBODY = "00000000-0000-4000-8000-000000000000";
 const APPLY_021 = "Apply db/migrations/021_embedding_model_per_row.sql.";
 const APPLY_042 = "Apply db/migrations/042_thought_citations.sql.";
 /**
@@ -388,7 +439,6 @@ const keyRuleHolds = (trigSrc: string, appendSrc: string): boolean =>
   /ob1_append_thought_event\(/.test(trigSrc) ? /ob1:audit-event-from-the-key/.test(appendSrc) : /ob1:audit-event-from-the-key/.test(trigSrc);
 /** The most capture rows without content the `audit events` census derives one by one; above it the line says "at least" and the pass is the remedy (SMD-2115). */
 const PAYLOAD_CENSUS_BOUND = 2000;
-const APPLY_042_POSTGREST = `Apply the migrations through db/migrations/042_thought_citations.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
 /**
  * Where the ledger already records the migration a check finds absent — a
  * brain adopted with --baseline whose schema is the guide's — "apply it" is a
@@ -396,24 +446,19 @@ const APPLY_042_POSTGREST = `Apply the migrations through db/migrations/042_thou
  * (SMD-1193); the 014, 019 and 023 remedies read the ledger the same way.
  */
 const REAPPLY = `The ledger records that migration but the schema installed is older — adopted with --baseline, or a body put there or removed from outside the migrations (an earlier migration re-applied by hand, a vendored schema's CREATE OR REPLACE or DROP; SMD-1250): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.`;
-const APPLY_032_POSTGREST = `Apply the migrations through db/migrations/032_update_thought_provenance.sql against the project's direct connection (server-portable/README.md §4). ${RELOAD_HINT}`;
-/** PostgREST's wording for a function it cannot resolve — missing, or not at the argument shape sent. */
-const missing = (msg: string) => /could not find the function|does not exist/i.test(msg);
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
-// The SQL store is the default (change 97, SMD-1797); PostgREST is kept for
-// Cloudflare Workers, where the SQL store's driver does not run, and is said to
-// be retired wherever it does — this process runs on Bun, so a PostgREST
-// selection here is that case. A warning, not a failure: the deployment works.
-const retired = postgrestOnBunNotice(store);
-if (store !== "postgrest" && store !== "sql") {
+// The SQL store is the only one (change 97 made it the default, SMD-1797;
+// SMD-3152 retired the PostgREST store and its Workers target). A PostgREST
+// selection is refused by name, as createStore refuses it.
+if (store === "postgrest") {
+  add("store selection", "fail", "OB1_STORE=postgrest — the PostgREST store, retired", POSTGREST_RETIRED);
+} else if (store !== "sql") {
   add("store selection", "fail", `OB1_STORE="${store}" is not a known store`,
-      `Set OB1_STORE to "${DEFAULT_STORE}" (the default — leave it unset) or "postgrest" (Cloudflare Workers only).`);
-} else if (retired) {
-  add("store selection", "warn", "OB1_STORE=postgrest — the PostgREST store, kept for Cloudflare Workers", retired);
+      `Unset OB1_STORE: "${DEFAULT_STORE}" is the only store.`);
 } else {
-  add("store selection", "ok", env.OB1_STORE === undefined ? `OB1_STORE unset — ${DEFAULT_STORE}, the default` : `OB1_STORE=${store}`);
+  add("store selection", "ok", env.OB1_STORE === undefined ? `OB1_STORE unset — ${DEFAULT_STORE}, the only store` : `OB1_STORE=${store}`);
 }
 
 // ── Model provider ──────────────────────────────────────────────────────────
@@ -963,14 +1008,7 @@ if (env.MCP_ACCESS_KEY && env.MCP_ACCESS_KEY.length < 32) {
 {
   const problem = pluginProblem(env.OB1_PLUGINS);
   const names = pluginNames(env.OB1_PLUGINS);
-  // A plugin with tables reaches them through the SQL store alone: on the
-  // PostgREST store its operations would fail at their first call, and the
-  // plugin tables row below runs only on the SQL path (review pass 1).
-  const tabled = names.filter((n) => pluginMigrationFiles(n).length > 0);
   if (problem) add("plugins", "fail", problem, "Name plugins from plugins/registry.ts in OB1_PLUGINS, comma-separated, or unset it");
-  else if (store === "postgrest" && tabled.length)
-    add("plugins", "fail", `${tabled.join(", ")} keep${tabled.length === 1 ? "s" : ""} tables, which need the SQL store; this server runs OB1_STORE=postgrest`,
-        "Run the SQL store (unset OB1_STORE), or leave the plugin out of OB1_PLUGINS");
   else if (names.length) add("plugins", "ok", `${names.join(", ")} — enabled`);
   // The webhooks (SMD-2310): OB1_HOOKS names enabled plugins with a webhook,
   // OB1_HOOK_SECRETS is well formed — the server does not start otherwise —
@@ -1046,29 +1084,15 @@ if (store === "sql") {
         maskUrl(conn.url) + (conn.from === "SUPABASE_URL" ? " (from SUPABASE_URL, which holds a postgres:// URL; DATABASE_URL is unset)" : ""));
   }
   // The "unused" warns only once the connection string is in hand: with no
-  // DATABASE_URL the fail line above may have just named OB1_STORE=postgrest
-  // as a way out, and a warn telling the operator to remove SUPABASE_URL two
-  // lines later would contradict it (first review pass).
+  // DATABASE_URL the fail line above is the one to act on (first review pass).
   if (conn && env.SUPABASE_URL && conn.from !== "SUPABASE_URL") {
     add("SUPABASE_URL", "warn", "set but unused with the SQL store",
-        "Remove SUPABASE_URL to avoid confusion about which backend is live.");
+        "Remove SUPABASE_URL: the server reads it only as the connection string, and only while DATABASE_URL is unset.");
   }
   if (conn && env.SUPABASE_SERVICE_ROLE_KEY) {
     add("SUPABASE_SERVICE_ROLE_KEY", "warn", "set but unused with the SQL store",
-        "Remove SUPABASE_SERVICE_ROLE_KEY to avoid confusion about which backend is live.");
+        "Remove SUPABASE_SERVICE_ROLE_KEY: it was the retired PostgREST store's (SMD-3152).");
   }
-} else {
-  // A postgres:// URL under the PostgREST selection is the one-box operator's
-  // slip (an old OB1_STORE=postgrest kept beside a shim-migrated neighbour's
-  // SUPABASE_URL): refused here by name, and never printed raw — it carries a
-  // password, and the first version of this branch echoed it (first review pass).
-  const mismatch = postgrestOverPostgresUrl(env);
-  const unset = (k: string) => add(k, "fail", `not set, but OB1_STORE=${store}`, `Set ${k}, or use the SQL store (OB1_STORE unset) with DATABASE_URL.`);
-  if (!env.SUPABASE_URL) unset("SUPABASE_URL");
-  else if (mismatch) add("SUPABASE_URL", "fail", `holds a postgres:// connection string (${maskUrl(env.SUPABASE_URL)}), which the PostgREST store cannot dial`, mismatch);
-  else add("SUPABASE_URL", "ok", maskUrl(env.SUPABASE_URL));
-  if (!env.SUPABASE_SERVICE_ROLE_KEY) unset("SUPABASE_SERVICE_ROLE_KEY");
-  else add("SUPABASE_SERVICE_ROLE_KEY", "ok", `set (${env.SUPABASE_SERVICE_ROLE_KEY.length} chars)`);
 }
 
 // The generated version module against the tree it sits in (SMD-2041 review
@@ -1107,37 +1131,16 @@ if (configFailed) {
   }
 
   if (built) {
-    /**
-     * Every schema check below is gated on the SQL store, because they read
-     * pg_proc and pg_attribute over a direct connection that the PostgREST
-     * path does not have. That has been true since migration 004's check and is
-     * a limitation of the deployment shape rather than of any one migration.
-     *
-     * It is called out here only for chunk context, because that is the setting
-     * whose unchecked state is silent in a way the others are not: with the flag
-     * on against a database still at 012, the RPC accepts the extra key and
-     * ignores it, so blurbs reach the vector and nothing records that they did.
-     * Every other gated check fails loudly at first use instead.
-     */
-    const { CHUNK_CONTEXT: wantCtxAnywhere } = await import("../db/config.mjs");
-    if (built.kind !== "sql" && wantCtxAnywhere) {
-      add("chunk context", "warn",
-          "OB1_CHUNK_CONTEXT is on, but the PostgREST store cannot be checked against the schema from here — if migration 013 is not applied, every blurb is embedded and none is recorded",
-          `Confirm db/migrations/013_chunk_context.sql is applied, or ${CATALOG_HINT}.`);
-    }
     // countThoughts is the cheapest call that proves the connection works, the
     // table exists and the credentials are accepted.
-    let rowCount: number | null = null;
     try {
       const n = await built.countThoughts();
-      rowCount = n;
       add("schema", "ok", `thoughts table reachable, ${n} row(s)`);
     } catch (e) {
       const msg = (e as Error).message;
       // The migrator takes the connection string by name; say the variable
-      // that holds it here (the alias included), and for PostgREST — which has
-      // no connection string of its own — say what to hand it instead.
-      const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string — Supabase's direct connection, not the pooler>";
+      // that holds it here (the alias included).
+      const urlArg = conn ? `$${conn.from}` : "<the brain's postgres:// connection string>";
       /** GRANT CONNECT for the connection string's database and user, each as the server reads it (no case folding); placeholders where the URL names none. */
       const connectGrant = (url: string) => {
         let db = "<the database>", user = "<the role>";
@@ -1175,13 +1178,13 @@ if (configFailed) {
       //   reaches, the row-level security policies a SELECT by this role meets.
       // The probe's query needs no privilege, so a 42501 on it is a refusal
       // at connection (no CONNECT, a connection-string setting the role may
-      // not make, a login trigger), which the count met too. Over PostgREST
-      // there is no catalog to ask; a probe that fails otherwise (no
-      // connection slot) leaves the SQLSTATE's own remedy below.
+      // not make, a login trigger), which the count met too. A probe that
+      // fails otherwise (no connection slot) leaves the SQLSTATE's own remedy
+      // below.
       const errno = String((e as { errno?: unknown }).errno ?? "");
       let probeErrno = "";
       let found: { detail: string; remedy: string } | null = null;
-      if (built.kind === "sql" && conn && (errno === "42P01" || errno === "42501")) {
+      if (conn && (errno === "42P01" || errno === "42501")) {
         try {
           const { SQL } = await import("bun");
           const probe = new SQL({ url: conn.url, max: 1 });
@@ -1321,268 +1324,8 @@ if (configFailed) {
             : "Check credentials and network reachability to the database.");
     }
 
-    /**
-     * Migration 014 through PostgREST, where the catalog cannot be read. The
-     * body can still be told apart from 007's: 007 evaluated a NULL filter as
-     * `NULL = '{}' OR metadata @> NULL`, which excluded every row, and 014
-     * treats NULL as unfiltered. So one RPC with `filter := null` against a
-     * non-empty table returns a row under 014 and nothing under 007. That
-     * proves the body, not the SET clauses — those need the SQL store — and
-     * the message says so. With no rows there is nothing to probe with, and
-     * that is reported as a skip rather than as a permanent warning nobody can
-     * clear (which is what the first version of this check was).
-     *
-     * The gap it guards is narrow: the server's own search_thoughts sends no
-     * filter, so 007's recall loss reached only direct SQL, PostgREST RPC
-     * callers and community code with a metadata filter of their own.
-     */
-    if (built.kind !== "sql") {
-      if (rowCount === null) {
-        add("filtered search", "skip", "not probed — the schema check above failed first");
-      } else if (rowCount === 0) {
-        add("filtered search", "skip", `no rows to probe with; ${CATALOG_HINT}`);
-      } else {
-        try {
-          const probe = new Array(embDim).fill(0);
-          probe[0] = 1;
-          // Zero rows for a NULL filter proves 007's body only if the same
-          // call WITH an empty filter returns something: a table whose rows all
-          // lack an embedding (the 2-arg capture fallback leaves them that way)
-          // returns nothing under either body, and must not be read as "014
-          // missing" — that warning could never be cleared.
-          const anyEmbedded = await built.matchThoughts({ embedding: probe, threshold: -1, limit: 1, filter: {} });
-          const rows = anyEmbedded.length
-            ? await built.matchThoughts({
-                embedding: probe,
-                threshold: -1,
-                limit: 1,
-                filter: null as unknown as Record<string, unknown>,
-              })
-            : [];
-          if (!anyEmbedded.length) {
-            add("filtered search", "skip", `${rowCount} row(s) but none with an embedding to probe with; ${CATALOG_HINT}`);
-          } else if (rows.length >= 1) {
-            add("filtered search", "ok",
-                `match_thoughts treats a NULL filter as unfiltered, which only 014's body does (its SET clauses cannot be read over PostgREST — ${CATALOG_HINT})`);
-          } else {
-            // Over PostgREST the body cannot be read, and a NULL-filter miss has
-            // two causes the SQL path tells apart by the body's sentinel: 014
-            // not applied, or a later redefinition that kept the in-scan filter
-            // and changed NULL handling. Re-running 014 over the second would
-            // revert it, so the remedy names both (tenth review pass).
-            add("filtered search", "warn",
-                `match_thoughts returned nothing for a NULL filter, which every body before 014 does — either the migrations are not applied through 014 (then ${EXPOSURE}) or a later migration redefined match_thoughts and changed how a NULL filter is treated; over PostgREST the two cannot be told apart (${CATALOG_HINT})`,
-                `If the ledger stops before 014 — including a Supabase project built from the guide, which has never run the fork's migrator — apply db/migrations through 014 against the project's direct connection (server-portable/README.md §4). If a later migration redefined match_thoughts, verify it kept the filter inside the scan rather than re-running 014 over it.`);
-          }
-        } catch (e) {
-          // A failed probe is not evidence either way — a width mismatch or a
-          // permission error says nothing about the body — so it is a skip. A
-          // function PostgREST cannot resolve at the shape the store sends is
-          // the `search signatures` check's finding, and it says so.
-          const msg = (e as Error).message;
-          add("filtered search", "skip", missing(msg)
-            ? `match_thoughts does not take the arguments the server sends over PostgREST — the search signatures check below says whether it is missing or predates migration 020`
-            : `could not probe match_thoughts over PostgREST (${msg}); ${CATALOG_HINT}`);
-        }
-      }
-    }
-
-    /**
-     * Migration 017 through PostgREST. `search` and `search_thoughts` call
-     * `search_thoughts_hybrid` unconditionally since SMD-958, so a Supabase
-     * project served over PostgREST whose migrations stop at 016 would pass
-     * every check here, advertise both tools, and fail every call to them. The
-     * catalog cannot be read over PostgREST, but the function can be
-     * called: an RPC with an empty query text and a unit vector returns rows or
-     * nothing under 017, and "Could not find the function" without it. The
-     * first version of this check lived only on the SQL branch (review pass).
-     */
-    if (built.kind !== "sql") {
-      if (rowCount === null) {
-        add("keyword search", "skip", "not probed — the schema check above failed first");
-        add("hybrid search", "skip", "not probed — the schema check above failed first");
-        add("search signatures", "skip", "not probed — the schema check above failed first");
-        add("edit signature", "skip", "not probed — the schema check above failed first");
-        add("delete signature", "skip", "not probed — the schema check above failed first");
-      } else {
-        // 012 first, because 017 calls it: a missing search_thoughts_keyword
-        // surfaces inside search_thoughts_hybrid with the same "does not
-        // exist" wording, and a check that only probed 017 would send the
-        // operator to re-apply the wrong migration (review pass).
-        let keywordOk = false;
-        try {
-          await built.keywordThoughts({ query: "ob1-preflight-probe-zylotrope", limit: 1, offset: 0, filter: {} });
-          keywordOk = true;
-          add("keyword search", "ok", "search_thoughts_keyword answers over PostgREST");
-        } catch (e) {
-          const msg = (e as Error).message;
-          if (missing(msg)) {
-            add("keyword search", "fail",
-                "search_thoughts_keyword is missing, but the tool that calls it is registered — every call to it, and every search through search_thoughts_hybrid, would fail",
-                "Apply db/migrations/012_search_thoughts_keyword.sql against the project's direct connection (server-portable/README.md §4). Then db/migrations/074_min_trust.sql, its last definer: 012's file alone re-creates the 4-argument form, without min_trust and with ROWS 1000 (SMD-1724).");
-          } else {
-            add("keyword search", "skip", `could not probe search_thoughts_keyword over PostgREST (${msg}); ${CATALOG_HINT}`);
-          }
-        }
-        try {
-          const probe = new Array(embDim).fill(0);
-          probe[0] = 1;
-          await built.hybridThoughts({ query: "", embedding: probe, threshold: -1, limit: 1, filter: {} });
-          add("hybrid search", "ok", "search_thoughts_hybrid answers over PostgREST");
-        } catch (e) {
-          const msg = (e as Error).message;
-          if (missing(msg) && (/search_thoughts_keyword/.test(msg) || !keywordOk)) {
-            add("hybrid search", "fail",
-                "search_thoughts_hybrid cannot run because search_thoughts_keyword is missing — every semantic search would fail",
-                "Apply db/migrations/012_search_thoughts_keyword.sql first; 017 is present or will run once it is.");
-          } else if (missing(msg)) {
-            // The probe sends 020's two extra arguments, so over PostgREST a
-            // function from before 020 reads exactly like a missing one.
-            add("hybrid search", "fail",
-                "search_thoughts_hybrid is missing, or is the form from before migration 020 (the server sends recency_weight and half_life_days, which only 020's takes) — either way search and search_thoughts, which call it, would fail on every call",
-                APPLY_020_POSTGREST);
-          } else {
-            add("hybrid search", "skip", `could not probe search_thoughts_hybrid over PostgREST (${msg}); ${CATALOG_HINT}`);
-          }
-        }
-        /**
-         * Migration 020's form, over PostgREST: the store's own call sends every
-         * argument by name, so a database whose only match_thoughts predates 020
-         * answers it with PGRST202 — reported as such rather than as a resolved
-         * function (second review pass of 020). What this cannot see is 020's
-         * OTHER failure state: a 4-argument match_thoughts re-created BESIDE
-         * 020's by a hand re-apply of 007/014/019, which resolves the store's
-         * six-argument call uniquely while every PostgREST caller that sends
-         * the four arguments the old form took (the community integrations, a
-         * dashboard) fails with PGRST203. Until change 97 this check probed
-         * that as such a caller would, through a supabase-js client of its
-         * own; preflight no longer carries one (the PostgREST store is kept for
-         * Workers, and this file runs on Bun), and the overload count is a
-         * pg_proc fact the SQL branch reads — so the detail says which half is
-         * proved and names the run that proves the rest.
-         */
-        try {
-          const probe = new Array(embDim).fill(0);
-          probe[0] = 1;
-          await built.matchThoughts({ embedding: probe, threshold: -1, limit: 1, filter: {} });
-          add("search signatures", "ok",
-              `match_thoughts takes 020's arguments over PostgREST; whether an earlier form sits beside it — which fails every 4-argument caller by name with PGRST203 — is read from pg_proc (${CATALOG_HINT})`);
-        } catch (e) {
-          const msg = (e as Error).message;
-          if (missing(msg)) {
-            add("search signatures", "fail",
-                "match_thoughts does not take recency_weight and half_life_days over PostgREST — it is missing or is the form from before migration 020 — and the server sends them on every search, so every search would fail",
-                APPLY_020_POSTGREST);
-          } else {
-            add("search signatures", "skip", `could not probe match_thoughts over PostgREST (${msg}); ${CATALOG_HINT}`);
-          }
-        }
-
-        /**
-         * Migration 032 gave update_thought a ninth parameter, the provenance
-         * envelope, by dropping the 8-argument form — as 021 gave it the
-         * eighth, the model beside the vector, by dropping the seventh — and
-         * the store sends all nine by name on every edit. Probed AS the store
-         * calls it (its own updateThought), with an id no row has:
-         * update_thought answers {ok:false, error:'NOT_FOUND'} from its
-         * row-lock read and writes nothing, so the probe is free. PGRST202 is a
-         * form from before 032 (or no function). Whether an earlier form —
-         * 018's or 021's re-applied by hand — sits beside 032's, which makes
-         * every call with fewer than nine arguments ambiguous for PostgREST, is
-         * the pg_proc read the SQL branch does; change 97 dropped the 7-argument
-         * probe this check sent through a client of its own (see search
-         * signatures above), so the detail names the run that reads it.
-         */
-        try {
-          const r = await built.updateThought({ id: NOBODY });
-          if (!r.ok && r.error === "NOT_FOUND") {
-            add("edit signature", "ok",
-                `update_thought takes 032's arguments over PostgREST; whether an earlier form sits beside it — which fails every caller by name with fewer than nine arguments — is read from pg_proc (${CATALOG_HINT})`);
-          } else {
-            add("edit signature", "skip", `update_thought answered a probe for an id no row has with ${JSON.stringify(r)} rather than NOT_FOUND; ${CATALOG_HINT}`);
-          }
-        } catch (e) {
-          const msg = (e as Error).message;
-          if (missing(msg)) {
-            add("edit signature", "fail",
-                "update_thought does not take p_provenance over PostgREST — it is missing or is a form from before migration 032 — and the server sends it on every edit, so every update_thought call would fail",
-                APPLY_032_POSTGREST);
-          } else {
-            add("edit signature", "skip", `could not probe update_thought over PostgREST (${msg}); ${CATALOG_HINT}`);
-          }
-        }
-        /**
-         * Migration 042 gave delete_thought a third parameter, p_detach, by
-         * dropping the two-argument form, and the store sends all three by
-         * name on every delete. Probed as the store calls it, with an id no
-         * row has: the function answers {ok:false, error:'NOT_FOUND'} and
-         * writes nothing. PGRST202 is a form from before 042 (or no
-         * function); then two named arguments, which only a two-argument form
-         * re-created beside 042's by a hand re-apply of 009 or 036 makes
-         * ambiguous — and that breaks every PostgREST caller by name from
-         * before this change (third review pass of 042). Probed AS the store
-         * calls it (its own deleteThought) since change 97, which dropped the
-         * supabase-js client preflight sent the two-argument call through: the
-         * overload half is the pg_proc read the SQL branch does, and the detail
-         * names the run that reads it (see search signatures above).
-         */
-        try {
-          const r = await built.deleteThought({ id: NOBODY });
-          if (!r.ok && r.error === "NOT_FOUND") {
-            add("delete signature", "ok",
-                `delete_thought takes 042's arguments over PostgREST; whether a two-argument form sits beside it — which fails every caller by name with two arguments — is read from pg_proc (${CATALOG_HINT})`);
-          } else {
-            add("delete signature", "skip", `delete_thought answered a probe for an id no row has with ${JSON.stringify(r)} rather than NOT_FOUND; ${CATALOG_HINT}`);
-          }
-        } catch (e) {
-          const msg = (e as Error).message;
-          if (missing(msg)) {
-            add("delete signature", "fail",
-                "delete_thought does not take p_detach over PostgREST — it is missing or is a form from before migration 042 — and the server sends it on every delete, so every delete_thought call would fail",
-                APPLY_042_POSTGREST);
-          } else if (/permission denied/i.test(msg)) {
-            // 042's guard reads and writes thought_facets as the caller on
-            // every delete, a zero-row one included — so the probe itself
-            // meets the missing privilege, and the evidence is in hand: not a
-            // skip (seventh review pass of 042). The direct path's `write
-            // privileges` says the same from the catalog.
-            add("delete signature", "fail",
-                `the connection's role lacks a privilege 042's citation guard needs on every delete (${msg}) — so every delete_thought call would fail`,
-                "GRANT SELECT, UPDATE ON thought_facets TO <the connector's role>; against the project's direct connection (db/README.md, Grants for a capturing role).");
-          } else {
-            add("delete signature", "skip", `could not probe delete_thought over PostgREST (${msg}); ${CATALOG_HINT}`);
-          }
-        }
-      }
-      // The 3-argument upsert_thought's body (022's sentinel) and the role's
-      // DELETE on thought_chunks are catalog facts; over PostgREST neither is
-      // reachable, and a check that prints nothing looks like one that passed.
-      add("atomic capture", "skip", `not checked over PostgREST — whether the 3-argument upsert_thought is 022's is read from the catalog; ${CATALOG_HINT}`);
-      add("write privileges", "skip", `not checked over PostgREST — the capture path's table privileges are read over a direct connection; ${CATALOG_HINT}`);
-      add("fingerprint backfill", "skip", `not checked over PostgREST — whether a thought without a fingerprint has one waiting is decided by hashing rows on the server; ${CATALOG_HINT}`);
-      // The query log (034) and whether upsert_thought answers `existed` (035,
-      // without which no cite row is logged, SMD-1719) are catalog facts too.
-      // A seventh review pass walked the hosted path and found this check
-      // printed nothing there — the one shape the comment above forbids.
-      add("query log", "skip", `not checked over PostgREST — whether query_log (034) is present, and whether upsert_thought answers \`existed\` (035), without which a write that cites a returned id logs no cite row (SMD-1719), are read from the catalog; ${CATALOG_HINT}`);
-      // The connection's isolation level is a direct-connection read whether or
-      // not the schema check answered — reported beside the other catalog facts,
-      // not inside the rows-present branch (moved at change 97's merge of change 95).
-      add("transaction isolation", "skip", `not checked over PostgREST — the connection's default isolation level is read over a direct connection; ${CATALOG_HINT}`);
-      // The rest of the direct-connection block — catalog reads with no
-      // PostgREST form at all — reported by name too, so this path prints
-      // every check the SQL path does. Before the first review pass of change
-      // 97 sixteen of them printed nothing here, the one shape the DIRECT_CHECKS
-      // comment forbids, while the README said they were skips.
-      for (const name of DIRECT_CHECKS) {
-        if (!results.some((r) => r.name === name)) add(name, "skip", `${DIRECT_CHECK_SKIP_OVER_POSTGREST}; ${CATALOG_HINT}`);
-      }
-    }
-
-    // The atomic capture path needs migration 004. Its absence is not fatal — the
-    // PostgREST store falls back — but the fallback is the failure mode migration
-    // 004 exists to remove, so say so.
-    if (built.kind === "sql" && conn) {
+    // Every schema check below reads the catalog over a direct connection.
+    if (conn) {
       try {
         const { SQL } = await import("bun");
         const sql = new SQL({ url: conn.url, max: 1 });
@@ -2921,9 +2664,7 @@ if (configFailed) {
          * thought_stats_summary() does not exist` while the other tools work —
          * the same shape the keyword and hybrid checks above convert to a startup
          * message. A fail, not a warn: the absence breaks the tool, it does not
-         * degrade it. (Only the SQL store calls it — the PostgREST store still
-         * walks pages — and this whole block is SQL-only, so the check is where
-         * it belongs.)
+         * degrade it.
          */
         const stats = await sql`
           SELECT p.prosrc AS src FROM pg_proc p
@@ -3138,7 +2879,7 @@ if (configFailed) {
         /**
          * Migration 020 changed both search functions' signatures — two
          * defaulted parameters, recency_weight and half_life_days — by DROPPING
-         * the earlier forms, and both stores send all the arguments. Two states
+         * the earlier forms, and the store sends all the arguments. Two states
          * break every search and neither shows in the presence checks above:
          *
          *   * the functions predate 020 (the ledger stops at 019, or a hand
@@ -3258,11 +2999,10 @@ if (configFailed) {
           // lineage envelope, by dropping the 10-argument form — 046's
           // mechanism, one form later. A 10-argument form ALONE is a brain at
           // 060, a 9-argument form alone a brain at 044 — and under THIS
-          // server both are the pre-032 case, not 046's warning: the SQL store
-          // sends eleven positional arguments and the PostgREST store names
-          // p_lineage, which only 061's form takes, so every edit fails there
-          // ("function does not exist" / PGRST202), as it did for p_provenance
-          // before 032. A FAIL naming 061, whose DROP chain reaches both (cold
+          // server both are the pre-032 case, not 046's warning: the store
+          // sends eleven positional arguments, which only 061's form takes, so
+          // every edit fails there ("function does not exist"), as it did for
+          // p_provenance before 032. A FAIL naming 061, whose DROP chain reaches both (cold
           // read, third review pass of SMD-1731: the arms said "every edit
           // resolves", true when the servers sent ten by name).
           const tenAlone = ut.length === 1 && Number(ut[0].nargs) === ARITY - 1;
@@ -3317,7 +3057,7 @@ if (configFailed) {
         /**
          * Migration 042 changed delete_thought the way 021 and 032 changed
          * update_thought: a defaulted third parameter (p_detach), the
-         * two-argument form dropped, both stores sending all three. The same
+         * two-argument form dropped, the store sending all three. The same
          * two states break every delete and neither shows in a presence
          * check: the function predates 042 (the call has no function to
          * resolve to — a server deployed ahead of the migration fails at the
@@ -3858,20 +3598,244 @@ if (configFailed) {
          * would be absurd.
          */
         const { TRGM_INDEX: wantTrgm } = await import("../db/config.mjs");
-        const trgmIdx = await sql`
-          SELECT count(*)::int AS c FROM pg_indexes
-          WHERE tablename = 'thoughts' AND indexname = 'idx_thoughts_content_trgm'`;
-        const haveTrgm = Number(trgmIdx[0].c) >= 1;
-        if (wantTrgm === haveTrgm) {
-          add("trigram index", "ok", haveTrgm ? "enabled and present" : "disabled (OB1_TRGM_INDEX=off)");
-        } else if (wantTrgm) {
-          add("trigram index", "warn",
-              "OB1_TRGM_INDEX is on but idx_thoughts_content_trgm does not exist — migration 011 already applied with it off, so the setting is doing nothing and search_thoughts_keyword sequentially scans",
-              "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_thoughts_content_trgm ON thoughts USING gin (content gin_trgm_ops);");
-        } else {
-          add("trigram index", "warn",
-              "idx_thoughts_content_trgm exists but OB1_TRGM_INDEX is off — every capture pays for an index this configuration says it does not want",
-              "DROP INDEX CONCURRENTLY IF EXISTS idx_thoughts_content_trgm;  (or set OB1_TRGM_INDEX=on)");
+        // Its validity too (SMD-3146): an INVALID index under the name — a
+        // CONCURRENTLY build or drop that did not finish — is present to a
+        // name lookup and ignored by the planner, and the CREATE … IF NOT
+        // EXISTS below keeps it. Read by name from the catalog, which needs
+        // no USAGE on public, in a boundary of its own: a raise here would
+        // take every later check with it.
+        try {
+          const trgmIdx = (await sql.unsafe(`${BUSY_CTE}
+            SELECT i.indisvalid AS valid, i.indisready AS ready, ${RUNS_COLUMNS}
+              FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+              LEFT JOIN busy b ON b.rel = c.oid
+             WHERE n.nspname = 'public' AND c.relname = 'idx_thoughts_content_trgm' AND i.indrelid = (SELECT oid FROM thoughts_rel)`)) as { valid: boolean; ready: boolean; runs: { pid: number; by: number[] }[] | null }[];
+          const haveTrgm = trgmIdx.length >= 1;
+          if (wantTrgm && haveTrgm && !trgmIdx[0].valid && trgmIdx[0].runs) {
+            const pids = trgmIdx[0].runs.map((r) => r.pid).join(", ");
+            add("trigram index", "warn",
+                `enabled, but idx_thoughts_content_trgm is INVALID while an index operation holding thoughts runs now (pid ${pids}), so search_thoughts_keyword sequentially scans meanwhile`,
+                `Wait for pid ${pids} to finish, then run preflight again.`);
+          } else if (wantTrgm && haveTrgm && !trgmIdx[0].valid) {
+            add("trigram index", "warn",
+                "enabled, but idx_thoughts_content_trgm is INVALID — a CONCURRENTLY build or drop that did not finish — which the planner ignores, so search_thoughts_keyword sequentially scans",
+                "REINDEX INDEX CONCURRENTLY idx_thoughts_content_trgm;  (CREATE … IF NOT EXISTS keeps an INVALID one)");
+          } else if (wantTrgm === haveTrgm) {
+            add("trigram index", "ok", haveTrgm ? "enabled and present" : "disabled (OB1_TRGM_INDEX=off)");
+          } else if (wantTrgm) {
+            add("trigram index", "warn",
+                "OB1_TRGM_INDEX is on but idx_thoughts_content_trgm does not exist — migration 011 already applied with it off, so the setting is doing nothing and search_thoughts_keyword sequentially scans",
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_thoughts_content_trgm ON thoughts USING gin (content gin_trgm_ops);");
+          } else {
+            add("trigram index", "warn",
+                trgmIdx[0].ready ? "idx_thoughts_content_trgm exists but OB1_TRGM_INDEX is off — every capture pays for an index this configuration says it does not want"
+                  : "idx_thoughts_content_trgm exists (INVALID, not kept up) but OB1_TRGM_INDEX is off — nothing reads it, and nothing will",
+                "DROP INDEX CONCURRENTLY IF EXISTS idx_thoughts_content_trgm;  (or set OB1_TRGM_INDEX=on)");
+          }
+        } catch (e) {
+          add("trigram index", "warn", `could not verify: ${(e as Error).message}`, "The catalog reads behind this check need SELECT on pg_index, pg_class, pg_locks and pg_stat_progress_create_index.");
+        }
+
+        /**
+         * The indexes on thoughts the reads are planned around (SMD-3146): an
+         * index the ledger records can still be gone — --baseline over a
+         * hand-built schema, a CONCURRENTLY build or drop that did not finish
+         * (INVALID, which the planner ignores and an IF NOT EXISTS re-run
+         * keeps), a drop or rename by hand — and then each read is slower,
+         * answers right, and nothing says so. Looked up by name in thoughts'
+         * schema, as 100 looks for its own. Whatever holds a name is judged;
+         * a name nothing holds is not looked for when the ledger does not
+         * record its migration (a plain run applies it — a hole too, which
+         * the ledger row, reading the highest number, does not show) or, with
+         * no ledger read, when its migration's schema is not here. An
+         * INVALID index with a build, reindex or drop of it running, or a
+         * session holding thoughts for one, is waited for, never REINDEXed
+         * into the queue behind it (a missing or misshapen one gets its
+         * statements, which queue behind any such session and then run); an
+         * INVALID index on thoughts under another name is a REINDEX's copy
+         * or a copy of one of these (dropped) or someone's index (rebuilt).
+         * A WARNING: the brain answers, only slower.
+         */
+        try {
+          const [{ present }] = (await sql`SELECT to_regclass('public.thoughts') IS NOT NULL AS present`) as { present: boolean }[];
+          if (!present) {
+            add("thought indexes", "skip", "not checked — public.thoughts is not there (the schema row says so)");
+          } else {
+            const [have] = (await sql`
+              SELECT 'content_fingerprint' = ANY (a.cols) AS fingerprint, 'derived_from' = ANY (a.cols) AS derived_from, 'supersedes' = ANY (a.cols) AS supersedes,
+                     to_regclass('public.ob1_ticket_head') IS NOT NULL AS ticket_head,
+                     to_regprocedure('public.ob1_trust_rank(text)') IS NOT NULL AS trust_rank
+                FROM (SELECT array_agg(attname::text) AS cols FROM pg_attribute WHERE attrelid = to_regclass('public.thoughts') AND attnum > 0 AND NOT attisdropped) a`) as Record<NonNullable<(typeof THOUGHT_INDEXES)[number]["needs"]>, boolean>[];
+            type Run = { pid: number; by: number[] };
+            // Constants only: the names below are this file's.
+            const named = (await sql.unsafe(`${BUSY_CTE}
+              SELECT c.relname AS name, c.relkind::text AS kind, i.indrelid = (SELECT oid FROM thoughts_rel) AS on_thoughts,
+                     i.indisvalid AS valid, i.indisready AS ready, pg_get_indexdef(c.oid) AS def, i.indrelid::regclass::text AS of_table, ${RUNS_COLUMNS}
+                FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_index i ON i.indexrelid = c.oid LEFT JOIN busy b ON b.rel = c.oid
+               WHERE n.nspname = 'public' AND c.relname IN (${THOUGHT_INDEXES.map((x) => `'${x.name}'`).join(", ")})`)) as { name: string; kind: string; on_thoughts: boolean | null; valid: boolean | null; ready: boolean | null; def: string | null; of_table: string | null; runs: Run[] | null; on_table: boolean | null }[];
+            // Every index on thoughts: one of a shape under another name (the
+            // reads take it, nothing need be built), and the INVALID ones.
+            const onThoughts = (await sql.unsafe(`${BUSY_CTE}
+              SELECT c.relname AS name, pg_get_indexdef(c.oid) AS def, i.indisvalid AS valid, ${RUNS_COLUMNS}
+                FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid LEFT JOIN busy b ON b.rel = c.oid
+               WHERE i.indrelid = (SELECT oid FROM thoughts_rel)`)) as { name: string; def: string; valid: boolean; runs: Run[] | null; on_table: boolean }[];
+            const ours = new Set([...THOUGHT_INDEXES.map((x) => x.name), ...OTHER_ROWS_INDEXES]);
+            const problems: string[] = [];
+            const waits: string[] = [];
+            const steps: string[] = [];
+            const older: string[] = [];
+            const running: string[] = [];
+            const judgedAfter: string[] = [];
+            const unrecorded: typeof THOUGHT_INDEXES = [];
+            const unledgered: typeof THOUGHT_INDEXES = [];
+            const waited = new Set<number>();
+            let checked = 0;
+            let resolveFirst = false;
+            let slower = false;
+            const pids = (runs: Run[]) => runs.map((r) => r.pid).join(", ");
+            // One wait per pid, with what that pid itself waits on — an idle
+            // transaction's snapshot, which a CONCURRENTLY operation waits out.
+            const wait = (runs: Run[]) => {
+              for (const r of runs) {
+                if (waited.has(r.pid)) continue;
+                waited.add(r.pid);
+                waits.push(`pid ${r.pid}${r.by.length ? ` (itself waiting on pid ${r.by.join(", ")} — as a superuser, a member of pg_read_all_stats or that session's own role, \`SELECT pid, state, xact_start FROM pg_stat_activity WHERE pid IN (${r.by.join(", ")})\` shows it; a session idle in a transaction keeps it waiting until that transaction ends)` : ""}`);
+              }
+            };
+            // A free name to move something out of the way to.
+            const movedName = async (name: string) => {
+              const taken = new Set(((await sql`SELECT relname FROM pg_class WHERE relname LIKE ${`${name}_moved%`} UNION SELECT typname FROM pg_type WHERE typname LIKE ${`${name}_moved%`}`) as { relname: string }[]).map((r) => r.relname));
+              let n = `${name}_moved`;
+              for (let k = 2; taken.has(n); k++) n = `${name}_moved${k}`;
+              return n;
+            };
+            for (const x of THOUGHT_INDEXES) {
+              const at = named.find((r) => r.name === x.name);
+              const isIndex = at !== undefined && (at.kind === "i" || at.kind === "I");
+              const shaped = isIndex && at.on_thoughts === true && indexBody(at.def ?? "") === x.body;
+              if (shaped && at.valid !== false) { checked++; continue; }
+              const needsOk = !x.needs || have[x.needs];
+              const recorded = ledgerRead && ledger.has(x.migration);
+              // A twin: valid and of the shape under another name, or one
+              // being built of it right now (waited for, then renamed in).
+              const shapedHere = needsOk ? onThoughts.filter((o) => !ours.has(o.name) && indexBody(o.def) === x.body) : [];
+              const twin = shapedHere.find((o) => o.valid) ?? shapedHere.find((o) => o.runs);
+              const state = !at ? "missing"
+                : !isIndex ? `a relation of kind ${at.kind}`
+                : !at.on_thoughts ? `an index on ${at.of_table}`
+                : shaped ? `INVALID — a CONCURRENTLY build or drop that did not finish${x.unique ? ", or a unique build that met two rows of one fingerprint" : ""} — which the planner ignores`
+                : `of another shape (${at.def}${at.valid === false ? ", and INVALID" : ""})`;
+              // The fingerprint's uniqueness: an INVALID index still ready
+              // still refuses a second row; gone or not ready, captures and
+              // edits still merge under the fingerprint lock, and only a
+              // record ingest or a raw write can add one.
+              const without = !x.unique ? x.without
+                : shaped && at.ready ? `${x.without} (while ready it still refuses a second row of one text)`
+                : `${x.without}, and a record ingest or a raw write can add a second row of one text (captures and edits still merge under the fingerprint lock)`;
+              if (at?.runs) {
+                problems.push(`${x.name} (${x.migration}) is ${state}, while ${at.on_table ? "a session holding thoughts runs an index build or reindex, which a REINDEX of it would queue behind," : "another session builds, reindexes, alters or drops it"} now (pid ${pids(at.runs)})${twin?.valid ? `, and ${twin.name}, of its shape, serves the reads meanwhile` : `, so ${without}`}`);
+                wait(at.runs);
+                if (!twin?.valid) slower = true;
+                continue;
+              }
+              // Fingerprints held by more than one row — what fails a unique
+              // build, a REINDEX, or the migration's own run — counted under a
+              // short timeout (the index that would make it cheap is the one
+              // not whole); unknown when it runs out.
+              let twinsOfText: number | null = null;
+              if (x.unique && needsOk && !at?.runs) {
+                twinsOfText = await sql.begin(async (tx) => {
+                  await tx`SET LOCAL statement_timeout = '2s'`;
+                  const [{ n }] = (await tx`SELECT count(*)::int AS n FROM (SELECT 1 FROM thoughts WHERE content_fingerprint IS NOT NULL GROUP BY content_fingerprint HAVING count(*) > 1) d`) as { n: number }[];
+                  return n;
+                }).catch(() => null);
+              }
+              const twiceHeld = twinsOfText ? `${twinsOfText} fingerprint${twinsOfText === 1 ? " is" : "s are"} held by more than one row, so a unique build or REINDEX of ${x.name}, or migration ${x.migration}'s own run, fails until each is held by one` : "";
+              if (!at && !twin && ledgerRead && !recorded) {
+                if (!twinsOfText) { unrecorded.push(x); continue; }
+                problems.push(`${x.name} (${x.migration}) is missing and the ledger does not record ${x.migration}; ${twiceHeld}`);
+                resolveFirst = true;
+                continue;
+              }
+              if (!at && !needsOk && !ledgerRead) { unledgered.push(x); continue; }
+              // What holds the name, cleared first: thoughts' own index
+              // dropped; another table's index or a relation that is no index
+              // someone else's, renamed out of the way.
+              const clear = !at ? "" : isIndex && at.on_thoughts ? `\`DROP INDEX CONCURRENTLY ${x.name};\``
+                : `\`ALTER ${at.kind === "c" ? "TYPE" : isIndex ? "INDEX" : "TABLE"} ${x.name} RENAME TO ${await movedName(x.name)};\``;
+              if (!needsOk) {
+                problems.push(`${x.name} (${x.migration}) is ${state}, and ${NEEDS_WHAT[x.needs!]}, which ${x.migration} also brings, is absent too — ${recorded ? `the ledger records ${x.migration} over a schema from before it` : `${x.migration} has not run here`}`);
+                if (clear) steps.push(`${clear}${recorded ? "" : ` — then migration ${x.migration} builds the index`}`);
+                if (recorded) older.push(x.migration);
+                continue;
+              }
+              if (twin) {
+                problems.push(twin.valid
+                  ? `${x.name} (${x.migration}) is ${state}, but ${twin.name} is of its shape — the reads take it; the name is what the migrations and this check look for`
+                  : `${x.name} (${x.migration}) is ${state}, but ${twin.name}, of its shape, is being built now — the reads take it once it is valid, so meanwhile ${without}`);
+                if (!twin.valid) slower = true;
+                if (twin.runs) wait(twin.runs);
+                steps.push(`${clear ? `${clear} then ` : ""}\`ALTER INDEX ${twin.name} RENAME TO ${x.name};\``);
+                continue;
+              }
+              slower = true;
+              const create = `CREATE ${x.unique ? "UNIQUE " : ""}INDEX CONCURRENTLY ${x.name} ON thoughts ${x.build};`;
+              if (twinsOfText) resolveFirst = true;
+              const dupes = x.unique && twinsOfText === null ? ` (a unique build fails while two rows share a fingerprint: ${RESOLVE_TWICE})` : "";
+              if (shaped) {
+                problems.push(`${x.name} (${x.migration}) is ${state}, so ${without}`);
+                steps.push(`\`REINDEX INDEX CONCURRENTLY ${x.name};\` (or \`DROP INDEX CONCURRENTLY ${x.name};\` then \`${create}\`)${dupes} — ${x.migration === "100" ? "100's file refuses an INVALID one, so a run of it stops there until this is done" : `re-applying ${x.migration} does not mend it: its IF NOT EXISTS keeps an INVALID one`}`);
+              } else {
+                problems.push(at && isIndex && at.on_thoughts
+                  ? `${x.name} (${x.migration}) is ${state}, which the reads may not take — without it, ${without}`
+                  : `${x.name} (${x.migration}) is ${state}, so ${without}`);
+                steps.push(`${clear ? `${clear} then ` : ""}\`${create}\`${dupes}${!at && !ledgerRead && !x.needs && x.migration !== "001" ? ` (if migration ${x.migration} has not run here, apply it instead: it builds the index)` : ""}`);
+              }
+              if (twinsOfText) problems.push(twiceHeld);
+            }
+            // INVALID indexes under other names: one being reindexed or
+            // dropped now (a lock on it) is said as running, not warned of (a
+            // routine REINDEX of a valid index runs through one); one while a
+            // session holds thoughts for an index build — the build's own
+            // index, which locks only the table, or a stale one — is said to
+            // be judged once that ends; a REINDEX's copy (its base beside it)
+            // or a copy of one of the shapes above is dropped; anything else
+            // is someone's index, rebuilt.
+            for (const o of onThoughts) {
+              if (o.valid || ours.has(o.name)) continue;
+              if (o.runs) {
+                if (o.runs.some((r) => !waited.has(r.pid))) (o.on_table ? judgedAfter : running).push(o.on_table ? o.name : `${o.name} (pid ${pids(o.runs)})`);
+              } else if ((/_cc(new|old)\d*$/.test(o.name) && onThoughts.some((b) => b.name === o.name.replace(/_cc(new|old)\d*$/, ""))) || THOUGHT_INDEXES.some((x) => indexBody(o.def) === x.body)) {
+                problems.push(`${o.name} is an INVALID copy on thoughts — what a REINDEX CONCURRENTLY, or a build under another name, that did not finish leaves — which no read takes, though while it is ready every write to thoughts still updates it`);
+                steps.push(`\`DROP INDEX CONCURRENTLY ${o.name};\``);
+              } else {
+                problems.push(`${o.name} is INVALID — a CONCURRENTLY build, reindex or drop of it that did not finish — which the planner ignores, though while it is ready every write to thoughts still updates it`);
+                steps.push(`\`REINDEX INDEX CONCURRENTLY ${o.name};\` (or, if it is not wanted, \`DROP INDEX CONCURRENTLY ${o.name};\`)`);
+              }
+            }
+            const list = (xs: typeof THOUGHT_INDEXES) => xs.map((x) => `${x.name} (${x.migration})`).join(", ");
+            const notes = [
+              unrecorded.length ? `not looked for, the ledger not recording their migration (a plain migrate run applies it): ${list(unrecorded)}` : "",
+              unledgered.length ? `not looked for, their migration's schema not here and no ledger read to say it ran: ${list(unledgered)}` : "",
+              running.length ? `an index operation runs now on ${running.join(", ")}` : "",
+              judgedAfter.length ? `judged once the session holding thoughts for an index build or reindex ends (pid ${pids(onThoughts.find((o) => o.on_table)!.runs!)}): ${judgedAfter.join(", ")}` : "",
+            ].filter(Boolean).join("; ");
+            if (!problems.length) {
+              const all = checked ? `${checked === THOUGHT_INDEXES.length ? "all" : `${checked} of`} ${THOUGHT_INDEXES.length} indexes thoughts' reads are planned around are present, valid and of their migrations' shape` : "";
+              add("thought indexes", "ok", [all, notes].filter(Boolean).join("; "));
+            } else {
+              const olderList = [...new Set(older)];
+              add("thought indexes", "warn",
+                  `${slower ? "the reads answer right, only slower: " : ""}${problems.join("; ")}${notes ? `; ${notes}` : ""}`,
+                  [waits.length ? `First wait for ${waits.join("; and ")} to finish (a build or reindex shows in pg_stat_progress_create_index, a drop or ALTER only in pg_locks).` : "",
+                   resolveFirst ? `${waits.length ? "Then resolve" : "First resolve"} the fingerprints held twice: ${RESOLVE_TWICE}.` : "",
+                   steps.length ? `${waits.length || resolveFirst ? "Then run" : "Run"} in psql against the brain's database, as thoughts' owner, one statement at a time (CONCURRENTLY refuses a transaction block, and leaves writes to thoughts running): ${steps.map((st, k) => `${k + 1}) ${st}`).join(" ")}.` : "",
+                   olderList.length ? `The ledger records ${olderList.join(", ")} but the schema installed is from before ${olderList.length === 1 ? "it" : "them"} (adopted with --baseline, or removed from outside the migrations): re-apply the recorded migrations with the migrator — ${REAPPLY_COMMAND} — with the server and every worker stopped; a plain run skips a recorded file.` : "",
+                   waits.length ? "Then run preflight again: what was waited for has its own remedy once it ends." : ""].filter(Boolean).join(" "));
+            }
+          }
+        } catch (e) {
+          add("thought indexes", "warn", `could not verify: ${(e as Error).message}`, "The reads behind this check need USAGE on thoughts' schema and SELECT on pg_class, pg_index, pg_attribute, pg_locks and pg_stat_progress_create_index.");
         }
         // ob1_config records the width and model the schema was created with.
         // A same-width model from a different family produces numerically valid,
@@ -4305,7 +4269,7 @@ if (configFailed) {
               }
               if (l.live > 0 || follower) {
                 const followerWords = follower
-                  ? `a follower is running this key (stamped ${ago(follower.ageS)} ago): ${c.pending} pending${follower.running ? "" : " between its polls"}${l.expired ? `, ${l.expired} left by a worker that died, which its next poll reclaims` : ""}`
+                  ? `a follower is running this key (stamped ${ago(follower.ageS)} ago${follower.running && follower.waitingMidPass?.length ? ", waiting for the provider mid-pass" : ""}): ${c.pending} pending${follower.running ? "" : " between its polls"}${l.expired ? `, ${l.expired} left by a worker that died, which its next poll reclaims` : ""}`
                   : "";
                 const r = runningRow(key, c, `${key}: ${counts} — ${l.live > 0 ? runningWords(l, c) : followerWords}`);
                 add("consolidate pass", r.status, r.detail, r.fix);
@@ -4320,13 +4284,17 @@ if (configFailed) {
               // their words below (review pass 2).
               const sleeper = l.expired === 0 ? sleeping : undefined;
               if (sleeper) {
-                // Its passes waiting for the provider at their start run nothing, as the sleep row says (SMD-2752 PR 3, review pass 2).
-                const waitingFor = sleeper.waiting?.length ? `asleep, ${providerWaitWords(sleeper.waiting)}` : null;
+                // Its passes waiting for the provider at their start run nothing, as the sleep row says (SMD-2752 PR 3, review pass 2),
+                // nor do those waiting mid-pass for one that stopped answering (SMD-2905).
+                const waitingFor = sleeper.waiting?.length || sleeper.waitingMidPass?.length ? `asleep, ${allWaitWords(sleeper.waiting ?? null, sleeper.waitingMidPass ?? null)}` : null;
                 const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeper.ageS)} ago; ${sleeper.running ? waitingFor ?? "asleep, its passes running" : "awake, its passes waiting for the brain to go quiet"})`;
                 if (sleeper.outcome === "failed") {
                   const failedRows = c.failed ? ` The retry_failed tool (work_type ${key}) puts its ${c.failed} failed row(s) back to pending once their cause is fixed.` : "";
+                  // Waiting mid-pass, the cause is the provider, by the row's own word (SMD-2905).
                   add("consolidate pass", "warn", `${words}, and its last pass failed`,
-                      `The scheduler's log says why — a pass refused at its start, which it retries, or the provider kept failing — with no second worker.${failedRows}`);
+                      sleeper.running && sleeper.waitingMidPass?.length
+                        ? `The provider stopped answering mid-pass — check it, and the model provider rows here (--deep probes chat); the scheduler's pass goes on by itself once it answers, with no second worker.${failedRows}`
+                        : `The scheduler's log says why — a pass refused at its start, which it retries, or the provider kept failing — with no second worker.${failedRows}`);
                 } else {
                   const r = runningRow(key, c, words);
                   add("consolidate pass", r.status, r.detail, r.fix);
@@ -4632,6 +4600,8 @@ if (configFailed) {
                 if ((h.stale || h.ended) && sleepRuns && (h.worker === "extract" || h.worker === "consolidate")) return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs here instead, which will not run beside a follower: take workers out of COMPOSE_PROFILES in deploy/.env and retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
                 if (h.stale || h.ended) return `${name} ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again${checkModel} — ${restartCommand(h.worker, h.job)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
                 if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266). The row carries the block until the follower judges its next block (48 answers or more). A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers.`;
+                // Waiting mid-pass, by its own word: the provider stopped answering (SMD-2905).
+                if (h.running && h.waitingMidPass?.length) return `${name} waits for the provider mid-pass — it stopped answering: check it, and the model provider rows here (--deep probes chat); the pass resumes on its own once it answers.`;
                 return h.worker === "board-sync"
                   ? `${name}'s last pass failed — errors in its report, or Linear or the database out of reach: its log says why.`
                   : `${name}'s last pass stopped a worker on the provider still failing after its pauses: check the provider; its log says why.`;
@@ -4706,13 +4676,15 @@ if (configFailed) {
               const span = (from: string, to: string) => ago(Math.max(0, (Date.parse(to) - Date.parse(from)) / 1000));
               const since = (t: string) => ago(Math.max(0, h.ageS + (Date.parse(h.at) - Date.parse(t)) / 1000));
               // Its passes waiting at their start for a provider that does not
-              // answer, by its own word (SMD-2752): asleep, but nothing runs.
+              // answer, by its own word (SMD-2752), or mid-pass for one that
+              // stopped answering (SMD-2905): asleep, but nothing runs.
               const waitingFor = !(h.stale || h.ended) && h.running && h.waiting?.length ? h.waiting : null;
-              const waitWords = waitingFor ? providerWaitWords(waitingFor) : "";
+              const waitingMid = !(h.stale || h.ended) && h.running && h.waitingMidPass?.length ? h.waitingMidPass : null;
+              const waitWords = allWaitWords(waitingFor, waitingMid);
               const sleepWords = h.stale || h.ended
                 ? s ? (s.to ? `its last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}` : `its last sleep began ${since(s.from)} ago`) : "no sleep recorded"
                 : h.running
-                  ? waitingFor
+                  ? waitingFor || waitingMid
                     ? `asleep, ${waitWords}${s ? ` — the sleep began ${since(s.from)} ago` : ""}`
                     : `asleep, its passes running${s ? ` — for ${since(s.from)}` : ""}`
                   : s && s.to
@@ -4743,8 +4715,11 @@ if (configFailed) {
                 fixes.push(`sleep ended ${ago(h.ageS)} ago on a pass's start refusal (${refusedBy}): ${startRefusalRemedy(refusedBy)} — its log names the pass and the cause. Then start it — ${restartCommand("sleep", null)}${refusedBy === "lookup" ? "" : "; started before that, it refuses again"}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
               } else if (down) {
                 fixes.push(`sleep ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again — ${restartCommand("sleep", null)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
-              } else if (waitingFor) {
-                fixes.push(`${waitWords.charAt(0).toUpperCase()}${waitWords.slice(1)}: the provider does not answer a one-token call — check it, and the model provider rows here (--deep probes chat); ${waitingFor.length > 1 ? "the passes begin on their own" : "the pass begins on its own"} once it answers.`);
+              } else if (waitingFor || waitingMid) {
+                const cap = (t: string) => `${t.charAt(0).toUpperCase()}${t.slice(1)}`;
+                if (waitingFor) fixes.push(`${cap(providerWaitWords(waitingFor))}: the provider does not answer a one-token call — check it, and the model provider rows here (--deep probes chat); ${waitingFor.length > 1 ? "the passes begin on their own" : "the pass begins on its own"} once it answers.`);
+                // Mid-pass, the cause is known where "its log says which" was all it had (SMD-2905).
+                if (waitingMid) fixes.push(`${cap(providerWaitWords(waitingMid, true))}: the provider stopped answering — check it, and the model provider rows here (--deep probes chat); ${waitingMid.length > 1 ? "the passes go on by themselves" : "the pass goes on by itself"} once it answers, the thoughts in hand back in the pool meanwhile.`);
               } else if (h.outcome === "failed") {
                 fixes.push("Its last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).");
               }
@@ -4813,7 +4788,8 @@ const telemetry = deep ? await import("./telemetry.ts") : undefined;
 const telemetrySaid: string[] = [];
 /** The provider probes made, for the telemetry row: a flush that found nothing left is no proof none ran (the span batch may have sent them). */
 let probes = 0;
-const telemetryStarted = telemetry ? await telemetry.startTelemetry(PREFLIGHT_SERVICE, (line) => telemetrySaid.push(line)) : false;
+// One export and exit: no uptime gauge, which the observability profile's silent-server rule would read as a server gone (SMD-3050).
+const telemetryStarted = telemetry ? await telemetry.startTelemetry(PREFLIGHT_SERVICE, (line) => telemetrySaid.push(line), undefined, { oneShot: true }) : false;
 
 /**
  * A probe as a provider call's span and point, marked `ob1.probe` so a backend

@@ -221,11 +221,17 @@
  *      specifier-shaped string naming the package (bare, `npm:`, `jsr:`, an
  *      esm.sh URL, a subpath), comments blanked, in any code file under the
  *      seven category directories and docs/: every vendored server reaches the
- *      brain through compat/supabase-sql, and supabase-js stays only in
- *      server-portable's Workers store (server/index.ts, the Edge Function
+ *      brain through compat/supabase-sql, and supabase-js left the server
+ *      with its PostgREST store (SMD-3152; server/index.ts, the Edge Function
  *      build that also held it, left with SMD-1800); counted per-file
- *      exceptions as 7's — the dashboard's type-only import (SMD-1801's)
- *      (SMD-1798)
+ *      exceptions as 7's — none today (SMD-1798)
+ * 22b. the retired Cloudflare Workers target stays retired (SMD-3152): no
+ *      server-portable/wrangler.toml or store-postgrest.ts, no wrangler or
+ *      supabase-js in server-portable/package.json, and no file outside the
+ *      history (changes/, CHANGELOG.md, FORK.md) and dashboards/ (whose Next
+ *      dashboard has a Cloudflare build of its own) that names `wrangler`, or
+ *      — outside code, where the refusal is spelled — sets OB1_STORE to
+ *      postgrest; probes for both patterns
  *  23. every workflow under .github/workflows/ names its runner image — no
  *      `-latest` label in any case or size, no expression — and pins every
  *      `uses:` (a step's, or a job's reusable workflow) to a full commit SHA
@@ -323,7 +329,7 @@
  *      step whole (PG_EXPORTER_SERVICE, PG_MONITOR_ROLE_SERVICE), and its forwarder (SMD-2583), with the
  *      forwarder's script, as config and as label, byte for byte
  *      deploy/forwarder.ts; an overlay's only its own table's mount,
- *      no config but the file's own table's (compose.yaml's BASE_CONFIGS too: the forwarder's script, the dashboard and its provider), each service's configs as held (SERVICE_CONFIGS), no name compose takes with no -f
+ *      no config but the file's own table's (compose.yaml's BASE_CONFIGS too: the forwarder's script, the dashboard and its provider, the alert rules), each service's configs as held (SERVICE_CONFIGS), no name compose takes with no -f
  *      and none outside printable ASCII; every overlay declared with the keys
  *      it sets, compose.yaml's services setting only keys that act inside
  *      their own container (no shared namespace, privilege or hook), each
@@ -406,7 +412,8 @@
  *      3c): compose.yaml's `grafana-dashboard` config is
  *      deploy/observability/dashboard.json with each `$` doubled, as its
  *      content alone, and its provider DASHBOARD_PROVIDER byte for byte; lgtm
- *      carries each one's sha256 as a label, so a change recreates it; the
+ *      carries each one's sha256 as a label, and the alert rules' (check
+ *      38's file, SMD-3050), and no other, so a change recreates it; the
  *      dashboard parses, is uid ob1 and not editable, with no id twice; every
  *      data source is one the pinned image provisions; every Prometheus name a
  *      query or variable reads, a collapsed row's panels' included, is an
@@ -416,9 +423,23 @@
  *      none in the old `[[…]]` form; no top-level panel overlaps another, and
  *      none leaves the 24 columns; each rule is the only catch of one of its
  *      probes
+ *  38. the provisioned alert rules read what the stack writes and send only
+ *      names and numbers (SMD-3050): compose.yaml's `grafana-alert-rules`
+ *      config is deploy/observability/alert-rules.yaml with each `$` doubled,
+ *      as its content alone (lgtm's label for it is check 37's); the file
+ *      provisions one group of ALERT_RULE_UIDS in the dashboard's folder and
+ *      no contact point, policy or template, a deletion only of a rule it no
+ *      longer holds; no `$` where Grafana expands one; each query Prometheus
+ *      or an expression, each Prometheus query reading names and labels as
+ *      check 37 holds a panel's, an aggregation at its outermost by
+ *      ALERT_LABELS or by nothing, making no label, so an alert carries those
+ *      labels alone; an annotation templates only those and the rule's values;
+ *      no rule paused or recording. What Grafana itself refuses is left to it:
+ *      it refuses the file and lgtm does not start, which CI's observability
+ *      step sees. Each rule is the only catch of one of its probes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34, 35, 36 and 37 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34, 35, 36, 37 and 38 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -431,7 +452,7 @@ import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, class
 import { FORK_VERSION, REPO_URL, migrationSha, readReleases, schemaVersionValue, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.ts";
 import { ASSETS, renderNotes } from "./release-artifacts.ts";
-import { inlined as inlinedDashboard } from "./inline-dashboard.ts";
+import { inlined as inlinedGrafana, INLINE_FILES } from "./inline-grafana.ts";
 import type { ChangeEntry, ClassifiedChanges, NumberedChange } from "./fork-index.ts";
 import { DISPOSITION_PATH, FACET_SETS, FETCHERS, REGISTRY_PATH, SPEC_PATH, VENDOR_PATTERN, dispositionPaths, readMetadata, readRegistry, registryProblems, renderClassification, tablesSpan } from "./connector-registry.ts";
 import type { Family, Problem, Registry, Tree } from "./connector-registry.ts";
@@ -2943,7 +2964,7 @@ const NOT_FORWARDED: Record<string, string> = {
   OB1_OTEL_TRUST_TRACEPARENT: "trusting a caller's traceparent (SMD-1849 PR 2b) is a proxy deployment's to say, by an operator's own -f file outside deploy/, not any stack here: forwarded by the server, it would be one setting in deploy/.env from continuing every caller's trace",
   OB1_HOOKS: "the plugins whose webhooks the REST core serves (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook",
   OB1_HOOK_SECRETS: "the plugins' webhook secrets (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook, so it is not handed the secrets",
-  OB1_STORE: "the SQL store is the server's default (FORK.md change 97) and this stack is the deployment that proves it — forwarding it would let the default drift back to PostgREST with nothing in CI noticing",
+  OB1_STORE: "the SQL store is the server's only store (FORK.md change 97; the PostgREST store retired in SMD-3152) — forwarding it would only carry a value the server refuses",
   OB1_GIT_SHA: "the commit the image was built from, baked by server-portable/Dockerfile from the build arg of the same name (compose's `build.args`) — a runtime forward would override the baked value with whatever deploy/.env names, a commit the image need not have been built from (SMD-2041)",
 };
 
@@ -3336,8 +3357,8 @@ function checkServerEnvForwarded() {
       else if (/\.ts$/.test(f) && !/^test-/.test(f)) sources.push(srcRel);
     }
   };
-  walk("server-portable"); // subdirectories too (shims/) — the fifth pass found the walk flat
-  if (!sources.includes("server-portable/shims/bun-unavailable.ts")) fail(SELF, `check 14's read scan no longer reaches server-portable/shims/ (bun-unavailable.ts is not in its list) — a knob read in a subdirectory would go undeclared unseen (SMD-1843)`);
+  walk("server-portable"); // subdirectories too (core/, rest/) — the fifth pass found the walk flat
+  if (!sources.includes("server-portable/core/context.ts")) fail(SELF, `check 14's read scan no longer reaches server-portable/core/ (context.ts is not in its list) — a knob read in a subdirectory would go undeclared unseen (SMD-1843)`);
   sources.push("db/config.mjs");
   const readSomewhere = new Set();
   for (const srcRel of sources) {
@@ -4046,7 +4067,7 @@ checkSchemaVersion();
 /**
  * 17e: server-portable/version.ts is generated (SMD-2041) — the version, the
  * release range and the tree's last migration the server reports, in a module
- * the Workers build can bundle (db/version.mjs is node-only). It must be
+ * with no imports (the image carries no db/migrations/ to read). It must be
  * exactly what scripts/gen-version.ts renders, so a migration added or a cut
  * made without regenerating it fails here rather than a brain reporting the
  * previous tree. Bun-only, like the tools.json round-trip.
@@ -4739,9 +4760,9 @@ checkDestructiveSql();
 // SMD-1798 (the third of SMD-1795's seven). Every vendored MCP server, API,
 // worker and script reaches the brain through compat/supabase-sql — Bun's
 // Postgres client in supabase-js's shape — so running any of them needs no
-// Supabase project, PostgREST or service key; supabase-js stays in the tree in
-// server-portable/store-postgrest.ts alone, for the Cloudflare Workers target
-// (SMD-1847), outside this scan (the shim's own suite writes its PostgREST
+// Supabase project, PostgREST or service key; supabase-js left the server with
+// its PostgREST store and the Cloudflare Workers target (SMD-3152, check 22b),
+// which were outside this scan (the shim's own suite writes its PostgREST
 // expectations by hand and loads no oracle; server/index.ts, the Edge Function
 // build that also held it, left with SMD-1800). This is what keeps the next rebase, or
 // the next vendored file, from bringing a PostgREST client back: a
@@ -4832,12 +4853,79 @@ function checkSupabaseJsImports() {
       continue;
     }
     for (const line of lines) {
-      fail(`${rel}:${line}`, `imports @supabase/supabase-js at runtime — every vendored server reaches the brain through compat/supabase-sql since SMD-1798 (\`bun scripts/migrate-to-sql-shim.ts --apply ${rel}\`; the shim's README says what it still refuses); supabase-js stays only in server-portable's Workers store`);
+      fail(`${rel}:${line}`, `imports @supabase/supabase-js at runtime — every vendored server reaches the brain through compat/supabase-sql since SMD-1798 (\`bun scripts/migrate-to-sql-shim.ts --apply ${rel}\`; the shim's README says what it still refuses); the server dropped it with its PostgREST store (SMD-3152)`);
     }
   }
   for (const rel of SUPABASE_JS_EXCEPTIONS.keys()) if (!seen.has(rel)) fail(rel, "check 22's exception names a file the scan does not reach — stale, or the file is gone");
 }
 checkSupabaseJsImports();
+
+// ── 22b: the retired Workers target stays retired (SMD-3152) ─────────────────
+//
+// The PostgREST store was kept for one target, Cloudflare Workers
+// (server-portable/wrangler.toml pinned OB1_STORE=postgrest), and no brain ran
+// it: stable and canary run the compose stack on the SQL store. SMD-3152
+// removed the store, the target, their CI steps and their docs. This keeps a
+// rebase, a revert or a copied guide from bringing either back unseen: the two
+// files stay gone, server-portable's package.json names neither wrangler nor
+// supabase-js, and no live file names `wrangler` or sets OB1_STORE to
+// postgrest. A code file is exempt from the second pattern alone: the refusal
+// and its tests spell the selection they refuse. The history (changes/,
+// CHANGELOG.md, FORK.md) records what was; dashboards/ is exempt from both,
+// since open-brain-dashboard-next deploys to Cloudflare with wrangler of its
+// own, which is not the brain server.
+/** `wrangler` as a word, any case. */
+const WRANGLER_WORD = /\bwrangler\b/i;
+/**
+ * OB1_STORE set to postgrest on one line — an env line, a YAML, TOML or JSON
+ * key, a shell assignment, a Dockerfile `ENV` with its space, a compose
+ * default (`${OB1_STORE:-postgrest}`) — any case, quoted or not. A value on a
+ * line of its own (Kubernetes' `name:`/`value:` pair) is not read: structure
+ * across lines is a parser's job, and the runtime refuses the selection anyway.
+ */
+const POSTGREST_SELECTED = /\bOB1_STORE["']?(?:\s*[=:]\s*|\s+)(?:\$\{OB1_STORE:?-)?["']?postgrest\b/i;
+/** [text, wrangler?, postgrest selected?] — what 22b must catch, and the neighbours it must not reach. */
+const RETIRED_TARGET_PROBES: [string, boolean, boolean][] = [
+  ["bunx wrangler deploy --dry-run --outdir=.cf-out", true, false],
+  ['"wrangler": "4.127.1"', true, false],
+  ["Wrangler dev serves it", true, false],
+  ["OB1_STORE=postgrest", false, true],
+  ['OB1_STORE = "postgrest"', false, true],
+  ["      OB1_STORE: postgrest", false, true],
+  ["export OB1_STORE='PostgREST'", false, true],
+  ['"OB1_STORE": "postgrest"', false, true],
+  ["ENV OB1_STORE postgrest", false, true],
+  ["      OB1_STORE: ${OB1_STORE:-postgrest}", false, true],
+  ["OB1_STORE=sql", false, false],
+  ["      OB1_STORE: ${OB1_STORE:-sql}", false, false],
+  ["OB1_STORE is unset; postgrest is refused", false, false],
+  ["the PostgREST store, retired", false, false],
+  ["wranglers' wrangling", false, false],
+];
+const RETIRED_FILES = ["server-portable/wrangler.toml", "server-portable/wrangler.json", "server-portable/wrangler.jsonc", "server-portable/store-postgrest.ts", "server-portable/test-store-postgrest.ts"];
+const isHistory = (rel: string) => rel.startsWith("changes/") || rel === "CHANGELOG.md" || rel === "FORK.md";
+function checkRetiredTarget() {
+  for (const [probe, wrangler, selected] of RETIRED_TARGET_PROBES) {
+    if (WRANGLER_WORD.test(probe) !== wrangler) fail(SELF, `check 22b's wrangler pattern ${wrangler ? "misses" : "catches"} its probe ${JSON.stringify(probe)} (its own probe)`);
+    if (POSTGREST_SELECTED.test(probe) !== selected) fail(SELF, `check 22b's OB1_STORE pattern ${selected ? "misses" : "catches"} its probe ${JSON.stringify(probe)} (its own probe)`);
+  }
+  for (const rel of RETIRED_FILES) if (existsSync(join(ROOT, rel))) fail(rel, "the retired Workers target's file is back (SMD-3152): the PostgREST store and wrangler.toml served no brain — delete it");
+  const pkg = JSON.parse(readFileSync(join(ROOT, "server-portable/package.json"), "utf8")) as Record<string, Record<string, string> | undefined>;
+  for (const dep of ["wrangler", "@supabase/supabase-js"]) {
+    if (pkg.dependencies?.[dep] || pkg.devDependencies?.[dep]) fail("server-portable/package.json", `names ${dep}, which only the retired Workers target and PostgREST store needed (SMD-3152)`);
+  }
+  const files = citationFiles().filter((rel) => !isHistory(rel) && !rel.startsWith("dashboards/"));
+  if (!files.includes("SETUP.md")) fail(SELF, "check 22b's listing does not reach SETUP.md — the listing is broken, not the tree clean");
+  for (const rel of files) {
+    const text = readFileSync(join(ROOT, rel), "utf8");
+    const code = CODE_FILE.test(rel);
+    text.split("\n").forEach((line, i) => {
+      if (WRANGLER_WORD.test(line)) fail(`${rel}:${i + 1}`, "names wrangler — the Cloudflare Workers target was retired (SMD-3152); the brain deploys as the compose stack");
+      if (!code && POSTGREST_SELECTED.test(line)) fail(`${rel}:${i + 1}`, "sets OB1_STORE to postgrest — the PostgREST store was retired (SMD-3152) and the server refuses the selection; leave OB1_STORE unset");
+    });
+  }
+}
+checkRetiredTarget();
 
 // ── 23: a workflow names its runner image and pins every action to a commit (SMD-2093) ──
 /**
@@ -5422,8 +5510,8 @@ const EDGE_ROLE: TransportRole = {
 };
 const ROOT_ROLE: TransportRole = {
   imports: new Map<string, "*" | ReadonlySet<string>>([
-    // The factory, for db() alone (STORE_WIRING); a notice, the store's kind and its type.
-    ["./store.ts", new Set(["createStore", "postgrestOnBunNotice", "storeKind", "ThoughtStore"])],
+    // The factory, for db() alone (STORE_WIRING), and the store's type.
+    ["./store.ts", new Set(["createStore", "ThoughtStore"])],
     ["../db/config.mjs", new Set(["tierProblem", "trimmedEnv"])],
     ["./agents.ts", "*"],
     ["./jobs.ts", new Set(["setJobSink"])],
@@ -5647,7 +5735,9 @@ const TRANSPORT_PROBES: [string, boolean, TransportRole?][] = [
   ['import { createCore, SPECS } from "./core/index.ts";\n', false],
   ['import type { ToolName } from "./tools.ts";\nexport { parseFilter } from "./core/filter.ts";\n', false],
   ['import { HEALTH_DEADLINE_MS } from "./core/reads.ts";\nexport { HEALTH_DEADLINE_MS, BRAIN_INFO_TOOL_DEADLINE_MS } from "./core/reads.ts";\n', false],
-  ['import { createStore, postgrestOnBunNotice, storeKind, type ThoughtStore } from "./store.ts";\n', false, ROOT_ROLE],
+  ['import { createStore, type ThoughtStore } from "./store.ts";\n', false, ROOT_ROLE],
+  // The PostgREST store's notice and the kind left with it (SMD-3152): the root names neither.
+  ['import { createStore, postgrestOnBunNotice, type ThoughtStore } from "./store.ts";\n', true, ROOT_ROLE],
   ['// import { decideCalls } from "./egress.ts";\n', false],
   ["const msg = \"copied from './egress.ts' once\";\nconst t = `moved from \"./x.ts\"`;\n", false],
   ["let _store: Promise<ThoughtStore> | null = null;\nexport function db(): Promise<ThoughtStore> {\n  if (!_store) _store = createStore(env());\n  void _store.then((s) => s.jobSink(serving));\n  return _store;\n}\n", false, ROOT_ROLE],
@@ -5655,7 +5745,7 @@ const TRANSPORT_PROBES: [string, boolean, TransportRole?][] = [
   ["const identity = await agents().resolve(db(), principal);\n", false],
   ["const core = createCore({ env, store: db, door: SERVER_NAME });\n", false],
   ["const core = createCore({\n  env,\n  store: db,\n  door: SERVER_NAME,\n});\n", false],
-  ['import {\n  createStore,\n  storeKind,\n  type ThoughtStore,\n} from "./store.ts";\n', false, ROOT_ROLE],
+  ['import {\n  createStore,\n  type ThoughtStore,\n} from "./store.ts";\n', false, ROOT_ROLE],
   ['return c.json({ db: "up", store: "sql" });\n', false],
   ["function closeStore(): Promise<{ closed: boolean }> {\n  return _store ? _store.then(() => ({ closed: true })) : Promise.resolve({ closed: false });\n}\n", false, ROOT_ROLE],
   ["export default { port, fetch: app.fetch };\nconst r = await app.fetch(req);\n", false],
@@ -5908,13 +5998,11 @@ const routeRouter = (name: string, rule: string, priority: number, mw: string, s
 const routeErrors = (name: string, status: string) =>
   `    ${name}:\n      errors:\n        status: ["${status}"]\n        service: noop@internal\n        statusRewrites:\n          "${status}": 404\n`;
 const routeService = (name: string, url: string) => `    ${name}:\n      loadBalancer:\n        servers:\n          - url: "${url}"\n`;
-/** Each origin's canary and working routers, with the given middlewares, and the 404 for the rest of their prefixes. */
-const routeTierPaths = (mw: string) => TIERS.filter((t) => t !== "stable").map((t) => routeRouter(t, `Path(\`/${t}/mcp\`) || PathPrefix(\`/${t}/mcp/\`)`, 30, mw, t)).join("")
-  + routeRouter("tier-off", "PathRegexp(`(?i)^/(canary|working)`)", 25, "not-served", "noop@internal");
-/** compose.tiers.yaml's: its tiers are its own, and stay. */
-const ROUTE_TIER_PATHS = routeTierPaths("not-legacy, tier-absent");
-/** compose.yaml's routes to a tier on its mesh, deprecated (SMD-3057): v2.0.0 removes them (SMD-2874), and until then every answer says so. */
-const ROUTE_TIER_DEPRECATED = "    tier-deprecated:\n      headers:\n        customResponseHeaders:\n          Deprecation: \"@1792108800\"\n          Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#a-canary-beside-the-stack>; rel=\"deprecation\"; type=\"text/html\"'\n";
+/** The 404 for every path under /canary or /working, in compose.yaml's table until SMD-2532 removes the legacy route (SMD-2874), and in compose.tiers.yaml's after its tier routers. */
+const ROUTE_TIER_OFF = routeRouter("tier-off", "PathRegexp(`(?i)^/(canary|working)`)", 25, "not-served", "noop@internal");
+/** compose.tiers.yaml's canary and working routers, and the 404 for the rest of their prefixes: the three-brain stack's alone since SMD-2874 took them out of compose.yaml's (SMD-2878 decides that stack's future). */
+const ROUTE_TIER_PATHS = TIERS.filter((t) => t !== "stable").map((t) => routeRouter(t, `Path(\`/${t}/mcp\`) || PathPrefix(\`/${t}/mcp/\`)`, 30, "not-legacy, tier-absent", t)).join("")
+  + ROUTE_TIER_OFF;
 const routeHealth = (service: string) => routeRouter("health", "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))", 20, "not-legacy", service);
 const ROUTE_NOT_LEGACY = "    not-legacy:\n      headers:\n        customRequestHeaders:\n          X-OB1-Legacy-Route: \"\"\n";
 /** compose.tiers.yaml's route table, byte for byte, as Bun.YAML reads the block. */
@@ -6216,12 +6304,12 @@ const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("hooks-off", "Path(`/hooks`) || PathPrefix(`/hooks/`)", 35, "not-served", "noop@internal")
   + routeRouter("grafana-off", "Path(`/grafana`) || PathPrefix(`/grafana/`)", 35, "not-served", "noop@internal")
   + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "not-legacy", "server")
-  + routeTierPaths("not-legacy, tier-deprecated, tier-absent") + routeHealth("server")
+  + ROUTE_TIER_OFF + routeHealth("server")
   + routeRouter("legacy", "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))", 1, "legacy-window", "server")
   + "  middlewares:\n"
   + "    legacy-window:\n      headers:\n        customRequestHeaders:\n          X-OB1-Legacy-Route: \"1\"\n        customResponseHeaders:\n          Deprecation: \"@1790899200\"\n          Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#moving-a-client-to-mcp>; rel=\"deprecation\"; type=\"text/html\"'\n"
-  + ROUTE_NOT_LEGACY + routeErrors("auth-absent", "502") + routeErrors("tier-absent", "502") + ROUTE_TIER_DEPRECATED + routeErrors("api-off", "418") + routeErrors("not-served", "418")
-  + "  services:\n" + TIERS.map((t) => routeService(t === "stable" ? "server" : t, `http://${tierMeshName("mcp", t)}.:8000`)).join("")
+  + ROUTE_NOT_LEGACY + routeErrors("auth-absent", "502") + routeErrors("api-off", "418") + routeErrors("not-served", "418")
+  + "  services:\n" + routeService("server", `http://${tierMeshName("mcp", "stable")}.:8000`)
   + routeService("auth", "http://auth.ob1.internal.:3000");
 /** compose.api-public.yaml's route table, byte for byte, as Bun.YAML reads the block. */
 const API_ROUTE_TABLE = "http:\n  routers:\n"
@@ -6294,6 +6382,8 @@ const FORWARDER_SERVICE = {
 /** Where lgtm's Grafana finds the provisioned dashboard (SMD-1849 PR 3c): the file its provider reads, mounted from the grafana-dashboard config and its home page; and where the provider is mounted, Grafana's provisioning directory's dashboards/, every file of which it reads as a provider. Check 37's DASHBOARD_PROVIDER names the first. */
 const DASHBOARD_PATH = "/otel-lgtm/open-brain-dashboard.json";
 const DASHBOARD_PROVIDER_PATH = "/otel-lgtm/grafana/conf/provisioning/dashboards/open-brain.yaml";
+/** Where lgtm's Grafana finds the provisioned alert rules (SMD-3050), mounted from the grafana-alert-rules config: its provisioning directory's alerting/, every file of which it reads for rules (and contact points, policies and templates, which check 38 refuses there). */
+const ALERT_RULES_PATH = "/otel-lgtm/grafana/conf/provisioning/alerting/open-brain.yaml";
 /**
  * compose.yaml's observability collector (SMD-1849 PR 3a) as Bun.YAML reads it, its `logging` (check 29's) and its labels (check 37's,
  * PR 3c) aside: the image by its digest,
@@ -6351,8 +6441,8 @@ const LGTM_SERVICE = {
     OTELCOL_EXTRA_ARGS: "--config=yaml:{\"receivers\":{\"prometheus/postgres\":{\"config\":{\"scrape_configs\":[{\"job_name\":\"postgres\",\"scrape_interval\":\"30s\",\"static_configs\":[{\"targets\":[\"pg-exporter.ob1.internal.:9187\"]}]}]}}},\"service\":{\"pipelines\":{\"metrics\":{\"receivers\":[\"otlp\",\"prometheus/collector\",\"prometheus/postgres\"]}}}}",
   },
   volumes: ["lgtm-data:/data"],
-  // The provisioned dashboard and its provider (PR 3c), check 37's.
-  configs: [{ source: "grafana-dashboard", target: DASHBOARD_PATH }, { source: "grafana-dashboard-provider", target: DASHBOARD_PROVIDER_PATH }],
+  // The provisioned dashboard and its provider (PR 3c), check 37's, and the alert rules (SMD-3050), check 38's.
+  configs: [{ source: "grafana-dashboard", target: DASHBOARD_PATH }, { source: "grafana-dashboard-provider", target: DASHBOARD_PROVIDER_PATH }, { source: "grafana-alert-rules", target: ALERT_RULES_PATH }],
   networks: { mesh: { aliases: ["lgtm.ob1.internal"] }, telemetry: {} },
   healthcheck: { test: ["CMD", "bash", "-c", "test -f /tmp/ready && for u in 3000/api/health 3100/ready 9090/api/v1/status/runtimeinfo 3200/ready 4040/ready 13133/ready; do curl -fsS -o /dev/null -m 1 http://127.0.0.1:$${u} || exit 1; done"], interval: "10s", timeout: "8s", retries: 3, start_period: "300s" },
   restart: "unless-stopped",
@@ -6409,8 +6499,8 @@ const OVERLAYS: Record<string, { services: Record<string, string[]>; top: string
 };
 /** compose.yaml's top-level keys, x-* anchors aside. */
 const COMPOSE_TOP = ["name", "services", "networks", "volumes", "configs"];
-/** compose.yaml's configs beside its route table: the forwarder's script (SMD-2583) and the observability profile's dashboard and its provider (SMD-1849 PR 3c, check 37's), each its content alone; where each lands is SERVICE_CONFIGS'. */
-const BASE_CONFIGS = ["forwarder", "grafana-dashboard", "grafana-dashboard-provider"];
+/** compose.yaml's configs beside its route table: the forwarder's script (SMD-2583), the observability profile's dashboard and its provider (SMD-1849 PR 3c, check 37's) and its alert rules (SMD-3050, check 38's), each its content alone; where each lands is SERVICE_CONFIGS'. */
+const BASE_CONFIGS = ["forwarder", "grafana-dashboard", "grafana-dashboard-provider", "grafana-alert-rules"];
 /** The keys a compose.yaml service sets that act inside its own container: none shares another's namespaces (`pid`, `ipc`, `network_mode`, `volumes_from`), lifts its confinement (`privileged`, `devices`, `userns_mode`), runs a hook (`post_start`, which may be privileged), names it on a network (`container_name`, `hostname`), or reads a host file (`env_file`). The confinement keys are CONFINEMENT's, and `build`, `volumes` and `configs` SERVICE_BUILDS', SERVICE_MOUNTS' and SERVICE_CONFIGS', by value (a build's `network`, `privileged`, `entitlements`, `secrets` or `additional_contexts` act on the host's builder); `networks` is the networks rule's; `ports` is check 13's. A key added here is added on purpose: `x-env` is an extension compose ignores, under which compose.yaml's server anchors its block so the two servers alone add the plugin knobs no worker takes (SMD-2310). */
 const SERVICE_KEYS = ["build", "image", "pull_policy", "profiles", "command", "entrypoint", "working_dir", "user", "environment", "labels", "depends_on", "healthcheck", "restart", "stop_grace_period", "stop_signal", "init", "tmpfs", "shm_size", "mem_limit", "pids_limit", "ulimits", "logging", "expose", "extra_hosts", "cap_drop", "cap_add", "security_opt", "read_only", "volumes", "configs", "networks", "ports", "x-env"];
 /** Each compose.yaml service's confinement — its `cap_add`, `cap_drop`, `security_opt` and `read_only` — exactly; a service not named here sets none of them. A capability added, or a drop or no-new-privileges removed, is a change here, on purpose. The proxy's are PROXY_SERVICE's. */
@@ -6434,7 +6524,7 @@ const SERVICE_MOUNTS: Record<string, unknown[]> = {
   auth: ["auth-data:/data"],
   lgtm: ["lgtm-data:/data"],
 };
-/** Each compose.yaml service's `configs:`, exactly, beside the proxy's and the forwarder's (held whole): lgtm's dashboard and provider (SMD-1849 PR 3c); a service not named here mounts none. A config's content is fixed (BASE_CONFIGS, check 37), but where it lands — a path, a mode, an owner — is a mount, so it is held as SERVICE_MOUNTS holds those (review pass 1: a runner mounting the forwarder's script over an init path passed). */
+/** Each compose.yaml service's `configs:`, exactly, beside the proxy's and the forwarder's (held whole): lgtm's dashboard and provider (SMD-1849 PR 3c) and alert rules (SMD-3050); a service not named here mounts none. A config's content is fixed (BASE_CONFIGS, check 37), but where it lands — a path, a mode, an owner — is a mount, so it is held as SERVICE_MOUNTS holds those (review pass 1: a runner mounting the forwarder's script over an init path passed). */
 const SERVICE_CONFIGS: Record<string, unknown[]> = {
   lgtm: LGTM_SERVICE.configs,
 };
@@ -7863,8 +7953,10 @@ const DASHBOARD_PROVIDER = [
   "      foldersFromFilesStructure: false\n",
 ].join("");
 const DASHBOARD_FILE = "deploy/observability/dashboard.json";
+/** The alert rules' file (SMD-3050, check 38's), as the generator names it. */
+const ALERT_FILE = INLINE_FILES.find((f) => f.config === "grafana-alert-rules")!.path;
 const DASHBOARD_UNITS: Record<string, string> = { s: "_seconds", ms: "_milliseconds", By: "_bytes" };
-/** The instruments server-portable/'s code records, by the name a histogram is made or a span's metric is given under (`histogram("x.duration", SPEC` or `name: "x.duration", spec: SPEC`), each named in Prometheus with its spec's unit (`unit: "s"` → `_seconds`) and labelled as DASHBOARD_INSTRUMENT_LABELS holds; a name whose spec it cannot find, or whose unit it does not know, is named with no unit, which no query here reads. */
+/** The instruments server-portable/'s code records, by the name a histogram is made or a span's metric is given under (`histogram("x.duration", SPEC` or `name: "x.duration", spec: SPEC`), each named in Prometheus with its spec's unit (`unit: "s"` → `_seconds`) and labelled as DASHBOARD_INSTRUMENT_LABELS holds, and each observable gauge by its name and the unit in its own options (`createObservableGauge("process.uptime", { unit: "s"` → `process_uptime_seconds`, SMD-3050); a name whose spec it cannot find, or whose unit it does not know, is named with no unit, which no query here reads. */
 function instrumentNamesIn(texts: string[]): Map<string, string[]> {
   const all = texts.join("\n");
   const names = new Map<string, string[]>();
@@ -7876,12 +7968,35 @@ function instrumentNamesIn(texts: string[]): Map<string, string[]> {
     names.set(`${base}_bucket`, [...labels, "le"]);
     for (const suffix of ["_count", "_sum"]) names.set(base + suffix, labels);
   }
+  for (const m of all.matchAll(/createObservableGauge\("([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*)",\s*\{([^}]{0,300})\}/g)) {
+    const unit = /\bunit:\s*"([^"]+)"/.exec(m[2])?.[1];
+    const base = `${m[1].replace(/\./g, "_")}${(unit && DASHBOARD_UNITS[unit]) ?? ""}`;
+    names.set(base, DASHBOARD_INSTRUMENT_LABELS[base] ?? []);
+  }
   return names;
 }
 const PROMQL_KEYWORDS = new Set(["by", "without", "on", "ignoring", "group_left", "group_right", "bool", "offset", "or", "and", "unless", "atan2", "inf", "nan"]);
 /** The expression with each string's content blanked to `~`, its quotes and length kept: a regex run on it sees no `by (` or `{` inside a matcher's value, and an index into it is one into the expression. */
 function maskStrings(expr: string): string {
-  return expr.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, (q) => q[0] + "~".repeat(q.length - 2) + q[0]);
+  return expr.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`]*`/g, (q) => q[0] + "~".repeat(q.length - 2) + q[0]);
+}
+/** Each backtick string (PromQL's raw string, no escapes) written as a double-quoted one, so the readings of `"…"` and `'…'` read it too (SMD-3050 review pass 2: a `(` in one moved a count, a matcher in one went unread). */
+const unraw = (expr: string) => expr.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`]*`/g, (q) => (q[0] === "`" ? JSON.stringify(q.slice(1, -1)) : q));
+/** The expression with each `#` comment outside a string taken out (PromQL's run to the line's end), its line kept: a `(` or a word in one is not the query's (SMD-3050 review pass 1). */
+function withoutComments(expr: string): string {
+  let out = "";
+  let quote: string | null = null;
+  for (let i = 0; i < expr.length; i++) {
+    const c = expr[i];
+    if (quote) {
+      out += c;
+      if (c === "\\" && quote !== "`") out += expr[++i] ?? "";
+      else if (c === quote) quote = null;
+    } else if (c === '"' || c === "'" || c === "`") { quote = c; out += c; }
+    else if (c === "#") { while (i + 1 < expr.length && expr[i + 1] !== "\n") i++; }
+    else out += c;
+  }
+  return out;
 }
 /** A grouping list's labels, a quoted one (Prometheus 3) unquoted. */
 function groupingList(list: string): string[] {
@@ -7916,7 +8031,8 @@ function outermostGrouping(expr: string, carried: Set<string>): Set<string> | un
   return kept;
 }
 /** What a PromQL expression (or a `label_values(metric, label)` variable query) reads: the metric names — what is left once strings, matchers, ranges, offsets, numbers, grouping lists, functions and keywords are taken out, and each `__name__="…"` matcher's — any `__name__` matched by regex (which this cannot hold), each selector's matcher labels by the name it selects (null where it names none), the labels its grouping lists and label_replace sources read, and those label_replace and count_values make. */
-function promqlReads(expr: string): { names: string[]; nameRegex: boolean; selectors: [string | null, string[]][]; labels: string[]; made: string[] } {
+function promqlReads(given: string): { names: string[]; nameRegex: boolean; selectors: [string | null, string[]][]; labels: string[]; made: string[] } {
+  const expr = unraw(given);
   const lv = /^\s*label_values\(\s*(?:(.+?)\s*,\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*$/s.exec(expr);
   if (lv) { const inner = lv[1] ? promqlReads(lv[1]) : { names: [], nameRegex: false, selectors: [], labels: [], made: [] }; return { ...inner, labels: [...inner.labels, lv[2]] }; }
   const labels: string[] = [];
@@ -7955,16 +8071,35 @@ function promqlReads(expr: string): { names: string[]; nameRegex: boolean; selec
   }
   return { names, nameRegex, selectors, labels, made };
 }
+/** One Prometheus query's names and labels, held to what the stack writes (check 37's rules for a panel, check 38's for an alert rule): [the rule, what is wrong]. `text` has its variables already put in; `legend` is the labels a legend shows, each held to those the result keeps. */
+function promqlProblems(where: string, given: string, written: Map<string, string[]>, legend: string[] = []): ["name" | "label", string][] {
+  const out: ["name" | "label", string][] = [];
+  const text = withoutComments(given);
+  const reads = promqlReads(text);
+  const unknown = [...new Set(reads.names)].filter((n) => !written.has(n));
+  if (unknown.length || reads.nameRegex) out.push(["name", `${where} reads ${[...unknown, ...(reads.nameRegex ? ["a __name__ matched by regex"] : [])].join(", ")}, which nothing in the stack writes as far as this check can hold, so it reads nothing for ever (a panel's "No data", a rule that never fires) — the names there are: the servers' instruments in server-portable/*.ts (instrumentNamesIn reads their \`*.duration\` histograms and their observable gauges alone: a new server metric, of another kind or in a subdirectory, is taught to it, not listed as an image's) and check 37's DASHBOARD_IMAGE_SERIES, measured on the pinned images`]);
+  const carried = new Set([...DASHBOARD_RESOURCE_LABELS, ...reads.made, ...reads.names.flatMap((n) => written.get(n) ?? [])]);
+  const stray = [...new Set(reads.labels)].filter((l) => !carried.has(l));
+  for (const [name, read] of reads.selectors) {
+    const own = new Set([...DASHBOARD_RESOURCE_LABELS, ...(name === null ? [...carried] : written.get(name) ?? [])]);
+    for (const l of read) if (!own.has(l) && !stray.includes(l)) stray.push(l);
+  }
+  // A legend shows a label its result keeps: the outermost aggregation's, where that is the outermost operation (review pass 5), else one its names carry or label_replace makes (review pass 4).
+  const kept = outermostGrouping(text, carried) ?? carried;
+  for (const l of legend) if (l !== "__name__" && !kept.has(l) && !stray.includes(l)) stray.push(l);
+  if (stray.length && !unknown.length) out.push(["label", `${where} reads label${stray.length > 1 ? "s" : ""} ${stray.join(", ")}, which the name it selects (a matcher) or none of ${reads.names.length ? [...new Set(reads.names)].join(", ") : "the names it reads (it reads none)"} (a grouping) carries (DASHBOARD_INSTRUMENT_LABELS, DASHBOARD_IMAGE_SERIES, DASHBOARD_RESOURCE_LABELS): a matcher on it matches nothing, and a grouping by it is one series`]);
+  return out;
+}
 type DashboardRule = "copy" | "provider" | "recreate" | "json" | "identity" | "datasource" | "name" | "label" | "variable" | "layout";
 const sha256Of = (text: string) => `sha256:${new Bun.CryptoHasher("sha256").update(text).digest("hex")}`;
-/** Every way the dashboard, its inline copy, its provider or lgtm's labels stray: [the rule, what is wrong]. `inline` and `provider` are the configs' mappings and `labels` lgtm's, as Bun.YAML reads compose.yaml; `written` each name the stack writes, with its labels. */
-function dashboardProblems(fileText: string, inline: unknown, provider: unknown, labels: unknown, written: Map<string, string[]>): [DashboardRule, string][] {
+/** Every way the dashboard, its inline copy, its provider or lgtm's labels stray: [the rule, what is wrong]. `inline` and `provider` are the configs' mappings and `labels` lgtm's, as Bun.YAML reads compose.yaml; `written` each name the stack writes, with its labels; `others` the labels lgtm carries for the other inline configs (the alert rules', SMD-3050), each its sha256. */
+function dashboardProblems(fileText: string, inline: unknown, provider: unknown, labels: unknown, written: Map<string, string[]>, others: Record<string, string> = {}): [DashboardRule, string][] {
   const out: [DashboardRule, string][] = [];
   const contentOf = (c: unknown) => isMapping(c) ? c.content : undefined;
-  if (!isMapping(inline) || contentOf(inline) !== fileText.replace(/\$/g, "$$$$") || canonJson(Object.keys(inline)) !== canonJson(["content"])) out.push(["copy", `compose.yaml's configs.grafana-dashboard is not ${DASHBOARD_FILE} with each \`$\` doubled, as its content alone: compose reads a single \`$\` as a variable, so the dashboard Grafana loads would not be the file — run \`bun scripts/inline-dashboard.ts\`, which writes it and lgtm's labels`]);
+  if (!isMapping(inline) || contentOf(inline) !== fileText.replace(/\$/g, "$$$$") || canonJson(Object.keys(inline)) !== canonJson(["content"])) out.push(["copy", `compose.yaml's configs.grafana-dashboard is not ${DASHBOARD_FILE} with each \`$\` doubled, as its content alone: compose reads a single \`$\` as a variable, so the dashboard Grafana loads would not be the file — run \`bun scripts/inline-grafana.ts\`, which writes it and lgtm's labels`]);
   if (!isMapping(provider) || contentOf(provider) !== DASHBOARD_PROVIDER || canonJson(Object.keys(provider)) !== canonJson(["content"])) out.push(["provider", `compose.yaml's configs.grafana-dashboard-provider is not check 37's DASHBOARD_PROVIDER byte for byte, as its content alone: it decides which file Grafana loads and whether its UI may save a change`]);
-  const wantLabels = { "ob1.grafana-dashboard": sha256Of(fileText), "ob1.grafana-dashboard-provider": sha256Of(DASHBOARD_PROVIDER) };
-  if (canonJson(labels ?? null) !== canonJson(wantLabels)) out.push(["recreate", `compose.yaml's services.lgtm.labels is ${JSON.stringify(labels ?? null)} where it is ${JSON.stringify(wantLabels)}: compose recreates lgtm when a label changes and not when only an inline config does (docker/compose#11900), so without each config's sha256 an upgrade's \`up -d\` leaves Grafana on the old dashboard — \`bun scripts/inline-dashboard.ts\` writes them`]);
+  const wantLabels = { "ob1.grafana-dashboard": sha256Of(fileText), "ob1.grafana-dashboard-provider": sha256Of(DASHBOARD_PROVIDER), ...others };
+  if (canonJson(labels ?? null) !== canonJson(wantLabels)) out.push(["recreate", `compose.yaml's services.lgtm.labels is ${JSON.stringify(labels ?? null)} where it is ${JSON.stringify(wantLabels)}: compose recreates lgtm when a label changes and not when only an inline config does (docker/compose#11900), so without each config's sha256 an upgrade's \`up -d\` leaves Grafana on the old dashboard or rules — \`bun scripts/inline-grafana.ts\` writes them`]);
   let d: unknown;
   try { d = JSON.parse(fileText); } catch (e) { out.push(["json", `does not parse as JSON, so Grafana loads no dashboard: ${(e as Error).message}`]); return out; }
   if (!isMapping(d) || !Array.isArray(d.panels)) { out.push(["json", "is not a dashboard: no `panels` array"]); return out; }
@@ -8011,19 +8146,7 @@ function dashboardProblems(fileText: string, inline: unknown, provider: unknown,
     for (const m of text.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)) if (!m[1].startsWith("__") && !defined.has(m[1])) out.push(["variable", `${where} names $${m[1]}, which the dashboard does not define: Grafana sends it as written`]);
     if (/\[\[[A-Za-z_][A-Za-z0-9_]*(?::[^\]]*)?\]\]/.test(text)) out.push(["variable", `${where} names a variable in the old \`[[…]]\` form, which this check does not read: write it \`$name\``]);
     if (uid !== "prometheus") continue;
-    const reads = promqlReads(text.replace(/\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/g, "1"));
-    const unknown = [...new Set(reads.names)].filter((n) => !written.has(n));
-    if (unknown.length || reads.nameRegex) out.push(["name", `${where} reads ${[...unknown, ...(reads.nameRegex ? ["a __name__ matched by regex"] : [])].join(", ")}, which nothing in the stack writes as far as this check can hold, so the panel would show "No data" for ever — the names there are: the servers' \`*.duration\` histograms in server-portable/*.ts (instrumentNamesIn reads those alone: a new server metric, of another kind or in a subdirectory, is taught to it, not listed as an image's) and check 37's DASHBOARD_IMAGE_SERIES, measured on the pinned images`]);
-    const carried = new Set([...DASHBOARD_RESOURCE_LABELS, ...reads.made, ...reads.names.flatMap((n) => written.get(n) ?? [])]);
-    const stray = [...new Set(reads.labels)].filter((l) => !carried.has(l));
-    for (const [name, read] of reads.selectors) {
-      const own = new Set([...DASHBOARD_RESOURCE_LABELS, ...(name === null ? [...carried] : written.get(name) ?? [])]);
-      for (const l of read) if (!own.has(l) && !stray.includes(l)) stray.push(l);
-    }
-    // A legend shows a label its result keeps: the outermost aggregation's, where that is the outermost operation (review pass 5), else one its names carry or label_replace makes (review pass 4).
-    const kept = outermostGrouping(text.replace(/\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/g, "1"), carried) ?? carried;
-    for (const l of legends.get(where) ?? []) if (l !== "__name__" && !kept.has(l) && !stray.includes(l)) stray.push(l);
-    if (stray.length && !unknown.length) out.push(["label", `${where} reads label${stray.length > 1 ? "s" : ""} ${stray.join(", ")}, which the name it selects (a matcher) or none of ${reads.names.length ? [...new Set(reads.names)].join(", ") : "the names it reads (it reads none)"} (a grouping) carries (DASHBOARD_INSTRUMENT_LABELS, DASHBOARD_IMAGE_SERIES, DASHBOARD_RESOURCE_LABELS): a matcher on it matches nothing, and a grouping by it is one series`]);
+    out.push(...promqlProblems(where, text.replace(/\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/g, "1"), written, legends.get(where) ?? []));
   }
   return out;
 }
@@ -8075,6 +8198,7 @@ const DASHBOARD_PROBES: [string, string, unknown, unknown, unknown, DashboardRul
     ["a panel in a collapsed row reading a metric nothing writes", (d) => { d.panels[0].collapsed = true; d.panels[0].panels = [{ type: "timeseries", id: 9, title: "hidden", datasource: { type: "prometheus", uid: "prometheus" }, gridPos: { x: 0, y: 1, w: 12, h: 8 }, targets: [{ refId: "A", datasource: { type: "prometheus", uid: "prometheus" }, expr: "sum(rate(ghost_metric_total[5m]))" }] }]; }, ["name"]],
     ["a grouping by a label the metric does not carry", (d) => { d.panels[1].targets[0].expr = d.panels[1].targets[0].expr.replace("by (le, ob1_tool)", "by (le, ob1_tools)"); }, ["label"]],
     ["a matcher on a label the metric does not carry", (d) => { d.panels[1].targets[0].expr = d.panels[1].targets[0].expr.replace('service_name=~"$service"', 'ob1_outcomes="error"'); }, ["label"]],
+    ["…written as a backtick string (SMD-3050 review pass 2)", (d) => { d.panels[1].targets[0].expr = d.panels[1].targets[0].expr.replace('service_name=~"$service"', "ob1_outcomes=`error`"); }, ["label"]],
     ["a matcher on a label another name in the expression carries but its own does not (review pass 2)", (d) => { d.panels[1].targets[0].expr = 'sum(rate(pg_stat_statements_seconds_total[5m])) * on (queryid) group_left (query) max by (queryid, query) (pg_stat_statements_query_id_total{datname="x"})'; }, ["label"]],
     ["a label_replace relabelling a label in place that its series does not carry (review pass 3)", (d) => { d.panels[1].targets[0].expr = 'label_replace(sum by (ob1_tools) (rate(http_server_request_duration_seconds_count[5m])), "ob1_tools", "(none)", "ob1_tools", "")'; }, ["label"]],
     ["a label_replace whose source its series does not carry", (d) => { d.panels[1].targets[0].expr = 'label_replace(sum(rate(http_server_request_duration_seconds_count[5m])), "door", "$1", "ob1_doors", "(.*)")'; }, ["label"]],
@@ -8105,6 +8229,8 @@ const INSTRUMENT_PROBES: [string, string, string][] = [
   ["an instrument in seconds", DASHBOARD_PROBE_CODE, "http_server_request_duration_seconds_count"],
   ["an instrument whose unit became milliseconds is not the seconds name", DASHBOARD_PROBE_CODE.replace('unit: "s"', 'unit: "ms"'), "!http_server_request_duration_seconds_count"],
   ["a span's metric by its spec", 'const JOB_DURATION: HistogramSpec = {\n  unit: "s",\n};\nmetric: { name: "ob1.job.duration", spec: JOB_DURATION, labels }', "ob1_job_duration_seconds_bucket"],
+  ["an observable gauge in seconds (SMD-3050)", 'provider.getMeter("ob1").createObservableGauge("process.uptime", { unit: "s", description: "x" })', "process_uptime_seconds"],
+  ["an observable gauge whose unit became milliseconds is not the seconds name", 'provider.getMeter("ob1").createObservableGauge("process.uptime", { unit: "ms", description: "x" })', "!process_uptime_seconds"],
 ];
 function checkDashboard() {
   if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
@@ -8133,14 +8259,266 @@ function checkDashboard() {
   const lgtm = isMapping(doc) && isMapping(doc.services) && isMapping(doc.services.lgtm) ? doc.services.lgtm : {};
   let fileText: string;
   try { fileText = readFileSync(join(ROOT, DASHBOARD_FILE), "utf8"); } catch { fail(DASHBOARD_FILE, "missing — compose.yaml's lgtm loads it as the observability profile's dashboard (check 37, SMD-1849)"); return; }
-  // The generator the README and these messages name, run on the tree: where it can no longer write compose.yaml's copy, it says so here (review pass 5).
-  try { inlinedDashboard(composeText, fileText); } catch (e) { fail("scripts/inline-dashboard.ts", `can no longer write compose.yaml's inline copy of the dashboard: ${(e as Error).message} — the README sends an operator to it (check 37, SMD-1849)`); }
+  // The alert rules' file (check 38's), whose sha256 is lgtm's third label.
+  let alertText: string | undefined;
+  try { alertText = readFileSync(join(ROOT, ALERT_FILE), "utf8"); } catch { fail(ALERT_FILE, "missing — compose.yaml's lgtm loads it as the observability profile's alert rules (check 38, SMD-3050)"); }
+  // Missing, the label is left as it stands and the dashboard still held (review pass 2).
+  const standing: Record<string, string> = isMapping(lgtm.labels) && typeof lgtm.labels["ob1.grafana-alert-rules"] === "string" ? { "ob1.grafana-alert-rules": lgtm.labels["ob1.grafana-alert-rules"] } : {};
+  const others: Record<string, string> = alertText === undefined ? standing : { "ob1.grafana-alert-rules": sha256Of(alertText) };
+  // The generator the README and these messages name, run on the tree: where it can no longer write compose.yaml's copies, it says so here (review pass 5).
+  if (alertText !== undefined) try { inlinedGrafana(composeText, { "grafana-dashboard": fileText, "grafana-alert-rules": alertText }); } catch (e) { fail("scripts/inline-grafana.ts", `can no longer write compose.yaml's inline copies of the dashboard and the alert rules: ${(e as Error).message} — the README sends an operator to it (checks 37 and 38, SMD-1849, SMD-3050)`); }
   const written = new Map([...instruments, ...Object.entries(DASHBOARD_IMAGE_SERIES)]);
-  for (const [rule, detail] of dashboardProblems(fileText, configs["grafana-dashboard"], configs["grafana-dashboard-provider"], lgtm.labels, written)) {
+  for (const [rule, detail] of dashboardProblems(fileText, configs["grafana-dashboard"], configs["grafana-dashboard-provider"], lgtm.labels, written, others)) {
     fail(rule === "copy" || rule === "provider" || rule === "recreate" ? "deploy/compose.yaml" : DASHBOARD_FILE, `${detail} (check 37, SMD-1849)`);
   }
 }
 checkDashboard();
+
+// ── 38. The provisioned alert rules read what the stack writes, and send only names and numbers (SMD-3050) ──
+//
+// lgtm's Grafana loads deploy/observability/alert-rules.yaml at its start, from
+// the `grafana-alert-rules` config (inline as the dashboard is, each `$`
+// doubled; lgtm's label for it is check 37's), into the dashboard's folder. A
+// rule whose query reads a name or label nothing writes never fires, and looks
+// like a quiet stack, so each Prometheus query is held as a panel's is
+// (promqlProblems, check 37's names and labels). The file provisions no contact
+// point, policy or template: a rule that fires is in Grafana's alert list, and
+// nothing leaves the machine until an operator adds a contact point (SMD-1849's
+// telemetry stays local; deploy/README.md, "Alerts"). What a contact point
+// would carry is each alert's labels and annotations, so each query is an
+// aggregation at its outermost by ALERT_LABELS alone (or by nothing) and makes
+// no label — no query's text, no database or role — and an annotation templates
+// only those and the rule's values; and a `$` stands nowhere Grafana expands
+// one. What Grafana refuses outright is not copied: it refuses the file and
+// lgtm does not start, which CI's observability step sees — that step reads the
+// rules back, holds four normal and the provider rule pending after its
+// traffic, then the Postgres rule pending with pg-exporter stopped. This holds
+// what can be read without a running profile.
+/** The labels an alert may carry beside Grafana's own (alertname, grafana_folder): what a contact point sends with it. One added is a label every notification carries, on purpose. */
+const ALERT_LABELS = ["service_name", "deployment_environment_name", "gen_ai_operation_name", "error_type"];
+/** The rules, by uid: one dropped or added is a change here, and in deploy/README.md's list, on purpose. */
+const ALERT_RULE_UIDS = ["ob1-server-silent", "ob1-server-failures", "ob1-provider-failures", "ob1-postgres-unreached", "ob1-telemetry-lost"];
+/** An annotation's template: a label (`{{ $labels.x }}`) or a value (`{{ $values.A.Value }}`), either through one of Grafana's humanizers, trim markers allowed. */
+const ALERT_TEMPLATE = /^\{\{-?\s*(?:(?:humanize|humanizePercentage|humanizeDuration)\s+)?\$(?:labels\.([A-Za-z_][A-Za-z0-9_]*)|values\.([A-Za-z0-9_]+)\.Value)\s*-?\}\}$/;
+/**
+ * The labels an alert from `expr` carries, where its outermost operation is an aggregation `by` a list (that list) or
+ * with no grouping (none) — exact, as Prometheus defines an aggregation's result; undefined for any other shape (a binary
+ * operation, a function, `without`, a selecting or label-making aggregation, a `by` on both sides, which Prometheus
+ * refuses), which check 38 refuses, so it never has to follow PromQL's operators (review pass 1: a label read through
+ * `or`, `group_left` or a comment slipped past a reading of them).
+ */
+function alertGrouping(expr: string): string[] | undefined {
+  const masked = maskStrings(expr);
+  const head = /^\s*(sum|min|max|avg|group|count|stddev|stdvar|quantile)\s*(?:(by|without)\s*\(([^)]*)\)\s*)?\(/di.exec(masked);
+  if (!head) return undefined;
+  let depth = 0, close = -1;
+  for (let i = head[0].length - 1; i < masked.length; i++) {
+    if (masked[i] === "(") depth++;
+    else if (masked[i] === ")" && --depth === 0) { close = i; break; }
+  }
+  if (close < 0) return undefined;
+  const rest = masked.slice(close + 1);
+  const trailing = /^\s*(by|without)\s*\(([^)]*)\)\s*$/di.exec(rest);
+  if (rest.trim() !== "" && !trailing) return undefined;
+  if (head[2] && trailing) return undefined;
+  const kind = (head[2] ?? trailing?.[1])?.toLowerCase();
+  if (kind === undefined) return [];
+  if (kind === "without") return undefined;
+  const [from, to] = head[2] ? head.indices![3] : trailing!.indices![2].map((x) => x + close + 1);
+  return groupingList(expr.slice(from, to));
+}
+/** Each place in the file a `$` stands where Grafana expands it as it provisions (`$VAR`, `${VAR}`, `$__env{…}`, `$__file{…}`, measured on the pin for a title and labels): every key and string but an annotation's value and a query's model, which it reads raw (review passes 2, 3). */
+function expandedDollars(v: unknown, path: string, raw: boolean): string[] {
+  if (typeof v === "string") return !raw && v.includes("$") ? [path] : [];
+  if (Array.isArray(v)) return v.flatMap((x, i) => expandedDollars(x, `${path}[${i}]`, raw));
+  if (!isMapping(v)) return [];
+  return Object.entries(v).flatMap(([k, x]) => [
+    ...(k.includes("$") ? [`${path}.${k} (its key)`] : []),
+    ...expandedDollars(x, `${path}.${k}`, raw || /\.annotations$/.test(path) || (k === "model" && /\.data\[\d+\]$/.test(path))),
+  ]);
+}
+type AlertRuleProblem = "copy" | "yaml" | "contact" | "delete" | "group" | "identity" | "query" | "name" | "label" | "sent" | "template";
+/**
+ * Every way the alert rules' file, or its inline copy, strays: [the rule, what is wrong]. `inline` is the config's mapping
+ * as Bun.YAML reads compose.yaml; `written` each name the stack writes, with its labels; `uids` the rules the file holds.
+ * What Grafana itself refuses (an interval, an evaluator, a uid's length) is not copied here: it refuses the file and
+ * `lgtm` does not start (measured), which CI's observability step reads (review pass 3).
+ */
+function alertRulesProblems(fileText: string, inline: unknown, written: Map<string, string[]>, uids: string[] = ALERT_RULE_UIDS): [AlertRuleProblem, string][] {
+  const out: [AlertRuleProblem, string][] = [];
+  if (!isMapping(inline) || inline.content !== fileText.replace(/\$/g, "$$$$") || canonJson(Object.keys(inline)) !== canonJson(["content"])) out.push(["copy", `compose.yaml's configs.grafana-alert-rules is not ${ALERT_FILE} with each \`$\` doubled, as its content alone: compose reads a single \`$\` as a variable, so the rules Grafana loads would not be the file — run \`bun scripts/inline-grafana.ts\`, which writes it and lgtm's labels`]);
+  let d: unknown;
+  try { d = Bun.YAML.parse(fileText); } catch (e) { out.push(["yaml", `does not parse as YAML, so Grafana loads no rule: ${(e as Error).message}`]); return out; }
+  if (!isMapping(d) || d.apiVersion !== 1 || !Array.isArray(d.groups)) { out.push(["yaml", "is not Grafana's alerting provisioning file: apiVersion 1 and a `groups` list"]); return out; }
+  const extra = Object.keys(d).filter((k) => !["apiVersion", "groups", "deleteRules"].includes(k));
+  if (extra.length) out.push(["contact", `provisions ${extra.join(", ")} beside its rules: the file ships no contact point, policy or template — a rule that fires stays in Grafana's alert list, and nothing leaves the machine until an operator adds a contact point (deploy/README.md, "Alerts")`]);
+  const dollars = expandedDollars(d, "file", false);
+  if (dollars.length) out.push(["sent", `holds a \`$\` at ${dollars.join(", ")}, where Grafana expands it from its environment or a file as it loads the rule ($VAR, $__env{…}, $__file{…}; measured): lgtm's admin password, say, would ride every notification — a \`$\` belongs in an annotation's template or a query alone`]);
+  const groups = d.groups.filter(isMapping);
+  if (groups.length !== 1 || d.groups.length !== 1) { out.push(["group", `has ${d.groups.length} groups where it has one, "Open Brain"`]); if (!groups.length) return out; }
+  const g = groups[0];
+  if (g.orgId !== 1 || g.name !== "Open Brain" || g.folder !== "Open Brain" || !Array.isArray(g.rules)) out.push(["group", `its group is orgId ${JSON.stringify(g.orgId)}, name ${JSON.stringify(g.name)}, folder ${JSON.stringify(g.folder)} where it is orgId 1, "Open Brain" in the dashboard's folder "Open Brain", with a \`rules\` list`]);
+  const rules = Array.isArray(g.rules) ? g.rules.filter(isMapping) : [];
+  // A rule taken out of the file stays in Grafana, evaluating, until a deletion names it (measured): the one way out.
+  const deletions = d.deleteRules;
+  if (deletions !== undefined && (!Array.isArray(deletions) || deletions.some((x) => !isMapping(x) || x.orgId !== 1 || typeof x.uid !== "string" || canonJson(Object.keys(x).sort()) !== canonJson(["orgId", "uid"]) || rules.some((r) => r.uid === x.uid)))) out.push(["delete", `its deleteRules is not a list of { orgId: 1, uid } naming rules the file no longer holds: ${JSON.stringify(deletions)}`]);
+  const seenUid = new Set<unknown>(), seenTitle = new Set<unknown>();
+  for (const r of rules) {
+    const where = `rule ${JSON.stringify(r.uid)}`;
+    if (typeof r.uid !== "string" || r.uid === "" || seenUid.has(r.uid) || typeof r.title !== "string" || r.title === "" || seenTitle.has(r.title)) out.push(["identity", `${where} (${JSON.stringify(r.title)}) has no uid or title of its own: Grafana keeps the last of two rules with one uid, and two with one title send one alertname`]);
+    seenUid.add(r.uid); seenTitle.add(r.title);
+    if ("notification_settings" in r) out.push(["contact", `${where} names a receiver in notification_settings: the file ships no contact point, so the rule would route to one that is not there`]);
+    if ("labels" in r && r.labels !== undefined && (!isMapping(r.labels) || Object.values(r.labels).some((v) => typeof v !== "string" || v.includes("{{")))) out.push(["sent", `${where} sets labels of its own, ${JSON.stringify(r.labels)}, that are not plain words: every notification of it carries them, so a templated one would carry what the template reads`]);
+    if (r.isPaused === true) out.push(["query", `${where} is paused, so it never fires`]);
+    if ("record" in r) out.push(["query", `${where} has a \`record\` block, which makes it a recording rule that never fires`]);
+    const data = Array.isArray(r.data) ? r.data.filter(isMapping) : [];
+    const refs = data.map((q) => q.refId);
+    const kept = new Set<string>();
+    let read = true; // whether every query was read, so `kept` is the result's whole
+    for (const q of data) {
+      const model = isMapping(q.model) ? q.model : {};
+      if (q.datasourceUid === "prometheus" && typeof model.expr === "string") {
+        out.push(...promqlProblems(`${where} query ${q.refId}`, model.expr, written));
+        const expr = withoutComments(model.expr);
+        const keeps = alertGrouping(expr);
+        const making = /\b(label_replace|label_join|count_values)\b/i.exec(maskStrings(expr));
+        if (keeps === undefined || making) {
+          out.push(["sent", `${where} query ${q.refId} ${making ? `makes a label (${making[1]})` : "is not an aggregation at its outermost — by a list, or by nothing"}: an alert carries every label its result keeps, values and all, so each query here is \`<sum|min|max|avg|group|count|stddev|stdvar|quantile> by (<labels of ALERT_LABELS>) (…)\` or the same by nothing, and makes no label — wrap it in one, which also says exactly what it keeps`]);
+          read = false;
+        } else {
+          for (const l of keeps) kept.add(l);
+          const sent = keeps.filter((l) => !ALERT_LABELS.includes(l));
+          if (sent.length) out.push(["sent", `${where} query ${q.refId}'s result keeps ${sent.join(", ")}, which every notification of it would carry: an alert carries ALERT_LABELS alone (${ALERT_LABELS.join(", ")}) — group its result by those, or add one there on purpose`]);
+        }
+      } else if (q.datasourceUid !== "__expr__") {
+        out.push(["query", `${where} query ${q.refId} is ${q.datasourceUid === "prometheus" ? "a Prometheus query with no expr" : `on data source ${JSON.stringify(q.datasourceUid)}`}: a rule here reads the pinned image's Prometheus ("prometheus", an expr this check reads) and Grafana's expressions ("__expr__") alone — another source's result, a log line's say, would ride the notification unread`]);
+        read = false;
+      }
+    }
+    const annotations = isMapping(r.annotations) ? r.annotations : {};
+    for (const [key, value] of Object.entries(annotations)) {
+      const text = String(value);
+      for (const t of text.match(/\{\{[^}]*\}\}/g) ?? []) {
+        const m = ALERT_TEMPLATE.exec(t);
+        if (!m || (m[1] !== undefined && read && !kept.has(m[1])) || (m[2] !== undefined && !refs.includes(m[2]))) out.push(["template", `${where}'s ${key} templates ${t}, not a label its result keeps (${[...kept].join(", ") || "none"}) or one of its values (${refs.join(", ")}), through humanize at most: a notification carries the annotation, so it says names and numbers alone (and a label the result does not keep prints [no value])`]);
+      }
+      if ((text.match(/\{\{/g) ?? []).length !== (text.match(/\{\{[^}]*\}\}/g) ?? []).length) out.push(["template", `${where}'s ${key} has a \`{{\` that does not close as one template: this check reads each template whole`]);
+    }
+  }
+  const have = rules.map((r) => r.uid);
+  if (canonJson([...have].sort()) !== canonJson([...uids].sort())) out.push(["identity", `holds rules ${JSON.stringify(have)} where check 38's ALERT_RULE_UIDS holds ${JSON.stringify(uids)}: a rule dropped or added is a change there, and in deploy/README.md's list, on purpose (one dropped is also a deleteRules entry, or it stays in Grafana)`]);
+  return out;
+}
+type AlertProbeRule = Mapping & { data: Mapping[]; annotations: Mapping };
+type AlertProbe = Mapping & { groups: (Mapping & { rules: AlertProbeRule[] })[] };
+const ALERT_PROBE: AlertProbe = {
+  apiVersion: 1,
+  groups: [{ orgId: 1, name: "Open Brain", folder: "Open Brain", interval: "30s", rules: [{
+    uid: "probe", title: "Probe", condition: "B", noDataState: "OK", execErrState: "Error", for: "5m",
+    data: [
+      { refId: "A", datasourceUid: "prometheus", model: { refId: "A", instant: true, expr: 'max by (service_name) (sum by (service_name) (rate(http_server_request_duration_seconds_count{ob1_outcome="error"}[10m])) / sum by (service_name) (rate(http_server_request_duration_seconds_count[10m])))' } },
+      { refId: "B", datasourceUid: "__expr__", model: { refId: "B", type: "threshold", expression: "A", conditions: [{ evaluator: { type: "gt", params: [0.05] } }] } },
+    ],
+    annotations: { summary: "{{ $labels.service_name }} failed {{ humanizePercentage $values.A.Value }}" },
+  }] }],
+};
+/** The probe file's text, changed by `mutate`. */
+function alertProbe(mutate?: (d: AlertProbe) => void): string {
+  const d = structuredClone(ALERT_PROBE);
+  mutate?.(d);
+  return Bun.YAML.stringify(d, null, 2);
+}
+const rule0 = (d: AlertProbe) => d.groups[0].rules[0];
+const exprA = (d: AlertProbe, expr: string) => { rule0(d).data[0].model = { ...rule0(d).data[0].model as Mapping, expr }; };
+/** [what, mutation, the rules that alone must catch it]. */
+const ALERT_PROBES: [string, (d: AlertProbe) => void, AlertRuleProblem[]][] = [
+  ["the probe as held", () => {}, []],
+  ["a contact point beside the rules", (d) => { d.contactPoints = [{ orgId: 1, name: "x", receivers: [{ uid: "x", type: "webhook", settings: { url: "http://x" } }] }]; }, ["contact"]],
+  ["a policy beside the rules", (d) => { d.policies = [{ orgId: 1, receiver: "x" }]; }, ["contact"]],
+  ["a rule routed to a receiver", (d) => { rule0(d).notification_settings = { receiver: "x" }; }, ["contact"]],
+  ["a rule taken out, deleted by uid (review pass 3)", (d) => { d.deleteRules = [{ orgId: 1, uid: "ob1-gone" }]; }, []],
+  ["a deletion naming a rule the file holds", (d) => { d.deleteRules = [{ orgId: 1, uid: "probe" }]; }, ["delete"]],
+  ["a deletion in another organisation", (d) => { d.deleteRules = [{ orgId: 2, uid: "ob1-gone" }]; }, ["delete"]],
+  ["a group in another folder", (d) => { d.groups[0].folder = "General"; }, ["group"]],
+  ["a group of another name", (d) => { d.groups[0].name = "Other"; }, ["group"]],
+  ["a group of another organisation", (d) => { d.groups[0].orgId = 2; }, ["group"]],
+  ["a second group", (d) => { d.groups.push({ ...structuredClone(d.groups[0]), name: "Other", rules: [] }); }, ["group"]],
+  ["a rule twice", (d) => { d.groups[0].rules.push(structuredClone(rule0(d))); }, ["identity"]],
+  ["a uid twice under two titles", (d) => { d.groups[0].rules.push({ ...structuredClone(rule0(d)), title: "Other" }); }, ["identity"]],
+  ["a title twice under two uids", (d) => { d.groups[0].rules.push({ ...structuredClone(rule0(d)), uid: "probe2" }); }, ["identity"]],
+  ["a query on Loki", (d) => { rule0(d).data[0].datasourceUid = "loki"; }, ["query"]],
+  ["a paused rule", (d) => { rule0(d).isPaused = true; }, ["query"]],
+  ["a recording rule", (d) => { rule0(d).record = { metric: "x", from: "A" }; }, ["query"]],
+  ["a name nothing writes", (d) => exprA(d, "sum by (service_name) (http_server_requests_total)"), ["name"]],
+  ["a matcher on a label the name does not carry", (d) => exprA(d, 'sum by (service_name) (http_server_request_duration_seconds_count{datname="x"})'), ["label"]],
+  ["a result keeping a statement's text", (d) => { exprA(d, "sum by (query) (pg_stat_statements_query_id_total)"); rule0(d).annotations.summary = "{{ $labels.query }}"; }, ["sent"]],
+  ["a result keeping every label (no aggregation)", (d) => exprA(d, "rate(http_server_request_duration_seconds_count[10m])"), ["sent"]],
+  ["a binary operation whose first operand keeps a tool's name", (d) => exprA(d, "sum by (service_name, ob1_tool) (http_server_request_duration_seconds_count) > 0"), ["sent"]],
+  ["an `or` whose second operand keeps a tool's name", (d) => exprA(d, "sum by (service_name) (http_server_request_duration_seconds_count) or sum by (ob1_tool) (http_server_request_duration_seconds_count)"), ["sent"]],
+  ["a label-only first operand of `and` keeping a label of its own (review pass 1)", (d) => { exprA(d, 'label_replace(vector(1), "query", "x", "", "") and on () sum by (service_name) (http_server_request_duration_seconds_count)'); rule0(d).annotations.summary = "{{ $labels.query }}"; }, ["sent"]],
+  ["a group_left adding a tool's name (review pass 1)", (d) => exprA(d, "group by (service_name) (http_server_request_duration_seconds_count) * on (service_name) group_left (ob1_tool) group by (service_name, ob1_tool) (http_server_request_duration_seconds_count)"), ["sent"]],
+  ["a statement's text put in an allowed label by label_replace (review pass 1)", (d) => exprA(d, 'group by (service_name) (label_replace(pg_stat_statements_query_id_total, "service_name", "$1", "query", "(.*)"))'), ["sent"]],
+  ["a comment hiding an `or` that keeps a tool's name (review pass 1)", (d) => exprA(d, "group by (service_name) ( # (\nhttp_server_request_duration_seconds_count) or group by (ob1_tool) (http_server_request_duration_seconds_count) # )"), ["sent"]],
+  ["a backtick string's parenthesis hiding an `or` (review pass 2)", (d) => exprA(d, "sum by (service_name) (http_server_request_duration_seconds_count{ob1_outcome=`(`}) or sum by (ob1_tool) (http_server_request_duration_seconds_count{ob1_outcome=`)`})"), ["sent"]],
+  ["an aggregation `by` written after it", (d) => { exprA(d, "sum(http_server_request_duration_seconds_count) by (service_name)"); }, []],
+  ["…keeping a tool's name", (d) => { exprA(d, "sum(http_server_request_duration_seconds_count) by (ob1_tool)"); rule0(d).annotations.summary = "{{ $labels.ob1_tool }}"; }, ["sent"]],
+  ["a `by` on both sides, which Prometheus refuses (review pass 3)", (d) => exprA(d, "sum by (service_name) (http_server_request_duration_seconds_count) by (ob1_tool)"), ["sent"]],
+  ["a quantile by allowed labels", (d) => exprA(d, "quantile by (service_name) (0.9, http_server_request_duration_seconds_count)"), []],
+  ["a statement's text put in an allowed label by label_join", (d) => exprA(d, 'group by (service_name) (label_join(pg_stat_statements_query_id_total, "service_name", "", "query"))'), ["sent"]],
+  ["count_values with a grouping before its parenthesis (review pass 2)", (d) => exprA(d, 'group by (service_name) (count_values by (service_name) ("service_name", pg_stat_statements_query_id_total))'), ["sent"]],
+  ["a `#` inside a matcher's string, no comment", (d) => exprA(d, 'max by (service_name) (http_server_request_duration_seconds_count{ob1_tool!="#"})'), []],
+  ["…after an escaped quote", (d) => exprA(d, 'max by (service_name) (http_server_request_duration_seconds_count{ob1_tool!="\\"#"})'), []],
+  ["a `$` in a query's string, which Grafana reads raw", (d) => exprA(d, 'max by (service_name) (http_server_request_duration_seconds_count{ob1_tool!="$x"})'), []],
+  ["a backtick string's quote pairing past an `or` (review pass 2)", (d) => exprA(d, "group by (service_name) (http_server_request_duration_seconds_count{ob1_outcome!=`\"`}) or group by (ob1_tool) (http_server_request_duration_seconds_count{ob1_outcome!=`\"`})"), ["sent"]],
+  ["…hiding a label_replace (review pass 2)", (d) => exprA(d, 'group by (service_name) (pg_stat_statements_query_id_total{queryid!=`"`} or label_replace(pg_stat_statements_query_id_total{queryid!=`"(`}, "service_name", "$1", "query", "(.*)"))'), ["sent"]],
+  ["a comment inside the query, its words no name", (d) => exprA(d, "max by (service_name) ( # the share the server failed\nsum by (service_name) (rate(http_server_request_duration_seconds_count[10m])))"), []],
+  ["an aggregation `without` a list", (d) => exprA(d, "sum without (ob1_tool) (http_server_request_duration_seconds_count)"), ["sent"]],
+  ["a file that is not YAML", () => {}, ["yaml"]],
+  ["a rule's own label, a plain word", (d) => { rule0(d).labels = { severity: "critical" }; }, []],
+  ["a rule's own label, templated", (d) => { rule0(d).labels = { tool: "{{ .Labels.ob1_tool }}" }; }, ["sent"]],
+  ["a rule's own label reading lgtm's environment (review pass 2)", (d) => { rule0(d).labels = { severity: "$GF_SECURITY_ADMIN_PASSWORD" }; }, ["sent"]],
+  ["…or a file", (d) => { rule0(d).labels = { host: "$__file{/etc/hostname}" }; }, ["sent"]],
+  ["…in a label's key", (d) => { rule0(d).labels = { $GF_SECURITY_ADMIN_PASSWORD: "x" }; }, ["sent"]],
+  ["a title reading lgtm's environment", (d) => { rule0(d).title = "Probe $GF_SECURITY_ADMIN_PASSWORD"; }, ["sent"]],
+  ["a dashboard uid reading lgtm's environment, which every notification's links carry (review pass 3)", (d) => { rule0(d).dashboardUid = "$GF_SECURITY_ADMIN_PASSWORD"; rule0(d).panelId = 1; }, ["sent"]],
+  ["an annotation's `$` outside a template, which Grafana reads raw", (d) => { rule0(d).annotations.description = "costs $5"; }, []],
+  ["an annotation's template with trim markers", (d) => { rule0(d).annotations.summary = "{{- $labels.service_name -}}"; }, []],
+  ["an annotation's template holding a lone `}` (review pass 1)", (d) => { rule0(d).annotations.summary = '{{ printf "%s}" $labels.instance }}'; }, ["template"]],
+  ["an annotation templating a label its result does not keep", (d) => { rule0(d).annotations.summary = "{{ $labels.ob1_tool }}"; }, ["template"]],
+  ["an annotation templating anything else", (d) => { rule0(d).annotations.summary = "{{ .Value }}"; }, ["template"]],
+  ["an annotation templating a value no query has", (d) => { rule0(d).annotations.summary = "{{ $values.Z.Value }}"; }, ["template"]],
+];
+function checkAlertRules() {
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
+    fail(SELF, `check 38 parses the alert rules with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-3050)`);
+    return;
+  }
+  const uids = ["probe"];
+  for (const [what, mutate, expected] of ALERT_PROBES) {
+    const text = what === "a file that is not YAML" ? "groups: [unclosed\n" : alertProbe(mutate);
+    // Each probe's own rules are its held list: the list's rule has a probe of its own, below.
+    const own = (() => { const d = structuredClone(ALERT_PROBE); mutate(d); return d.groups.flatMap((g) => g.rules.map((r) => String(r.uid))); })();
+    const got = alertRulesProblems(text, { content: text.replace(/\$/g, "$$$$") }, DASHBOARD_PROBE_WRITTEN, own).map(([rule]) => rule);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 38 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  const held = alertProbe();
+  const stale = alertRulesProblems(held, { content: alertProbe((d) => { rule0(d).title = "Older"; }).replace(/\$/g, "$$$$") }, DASHBOARD_PROBE_WRITTEN, uids).map(([rule]) => rule);
+  if (JSON.stringify(stale) !== JSON.stringify(["copy"])) fail(SELF, `check 38 no longer reports exactly ["copy"] for its probe "an inline copy from an older file" (reported ${JSON.stringify(stale)})`);
+  const undoubled = alertRulesProblems(held, { content: held }, DASHBOARD_PROBE_WRITTEN, uids).map(([rule]) => rule);
+  if (JSON.stringify(undoubled) !== JSON.stringify(["copy"])) fail(SELF, `check 38 no longer reports exactly ["copy"] for its probe "an inline copy with each \`$\` single" (reported ${JSON.stringify(undoubled)})`);
+  const extra = alertRulesProblems(held, { content: held.replace(/\$/g, "$$$$") }, DASHBOARD_PROBE_WRITTEN, ["probe", "ob1-other"]).map(([rule]) => rule);
+  if (JSON.stringify(extra) !== JSON.stringify(["identity"])) fail(SELF, `check 38 no longer reports exactly ["identity"] for its probe "a rule dropped from the held list" (reported ${JSON.stringify(extra)})`);
+  let fileText: string;
+  try { fileText = readFileSync(join(ROOT, ALERT_FILE), "utf8"); } catch { return; } // check 37 said it is missing
+  const doc = Bun.YAML.parse(readFileSync(join(ROOT, "deploy/compose.yaml"), "utf8"));
+  const configs = isMapping(doc) && isMapping(doc.configs) ? doc.configs : {};
+  const code = readdirSync(join(ROOT, "server-portable")).filter((f) => f.endsWith(".ts") && !f.startsWith("test-")).map((f) => readFileSync(join(ROOT, "server-portable", f), "utf8"));
+  const written = new Map([...instrumentNamesIn(code), ...Object.entries(DASHBOARD_IMAGE_SERIES)]);
+  for (const [rule, detail] of alertRulesProblems(fileText, configs["grafana-alert-rules"], written)) {
+    fail(rule === "copy" ? "deploy/compose.yaml" : ALERT_FILE, `${detail} (check 38, SMD-3050)`);
+  }
+}
+checkAlertRules();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

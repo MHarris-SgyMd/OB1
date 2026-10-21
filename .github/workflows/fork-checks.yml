@@ -87,7 +87,7 @@ jobs:
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 27, 28,
       # 29, 32, 33, 34 and 35 parse YAML with Bun.YAML.
-      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, and the edge proxy
+      - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, and the edge proxy
         run: bun scripts/check-fork-consistency.ts
 
       # The scripts are type-checked where they run (SMD-1870): scripts/tsconfig.json
@@ -151,7 +151,7 @@ jobs:
         run: bun deploy/test-tier-sh.ts
 
   portable-server:
-    name: Portable server (Bun + Workers)
+    name: Portable server
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -490,28 +490,6 @@ jobs:
       - name: Authorization server rules
         working-directory: deploy/auth
         run: bun store.ts --self-check && bun provision.ts --self-check && bun limits.ts --self-check && bun target.ts --self-check
-
-      # Proves the Cloudflare target still builds under the real Workers bundler.
-      # Catches a dependency pulling in a node: builtin Workers cannot provide.
-      - name: Cloudflare Workers build
-        working-directory: server-portable
-        run: bunx wrangler deploy --dry-run --outdir=.cf-out
-        env:
-          CLOUDFLARE_API_TOKEN: ""
-          WRANGLER_SEND_METRICS: "false"
-
-      # The Worker carries OpenTelemetry's API alone, whose spans are no-ops
-      # there: the SDK is loaded only on Bun, and wrangler.toml aliases its
-      # module to a stub, without which the bundler would put the whole SDK
-      # (its exporter, its context manager, async_hooks) in the Worker for
-      # code that never runs there (SMD-1849 PR 2b). The bundle names each
-      # module it holds by its path.
-      - name: The Worker bundles no OpenTelemetry SDK
-        working-directory: server-portable
-        run: |
-          bundled=$(grep -o 'node_modules/@opentelemetry/[a-z-]*' .cf-out/index.js | sort -u | tr '\n' ' ')
-          [ "$bundled" = "node_modules/@opentelemetry/api " ] \
-            || { echo "the Worker bundles more of OpenTelemetry than its API: $bundled" >&2; exit 1; }
 
       # Every vendored server is a consumer of this server's auth module — the
       # seven extensions (change 64) and the recipes' and integrations' MCP
@@ -933,8 +911,8 @@ jobs:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
       # The one that matters: the real MCP server, driven over JSON-RPC, with
-      # OB1_STORE unset — the SQL store is the default (change 97) and this is
-      # the job that proves it — and no Supabase configuration present at all.
+      # OB1_STORE unset — the SQL store, the only one (change 97, SMD-3152) —
+      # and no Supabase configuration present at all.
       - name: End-to-end over MCP with no Supabase
         working-directory: server-portable
         run: bun test-e2e-sql.ts
@@ -1071,15 +1049,6 @@ jobs:
       - name: Agent identity
         working-directory: server-portable
         run: bun test-agents.ts
-        env:
-          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-
-      # The PostgREST store — kept for Cloudflare Workers (change 97); every
-      # other suite runs the SQL store. Uses compat/supabase-sql as the fixture: real SQL against
-      # real Postgres, so a wrong RPC argument shape fails here as it would live.
-      - name: PostgREST store argument shapes
-        working-directory: server-portable
-        run: bun test-store-postgrest.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
@@ -1666,7 +1635,8 @@ jobs:
           trap 'rm -f compose.release.yaml .bun-view.*.json' EXIT
           # What each render must hold: beside the tables, the forwarder's
           # script and, with lgtm in the render, the dashboard and its
-          # provider (SMD-1849 PR 3c), each compose.yaml's. Labels are held on
+          # provider (SMD-1849 PR 3c) and the alert rules (SMD-3050), each
+          # compose.yaml's. Labels are held on
           # the substituted render alone: --no-interpolate leaves two files' labels a list,
           # and their environment one too, which `env` reads as a mapping
           # (compose.grafana-port.yaml sets one key of lgtm's, SMD-1849 PR 3a).
@@ -1676,11 +1646,12 @@ jobs:
             def rest: del(.services.proxy, .configs) | (.services[]? |= (if has("environment") then .environment |= env else . end)) | delpaths($declared) | with_entries(select(.key | startswith("x-") | not));
             ($p | del(.configs, .labels, .depends_on)) == ($base | del(.configs, .labels, .depends_on))
             and $p.configs == [$want[] | {source, target}]
-            and (($r.configs // {}) | keys) == ([$want[].source, "forwarder", (if $r.services.lgtm then "grafana-dashboard", "grafana-dashboard-provider" else empty end)] | sort)
+            and (($r.configs // {}) | keys) == ([$want[].source, "forwarder", (if $r.services.lgtm then "grafana-dashboard", "grafana-dashboard-provider", "grafana-alert-rules" else empty end)] | sort)
             and all($want[]; ($r.configs[.source] | keys) == ["content", "name"])
             and $r.configs.forwarder == $alone.configs.forwarder
             and $r.configs["grafana-dashboard"] == $alone.configs["grafana-dashboard"]
             and $r.configs["grafana-dashboard-provider"] == $alone.configs["grafana-dashboard-provider"]
+            and $r.configs["grafana-alert-rules"] == $alone.configs["grafana-alert-rules"]
             and ($r | rest) == ($alone | rest)
             and ([$r.networks[].name] | length == (unique | length))
             and ([$r.services[].ports[]? | if type == "object" then [.host_ip, .published] else . end] | length == (unique | length))'
@@ -2070,6 +2041,12 @@ jobs:
       # line, which a collector would lengthen. A capture citing a thought
       # that is not there makes the store's refusals line read above 0, and
       # one tool called once proves Prometheus's zero at a series' start.
+      # SMD-3050: compose's render of the alert rules is
+      # deploy/observability/alert-rules.yaml, Grafana holds exactly its
+      # rules, provisioned from it, and after the traffic the provider rule is
+      # pending (the stub's 404s) and the other four normal and healthy; then
+      # pg-exporter stops and the Postgres rule must go pending (check 38
+      # holds the rules' names and labels without a running profile).
       - name: The observability profile's dashboard reads every series it names
         working-directory: deploy
         run: |
@@ -2077,8 +2054,11 @@ jobs:
           printf 'GRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\nOB1_MONITOR_DB_PASSWORD=ci-dummy-monitor-password-0123456789\nOTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm.ob1.internal.:4318\nOTEL_METRIC_EXPORT_INTERVAL=5000\n' >> .env
           # compose's render prints each `$` doubled again, as compose.yaml has it,
           # so it reads back as the file once undoubled (Grafana's mount has one).
-          docker compose -f compose.yaml --profile observability config --format json | jq -j '.configs["grafana-dashboard"].content | gsub("[$][$]"; "$")' | cmp - observability/dashboard.json \
+          docker compose -f compose.yaml --profile observability config --format json > /tmp/observability-render.json
+          jq -j '.configs["grafana-dashboard"].content | gsub("[$][$]"; "$")' /tmp/observability-render.json | cmp - observability/dashboard.json \
             || { echo "compose renders the grafana-dashboard config otherwise than deploy/observability/dashboard.json" >&2; exit 1; }
+          jq -j '.configs["grafana-alert-rules"].content | gsub("[$][$]"; "$")' /tmp/observability-render.json | cmp - observability/alert-rules.yaml \
+            || { echo "compose renders the grafana-alert-rules config otherwise than deploy/observability/alert-rules.yaml" >&2; exit 1; }
           # The disk read once lgtm's image (2.6 GB) is pulled and before Loki
           # starts on it: Loki refuses every record with the disk under lgtm-data
           # past 90% (PR 3c, measured), and the log query below would fail with
@@ -2196,6 +2176,57 @@ jobs:
             sleep 5
           done
           if ! { [[ "$born" =~ ^[0-9.]+$ ]] && awk -v b="$born" 'BEGIN { exit !(b > 0.5) }'; }; then said "worker_status, called once, increased by $born over 10 m: Prometheus no longer ingests a zero at a series' start (created-timestamp-zero-ingestion in compose.yaml's PROMETHEUS_EXTRA_ARGS), so a single failure reads 0 on every panel"; fi
+          # SMD-3050: the alert rules, as Grafana holds them — each of the
+          # file's, from the file (provisioned) — and their states, each rule's
+          # on a line: state, health, uid.
+          # shellcheck disable=SC2016 # as above
+          in_lgtm bash -c 'curl -fsS --max-time 10 -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/v1/provisioning/alert-rules' > /tmp/grafana-alert-rules.json || said "Grafana's alert rules did not answer"
+          rules_have=$(jq -r '[.[] | select(.provenance == "file") | .uid] | sort | join(" ")' /tmp/grafana-alert-rules.json)
+          rules_want=$({ grep -oP '^      - uid: \K\S+' observability/alert-rules.yaml || true; } | LC_ALL=C sort | paste -sd ' ')
+          # …in the dashboard's folder, not a second "Open Brain" beside it.
+          jq -e --slurpfile d /tmp/grafana-dashboard.json '. != [] and all(.[]; .folderUID == $d[0].meta.folderUid)' /tmp/grafana-alert-rules.json > /dev/null \
+            || said "Grafana's alert rules are not all in the dashboard's folder ($(jq -r '.meta.folderUid' /tmp/grafana-dashboard.json)): $(jq -c '[.[] | {uid, folderUID}]' /tmp/grafana-alert-rules.json)"
+          if [ -z "$rules_want" ] || [ "$rules_have" != "$rules_want" ]; then said "Grafana holds the provisioned alert rules '$rules_have' where deploy/observability/alert-rules.yaml has '${rules_want:-none (its uid lines were not read)}'"; fi
+          states() {
+            # shellcheck disable=SC2016 # as above
+            in_lgtm bash -c 'curl -fsS --max-time 10 -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/prometheus/grafana/api/v1/rules' \
+              | jq -r '.data.groups[] | select(.name == "Open Brain") | .rules[] | "\(.state) \(.health) \(.uid)"'
+          }
+          prom() { in_lgtm curl -s --max-time 10 -G http://127.0.0.1:9090/api/v1/query --data-urlencode "query=$1" | jq -c '[.data.result[]? | {m: .metric, v: .value[1]}]' || true; }
+          # Every rule judged on one read: the provider rule pending or firing
+          # — the stub's 404 for each capture's metadata call is a provider
+          # failure, and about three in 10 m make it pending (firing 5 m on) —
+          # and the other four normal and healthy, nothing here making their
+          # conditions. Rules are evaluated every 30 s; a read from before the
+          # exporter's first scrape may still hold the Postgres rule's NoData,
+          # so the wait is for all of it, 18 rounds (about two minutes).
+          judged() {
+            local uid
+            grep -qE '^(pending|firing) ok ob1-provider-failures$' <<<"$st" || return 1
+            for uid in $rules_want; do
+              [ "$uid" = ob1-provider-failures ] || grep -qx "inactive ok $uid" <<<"$st" || return 1
+            done
+          }
+          for _ in $(seq 18); do
+            st=$(states) || st=""
+            judged && break
+            traffic > /dev/null || true
+            sleep 5
+          done
+          echo "$st"
+          judged || said "the alert rules are not the provider rule pending (the stub's 404s) and the other four normal and healthy after 18 rounds: $(tr '\n' ';' <<<"$st"); Prometheus's failed provider calls over 10 m: $(prom 'sum by (gen_ai_operation_name, error_type) (increase(gen_ai_client_operation_duration_seconds_count{error_type!="", ob1_probe=""}[10m]))')"
+          # The ticket's forced condition: the exporter stopped, the collector's
+          # next scrape reads up 0 (within its 30 s), and the Postgres rule is
+          # pending at an evaluation after it (22–61 s from the stop over three
+          # fresh runs, measured), firing a minute on.
+          docker compose -f compose.yaml --profile observability stop pg-exporter
+          for _ in $(seq 36); do
+            st=$(states) || st=""
+            grep -qE '^(pending|firing) ok ob1-postgres-unreached$' <<<"$st" && break
+            sleep 5
+          done
+          grep -qE '^(pending|firing) ok ob1-postgres-unreached$' <<<"$st" || said "the Postgres rule did not go pending within 3 minutes of pg-exporter's stop: $(tr '\n' ';' <<<"$st"); Prometheus's up and pg_up for the exporter: $(prom 'up{job="postgres"}') $(prom 'pg_up{job="postgres"}')"
+          echo "the Postgres rule pending after pg-exporter's stop"
           cp /tmp/env-before-observability .env
           docker compose -f compose.yaml --profile observability rm -sf lgtm pg-exporter pg-monitor-role
           docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 server api
@@ -2204,88 +2235,56 @@ jobs:
             [ -z "$endpoint" ] || { echo "$s still sends to the collector after the step" >&2; exit 1; }
           done
 
-      # SMD-2294: a canary or working tier of its own compose project joins
-      # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes
-      # /canary/mcp and /working/mcp there. With no tier both are the proxy's
-      # bodiless 404, and so is every other path starting with either word,
-      # in any case and whatever follows (an escaped slash, a `;`, a pasted
-      # zero-width space), which never falls to the legacy route. A stand-in per tier on
-      # the mesh, under its tier's name and under `server` as a tier's
-      # container is, answers its own route: the client's Host passed, the
-      # legacy marker deleted, its own 4xx and 5xx untouched, headers and all
-      # (only a 502 is the proxy's 404). From the mesh, `server` then names
-      # more than one container: the collision the route table's mesh names
-      # avoid while no tier claims stable's own names, which check 28's
-      # PROXY_ROUTE_TABLE (scripts/check-fork-consistency.ts) holds. Gone,
-      # each is a 404, and the proxy logged no route-table error. The two
-      # routes are deprecated (SMD-3057; v2.0.0 removes them, SMD-2874): each
-      # answer through them carries a Deprecation header and a Link to where a
-      # tier lives now, and stable's own /mcp carries neither.
-      - name: The tier routes reach a tier on the mesh, and nothing else under its prefix
+      # SMD-2874: stable routes no tier. A canary or a working tier is a brain
+      # of its own on its own port; from SMD-2294 to v2.0.0 stable's proxy
+      # routed /canary/mcp and /working/mcp to one on its mesh, deprecated by
+      # SMD-3057 for a release first. Every path starting with either word, in
+      # any case and whatever follows (an escaped slash, a `;`, a pasted
+      # zero-width space), is the proxy's bodiless 404 (`tier-off`, kept until
+      # SMD-2532 removes the legacy route) with no deprecation, and never
+      # falls to the legacy route, where the same key would write to stable.
+      # A stand-in on stable's mesh under each tier's old name, and under
+      # `server` as a tier's container once was, is reached by none of those
+      # paths, and stable's /mcp still reaches stable beside them: from the
+      # mesh `server` then names more than one container, the collision the
+      # route table's mesh names avoid. Check 28's PROXY_ROUTE_TABLE
+      # (scripts/check-fork-consistency.ts) holds the table.
+      - name: Stable routes no tier, and nothing under a tier's prefix reaches stable
         working-directory: deploy
         run: |
           B=http://127.0.0.1:8010
           code() { curl -sS -o /tmp/tier-body -D /tmp/tier-head -w '%{http_code}' --max-time 15 "$@"; }
           bare404() { c=$(code "${@:2}") || c="no answer (curl exit $?)"; if ! { [ "$c" = 404 ] && [ ! -s /tmp/tier-body ]; }; then echo "$1 answered $c '$(head -c 80 /tmp/tier-body)', not the proxy's bodiless 404" >&2; exit 1; fi; }
-          # SMD-3057: the headers of the answer code() or bare404 just read
-          # (a fresh /tmp/tier-head each time) carry the tiers' deprecation.
-          deprecated() { grep -qix 'deprecation: @1792108800'$'\r' /tmp/tier-head && grep -i '^link:' /tmp/tier-head | grep -F '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#a-canary-beside-the-stack>; rel="deprecation"' > /dev/null; }
-          must_deprecate() { deprecated || { cat /tmp/tier-head >&2; echo "$1 carries no Deprecation header and Link" >&2; exit 1; }; }
-          bare404 'GET /canary/mcp/health with no canary' "$B/canary/mcp/health"
-          # …and that 404, tier-absent's, says so too: tier-deprecated is
-          # outside it (the client a moved canary leaves is the one to tell).
-          must_deprecate "the bodiless 404 at /canary/mcp with no canary"
-          bare404 'a keyed tools/list at /canary/mcp with no canary' -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
-            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "$B/canary/mcp"
-          must_deprecate "the bodiless 404 to a keyed tools/list at /canary/mcp"
-          bare404 'GET /working/mcp/health with no working tier' "$B/working/mcp/health"
-          must_deprecate "the bodiless 404 at /working/mcp with no tier"
+          # The tiers' deprecation (SMD-3057) went with their routes: tier-off's
+          # 404, read from the answer bare404 just read, carries none.
+          undeprecated() { if grep -qi '^deprecation:' /tmp/tier-head || grep -qi '^link:.*rel="deprecation"' /tmp/tier-head; then cat /tmp/tier-head >&2; echo "$1 carries a Deprecation header or a deprecation Link" >&2; exit 1; fi; }
           offprefix() {
-            for p in /canary /canary/ /canary/health /canary/mcpx /CANARY/mcp /Canary/mcp/health /canary%2Fmcp /CANARY%2Fmcp '/canary;x' /canary%E2%80%8B/mcp /canary%5Cmcp /canaryx/mcp /working /working/ /working/x /working/mcpx /WORKING/mcp; do
-              bare404 "a keyed POST to $p$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{}' "$B$p"
-              # tier-off's 404 is no tier route's, so no tier deprecation (SMD-3057).
-              if grep -qi '^deprecation:' /tmp/tier-head || grep -qi '^link:.*rel="deprecation"' /tmp/tier-head; then cat /tmp/tier-head >&2; echo "tier-off's 404 at $p$1 carries a Deprecation header or a deprecation Link" >&2; exit 1; fi
+            for p in /canary/mcp /canary/mcp/health /working/mcp /working/mcp/health /canary /canary/ /canary/health /canary/mcpx /CANARY/mcp /Canary/mcp/health /canary%2Fmcp /CANARY%2Fmcp '/canary;x' /canary%E2%80%8B/mcp /canary%5Cmcp /canaryx/mcp /working /working/ /working/x /working/mcpx /WORKING/mcp; do
+              bare404 "a keyed tools/list to $p$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+                -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "$B$p"
+              undeprecated "tier-off's 404 at $p$1"
             done
+            bare404 "GET /canary/mcp/health$1" "$B/canary/mcp/health"
+            undeprecated "tier-off's 404 to GET /canary/mcp/health$1"
           }
           offprefix ""
           trap 'docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null 2>&1 || true' EXIT
           IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
-          # Each answers /…/status/NNN with that status, its body and an
-          # x-tier header, and anything else with the path, the Host and the
-          # legacy marker it was sent.
           for tier in canary working; do
             docker run -d --name "ob1-ci-$tier-stand-in" --network open-brain_mesh --network-alias "mcp.$tier.ob1.internal" --network-alias server --entrypoint bun "$IMAGE" \
-              -e "Bun.serve({ port: 8000, fetch(r) { const p = new URL(r.url).pathname; const s = /\/status\/(\d+)$/.exec(p); if (s) return new Response('$tier ' + s[1], { status: Number(s[1]), headers: { 'x-tier': '$tier' } }); return new Response('$tier ' + p + ' host=' + r.headers.get('host') + ' legacy=' + (r.headers.get('x-ob1-legacy-route') ?? '-')); } })" > /dev/null
+              -e "Bun.serve({ port: 8000, fetch(r) { return new Response('$tier ' + new URL(r.url).pathname); } })" > /dev/null
           done
-          H="${B#http://}"
-          for tier in canary working; do
-            want="$tier /$tier/mcp/health host=$H legacy=-"
-            for _ in $(seq 1 40); do [ "$(curl -s --max-time 2 -H 'X-OB1-Legacy-Route: 1' "$B/$tier/mcp/health")" = "$want" ] && break; sleep 0.5; done
-            c=$(code -H 'X-OB1-Legacy-Route: 1' "$B/$tier/mcp/health") || c="no answer (curl exit $?)"
-            { [ "$c" = 200 ] && [ "$(cat /tmp/tier-body)" = "$want" ]; } || { echo "/$tier/mcp/health answered $c, not the $tier stand-in with the client's Host and no legacy marker: '$(head -c 120 /tmp/tier-body)'" >&2; exit 1; }
-            # SMD-3057: deprecated until v2.0.0 removes the route, and every
-            # answer through it says so, with a Link to where a tier lives now.
-            must_deprecate "/$tier/mcp/health's 200"
-            got=$(curl -sS -D /tmp/tier-head --max-time 5 -X POST -d '{}' "$B/$tier/mcp") || got="no answer (curl exit $?)"
-            [ "$got" = "$tier /$tier/mcp host=$H legacy=-" ] || { echo "a POST to /$tier/mcp did not reach the $tier stand-in: '$got'" >&2; exit 1; }
-            must_deprecate "a POST to /$tier/mcp, the method a client uses,"
-            for s in 401 404 429 500 503 504; do
-              c=$(code "$B/$tier/mcp/status/$s") || c="no answer (curl exit $?)"
-              if ! { [ "$c" = "$s" ] && [ "$(cat /tmp/tier-body)" = "$tier $s" ] && grep -qix "x-tier: $tier"$'\r' /tmp/tier-head && deprecated; }; then echo "the $tier tier's own $s came back as $c '$(head -c 80 /tmp/tier-body)', or without its header or the deprecation: only a 502 is the proxy's" >&2; exit 1; fi
-            done
-            bare404 "the $tier tier's own 502" "$B/$tier/mcp/status/502"
-            must_deprecate "the $tier tier's own 502, made the bodiless 404,"
-          done
-          offprefix " beside both tiers"
+          # The stand-ins answer on the mesh, so a route to them would reach
+          # them: one container polls both, each try bounded at 2 s, for 40
+          # tries, and prints each one's last failure if they never both do.
+          docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'const last = {}; for (let i = 0; i < 40; i++) { const up = await Promise.all(["canary", "working"].map((t) => fetch(`http://mcp.${t}.ob1.internal:8000/x`, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok || ((last[t] = `HTTP ${r.status}`), false), (e) => ((last[t] = `${e?.name ?? "Error"} ${e?.code ?? e?.message ?? ""}`), false)))); if (up.every(Boolean)) process.exit(0); await Bun.sleep(500); } console.error(JSON.stringify(last)); process.exit(1)' > /dev/null \
+            || { docker logs --tail 20 ob1-ci-canary-stand-in >&2; docker logs --tail 20 ob1-ci-working-stand-in >&2; echo "a stand-in never answered on the mesh (each one's last failure above), so this step proves nothing" >&2; exit 1; }
+          offprefix " beside a stand-in under each tier's old mesh name"
           holders=$(docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'console.log(new Set((await Bun.dns.lookup("server", { family: 4 })).map((a) => a.address)).size)')
           [ "$holders" -ge 2 ] || { echo "from the mesh, \`server\` named $holders container(s) with two stand-ins claiming it: the collision this step stands for is not there" >&2; exit 1; }
           c=$(code "$B/mcp/health") || c="no answer (curl exit $?)"
-          { [ "$c" = 200 ] && [ "$(cat /tmp/tier-body)" = ok ] && ! grep -qi '^deprecation:' /tmp/tier-head && ! grep -qi '^link:.*rel="deprecation"' /tmp/tier-head; } || { echo "stable's /mcp/health beside the tiers answered $c '$(head -c 80 /tmp/tier-body)', not ok, or carries the tiers' Deprecation header or Link" >&2; exit 1; }
+          { [ "$c" = 200 ] && [ "$(cat /tmp/tier-body)" = ok ]; } || { echo "stable's /mcp/health beside the stand-ins answered $c '$(head -c 80 /tmp/tier-body)', not ok: the proxy reached a stand-in claiming \`server\`" >&2; exit 1; }
           docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null
-          for tier in canary working; do
-            for _ in $(seq 1 20); do [ "$(code "$B/$tier/mcp/health" || true)" = 404 ] && break; sleep 0.5; done
-            bare404 "GET /$tier/mcp/health once the tier left" "$B/$tier/mcp/health"
-          done
           # A router whose rule does not compile is dropped, its paths to the
           # next router (legacy), and a route file Traefik cannot read takes
           # every route with it, with nothing but this line to say so. Traefik
@@ -3086,16 +3085,24 @@ jobs:
           grep -q '^GRAFANA_ADMIN_PASSWORD=' .env || { echo "no GRAFANA_ADMIN_PASSWORD line in .env to leave out" >&2; exit 1; }
           grep -q '^OB1_MONITOR_DB_PASSWORD=' .env || { echo "no OB1_MONITOR_DB_PASSWORD line in .env to leave out" >&2; exit 1; }
           if grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_|OB1_MONITOR_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
-          # SMD-2874 PR 2: the canary's own write key, minted, its hash alone in
+          # SMD-2874 PR 2: the canary's own write key, minted, and (SMD-2287)
+          # its own forward key for the MCP server, their hashes alone in
           # MCP_ACCESS_KEYS; no key hash of stable's anywhere in the file; a
           # plugin role password of its own; no webhook secret of stable's.
+          # The canary's forward key as the file holds it last, and the
+          # MCP_ACCESS_KEYS its write key and a given forward key make.
+          canary_forward() { sed -n 's/^OB1_FORWARDER_KEY=//p' .env.canary.local | tail -n 1 | tr -d "\"'"; }
+          own_keys_with() { printf 'open-brain-canary:write:%s,open-brain-canary-mcp-forwarder:forward:%s' "$(printf '%s' "$CANARY_KEY" | shasum -a 256 | cut -d' ' -f1)" "$(printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1)"; }
           CANARY_KEY="$(sed -n 's/^OB1_CANARY_KEY=//p' .env.canary.local | tr -d "\"'")"
           [ "${#CANARY_KEY}" = 64 ] || { echo "the canary's env file holds no minted OB1_CANARY_KEY" >&2; exit 1; }
-          [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "open-brain-canary:write:$(printf '%s' "$CANARY_KEY" | shasum -a 256 | cut -d' ' -f1)" ] || { echo "the canary's MCP_ACCESS_KEYS is not its own key alone" >&2; exit 1; }
+          CANARY_FORWARD="$(canary_forward)"
+          [ "${#CANARY_FORWARD}" = 64 ] || { echo "the canary's env file holds no minted OB1_FORWARDER_KEY" >&2; exit 1; }
+          [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "$(own_keys_with "$CANARY_FORWARD")" ] || { echo "the canary's MCP_ACCESS_KEYS is not its own two keys alone" >&2; exit 1; }
+          grep -F "minted the canary's own write key, open-brain-canary" /tmp/canary-up.out
+          grep -F "minted the canary's own forward key, open-brain-canary-mcp-forwarder" /tmp/canary-up.out
           for h in $(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'" | tr ',' '\n' | cut -d: -f3); do
             if grep -qF "$h" .env.canary.local; then echo "the canary's env file holds a key hash of stable's" >&2; exit 1; fi
           done
-          grep -F "minted the canary's own write key, open-brain-canary" /tmp/canary-up.out
           canary_plugin="$(sed -n 's/^OB1_PLUGIN_DB_PASSWORD=//p' .env.canary.local | tr -d "\"'")"
           if [ -z "$canary_plugin" ] || [ "$canary_plugin" = ci-dummy-plugin-password-0123456789 ]; then echo "the canary's plugin role password is not its own" >&2; exit 1; fi
           if grep -qF ci-dummy-hook-secret .env.canary.local; then echo "the canary's env file holds stable's webhook secret" >&2; exit 1; fi
@@ -3171,7 +3178,7 @@ jobs:
           plugin_login() { PGPASSWORD="$1" docker run --rm --network open-brain-canary_data -e PGPASSWORD pgvector/pgvector:0.8.6-pg16 psql -h postgres -U ob1_plugins -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1; }
           plugin_login "$canary_plugin" || { echo "the canary's plugin role does not take the canary's own password" >&2; exit 1; }
           if plugin_login ci-dummy-plugin-password-0123456789; then echo "the canary's plugin role still takes stable's password" >&2; exit 1; fi
-          if grep -qFf <(printf '%s\n' "$PG_CANARY" "$CANARY_KEY" "$canary_plugin") /tmp/canary-wrong.out /tmp/canary-up.out; then echo "canary.sh printed the canary's password (the lines are not shown here, so this log does not)" >&2; exit 1; fi
+          if grep -qFf <(printf '%s\n' "$PG_CANARY" "$CANARY_KEY" "$CANARY_FORWARD" "$canary_plugin") /tmp/canary-wrong.out /tmp/canary-up.out; then echo "canary.sh printed a key or password of the canary's (this check shows no line of it)" >&2; exit 1; fi
           [ "$rc" = 1 ] || { cat /tmp/canary-wrong.out >&2; echo "up passed its smoke under a provider serving another model (exit $rc)" >&2; exit 1; }
           grep -F "differs from stable's on OB1_QUERY_LOG_RETENTION_DAYS" /tmp/canary-wrong.out
           grep -F 'returned none of' /tmp/canary-wrong.out
@@ -3213,16 +3220,88 @@ jobs:
           echo 'SERVER_PORT="8013"' >> .env.canary.local
           # …with stable's keys beside the canary's, as a file made before
           # SMD-2874 PR 2 holds them: the up takes them out, by count, keeps the
-          # canary's own key, and leaves one MCP_ACCESS_KEYS line.
-          printf 'MCP_ACCESS_KEYS="%s,%s"\n' "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tail -n 1 | tr -d "\"'")" "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'")" >> .env.canary.local
+          # canary's own key, and leaves one MCP_ACCESS_KEYS line. Two forward
+          # keys of stable's are in play (SMD-2287):
+          #   - OB1_SMOKE_FORWARD_KEY, the ci-forwarder entry stable's
+          #     MCP_ACCESS_KEYS lists, copied in as the canary's
+          #     OB1_FORWARDER_KEY: replaced by a fresh key of the canary's,
+          #     under the base name, and the forward entry the first up minted
+          #     is removed (review pass 1);
+          #   - STABLE_FWD, stable's own OB1_FORWARDER_KEY, set in stable's file
+          #     with spaces around it and listed nowhere by stable: one of
+          #     stable's keys all the same, so the canary's read entry for it
+          #     goes with stable's, counted (review passes 3 and 4).
+          # The operator's two entries stay: a forward entry named -1, which no
+          # up mints and a prefix match would remove (passes 2 and 4), and a
+          # read entry under a minted name, since only forward entries go
+          # (pass 3).
+          OPS_FORWARD="open-brain-canary-mcp-forwarder-1:forward:$(openssl rand -hex 32 | tr -d '\n' | shasum -a 256 | cut -d' ' -f1)"
+          OPS_READ="open-brain-canary-mcp-forwarder-2:read:$(openssl rand -hex 32 | tr -d '\n' | shasum -a 256 | cut -d' ' -f1)"
+          STABLE_FWD="$(openssl rand -hex 32)"
+          printf 'OB1_FORWARDER_KEY=" %s "\n' "$STABLE_FWD" >> .env
+          printf 'MCP_ACCESS_KEYS="%s,%s,%s,%s,%s"\n' "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tail -n 1 | tr -d "\"'")" "$OPS_FORWARD" "$OPS_READ" "stable-mcp-copy:read:$(printf '%s' "$STABLE_FWD" | shasum -a 256 | cut -d' ' -f1)" "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'")" >> .env.canary.local
+          printf 'OB1_FORWARDER_KEY=%s\n' "$OB1_SMOKE_FORWARD_KEY" >> .env.canary.local
           stable_keys="$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'" | tr ',' '\n' | grep -c .)"
           FAKE_URL='http://127.0.0.1:8012/mcp?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-edited.out
-          grep -F "removed $stable_keys of stable's access keys from MCP_ACCESS_KEYS" /tmp/canary-edited.out
-          if grep -F 'minted' /tmp/canary-edited.out; then echo "the up minted a key where the canary had its own" >&2; exit 1; fi
+          sed -i '/^OB1_FORWARDER_KEY=/d' .env
+          grep -F "removed $((stable_keys + 1)) of stable's access keys from MCP_ACCESS_KEYS" /tmp/canary-edited.out
+          if grep -F "minted the canary's own write key" /tmp/canary-edited.out; then echo "the up minted a write key where the canary had its own" >&2; exit 1; fi
+          grep -F "minted the canary's own forward key, open-brain-canary-mcp-forwarder (its hash in MCP_ACCESS_KEYS, the raw key in OB1_FORWARDER_KEY, in place of stable's)" /tmp/canary-edited.out
+          grep -F "removed 1 forward entry an earlier up minted (open-brain-canary-mcp-forwarder, open-brain-canary-mcp-forwarder-2 and on) from MCP_ACCESS_KEYS" /tmp/canary-edited.out
+          FORWARD_2="$(canary_forward)"
+          { [ "${#FORWARD_2}" = 64 ] && [ "$FORWARD_2" != "$OB1_SMOKE_FORWARD_KEY" ] && [ "$FORWARD_2" != "$CANARY_FORWARD" ]; } || { echo "the canary's forward key is not a fresh one of its own" >&2; exit 1; }
+          [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "$(own_keys_with "$FORWARD_2" | sed "s|,|,$OPS_FORWARD,$OPS_READ,|")" ] || { echo "the canary's MCP_ACCESS_KEYS is not its write key, the operator's two entries and its fresh forward key" >&2; exit 1; }
           [ "$(grep -c '^MCP_ACCESS_KEYS=' .env.canary.local)" = 1 ] || { echo "the canary's env file holds more than one MCP_ACCESS_KEYS line" >&2; exit 1; }
           [ "$(sed -n 's/^OB1_CANARY_KEY=//p' .env.canary.local | tr -d "\"'")" = "$CANARY_KEY" ] || { echo "the canary's key changed" >&2; exit 1; }
           grep -F 'connector open-brain-canary still points at http://127.0.0.1:8012/mcp?…, a port this canary no longer answers on' /tmp/canary-edited.out
           [ "$(docker compose -p open-brain-canary -f compose.yaml port forwarder 8000)" = 127.0.0.1:8013 ] || { echo "the canary's forwarder did not move to the edited port, 127.0.0.1:8013" >&2; exit 1; }
+          # SMD-3154: up --no-refresh brings the canary level in place. A row
+          # only the canary holds (a key in its ob1_config, which a refresh's
+          # restore replaces) survives it, no tier half runs, and its ledger is
+          # current. A running sleep worker (a stand-in carrying compose's
+          # labels for the service; --init, so a stop does not wait out its
+          # grace) is stopped before the canary's Postgres is touched, and
+          # comes back from compose.yaml's definition after the smoke, unless
+          # the env file holds no OB1_WORKER_KEY, as this canary's does not:
+          # then it is left stopped and up exits 1, said.
+          cq "INSERT INTO ob1_config (key, value) VALUES ('ci_canary_only', 'kept') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+          standin() { docker rm -f open-brain-canary-sleep-1 > /dev/null 2>&1 || true
+            docker run -d --init --name open-brain-canary-sleep-1 --label com.docker.compose.project=open-brain-canary --label com.docker.compose.service=sleep \
+              --label com.docker.compose.oneoff=False --label com.docker.compose.container-number=1 --entrypoint sleep docker.io/oven/bun:1.4.3-alpine 600; }
+          standin > /dev/null
+          rc=0; FAKE_URL='http://127.0.0.1:8013/mcp?key=x' ./canary.sh up --no-refresh --no-smoke > /tmp/canary-nokey.out 2>&1 || rc=$?
+          { [ "$rc" = 1 ] && grep -qF 'canary sleep worker LEFT STOPPED' /tmp/canary-nokey.out && grep -qF 'migrated in place (its own rows kept)' /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with a worker and no OB1_WORKER_KEY exited $rc, not 1 with the worker left stopped" >&2; exit 1; }
+          if [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=sleep)" ]; then echo "up --no-refresh started a worker with no OB1_WORKER_KEY" >&2; exit 1; fi
+          printf 'OB1_WORKER_KEY=ci-canary-worker-key-not-stables\n' >> .env.canary.local
+          # The file as a canary mended by SMD-2874 PR 2 holds it, the dogfood
+          # canary's next upgrade: its write key alone, no forward key. The up
+          # mints the forward key, adding its entry to MCP_ACCESS_KEYS beside
+          # the write key, which it keeps (SMD-2287 review pass 1: a mutant
+          # that wrote the raw key without its entry passed every up above).
+          sed -i '/^OB1_FORWARDER_KEY=/d; /^MCP_ACCESS_KEYS=/d' .env.canary.local
+          printf 'MCP_ACCESS_KEYS=open-brain-canary:write:%s\n' "$(printf '%s' "$CANARY_KEY" | shasum -a 256 | cut -d' ' -f1)" >> .env.canary.local
+          standin_id="$(standin)"
+          FAKE_URL='http://127.0.0.1:8013/mcp?key=x' ./canary.sh up --no-refresh --no-smoke | tee /tmp/canary-norefresh.out
+          grep -F "minted the canary's own forward key, open-brain-canary-mcp-forwarder (its hash in MCP_ACCESS_KEYS, the raw key in OB1_FORWARDER_KEY)" /tmp/canary-norefresh.out
+          if grep -F "minted the canary's own write key" /tmp/canary-norefresh.out; then echo "up --no-refresh minted a write key where the canary had its own" >&2; exit 1; fi
+          FORWARD_3="$(canary_forward)"
+          [ "${#FORWARD_3}" = 64 ] || { echo "up --no-refresh left the canary no forward key" >&2; exit 1; }
+          [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "$(own_keys_with "$FORWARD_3")" ] || { echo "up --no-refresh did not give the canary its forward key beside its write key" >&2; exit 1; }
+          if grep -qFf <(printf '%s\n' "$FORWARD_2" "$FORWARD_3" "$CANARY_KEY" "$CANARY_FORWARD" "$OB1_SMOKE_FORWARD_KEY" "$STABLE_FWD" "$PG_CANARY" "$canary_plugin") /tmp/canary-edited.out /tmp/canary-nokey.out /tmp/canary-norefresh.out; then echo "canary.sh printed a raw key, the canary's or stable's forward key" >&2; exit 1; fi
+          grep -F 'migrate open-brain-canary-postgres-1 in place' /tmp/canary-norefresh.out
+          grep -F 'canary sleep worker stopped for the migration' /tmp/canary-norefresh.out
+          grep -F 'canary sleep worker, on the new build' /tmp/canary-norefresh.out
+          grep -F 'migrated in place (its own rows kept)' /tmp/canary-norefresh.out
+          if grep -F 'refresh open-brain-postgres-1' /tmp/canary-norefresh.out; then echo "up --no-refresh ran the refresh" >&2; exit 1; fi
+          [ "$(cq "SELECT value FROM ob1_config WHERE key = 'ci_canary_only'")" = kept ] || { echo "up --no-refresh lost the canary's own row" >&2; exit 1; }
+          [ "$(curl -s --max-time 5 http://127.0.0.1:8013/mcp/health)" = ok ] || { echo "the canary does not answer at 8013 after up --no-refresh" >&2; exit 1; }
+          worker="$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=sleep --no-trunc)"
+          { [ -n "$worker" ] && [ "$worker" != "$standin_id" ] && [ "$(docker inspect -f '{{join .Config.Cmd " "}}' "$worker")" != 600 ]; } || { echo "up --no-refresh did not replace the sleep stand-in with compose's worker (${worker:-none})" >&2; exit 1; }
+          migs=(../db/migrations/*.sql)
+          [ "$(cq "SELECT max(name) FROM schema_migrations")" = "${migs[-1]##*/}" ] || { echo "the canary's ledger is not at the highest migration (${migs[-1]##*/}) after up --no-refresh" >&2; exit 1; }
+          docker rm -f open-brain-canary-sleep-1 > /dev/null
+          sed -i '/^OB1_WORKER_KEY=ci-canary-worker-key-not-stables$/d' .env.canary.local
+          cq "DELETE FROM ob1_config WHERE key = 'ci_canary_only'"
           cq "UPDATE ob1_config SET value = 'working' WHERE key = 'tier'"
           cq "ALTER DATABASE openbrain RESET ob1.refresh_target"
           refused 'refusing to delete its volume' down --volumes
@@ -3234,8 +3313,17 @@ jobs:
           if docker network inspect open-brain-canary_default > /dev/null 2>&1; then echo "down left the canary's network from before SMD-2583" >&2; exit 1; fi
           ! grep -F 'mcp remove' /tmp/fake-claude.log || { echo "down removed another connector" >&2; exit 1; }
           docker compose -p open-brain-canary -f compose.yaml up -d --wait postgres
+          # SMD-3154: a canary volume whose database holds nothing is no canary
+          # to keep: up --no-refresh exits 1 and migrates nothing into it.
+          rc=0; ./canary.sh up --no-refresh --no-smoke > /tmp/canary-emptydb.out 2>&1 || rc=$?
+          { [ "$rc" = 1 ] && grep -qF 'holds no relations' /tmp/canary-emptydb.out; } || { cat /tmp/canary-emptydb.out >&2; echo "up --no-refresh on an empty canary database exited $rc, not 1" >&2; exit 1; }
           ./canary.sh down --volumes | tee /tmp/canary-down-empty.out
           grep -F 'canary down, its database deleted' /tmp/canary-down-empty.out
+          # SMD-3154: with no database to keep, up --no-refresh is refused and
+          # changes nothing: no volume made, no container started.
+          rc=0; ./canary.sh --port 8011 up --no-refresh > /tmp/canary-nodb.out 2>&1 || rc=$?
+          { [ "$rc" = 2 ] && grep -qF -- "--no-refresh keeps the canary's database, and open-brain-canary has none" /tmp/canary-nodb.out; } || { cat /tmp/canary-nodb.out >&2; echo "up --no-refresh with no canary database exited $rc, not refused" >&2; exit 1; }
+          if docker volume inspect open-brain-canary_pgdata > /dev/null 2>&1; then echo "the refused up --no-refresh made the canary's volume" >&2; exit 1; fi
           FAKE_SCOPE="Local config (private to you in this project)" FAKE_URL=http://127.0.0.1:8013/mcp ./canary.sh down --volumes | tee /tmp/canary-down2.out
           grep -F 'nothing to delete' /tmp/canary-down2.out
           grep -F 'is in local scope, not user — left as it is' /tmp/canary-down2.out
@@ -3357,6 +3445,38 @@ jobs:
       # .github/ci/full-stack-up.sh's, with why each is as it is (SMD-3051).
       - name: Bring up the compose stack
         run: .github/ci/full-stack-up.sh
+
+      # SMD-2287 PR 5a: the server image just built carries the MCP server as a
+      # REST client (mcp-server/) and its client (rest-client/), each with its
+      # own lockfile's packages, run with `bun` as the entrypoint, without the
+      # image's preflight, since it reads no store. Without a forward key it stops at
+      # once in its own words, exit 2, after every import has loaded; with one
+      # it answers keyless liveness, refuses a keyless initialize on its own
+      # request line, and stops on SIGTERM, exit 0. The REST core it names is
+      # an address nothing answers, and none of this calls it. With no network:
+      # Bun installs a package itself, from the registry, for a directory with
+      # no node_modules (SMD-2978), and an image missing mcp-server/'s passed
+      # this step that way (a mutant, measured).
+      - name: The server image runs the MCP server as a REST client
+        working-directory: deploy
+        run: |
+          IMG="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
+          if out=$(docker run --rm --network none --entrypoint bun "$IMG" ../mcp-server/index.ts 2>&1); then code=0; else code=$?; fi
+          echo "$out"
+          if [ "$code" != 2 ] || ! grep -q '^OB1_FORWARDER_KEY is not set' <<< "$out"; then echo "expected exit 2 naming the missing forward key; exit $code" >&2; exit 1; fi
+          docker run -d --name ob1-mcp-image --network none --entrypoint bun -e "OB1_FORWARDER_KEY=$(openssl rand -hex 32)" -e OB1_REST_URL=http://127.0.0.1:9 "$IMG" ../mcp-server/index.ts > /dev/null
+          up=""
+          for _ in $(seq 1 40); do [ "$(docker exec ob1-mcp-image wget -qO- http://127.0.0.1:8000/health 2> /dev/null)" = ok ] && { up=1; break; }; sleep 0.25; done
+          docker exec ob1-mcp-image wget -qO- --header 'Content-Type: application/json' --header 'Accept: application/json, text/event-stream' \
+            --post-data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' http://127.0.0.1:8000/mcp > /dev/null 2>&1 || true
+          docker stop ob1-mcp-image > /dev/null
+          code=$(docker inspect -f '{{.State.ExitCode}}' ob1-mcp-image)
+          log=$(docker logs ob1-mcp-image 2>&1)
+          docker rm -f ob1-mcp-image > /dev/null
+          echo "$log"
+          [ -n "$up" ] || { echo "the MCP server never answered keyless /health with ok" >&2; exit 1; }
+          grep -q '"door":"mcp".*"rpc":"initialize".*"code":"UNAUTHORIZED"' <<< "$log" || { echo "the keyless initialize was not refused on the MCP server's own request line" >&2; exit 1; }
+          if [ "$code" != 0 ] || ! grep -q '^SIGTERM: stopped in ' <<< "$log"; then echo "expected the server's own stop line and exit 0; exit $code" >&2; exit 1; fi
 
       # SMD-2212: the import runner's image copies the ingestion pipeline's
       # import graph file by file, and its build resolves every import. So a

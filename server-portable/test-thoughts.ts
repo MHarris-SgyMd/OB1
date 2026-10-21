@@ -23,7 +23,7 @@ import { MEND_BATCH, MEND_SCAN, MENDER_ACTOR, mendIntervalFrom, mendOnce, newMen
 import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
-import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, evidenceIn, judgedRecipe, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
+import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
 import { consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, onlyQuoted, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe } from "./lineage.ts";
@@ -625,6 +625,49 @@ console.log("\n[9] The supersession judge's prompt and parser (migration 029): a
   const t0 = performance.now();
   for (let i = 0; i < 20; i++) evidenceIn("contents" + ".".repeat(60) + " x", dots, dots);
   assert(performance.now() - t0 < 200, `twenty quotes over text holding a run of four thousand dots take ${(performance.now() - t0).toFixed(0)} ms, not the seconds an alternation that matches a dot two ways backtracks for`);
+  // SMD-3151: a model quotes the words it reads, not the markdown around them, so quote and texts are read without it.
+  assert(evidenceIn("the monthly plan is withdrawn", "The **monthly plan** is withdrawn.") && evidenceIn("it is not shipped", "it is _not_ shipped")
+      && evidenceIn("it is not shipped", "it is __not__ shipped"), "a quote across bold and emphasis underscores is found, a doubled underscore gone whole");
+  assert(evidenceIn("Release target: ~~Friday~~ Monday", "Release target: ~~Friday~~ Monday.") && evidenceIn("Release target: Monday", "Release target: ~~Friday~~ Monday, not ~~Tuesday~~.")
+      && !evidenceIn("Friday Monday", "~~Friday~~ Monday"), "struck text goes with its markers, each span alone: a reader takes it as withdrawn, so a quote reading it as stated is not found");
+  assert(evidenceIn("the plan ships Friday", "Use `a~~b` here, then the plan ships Friday, see `c~~d`.") && evidenceIn("the plan ships Friday", "Use `a\n~~b` here, then the plan ships Friday, see `c~~d`.")
+      && !evidenceIn("Friday Monday", "about ~~ 5 min. Plan: ~~Friday~~ Monday")
+      && evidenceIn("the tool", "~~`obsidian`~~ the tool") && evidenceIn("about 5 min", "about ~~5 min"),
+    "…by GFM's rule: no strike pairs across code spans, a `~~` before a space opens none, struck code is struck, and a stray `~~` goes (review pass 2)");
+  assert(evidenceIn("the **monthly plan** is withdrawn", "The **monthly plan** is withdrawn.") && evidenceIn("the **monthly plan** is withdrawn", "The monthly plan is withdrawn."),
+    "…and a quote that copied the markup is read without it too, so it matches with the markup in the text or without");
+  assert(evidenceIn("run bun db/consolidate.ts --status first", "Run `bun db/consolidate.ts --status` first.") && evidenceIn("`bun db/consolidate.ts --status`", "Run `bun db/consolidate.ts --status` first."),
+    "…across a code span, whether or not the quote keeps its backticks");
+  const linked = "Blocked by [SMD-1806](https://linear.app/siggymd/issue/SMD-1806/three-brains) and [the ADR](<https://github.com/o/r/blob/main/docs/a.md>) until both land.";
+  assert(evidenceIn("blocked by SMD-1806 and the ADR until both land", linked) && evidenceIn("see diagram shows the flow", "see ![diagram](img/flow.png) shows the flow")
+      && evidenceIn("see a here", 'see [a](u "t") here') && evidenceIn("see a here", "see [a]( u ) here") && evidenceIn("see the three brains plan here", "see [the three brains plan](u) here"),
+    "…across a link's text and an image's, their targets dropped, a title or space inside the parentheses too");
+  assert(!evidenceIn("linear.app/siggymd/issue", linked) && !evidenceIn("three-brains", linked) && !evidenceIn("docs/a.md", linked),
+    "a quote found only inside a link's target is not found: a URL is not text the reader sees");
+  assert(evidenceIn("db/test-live.ts [6g] arm 1 races 40 accepts", "`db/test-live.ts` \\[6g\\] arm 1 races 40 accepts") && evidenceIn("Problem The stack fails", "## Problem\nThe stack fails")
+      && evidenceIn("intro the gate denies by default", "intro\n> the gate denies\nby default"), "…through an escape's backslash, a heading's hashes and a blockquote's marker");
+  assert(evidenceIn("Blocked by [SMD-1806]", linked) && evidenceIn("intro > the gate denies > by default", "intro\n> the gate denies\n> by default") && evidenceIn("Done. ## Next steps", "Done.\n## Next steps"),
+    "…and a quote keeping part of the markup is found too: a link's brackets without its target, or a marker that opened a line, mid-quote once the quote is one line (review pass 1)");
+  const wrapped = "see [the\nboard](https://e.com/b) for more", wrappedStrike = "Plan: ~~ship on\nFriday~~ ship Monday";
+  assert(evidenceIn("Done. Next steps", "Done.\n## Next steps") && evidenceIn("intro deep", "intro\n>> deep") && evidenceIn("see the board for more", wrapped) && !evidenceIn("e.com/b", wrapped)
+      && evidenceIn("Plan: ~~ship on Friday~~ ship Monday", wrappedStrike) && !evidenceIn("ship on Friday", wrappedStrike) && evidenceIn("one two stays", "Plan ~~one\n\ntwo~~ stays")
+      && evidenceIn("e.com/b", "[notes\n\nsee](https://e.com/b)"),
+    "…and one the text wraps: a heading's hashes or a `>>` the quote skipped, a link's text or a strike across a line break, but never across a blank line (review pass 2)");
+  assert(evidenceIn("count >= 5", "the gate needs count >= 5", "the gate needs count = 5") && !evidenceIn("count = 5", "the gate needs count >= 5")
+      && evidenceIn("reads process.argv", "it reads process.argv[2] first") && evidenceIn("the plan shipped", "the plan shipped[1] on Monday") && evidenceIn("a_b_c is the key", "a\\_b\\_c is the key"),
+    "a comparison's `>=` stays, a bracket after a word keeps the words apart, and an escaped underscore inside a word is text (review pass 2)");
+  assert(evidenceIn("record_thought_relation writes it", "`record_thought_relation` writes it") && !evidenceIn("record thought relation", "`record_thought_relation` writes it")
+      && withoutMarkdown("record_thought_relation") === "record_thought_relation" && withoutMarkdown("a__b") === "a__b" && withoutMarkdown("#433 merged") === "#433 merged" && withoutMarkdown("####### x") === "####### x" && withoutMarkdown("a * b") === "a  b",
+    "an underscore inside a word is text and stays; a hash that opens no heading stays, and every asterisk goes");
+  assert(!evidenceIn("done", "The plan was aban**done**d.") && evidenceIn("plan is done", "The plan is **done**."), "the whole-word rule holds over folded markdown: a word markup split is one word again");
+  assert(!evidenceIn("the plan shipped", "the **plan** shipped", "the plan shipped late") && evidenceIn("the plan shipped", "the **plan** shipped", "the plan was late")
+      && !evidenceIn("the plan shipped", "the plan shipped", "the `plan` shipped late"), "a phrase both sides hold once folded is evidence for neither, whichever side carried the markup");
+  assert(!evidenceIn("tail", "*".repeat(5999) + " tail") && evidenceIn("tail", "*".repeat(5990) + " tail"),
+    "the text is cut to what the model was sent before it is folded: folded first, the asterisks would pull a word past the cut into reach");
+  const worst = ["[".repeat(6000), "[a](".repeat(1500), "[a](" + " ".repeat(5996), "[a](" + "\n".repeat(5996), "[a" + "\n a".repeat(2999), "~~a".repeat(2000), "`a".repeat(3000), "a" + "_".repeat(5998) + "b"];
+  const t1 = performance.now();
+  for (let i = 0; i < 20; i++) for (const s of worst) withoutMarkdown(s);
+  assert(performance.now() - t1 < 200, `twenty readings each of six thousand brackets, an unclosed link run, a link opened onto six thousand spaces or line breaks, a link's text across three thousand, runs of tildes and backticks, and an underscore run take ${(performance.now() - t1).toFixed(0)} ms: every run is bounded or tried from its start alone (review passes 1 and 2)`);
   assert(parseJudgement("I cannot say.").malformed && parseJudgement("").malformed, "prose and an empty answer are malformed");
   const long = parseJudgement(`{"verdict":"outdates","supersedes":"unknown","confidence":0.6,"reason":"${"x\u001b[2K ".repeat(200)}"}`);
   assert(long.reason.length <= 400 && !long.reason.includes("\u001b"), "the reason is clipped to 400 characters with control characters stripped");
@@ -1603,13 +1646,6 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
       await sleep(300);
       loop5.stop();
       assert(loop5.ticks() - atHeal >= 4, `after the database answers again the ticks return to the interval (${loop5.ticks() - atHeal} in 300 ms at 30 ms)`);
-      // The PostgREST store: no mender, said once.
-      const said6: string[] = [];
-      const pgrst = createContext({ env: () => ({ OB1_EMBEDDING_DIM: "4", ...local() }), store: async () => ({ kind: "postgrest", listVectorless: async () => [] }) as never, door: "t" });
-      const loop6 = startVectorMender(pgrst, { intervalS: 0.03, firstDelayMs: 0, log: (l) => said6.push(l) });
-      await sleep(200);
-      loop6.stop();
-      assert(loop6.ticks() === 0 && said6.length === 1 && /not started — the PostgREST store/.test(said6[0]), `over PostgREST: not started, said once (${said6.join(" / ")})`);
       // A lock the session did not let go: said once, not per tick.
       const said7: string[] = [];
       const kept = createContext({ env: () => ({ OB1_EMBEDDING_DIM: "4", ...local() }), store: async () => ({ mendLock: async () => async () => false, listVectorless: async () => [] }) as never, door: "t" });
@@ -1680,7 +1716,7 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
 
 // ── 15. Decide mode: the tier decides, the judge's model writes the proposal ──
 
-console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal written only on its outdates and only when both quotes check, a pass key naming both, and the pass's readers taking it as a judgement");
+console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal written only on its outdates at the floor and only when both quotes check, a pass key naming both, and the pass's readers taking it as a judgement");
 {
   // The key: decide mode's names the decider, the writer and the mode's version; with no decider the judge's stands.
   assert(consolidatePassKey({ judgeModel: "qwen2.5:7b", decider: "" }) === consolidateKey("qwen2.5:7b"), "no decider: the judge's key");
@@ -1718,19 +1754,30 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   assert(judgedR.prompt_hash === promptHash(CONSOLIDATE_PROMPT) && !("decider" in judgedR) && !("decide_version" in judgedR), "…and the judge's names prompt 4's, as before");
 
   // The writer's question: prompt 4's rendering of both thoughts, two-sided with the part rule, as the pass runs it
-  // (decide version 1). Version 2's record rule is the eval's (`--record-rule`), not the pass's: shelved 2026-10-18.
+  // (decide version 3: version 1's writer, its quotes read without markdown, SMD-3151). Version 2's record rule is the
+  // eval's (`--record-rule`), not the pass's: shelved 2026-10-18.
   const older = { content: "the plan is to ship on Friday", createdAt: "2026-10-01T00:00:00Z" };
   const newer = { content: "we shipped on Monday instead of Friday", createdAt: "2026-10-03T00:00:00Z" };
   const msg = writerMessages({ older, newer }, PASS_WRITER.twoSided, PASS_WRITER.partRule, PASS_WRITER.recordRule)[0].content;
   assert(msg.startsWith(WRITER_HEAD) && msg.includes("<thought_a>\nthe plan is to ship on Friday\n</thought_a>") && msg.includes('"stale": words copied') && msg.includes(PART_RULE.trim()) && !msg.includes(RECORD_RULE.trim()),
     "the pass's writer: both thoughts, the stale quote and the part rule, not the record rule");
-  // The pass asks version 1's text, SMD-3114's, word for word. Under the record rule (version 2, the eval's) the
-  // definition no longer counts a later summary of the same work, or one saying the other is done, as outdating it.
+  // The pass asks version 1's text, SMD-3114's, word for word (version 3 moved the quote check and when the writer is asked, not its prompt). Under the record
+  // rule (version 2, the eval's) the definition no longer counts a later summary of the same work, or one saying the
+  // other is done, as outdating it.
   const v1 = writerRules(true, true), v2 = writerRules(true, true, true);
-  assert(DECIDE_VERSION === 1 && DECIDE_PROMPT.endsWith(v1) && v1.includes("a progress note or summary of some work and a later one of the same work") && v1.includes("or one saying the other is done, closed, obsolete or replaced") && !v1.includes(RECORD_RULE.trim())
+  assert(DECIDE_VERSION === 3 && DECIDE_PROMPT.endsWith(v1) && v1.includes("a progress note or summary of some work and a later one of the same work") && v1.includes("or one saying the other is done, closed, obsolete or replaced") && !v1.includes(RECORD_RULE.trim())
       && !v2.includes("a later one of the same work") && !v2.includes("one saying the other is done") && v2.includes("the two say different things about the same subject") && v2.includes("a status and a later status of something still open"),
     "the pass asks version 1's text; the record rule's definition drops a later summary and a report of done from what outdates");
   assert(stands(prop, older.content, newer.content, true) && !stands({ ...prop, stale: "Monday" }, older.content, newer.content, true), "both quotes checked, each in its own side");
+  // SMD-3151 (version 3): the writer quotes the words it reads, so markdown around them in either thought does not fail
+  // the check — the pass's whole-quote check, not version 2's reading.
+  const markedOlder = "The plan is to **ship on `Friday`**, see [the board](https://e.com/b).", markedNewer = "We _shipped_ on **Monday** instead.";
+  const bothHold = "We **shipped** on Monday too; the plan was to ship on Friday.";
+  assert(stands(prop, markedOlder, markedNewer, true) && !stands({ ...prop, stale: "https://e.com/b" }, markedOlder, newer.content, true)
+      && stands(prop, "the plan was to ship on Friday.", markedNewer, true) && !stands(prop, bothHold, newer.content, true),
+    "quotes across bold, a code span, emphasis and a link stand; a quote reaching into a link's target does not, nor evidence both sides hold once folded");
+  assert(stands({ ...prop, evidence: "Release target: ~~Friday~~ Monday", stale: "Release target: Friday" }, "Release target: Friday.", "Release target: ~~Friday~~ Monday, after the review.", true),
+    "a stale claim the current thought strikes through is withdrawn there, not stated, so the proposal stands (review pass 1)");
   // A quote shortened with "…" or "...": read piece by piece under version 2's reading (the eval's `--v2-quotes`),
   // every piece in its side and not every piece in the other; the pass keeps SMD-3114's whole-quote check.
   const shortened = { ...prop, evidence: "we shipped … instead of Friday", stale: "the plan is ... on Friday" };
@@ -1755,6 +1802,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
 
   // decidePair end to end, against an in-process tier and writer.
   const MODEL = { name: "h2o-test", source: "stub", revision: "r1", weights_sha256: "w1", calibrator_sha256: "c1", rules: "x1" };
+  const FLOOR = DEFAULT_MIN_CONFIDENCE;
   let tierP: Record<string, number> = p, tierStatus = 200, tierCalls = 0;
   const tier = Bun.serve({
     port: 0,
@@ -1784,53 +1832,78 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   try {
     const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${writer.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "writer-test", OB1_CONSOLIDATE_DECIDER: "h2o-test" });
     const jev = resolveJevConfig({ OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "h2o-test" })!;
-    const a = await decidePair(older, newer, cfg, jev);
+    const a = await decidePair(older, newer, cfg, jev, FLOOR);
     assert(a.verdict === "outdates" && a.supersedes === "newer" && a.decide.top === "outdates" && a.decide.writer?.stale_found === true && a.decide.decider.name === "h2o-test" && writerCalls === 1,
       "the tier's outdates asks the writer, and its standing proposal is the judgement");
+    assert(a.decide.writer?.evidence === "shipped on Monday" && a.decide.writer.stale === "ship on Friday" && a.decide.floor === undefined,
+      "the writer's note keeps both quotes, so a recorded proposal can be checked again under another quote rule (version 3)");
     assert(writerBody.model === "writer-test" && (writerBody.messages?.[0]?.content ?? "").includes(PART_RULE.trim()) && !(writerBody.messages?.[0]?.content ?? "").includes(RECORD_RULE.trim()),
       "the writer is the judge's model, asked the pass's question, without the record rule");
     tierP = { ...p, outdates: 0.05, related: 0.75 };
-    const b = await decidePair(older, newer, cfg, jev);
-    assert(b.verdict === "related" && b.decide.writer === undefined && writerCalls === 1, "the tier's related: no writer call, the relation stands");
+    const b = await decidePair(older, newer, cfg, jev, FLOOR);
+    assert(b.verdict === "related" && b.decide.writer === undefined && b.decide.floor === undefined && writerCalls === 1, "the tier's related: no writer call, the relation stands, and its note names no floor, which only a gated outdates does");
     tierP = p;
     writerAnswer = JSON.stringify({ current: "B", evidence: "we shipped … instead of Friday", stale: "the plan is ... on Friday", reason: "it shipped later" });
-    const s = await decidePair(older, newer, cfg, jev);
+    const s = await decidePair(older, newer, cfg, jev, FLOOR);
     assert(s.verdict === "related" && /quotes did not check out/.test(s.reason) && s.decide.writer?.evidence_found === false && s.decide.writer.stale_found === false,
-      "a writer's quotes shortened with \"…\" do not stand in the pass, which reads quotes whole (version 1), and its note says neither was found");
+      "a writer's quotes shortened with \"…\" do not stand in the pass, which reads quotes whole (version 3, as version 1 did), and its note says neither was found");
     writerAnswer = JSON.stringify({ current: "none", evidence: "", stale: "", reason: "both stay current" });
-    const c = await decidePair(older, newer, cfg, jev);
+    const c = await decidePair(older, newer, cfg, jev, FLOOR);
     assert(c.verdict === "related" && c.decide.writer?.current === "none" && c.decide.writer.stale_found === false && c.decide.writer.evidence_found === false && proposalVerdict(c) === null,
       "a writer's none: H2O's best verdict that proposes nothing, its note checking no quote");
     writerAnswer = "not json";
-    const d = await decidePair(older, newer, cfg, jev);
+    const d = await decidePair(older, newer, cfg, jev, FLOOR);
     assert(d.verdict === "related" && d.decide.writer?.current === "unparsed" && !d.malformed, "a writer's answer that does not parse is a decline, not a malformed judgement");
     writerStatus = 503;
-    const e = await decidePair(older, newer, cfg, jev).then(() => null, (x: Error & { status?: number }) => x);
+    const e = await decidePair(older, newer, cfg, jev, FLOOR).then(() => null, (x: Error & { status?: number }) => x);
     assert(e?.status === 503 && /Writer request/.test(e.message), "a writer's 503 throws with its status, for the pass to classify");
     writerStatus = 200;
     tierStatus = 500;
-    const f = await decidePair(older, newer, cfg, jev).then(() => null, (x: Error & { status?: number }) => x);
+    const f = await decidePair(older, newer, cfg, jev, FLOOR).then(() => null, (x: Error & { status?: number }) => x);
     assert(f !== null && f.status === 500, "a tier's 500 throws with its status, for the pass to classify");
     tierStatus = 200;
     const other = resolveJevConfig({ OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "another" })!;
-    const g = await decidePair(older, newer, cfg, other).then(() => null, (x: Error) => x);
+    const g = await decidePair(older, newer, cfg, other, FLOOR).then(() => null, (x: Error) => x);
     assert(g !== null && /another/.test(g.message), "an answer from a model the decider does not name is refused");
+
+    // Version 3 (SMD-3151 review pass 3): the writer is asked only at the pass's floor, read as the pass reads a proposal's
+    // confidence; under it a standing proposal would record nothing and close the pair's relation, so the pair takes
+    // H2O's best verdict that proposes nothing, as a quote that fails does, and the note names the floor.
+    const answered = writerAnswer;
+    writerAnswer = JSON.stringify({ current: "B", evidence: "shipped on Monday", stale: "ship on Friday", reason: "it shipped later" });
+    const w0 = writerCalls;
+    tierP = { unrelated: 0.05, related: 0.3, evolves: 0.2, duplicate: 0.05, outdates: 0.4 };
+    const u = await decidePair(older, newer, cfg, jev, FLOOR);
+    assert(u.verdict === "related" && u.decide.top === "outdates" && u.decide.floor === FLOOR && u.decide.writer === undefined && writerCalls === w0
+        && proposalVerdict(u) === null && relationVerdict(u) === "related" && relationConfidence(u).mass === 0.55,
+      "H2O's outdates under the floor: no writer call, and the pair takes H2O's relation at the relation words' mass, its note naming the floor");
+    tierP = { unrelated: 0.05, related: 0.3, evolves: 0.1049, duplicate: 0.05, outdates: 0.4951 };
+    const atFloor = await decidePair(older, newer, cfg, jev, FLOOR);
+    tierP = { unrelated: 0.05, related: 0.3, evolves: 0.1051, duplicate: 0.05, outdates: 0.4949 };
+    const underFloor = await decidePair(older, newer, cfg, jev, FLOOR);
+    assert(atFloor.verdict === "outdates" && atFloor.decide.floor === undefined && underFloor.decide.floor === FLOOR && writerCalls === w0 + 1
+        && outdatesConfidence(atFloor.probabilities?.verdict?.p ?? p) === FLOOR && proposalConfidence(atFloor).confidence === FLOOR,
+      "the gate reads P(outdates) as the pass holds a proposal to its floor, rounded to two places: 0.4951 asks the writer and is recorded, 0.4949 does neither");
+    tierP = p;
+    const higher = await decidePair(older, newer, cfg, jev, 0.6);
+    assert(higher.decide.floor === 0.6 && higher.decide.writer === undefined && writerCalls === w0 + 1, "the floor is the pass's: at --min-confidence 0.6, H2O's 0.55 asks no writer");
+    writerAnswer = answered;
 
     // The egress gate, before any request, as judgePair's: a remote writer endpoint under the default policy refuses
     // the pair, and so does an older side the policy keeps from a remote tier, though the newer side alone would pass
     // the gate the tier's client applies to the call.
     const before = { tier: tierCalls, writer: writerCalls };
     const remoteWriter = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${writer.port}/v1`, OB1_JUDGE_MODEL: "writer-test", OB1_CONSOLIDATE_DECIDER: "h2o-test" });
-    const h = await decidePair(older, newer, remoteWriter, jev).then(() => null, (x: unknown) => x);
+    const h = await decidePair(older, newer, remoteWriter, jev, FLOOR).then(() => null, (x: unknown) => x);
     assert(h instanceof ProviderError && h.kind === "egress" && /^Writer request to /.test(h.message) && tierCalls === before.tier && writerCalls === before.writer,
       "a writer endpoint the gate refuses: the pair refused before the tier is asked");
     const allowAll = { OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "source:private-notes" };
     const localWriter = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${writer.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "writer-test", OB1_CONSOLIDATE_DECIDER: "h2o-test", ...allowAll });
     const remoteTier = resolveJevConfig({ OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_MODEL: "h2o-test", ...allowAll })!;
-    const i = await decidePair({ ...older, metadata: { source: "private-notes" } }, newer, localWriter, remoteTier).then(() => null, (x: unknown) => x);
+    const i = await decidePair({ ...older, metadata: { source: "private-notes" } }, newer, localWriter, remoteTier, FLOOR).then(() => null, (x: unknown) => x);
     assert(i instanceof ProviderError && i.kind === "egress" && /^Decision request to /.test(i.message) && tierCalls === before.tier,
       "an older side the policy keeps from a remote tier: the pair refused before the tier is asked");
-    assert((await decidePair(older, newer, localWriter, remoteTier)).verdict === "related" && tierCalls === before.tier + 1, "…while the same pair without it is decided");
+    assert((await decidePair(older, newer, localWriter, remoteTier, FLOOR)).verdict === "related" && tierCalls === before.tier + 1, "…while the same pair without it is decided");
 
     // The follower's probe of the tier: up when it serves the decider, missing when another, out when nothing answers.
     assert((await probeTier(jev, "h2o-test", 2000)).state === "up", "probeTier: the tier serving the decider is up");

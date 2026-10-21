@@ -31,6 +31,9 @@ import { REVOKED_MESSAGE, BUSY_MESSAGE, MIRROR_WORDS } from "../server-portable/
 import type { AgentOutcome } from "../server-portable/agents.ts";
 import { createRestClient } from "../rest-client/index.ts";
 import { argumentsById, createMcpApp } from "./app.ts";
+import { createExchanger, exchangeSettings, MAX_ENTRIES } from "./exchange.ts";
+import { checkerOver, tokenSettings } from "../server-portable/oauth-token.ts";
+import { AuthReachability, useAuthReachability } from "../server-portable/oauth-edge.ts";
 import { loadPlugins, runOperation } from "../server-portable/core/plugins.ts";
 import { definePlugin, ok as pluginOk, operation, refuse as pluginRefuse, z } from "../server-portable/plugin-sdk.ts";
 
@@ -147,11 +150,6 @@ console.log("\n[3] A refusal is said as server-portable says it: the refusal who
     const got = await tool(name, args);
     assert(got.isError && expectReply(got, render({ ok: false, refusal } as never)), `${name} ${refusal.code}: the words in-process (${got.text.slice(0, 70)})`);
   }
-  // A save whose vector did not attach: a 201 with the refusal beside it, said as the refusal.
-  const unattached = { code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "00000000-0000-4000-8000-000000000003", detail: "the vector write failed" } as const;
-  answer = (n) => (n === "capture" ? refuse(unattached) : ok({}));
-  const saved = await tool("capture_thought", { content: "y" });
-  assert(expectReply(saved, say.renderCapture({ ok: false, refusal: unattached } as never)), `capture saved without its vector: the in-process words (${saved.text.slice(0, 60)})`);
 }
 
 console.log("\n[4] A fault is the tool's fault words: FAILED, capture's STORE_UNAVAILABLE, and the REST core away");
@@ -893,6 +891,373 @@ console.log("\n[9] The method guard, the preflight and discovery, as index.ts an
   assert(r.status === 200 && r.headers.get("access-control-allow-origin") === "*", "OPTIONS: the CORS preflight");
   r = await app.fetch(new Request("http://mcp/.well-known/oauth-protected-resource/mcp"));
   assert(r.status === 404, "an unconfigured stack's protected-resource path: 404");
+}
+
+console.log("\n[10] The token exchange at the hop (SMD-2286 PR 2): an OAuth token traded for the REST core's, cached by its digest, never sent as a key; its refusals RFC 6750's");
+{
+  const ORIGIN = "https://brain.example.test";
+  const ISSUER = `${ORIGIN}/auth`;
+  // ES256 by WebCrypto (its signature is JWS's r||s): the authorization server's key, and a JWT minted with it.
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]) as CryptoKeyPair;
+  const b64 = (v: unknown) => Buffer.from(typeof v === "string" ? v : JSON.stringify(v)).toString("base64url");
+  const mint = async (claims: Record<string, unknown>) => {
+    const head = `${b64({ alg: "ES256", typ: "at+jwt", kid: "t" })}.${b64({ iss: ISSUER, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 600, ...claims })}`;
+    const sig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, new TextEncoder().encode(head)));
+    return `${head}.${Buffer.from(sig).toString("base64url")}`;
+  };
+  const claimsOf = (t: string) => JSON.parse(Buffer.from(t.split(".")[1], "base64url").toString()) as Record<string, unknown>;
+  // The authorization server's token endpoint, as deploy/auth/server.ts's grant answers: the `mcp` client's secret, the
+  // subject's /mcp audience, the same subject and scope, `act: {sub: "mcp"}`, the REST core's audience.
+  let asMode: "ok" | "down" | "busy" | "limited" | "truncated" | "stalled" | "echo" | "echo-hex" | "slow" | "invalid_grant" | "invalid_scope" | "invalid_client" = "ok";
+  // A bare 64-hex value, the shape of OB1_AUTH_SECRET_MCP and of a keygen key, starting with a letter.
+  const HEX64 = `f${"0123456789abcdef".repeat(4).slice(1)}`;
+  // The authorization server's health, as the edge's probe reads it: asked every time (no TTL), so a step flips it.
+  let asUp = true;
+  useAuthReachability(new AuthReachability("http://auth.test/healthz", 0, 500, (async () => new Response(null, { status: asUp ? 200 : 503 })) as unknown as typeof fetch));
+  let trades = 0;
+  let lastForm: URLSearchParams | null = null;
+  const asFetch = async (req: Request): Promise<Response> => {
+    trades++;
+    if (asMode === "down") throw new TypeError("fetch failed: connection refused");
+    // Slower than the keyed routes' 2.5 s deadline, within the trade's 5 s.
+    if (asMode === "slow") await new Promise((done) => setTimeout(done, 3_000));
+    if (asMode === "busy") return new Response("busy", { status: 503 });
+    if (asMode === "limited") return Response.json({ error: "slow_down" }, { status: 429 });
+    // A 200 cut short, as a body that stalled past the timeout reads.
+    if (asMode === "truncated") return new Response('{"access_token":"ey', { status: 200, headers: { "content-type": "application/json" } });
+    // A refusal whose body stalls past the timeout, as the fetch's signal ends it.
+    if (asMode === "stalled") return new Response(new ReadableStream({ start(c) { c.error(new DOMException("The operation timed out.", "TimeoutError")); } }), { status: 400, headers: { "content-type": "application/json" } });
+    const form = new URLSearchParams(await req.text());
+    lastForm = form;
+    const okClient = req.headers.get("authorization") === `Basic ${Buffer.from("mcp:mcp-secret").toString("base64")}`;
+    if (asMode === "invalid_client" || !okClient) return Response.json({ error: "invalid_client" }, { status: 401 });
+    // An authorization server that echoes what it was sent in `error`: none of it may reach the log.
+    if (asMode === "echo-hex") return Response.json({ error: HEX64 }, { status: 400 });
+    if (asMode === "echo") return Response.json({ error: `invalid_request ${form.get("subject_token")} ${req.headers.get("authorization")}` }, { status: 400 });
+    if (asMode !== "ok") return Response.json({ error: asMode }, { status: 400 });
+    const subject = claimsOf(form.get("subject_token") ?? "");
+    const exchanged = await mint({ sub: subject.sub, scope: subject.scope, aud: form.get("resource"), act: { sub: "mcp" }, exp: subject.exp, client_id: "mcp" });
+    return Response.json({ access_token: exchanged, issued_token_type: "urn:ietf:params:oauth:token-type:access_token", token_type: "Bearer", expires_in: (subject.exp as number) - Math.floor(Date.now() / 1000), scope: subject.scope });
+  };
+  let clock = Date.now();
+  let keysDown = false;
+  const exchanger = createExchanger(exchangeSettings(ORIGIN, "mcp-secret")!, { fetch: asFetch, now: () => clock });
+  // The REST core checking its own tokens (server-portable/oauth-token.ts), over the stub core above.
+  const restWithTokens = createRestApp({
+    core, init: () => {}, track: (run) => run(), log: () => {},
+    keys: () => ({ MCP_ACCESS_KEYS: [`laptop:write:${hashKey("write-raw")}`, `mcp:forward:${hashKey("fwd-raw")}`, `legacy:read:${hashKey("team.alice.k2026")}`].join(",") }),
+    tokens: () => checkerOver(tokenSettings({ COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: ORIGIN })!, async () => {
+      if (keysDown) throw new TypeError("fetch failed: the key set could not be read");
+      return pair.publicKey;
+    }),
+    resolve: async (p) => (p.scope === "forward" ? { status: "ok", agentId: "agent-f" } : identity),
+  });
+  const restCalls: { key: string | null; bearer: string | null }[] = [];
+  // A REST core echoing a secret in its code — at whoami, as the forwarder's refusal, at an operation: never printed whole.
+  let whoamiEcho = false;
+  let forwarderEcho = false;
+  let opEcho = false;
+  const tokenRest = createRestClient({
+    baseUrl: "http://api.ob1.internal",
+    fetch: async (req) => {
+      restCalls.push({ key: req.headers.get("x-brain-key"), bearer: req.headers.get("authorization") });
+      const atWhoami = new URL(req.url).pathname.endsWith("/whoami");
+      if (whoamiEcho && atWhoami) return Response.json({ code: HEX64 }, { status: 500 });
+      if (forwarderEcho && atWhoami) return Response.json({ code: HEX64, credential: "forwarder" }, { status: 401 });
+      if (opEcho && !atWhoami) return Response.json({ code: HEX64 }, { status: 409 });
+      return restWithTokens.fetch(req);
+    },
+    forwarderKey: "fwd-raw",
+  });
+  let trading: boolean = true;
+  const tokenApp = createMcpApp({ rest: tokenRest, edge: () => ({ configured: true, origin: ORIGIN }), exchanger: () => (trading ? exchanger : null), warn: (line) => warned.push(line) });
+  const warned: string[] = [];
+  const ask = async (token: string | null, opts: { method?: string; params?: unknown; host?: string; key?: string; access?: string; path?: string } = {}) => {
+    const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+    if (token) headers.authorization = `Bearer ${token}`;
+    if (opts.key) headers["x-brain-key"] = opts.key;
+    if (opts.access) headers["x-access-key"] = opts.access;
+    const r = await tokenApp.fetch(new Request(`${opts.host ?? ORIGIN}${opts.path ?? "/mcp"}`, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: opts.method ?? "tools/list", params: opts.params ?? {} }) }));
+    const text = await r.text();
+    const line = text.startsWith("{") ? text : (text.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6);
+    return { status: r.status, headers: r.headers, body: line ? JSON.parse(line) as Record<string, unknown> : null };
+  };
+  const www = (r: { headers: Headers }) => r.headers.get("www-authenticate") ?? "";
+  const toolNames = (r: { body: Record<string, unknown> | null }) => (((r.body?.result as { tools?: { name: string }[] } | undefined)?.tools) ?? []).map((t) => t.name).sort();
+  identity = { status: "ok", agentId: "agent-o" };
+
+  // A write connector: traded once, then from the cache; its calls carry the exchanged token, never the client's.
+  const write = await mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/mcp` });
+  trades = 0;
+  restCalls.length = 0;
+  let r = await ask(write);
+  assert(r.status === 200 && same(toolNames(r), [...visibleToolNames({ scope: "write" })].sort()) && trades === 1, `a write token: traded once, a write key's tools (${r.status}, ${toolNames(r).length} tools, ${trades} trade)`);
+  const sent = lastForm as URLSearchParams | null;
+  assert(sent?.get("grant_type") === "urn:ietf:params:oauth:grant-type:token-exchange" && sent?.get("resource") === `${ORIGIN}/api` && sent?.get("subject_token") === write, "…by RFC 8693, for the REST core's resource, as the `mcp` client");
+  assert(restCalls.every((c) => c.key === null && c.bearer !== `Bearer ${write}` && c.bearer?.startsWith("Bearer ")), "…and the REST core is sent the exchanged token as a bearer, never the client's token, never as a key");
+  r = await ask(write);
+  assert(r.status === 200 && trades === 1, `the same token again: from the cache, no second trade (${trades})`);
+  calls.length = 0;
+  answer = () => ok({ id: "t1", reader: false, tags: {}, chunks: 0, contextFailures: 0, headWindow: null, recapture: null, embeddings: { allowed: true, reason: "allowed" }, chat: { allowed: true, reason: "allowed", base: "http://x/v1" } });
+  r = await ask(write, { method: "tools/call", params: { name: "capture_thought", arguments: { content: "a token's thought" } } });
+  const p = calls.find((c) => c.name === "capture")?.principal as Principal | undefined;
+  assert(p?.name === "oauth:operator" && p.scope === "write" && same(p.act, { name: "oauth:mcp" }), `a capture runs at the REST core as oauth:operator, act the MCP service (${JSON.stringify(p && { name: p.name, scope: p.scope, act: p.act })})`);
+  answer = () => ok({});
+
+  // Verify: a read connector and a write connector of the same subject — the read one's calls never carry write.
+  const read = await mint({ sub: "operator", scope: "brain:read", aud: `${ORIGIN}/mcp` });
+  r = await ask(read);
+  assert(same(toolNames(r), [...visibleToolNames({ scope: "read" })].sort()), `a read token of the same subject, the write one cached: a read key's tools (${toolNames(r).length})`);
+  calls.length = 0;
+  r = await ask(read, { method: "tools/call", params: { name: "capture_thought", arguments: { content: "x" } } });
+  const readCapture = (r.body?.result as { isError?: boolean } | undefined)?.isError === true || (r.body?.error !== undefined);
+  assert(readCapture && !calls.some((c) => c.name === "capture"), "…and its capture is refused, the core never asked: the cache keys by the token, not the subject");
+  const both = await Promise.all([ask(write), ask(read)]);
+  assert(same(toolNames(both[0]), [...visibleToolNames({ scope: "write" })].sort()) && same(toolNames(both[1]), [...visibleToolNames({ scope: "read" })].sort()), "…both at once: each its own scope");
+
+  // One trade at a time per token; the entry lives until 5 s before the exchanged token's expiry.
+  const fresh = await mint({ sub: "operator", scope: "brain:read", aud: `${ORIGIN}/mcp` });
+  trades = 0;
+  await Promise.all(Array.from({ length: 10 }, () => ask(fresh)));
+  assert(trades === 1, `ten requests at once with a new token: one trade (${trades})`);
+  clock += (600 - 6) * 1000;
+  await ask(fresh);
+  assert(trades === 1, `594 s on: still from the cache (${trades})`);
+  clock += 2000;
+  await ask(fresh);
+  assert(trades === 2, `596 s on, inside the 5 s margin: traded again (${trades})`);
+  clock = Date.now();
+
+  // Refused before any trade, on the claims: expired, another audience, another issuer, more audiences than /mcp, no expiry.
+  trades = 0;
+  for (const [label, made] of [
+    ["expired", mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/mcp`, exp: Math.floor(Date.now() / 1000) - 5 })],
+    ["the REST core's audience", mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/api` })],
+    ["another issuer", mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/mcp`, iss: "https://elsewhere.example.test/auth" })],
+    ["an audience list naming /mcp and the REST core", mint({ sub: "operator", scope: "brain:write", aud: [`${ORIGIN}/mcp`, `${ORIGIN}/api`] })],
+    ["no expiry", mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/mcp`, exp: undefined })],
+  ] as const) {
+    r = await ask(await made);
+    assert(r.status === 401 && (r.headers.get("www-authenticate") ?? "").includes('error="invalid_token"') && (r.headers.get("www-authenticate") ?? "").includes(`resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource/mcp"`), `${label}: 401 invalid_token naming the document (${r.status} ${r.headers.get("www-authenticate")})`);
+  }
+  assert(trades === 0, `…none of them traded (${trades})`);
+  // The authorization server away: an expired token's refresh cannot finish, so 503, never a 401 that sends the client to an interactive sign-in.
+  asUp = false;
+  const lapsed = await mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/mcp`, exp: Math.floor(Date.now() / 1000) - 5 });
+  r = await ask(lapsed);
+  assert(r.status === 503 && r.headers.get("retry-after") === "30", `an expired token with the authorization server away: 503, retry in 30 s (${r.status} ${r.headers.get("retry-after")})`);
+  asUp = true;
+
+  // The authorization server's answers to a trade.
+  const live = async () => mint({ sub: "operator", scope: "brain:write", aud: `${ORIGIN}/mcp`, jti: crypto.randomUUID() });
+  asMode = "invalid_grant";
+  r = await ask(await live());
+  assert(r.status === 401 && (r.headers.get("www-authenticate") ?? "").includes('error="invalid_token"'), `the authorization server refuses the subject token (invalid_grant): 401 invalid_token, so the client refreshes (${r.status})`);
+  asMode = "invalid_scope";
+  r = await ask(await live());
+  assert(r.status === 403 && www(r).includes('error="insufficient_scope"') && www(r).includes('scope="brain:read"'), `its scopes name no key scope (invalid_scope): 403 insufficient_scope, naming brain:read to step up to (${r.status} ${www(r)})`);
+  warned.length = 0;
+  for (const [mode, label] of [["down", "away"], ["busy", "answering 503"], ["limited", "limiting this server (429)"], ["truncated", "answering a 200 cut short"], ["stalled", "stalling a refusal's body"]] as const) {
+    asMode = mode;
+    r = await ask(await live());
+    assert(r.status === 503 && r.headers.get("retry-after") === "30", `the authorization server ${label}: 503, retry in 30 s — not a 401 that restarts a sign-in (${r.status} ${r.headers.get("retry-after")})`);
+  }
+  assert(warned.some((l) => l.includes("an OAuth token could not be checked") && l.includes("it could not be reached")) && warned.some((l) => l.includes("rate-limited")), `…each said in the log, why in this server's own words (${warned.length} lines: ${warned.join(" | ").slice(0, 160)})`);
+  asMode = "invalid_client";
+  warned.length = 0;
+  r = await ask(await live());
+  assert(r.status === 500, `this server's own client refused (invalid_client): a fault, not the caller's refusal (${r.status})`);
+  assert(warned.some((l) => l.includes("this server is misconfigured") && l.includes("OB1_AUTH_SECRET_MCP")), `…said as this server's misconfiguration, with its fix (${warned.join(" | ")})`);
+  asMode = "echo";
+  warned.length = 0;
+  const echoed = await live();
+  r = await ask(echoed);
+  assert(r.status === 500 && warned.length === 1 && !warned[0].includes(echoed.slice(-20)) && !warned[0].includes("Basic") && warned[0].includes("no error code"), `an error code echoing the token and the client's secret: a fault, neither printed (${warned.join(" | ").slice(0, 160)})`);
+  // Asked of the exchange itself: the log says a line once a minute, and the echo above said this one.
+  asMode = "echo-hex";
+  const hexSaid = await exchanger.exchange(await live()).then((x) => `no throw: ${x.status}`, (e: Error) => e.message);
+  assert(hexSaid.includes("no error code") && !hexSaid.includes(HEX64), `an error that is a bare 64-hex value, a secret's shape: never printed (${hexSaid.slice(0, 120)})`);
+  asMode = "ok";
+  whoamiEcho = true;
+  warned.length = 0;
+  await ask(await live());
+  await ask(null, { key: "write-raw" });
+  whoamiEcho = false;
+  assert(warned.length === 2 && warned.every((l) => !l.includes(HEX64)), `a whoami code echoing a secret, for a token and for a key: never printed (${warned.join(" | ").slice(0, 160)})`);
+  forwarderEcho = true;
+  warned.length = 0;
+  await ask(null, { key: "write-raw" });
+  forwarderEcho = false;
+  assert(warned.length === 1 && warned[0].includes("forwarder key") && !warned[0].includes(HEX64), `…as the forwarder's refusal: never printed (${warned.join(" | ").slice(0, 120)})`);
+  opEcho = true;
+  r = await ask(null, { key: "write-raw", method: "tools/call", params: { name: "thought_stats", arguments: {} } });
+  opEcho = false;
+  const opText = JSON.stringify(r.body ?? {});
+  assert(opText.includes("the REST core answered 409") && !opText.includes(HEX64), `…at an operation: the tool's fault names the status, never the code (${opText.slice(0, 120)})`);
+
+  // The REST core's word on the exchanged token: a revoked subject is refused as a revoked key is (no sign-in loop).
+  identity = { status: "revoked", agentId: "agent-o", revokedAt: "2026-10-19T00:00:00Z", reason: null };
+  r = await ask(await live());
+  const revokedMessage = ((r.body?.error as { message?: string } | undefined)?.message ?? "");
+  assert(r.status !== 401 && revokedMessage === REVOKED_MESSAGE, `the subject revoked in the registry: the revoked key's refusal, not a 401 challenge (${r.status} ${revokedMessage.slice(0, 40)})`);
+  identity = { status: "ok", agentId: "agent-o" };
+  // Its scopes reaching no operation there (brain:read with brain:capture): 403, as the authorization server's invalid_scope.
+  const narrow = await mint({ sub: "operator", scope: "brain:read brain:capture", aud: `${ORIGIN}/mcp`, jti: crypto.randomUUID() });
+  r = await ask(narrow);
+  assert(r.status === 403 && www(r).includes('error="insufficient_scope"'), `the REST core finds the exchanged token's scopes reach nothing: 403 insufficient_scope (${r.status} ${www(r)})`);
+  // Its trade kept, the authorization server away: still 403, a scope no retry mends — only a refused token waits on the server.
+  asUp = false;
+  r = await ask(narrow);
+  asUp = true;
+  assert(r.status === 403, `…and with the authorization server away, from its kept trade: 403 still, not 503 (${r.status})`);
+  // Its key set unreadable there: 503, retry — never a 401 sign-in, never a busy registry's JSON-RPC refusal.
+  keysDown = true;
+  r = await ask(await live());
+  keysDown = false;
+  assert(r.status === 503 && r.headers.get("retry-after") === "30", `the REST core cannot read the authorization server's keys: 503, retry in 30 s (${r.status} ${r.headers.get("retry-after")})`);
+
+  // The keyed routes at the origin's Host take a token as they take a key: a scan's job links, the mirrors; /health's record is a key's.
+  answer = (n) => (n === "workerStatus" ? ok({ pools: [{ workType: "w", pending: 1 }] }) : n === "jobStatus" ? ok({ jobId: "job-7", kind: "scan", status: "succeeded" }) : { version: "1.0.0", store: "sql" });
+  const keyedGet = async (path: string, token: string, host = ORIGIN) => {
+    const k = await tokenApp.fetch(new Request(`${host}${path}`, { headers: { authorization: `Bearer ${token}` } }));
+    return { status: k.status, text: await k.text() };
+  };
+  restCalls.length = 0;
+  let k = await keyedGet("/mcp/jobs/job-7", read);
+  assert(k.status === 200 && k.text.includes('"status":"succeeded"'), `a read token at a job link under the origin: the job (${k.status} ${k.text.slice(0, 60)})`);
+  k = await keyedGet("/mcp/worker-status", read);
+  assert(k.status === 200 && k.text === JSON.stringify([{ workType: "w", pending: 1 }]), `…at a keyed mirror: the rows (${k.text.slice(0, 60)})`);
+  assert(restCalls.length > 0 && restCalls.every((c) => c.key === null && c.bearer?.startsWith("Bearer ") && c.bearer !== `Bearer ${read}`), "…each read with the exchanged token, the client's never sent");
+  trades = 0;
+  restCalls.length = 0;
+  k = await keyedGet("/mcp/health", read);
+  assert(k.text === "ok" && trades === 0 && restCalls.length === 0, `…at /health: liveness, no trade, nothing sent (the REST core's record is a key's) (${k.text.slice(0, 40)}, ${trades}, ${restCalls.length})`);
+  k = await keyedGet("/mcp/worker-status", read, "http://127.0.0.1:8000");
+  assert(k.text === "ok", `…and at a loopback Host, no trade: shown nothing (${k.text.slice(0, 40)})`);
+  const keyedHead = async (path: string, token: string) => {
+    const h = await tokenApp.fetch(new Request(`${ORIGIN}${path}`, { headers: { authorization: `Bearer ${token}` } }));
+    await h.text();
+    return { status: h.status, www: h.headers.get("www-authenticate") ?? "", retry: h.headers.get("retry-after") };
+  };
+  let kh = await keyedHead("/mcp/jobs/job-7", lapsed);
+  assert(kh.status === 401 && kh.www.includes('error="invalid_token"'), `an expired token at a job link: 401 invalid_token, so the poller refreshes — never \`ok\` for ever (${kh.status} ${kh.www.slice(0, 60)})`);
+  kh = await keyedHead("/mcp/jobs/job-7/stream", await mint({ sub: "operator", scope: "brain:read", aud: `${ORIGIN}/api` }));
+  assert(kh.status === 401 && kh.www.includes('error="invalid_token"'), `…a token for another audience at a job stream: 401 (${kh.status})`);
+  asMode = "invalid_scope";
+  kh = await keyedHead("/mcp/worker-status", await live());
+  asMode = "ok";
+  assert(kh.status === 403 && kh.www.includes('error="insufficient_scope"'), `…scopes reaching nothing at a mirror: 403 insufficient_scope (${kh.status})`);
+  asUp = false;
+  kh = await keyedHead("/mcp/jobs/job-7", lapsed);
+  asUp = true;
+  assert(kh.status === 503 && kh.retry === "30", `…an expired token at a job link with the authorization server away: 503, retry in 30 s (${kh.status} ${kh.retry})`);
+  {
+    const { useRequestLog } = await import("../server-portable/telemetry.ts");
+    const lines: Record<string, unknown>[] = [];
+    const before = useRequestLog((l) => lines.push(JSON.parse(l) as Record<string, unknown>));
+    await keyedHead("/mcp/jobs/job-7", lapsed);
+    asUp = false;
+    await keyedHead("/mcp/jobs/job-7", lapsed);
+    asUp = true;
+    useRequestLog(before);
+    const ours = lines.filter((l) => l.door === "mcp" && l.route === "/jobs/:id");
+    assert(ours.length === 2 && ours[0].outcome === "refused" && ours[0].code === "UNAUTHORIZED" && ours[0].status === 401 && ours[1].outcome === "refused" && ours[1].code === "AUTH_UNREACHABLE" && ours[1].status === 503, `…its line \`refused\`, the code beside it (${JSON.stringify(ours.map((l) => [l.status, l.outcome, l.code]))})`);
+  }
+  // A trade slower than the keyed routes' deadline: 503, retry, never \`ok\`; the next poll is answered from the kept trade.
+  asMode = "slow";
+  warned.length = 0;
+  const slowToken = await live();
+  kh = await keyedHead("/mcp/jobs/job-7", slowToken);
+  assert(kh.status === 503 && kh.retry === "30" && warned.some((l) => l.includes("an OAuth token could not be checked")), `a trade past a job link's deadline: 503, retry in 30 s, said in the log (${kh.status} ${kh.retry})`);
+  await new Promise((done) => setTimeout(done, 700));
+  asMode = "ok";
+  const after = await keyedGet("/mcp/jobs/job-7", slowToken);
+  assert(after.status === 200 && after.text.includes('"status":"succeeded"'), `…and the next poll, the trade kept: the job (${after.status} ${after.text.slice(0, 40)})`);
+  answer = () => ok({});
+
+  // A token beside a key form is a key client's, and is still never sent on as a key.
+  restCalls.length = 0;
+  await ask(write, { key: "unknown-raw" });
+  await ask(write, { path: "/mcp?key=" });
+  await tokenApp.fetch(new Request(`${ORIGIN}/mcp/health`, { headers: { authorization: `Bearer ${write}`, "x-brain-key": "unknown-raw" } }));
+  assert(restCalls.length > 0 && restCalls.every((c) => c.key !== write && c.bearer !== `Bearer ${write}`), `a token beside an unknown key or an empty ?key=: never sent to the REST core (${restCalls.length} calls)`);
+
+  // A raw key with dots in a key form is a key, as the REST core reads it: only the bearer slot's JWT shape is passed over.
+  r = await ask(null, { key: "team.alice.k2026" });
+  assert(r.status === 200 && same(toolNames(r), [...visibleToolNames({ scope: "read" })].sort()), `a dotted raw key as x-brain-key: a read key's tools (${r.status}, ${toolNames(r).length})`);
+  r = await ask(null, { path: "/mcp?key=team.alice.k2026" });
+  assert(r.status === 200 && same(toolNames(r), [...visibleToolNames({ scope: "read" })].sort()), `…as ?key=: the same (${r.status}, ${toolNames(r).length})`);
+  for (const [form, opts] of [["x-brain-key", { key: "team.alice.k2026" }], ["x-access-key", { access: "team.alice.k2026" }], ["?key=", { path: "/mcp?key=team.alice.k2026" }]] as const) {
+    r = await ask("team.alice.k2026", opts);
+    assert(r.status === 200 && same(toolNames(r), [...visibleToolNames({ scope: "read" })].sort()), `…as ${form} and the bearer both: the same (${r.status}, ${toolNames(r).length})`);
+  }
+  // A keygen key (hex, no dots) as a bearer on a stack with OAuth: a key, as ever.
+  r = await ask("write-raw");
+  assert(r.status === 200 && same(toolNames(r), [...visibleToolNames({ scope: "write" })].sort()), `a key with no dots as a bearer on a stack with OAuth: a key's tools (${r.status}, ${toolNames(r).length})`);
+  /** tools/list to another app of this section, with a bearer: its status and its text. */
+  const listWith = async (app: ReturnType<typeof createMcpApp>, bearer: string) => {
+    const res = await app.fetch(new Request(`${ORIGIN}/mcp`, { method: "POST", headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/list", params: {} }) }));
+    return { status: res.status, text: await res.text() };
+  };
+  // A stack with no public origin has no OAuth: a bearer of any shape is a key there, as server-portable reads it.
+  const noOAuth = createMcpApp({ rest: tokenRest, edge: () => ({ configured: false, origin: null }), exchanger: () => exchanger, warn: () => {} });
+  const lone = await listWith(noOAuth, "team.alice.k2026");
+  assert(lone.status === 200 && lone.text.includes('"name":"search"') && !lone.text.includes("capture_thought"), `…as a lone bearer on a stack with no OAuth: a read key's tools (${lone.status} ${lone.text.slice(0, 50)})`);
+  answer = (n) => (n === "workerStatus" ? ok({ pools: [{ workType: "w", pending: 1 }] }) : { version: "1.0.0", store: "sql" });
+  const dotted = await tokenApp.fetch(new Request(`${ORIGIN}/mcp/worker-status`, { headers: { "x-brain-key": "team.alice.k2026" } }));
+  const dottedHealth = await tokenApp.fetch(new Request(`${ORIGIN}/mcp/health`, { headers: { "x-brain-key": "team.alice.k2026" } }));
+  const dottedRecord = await dottedHealth.text();
+  assert((await dotted.text()) === JSON.stringify([{ workType: "w", pending: 1 }]) && dottedRecord.includes('"version":"1.0.0"'), `…at a mirror and /health: the rows and the record (${dottedRecord.slice(0, 40)})`);
+  answer = () => ok({});
+
+  /** This section's MCP app at ORIGIN, trading, over a REST core of its own (the forwarder's key alone) checking tokens with `tokens`, its log kept in `warned`. */
+  const appOverRest = (tokens: (() => ReturnType<typeof checkerOver>) | undefined, warned: string[]) => {
+    const rest = createRestApp({
+      core, init: () => {}, track: (run) => run(), log: () => {},
+      keys: () => ({ MCP_ACCESS_KEYS: `mcp:forward:${hashKey("fwd-raw")}` }),
+      ...(tokens ? { tokens } : {}),
+      resolve: async (p) => (p.scope === "forward" ? { status: "ok", agentId: "agent-f" } : identity),
+    });
+    return createMcpApp({ rest: createRestClient({ baseUrl: "http://api.ob1.internal", fetch: async (req) => rest.fetch(req), forwarderKey: "fwd-raw" }), edge: () => ({ configured: true, origin: ORIGIN }), exchanger: () => exchanger, warn: (line) => warned.push(line) });
+  };
+  // A REST core that checks no token: an exchanged token's 401 is this stack's misconfiguration, a fault with its fix, never invalid_token.
+  const plainWarned: string[] = [];
+  const plain = await listWith(appOverRest(undefined, plainWarned), await live());
+  assert(plain.status === 500 && plainWarned.some((l) => l.includes("refused a token traded for it") && l.includes("checking no token") && l.includes("auth profile")), `a REST core that checks no token: a fault, logged with its fix (${plain.status} ${plainWarned.join(" | ").slice(0, 120)})`);
+  // One checking another origin's tokens refuses this one on its claims, credential token: the same misconfiguration, never invalid_token.
+  const elsewhereWarned: string[] = [];
+  const elsewhere = await listWith(appOverRest(() => checkerOver(tokenSettings({ COMPOSE_PROFILES: "auth", OB1_PUBLIC_ORIGIN: "https://elsewhere.example.test" })!, async () => pair.publicKey), elsewhereWarned), await live());
+  assert(elsewhere.status === 500 && elsewhereWarned.some((l) => l.includes("refused a token traded for it") && !l.includes("checking no token") && l.includes("OB1_PUBLIC_ORIGIN")), `a REST core on another origin: a fault, logged with its fix, never a sign-in loop (${elsewhere.status} ${elsewhereWarned.join(" | ").slice(0, 120)})`);
+
+  // Where no token is traded: at another Host, or a server given no exchange — and a token is never sent as a key.
+  trades = 0;
+  restCalls.length = 0;
+  r = await ask(write, { host: "http://127.0.0.1:8000" });
+  assert(trades === 0 && r.status === 200 && (r.body?.error as { code?: number } | undefined)?.code === -32001, `a token at a loopback Host: today's refusal, no trade (${r.status}, ${trades})`);
+  trading = false;
+  asUp = false;
+  r = await ask(write);
+  // No caller, so the edge answers a token as before: its challenge while the authorization server answers its probe, 503 while it does not (as here).
+  assert(trades === 0 && r.status === 503 && r.headers.get("retry-after") === "30", `a server given no exchange (no secret): the token is no caller, the edge's answer as before (${r.status})`);
+  assert(restCalls.every((c) => c.key !== write && c.bearer !== `Bearer ${write}`), "…and in neither case is the client's token sent to the REST core, as a key or a bearer");
+  trading = true;
+  asUp = true;
+
+  // Verify (step 4's half): a key client goes on working with the authorization server away.
+  asMode = "down";
+  r = await ask(null, { key: "write-raw" });
+  assert(r.status === 200 && same(toolNames(r), [...visibleToolNames({ scope: "write" })].sort()), `a key client with the authorization server away: served as ever (${r.status})`);
+  asMode = "ok";
+
+  // The cache is bounded.
+  const bounded = createExchanger(exchangeSettings(ORIGIN, "mcp-secret")!, { fetch: asFetch });
+  for (let i = 0; i < MAX_ENTRIES + 20; i++) await bounded.exchange(await mint({ sub: "operator", scope: "brain:read", aud: `${ORIGIN}/mcp`, jti: `j${i}` }));
+  assert(bounded.size() === MAX_ENTRIES, `${MAX_ENTRIES + 20} distinct tokens: the cache holds ${MAX_ENTRIES} (${bounded.size()})`);
+  // A token that lapses inside the margin is used once and never kept.
+  const brief = createExchanger(exchangeSettings(ORIGIN, "mcp-secret")!, { fetch: asFetch });
+  const once = await brief.exchange(await mint({ sub: "operator", scope: "brain:read", aud: `${ORIGIN}/mcp`, exp: Math.floor(Date.now() / 1000) + 3 }));
+  assert(once.status === "ok" && brief.size() === 0, `a token 3 s from expiry: traded, not kept (${once.status}, ${brief.size()})`);
+  useAuthReachability(null);
 }
 
 report();

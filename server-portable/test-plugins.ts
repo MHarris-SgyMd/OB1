@@ -22,7 +22,6 @@ import { ok as coreOk, refuse as coreRefuse } from "./core/refusal.ts";
 import type { AgentOutcome } from "./agents.ts";
 import { createRestApp } from "./rest/app.ts";
 import { mcpUnderTest, servedAsNamed } from "./test-support.ts";
-import { openApiDocument } from "./rest/openapi.ts";
 import { definePlugin, ok, operation, refuse, z, type PluginManifest } from "./plugin-sdk.ts";
 import { PLUGINS } from "../plugins/registry.ts";
 import { pluginLoginUrl } from "../db/config.mjs";
@@ -541,11 +540,6 @@ console.log("\n[8] Preflight: a name in OB1_PLUGINS that is no plugin fails the 
   assert(served?.status === "ok" && !served.detail.includes("abc"), `a served plugin with its secret: ok, and the secret never printed (${JSON.stringify(served)})`);
   const good = run("example");
   assert(good.row?.status === "ok" && /example — enabled/.test(good.row.detail), `a sound name is reported enabled (${JSON.stringify(good.row)})`);
-  // A plugin with tables on the PostgREST store: its operations would fail at their first call.
-  const p = Bun.spawnSync(["bun", "--no-env-file", "preflight.ts", "--json"], { cwd: import.meta.dir, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", OB1_PLUGINS: "example", OB1_STORE: "postgrest", SUPABASE_URL: "https://stub.invalid", SUPABASE_SERVICE_ROLE_KEY: "stub" }, stdout: "pipe", stderr: "pipe" });
-  const parsed = JSON.parse(p.stdout.toString() || "{}") as { checks?: { name: string; status: string; detail: string }[] } | { name: string; status: string; detail: string }[];
-  const postgrest = (Array.isArray(parsed) ? parsed : parsed.checks ?? []).find((c) => c.name === "plugins");
-  assert(postgrest?.status === "fail" && /example keeps tables, which need the SQL store/.test(postgrest.detail), `a plugin with tables on the PostgREST store fails the plugins row (${JSON.stringify(postgrest)})`);
 }
 
 console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alone, the body bounded, the handler's verification and its capture as the hook's own caller");
@@ -821,10 +815,10 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   finishRetry(coreOk({ id: thought(3) }));
   r = await within("the retry", retry);
   assert(r.status === 202 && claims.get("evt-7") === thought(3), `and the retry records its thought (${r.status})`);
-  answer = async () => coreRefuse({ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "t-x", detail: "d" });
+  answer = async () => coreRefuse({ code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "registry_away" });
   r = await send("evt-6");
   const later = (await r.json()) as { code?: string; retryable?: boolean; refused?: string };
-  assert(r.status === 503 && later.retryable === true && later.refused === "EMBEDDING_NOT_ATTACHED" && !claims.has("evt-6"), `a refusal the core says is retryable: 503, retryable, the claim given back (${r.status} ${JSON.stringify(later)})`);
+  assert(r.status === 503 && later.retryable === true && later.refused === "SUPERSEDES_UNJUDGED" && !claims.has("evt-6"), `a refusal the core says is retryable: 503, retryable, the claim given back (${r.status} ${JSON.stringify(later)})`);
   answer = async () => coreOk({ thoughts: [] });
   // A handler's answer the REST core will not pass on.
   const odd = definePlugin({ name: "probe-kit", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/x", input: {}, output: {}, handler: async () => ok({}) }) },
@@ -1124,7 +1118,7 @@ console.log("\n[14] ctx.defer: a hook answers before its work ends; the work cou
 
 console.log("\n[15] A plugin operation over REST has its span under its request's, as a core route's does (SMD-1849 PR 2b review pass 2)");
 {
-  const { SpanKind, SpanStatusCode } = await import("@opentelemetry/api");
+  const { SpanKind } = await import("@opentelemetry/api");
   const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
   const { setUpTelemetry } = await import("./otel-setup.ts");
   const exporter = new InMemorySpanExporter();

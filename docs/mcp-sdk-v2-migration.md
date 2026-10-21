@@ -77,8 +77,9 @@ untouched. **No tool code changed.** The tool `inputSchema` stays a zod object.
   not a regression (the fork's own refusals-as-values path, SMD-1978, is
   unaffected — this is the SDK's built-in not-found).
 - `test-auth.ts` — **120/120**.
-- Workers (`wrangler deploy --dry-run`) — **builds and serves** (1767 KiB /
-  336 KiB gzip), `nodejs_compat` only.
+- Workers (Cloudflare's CLI, a dry-run deploy) — **builds and serves** (1767 KiB /
+  336 KiB gzip), `nodejs_compat` only. (A target since retired, with the
+  PostgREST store it ran, in SMD-3152.)
 
 **The revision matches the fork's posture.** v2 negotiated `protocolVersion`
 down to the client's requested `2024-11-05` and returned a well-formed

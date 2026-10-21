@@ -3,7 +3,7 @@
  * _chunk-e2e-child.ts — one server configuration, one measurement.
  *
  * Spawned by eval-chunking-e2e.ts. Separate because the server snapshots its
- * environment once at boot (so Cloudflare Workers bindings behave), which means
+ * environment once at boot (root.ts's initEnv), which means
  * OB1_CHUNK_TOKENS cannot be changed within a process. Comparing two settings
  * honestly therefore needs two processes.
  *

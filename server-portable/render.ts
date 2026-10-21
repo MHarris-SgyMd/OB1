@@ -485,7 +485,7 @@ export function currentNote(rows: Pick<ThoughtHybridMatch, "window" | "demoted">
  */
 export function minTrustHint(msg: string): string {
   return /search_thoughts_(hybrid|current|keyword)/.test(msg) && /does not exist|could not find/i.test(msg)
-    ? " — min_trust needs migrations 074 and 075 (db/migrations/074_min_trust.sql, 075_min_trust_hybrid.sql), or PostgREST has not reloaded its schema cache; search without min_trust meanwhile"
+    ? " — min_trust needs migrations 074 and 075 (db/migrations/074_min_trust.sql, 075_min_trust_hybrid.sql); search without min_trust meanwhile"
     : "";
 }
 
@@ -498,7 +498,7 @@ export function searchHint(asked: { min_trust?: unknown; prefer_current?: boolea
 /** The hint an error from prefer_current's path carries: the migration or the grant it needs. */
 export function currentSearchHint(msg: string): string {
   return /search_thoughts_current/.test(msg) && /does not exist|could not find/i.test(msg)
-    ? " — migration 059 (db/migrations/059_search_prefers_current.sql) is not applied, or PostgREST has not reloaded its schema cache; search without prefer_current meanwhile"
+    ? " — migration 059 (db/migrations/059_search_prefers_current.sql) is not applied; search without prefer_current meanwhile"
     : /permission denied for table ob1_(ticket_head|superseded_by)\b/i.test(msg)
     ? " — prefer_current reads node_state's projection (migration 068), and the server's role needs the capture group's grants on ob1_ticket_head and ob1_superseded_by (db/README.md, Grants for a capturing role; migrate.ts --grant issues them); search without prefer_current meanwhile"
     : /permission denied for table thought_sources/i.test(msg)
@@ -796,15 +796,15 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
 }
 
 /**
- * The hint a listing error carries. 070 (SMD-2313): both stores call the
+ * The hint a listing error carries. 070 (SMD-2313): the store calls the
  * three-argument form, so a brain short of 070 — or of 029, whose queue the
- * listing reads — fails naming that form (PostgREST names p_lineage); the
- * driver's message is the same either way, so one hint names both files (cold
- * read, first and fourth review passes).
+ * listing reads — fails naming that form (`p_lineage` was PostgREST's word for
+ * it, before SMD-3152); the driver's message is the same either way, so one
+ * hint names both files (cold read, first and fourth review passes).
  */
 export const proposalsHint = (msg: string): string =>
   /list_supersession_proposals|supersession_proposals|p_lineage/.test(msg)
-    ? " — the migrations through 070 are not applied (029, db/migrations/029_supersession_proposals.sql, creates the queue; 070, db/migrations/070_listing_flags_lineage_pair.sql, its current listing), or PostgREST has not reloaded its schema cache"
+    ? " — the migrations through 070 are not applied (029, db/migrations/029_supersession_proposals.sql, creates the queue; 070, db/migrations/070_listing_flags_lineage_pair.sql, its current listing)"
     : "";
 
 export function renderThoughtStats(o: Outcome<ThoughtStats>): Reply {
@@ -825,10 +825,10 @@ export function renderThoughtStats(o: Outcome<ThoughtStats>): Reply {
       }`,
     ];
 
-    // Never report aggregates as corpus-wide when they are not. The SQL path
-    // covers the whole corpus (aggregated === total) and this never fires; a
-    // capped PostgREST walk that stopped short says so rather than quietly
-    // under-reporting.
+    // Never report aggregates as corpus-wide when they are not. The store
+    // covers the whole corpus (aggregated === total), so this does not fire;
+    // it stays for the contract's field (the capped walk that could stop
+    // short was the PostgREST store's, retired in SMD-3152).
     if (aggregated < total) {
       lines.push(
         `Note: breakdowns below cover the ${aggregated.toLocaleString()} most recent thoughts, ` +
@@ -959,7 +959,7 @@ export function renderThoughtChanges(o: Outcome<ChangesResult>): Reply {
 
 export const changesHint = (msg: string): string =>
   /thought_changes/.test(msg) && /does not exist|could not find/i.test(msg)
-    ? " — migration 052 (db/migrations/052_thought_changes.sql) is not applied, or PostgREST has not reloaded its schema cache"
+    ? " — migration 052 (db/migrations/052_thought_changes.sql) is not applied"
     : /permission denied for table thought_audit/i.test(msg)
     ? " — the server's role needs SELECT on thought_audit (db/README.md, Grants for a capturing role — the server group, which migrate.ts --grant issues)"
     : "";
@@ -974,7 +974,7 @@ export const renderLoggedSearches = (o: Outcome<LoggedSearchPage>): Reply =>
 
 export const loggedSearchesHint = (msg: string): string =>
   /query_log/.test(msg) && /does not exist|could not find/i.test(msg)
-    ? " — migration 034 (db/migrations/034_query_log.sql) is not applied, or PostgREST has not reloaded its schema cache"
+    ? " — migration 034 (db/migrations/034_query_log.sql) is not applied"
     : "";
 
 /** worker_status: the text is the bare array it has always been; the value keys it (a result is an object). */
@@ -1114,9 +1114,6 @@ function captureRefusal(r: Refusal): string {
         : "a `derived_from` id";
       return `Refused: ${where} name${r.named.length > 1 ? "" : "s"} no thought. Each entry must be an existing thought id (the ID: line of a search result).`;
     }
-    case "EMBEDDING_NOT_ATTACHED":
-      return `Thought saved (id ${r.id}) but its embedding failed to attach: ` +
-        `${r.detail}. It will NOT appear in semantic search until re-captured.`;
     default: return unknownRefusal(r);
   }
 }
@@ -1154,8 +1151,7 @@ export function renderCapture(o: Outcome<Captured>): Reply {
     // error — the policy did what it says — but said in full. On a
     // RE-CAPTURE the row keeps the vector it had (upsert_thought
     // coalesces), so the note says that instead of "no vector" (first
-    // review pass). A database from before 035, or the PostgREST
-    // two-step, does not say which this was — and the coalesce holds
+    // review pass). A database from before 035 does not say which this was — and the coalesce holds
     // there too (033), so the note hedges rather than tell the fresh-row
     // story of a row that may be keeping its vector (second review pass).
     if (!embeddings.allowed) {
@@ -1528,7 +1524,7 @@ export function renderResetCaptureStamp(o: Outcome<StampReset, StampResetCode>):
 /** reset_capture_stamp's fault: a database before 086 has no such function. */
 export const resetHint = (msg: string): string =>
   /ob1_reset_capture_stamp/.test(msg) && /does not exist|could not find/i.test(msg)
-    ? " — migration 086 (db/migrations/086_capture_stamp_reset.sql) is not applied, or PostgREST has not reloaded its schema cache"
+    ? " — migration 086 (db/migrations/086_capture_stamp_reset.sql) is not applied"
     : "";
 
 // ── The worker actions (SMD-2283 PR 3) ───────────────────────────────────────

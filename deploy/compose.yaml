@@ -172,31 +172,20 @@ x-otel-env: &otel-env
 #           origin shares it with /auth, so a script running in a Grafana
 #           page could act on the authorization server's session;
 #   mcp     /mcp and everything under it — the endpoint clients are given;
-#   canary, working  /canary/mcp and /working/mcp and everything under each
-#           — that tier's MCP server (SMD-2294), mcp.canary.ob1.internal or
-#           mcp.working.ob1.internal on `mesh`, where a tier stood up as a
-#           compose project of its own joins this stack's mesh under that
-#           name. Only while it answers: with no such tier, or one stopped
-#           or still starting, Traefik's 502 becomes a bare 404
-#           (`tier-absent`), as auth-absent does for the authorization
-#           server. The tiers' protected-resource paths are not routed, so
-#           a tier is reached with keys (no tier route carries OAuth: a
-#           brain's own /mcp does, SMD-2286; docs/one-brain-per-stack.md).
-#           Deprecated (SMD-3057): since SMD-2874 a canary is a brain of its
-#           own on its own port, and the three-brain stack
-#           (compose.tiers.yaml) routes its own canary and working tiers;
-#           v2.0.0 removes these two routes, and until then every answer
-#           carries a Deprecation header and a Link to the README's "A
-#           canary beside the stack", which names both (`tier-deprecated`);
-#   tier-off every other path that starts with /canary or /working, in
-#           any case and whatever follows: a bare 404 (`not-served`), so a
-#           client handed a tier's URL changed in any way after the prefix
-#           (its case, an escaped slash, a pasted invisible space) never
+#   tier-off every path that starts with /canary or /working, in any case
+#           and whatever follows: a bare 404 (`not-served`). A canary or a
+#           working tier is a brain of its own on its own port (SMD-2874;
+#           docs/one-brain-per-stack.md), and this stack routes none; from
+#           SMD-2294 to v2.0.0 a tier answered at /canary/mcp here,
+#           deprecated by SMD-3057 for a release before it went. Kept
+#           until SMD-2532 removes the legacy route, so a client still given
+#           a tier's URL on this origin, in any spelling after the prefix
+#           (its case, an escaped slash, a pasted invisible space), never
 #           reaches this stack's server by the legacy route, to write with
 #           the same key (a typo of the prefix itself, `/canry/mcp`, still
-#           does until SMD-2532). No boundary after the prefix: each one
-#           tried left some character through (SMD-2294 review passes 2-4),
-#           and nothing this stack serves starts with either word;
+#           does until then). No boundary after the prefix: each one tried
+#           left some character through (SMD-2294 review passes 2-4), and
+#           nothing this stack serves starts with either word;
 #   health  GET, HEAD and OPTIONS /health at the origin root, for a GET-only
 #           probe and a browser's CORS preflight;
 #   legacy  everything but /.well-known — what clients reach today at the root
@@ -230,10 +219,7 @@ x-otel-env: &otel-env
 #           upgrade guide;
 #   not-legacy  deletes that marker (an empty value deletes the header), so a
 #           client cannot send it on /mcp and be logged as a straggler;
-#   tier-deprecated  adds to every answer on the canary and working routes a
-#           Deprecation header (RFC 9745) dated 2026-10-16 and a Link to
-#           deploy/README.md's "A canary beside the stack" (SMD-3057);
-#   auth-absent, tier-absent  any 502 — Traefik's own: no such name, nothing
+#   auth-absent  any 502 — Traefik's own: no such name, nothing
 #           listening, or a request the server dropped mid-flight, as its
 #           registration stall does at 30 s; the server never answers 502
 #           itself — is answered by noop@internal and becomes a 404 with no
@@ -243,8 +229,8 @@ x-otel-env: &otel-env
 #           serves gets (measured on this pin).
 # Every backend is dialled by its mesh name, written rooted. Not `server`:
 # compose gives each container its service name as an alias on every network
-# it joins, so a tier of another project on this mesh (SMD-2294) would answer
-# to `server` beside this stack's.
+# it joins, so a container of another project on this mesh (a tier joined it
+# from SMD-2294 to SMD-2874) would answer to `server` beside this stack's.
 # The table holds no comment of its own: Traefik renders it as a Go template
 # first, so a comment line there is not inert, and check 28
 # (scripts/check-fork-consistency.ts, PROXY_ROUTE_TABLE) holds it byte for
@@ -294,18 +280,6 @@ x-proxy-routes: &proxy-routes |
         entryPoints: [web]
         middlewares: [not-legacy]
         service: server
-      canary:
-        rule: "Path(`/canary/mcp`) || PathPrefix(`/canary/mcp/`)"
-        priority: 30
-        entryPoints: [web]
-        middlewares: [not-legacy, tier-deprecated, tier-absent]
-        service: canary
-      working:
-        rule: "Path(`/working/mcp`) || PathPrefix(`/working/mcp/`)"
-        priority: 30
-        entryPoints: [web]
-        middlewares: [not-legacy, tier-deprecated, tier-absent]
-        service: working
       tier-off:
         rule: "PathRegexp(`(?i)^/(canary|working)`)"
         priority: 25
@@ -342,17 +316,6 @@ x-proxy-routes: &proxy-routes |
           service: noop@internal
           statusRewrites:
             "502": 404
-      tier-absent:
-        errors:
-          status: ["502"]
-          service: noop@internal
-          statusRewrites:
-            "502": 404
-      tier-deprecated:
-        headers:
-          customResponseHeaders:
-            Deprecation: "@1792108800"
-            Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#a-canary-beside-the-stack>; rel="deprecation"; type="text/html"'
       api-off:
         errors:
           status: ["418"]
@@ -370,14 +333,6 @@ x-proxy-routes: &proxy-routes |
         loadBalancer:
           servers:
             - url: "http://mcp.ob1.internal.:8000"
-      canary:
-        loadBalancer:
-          servers:
-            - url: "http://mcp.canary.ob1.internal.:8000"
-      working:
-        loadBalancer:
-          servers:
-            - url: "http://mcp.working.ob1.internal.:8000"
       auth:
         loadBalancer:
           servers:
@@ -803,10 +758,10 @@ services:
     # sits under an extension key, which compose ignores, so the server's
     # `environment` below can add the plugin knobs no worker takes.
     x-env: &server-env
-      # No OB1_STORE on purpose: the SQL store is the server's default (FORK.md
-      # change 97), and this stack — the "Full stack, no Supabase" CI job — is
-      # the deployment that proves it. Setting it here would let the default
-      # drift back to PostgREST with nothing in CI noticing.
+      # No OB1_STORE on purpose: the SQL store is the server's only store (FORK.md
+      # change 97 made it the default; SMD-3152 retired the PostgREST store), and
+      # this stack — the "Full stack, no Supabase" CI job — runs it. A value set
+      # here could only be one the server refuses.
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain
       MCP_ACCESS_KEYS: ${MCP_ACCESS_KEYS:?set MCP_ACCESS_KEYS in deploy/.env — mint with server-portable/keygen.ts}
       # Not required when OB1_LLM_BASE_URL points at a local provider; preflight
@@ -1135,9 +1090,10 @@ services:
     # reaches it as proxy.ob1.internal and nothing else is, and `mesh`, where
     # it reaches every backend — the MCP server as mcp.ob1.internal
     # (SMD-2382), the REST core as api.ob1.internal (SMD-2284), the
-    # authorization server as auth.ob1.internal, and the tier routes' MCP
-    # servers as mcp.<tier>.ob1.internal (SMD-2294), which no project of
-    # another brain joins since SMD-2874. It shares no network with Postgres,
+    # authorization server as auth.ob1.internal. Until v2.0.0 it also
+    # reached a tier's MCP server there as mcp.<tier>.ob1.internal
+    # (SMD-2294); a tier is a brain of its own since SMD-2874, and this
+    # stack routes none. It shares no network with Postgres,
     # the model services, n8n or the workers, and has no route out.
     networks:
       front:
@@ -1150,11 +1106,10 @@ services:
     # POST included (review: a decoy by that name got the password). With
     # none, and the route's name written rooted (`auth.ob1.internal.`), the
     # one lookup is the stack's own name under the reserved .internal TLD.
-    # An absent tier's name (mcp.canary.ob1.internal.) is written the same
-    # way, for the same reason, as is this stack's own server's while it is
-    # stopped or recreated. And that one lookup stays in the stack: an
-    # internal network forwards no name it does not hold to the host's
-    # resolvers (measured on podman 6), and this service is on internal
+    # This stack's own server's name is written the same way, for the same
+    # reason, while it is stopped or recreated. And that one lookup stays in
+    # the stack: an internal network forwards no name it does not hold to the
+    # host's resolvers (measured on podman 6), and this service is on internal
     # networks alone (SMD-2583), so a resolver that answers *.ob1.internal
     # itself is never asked.
     dns_search: ["."]
@@ -1996,7 +1951,8 @@ services:
   # DASHBOARD_DATASOURCES (the dashboard's rate window also rests on this
   # image's Prometheus data source, timeInterval 60s) and runs CI's "The
   # observability profile's dashboard reads every series it names", which
-  # also fails should Prometheus stop taking created-timestamp-zero-ingestion.
+  # also fails should Prometheus stop taking created-timestamp-zero-ingestion,
+  # or Grafana stop loading or evaluating the alert rules (SMD-3050, check 38).
   # Check 28 (scripts/check-fork-consistency.ts, LGTM_SERVICE) holds this
   # service whole but its labels, which check 37 holds.
   #
@@ -2100,20 +2056,24 @@ services:
     # Prometheus's, Tempo's, Loki's, Pyroscope's and Grafana's data, in one volume.
     volumes:
       - lgtm-data:/data
-    # The dashboard and its provider (PR 3c), the last two of the configs at
-    # the end of this file: Grafana reads every file in its provisioning
-    # directory's dashboards/ as a provider.
+    # The dashboard and its provider (PR 3c) and the alert rules (SMD-3050),
+    # the last three of the configs at the end of this file: Grafana reads
+    # every file in its provisioning directory's dashboards/ as a provider,
+    # and every file in its alerting/ as rules.
     configs:
       - source: grafana-dashboard
         target: /otel-lgtm/open-brain-dashboard.json
       - source: grafana-dashboard-provider
         target: /otel-lgtm/grafana/conf/provisioning/dashboards/open-brain.yaml
+      - source: grafana-alert-rules
+        target: /otel-lgtm/grafana/conf/provisioning/alerting/open-brain.yaml
     # Each config's sha256 (check 37 holds them): compose recreates a
     # container when a label changes, and not when only an inline config does
     # (docker/compose#11900, as with the proxy's table), so an upgrade that
-    # changes the dashboard reaches Grafana on its `up -d`.
+    # changes the dashboard or a rule reaches Grafana on its `up -d`.
     labels:
       ob1.grafana-dashboard: "sha256:d5d2486a57a6101b14c533e238956aacfc2b633017402524593ed82fe30cbb83"
+      ob1.grafana-alert-rules: "sha256:b49651cf40cccc8943b6525e8351df4254ff558a37609bb61453f5181b47ac95"
       ob1.grafana-dashboard-provider: "sha256:2a13b2862670670482aadbadfcf7a864e28fe4d3c9704faa9ac75ff66b9d021d"
     # `mesh` as lgtm.ob1.internal: the two servers send to it there, and
     # compose.grafana-public.yaml's proxy reaches its Grafana there; and
@@ -3036,3 +2996,143 @@ configs:
           options:
             path: /otel-lgtm/open-brain-dashboard.json
             foldersFromFilesStructure: false
+  # The observability profile's alert rules (SMD-3050), which lgtm's Grafana
+  # loads at its start into the dashboard's folder: deploy/observability/alert-rules.yaml,
+  # inline as the dashboard is, each dollar sign doubled. No contact point:
+  # a rule that fires is in Grafana's alert list, and nothing leaves the
+  # machine until an operator adds one (deploy/README.md, "Alerts"). Check 38
+  # holds it to that file, and each query to the names the stack writes.
+  grafana-alert-rules:
+    content: |
+      apiVersion: 1
+      groups:
+        - orgId: 1
+          name: Open Brain
+          folder: Open Brain
+          interval: 30s
+          rules:
+            - uid: ob1-server-silent
+              title: A server stopped sending metrics
+              condition: B
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 86400, to: 0 }
+                  datasourceUid: prometheus
+                  model:
+                    refId: A
+                    instant: true
+                    expr: group by (service_name, deployment_environment_name) (group by (service_name, deployment_environment_name) (max_over_time(process_uptime_seconds[1d])) unless group by (service_name, deployment_environment_name) (max_over_time(process_uptime_seconds[10m])))
+                - refId: B
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: threshold
+                    expression: A
+                    conditions:
+                      - evaluator: { type: gt, params: [0] }
+              noDataState: OK
+              execErrState: Error
+              for: 2m
+              annotations:
+                summary: "{{ $$labels.service_name }} sent metrics in the last day and none in the last 10 minutes"
+                description: "A running server sends process.uptime at every export from its start, so it has stopped, or cannot reach the collector. Stopped or renamed on purpose, it clears a day later. deploy/README.md, The observability profile, Alerts."
+            - uid: ob1-server-failures
+              title: The server failed requests
+              condition: B
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: prometheus
+                  model:
+                    refId: A
+                    instant: true
+                    expr: max by (service_name, deployment_environment_name) ((sum by (service_name, deployment_environment_name) (rate(http_server_request_duration_seconds_count{ob1_outcome=~"error|stalled|cut"}[10m])) / sum by (service_name, deployment_environment_name) (rate(http_server_request_duration_seconds_count[10m]))) and on (service_name, deployment_environment_name) (sum by (service_name, deployment_environment_name) (increase(http_server_request_duration_seconds_count{ob1_outcome=~"error|stalled|cut"}[10m])) > 2.5))
+                - refId: B
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: threshold
+                    expression: A
+                    conditions:
+                      - evaluator: { type: gt, params: [0.05] }
+              noDataState: OK
+              execErrState: Error
+              for: 5m
+              annotations:
+                summary: "{{ $$labels.service_name }} failed {{ humanizePercentage $$values.A.Value }} of its requests over the last 10 minutes"
+                description: "Outcomes error, stalled and cut: the dashboard's Server failures, by error type says which. deploy/README.md, The observability profile, Alerts."
+            - uid: ob1-provider-failures
+              title: The model provider failed calls
+              condition: B
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: prometheus
+                  model:
+                    refId: A
+                    instant: true
+                    expr: sum by (service_name, deployment_environment_name, gen_ai_operation_name, error_type) (increase(gen_ai_client_operation_duration_seconds_count{error_type!="", ob1_probe=""}[10m]))
+                - refId: B
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: threshold
+                    expression: A
+                    conditions:
+                      - evaluator: { type: gt, params: [2.5] }
+              noDataState: OK
+              execErrState: Error
+              for: 5m
+              annotations:
+                summary: "{{ $$labels.service_name }}'s {{ $$labels.gen_ai_operation_name }} calls failed with {{ $$labels.error_type }} about {{ humanize $$values.A.Value }} times in 10 minutes"
+                description: "An HTTP status, a timeout or another kind, as the dashboard's Provider failures, by error type shows. deploy/README.md, The observability profile, Alerts."
+            - uid: ob1-postgres-unreached
+              title: The exporter does not reach Postgres
+              condition: B
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 300, to: 0 }
+                  datasourceUid: prometheus
+                  model:
+                    refId: A
+                    instant: true
+                    expr: min (min(up{job="postgres"}) * (min(pg_up{job="postgres"}) or on () vector(0)))
+                - refId: B
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: threshold
+                    expression: A
+                    conditions:
+                      - evaluator: { type: lt, params: [1] }
+              noDataState: Alerting
+              execErrState: Error
+              for: 1m
+              annotations:
+                summary: "The collector does not reach pg-exporter, or pg-exporter does not reach Postgres"
+                description: "The dashboard's Exporter reaching Postgres reads 0; no series at all means the collector is scraping nothing. deploy/README.md, The observability profile, Alerts."
+            - uid: ob1-telemetry-lost
+              title: The collector is losing telemetry
+              condition: B
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 300, to: 0 }
+                  datasourceUid: prometheus
+                  model:
+                    refId: A
+                    instant: true
+                    expr: sum ((sum(rate(otelcol_exporter_send_failed_spans_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_send_failed_metric_points_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_send_failed_log_records_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_enqueue_failed_spans_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_enqueue_failed_metric_points_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_enqueue_failed_log_records_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_refused_spans_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_refused_metric_points_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_refused_log_records_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_failed_spans_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_failed_metric_points_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_failed_log_records_total[5m])) or vector(0)))
+                - refId: B
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: threshold
+                    expression: A
+                    conditions:
+                      - evaluator: { type: gt, params: [0] }
+              noDataState: OK
+              execErrState: Error
+              for: 10m
+              annotations:
+                summary: "The collector has refused, failed to queue or could not store telemetry for 10 minutes ({{ humanize $$values.A.Value }} items a second)"
+                description: "Loki refuses every record once the disk under lgtm-data passes 90% full. The dashboard's Telemetry the collector could not store says which signal. deploy/README.md, The observability profile, Alerts."

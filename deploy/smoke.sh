@@ -2,8 +2,8 @@
 # Smoke-test a running Open Brain server over MCP.
 #
 # Point it at anything that speaks the protocol — the compose stack, a container on
-# EKS, a Cloudflare Worker. It only needs the URL and the access key, so the same
-# check works for every deployment target.
+# EKS. It only needs the URL and the access key, so the same check works for every
+# deployment target.
 #
 #   ./smoke.sh                                    # reads deploy/.env
 #   ./smoke.sh https://ob1.example.com/mcp "$KEY"

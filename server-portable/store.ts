@@ -1,30 +1,13 @@
 /**
  * store.ts — the seam between the MCP tools and whatever holds the thoughts.
  *
- * Phase 2 of the Supabase migration. `supabase-js` is not a Postgres driver; it is
- * an HTTP client for PostgREST, and it is the deepest coupling in the project —
- * moving the database alone does nothing for it. This interface is the boundary
- * that lets the PostgREST client be swapped for direct SQL without the tool
- * definitions knowing.
- *
- * Two implementations, one default:
- *
- *   - `sql` (store-sql.ts) — Postgres directly, through Bun's client. THE
- *     DEFAULT since change 97 (SMD-1797): it is the store SETUP.md's container
- *     runs, the one every CI job against real Postgres exercises, and the one
- *     that needs no Supabase project. Unset OB1_STORE selects it.
- *   - `postgrest` (store-postgrest.ts) — PostgREST over HTTP, via supabase-js.
- *     Kept for Cloudflare Workers, which cannot hold a Postgres connection, so
- *     the Bun client that store-sql.ts imports does not run there. Selected
- *     explicitly with OB1_STORE=postgrest; on a runtime that has Bun the
- *     selection is reported as retired (postgrestOnBunNotice), since the SQL
- *     store is available there and is what every other path runs.
- *
- * The cutover rationale the first version of this file gave — run both stacks
- * against the same data and diff — is done: test-store-postgrest.ts holds the
- * PostgREST store's argument shapes against real Postgres through the SQL shim,
- * and the two stores share every normaliser below so they cannot present two
- * shapes to the tools (SMD-1040, SMD-1328).
+ * One implementation: `sql` (store-sql.ts), Postgres directly through Bun's
+ * client — the store the compose stack runs and every CI job against real
+ * Postgres exercises. It became the default in change 97 (SMD-1797). The
+ * PostgREST store beside it, kept for a Cloudflare Workers target no brain ran,
+ * was retired by SMD-3152, so OB1_STORE has one value, `sql`, and an unset
+ * OB1_STORE selects it. The interface stays the seam the tools and their fakes
+ * meet, and the normalisers below keep each row shape in one place.
  */
 
 import type { EgressRecord } from "./egress.ts";
@@ -64,7 +47,7 @@ export type RecencyOpts = {
   /** Days for the recency factor to halve. */
   halfLifeDays?: number;
 };
-/** What the store sends when the caller says nothing: the function's own DEFAULTs (migration 020), mirrored once for both stores. */
+/** What the store sends when the caller says nothing: the function's own DEFAULTs (migration 020), mirrored once here. */
 export const RECENCY_DEFAULTS = { weight: 0, halfLifeDays: 90 } as const;
 
 /**
@@ -132,23 +115,24 @@ export type ThoughtHybridMatch = {
 };
 
 /**
- * A timestamptz as either backend hands it back, into the one string form the
- * store's types promise. The two clients disagree: Bun.sql (the SQL store)
- * returns a Date, or the number ±Infinity for an infinite timestamp; PostgREST
- * returns a JSON string in Postgres's own spelling —
- * `2026-09-14T16:27:09.123456+00:00`, or `infinity`; and `compat/supabase-sql`
- * under the PostgREST store's tests, which hands back a finite Date as its
- * `toISOString` string since FORK.md change 73 (SMD-1544), gives the string
- * form in JS's spelling. Nothing else may format a timestamp: a `String()` on the Date
+ * A timestamptz as a driver or a JSON body hands it back, into the one string
+ * form the store's types promise. They disagree: Bun.sql (the SQL store)
+ * returns a Date, or the number ±Infinity for an infinite timestamp; JSON
+ * carries a string in Postgres's own spelling —
+ * `2026-09-14T16:27:09.123456+00:00`, or `infinity`; and `compat/supabase-sql`,
+ * which hands back a finite Date as its `toISOString` string since FORK.md
+ * change 73 (SMD-1544), gives the string form in JS's spelling. (PostgREST, the
+ * JSON source this was first written for, left with its store in SMD-3152.)
+ * Nothing else may format a timestamp: a `String()` on the Date
  * gave a locale string once, and a bare cast gave each caller its client's
  * shape (SMD-1040; FORK.md §52 has the history).
  *
  * The rule. A finite timestamp is `toISOString`. One with no ISO form keeps
  * the text it arrived as rather than failing the caller's whole result — one
  * odd row stays one odd row. The column allows `infinity`, which migration
- * 020 ranks by design; both clients' spellings of it come out as Postgres's.
- * A BC date or a year past ±275760 is the case the two clients do NOT agree
- * on: PostgREST's text survives (`0044-03-15T00:00:00+00:00 BC`), but Bun's
+ * 020 ranks by design; every spelling of it comes out as Postgres's.
+ * A BC date or a year past ±275760 is the case they do NOT agree
+ * on: a JSON body's text survives (`0044-03-15T00:00:00+00:00 BC`), but Bun's
  * driver has already turned it into `Date(NaN)` — or, on a parameterised
  * query, a Date whose `toISOString` is the extended-year form — before the
  * store sees it, so the SQL store hands back JS's "Invalid Date". Recovering
@@ -195,12 +179,12 @@ export function isoTimestampOrNull(v: unknown): string | null {
 
 /**
  * The day of a timestamp, `YYYY-MM-DD`, for a tool that prints a date from a
- * raw driver row — Bun's `Date`, PostgREST's string, the number `Infinity` —
+ * raw driver row — Bun's `Date`, a JSON body's string, the number `Infinity` —
  * where `String(d).slice(0, 10)` gave `"Wed Sep 09"` (SMD-1842). Through
  * `isoTimestampOrNull`'s rule: NULL is null (the caller picks its word). Only
  * `toISOString`'s own form is cut to its date, an extended year's
  * (`+275760-09-13`) included; any other text `isoTimestamp` keeps — a sentinel
- * ("infinity"), PostgREST's `0044-03-15T00:00:00+00:00 BC`, a PostgREST year
+ * ("infinity"), Postgres's text `0044-03-15T00:00:00+00:00 BC`, a year
  * past 9999 JS cannot parse — comes out whole, not sliced to a stub or a BC
  * date read as AD. What Bun hands over for a BC timestamp depends on the
  * query: `Date(NaN)` (so `Invalid Date`) on an unparameterised one, and on a
@@ -229,12 +213,12 @@ export function isoTimestampOpt(v: unknown): string | undefined {
 }
 
 /**
- * The row normalisers. One per row shape the store interface returns, shared
- * by both stores, so a field's format or a column's name cannot drift between
- * them: PostgREST returns the function's snake_case columns, and a cast
- * type-checks while delivering `undefined` (`total_count` once) or the
- * client's own value (`created_at`, above). Numeric columns go through
- * `Number` because a driver may hand a float8 or bigint back as a string.
+ * The row normalisers. One per row shape the store interface returns, so a
+ * field's format or a column's name is decided once: a function answers its
+ * snake_case columns, and a cast type-checks while delivering `undefined`
+ * (`total_count` once) or the driver's own value (`created_at`, above).
+ * Numeric columns go through `Number` because a driver may hand a float8 or
+ * bigint back as a string.
  */
 export function normaliseMatchRow(r: Record<string, unknown>): ThoughtMatch {
   return {
@@ -255,11 +239,11 @@ export function normaliseKeywordRow(r: Record<string, unknown>): ThoughtKeywordM
 }
 
 /**
- * A `search_thoughts_hybrid` row as either backend hands it back — snake_case
+ * A `search_thoughts_hybrid` row as the driver hands it back — snake_case
  * column names, `similarity` possibly NULL, text[] as arrays — into the store's
- * shape. Shared so the two stores cannot drift on the nullable field:
- * `Number(null)` is 0, which would turn "this row has no vector" into "this row
- * is orthogonal to the query" on whichever store forgot.
+ * shape. The nullable field is the one to watch: `Number(null)` is 0, which
+ * would turn "this row has no vector" into "this row is orthogonal to the
+ * query".
  */
 export function normaliseHybridRow(r: Record<string, unknown>): ThoughtHybridMatch {
   const strings = (x: unknown) => (Array.isArray(x) ? x.map(String) : []);
@@ -270,7 +254,7 @@ export function normaliseHybridRow(r: Record<string, unknown>): ThoughtHybridMat
     needles: strings(r.needles),
     // Array-like, not Array: the SQL-backed compat client hands an int[] back
     // as a typed array, for which Array.isArray is false and a JSON round trip
-    // gives {"0":1}. The PostgREST store's conformance test caught it.
+    // gives {"0":1}. The retired PostgREST store's conformance test caught it.
     needleCounts: r.needle_counts != null && typeof r.needle_counts === "object" && "length" in (r.needle_counts as object)
       ? Array.from(r.needle_counts as ArrayLike<unknown>, Number)
       : [],
@@ -320,7 +304,7 @@ export type ThoughtMeta = {
   created_at: string | null;
 };
 
-/** A caller's list of ids as a store queries it: well-formed uuids, lower-cased, de-duplicated. One rule for both stores (SMD-1298). */
+/** A caller's list of ids as a store queries it: well-formed uuids, lower-cased, de-duplicated. One rule for every read (SMD-1298). */
 export function idList(ids: string[]): string[] {
   return [...new Set(ids.filter((id) => UUID_RE.test(id)).map((id) => id.toLowerCase()))];
 }
@@ -353,22 +337,21 @@ export function normaliseThoughtMeta(r: Record<string, unknown>): ThoughtMeta {
 
 /**
  * The canonical hyphenated uuid. A malformed id is a cast error on a uuid
- * column or argument, not a not-found; both stores' read methods treat it as
+ * column or argument, not a not-found; the store's read methods treat it as
  * no-match so a bad id from an MCP client gets a clean answer, not a Postgres
- * error string — the same answer whichever store is configured.
+ * error string.
  */
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * The one contract for a batch of query-log action rows, applied by BOTH
- * writers before anything reaches a database: an absent agent — null,
- * undefined or the empty string — is SQL NULL (034's anonymous bucket); a
- * target must be present; and any id that is not a uuid is refused here,
- * loudly and naming the column, rather than reaching array_in or PostgREST as
- * a malformed value the best-effort caller would swallow with the whole batch.
- * An eighth review pass found the SQL writer holding this rule and the
- * PostgREST writer sending `""` through as an agent id (22P02, batch dropped);
- * one function, one contract.
+ * The one contract for a batch of query-log action rows, applied before
+ * anything reaches a database: an absent agent — null, undefined or the empty
+ * string — is SQL NULL (034's anonymous bucket); a target must be present; and
+ * any id that is not a uuid is refused here, loudly and naming the column,
+ * rather than reaching array_in as a malformed value the best-effort caller
+ * would swallow with the whole batch. An eighth review pass found one of two
+ * writers (the PostgREST one, retired in SMD-3152) sending `""` through as an
+ * agent id (22P02, batch dropped); one function, one contract.
  */
 export function normaliseActionRows(rows: QueryActionLog[]): { tool: string; agentId: string | null; targetId: string }[] {
   return rows.map((r) => {
@@ -384,26 +367,15 @@ export function normaliseActionRows(rows: QueryActionLog[]): { tool: string; age
  * What thought_stats renders: the corpus total, its date range, and the counts
  * by type, topic and person. The tool sorts each map and renders its own top 10,
  * so a store need only return at least that many, in any order — the maps are not
- * a contract for the full distribution. They differ by backend and deliberately:
- * the SQL store returns every `type` but only the top 10 `topics`/`people`
- * (migration 024 caps them in SQL); the PostgREST walk returns every key of all
- * three. For the metadata the capture path produces — a string `type`, `topics`
- * and `people` as arrays of strings — the two backends render the same top-10
- * breakdowns, which the tests assert. The guarantee stops at well-formed data:
- * a non-string scalar `type` (`0`, `false`) or a non-string array element is
- * degenerate metadata the capture path never writes, and the SQL text-coercion
- * (`->>`, `jsonb_array_elements_text`) and the JS walk's truthiness/`String()`
- * may key or drop it differently; likewise, when equal counts tie for the 10th
- * slot, which of the tied keys shows is unspecified on both paths. Both remain
- * a correct top-10 — this is not a byte-identical-output contract.
+ * a contract for the full distribution. The SQL store returns every `type` but
+ * only the top 10 `topics`/`people` (migration 024 caps them in SQL). When equal
+ * counts tie for the 10th slot, which of the tied keys shows is unspecified.
  *
- * `aggregated` is how many rows the breakdowns actually cover. On the SQL store
- * it equals `total`: one aggregate over the whole table (migration 024), never
- * capped. On the PostgREST store it is the reach of the capped page walk and can
- * be < total on a very large brain; the tool prints a truncation note only when
- * the two differ. `total` and the walk are separate reads there (as the tool's
- * were before SMD-1249), so under concurrent writes across the ~100-page window
- * the note is best-effort, not transactional. See `statsSummary`.
+ * `aggregated` is how many rows the breakdowns actually cover. The SQL store
+ * runs one aggregate over the whole table (migration 024), never capped, so it
+ * equals `total`; the tool prints a truncation note only when the two differ.
+ * The field stays in the REST/MCP contract: the capped page walk that could
+ * fall short was the PostgREST store's, retired in SMD-3152.
  */
 export type ThoughtStats = {
   total: number;
@@ -419,10 +391,9 @@ export type ThoughtStats = {
  * A page of a brain's thought-id set (SMD-2244) — for a cheap cross-brain id-set
  * diff. `ids` are in id order; `cursor` is the last id when a full page was
  * returned (more may follow), else null. The first page (asked with `after`
- * null) also carries `total` (the whole corpus) and, where a store can compute it
- * server-side, a `digest` (an md5 of every id in id order) — so a caller can tell
- * two corpora apart without enumerating either. `digest` is null on a store that
- * cannot aggregate server-side (the PostgREST shim), and on an empty corpus.
+ * null) also carries `total` (the whole corpus) and a `digest` (an md5 of every
+ * id in id order, computed server-side) — so a caller can tell two corpora
+ * apart without enumerating either. `digest` is null on an empty corpus.
  */
 export type ThoughtIdPage = {
   ids: string[];
@@ -454,7 +425,7 @@ export type VectorlessRow = {
   origin: string | null;
 };
 
-/** One `listVectorless` row from either store: `updated_at` is the COALESCE the query selects. */
+/** One `listVectorless` row: `updated_at` is the COALESCE the query selects. */
 export function normaliseVectorlessRow(r: Record<string, unknown>): VectorlessRow {
   const metadata = r.metadata;
   return {
@@ -472,7 +443,7 @@ export function normaliseVectorlessRow(r: Record<string, unknown>): VectorlessRo
  * tier that logged it, when, and the search's own arguments. `result_ids` (the
  * historical answer) is left off — the compare replays each query FRESH against
  * both brains and diffs those, so the recorded ids are not needed, and a uuid
- * array would diverge across the two stores' drivers for no gain.
+ * array would diverge across drivers for no gain.
  */
 export type LoggedSearchRow = {
   query: string;
@@ -600,8 +571,8 @@ export type ListFilters = {
   actor?: string;
   /**
    * SMD-1724: `metadata.trust` is one of these words — the ladder at or above
-   * a min_trust, which core/filter.ts's trustAtOrAbove spells out, since a
-   * PostgREST filter cannot call ob1_trust_rank. A row with no trust is in no
+   * a min_trust, which core/filter.ts's trustAtOrAbove spells out (a word list,
+   * from when a PostgREST filter could not call ob1_trust_rank). A row with no trust is in no
    * list. Absent: every row.
    */
   trustIn?: string[];
@@ -665,15 +636,12 @@ export function normaliseProvenanceNode(r: Record<string, unknown>): ProvenanceN
 
 export type CaptureResult = {
   id: string;
-  /** Set when the row was written but its embedding could not be attached. */
-  embeddingFailed?: string;
   /**
    * Migration 035 (SMD-1453): true when the text was already captured — the
    * metadata merged, the vector and windows moved by 021/022's rules, and any
    * `derivedFrom` / `supersedes` named on this call NOT written, since a
    * re-capture leaves an existing thought's provenance as it is (setting it is
-   * update_thought's). Absent when the database is from before 035, or on the
-   * PostgREST two-step fallback, whose 2-argument form does not say.
+   * update_thought's). Absent when the database is from before 035.
    */
   existed?: boolean;
   /**
@@ -696,7 +664,7 @@ export type CaptureResult = {
  * One row of migration 029's review queue, with both thoughts (SMD-1294): a
  * pair the consolidation pass judged one to outdate or duplicate the other, the judge's verdict on which
  * is current, and where the review stands. `list_supersession_proposals`'s
- * shape, in one place for both stores.
+ * shape, in one place.
  */
 export type SupersessionProposal = {
   id: string;
@@ -741,7 +709,7 @@ export type ProposalSide = {
   lapses: { id: string; onto: string }[];
 };
 
-/** list_supersession_proposals's row → SupersessionProposal; both stores map through here so neither drifts. */
+/** list_supersession_proposals's row → SupersessionProposal. */
 export function normaliseProposal(r: Record<string, unknown>): SupersessionProposal {
   // SMD-1803: older/newer.created_at take the read path's rule — isoTimestampOrNull
   // (NULL → null, infinity kept, no throw); see isoTimestamp's header for why the
@@ -779,7 +747,7 @@ export function withWriters(rows: Record<string, unknown>[], writers: Record<str
   return (read ? rows.filter((r) => by.has(String(r.id))) : rows).map((r) => ({ ...(by.get(String(r.id)) ?? {}), ...r }));
 }
 
-/** The error a brain short of 094 answers list_proposal_writers with — the driver's and PostgREST's schema cache's. */
+/** The error a brain short of 094 answers list_proposal_writers with (the `Could not find` forms were PostgREST's schema cache's, before SMD-3152). */
 export const WRITERS_MISSING = /(list_proposal_writers|ob1_capture_only_text|ob1_accept_lapses).*(does not exist|Could not find)|Could not find the function public\.list_proposal_writers/;
 
 /** The lapses column, a jsonb array of {id, onto} — parsed by either driver, or its text; anything else is none. */
@@ -868,8 +836,7 @@ export function ticketList(tickets: string[]): string[] {
 }
 
 /**
- * ticket_status_inputs's rows → TicketStatusInputs; both stores map through
- * here so neither drifts. A history row's elements are the ticket's statuses
+ * ticket_status_inputs's rows → TicketStatusInputs. A history row's elements are the ticket's statuses
  * in the log's order, kept in it; `at` is ms since the epoch. Never throws:
  * a kind it does not know is skipped, and a head or a history it cannot read
  * leaves that ticket out (no label for it) — so a server older than its
@@ -880,14 +847,14 @@ export function ticketList(tickets: string[]): string[] {
 /**
  * The stated-status label's read failed (SMD-2540): said once per reason
  * until a read succeeds, so a lock or a timeout under load is one line, not
- * one per search. A brain before 095 (42883; PostgREST's PGRST202) is
+ * one per search. A brain before 095 (42883) is
  * expected and brain_info's version check names it behind, so it is not
  * said — nor, so, a 42883 from a callee a role's search_path misses; a missing grant
  * (42501), 098's lock timeout (55P03) or a statement timeout (57014) is.
  */
 const labelUnread = new Set<string>();
 export function labelReadFailed(code: string, cause: string): void {
-  if (code === "42883" || code === "PGRST202" || labelUnread.has(code)) return;
+  if (code === "42883" || labelUnread.has(code)) return;
   labelUnread.add(code);
   console.warn(`stated-status label not read (${code || "no code"}): searches answer without it until a read succeeds — ${cause}`);
 }
@@ -897,8 +864,7 @@ export function normaliseTicketStatusInputs(rows: unknown): TicketStatusInputs {
   const out: TicketStatusInputs = { lifecycle: new Set(), heads: new Map(), history: new Map() };
   const text = (v: unknown) => (typeof v === "string" ? v : null);
   // A later function may answer one object, a scalar or a list holding nulls
-  // over PostgREST (SMD-2540 PR 2a's fourth review pass): no list is no rows,
-  // no object no row.
+  // (SMD-2540 PR 2a's fourth review pass): no list is no rows, no object no row.
   if (!Array.isArray(rows)) return out;
   for (const r of rows as Record<string, unknown>[]) {
     if (!r || typeof r !== "object") continue;
@@ -926,7 +892,7 @@ export function normaliseTicketStatusInputs(rows: unknown): TicketStatusInputs {
 
 const CHANGE_ACTIONS = new Set(["capture", "update", "delete"]);
 
-/** thought_changes's row → AuditChange; both stores map through here so neither drifts. */
+/** thought_changes's row → AuditChange. */
 export function normaliseChange(r: Record<string, unknown>): AuditChange {
   const action = String(r.action);
   // 008's CHECK admits only the three; a fourth word here is a changed function.
@@ -956,8 +922,7 @@ export function normaliseChange(r: Record<string, unknown>): AuditChange {
 
 /**
  * Every database operation the MCP tools perform. Errors are thrown, not returned
- * — each implementation normalises its own error shape so callers do not have to
- * know whether they are talking to PostgREST or to Postgres.
+ * — the store normalises its driver's error shape so callers do not have to.
  */
 /**
  * A refused mutation is a result, not an exception: "your read was stale" and
@@ -1013,8 +978,7 @@ export type ResetStampResult =
   | { ok: false; error: ResetStampError; kind?: string | null };
 /**
  * Both functions' envelopes as one normaliser reads them — the superset that
- * UpdateResult and DeleteResult each narrow. Shared so the two stores cannot
- * disagree about what a refusal looks like.
+ * UpdateResult and DeleteResult each narrow, so a refusal looks one way.
  */
 export type MutationEnvelope =
   | { ok: true; id: string; updatedAt?: string; duplicateOf?: string; fingerprintHeldBy?: string; detached?: number; inactive?: number; stamp?: Record<string, unknown>; sameText?: boolean; metadataMerged?: boolean; patchDropped?: boolean }
@@ -1035,8 +999,8 @@ export type UpdateResult = MutationResult & {
 
 /**
  * Both SQL functions return the same {ok, id|error} envelope; this turns it into
- * the store's discriminated union. Shared so the two stores cannot disagree
- * about what a refusal looks like — the class of bug the audit work hit twice.
+ * the store's discriminated union, in one place so a refusal looks one way —
+ * the class of bug the audit work hit twice.
  */
 export function normaliseMutation(r: Record<string, unknown> | undefined): MutationEnvelope {
   if (!r) return { ok: false, error: "NOT_FOUND" };
@@ -1090,8 +1054,7 @@ export function normaliseMutation(r: Record<string, unknown> | undefined): Mutat
 }
 
 /**
- * ob1_reset_capture_stamp's jsonb (migration 086) as the store's union — one
- * reading for both stores. An error the function does not name, or a body
+ * ob1_reset_capture_stamp's jsonb (migration 086) as the store's union. An error the function does not name, or a body
  * that is no envelope, throws: a refusal this server cannot word is a fault.
  */
 export function normaliseResetStamp(r: unknown): ResetStampResult {
@@ -1134,8 +1097,7 @@ export type RecaptureLabel =
   | { outcome: "unweighed"; stamp: ActorStamp };
 
 /**
- * ob1_weigh_recapture's jsonb (migration 090) as the store's label — one
- * reading for both stores. `none`, an outcome this server does not know, or
+ * ob1_weigh_recapture's jsonb (migration 090) as the store's label. `none`, an outcome this server does not know, or
  * a body that is no envelope (085's boolean, from the function before 090)
  * is no label: the capture landed, and the reply says what it said before.
  */
@@ -1233,7 +1195,7 @@ export type Actor = {
  * TypeScript field is `agentId`. Passing the object through unchanged type-checks
  * cleanly, runs without error, and writes NULL into canonical_agent_id on every
  * row — the failure is invisible until someone queries the column months later
- * and finds it empty. Both stores go through here so neither can drift.
+ * and finds it empty. Every write goes through here.
  */
 export function actorPayload(actor: Actor | undefined): Record<string, unknown> | null {
   if (!actor) return null;
@@ -1254,8 +1216,8 @@ export function actorPayload(actor: Actor | undefined): Record<string, unknown> 
 /**
  * The `p_payload` envelope `upsert_thought` has read since migration 004:
  * `metadata`, plus `actor` (008, the audit trail) and `embedding_model` (021,
- * the label beside the vector) when given. Built here for both stores, so a
- * key one of them forgot is a compile error rather than a NULL label.
+ * the label beside the vector) when given. Built here, so a key the caller
+ * forgot is a compile error rather than a NULL label.
  */
 export function captureEnvelope(
   payload: { metadata: Record<string, unknown> },
@@ -1263,8 +1225,8 @@ export function captureEnvelope(
   embeddingModel: string | undefined,
   /**
    * Migration 025 (SMD-1253): what this thought was derived from, and which it
-   * supersedes. Rides the envelope like the actor and the model, so both stores
-   * send it identically and upsert_thought validates it in one place. Absent
+   * supersedes. Rides the envelope like the actor and the model, so
+   * upsert_thought validates it in one place. Absent
    * keys mean "no provenance"; upsert_thought refuses a malformed derived_from.
    */
   provenance?: { derivedFrom?: string[]; supersedes?: string },
@@ -1316,8 +1278,7 @@ export type UpdateProvenance = { derivedFrom?: string[] | null; supersedes?: str
  * the caller named, and only those — an absent key must reach the function
  * absent, not as null, since null means CLEAR there. NULL when nothing was
  * named, so an edit without provenance sends what an 8-argument caller does.
- * Built here for both stores, as captureEnvelope is, so the SQL positional
- * call and the PostgREST named one cannot spell the envelope differently.
+ * Built here, as captureEnvelope is.
  */
 export function provenanceEnvelope(p: UpdateProvenance | undefined): Record<string, unknown> | null {
   if (!p) return null;
@@ -1416,7 +1377,8 @@ export type QueryActionLog = {
 };
 
 export interface ThoughtStore {
-  readonly kind: "postgrest" | "sql";
+  /** The store's name, on each operation's span (`ob1.store`). One since SMD-3152. */
+  readonly kind: "sql";
 
   matchThoughts(opts: {
     embedding: number[];
@@ -1429,8 +1391,7 @@ export interface ThoughtStore {
    * Exact substring search over `content`, case-insensitive. Migration 012.
    *
    * The store passes the query through untouched: `%` and `_` are escaped inside
-   * the SQL function, not here, so both backends escape identically and neither
-   * can be the one that forgets.
+   * the SQL function, not here, so no caller can be the one that forgets.
    */
   keywordThoughts(opts: {
     query: string;
@@ -1449,7 +1410,7 @@ export interface ThoughtStore {
   /**
    * The two above fused (migration 017): rank on the vector arm, presence per
    * needle on the keyword arm. `query` is the text the needles are extracted
-   * from, in SQL, so both backends extract identically; `embedding` is of that
+   * from, in SQL, so every caller extracts identically; `embedding` is of that
    * same text. Fixed top-`limit`, no paging.
    */
   hybridThoughts(opts: {
@@ -1506,8 +1467,7 @@ export interface ThoughtStore {
    * replicas, and a process that dies lets it go with its connection. The
    * release — true when it let the lock go, false when the session that
    * took it was not the one asked (a pooler between) — or null when another
-   * holds it. The PostgREST store has no session to hold one: it answers a
-   * release that does nothing.
+   * holds it.
    */
   mendLock(): Promise<(() => Promise<boolean>) | null>;
 
@@ -1521,9 +1481,8 @@ export interface ThoughtStore {
 
   /**
    * The background-work pools' state (SMD-2131), one row per `work_type` over
-   * `thought_work_claims`, for a read-only queue view over MCP/REST. SQL-backend
-   * only — the table is not published to PostgREST (migration 015), so the shim
-   * throws. Read-only: no lock, no reaper, no write.
+   * `thought_work_claims`, for a read-only queue view over MCP/REST.
+   * Read-only: no lock, no reaper, no write.
    */
   workerStatus(): Promise<WorkerStatusRow[]>;
 
@@ -1531,9 +1490,7 @@ export interface ThoughtStore {
    * Requeue a pool's `failed` claim rows to `pending` (SMD-2132) — the write
    * half of `worker_status`, the `db/*.ts --retry-failed` path over a tool. One
    * statement, scoped to `workType` alone (`WHERE work_type = $1 AND status =
-   * 'failed'`), resetting `last_error`, `finished_at` and `attempt_count`. Like
-   * `workerStatus`, SQL-backend only — the shim throws (migration 015 does not
-   * publish `thought_work_claims`). The caller has already been gated to a write
+   * 'failed'`), resetting `last_error`, `finished_at` and `attempt_count`. The caller has already been gated to a write
    * key; this method does the mutation and returns the ids for the audit log.
    */
   retryFailed(workType: string): Promise<RetryFailedResult>;
@@ -1562,13 +1519,9 @@ export interface ThoughtStore {
   dryRunClaim(workType: string, limit?: number): Promise<DryRunClaimResult>;
 
   /**
-   * Everything thought_stats needs, aggregated by the store. The two backends
-   * differ, and this is one of the places the interface says so:
-   *   - SQL (store-sql.ts) runs migration 024's thought_stats_summary() — the
-   *     whole corpus in one statement, `aggregated === total`, no cap.
-   *   - PostgREST (store-postgrest.ts) has no server-side aggregation, so it
-   *     walks pageThoughtMeta in pages up to a safety cap and tallies in memory;
-   *     `aggregated` is that reach and may be < total, which the tool surfaces.
+   * Everything thought_stats needs, aggregated by the store: migration 024's
+   * thought_stats_summary(), the whole corpus in one statement,
+   * `aggregated === total`, no cap.
    */
   statsSummary(): Promise<ThoughtStats>;
 
@@ -1577,16 +1530,14 @@ export interface ThoughtStore {
    * schema version and ledger, row counts, size, HNSW parameters — for
    * brain_info and the keyed /health body (SMD-2041). The SQL store runs
    * brain-info.ts's readDatabaseFacts over its pool, the reads preflight's rows
-   * make; the PostgREST store has no catalog reads and refuses, so the record
-   * carries the server's own facts and says why the database's are missing.
+   * make. A store that refuses leaves the record the server's own facts and
+   * says why the database's are missing.
    */
   databaseFacts(opts?: ReadOptions, progress?: ReadProgress): Promise<DatabaseFacts>;
 
   /**
-   * One page of metadata for aggregation, newest first. The PostgREST
-   * `statsSummary` walks this; the SQL store keeps it as a primitive
-   * (test-store-sql covers it) even though its own `statsSummary` no longer
-   * needs it.
+   * One page of metadata, newest first — what scan_thoughts' job walks
+   * (core/reads.ts scanThoughts); `statsSummary` does not need it.
    */
   pageThoughtMeta(offset: number, limit: number): Promise<ThoughtMeta[]>;
 
@@ -1601,10 +1552,8 @@ export interface ThoughtStore {
      * Who is writing, for the audit trail (migrations 008 and 010). Optional
      * because a mutation from a script legitimately has no principal — the audit
      * row then records a NULL actor, which is more honest than a placeholder.
-     *
-     * Both stores carry it. An earlier version of this comment claimed the
-     * PostgREST path could not, which was wrong: the actor rides in the payload
-     * envelope, and `upsert_thought` has read one since migration 004.
+     * The actor rides in the payload envelope; `upsert_thought` has read one
+     * since migration 004.
      */
     actor?: Actor;
     payload: { metadata: Record<string, unknown> };
@@ -1627,7 +1576,7 @@ export interface ThoughtStore {
      * OB1_EMBEDDING_MODEL names it — recorded on the row since migration 021 so
      * preflight and the re-embed can tell which model a vector is at. Absent
      * leaves the row's label unknown, which is what an older server's capture
-     * is. Rides in the payload envelope on both stores, as the actor does.
+     * is. Rides in the payload envelope, as the actor does.
      */
     embeddingModel?: string;
     /**
@@ -1723,12 +1672,8 @@ export interface ThoughtStore {
    * Resolve a key digest and its configured name to a stable agent id,
    * registering the pair on first sight. Migration 010.
    *
-   * On the store rather than in a helper because the two backends reach
-   * Postgres differently and this has to work on both — a Workers deployment
-   * speaking PostgREST needs the same identity a Bun deployment gets.
-   *
    * A failure throws with the SQLSTATE on the error's `errno` (Bun's SQL sets
-   * it; the PostgREST store copies PostgREST's `code` there): agents.ts reads
+   * it): agents.ts reads
    * 55P03, 57014, 40P01 and 40001 as a registry busy — a lock timeout or a
    * serialization failure — retried and then refusing the key; 42883, 42P01,
    * 23514 and 42501 as misconfigured, served by name with no retry offered to
@@ -1772,8 +1717,7 @@ export interface ThoughtStore {
   /**
    * Migration 025's read-back. traceProvenance walks UP the derived_from chain
    * (ancestors, depth 0 = the thought itself); findDerivatives looks DOWN it
-   * (what was derived from this, one level). Both backends run the SQL functions
-   * — plain, ungranted, so PostgREST can call them too — and both are
+   * (what was derived from this, one level). Both are SQL functions,
    * cycle-guarded and capped in SQL. No MCP tool exposes them yet; they back
    * db/test-live.ts and a future read API.
    */
@@ -1817,8 +1761,7 @@ export interface ThoughtStore {
 
   /**
    * Migration 052's change feed (SMD-1296): one page of thought_audit, oldest
-   * first, from a time or a cursor — see ChangeFilters. Both stores call the
-   * one function, so the bounds, the order and the bounded rendering are
+   * first, from a time or a cursor — see ChangeFilters. One function, so the bounds, the order and the bounded rendering are
    * decided once, in SQL. Throws on a schema before 052 (the tool names the
    * migration), on a cursor that names no row, on an unknown action, and on a
    * time beside a cursor — each by the function's own message.
@@ -1842,17 +1785,16 @@ export interface ThoughtStore {
   /**
    * The action rows of one call in one round trip — a fetch's single row, an
    * edit's opened row beside its cite, a capture's cite per source (SMD-1719).
-   * One writer for every action row, so there is one INSERT shape per store
-   * to keep right; an empty list writes nothing.
+   * One writer for every action row, so there is one INSERT shape to keep
+   * right; an empty list writes nothing.
    */
   logActions(rows: QueryActionLog[]): Promise<void>;
 
   /**
    * The durable backing store for the async job registry (SMD-2318, migration
-   * 069's `jobs` table), or null when this store cannot hold one. The SQL store
-   * returns a sink; the PostgREST store returns null, so the Workers/PostgREST
-   * path stays pure in-memory (no long-lived process to persist or resume a
-   * detached run). root.ts injects the result into jobs.ts (`setJobSink`) at
+   * 069's `jobs` table), or null when this store cannot hold one (a test's
+   * fake: the registry then stays in memory). The SQL store returns a sink.
+   * root.ts injects the result into jobs.ts (`setJobSink`) at
    * startup and runs the reconcile once. `door` names the server it writes
    * for (078's jobs.door): the jobs it starts carry it, and its reconcile
    * touches only rows bearing it, so two servers on one database leave each
@@ -1863,8 +1805,8 @@ export interface ThoughtStore {
   /**
    * A plugin's own tables (SMD-2310): `fn` runs in one transaction as the
    * plugin's role, its schema first on the path, handed a tagged template and
-   * nothing else. The SQL store's alone; the PostgREST store has none, and a
-   * plugin that reaches for its tables there is told so.
+   * nothing else. Optional for a test's fake; a plugin that reaches for its
+   * tables on a store without it is told so.
    */
   pluginTx?<T>(plugin: string, fn: (sql: PluginSql) => Promise<T>): Promise<T>;
 
@@ -1876,16 +1818,15 @@ export type PluginSql = <R = Record<string, unknown>>(strings: TemplateStringsAr
 
 export type StoreEnv = {
   /**
-   * The PostgREST store's base URL — or, holding a postgres:// URL, the SQL
-   * store's connection string (see databaseUrl): compat/supabase-sql reads a
-   * Postgres URL from this name for every vendored server migrated onto it, so
-   * a box running one of those beside this server sets one variable, not two.
+   * Holding a postgres:// URL, the SQL store's connection string (see
+   * databaseUrl): compat/supabase-sql reads a Postgres URL from this name for
+   * every vendored server migrated onto it, so a box running one of those
+   * beside this server sets one variable, not two.
    */
   SUPABASE_URL?: string;
-  SUPABASE_SERVICE_ROLE_KEY?: string;
   /** The SQL store's connection string. Read before SUPABASE_URL. */
   DATABASE_URL?: string;
-  /** "sql" (the default when unset) or "postgrest" (Cloudflare Workers). */
+  /** "sql", the only store, or unset. `postgrest` is refused by name (SMD-3152). */
   OB1_STORE?: string;
   /** The password of the login role plugins' SQL runs on (db/config.mjs's PLUGIN_LOGIN_ROLE, SMD-2310); unset, a plugin's tables are refused. */
   OB1_PLUGIN_DB_PASSWORD?: string;
@@ -1899,7 +1840,7 @@ export function storeKind(env: StoreEnv): string {
   return (env.OB1_STORE ?? DEFAULT_STORE).toLowerCase();
 }
 
-/** A libpq-style connection string — what the SQL store dials and PostgREST never is. */
+/** A libpq-style connection string — what the SQL store dials. */
 export function isPostgresUrl(value: string | undefined): boolean {
   return typeof value === "string" && /^postgres(ql)?:\/\//i.test(value.trim());
 }
@@ -1909,9 +1850,8 @@ export function isPostgresUrl(value: string | undefined): boolean {
  * DATABASE_URL first; else SUPABASE_URL when it holds a postgres:// URL — the
  * spelling compat/supabase-sql takes, so a deployment of a shim-migrated
  * vendored server beside this one sets that name once and both read it. An
- * https:// SUPABASE_URL is PostgREST's and is never dialled as Postgres: the
- * caller reports it as the PostgREST store's configuration under an SQL
- * selection (missingDatabaseUrl names both fixes).
+ * https:// SUPABASE_URL is never dialled as Postgres (missingDatabaseUrl says
+ * so).
  */
 export function databaseUrl(env: StoreEnv): { url: string; from: "DATABASE_URL" | "SUPABASE_URL" } | null {
   if (env.DATABASE_URL) return { url: env.DATABASE_URL, from: "DATABASE_URL" };
@@ -1920,41 +1860,29 @@ export function databaseUrl(env: StoreEnv): { url: string; from: "DATABASE_URL" 
 }
 
 /**
- * Why an SQL selection with no connection string is refused — one message for
+ * Why the SQL store with no connection string is refused — one message for
  * createStore's throw and preflight's DATABASE_URL check, so the two cannot
- * disagree about what to set. Names the PostgREST route when SUPABASE_URL holds
- * an https:// URL: that is the deployment the old default served, and it keeps
- * working under an explicit OB1_STORE=postgrest.
+ * disagree about what to set. Says so when SUPABASE_URL holds a URL that is
+ * not a connection string (an https:// one, the retired PostgREST store's
+ * base URL), so the alias is not taken for set.
  */
 export function missingDatabaseUrl(env: StoreEnv): { problem: string; fix: string } {
   const selected = env.OB1_STORE === undefined ? "OB1_STORE is unset, which selects the SQL store" : `OB1_STORE=${env.OB1_STORE} selects the SQL store`;
-  const postgrestUrl = Boolean(env.SUPABASE_URL) && !isPostgresUrl(env.SUPABASE_URL);
+  const otherUrl = Boolean(env.SUPABASE_URL) && !isPostgresUrl(env.SUPABASE_URL);
   return {
-    problem: `${selected}, and DATABASE_URL is not set${postgrestUrl ? " — SUPABASE_URL holds a non-postgres:// URL, the PostgREST store's base URL rather than a connection string" : ""}`,
-    fix: postgrestUrl
-      ? "Set DATABASE_URL to the brain's postgres:// connection string — or, to keep reaching this brain through PostgREST at SUPABASE_URL (kept for Cloudflare Workers), set OB1_STORE=postgrest."
-      : "Set DATABASE_URL to the brain's postgres:// connection string.",
+    problem: `${selected}, and DATABASE_URL is not set${otherUrl ? " — SUPABASE_URL holds a non-postgres:// URL, not a connection string" : ""}`,
+    fix: "Set DATABASE_URL to the brain's postgres:// connection string.",
   };
 }
 
 /**
- * The other mismatch: the PostgREST store selected while SUPABASE_URL holds a
- * postgres:// connection string — the one-box operator who kept an old
- * OB1_STORE=postgrest beside a shim-migrated neighbour's variable. supabase-js
- * would take the string as a base URL and fail at the first call with
- * "protocol must be http:, https: or s3:", a message that names neither the
- * variable nor the fix; and the string carries a password, which no report
- * may print. One refusal for createStore and preflight; null when the
- * selection and the URL agree.
+ * The refusal for OB1_STORE=postgrest: the PostgREST store was kept for a
+ * Cloudflare Workers target no brain ran, and SMD-3152 retired both. One
+ * message for createStore and preflight's `store selection` row.
  */
-export function postgrestOverPostgresUrl(env: StoreEnv): string | null {
-  if (storeKind(env) !== "postgrest" || !isPostgresUrl(env.SUPABASE_URL)) return null;
-  return "OB1_STORE=postgrest selects the PostgREST store, but SUPABASE_URL holds a postgres:// connection string, which PostgREST cannot dial (its base URL is http(s)://). " +
-    "Unset OB1_STORE — the SQL store reads that URL as its connection string — or set SUPABASE_URL to the PostgREST base URL.";
-}
-
-/** preflight's wording for a direct-connection check that has no PostgREST form; exported so the suite can name it. */
-export const DIRECT_CHECK_SKIP_OVER_POSTGREST = "not checked over PostgREST — a catalog read with no PostgREST form";
+export const POSTGREST_RETIRED =
+  "OB1_STORE=postgrest selected the PostgREST store, which was retired with the Cloudflare Workers target (SMD-3152): " +
+  "the SQL store is the only one. Unset OB1_STORE and set DATABASE_URL to the brain's postgres:// connection string.";
 
 /**
  * A connection string with its credentials blanked, for any line a report
@@ -1967,20 +1895,6 @@ export const DIRECT_CHECK_SKIP_OVER_POSTGREST = "not checked over PostgREST — 
  */
 export function maskUrl(url: string): string {
   return url.replace(/:\/\/[^/]*@/, "://***@");
-}
-
-/**
- * The line a PostgREST selection earns on a runtime where the SQL store runs.
- * Null on Workers (no Bun, no SQL store, PostgREST is the path) and for every
- * other selection. `hasBun` is a parameter so the test can ask both answers on
- * one runtime; production passes nothing and gets the runtime's own.
- */
-export function postgrestOnBunNotice(kind: string, hasBun: boolean = typeof Bun !== "undefined"): string | null {
-  if (kind !== "postgrest" || !hasBun) return null;
-  return "OB1_STORE=postgrest selects the PostgREST store, which this fork keeps for Cloudflare Workers only: " +
-    "this process runs on Bun, where the SQL store (OB1_STORE unset or sql, DATABASE_URL set to the brain's postgres:// URL) " +
-    "reaches the same database directly, needs no Supabase project and is what every test and the container run. " +
-    "FORK.md change 97 (SMD-1797).";
 }
 
 /**
@@ -2027,14 +1941,9 @@ export function tracedStore(store: ThoughtStore): ThoughtStore {
 }
 
 /**
- * Build the configured store, each operation spanned (tracedStore).
- *
- * The SQL implementation is imported dynamically on purpose: it pulls in Bun's
- * Postgres client, which does not exist on Cloudflare Workers. A static import
- * would break the Workers build for every deployment, including the ones that
- * only ever use PostgREST. (wrangler.toml aliases the `bun` specifier to a stub
- * for the bundler's sake, and sets OB1_STORE=postgrest so the default here is
- * never what a Workers deployment gets.)
+ * Build the configured store, each operation spanned (tracedStore). The SQL
+ * implementation is imported here, not at the top: store-sql.ts imports this
+ * file's normalisers, and a static import back would make the two a cycle.
  */
 export async function createStore(env: StoreEnv): Promise<ThoughtStore> {
   const kind = storeKind(env);
@@ -2050,15 +1959,6 @@ export async function createStore(env: StoreEnv): Promise<ThoughtStore> {
     return tracedStore(new SqlStore(conn.url, { pluginPassword: env.OB1_PLUGIN_DB_PASSWORD }));
   }
 
-  if (kind === "postgrest") {
-    if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
-      throw new Error("OB1_STORE=postgrest requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY");
-    }
-    const mismatch = postgrestOverPostgresUrl(env);
-    if (mismatch) throw new Error(mismatch);
-    const { PostgrestStore } = await import("./store-postgrest.ts");
-    return tracedStore(new PostgrestStore(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY));
-  }
-
-  throw new Error(`Unknown OB1_STORE "${kind}" — expected "sql" (the default) or "postgrest" (Cloudflare Workers)`);
+  if (kind === "postgrest") throw new Error(POSTGREST_RETIRED);
+  throw new Error(`Unknown OB1_STORE "${kind}" — expected "sql" (the only store; leave it unset)`);
 }

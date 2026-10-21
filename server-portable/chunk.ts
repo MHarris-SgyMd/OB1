@@ -10,7 +10,7 @@
  * Two things this deliberately does NOT do:
  *
  *   NO TOKENISER. Pulling one in would tie the server to a specific model family
- *   and add a dependency to a file that has to build for Cloudflare Workers. The
+ *   and add a dependency for an estimate. The
  *   estimate below is intentionally pessimistic instead — over-estimating tokens
  *   produces smaller chunks, which is the safe direction to be wrong in.
  *

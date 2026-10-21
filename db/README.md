@@ -530,8 +530,8 @@ holds the two to one answer.
 Migration 058 is `node_state` (SMD-2074): one read of a thought's lifecycle,
 blockers and supersession, for every surface that ranks by them. Until it,
 `graph-centrality.ts` held those rules as SQL private to the script, and the
-server — which cannot import a `db/` script, and whose PostgREST store reaches
-only RPCs — could not share them. Five functions, all `LANGUAGE sql`, SECURITY
+server — which cannot import a `db/` script, and whose PostgREST store (retired
+in SMD-3152) reached only RPCs — could not share them. Five functions, all `LANGUAGE sql`, SECURITY
 INVOKER, no SET, not STRICT, so a caller's planner inlines them:
 `node_lifecycle_types()` and `node_settled_types()` (the six status types this
 schema knows, and the two that settle a node — seven and three since 104);
@@ -1301,7 +1301,7 @@ reset since 086 (below). The settled rows are those with a decline in the log �
 reads a restamp as "re-captured … the label moved to this key" and a decline
 as "re-captured … the label kept". It refuses to apply
 without 055, 060, 073 or 074. test-schema [75], test-upgrade [20ag],
-test-store-sql and test-store-postgrest [8d], test-e2e-sql [13f].
+test-store-sql [8d], test-e2e-sql [13f].
 
 Migration 086 is the operator's way out of a label 085 settled or moved
 (SMD-2744). Under 085 the first classified key that can read to re-capture a
@@ -1339,8 +1339,7 @@ agent key landing in between is weighed first. `ob1_restamp_recapture` is
 `backfill_thought_actors` 085's body with a reset among its candidate rows:
 a restamp with a reset after it is no writer, and the capture is the writer
 again. It refuses to apply without 046 or 085. test-schema [77],
-test-upgrade [20ah], test-store-sql [8e], test-store-postgrest [8g],
-test-e2e-sql [13g].
+test-upgrade [20ah], test-store-sql [8e], test-e2e-sql [13g].
 
 Migration 087 adds `board_findings_posted`, what board-sync's findings step
 posted to the Linear board (SMD-2681): one row per ticket pair and word —
@@ -1407,8 +1406,8 @@ the label is the caller's own or was not weighed — the operator's
 the structured content carries the outcome and, after a restamp, `labelMine`.
 It refuses
 to apply without 085 and 086. test-schema [80], test-upgrade [20ak],
-server-portable/test-server.ts [29], test-e2e-sql [13h], test-store-sql and
-test-store-postgrest [8d], test-rest-sql [3].
+server-portable/test-server.ts [29], test-e2e-sql [13h], test-store-sql
+[8d], test-rest-sql [3].
 
 Migration 091 keeps every time the consolidation pass settled a proposal,
 since the judge last asserted it, on its row (SMD-2913). 067's `rebuild_derived` reopens a settled row on a later
@@ -1463,8 +1462,7 @@ written before 092 onto a thought an earlier accept took stays until an event
 below it fires the lapse (no sweep; SMD-2934); a lapsed pointer is not put back by a reject (SMD-2933); a thought
 the key wrote with no agent id counts as another's. It refuses to apply
 without 082. test-schema [72] and [82], test-upgrade [20am], test-store-sql
-[8c] and [8f] (the chain locks on two connections), test-store-postgrest [8c],
-test-e2e-sql [13e].
+[8c] and [8f] (the chain locks on two connections), test-e2e-sql [13e].
 
 Migration 093 adds `extraction_progress`, a long thought's extraction
 windows kept across a claim that does not finish (SMD-2694). A hard stop
@@ -1538,7 +1536,7 @@ cleared, read off its own transaction's events. A brain short of 094 lists
 without the writers and says so, and an accept there says the writer check did
 not run. It refuses to apply without
 016, 025, 029, 082 or 092. test-schema [84], test-upgrade [20ao], test-live
-[16], test-store-sql and test-store-postgrest [10], test-e2e-sql [13i],
+[16], test-store-sql [10], test-e2e-sql [13i],
 test-server [16l].
 
 Migration 095 gives the stated-status label its inputs in one call
@@ -1563,7 +1561,7 @@ the server's role reads `thoughts`, `thought_audit`, `ob1_ticket_head` and
 no label rather than a failed search (`node_state`'s `thought_sources` is not
 read when only `open` is). It refuses to apply without 068 or 060. test-schema
 [85], test-live [43] (the plans), test-upgrade [20ap], server-portable's
-test-store-sql and test-store-postgrest [17].
+test-store-sql [17].
 
 Migration 096 creates `pg_stat_statements` where the server offers it
 (SMD-1849 PR 3b): each SQL statement's calls, times, rows and blocks, which
@@ -1712,7 +1710,17 @@ the one kept is on `thoughts` by its oid. Needs nothing past 001; a re-apply
 is a no-op. test-schema [90] (the definition, the five refusals, another
 schema's index), test-store-sql [18] (the store's two page statements and
 the count read through it, each reading only its own rows' entries; the
-page's LIMIT).
+page's LIMIT). Preflight's `thought indexes` row warns while the index is
+INVALID or of another shape, and — once the ledger records 100 — missing: the
+file is not re-run, so a drop, a `--baseline` adoption or an unfinished
+`CONCURRENTLY` build would otherwise pass unsaid. It prints the statement
+that mends it (`--reapply` for an index whose migration's other objects are
+absent too), or — for an INVALID one — the pid of the index operation it
+waits behind; it reads 074's `thoughts_trust_rank_idx` and the other indexes on
+`thoughts` a read is planned around the same way (the fingerprint's unique
+index among them, with any text held twice to resolve first), and names an
+INVALID index left on `thoughts` under another name — a cancelled REINDEX's
+copy to drop, anyone's index to rebuild (SMD-3146, test-preflight [12]).
 
 Migration 101 counts the sleep scheduler's own cuts of a claimed thought
 apart from its stops (SMD-3060). 093's `stops` counted every hard stop that
@@ -3074,7 +3082,8 @@ word **distinct**: two near neighbours the judge called unrelated, kept apart
 (SMD-3117, the word SMD-3116 gave it). Its floor is its own probability (the
 token's, or under decide mode H2O's), not the relation words' mass, which a
 confident unrelated leaves near nothing; under decide mode only H2O's own top
-unrelated records one, not one taken after a proposal failed. Prompt 4 still
+unrelated records one, not one taken after a proposal failed or under the
+floor (SMD-3151). Prompt 4 still
 asks for "unrelated", so no pass key moved. A distinct is one more word on the
 pair's one standing edge — a relation replaces it, and it a relation. The run
 summary says how many of each action's writes were distinct (`1 added (1
@@ -3144,16 +3153,36 @@ naming the typed-decision tier's model (H2O-Lightning-4B, `jev/h2o`), the
 tier gives each pair's verdict, not the judge:
 - **The tier's question** is prompt 4's five verdicts as one choice, over
   prompt 4's own rendering of the pair.
-- **The writer.** Only when the tier's top verdict is outdates is the judge's
-  model asked, and only to write the proposal: which thought is current, the
-  words in it that show the other is not, and the other's words that no
-  longer hold. **The part rule** holds it: a part of some work finishing does
-  not outdate the whole.
+- **The writer.** Only when the tier's top verdict is outdates, at the pass's
+  `--min-confidence` floor, is the judge's model asked, and only to write the
+  proposal: which thought is current, the words in it that show the other is
+  not, and the other's words that no longer hold. **The part rule** holds it:
+  a part of some work finishing does not outdate the whole. Under the floor a
+  proposal could not be recorded, so the writer is not asked (SMD-3151): the
+  pair takes the relation the tier's distribution gives at the floor, as a
+  quote that fails does, else its edge is closed. The pass counts it under
+  confidence and as a proposing verdict (its verdicts line counts the
+  relation word it takes, as for a failed quote), settles a stale proposal
+  on it as an outdates under the floor, and a relation it writes carries the
+  floor in its note. The run's summary counts the writer's calls by what came
+  back.
 - **Both quotes must check out** in the side each names and not in the other,
-  or the pair stays at the tier's best verdict that proposes nothing.
-- **Version 1 is the pass's** (`@p4d1`), SMD-3114's writer, two-sided with the
-  part rule. Version 2 was measured on the canary's proposals and shelved
-  (2026-10-18), having missed its bar twice. It added:
+  or the pair stays at the tier's best verdict that proposes nothing. They are
+  read without their markdown (SMD-3151), in quote and text alike: asterisks,
+  backticks, brackets, escapes' backslashes, underscores at a word's edge and
+  a `#` or `>` run opening a word go (not `#433`, whose hashes need a space,
+  nor `>=`), an inline link keeps its text and loses its target, and struck text goes with its `~~`, read as withdrawn.
+- **Version 3 is the pass's** (`@p4d3`): version 1's writer, SMD-3114's,
+  two-sided with the part rule, its quotes read without markdown and asked
+  only at the floor (SMD-3151). The writer quotes the words it reads, and on
+  SMD-3116's writer test the check refused 11 of the 18 proposals it wrote on
+  settling pairs, 10 of the 12 missed quotes there over markup. Under version
+  1 a standing proposal under the floor recorded nothing and closed the pair's
+  relation, and every relation the canary held for a pair whose quotes had
+  failed sat under it (all 67), so reading more quotes without the floor's
+  gate would have closed about 50 of them, those whose quotes now check out,
+  for no proposal. Version 2 was measured on the canary's
+  proposals and shelved (2026-10-18), having missed its bar twice. It added:
   - the record rule: a record of past understanding (a done ticket, a session
     summary, a change record) is outdated only by a later thought that says
     something different about its subject, never by its work reported done;
@@ -3167,7 +3196,10 @@ tier gives each pair's verdict, not the judge:
   words.
 - **Gating:** both rows are gated for both endpoints before any request.
 - **The key** is `consolidate:<decider>+<writer>@p4d<version>`, so turning it
-  on starts a fresh pass.
+  on, or a new decide version, starts a fresh pass: the tier again for every
+  pooled thought's candidates, and the writer for each outdates at the floor
+  not yet proposed. The canary's `@p4d1` pass took about 6 hours of sleep, at
+  about 3.8 s a pair.
 - **Refused at start:** the run refuses without `OB1_JEV_BASE_URL`, or with
   `OB1_JEV_MODEL` naming another model.
 - **Probes:** a follower probes the tier's `/info` after the writer's endpoint,
@@ -3175,7 +3207,9 @@ tier gives each pair's verdict, not the judge:
   is waited out.
 - **Lineage:** each proposal and relation names the writer, the decider,
   `decide_version` and decide mode's prompt hash, and its recipe carries what
-  the tier and the writer said (`judged.decide`).
+  the tier and the writer said (`judged.decide`): since version 3 both of the
+  writer's quotes, so a proposal can be checked again under another quote
+  rule, and the floor when the writer was not asked.
 
 **Staleness**, the same pass's second output: `stale_entities(window)` names
 the entities nothing has mentioned within the window, quietest first, each
@@ -3313,8 +3347,8 @@ the one write, the review path's states and refusals with the audit row, the
 queue and staleness against PGlite; `test-live.ts` [16] runs the worker end to
 end against a stub judge — the audited accept under the key's name, the reject
 that clears, a cleared claim table not re-proposing a decided pair, the pool
-picking up a thought extracted since. `test-store-sql`/`-postgrest` [10] cover
-the tool's read on both stores; `test-preflight` the line.
+picking up a thought extracted since. `test-store-sql` [10] covers the tool's
+read; `test-preflight` the line.
 
 ## Rebuilding derived artifacts (SMD-1732)
 
@@ -3520,6 +3554,17 @@ words, and the `sleep` row says each:
   (key)", with that kind's remedy before the restart, where "start it again"
   alone would only refuse again.
 
+Since SMD-2905 it also carries `waitingMidPass`, the passes waiting mid-pass
+for a provider that stopped answering (past a worker's pauses for a 5xx, at
+once for a model gone missing or a call no probe answers): "asleep,
+consolidate waiting for the provider mid-pass", a warning naming the
+provider, where it read "its passes running" and "its log says which". The
+provider answering clears it, and so does a wake. A follower's own row
+(`heartbeat:extract:…`, `heartbeat:consolidate:…`) carries the word with its
+own name while it waits, and the `workers` and `consolidate pass` rows say
+it. A follower's start wait stays unsaid: its row does not exist until its
+first pass begins.
+
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
 the wakes (a hard stop counted on them, 093): how many, and the three most
 stalled, then most stopped, with their stops and windows kept — stalled as
@@ -3569,8 +3614,7 @@ used to end the scheduler (SMD-2752). A wake or a stop during that wait stops
 the pass before it began, and a stop is a stop however a pass then ends, unless one throws.
 
 Not yet here: a budget per pass and per sleep and the re-derive pass
-(SMD-2679); a `waiting` word for a pass waiting mid-pass for the provider,
-which reads "running a pass" — `waiting` is its start's alone (SMD-2905).
+(SMD-2679).
 test-live [38] drives it against a stub model.
 
 ## Extensions
@@ -3652,11 +3696,14 @@ The five variables are the canary's model settings. For another brain, they, and
 any of `OB1_LLM_TIMEOUT`, `OB1_CHUNK_CONTEXT` and `OB1_JEV_*` it sets, must mirror
 its server's: the direct calls use them, and each MCP call ends at the server's own
 bound on a capture, computed from them, plus a minute (a call that makes no model
-call ends at 30 s). The banner prints what was resolved. `--mcp` names the
-endpoint. Its default is this Mac's canary on stable's origin
-(`http://127.0.0.1:8010/canary/mcp`); a stack's own endpoint is `/mcp` on its
-`SERVER_PORT` (8000 by default). The key is the stable connector's from
-`~/.claude.json`, which the canary also accepts; `--key-from` names another entry.
+call ends at 30 s). The banner prints what was resolved. The endpoint
+and key are the canary connector's, `open-brain-canary` in `~/.claude.json`,
+which `deploy/canary.sh up --connect` registers at the canary's own port with
+its own key (SMD-2874); the key is the entry's `x-brain-key`, or the `?key=` on
+its url. `--key-from` names another entry; `--mcp` names another endpoint and
+needs `--key-from` beside it, as another brain refuses the canary's key. A
+stack's own endpoint is `/mcp` on its `SERVER_PORT` (8000 by default). Stable's `/canary/mcp` is no canary's: it is the proxy's
+404 from v2.0.0 (SMD-3101).
 
 Captures are real writes:
 - **Which brain:** it runs only against a brain whose `brain_info` says tier
@@ -4916,11 +4963,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2956 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1434 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 870 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 55 assertions: the shards SHARDS lists in test-live.ts, each its own job
-OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 275 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 237 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+./with-postgres.sh bun test-live.ts         # 1443 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 873 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 57 assertions: the shards SHARDS lists in test-live.ts, each its own job
+OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 239 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

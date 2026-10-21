@@ -23,7 +23,8 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
 | File | What it is |
 |---|---|
 | `app.ts` | `createMcpApp`: the MCP endpoint, `/health`, the keyed worker mirrors, the job routes, the method guard and discovery |
-| `index.ts` | The entry, `bun index.ts`: OB1_REST_URL, OB1_FORWARDER_KEY, OB1_PLUGINS, PORT, OB1_STOP_GRACE |
+| `index.ts` | The entry, `bun index.ts`: OB1_REST_URL, OB1_FORWARDER_KEY, OB1_PLUGINS, PORT, OB1_STOP_GRACE, and for OAuth COMPOSE_PROFILES (naming `auth`), OB1_PUBLIC_ORIGIN and OB1_AUTH_SECRET_MCP |
+| `exchange.ts` | The token exchange at the hop (SMD-2286): an OAuth token traded for the REST core's, cached by its digest |
 | `stack.ts` | This server with the REST core behind it in one process, for server-portable's suites |
 | `test-mcp.ts` | The suite |
 
@@ -41,6 +42,42 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
   A refused notification gets a bare 202, or 503 when busy, as server-portable answers
   (SMD-2106). If the REST core refuses this server's own forwarder key, the server is
   misconfigured: the request is a 500, never the caller's refusal.
+- **An OAuth client** (SMD-2286): a bearer of a JWT's shape is never sent to the REST
+  core as a key, a key form beside it or not (a dotted value in a key form stays a
+  key, since a raw `MCP_ACCESS_KEY` may have dots; on a stack with no public origin
+  any bearer is a key; on one with an origin, send a dotted key in a key form). With
+  no key beside it, at the public
+  resource of a stack with the
+  `auth` profile, it is traded (RFC 8693) at the authorization server's token endpoint
+  on the mesh, as the `mcp` client (`OB1_AUTH_SECRET_MCP`), for a token whose audience
+  is the REST core; that token rides `Authorization: Bearer` on every call, and the
+  REST core records the subject (`oauth:operator`) with this server as `act`
+  (`oauth:mcp`). The keyed routes at the origin's `Host` (a scan's job links, the
+  worker mirrors) trade it too; `/health`'s record stays a key's.
+  - The claims are read first, only to refuse: another issuer, any audience but
+    exactly `<origin>/mcp`, or an expired or exp-less token is refused with no trade.
+  - A trade is cached by the incoming token's digest, never by its subject, until 5 s
+    before the exchanged token expires: one operator's read and write connectors each
+    keep their own scope. The authorization server's exchange checks the token, not
+    its grant: a grant revoked there is refused once the client's access token
+    expires (at most 600 s); a subject revoked in the registry, at the next call.
+  - Refused (`invalid_grant`, or the claims), at `/mcp` and the keyed routes alike:
+    401 `invalid_token`, so the client refreshes, or 503 while the authorization
+    server is away, so a refresh that cannot finish does not become a sign-in. A
+    token not checked within a keyed route's 2.5 s deadline: 503. Scopes with no key's meaning: 403 `insufficient_scope`,
+    `scope="brain:read"`. The authorization server away, limiting, stalling or cut
+    short: 503, `Retry-After: 30`. A subject revoked in the registry: the revoked
+    key's refusal, not a sign-in loop. This server's own client refused, or the REST
+    core refusing a token traded for it a moment ago (it checks none, or another
+    origin's): a 500 and one line in the log, with its fix. A trade the authorization
+    server did not answer is said in the log too, at most once a minute.
+  - The token endpoint is the mesh name over plain HTTP (`exchange.ts`
+    `AUTH_TOKEN_URL`): this server trades inside the stack's network only.
+  - On a stack with an origin, anywhere else (another `Host`, no secret), a token is
+    no caller and gets the edge's answer as before; the start warns when a configured
+    stack has no secret, and when the secret is set but the stack is not configured
+    or its origin is unsound. On a stack with no origin there is no OAuth, and a
+    bearer of any shape is sent on as a key, as on main.
 - **The tools** are the caller's operations, each validated by the SDK against its
   schema. A call goes to the REST core with the caller's key, and its answer is
   rendered by `render.ts`:
@@ -167,18 +204,34 @@ cd mcp-server && bun install
 OB1_REST_URL=http://api.ob1.internal.:8000 OB1_FORWARDER_KEY=<a forward-scope key> OB1_PLUGINS=<the REST core's> bun index.ts
 ```
 
-The forwarder key is minted with `cd server-portable && bun keygen.ts <name> --scope
+The forwarder key is minted with `cd server-portable && bun keygen.ts --name <name> --scope
 forward`, and its hash goes in the REST core's `MCP_ACCESS_KEYS`. With no
-`OB1_FORWARDER_KEY` the entry exits 2. The compose service, its forwarder key from
-`deploy/.env` and the canary tier's route are SMD-2287 PR 5.
+`OB1_FORWARDER_KEY` the entry exits 2. To trade OAuth tokens it reads what the REST
+core reads, `COMPOSE_PROFILES` naming `auth` and a sound `OB1_PUBLIC_ORIGIN`, the
+same values, and also needs `OB1_AUTH_SECRET_MCP`, the authorization server's `mcp` client secret from
+`deploy/.env`.
+
+The server image (`server-portable/Dockerfile`) carries this directory and
+`rest-client/`, each with its own lockfile's packages (PR 5a). It runs there without
+the image's preflight, which needs a database this server never opens:
+
+```bash
+docker run --entrypoint bun -p 127.0.0.1:<port>:8000 --network <a network the REST core is on> \
+  -e OB1_FORWARDER_KEY=<key> -e OB1_REST_URL=<the REST core> -e OB1_PLUGINS=<the REST core's> \
+  <server image> ../mcp-server/index.ts
+```
+
+`deploy/canary.sh` mints a canary's own forwarder key. The compose service, which
+routes `/mcp` here and hands it `OB1_FORWARDER_KEY` and `OB1_AUTH_SECRET_MCP` from
+`deploy/.env`, is PR 5b.
 
 ## Test
 
 ```bash
-bun test-mcp.ts                                                  # 125 — the tool list from whoami; each reply what render.ts makes of the core's outcome (a success, a refusal carried whole, a fault, capture's STORE_UNAVAILABLE, the REST core away); a scan's links under the endpoint; the key refusals' envelopes and a notification's bare answer; /health; the mirrors and the job routes; a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault; /health's one deadline, a job stream's answers, a misconfigured forwarder said once; the forwarder's busy key, the registry busy mid-call, one line for a route's throw, the entry's idle timeout and its refusal of a base; a route's throw named with the REST core's address, a client gone unsaid, a base's credentials unprinted, the entry imported throwing; a plugin's operation a tool where whoami names it, its value, refusal and fault as renderPlugin says them, the entry's OB1_PLUGINS, an input's steps run once, a call with no arguments, a batch's shared id refused, a body behind byte-order marks; the entry's stop, a tool call waited on and cut; a fault's line `error` FAILED, the keyed HEADs at once, `/health`'s record beside the key's check, a key turned mid-call; the entry's spans sent at its stop as open-brain-mcp, the REST core's span the child of its tool call's across two processes, a plugin tool named on its line; the method guard
+bun test-mcp.ts                                                  # 191 — the tool list from whoami; each reply what render.ts makes of the core's outcome (a success, a refusal carried whole, a fault, capture's STORE_UNAVAILABLE, the REST core away); a scan's links under the endpoint; the key refusals' envelopes and a notification's bare answer; /health; the mirrors and the job routes; a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault; /health's one deadline, a job stream's answers, a misconfigured forwarder said once; the forwarder's busy key, the registry busy mid-call, one line for a route's throw, the entry's idle timeout and its refusal of a base; a route's throw named with the REST core's address, a client gone unsaid, a base's credentials unprinted, the entry imported throwing; a plugin's operation a tool where whoami names it, its value, refusal and fault as renderPlugin says them, the entry's OB1_PLUGINS, an input's steps run once, a call with no arguments, a batch's shared id refused, a body behind byte-order marks; the entry's stop, a tool call waited on and cut; a fault's line `error` FAILED, the keyed HEADs at once, `/health`'s record beside the key's check, a key turned mid-call; the entry's spans sent at its stop as open-brain-mcp, the REST core's span the child of its tool call's across two processes, a plugin tool named on its line; the method guard; the token exchange: a token traded once and cached by its digest, the REST core sent the exchanged token alone, a read and a write connector of one subject each their own scope, one trade at a time, the cache's margin and bound, refusals on the claims, the authorization server's answers (invalid_grant, invalid_scope, away, busy, 429, a cut-short 200, its client refused) and the REST core's (403, keyless), a revoked subject, job links and mirrors by token, refused ones answered (503 with the authorization server away), /health not, a token beside a key form never sent as one, a dotted raw key in each form and as a bearer with no OAuth, a REST core that checks no token or another origin's, a trade past a job link's deadline, unavailable trades said in the log, a stalled refusal, echoing error codes (a bare 64-hex value too) and a hex key as a bearer, another Host and no secret, a key client with the authorization server away, a token too brief to keep
 cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-auth.ts   # 191 — test-auth's assertions, held to this server with the REST core behind it
-cd ../server-portable && OB1_MCP_UNDER_TEST=client ../db/with-postgres.sh bun test-e2e-sql.ts   # 590 — the whole server over MCP on real Postgres, held to this server the same way
-cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-server.ts   # 1097 — the real server's suite whole: its request lines, its spans, one trace per tool call, the entry's telemetry, a keyed HEAD outside the budget, and its stop
+cd ../server-portable && OB1_MCP_UNDER_TEST=client ../db/with-postgres.sh bun test-e2e-sql.ts   # 630 — the whole server over MCP on real Postgres, held to this server the same way
+cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-server.ts   # 1141 — the real server's suite whole: its request lines, its spans, one trace per tool call, the entry's telemetry, a keyed HEAD outside the budget, and its stop
 cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-plugins.ts   # 283 — plugins in the contract, an enabled plugin's operation as this server's tool
 cd ../server-portable && OB1_MCP_UNDER_TEST=client ../db/with-postgres.sh bun test-plugins-sql.ts   # 107 — the example's operations, pinned over REST and read back through this server
 ```

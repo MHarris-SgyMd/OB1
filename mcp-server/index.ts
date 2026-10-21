@@ -2,12 +2,15 @@
 // as mcp.ob1.internal on the stack's mesh and at /mcp through the proxy once
 // SMD-2287 PR 5 gives it a compose service (server-portable's is there now).
 // It calls the REST core at OB1_REST_URL with OB1_FORWARDER_KEY — a
-// forward-scope key MCP_ACCESS_KEYS holds (`bun keygen.ts --scope forward`) —
+// forward-scope key MCP_ACCESS_KEYS holds (`bun keygen.ts --name <name> --scope forward`) —
 // beside each caller's key, and reads OB1_PLUGINS as the REST core does, for
 // the enabled plugins' tools. It reads no store and holds no key list: what a
 // key may do is the REST core's to say. Its spans, metrics and log records go
 // where OTEL_EXPORTER_OTLP_ENDPOINT says, as `open-brain-mcp` (SMD-1849, PR 4c),
-// and each call on the REST core carries its span's traceparent.
+// and each call on the REST core carries its span's traceparent. On a stack
+// configured with the authorization server (COMPOSE_PROFILES names auth, with
+// a sound OB1_PUBLIC_ORIGIN) it trades each OAuth token at the hop as the
+// `mcp` client, its secret OB1_AUTH_SECRET_MCP (exchange.ts, SMD-2286).
 
 import { createRestClient } from "../rest-client/index.ts";
 import { loadPlugins, type LoadedPlugin } from "../server-portable/core/plugins.ts";
@@ -15,6 +18,8 @@ import { routable } from "../server-portable/auth.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "../server-portable/shutdown.ts";
 import { cutOpenRequests, flushTelemetry, knowTools, outgoingTraceparent, startTelemetry } from "../server-portable/telemetry.ts";
 import { createMcpApp, edgeFrom, REST_TIMEOUT_MS } from "./app.ts";
+import { createExchanger, exchangeSettings } from "./exchange.ts";
+import { originProblem } from "../server-portable/oauth-edge.ts";
 
 /** Where the REST core answers on the mesh unless OB1_REST_URL says otherwise. */
 export const DEFAULT_REST_URL = "http://api.ob1.internal.:8000";
@@ -29,7 +34,7 @@ export const SERVICE_NAME = "open-brain-mcp";
 const env = process.env;
 const forwarderKey = env.OB1_FORWARDER_KEY?.trim();
 if (import.meta.main && !forwarderKey) {
-  console.error("OB1_FORWARDER_KEY is not set: the MCP server forwards each caller's key to the REST core beside a forward-scope key of its own (`cd server-portable && bun keygen.ts <name> --scope forward`, its hash in MCP_ACCESS_KEYS).");
+  console.error("OB1_FORWARDER_KEY is not set: the MCP server forwards each caller's key to the REST core beside a forward-scope key of its own (`cd server-portable && bun keygen.ts --name <name> --scope forward`, its hash in MCP_ACCESS_KEYS).");
   process.exit(2);
 }
 
@@ -64,7 +69,18 @@ knowTools(plugins.flatMap((p) => p.operations.map((op) => op.tool)));
 const toolCalls = createCallCount();
 /** The stop's word: set when it cuts what is still in flight, so a request it ends then is `cut`, not `abandoned`. */
 const stop = { cut: false };
-const app = createMcpApp({ rest, plugins: () => plugins, toolCalls, stop, restUrl: baseUrl.replace(/\/\/[^/@]*@/, "//…@"), edge: () => edgeFrom({ COMPOSE_PROFILES: env.COMPOSE_PROFILES, OB1_PUBLIC_ORIGIN: env.OB1_PUBLIC_ORIGIN }) });
+const edge = edgeFrom({ COMPOSE_PROFILES: env.COMPOSE_PROFILES, OB1_PUBLIC_ORIGIN: env.OB1_PUBLIC_ORIGIN });
+// The token exchange (SMD-2286): on a configured stack with the `mcp` client's secret; without the secret a token is
+// no caller (refused as before), said once at the start rather than on every OAuth client's request.
+const exchange = exchangeSettings(edge.origin, env.OB1_AUTH_SECRET_MCP);
+if (import.meta.main && edge.origin && !exchange) console.warn("OB1_AUTH_SECRET_MCP is not set: this configured stack's OAuth tokens are refused here (the `mcp` client's secret, from deploy/.env, which deploy/auth/provision.ts --init writes).");
+// The secret given where nothing trades: the stack is not configured or its origin unsound, said once, since tokens
+// are then no caller and the start was otherwise silent (review pass 3: an operator setting only the secret saw nothing).
+if (import.meta.main && !edge.origin && env.OB1_AUTH_SECRET_MCP?.trim()) {
+  console.warn(`OB1_AUTH_SECRET_MCP is set, but no OAuth token is traded: ${edge.configured ? originProblem(env.OB1_PUBLIC_ORIGIN) : "COMPOSE_PROFILES does not name auth"} (set COMPOSE_PROFILES and OB1_PUBLIC_ORIGIN as the REST core has them).`);
+}
+const exchanger = exchange ? createExchanger(exchange) : null;
+const app = createMcpApp({ rest, plugins: () => plugins, toolCalls, stop, restUrl: baseUrl.replace(/\/\/[^/@]*@/, "//…@"), edge: () => edge, exchanger: () => exchanger });
 
 let bunServer: Stoppable | undefined;
 if (import.meta.main) {

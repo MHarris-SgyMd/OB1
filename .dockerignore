@@ -12,7 +12,8 @@
 # Never ship dependency trees — the image installs its own from bun.lock.
 **/node_modules
 
-# Everything outside the directories the images actually need (db/, server-portable/, plugins/).
+# Everything outside the directories the images actually need (db/, server-portable/, plugins/,
+# mcp-server/, rest-client/).
 recipes
 dashboards
 integrations
@@ -35,10 +36,7 @@ supabase
 **/test-*.mjs
 **/*.test.ts
 **/tsconfig.json
-**/wrangler.toml
 **/README.md
-**/.dev.vars
-**/.cf-out
 **/*.log
 
 # db/: the server image copies config.mjs, version.mjs and their types; the
@@ -73,6 +71,13 @@ db/*.ts
 db/*.sh
 db/package.json
 db/bun.lock
+# The REST client's generator and the OpenAPI document it writes (SMD-2287):
+# tooling, run in a checkout, where its test fails on stale output. The image
+# needs only the client, its operations table and its types. And the MCP
+# server's in-process stack, which only its suites start.
+rest-client/generate.ts
+rest-client/openapi.json
+mcp-server/stack.ts
 
 # Local environment and editor state.
 .env

@@ -35,10 +35,6 @@ if (!URL_) {
   process.exit(2);
 }
 
-/**
- * db/migrations/*.sql are templates — migrate.ts substitutes these at apply time.
- * Applying them raw fails with `syntax error at or near "{"`.
- */
 // Pinned, not inherited from the shipped defaults. This suite asserts the data
 // layer, not the model choice, and reading the default meant the schema it built
 // and the width the server expected drifted apart the moment the default changed.
@@ -46,11 +42,6 @@ const EMBEDDING_DIM = Number(process.env.OB1_EMBEDDING_DIM ?? 1536);
 const EMBEDDING_MODEL = process.env.OB1_EMBEDDING_MODEL ?? "openai/text-embedding-3-small";
 process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
 process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
-function subst(sql: string): string {
-  return sql
-    .replace(/\{\{EMBEDDING_DIM\}\}/g, String(EMBEDDING_DIM))
-    .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBEDDING_MODEL);
-}
 
 const { assert, report } = createAssert();
 
@@ -197,7 +188,7 @@ const result = async (name: string, args: Record<string, unknown> = {}) => {
   return { text: res.content.map((c) => c.text).join("\n"), isError: res.isError === true, sc: res.structuredContent };
 };
 
-console.log(`  store: OB1_STORE unset (sql, the default), SUPABASE_URL unset\n`);
+console.log(`  store: OB1_STORE unset (sql, the only store), SUPABASE_URL unset\n`);
 
 console.log("[1] The server runs with no Supabase configuration at all");
 {
@@ -217,7 +208,7 @@ console.log("\n[2] capture_thought writes through SQL");
 {
   const out = await call("capture_thought", { content: "alpha thought about migrations" });
   assert(/Captured as/.test(out), `capture reports success (${out.split("\n")[0].slice(0, 50)}…)`);
-  assert(!/NOT appear in semantic search/.test(out), "no degraded-write warning");
+  assert(!/WITHOUT a vector|no vector was made|embedding call for this capture was not made/.test(out), "no degraded-write note");
 
   const sql = new SQL({ url: URL_, max: 1 });
   const [row] = await sql`SELECT content, metadata, embedding IS NOT NULL AS has, embedding_model AS m FROM thoughts`;
@@ -3279,9 +3270,7 @@ console.log("\n[17] Every worker action answers its result beside the text, and 
   }
 
   // A fault: the claim table is away, so the store throws. Each action keeps
-  // its lead, FAILED beside it with no retryable — on a PostgREST deploy the
-  // store throws the SQL-only reason, which a retry does not mend — and each
-  // POST answers the reason as a 200 {error}, as /worker-status does. Put the
+  // its lead, FAILED beside it with no retryable — and each POST answers the reason as a 200 {error}, as /worker-status does. Put the
   // table back whatever the assertions do; a lock held elsewhere fails the
   // rename within seconds rather than hanging the suite.
   const sql = new SQL({ url: URL_, max: 1 });
