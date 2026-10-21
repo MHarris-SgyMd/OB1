@@ -5271,10 +5271,12 @@ console.log("\n[31] A search answered without a vector says so — search_though
     `nothing found, the literal too common: said so, not absent, and literalOnly unknown in the typed result (${common.content[0].text.slice(-160)})`);
   const absent = renderSearchThoughts({ ok: true, value: { query: "SMD-2", preferCurrent: false, hits: [], facts: { needles: ["SMD-2"], needleCounts: [0], commonNeedles: [], literalOnly: true }, window: null, vectorFailed: vf } } as never, false).content[0].text;
   assert(absent.endsWith("No thought contains: SMD-2.") && !absent.includes("has no identifier"), `nothing found with the facts: the literal no thought contains, by name (${absent})`);
-  // A literal held by thoughts the search's scope left out — with or without a vector (review pass 2).
-  const outside = renderSearchThoughts({ ok: true, value: { query: "RARE-7", preferCurrent: false, hits: [], facts: { needles: ["RARE-7", "GONE-8"], needleCounts: [3, 0], commonNeedles: [], literalOnly: true }, window: null } } as never, false).content[0].text;
-  assert(outside === 'No thoughts found matching "RARE-7". No thought contains: GONE-8. Held only by thoughts outside this search\'s filter, said_by, actor or min_trust: RARE-7 (in 3 thoughts).',
-    `nothing found, a literal held outside the search's scope: said so with its count, beside the absent one (${outside})`);
+  // A literal held by thoughts the search's scope left out: said without a vector; with one, the provider up changes nothing (review pass 10).
+  const outsideFacts = { needles: ["RARE-7", "GONE-8"], needleCounts: [3, 0], commonNeedles: [], literalOnly: true };
+  const outside = renderSearchThoughts({ ok: true, value: { query: "RARE-7", preferCurrent: false, hits: [], facts: outsideFacts, window: null, vectorFailed: vf } } as never, false).content[0].text;
+  const outsideUp = renderSearchThoughts({ ok: true, value: { query: "RARE-7", preferCurrent: false, hits: [], facts: outsideFacts, window: null } } as never, false).content[0].text;
+  assert(outside.endsWith("No thought contains: GONE-8. Held only by thoughts outside this search's filter, said_by, actor or min_trust: RARE-7 (in 3 thoughts).") && outsideUp === 'No thoughts found matching "RARE-7". No thought contains: GONE-8.',
+    `nothing found, a literal held outside the scope: said so without a vector, and with one the reply as before (${outside.slice(-160)} | ${outsideUp})`);
   const withVector = renderSearchThoughts({ ok: true, value: { query: "SMD-1", preferCurrent: false, hits: [{ ...hit, similarity: 0.9 }], facts, window: null } } as never, false);
   assert(!withVector.content[0].text.includes("Semantic search is unavailable") && !("vectorFailed" in withVector.structuredContent) && /ranked first and the rest by similarity/.test(withVector.content[0].text),
     "an answer with a vector: no mark, no field, the similarity note as before");

@@ -1420,10 +1420,11 @@ export interface ThoughtStore {
   /**
    * The literals 017's extract_search_needles takes from `query`, in its
    * order, each with whether more thoughts hold it than one keyword page —
-   * 075's own rarity probe, unfiltered (SMD-2891). Asked only where no literal
-   * matched an unfiltered search, so each is absent or too common there. Never
-   * a count (review pass 2: a count read the whole match set, seconds per
-   * needle), and never a bare first-row probe (review pass 3: it plans a
+   * 075's own rarity probe, unfiltered (SMD-2891). Its answer is read as
+   * absent or too common only once no unfiltered search matched a literal
+   * (answerWithoutVector's literal arm, or its probe for a filtered search).
+   * Never a count (a count read the whole match set, seconds per needle), and
+   * never a bare first-row probe (it plans a
    * sequential scan, the whole table for an absent needle). `textable`: whether
    * the whole query may be matched as one text — at least three characters and
    * a word the English parser keeps, 017's rule for a quoted span, so `the`,

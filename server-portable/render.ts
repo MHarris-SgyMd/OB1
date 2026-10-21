@@ -559,7 +559,7 @@ const thoughtCount = (n: number) => n > TEXT_PAGE ? `more than ${TEXT_PAGE} thou
  * the tool that matches any word — search_thoughts_keyword, which the compat
  * `search`'s caller may not have, so it is named there as the brain's.
  */
-export function literalOnlyNote(f: Pick<QueryVectorFailed, "base" | "detail" | "matched">, tool: "search" | "search_thoughts"): string {
+function literalOnlyNote(f: Pick<QueryVectorFailed, "base" | "detail" | "matched">, tool: "search" | "search_thoughts"): string {
   // Its literals; then, those matching nothing, the query as one text; or nothing could be (review passes 4 and 5).
   const how = f.matched === "text"
     ? "the query was matched by its identifiers and quoted spans, if any, and then as one text, exactly (case aside) — not by meaning"
@@ -589,8 +589,10 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         if (absent.length) why.push(`No thought contains: ${absent.join(", ")}.`);
         // A literal some thought holds that matched nothing here: the probe is
         // unfiltered and an exact hit clears any threshold, so its thoughts are
-        // outside the search's filter, said_by, actor or min_trust (review pass 2).
-        const outside = facts.needles.map((n, i) => [n, facts.needleCounts[i]] as const).filter(([, c]) => c > 0);
+        // outside the search's filter, said_by, actor or min_trust. Said only
+        // without a vector: with one, a scoped count is SMD-3185's to word, and
+        // the provider up changes nothing here (review pass 10).
+        const outside = literal ? facts.needles.map((n, i) => [n, facts.needleCounts[i]] as const).filter(([, c]) => c > 0) : [];
         if (outside.length) why.push(`Held only by thoughts outside this search's filter, said_by, actor or min_trust: ${outside.map(([n, c]) => `${n} (in ${thoughtCount(c)})`).join(", ")}.`);
         if (facts.commonNeedles.length) why.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${facts.commonNeedles.join(", ")} — use search_thoughts_keyword to page through them.`);
       }

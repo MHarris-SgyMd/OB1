@@ -85,70 +85,77 @@ const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
   const q = gateQuery(ctx, opts.query, principal);
   if (q.refusal) return { refusal: q.refusal, rows: [] };
   // A provider that did not answer (refused, timed out, 5xx — providerDown)
-  // leaves the search its exact-literal arm, which needs no model: the same
-  // function with no vector, so the literals are the ones it would have fused
-  // and the rows say so (SMD-2891). Any other failure — a 4xx, a width
-  // mismatch — still fails the search, so a misconfigured brain says so, as a
-  // capture does (SMD-2888).
-  const outage: { down?: { reason: string; detail: string }; base?: string } = {};
-  const embedding = await ctx.embedder.getEmbedding(opts.query, q.subject, "query").catch((e: unknown) => {
+  // leaves the search what needs no model (answerWithoutVector, SMD-2891).
+  // Any other failure — a 4xx, a width mismatch — still fails the search, so
+  // a misconfigured brain says so, as a capture does (SMD-2888).
+  let embedding: number[];
+  try {
+    embedding = await ctx.embedder.getEmbedding(opts.query, q.subject, "query");
+  } catch (e) {
     const down = providerDown(e);
     if (!down) throw e;
     // As a row prints an endpoint: userinfo masked (SMD-2885).
-    outage.base = shownBase(ctx.embedConfig().embeddings);
-    console.error(`${opts.tool}: the embedding provider at ${outage.base} was unavailable: ${down.detail}; answered by exact matches alone`);
-    outage.down = down;
-    return null;
-  });
+    const base = shownBase(ctx.embedConfig().embeddings);
+    console.error(`${opts.tool}: the embedding provider at ${base} was unavailable: ${down.detail}; answered by exact matches alone`);
+    const a = await answerWithoutVector(await ctx.store(), opts, { ...down, base });
+    // Logged as arm `literal` (104): no arm a replay could take, since a
+    // replay's provider answers; db/brain-compare.ts leaves it out of a plan.
+    if (logged) await ctx.logSearch(principal, opts.tool, { query: opts.query, limit: opts.limit, threshold: opts.threshold ?? 0, recencyWeight: opts.recencyWeight ?? 0, filter: opts.filter, arm: "literal" }, a.rows);
+    return { rows: a.rows, embedding: null, vectorFailed: a.vectorFailed, ...(a.facts ? { facts: a.facts } : {}) };
+  }
   // prefer_current (059, SMD-2255) is the same arm through another function,
   // logged as arm `current` so a replay takes the same one.
   const preferCurrent = opts.preferCurrent === true;
-  const store = await ctx.store();
-  let rows = await store.hybridThoughts({
+  const rows = await (await ctx.store()).hybridThoughts({
     query: opts.query, embedding, threshold: opts.threshold ?? 0, limit: opts.limit,
     filter: opts.filter, recencyWeight: opts.recencyWeight ?? 0, preferCurrent, minTrust: opts.minTrust,
   });
-  let vectorFailed: QueryVectorFailed | undefined = outage.down ? { ...outage.down, base: outage.base!, matched: "literals" } : undefined;
-  let facts: QueryFacts | undefined;
-  if (vectorFailed && rows.length === 0) {
-    // Its literals matched nothing (or it holds none): the whole query, as one
-    // text, is the keyword arm's match — what a one- or two-word query means,
-    // and what a too-common identifier (`GitHub`) still finds (review pass 4,
-    // the maintainer's call; pass 5: whether or not it held a literal). Not
-    // for a query too short or only common words (`the`, `AI`), a substring of
-    // nearly every thought. The order is the keyword arm's; prefer_current
-    // ranks no text match, and the reply says so. The text is the query
-    // without the whitespace at its ends, which no reader sees and the hybrid
-    // never weighed (review pass 6: "deploy\n" was held by none of 176).
-    const text = opts.query.trim();
-    const { literals, textable } = await store.literalFacts(text);
-    if (textable) {
-      vectorFailed = { ...vectorFailed, matched: "text" };
-      const kw = await store.textThoughts({ query: text, limit: opts.limit, filter: opts.filter, minTrust: opts.minTrust });
-      // A literal too common to match exactly is why the text was asked; its rows say so (review pass 6).
-      const common = literals.filter((l) => l.common).map((l) => l.needle);
-      rows = kw.map((k) => textRow(k, text, common));
-    } else if (literals.length === 0) vectorFailed = { ...vectorFailed, matched: "none" };
-    if (rows.length === 0) {
-      // Why nothing. A text held only outside the search's scope is said so
-      // first, whatever its literals' rarity — "too common, page with
-      // search_thoughts_keyword" beside that tool's own empty match read false
-      // (review pass 6); then each literal absent or too common (unfiltered);
-      // then the text held by none.
-      const scoped = Object.keys(opts.filter).length > 0 || opts.minTrust !== undefined;
-      const outside = textable && scoped ? ((await store.textThoughts({ query: text, limit: 1, filter: {} }))[0]?.totalCount ?? 0) : 0;
-      if (outside > 0) facts = { needles: [text], needleCounts: [outside], commonNeedles: [], literalOnly: null };
-      else if (literals.length > 0) facts = factsFromLiterals(literals);
-      else if (textable) facts = { needles: [text], needleCounts: [0], commonNeedles: [], literalOnly: null };
-      else facts = { needles: [], needleCounts: [], commonNeedles: [], literalOnly: null };
-    }
-  }
-  // A literal-only answer is logged as arm `literal` (104): it is neither arm a
-  // replay could take, since a replay's provider answers, and db/brain-compare.ts
-  // leaves it out of a replay plan as it does a row with no arm.
-  if (logged) await ctx.logSearch(principal, opts.tool, { query: opts.query, limit: opts.limit, threshold: opts.threshold ?? 0, recencyWeight: opts.recencyWeight ?? 0, filter: opts.filter, arm: vectorFailed ? "literal" : preferCurrent ? "current" : "hybrid" }, rows);
-  return { rows, embedding, ...(vectorFailed ? { vectorFailed } : {}), ...(facts ? { facts } : {}) };
+  if (logged) await ctx.logSearch(principal, opts.tool, { query: opts.query, limit: opts.limit, threshold: opts.threshold ?? 0, recencyWeight: opts.recencyWeight ?? 0, filter: opts.filter, arm: preferCurrent ? "current" : "hybrid" }, rows);
+  return { rows, embedding };
 }) as RunSearch;
+
+/**
+ * A search with no query vector (SMD-2891). First the hybrid function with
+ * none — its exact-literal arm, filter, floor and prefer_current as ever.
+ * Then, that matching nothing, the query as one text (trimmed; 3 to 64
+ * characters and a word the English parser keeps — 017's rule for a span)
+ * through the bounded textThoughts, its order newest first, prefer_current
+ * ranking none of it. Otherwise nothing could be matched.
+ *
+ * With nothing found, why, first fact first: a literal some thought outside
+ * a filtered search's scope holds (the hybrid's unfiltered probe); the text
+ * held only outside the scope; each literal absent or too common — which is
+ * all a literal can be once no unfiltered search matched it, so
+ * literalFacts reads rarity alone; the text held by none.
+ */
+async function answerWithoutVector(
+  store: ThoughtStore,
+  opts: { query: string; limit: number; threshold?: number; recencyWeight?: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust },
+  failed: { reason: string; detail: string; base: string },
+): Promise<{ rows: ThoughtHybridMatch[]; vectorFailed: QueryVectorFailed; facts?: QueryFacts }> {
+  const rows = await store.hybridThoughts({
+    query: opts.query, embedding: null, threshold: opts.threshold ?? 0, limit: opts.limit,
+    filter: opts.filter, recencyWeight: opts.recencyWeight ?? 0, preferCurrent: opts.preferCurrent === true, minTrust: opts.minTrust,
+  });
+  if (rows.length > 0) return { rows, vectorFailed: { ...failed, matched: "literals" } };
+  const text = opts.query.trim();
+  const { literals, textable } = await store.literalFacts(text);
+  const vectorFailed: QueryVectorFailed = { ...failed, matched: textable ? "text" : literals.length > 0 ? "literals" : "none" };
+  if (textable) {
+    // A literal too common to match exactly is why the text was asked; its rows say so.
+    const common = literals.filter((l) => l.common).map((l) => l.needle);
+    const kw = await store.textThoughts({ query: text, limit: opts.limit, filter: opts.filter, minTrust: opts.minTrust });
+    if (kw.length > 0) return { rows: kw.map((k) => textRow(k, text, common)), vectorFailed };
+  }
+  const scoped = Object.keys(opts.filter).length > 0 || opts.minTrust !== undefined;
+  const probe = scoped ? (await store.hybridThoughts({ query: opts.query, embedding: null, threshold: -1, limit: 1, filter: {} }))[0] : undefined;
+  if (probe) return { rows: [], vectorFailed, facts: { ...factsOf(probe)!, literalOnly: null } };
+  const outside = textable && scoped ? ((await store.textThoughts({ query: text, limit: 1, filter: {} }))[0]?.totalCount ?? 0) : 0;
+  const facts: QueryFacts = outside > 0 ? { needles: [text], needleCounts: [outside], commonNeedles: [], literalOnly: null }
+    : literals.length > 0 ? factsFromLiterals(literals)
+    : { needles: textable ? [text] : [], needleCounts: textable ? [0] : [], commonNeedles: [], literalOnly: null };
+  return { rows: [], vectorFailed, facts };
+}
 
 /** A keyword row as a hybrid one, the whole query its one literal (SMD-2891): no similarity, no score; the count the keyword arm's own, and the query's too-common literals beside it. */
 function textRow(k: ThoughtKeywordMatch, query: string, common: string[]): ThoughtHybridMatch {
@@ -300,10 +307,10 @@ const factsOf = (r: ThoughtHybridMatch | undefined): QueryFacts | null =>
 
 /**
  * The query's facts when no row reports them and no vector was made
- * (SMD-2891), in the hybrid's own terms: asked only where no literal matched
- * an unfiltered search, so a literal is absent — a needle counted 0 — or too
+ * (SMD-2891), in the hybrid's own terms: read only once no unfiltered search
+ * matched a literal, so a literal is absent — a needle counted 0 — or too
  * common, a common needle alone, as the hybrid never lists a common one among
- * its needles (review pass 2).
+ * its needles.
  */
 function factsFromLiterals(lits: { needle: string; common: boolean }[]): QueryFacts {
   const absent = lits.filter((l) => !l.common).map((l) => l.needle);
@@ -373,14 +380,8 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
     // 150 thoughts contained, because it was too common to match). Reuses
     // the arm's embedding, and stays unfiltered — no min_trust either — so
     // the facts are the query's, not the filtered scope's.
-    // Without a vector (SMD-2891) runSearch read the facts itself — each
-    // needle's rarity, as the hybrid probes it, since the probe has a row only
-    // where a literal matched and none for one too common (review pass 1), or
-    // the whole query's as one text. A probe row still comes first, for the
-    // count of a literal held only outside the search's scope, whatever else
-    // was matched (review pass 5: skipping it called such a literal absent).
-    const probe = await (await ctx.store()).hybridThoughts({ query, embedding: r.embedding, threshold: -1, limit: 1, filter: {} });
-    const facts = factsOf(probe[0]) ?? r.facts ?? null;
+    // Without a vector the facts are answerWithoutVector's (SMD-2891).
+    const facts = r.vectorFailed ? (r.facts ?? null) : factsOf((await (await ctx.store()).hybridThoughts({ query, embedding: r.embedding, threshold: -1, limit: 1, filter: {} }))[0]);
     return ok({ query, preferCurrent: prefer_current, hits: [], facts, window: null, ...failed });
   }
 

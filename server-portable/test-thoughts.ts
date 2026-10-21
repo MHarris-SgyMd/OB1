@@ -1070,9 +1070,9 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   const sv = sr.ok ? sr.value : undefined;
   assert(sv?.vectorFailed?.reason === "provider_unreachable" && sv.vectorFailed.base.includes("***@") && !sv.vectorFailed.base.includes("hunter2"),
     `a search with the provider down: answered, the endpoint named with its userinfo masked (${JSON.stringify(sv?.vectorFailed)})`);
-  assert(asked.length === 3 && asked[0].embedding === null && JSON.stringify(asked[1]) === JSON.stringify({ literalFacts: "about X-2891" }) && asked[2].embedding === null && asked[2].threshold === -1
+  assert(asked.length === 2 && asked[0].embedding === null && JSON.stringify(asked[1]) === JSON.stringify({ literalFacts: "about X-2891" })
       && JSON.stringify(sv?.facts) === JSON.stringify({ needles: ["X-2891"], needleCounts: [0], commonNeedles: ["Y-2891"], literalOnly: null }),
-    `…the literal arm asked with no vector, then the literals' facts, then the probe: the facts in the hybrid's terms, a literal none holds a needle counted 0, a held one common alone (${JSON.stringify(sv?.facts)})`);
+    `…the literal arm asked with no vector, then the literals' facts (no probe for an unfiltered search, review pass 10): the facts in the hybrid's terms, a literal none holds a needle counted 0, a held one common alone (${JSON.stringify(sv?.facts)})`);
   // A query holding no literal: the keyword arm, the whole query as one text (review pass 4); the endpoint named is the embeddings', with a chat endpoint of its own beside it.
   const asked2: Record<string, unknown>[] = [];
   const textStore = {
