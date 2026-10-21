@@ -707,6 +707,8 @@ export type ProposalSide = {
   takes: boolean;
   /** The pointers an accept making this side stand over the other would clear (ob1_accept_lapses: 092's lapse, read): `id`'s pointer onto `onto`. None on an accepted row, or for an accept 029 would refuse or that writes nothing. */
   lapses: { id: string; onto: string }[];
+  /** The listing left `takes` and `lapses` unread: the chain below the other side or the rows above this one pass its cap (105, SMD-3036: ob1_listing_walk_fits). Never on an accepted row, which takes no accept (029); its unread takes reads false. */
+  walkCapped: boolean;
 };
 
 /** list_supersession_proposals's row → SupersessionProposal. */
@@ -748,7 +750,7 @@ export function withWriters(rows: Record<string, unknown>[], writers: Record<str
 }
 
 /** The error a brain short of 094 answers list_proposal_writers with (the `Could not find` forms were PostgREST's schema cache's, before SMD-3152). */
-export const WRITERS_MISSING = /(list_proposal_writers|ob1_capture_only_text|ob1_accept_lapses).*(does not exist|Could not find)|Could not find the function public\.list_proposal_writers/;
+export const WRITERS_MISSING = /(list_proposal_writers|ob1_capture_only_text|ob1_accept_lapses|ob1_accept_takes).*(does not exist|Could not find)|Could not find the function public\.list_proposal_writers/;
 
 /** The lapses column, a jsonb array of {id, onto} — parsed by either driver, or its text; anything else is none. */
 function lapseList(v: unknown): { id: string; onto: string }[] {
@@ -771,6 +773,10 @@ function proposalSide(r: Record<string, unknown>, side: "older" | "newer"): Prop
     supersededBy: by == null ? null : String(by),
     lapses: lapseList(r[`${side}_lapses`]),
     takes: r[`${side}_takes`] === true,
+    // 105: a NULL takes on a row that carries 094's columns is the cap's —
+    // said only while an accept can still come (029 refuses one on an
+    // accepted row, so "--accept reads it in full" would be wrong there).
+    walkCapped: `${side}_capture_only` in r && r[`${side}_takes`] == null && r.status !== "accepted",
   };
 }
 

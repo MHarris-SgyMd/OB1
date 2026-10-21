@@ -14319,12 +14319,12 @@ console.log("\n[84] Migration 094: list_proposal_writers names who wrote each si
   const comment = async (sig: string) => (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? "";
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
   const cols = (await one<{ c: string }>(`SELECT array_to_string(array(SELECT n FROM unnest(proargnames, proargmodes) AS u(n, m) WHERE m = 't'), ',') AS c FROM pg_proc WHERE oid = $1::regprocedure`, [SIG])).c;
-  assert((await functionsNamed("list_proposal_writers")) === 1 && lastDefinerOf("list_proposal_writers").startsWith("094") && lastDefinerOf("ob1_capture_only_text").startsWith("094")
+  assert((await functionsNamed("list_proposal_writers")) === 1 && lastDefinerOf("list_proposal_writers").startsWith("105") && lastDefinerOf("ob1_capture_only_text").startsWith("094")
       && lastDefinerOf("list_supersession_proposals").startsWith("070") && /ob1:listing-names-the-writers/.test(await src(SIG))
       && lastDefinerOf("ob1_accept_lapses").startsWith("097") && /ob1:accept-lapses-read/.test(await src("ob1_accept_lapses(uuid, uuid)")) && /094 \/ SMD-2707/.test(await comment("ob1_accept_lapses(uuid, uuid)"))
       && lastDefinerOf("ob1_accept_takes").startsWith("094") && /094 \/ SMD-2707/.test(await comment("ob1_accept_takes(uuid, uuid)"))
       && /094 \/ SMD-2707/.test(await comment(SIG)) && /094 \/ SMD-2707/.test(await comment("ob1_capture_only_text(uuid)")),
-    "the writers' read and ob1_capture_only_text 094's, ob1_accept_lapses 097's since SMD-3035, each its comment, the sentinels in the bodies; 070's listing untouched");
+    "ob1_capture_only_text 094's, the writers' read 105's since SMD-3036 (its walks capped, [94]), ob1_accept_lapses 097's since SMD-3035, each its comment, the sentinels in the bodies; 070's listing untouched");
   assert(cols === "id,older_actor_name,older_actor_kind,older_trust,older_capture_only,older_superseded_by,older_lapses,older_takes,newer_actor_name,newer_actor_kind,newer_trust,newer_capture_only,newer_superseded_by,newer_lapses,newer_takes,same_capturer",
     `the proposal's id, each side's writer and superseder, then same_capturer (${cols})`);
 
@@ -14553,9 +14553,10 @@ console.log("\n[84] Migration 094: list_proposal_writers names who wrote each si
   assert((await read()) === before && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n === events
       && (await functionsNamed("list_proposal_writers")) === 1,
     "094 re-applied: one form, the same rows, no event");
-  // 094 re-applied puts its own read back; 097 is its last definer since
-  // SMD-3035, and the sections after run on the shipped state.
-  await restoreShipped("ob1_accept_lapses");
+  // 094 re-applied puts its own read and listing back; 097 and 105 are
+  // their last definers since SMD-3035 and SMD-3036, and the sections after
+  // run on the shipped state.
+  await restoreShipped("ob1_accept_lapses", "list_proposal_writers");
   await db.exec(`DELETE FROM thoughts`);
 }
 
@@ -14817,8 +14818,9 @@ console.log("\n[87] Migration 097: one walk for 082's lapse — ob1_lapse_walk i
   const own = !/ob1_lapse_walk/.test(await src(LAPSE)) && !/ob1_lapse_walk/.test(await src(READ));
   await reapply("097");
   assert(own && (await shape()), "092 and 094 re-applied put their own lapse and read back; 097 re-applied after them, the walk");
-  // 097 re-applied put its own walk and lockless trigger back over 104's.
-  await restoreShipped("ob1_lapse_walk", "ob1_lapse_capture_pointers", "ob1_lapse_tree");
+  // 097 re-applied put its own walk and lockless trigger back over 104's,
+  // and 094 its uncapped listing over 105's.
+  await restoreShipped("ob1_lapse_walk", "ob1_lapse_capture_pointers", "ob1_lapse_tree", "list_proposal_writers");
   await db.exec(`DELETE FROM thoughts`);
 }
 
@@ -15262,6 +15264,128 @@ console.log("\n[93] Migration 104: the lapse locks its own tree — ob1_lapse_tr
   await restoreShipped("ob1_lapse_walk", "ob1_lapse_capture_pointers", "ob1_lapse_tree");
   assert(lockless && /ob1:lapse-locks-its-tree/.test(await src(LAPSE)) && /ob1_lapse_tree\(p_row, p_onto\)/.test(await src(WALK)),
     "097 re-applied puts its own walk and lockless trigger back; 104 restored after it, the tree and the locks");
+  await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[94] Migration 105: the listing caps the walks it runs — list_proposal_writers reads a side's takes and lapses only when the chain below the other side and the rows above it each hold 25 or fewer (ob1_listing_walk_fits), NULL past it and the rest of the row read; within it the direct reads; the rows above counted, not the depth; a raw cycle ends; an accepted row's lapses stay []; a re-apply a no-op, and 094 re-applied uncapped (SMD-3036)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const agent = async (seed: string, label: string, scope: string) => (await one<{ r: { agent_id: string } }>(`SELECT resolve_agent($1, $2, $3) AS r`, [seed.repeat(64), label, scope])).r.agent_id;
+  await restoreShipped("list_proposal_writers");
+  await db.exec(`DELETE FROM thoughts`);
+  // [87]'s two keys, as it made them.
+  const HOOK = { name: "hook-83", agent_id: await agent("8", "hook-83", "capture"), via: "test-door", scope: "capture" };
+  const WRITER = { name: "writer-83", agent_id: await agent("5", "writer-83", "write"), via: "test-door" };
+  let serial = 0;
+  const cap = async (label: string, actor: Record<string, unknown>, supersedes?: string) =>
+    (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`,
+      [`[94] ${label} ${++serial}`, JSON.stringify({ metadata: { source: "codex" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }), unit(94)])).r.id;
+  const unchecked = async <T>(body: () => Promise<T>) => {
+    await db.exec(`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_check_capture_pointer`);
+    try { return await body(); } finally { await db.exec(`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_check_capture_pointer`); }
+  };
+  const note = (id: string) => one<{ r: boolean }>(`SELECT ob1_note_recapture($1::uuid, $2::jsonb) AS r`, [id, JSON.stringify(WRITER)]);
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const comment = async (sig: string) => (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? "";
+  let conf = 0.99;
+  const propose = async (older: string, newer: string) =>
+    (await one<{ id: string }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', $3, '[94]', 0.9, 'consolidate:stub@p94') AS id`, [older, newer, (conf -= 0.01)])).id;
+  type Row = Record<string, unknown>;
+  const row = async (pid: string) => (await q<Row>(`SELECT * FROM list_proposal_writers(ARRAY[$1::uuid])`, [pid]))[0];
+  const direct = (side: string, other: string) =>
+    one<{ l: unknown; t: boolean }>(`SELECT ob1_accept_lapses($1::uuid, $2::uuid) AS l, ob1_accept_takes($1::uuid, $2::uuid) AS t`, [side, other]);
+  const fits = async (side: string, other: string) => (await one<{ f: boolean }>(`SELECT ob1_listing_walk_fits($1::uuid, $2::uuid) AS f`, [side, other])).f;
+  const FITS = "ob1_listing_walk_fits(uuid, uuid)", SIG = "list_proposal_writers(uuid[])";
+
+  // The shape.
+  const meta = await one<{ v: string; l: string }>(`SELECT p.provolatile::text AS v, l.lanname AS l FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang WHERE p.oid = $1::regprocedure`, [FITS]);
+  const body = await src(SIG);
+  assert((await functionsNamed("ob1_listing_walk_fits")) === 1 && (await functionsNamed("list_proposal_writers")) === 1
+      && lastDefinerOf("ob1_listing_walk_fits").startsWith("105") && lastDefinerOf("list_proposal_writers").startsWith("105")
+      && meta.v === "s" && meta.l === "plpgsql" && /ob1:listing-walk-cap/.test(await src(FITS))
+      && /ob1:listing-names-the-writers/.test(body) && /ob1:listing-walk-cap/.test(body)
+      && /WHEN f\.older_fits THEN ob1_accept_lapses\(g\.older_id, g\.newer_id\)/.test(body) && /WHEN f\.newer_fits THEN ob1_accept_takes\(g\.newer_id, g\.older_id\)/.test(body)
+      && /105 \/ SMD-3036/.test(await comment(FITS)) && /105 \/ SMD-3036/.test(await comment(SIG)),
+    "105 defines the cap's count (STABLE, its sentinel) and redefines the listing to read each side's takes and lapses behind it; each comment names 105");
+
+  // The chain below: the write key's B, then the hook's c1..c25, each onto
+  // the one below (planted with the check off, as [87] plants the hook's
+  // pointers). Under c24, with it, 25 rows; under c25 26. The hook's S1 and
+  // S2 proposed to stand over c24 and c25: each accept would take its side
+  // (the chain reaches B), and nothing sits above either to lapse.
+  const B = await cap("B, the writer's", WRITER);
+  const chain: string[] = [];
+  await unchecked(async () => { let below = B; for (let i = 1; i <= 25; i++) chain.push(below = await cap(`c${i}`, HOOK, below)); });
+  const [c24, c25] = [chain[23], chain[24]];
+  const S1 = await cap("S1, the hook's", HOOK), S2 = await cap("S2, the hook's", HOOK);
+  const p25 = await propose(c24, S1), p26 = await propose(c25, S2);
+  const r25 = await row(p25), r26 = await row(p26);
+  const n25 = await direct(S1, c24), o25 = await direct(c24, S1), n26 = await direct(S2, c25), o26 = await direct(c25, S2);
+  assert(n25.t === true && r25.newer_takes === true && JSON.stringify(r25.newer_lapses) === JSON.stringify(n25.l)
+      && r25.older_takes === o25.t && JSON.stringify(r25.older_lapses) === JSON.stringify(o25.l),
+    `25 rows below the other side: the side's takes and lapses read, as the direct reads give them (${r25.newer_takes}, ${JSON.stringify(r25.newer_lapses)})`);
+  assert(n26.t === true && r26.newer_takes === null && r26.newer_lapses === null
+      && r26.older_takes === o26.t && JSON.stringify(r26.older_lapses) === JSON.stringify(o26.l)
+      && typeof r26.newer_actor_name === "string" && r26.newer_capture_only === true && r26.same_capturer === true,
+    `26 rows below: that side's takes and lapses unread (NULL), though the direct read takes it; the other side read, and every writer column (${r26.newer_takes}, ${JSON.stringify(r26.newer_lapses)}, ${r26.newer_actor_name})`);
+
+  // The tree above: the hook's T25 and T26, each with 25 of the hook's
+  // pointers stacked above it, every one re-captured by the write key so the
+  // lapse walks on through it; T26 gets one more. Each proposed to stand
+  // over the write key's W: the accept takes it and lapses the whole stack.
+  const W = await cap("W, the writer's", WRITER);
+  const stack = (t: string, n: number) => unchecked(async () => { let at = t; for (let i = 1; i <= n; i++) { at = await cap(`u${i} over ${t.slice(0, 8)}`, HOOK, at); await note(at); } });
+  const T25 = await cap("T25, the hook's", HOOK), T26 = await cap("T26, the hook's", HOOK);
+  await stack(T25, 25);
+  await stack(T26, 26);
+  const q25 = await propose(W, T25), q26 = await propose(W, T26);
+  const t25 = await row(q25), t26 = await row(q26);
+  const m25 = await direct(T25, W), m26 = await direct(T26, W), w26 = await direct(W, T26);
+  assert(Array.isArray(m25.l) && m25.l.length === 25 && JSON.stringify(t25.newer_lapses) === JSON.stringify(m25.l) && t25.newer_takes === true,
+    `25 rows above the side: the listing names all 25 lapses, as the direct read does (${Array.isArray(t25.newer_lapses) ? t25.newer_lapses.length : t25.newer_lapses})`);
+  assert(Array.isArray(m26.l) && m26.l.length === 26 && t26.newer_lapses === null && t26.newer_takes === null && t26.older_takes === w26.t && JSON.stringify(t26.older_lapses) === JSON.stringify(w26.l),
+    `26 rows above: unread (NULL), though the direct read names 26; the write key's side read (${JSON.stringify(t26.newer_lapses)}, ${t26.older_takes})`);
+
+  // Wide, not deep: rows onto the side directly are rows above it.
+  const SW = await cap("SW, the writer's", WRITER);
+  for (let i = 0; i < 25; i++) await cap(`onto SW ${i}`, WRITER, SW);
+  const wide25 = await fits(SW, W);
+  await cap("onto SW, one more", WRITER, SW);
+  assert(wide25 === true && (await fits(SW, W)) === false, "25 rows directly onto the side fit and a 26th does not: the rows above are counted, not the depth");
+
+  // A raw cycle (update_thought refuses one; a raw write can close it) ends
+  // both counts: down, it is counted out past 25; up, the UNION ends.
+  const a = await cap("a", WRITER), b = await cap("b, onto a", WRITER, a);
+  await q(`UPDATE thoughts SET supersedes = $1::uuid WHERE id = $2::uuid`, [b, a]);
+  assert((await fits(W, a)) === false && (await fits(a, W)) === true,
+    "a raw cycle ends both counts: a side proposed over a row on it does not fit (the chain below never ends); the rows above a row on it are the cycle's two");
+
+  // An accepted row: its lapses [] as 094 has them, its capped takes NULL.
+  await db.exec("BEGIN");
+  let accepted: { ok: boolean; row: Row };
+  try {
+    const r = (await one<{ r: { ok: boolean } }>(`SELECT review_supersession_proposal($1::uuid, 'accept', NULL, NULL, $2::jsonb, true) AS r`,
+      [p26, JSON.stringify({ name: "consolidate-94", via: "consolidate", session: "job-94" })])).r;
+    accepted = { ok: r.ok, row: await row(p26) };
+  } finally { await db.exec("ROLLBACK"); }
+  assert(accepted.ok && JSON.stringify(accepted.row.newer_lapses) === "[]" && accepted.row.newer_takes === null && JSON.stringify(accepted.row.older_lapses) === "[]" && accepted.row.older_takes === null,
+    `an accepted row past the cap: both sides' lapses [] (029 answers its accept), their takes unread (${JSON.stringify(accepted.row)})`);
+
+  // Re-apply: 105 again moves nothing; 094 re-applied puts its uncapped
+  // listing back, and the restore (105 last) the cap.
+  const pids = [p25, p26, q25, q26];
+  const read = async () => JSON.stringify(await q(`SELECT * FROM list_proposal_writers($1::uuid[])`, [pids]));
+  const events = async () => (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n;
+  const before = await read(), eventsBefore = await events();
+  await reapply("105");
+  assert((await read()) === before && (await events()) === eventsBefore && (await functionsNamed("list_proposal_writers")) === 1 && (await functionsNamed("ob1_listing_walk_fits")) === 1,
+    "105 re-applied: one form each, the same rows, no event");
+  await reapply("094");
+  const uncapped = (await row(p26)).newer_takes === true && !/ob1:listing-walk-cap/.test(await src(SIG));
+  await restoreShipped("list_proposal_writers", "ob1_accept_lapses");
+  assert(uncapped && (await row(p26)).newer_takes === null && /ob1:listing-walk-cap/.test(await src(SIG)) && (await functionsNamed("list_proposal_writers")) === 1,
+    "094 re-applied puts its uncapped listing back (the 26-row side read); 105 restored after it, the cap");
   await db.exec(`DELETE FROM thoughts`);
 }
 
