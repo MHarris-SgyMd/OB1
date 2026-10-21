@@ -258,8 +258,11 @@ const runningWords = (l: Leases, c: PassCounts) =>
 /** A pass whose only claimed rows' leases expired: its worker died holding them. */
 const diedWords = (l: Leases) => `a worker died holding ${l.expired} of the claim(s) in flight, their leases expired`;
 const reclaim = (key: string) => `The next pass reclaims the expired claims (a row on its third expiry is marked failed); the release_stale_leases tool (work_type ${key}) returns them now. `;
-/** The sleep scheduler's passes waiting at their start for the provider, as its `sleep` and `consolidate pass` rows both say them (SMD-2752). */
-const providerWaitWords = (passes: readonly string[]) => `${passes.join(" and ")} waiting for the provider at ${passes.length > 1 ? "their" : "its"} start`;
+/** The sleep scheduler's passes waiting at their start for the provider (SMD-2752), or mid-pass for one that stopped answering (SMD-2905), as its `sleep` and `consolidate pass` rows both say them. */
+const providerWaitWords = (passes: readonly string[], midPass = false) => `${passes.join(" and ")} waiting for the provider ${midPass ? "mid-pass" : `at ${passes.length > 1 ? "their" : "its"} start`}`;
+/** Both waits a row can carry, the start's first: what a reader acts on (SMD-2905). */
+const allWaitWords = (start: readonly string[] | null, midPass: readonly string[] | null) =>
+  [start?.length ? providerWaitWords(start) : null, midPass?.length ? providerWaitWords(midPass, true) : null].filter((w) => w !== null).join(", and ");
 /**
  * A running pass's failed rows: a worker never retries them on its own (a
  * follower's --retry-failed runs once, before it follows), so a running row
@@ -4266,7 +4269,7 @@ if (configFailed) {
               }
               if (l.live > 0 || follower) {
                 const followerWords = follower
-                  ? `a follower is running this key (stamped ${ago(follower.ageS)} ago): ${c.pending} pending${follower.running ? "" : " between its polls"}${l.expired ? `, ${l.expired} left by a worker that died, which its next poll reclaims` : ""}`
+                  ? `a follower is running this key (stamped ${ago(follower.ageS)} ago${follower.running && follower.waitingMidPass?.length ? ", waiting for the provider mid-pass" : ""}): ${c.pending} pending${follower.running ? "" : " between its polls"}${l.expired ? `, ${l.expired} left by a worker that died, which its next poll reclaims` : ""}`
                   : "";
                 const r = runningRow(key, c, `${key}: ${counts} — ${l.live > 0 ? runningWords(l, c) : followerWords}`);
                 add("consolidate pass", r.status, r.detail, r.fix);
@@ -4281,13 +4284,17 @@ if (configFailed) {
               // their words below (review pass 2).
               const sleeper = l.expired === 0 ? sleeping : undefined;
               if (sleeper) {
-                // Its passes waiting for the provider at their start run nothing, as the sleep row says (SMD-2752 PR 3, review pass 2).
-                const waitingFor = sleeper.waiting?.length ? `asleep, ${providerWaitWords(sleeper.waiting)}` : null;
+                // Its passes waiting for the provider at their start run nothing, as the sleep row says (SMD-2752 PR 3, review pass 2),
+                // nor do those waiting mid-pass for one that stopped answering (SMD-2905).
+                const waitingFor = sleeper.waiting?.length || sleeper.waitingMidPass?.length ? `asleep, ${allWaitWords(sleeper.waiting ?? null, sleeper.waitingMidPass ?? null)}` : null;
                 const words = `${key}: ${counts} — the sleep scheduler runs this key (stamped ${ago(sleeper.ageS)} ago; ${sleeper.running ? waitingFor ?? "asleep, its passes running" : "awake, its passes waiting for the brain to go quiet"})`;
                 if (sleeper.outcome === "failed") {
                   const failedRows = c.failed ? ` The retry_failed tool (work_type ${key}) puts its ${c.failed} failed row(s) back to pending once their cause is fixed.` : "";
+                  // Waiting mid-pass, the cause is the provider, by the row's own word (SMD-2905).
                   add("consolidate pass", "warn", `${words}, and its last pass failed`,
-                      `The scheduler's log says why — a pass refused at its start, which it retries, or the provider kept failing — with no second worker.${failedRows}`);
+                      sleeper.running && sleeper.waitingMidPass?.length
+                        ? `The provider stopped answering mid-pass — check it, and the model provider rows here (--deep probes chat); the scheduler's pass goes on by itself once it answers, with no second worker.${failedRows}`
+                        : `The scheduler's log says why — a pass refused at its start, which it retries, or the provider kept failing — with no second worker.${failedRows}`);
                 } else {
                   const r = runningRow(key, c, words);
                   add("consolidate pass", r.status, r.detail, r.fix);
@@ -4593,6 +4600,8 @@ if (configFailed) {
                 if ((h.stale || h.ended) && sleepRuns && (h.worker === "extract" || h.worker === "consolidate")) return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs here instead, which will not run beside a follower: take workers out of COMPOSE_PROFILES in deploy/.env and retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
                 if (h.stale || h.ended) return `${name} ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again${checkModel} — ${restartCommand(h.worker, h.job)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
                 if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266). The row carries the block until the follower judges its next block (48 answers or more). A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers.`;
+                // Waiting mid-pass, by its own word: the provider stopped answering (SMD-2905).
+                if (h.running && h.waitingMidPass?.length) return `${name} waits for the provider mid-pass — it stopped answering: check it, and the model provider rows here (--deep probes chat); the pass resumes on its own once it answers.`;
                 return h.worker === "board-sync"
                   ? `${name}'s last pass failed — errors in its report, or Linear or the database out of reach: its log says why.`
                   : `${name}'s last pass stopped a worker on the provider still failing after its pauses: check the provider; its log says why.`;
@@ -4667,13 +4676,15 @@ if (configFailed) {
               const span = (from: string, to: string) => ago(Math.max(0, (Date.parse(to) - Date.parse(from)) / 1000));
               const since = (t: string) => ago(Math.max(0, h.ageS + (Date.parse(h.at) - Date.parse(t)) / 1000));
               // Its passes waiting at their start for a provider that does not
-              // answer, by its own word (SMD-2752): asleep, but nothing runs.
+              // answer, by its own word (SMD-2752), or mid-pass for one that
+              // stopped answering (SMD-2905): asleep, but nothing runs.
               const waitingFor = !(h.stale || h.ended) && h.running && h.waiting?.length ? h.waiting : null;
-              const waitWords = waitingFor ? providerWaitWords(waitingFor) : "";
+              const waitingMid = !(h.stale || h.ended) && h.running && h.waitingMidPass?.length ? h.waitingMidPass : null;
+              const waitWords = allWaitWords(waitingFor, waitingMid);
               const sleepWords = h.stale || h.ended
                 ? s ? (s.to ? `its last sleep ended ${since(s.to)} ago, after ${span(s.from, s.to)}` : `its last sleep began ${since(s.from)} ago`) : "no sleep recorded"
                 : h.running
-                  ? waitingFor
+                  ? waitingFor || waitingMid
                     ? `asleep, ${waitWords}${s ? ` — the sleep began ${since(s.from)} ago` : ""}`
                     : `asleep, its passes running${s ? ` — for ${since(s.from)}` : ""}`
                   : s && s.to
@@ -4704,8 +4715,11 @@ if (configFailed) {
                 fixes.push(`sleep ended ${ago(h.ageS)} ago on a pass's start refusal (${refusedBy}): ${startRefusalRemedy(refusedBy)} — its log names the pass and the cause. Then start it — ${restartCommand("sleep", null)}${refusedBy === "lookup" ? "" : "; started before that, it refuses again"}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
               } else if (down) {
                 fixes.push(`sleep ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again — ${restartCommand("sleep", null)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
-              } else if (waitingFor) {
-                fixes.push(`${waitWords.charAt(0).toUpperCase()}${waitWords.slice(1)}: the provider does not answer a one-token call — check it, and the model provider rows here (--deep probes chat); ${waitingFor.length > 1 ? "the passes begin on their own" : "the pass begins on its own"} once it answers.`);
+              } else if (waitingFor || waitingMid) {
+                const cap = (t: string) => `${t.charAt(0).toUpperCase()}${t.slice(1)}`;
+                if (waitingFor) fixes.push(`${cap(providerWaitWords(waitingFor))}: the provider does not answer a one-token call — check it, and the model provider rows here (--deep probes chat); ${waitingFor.length > 1 ? "the passes begin on their own" : "the pass begins on its own"} once it answers.`);
+                // Mid-pass, the cause is known where "its log says which" was all it had (SMD-2905).
+                if (waitingMid) fixes.push(`${cap(providerWaitWords(waitingMid, true))}: the provider stopped answering — check it, and the model provider rows here (--deep probes chat); ${waitingMid.length > 1 ? "the passes go on by themselves" : "the pass goes on by itself"} once it answers, the thoughts in hand back in the pool meanwhile.`);
               } else if (h.outcome === "failed") {
                 fixes.push("Its last pass failed — a pass refused at its start, which it retries on its own, or the provider kept failing after a worker's pauses: its log says which (SMD-1794).");
               }
