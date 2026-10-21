@@ -22,7 +22,6 @@ import { ok as coreOk, refuse as coreRefuse } from "./core/refusal.ts";
 import type { AgentOutcome } from "./agents.ts";
 import { createRestApp } from "./rest/app.ts";
 import { mcpUnderTest, servedAsNamed } from "./test-support.ts";
-import { openApiDocument } from "./rest/openapi.ts";
 import { definePlugin, ok, operation, refuse, z, type PluginManifest } from "./plugin-sdk.ts";
 import { PLUGINS } from "../plugins/registry.ts";
 import { pluginLoginUrl } from "../db/config.mjs";
@@ -1119,7 +1118,7 @@ console.log("\n[14] ctx.defer: a hook answers before its work ends; the work cou
 
 console.log("\n[15] A plugin operation over REST has its span under its request's, as a core route's does (SMD-1849 PR 2b review pass 2)");
 {
-  const { SpanKind, SpanStatusCode } = await import("@opentelemetry/api");
+  const { SpanKind } = await import("@opentelemetry/api");
   const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
   const { setUpTelemetry } = await import("./otel-setup.ts");
   const exporter = new InMemorySpanExporter();

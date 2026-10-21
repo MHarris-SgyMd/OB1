@@ -404,8 +404,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // store says `existed: false` only when 035's function answered; a
     // brain without 035 reports nothing, and nothing is logged there
     // either (second review pass: `!== true` had read an absent flag as
-    // "fresh" on the one schema where the pointer's fate is unknown). The
-    // vector attaching or not does not change what was written.
+    // "fresh" on the one schema where the pointer's fate is unknown).
     if (captured.existed === false) {
       await ctx.logActions(principal, citeRows("capture_thought", { derived_from: derivedFrom, supersedes: pointer }));
     }

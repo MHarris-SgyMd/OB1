@@ -8,7 +8,7 @@
 // body, so it never sits in a URL a log or a proxy may keep.
 
 import type { ToolName } from "../tools.ts";
-import { CALLS, type Call, type CallOptions } from "../core/index.ts";
+import { CALLS, type Call } from "../core/index.ts";
 import type { RefusalCode } from "../core/refusal.ts";
 
 export type { CallOptions } from "../core/index.ts";
