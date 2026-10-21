@@ -544,8 +544,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // cuts counted apart from the stops, SMD-3060), 102 (the
   // consolidation judge's distinct stored, SMD-3117), 103 (the 1.9.0 cut's
   // schema_version, SMD-1804), 104 (the lapse locks its own tree,
-  // SMD-3046) and 105 (Linear's duplicate status type known and
-  // settled, SMD-2935)
+  // SMD-3046), 105 (Linear's duplicate status type known and
+  // settled, SMD-2935) and 106 (a keyed rebuild of 071's mirror for a
+  // status-set change, SMD-3160)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -679,14 +680,16 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // their own bodies, refusing by name without 084 ([20au]); 103 upserts
   // ob1_config.schema_version for the 1.9.0 cut, needing only 006's table;
   // 104 adds the lapse's tree and redefines 097's walk over it and its
-  // trigger to lock it, refusing by name without 097 ([20av]); 105 redefines 058's two status sets and rebuilds 071's mirror,
-  // refusing by name without 058 or 071 ([20aw]) — all
+  // trigger to lock it, refusing by name without 097 ([20av]); 105 redefines
+  // 058's two status sets and rebuilds 071's mirror, refusing by name
+  // without 058 or 071 ([20aw]); 106 adds the mirror's keyed rebuild,
+  // refusing by name without 071 ([20ax]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 76, `030 is among the last seventy-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 77, `030 is among the last seventy-seven migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4595,6 +4598,60 @@ console.log("\n[20aw] Migration 105: refused by name without 058, then without 0
   await sql.unsafe(`DROP ROLE ob1_upgrade_mig105`);
   assert(asOwner === "applied" && owned.length >= 5 && owned.every((f) => ownedAfter.get(f) !== ownedBefore.get(f)),
     `run by a brain owner that is no superuser, the block alters every reader of its own (${asOwner.slice(0, 80)}; ${owned.length})`);
+  await sql.close();
+}
+
+console.log("\n[20ax] Migration 106: refused by name without 071; onto a populated brain at the file before it — the keyed rebuild there, no thought, audit or gate row moved by the file; a status write waits for the keyed form's locks, as for the full rebuild's; a re-apply a no-op (SMD-3160)");
+{
+  const the106 = MIGRATIONS.find((f) => f.endsWith("_source_gate_keyed_rebuild.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "071" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the106 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 106 needs 071 (ob1_source_gate_reconcile, ob1_rebuild_source_gate); this schema lacks it",
+    `106 on a schema stopped before 071 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the106 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const ticket = async (key: string, type: string) =>
+    ((await sql`INSERT INTO thoughts (content, metadata) VALUES (${`upgrade 106: ${key}`}, ${{ source: "linear", issue: key, status: type, status_type: type }}::jsonb) RETURNING id::text AS id`)[0] as { id: string }).id;
+  const a = await ticket("UPK-1", "duplicate"), b = await ticket("UPK-2", "started");
+  for (const [id, key] of [[a, "UPK-1"], [b, "UPK-2"]]) await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${key}, ${key}, 'text/markdown')`;
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const mirror = async () => JSON.stringify(await sql`SELECT thought_id, system, gates FROM ob1_source_gate ORDER BY thought_id`);
+  const before = await rows(), auditBefore = await audits(), mirrorBefore = await mirror();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the106 });
+  const [fn] = await sql`SELECT to_regprocedure('ob1_rebuild_source_gate_for_types(text[])') IS NOT NULL AS ok`;
+  const [r] = await sql`SELECT * FROM ob1_rebuild_source_gate_for_types('{duplicate}')`;
+  assert(fn.ok && (await rows()) === before && (await audits()) === auditBefore && (await mirror()) === mirrorBefore && r.written === 0 && r.deleted === 0,
+    `106 onto the populated brain: the keyed rebuild there, finding the exact mirror exact (${JSON.stringify(r)}), and no thought, audit or gate row moved`);
+
+  // The keyed form holds SHARE on thoughts to its transaction's end, as the
+  // full rebuild does: a status write in the meantime waits, here cut at 1 s.
+  const holder = new SQL({ url: URL_, max: 1 });
+  let waited = "ran", after = "unread";
+  try {
+    await holder.unsafe(`BEGIN; SELECT * FROM ob1_rebuild_source_gate_for_types('{duplicate}')`);
+    waited = await sql.begin(async (tx: SQL) => {
+      await tx.unsafe(`SET LOCAL lock_timeout = '1s'`);
+      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "completed"}'::jsonb WHERE id = ${b}::uuid`;
+      return "ran";
+    }).catch((e: Error) => (e as Error & { code?: string; errno?: string }).errno ?? (e as Error & { code?: string }).code ?? e.message);
+    await holder.unsafe(`COMMIT`);
+    await sql`UPDATE thoughts SET metadata = metadata || '{"status_type": "completed"}'::jsonb WHERE id = ${b}::uuid`;
+    after = String(((await sql`SELECT gates FROM ob1_source_gate WHERE thought_id = ${b}::uuid`)[0] as { gates: boolean }).gates);
+  } finally {
+    await holder.unsafe(`ROLLBACK`).catch(() => undefined);
+    await holder.close();
+  }
+  assert(waited === "55P03" && after === "true",
+    `a status write waits for the keyed form's locks to its transaction's end (${waited} at a 1 s lock_timeout), and goes through after, the mirror following it (${after})`);
+
+  // A re-apply moves nothing.
+  const rowsAgain = await rows(), mirrorAgain = await mirror(), auditsAgain = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the106 });
+  assert((await rows()) === rowsAgain && (await mirror()) === mirrorAgain && (await audits()) === auditsAgain, "a re-apply of 106 is a no-op: no thought, gate or audit row moved");
   await sql.close();
 }
 

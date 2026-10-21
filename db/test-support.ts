@@ -211,6 +211,7 @@ const FUNCTIONS = [
   "ob1_source_gate_truncate()",
   "ob1_source_gate_reconcile(uuid[])",
   "ob1_rebuild_source_gate()",
+  "ob1_rebuild_source_gate_for_types(text[])",
   "consolidation_pool(text)",
   "stale_entities(interval, int)",
   // 032 (SMD-1323)

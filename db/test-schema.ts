@@ -15328,6 +15328,73 @@ console.log("\n[94] Migration 105: Linear's duplicate status type known and sett
   await db.query(`DELETE FROM thoughts WHERE content LIKE '[94]%'`);
 }
 
+console.log("\n[95] Migration 106: a keyed rebuild of 071's gate mirror for a status-set change (SMD-3160) — a set change simulated each way: the moved type's rows reconciled and no other, an unrelated drift left for the full rebuild; empty and NULL touch nothing; refused outside READ COMMITTED; a re-apply a no-op");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  // By name, not number: main may take the number.
+  const the106 = files.find((f) => f.endsWith("_source_gate_keyed_rebuild.sql")) ?? "no _source_gate_keyed_rebuild.sql";
+  const row = async (content: string, metadata: Record<string, unknown>) =>
+    (await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text AS id`, [content, JSON.stringify(metadata)]))[0].id;
+  // Two sourced rows of a type no set knows yet, one of a known type, one whose
+  // stored gate will be made wrong by hand (a write with triggers disabled).
+  const w1 = await row("[95] KG-1 — a weird one", { source: "linear", issue: "KG-1", status_type: "kgweird" });
+  const w2 = await row("[95] KG-2 — another", { source: "linear", issue: "KG-2", status_type: "kgweird" });
+  const s1 = await row("[95] KG-3 — started", { source: "linear", issue: "KG-3", status_type: "started" });
+  const d1 = await row("[95] KG-4 — done, its gate made wrong", { source: "linear", issue: "KG-4", status_type: "completed" });
+  for (const [id, key] of [[w1, "KG-1"], [w2, "KG-2"], [s1, "KG-3"], [d1, "KG-4"]]) await q(`SELECT record_thought_source($1::uuid, 'linear', $2, $2, 'text/markdown')`, [id, key]);
+  const gates = async () => new Map((await q<{ id: string; g: boolean }>(`SELECT thought_id::text AS id, gates AS g FROM ob1_source_gate WHERE thought_id = ANY($1::uuid[])`, [[w1, w2, s1, d1]])).map((r) => [r.id, r.g]));
+  const drift = async () => (await q<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_node_projection_drift()`))[0].n;
+  const keyed = async (types: string[] | null) => (await q<{ written: number; deleted: number }>(`SELECT * FROM ob1_rebuild_source_gate_for_types($1::text[])`, [types]))[0];
+  const g0 = await gates();
+  assert(g0.get(w1) === false && g0.get(w2) === false && g0.get(s1) === true && g0.get(d1) === true && (await drift()) === 0,
+    `setup: the unknown type's rows do not gate, the known ones do, nothing drifts (${JSON.stringify([...g0.values()])})`);
+
+  // A set change that adds the type, and an unrelated wrong row beside it.
+  const known = (await q<{ k: string[] }>(`SELECT node_lifecycle_types() AS k`))[0].k;
+  await db.exec(`CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{${[...known, "kgweird"].join(",")}}'::text[] $$`);
+  await q(`UPDATE ob1_source_gate SET gates = false WHERE thought_id = $1`, [d1]);
+  const before = await drift();
+  const added = await keyed(["kgweird"]);
+  const g1 = await gates(), after = await drift();
+  assert(before === 3 && added.written === 2 && added.deleted === 0 && g1.get(w1) === true && g1.get(w2) === true && g1.get(s1) === true && g1.get(d1) === false && after === 1,
+    `a set change that adds a type: the keyed form reconciles that type's two rows and no other — the wrong row it was not asked about stays wrong, drift() still naming it (${before} → ${after}; ${JSON.stringify(added)})`);
+  const [full] = await q<{ written: number; deleted: number }>(`SELECT * FROM ob1_rebuild_source_gate()`);
+  assert(full.written === 1 && (await gates()).get(d1) === true && (await drift()) === 0,
+    `…which the full rebuild, the repair, then fixes (${JSON.stringify(full)})`);
+
+  // Empty and NULL touch nothing; the same call again finds nothing to fix.
+  const [empty, nul, again] = [await keyed([]), await keyed(null), await keyed(["kgweird", "nosuchtype"])];
+  assert(JSON.stringify([empty, nul, again]) === JSON.stringify([{ written: 0, deleted: 0 }, { written: 0, deleted: 0 }, { written: 0, deleted: 0 }]),
+    `an empty or NULL array touches nothing, and on an exact mirror the call writes nothing, a type no row holds included (${JSON.stringify([empty, nul, again])})`);
+
+  // Refused outside READ COMMITTED: its snapshot must postdate its locks.
+  let refused = "ran";
+  await db.exec(`BEGIN ISOLATION LEVEL REPEATABLE READ`);
+  try { await keyed(["kgweird"]); } catch (e) { refused = (e as Error).message; }
+  await db.exec(`ROLLBACK`);
+  assert(/^ob1_rebuild_source_gate_for_types\(\) must run under READ COMMITTED; this transaction is REPEATABLE READ$/.test(refused),
+    `refused under REPEATABLE READ, naming the level (${refused})`);
+
+  // The change undone — a set change that drops the type: the same call puts
+  // the rows back. The set as it was, by hand: 105 re-applied would run its
+  // own full rebuild first and leave the keyed form nothing to do.
+  await db.exec(`CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{${known.join(",")}}'::text[] $$`);
+  const dropBefore = await drift();
+  const dropped = await keyed(["kgweird"]);
+  const g2 = await gates();
+  assert(dropBefore === 2 && dropped.written === 2 && g2.get(w1) === false && g2.get(w2) === false && (await drift()) === 0,
+    `a set change that drops the type: the same call takes the two rows back to not gating, and nothing drifts (${dropBefore}; ${JSON.stringify(dropped)})`);
+
+  // 106 again changes nothing; its comments name it and the full rebuild names it back.
+  let reapplied: string;
+  try { reapplied = await reapply(the106); } catch (e) { reapplied = `threw: ${(e as Error).message}`; }
+  const [c] = await q<{ k: string; f: string }>(`SELECT obj_description('ob1_rebuild_source_gate_for_types(text[])'::regprocedure, 'pg_proc') AS k, obj_description('ob1_rebuild_source_gate()'::regprocedure, 'pg_proc') AS f`);
+  assert(reapplied.endsWith("_source_gate_keyed_rebuild.sql") && (await drift()) === 0 && /Migration 106 \/ SMD-3160/.test(c.k) && /ob1_rebuild_source_gate_for_types/.test(c.f) && /Migrations 071, 106/.test(c.f),
+    `a re-apply of 106 is a no-op; its function's comment names it, and the full rebuild's names the keyed form for a set change (${reapplied.slice(0, 60)})`);
+
+  await db.query(`DELETE FROM thoughts WHERE content LIKE '[95]%'`);
+}
+
 // db/README.md quotes this suite's assertion total in two places ("Expected
 // outcome" and the Testing block). It used to be edited by hand and drifted;
 // this holds every count the README gives for test-schema.ts to what the suite
