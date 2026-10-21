@@ -532,8 +532,22 @@ export const renderSearch = (o: Outcome<SearchResult>): Reply =>
   // …and the whole answer says so beside the results, for a surface that
   // reads the shape and for an empty answer, which has no title to mark: the
   // marker word, as search_thoughts' typed result carries it, and a note.
-  ...(o.value.vectorFailed ? { vectorFailed: o.value.vectorFailed.reason, note: literalOnlyNote(o.value.vectorFailed, "search") } : {}) }) : o,
+  ...(o.value.vectorFailed ? { vectorFailed: o.value.vectorFailed.reason, note: literalOnlyNote(o.value.vectorFailed, "search") + emptyLiteralWords(o.value.facts) } : {}) }) : o,
     (v) => JSON.stringify(v), searchRefusal, AS_JSON);
+
+/**
+ * The compat search's empty answer without a vector, in words (review pass 2):
+ * each literal absent or too common, or that the query has none. The facts
+ * come only on an empty answer, so this is nothing beside results.
+ */
+function emptyLiteralWords(f: SearchResult["facts"]): string {
+  if (!f) return "";
+  const words: string[] = [];
+  if (f.needles.length) words.push(`No thought contains: ${f.needles.join(", ")}.`);
+  if (f.commonNeedles.length) words.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${f.commonNeedles.join(", ")} — the brain's search_thoughts_keyword tool pages through them.`);
+  if (!f.needles.length && !f.commonNeedles.length) words.push("The query has no identifier or quoted span, so nothing could be matched without a vector.");
+  return ` ${words.join(" ")}`;
+}
 
 /**
  * What a search answered without a vector says (SMD-2891): the provider and
@@ -563,9 +577,14 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
       if (facts) {
         const absent = facts.needles.filter((_, i) => facts.needleCounts[i] === 0);
         if (absent.length) why.push(`No thought contains: ${absent.join(", ")}.`);
+        // A literal some thought holds that matched nothing here: the probe is
+        // unfiltered and an exact hit clears any threshold, so its thoughts are
+        // outside the search's filter, said_by, actor or min_trust (review pass 2).
+        const outside = facts.needles.map((n, i) => [n, facts.needleCounts[i]] as const).filter(([, c]) => c > 0);
+        if (outside.length) why.push(`Held only by thoughts outside this search's filter, said_by, actor or min_trust: ${outside.map(([n, c]) => `${n} (in ${c} thought${c === 1 ? "" : "s"})`).join(", ")}.`);
         if (facts.commonNeedles.length) why.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${facts.commonNeedles.join(", ")} — use search_thoughts_keyword to page through them.`);
         // Without a vector only a literal can match (SMD-2891), and this query has none.
-        if (literal && facts.needles.length === 0) why.push("The query has no identifier or quoted span, so nothing could be matched without a vector.");
+        if (literal && facts.needles.length === 0 && facts.commonNeedles.length === 0) why.push("The query has no identifier or quoted span, so nothing could be matched without a vector.");
       }
       return `No thoughts found matching "${query}".${why.length ? ` ${why.join(" ")}` : ""}`;
     }

@@ -1047,7 +1047,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   const asked: Record<string, unknown>[] = [];
   const searchStore = {
     hybridThoughts: async (o: Record<string, unknown>) => { asked.push(o); return []; },
-    literalFacts: async (q: string) => { asked.push({ literalFacts: q }); return [{ needle: "X-2891", count: 0 }]; },
+    literalFacts: async (q: string) => { asked.push({ literalFacts: q }); return [{ needle: "X-2891", held: false }, { needle: "Y-2891", held: true }]; },
   };
   const sctx = createContext({
     env: () => ({ OB1_LLM_BASE_URL: `http://user:hunter2@127.0.0.1:${closedNow()}/v1`, OB1_LLM_LOCAL: "1" }),
@@ -1055,13 +1055,24 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
     door: "test",
   });
   const { searchThoughts } = await import("./core/reads.ts");
-  const sr = await searchThoughts(sctx, { name: "reader", scope: "read", keyHash: "h" } as never, { query: "about X-2891", limit: 10, threshold: 0, recency_weight: 0, prefer_current: false } as never);
+  const errLines: string[] = [];
+  const realError = console.error;
+  console.error = (...m: unknown[]) => { errLines.push(m.join(" ")); };
+  let sr: Awaited<ReturnType<typeof searchThoughts>>;
+  try {
+    sr = await searchThoughts(sctx, { name: "reader", scope: "read", keyHash: "h" } as never, { query: "about X-2891", limit: 10, threshold: 0, recency_weight: 0, prefer_current: false } as never);
+  } finally {
+    console.error = realError;
+  }
+  // The server's line: which tool, the endpoint masked, what happened — never the query (review pass 2).
+  assert(errLines.length === 1 && /^search_thoughts: the embedding provider at http:\/\/\*\*\*@127\.0\.0\.1:\d+\/v1 was unavailable: the connection was refused; answered by exact literals alone$/.test(errLines[0]) && !errLines[0].includes("X-2891"),
+    `the server says so once on stderr, the endpoint masked and the query left out (${JSON.stringify(errLines)})`);
   const sv = sr.ok ? sr.value : undefined;
   assert(sv?.vectorFailed?.reason === "provider_unreachable" && sv.vectorFailed.base.includes("***@") && !sv.vectorFailed.base.includes("hunter2"),
     `a search with the provider down: answered, the endpoint named with its userinfo masked (${JSON.stringify(sv?.vectorFailed)})`);
   assert(asked.length === 3 && asked[0].embedding === null && asked[1].embedding === null && asked[1].threshold === -1 && JSON.stringify(asked[2]) === JSON.stringify({ literalFacts: "about X-2891" })
-      && JSON.stringify(sv?.facts) === JSON.stringify({ needles: ["X-2891"], needleCounts: [0], commonNeedles: [], literalOnly: null }),
-    `…the literal arm asked with no vector, the probe too, then the literals' facts, which the value carries (${JSON.stringify(asked)})`);
+      && JSON.stringify(sv?.facts) === JSON.stringify({ needles: ["X-2891"], needleCounts: [0], commonNeedles: ["Y-2891"], literalOnly: null }),
+    `…the literal arm asked with no vector, the probe too, then the literals' facts in the hybrid's terms: a literal none holds a needle counted 0, a held one common alone (${JSON.stringify(sv?.facts)})`);
 }
 
 console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vector through update_thought with the stamp it read; two outages in a row stop the tick, and two such ticks running are the provider away; the gate is asked the question the row's writer asked; a failing row is held for doubling sweeps and holds back nothing; a tick acts only under the leader lock");

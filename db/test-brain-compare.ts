@@ -969,6 +969,9 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   ok(bothDown.code === 3 && bothDown.out.includes("nothing to compare: both brains failed every search in the window."), `both brains answering by literals alone: nothing compared, exit 3, not a pass (${bothDown.code}: ${bothDown.out.split("\n").slice(-1)})`);
   const canaryDown = await gate({ log: logged(["q", "hybrid"]), hits: { q: [uid(2)] } }, { hits: { q: [uid(2)] }, literal: ["q"] });
   ok(canaryDown.code === 1 && /failed 1 that .* answered/.test(canaryDown.out) && canaryDown.out.includes("answered by exact literals alone"), `the canary alone answering by literals: a failure on its side, exit 1, saying why (${canaryDown.code}: ${canaryDown.out.split("\n").filter((l) => /literals|failed/.test(l)).join(" / ").slice(0, 300)})`);
+  // The servers frame tools/call as SSE, and a current-arm row replays through search_thoughts too (review pass 2: both survived as mutants).
+  const sseCurrent = await gate({ log: logged(["q", "current"]), hits: { "q#current": [uid(2)] }, literal: ["q"], sse: true }, { hits: { "q#current": [uid(2)] }, literal: ["q"], sse: true });
+  ok(sseCurrent.code === 3 && sseCurrent.out.includes("nothing to compare: both brains failed every search in the window."), `an SSE-framed literal answer on a current-arm replay is a failed search too (${sseCurrent.code})`);
   const replayDown = await gate({ log: logged(["q", "hybrid"]), hits: { q: [uid(2)] } }, { hits: { q: [uid(3)] }, literal: ["q"] }, { gate: false });
   ok(replayDown.code === 1 && !replayDown.out.includes("what moved: 1 of 1"), `--replay too: a failed step, not a moved ranking (${replayDown.code})`);
 

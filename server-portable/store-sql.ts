@@ -253,14 +253,18 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r: Record<string, unknown>) => normaliseHybridRow(r));
   }
 
-  async literalFacts(query: string): Promise<{ needle: string; count: number }[]> {
-    // 017's needles and search_thoughts_keyword's own count of each, as the
-    // hybrid function reads them: no copy of either rule here (SMD-2891).
+  async literalFacts(query: string): Promise<{ needle: string; held: boolean }[]> {
+    // 017's needles, each probed for one matching row, as 075's hybrid probes
+    // a needle for its 101st: the pattern escaped exactly as 012 escapes it
+    // (test-e2e-sql [23] plants a decoy only an unescaped pattern matches),
+    // and the trigram index answering it (SMD-2891, review pass 2).
     const rows = await this.sql`
-      SELECT n.needle, COALESCE((SELECT k.total_count FROM search_thoughts_keyword(n.needle, 1, 0, '{}'::jsonb) k LIMIT 1), 0)::int AS count
+      SELECT n.needle,
+             EXISTS (SELECT 1 FROM thoughts t
+                     WHERE t.content ILIKE '%' || replace(replace(replace(n.needle, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%') AS held
       FROM unnest(extract_search_needles(${query}::text)) WITH ORDINALITY AS n(needle, ord)
       ORDER BY n.ord`;
-    return rows.map((r: { needle: string; count: number }) => ({ needle: String(r.needle), count: Number(r.count) }));
+    return rows.map((r: { needle: string; held: boolean }) => ({ needle: String(r.needle), held: r.held === true }));
   }
 
   /** hybridThoughts with min_trust: 075's 8-argument forms, the same columns as the 7's. */

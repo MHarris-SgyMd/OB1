@@ -85,9 +85,11 @@ A search whose query embedding the provider does not answer (the same
 the identifiers and quoted spans in the query, through the same function with
 no vector (SMD-2891). `search_thoughts` says so first, names the endpoint and
 `search_thoughts_keyword`, and carries `vectorFailed`; with nothing found it
-says whether the query's literals are absent, too common to match exactly, or
-none. The compat `search` marks each title `[exact match — semantic search
-unavailable]` and adds `vectorFailed` and a `note`. The query log records the
+says whether the query's literals are absent, too common to match exactly,
+held only by thoughts outside the search's filter, `said_by`, `actor` or
+`min_trust`, or none. The compat `search` marks each title `[exact match —
+semantic search unavailable]` and adds `vectorFailed` and a `note`, which on an
+empty answer says the same of its literals. The query log records the
 search as arm `literal` (migration 104). Any other embedding failure still
 fails the search.
 

@@ -4407,8 +4407,12 @@ query and arm once, and the ids the two return are diffed: the measured per-PR
 **"what moved"**, in place of the hand-written control run. Each brain embeds its
 own query, so the hybrid and current arms need no model here. A search both
 brains refuse is skipped; one only one brain fails, the other answering, fails
-the run (exit 1 on both verbs). Rows logged before migration 045 have no arm,
-and are counted apart, not replayed. Both verbs print `--compare`'s report, then
+the run (exit 1 on both verbs); a search a brain answers by exact literals
+alone, its embedding provider down (`vectorFailed`, SMD-2891), is that brain
+failing it, so two brains on one downed provider compare nothing (exit 3 under
+`--diff`) rather than pass. Rows logged before migration 045 have no arm, and
+rows logged as arm `literal` (104) ran without a vector; both are counted
+apart, not replayed, unless the same query replays on another arm. Both verbs print `--compare`'s report, then
 the window and how many searches were replayed and skipped. A window that
 replayed none compared nothing, and `--diff` exits 3 on it: 0 is a pass, 1 a
 ranking that moved or a step that failed (stable's log unread, or a search one
@@ -4456,7 +4460,7 @@ replay over HTTP) do not need them and are here now.
 The `query_log.tier` column the tiers read is from migration 045 (SMD-1490): the
 server stamps every query_log row with its `OB1_TIER` (stable | canary | working,
 NULL for a plain brain). 045 also added `query_log.arm` (the retrieval arm a search
-ran — `hybrid` or `keyword`) and populated the long-dead `filter` column: the search
+ran — `hybrid` or `keyword`; 059 adds `current`, 104 `literal`) and populated the long-dead `filter` column: the search
 tools now take a metadata filter (`metadata @> filter`, a shallow object) and log
 it, so both replay halves can measure the filtered path against real use.
 

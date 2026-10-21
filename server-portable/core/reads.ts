@@ -164,6 +164,12 @@ export type SearchResult = {
   results: { id: string; title: string; url: string; trust: unknown; moved?: MovedType[]; movedNotRead?: number }[];
   /** Present only when the provider did not answer for the query, and the results are exact-literal matches alone (SMD-2891). */
   vectorFailed?: QueryVectorFailed;
+  /**
+   * With vectorFailed and no result: the query's literals, absent (`needles`)
+   * or too common to match exactly (`commonNeedles`) — this surface takes no
+   * filter, so those are the only two (review pass 2).
+   */
+  facts?: QueryFacts;
 };
 
 export async function search(ctx: Ctx, principal: Principal, { query }: Input<"search">): Promise<Outcome<SearchResult>> {
@@ -174,7 +180,12 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
   // recency weight above. runSearch gates the query (SMD-1903) and logs.
   const r = await runSearch(ctx, principal, { tool: "search", arm: "hybrid", query, limit: 10, threshold: 0, recencyWeight: SEARCH_COMPAT_RECENCY_WEIGHT, preferCurrent: SEARCH_COMPAT_PREFER_CURRENT, filter: {} });
   if (r.refusal) return refuse(r.refusal);
-  const moved = await movedOf(await ctx.store(), r.rows, null);
+  const store = await ctx.store();
+  const moved = await movedOf(store, r.rows, null);
+  // Nothing answered without a vector: say of each literal whether it is
+  // absent or too common, as search_thoughts does — an empty answer alone
+  // reads as "no thought holds it" when a hundred might (review pass 2).
+  const facts = r.vectorFailed && r.rows.length === 0 ? await literalFactsOf(store, query) : undefined;
   return ok({
     results: r.rows.map((t) => ({
       id: t.id,
@@ -184,6 +195,7 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
       ...resultLabel(moved[t.id]),
     })),
     ...(r.vectorFailed ? { vectorFailed: r.vectorFailed } : {}),
+    ...(facts ? { facts } : {}),
   });
 }
 
@@ -244,10 +256,17 @@ export type SearchThoughtsResult = {
 const factsOf = (r: ThoughtHybridMatch | undefined): QueryFacts | null =>
   r ? { needles: r.needles, needleCounts: r.needleCounts, commonNeedles: r.commonNeedles, literalOnly: r.literalOnly } : null;
 
-/** The query's facts when no row reports them and no vector was made (SMD-2891): each literal and its count; one held by any thought, unmatched, was too common. */
+/**
+ * The query's facts when no row reports them and no vector was made
+ * (SMD-2891), in the hybrid's own terms: a literal no thought holds is a
+ * needle counted 0; one held by any thought, unmatched, was too common, and
+ * is a common needle alone, as the hybrid never lists a common one among its
+ * needles (review pass 2).
+ */
 async function literalFactsOf(store: Pick<ThoughtStore, "literalFacts">, query: string): Promise<QueryFacts> {
   const lits = await store.literalFacts(query);
-  return { needles: lits.map((l) => l.needle), needleCounts: lits.map((l) => l.count), commonNeedles: lits.filter((l) => l.count > 0).map((l) => l.needle), literalOnly: null };
+  const absent = lits.filter((l) => !l.held).map((l) => l.needle);
+  return { needles: absent, needleCounts: absent.map(() => 0), commonNeedles: lits.filter((l) => l.held).map((l) => l.needle), literalOnly: null };
 }
 
 /**

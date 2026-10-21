@@ -1416,12 +1416,14 @@ export interface ThoughtStore {
 
   /**
    * The literals 017's extract_search_needles takes from `query`, in its
-   * order, each with how many thoughts contain it (search_thoughts_keyword's
-   * total, unfiltered) — what a search answered without a vector reports when
-   * no literal was matched, since the hybrid function reports its facts only
-   * on a row (SMD-2891). One call; the rules stay the functions'.
+   * order, each with whether any thought contains it (unfiltered) — what a
+   * search answered without a vector reports when no literal was matched,
+   * since the hybrid function reports its facts only on a row (SMD-2891).
+   * There a held literal was too common to match; one a probe answers by its
+   * first matching row, never a count (review pass 2: a count read the whole
+   * match set, seconds per needle on a large brain).
    */
-  literalFacts(query: string): Promise<{ needle: string; count: number }[]>;
+  literalFacts(query: string): Promise<{ needle: string; held: boolean }[]>;
 
   /**
    * The two above fused (migration 017): rank on the vector arm, presence per
