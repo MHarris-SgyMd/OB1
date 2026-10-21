@@ -3160,14 +3160,21 @@ jobs:
           # goes with it (SMD-2287 review pass 1). An operator's forward entry
           # whose name only starts like the minted one stays (review pass 2: a
           # prefix match dropped it), and so does a read entry under a minted
-          # name, since only forward entries go (review pass 3).
-          OPS_FORWARD="open-brain-canary-mcp-forwarder-backup:forward:$(openssl rand -hex 32 | tr -d '\n' | shasum -a 256 | cut -d' ' -f1)"
+          # name, since only forward entries go (review pass 3). The operator's
+          # forward entry is named -1, which no up mints (review pass 4). And
+          # stable's own forward key, set in stable's file with spaces around
+          # it and listed in no MCP_ACCESS_KEYS of stable's, is one of stable's
+          # keys: the canary's read entry for it goes with stable's, counted.
+          OPS_FORWARD="open-brain-canary-mcp-forwarder-1:forward:$(openssl rand -hex 32 | tr -d '\n' | shasum -a 256 | cut -d' ' -f1)"
           OPS_READ="open-brain-canary-mcp-forwarder-2:read:$(openssl rand -hex 32 | tr -d '\n' | shasum -a 256 | cut -d' ' -f1)"
-          printf 'MCP_ACCESS_KEYS="%s,%s,%s,%s"\n' "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tail -n 1 | tr -d "\"'")" "$OPS_FORWARD" "$OPS_READ" "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'")" >> .env.canary.local
+          STABLE_FWD="$(openssl rand -hex 32)"
+          printf 'OB1_FORWARDER_KEY=" %s "\n' "$STABLE_FWD" >> .env
+          printf 'MCP_ACCESS_KEYS="%s,%s,%s,%s,%s"\n' "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tail -n 1 | tr -d "\"'")" "$OPS_FORWARD" "$OPS_READ" "stable-mcp-copy:read:$(printf '%s' "$STABLE_FWD" | shasum -a 256 | cut -d' ' -f1)" "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'")" >> .env.canary.local
           printf 'OB1_FORWARDER_KEY=%s\n' "$OB1_SMOKE_FORWARD_KEY" >> .env.canary.local
           stable_keys="$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'" | tr ',' '\n' | grep -c .)"
           FAKE_URL='http://127.0.0.1:8012/mcp?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-edited.out
-          grep -F "removed $stable_keys of stable's access keys from MCP_ACCESS_KEYS" /tmp/canary-edited.out
+          sed -i '/^OB1_FORWARDER_KEY=/d' .env
+          grep -F "removed $((stable_keys + 1)) of stable's access keys from MCP_ACCESS_KEYS" /tmp/canary-edited.out
           if grep -F "minted the canary's own write key" /tmp/canary-edited.out; then echo "the up minted a write key where the canary had its own" >&2; exit 1; fi
           grep -F "minted the canary's own forward key, open-brain-canary-mcp-forwarder (its hash in MCP_ACCESS_KEYS, the raw key in OB1_FORWARDER_KEY, in place of stable's)" /tmp/canary-edited.out
           grep -F "removed 1 forward entry an earlier up minted (open-brain-canary-mcp-forwarder, open-brain-canary-mcp-forwarder-2 and on) from MCP_ACCESS_KEYS" /tmp/canary-edited.out
@@ -3212,7 +3219,7 @@ jobs:
           FORWARD_3="$(forward_of)"
           [ "${#FORWARD_3}" = 64 ] || { echo "up --no-refresh left the canary no forward key" >&2; exit 1; }
           [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "$(own_keys "$FORWARD_3")" ] || { echo "up --no-refresh did not give the canary its forward key beside its write key" >&2; exit 1; }
-          if grep -qFf <(printf '%s\n' "$FORWARD_2" "$FORWARD_3" "$CANARY_KEY" "$OB1_SMOKE_FORWARD_KEY") /tmp/canary-edited.out /tmp/canary-nokey.out /tmp/canary-norefresh.out; then echo "canary.sh printed a raw key, the canary's or stable's forward key" >&2; exit 1; fi
+          if grep -qFf <(printf '%s\n' "$FORWARD_2" "$FORWARD_3" "$CANARY_KEY" "$OB1_SMOKE_FORWARD_KEY" "$STABLE_FWD") /tmp/canary-edited.out /tmp/canary-nokey.out /tmp/canary-norefresh.out; then echo "canary.sh printed a raw key, the canary's or stable's forward key" >&2; exit 1; fi
           grep -F 'migrate open-brain-canary-postgres-1 in place' /tmp/canary-norefresh.out
           grep -F 'canary sleep worker stopped for the migration' /tmp/canary-norefresh.out
           grep -F 'canary sleep worker, on the new build' /tmp/canary-norefresh.out

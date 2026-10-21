@@ -648,11 +648,11 @@ if mode == "own-fix":
         # Another name'"'"'s forward entry is the operator'"'"'s, and stays; so does
         # any other scope'"'"'s under any name (review pass 2).
         base = os.environ["OWN_PROJECT"] + "-mcp-forwarder"
-        minted_here = re.compile(re.escape(base) + r"(?:-[1-9][0-9]*)?")
+        minted_here = re.compile(re.escape(base) + r"(?:-(?:[2-9]|[1-9][0-9]+))?")
         before = len(kept)
         kept = [x for x in kept if not (x[2] == "forward" and minted_here.fullmatch(x[1]))]
         if len(kept) < before:
-            said.append("removed %d forward entr%s an earlier up minted (%s, %s-2 and on) from MCP_ACCESS_KEYS: the file no longer holds its raw key" % (before - len(kept), "y" if before - len(kept) == 1 else "ies", base, base))
+            said.append("removed %d forward entr%s an earlier up minted (%s, %s-2 and on) from MCP_ACCESS_KEYS: the file no longer holds %s" % (before - len(kept), "y" if before - len(kept) == 1 else "ies", base, base, "its raw key" if before - len(kept) == 1 else "their raw keys"))
         was = ", in place of stable'"'"'s" if fwd_stable else ", in place of one MCP_ACCESS_KEYS does not hold as a forward key" if fwd else ""
         fwd = secrets.token_hex(32)
         name = unused(base)
