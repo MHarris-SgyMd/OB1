@@ -2409,8 +2409,8 @@ export async function main(argv) {
     let cfg;
     if (modeError) { console.error(`session-capture: ${modeError}`); return 1; } // before the config: a missing config must not hide the typo (first review pass)
     try { cfg = loadConfig(); } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
-    // An answer from the root through the proxy's legacy route works until
-    // v2.0.0 closes it (SMD-2532), so it is a warning, not a failure.
+    // An answer from the root through the proxy's legacy route worked until
+    // v2.0.0 closed it (SMD-2532), so on an older stack it is a warning, not a failure.
     // A tier's route through stable's proxy closes then too (SMD-3057), and
     // its /mcp is stable's: the tier itself is the url to set. Each route's
     // Deprecation date is its own, stamped by a release and never moved

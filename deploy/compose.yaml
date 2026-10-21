@@ -153,16 +153,14 @@ x-otel-env: &otel-env
 #   oauth-fallback-off  /register, /authorize and /token at the origin root:
 #           a bare 404 (`not-served`). An MCP client that finds the document
 #           but no authorization-server metadata registers and signs in at the
-#           issuer's root, and the legacy route would hand that POST to the
-#           MCP server, whose 200 envelope the client cannot read (SMD-2382
-#           review). The authorization server's own are under /auth;
+#           issuer's root (SMD-2382 review); until v2.0.0 the legacy route
+#           handed that POST to the MCP server, whose 200 envelope the client
+#           cannot read. The authorization server's own are under /auth;
 #   api-off /api and everything under it. Unless the operator names
 #           deploy/compose.api-public.yaml, whose router (priority 36) wins
-#           over this one (SMD-2284), a bare 404 (`api-off`) rather than the
-#           legacy route, where the MCP server takes a POST at every path;
-#   hooks-off  /hooks and everything under it: a bare 404 (`not-served`), so
-#           a delivery to a plugin's webhook never falls to the legacy route
-#           and the MCP server, until the operator names
+#           over this one (SMD-2284), a bare 404 (`api-off`);
+#   hooks-off  /hooks and everything under it: a bare 404 (`not-served`)
+#           until the operator names
 #           deploy/compose.hooks-public.yaml, whose router (priority 36) takes
 #           it to the REST core (SMD-2310);
 #   grafana-off  /grafana and everything under it: a bare 404 (`not-served`)
@@ -172,53 +170,34 @@ x-otel-env: &otel-env
 #           origin shares it with /auth, so a script running in a Grafana
 #           page could act on the authorization server's session;
 #   mcp     /mcp and everything under it — the endpoint clients are given;
-#   tier-off every path that starts with /canary or /working, in any case
-#           and whatever follows: a bare 404 (`not-served`). A canary or a
-#           working tier is a brain of its own on its own port (SMD-2874;
-#           docs/one-brain-per-stack.md), and this stack routes none; from
-#           SMD-2294 to v2.0.0 a tier answered at /canary/mcp here,
-#           deprecated by SMD-3057 for a release before it went. Kept
-#           until SMD-2532 removes the legacy route, so a client still given
-#           a tier's URL on this origin, in any spelling after the prefix
-#           (its case, an escaped slash, a pasted invisible space), never
-#           reaches this stack's server by the legacy route, to write with
-#           the same key (a typo of the prefix itself, `/canry/mcp`, still
-#           does until then). No boundary after the prefix: each one tried
-#           left some character through (SMD-2294 review passes 2-4), and
-#           nothing this stack serves starts with either word;
 #   health  GET, HEAD and OPTIONS /health at the origin root, for a GET-only
-#           probe and a browser's CORS preflight;
-#   legacy  everything but /.well-known — what clients reach today at the root
-#           (`POST /?key=`, /worker-status, /jobs/<id>, and
-#           `GET /`, whose 405 an MCP SDK client takes as "no stream here";
-#           the proxy's 404 there made v1 and v2 clients report an error on
-#           every connect, measured), kept so the upgrade that lands the proxy
-#           breaks no configured client. Its window (SMD-2306): every answer
-#           carries a Deprecation header and a Link to the upgrade guide, and
-#           the server names each key still on it; it closes with v2.0.0,
-#           when SMD-2532 removes it and `/` is the proxy's 404 too.
-# No router matches /.well-known or anything under it but the auth router's
-# three and the resource router's one, so the proxy answers the rest 404
-# itself and the server never sees them: a claude.ai connector at
+#           probe and a browser's CORS preflight.
+# Nothing else is routed, so the proxy answers every other path itself, with
+# Traefik's own 404 (body `404 page not found`): the origin root — `/`,
+# `GET /`, `POST /?key=`, /worker-status, /jobs/<id> — and every path under
+# /canary or /working. Until v2.0.0 a priority-1 `legacy` router sent all but
+# /.well-known to the server, so the clients configured at the root before
+# the proxy kept working, each answer marked deprecated (SMD-2306); SMD-2532
+# removed it, and with it `tier-off`, which kept a tier's URL on this origin
+# (from SMD-2294 to v2.0.0 a tier answered at /canary/mcp here) off that
+# route. A client given the root moves to /mcp (deploy/README.md, "Moving a
+# client to /mcp"). Of /.well-known, the auth router's three paths and the
+# resource router's one are routed, and the rest is that 404: a claude.ai connector at
 # https://host/mcp asks /.well-known/oauth-protected-resource/mcp at the
 # origin root, and proceeds on the key only on a 404 (SMD-1246, FORK.md
 # change 42) — the server's 404 there, unless OAuth is advertised (SMD-2382).
 # Traefik matches the cleaned, decoded path, so `//.well-known/`,
 # `/%2ewell-known/` and `/x/../.well-known/` are refused too (measured on
-# v3.7.13) — all but an encoded slash, which it leaves encoded:
-# `/.well-known%2Fx` reaches the server's 405, as it did before the proxy, and
-# no discovery client sends it. Its 404 carries
+# v3.7.13) — and an encoded slash, which it leaves encoded,
+# `/.well-known%2Fx`, matches no router either. Its 404 carries
 # none of the server's CORS headers; the SDK's discovery reads a CORS failure
 # as a 404 and goes on. The resource router's 404 is the server's, with them,
 # while the server is up; with it down, auth-absent's bare 404 has none.
 # The middlewares:
-#   legacy-window  marks the request for the server, which logs each key
-#           name still on the root once (X-OB1-Legacy-Route, set, so a
-#           client's own value is replaced), and adds to every answer a
-#           Deprecation header (RFC 9745) dated 2026-10-02 and a Link to the
-#           upgrade guide;
-#   not-legacy  deletes that marker (an empty value deletes the header), so a
-#           client cannot send it on /mcp and be logged as a straggler;
+#   not-legacy  deletes X-OB1-Legacy-Route, the marker the legacy route set
+#           until v2.0.0 (an empty value deletes the header), so a client
+#           cannot send it and be logged as a straggler by a server that
+#           still reads it;
 #   auth-absent  any 502 — Traefik's own: no such name, nothing
 #           listening, or a request the server dropped mid-flight, as its
 #           registration stall does at 30 s; the server never answers 502
@@ -280,32 +259,13 @@ x-proxy-routes: &proxy-routes |
         entryPoints: [web]
         middlewares: [not-legacy]
         service: server
-      tier-off:
-        rule: "PathRegexp(`(?i)^/(canary|working)`)"
-        priority: 25
-        entryPoints: [web]
-        middlewares: [not-served]
-        service: noop@internal
       health:
         rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))"
         priority: 20
         entryPoints: [web]
         middlewares: [not-legacy]
         service: server
-      legacy:
-        rule: "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))"
-        priority: 1
-        entryPoints: [web]
-        middlewares: [legacy-window]
-        service: server
     middlewares:
-      legacy-window:
-        headers:
-          customRequestHeaders:
-            X-OB1-Legacy-Route: "1"
-          customResponseHeaders:
-            Deprecation: "@1790899200"
-            Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#moving-a-client-to-mcp>; rel="deprecation"; type="text/html"'
       not-legacy:
         headers:
           customRequestHeaders:

@@ -116,9 +116,9 @@ http://127.0.0.1:8000/mcp?key=<your key>
 publishes it (a devcontainer publishing 8000 on the podman VM was the case met);
 the URL, `smoke.sh` and the `lsof` line below follow it. It is the port in front
 of the proxy (the forwarder's, SMD-2583), and `/mcp` the server's path on it. A client configured before SMD-1846 at the
-root (`http://127.0.0.1:8000/?key=…`) still works, through the proxy's legacy
-route ("One origin" below), until v2.0.0; give new clients `/mcp`, and move
-the old ones ("Moving a client to /mcp").
+root (`http://127.0.0.1:8000/?key=…`) stopped working at v2.0.0, when the
+proxy's legacy route went (SMD-2532): give clients `/mcp` ("Moving a client to
+/mcp").
 
 That URL works from this machine and nowhere else, by default — a client on
 this machine, such as Claude Code at user scope
@@ -417,7 +417,7 @@ on it (SMD-2294): `/mcp` the stable tier's server, `/canary/mcp` and
 servers, REST cores, three Postgres services and shared Ollama publish nothing,
 and it has compose.yaml's networks, less the authorization server's.
 Nothing public routes to a REST core, and the root, `/.well-known` and `/api`
-are the proxy's 404: that stack has no legacy window, no authorization server
+are the proxy's 404: that stack never had compose.yaml's legacy route, and has no authorization server
 and no `/api`. It reads `SERVER_PORT` as this file does, so to run the two side
 by side set `SERVER_PORT` in the shell for one of them, which wins over
 `deploy/.env`. Its proxy waits on no tier and starts in compose's first wave,
@@ -491,12 +491,12 @@ paths today:
 | `/hooks` and everything under it | the proxy's bodiless 404 by default. With `compose.hooks-public.yaml` named ("Plugins' webhooks" below), `api` — the REST core — path kept: `/hooks/<plugin>/<name>` is a plugin's inbound webhook, served only for a plugin `OB1_HOOKS` names (SMD-2310) |
 | `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
 | `/grafana` and everything under it | the proxy's bodiless 404 by default. With `compose.grafana-public.yaml` named ("The observability profile" below), `lgtm` (`--profile observability`), as `lgtm.ob1.internal` on the `mesh` network — its Grafana, serving from `/grafana`, path kept, behind its own sign-in. With the profile off, or the container stopped or still starting, the proxy's bodiless 404 too, and so is a 502 of Grafana's own (a data source it cannot reach) |
-| every path starting with `/canary` or `/working`, in any letter case | the proxy's bodiless 404 (SMD-2874: a canary or a working tier is a brain of its own on its own port, and this stack routes none; from SMD-2294 to v2.0.0 a tier answered at `/canary/mcp` here, deprecated by SMD-3057 for a release before it went), so a client still given a tier's URL on this origin, in any spelling after the prefix (`/canary`, `/CANARY/mcp`, `/canary%2Fmcp`, an invisible space pasted after `canary`) never reaches this stack's server by the legacy route, where the same key would write to this brain. A typo of the prefix itself (`/canry/mcp`) still does, until SMD-2532 closes the legacy route |
+| every path starting with `/canary` or `/working`, in any letter case | the proxy's own 404 (SMD-2874: a canary or a working tier is a brain of its own on its own port, and this stack routes none; from SMD-2294 to v2.0.0 a tier answered at `/canary/mcp` here, deprecated by SMD-3057 for a release before it went). No router matches them, so a client still given a tier's URL here reaches nothing; until v2.0.0 `tier-off` kept them off the legacy route, and went with it (SMD-2532) |
 | `GET`/`HEAD`/`OPTIONS /health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key; OPTIONS for a browser's CORS preflight |
 | `/.well-known/oauth-protected-resource/mcp` | `server` — the MCP server's protected-resource document while it advertises OAuth: the `auth` profile on, the request at the origin's `Host`, and the authorization server answering the server's probe on the mesh. Otherwise the server's 404, and a server that is down is the proxy's 404, never a 502 (SMD-2382). A claude.ai connector at `https://host/mcp` asks this at the origin root before it uses its key, and proceeds on the key only on a 404 (SMD-1246) |
-| `/register`, `/authorize`, `/token` | the proxy's bodiless 404: where an MCP client that found the document but no authorization-server metadata would register and sign in, at the issuer's root. Kept off the legacy route, which would hand the POST to the MCP server (SMD-2382). The authorization server's own are under `/auth` |
+| `/register`, `/authorize`, `/token` | the proxy's bodiless 404: where an MCP client that found the document but no authorization-server metadata would register and sign in, at the issuer's root. A router of its own since SMD-2382, when the legacy route would have handed the POST to the MCP server. The authorization server's own are under `/auth` |
 | `/.well-known` and everything else under it | the proxy: a 404. It carries none of the server's CORS headers; the MCP SDK's discovery reads a CORS failure as a 404 and goes on |
-| anything else | `server`, through the **legacy** route: what clients reach at the root today — `POST /?key=…`, `GET /` (the server's 405, which an MCP SDK client takes as "no stream here"; a 404 there made v1 and v2 clients report an error on every connect, measured), `/worker-status`, `/jobs/<id>`. It keeps every client configured before SMD-1846 working until v2.0.0, and every answer says so: a `Deprecation` header and a `Link` to "Moving a client to /mcp" below, where the server's line naming each key still on it is too (SMD-2306). SMD-2532 removes it, and `/` becomes the proxy's 404 |
+| anything else | the proxy's own 404 (body `404 page not found`), the origin root included: `POST /?key=…`, `GET /`, `/worker-status`, `/jobs/<id>`. Until v2.0.0 the **legacy** route sent these to `server`, so every client configured before SMD-1846 kept working, each answer deprecated (SMD-2306); SMD-2532 removed it. A client given the root moves to `/mcp` ("Moving a client to /mcp" below) |
 
 Every backend is dialled by its name on the `mesh` network — the server as
 `mcp.ob1.internal`, never `server`, because compose gives every container its
@@ -555,7 +555,9 @@ needs `up -d --remove-orphans`, or the forwarder, an orphan, keeps the port.
 **Upgrading a stack from before SMD-1846** is one plain `compose up -d --build`
 (with the `-f` files and profiles it runs with): compose recreates the server
 without its port, then starts the proxy on it — about 1.5 s with no answer on
-the port, measured on podman — and every client URL keeps working. The last
+the port, measured on podman. A client still configured at the root stops
+working there from v2.0.0: move it to `/mcp` first ("Moving a client to /mcp").
+The last
 30–100 ms of it is the proxy's own 404, between its start and its routes
 loading; an SDK client connected across it saw one 404 and went on (measured).
 On that first `up` name the proxy and the forwarder wherever you name the server
@@ -571,8 +573,8 @@ proxy, now an orphan, keeps the port and the old server cannot bind it
 (measured: "address already in use", the stack down).
 
 **Adding a service** is two edits in `compose.yaml`: the service, with no
-`ports:`, and a router for its path in `x-proxy-routes`, at a priority above
-`legacy` (1). The same router, and its backend under `services:`, go in
+`ports:`, and a router for its path in `x-proxy-routes`, at a priority that
+orders it among the others. The same router, and its backend under `services:`, go in
 `PROXY_ROUTE_TABLE` in `scripts/check-fork-consistency.ts`, whose check 28
 holds the table byte for byte. A note on a route goes in the YAML comments
 above the block, never in it: Traefik renders a route file as a Go template
@@ -764,15 +766,15 @@ example plugin turned on for the step alone):
 
 Before SMD-1846 the server answered at the origin root, so every client was
 given the root: `http://127.0.0.1:8000/?key=…`, or `https://host/?key=…`
-through a tunnel. The proxy's legacy route still answers there, for a window
-that closes with **v2.0.0**, and no sooner than two weeks after the first
-release carrying this section (SMD-2306). After the window the root is the
-proxy's 404, and a client still on it stops working (SMD-2532). The port does
+through a tunnel. From SMD-1846 to v2.0.0 the proxy's legacy route kept the
+root answering, for a window (SMD-2306). **From v2.0.0 the window is closed**:
+the root is the proxy's own 404 (body `404 page not found`), and a client still
+on it stops working (SMD-2532). The port does
 not change: the forwarder publishes the same `SERVER_PORT` the proxy did. Only the path
 changes: add `/mcp`.
 
-**During the window.** Every answer through the legacy route carries two
-headers:
+**On a stack from v1.6.0 to v1.9.0,** still in the window, every answer
+through the legacy route carries two headers:
 
 ```
 Deprecation: @1790899200
@@ -799,19 +801,21 @@ is still on the root. The proxy's access log has a line for every such
 request, with `"RouterName":"legacy@file"`, the path, and the client's address
 but no key; a keyless request is only there. On podman for macOS that address
 is the VM's gateway, not the client. `smoke.sh` run with no URL probes the root
-without a key, so it adds no name, and expects both headers (check 11).
+without a key, so it adds no name. From v2.0.0 its check 11 expects the
+proxy's own 404 there instead, and a client still on the root reports that 404
+itself.
 
 | Client | Before | After |
 | --- | --- | --- |
 | Claude Code (`claude mcp add`) | `http://127.0.0.1:<SERVER_PORT>/` | `claude mcp get open-brain` names the scope (and prints the key); then `claude mcp remove open-brain -s <scope>` and `claude mcp add --transport http --scope <scope> open-brain http://127.0.0.1:<SERVER_PORT>/mcp --header "x-brain-key: <key>"`. Without `--transport http` the add makes a stdio entry. A project-scope entry is the `url` in `.mcp.json`: edit it there |
 | Claude Desktop or claude.ai custom connector | `https://host/?key=…` | `https://host/mcp?key=…`: remove the connector and add it with the new URL |
-| The session-capture hook | `"url": "http://127.0.0.1:<port>/"` in `~/.config/open-brain/session-capture.json` (or the file `OB1_SESSION_CAPTURE_CONFIG` names) | `"url": "http://127.0.0.1:<port>/mcp"`, then `bun recipes/session-capture-hook/session-capture.mjs --check`, which warns while the url still answers through the legacy route. `OB1_BRAIN_URL` in the hook's environment overrides the file: move it too |
+| The session-capture hook | `"url": "http://127.0.0.1:<port>/"` in `~/.config/open-brain/session-capture.json` (or the file `OB1_SESSION_CAPTURE_CONFIG` names) | `"url": "http://127.0.0.1:<port>/mcp"`, then `bun recipes/session-capture-hook/session-capture.mjs --check`, which warns while the url answers through a pre-v2.0.0 stack's legacy route, and from v2.0.0 names the root as not the endpoint. `OB1_BRAIN_URL` in the hook's environment overrides the file: move it too |
 | `db/tier.ts --compare` (`db/brain-compare.ts`) | `http://127.0.0.1:<port>/`, or a connector name it reads with `claude mcp get` | `http://127.0.0.1:<port>/mcp`; a connector name follows the Claude Code row |
-| curl, a script, a monitor | `/worker-status`, `/jobs/<id>`, `POST /worker-retry-failed`, `/worker-release-leases`, `/worker-run`, `/health` at the root | the same under `/mcp` (`/mcp/worker-status`, …). `GET /health` at the root stays: it is the health route, not the legacy one. A `scan_thoughts` handle's links are now under the endpoint the call came to |
+| curl, a script, a monitor | `/worker-status`, `/jobs/<id>`, `POST /worker-retry-failed`, `/worker-release-leases`, `/worker-run`, `/health` at the root | the same under `/mcp` (`/mcp/worker-status`, …). `GET /health` at the root stays: it has a route of its own. A `scan_thoughts` handle's links are now under the endpoint the call came to |
 | n8n | `http://server:8000/` in a workflow node you built | no change needed: n8n reaches the server on the `egress` network, not through the proxy |
 | any other client: Codex or Cursor, an `mcp-remote` or `supergateway` bridge, a dashboard's `MCP_URL` | the root, with or without `?key=` | put `/mcp` before `?key=` (`https://host/mcp?key=…`), or at the end of a URL without one |
 
-A stack run with `compose.tiers.yaml` has no legacy window: since SMD-2294 its
+A stack run with `compose.tiers.yaml` never had the legacy route: since SMD-2294 its
 proxy answers the root with a 404, and each tier is `/mcp`, `/canary/mcp` or
 `/working/mcp` on the proxy's port. A client of that stack moves from the
 tier's old host port to its path.
@@ -850,9 +854,9 @@ Point an HTTP liveness probe at **`GET <base>/health`** (200, no key) —
 endpoint, or whatever URL you configure outside the proxy; the exact match rule
 is the comment above `server-portable/index.ts`'s `/health` route, whose test is
 `mcp-edge.ts`'s `HEALTH_PATH` (FORK.md change 75).
-The MCP endpoint serves POST only: `GET /mcp` answers 405 (and `GET /` too,
-through the legacy route; the proxy's 404 once SMD-2532 removes it), so a
-platform-default probe aimed at `/` marks a healthy server down. The image's own `HEALTHCHECK` is that keyless `GET /health` too —
+The MCP endpoint serves POST only: `GET /mcp` answers 405 (and `GET /` is the
+proxy's own 404 since v2.0.0, SMD-2532), so a platform-default probe aimed at
+`/` marks a healthy server down. The image's own `HEALTHCHECK` is that keyless `GET /health` too —
 not a POST to the endpoint, which the request log would write as a refusal every
 30 s (SMD-1849). Opening the connector URL in a browser shows `Method Not Allowed`,
 which is expected.
@@ -2624,9 +2628,9 @@ URL of the canary's: one of its ports on loopback (`127.0.0.1`,
 connector where it was, and says how to move it: that old port is no longer
 the canary's from the next run, so remove the connector first, then
 `up --connect`.
-One at the root of the canary's port, the URL from before `/mcp`, still
-answers through the deprecated root until v2.0.0 (SMD-2532), and `up` says
-so; `--connect` moves it to `/mcp`.
+One at the root of the canary's port, the URL from before `/mcp`, is one
+the canary no longer answers since v2.0.0, when the root became the proxy's
+404 (SMD-2532); `up` says so, and `--connect` moves it to `/mcp`.
 The canary's ports are `--port`, its env file's `SERVER_PORT`, and the one
 its forwarder publishes (its proxy's before SMD-2583), read from the
 container running or stopped (a reboot can leave it stopped: "After a
@@ -2665,9 +2669,9 @@ is the canary's life, in four `up`s:
   canary's forwarder must stay on loopback and stable's `/canary/mcp` be the
   proxy's 404; the thought put on stable just before it must reach the
   canary, and the smoke must fail on the floor;
-- a third `up`, with a connector at the port's root: named as on the
-  deprecated root, not as one the canary no longer answers, and the root
-  answering 200 with a `Deprecation` header;
+- a third `up`, with a connector at the port's root: named as one the
+  canary no longer answers, and the root the proxy's own 404 with no
+  `Deprecation` header (SMD-2532);
 - a fourth `up`, on `--port 8012`: written to the canary's env file (written
   mode 600, compose reading 8012), its forwarder moved, 8011 free, and a
   connector left at 8011 named, one `SERVER_PORT` line left; then 8013
