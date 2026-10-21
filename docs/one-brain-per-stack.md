@@ -141,8 +141,8 @@ MCP SDK v2 and Claude Code send a token request over plain HTTP only to exactly 
   - In the checker, the shared `ROUTE_TIER_PATHS` (defined beside check 27) builds the `canary`, `working` and `tier-off` routers.
   - Check 28's `PROXY_ROUTE_TABLE` stops using it and keeps a `tier-off` router of its own.
   - Check 27's `TIER_ROUTE_TABLE` keeps it while `compose.tiers.yaml` lives.
-- **Stable's `tier-off` stays until SMD-2532 removes the legacy route (v2.0.0).**
-  - The legacy route is the proxy's catch-all that still hands root-path requests, such as `POST /?key=`, to the MCP server.
+- **Stable's `tier-off` stays until SMD-2532 removes the legacy route (v2.0.0).** Done: both went at v2.0.0 ("As built (SMD-2532)" below).
+  - The legacy route was the proxy's catch-all that handed root-path requests, such as `POST /?key=`, to the MCP server until then.
   - `tier-off` is a bare 404 for any path starting with `/canary` or `/working`, in any case. It keeps a changed tier URL from reaching stable through the legacy route and writing with the same key. A connector left at `…/canary/mcp` must not write into stable.
   - In CI's "The tier routes reach a tier on the mesh…", the tier-off probes stay; its tier-absent and tier stand-up probes go.
 - **The canary's keys are its own.** The dogfood connector `open-brain-canary` gets the new port and a new key.
