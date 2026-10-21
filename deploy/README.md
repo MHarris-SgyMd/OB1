@@ -570,7 +570,10 @@ stack, `ps`, `logs` and `down` among them, naming it, before anything changes:
 inspect or stop the old stack with the old `compose.yaml`, or hand one command
 `OB1_FORWARDER_KEY=x` in the shell. The `up` creates `mcp` and recreates
 `server` off the mesh and the proxy, which waits on the MCP server and the
-REST core. Then check the key took: `curl -s -H "x-brain-key: <a read or write
+REST core. On a stack running the observability profile, the `ob1-server-silent`
+alert fires for up to a day after it: `server` stops sending its series as it
+leaves the collector's mesh, which the alert reads as a server gone quiet. Then
+check the key took: `curl -s -H "x-brain-key: <a read or write
 key>" <origin>/mcp/health` answers the brain's JSON record. A bare `ok` there
 is a key the brain did not take: yours (unknown, revoked, out of scope) or,
 when `compose logs mcp` says this server is misconfigured, its own forward key
@@ -1226,13 +1229,13 @@ traces, which would refuse the rest and have their losses said every minute.
 | `OTEL_RESOURCE_ATTRIBUTES` | more of the resource (`deployment.environment.name=home` on a plain brain; a `service.namespace` would make Prometheus's `job` `<namespace>/<name>`); a key it names wins, `service.version` included — but not over a pipeline tier's `deployment.environment.name`, which a canary's env file would otherwise take from stable's |
 | `OTEL_TRACES_SAMPLER` | the SDK's sampler; by default `parentbased_always_on`. A request's own trace is a root, so a caller decides nothing — unless its `traceparent` is trusted, when the `parentbased_` samplers follow its sampled flag and `traceidratio` reads its trace id; the REST core trusts its forwarder's, so it samples the MCP server's tool calls as the MCP server does. Under `always_off` a line names a trace no span was exported for |
 
-In `deploy/`'s compose stacks the server and the REST core take
+In `deploy/`'s compose stacks the MCP server at `/mcp` and the REST core take
 `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`,
 `OTEL_RESOURCE_ATTRIBUTES`, the three `OTEL_*_EXPORTER` switches,
 `OTEL_SDK_DISABLED`, `OTEL_TRACES_SAMPLER` and its `_ARG`, and
 `OTEL_METRIC_EXPORT_INTERVAL` from `deploy/.env` (`x-otel-env`), each empty
 — read as unset — where the file names none; the workers take none. Not
-`OTEL_SERVICE_NAME`, which would give all three servers one name, nor the per-signal
+`OTEL_SERVICE_NAME`, which would give both one name, nor the per-signal
 endpoints, the batch and protocol settings or `OB1_OTEL_TRUST_TRACEPARENT`
 (no proxy in the stack sets a `traceparent`): name those in a second `-f` file.
 The `observability` profile below is a collector for them on the stack's own
@@ -1376,8 +1379,9 @@ it. Its `telemetry` row says, within 5 s, whether they went: `ok` with where,
 naming spans, points or both by what is sent; a warning for an export not
 sent, or for an endpoint that is no URL or an SDK that would not start (the
 server would share either); a skip when no collector is named, when spans and
-points are both turned off or the SDK is disabled, or when no probe ran. A
-plain preflight, the one each container start runs, starts no telemetry, so a
+points are both turned off or the SDK is disabled, or when no probe ran —
+run it in `api`, which holds the OTEL settings (`server` holds none since it
+left the mesh, SMD-2287). A plain preflight, the one each container start runs, starts no telemetry, so a
 stack no one has used yet has a first point only from `--deep`.
 
 Never the URL, a query string, another header, a key, a body, an argument or

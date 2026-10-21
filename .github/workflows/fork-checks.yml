@@ -3738,7 +3738,10 @@ jobs:
           # sign-ins here register a client each, so this start's cap is higher
           # (the shell's value is compose's over .env's).
           OB1_AUTH_MAX_CLIENTS=10 auth up -d --wait --wait-timeout 120 --no-deps auth
-          auth up -d --force-recreate --wait --wait-timeout 120 --no-deps api
+          # The MCP server beside it, so its first calls on the REST core and the
+          # authorization server, both recreated here, look each name up afresh
+          # (SMD-2287 PR 5b review pass 5).
+          auth up -d --force-recreate --wait --wait-timeout 120 --no-deps api mcp
           # The password and the tokens go by name (-e NAME, from this shell's
           # environment), never on a command line the runner's process list shows.
           OB1_AUTH_OPERATOR_PASSWORD=$(sed -n 's/^OB1_AUTH_OPERATOR_PASSWORD=//p' .env | tr -d "'")

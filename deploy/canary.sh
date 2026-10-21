@@ -1154,15 +1154,17 @@ fi
 # The canary's env file is written with deploy/env-file.ts (SMD-2874 PR 2).
 command -v bun > /dev/null 2>&1 || { echo "up needs bun on PATH: deploy/env-file.ts writes the canary's own keys and settings to its env file." >&2; exit 2; }
 
-# Where the canary's server would send its model calls, as compose resolves
-# them for it (the fallbacks included). A bare name is a service on the
+# Where the canary's REST core would send its model calls, as compose
+# resolves them for it (the fallbacks included), and its telemetry: the REST
+# core holds both, the server's model knobs and the OTEL block, where `server`
+# holds no OTEL since it left the mesh (SMD-2287 PR 5b review pass 5). A bare name is a service on the
 # network the server is on, and the canary's has none of stable's; an address
 # (a dotted name, IPv4 or IPv6) is reached as stable reaches it.
 CONFIG_ERR="$(mktemp "${TMPDIR:-/tmp}/ob1-canary-config.XXXXXX")"
 said="$(canary_compose config --format json 2>"$CONFIG_ERR" | python3 -c '
 import json, sys
 from urllib.parse import urlparse
-env = json.load(sys.stdin)["services"]["server"].get("environment") or {}
+env = json.load(sys.stdin)["services"]["api"].get("environment") or {}
 for k in ("OB1_LLM_BASE_URL", "OB1_CHAT_BASE_URL", "OB1_JEV_BASE_URL"):
     host = urlparse(env.get(k) or "").hostname or ""
     if host and "." not in host and ":" not in host and host != "localhost":
