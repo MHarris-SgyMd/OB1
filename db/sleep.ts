@@ -163,7 +163,8 @@
  * scheduler stops, a second signal included; `slept` carries the current or
  * last sleep's start and, once it is over, its end, on the database's clock
  * (SMD-2678); `waiting` names the passes waiting at their start for a
- * provider that does not answer, while one is, and `refused` the start
+ * provider that does not answer, while one is, and `waitingMidPass` those
+ * waiting mid-pass for one that stopped answering (SMD-2905); `refused` the start
  * refusal that ended it, so preflight's `sleep` row says each — not "its
  * passes running", nor "start it again", which would only refuse again
  * (SMD-2752); `held`, the thoughts extraction holds back across the wakes —
@@ -191,12 +192,9 @@
  *
  * ── Not here ────────────────────────────────────────────────────────────────
  * A budget per pass (statement_timeout, work_mem) and per sleep (a wall
- * clock), and the re-derive pass (rebuild_derived, SMD-1732) (SMD-2679). A
- * pass waiting mid-pass for the provider, after its workers' pauses, reads
- * "running a pass" on the row — the `waiting` word is its start's alone
- * (SMD-2905); the scheduler hears it from consolidation (SMD-3008), and keeps
- * it off the row. The frozen-belief scan, decay relabelling and an HNSW heal are
- * their own tickets' passes (SMD-1722, SMD-1736, SMD-1632), as is the awake
+ * clock), and the re-derive pass (rebuild_derived, SMD-1732) (SMD-2679).
+ * The frozen-belief scan, decay relabelling and an HNSW heal are their own
+ * tickets' passes (SMD-1722, SMD-1736, SMD-1632), as is the awake
  * latency under a sleep at 1M and 10M rows (SMD-1500's harness).
  */
 
@@ -780,10 +778,16 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
    * passes run (SMD-2752).
    */
   const waitingAtStart = new Set<PassName>();
-  /** The passes waiting mid-pass for a provider that stopped answering (consolidate.ts's providerWait): kept off the row (SMD-2905), read by the poll (SMD-3008). */
+  /**
+   * The passes waiting mid-pass for a provider that stopped answering, as each
+   * says through its stamper (providerWait): read by the poll (SMD-3008), and
+   * carried by heartbeat:sleep beside the start's, so preflight's row says the
+   * provider rather than that its passes run (SMD-2905).
+   */
   const waitingMidPass = new Set<PassName>();
   const sayWaiting = async (): Promise<void> => {
     stamper.waiting?.(PASSES.filter((p) => waitingAtStart.has(p)));
+    stamper.waitingMidPass?.(PASSES.filter((p) => waitingMidPass.has(p)));
     await stamper.alive();
   };
   /** What a pass stamps goes to the sleep's row: its outcome mid-sleep, never an end, which is the scheduler's. */
@@ -808,6 +812,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
     async providerWait(on) {
       if (on) waitingMidPass.add(pass);
       else waitingMidPass.delete(pass);
+      await sayWaiting();
     },
   });
 
@@ -924,7 +929,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: { quiet: 
       waitingAtStart.clear();
       stamper.waiting?.([]);
     }
-    waitingMidPass.clear();
+    if (waitingMidPass.size) {
+      waitingMidPass.clear();
+      stamper.waitingMidPass?.([]);
+    }
     const thrown = results.find((r) => r.status === "rejected");
     if (thrown) throw (thrown as PromiseRejectedResult).reason;
   };
