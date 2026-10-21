@@ -1122,8 +1122,8 @@ and its line is `refused`: with no key named when the key is missing (at a
 mirror other than `/health`), wrong or out of scope, and by the key's name,
 when the registry has not cleared it, with `REVOKED` or `BUSY` where it said
 which (none when it did not answer in time). The lines in words beside them —
-the MCP server's (a client that left, a stop that cut a call, a stalled stream,
-a key on the old root URL) and the REST core's job stream at its ceiling — go
+the MCP server's (a client that left, a stop that cut a call, a stalled
+stream) and the REST core's job stream at its ceiling — go
 to stderr, as before; their method and tool are the caller's strings, cut to
 64 printable characters. Stdout carries lines that are not JSON as well —
 preflight's report at every start (each check, then `preflight OK`), Bun's

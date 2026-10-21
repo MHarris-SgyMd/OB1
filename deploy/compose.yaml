@@ -194,10 +194,6 @@ x-otel-env: &otel-env
 # as a 404 and goes on. The resource router's 404 is the server's, with them,
 # while the server is up; with it down, auth-absent's bare 404 has none.
 # The middlewares:
-#   not-legacy  deletes X-OB1-Legacy-Route, the marker the legacy route set
-#           until v2.0.0 (an empty value deletes the header), so a client
-#           cannot send it and be logged as a straggler by a server that
-#           still reads it;
 #   auth-absent  any 502 — Traefik's own: no such name, nothing
 #           listening, or a request the server dropped mid-flight, as its
 #           registration stall does at 30 s; the server never answers 502
@@ -227,7 +223,7 @@ x-proxy-routes: &proxy-routes |
         rule: "Path(`/.well-known/oauth-protected-resource/mcp`)"
         priority: 40
         entryPoints: [web]
-        middlewares: [not-legacy, auth-absent]
+        middlewares: [auth-absent]
         service: server
       oauth-fallback-off:
         rule: "Path(`/register`) || Path(`/authorize`) || Path(`/token`)"
@@ -257,19 +253,13 @@ x-proxy-routes: &proxy-routes |
         rule: "Path(`/mcp`) || PathPrefix(`/mcp/`)"
         priority: 30
         entryPoints: [web]
-        middlewares: [not-legacy]
         service: server
       health:
         rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))"
         priority: 20
         entryPoints: [web]
-        middlewares: [not-legacy]
         service: server
     middlewares:
-      not-legacy:
-        headers:
-          customRequestHeaders:
-            X-OB1-Legacy-Route: ""
       auth-absent:
         errors:
           status: ["502"]
