@@ -4,8 +4,7 @@
 // its streams alive with the same frame and the same ceiling. The vendored MCP
 // servers answer on the same kind of stream (@hono/mcp's transport, which pings
 // only a GET's stream), so a byte-for-byte copy of this file sits in
-// extensions/_shared/, recipes/_shared/ and integrations/_shared/ beside
-// auth.ts's, and each of those servers sends its reply through mcpReply below
+// extensions/_shared/ and recipes/_shared/ beside auth.ts's, and each of those servers sends its reply through mcpReply below
 // (SMD-2001). `bun run sync-sse` in extensions/ rewrites the copies from this
 // file; extensions/test-auth.ts fails if one differs or a server skips it. It
 // imports nothing, and everything here runs as it is on Bun, Node, Deno and Workers.

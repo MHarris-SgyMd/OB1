@@ -48,14 +48,14 @@ features, not upstream parity).
 **87 artifacts** (17 integrations + 51 recipes + 16 schemas + 3 docs/drafts), each with
 exactly one disposition.
 
-- **keep + audited: 71** (78 until `brain-smoke-test` retired, SMD-2103; 77 until SMD-1931 retired `open-brain-rest` and `rest-api`, 75 until it retired `enhanced-mcp`, `delete-thought-mcp`, `update-thought-mcp` and `discord-capture`). Two of them — `edge-function-cost-optimization` and
+- **keep + audited: 70** (71 until SMD-2288 retired `kubernetes-deployment`; 78 until `brain-smoke-test` retired, SMD-2103; 77 until SMD-1931 retired `open-brain-rest` and `rest-api`, 75 until it retired `enhanced-mcp`, `delete-thought-mcp`, `update-thought-mcp` and `discord-capture`). Two of them — `edge-function-cost-optimization` and
   `local-brain-no-mcp` — are struck through as retired by SMD-1800 and stay in this count as
   they did before SMD-2126. The vendored tree is overwhelmingly legitimate community
   content with live in-tree references (CI parity tests, recipes, the fork's ROLE_GRANTS,
   cross-schema deps). The seed "remove" list did not survive the gate — every seed-remove
   integration/schema is load-bearing today (the SMD-1228/1524/1544/1798 audit wired them
   into CI + the shim after the seed was written).
-- **remove: 16.**
+- **remove: 17.**
   - `schemas/text-search-trgm` — index verbatim in migration 011; no fork-side dep.
   - `schemas/recency-boosted-match-thoughts` — `match_thoughts_recency` has zero callers; 020 folded recency into core `match_thoughts`.
   - `schemas/thought-work-claims` — comment-only stub; 015 owns the table.
@@ -72,6 +72,7 @@ exactly one disposition.
   - `integrations/delete-thought-mcp` — the core's `delete_thought` (SMD-1931).
   - `integrations/update-thought-mcp` — the core's `update_thought` (SMD-1931).
   - `integrations/discord-capture` — a README with no code (SMD-1931).
+  - `integrations/kubernetes-deployment` — no deployment target under compose-only (SMD-1931; removed by SMD-2288).
 - **sub-file removal: 2.** `recipes/email-history-import/rollback-chunking-columns.sql`
   — undoes abandoned upstream PR #27 column-chunking; no-op on the fork; and
   `recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs` — migration 023 backfills the

@@ -430,16 +430,102 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   env(s, KEYS);
 }
 
+// ── A tool call that outlives the runtime's idle timeout ─────────────────────
+//
+// SMD-2001: the core server's SMD-1864 fix, on the vendored servers. @hono/mcp
+// answers a POST on an event stream it writes nothing to until the tool returns,
+// and Bun closes a stream silent for 8 to 12 s by phase (test-server.ts [17]
+// measures that premise); every vendored MCP server hands its reply to
+// _shared/sse.ts's mcpReply, which keeps it alive and logs a client that leaves
+// (the shape rule below holds each server to it). The probe was a vendored
+// server's own slow tool, kubernetes-deployment's search with its embedding
+// held, until that server, the one vendored server that called a provider,
+// retired with compose-only (SMD-2288; enhanced-mcp, the first host, with
+// SMD-1931). The rest make queries alone, so the probe drives mcpReply as a
+// route hands it a call, served as `bun <file>` serves it — Bun.serve on the
+// runtime's defaults, idle timeout 10 s — with a transport stand-in whose
+// event stream is silent for SLOW_REPLY_MS: past the last sweep that can reset
+// it, so a reply that skipped the keepalive is reset on every run. Beside it, a
+// client that gives up at 1.5 s is logged once, by method and tool and never by
+// its query.
+console.log("\n[mcpReply: a call slower than the idle timeout is answered, and a client that leaves is logged (SMD-2001)]");
+{
+  const SLOW_REPLY_MS = 13_000;
+  const enc = new TextEncoder();
+  let ran = 0;
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      // As hono's c.req.text(): read once, the same text for every caller.
+      let text: Promise<string> | undefined;
+      const c = { req: { raw: req, text: () => (text ??= req.text()) } };
+      return mcpReply(c, async () => {
+        const id = (JSON.parse(await c.req.text()) as { id: number }).id;
+        return new Response(new ReadableStream({
+          async start(ctl) {
+            await Bun.sleep(SLOW_REPLY_MS);
+            ran++;
+            try {
+              ctl.enqueue(enc.encode(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "found" }] } })}\n\n`));
+              ctl.close();
+            } catch { /* the client left, and the keepalive let the stream go */ }
+          },
+        }), { headers: { "content-type": "text/event-stream" } });
+      }) as Promise<Response>;
+    },
+  });
+  type Read = { ok: boolean; status: number; text: string; error: string; ms: number };
+  const search = async (id: number, query: string, signal?: AbortSignal): Promise<Read> => {
+    const t0 = performance.now();
+    try {
+      const r = await fetch(`http://127.0.0.1:${server.port}/mcp`, { method: "POST", headers: RPC, signal,
+        body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "search_thoughts", arguments: { query } } }) });
+      const text = await r.text();
+      return { ok: true, status: r.status, text, error: "", ms: performance.now() - t0 };
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      return { ok: false, status: 0, text: "", error: e instanceof Error ? `${e.name}${code ? ` ${code}` : ""}` : String(e), ms: performance.now() - t0 };
+    }
+  };
+  const warned: string[] = [];
+  const errored: string[] = [];
+  const quiet = { error: console.error, warn: console.warn };
+  console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+  console.error = (...args: unknown[]) => { errored.push(args.map(String).join(" ")); };
+  let slow: Read, gone: Read;
+  try {
+    [slow, gone] = await Promise.all([
+      search(50, "a query whose call outlives the idle timeout"),
+      search(51, "needle-the-line-must-not-carry", AbortSignal.timeout(1500)),
+    ]);
+    // The abandoned call's tool runs on behind it: held until it has finished too.
+    for (let i = 0; i < 40 && ran < 2; i++) await Bun.sleep(50);
+    await Bun.sleep(300);
+  } finally {
+    Object.assign(console, quiet);
+    server.stop(true);
+  }
+  const frames = (t: string) => t.split(": keepalive\n\n").length - 1;
+  assert(slow.ok && slow.status === 200 && slow.ms >= SLOW_REPLY_MS,
+    `a call is answered after ${SLOW_REPLY_MS} ms of silence, past the last sweep (${slow.ok ? `${slow.status} in ${Math.round(slow.ms)} ms` : `${slow.error} at ${Math.round(slow.ms)} ms`})`);
+  const reply = await parse(new Response(slow.text));
+  assert(reply.json?.jsonrpc === "2.0" && reply.json?.id === 50, `…with the call's JSON-RPC envelope (${slow.text.slice(0, 80).replace(/\n/g, "\\n")})`);
+  assert(frames(slow.text) >= 2, `…kept alive by comment frames the client never sees as events (${frames(slow.text)})`);
+  assert(!gone.ok, `a client that gives up at 1.5 s is gone (${gone.ok ? "answered" : gone.error})`);
+  const lines = warned.filter((w) => /request abandoned/.test(w));
+  const m = /after (\d+\.\d) s/.exec(lines[0] ?? "");
+  assert(lines.length === 1 && m !== null && lines[0] === abandonedRequestLine("tools/call search_thoughts", Number(m[1]) * 1000),
+    `…and it is logged once, in sse.ts's line naming the method and the tool (${lines.length} of ${warned.length} warnings)`);
+  assert(m !== null && Number(m[1]) >= 1.4 && Number(m[1]) < 3, `…at the moment the client left (${m?.[1] ?? "?"} s)`);
+  // The positive control first (review pass 3): both calls ran on to their end while this probe listened.
+  assert(ran === 2, `both calls ran to their end, the abandoned one too (${ran})`);
+  assert(![...warned, ...errored].some((w) => /needle-the-line-must-not-carry/.test(w)), `…and never the query, in a warning or an error (${warned.length + errored.length} lines)`);
+}
+
 // ── mcpReply's edges ─────────────────────────────────────────────────────────
 //
-// SMD-2001: a vendored MCP server's reply leaves through _shared/sse.ts's
-// mcpReply, a byte copy of server-portable/sse.ts, whose keepalive past Bun's
-// idle timeout test-server.ts [17] measures. A slow call on a vendored server
-// was held here on kubernetes-deployment's search, the one vendored server that
-// called a provider, until it retired with compose-only (SMD-2288; enhanced-mcp,
-// the first host, retired with SMD-1931): the rest make queries alone. What is
-// the vendored servers' own is held here — what passes untouched, a client gone
-// before the call or mid-upload, and the line at the ceiling.
+// What passes untouched, a client gone before the call or mid-upload (at a
+// vendored server's real route and transport), and the line at the ceiling.
 const MID_UPLOAD = SERVERS.find((s) => s.file === "recipes/ob-graph/index.ts")!;
 {
   // mcpReply's edges, on a context as a route hands it: `c.req.raw` and a body reader.
@@ -912,13 +998,20 @@ const ALLOW_HEADERS = /"Access-Control-Allow-Headers":\s*\n?\s*"([^"]+)"/;
  * server with no list at all is not a browser's to reach and is not held.
  */
 const HELD_ALLOW_LISTS: string[] = [];
-const holdsBrowserHeaders = (file: string, text: string) => {
+const BROWSER_HEADERS = ["mcp-protocol-version", "last-event-id"];
+/** The browser headers a text's list leaves out, or null when the text has no list the rule reads. */
+const browserHeadersMissing = (text: string): string[] | null => {
   const list = text.match(ALLOW_HEADERS);
-  if (!list) return;
-  HELD_ALLOW_LISTS.push(file);
+  if (!list) return null;
   const names = list[1].split(",").map((h) => h.trim().toLowerCase());
-  for (const h of ["mcp-protocol-version", "last-event-id"]) {
-    assert(names.includes(h), `${file}: Access-Control-Allow-Headers names ${h} — a browser client's preflight is refused without it (SMD-1668)`);
+  return BROWSER_HEADERS.filter((h) => !names.includes(h));
+};
+const holdsBrowserHeaders = (file: string, text: string) => {
+  const missing = browserHeadersMissing(text);
+  if (missing === null) return;
+  HELD_ALLOW_LISTS.push(file);
+  for (const h of BROWSER_HEADERS) {
+    assert(!missing.includes(h), `${file}: Access-Control-Allow-Headers names ${h} — a browser client's preflight is refused without it (SMD-1668)`);
   }
 };
 
@@ -1000,15 +1093,20 @@ for (const s of SERVERS) {
     .sort();
   assert(building.join() === held.join(), `every file that builds a StreamableHTTPTransport is an MCP server held above (${building.length}; unheld: ${building.filter((f) => !held.includes(f)).join(", ") || "none"}; held but building none: ${held.filter((f) => !building.includes(f)).join(", ") || "none"})`);
 }
-// No MCP server in the tree publishes a list since kubernetes-deployment's retired (SMD-2288), so the rule
-// reads none; one added, or respelled (a template literal, hono's cors()) where the regex cannot reach it,
-// names the header here (first review pass). The regex is held to the shape it read, on its own probe.
+// The rule reads every list an MCP server in the tree publishes: none since kubernetes-deployment's
+// retired (SMD-2288). A list in a spelling the regex cannot read (a template literal, hono's
+// cors({ allowHeaders })) would drop out of its reach silently (first review pass), so a server whose
+// text publishes a list in any spelling this knows must be one the rule read. The rule itself is held on
+// two lists of its own: one naming both headers, one leaving one out.
 {
-  assert(HELD_ALLOW_LISTS.length === 0, `the allow-list rule read no list (${HELD_ALLOW_LISTS.join(", ")})`);
-  const naming = SERVERS.filter((s) => s.kind === "mcp" && /access-control-allow-headers/i.test(readFileSync(join(ROOT, s.file), "utf8"))).map((s) => s.file);
-  assert(naming.length === 0, `no MCP server names Access-Control-Allow-Headers in any spelling (${naming.join(", ") || "none"})`);
-  const probe = '  "Access-Control-Allow-Headers":\n    "Content-Type, Authorization, mcp-session-id, mcp-protocol-version, last-event-id",';
-  assert(ALLOW_HEADERS.exec(probe)?.[1].split(",").length === 5, "…and the rule's pattern reads a list in the shape the last one had (its own probe)");
+  const LIST_SPELLINGS = /access-control-allow-headers|\ballowHeaders\b|\bcors\(/i;
+  const unread = SERVERS.filter((s) => s.kind === "mcp" && LIST_SPELLINGS.test(readFileSync(join(ROOT, s.file), "utf8")) && !HELD_ALLOW_LISTS.includes(s.file)).map((s) => s.file);
+  assert(unread.length === 0, `every MCP server's allow-list is one the rule read (${HELD_ALLOW_LISTS.length} read; unread: ${unread.join(", ") || "none"})`);
+  const list = (names: string) => `  "Access-Control-Allow-Headers":\n    "${names}",`;
+  const whole = browserHeadersMissing(list("Content-Type, Authorization, mcp-session-id, mcp-protocol-version, last-event-id"));
+  assert(whole !== null && whole.length === 0, `the rule passes a list that names both headers (its own probe: ${whole === null ? "unread" : whole.join(", ") || "none missing"})`);
+  const short = browserHeadersMissing(list("Content-Type, Authorization, mcp-session-id, mcp-protocol-version"));
+  assert(short?.join() === "last-event-id", `…and names the header a list leaves out (its own probe: ${short === null ? "unread" : short.join(", ") || "none missing"})`);
 }
 
 // The files this test cannot import — a Next.js route, a README's code block, a
@@ -1050,14 +1148,9 @@ for (const t of TEXT_ONLY) {
 {
   const pkg = JSON.parse(readFileSync(join(HERE, "package.json"), "utf8")).devDependencies as Record<string, string>;
   // The stack is STACK's names: a test-only devDependency added here (a fixture library, say) is not
-  // demanded of the image or the core server.
+  // demanded of the core server.
   const stack = Object.entries(pkg).filter(([name]) => STACK.includes(name));
   assert(stack.map(([n]) => n).sort().join() === [...STACK].sort().join(), `extensions/package.json installs the ${STACK.length} packages of the MCP stack (${stack.map(([n]) => n).join(", ") || "none"})`);
-  const hold = (file: string, deps: Record<string, string>, exact: boolean) => {
-    const drift = stack.filter(([name, version]) => deps[name] !== version);
-    const extra = exact ? Object.keys(deps).filter((name) => !STACK.includes(name)) : [];
-    assert(drift.length === 0 && extra.length === 0, `${file} pins ${exact ? "exactly " : ""}the MCP stack extensions/package.json installs${drift.length || extra.length ? ` (${[...drift.map(([n, v]) => `${n}: ${deps[n] ?? "absent"} vs ${v}`), ...extra.map((n) => `${n}: not one of the stack`)].join(", ")})` : ""}`);
-  };
   // server-portable is on the v2 stack (SMD-2278). It shares hono+zod with the
   // vendored servers — held to extensions' versions — pins the v2 MCP packages to
   // SERVER_V2_PINS (the independent truth while it is the sole v2 install), and the
