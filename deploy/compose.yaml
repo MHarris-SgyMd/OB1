@@ -58,9 +58,10 @@ x-logging: &logging
     max-size: "10m"
     max-file: "3"
 
-# The plugins' knobs (SMD-2310), merged by the MCP server and the REST core
-# alone: the workers merge the server's block, and none of them runs a plugin
-# or needs the plugin login role's password. The migrator forwards its own.
+# The plugins' knobs (SMD-2310), merged by `server` and the REST core alone:
+# the workers merge the server's block, and none of them runs a plugin or
+# needs the plugin login role's password. The migrator forwards its own, and
+# the MCP server at /mcp only OB1_PLUGINS, its tools' names (SMD-2287).
 x-plugin-env: &plugin-env
   # The plugins the brain runs: names from plugins/registry.ts,
   # comma-separated; unset, none. Both servers serve the same set; preflight
@@ -78,14 +79,14 @@ x-hook-env: &hook-env
   OB1_HOOKS: ${OB1_HOOKS:-}
   OB1_HOOK_SECRETS: ${OB1_HOOK_SECRETS:-}
 
-# The servers' OpenTelemetry settings (SMD-1849), merged by the MCP server and
-# the REST core alone: the workers send no telemetry. Each is the SDK's own
+# The servers' OpenTelemetry settings (SMD-1849), merged by the three servers
+# alone: the workers send no telemetry. Each is the SDK's own
 # variable, passed as deploy/.env gives it; unset, it is empty, which the
 # servers read as unset (measured: no line, no change), so nothing is sent until
 # OTEL_EXPORTER_OTLP_ENDPOINT names a collector — the observability profile's
 # below is http://lgtm.ob1.internal.:4318 — and each server keeps its own
-# service name (open-brain, open-brain-api): no OTEL_SERVICE_NAME here, which
-# would give both one. OB1_OTEL_TRUST_TRACEPARENT stays out on purpose (check
+# service name (open-brain-mcp, open-brain-api, open-brain): no
+# OTEL_SERVICE_NAME here, which would give all three one. OB1_OTEL_TRUST_TRACEPARENT stays out on purpose (check
 # 14's NOT_FORWARDED): no proxy in this stack sets a traceparent to trust. The
 # three-brain stack leaves them out (check 27's TIER_OMITTED_ENV);
 # deploy/README.md, "Traces, metrics and log records", says what each does.
@@ -913,8 +914,8 @@ services:
       <<: [*server-env, *plugin-env, *otel-env]
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     # No `ports:`. The proxy below is the stack's published port and reaches
-    # this server as mcp.ob1.internal:8000 on the mesh (SMD-1846, SMD-2294);
-    # n8n reaches it as `server:8000` on `egress`.
+    # this server's legacy route as server.ob1.internal:8000 on the mesh
+    # (SMD-1846, SMD-2287); n8n reaches it as `server:8000` on `egress`.
     depends_on:
       postgres:
         condition: service_healthy
@@ -1035,7 +1036,7 @@ services:
       <<: *otel-env
       # Required: without it the server stops at once (exit 2), and /mcp
       # would answer the proxy's 502. deploy/canary.sh mints a canary's own.
-      OB1_FORWARDER_KEY: ${OB1_FORWARDER_KEY:?set OB1_FORWARDER_KEY in deploy/.env — the MCP server's forward-scope key, minted with server-portable/keygen.ts --name mcp-forwarder --scope forward, its hash in MCP_ACCESS_KEYS}
+      OB1_FORWARDER_KEY: ${OB1_FORWARDER_KEY:?set OB1_FORWARDER_KEY in the stack's env file — the MCP server's forward-scope key, minted with bun server-portable/keygen.ts --name mcp-forwarder --scope forward, its line in MCP_ACCESS_KEYS}
       OB1_PLUGINS: ${OB1_PLUGINS:-}
       OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:-}
       COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
@@ -1151,7 +1152,8 @@ services:
     # internal networks and no other (SMD-2583): `front`, where the forwarder
     # reaches it as proxy.ob1.internal and nothing else is, and `mesh`, where
     # it reaches every backend — the MCP server as mcp.ob1.internal
-    # (SMD-2382), the REST core as api.ob1.internal (SMD-2284), the
+    # (SMD-2287), the legacy route's server as server.ob1.internal, the REST
+    # core as api.ob1.internal (SMD-2284), the
     # authorization server as auth.ob1.internal. Until v2.0.0 it also
     # reached a tier's MCP server there as mcp.<tier>.ob1.internal
     # (SMD-2294); a tier is a brain of its own since SMD-2874, and this
@@ -2137,7 +2139,7 @@ services:
     # (docker/compose#11900, as with the proxy's table), so an upgrade that
     # changes the dashboard or a rule reaches Grafana on its `up -d`.
     labels:
-      ob1.grafana-dashboard: "sha256:d5d2486a57a6101b14c533e238956aacfc2b633017402524593ed82fe30cbb83"
+      ob1.grafana-dashboard: "sha256:047a6c28973124dd0f8573329fe40b326ae1eff4e1e5ffd3f00d45373087e090"
       ob1.grafana-alert-rules: "sha256:b49651cf40cccc8943b6525e8351df4254ff558a37609bb61453f5181b47ac95"
       ob1.grafana-dashboard-provider: "sha256:2a13b2862670670482aadbadfcf7a864e28fe4d3c9704faa9ac75ff66b9d021d"
     # `mesh` as lgtm.ob1.internal: the two servers send to it there, and
@@ -2238,7 +2240,8 @@ networks:
   # The ADR's networks (docs/operator-surface-tiers.md, "Two networks"), as
   # the network move built them (SMD-2583). Every service names its own, so
   # compose makes no default network and nothing joins one.
-  #   mesh   internal: the proxy, the MCP server (mcp.ob1.internal), the REST
+  #   mesh   internal: the proxy, the MCP server (mcp.ob1.internal), the
+  #          legacy route's server (server.ob1.internal), the REST
   #          core (api.ob1.internal), the authorization server
   #          (auth.ob1.internal) and the observability profile's collector
   #          (lgtm.ob1.internal), each called by that name. No other
@@ -2316,7 +2319,7 @@ configs:
             {
               "name": "service",
               "label": "Server",
-              "description": "open-brain is the MCP server, open-brain-api the REST core: each server's own service.name.",
+              "description": "open-brain-mcp is the MCP server at /mcp, open-brain-api the REST core, open-brain the legacy route's server: each server's own service.name.",
               "type": "query",
               "datasource": {"type": "prometheus", "uid": "prometheus"},
               "query": {
@@ -2374,7 +2377,7 @@ configs:
           {
             "type": "row",
             "id": 1,
-            "title": "Requests — both servers, per request (http_server_request_duration_seconds)",
+            "title": "Requests — every server, per request (http_server_request_duration_seconds)",
             "collapsed": false,
             "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1},
             "panels": []

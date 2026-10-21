@@ -404,7 +404,8 @@ app.options("*", (c) => {
 // unsound origin, and while the authorization server is down. Asked without a
 // key, as claude.ai asks it, so a `?key=` connector at /mcp of a configured
 // stack is asked to sign in; its key still authenticates first (auth.ts), so
-// it is served once it has (the auth profile is a preview until SMD-2287 PR 5 serves `/mcp` from mcp-server/).
+// it is served once it has. On the compose stack /mcp is mcp-server/'s since SMD-2287 PR 5b, which trades a token;
+// this server keeps the legacy root route, where a token is still refused.
 // A `Host` the URL cannot parse falls through too (oauth-edge.ts atOrigin).
 app.get(PRM_PATH, async (c, next) => {
   const { origin } = edgeHere();

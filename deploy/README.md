@@ -28,7 +28,12 @@ backups, no resource limits.
 cp deploy/.env.example deploy/.env
 openssl rand -hex 24                                    # → POSTGRES_PASSWORD
 bun server-portable/keygen.ts --name laptop --scope write   # → a line for MCP_ACCESS_KEYS; keep the key
+bun server-portable/keygen.ts --name mcp-forwarder --scope forward   # → a line for MCP_ACCESS_KEYS too, its key OB1_FORWARDER_KEY
 ```
+
+`MCP_ACCESS_KEYS` takes both lines, comma-separated. The second is the MCP
+server's own forward key (SMD-2287), required: compose refuses the stack
+without `OB1_FORWARDER_KEY`.
 
 `deploy/.env` is gitignored. This replaces `supabase secrets set`: the same values,
 now ordinary environment variables your platform's secret store supplies.
@@ -94,8 +99,10 @@ The services, in order, the last two with the profile:
 | --- | --- |
 | `postgres` | The Supabase-hosted database (`pgvector/pgvector:0.8.6-pg16`) |
 | `migrate` | Pasting SQL into the Supabase dashboard — the `ob1-migrate` image (`db/Dockerfile`) runs `db/migrate.ts`, then exits |
-| `server` | Upstream's Edge Function and its deploy command |
-| `proxy` | Supabase's gateway in front of the function — the stack's one origin, with the server at `/mcp` on it ("One origin" below) |
+| `server` | Upstream's Edge Function and its deploy command — the legacy root route's server until v2.0.0, and n8n's |
+| `api` | — the REST core: every operation, as JSON, over Postgres and the model provider; internal unless opted in (SMD-2284) |
+| `mcp` | — the MCP server at `/mcp`, a client of the REST core, on the mesh alone (SMD-2287) |
+| `proxy` | Supabase's gateway in front of the function — the stack's one origin, with the MCP server at `/mcp` on it ("One origin" below) |
 | `forwarder` | — the stack's one published port, in front of the proxy, which is on internal networks alone (SMD-2583) |
 | `ollama` (profile) | OpenRouter — the model endpoint the server defaults to |
 | `ollama-pull` (profile) | Pulling both models by hand; runs once, then exits |
@@ -115,7 +122,7 @@ http://127.0.0.1:8000/mcp?key=<your key>
 8000 is `SERVER_PORT`, set in `deploy/.env` when something on the host already
 publishes it (a devcontainer publishing 8000 on the podman VM was the case met);
 the URL, `smoke.sh` and the `lsof` line below follow it. It is the port in front
-of the proxy (the forwarder's, SMD-2583), and `/mcp` the server's path on it. A client configured before SMD-1846 at the
+of the proxy (the forwarder's, SMD-2583), and `/mcp` the MCP server's path on it. A client configured before SMD-1846 at the
 root (`http://127.0.0.1:8000/?key=…`) still works, through the proxy's legacy
 route ("One origin" below), until v2.0.0; give new clients `/mcp`, and move
 the old ones ("Moving a client to /mcp").
@@ -406,7 +413,7 @@ network of its own, `postgres-port`, for its loopback port, and
 | `sleep` (`--profile sleep`) | Listens on nothing; dials `postgres:5432` on `data` and the model provider on `egress` | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678` on `egress`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name, all on `egress`. Not the mesh, where every backend the proxy reaches is (a tier of another project joined it, its server `server` too, from SMD-2294 to SMD-2874) | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090` on `egress`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` on `data` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
-| `lgtm` (`--profile observability`) | `lgtm.ob1.internal` on the `mesh` network: the two servers send their OTLP to `:4318` there, and with `compose.grafana-public.yaml` the proxy dials its Grafana at `:3000` for `/grafana`. On the internal `telemetry` network its collector scrapes `pg-exporter` every 30 s. Its Prometheus, Tempo, Loki and Pyroscope listen on its own loopback. It dials nothing else by itself — a data source its admin adds reaches any name on `mesh` or `telemetry` ("The observability profile" below) — and shares no network with Postgres or the model providers, though `pg-exporter`'s `/probe` dials Postgres for whoever on `telemetry` names it a target (SMD-3023) | Nothing by default. `compose.grafana-port.yaml` publishes its Grafana on `${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}`, an origin of its own; `compose.grafana-public.yaml` routes `/grafana` on the proxy's port | Grafana's own sign-in, anonymous access off: through a TLS proxy to the loopback port (`GRAFANA_ORIGIN` its https origin), or at `/grafana` with `compose.grafana-public.yaml`, which shares the stack's origin ("The observability profile" below) |
+| `lgtm` (`--profile observability`) | `lgtm.ob1.internal` on the `mesh` network: the three servers send their OTLP to `:4318` there, and with `compose.grafana-public.yaml` the proxy dials its Grafana at `:3000` for `/grafana`. On the internal `telemetry` network its collector scrapes `pg-exporter` every 30 s. Its Prometheus, Tempo, Loki and Pyroscope listen on its own loopback. It dials nothing else by itself — a data source its admin adds reaches any name on `mesh` or `telemetry` ("The observability profile" below) — and shares no network with Postgres or the model providers, though `pg-exporter`'s `/probe` dials Postgres for whoever on `telemetry` names it a target (SMD-3023) | Nothing by default. `compose.grafana-port.yaml` publishes its Grafana on `${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}`, an origin of its own; `compose.grafana-public.yaml` routes `/grafana` on the proxy's port | Grafana's own sign-in, anonymous access off: through a TLS proxy to the loopback port (`GRAFANA_ORIGIN` its https origin), or at `/grafana` with `compose.grafana-public.yaml`, which shares the stack's origin ("The observability profile" below) |
 | `pg-exporter` (`--profile observability`) | `pg-exporter.ob1.internal:9187` on the internal `telemetry` network, where lgtm's collector scrapes it; it dials `postgres:5432` on `data` as `ob1_monitor` (a member of `pg_monitor` alone). Its port answers on `data` too, and its `/probe` dials any target and credentials its caller names (SMD-3023). It shares no network with the model providers or the mesh | Nothing | Nothing |
 | `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on `auth-egress`, its own, through its fetch guard. It shares no network with Postgres, Ollama, Jev, n8n or the workers, and holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
@@ -547,17 +554,27 @@ container for a changed inline config alone (docker/compose#11900, measured on
 5.5).
 
 **Upgrading a stack from before SMD-2287 PR 5b**, where `/mcp` moves to the
-`mcp` service: first mint the MCP server's forward key and give it to
-`deploy/.env` — `cd server-portable && bun keygen.ts --name mcp-forwarder
---scope forward`, its hash line added to `MCP_ACCESS_KEYS` and the raw key as
-`OB1_FORWARDER_KEY=` — then one plain `compose up -d --build` (with its `-f`
-files and profiles). Without the key compose refuses every command on the
-stack, naming it, before anything changes. The `up` creates `mcp` and
-recreates `server` under its new mesh name and the proxy, which waits on
-both; every client URL keeps working, `/mcp` now answered through the REST
-core. A canary gets its own key from `canary.sh up`. **Rolling back** to a
-`compose.yaml` from before it needs `up -d --remove-orphans`, or `mcp`, an
-orphan, keeps running beside the old server.
+`mcp` service: first mint the MCP server's forward key and give it to the
+stack's env file — its hash line added to `MCP_ACCESS_KEYS` and the raw key as
+`OB1_FORWARDER_KEY=`. From a checkout, `bun server-portable/keygen.ts --name
+mcp-forwarder --scope forward`; on a release install, which has no checkout,
+the release's image mints it: `docker run --rm --entrypoint bun <its server
+image> keygen.ts --name mcp-forwarder --scope forward`. Then the stack's own
+`up`: `compose up -d --build` from a checkout, or the release's `pull` and
+`up -d --wait` with `compose.release.yaml` ("Pinning a release"), with its `-f`
+files and profiles. Without the key compose refuses every command on the
+stack, `ps`, `logs` and `down` among them, naming it, before anything changes:
+inspect or stop the old stack with the old `compose.yaml`, or hand one command
+`OB1_FORWARDER_KEY=x` in the shell. The `up` creates `mcp` and recreates
+`server` under its new mesh name and the proxy, which waits on both. Then
+`deploy/smoke.sh <origin>/mcp <key>`: a hash line missing or mistyped leaves
+`mcp` healthy and every tool call a 500 (the REST core refuses its forward
+key), which the smoke's tool checks catch and its log names. A canary gets its
+own key from `canary.sh up`. **Rolling back** to a `compose.yaml` from before
+it needs `up -d --remove-orphans`, or `mcp`, an orphan, keeps the
+`mcp.ob1.internal` alias and answers part of `/mcp` beside the old server; a
+canary rolled back with an older `canary.sh` needs `compose -p <canary> rm -sf
+mcp` for the same reason.
 
 **Upgrading a stack from before SMD-2583's forwarder** is one plain `compose
 up -d` (with its `-f` files and profiles): compose recreates the proxy without
@@ -898,9 +915,9 @@ baked one, so set none. Unset at build, the image reports `unknown`. Rebuild wit
 OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --build server proxy forwarder
 ```
 
-The REST core runs the server's image by name, and the proxy depends on it,
-so this rebuilds and recreates it too; add `-f compose.api-public.yaml` where
-`/api` is on.
+The REST core and the MCP server at `/mcp` run the server's image by name,
+and the proxy depends on both, so this rebuilds and recreates them too; add
+`-f compose.api-public.yaml` where `/api` is on.
 
 `proxy` and `forwarder` named beside `server`: the proxy waits on the server
 and the forwarder on the proxy, nothing waits on the forwarder, so `up server`
@@ -940,7 +957,7 @@ and SMD-2238.
 
 What comes back after the host, the Docker daemon or a podman machine
 restarts is each container's restart policy; compose is not involved. In
-`compose.yaml` what serves is `unless-stopped`: Postgres, the two servers,
+`compose.yaml` what serves is `unless-stopped`: Postgres, the three servers,
 the proxy, the forwarder that publishes its port, Ollama, n8n, the
 orchestration runner, the authorization server and the observability
 profile's `lgtm` and `pg-exporter`. What runs once is `"no"`: the migrator,
@@ -1072,7 +1089,7 @@ down inside one run (its probe's 30 s) can fail it once; run it again.
 
 ## What the servers log
 
-Both servers write one JSON line to stdout per request, every route of each
+Each server writes one JSON line to stdout per request — the MCP server at `/mcp`, the REST core and the legacy route's — every route of each
 (SMD-1849, `server-portable/telemetry.ts`) — the MCP endpoint, the MCP
 server's keyed `/health`, worker mirrors and `/jobs/`, its 405s, CORS
 preflights and `/.well-known/` answers, and every REST route — when the
@@ -1119,7 +1136,7 @@ server and looks for each, and holds a key's name with a line break and JSON in
 it to printable ASCII in a unit check (`JSON.stringify` escapes a line break
 anyway, so no line is forged either way); `test-rest.ts` [8] does the same with
 a key, an id and query text. The liveness checks are not logged: the image's `HEALTHCHECK` is a
-keyless `GET /health`, which neither server writes a line for — its 200, or the
+keyless `GET /health`, which no server writes a line for — its 200, or the
 500 of an environment that will not seed, is the healthcheck's to read. On the MCP server a keyed `/health` (smoke.sh's, an operator's curl) is
 logged with its key's name when the key reaches `brain_info`; a wrong key or
 one out of scope is shown `ok` as the probe is, but logged, `refused` — a key
@@ -1146,10 +1163,12 @@ keys after the client or device they are for (`laptop`, `claude-desktop`), not
 after a person, so the log stays free of names and addresses.
 
 ```bash
-# every request that did not end `ok`, on either server (the default project's
-# containers; another brain's are <project>-server-1 and <project>-api-1)
-docker logs open-brain-server-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
+# every request that did not end `ok`, on each server (the default project's
+# containers; another brain's are <project>-mcp-1, -api-1 and -server-1): /mcp's
+# in the MCP server's, the REST core's own, the legacy root route's in server's
+docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
 docker logs open-brain-api-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
+docker logs open-brain-server-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
 ```
 
 **Every service in `deploy/`'s stacks has a bounded log**: the json-file driver,
@@ -1202,7 +1221,7 @@ In `deploy/`'s compose stacks the server and the REST core take
 `OTEL_SDK_DISABLED`, `OTEL_TRACES_SAMPLER` and its `_ARG`, and
 `OTEL_METRIC_EXPORT_INTERVAL` from `deploy/.env` (`x-otel-env`), each empty
 — read as unset — where the file names none; the workers take none. Not
-`OTEL_SERVICE_NAME`, which would give both servers one name, nor the per-signal
+`OTEL_SERVICE_NAME`, which would give all three servers one name, nor the per-signal
 endpoints, the batch and protocol settings or `OB1_OTEL_TRUST_TRACEPARENT`
 (no proxy in the stack sets a `traceparent`): name those in a second `-f` file.
 The `observability` profile below is a collector for them on the stack's own
@@ -1493,7 +1512,7 @@ Either way Grafana's cookie is `Path=/grafana` (measured), and it sends its
 Content-Security-Policy, which narrows which scripts a page runs, not what one
 that runs can do.
 
-What it holds, from the two servers (the workers send nothing, SMD-2910):
+What it holds, from the servers (the workers send nothing, SMD-2910):
 - **Traces** in Tempo: one per request, `tools/call capture_thought` and the
   like, under `service.name` `open-brain-mcp` (the MCP server at `/mcp`, its
   tool call the parent of the REST core's operation, one trace), `open-brain-api`
@@ -1573,7 +1592,7 @@ counts, so one failure would read 0 (measured); series already stored are as
 they were. The series the collector scrapes — pg-exporter's and its own — get
 no such zero, so its losses have totals beside their rate. Its rows, each
 panel saying what it counts:
-- **Requests**, both servers: per second by door and the tool each ran (an
+- **Requests**, every server: per second by door and the tool each ran (an
   MCP tool call's, a REST route's operation, a mirror's; a keyed `/health` is
   `brain_info`'s), latency p50 and p99 by tool, by outcome, the share the
   server failed (`error`, `stalled`, `cut`; a refusal is the caller's), and
@@ -1744,7 +1763,7 @@ which says only that it is up) answer: Prometheus, Tempo, Loki and Pyroscope
 listen on the container's own loopback, server, gRPC and gossip ports alike
 (each port probed from the mesh). Grafana's data-source proxy is held to those
 four, but a data source's own queries are not: Grafana's admin reaches every
-name on `mesh` — the two servers, the authorization server, a joined tier
+name on `mesh` — the three servers, the authorization server, a joined tier
 (measured: a data source at the REST core) — where the servers ask for a key
 and the authorization server for the operator's password, its discovery and
 registration aside; with `compose.grafana-port.yaml`, the LAN and the host
@@ -2705,8 +2724,11 @@ stable is redeployed:
    `--from-env-file`.
 3. It builds the server from this checkout and recreates it and the REST
    core, which runs the server's image, so their pools open on the refreshed
-   database, and starts its own proxy and forwarder, recreated only when
-   their port changed. Standing servers are stopped before the refresh, so
+   database, then the MCP server at `/mcp` (SMD-2287), on the same image and
+   the file's own forward key, and starts its own proxy and forwarder,
+   recreated only when their port changed. It waits for the keyed `/health` to
+   be the REST core's record, which the MCP server answers only once the REST
+   core behind it does. Standing servers are stopped before the refresh, so
    nothing serves the copy mid-restore through the connector, or writes rows
    the restore then collides with. `OB1_GIT_SHA` is the checkout's
    `git describe`, unless the shell sets it.
@@ -3266,7 +3288,7 @@ its tokens (SMD-2286, "Tokens at the REST core" below). `mcp-server/` is
 its client: it trades each OAuth token sent to `/mcp` for the REST core's,
 as the `mcp` client (SMD-2286), and serves `/mcp` as the `mcp` service
 since SMD-2287 PR 5b; the GUI becomes one with SMD-2280. The
-MCP server already sends clients to it (SMD-2382), a preview: at the public origin, while
+MCP server sends clients to it (SMD-2382): at the public origin, while
 this server answers its probe on the mesh, it serves the protected-resource
 document and answers a keyless `/mcp` with the 401 challenge naming it.
 
@@ -3281,7 +3303,7 @@ must be set even to start this one.
 #              COMPOSE_PROFILES=auth   (with any other profiles, comma-separated)
 bun deploy/auth/provision.ts --init   # once: the profile's secrets into deploy/.env (it keeps every value it finds)
 bun deploy/auth/provision.ts          # what the server would refuse, read from deploy/.env
-compose up -d --wait --wait-timeout 60 auth server proxy   # builds and starts it, recreates the server on the new .env (it advertises OAuth only when configured), and waits
+compose up -d --wait --wait-timeout 60 auth mcp server proxy   # builds and starts it, recreates the MCP servers on the new .env (they advertise OAuth only when configured), and waits
 ```
 
 `COMPOSE_PROFILES=auth` in `deploy/.env` is the switch (ADR decision 16): the
@@ -3623,9 +3645,9 @@ so the profile builds from a checkout.
   exit 2. Reviewing what consolidation proposes stays a person's job.
 - **Auth.** Still a single shared key, in a header or `?key=`. Moving off Supabase
   does not improve that; see [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
-  The `auth` profile's authorization server runs behind the proxy's `/auth`,
-  but no service is its client yet, and a claude.ai connector's sign-in there
-  is a preview ("Authorization server", above).
+  The `auth` profile's authorization server runs behind the proxy's `/auth`;
+  the MCP server at `/mcp` is its client (SMD-2287), and only the operator
+  signs in there, with no passkey yet ("Authorization server", above).
 
 ## Related
 

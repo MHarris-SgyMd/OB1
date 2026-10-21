@@ -31,11 +31,11 @@
  * configured stack a `?key=` connector is asked to sign in once; its key
  * still authenticates first, so it is served after: SMD-2286's to settle.)
  *
- * This server (server-portable's /mcp) accepts no OAuth token: one is
+ * This server (server-portable's index.ts) accepts no OAuth token: one is
  * answered 401 `invalid_token` here. The REST core checks the authorization
  * server's tokens (SMD-2286 PR 1, oauth-token.ts), and mcp-server/ trades
- * each at the hop (PR 2, mcp-server/exchange.ts), serving /mcp with SMD-2287
- * PR 5.
+ * each at the hop (PR 2, mcp-server/exchange.ts), serving the compose stack's
+ * /mcp since SMD-2287 PR 5b; index.ts keeps the legacy root route.
  */
 
 import { queryOf } from "./auth.ts";

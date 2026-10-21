@@ -426,10 +426,14 @@ No Supabase account. No Supabase CLI. No Deno.
 cp deploy/.env.example deploy/.env
 openssl rand -hex 24                                    # POSTGRES_PASSWORD
 cd server-portable && bun keygen.ts --name laptop --scope write
+bun keygen.ts --name mcp-forwarder --scope forward     # the MCP server's own key
 ```
 
-Put the `name:scope:sha256` line in `MCP_ACCESS_KEYS`, and keep the raw key
-somewhere safe — it is not recoverable.
+Put each `name:scope:sha256` line in `MCP_ACCESS_KEYS`, comma-separated, and
+keep the laptop key somewhere safe — it is not recoverable. The forward key's raw
+value goes in `OB1_FORWARDER_KEY`: the MCP server at `/mcp` calls the REST core
+with it beside each client's key, and compose refuses the stack without it
+(SMD-2287). It grants nothing as a caller.
 
 The name becomes an agent on first use, with a stable id recorded against every
 write (`thought_audit.canonical_agent_id`). The id survives rotating the key —

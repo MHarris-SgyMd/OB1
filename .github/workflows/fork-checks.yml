@@ -3266,7 +3266,8 @@ jobs:
           printf 'OB1_FORWARDER_KEY=%s\n' "$OB1_SMOKE_FORWARD_KEY" >> .env.canary.local
           stable_keys="$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env | tr -d "\"'" | tr ',' '\n' | grep -c .)"
           FAKE_URL='http://127.0.0.1:8012/mcp?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-edited.out
-          sed -i '/^OB1_FORWARDER_KEY=/d' .env
+          # Only the spaced line this step appended: stable's own key, full-stack-up.sh's, stays (SMD-2287 PR 5b review pass 1).
+          sed -i '/^OB1_FORWARDER_KEY=" /d' .env
           grep -F "removed $((stable_keys + 1)) of stable's access keys from MCP_ACCESS_KEYS" /tmp/canary-edited.out
           if grep -F "minted the canary's own write key" /tmp/canary-edited.out; then echo "the up minted a write key where the canary had its own" >&2; exit 1; fi
           grep -F "minted the canary's own forward key, open-brain-canary-mcp-forwarder (its hash in MCP_ACCESS_KEYS, the raw key in OB1_FORWARDER_KEY, in place of stable's)" /tmp/canary-edited.out
@@ -3760,8 +3761,10 @@ jobs:
           [ "$row" = "oauth:operator oauth:mcp" ] || { echo "the capture's audit row names \"$row\", not the subject and the MCP service as act"; exit 1; }
           # The JSON-RPC answer to a POST to the proxy's /mcp at the origin's Host with this /mcp token, its bearer
           # read from a file (curl -H @file), never a command line; an event stream's data line, or the JSON body.
+          # Read to its end (tail, not head): a tools/list line is some 22 KB, and a reader that leaves early
+          # breaks sed's pipe, which pipefail makes the step's failure (review pass 1).
           bearer_file=$(mktemp)
-          at_mcp_t() { (umask 077; printf 'Authorization: Bearer %s\n' "$1" > "$bearer_file"); curl -s --max-time 30 -H 'Host: brain.example.test' -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "@$bearer_file" -d "$2" http://127.0.0.1:8010/mcp | sed -n 's/^data: //p; /^{/p' | head -n 1; }
+          at_mcp_t() { (umask 077; printf 'Authorization: Bearer %s\n' "$1" > "$bearer_file"); curl -s --max-time 30 -H 'Host: brain.example.test' -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "@$bearer_file" -d "$2" http://127.0.0.1:8010/mcp | sed -n -e 's/^data: //' -e '/^{/p' | tail -n 1; }
           tools_of() { at_mcp_t "$1" '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | jq -c '[.result.tools[]?.name] | sort'; }
           w_tools=$(tools_of "$(jq -r .mcp <<<"$write_t")")
           r_tools=$(tools_of "$(jq -r .mcp <<<"$read_t")")

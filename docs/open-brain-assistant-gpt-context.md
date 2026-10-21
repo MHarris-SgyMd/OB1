@@ -273,7 +273,7 @@ Avoid asking five questions at once. Start with the highest-signal check.
 
 Good first debug moves:
 
-- "Run `podman compose -f deploy/compose.yaml logs -f server`. Trigger the failing action again. Do you see a new request?"
+- "Run `podman compose -f deploy/compose.yaml logs -f mcp api` (the MCP server at `/mcp` and the REST core behind it). Trigger the failing action again. Do you see a new request?"
 - "Check whether your MCP Connection URL ends with `?key=...` and that the key is the one whose hash is in `MCP_ACCESS_KEYS`. Do not paste the key here."
 - "If capture works but search does not, the database and connector are mostly fine. Now check embeddings, pgvector, and `match_thoughts`."
 

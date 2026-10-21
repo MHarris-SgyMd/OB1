@@ -358,10 +358,19 @@ say() { printf '▸ %s\n' "$*"; }
 # The env file is the canary's own once `up` has made it (SMD-2583); before
 # that — `up`'s refusals, a `down` of a canary from before it — stable's, the
 # file the canary's is made from.
+# compose.yaml requires OB1_FORWARDER_KEY (SMD-2287), which `up` mints into
+# the canary's file only once the file is made or mended (set_canary_own):
+# until then — the model probe below, a `down` of a canary from before it,
+# stable's file read before the canary has one — a placeholder fills it for
+# that call alone, so compose can read the file at all. Never when the file
+# holds a key: the shell's value would win over the file's in the MCP server.
+# Every `up` of the MCP server comes after set_canary_own has written one.
 canary_compose() {
-  local env="$ENV_FILE"
+  local env="$ENV_FILE" fwd=()
   [ ! -f "$CANARY_ENV" ] || env="$CANARY_ENV"
-  SERVER_PORT="${PORT:-8000}" SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES="" OB1_GIT_SHA="$GIT_SHA" \
+  grep -qE "^[[:space:]]*(export[[:space:]]+)?OB1_FORWARDER_KEY=([^[:space:]#\"']|\"[^\"]|'[^'])" "$env" 2>/dev/null \
+    || fwd=(OB1_FORWARDER_KEY=placeholder-until-canary-sh-mints-one)
+  env ${fwd[@]+"${fwd[@]}"} SERVER_PORT="${PORT:-8000}" SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES="" OB1_GIT_SHA="$GIT_SHA" \
     "$RUNTIME" compose -p "$CANARY" --env-file "$env" -f "$HERE/compose.yaml" "$@"
 }
 

@@ -14,7 +14,7 @@
       {
         "name": "service",
         "label": "Server",
-        "description": "open-brain is the MCP server, open-brain-api the REST core: each server's own service.name.",
+        "description": "open-brain-mcp is the MCP server at /mcp, open-brain-api the REST core, open-brain the legacy route's server: each server's own service.name.",
         "type": "query",
         "datasource": {"type": "prometheus", "uid": "prometheus"},
         "query": {
@@ -72,7 +72,7 @@
     {
       "type": "row",
       "id": 1,
-      "title": "Requests — both servers, per request (http_server_request_duration_seconds)",
+      "title": "Requests — every server, per request (http_server_request_duration_seconds)",
       "collapsed": false,
       "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1},
       "panels": []

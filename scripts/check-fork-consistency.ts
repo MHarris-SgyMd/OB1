@@ -3226,6 +3226,8 @@ function serverEnvGapsIn(declared: string[], documented: Set<string>, files: Com
   for (const k of Object.keys(excused)) {
     if (!declared.includes(k)) gaps.push(["excuse-stale", null, null, k, ""]);
   }
+  // A knob compose refuses to run without is documented, or the operator meets it first as compose's refusal (SMD-2287).
+  for (const k of Object.keys(required)) if (!documented.has(k)) gaps.push(["undocumented", ".env.example", null, k, ""]);
   for (const k of documented) {
     if (k in fileOnly) {
       if (anywhere.has(k)) gaps.push(["file-only-forwarded", ".env.example", null, k, fileOnly[k]]);
@@ -3263,6 +3265,7 @@ const DECISION_PROBES: [string[], string[], { name: string; yaml: string }[], st
   // A required knob is forwarded as `${X:?…}` and in no other form; another service may forward it (SMD-2287).
   [["OB1_A"], ["OB1_A", "OB1_R"], [BASE(`${SRV("      OB1_A: ${OB1_A:-}\n")}  mcp:\n    environment:\n      OB1_R: \${OB1_R:?set OB1_R}\n`)], [], undefined, undefined, { OB1_R: "why" }],
   [["OB1_A"], ["OB1_A", "OB1_R"], [BASE(`${SRV("      OB1_A: ${OB1_A:-}\n")}  mcp:\n    environment:\n      OB1_R: \${OB1_R:-}\n`)], ["not-house-form:OB1_R"], undefined, undefined, { OB1_R: "why" }],
+  [["OB1_A"], ["OB1_A"], [BASE(`${SRV("      OB1_A: ${OB1_A:-}\n")}  mcp:\n    environment:\n      OB1_R: \${OB1_R:?set OB1_R}\n`)], ["undocumented:OB1_R"], undefined, undefined, { OB1_R: "why" }],
   [["OB1_A"], ["OB1_A", "OB1_P"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n"))], [], undefined, { OB1_P: "why" }],
   [["OB1_A"], ["OB1_A", "OB1_P"], [BASE(`${SRV("      OB1_A: ${OB1_A:-}\n")}  other:\n    environment:\n      OB1_P: \${OB1_P:-}\n`)], ["file-only-forwarded:OB1_P"], undefined, { OB1_P: "why" }],
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n"))], ["file-only-stale:OB1_P"], undefined, { OB1_P: "why" }],
@@ -3416,7 +3419,9 @@ function checkServerEnvForwarded() {
       case "no-server": fail(`deploy/${file}`, `has no \`server\` service — check 14 reads what it forwards to the server (SMD-1843)`); break;
       case "no-base": fail(rel, `missing — check 14 reads the server's environment from it, and SETUP.md brings the stack up with it (SMD-1843)`); break;
       case "unforwarded": fail(at(file, "server", "environment"), `the server reads \`${name}\` (${SERVER_ENV_SOURCE}, type Env) and \`server.environment\` never forwards it, so a value in deploy/.env does nothing and says nothing — add \`${name}: \${${name}:-}\` (or, when the stack must not forward it, the name and the reason to NOT_FORWARDED in ${SELF}) (SMD-1843)`); break;
-      case "undocumented": fail("deploy/.env.example", `does not document \`${name}\`, which the server reads and compose forwards — an operator cannot find the knob; add a \`# ${name}=\` line with what it does (SMD-1843)`); break;
+      case "undocumented": fail("deploy/.env.example", name in REQUIRED_KNOBS
+        ? `does not document \`${name}\`, which compose refuses to run without (REQUIRED_KNOBS) — add its live \`${name}=\` line with what it is and how to mint it, and keep it in check 13's ENV_EXAMPLE_LIVE (SMD-2287)`
+        : `does not document \`${name}\`, which the server reads and compose forwards — an operator cannot find the knob; add a \`# ${name}=\` line with what it does (SMD-1843)`); break;
       case "excuse-stale": fail(SELF, `NOT_FORWARDED excuses \`${name}\`, which ${SERVER_ENV_SOURCE} no longer declares — drop the entry (SMD-1843)`); break;
       case "file-only-forwarded": fail(`deploy/.env.example${exampleLine(name) ? `:${exampleLine(name)}` : ""}`, `\`${name}\` is forwarded to a container, which FILE_ONLY in ${SELF} says no compose service forwards: ${detail}`); break;
       case "file-only-stale": fail(SELF, `FILE_ONLY names \`${name}\`, which deploy/.env.example no longer documents — drop the entry`); break;
@@ -6410,6 +6415,35 @@ const ALERT_RULES_PATH = "/otel-lgtm/grafana/conf/provisioning/alerting/open-bra
  * container's loopback, every call out off, Loki's retention, the mesh and (PR 3b) telemetry. Its environment holds telemetry's sign-in and
  * exposure; a change to it is made here too, on purpose (review pass 1).
  */
+/** The OpenTelemetry knobs compose.yaml's x-otel-env forwards, each the SDK's own name (SMD-1849). */
+const OTEL_KEYS = ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_LOGS_EXPORTER", "OTEL_SDK_DISABLED", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG", "OTEL_METRIC_EXPORT_INTERVAL"];
+/**
+ * compose.yaml's `mcp`, the MCP server built on the REST core (SMD-2287), whole, its logging aside: the knobs it holds
+ * are its environment, listed — none of the server's secrets (no database URL, key list, provider key, plugin or
+ * webhook secret), and only what mcp-server/index.ts reads — its entrypoint keeps auto-install off, its healthcheck is
+ * the only one podman keeps (an OCI image drops HEALTHCHECK), and it waits on the REST core. A change to it is made here
+ * too, on purpose (review pass 1 of PR 5b: a denylist in CI let a superuser password or a new name's secret through).
+ */
+const MCP_SERVICE = {
+  image: "${COMPOSE_PROJECT_NAME:-open-brain}-server",
+  pull_policy: "never",
+  entrypoint: ["bun", "--no-install"],
+  command: ["../mcp-server/index.ts"],
+  environment: {
+    ...Object.fromEntries(OTEL_KEYS.map((k) => [k, `\${${k}:-}`])),
+    OB1_FORWARDER_KEY: "${OB1_FORWARDER_KEY:?set OB1_FORWARDER_KEY in the stack's env file — the MCP server's forward-scope key, minted with bun server-portable/keygen.ts --name mcp-forwarder --scope forward, its line in MCP_ACCESS_KEYS}",
+    OB1_PLUGINS: "${OB1_PLUGINS:-}",
+    OB1_PUBLIC_ORIGIN: "${OB1_PUBLIC_ORIGIN:-}",
+    COMPOSE_PROFILES: "${COMPOSE_PROFILES:-}",
+    OB1_AUTH_SECRET_MCP: "${OB1_AUTH_SECRET_MCP:-}",
+    OB1_STOP_GRACE: "${OB1_STOP_GRACE:-}",
+  },
+  stop_grace_period: "${OB1_STOP_GRACE:-10}s",
+  depends_on: { api: { condition: "service_started" } },
+  restart: "unless-stopped",
+  networks: { mesh: { aliases: ["mcp.ob1.internal"] } },
+  healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"], interval: "30s", timeout: "3s", start_period: "10s", retries: 3 },
+};
 const LGTM_SERVICE = {
   image: "docker.io/grafana/otel-lgtm:0.36.0@sha256:57c04cbd8e7022f32bb84c4ac005d79baf8b08e2c5be44facf11f5f1f9944ba2",
   profiles: ["observability"],
@@ -6633,6 +6667,11 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
     const fdiffs: string[] = [];
     pathDiffs(JSON.parse(JSON.stringify(omitKeys(forwarder, ["labels", "logging"]))), FORWARDER_SERVICE, "services.forwarder", fdiffs);
     if (fdiffs.length) flag("proxy", `${fdiffs.slice(0, 6).join("; ")}${fdiffs.length > 6 ? `; and ${fdiffs.length - 6} more` : ""} — compose.yaml's forwarder is check 28's FORWARDER_SERVICE, its label aside: it holds the stack's published port and every client's bytes, so a change to it is made there too, on purpose (SMD-2583)`);
+    // The MCP server built on the REST core, whole (SMD-2287): what it holds, how it starts, its health.
+    const mcp = isMapping(services.mcp) ? services.mcp : undefined;
+    const mdiffs: string[] = [];
+    pathDiffs(JSON.parse(JSON.stringify(omitKeys(mcp, ["logging"]))), MCP_SERVICE, "services.mcp", mdiffs);
+    if (mdiffs.length) flag("proxy", `${mdiffs.slice(0, 6).join("; ")}${mdiffs.length > 6 ? `; and ${mdiffs.length - 6} more` : ""} — compose.yaml's mcp is check 28's MCP_SERVICE: it is on the mesh beside the proxy with none of the server's secrets, so a knob handed to it, its entrypoint, its health or its wait on the REST core is changed there too, on purpose (SMD-2287)`);
     // The observability collector, whole (SMD-1849 PR 3a): Grafana's sign-in, its exposure and what it calls out to are its environment.
     const lgtm = isMapping(services.lgtm) ? services.lgtm : undefined;
     const ldiffs: string[] = [];
