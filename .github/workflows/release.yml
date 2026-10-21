@@ -44,19 +44,29 @@ on:
     tags: ["v[0-9]*"]
   pull_request:
     # What the job builds from, or reads: the two Dockerfiles and what they
-    # COPY, the compose files, the manifest, the script and this file.
+    # COPY, the compose files, the manifest, the scripts the job runs or
+    # imports, and this file. The server image carries mcp-server/ and
+    # rest-client/ since SMD-2287 PR 5a.
     paths:
       - ".github/workflows/release.yml"
       - "scripts/release-artifacts.ts"
       - "server-portable/**"
+      - "mcp-server/**"
+      - "rest-client/**"
       - "plugins/**"
+      - "scripts/fork-index.ts"
+      - "scripts/mechanism-yield.ts"
+      - "scripts/commit-grammar.ts"
       - "db/Dockerfile"
       - "db/migrate.ts"
       - "db/cli.ts"
       - "db/connect.ts"
+      - "db/login-role.ts"
       - "db/migrations/**"
       - "db/config.mjs"
+      - "db/config.d.mts"
       - "db/version.mjs"
+      - "db/version.d.mts"
       - ".dockerignore"
       - "deploy/**"
       - "releases.json"
