@@ -1004,7 +1004,8 @@ transaction, upgraded the lock and deadlocked bucket-mates ten times in ten. REP
 every status move between known and unknown (a source row's delete and a
 re-record that changes nothing run; the delete raises 40001 if its thought's
 status moved since the snapshot). `ob1_rebuild_source_gate()` repairs the mirror after a write made with
-triggers disabled (a status-set change runs 106's keyed form instead), and `ob1_node_projection_drift()` gains a `source_gate` arm.
+triggers disabled, and `ob1_node_projection_drift()` gains a `source_gate` arm. (A status-set change runs 106's keyed form,
+not the full rebuild.)
 `node_dependencies()` keeps its rows and tests each link's system against the
 gating systems, read once per call, instead of grouping every source row with
 its thought. `source_thought()` keeps its
@@ -1882,23 +1883,32 @@ Migration 106 adds a keyed rebuild of 071's gate mirror for a status-set change
 (SMD-3160): `ob1_rebuild_source_gate_for_types(text[])`. 071 asked a migration
 that changes `node_lifecycle_types()` to run the full
 `ob1_rebuild_source_gate()`, which joins every source row to its thought under
-SHARE locks on `thoughts` and `thought_sources`, so writes wait for the whole
-table — 26 ms at 10,000 source rows, 3.3–4.4 s at a million (105, SMD-2935
+SHARE locks on `thoughts` and `thought_sources`, so writes wait for as long as
+that takes — 26 ms at 10,000 source rows, 3.3–4.4 s at a million (105, SMD-2935
 review pass 5), minutes at the 1B horizon — though a change moves only the rows
 of the types it adds or drops. The keyed form takes the same locks after the
 same READ COMMITTED refusal, finds the sourced thoughts whose `status_type` is
-one of the types given (a probe of 001's GIN index on `thoughts.metadata` per
-type) and reconciles those alone with 071's `ob1_source_gate_reconcile(ids)`,
-returning what it wrote and deleted; an empty or NULL array touches nothing. No
-advisory lock: SHARE holds off every writer whose triggers could touch the
-mirror, as the full rebuild relies on. The full rebuild stays for repair after a
-write with triggers disabled, and its comment now names the keyed form; 071's
-own header is not edited. A migration that changes the set runs `SELECT * FROM
-ob1_rebuild_source_gate_for_types('{<each type it moves>}')` after it. Refuses
-by name without 071; a re-apply is a no-op. test-schema [95] (a set change
-simulated: the moved type's rows fixed, an unrelated drift left for the full
-rebuild; empty and NULL; the READ COMMITTED refusal), test-upgrade [20ax] (onto
-a populated brain; a status write waits for it).
+one of the types given, each type once (a probe of 001's GIN index on
+`thoughts.metadata` per type; a type held by a large share of rows is scanned,
+at about the full rebuild's cost), and reconciles those alone with 071's
+`ob1_source_gate_reconcile(ids)`, returning what it wrote and deleted; an empty
+or NULL array touches nothing. No advisory lock: SHARE holds off every writer
+whose triggers could touch the mirror, as the full rebuild relies on. At a
+million source rows a capture waited 1.39 s behind it against 8.9 s behind the
+full rebuild with 21,212 rows of the type, 29 ms against 6.2 s with 16. The full
+rebuild stays for repair after a write with triggers disabled, and its comment
+now names the keyed form; 071's own header is not edited. A migration that
+changes the set does two things after it, as 105 did: the plan refresh (105's
+no-op ALTER of the brain's functions that name a set, 071's gate triggers among
+them) and `SELECT * FROM ob1_rebuild_source_gate_for_types('{<each type it adds
+or drops>}')`; a change to `node_settled_types()` alone needs only the first.
+`node_lifecycle_types()`'s comment says so, and check 39 of
+`scripts/check-fork-consistency.ts` holds the rebuild — one of the two, the
+keyed one with exactly the types the change moves. Refuses by name without 071;
+a re-apply is a no-op. test-schema [95] (a set change simulated each way: the
+moved type's rows fixed, an unrelated drift left for the full rebuild; empty,
+NULL and repeated types; the READ COMMITTED refusal), test-upgrade [20ax] (onto
+a populated brain; a status write and a source-row write wait for it).
 
 ## What changed relative to the guide
 

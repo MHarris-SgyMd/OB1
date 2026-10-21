@@ -4627,26 +4627,31 @@ console.log("\n[20ax] Migration 106: refused by name without 071; onto a populat
   assert(fn.ok && (await rows()) === before && (await audits()) === auditBefore && (await mirror()) === mirrorBefore && r.written === 0 && r.deleted === 0,
     `106 onto the populated brain: the keyed rebuild there, finding the exact mirror exact (${JSON.stringify(r)}), and no thought, audit or gate row moved`);
 
-  // The keyed form holds SHARE on thoughts to its transaction's end, as the
-  // full rebuild does: a status write in the meantime waits, here cut at 1 s.
+  // The keyed form holds SHARE on thoughts and on thought_sources to its
+  // transaction's end, as the full rebuild does: a status write and a source
+  // row's write in the meantime each wait, here cut at 1 s. The second is the
+  // one only thought_sources' lock holds off — a source row recorded meanwhile
+  // would take its gate from the set as it was (review pass 1).
+  const c = await ticket("UPK-3", "duplicate");
   const holder = new SQL({ url: URL_, max: 1 });
-  let waited = "ran", after = "unread";
+  const errOf = (e: Error) => (e as Error & { errno?: string }).errno ?? (e as Error & { code?: string }).code ?? e.message;
+  const cut = (write: (tx: SQL) => Promise<unknown>) => sql.begin(async (tx: SQL) => { await tx.unsafe(`SET LOCAL lock_timeout = '1s'`); await write(tx); return "ran"; }).catch(errOf);
+  let waited = "ran", sourceWaited = "ran", after = "unread", sourceAfter = "unread";
   try {
     await holder.unsafe(`BEGIN; SELECT * FROM ob1_rebuild_source_gate_for_types('{duplicate}')`);
-    waited = await sql.begin(async (tx: SQL) => {
-      await tx.unsafe(`SET LOCAL lock_timeout = '1s'`);
-      await tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "completed"}'::jsonb WHERE id = ${b}::uuid`;
-      return "ran";
-    }).catch((e: Error) => (e as Error & { code?: string; errno?: string }).errno ?? (e as Error & { code?: string }).code ?? e.message);
+    waited = await cut((tx) => tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "completed"}'::jsonb WHERE id = ${b}::uuid`);
+    sourceWaited = await cut((tx) => tx`SELECT record_thought_source(${c}::uuid, 'linear', 'UPK-3', 'UPK-3', 'text/markdown')`);
     await holder.unsafe(`COMMIT`);
     await sql`UPDATE thoughts SET metadata = metadata || '{"status_type": "completed"}'::jsonb WHERE id = ${b}::uuid`;
+    await sql`SELECT record_thought_source(${c}::uuid, 'linear', 'UPK-3', 'UPK-3', 'text/markdown')`;
     after = String(((await sql`SELECT gates FROM ob1_source_gate WHERE thought_id = ${b}::uuid`)[0] as { gates: boolean }).gates);
+    sourceAfter = String(((await sql`SELECT gates FROM ob1_source_gate WHERE thought_id = ${c}::uuid`)[0] as { gates: boolean } | undefined)?.gates ?? "no row");
   } finally {
     await holder.unsafe(`ROLLBACK`).catch(() => undefined);
     await holder.close();
   }
-  assert(waited === "55P03" && after === "true",
-    `a status write waits for the keyed form's locks to its transaction's end (${waited} at a 1 s lock_timeout), and goes through after, the mirror following it (${after})`);
+  assert(waited === "55P03" && sourceWaited === "55P03" && after === "true" && sourceAfter === "true",
+    `a status write and a source row's write each wait for the keyed form's locks to its transaction's end (${waited}, ${sourceWaited} at a 1 s lock_timeout), and go through after, the mirror following both (${after}, ${sourceAfter})`);
 
   // A re-apply moves nothing.
   const rowsAgain = await rows(), mirrorAgain = await mirror(), auditsAgain = await audits();

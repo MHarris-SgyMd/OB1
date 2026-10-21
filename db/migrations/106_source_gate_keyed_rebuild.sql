@@ -34,8 +34,18 @@
 --     triggers disabled; its comment now names the keyed form for a set
 --     change. 071's header still says to run the full rebuild — the file is
 --     not edited (append-only); this one supersedes that note.
---   A migration that changes node_lifecycle_types() runs, after it:
+--   A migration that changes node_lifecycle_types() does two things after it,
+--   as 105 did: the plan refresh — 105's no-op ALTER of the brain's own
+--   functions that name a set, so no session keeps a plan built on the old
+--   set (071's gate triggers among them, which would go on writing gates
+--   from it) — and
 --     SELECT * FROM ob1_rebuild_source_gate_for_types('{<each type it adds or drops>}');
+--   A change to node_settled_types() alone needs the plan refresh and no
+--   mirror work: the mirror reads node_lifecycle_types() only.
+--   scripts/check-fork-consistency.ts check 39 holds the rebuild: a migration
+--   that changes the set calls one of the two, and the keyed one with exactly
+--   the types the change adds and drops. node_lifecycle_types()'s comment
+--   says the same, where the next change is made.
 --   No table, column or grant. MINOR under the version rules.
 --
 -- NOT HERE
@@ -43,6 +53,12 @@
 --     wrong for another reason (a write with triggers disabled) is the full
 --     rebuild's, and drift() names it.
 --   * 105 itself: applied, and append-only; its full rebuild stands.
+--   * A status_type stored as a JSON number or boolean: the probe matches a
+--     JSON string, as Linear and every writer here store it; a set listing
+--     '7' or 'true' would need the full rebuild for such rows.
+--   * A common type: a type held by a large share of the rows (40%, say) is
+--     scanned rather than probed, at about the full rebuild's cost — the
+--     keyed form pays for the rows it moves.
 --
 -- Measured (PG 16, compose defaults, 1M source rows, a capture issued as the
 -- call took its locks): with 21,212 rows of the moved type the capture waited
@@ -97,13 +113,14 @@ BEGIN
   -- thoughts before thought_sources, the order a writer of both takes them.
   LOCK TABLE thoughts IN SHARE MODE;
   LOCK TABLE thought_sources IN SHARE MODE;
-  FOREACH v_type IN ARRAY p_types LOOP
-    IF v_type IS NOT NULL THEN
-      v_ids := v_ids || ARRAY(
-        SELECT o.thought_id
-          FROM thoughts t JOIN thought_sources o ON o.thought_id = t.id
-         WHERE t.metadata @> jsonb_build_object('status_type', v_type));
-    END IF;
+  -- Each type once: a list naming one a thousand times would otherwise probe,
+  -- and copy the ids gathered so far, a thousand times under the locks
+  -- (review pass 1: 8 s at 1,000 repeats of a type of 668 rows).
+  FOREACH v_type IN ARRAY ARRAY(SELECT DISTINCT x FROM unnest(p_types) x WHERE x IS NOT NULL) LOOP
+    v_ids := v_ids || ARRAY(
+      SELECT o.thought_id
+        FROM thoughts t JOIN thought_sources o ON o.thought_id = t.id
+       WHERE t.metadata @> jsonb_build_object('status_type', v_type));
   END LOOP;
   RETURN QUERY SELECT * FROM ob1_source_gate_reconcile(v_ids);
 END
@@ -114,3 +131,8 @@ COMMENT ON FUNCTION ob1_rebuild_source_gate_for_types(text[]) IS
 
 COMMENT ON FUNCTION ob1_rebuild_source_gate() IS
   'Reconciles the whole of ob1_source_gate under SHARE locks on thoughts and thought_sources and returns what it wrote and deleted — zeros when it was exact. Refuses to run outside READ COMMITTED. 071''s seed and the repair after a write made with either table''s user triggers disabled (beside ob1_rebuild_node_projection(), 068''s). A migration that changes node_lifecycle_types() runs ob1_rebuild_source_gate_for_types(<the types it moves>) instead, whose cost follows those rows (106). Migrations 071, 106 / SMD-2267, SMD-3160.';
+
+-- Where the next set change is made: the set's own comment says what follows
+-- it (105's words kept, then this).
+COMMENT ON FUNCTION node_lifecycle_types() IS
+  'The status types node_state knows — Linear''s seven state types, in board order. A status_type outside them is unknown: no lifecycle, no claim that a blocker is settled. graph-centrality.ts''s LIFECYCLE_TYPES must equal it. A migration that changes it runs, after it, the plan refresh (105''s no-op ALTER of the brain''s functions that name a set) and SELECT * FROM ob1_rebuild_source_gate_for_types(''{<each type it adds or drops>}'') — check 39 holds the second. Migration 058 / SMD-2074; duplicate since migration 105 / SMD-2935; the rebuild, 106 / SMD-3160.';

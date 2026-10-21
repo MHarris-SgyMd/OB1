@@ -15354,8 +15354,9 @@ console.log("\n[95] Migration 106: a keyed rebuild of 071's gate mirror for a st
   await db.exec(`CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{${[...known, "kgweird"].join(",")}}'::text[] $$`);
   await q(`UPDATE ob1_source_gate SET gates = false WHERE thought_id = $1`, [d1]);
   const before = await drift();
-  // The moved type second, behind one no row holds: every type given is read.
-  const added = await keyed(["kgnone", "kgweird"]);
+  // The moved type second, behind one no row holds, and named twice: every
+  // type given is read, each once.
+  const added = await keyed(["kgnone", "kgweird", "kgweird"]);
   const g1 = await gates(), after = await drift();
   assert(before === 3 && added.written === 2 && added.deleted === 0 && g1.get(w1) === true && g1.get(w2) === true && g1.get(s1) === true && g1.get(d1) === false && after === 1,
     `a set change that adds a type: the keyed form reconciles that type's two rows and no other — the wrong row it was not asked about stays wrong, drift() still naming it (${before} → ${after}; ${JSON.stringify(added)})`);
@@ -15389,9 +15390,10 @@ console.log("\n[95] Migration 106: a keyed rebuild of 071's gate mirror for a st
   // 106 again changes nothing; its comments name it and the full rebuild names it back.
   let reapplied: string;
   try { reapplied = await reapply(the106); } catch (e) { reapplied = `threw: ${(e as Error).message}`; }
-  const [c] = await q<{ k: string; f: string }>(`SELECT obj_description('ob1_rebuild_source_gate_for_types(text[])'::regprocedure, 'pg_proc') AS k, obj_description('ob1_rebuild_source_gate()'::regprocedure, 'pg_proc') AS f`);
-  assert(reapplied.endsWith("_source_gate_keyed_rebuild.sql") && (await drift()) === 0 && /Migration 106 \/ SMD-3160/.test(c.k) && /ob1_rebuild_source_gate_for_types/.test(c.f) && /Migrations 071, 106/.test(c.f),
-    `a re-apply of 106 is a no-op; its function's comment names it, and the full rebuild's names the keyed form for a set change (${reapplied.slice(0, 60)})`);
+  const [c] = await q<{ k: string; f: string; s: string }>(`SELECT obj_description('ob1_rebuild_source_gate_for_types(text[])'::regprocedure, 'pg_proc') AS k, obj_description('ob1_rebuild_source_gate()'::regprocedure, 'pg_proc') AS f, obj_description('node_lifecycle_types()'::regprocedure, 'pg_proc') AS s`);
+  assert(reapplied.endsWith("_source_gate_keyed_rebuild.sql") && (await drift()) === 0 && /Migration 106 \/ SMD-3160/.test(c.k) && /ob1_rebuild_source_gate_for_types/.test(c.f) && /Migrations 071, 106/.test(c.f)
+      && /ob1_rebuild_source_gate_for_types/.test(c.s) && /plan refresh/.test(c.s) && /Migration 058 \/ SMD-2074/.test(c.s) && /SMD-2935/.test(c.s),
+    `a re-apply of 106 is a no-op; its function's comment names it, the full rebuild's names the keyed form for a set change, and the set's own says what a change to it runs, 058's and 105's words kept (${reapplied.slice(0, 60)})`);
 
   await db.query(`DELETE FROM thoughts WHERE content LIKE '[95]%'`);
 }

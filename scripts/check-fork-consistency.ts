@@ -447,6 +447,13 @@
  *      no rule paused or recording. What Grafana itself refuses is left to it:
  *      it refuses the file and lgtm does not start, which CI's observability
  *      step sees. Each rule is the only catch of one of its probes
+ *  39. a status-set change rebuilds the gate it moves (SMD-3160): a
+ *      migration that redefines node_lifecycle_types() to another set than
+ *      the file before it calls a rebuild of 071's mirror — the full
+ *      ob1_rebuild_source_gate(), or 106's
+ *      ob1_rebuild_source_gate_for_types('{…}') with exactly the types the
+ *      change adds and drops — read on the comment-stripped text, the sets
+ *      from their literals. Each rule is the only catch of one of its probes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34, 35, 36, 37 and 38 parse YAML with Bun.YAML)
@@ -457,7 +464,7 @@ import { readFileSync, existsSync, readdirSync, statSync, lstatSync } from "node
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
-import { coreColumnCommentStatement, coreFunctionStatement, DESTRUCTIVE_SQL_RULES, destructiveSqlIn, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
+import { coreColumnCommentStatement, coreFunctionStatement, DESTRUCTIVE_SQL_RULES, destructiveSqlIn, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, stripSqlComments, supabaseIsmsIn } from "../db/config.mjs";
 import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.ts";
 import { FORK_VERSION, REPO_URL, migrationSha, readReleases, schemaVersionValue, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.ts";
@@ -8833,6 +8840,70 @@ function checkAlertRules() {
   }
 }
 checkAlertRules();
+
+// ── Check 39: a status-set change rebuilds the gate it moves (SMD-3160) ──────
+// 071's ob1_source_gate stores, per source row, whether its thought's
+// status_type is in node_lifecycle_types(). A migration that changes the set
+// leaves those rows wrong until a rebuild: the full one, or 106's keyed one,
+// which reconciles only the types it is given — a type left out stays wrong
+// on every brain, and only drift() would say so. The sets are read from the
+// files' literals, in order, so the types a change moves are known exactly.
+type SetChangeRule = "rebuild" | "types";
+const SET_DEF = /\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:public\.)?node_lifecycle_types\s*\(\s*\)[\s\S]*?'\{([^}']*)\}'\s*::\s*text\s*\[\s*\]/i;
+// A call: after SELECT … FROM, FROM or PERFORM — not a definition, nor a name
+// quoted in a guard (to_regprocedure('ob1_rebuild_source_gate()'), as 105 has).
+const FULL_CALL = /\b(?:FROM|PERFORM)\s+(?:public\.)?ob1_rebuild_source_gate\s*\(\s*\)/i;
+const KEYED_CALL = /\b(?:FROM|PERFORM)\s+(?:public\.)?ob1_rebuild_source_gate_for_types\s*\(\s*'\{([^}']*)\}'/gi;
+const setOf = (literal: string) => new Set(literal.split(",").map((t) => t.trim().replace(/^"(.*)"$/, "$1")).filter((t) => t !== ""));
+/** Each migration (in order) that redefines the set to another than the one before, without a rebuild of exactly what it moves. */
+function setChangeProblems(files: readonly { name: string; text: string }[]): [SetChangeRule, string, string][] {
+  const out: [SetChangeRule, string, string][] = [];
+  let prev: Set<string> | null = null;
+  for (const { name, text } of files) {
+    const code = stripSqlComments(text) as string;
+    const def = SET_DEF.exec(code);
+    if (!def) continue;
+    const next = setOf(def[1]);
+    if (prev !== null) {
+      const moved = [...new Set([...[...next].filter((t) => !prev!.has(t)), ...[...prev].filter((t) => !next.has(t))])].sort();
+      if (moved.length > 0) {
+        const keyed = [...code.matchAll(KEYED_CALL)].map((m) => [...setOf(m[1])].sort());
+        if (!FULL_CALL.test(code) && keyed.length === 0) {
+          out.push(["rebuild", name, `it changes node_lifecycle_types() (moving ${moved.join(", ")}) and calls no rebuild of 071's gate mirror — add SELECT * FROM ob1_rebuild_source_gate_for_types('{${moved.join(",")}}') after the set`]);
+        } else if (!FULL_CALL.test(code) && !keyed.some((k) => k.join() === moved.join())) {
+          out.push(["types", name, `its ob1_rebuild_source_gate_for_types call names {${keyed.map((k) => k.join(",")).join("} and {")}}, but the change moves {${moved.join(",")}} — every type it adds and every type it drops`]);
+        }
+      }
+    }
+    prev = next;
+  }
+  return out;
+}
+const SET_BASE = { name: "001_base.sql", text: "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;" };
+const setChange = (body: string) => ({ name: "002_change.sql", text: body });
+const SET_PROBES: [string, string, SetChangeRule[]][] = [
+  ["a change that runs the full rebuild", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$; SELECT * FROM ob1_rebuild_source_gate();", []],
+  ["a change that runs the keyed form with what it adds", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$; SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');", []],
+  ["a change that adds and drops, keyed with both", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,c}'::text[] $$; SELECT * FROM ob1_rebuild_source_gate_for_types('{c, b}');", []],
+  ["the same set again", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{b,a}'::text[] $$;", []],
+  ["a change with no rebuild", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$;", ["rebuild"]],
+  ["a change whose only mention of the rebuild is a guard's quoted name", "DO $g$ BEGIN IF to_regprocedure('ob1_rebuild_source_gate()') IS NULL THEN RAISE EXCEPTION 'x'; END IF; END $g$; CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$;", ["rebuild"]],
+  ["a change whose rebuild is only in a comment", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$;\n-- SELECT * FROM ob1_rebuild_source_gate();", ["rebuild"]],
+  ["a change that adds and drops, keyed with what it adds alone", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,c}'::text[] $$; SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');", ["types"]],
+];
+function checkSetChanges() {
+  for (const [what, body, expected] of SET_PROBES) {
+    const got = setChangeProblems([SET_BASE, setChange(body)]).map(([rule]) => rule);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 39 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  // A definition of the full rebuild is no call of it.
+  const defOnly = setChangeProblems([SET_BASE, setChange("CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$; CREATE OR REPLACE FUNCTION ob1_rebuild_source_gate() RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;")]).map(([rule]) => rule);
+  if (JSON.stringify(defOnly) !== JSON.stringify(["rebuild"])) fail(SELF, `check 39 no longer reports exactly ["rebuild"] for its probe "a change beside a definition of the full rebuild, no call" (reported ${JSON.stringify(defOnly)})`);
+  const dir = join(ROOT, "db/migrations");
+  const files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort().map((f) => ({ name: f, text: readFileSync(join(dir, f), "utf8") }));
+  for (const [, name, detail] of setChangeProblems(files)) fail(`db/migrations/${name}`, `${detail} (check 39, SMD-3160)`);
+}
+checkSetChanges();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so
