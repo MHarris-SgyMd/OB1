@@ -2089,6 +2089,303 @@ if (want("6j")) {
   await sql`DELETE FROM thoughts`;
 }
 
+if (want("6k")) {
+  console.log("\n[6k] The lapse locks its own tree: a link moved out under a taking's lapse waits or is read again and leaves the pointers above it, a link moved in waits for the taking and lapses the pointer above it, in either order; the path locked bottom-up and a pointer's target chain bottom-up, so neither deadlocks — but for the one named residual, a pointer write whose target chain reaches a row the taking holds, moving a row it will lock; page writes never deadlock (migration 104, SMD-3046)");
+  await sql`DELETE FROM thoughts`;
+  // S is the hook's, its capture pointer `first` onto S; a write key's
+  // re-capture note on S takes S (082), and its lapse clears `first` and
+  // what the walk finds above. Each arm holds one side open, or pauses the
+  // taking's lapse after its walk on an advisory gate this section holds,
+  // so the order is fixed and the other side's wait is read from pg_locks.
+  const agentOf = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
+  // [6j]'s two keys, as it made them.
+  const HOOK = { name: "hook-6j", agent_id: await agentOf("e", "hook-6j", "capture"), via: "test-door", scope: "capture" };
+  const OPER = { name: "oper-6j", agent_id: await agentOf("7", "oper-6j", "write"), via: "test-door" };
+  await sql`SELECT set_agent_kind('hook-6j', 'agent'), set_agent_kind('oper-6j', 'operator')`;
+  let n = 0;
+  const cap = async (label: string, actor: Record<string, unknown>, supersedes?: string) =>
+    ((await sql`SELECT upsert_thought(${`[6k] ${label} ${++n}`}, ${{ metadata: { source: "test" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }}::jsonb, ${unit(42)}::vector) AS r`)[0].r as { id: string }).id;
+  const pointerOf = async (id: string) => (await sql`SELECT supersedes FROM thoughts WHERE id = ${id}::uuid`)[0].supersedes as string | null;
+  const waitFor = async (pred: () => boolean | Promise<boolean>, ticks = 400) => { for (let i = 0; i < ticks && !(await pred()); i++) await Bun.sleep(20); };
+  /** Locks a backend waits on, of any kind — a row's, a transaction's, an advisory gate's. */
+  const waiting = async (pid: number) => Number((await sql`SELECT count(*)::int AS n FROM pg_locks WHERE NOT granted AND pid = ${pid}`)[0].n);
+  const gate = () => { let open: () => void = () => {}; const p = new Promise<void>((r) => { open = r; }); return { p, open }; };
+  type Out = { pid: number; result?: unknown; error?: string; done?: boolean };
+  /** Calls in one transaction, held open until `done`; its pid reported first, `out.result` the last call's. */
+  const hold = (conn: SQL, stmts: ((tx: SQL) => Promise<unknown>)[], done: Promise<void>, out: Out, between?: Promise<void>) =>
+    conn.begin(async (tx: SQL) => {
+      await tx`SET LOCAL statement_timeout = '8s'`;
+      out.pid = Number((await tx`SELECT pg_backend_pid() AS pid`)[0].pid);
+      for (const [i, stmt] of stmts.entries()) {
+        if (i > 0 && between) await between;
+        out.result = await stmt(tx);
+      }
+      out.done = true;
+      await done;
+    }).catch((e: Error) => { out.error = e.message; out.done = true; });
+  const note = (s: string, pause = false) => async (tx: SQL) => {
+    if (pause) await tx`SELECT set_config('ob1.t6k_pause', 'ob1:t6k', true)`;
+    return (await tx`SELECT ob1_note_recapture(${s}::uuid, ${OPER}::jsonb) AS r`)[0].r as boolean;
+  };
+  const point = (id: string, to: string | null) => (tx: SQL) => (to === null
+    ? tx`SELECT update_thought(p_id := ${id}::uuid, p_actor := ${OPER}::jsonb, p_provenance := '{"supersedes": null}'::jsonb) AS r`
+    : tx`SELECT update_thought(p_id := ${id}::uuid, p_actor := ${OPER}::jsonb, p_provenance := jsonb_build_object('supersedes', ${to}::uuid)) AS r`).then((r) => r[0].r as { ok: boolean });
+  const touch = (id: string) => (tx: SQL) => tx`SELECT update_thought(p_id := ${id}::uuid, p_metadata_patch := ${{ touched: true }}::jsonb, p_actor := ${OPER}::jsonb) AS r`.then((r) => r[0].r as { ok: boolean });
+  const linkNow = async (id: string, to: string) => (await sql`SELECT update_thought(p_id := ${id}::uuid, p_actor := ${OPER}::jsonb, p_provenance := jsonb_build_object('supersedes', ${to}::uuid)) AS r`)[0].r as { ok: boolean };
+  const dead = (...o: Out[]) => o.some((x) => /deadlock/.test(x.error ?? ""));
+  const fixture = async () => {
+    const s = await cap("S, the hook's", HOOK), first = await cap("first, onto S", HOOK, s);
+    const x = await cap("X, the hook's", HOOK), y = await cap("Y, onto X", HOOK, x);
+    const linked = await linkNow(x, s);
+    assert(linked.ok && (await pointerOf(y)) === x && (await pointerOf(x)) === s && (await pointerOf(first)) === s, "[6k] setup: first→S, the write key's X→S, Y→X");
+    return { s, first, x, y };
+  };
+
+  // Moved out: the write key's unlink of X held open; the note on S walks,
+  // and its lock of the link X→S waits on the unlink. Then it reads X again,
+  // finds it moved, and leaves the hook's Y on X.
+  {
+    const { s, first, x, y } = await fixture();
+    const connA = racer(), connB = racer();
+    const { p: bDone, open: openB } = gate(), { p: aDone, open: openA } = gate();
+    const b: Out = { pid: -1 }, a: Out = { pid: -1 };
+    const bTx = hold(connB, [point(x, null)], bDone, b);
+    await waitFor(() => b.done === true);
+    const aTx = hold(connA, [note(s)], aDone, a);
+    await waitFor(async () => a.done === true || (a.pid > 0 && (await waiting(a.pid)) > 0));
+    const aWaited = !a.done && a.pid > 0 && (await waiting(a.pid)) > 0;
+    openB(); await bTx;
+    await waitFor(() => a.done === true);
+    openA(); await aTx;
+    await connA.close(); await connB.close();
+    assert(aWaited && a.result === true && !dead(a, b) && (await pointerOf(first)) === null && (await pointerOf(x)) === null && (await pointerOf(y)) === x,
+      `a link moved out under the lapse: the note's lock of X waits on the unlink, reads X moved, clears first and leaves the hook's Y on X (${aWaited ? "waited" : `did not wait: ${a.error ?? JSON.stringify(a.result)}`}; first→${await pointerOf(first)}, Y→${(await pointerOf(y)) === x ? "X" : await pointerOf(y)})`);
+  }
+
+  // Moved in, the taking first: the note on S held open; the write key links
+  // Z onto S, and its lapse's lock of S's chain waits on the note. Then its
+  // walk reads S taken and clears the hook's Y2 above Z.
+  // Moved in, the link first: the link of Z onto S held open (S locked FOR
+  // SHARE by its lapse); the note waits at S's row, then its walk reads Z
+  // on S and clears Y2.
+  for (const linkFirst of [false, true]) {
+    const { s, first } = await fixture();
+    const z = await cap("Z, the hook's", HOOK), y2 = await cap("Y2, onto Z", HOOK, z);
+    const connA = racer(), connB = racer();
+    const { p: firstDone, open: openFirst } = gate(), { p: secondDone, open: openSecond } = gate();
+    const one: Out = { pid: -1 }, two: Out = { pid: -1 };
+    const [firstCall, secondCall] = linkFirst ? [point(z, s), note(s)] : [note(s), point(z, s)];
+    const firstTx = hold(connA, [firstCall], firstDone, one);
+    await waitFor(() => one.done === true);
+    const secondTx = hold(connB, [secondCall], secondDone, two);
+    await waitFor(async () => two.done === true || (two.pid > 0 && (await waiting(two.pid)) > 0));
+    const waited = !two.done && two.pid > 0 && (await waiting(two.pid)) > 0;
+    openFirst(); await firstTx;
+    await waitFor(() => two.done === true);
+    openSecond(); await secondTx;
+    await connA.close(); await connB.close();
+    assert(waited && !dead(one, two) && (await pointerOf(first)) === null && (await pointerOf(z)) === s && (await pointerOf(y2)) === null,
+      `a link moved in, ${linkFirst ? "the link held first: the note waits at S" : "the note held first: the link's chain lock waits at S"}, and the hook's Y2 above Z is lapsed (${waited ? "waited" : `did not wait: ${two.error ?? JSON.stringify(two.result)}`}; Y2→${await pointerOf(y2)})`);
+  }
+
+  // The pause arms: a scratch copy of the trigger waits, when the taking's
+  // transaction says so, on an advisory gate this section holds — after its
+  // walk, before its locks. Put back as it was in `finally`.
+  const shipped = String((await sql`SELECT pg_get_functiondef('ob1_lapse_capture_pointers()'::regprocedure) AS d`)[0].d);
+  const AFTER_TREE = "  v_tree := ob1_lapse_tree(NEW.thought_id, v_to);\n";
+  const PAUSE = "  IF COALESCE(current_setting('ob1.t6k_pause', true), '') <> '' THEN\n    PERFORM pg_advisory_lock_shared(hashtext(current_setting('ob1.t6k_pause')));\n    PERFORM pg_advisory_unlock_shared(hashtext(current_setting('ob1.t6k_pause')));\n  END IF;\n";
+  assert(shipped.includes(AFTER_TREE), "[6k] setup: the shipped trigger calls the tree where the pause hooks in");
+  const connG = racer();
+  await sql.unsafe(shipped.replace(AFTER_TREE, AFTER_TREE + PAUSE));
+  try {
+    /** A taking paused after its walk, a second writer's steps, then the gate opened; the outcomes. */
+    const paused = async (taking: (tx: SQL) => Promise<unknown>, steps: ((tx: SQL) => Promise<unknown>)[], opts: { releaseAfterFirst?: boolean } = {}) => {
+      await connG`SELECT pg_advisory_lock(hashtext('ob1:t6k'))`;
+      const connA = racer(), connB = racer();
+      const { p: aDone, open: openA } = gate(), { p: bDone, open: openB } = gate(), { p: bNext, open: openNext } = gate();
+      const a: Out = { pid: -1 }, b: Out = { pid: -1 };
+      const aTx = hold(connA, [taking], aDone, a);
+      await waitFor(async () => a.done === true || (a.pid > 0 && (await waiting(a.pid)) > 0));
+      const bTx = hold(connB, steps, bDone, b, bNext);
+      let bWaited = false;
+      if (opts.releaseAfterFirst) {
+        // B's first step lands; the gate opens; A's path lock waits on B; then B's next step.
+        await waitFor(() => b.result !== undefined || b.error !== undefined);
+        await connG`SELECT pg_advisory_unlock(hashtext('ob1:t6k'))`;
+        await waitFor(async () => a.done === true || (await waiting(a.pid)) > 0 && !(await sql`SELECT 1 FROM pg_locks WHERE NOT granted AND pid = ${a.pid} AND locktype = 'advisory'`).length);
+        openNext();
+        // B finishes and commits; A, waiting on B's row, then finishes.
+        await waitFor(() => b.done === true);
+        openB(); await bTx;
+        await waitFor(() => a.done === true);
+        openA(); await aTx;
+      } else {
+        // B blocks on A; the gate opens; A finishes and commits; then B.
+        await waitFor(async () => b.done === true || (b.pid > 0 && (await waiting(b.pid)) > 0));
+        bWaited = !b.done && (await waiting(b.pid)) > 0;
+        await connG`SELECT pg_advisory_unlock(hashtext('ob1:t6k'))`;
+        openNext();
+        await waitFor(() => a.done === true);
+        openA(); await aTx;
+        await waitFor(() => b.done === true);
+        openB(); await bTx;
+      }
+      await connA.close(); await connB.close();
+      return { a, b, bWaited };
+    };
+
+    // Path order: B edits X's metadata (X locked) and holds; the gate opens
+    // and A's bottom-up lock of X waits on B, holding nothing above X; B
+    // then unlinks X2 above X, unhindered, and commits. A reads X2 moved and
+    // leaves the hook's Y3 on X2. Top-down, A would hold X2 FOR SHARE and
+    // B's unlink of it would close a cycle.
+    {
+      // No hook pointer onto X itself here: the first path the taking locks
+      // is Y3's, X2 then X, so the order is what decides (with one onto X,
+      // its one-link path would wait on X first either way).
+      const s = await cap("S, the hook's", HOOK), first = await cap("first, onto S", HOOK, s);
+      const x = await cap("X, the hook's", HOOK);
+      const x2 = await cap("X2, the hook's", HOOK), y3 = await cap("Y3, onto X2", HOOK, x2);
+      assert((await linkNow(x, s)).ok && (await linkNow(x2, x)).ok && (await pointerOf(first)) === s, "[6k] setup: first→S, the write key's X→S and X2→X, Y3→X2");
+      const r = await paused(note(s, true), [touch(x), point(x2, null)], { releaseAfterFirst: true });
+      assert(!dead(r.a, r.b) && r.a.result === true && (await pointerOf(first)) === null && (await pointerOf(x2)) === null && (await pointerOf(y3)) === x2,
+        `path order: B holds X, A's bottom-up lock waits on it holding nothing above, B unlinks X2 and commits; no deadlock, and the hook's Y3 stays on the moved X2 (${r.a.error ?? r.b.error ?? "ok"}; Y3→${(await pointerOf(y3)) === x2 ? "X2" : await pointerOf(y3)})`);
+    }
+
+    // Chain order: A paused after its walk, holding S; B links its Z onto
+    // first, a row A clears, and its lapse locks first's chain from S up — it
+    // waits at S without holding first, so A clears first and commits. Top-
+    // down, B would hold first FOR SHARE while A wants it: a cycle.
+    {
+      const { s, first } = await fixture();
+      const z = await cap("Z, the hook's", HOOK);
+      const r = await paused(note(s, true), [point(z, first)]);
+      assert(r.bWaited && !dead(r.a, r.b) && r.a.result === true && (r.b.result as { ok?: boolean } | undefined)?.ok === true && (await pointerOf(first)) === null && (await pointerOf(z)) === first,
+        `chain order: B's link onto first waits at S for the paused taking, never holding first; no deadlock, first lapsed, Z on it (${r.bWaited ? "waited" : "did not wait"}; ${r.a.error ?? r.b.error ?? "ok"})`);
+    }
+
+    // The named residual, one instance: B re-points X — a link of A's tree —
+    // onto first, whose chain reaches A's row, while A is paused. B's chain
+    // lock waits on A's row; A's path lock then waits on X, which B holds:
+    // Postgres breaks the cycle with 40P01 in one of the two, and the other
+    // completes.
+    {
+      const { s, x } = await fixture();
+      const r = await paused(note(s, true), [point(x, (await sql`SELECT id FROM thoughts WHERE supersedes = ${s}::uuid AND id <> ${x}::uuid`)[0].id as string)]);
+      assert(dead(r.a, r.b) && !(r.a.error && r.b.error),
+        `the named residual: a re-point of a link of the taking's tree onto a row whose chain reaches the taken row, overlapping the taking, deadlocks — one side rolls back with 40P01, the other completes (A: ${r.a.error?.slice(0, 40) ?? "ok"}; B: ${r.b.error?.slice(0, 40) ?? "ok"})`);
+    }
+    // A row the lapse clears, held by a transaction of several calls that
+    // then moves a link on another branch, or deletes the row: the lapse
+    // locks each clear's row right after the links under it, so it waits on
+    // that row holding nothing on its path above it, and the second call
+    // goes through. Holding a link and waiting on the row in its clear
+    // crossed both (review pass 2): the unlink of X waited on the link the
+    // lapse held, and the delete's cascade on the link above the deleted
+    // row. (A link on the held row's own path is still locked before the row
+    // — a delete's cascade needs that order — the multi-call class 104's
+    // header names.)
+    {
+      const { s, first, x, y } = await fixture();
+      const edit = (tx: SQL) => tx`SELECT update_thought(p_id := ${first}::uuid, p_content := ${"[6k] first, the hook's own word edited"}::text, p_actor := ${HOOK}::jsonb) AS r`.then((r) => r[0].r as { ok: boolean });
+      const r = await paused(note(s, true), [edit, point(x, null)], { releaseAfterFirst: true });
+      assert(!dead(r.a, r.b) && r.a.result === true && (await pointerOf(first)) === null && (await pointerOf(x)) === null && (await pointerOf(y)) === x,
+        `a transaction edits first (a row the lapse clears) and then unlinks X, on another branch: the lapse waits on first holding nothing on its path, the unlink goes through; no deadlock, first lapsed, Y left on the moved X (${r.a.error ?? r.b.error ?? "ok"}; Y→${(await pointerOf(y)) === x ? "X" : await pointerOf(y)})`);
+    }
+    {
+      // h, the hook's pointer onto S, taken by the write key's re-capture; r
+      // the hook's, linked onto h by the write key; h3 the hook's onto r,
+      // planted after h was taken (082's check refuses it then, as a brain
+      // from before 082 holds one). Taking S clears h and, from it, h3.
+      const s = await cap("S, the hook's", HOOK), h = await cap("h, onto S", HOOK, s), rr = await cap("r, the hook's", HOOK);
+      assert((await linkNow(rr, h)).ok, "[6k] setup: the write key's r→h");
+      await sql`SELECT ob1_note_recapture(${h}::uuid, ${OPER}::jsonb)`;
+      await sql`ALTER TABLE thought_audit DISABLE TRIGGER thought_audit_check_capture_pointer`;
+      let h3 = "";
+      try { h3 = await cap("h3, onto r", HOOK, rr); } finally { await sql`ALTER TABLE thought_audit ENABLE TRIGGER thought_audit_check_capture_pointer`; }
+      const touchH = (tx: SQL) => tx`SELECT update_thought(p_id := ${h}::uuid, p_metadata_patch := ${{ touched: true }}::jsonb, p_actor := ${OPER}::jsonb) AS r`.then((q) => q[0].r as { ok: boolean });
+      const del = (tx: SQL) => tx`SELECT delete_thought(${h}::uuid, NULL::jsonb) AS r`.then((q) => q[0].r as { ok: boolean });
+      const r = await paused(note(s, true), [touchH, del], { releaseAfterFirst: true });
+      const gone = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id = ${h}::uuid`)[0].c) === 0;
+      assert(!dead(r.a, r.b) && r.a.result === true && (r.b.result as { ok?: boolean } | undefined)?.ok === true && gone && (await pointerOf(rr)) === null && (await pointerOf(h3)) === rr,
+        `a transaction holds h (a cleared row the walk went on from) and then deletes it: the lapse waits on h holding nothing above it, the delete's cascade unlinks r; no deadlock, and h3 left on r — no longer under the taken row (${r.a.error ?? r.b.error ?? "ok"}; r→${await pointerOf(rr)}, h3→${(await pointerOf(h3)) === rr ? "r" : await pointerOf(h3)})`);
+    }
+    // A re-point out of the tree with both lapses paused after their walks:
+    // the taking released first locks its links before any clear, so it
+    // waits on X — which the re-point holds — holding no node-state bucket;
+    // the re-point, released, clears Y and projects X (taking S's bucket)
+    // and commits; the taking then reads X moved. Clearing `first` before
+    // locking X took S's bucket first, and the re-point's projection closed
+    // a cycle on it (the race table's first live run).
+    {
+      const { s, first, x, y } = await fixture();
+      const h3 = await cap("H3, the write key's", OPER);
+      await connG`SELECT pg_advisory_lock(hashtext('ob1:t6k')), pg_advisory_lock(hashtext('ob1:t6k-b'))`;
+      const connA = racer(), connB = racer();
+      const { p: aDone, open: openA } = gate(), { p: bDone, open: openB } = gate();
+      const a: Out = { pid: -1 }, b: Out = { pid: -1 };
+      const advisoryWait = async (pid: number) => (await sql`SELECT 1 FROM pg_locks WHERE NOT granted AND pid = ${pid} AND locktype = 'advisory'`).length > 0;
+      const aTx = hold(connA, [note(s, true)], aDone, a);
+      await waitFor(async () => a.done === true || (a.pid > 0 && (await advisoryWait(a.pid))));
+      const bTx = hold(connB, [async (tx: SQL) => { await tx`SELECT set_config('ob1.t6k_pause', 'ob1:t6k-b', true)`; return point(x, h3)(tx); }], bDone, b);
+      await waitFor(async () => b.done === true || (b.pid > 0 && (await advisoryWait(b.pid))));
+      await connG`SELECT pg_advisory_unlock(hashtext('ob1:t6k'))`;
+      await waitFor(async () => a.done === true || ((await waiting(a.pid)) > 0 && !(await advisoryWait(a.pid))));
+      const aWaitedOnX = !a.done && (await waiting(a.pid)) > 0;
+      await connG`SELECT pg_advisory_unlock(hashtext('ob1:t6k-b'))`;
+      await waitFor(() => b.done === true);
+      openB(); await bTx;
+      await waitFor(() => a.done === true);
+      openA(); await aTx;
+      await connA.close(); await connB.close();
+      assert(aWaitedOnX && !dead(a, b) && a.result === true && (b.result as { ok?: boolean } | undefined)?.ok === true && (await pointerOf(first)) === null && (await pointerOf(x)) === h3 && (await pointerOf(y)) === null,
+        `a re-point out of the tree, both lapses paused: the taking waits on X before any clear, the re-point lapses Y and commits, no deadlock (${aWaitedOnX ? "waited on X" : "did not wait"}; ${a.error ?? b.error ?? "ok"}; X→${(await pointerOf(x)) === h3 ? "H3" : await pointerOf(x)}, Y→${await pointerOf(y)})`);
+    }
+  } finally {
+    await connG.close();
+    await sql.unsafe(shipped);
+  }
+
+  // Page writes: a page another agent created, its section written by a
+  // second agent — a text move, a taking — raced against delete_thought and
+  // a write key's re-point of the page thought, twelve times each. Writer-
+  // side locks deadlocked here (SMD-3046's review pass 1: 154 of 400); the
+  // lapse's own locks take nothing a page write holds first.
+  {
+    const PAGE_A = { name: "page-a-6k", agent_id: await agentOf("8", "page-a-6k", "write"), via: "test-door" };
+    const PAGE_B = { name: "page-b-6k", agent_id: await agentOf("9", "page-b-6k", "write"), via: "test-door" };
+    const src = await cap("a source for the pages", OPER), target = await cap("a page to point at", OPER);
+    let deadlocks = 0, other = 0;
+    for (const kind of ["delete", "re-point"]) {
+      for (let i = 0; i < 12; i++) {
+        const page = await sql.begin(async (tx: SQL) => {
+          await tx`SELECT set_config('ob1.actor', ${JSON.stringify(PAGE_A)}, true)`;
+          return ((await tx`SELECT upsert_page(${`raced-6k-${kind}-${i}`}, ${`Raced ${kind} ${i}`}) AS r`)[0].r as { page_id: string }).page_id;
+        });
+        const connA = racer(), connB = racer();
+        const w = connA.begin(async (tx: SQL) => {
+          await tx`SELECT set_config('ob1.actor', ${JSON.stringify(PAGE_B)}, true)`;
+          await Bun.sleep(Math.random() * 3);
+          await tx`SELECT write_page_section(${page}::uuid, 'second', ${`Racing the ${kind}.`}, 'generated', NULL, '{}'::jsonb, ${sql.array([src], "TEXT")}::uuid[], NULL, 'gen') AS r`;
+          return "landed";
+        }).catch((e: Error) => e.message);
+        const d = (async () => {
+          await Bun.sleep(Math.random() * 3);
+          return (kind === "delete"
+            ? connB`SELECT delete_thought(${page}::uuid, NULL::jsonb) AS r`
+            : connB`SELECT update_thought(p_id := ${page}::uuid, p_actor := ${OPER}::jsonb, p_provenance := jsonb_build_object('supersedes', ${target}::uuid)) AS r`).then(() => "done", (e: Error) => e.message);
+        })();
+        const [wr, dr] = await Promise.all([w, d]);
+        if (/deadlock/.test(wr) || /deadlock/.test(dr)) deadlocks++;
+        else if (dr !== "done") other++;
+        await connA.close(); await connB.close();
+      }
+    }
+    assert(deadlocks === 0 && other === 0, `twelve page section writes by another agent raced against a delete of the page, and twelve against a re-point of it: no deadlock (${deadlocks} deadlocked, ${other} other errors)`);
+  }
+  await sql`DELETE FROM thoughts`;
+}
+
 if (want("7")) {
   console.log("\n[7] Chunk context survives capture, edit and a payload without it");
   await sql`DELETE FROM thoughts`;
