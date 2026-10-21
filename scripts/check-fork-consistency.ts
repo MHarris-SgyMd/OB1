@@ -7825,7 +7825,7 @@ function matrixCells(strategy: unknown): Record<string, unknown>[] {
   cells = cells.filter((c) => !exclude.some((x) => Object.keys(x).length > 0 && Object.entries(x).every(([k, v]) => same(c[k], v))));
   const added: Record<string, unknown>[] = [];
   for (const inc of include as Mapping[]) {
-    const fits = cells.filter((c) => Object.entries(inc).every(([k, v]) => !(k in axes) || same(c[k], v)));
+    const fits = cells.filter((c) => Object.entries(inc).every(([k, v]) => !Object.hasOwn(axes, k) || same(c[k], v)));
     if (fits.length) for (const c of fits) Object.assign(c, inc);
     else added.push({ ...inc });
   }
@@ -7909,15 +7909,16 @@ function scriptRunsIn(rel: string, doc: unknown, unread: Set<string> = new Set()
     if (!isMapping(def) || failureIgnored(def)) continue;
     const jobWd = wdOf(def.defaults) ?? top ?? ".";
     const steps = Array.isArray(def.steps) ? def.steps : [];
-    // A job with no readable matrix is one empty cell, its values left as written.
     for (const cell of matrixCells(def.strategy)) {
-      const fill = (env: Record<string, string>): Record<string, string> =>
-        Object.keys(cell).length ? Object.fromEntries(Object.entries(env).map(([k, v]) => [k, fillMatrix(v, cell)])) : env;
-      const fillText = (v: string): string => (Object.keys(cell).length ? fillMatrix(v, cell) : v);
-      const cellName = Object.keys(cell).length ? ` (${Object.values(cell).map(matrixText).join(", ")})` : "";
+      // A job with no readable matrix is one empty cell, its values left as written.
+      const inCell = Object.keys(cell).length > 0;
+      const fillText = (v: string): string => (inCell ? fillMatrix(v, cell) : v);
+      const fill = (env: Record<string, string>): Record<string, string> => Object.fromEntries(Object.entries(env).map(([k, v]) => [k, fillText(v)]));
+      const cellName = inCell ? ` (${Object.values(cell).map(matrixText).join(", ")})` : "";
       const jobEnv = fill({ ...topEnv, ...envOf(def) });
       steps.forEach((step, i) => {
         if (!isMapping(step) || typeof step.run !== "string" || failureIgnored(step)) return;
+        const stepName = typeof step.name === "string" ? JSON.stringify(step.name) : i + 1;
         const runs = matrixIfHolds(step.if, cell);
         if (runs === false) return;
         const runsBefore = out.length;
@@ -7925,7 +7926,7 @@ function scriptRunsIn(rel: string, doc: unknown, unread: Set<string> = new Set()
         const wd = posix.normalize(typeof step["working-directory"] === "string" ? fillText(step["working-directory"]) : jobWd);
         const text = fillText(step.run).replace(/\\\n/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)).join("\n").replace(SHELL_QUOTED, '""');
         const dirs = [wd, ...[...text.matchAll(SHELL_CD)].map((m) => posix.normalize(posix.join(wd, m[1])))];
-        const where = `${rel}: job ${job}${cellName}, step ${typeof step.name === "string" ? JSON.stringify(step.name) : i + 1}`;
+        const where = `${rel}: job ${job}${cellName}, step ${stepName}`;
         const stepEnv = { ...jobEnv, ...fill(envOf(step)) };
         for (const m of text.matchAll(SCRIPT_RUN)) {
           if (SHELL_SWALLOWED.test(text.slice(m.index! + m[0].length))) continue;
@@ -7936,7 +7937,7 @@ function scriptRunsIn(rel: string, doc: unknown, unread: Set<string> = new Set()
           const inline = Object.fromEntries((SHELL_ASSIGNS.exec(segment)?.[1] ?? "").trim().split(/\s+/).filter(Boolean).map((a) => [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]));
           out.push({ dirs, script: m[1], args: m[2].trim().split(/\s+/).filter(Boolean).join(" "), env: { ...stepEnv, ...inline }, job, where });
         }
-        if (runs === "unread" && out.length > runsBefore) unread.add(`${rel}: job ${job}, step ${typeof step.name === "string" ? JSON.stringify(step.name) : i + 1}`);
+        if (runs === "unread" && out.length > runsBefore) unread.add(`${rel}: job ${job}, step ${stepName}`);
       });
     }
   }
