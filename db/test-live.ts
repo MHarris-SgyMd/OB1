@@ -7607,10 +7607,11 @@ if (want("16")) {
 
   // SMD-3115, decide mode: a stub tier (ob1-jev/1) answers prompt 4's five
   // verdicts as one choice, and a stub writer, asked only where the tier's top
-  // is outdates, writes the proposal. The pass key names both; a standing
-  // proposal is recorded at the tier's P(outdates) with decide mode's lineage,
-  // a related pair is a relation with no writer call, and a writer's "none"
-  // leaves neither. A start without the tier, or with the tier held to
+  // is outdates at the pass's floor (SMD-3151), writes the proposal. The pass
+  // key names both; a standing proposal is recorded at the tier's P(outdates)
+  // with decide mode's lineage, a related pair is a relation with no writer
+  // call, so is an outdates under the floor, and a writer's "none" leaves
+  // neither. A start without the tier, or with the tier held to
   // another model, is refused before anything is claimed.
   {
     const DECIDER = "h2o-stub", WRITER = "stub-writer";
@@ -7633,6 +7634,7 @@ if (want("16")) {
         const p: Record<string, number> = /tenancy/.test(both) ? { unrelated: 0.03, related: 0.1, evolves: 0.05, duplicate: 0.02, outdates: 0.8 }
           : /cutover/.test(both) ? { unrelated: 0.05, related: 0.2, evolves: 0.1, duplicate: 0.05, outdates: 0.6 }
           : /runbook/.test(both) ? { unrelated: 0.05, related: 0.7, evolves: 0.15, duplicate: 0.05, outdates: 0.05 }
+          : /migration/.test(both) ? { unrelated: 0, related: 0.38, evolves: 0.2, duplicate: 0, outdates: 0.42 }
           : { unrelated: 0.9, related: 0.05, evolves: 0.02, duplicate: 0.01, outdates: 0.02 };
         const probabilities: Record<string, number> = { ...Object.fromEntries(d.options.map((o) => [o.id, p[o.id] ?? 0])), __insufficient_evidence__: 0 };
         const ids = Object.keys(probabilities);
@@ -7649,13 +7651,17 @@ if (want("16")) {
         if (prompt === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
         writerCalls++;
         writerModels.add(String(body.model));
-        // The pass's writer (decide version 1): the part rule, and not the record rule, version 2's, shelved 2026-10-18.
+        // The pass's writer (decide version 1's, kept by version 3): the part rule, and not the record rule, version 2's, shelved 2026-10-18.
         if (prompt.includes(PART_RULE.trim()) && !prompt.includes(RECORD_RULE.trim())) writerPartRule++;
+        // The migration pair's proposal would stand if the writer were asked: under the floor it must not be, or the
+        // standing outdates would record nothing and close the pair's relation (SMD-3151 review pass 4).
         const answer = /tenancy/.test(thoughtsIn(prompt)) ? { current: "B", evidence: "now runs 90 days", stale: "runs 30 days", reason: "the tenancy was extended" }
+          : /migration/.test(thoughtsIn(prompt)) ? { current: "B", evidence: "moved to the evening", stale: "opens at noon", reason: "the window moved" }
           : { current: "none", evidence: "", stale: "", reason: "both stay current" };
         return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }] });
       },
     });
+    const ddump = join(tmpdir(), `ob1-test-live-decide-${process.pid}.jsonl`);
     try {
       const tenOld = await seed("[16d] The tenancy runs 30 days.", 50, 3, ["tenancy"]);
       const tenNew = await seed("[16d] The tenancy now runs 90 days.", 50, 0, ["tenancy"]);
@@ -7663,6 +7669,8 @@ if (want("16")) {
       await seed("[16d] The cutover checklist has a new owner.", 51, 0, ["cutover"]);
       const runOld = await seed("[16d] The runbook lives in the wiki.", 52, 3, ["runbook"]);
       const runNew = await seed("[16d] The runbook has a section on restores.", 52, 0, ["runbook"]);
+      const migOld = await seed("[16d] The migration window opens at noon.", 53, 3, ["migration"]);
+      const migNew = await seed("[16d] The migration window moved to the evening.", 53, 0, ["migration"]);
       const denv: Record<string, string | undefined> = {
         ...env, OB1_LLM_BASE_URL: `http://127.0.0.1:${writer.port}/v1`, OB1_JUDGE_MODEL: WRITER, OB1_CONSOLIDATE_DECIDER: DECIDER,
         OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_MODEL: DECIDER, OB1_JEV_LOCAL: "1",
@@ -7679,10 +7687,11 @@ if (want("16")) {
       const ddry = await decide(denv, "--dry-run");
       const banner = ddry.out.split("\n").filter((l) => /^\s*(job|decide|tier):/.test(l));
       assert(ddry.code === 0 && banner.some((l) => /^\s*job:\s+/.test(l) && l.trim().endsWith(DKEY)) && banner.some((l) => /^\s*decide: h2o-stub through the typed-decision tier at http:\/\/127\.0\.0\.1:\d+ gives each verdict/.test(l))
-          && banner.some((l) => /^\s*tier:\s+/.test(l)) && /add 6 thoughts to the pool/.test(ddry.out) && tierCalls === 0 && writerCalls === 0,
+          && banner.some((l) => /^\s*tier:\s+/.test(l)) && /add 8 thoughts to the pool/.test(ddry.out) && tierCalls === 0 && writerCalls === 0,
         `a dry run names decide mode's key, its decider and the tier's egress, and asks neither model (exit ${ddry.code}: ${banner.join(" | ").trim().slice(0, 300)})`);
 
-      const drun = await decide(denv);
+      // At --min-confidence 0.55, the pass's own floor, which decide version 3's writer gate reads (SMD-3151).
+      const drun = await decide(denv, "--min-confidence", "0.55", "--dump", ddump);
       const dprops = (await sql`SELECT sp.older_id::text AS o, sp.newer_id::text AS n, sp.verdict, sp.confidence::float AS confidence, d.recipe
                                   FROM supersession_proposals sp LEFT JOIN derivations d ON d.artifact_kind = 'proposal' AND d.artifact_id = sp.id AND d.produced_by = ${DKEY}
                                  WHERE sp.judge_key = ${DKEY}`) as { o: string; n: string; verdict: string; confidence: number; recipe: Record<string, unknown> | null }[];
@@ -7697,12 +7706,42 @@ if (want("16")) {
       const drels = (await sql`SELECT thought_id::text AS t, payload->>'target' AS target, payload->>'relation' AS relation, payload->>'judge_key' AS key
                                  FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL
                                   AND thought_id IN (SELECT id FROM thoughts WHERE content LIKE '[16d]%')`) as { t: string; target: string; relation: string; key: string }[];
-      assert(drels.length === 1 && drels[0].t === runNew && drels[0].target === runOld && drels[0].relation === "related" && drels[0].key === DKEY,
-        `the tier's related is a relation under decide mode's key, and the writer's "none" leaves the cutover pair neither a proposal nor a relation, the relation words' mass under the floor (${JSON.stringify(drels)})`);
-      assert(tierCalls === 3 && writerCalls === 2 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2,
-        `the tier was asked about each of the three pairs and the writer only about the two it called outdates, as the judge's model with the part rule and not the record rule (tier ${tierCalls}, writer ${writerCalls}: ${[...writerModels].join(", ")})`);
+      const rel = (t: string, target: string) => drels.find((r) => r.t === t && r.target === target && r.relation === "related" && r.key === DKEY);
+      assert(drels.length === 2 && rel(runNew, runOld) !== undefined && rel(migNew, migOld) !== undefined,
+        `the tier's related is a relation under decide mode's key, its outdates under the floor takes the tier's relation, and the writer's "none" leaves the cutover pair neither a proposal nor a relation, the relation words' mass under the floor (${JSON.stringify(drels)})`);
+      // Decide version 3 (SMD-3151 review pass 3): under the floor the writer is not asked, since a standing proposal
+      // would record nothing and close the pair's relation; the relation's note names the pass's floor.
+      type RelNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; floor?: number; writer?: unknown } } } };
+      const noteOf = async (t: string) => ((await sql`SELECT d.recipe FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = ${DKEY}
+                                                      WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.thought_id = ${t}::uuid`) as RelNote[])[0];
+      const [mig, run] = [await noteOf(migNew), await noteOf(runNew)];
+      const migDump = readFileSync(ddump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { newer: string; older: string; recorded: string | null; top?: string; floor?: number | null })
+        .find((l) => l.newer === migNew && l.older === migOld);
+      assert(mig?.recipe.judged?.verdict === "related" && mig.recipe.judged.decide?.top === "outdates" && mig.recipe.judged.decide.floor === 0.55 && mig.recipe.judged.decide.writer === undefined
+          && run?.recipe.judged?.decide?.top === "related" && run.recipe.judged.decide.floor === undefined
+          && migDump?.recorded === "under-confidence" && migDump.top === "outdates" && migDump.floor === 0.55,
+        `the tier's outdates under the pass's floor asks no writer: the relation's note names the floor, 0.55, and carries no writer, a related pair's names none, and the dump line records it under the floor (${JSON.stringify(mig?.recipe.judged ?? null).slice(0, 200)}; dump ${JSON.stringify(migDump ?? null)})`);
+      assert(tierCalls === 4 && writerCalls === 2 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2
+          && /1 under confidence 0\.55 not recorded/.test(drun.out)
+          && /decide: the writer asked on 2 pair\(s\) — 1 stood, 1 declined, 0 with quotes that did not check out, 0 unparsed; 1 outdates under the floor 0\.55, the writer not asked/.test(drun.out),
+        `the tier was asked about each of the four pairs and the writer only about the two it called outdates at the floor, as the judge's model with the part rule and not the record rule, and the run's summary counts both (tier ${tierCalls}, writer ${writerCalls}: ${[...writerModels].join(", ")}; ${drun.out.split("\n").find((l) => /^\s*decide: the writer/.test(l))?.trim() ?? "no decide line"})`);
       const dclaims = Object.fromEntries(((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${DKEY} GROUP BY status`) as { status: string; c: number }[]).map((r) => [r.status, Number(r.c)]));
-      assert(dclaims.succeeded === 6 && Object.keys(dclaims).length === 1, `every thought's claim succeeded under decide mode's key (${JSON.stringify(dclaims)})`);
+      assert(dclaims.succeeded === 8 && Object.keys(dclaims).length === 1, `every thought's claim succeeded under decide mode's key (${JSON.stringify(dclaims)})`);
+
+      // SMD-3151 review pass 4: a stale proposal whose pair the tier calls outdates under the floor is settled as an
+      // outdates under the floor, the note naming the floor and that the writer was not asked, and the summary counts
+      // it — not as the related verdict the pair falls back to.
+      const [{ id: tenId }] = (await sql`SELECT id::text AS id FROM supersession_proposals WHERE judge_key = ${DKEY} AND older_id = ${tenOld}::uuid AND newer_id = ${tenNew}::uuid`) as { id: string }[];
+      const movedTenancy = "[16d] The tenancy now runs 90 days, signed in May.";
+      await sql`UPDATE thoughts SET content = ${movedTenancy}, content_fingerprint = content_fingerprint_of(${movedTenancy}) WHERE id = ${tenNew}::uuid`;
+      const [{ r: tenRebuilt }] = (await sql`SELECT rebuild_derived(${tenNew}::uuid, 'live: edit') AS r`) as { r: { stale_proposals: number } }[];
+      const askedBefore = writerCalls;
+      const resettle = await decide(denv, "--min-confidence", "0.85");
+      const [tenAfter] = (await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${tenId}::uuid`) as { status: string; review_note: string | null }[];
+      const underNote = passSettledNote("judged again after a text moved — outdates at confidence 0.80 (token probability), under the floor 0.85, the writer not asked", DKEY);
+      assert(tenRebuilt.stale_proposals === 1 && resettle.code === 0 && tenAfter?.status === "rejected" && tenAfter.review_note === underNote && writerCalls === askedBefore
+          && /1 under confidence 0\.85 not recorded/.test(resettle.out) && /decide: the writer asked on 0 pair\(s\) — .*; 1 outdates under the floor 0\.85, the writer not asked/.test(resettle.out),
+        `a stale proposal the tier calls outdates under the floor is settled as one, its note naming the floor and the writer not asked, and counted so (exit ${resettle.code}: ${JSON.stringify(tenAfter ?? null)}; ${resettle.out.split("\n").find((l) => /^\s*decide: the writer/.test(l))?.trim() ?? "no decide line"})`);
 
       // A follower checks the tier at start as it checks the chat endpoint: a
       // tier serving another model is refused before anything is claimed.
@@ -7712,11 +7751,12 @@ if (want("16")) {
       const [fo, fe] = await Promise.all([new Response(follower.stdout).text(), new Response(follower.stderr).text()]);
       const fcode = await follower.exited;
       clearTimeout(stopFollower);
-      assert(fcode === 2 && /the tier at http:\/\/127\.0\.0\.1:\d+ serves h2o-other, not h2o-stub at start/.test(fe) && /serve h2o-stub at OB1_JEV_BASE_URL/.test(fe) && tierCalls === 3,
+      assert(fcode === 2 && /the tier at http:\/\/127\.0\.0\.1:\d+ serves h2o-other, not h2o-stub at start/.test(fe) && /serve h2o-stub at OB1_JEV_BASE_URL/.test(fe) && tierCalls === 5,
         `a follower whose tier serves another model is refused at start, naming the remedy, and decides nothing (exit ${fcode}: ${last(fo + fe)})`);
     } finally {
       tier.stop(true);
       writer.stop(true);
+      try { unlinkSync(ddump); } catch { /* already gone */ }
     }
     await sql`DELETE FROM thoughts`;
     await sql`DELETE FROM ob1_entities`;

@@ -3050,7 +3050,8 @@ word **distinct**: two near neighbours the judge called unrelated, kept apart
 (SMD-3117, the word SMD-3116 gave it). Its floor is its own probability (the
 token's, or under decide mode H2O's), not the relation words' mass, which a
 confident unrelated leaves near nothing; under decide mode only H2O's own top
-unrelated records one, not one taken after a proposal failed. Prompt 4 still
+unrelated records one, not one taken after a proposal failed or under the
+floor (SMD-3151). Prompt 4 still
 asks for "unrelated", so no pass key moved. A distinct is one more word on the
 pair's one standing edge — a relation replaces it, and it a relation. The run
 summary says how many of each action's writes were distinct (`1 added (1
@@ -3120,16 +3121,36 @@ naming the typed-decision tier's model (H2O-Lightning-4B, `jev/h2o`), the
 tier gives each pair's verdict, not the judge:
 - **The tier's question** is prompt 4's five verdicts as one choice, over
   prompt 4's own rendering of the pair.
-- **The writer.** Only when the tier's top verdict is outdates is the judge's
-  model asked, and only to write the proposal: which thought is current, the
-  words in it that show the other is not, and the other's words that no
-  longer hold. **The part rule** holds it: a part of some work finishing does
-  not outdate the whole.
+- **The writer.** Only when the tier's top verdict is outdates, at the pass's
+  `--min-confidence` floor, is the judge's model asked, and only to write the
+  proposal: which thought is current, the words in it that show the other is
+  not, and the other's words that no longer hold. **The part rule** holds it:
+  a part of some work finishing does not outdate the whole. Under the floor a
+  proposal could not be recorded, so the writer is not asked (SMD-3151): the
+  pair takes the relation the tier's distribution gives at the floor, as a
+  quote that fails does, else its edge is closed. The pass counts it under
+  confidence and as a proposing verdict (its verdicts line counts the
+  relation word it takes, as for a failed quote), settles a stale proposal
+  on it as an outdates under the floor, and a relation it writes carries the
+  floor in its note. The run's summary counts the writer's calls by what came
+  back.
 - **Both quotes must check out** in the side each names and not in the other,
-  or the pair stays at the tier's best verdict that proposes nothing.
-- **Version 1 is the pass's** (`@p4d1`), SMD-3114's writer, two-sided with the
-  part rule. Version 2 was measured on the canary's proposals and shelved
-  (2026-10-18), having missed its bar twice. It added:
+  or the pair stays at the tier's best verdict that proposes nothing. They are
+  read without their markdown (SMD-3151), in quote and text alike: asterisks,
+  backticks, brackets, escapes' backslashes, underscores at a word's edge and
+  a `#` or `>` run opening a word go (not `#433`, whose hashes need a space,
+  nor `>=`), an inline link keeps its text and loses its target, and struck text goes with its `~~`, read as withdrawn.
+- **Version 3 is the pass's** (`@p4d3`): version 1's writer, SMD-3114's,
+  two-sided with the part rule, its quotes read without markdown and asked
+  only at the floor (SMD-3151). The writer quotes the words it reads, and on
+  SMD-3116's writer test the check refused 11 of the 18 proposals it wrote on
+  settling pairs, 10 of the 12 missed quotes there over markup. Under version
+  1 a standing proposal under the floor recorded nothing and closed the pair's
+  relation, and every relation the canary held for a pair whose quotes had
+  failed sat under it (all 67), so reading more quotes without the floor's
+  gate would have closed about 50 of them, those whose quotes now check out,
+  for no proposal. Version 2 was measured on the canary's
+  proposals and shelved (2026-10-18), having missed its bar twice. It added:
   - the record rule: a record of past understanding (a done ticket, a session
     summary, a change record) is outdated only by a later thought that says
     something different about its subject, never by its work reported done;
@@ -3143,7 +3164,10 @@ tier gives each pair's verdict, not the judge:
   words.
 - **Gating:** both rows are gated for both endpoints before any request.
 - **The key** is `consolidate:<decider>+<writer>@p4d<version>`, so turning it
-  on starts a fresh pass.
+  on, or a new decide version, starts a fresh pass: the tier again for every
+  pooled thought's candidates, and the writer for each outdates at the floor
+  not yet proposed. The canary's `@p4d1` pass took about 6 hours of sleep, at
+  about 3.8 s a pair.
 - **Refused at start:** the run refuses without `OB1_JEV_BASE_URL`, or with
   `OB1_JEV_MODEL` naming another model.
 - **Probes:** a follower probes the tier's `/info` after the writer's endpoint,
@@ -3151,7 +3175,9 @@ tier gives each pair's verdict, not the judge:
   is waited out.
 - **Lineage:** each proposal and relation names the writer, the decider,
   `decide_version` and decide mode's prompt hash, and its recipe carries what
-  the tier and the writer said (`judged.decide`).
+  the tier and the writer said (`judged.decide`): since version 3 both of the
+  writer's quotes, so a proposal can be checked again under another quote
+  rule, and the floor when the writer was not asked.
 
 **Staleness**, the same pass's second output: `stale_entities(window)` names
 the entities nothing has mentioned within the window, quietest first, each
@@ -4904,8 +4930,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2948 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1439 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 871 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1441 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 873 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 57 assertions: the shards SHARDS lists in test-live.ts, each its own job
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 237 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
