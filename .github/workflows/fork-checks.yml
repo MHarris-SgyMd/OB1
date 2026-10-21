@@ -3778,10 +3778,7 @@ jobs:
       #   form clients held before the proxy, `GET /`, /worker-status and
       #   /jobs at the root are the proxy's own 404 with no Deprecation header
       #   (smoke.sh check 11 holds the POST's too); no /mcp, /health or
-      #   OPTIONS /health answer carries one; and the server's log names the
-      #   read key nowhere, whose marker it set itself on /mcp and /health,
-      #   which the proxy deletes, once a marked request sent straight to the
-      #   server has shown its line is read (until PR 2);
+      #   OPTIONS /health answer carries one;
       # - the access log never holds a query string or userinfo: after calls
       #   carrying the smoke key as `?key=`, `code=`, `state=` and as the user
       #   part of an absolute-form target, no log line carries it, and the
@@ -3830,28 +3827,6 @@ jobs:
           done
           got=$(dep -X OPTIONS -H 'Origin: https://client.example' -H 'Access-Control-Request-Method: GET' "$B/health")
           [ "$got" = "200 0" ] || { echo "OPTIONS /health: '$got', expected 200 with no Deprecation header (the health route's)" >&2; exit 1; }
-          code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'X-OB1-Legacy-Route: 1' \
-            -H "x-brain-key: $OB1_SMOKE_READ_KEY" -d '{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}' "$B/mcp")
-          [ "$code" = 200 ] || { echo "the read key's tools/list at /mcp got HTTP $code, so the absence of its line proves nothing" >&2; exit 1; }
-          [ "$(curl -s --max-time 10 -H 'X-OB1-Legacy-Route: 1' -H "x-brain-key: $OB1_SMOKE_READ_KEY" "$B/health" | head -c 1)" = "{" ] || { echo "the read key's GET /health got no record, so the absence of its line proves nothing" >&2; exit 1; }
-          # The control: a marked request straight to the server from inside
-          # its own container, the proxy bypassed, under the capture key's name, which the server
-          # logs; once its line is in the log (docker copies it on its own
-          # time), the read key's marker, set on /mcp and /health through the
-          # proxy, which deletes it, is judged by its absence. Until PR 2 drops
-          # the server's reading of the marker (SMD-2532).
-          # The key by name from the environment, never on the command line;
-          # a refused key is a 200 with a JSON-RPC error, so the body is read.
-          KEY="$OB1_SMOKE_CAPTURE_KEY" docker compose -f compose.yaml exec -T -e KEY server bun \
-            -e 'const r = await fetch("http://127.0.0.1:8000/", { method: "POST", signal: AbortSignal.timeout(15000), headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-ob1-legacy-route": "1", "x-brain-key": process.env.KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/list", params: {} }) }); const t = await r.text(); if (!r.ok || /"error"\s*:/.test(t)) { console.error(`the server answered the marked control request ${r.status}: ${t.slice(0, 160)}`); process.exit(1); } process.exit(0)' \
-            || { echo "the marked control request failed (above)" >&2; exit 1; }
-          for _ in $(seq 1 20); do
-            SLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix server)"
-            grep -qF 'key "ci-capture" reached the brain at the old root URL' <<<"$SLOG" && break
-            sleep 0.5
-          done
-          grep -qF 'key "ci-capture" reached the brain at the old root URL' <<<"$SLOG" || { echo "the server's log never showed the control's line, so the read key's absence below would prove nothing" >&2; exit 1; }
-          if grep -F 'key "ci-read" reached' <<<"$SLOG" >&2; then echo "a marker the client set on /mcp or /health reached the server and was logged (above): not-legacy did not delete it" >&2; exit 1; fi
           curl -s --max-time 10 -o /dev/null "$B/auth/callback?code=code-$OB1_SMOKE_KEY&state=state-$OB1_SMOKE_KEY"
           # The server's JSON lines for a thought_stats call so far (SMD-1849),
           # so the absolute-form probe's own line is counted below, not an

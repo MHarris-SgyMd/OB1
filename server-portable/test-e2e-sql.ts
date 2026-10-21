@@ -627,7 +627,7 @@ console.log("\n[6f] Async job handle: scan_thoughts returns a handle, the poll w
   assert(handle.poll === `/jobs/${handle.jobId}` && handle.stream === `/jobs/${handle.jobId}/stream`, `the handle carries the poll and stream routes (${handle.poll}, ${handle.stream})`);
   // Called at /mcp (the proxy's path), the links are under it, and answer
   // there: behind the proxy a root-relative one reached the server only
-  // through the legacy route v2.0.0 removes (SMD-2306).
+  // through the legacy route v2.0.0 removed (SMD-2532).
   const mounted = JSON.parse(await call("scan_thoughts", { limit: 1 }, "e2e-key", "/mcp/")) as { jobId: string; poll: string; stream: string };
   assert(mounted.poll === `/mcp/jobs/${mounted.jobId}` && mounted.stream === `/mcp/jobs/${mounted.jobId}/stream`, `called at /mcp/, the links are under /mcp (${mounted.poll}, ${mounted.stream})`);
   const viaMount = await fetch(`${BASE}${mounted.poll}`, { headers: { "x-brain-key": "e2e-key" } });
@@ -2850,21 +2850,6 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   await call("thought_stats", {}, "bot-raw"); // registers bot-key in the registry, as any first request does
   await sql`SELECT revoke_agent_key(${hashKey("bot-raw")}, 'SMD-2041 e2e')`;
   assert(await health("bot-raw") === "ok", "a revoked write key → `ok`, not the record");
-  {
-    // Nor is a revoked key named as still on the old root URL (SMD-2306): the
-    // line comes after the refusal, on the MCP endpoint and a REST route alike.
-    const warned: string[] = [];
-    const realWarn = console.warn;
-    console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
-    try {
-      const MARK = { "x-ob1-legacy-route": "1", "x-brain-key": "bot-raw" };
-      await fetch(BASE, { method: "POST", headers: { ...H, ...MARK }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) }).then((r) => r.text());
-      await fetch(`${BASE}/worker-status`, { headers: MARK }).then((r) => r.text());
-    } finally {
-      console.warn = realWarn;
-    }
-    assert(!warned.some((w) => w.includes(`key "bot-key" reached`)), `a revoked key, marked, on POST / and GET /worker-status → no old-root-URL line (${warned.filter((w) => w.includes("old root URL")).join(" | ") || "none"})`);
-  }
   // The registry's lookup under a lock (SMD-2072). Each lock wait is capped
   // (agents.ts's RESOLVE_LOCK_TIMEOUT_MS, 250 ms) and a timed-out lookup is
   // retried for up to 2 s (BUSY_RETRY), so every key answers inside /health's
