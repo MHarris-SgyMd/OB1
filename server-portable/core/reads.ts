@@ -6,6 +6,7 @@
 
 import { thoughtTitle, thoughtUrl } from "../thoughts.ts";
 import { mayLeaveBox, type EgressSubject } from "../egress.ts";
+import { providerDown } from "../embed.ts";
 import { storeKind, UUID_RE, type AuditChange, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
 import { keysInOrder, MOVED_READ, movedAmong, typesOf, type Moved, type MovedHit, type MovedType } from "../stated-status.ts";
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
@@ -19,6 +20,14 @@ import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
 import { SCAN_DEFAULT, SCAN_MAX, type Input } from "./schemas.ts";
 
 // ── The one search operation ─────────────────────────────────────────────────
+
+/**
+ * A query the embedding provider did not answer for (SMD-2891): what
+ * providerDown read — its marker word and its words, never the text — and the
+ * endpoint the call went to, which the reply names. The search was answered
+ * by the exact-literal arm alone.
+ */
+export type QueryVectorFailed = { reason: string; detail: string; base: string };
 
 /**
  * The question the hybrid arm asks before embedding a query (SMD-1903): the
@@ -45,15 +54,17 @@ interface RunSearch {
   // The hybrid arm hands back the query embedding it computed, so a caller
   // (search_thoughts's zero-result probe) reuses it without a second gate or
   // provider call.
+  // An embedding of null is a query the provider did not answer for, and
+  // vectorFailed says why (SMD-2891).
   (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "hybrid"; query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust }):
-    Promise<Refused | { refusal?: undefined; rows: ThoughtHybridMatch[]; embedding: number[] }>;
+    Promise<Refused | { refusal?: undefined; rows: ThoughtHybridMatch[]; embedding: number[] | null; vectorFailed?: QueryVectorFailed }>;
   (ctx: Ctx, principal: Principal, opts: { tool: string; arm: "keyword"; query: string; limit: number; offset: number; filter: Record<string, unknown>; minTrust?: Trust }):
     Promise<{ refusal?: undefined; rows: ThoughtKeywordMatch[] }>;
 }
 const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
   tool: string; arm: "hybrid" | "keyword"; query: string; limit: number;
   threshold?: number; recencyWeight?: number; offset?: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust;
-}): Promise<{ refusal?: Refusal; rows: (ThoughtHybridMatch | ThoughtKeywordMatch)[]; embedding?: number[] }> => {
+}): Promise<{ refusal?: Refusal; rows: (ThoughtHybridMatch | ThoughtKeywordMatch)[]; embedding?: number[] | null; vectorFailed?: QueryVectorFailed }> => {
   // min_trust (SMD-1724) is no column of query_log, so a search with it is not
   // logged: a replay (db/tier.ts) would run it without the floor and report
   // the rows it kept out as a difference (the maintainer's call; the column is
@@ -69,7 +80,21 @@ const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
   // The query text leaves for its embedding as a thought's does (SMD-1903).
   const q = gateQuery(ctx, opts.query, principal);
   if (q.refusal) return { refusal: q.refusal, rows: [] };
-  const embedding = await ctx.embedder.getEmbedding(opts.query, q.subject, "query");
+  // A provider that did not answer (refused, timed out, 5xx — providerDown)
+  // leaves the search its exact-literal arm, which needs no model: the same
+  // function with no vector, so the literals are the ones it would have fused
+  // and the rows say so (SMD-2891). Any other failure — a 4xx, a width
+  // mismatch — still fails the search, so a misconfigured brain says so, as a
+  // capture does (SMD-2888).
+  let vectorFailed: QueryVectorFailed | undefined;
+  const embedding = await ctx.embedder.getEmbedding(opts.query, q.subject, "query").catch((e: unknown) => {
+    const down = providerDown(e);
+    if (!down) throw e;
+    const base = ctx.embedConfig().embeddings.base;
+    console.error(`${opts.tool}: the embedding provider at ${base} was unavailable: ${down.detail}; answered by exact literals alone`);
+    vectorFailed = { ...down, base };
+    return null;
+  });
   // prefer_current (059, SMD-2255) is the same arm through another function,
   // logged as arm `current` so a replay takes the same one.
   const preferCurrent = opts.preferCurrent === true;
@@ -77,8 +102,11 @@ const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
     query: opts.query, embedding, threshold: opts.threshold ?? 0, limit: opts.limit,
     filter: opts.filter, recencyWeight: opts.recencyWeight ?? 0, preferCurrent, minTrust: opts.minTrust,
   });
-  if (logged) await ctx.logSearch(principal, opts.tool, { query: opts.query, limit: opts.limit, threshold: opts.threshold ?? 0, recencyWeight: opts.recencyWeight ?? 0, filter: opts.filter, arm: preferCurrent ? "current" : "hybrid" }, rows);
-  return { rows, embedding };
+  // A literal-only answer is logged as arm `literal` (104): it is neither arm a
+  // replay could take, since a replay's provider answers, and db/brain-compare.ts
+  // leaves it out of a replay plan as it does a row with no arm.
+  if (logged) await ctx.logSearch(principal, opts.tool, { query: opts.query, limit: opts.limit, threshold: opts.threshold ?? 0, recencyWeight: opts.recencyWeight ?? 0, filter: opts.filter, arm: vectorFailed ? "literal" : preferCurrent ? "current" : "hybrid" }, rows);
+  return { rows, embedding, ...(vectorFailed ? { vectorFailed } : {}) };
 }) as RunSearch;
 
 /** The filter a search tool was given, folded and bounded — or the refusal of it. */
@@ -131,7 +159,11 @@ const SEARCH_COMPAT_PREFER_CURRENT = false;
  * Absent, not empty, elsewhere: an MCP server older than this REST core passes
  * an unknown field through, and then only the results it is about carry it.
  */
-export type SearchResult = { results: { id: string; title: string; url: string; trust: unknown; moved?: MovedType[]; movedNotRead?: number }[] };
+export type SearchResult = {
+  results: { id: string; title: string; url: string; trust: unknown; moved?: MovedType[]; movedNotRead?: number }[];
+  /** Present only when the provider did not answer for the query, and the results are exact-literal matches alone (SMD-2891). */
+  vectorFailed?: QueryVectorFailed;
+};
 
 export async function search(ctx: Ctx, principal: Principal, { query }: Input<"search">): Promise<Outcome<SearchResult>> {
   // The one search op, hybrid arm (SMD-1490); this surface is fixed, so it
@@ -150,6 +182,7 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
       trust: t.metadata?.trust,
       ...resultLabel(moved[t.id]),
     })),
+    ...(r.vectorFailed ? { vectorFailed: r.vectorFailed } : {}),
   });
 }
 
@@ -199,6 +232,8 @@ export type SearchThoughtsResult = {
   facts: QueryFacts | null;
   /** prefer_current's window (059): what it held, for the header note. Null without the flag. */
   window: NonNullable<ThoughtHybridMatch["window"]> | null;
+  /** Present only when the provider did not answer for the query, and the hits are exact-literal matches alone (SMD-2891). */
+  vectorFailed?: QueryVectorFailed;
 };
 
 const factsOf = (r: ThoughtHybridMatch | undefined): QueryFacts | null =>
@@ -256,6 +291,7 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
   const r = await runSearch(ctx, principal, { tool: "search_thoughts", arm: "hybrid", query, limit, threshold, recencyWeight: recency_weight, filter: f.filter, preferCurrent: prefer_current, minTrust: min_trust });
   if (r.refusal) return refuse(r.refusal);
   const data = r.rows;
+  const failed = r.vectorFailed ? { vectorFailed: r.vectorFailed } : {};
 
   if (data.length === 0) {
     // Nothing cleared the threshold and no literal matched — but WHY is
@@ -265,9 +301,10 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
     // the first version said "no thoughts found" about a literal that
     // 150 thoughts contained, because it was too common to match). Reuses
     // the arm's embedding, and stays unfiltered — no min_trust either — so
-    // the facts are the query's, not the filtered scope's.
+    // the facts are the query's, not the filtered scope's. Without a vector
+    // (SMD-2891) the probe reports them only when a literal matched somewhere.
     const probe = await (await ctx.store()).hybridThoughts({ query, embedding: r.embedding, threshold: -1, limit: 1, filter: {} });
-    return ok({ query, preferCurrent: prefer_current, hits: [], facts: factsOf(probe[0]), window: null });
+    return ok({ query, preferCurrent: prefer_current, hits: [], facts: factsOf(probe[0]), window: null, ...failed });
   }
 
   // 025 (SMD-1253): which of these hits a newer thought has superseded,
@@ -289,6 +326,7 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
     })),
     facts: factsOf(data[0]),
     window: data[0].window ?? null,
+    ...failed,
   });
 }
 

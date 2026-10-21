@@ -62,7 +62,7 @@ interface FakeConfig {
   /** the brain's thought-id set for list_thought_ids; omit to make the tool absent (a brain older than SMD-2244). */
   corpus?: { ids: string[]; digest?: string | null; pageCap?: number; fail?: string; failAfter?: boolean; badShape?: boolean; stuckCursor?: boolean; fakeTotal?: number };
   /** the brain's logged searches for list_logged_searches; omit to make the tool absent. */
-  log?: { searches: { query: string; arm: "keyword" | "hybrid" | "current" | null }[]; truncated?: boolean };
+  log?: { searches: { query: string; arm: "keyword" | "hybrid" | "current" | "literal" | null }[]; truncated?: boolean };
   /** a gateway/proxy that answers every tools/call POST with a plain 404 body (GET /health still routes). */
   proxy404?: boolean;
   /** frame the tools/call reply as an SSE stream rather than raw JSON. */
@@ -736,6 +736,9 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   // 059's arm (SMD-2255): a prefer_current search is replayed as one, not dropped.
   const withCurrent = replayPlanFromLog([{ query: "d", arm: "current" }, { query: "d", arm: "hybrid" }]);
   ok(withCurrent.length === 2 && withCurrent[0].arm === "current" && withCurrent[1].arm === "hybrid", `a logged current search is its own replay entry beside the hybrid one (${JSON.stringify(withCurrent)})`);
+  // 104's arm (SMD-2891): a search answered with no vector is no replay — a brain whose provider answers runs it with one.
+  const withLiteral = replayPlanFromLog([{ query: "e", arm: "literal" }, { query: "e", arm: "hybrid" }]);
+  ok(withLiteral.length === 1 && withLiteral[0].arm === "hybrid", `a logged literal search is left out, the same query's hybrid row replayed (${JSON.stringify(withLiteral)})`);
 }
 
 // A current-arm row replays as search_thoughts with prefer_current: the fake
@@ -888,7 +891,7 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
     } finally { console.log = logFn; a.server.stop(true); b.server.stop(true); }
     return { code, out: lines.join("\n") };
   };
-  const logged = (...qs: [string, "keyword" | "hybrid" | "current" | null][]) => ({ searches: qs.map(([query, arm]) => ({ query, arm })) });
+  const logged = (...qs: [string, "keyword" | "hybrid" | "current" | "literal" | null][]) => ({ searches: qs.map(([query, arm]) => ({ query, arm })) });
 
   const same = await gate({ log: logged(["q", "keyword"]), hits: { q: [uid(1), uid(2)] } }, { hits: { q: [uid(1), uid(2)] } });
   ok(same.code === 0 && /^replayed 1 of 1 distinct logged searches in the most recent page of localhost:\d+'s log \(0 skipped\)$/m.test(same.out) && /what moved: nothing — localhost:\d+ returns localhost:\d+'s ids on the one replayed\./.test(same.out),
@@ -944,6 +947,13 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
     `--diff over a log of pre-045 rows says so, not that nothing was logged (${noArmOnly.out.split("\n").slice(-1)})`);
   const noArmSome = await gate({ log: logged(["q", null], ["r", "keyword"]), hits: { r: [uid(2)] } }, { hits: { r: [uid(2)] } });
   ok(noArmSome.code === 0 && noArmSome.out.includes("replayed 1 of 1 distinct logged searches") && noArmSome.out.includes("1 more logged with no arm"), `…and beside a replayed one, counts it (${noArmSome.code})`);
+  // Searches answered by exact literals while the provider was down (arm literal, 104) are counted apart too (SMD-2891).
+  const literalOnly = await gate({ log: logged(["q", "literal"], ["q", "literal"], ["r", null]) }, {});
+  ok(literalOnly.code === 3 && literalOnly.out.includes("(0 skipped; 1 more logged with no arm, before migration 045, and 1 more answered by exact literals alone while the embedding provider was down (arm literal), not replayed)")
+      && literalOnly.out.includes("nothing to compare: every search in the window was logged before migration 045, with no arm to replay it on, or answered by exact literals alone while the embedding provider was down."),
+    `--diff over a log of literal and pre-045 rows counts each, distinct, and says why nothing was compared (${literalOnly.out.split("\n").slice(-2).join(" / ")})`);
+  const literalSome = await gate({ log: logged(["q", "literal"], ["r", "keyword"]), hits: { r: [uid(2)] } }, { hits: { r: [uid(2)] } });
+  ok(literalSome.code === 0 && literalSome.out.includes("replayed 1 of 1 distinct logged searches") && literalSome.out.includes("; 1 more answered by exact literals alone while the embedding provider was down (arm literal), not replayed)"), `…and beside a replayed one, counts it (${literalSome.code})`);
 
   // A page whose searches are not a list is a log not read, not an empty one.
   const badPage = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, log: { searches: "nope" as unknown as [] } });

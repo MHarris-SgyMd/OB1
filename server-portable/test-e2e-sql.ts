@@ -3702,6 +3702,71 @@ console.log("\n[22] A hit naming a ticket that moved since it was written says s
   }
 }
 
+console.log("\n[23] A search the provider does not answer for is answered by the exact-literal arm alone, said so and logged as arm literal — search_thoughts with and without prefer_current and min_trust, and the compat search; a query with no literal finds nothing and says why; a misconfigured provider still fails it; the provider back, nothing changed (SMD-2891)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const idIn = (s: string) => /id ([0-9a-f-]{36})/.exec(s)?.[1];
+  const lastArm = async (tool: string, query: string) => (await sql`SELECT arm FROM query_log WHERE kind = 'search' AND tool = ${tool} AND query = ${query} ORDER BY logged_at DESC LIMIT 1`)[0]?.arm as string | undefined;
+  const marked = /Semantic search is unavailable: the embedding provider at https:\/\/stub\.invalid\/v1 did not answer \(the connection was refused\), so the query was matched only by its identifiers and quoted spans, exactly — not by meaning\. search_thoughts_keyword finds any word or phrase a thought contains; semantic search returns once the provider answers\./;
+  stubDown = null;
+  const named = idIn(await call("capture_thought", { content: "[23] DOWN-2891 names the outage arm" }))!;
+  const plain = idIn(await call("capture_thought", { content: "[23] alpha words with no identifier in them" }))!;
+  try {
+    const q = "what was said about DOWN-2891";
+    const up = await result("search_thoughts", { query: q });
+    assert(!up.isError && !("vectorFailed" in (up.sc ?? {})) && !/Semantic search is unavailable/.test(up.text) && (await lastArm("search_thoughts", q)) === "hybrid",
+      `the provider answering: no mark, no field, logged as arm hybrid (${up.text.slice(0, 80)})`);
+
+    stubDown = "refused";
+    const down = await result("search_thoughts", { query: q });
+    const ids = ((down.sc?.hits ?? []) as { id: string; similarity: number | null }[]);
+    assert(!down.isError && marked.test(down.text) && down.sc?.vectorFailed === "provider_unreachable",
+      `refused at the socket: answered, not an error — the mark names the endpoint, what happened, that only literals matched and the keyword tool; the typed result carries the word (${down.text.replace(/\n+/g, " / ").slice(0, 300)})`);
+    assert(ids.some((h) => h.id === named && h.similarity === null) && !ids.some((h) => h.id === plain) && /exact match, no vector/.test(down.text) && /Searched exactly for: DOWN-2891\./.test(down.text),
+      `…the thought holding the literal is the hit, an exact match with no similarity, and the one without it is not (${JSON.stringify(ids)})`);
+    assert(!/by similarity/.test(down.text), "…and no note says the rest are ranked by a similarity there is none of");
+    assert((await lastArm("search_thoughts", q)) === "literal", "…logged as arm literal");
+    const current = await result("search_thoughts", { query: q + " now", prefer_current: true });
+    assert(!current.isError && marked.test(current.text) && ((current.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === named) && (await lastArm("search_thoughts", q + " now")) === "literal",
+      `prefer_current: the same — 059's function with no vector, the hit, the mark, arm literal (${current.text.slice(0, 120)})`);
+    // min_trust through 075's form: the floor holds without a vector too — the row
+    // the e2e key wrote has no trust recorded, below every word, so it is kept out.
+    const floor = await result("search_thoughts", { query: q + " at a floor", min_trust: "ingested" });
+    assert(!floor.isError && marked.test(floor.text) && ((floor.sc?.hits ?? []) as unknown[]).length === 0 && (await lastArm("search_thoughts", q + " at a floor")) === undefined,
+      `min_trust: answered and marked through 075's form, the floor keeping out the row with no trust, and not logged, as a min_trust search never is (${floor.text.slice(0, 160)})`);
+
+    const words = await result("search_thoughts", { query: "alpha words" });
+    assert(!words.isError && /^No thoughts found matching "alpha words"\./.test(words.text) && marked.test(words.text) && /No thought contains an identifier or quoted span of this query, if it has one\./.test(words.text) && words.sc?.vectorFailed === "provider_unreachable",
+      `a query of plain words: nothing found, and why — no literal to match without a vector (${words.text.replace(/\n+/g, " / ").slice(0, 300)})`);
+
+    const compat = await result("search", { query: "DOWN-2891" });
+    const vf = compat.sc?.vectorFailed as { reason?: string; detail?: string; base?: string } | undefined;
+    assert(!compat.isError && compat.text === JSON.stringify(compat.sc) && ((compat.sc?.results ?? []) as { id: string }[]).some((r) => r.id === named)
+        && vf?.reason === "provider_unreachable" && vf?.base === "https://stub.invalid/v1" && /The brain's search_thoughts_keyword tool finds any word or phrase/.test(String(compat.sc?.note)),
+      `search: ChatGPT's shape with the literal's thought, the typed field and a note naming the brain's keyword tool (${compat.text.slice(0, 300)})`);
+    assert((await lastArm("search", "DOWN-2891")) === "literal", "…logged as arm literal");
+
+    // A 503 is an outage too; a 400 says the request is wrong, so the search fails as before.
+    stubDown = 503;
+    const busy = await result("search_thoughts", { query: q + " busy" });
+    assert(!busy.isError && /did not answer \(it answered 503\)/.test(busy.text) && busy.sc?.vectorFailed === "provider_503", `a 503: answered by the literals, the word provider_503 (${busy.text.slice(0, 160)})`);
+    stubDown = 400;
+    const wrong = await result("search_thoughts", { query: q + " wrong" });
+    assert(wrong.isError && !/Semantic search is unavailable/.test(wrong.text) && (await lastArm("search_thoughts", q + " wrong")) === undefined,
+      `a 400: the search fails, unmarked and unlogged, as before (${wrong.text.slice(0, 160)})`);
+
+    // The provider back: the next search is a vector search again.
+    stubDown = null;
+    const back = await result("search_thoughts", { query: q });
+    assert(!back.isError && !("vectorFailed" in (back.sc ?? {})) && !/Semantic search is unavailable/.test(back.text) && ((back.sc?.hits ?? []) as { similarity: number | null }[]).some((h) => h.similarity !== null) && (await lastArm("search_thoughts", q)) === "hybrid",
+      `the provider back: no mark, rows with a similarity again, arm hybrid (${back.text.slice(0, 80)})`);
+  } finally {
+    stubDown = null;
+    await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([named, plain], "TEXT")}::uuid[])`;
+    await sql.close();
+  }
+}
+
 server.stop();
 globalThis.fetch = realFetch;
 

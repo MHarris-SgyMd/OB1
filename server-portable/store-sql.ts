@@ -203,7 +203,7 @@ export class SqlStore implements ThoughtStore {
 
   async hybridThoughts(opts: {
     query: string;
-    embedding: number[];
+    embedding: number[] | null;
     threshold: number;
     limit: number;
     filter: Record<string, unknown>;
@@ -215,6 +215,9 @@ export class SqlStore implements ThoughtStore {
     // methods above call their functions rather than inlining them. Under
     // prefer_current the demotion is 059's function's too (SMD-2255); a tagged
     // template cannot bind a function name, so the two calls are two literals.
+    // A null embedding is a query the provider could not embed (SMD-2891):
+    // NULL::vector, on which match_thoughts returns nothing, so each function
+    // answers its exact-literal arm alone, with the same needle facts.
     const weight = opts.recencyWeight ?? RECENCY_DEFAULTS.weight;
     const halfLife = opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays;
     // min_trust (SMD-1724) is the eighth argument of 075's forms, which take
@@ -227,7 +230,7 @@ export class SqlStore implements ThoughtStore {
                  matched_needles, needles, needle_counts, common_needles, literal_only, score,
                  fused, demoted, window_rows, window_known, window_demoted, window_synced_at, window_exact
           FROM search_thoughts_current(
-            ${toVector(opts.embedding)}::vector,
+            ${opts.embedding ? toVector(opts.embedding) : null}::vector,
             ${opts.query}::text,
             ${opts.threshold}::float,
             ${opts.limit}::int,
@@ -239,7 +242,7 @@ export class SqlStore implements ThoughtStore {
           SELECT id, content, metadata, created_at, similarity,
                  matched_needles, needles, needle_counts, common_needles, literal_only, score
           FROM search_thoughts_hybrid(
-            ${toVector(opts.embedding)}::vector,
+            ${opts.embedding ? toVector(opts.embedding) : null}::vector,
             ${opts.query}::text,
             ${opts.threshold}::float,
             ${opts.limit}::int,
@@ -251,14 +254,14 @@ export class SqlStore implements ThoughtStore {
   }
 
   /** hybridThoughts with min_trust: 075's 8-argument forms, the same columns as the 7's. */
-  private async hybridAtTrust(opts: { query: string; embedding: number[]; threshold: number; limit: number; filter: Record<string, unknown>; preferCurrent?: boolean }, weight: number, halfLife: number, minTrust: string): Promise<ThoughtHybridMatch[]> {
+  private async hybridAtTrust(opts: { query: string; embedding: number[] | null; threshold: number; limit: number; filter: Record<string, unknown>; preferCurrent?: boolean }, weight: number, halfLife: number, minTrust: string): Promise<ThoughtHybridMatch[]> {
     const rows = opts.preferCurrent === true
       ? await this.sql`
           SELECT id, content, metadata, created_at, similarity,
                  matched_needles, needles, needle_counts, common_needles, literal_only, score,
                  fused, demoted, window_rows, window_known, window_demoted, window_synced_at, window_exact
           FROM search_thoughts_current(
-            ${toVector(opts.embedding)}::vector,
+            ${opts.embedding ? toVector(opts.embedding) : null}::vector,
             ${opts.query}::text,
             ${opts.threshold}::float,
             ${opts.limit}::int,
@@ -271,7 +274,7 @@ export class SqlStore implements ThoughtStore {
           SELECT id, content, metadata, created_at, similarity,
                  matched_needles, needles, needle_counts, common_needles, literal_only, score
           FROM search_thoughts_hybrid(
-            ${toVector(opts.embedding)}::vector,
+            ${opts.embedding ? toVector(opts.embedding) : null}::vector,
             ${opts.query}::text,
             ${opts.threshold}::float,
             ${opts.limit}::int,

@@ -571,7 +571,9 @@ export async function fetchLoggedSearches(ep: BrainEndpoint, since: string | nul
 /**
  * A replay plan from logged searches: each search on the arm that ran it, a
  * null-arm row skipped (pre-045 rows carry no arm, so which one produced the ids
- * is unknown — as the SQL replay skips them), an empty query skipped, and identical
+ * is unknown — as the SQL replay skips them), a `literal` row skipped too (104,
+ * SMD-2891: answered with no vector, which no brain whose provider answers
+ * repeats), an empty query skipped, and identical
  * (query, arm) pairs collapsed so a query logged a hundred times replays once.
  */
 export function replayPlanFromLog(searches: { query: string; arm: string | null }[]): ReplayEntry[] {
@@ -1021,7 +1023,7 @@ export function replayVerdict(r: NonNullable<Comparison["retrieval"]>): ReplayVe
  * verdict in words. A window that compared nothing says why, so --diff's exit
  * 3 is not read as a pass (SMD-2182).
  */
-export function replayGateLines(r: NonNullable<Comparison["retrieval"]>, labels: { stable: string; canary: string }, since: string | undefined, gate: boolean, noArm = 0): string[] {
+export function replayGateLines(r: NonNullable<Comparison["retrieval"]>, labels: { stable: string; canary: string }, since: string | undefined, gate: boolean, noArm = 0, literal = 0): string[] {
   const verdict = replayVerdict(r);
   if (verdict === "unread") return [`nothing replayed: the log of ${labels.stable} could not be read.`];
   const ran = r.rows.filter((row) => !row.skipped);
@@ -1030,8 +1032,10 @@ export function replayGateLines(r: NonNullable<Comparison["retrieval"]>, labels:
   const skipped = r.rows.length - ran.length - oneSided;
   // The window as stable's log gives it: --since's, else its most recent page.
   const window = since !== undefined ? `since ${since} (--since)` : `in the most recent page of ${labels.stable}'s log`;
-  // Searches are counted once per (query, arm); one logged before migration 045 has no arm to replay on.
-  const lines = [`replayed ${ran.length} of ${r.queries} distinct logged searches ${window} (${skipped} skipped${oneSided ? `, ${oneSided} failed on one brain` : ""}${noArm ? `; ${noArm} more logged with no arm, before migration 045, not replayed` : ""})`];
+  // Searches are counted once per (query, arm); one logged before migration 045 has no arm to replay on,
+  // and one answered by exact literals while the provider was down (arm literal, 104) none a replay can take.
+  const apart = [noArm ? `${noArm} more logged with no arm, before migration 045` : "", literal ? `${literal} more answered by exact literals alone while the embedding provider was down (arm literal)` : ""].filter(Boolean);
+  const lines = [`replayed ${ran.length} of ${r.queries} distinct logged searches ${window} (${skipped} skipped${oneSided ? `, ${oneSided} failed on one brain` : ""}${apart.length ? `; ${apart.join(", and ")}, not replayed` : ""})`];
   const moved = ran.filter((row) => row.changed).length;
   if (verdict === "failed") {
     const on = (side: "a" | "b") => r.rows.filter((row) => row.failedOn === side).length;
@@ -1040,8 +1044,8 @@ export function replayGateLines(r: NonNullable<Comparison["retrieval"]>, labels:
     lines.push(`failed: ${parts.join(", and ")} (under Retrieval, above) — not a pass.`);
   } else if (verdict === "empty") {
     lines.push(r.queries === 0
-      ? noArm
-        ? `nothing to compare: every search in the window was logged before migration 045, with no arm to replay it on.`
+      ? noArm || literal
+        ? `nothing to compare: every search in the window was ${[noArm ? "logged before migration 045, with no arm to replay it on" : "", literal ? "answered by exact literals alone while the embedding provider was down" : ""].filter(Boolean).join(", or ")}.`
         : `nothing to compare: ${labels.stable} logged no searches in the window. A brain logs them only with OB1_QUERY_LOG=on${since !== undefined ? ", and an earlier --since widens the window" : ""}.`
       : "nothing to compare: both brains failed every search in the window.");
   } else if (verdict === "unmoved") {
@@ -1069,12 +1073,14 @@ export async function runTierReplay(args: TierReplayArgs): Promise<number> {
     resolveBrain(args.to, args.toKey, envKey, how),
   ]);
   let opts: Parameters<typeof compareBrains>[2];
-  let noArm = 0;
+  let noArm = 0, literal = 0;
   try {
     const page = await fetchLoggedSearches(stable, args.since ?? null);
     opts = { fromLog: replayPlanFromLog(page.searches), source: `the log of ${stable.label}`, truncated: page.truncated };
     // Distinct, as the plan's own count is: one query logged a hundred times with no arm is one.
-    noArm = new Set(page.searches.filter((s) => s.arm === null && typeof s.query === "string" && s.query.length > 0).map((s) => s.query)).size;
+    const distinct = (arm: string | null) => new Set(page.searches.filter((s) => s.arm === arm && typeof s.query === "string" && s.query.length > 0).map((s) => s.query)).size;
+    noArm = distinct(null);
+    literal = distinct("literal");
   } catch (e) {
     opts = { fromLog: [], source: `the log of ${stable.label}`, sourceError: (e as Error).message };
   }
@@ -1087,7 +1093,7 @@ export async function runTierReplay(args: TierReplayArgs): Promise<number> {
   } else {
     console.log(renderComparison(c));
     console.log("");
-    for (const line of replayGateLines(retrieval, { stable: stable.label, canary: canary.label }, args.since, args.gate, noArm)) console.log(line);
+    for (const line of replayGateLines(retrieval, { stable: stable.label, canary: canary.label }, args.since, args.gate, noArm, literal)) console.log(line);
   }
   if (verdict === "unread" || verdict === "failed") return 1;
   if (!args.gate) return 0;

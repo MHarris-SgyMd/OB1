@@ -273,7 +273,7 @@ export function armOf(s: SearchRow): string {
   // prefer_current (059, SMD-2255) is another ranking of the same tool and
   // arguments: named, so its rows are not pooled with the default's. Every
   // other row's name is what it was.
-  return `${s.tool} k=${s.matchCount ?? "?"} thr=${fmt(s.threshold)} rw=${fmt(s.recencyWeight)}${s.arm === "current" ? " current" : ""}`;
+  return `${s.tool} k=${s.matchCount ?? "?"} thr=${fmt(s.threshold)} rw=${fmt(s.recencyWeight)}${s.arm === "current" || s.arm === "literal" ? ` ${s.arm}` : ""}`;
 }
 
 export type ArmStats = {

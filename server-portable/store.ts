@@ -1362,7 +1362,7 @@ export type QuerySearchLog = {
   filter: Record<string, unknown>;
   resultIds: string[];
   resultScores: (number | null)[];
-  /** Which retrieval arm served the row: 'hybrid', 'keyword' (SMD-1490) or 'current' — search_thoughts with prefer_current (059, SMD-2255). */
+  /** Which retrieval arm served the row: 'hybrid', 'keyword' (SMD-1490), 'current' — search_thoughts with prefer_current (059, SMD-2255) — or 'literal': search or search_thoughts answered by the exact-literal arm alone while the provider could not embed the query (104, SMD-2891). */
   arm?: string;
   /** The tier the writing server runs as: stable|canary|working, else absent (SMD-1806). */
   tier?: string;
@@ -1417,11 +1417,13 @@ export interface ThoughtStore {
    * The two above fused (migration 017): rank on the vector arm, presence per
    * needle on the keyword arm. `query` is the text the needles are extracted
    * from, in SQL, so every caller extracts identically; `embedding` is of that
-   * same text. Fixed top-`limit`, no paging.
+   * same text — or null when the provider could not embed it (SMD-2891):
+   * then the vector arm finds nothing and the rows are the exact-literal
+   * arm's alone. Fixed top-`limit`, no paging.
    */
   hybridThoughts(opts: {
     query: string;
-    embedding: number[];
+    embedding: number[] | null;
     threshold: number;
     limit: number;
     filter: Record<string, unknown>;
