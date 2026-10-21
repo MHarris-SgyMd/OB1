@@ -667,7 +667,10 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     // A text match (review pass 5): no ranking for prefer_current to demote in, and a count past the limit said, as a literal's is.
     const asText = vectorFailed?.matched === "text";
     if (head.needles.length) notes.push(`Searched exactly for: ${head.needles.join(", ")}.`);
-    if (asText && head.needleCounts[0] > data.length) notes.push(`It is in ${thoughtCount(head.needleCounts[0])}; these are the newest ${data.length}${head.needleCounts[0] > TEXT_PAGE ? ` of the first ${TEXT_PAGE} found` : ""} — raise limit or page with search_thoughts_keyword.`);
+    // Past the page the shown are the newest of the first rows the scan met, not of every holder (review pass 9).
+    if (asText && head.needleCounts[0] > data.length) notes.push(head.needleCounts[0] > TEXT_PAGE
+      ? `It is in ${thoughtCount(head.needleCounts[0])}; these ${data.length} are the newest of the first ${TEXT_PAGE + 1} the scan found, not of all — page with search_thoughts_keyword.`
+      : `It is in ${thoughtCount(head.needleCounts[0])}; these are the newest ${data.length} — raise limit or page with search_thoughts_keyword.`);
     if (asText && v.preferCurrent) notes.push("prefer_current does not rank a text match: these are in its order, a superseded one labelled.");
     if (absent.length) notes.push(`No thought contains: ${absent.join(", ")}.`);
     if (truncated.length) notes.push(`Outside the top ${data.length}${v.preferCurrent ? " (or demoted past it)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")} — raise limit or use search_thoughts_keyword.`);

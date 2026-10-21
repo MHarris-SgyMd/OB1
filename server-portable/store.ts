@@ -457,15 +457,15 @@ export type LoggedSearchRow = {
   filter: Record<string, unknown>;
 };
 
+/** The page a text match is bounded by (SMD-2891, review pass 8): its count past this is "more than". */
+export const TEXT_PAGE = 1000;
+
 /**
  * A window of a brain's logged searches, most recent first, bounded by `limit`.
  * `truncated` is whether more searches matched the window than were returned —
  * a log-sourced replay is bounded (two search calls per row), so the whole log
  * is never streamed; a window is the unit.
  */
-/** The page a text match is bounded by (SMD-2891, review pass 8): its count past this is "more than". */
-export const TEXT_PAGE = 1000;
-
 export type LoggedSearchPage = { searches: LoggedSearchRow[]; truncated: boolean };
 
 /**
@@ -1437,7 +1437,9 @@ export interface ThoughtStore {
    * The text match a search falls back to without a vector (SMD-2891): the
    * thoughts holding `query` as one text, case aside, within the filter and
    * min_trust — bounded, as search_thoughts_keyword's function is not: the
-   * first TEXT_PAGE + 1 matching rows, newest first within them, each row
+   * first TEXT_PAGE + 1 matching rows the scan meets (all of them when fewer,
+   * so then the newest; past the page, not of every holder), newest first
+   * within them, each row
    * carrying how many that page held (`totalCount`, TEXT_PAGE + 1 meaning
    * more than TEXT_PAGE). Review pass 8: the keyword function counts and
    * scores its whole match set — 5.4 s for a word in nearly every thought at

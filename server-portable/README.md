@@ -86,7 +86,7 @@ the identifiers and quoted spans in the query, through the same function with
 no vector — and, those matching nothing, by the whole query matched as one
 text, case aside, as `search_thoughts_keyword` matches it — when it is 3 to 64
 characters and not only common words, in a scan bounded at its first 1,001
-matching rows, newest first, a count past that said "more than 1000" (SMD-2891). `search_thoughts` says so first, names the endpoint and
+matching rows, newest first among them, a count past that said "more than 1000" (SMD-2891). `search_thoughts` says so first, names the endpoint and
 `search_thoughts_keyword`, and carries `vectorFailed`; with nothing found it
 says whether the query's literals are absent, too common to match exactly,
 held only by thoughts outside the search's filter, `said_by`, `actor` or

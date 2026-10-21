@@ -1646,6 +1646,10 @@ console.log("\n[19] textThoughts: a search's text match without a vector, bounde
     const page = await store.textThoughts({ query: "paged-text", limit: 3, filter: {} });
     assert(page.length === 3 && page.every((r) => r.totalCount === 1001) && page.map((r) => r.content.split(" ").pop()).join() === "1,2,3",
       `1,005 holders: the page stops at 1,001 and says so, the newest three first (${JSON.stringify(page.map((r) => [r.content.slice(-6), r.totalCount]))})`);
+    // Under the page, every holder is in it, so the shown are the newest — though the scan meets them oldest first (review pass 9: a dropped ORDER BY passed).
+    await raw`INSERT INTO thoughts (content, created_at) SELECT 'store-sql 2891 ORDERED-TEXT ' || g, now() + (g || ' seconds')::interval FROM generate_series(1, 50) g`;
+    const ordered = await store.textThoughts({ query: "ORDERED-TEXT", limit: 3, filter: {} });
+    assert(ordered.map((r) => r.content.split(" ").pop()).join() === "50,49,48" && ordered[0].totalCount === 50, `under the page, the newest three of 50 first (${JSON.stringify(ordered.map((r) => r.content.slice(-3)))})`);
     const filtered = await store.textThoughts({ query: "PAGED-TEXT", limit: 2, filter: { type: "nope" } });
     const floored = await store.textThoughts({ query: "PAGED-TEXT", limit: 2, filter: {}, minTrust: "operator" });
     assert(filtered.length === 0 && floored.length === 0, "the filter and the trust floor apply inside the scan");

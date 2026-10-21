@@ -1101,6 +1101,19 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   assert(tv?.vectorFailed?.matched === "text" && tv.vectorFailed.base === `http://127.0.0.1:${embedPort2}/v1` && tv.hits.length === 1 && tv.hits[0].similarity === null && JSON.stringify(tv.hits[0].matchedNeedles) === JSON.stringify(["alpha words"])
       && JSON.stringify(asked2) === JSON.stringify([{ hybrid: null }, { literalFacts: true }, { text: "alpha words", limit: 5, filter: {} }]),
     `a query with no literal: the bounded text match asked for the whole query, its row the hit, matched as text, the embeddings endpoint named (${JSON.stringify({ vf: tv?.vectorFailed, asked2 })})`);
+  // A scoped text match that finds nothing asks the bounded text match again, unfiltered, for the held-outside count (review pass 9: an unbounded count passed).
+  asked2.length = 0;
+  textStore.textThoughts = async (o: Record<string, unknown>) => { asked2.push({ text: o.query, limit: o.limit, filter: o.filter, minTrust: o.minTrust }); return o.filter && Object.keys(o.filter as object).length ? [] : [{ id: "00000000-0000-4000-8000-0000000000c2", content: "alpha words", metadata: {}, created_at: "2026-10-21T00:00:00.000Z", occurrences: 1, totalCount: 7 }]; };
+  console.error = () => {};
+  let fr: Awaited<ReturnType<typeof searchThoughts>>;
+  try {
+    fr = await searchThoughts(tctx, { name: "reader", scope: "read", keyHash: "h" } as never, { query: "alpha words", limit: 5, threshold: 0, recency_weight: 0, prefer_current: false, filter: { type: "nope" } } as never);
+  } finally {
+    console.error = realError2;
+  }
+  const fv = fr.ok ? fr.value : undefined;
+  assert(JSON.stringify(asked2.filter((a) => "text" in a)) === JSON.stringify([{ text: "alpha words", limit: 5, filter: { type: "nope" } }, { text: "alpha words", limit: 1, filter: {} }]) && JSON.stringify(fv?.facts?.needleCounts) === "[7]",
+    `a scoped empty text match: the bounded text match asked again unfiltered, its page count the held-outside count (${JSON.stringify(asked2)})`);
 }
 
 console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vector through update_thought with the stamp it read; two outages in a row stop the tick, and two such ticks running are the provider away; the gate is asked the question the row's writer asked; a failing row is held for doubling sweeps and holds back nothing; a tick acts only under the leader lock");

@@ -3785,7 +3785,7 @@ console.log("\n[23] A search the provider does not answer for is answered by the
     // function's whole-set count held every pool connection for seconds on a common word); and to 64 characters, 017's span bound.
     await sql`INSERT INTO thoughts (content) SELECT '[23] MANY-2891 row ' || g FROM generate_series(1, 1005) g`;
     const many = await result("search_thoughts", { query: "MANY-2891", limit: 3 });
-    assert(!many.isError && ((many.sc?.hits ?? []) as unknown[]).length === 3 && /It is in more than 1000 thoughts; these are the newest 3 of the first 1000 found — raise limit or page with search_thoughts_keyword\./.test(many.text),
+    assert(!many.isError && ((many.sc?.hits ?? []) as unknown[]).length === 3 && /It is in more than 1000 thoughts; these 3 are the newest of the first 1001 the scan found, not of all — page with search_thoughts_keyword\./.test(many.text),
       `a text past the page: its count "more than 1000", the newest of the first found (${many.text.slice(0, 400)})`);
     const manyOutside = await result("search_thoughts", { query: "MANY-2891", filter: { type: "no-such-type" } });
     assert(/Held only by thoughts outside this search's filter, said_by, actor or min_trust: MANY-2891 \(in more than 1000 thoughts\)\./.test(manyOutside.text), `…and held outside the filter, "in more than 1000" (${manyOutside.text.slice(-200)})`);
@@ -3793,6 +3793,12 @@ console.log("\n[23] A search the provider does not answer for is answered by the
     const wildcard = await result("search_thoughts", { query: "alpha%words" });
     assert(!wildcard.isError && !((wildcard.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === plain) && /No thought contains: alpha%words\./.test(wildcard.text),
       `a text holding %: matched literally, not as a wildcard (${wildcard.text.slice(-200)})`);
+    // The text rule's bound at its edge: 64 characters matched, 65 not (review pass 9).
+    const at64 = "alpha words" + " plain".repeat(Math.ceil((64 - 11) / 6));
+    const sixtyFour = await result("search_thoughts", { query: at64.slice(0, 64) });
+    const sixtyFive = await result("search_thoughts", { query: (at64 + " plain").slice(0, 65) });
+    assert(at64.slice(0, 64).length === 64 && asText.test(sixtyFour.text) && /So nothing could be matched/.test(sixtyFive.text),
+      `64 characters are matched as text, 65 are not (${sixtyFour.text.slice(0, 120)} | ${sixtyFive.text.slice(0, 120)})`);
     const longWords = await result("search_thoughts", { query: "alpha words and many more plain words to make this query longer than sixty four" });
     assert(!longWords.isError && /So nothing could be matched/.test(longWords.text), `a plain-words query over 64 characters: nothing matched as text, said so (${longWords.text.slice(0, 260)})`);
     // Text hits beside a too-common literal say why the text was asked; a text match has no literal-only reading (review pass 6).
