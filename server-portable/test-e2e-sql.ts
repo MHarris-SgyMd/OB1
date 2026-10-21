@@ -3626,7 +3626,7 @@ console.log("\n[22] A hit naming a ticket that moved since it was written says s
   const filed = await capture(`[22] stated-status: a note filed under LBL-2540\n\n${session(ended)}`, { metadata: { ticket: "LBL-2540" } });
   const quiet = await capture(`[22] stated-status: LBL-2541 is in the backlog, beside ${extra}\n\n${session(ended)}`);
   const wide = await capture(`[22] stated-status: LBL-2540 is in progress, then ${extra}\n\n${session(ended)}`);
-  // A duplicate's ticket row quoting LBL-2540: no lifecycle to node_state, still a ticket row.
+  // A duplicate's ticket row quoting LBL-2540: settled to node_state since 105 (SMD-2935), and a ticket row either way.
   const dup = await capture(`[22] stated-status: LBL-2542 — a duplicate of LBL-2540, in progress\n\n${session(ended)}`, { source: "linear", metadata: { issue: "LBL-2542", status: "Duplicate", status_type: "duplicate" } });
   try {
     const { TYPE_WORDS } = await import("./stated-status.ts");
