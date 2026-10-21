@@ -16,7 +16,7 @@
 # workers' key, Linear's), stable's keys and the secrets that go with them,
 # and the settings that make it the canary: its port, loopback as its
 # address, its tier and its profiles (none), which compose is also handed in
-# the shell; its own access key, minted, and its own plugin role password
+# the shell; its own access keys, minted, and its own plugin role password
 # where stable sets one (SMD-2874, SMD-3032). It refuses a stable setting that carries stable's
 # database password in its value. From then on the file is the canary's: a
 # change to stable's does not reach it, and `up` names the settings that
@@ -639,13 +639,17 @@ if mode == "own-fix":
     fwd_ok = bool(fwd) and not fwd_stable and any(d == sha(fwd) and scope == "forward" for _, _, scope, d in kept)
     if not fwd_ok:
         # The entries an earlier mint here made, whose raw key this file no
-        # longer holds, go with the one it replaces, and stable'"'"'s key with
-        # them where stable does not list it: a forward key opens the
-        # forwarder slot whoever holds it (review pass 1). Another name'"'"'s
-        # forward entry is the operator'"'"'s, and stays.
+        # longer holds, go with the one it replaces, and stable'"'"'s forward
+        # entry with them where stable does not list it: a forward key opens
+        # the forwarder slot whoever holds it (review pass 1). Another name'"'"'s
+        # forward entry is the operator'"'"'s, and stays; so does any other
+        # scope'"'"'s, the canary'"'"'s write key among them (review pass 2).
         base = os.environ["OWN_PROJECT"] + "-forwarder"
         minted_here = re.compile(re.escape(base) + r"(?:-[0-9]+)?")
-        kept = [x for x in kept if not (x[2] == "forward" and minted_here.fullmatch(x[1])) and not (fwd_stable and x[3] == sha(fwd))]
+        before = len(kept)
+        kept = [x for x in kept if not (x[2] == "forward" and (minted_here.fullmatch(x[1]) or (fwd_stable and x[3] == sha(fwd))))]
+        if len(kept) < before:
+            said.append("removed %d forward entr%s from MCP_ACCESS_KEYS whose raw key the file no longer holds (named %s or %s-N, or stable'"'"'s)" % (before - len(kept), "y" if before - len(kept) == 1 else "ies", base, base))
         was = ", in place of stable'"'"'s" if fwd_stable else ", in place of one MCP_ACCESS_KEYS does not hold as a forward key" if fwd else ""
         fwd = secrets.token_hex(32)
         name = unused(base)
@@ -765,7 +769,7 @@ make_canary_env() {
 
 # Gives FILE, a copy being made ready, what env_file own-fix says it lacks to
 # be the canary's own (SMD-2874, SMD-3032): its port, address, tier and
-# profiles, its own access key, none of stable's keys or webhook secrets, and
+# profiles, its own access keys, none of stable's keys or webhook secrets, and
 # a plugin role password of its own. Written by deploy/env-file.ts's
 # setEnvValues, one line a setting: its old lines removed and the new one at
 # the file's end, the rest of the file as it was; the values reach

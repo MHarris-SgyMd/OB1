@@ -104,8 +104,8 @@ USER bun
 #
 # The entry is the command: index.ts, the MCP server, unless a service names
 # another — the REST core's `command: ["api.ts"]` in deploy/compose.yaml
-# (SMD-2284): one image, one preflight, two servers. A third runs past
-# preflight, with `bun` as the entrypoint: ../mcp-server/index.ts (SMD-2287),
+# (SMD-2284): one image, one preflight, two servers. A third runs without
+# it, with `bun` as the entrypoint: ../mcp-server/index.ts (SMD-2287),
 # which reads no store and holds no key list — the REST core does both — and
 # whose own handlers answer a stop (shutdown.ts).
 ENTRYPOINT ["/bin/sh", "-c", "trap 'exit 143' TERM; trap 'exit 130' INT; bun preflight.ts & wait $! || exit $?; exec bun \"$@\"", "entry"]

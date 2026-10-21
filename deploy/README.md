@@ -2456,7 +2456,10 @@ registers the connector with and which no container is handed. Beside it
 raw key in the file's `OB1_FORWARDER_KEY`: the MCP server's own for its calls
 on the canary's REST core (SMD-2287), never stable's, and refused as a caller
 like any forward key. A canary made before it gets one at its next `up`, which
-rewrites `MCP_ACCESS_KEYS` for it once (its other entries kept). For another
+rewrites `MCP_ACCESS_KEYS` for it once: its other entries kept, comments in it
+dropped, and one written across lines refused until it is on one line. A
+re-mint takes out the forward entries an earlier one made
+(`open-brain-canary-forwarder`, `-2` and on), whose raw key is gone. For another
 client, mint a key with `bun server-portable/keygen.ts --name <client>
 --scope read|write` and add the line it prints to the canary's
 `MCP_ACCESS_KEYS`; `up` keeps any entry that is not stable's. A refresh copies

@@ -212,7 +212,7 @@ same values, and also needs `OB1_AUTH_SECRET_MCP`, the authorization server's `m
 `deploy/.env`.
 
 The server image (`server-portable/Dockerfile`) carries this directory and
-`rest-client/`, each with its own lockfile's packages (PR 5a). It runs there past
+`rest-client/`, each with its own lockfile's packages (PR 5a). It runs there without
 the image's preflight, which needs a database this server never opens:
 
 ```bash

@@ -2,7 +2,7 @@
 // as mcp.ob1.internal on the stack's mesh and at /mcp through the proxy once
 // SMD-2287 PR 5 gives it a compose service (server-portable's is there now).
 // It calls the REST core at OB1_REST_URL with OB1_FORWARDER_KEY — a
-// forward-scope key MCP_ACCESS_KEYS holds (`bun keygen.ts --scope forward`) —
+// forward-scope key MCP_ACCESS_KEYS holds (`bun keygen.ts --name <name> --scope forward`) —
 // beside each caller's key, and reads OB1_PLUGINS as the REST core does, for
 // the enabled plugins' tools. It reads no store and holds no key list: what a
 // key may do is the REST core's to say. Its spans, metrics and log records go
