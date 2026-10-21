@@ -3112,7 +3112,7 @@ jobs:
           plugin_login() { PGPASSWORD="$1" docker run --rm --network open-brain-canary_data -e PGPASSWORD pgvector/pgvector:0.8.6-pg16 psql -h postgres -U ob1_plugins -d openbrain -tAc 'SELECT 1' > /dev/null 2>&1; }
           plugin_login "$canary_plugin" || { echo "the canary's plugin role does not take the canary's own password" >&2; exit 1; }
           if plugin_login ci-dummy-plugin-password-0123456789; then echo "the canary's plugin role still takes stable's password" >&2; exit 1; fi
-          if grep -qFf <(printf '%s\n' "$PG_CANARY" "$CANARY_KEY" "$CANARY_FORWARD" "$canary_plugin") /tmp/canary-wrong.out /tmp/canary-up.out; then echo "canary.sh printed the canary's password (the lines are not shown here, so this log does not)" >&2; exit 1; fi
+          if grep -qFf <(printf '%s\n' "$PG_CANARY" "$CANARY_KEY" "$CANARY_FORWARD" "$canary_plugin") /tmp/canary-wrong.out /tmp/canary-up.out; then echo "canary.sh printed a key or password of the canary's (this check shows no line of it)" >&2; exit 1; fi
           [ "$rc" = 1 ] || { cat /tmp/canary-wrong.out >&2; echo "up passed its smoke under a provider serving another model (exit $rc)" >&2; exit 1; }
           grep -F "differs from stable's on OB1_QUERY_LOG_RETENTION_DAYS" /tmp/canary-wrong.out
           grep -F 'returned none of' /tmp/canary-wrong.out
@@ -3154,17 +3154,21 @@ jobs:
           echo 'SERVER_PORT="8013"' >> .env.canary.local
           # …with stable's keys beside the canary's, as a file made before
           # SMD-2874 PR 2 holds them: the up takes them out, by count, keeps the
-          # canary's own key, and leaves one MCP_ACCESS_KEYS line. Stable's raw
-          # forward key, there too, is replaced by a fresh one of the canary's,
-          # under the name its first was minted with, and its own first entry
-          # goes with it (SMD-2287 review pass 1). An operator's forward entry
-          # whose name only starts like the minted one stays (review pass 2: a
-          # prefix match dropped it), and so does a read entry under a minted
-          # name, since only forward entries go (review pass 3). The operator's
-          # forward entry is named -1, which no up mints (review pass 4). And
-          # stable's own forward key, set in stable's file with spaces around
-          # it and listed in no MCP_ACCESS_KEYS of stable's, is one of stable's
-          # keys: the canary's read entry for it goes with stable's, counted.
+          # canary's own key, and leaves one MCP_ACCESS_KEYS line. Two forward
+          # keys of stable's are in play (SMD-2287):
+          #   - OB1_SMOKE_FORWARD_KEY, the ci-forwarder entry stable's
+          #     MCP_ACCESS_KEYS lists, copied in as the canary's
+          #     OB1_FORWARDER_KEY: replaced by a fresh key of the canary's,
+          #     under the base name, and the forward entry the first up minted
+          #     is removed (review pass 1);
+          #   - STABLE_FWD, stable's own OB1_FORWARDER_KEY, set in stable's file
+          #     with spaces around it and listed nowhere by stable: one of
+          #     stable's keys all the same, so the canary's read entry for it
+          #     goes with stable's, counted (review passes 3 and 4).
+          # The operator's two entries stay: a forward entry named -1, which no
+          # up mints and a prefix match would remove (passes 2 and 4), and a
+          # read entry under a minted name, since only forward entries go
+          # (pass 3).
           OPS_FORWARD="open-brain-canary-mcp-forwarder-1:forward:$(openssl rand -hex 32 | tr -d '\n' | shasum -a 256 | cut -d' ' -f1)"
           OPS_READ="open-brain-canary-mcp-forwarder-2:read:$(openssl rand -hex 32 | tr -d '\n' | shasum -a 256 | cut -d' ' -f1)"
           STABLE_FWD="$(openssl rand -hex 32)"
@@ -3207,9 +3211,9 @@ jobs:
           printf 'OB1_WORKER_KEY=ci-canary-worker-key-not-stables\n' >> .env.canary.local
           # The file as a canary mended by SMD-2874 PR 2 holds it, the dogfood
           # canary's next upgrade: its write key alone, no forward key. The up
-          # mints the forward key, rewriting MCP_ACCESS_KEYS for it alone, and
-          # keeps the write key (SMD-2287 review pass 1: a mutant that wrote
-          # the raw key without its entry passed every up above).
+          # mints the forward key, adding its entry to MCP_ACCESS_KEYS beside
+          # the write key, which it keeps (SMD-2287 review pass 1: a mutant
+          # that wrote the raw key without its entry passed every up above).
           sed -i '/^OB1_FORWARDER_KEY=/d; /^MCP_ACCESS_KEYS=/d' .env.canary.local
           printf 'MCP_ACCESS_KEYS=open-brain-canary:write:%s\n' "$(printf '%s' "$CANARY_KEY" | shasum -a 256 | cut -d' ' -f1)" >> .env.canary.local
           standin_id="$(standin)"
@@ -3219,7 +3223,7 @@ jobs:
           FORWARD_3="$(forward_of)"
           [ "${#FORWARD_3}" = 64 ] || { echo "up --no-refresh left the canary no forward key" >&2; exit 1; }
           [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "$(own_keys "$FORWARD_3")" ] || { echo "up --no-refresh did not give the canary its forward key beside its write key" >&2; exit 1; }
-          if grep -qFf <(printf '%s\n' "$FORWARD_2" "$FORWARD_3" "$CANARY_KEY" "$OB1_SMOKE_FORWARD_KEY" "$STABLE_FWD") /tmp/canary-edited.out /tmp/canary-nokey.out /tmp/canary-norefresh.out; then echo "canary.sh printed a raw key, the canary's or stable's forward key" >&2; exit 1; fi
+          if grep -qFf <(printf '%s\n' "$FORWARD_2" "$FORWARD_3" "$CANARY_KEY" "$CANARY_FORWARD" "$OB1_SMOKE_FORWARD_KEY" "$STABLE_FWD" "$PG_CANARY" "$canary_plugin") /tmp/canary-edited.out /tmp/canary-nokey.out /tmp/canary-norefresh.out; then echo "canary.sh printed a raw key, the canary's or stable's forward key" >&2; exit 1; fi
           grep -F 'migrate open-brain-canary-postgres-1 in place' /tmp/canary-norefresh.out
           grep -F 'canary sleep worker stopped for the migration' /tmp/canary-norefresh.out
           grep -F 'canary sleep worker, on the new build' /tmp/canary-norefresh.out
