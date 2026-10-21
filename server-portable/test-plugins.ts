@@ -816,10 +816,10 @@ console.log("\n[11] Webhooks: served only for a plugin OB1_HOOKS names, POST alo
   finishRetry(coreOk({ id: thought(3) }));
   r = await within("the retry", retry);
   assert(r.status === 202 && claims.get("evt-7") === thought(3), `and the retry records its thought (${r.status})`);
-  answer = async () => coreRefuse({ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "t-x", detail: "d" });
+  answer = async () => coreRefuse({ code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "registry_away" });
   r = await send("evt-6");
   const later = (await r.json()) as { code?: string; retryable?: boolean; refused?: string };
-  assert(r.status === 503 && later.retryable === true && later.refused === "EMBEDDING_NOT_ATTACHED" && !claims.has("evt-6"), `a refusal the core says is retryable: 503, retryable, the claim given back (${r.status} ${JSON.stringify(later)})`);
+  assert(r.status === 503 && later.retryable === true && later.refused === "SUPERSEDES_UNJUDGED" && !claims.has("evt-6"), `a refusal the core says is retryable: 503, retryable, the claim given back (${r.status} ${JSON.stringify(later)})`);
   answer = async () => coreOk({ thoughts: [] });
   // A handler's answer the REST core will not pass on.
   const odd = definePlugin({ name: "probe-kit", title: "P", description: "D", operations: { x: operation({ title: "t", description: "d", scope: "read", method: "GET", path: "/x", input: {}, output: {}, handler: async () => ok({}) }) },

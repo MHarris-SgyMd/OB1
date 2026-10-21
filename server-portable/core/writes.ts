@@ -410,8 +410,6 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       await ctx.logActions(principal, citeRows("capture_thought", { derived_from: derivedFrom, supersedes: pointer }));
     }
 
-    if (captured.embeddingFailed) return refuse({ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: captured.id, detail: captured.embeddingFailed });
-
     // What a key that cannot read may be told about the row: not whether
     // the text was already a thought, nor what it points at (first review
     // pass — an existence oracle on a capture-only key). The id is returned

@@ -217,7 +217,7 @@ console.log("\n[2] capture_thought writes through SQL");
 {
   const out = await call("capture_thought", { content: "alpha thought about migrations" });
   assert(/Captured as/.test(out), `capture reports success (${out.split("\n")[0].slice(0, 50)}…)`);
-  assert(!/NOT appear in semantic search/.test(out), "no degraded-write warning");
+  assert(!/WITHOUT a vector|no vector was made|embedding call for this capture was not made/.test(out), "no degraded-write note");
 
   const sql = new SQL({ url: URL_, max: 1 });
   const [row] = await sql`SELECT content, metadata, embedding IS NOT NULL AS has, embedding_model AS m FROM thoughts`;
