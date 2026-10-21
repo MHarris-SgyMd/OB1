@@ -25,7 +25,7 @@ import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgr
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -267,9 +267,33 @@ export class SqlStore implements ThoughtStore {
                                  WHERE t.content ILIKE '%' || replace(replace(replace(n.needle, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%'
                                  OFFSET 100 LIMIT 1)) ORDER BY n.ord)
                        FROM unnest(extract_search_needles(${query}::text)) WITH ORDINALITY AS n(needle, ord)), '[]'::jsonb) AS literals,
-             length(btrim(${query}::text)) >= 3 AND length(to_tsvector('english', ${query}::text)) > 0 AS textable`;
+             length(btrim(${query}::text)) BETWEEN 3 AND 64 AND length(to_tsvector('english', ${query}::text)) > 0 AS textable`;
     const literals = (typeof row.literals === "string" ? JSON.parse(row.literals) : row.literals) as { needle: string; common: boolean }[];
     return { literals: literals.map((l) => ({ needle: String(l.needle), common: l.common === true })), textable: row.textable === true };
+  }
+
+  async textThoughts(opts: { query: string; limit: number; filter: Record<string, unknown>; minTrust?: string }): Promise<ThoughtKeywordMatch[]> {
+    // 075's probe shape, bounded: the escaped pattern, the filter and the
+    // trust floor in one scan that stops at the page's last row, then the
+    // page ordered newest first. Never search_thoughts_keyword's function,
+    // whose count(*) OVER () and per-row occurrences read the whole match set
+    // (review pass 8). A row says how many the page held; a page past
+    // TEXT_PAGE says "more than".
+    const minTrust = opts.minTrust ?? null;
+    const rows = await this.sql`
+      WITH page AS (
+        SELECT t.id, t.content, t.metadata, t.created_at
+        FROM thoughts t
+        WHERE t.content ILIKE '%' || replace(replace(replace(${opts.query}::text, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%'
+          AND (${opts.filter}::jsonb = '{}'::jsonb OR t.metadata @> ${opts.filter}::jsonb)
+          AND (ob1_min_trust_rank(${minTrust}::text) = 0 OR ob1_trust_rank(t.metadata->>'trust') >= ob1_min_trust_rank(${minTrust}::text))
+        LIMIT ${TEXT_PAGE + 1}
+      )
+      SELECT id, content, metadata, created_at, 1 AS occurrences, (SELECT count(*) FROM page)::int AS total_count
+      FROM page
+      ORDER BY created_at DESC NULLS LAST, id
+      LIMIT ${opts.limit}::int`;
+    return rows.map(normaliseKeywordRow);
   }
 
   /** hybridThoughts with min_trust: 075's 8-argument forms, the same columns as the 7's. */

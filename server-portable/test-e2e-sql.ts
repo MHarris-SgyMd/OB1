@@ -3772,15 +3772,29 @@ console.log("\n[23] A search the provider does not answer for is answered by the
     assert(!wordsCurrent.isError && /prefer_current does not rank a text match: these are in its order, a superseded one labelled\./.test(wordsCurrent.text), `prefer_current over a text match: said not to rank it (${wordsCurrent.text.slice(0, 300)})`);
     // A query too short, or only common words, matches nothing as text (review pass 5: `the` counted every thought).
     const tooThin = await result("search_thoughts", { query: "the" });
-    assert(!tooThin.isError && /So nothing could be matched: the query holds no identifier or quoted span, and is too short or only common words to match as one text\./.test(tooThin.text) && ((tooThin.sc?.hits ?? []) as unknown[]).length === 0,
+    assert(!tooThin.isError && /So nothing could be matched: the query holds no identifier or quoted span, and is too short, longer than 64 characters, or only common words to match as one text\./.test(tooThin.text) && ((tooThin.sc?.hits ?? []) as unknown[]).length === 0,
       `"the": nothing matched, and why (${tooThin.text.slice(0, 260)})`);
     const tooShort = await result("search_thoughts", { query: "zq" });
-    assert(!tooShort.isError && /So nothing could be matched: the query holds no identifier or quoted span, and is too short or only common words to match as one text\./.test(tooShort.text),
+    assert(!tooShort.isError && /So nothing could be matched: the query holds no identifier or quoted span, and is too short, longer than 64 characters, or only common words to match as one text\./.test(tooShort.text),
       `"zq", a word under three characters: nothing matched, and why (${tooShort.text.slice(0, 260)})`);
     // A too-common identifier alone is matched as one text, the count past the limit said (review pass 5: it was refused).
     const commonAlone = await result("search_thoughts", { query: "COMMON-2891" });
-    assert(!commonAlone.isError && asText.test(commonAlone.text) && ((commonAlone.sc?.hits ?? []) as unknown[]).length === 10 && /It is in 120 thoughts; these are the first 10 — raise limit or page with search_thoughts_keyword\./.test(commonAlone.text),
+    assert(!commonAlone.isError && asText.test(commonAlone.text) && ((commonAlone.sc?.hits ?? []) as unknown[]).length === 10 && /It is in 120 thoughts; these are the newest 10 — raise limit or page with search_thoughts_keyword\./.test(commonAlone.text),
       `a too-common identifier alone: its first ten holders as text, the 120 said (${commonAlone.text.slice(0, 400)})`);
+    // The text match is bounded to its first 1,001 matching rows, its count past them "more than" (review pass 8: the keyword
+    // function's whole-set count held every pool connection for seconds on a common word); and to 64 characters, 017's span bound.
+    await sql`INSERT INTO thoughts (content) SELECT '[23] MANY-2891 row ' || g FROM generate_series(1, 1005) g`;
+    const many = await result("search_thoughts", { query: "MANY-2891", limit: 3 });
+    assert(!many.isError && ((many.sc?.hits ?? []) as unknown[]).length === 3 && /It is in more than 1000 thoughts; these are the newest 3 of the first 1000 found — raise limit or page with search_thoughts_keyword\./.test(many.text),
+      `a text past the page: its count "more than 1000", the newest of the first found (${many.text.slice(0, 400)})`);
+    const manyOutside = await result("search_thoughts", { query: "MANY-2891", filter: { type: "no-such-type" } });
+    assert(/Held only by thoughts outside this search's filter, said_by, actor or min_trust: MANY-2891 \(in more than 1000 thoughts\)\./.test(manyOutside.text), `…and held outside the filter, "in more than 1000" (${manyOutside.text.slice(-200)})`);
+    // The text match escapes as 012 does: `%` is no wildcard, so "alpha%words" is not "alpha words" (review pass 8).
+    const wildcard = await result("search_thoughts", { query: "alpha%words" });
+    assert(!wildcard.isError && !((wildcard.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === plain) && /No thought contains: alpha%words\./.test(wildcard.text),
+      `a text holding %: matched literally, not as a wildcard (${wildcard.text.slice(-200)})`);
+    const longWords = await result("search_thoughts", { query: "alpha words and many more plain words to make this query longer than sixty four" });
+    assert(!longWords.isError && /So nothing could be matched/.test(longWords.text), `a plain-words query over 64 characters: nothing matched as text, said so (${longWords.text.slice(0, 260)})`);
     // Text hits beside a too-common literal say why the text was asked; a text match has no literal-only reading (review pass 6).
     const commonRow = await result("search_thoughts", { query: "COMMON-2891 row" });
     assert(!commonRow.isError && ((commonRow.sc?.hits ?? []) as unknown[]).length === 10 && /Searched exactly for: COMMON-2891 row\. It is in 120 thoughts/.test(commonRow.text) && /Too common to match exactly .*: COMMON-2891\./.test(commonRow.text) && commonRow.sc?.literalOnly === null,
@@ -3843,7 +3857,7 @@ console.log("\n[23] A search the provider does not answer for is answered by the
       `the provider back: no mark, rows with a similarity again, arm hybrid (${back.text.slice(0, 80)})`);
   } finally {
     stubDown = null;
-    await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([named, plain], "TEXT")}::uuid[]) OR content LIKE '[23] COMMON-2891 row %' OR content LIKE '[23] decoy %'`;
+    await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([named, plain], "TEXT")}::uuid[]) OR content LIKE '[23] COMMON-2891 row %' OR content LIKE '[23] decoy %' OR content LIKE '[23] MANY-2891 row %'`;
     await sql.close();
   }
 }

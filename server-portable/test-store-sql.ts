@@ -1637,6 +1637,26 @@ console.log("\n[18] The vector mender's page, both forms, and brain_info's vecto
   }
 }
 
+console.log("\n[19] textThoughts: a search's text match without a vector, bounded — the first 1,001 matching rows, the newest of them first, the count the page's own; the filter and the trust floor inside the scan; % and _ literal (SMD-2891, review pass 8)");
+{
+  const raw = new SQL({ url: URL_, max: 1 });
+  try {
+    await raw`INSERT INTO thoughts (content, metadata, created_at) SELECT 'store-sql 2891 PAGED-TEXT ' || g, '{"type":"note"}'::jsonb, now() - (g || ' seconds')::interval FROM generate_series(1, 1005) g`;
+    await raw`INSERT INTO thoughts (content) VALUES ('store-sql 2891 PAGEDXTEXT decoy'), ('store-sql 2891 PAGED_TEXT 50% done')`;
+    const page = await store.textThoughts({ query: "paged-text", limit: 3, filter: {} });
+    assert(page.length === 3 && page.every((r) => r.totalCount === 1001) && page.map((r) => r.content.split(" ").pop()).join() === "1,2,3",
+      `1,005 holders: the page stops at 1,001 and says so, the newest three first (${JSON.stringify(page.map((r) => [r.content.slice(-6), r.totalCount]))})`);
+    const filtered = await store.textThoughts({ query: "PAGED-TEXT", limit: 2, filter: { type: "nope" } });
+    const floored = await store.textThoughts({ query: "PAGED-TEXT", limit: 2, filter: {}, minTrust: "operator" });
+    assert(filtered.length === 0 && floored.length === 0, "the filter and the trust floor apply inside the scan");
+    const escaped = await store.textThoughts({ query: "PAGED_TEXT 50%", limit: 5, filter: {} });
+    assert(escaped.length === 1 && escaped[0].content.endsWith("PAGED_TEXT 50% done") && escaped[0].totalCount === 1, `_ and % are literal: one holder, no decoy (${JSON.stringify(escaped.map((r) => r.content))})`);
+  } finally {
+    await raw`DELETE FROM thoughts WHERE content LIKE 'store-sql 2891 %'`;
+    await raw.close();
+  }
+}
+
 await store.close();
 
 report();

@@ -1078,7 +1078,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   const textStore = {
     hybridThoughts: async (o: Record<string, unknown>) => { asked2.push({ hybrid: o.embedding }); return []; },
     literalFacts: async () => { asked2.push({ literalFacts: true }); return { literals: [], textable: true }; },
-    keywordThoughts: async (o: Record<string, unknown>) => { asked2.push({ keyword: o.query, limit: o.limit, filter: o.filter }); return [{ id: "00000000-0000-4000-8000-0000000000c1", content: "alpha words", metadata: {}, created_at: "2026-10-21T00:00:00.000Z", occurrences: 1, totalCount: 1 }]; },
+    textThoughts: async (o: Record<string, unknown>) => { asked2.push({ text: o.query, limit: o.limit, filter: o.filter }); return [{ id: "00000000-0000-4000-8000-0000000000c1", content: "alpha words", metadata: {}, created_at: "2026-10-21T00:00:00.000Z", occurrences: 1, totalCount: 1 }]; },
 
     supersededAmong: async () => ({}),
     ticketStatusInputs: async () => null,
@@ -1099,8 +1099,8 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   }
   const tv = tr.ok ? tr.value : undefined;
   assert(tv?.vectorFailed?.matched === "text" && tv.vectorFailed.base === `http://127.0.0.1:${embedPort2}/v1` && tv.hits.length === 1 && tv.hits[0].similarity === null && JSON.stringify(tv.hits[0].matchedNeedles) === JSON.stringify(["alpha words"])
-      && JSON.stringify(asked2) === JSON.stringify([{ hybrid: null }, { literalFacts: true }, { keyword: "alpha words", limit: 5, filter: {} }]),
-    `a query with no literal: the keyword arm asked for the whole query, its row the hit, matched as text, the embeddings endpoint named (${JSON.stringify({ vf: tv?.vectorFailed, asked2 })})`);
+      && JSON.stringify(asked2) === JSON.stringify([{ hybrid: null }, { literalFacts: true }, { text: "alpha words", limit: 5, filter: {} }]),
+    `a query with no literal: the bounded text match asked for the whole query, its row the hit, matched as text, the embeddings endpoint named (${JSON.stringify({ vf: tv?.vectorFailed, asked2 })})`);
 }
 
 console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vector through update_thought with the stamp it read; two outages in a row stop the tick, and two such ticks running are the provider away; the gate is asked the question the row's writer asked; a failing row is held for doubling sweeps and holds back nothing; a tick acts only under the leader lock");

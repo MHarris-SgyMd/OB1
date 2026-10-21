@@ -11,8 +11,9 @@
 --   same hybrid function with no vector: match_thoughts finds nothing on
 --   NULL, so the rows are the identifiers and quoted spans the query names,
 --   matched exactly — no function changes. When those match nothing, the
---   whole query is matched as one text by search_thoughts_keyword's function
---   (at least three characters, and a word the English parser keeps).
+--   whole query (3 to 64 characters, and a word the English parser keeps)
+--   is matched as one text, as search_thoughts_keyword matches it, in a scan
+--   bounded at its first 1,001 matching rows.
 --   The ticket asks that the query log say which arm actually ran. It is
 --   none of the three 059 allows: `hybrid` and `current` would replay with a
 --   vector, and `keyword` is another tool's search, with its paging.
@@ -25,7 +26,7 @@
 --   server-portable/core/reads.ts's runSearch, the single writer of search
 --   rows: `literal` when the provider did not answer (providerDown) for a
 --   search or search_thoughts call, whichever function answered it — the
---   hybrid's, prefer_current's, or the keyword arm's for a text match.
+--   hybrid's, prefer_current's, or the bounded text match's.
 --
 -- NOT HERE
 --   * Replaying a literal row: db/brain-compare.ts's replayPlanFromLog takes

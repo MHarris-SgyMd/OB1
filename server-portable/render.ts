@@ -21,6 +21,7 @@ import { displayDate } from "./thoughts.ts";
 import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, REASON_MAX, UNSHOWN } from "./consolidate.ts";
 import type { ActorStamp, AuditChange, DryRunClaimResult, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
+import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
 import { SAID_BY, TRUST } from "./core/filter.ts";
@@ -549,6 +550,9 @@ function providerUnavailable(r: Extract<Refusal, { code: "EMBEDDING_PROVIDER_UNA
   return words.join(" ");
 }
 
+/** A count of thoughts in words; a text match's bounded count past its page is "more than" it (SMD-2891, review pass 8). */
+const thoughtCount = (n: number) => n > TEXT_PAGE ? `more than ${TEXT_PAGE} thoughts` : `${n} thought${n === 1 ? "" : "s"}`;
+
 /**
  * What a search answered without a vector says (SMD-2891): the provider and
  * what happened there, that the matches are the query's literals only, and
@@ -560,7 +564,7 @@ export function literalOnlyNote(f: Pick<QueryVectorFailed, "base" | "detail" | "
   const how = f.matched === "text"
     ? "the query was matched by its identifiers and quoted spans, if any, and then as one text, exactly (case aside) — not by meaning"
     : f.matched === "none"
-      ? "nothing could be matched: the query holds no identifier or quoted span, and is too short or only common words to match as one text"
+      ? "nothing could be matched: the query holds no identifier or quoted span, and is too short, longer than 64 characters, or only common words to match as one text"
       : "the query was matched only by its identifiers and quoted spans, exactly — not by meaning";
   return `Semantic search is unavailable — the embedding provider at ${f.base} failed: ${f.detail}. So ${how}. ` +
     `${tool === "search" ? "The brain's search_thoughts_keyword tool" : "search_thoughts_keyword"} finds any word or phrase a thought contains; semantic search returns once the provider answers.`;
@@ -587,7 +591,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         // unfiltered and an exact hit clears any threshold, so its thoughts are
         // outside the search's filter, said_by, actor or min_trust (review pass 2).
         const outside = facts.needles.map((n, i) => [n, facts.needleCounts[i]] as const).filter(([, c]) => c > 0);
-        if (outside.length) why.push(`Held only by thoughts outside this search's filter, said_by, actor or min_trust: ${outside.map(([n, c]) => `${n} (in ${c} thought${c === 1 ? "" : "s"})`).join(", ")}.`);
+        if (outside.length) why.push(`Held only by thoughts outside this search's filter, said_by, actor or min_trust: ${outside.map(([n, c]) => `${n} (in ${thoughtCount(c)})`).join(", ")}.`);
         if (facts.commonNeedles.length) why.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${facts.commonNeedles.join(", ")} — use search_thoughts_keyword to page through them.`);
       }
       return `No thoughts found matching "${query}".${why.length ? ` ${why.join(" ")}` : ""}`;
@@ -663,7 +667,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     // A text match (review pass 5): no ranking for prefer_current to demote in, and a count past the limit said, as a literal's is.
     const asText = vectorFailed?.matched === "text";
     if (head.needles.length) notes.push(`Searched exactly for: ${head.needles.join(", ")}.`);
-    if (asText && head.needleCounts[0] > data.length) notes.push(`It is in ${head.needleCounts[0]} thoughts; these are the first ${data.length} — raise limit or page with search_thoughts_keyword.`);
+    if (asText && head.needleCounts[0] > data.length) notes.push(`It is in ${thoughtCount(head.needleCounts[0])}; these are the newest ${data.length}${head.needleCounts[0] > TEXT_PAGE ? ` of the first ${TEXT_PAGE} found` : ""} — raise limit or page with search_thoughts_keyword.`);
     if (asText && v.preferCurrent) notes.push("prefer_current does not rank a text match: these are in its order, a superseded one labelled.");
     if (absent.length) notes.push(`No thought contains: ${absent.join(", ")}.`);
     if (truncated.length) notes.push(`Outside the top ${data.length}${v.preferCurrent ? " (or demoted past it)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")} — raise limit or use search_thoughts_keyword.`);

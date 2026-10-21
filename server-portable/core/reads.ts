@@ -124,7 +124,7 @@ const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
     const { literals, textable } = await store.literalFacts(text);
     if (textable) {
       vectorFailed = { ...vectorFailed, matched: "text" };
-      const kw = await store.keywordThoughts({ query: text, limit: opts.limit, offset: 0, filter: opts.filter, minTrust: opts.minTrust });
+      const kw = await store.textThoughts({ query: text, limit: opts.limit, filter: opts.filter, minTrust: opts.minTrust });
       // A literal too common to match exactly is why the text was asked; its rows say so (review pass 6).
       const common = literals.filter((l) => l.common).map((l) => l.needle);
       rows = kw.map((k) => textRow(k, text, common));
@@ -136,7 +136,7 @@ const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
       // (review pass 6); then each literal absent or too common (unfiltered);
       // then the text held by none.
       const scoped = Object.keys(opts.filter).length > 0 || opts.minTrust !== undefined;
-      const outside = textable && scoped ? ((await store.keywordThoughts({ query: text, limit: 1, offset: 0, filter: {} }))[0]?.totalCount ?? 0) : 0;
+      const outside = textable && scoped ? ((await store.textThoughts({ query: text, limit: 1, filter: {} }))[0]?.totalCount ?? 0) : 0;
       if (outside > 0) facts = { needles: [text], needleCounts: [outside], commonNeedles: [], literalOnly: null };
       else if (literals.length > 0) facts = factsFromLiterals(literals);
       else if (textable) facts = { needles: [text], needleCounts: [0], commonNeedles: [], literalOnly: null };
