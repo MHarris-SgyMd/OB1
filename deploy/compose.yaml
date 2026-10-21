@@ -172,31 +172,20 @@ x-otel-env: &otel-env
 #           origin shares it with /auth, so a script running in a Grafana
 #           page could act on the authorization server's session;
 #   mcp     /mcp and everything under it — the endpoint clients are given;
-#   canary, working  /canary/mcp and /working/mcp and everything under each
-#           — that tier's MCP server (SMD-2294), mcp.canary.ob1.internal or
-#           mcp.working.ob1.internal on `mesh`, where a tier stood up as a
-#           compose project of its own joins this stack's mesh under that
-#           name. Only while it answers: with no such tier, or one stopped
-#           or still starting, Traefik's 502 becomes a bare 404
-#           (`tier-absent`), as auth-absent does for the authorization
-#           server. The tiers' protected-resource paths are not routed, so
-#           a tier is reached with keys (no tier route carries OAuth: a
-#           brain's own /mcp does, SMD-2286; docs/one-brain-per-stack.md).
-#           Deprecated (SMD-3057): since SMD-2874 a canary is a brain of its
-#           own on its own port, and the three-brain stack
-#           (compose.tiers.yaml) routes its own canary and working tiers;
-#           v2.0.0 removes these two routes, and until then every answer
-#           carries a Deprecation header and a Link to the README's "A
-#           canary beside the stack", which names both (`tier-deprecated`);
-#   tier-off every other path that starts with /canary or /working, in
-#           any case and whatever follows: a bare 404 (`not-served`), so a
-#           client handed a tier's URL changed in any way after the prefix
-#           (its case, an escaped slash, a pasted invisible space) never
+#   tier-off every path that starts with /canary or /working, in any case
+#           and whatever follows: a bare 404 (`not-served`). A canary or a
+#           working tier is a brain of its own on its own port (SMD-2874;
+#           docs/one-brain-per-stack.md), and this stack routes none; from
+#           SMD-2294 to v2.0.0 a tier answered at /canary/mcp here,
+#           deprecated by SMD-3057 for a release before it went. Kept
+#           until SMD-2532 removes the legacy route, so a client still given
+#           a tier's URL on this origin, in any spelling after the prefix
+#           (its case, an escaped slash, a pasted invisible space), never
 #           reaches this stack's server by the legacy route, to write with
 #           the same key (a typo of the prefix itself, `/canry/mcp`, still
-#           does until SMD-2532). No boundary after the prefix: each one
-#           tried left some character through (SMD-2294 review passes 2-4),
-#           and nothing this stack serves starts with either word;
+#           does until then). No boundary after the prefix: each one tried
+#           left some character through (SMD-2294 review passes 2-4), and
+#           nothing this stack serves starts with either word;
 #   health  GET, HEAD and OPTIONS /health at the origin root, for a GET-only
 #           probe and a browser's CORS preflight;
 #   legacy  everything but /.well-known — what clients reach today at the root
@@ -230,10 +219,7 @@ x-otel-env: &otel-env
 #           upgrade guide;
 #   not-legacy  deletes that marker (an empty value deletes the header), so a
 #           client cannot send it on /mcp and be logged as a straggler;
-#   tier-deprecated  adds to every answer on the canary and working routes a
-#           Deprecation header (RFC 9745) dated 2026-10-16 and a Link to
-#           deploy/README.md's "A canary beside the stack" (SMD-3057);
-#   auth-absent, tier-absent  any 502 — Traefik's own: no such name, nothing
+#   auth-absent  any 502 — Traefik's own: no such name, nothing
 #           listening, or a request the server dropped mid-flight, as its
 #           registration stall does at 30 s; the server never answers 502
 #           itself — is answered by noop@internal and becomes a 404 with no
@@ -243,8 +229,8 @@ x-otel-env: &otel-env
 #           serves gets (measured on this pin).
 # Every backend is dialled by its mesh name, written rooted. Not `server`:
 # compose gives each container its service name as an alias on every network
-# it joins, so a tier of another project on this mesh (SMD-2294) would answer
-# to `server` beside this stack's.
+# it joins, so a container of another project on this mesh (a tier joined it
+# from SMD-2294 to SMD-2874) would answer to `server` beside this stack's.
 # The table holds no comment of its own: Traefik renders it as a Go template
 # first, so a comment line there is not inert, and check 28
 # (scripts/check-fork-consistency.ts, PROXY_ROUTE_TABLE) holds it byte for
@@ -294,18 +280,6 @@ x-proxy-routes: &proxy-routes |
         entryPoints: [web]
         middlewares: [not-legacy]
         service: server
-      canary:
-        rule: "Path(`/canary/mcp`) || PathPrefix(`/canary/mcp/`)"
-        priority: 30
-        entryPoints: [web]
-        middlewares: [not-legacy, tier-deprecated, tier-absent]
-        service: canary
-      working:
-        rule: "Path(`/working/mcp`) || PathPrefix(`/working/mcp/`)"
-        priority: 30
-        entryPoints: [web]
-        middlewares: [not-legacy, tier-deprecated, tier-absent]
-        service: working
       tier-off:
         rule: "PathRegexp(`(?i)^/(canary|working)`)"
         priority: 25
@@ -342,17 +316,6 @@ x-proxy-routes: &proxy-routes |
           service: noop@internal
           statusRewrites:
             "502": 404
-      tier-absent:
-        errors:
-          status: ["502"]
-          service: noop@internal
-          statusRewrites:
-            "502": 404
-      tier-deprecated:
-        headers:
-          customResponseHeaders:
-            Deprecation: "@1792108800"
-            Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#a-canary-beside-the-stack>; rel="deprecation"; type="text/html"'
       api-off:
         errors:
           status: ["418"]
@@ -370,14 +333,6 @@ x-proxy-routes: &proxy-routes |
         loadBalancer:
           servers:
             - url: "http://mcp.ob1.internal.:8000"
-      canary:
-        loadBalancer:
-          servers:
-            - url: "http://mcp.canary.ob1.internal.:8000"
-      working:
-        loadBalancer:
-          servers:
-            - url: "http://mcp.working.ob1.internal.:8000"
       auth:
         loadBalancer:
           servers:
@@ -1135,9 +1090,10 @@ services:
     # reaches it as proxy.ob1.internal and nothing else is, and `mesh`, where
     # it reaches every backend — the MCP server as mcp.ob1.internal
     # (SMD-2382), the REST core as api.ob1.internal (SMD-2284), the
-    # authorization server as auth.ob1.internal, and the tier routes' MCP
-    # servers as mcp.<tier>.ob1.internal (SMD-2294), which no project of
-    # another brain joins since SMD-2874. It shares no network with Postgres,
+    # authorization server as auth.ob1.internal. Until v2.0.0 it also
+    # reached a tier's MCP server there as mcp.<tier>.ob1.internal
+    # (SMD-2294); a tier is a brain of its own since SMD-2874, and this
+    # stack routes none. It shares no network with Postgres,
     # the model services, n8n or the workers, and has no route out.
     networks:
       front:
@@ -1150,11 +1106,10 @@ services:
     # POST included (review: a decoy by that name got the password). With
     # none, and the route's name written rooted (`auth.ob1.internal.`), the
     # one lookup is the stack's own name under the reserved .internal TLD.
-    # An absent tier's name (mcp.canary.ob1.internal.) is written the same
-    # way, for the same reason, as is this stack's own server's while it is
-    # stopped or recreated. And that one lookup stays in the stack: an
-    # internal network forwards no name it does not hold to the host's
-    # resolvers (measured on podman 6), and this service is on internal
+    # This stack's own server's name is written the same way, for the same
+    # reason, while it is stopped or recreated. And that one lookup stays in
+    # the stack: an internal network forwards no name it does not hold to the
+    # host's resolvers (measured on podman 6), and this service is on internal
     # networks alone (SMD-2583), so a resolver that answers *.ob1.internal
     # itself is never asked.
     dns_search: ["."]

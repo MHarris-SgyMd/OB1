@@ -1748,6 +1748,14 @@ else {
   // A follower mid-pass says so, not "between its polls" (review pass 3).
   await followerBeat(20, { running: true });
   assert(/a follower is running this key \(stamped \d+ s ago\): 1 pending\s*$/.test(row((await run(SQL_ENV)).out, "consolidate pass")), "a follower stamped mid-pass is not said to be between its polls");
+  // Waiting mid-pass for its provider, by its own row's word, it says so (SMD-2905);
+  // a follower's row naming another worker is not of the shape, and is left off.
+  await followerBeat(20, { running: true, outcome: "failed", waitingMidPass: ["consolidate"] });
+  const consFollowWaits = row((await run(SQL_ENV)).out, "consolidate pass");
+  await followerBeat(20, { running: true, outcome: "failed", waitingMidPass: ["extract"] });
+  const consFollowOther = row((await run(SQL_ENV)).out, "consolidate pass");
+  assert(/a follower is running this key \(stamped \d+ s ago, waiting for the provider mid-pass\): 1 pending\s*$/.test(consFollowWaits) && !/waiting for the provider/.test(consFollowOther),
+         `a follower waiting mid-pass for its provider says so on the consolidate pass row; one naming another worker is left off (${consFollowWaits} | ${consFollowOther})`);
   // A follower killed outright: its heartbeat stale, its claim's lease still
   // live until it lapses. The heartbeat is the fresher word — the row says the
   // follower is gone, not running (review pass 3, a walkthrough).
@@ -1799,6 +1807,12 @@ else {
   const consSleptWaiting = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
   assert(/the sleep scheduler runs this key \(stamped 20 s ago; asleep, consolidate waiting for the provider at its start\)/.test(row(consSleptWaiting.out, "consolidate pass")),
          `the consolidate pass row says the scheduler's pass waits for the provider, as the sleep row does (${row(consSleptWaiting.out, "consolidate pass")})`);
+  // Mid-pass, its last pass failed on the provider: the cause named, not "the log says why" (SMD-2905).
+  await claims`UPDATE ob1_config SET value = ${JSON.stringify({ v: 1, every_s: 60, running: true, outcome: "failed", waitingMidPass: ["consolidate"] })}, updated_at = now() - interval '20 seconds' WHERE key = 'heartbeat:sleep'`;
+  const consSleptMid = await run({ ...SQL_ENV, OB1_JUDGE_MODEL: "other-judge" });
+  assert(/the sleep scheduler runs this key \(stamped 20 s ago; asleep, consolidate waiting for the provider mid-pass\), and its last pass failed/.test(row(consSleptMid.out, "consolidate pass"))
+         && /The provider stopped answering mid-pass — check it/.test(fix(consSleptMid.out, "consolidate pass")) && !/log says why/.test(fix(consSleptMid.out, "consolidate pass")),
+         `the scheduler's pass waiting mid-pass is said on the consolidate pass row, the fix naming the provider (${row(consSleptMid.out, "consolidate pass")} | ${fix(consSleptMid.out, "consolidate pass")})`);
   // Asleep, the scheduler's own claim holds a live lease beside the workers
   // profile's old ended row: not "start it again", a second worker (review
   // pass 3). A stale heartbeat:sleep claims nothing: the row reads stopped.
@@ -3668,6 +3682,12 @@ else {
     await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "failed" }), 10);
     assert(/extract:qwen2\.5:7b@p2's last pass stopped a worker on the provider still failing after its pauses: check the provider/.test(fix((await run(SQL_ENV)).out, "workers")),
       "a live follower whose last pass hit a down provider says so");
+    // Waiting mid-pass for it, by its own word: the state and the fix say the provider (SMD-2905).
+    await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, running: true, outcome: "failed", waitingMidPass: ["extract"] }), 10);
+    const followWaitOut = await run(SQL_ENV);
+    assert(/!\s+workers\s+extract:qwen2\.5:7b@p2 waiting for the provider mid-pass, its last pass failed \(last stamped 10 s ago, every 60 s\)$/.test(row(followWaitOut.out, "workers"))
+           && /extract:qwen2\.5:7b@p2 waits for the provider mid-pass — it stopped answering: check it/.test(fix(followWaitOut.out, "workers")),
+      `a follower waiting mid-pass for its provider says so in the workers row, the fix naming the provider (${row(followWaitOut.out, "workers")} | ${fix(followWaitOut.out, "workers")})`);
 
     // The sleep scheduler's own row (SMD-2678): its heartbeat leaves the
     // workers row; the row says asleep or awake with its last sleep, and what
@@ -3761,6 +3781,25 @@ else {
       const bothOut = await run(LOG_ON);
       assert(/asleep, extract and consolidate waiting for the provider at their start/.test(row(bothOut.out, "sleep")) && /the passes begin on their own once it answers\./.test(fix(bothOut.out, "sleep")),
         `both passes waiting are named, at their start, and the fix says they begin on their own (${fix(bothOut.out, "sleep")})`);
+      // Waiting mid-pass for a provider that stopped answering (SMD-2905): said
+      // so, the provider in the fix, not "its log says which".
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", waitingMidPass: ["consolidate"], slept: { from: await at(130), to: null } }), 10);
+      const midOut = await run(LOG_ON);
+      assert(/!\s+sleep\s+waiting for the provider mid-pass, its last pass failed \(last stamped 10 s ago, every 60 s\); asleep, consolidate waiting for the provider mid-pass — the sleep began 2 min ago; a search or a write wakes it$/.test(row(midOut.out, "sleep"))
+             && /→ Consolidate waiting for the provider mid-pass: the provider stopped answering — check it, and the model provider rows here \(--deep probes chat\); the pass goes on by itself once it answers/.test(fix(midOut.out, "sleep")) && !/its log says which/.test(fix(midOut.out, "sleep")),
+        `a pass waiting mid-pass for the provider is said, a warning naming the provider (${row(midOut.out, "sleep")} | ${fix(midOut.out, "sleep")})`);
+      // One at its start, another mid-pass: both said, the start's first.
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "failed", waiting: ["consolidate"], waitingMidPass: ["extract"], slept: { from: await at(130), to: null } }), 10);
+      const startAndMid = await run(LOG_ON);
+      assert(/waiting for the provider, at a pass's start and mid-pass, its last pass failed .*; asleep, consolidate waiting for the provider at its start, and extract waiting for the provider mid-pass — the sleep began/.test(row(startAndMid.out, "sleep"))
+             && /Consolidate waiting for the provider at its start: .* Extract waiting for the provider mid-pass: the provider stopped answering/.test(fix(startAndMid.out, "sleep")),
+        `a start wait and a mid-pass wait are both said, each with its fix (${row(startAndMid.out, "sleep")} | ${fix(startAndMid.out, "sleep")})`);
+      // Not of the shape — a pass it does not run, a name twice — left off: the row reads as it did before.
+      for (const bad of [["reembed"], ["extract", "extract"], "extract"]) {
+        await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", waitingMidPass: bad, slept: { from: await at(130), to: null } }), 10);
+        const badRow = row((await run(LOG_ON)).out, "sleep");
+        assert(/running a pass/.test(badRow) && !/mid-pass/.test(badRow), `a waitingMidPass not of the shape is left off, the row reading as before (${JSON.stringify(bad)}: ${badRow})`);
+      }
       // Ended by a pass's start refusal (SMD-2752): its kind and remedy, not "start it again" alone.
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, refused: "key", slept: { from: await at(900), to: await at(700) } }), 30);
       const refusedOut = await run(LOG_ON);

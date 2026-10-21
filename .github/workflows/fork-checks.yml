@@ -2235,88 +2235,56 @@ jobs:
             [ -z "$endpoint" ] || { echo "$s still sends to the collector after the step" >&2; exit 1; }
           done
 
-      # SMD-2294: a canary or working tier of its own compose project joins
-      # this stack's mesh as mcp.<tier>.ob1.internal, and the proxy routes
-      # /canary/mcp and /working/mcp there. With no tier both are the proxy's
-      # bodiless 404, and so is every other path starting with either word,
-      # in any case and whatever follows (an escaped slash, a `;`, a pasted
-      # zero-width space), which never falls to the legacy route. A stand-in per tier on
-      # the mesh, under its tier's name and under `server` as a tier's
-      # container is, answers its own route: the client's Host passed, the
-      # legacy marker deleted, its own 4xx and 5xx untouched, headers and all
-      # (only a 502 is the proxy's 404). From the mesh, `server` then names
-      # more than one container: the collision the route table's mesh names
-      # avoid while no tier claims stable's own names, which check 28's
-      # PROXY_ROUTE_TABLE (scripts/check-fork-consistency.ts) holds. Gone,
-      # each is a 404, and the proxy logged no route-table error. The two
-      # routes are deprecated (SMD-3057; v2.0.0 removes them, SMD-2874): each
-      # answer through them carries a Deprecation header and a Link to where a
-      # tier lives now, and stable's own /mcp carries neither.
-      - name: The tier routes reach a tier on the mesh, and nothing else under its prefix
+      # SMD-2874: stable routes no tier. A canary or a working tier is a brain
+      # of its own on its own port; from SMD-2294 to v2.0.0 stable's proxy
+      # routed /canary/mcp and /working/mcp to one on its mesh, deprecated by
+      # SMD-3057 for a release first. Every path starting with either word, in
+      # any case and whatever follows (an escaped slash, a `;`, a pasted
+      # zero-width space), is the proxy's bodiless 404 (`tier-off`, kept until
+      # SMD-2532 removes the legacy route) with no deprecation, and never
+      # falls to the legacy route, where the same key would write to stable.
+      # A stand-in on stable's mesh under each tier's old name, and under
+      # `server` as a tier's container once was, is reached by none of those
+      # paths, and stable's /mcp still reaches stable beside them: from the
+      # mesh `server` then names more than one container, the collision the
+      # route table's mesh names avoid. Check 28's PROXY_ROUTE_TABLE
+      # (scripts/check-fork-consistency.ts) holds the table.
+      - name: Stable routes no tier, and nothing under a tier's prefix reaches stable
         working-directory: deploy
         run: |
           B=http://127.0.0.1:8010
           code() { curl -sS -o /tmp/tier-body -D /tmp/tier-head -w '%{http_code}' --max-time 15 "$@"; }
           bare404() { c=$(code "${@:2}") || c="no answer (curl exit $?)"; if ! { [ "$c" = 404 ] && [ ! -s /tmp/tier-body ]; }; then echo "$1 answered $c '$(head -c 80 /tmp/tier-body)', not the proxy's bodiless 404" >&2; exit 1; fi; }
-          # SMD-3057: the headers of the answer code() or bare404 just read
-          # (a fresh /tmp/tier-head each time) carry the tiers' deprecation.
-          deprecated() { grep -qix 'deprecation: @1792108800'$'\r' /tmp/tier-head && grep -i '^link:' /tmp/tier-head | grep -F '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#a-canary-beside-the-stack>; rel="deprecation"' > /dev/null; }
-          must_deprecate() { deprecated || { cat /tmp/tier-head >&2; echo "$1 carries no Deprecation header and Link" >&2; exit 1; }; }
-          bare404 'GET /canary/mcp/health with no canary' "$B/canary/mcp/health"
-          # …and that 404, tier-absent's, says so too: tier-deprecated is
-          # outside it (the client a moved canary leaves is the one to tell).
-          must_deprecate "the bodiless 404 at /canary/mcp with no canary"
-          bare404 'a keyed tools/list at /canary/mcp with no canary' -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
-            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "$B/canary/mcp"
-          must_deprecate "the bodiless 404 to a keyed tools/list at /canary/mcp"
-          bare404 'GET /working/mcp/health with no working tier' "$B/working/mcp/health"
-          must_deprecate "the bodiless 404 at /working/mcp with no tier"
+          # The tiers' deprecation (SMD-3057) went with their routes: tier-off's
+          # 404, read from the answer bare404 just read, carries none.
+          undeprecated() { if grep -qi '^deprecation:' /tmp/tier-head || grep -qi '^link:.*rel="deprecation"' /tmp/tier-head; then cat /tmp/tier-head >&2; echo "$1 carries a Deprecation header or a deprecation Link" >&2; exit 1; fi; }
           offprefix() {
-            for p in /canary /canary/ /canary/health /canary/mcpx /CANARY/mcp /Canary/mcp/health /canary%2Fmcp /CANARY%2Fmcp '/canary;x' /canary%E2%80%8B/mcp /canary%5Cmcp /canaryx/mcp /working /working/ /working/x /working/mcpx /WORKING/mcp; do
-              bare404 "a keyed POST to $p$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{}' "$B$p"
-              # tier-off's 404 is no tier route's, so no tier deprecation (SMD-3057).
-              if grep -qi '^deprecation:' /tmp/tier-head || grep -qi '^link:.*rel="deprecation"' /tmp/tier-head; then cat /tmp/tier-head >&2; echo "tier-off's 404 at $p$1 carries a Deprecation header or a deprecation Link" >&2; exit 1; fi
+            for p in /canary/mcp /canary/mcp/health /working/mcp /working/mcp/health /canary /canary/ /canary/health /canary/mcpx /CANARY/mcp /Canary/mcp/health /canary%2Fmcp /CANARY%2Fmcp '/canary;x' /canary%E2%80%8B/mcp /canary%5Cmcp /canaryx/mcp /working /working/ /working/x /working/mcpx /WORKING/mcp; do
+              bare404 "a keyed tools/list to $p$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+                -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "$B$p"
+              undeprecated "tier-off's 404 at $p$1"
             done
+            bare404 "GET /canary/mcp/health$1" "$B/canary/mcp/health"
+            undeprecated "tier-off's 404 to GET /canary/mcp/health$1"
           }
           offprefix ""
           trap 'docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null 2>&1 || true' EXIT
           IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
-          # Each answers /…/status/NNN with that status, its body and an
-          # x-tier header, and anything else with the path, the Host and the
-          # legacy marker it was sent.
           for tier in canary working; do
             docker run -d --name "ob1-ci-$tier-stand-in" --network open-brain_mesh --network-alias "mcp.$tier.ob1.internal" --network-alias server --entrypoint bun "$IMAGE" \
-              -e "Bun.serve({ port: 8000, fetch(r) { const p = new URL(r.url).pathname; const s = /\/status\/(\d+)$/.exec(p); if (s) return new Response('$tier ' + s[1], { status: Number(s[1]), headers: { 'x-tier': '$tier' } }); return new Response('$tier ' + p + ' host=' + r.headers.get('host') + ' legacy=' + (r.headers.get('x-ob1-legacy-route') ?? '-')); } })" > /dev/null
+              -e "Bun.serve({ port: 8000, fetch(r) { return new Response('$tier ' + new URL(r.url).pathname); } })" > /dev/null
           done
-          H="${B#http://}"
-          for tier in canary working; do
-            want="$tier /$tier/mcp/health host=$H legacy=-"
-            for _ in $(seq 1 40); do [ "$(curl -s --max-time 2 -H 'X-OB1-Legacy-Route: 1' "$B/$tier/mcp/health")" = "$want" ] && break; sleep 0.5; done
-            c=$(code -H 'X-OB1-Legacy-Route: 1' "$B/$tier/mcp/health") || c="no answer (curl exit $?)"
-            { [ "$c" = 200 ] && [ "$(cat /tmp/tier-body)" = "$want" ]; } || { echo "/$tier/mcp/health answered $c, not the $tier stand-in with the client's Host and no legacy marker: '$(head -c 120 /tmp/tier-body)'" >&2; exit 1; }
-            # SMD-3057: deprecated until v2.0.0 removes the route, and every
-            # answer through it says so, with a Link to where a tier lives now.
-            must_deprecate "/$tier/mcp/health's 200"
-            got=$(curl -sS -D /tmp/tier-head --max-time 5 -X POST -d '{}' "$B/$tier/mcp") || got="no answer (curl exit $?)"
-            [ "$got" = "$tier /$tier/mcp host=$H legacy=-" ] || { echo "a POST to /$tier/mcp did not reach the $tier stand-in: '$got'" >&2; exit 1; }
-            must_deprecate "a POST to /$tier/mcp, the method a client uses,"
-            for s in 401 404 429 500 503 504; do
-              c=$(code "$B/$tier/mcp/status/$s") || c="no answer (curl exit $?)"
-              if ! { [ "$c" = "$s" ] && [ "$(cat /tmp/tier-body)" = "$tier $s" ] && grep -qix "x-tier: $tier"$'\r' /tmp/tier-head && deprecated; }; then echo "the $tier tier's own $s came back as $c '$(head -c 80 /tmp/tier-body)', or without its header or the deprecation: only a 502 is the proxy's" >&2; exit 1; fi
-            done
-            bare404 "the $tier tier's own 502" "$B/$tier/mcp/status/502"
-            must_deprecate "the $tier tier's own 502, made the bodiless 404,"
-          done
-          offprefix " beside both tiers"
+          # The stand-ins answer on the mesh, so a route to them would reach
+          # them: one container polls both, each try bounded at 2 s, for 40
+          # tries, and prints each one's last failure if they never both do.
+          docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'const last = {}; for (let i = 0; i < 40; i++) { const up = await Promise.all(["canary", "working"].map((t) => fetch(`http://mcp.${t}.ob1.internal:8000/x`, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok || ((last[t] = `HTTP ${r.status}`), false), (e) => ((last[t] = `${e?.name ?? "Error"} ${e?.code ?? e?.message ?? ""}`), false)))); if (up.every(Boolean)) process.exit(0); await Bun.sleep(500); } console.error(JSON.stringify(last)); process.exit(1)' > /dev/null \
+            || { docker logs --tail 20 ob1-ci-canary-stand-in >&2; docker logs --tail 20 ob1-ci-working-stand-in >&2; echo "a stand-in never answered on the mesh (each one's last failure above), so this step proves nothing" >&2; exit 1; }
+          offprefix " beside a stand-in under each tier's old mesh name"
           holders=$(docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'console.log(new Set((await Bun.dns.lookup("server", { family: 4 })).map((a) => a.address)).size)')
           [ "$holders" -ge 2 ] || { echo "from the mesh, \`server\` named $holders container(s) with two stand-ins claiming it: the collision this step stands for is not there" >&2; exit 1; }
           c=$(code "$B/mcp/health") || c="no answer (curl exit $?)"
-          { [ "$c" = 200 ] && [ "$(cat /tmp/tier-body)" = ok ] && ! grep -qi '^deprecation:' /tmp/tier-head && ! grep -qi '^link:.*rel="deprecation"' /tmp/tier-head; } || { echo "stable's /mcp/health beside the tiers answered $c '$(head -c 80 /tmp/tier-body)', not ok, or carries the tiers' Deprecation header or Link" >&2; exit 1; }
+          { [ "$c" = 200 ] && [ "$(cat /tmp/tier-body)" = ok ]; } || { echo "stable's /mcp/health beside the stand-ins answered $c '$(head -c 80 /tmp/tier-body)', not ok: the proxy reached a stand-in claiming \`server\`" >&2; exit 1; }
           docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null
-          for tier in canary working; do
-            for _ in $(seq 1 20); do [ "$(code "$B/$tier/mcp/health" || true)" = 404 ] && break; sleep 0.5; done
-            bare404 "GET /$tier/mcp/health once the tier left" "$B/$tier/mcp/health"
-          done
           # A router whose rule does not compile is dropped, its paths to the
           # next router (legacy), and a route file Traefik cannot read takes
           # every route with it, with nothing but this line to say so. Traefik
