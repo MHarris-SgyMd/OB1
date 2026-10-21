@@ -494,10 +494,9 @@ jobs:
       # Every vendored server is a consumer of this server's auth module — the
       # seven extensions (change 64) and the recipes' and integrations' MCP
       # servers, HTTP APIs, workers and webhook receiver (change 67) — through a
-      # _shared/auth.ts beside it, a byte copy. Their test runs in THIS job
-      # because main's ruleset requires it: a separate job would not gate a
-      # merge. One MCP stack across the tree's three installs — the test fails
-      # if server-portable's or the Kubernetes image's pins drift from these.
+      # _shared/auth.ts beside it, a byte copy. One MCP stack across the
+      # tree's three installs — the test fails if server-portable's or the
+      # Kubernetes image's pins drift from these.
       - name: Install the vendored servers' pinned test dependencies
         working-directory: extensions
         run: bun install --frozen-lockfile
@@ -981,9 +980,8 @@ jobs:
       # the floor evals/baselines.json records, and proves the floor has teeth
       # with a reader that ignores every label. Keyless, as the replay gate
       # is; here rather than its own job because the write path needs the
-      # server and this database, and a step in a required job gates a merge
-      # without a new name in the ruleset (SMD-1856). No install for evals/
-      # or db/: the eval, the workers it spawns (db/extract-entities.ts,
+      # server and this database. No install for evals/ or db/: the eval,
+      # the workers it spawns (db/extract-entities.ts,
       # db/consolidate.ts) and the db/ modules they share import only bun,
       # node and ../server-portable, whose packages the first step installed;
       # a package added to db/ or evals/ and imported on this path would fail
@@ -3925,7 +3923,8 @@ jobs:
           echo "round-trip clean"
 
   # ── Commit + workflow linting (SMD-1808) ────────────────────────────────────
-  # Added as reporting jobs; making them required is SMD-1805's ruleset work.
+  # Both are required, as every job is, through "Fork Checks passed"
+  # (SMD-3168); commit-lint is the one job MAY_SKIP lets skip.
   commit-lint:
     name: Commit messages
     runs-on: ubuntu-24.04
@@ -3978,3 +3977,51 @@ jobs:
       # bodies they came from.
       - name: shellcheck on .github/ci's scripts
         run: shellcheck .github/ci/*.sh
+
+  # ── The one required check (SMD-3168) ───────────────────────────────────────
+  # main's ruleset requires this job alone. Every other job is required through
+  # its `needs:`, which check 20 holds to every job in this file, so a job
+  # added, renamed, split or run as a matrix needs no ruleset change. It runs
+  # `if: always()` because a job whose needs failed is otherwise skipped, and
+  # GitHub reads a skipped required check as passing; it fails unless every
+  # job succeeded, or was skipped where MAY_SKIP names it — commit-lint, whose
+  # own `if:` runs it on pull requests and the merge queue alone. The step is
+  # held verbatim by check 20, which runs it against its own cases.
+  fork-checks-passed:
+    name: Fork Checks passed
+    runs-on: ubuntu-24.04
+    if: always()
+    needs:
+      - repo-consistency
+      - portable-server
+      - db-schema
+      - replay-gate
+      - db-live
+      - db-live-sleep
+      - db-live-long
+      - db-live-extract
+      - data-layer
+      - deploy-stack
+      - deploy-stack-brains
+      - deploy-stack-auth
+      - auth-poc
+      - compat-shim
+      - commit-lint
+      - workflow-lint
+    steps:
+      - name: Every job succeeded, or was skipped where MAY_SKIP allows it
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          MAY_SKIP: commit-lint
+        run: |
+          # shellcheck disable=SC2016 # jq's variables, not the shell's
+          not_passed=$(jq -r --arg may_skip "$MAY_SKIP" '
+            ($may_skip | split(" ") | map(select(. != ""))) as $skip
+            | to_entries[]
+            | select(.value.result != "success" and (.value.result != "skipped" or (.key as $k | any($skip[]; . == $k) | not)))
+            | "\(.key): \(.value.result)"' <<<"$NEEDS")
+          if [ -n "$not_passed" ]; then
+            printf 'Not every job passed:\n%s\n' "$not_passed" >&2
+            exit 1
+          fi
+          echo "Every job passed: $(jq '[.[] | select(.result == "success")] | length' <<<"$NEEDS") succeeded, $(jq '[.[] | select(.result == "skipped")] | length' <<<"$NEEDS") skipped where MAY_SKIP allows."

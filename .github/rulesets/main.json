@@ -28,22 +28,7 @@
         "strict_required_status_checks_policy": true,
         "do_not_enforce_on_create": false,
         "required_status_checks": [
-          { "context": "Repo consistency", "integration_id": 15368 },
-          { "context": "Portable server", "integration_id": 15368 },
-          { "context": "Schema migrations", "integration_id": 15368 },
-          { "context": "Retrieval replay gate", "integration_id": 15368 },
-          { "context": "Schema against real Postgres", "integration_id": 15368 },
-          { "context": "Schema against real Postgres: the sleep scheduler", "integration_id": 15368 },
-          { "context": "Schema against real Postgres: long thoughts and the re-embed", "integration_id": 15368 },
-          { "context": "Schema against real Postgres: extraction", "integration_id": 15368 },
-          { "context": "SQL data layer against real Postgres", "integration_id": 15368 },
-          { "context": "Full stack, no Supabase", "integration_id": 15368 },
-          { "context": "Full stack: a second brain, the tier refresh and the canary", "integration_id": 15368 },
-          { "context": "Full stack: the import runner and the authorization server", "integration_id": 15368 },
-          { "context": "Authorization server POC (oidc-provider on Bun)", "integration_id": 15368 },
-          { "context": "supabase-js compatibility shim", "integration_id": 15368 },
-          { "context": "Commit messages", "integration_id": 15368 },
-          { "context": "Workflow lint (actionlint + shellcheck)", "integration_id": 15368 }
+          { "context": "Fork Checks passed", "integration_id": 15368 }
         ]
       }
     }
