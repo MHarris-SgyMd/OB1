@@ -80,7 +80,8 @@ ENV OB1_GIT_SHA=$OB1_GIT_SHA
 # ../mcp-server/index.ts reads none of the above but PORT and OB1_STOP_GRACE:
 #   OB1_FORWARDER_KEY — its forward-scope key, its hash in the REST core's
 #                  MCP_ACCESS_KEYS; and OB1_AUTH_SECRET_MCP on a stack that
-#                  trades OAuth tokens (mcp-server/README.md)
+#                  trades OAuth tokens. Its other settings (the REST core's
+#                  address, the plugins, the origin): mcp-server/README.md
 EXPOSE 8000
 USER bun
 

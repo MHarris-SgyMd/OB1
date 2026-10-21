@@ -54,6 +54,8 @@ on:
       - "rest-client/**"
       - "plugins/**"
       - "scripts/fork-index.ts"
+      - "scripts/mechanism-yield.ts"
+      - "scripts/commit-grammar.ts"
       - "db/Dockerfile"
       - "db/migrate.ts"
       - "db/cli.ts"

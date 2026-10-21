@@ -32,7 +32,7 @@
 # stable's opens it and its key opens nothing of stable's. The raw key is the
 # file's OB1_CANARY_KEY, which `up` smokes and registers the connector with,
 # and which no container is handed. Beside it `up` mints a forward key, named
-# <project>-forwarder, its raw key in OB1_FORWARDER_KEY: the MCP server's own
+# <project>-mcp-forwarder, its raw key in OB1_FORWARDER_KEY: the MCP server's own
 # for its calls on the REST core (SMD-2287), which grants nothing as a caller.
 # Mint another for a client with
 # server-portable/keygen.ts and add its line to the file's MCP_ACCESS_KEYS. A
@@ -597,7 +597,10 @@ if mode == "own-fix":
                 return True
         return False
     spans = [n for n in list(OWN) + ["MCP_ACCESS_KEYS", "MCP_ACCESS_KEY", "OB1_CANARY_KEY", "OB1_HOOK_SECRETS", "OB1_PLUGIN_DB_PASSWORD", "OB1_WORKER_KEY", "OB1_FORWARDER_KEY"] if spans_lines(n)]
-    stable_digests = {d for _, _, _, d in entries(s["MCP_ACCESS_KEYS"]) if d} | ({sha(s["MCP_ACCESS_KEY"])} if s["MCP_ACCESS_KEY"] else set())
+    # Stable'"'"'s keys: its MCP_ACCESS_KEYS entries, its legacy key, and its
+    # MCP server'"'"'s forward key, listed there or not (SMD-2287 review pass 3).
+    stable_fwd = (s["OB1_FORWARDER_KEY"] or "").strip()
+    stable_digests = {d for _, _, _, d in entries(s["MCP_ACCESS_KEYS"]) if d} | ({sha(s["MCP_ACCESS_KEY"])} if s["MCP_ACCESS_KEY"] else set()) | ({sha(stable_fwd)} if stable_fwd else set())
     fix, said = {}, []
     # The canary'"'"'s port, address, tier and profiles (SMD-2874 PR 1).
     for n, v in OWN.items():
@@ -631,25 +634,25 @@ if mode == "own-fix":
         said.append("minted the canary'"'"'s own write key, %s (its hash in MCP_ACCESS_KEYS, the raw key in OB1_CANARY_KEY)" % name)
     # Its forward key (SMD-2287): the MCP server calls the REST core with it
     # beside each client'"'"'s key, and refuses to start without one. Minted as
-    # the write key is, in place of stable'"'"'s, which the canary'"'"'s REST core
-    # does not take, or of one no forward entry here holds. Trimmed, as the
-    # MCP server reads it (review pass 1).
+    # the write key is, in place of stable'"'"'s (whose entries went with
+    # stable'"'"'s keys above), or of one no forward entry here holds. Trimmed,
+    # as the MCP server reads it (review pass 1). Named for the MCP server,
+    # since the REST core records the name as who carried each request, and
+    # `forwarder` alone is the stack'"'"'s port forwarder (review pass 3).
     fwd = (c["OB1_FORWARDER_KEY"] or "").strip()
-    fwd_stable = bool(fwd) and (sha(fwd) in stable_digests or fwd == (s.get("OB1_FORWARDER_KEY") or "").strip())
+    fwd_stable = bool(fwd) and sha(fwd) in stable_digests
     fwd_ok = bool(fwd) and not fwd_stable and any(d == sha(fwd) and scope == "forward" for _, _, scope, d in kept)
     if not fwd_ok:
-        # The entries an earlier mint here made, whose raw key this file no
-        # longer holds, go with the one it replaces, and stable'"'"'s forward
-        # entry with them where stable does not list it: a forward key opens
-        # the forwarder slot whoever holds it (review pass 1). Another name'"'"'s
-        # forward entry is the operator'"'"'s, and stays; so does any other
-        # scope'"'"'s, the canary'"'"'s write key among them (review pass 2).
-        base = os.environ["OWN_PROJECT"] + "-forwarder"
-        minted_here = re.compile(re.escape(base) + r"(?:-[0-9]+)?")
+        # The forward entries an earlier mint here made, whose raw key this
+        # file no longer holds, go with the one it replaces (review pass 1).
+        # Another name'"'"'s forward entry is the operator'"'"'s, and stays; so does
+        # any other scope'"'"'s under any name (review pass 2).
+        base = os.environ["OWN_PROJECT"] + "-mcp-forwarder"
+        minted_here = re.compile(re.escape(base) + r"(?:-[1-9][0-9]*)?")
         before = len(kept)
-        kept = [x for x in kept if not (x[2] == "forward" and (minted_here.fullmatch(x[1]) or (fwd_stable and x[3] == sha(fwd))))]
+        kept = [x for x in kept if not (x[2] == "forward" and minted_here.fullmatch(x[1]))]
         if len(kept) < before:
-            said.append("removed %d forward entr%s from MCP_ACCESS_KEYS whose raw key the file no longer holds (named %s or %s-N, or stable'"'"'s)" % (before - len(kept), "y" if before - len(kept) == 1 else "ies", base, base))
+            said.append("removed %d forward entr%s an earlier up minted (%s, %s-2 and on) from MCP_ACCESS_KEYS: the file no longer holds its raw key" % (before - len(kept), "y" if before - len(kept) == 1 else "ies", base, base))
         was = ", in place of stable'"'"'s" if fwd_stable else ", in place of one MCP_ACCESS_KEYS does not hold as a forward key" if fwd else ""
         fwd = secrets.token_hex(32)
         name = unused(base)

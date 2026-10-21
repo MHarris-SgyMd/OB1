@@ -216,7 +216,9 @@ The server image (`server-portable/Dockerfile`) carries this directory and
 the image's preflight, which needs a database this server never opens:
 
 ```bash
-docker run --entrypoint bun -e OB1_FORWARDER_KEY=<key> -e OB1_REST_URL=<the REST core> <server image> ../mcp-server/index.ts
+docker run --entrypoint bun -p 127.0.0.1:<port>:8000 --network <a network the REST core is on> \
+  -e OB1_FORWARDER_KEY=<key> -e OB1_REST_URL=<the REST core> -e OB1_PLUGINS=<the REST core's> \
+  <server image> ../mcp-server/index.ts
 ```
 
 `deploy/canary.sh` mints a canary's own forwarder key. The compose service, which
