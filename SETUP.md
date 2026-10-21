@@ -507,9 +507,10 @@ sees it:
 claude mcp add --transport http --scope user open-brain http://127.0.0.1:8000/mcp --header "x-brain-key: <your-raw-key>"
 ```
 
-`/mcp` is the server's path on the stack's proxy. The bare root still answers
-until v2.0.0, with a `Deprecation` header, for clients configured before the
-proxy; move those with `deploy/README.md`, "Moving a client to /mcp".
+`/mcp` is the server's path on the stack's proxy. The bare root, which
+answered until v2.0.0 for clients configured before the proxy, is the proxy's
+404 since (SMD-2532); move those with `deploy/README.md`, "Moving a client to
+/mcp".
 `127.0.0.1` rather than `localhost`, since the port binds the IPv4 loopback
 only. By default nothing outside your machine can reach it: the port in front
 of the proxy is the one the stack publishes without its opt-in profiles (n8n's profile adds

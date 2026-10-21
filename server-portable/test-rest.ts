@@ -91,7 +91,7 @@ console.log("\n[2] The OpenAPI document lists every operation the tools expose, 
     assert(responses["503"]?.headers?.["Retry-After"] !== undefined, `${r.method} ${r.path}: its 503 declares Retry-After`);
   }
   const codeLines = Object.values(ROUTES).flatMap((r) => Object.values(responsesOf(r)).map((x) => x.description)).join(" ");
-  assert(Object.keys(REFUSAL_STATUS).filter((c) => c !== "EMBEDDING_NOT_ATTACHED").every((c) => codeLines.includes(c)), "…and names every refusal code under its status");
+  assert(Object.keys(REFUSAL_STATUS).every((c) => codeLines.includes(c)), "…and names every refusal code under its status");
 }
 
 console.log("\n[3] A query string is read as the schema's types");
@@ -240,12 +240,13 @@ console.log("\n[5b] Forwarded: a caller's key beside the forwarder slot — the 
   assert(r.status === 400 && same(r.body, { code: "REFUSED_FILTER", retryable: false, refusal: filter }), `a forwarded refusal: its facts and, beside them, the refusal whole (${JSON.stringify(r.body)})`);
   r = await json(await hit("/v1/search", { key: "read-raw", method: "POST", body: JSON.stringify({ query: "q" }) }));
   assert(r.status === 400 && same(r.body, { code: "REFUSED_FILTER", retryable: false }), `…and not forwarded, the facts alone (${JSON.stringify(r.body)})`);
-  const unattached = { code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "saved-id", detail: "the vector write failed" } as const;
-  answer = async () => refuse(unattached);
+  // A capture's refusal is a refusal, never a creation (SMD-3153: the 201 for a save without its vector left with its code).
+  const unjudged = { code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "registry_away" } as const;
+  answer = async () => refuse(unjudged);
   r = await json(await fwd("/v1/thoughts", "cap-raw", "fwd-raw", { method: "POST", body: JSON.stringify({ content: "x" }) }));
-  assert(r.status === 201 && same(r.body, { id: "saved-id", embeddingAttached: false, refusal: unattached }), `a forwarded save whose vector did not attach: the creation, with its refusal beside it (${JSON.stringify(r.body)})`);
+  assert(r.status === 503 && same(r.body, { code: "SUPERSEDES_UNJUDGED", retryable: true, refusal: unjudged }), `a forwarded capture refusal: its facts and the refusal whole, a 503 (${r.status} ${JSON.stringify(r.body)})`);
   r = await json(await hit("/v1/thoughts", { key: "cap-raw", method: "POST", body: JSON.stringify({ content: "x" }) }));
-  assert(r.status === 201 && same(r.body, { id: "saved-id", embeddingAttached: false }), `…and not forwarded, the creation alone (${JSON.stringify(r.body)})`);
+  assert(r.status === 503 && same(r.body, { code: "SUPERSEDES_UNJUDGED", retryable: true }), `…and not forwarded, the facts alone (${r.status} ${JSON.stringify(r.body)})`);
   answer = async () => ok({});
 
   // Anything else in the slot is refused, naming the slot, whatever the
@@ -729,10 +730,6 @@ console.log("\n[7] A refusal answers its code, its status and its declared facts
   answer = async () => refuse({ code: "REFUSED_SUPERSEDES_SHAPE", retryable: false, value: "x".repeat(10_000), orNull: false });
   r = await json(await hit("/v1/thoughts", { key: "write-raw", method: "POST", body: JSON.stringify({ content: "y" }) }));
   assert(r.status === 400 && JSON.stringify(r.body).length < 100, `the caller's raw input is not echoed (${JSON.stringify(r.body).length} chars)`);
-  answer = async () => refuse({ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "saved-id", detail: "the store's own words" });
-  const created = await hit("/v1/thoughts", { key: "write-raw", method: "POST", body: JSON.stringify({ content: "y" }) });
-  const cb = await created.json() as Record<string, unknown>;
-  assert(created.status === 201 && JSON.stringify(cb) === JSON.stringify({ id: "saved-id", embeddingAttached: false }) && created.headers.get("location") === "/v1/thoughts/saved-id", `a save whose vector did not attach is a creation, flagged (${created.status} ${JSON.stringify(cb)})`);
   answer = async () => ok({ id: "new-id", reader: true, embeddings: { allowed: true, reason: "allowed" } });
   const made = await hit("/v1/thoughts", { key: "write-raw", method: "POST", body: JSON.stringify({ content: "y" }) });
   const mb = await made.json() as Record<string, unknown>;

@@ -50,7 +50,7 @@ chat only, beside Ollama:
 | `OB1_EMBEDDING_MODEL` / `OB1_EMBEDDING_DIM` | `openai/text-embedding-3-small` / 1536 | Must match the column; permanent once there is data |
 | `OB1_METADATA_MODEL` | `openai/gpt-4o-mini` | No schema dependency — safe to change anytime |
 | `OB1_JUDGE_MODEL` | the metadata model | The supersession judge's model (`db/consolidate.ts`), for running the judge — the harder task — on a stronger model than every capture's tagging; a model the chat endpoint serves. The pass key carries it, so a change starts a fresh pass (SMD-1901) |
-| `OB1_CONSOLIDATE_DECIDER` | unset (the judge decides) | Consolidation's decide mode: the typed-decision tier's model (`OB1_JEV_BASE_URL`) gives each pair's verdict, and `OB1_JUDGE_MODEL` only writes the proposals it calls outdates, both quotes checked in the texts. The pass key names both models, so turning it on starts a fresh pass; preflight fails it without the tier, or with `OB1_JEV_MODEL` naming another model (SMD-3115) |
+| `OB1_CONSOLIDATE_DECIDER` | unset (the judge decides) | Consolidation's decide mode: the typed-decision tier's model (`OB1_JEV_BASE_URL`) gives each pair's verdict, and `OB1_JUDGE_MODEL` only writes the proposals it calls outdates at the pass's floor, both quotes checked in the texts without their markdown (SMD-3151). The pass key names both models, so turning it on, or a new decide version, starts a fresh pass; preflight fails it without the tier, or with `OB1_JEV_MODEL` naming another model (SMD-3115) |
 | `OB1_LLM_LOCAL` / `OB1_CHAT_LOCAL` | unset (remote) | `1` declares the embeddings / chat endpoint on this machine or its private network, so the egress gate does not apply to it. Declared, never guessed from the address: a loopback URL with the flag unset is remote to the gate. A chat endpoint at the same base is the same box: either knob declares it (SMD-1903) |
 | `OB1_EGRESS_POLICY` | `deny` | What may leave the box for an endpoint not declared local: `deny` (only what an `OB1_EGRESS_ALLOW` term names), `allow` (everything but what an `OB1_EGRESS_DENY` term names), `off`. A knob that does not parse fails preflight and closes the gate |
 | `OB1_EGRESS_ALLOW` / `OB1_EGRESS_DENY` | none | Comma-separated `unit:value` terms — `actor` (the access key's name), `source`, `type`, `topic` (a row's metadata), `marker` (a literal in the text) — read under `deny` and `allow` respectively |
@@ -311,7 +311,8 @@ cannot take a parameter and sends a fixed weight; `db/migrations/020_*.sql` and
 `search_thoughts_hybrid` exactly as before, so the default ranking is unchanged
 and a superseded hit is only labelled (`⚠ Superseded by …`). On, it calls 059's
 `search_thoughts_current`: over the hybrid's top min(100, 4 × limit), a thought
-whose ticket is settled — completed or canceled, by 058's `node_state`, so a
+whose ticket is settled — completed, canceled or a duplicate, by 058's and
+105's `node_state`, so a
 note filed under a Done ticket counts — or that a newer thought supersedes has
 its score multiplied by 0.25. Under the hybrid's fusion that puts every current
 match in the window first, then the demoted ones in their own order (a demoted
@@ -319,10 +320,10 @@ exact hit keeps a quarter of its literal bonus, so on a query of literals only,
 or holding several of the query's literals, it can still outrank current rows —
 the header says when one does). Since migration 077 (SMD-2271) a thought with no
 ticket of its own is demoted too when every ticket it is about is finished:
-the keys in its topics, action items or session-summary header all Done or
-Canceled — or, naming none of those, three or more keys in its text, all
+the keys in its topics, action items or session-summary header all Done,
+Canceled or Duplicate — or, naming none of those, three or more keys in its text, all
 finished — and no open ticket named anywhere in it. Each
-demoted hit says `↓ Ranked ×0.25 — completed` (or `canceled`, `superseded`,
+demoted hit says `↓ Ranked ×0.25 — completed` (or `canceled`, `duplicate`, `superseded`,
 `references settled work (SMD-…)` with the deciding keys; the structured reply's
 `demoted` carries the token `references_settled`),
 and the header says how many of the window were demoted, how many carry a
@@ -357,7 +358,7 @@ and demoted lines, every moved ticket by key, and lists them in each hit's
 status's name and type); `search` gives that result `moved`, in status types
 over REST as well, and over MCP starts its title `[moved since written: …]` —
 before the thought's own words, which could forge it at the end. A status prints as its type's word (Triage,
-Backlog, Todo, In Progress, Done, Canceled), never the board's name: any write
+Backlog, Todo, In Progress, Done, Canceled, Duplicate), never the board's name: any write
 key can write a ticket row's name, and it would print on other people's hits.
 A hit's first 50 keys, in the order it mentions them, are read; the rest are
 counted (`movedNotRead`; beside a move, `(+N more named past the first 50, not
@@ -826,8 +827,7 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   `SUPERSEDES_UNJUDGED`; a capture-only key's `supersedes` it cannot prove its
   own is dropped, not refused, SMD-2473, and a thought another key or board-sync
   has since taken, or that something already supersedes, is not its own, a
-  pointer written before the taking lapsing, migration 082, SMD-2638), and
-  `EMBEDDING_NOT_ATTACHED` (saved without its vector; retryable, with the `id`). An
+  pointer written before the taking lapsing, migration 082, SMD-2638). An
   edit's and a delete's: `NOT_FOUND`, `REFUSED_NOTHING_TO_UPDATE`,
   `REFUSED_SUPERSEDES_SHAPE`, `REFUSED_STALE_READ` (with the row's
   `currentUpdatedAt`, to retry from without a re-read), `REFUSED_DUPLICATE_CONTENT`,
@@ -926,10 +926,7 @@ stripped (`X-Forwarded-Prefix`).
   store's or the egress gate's — so the MCP server says it as it always has
   (SMD-2287). It is the refusal as the operation made it for that caller, the
   existence-oracle rule applied: what `render.ts` has always been handed, and
-  bounds into its text. A
-  save whose vector did not attach (the retired PostgREST store's two-step; no producer since SMD-3152, SMD-3153 removes it) is a 201 with
-  `embeddingAttached: false`, not a refusal, so a client does not capture again
-  (forwarded, its `refusal` beside it). A refused input is a 400 `REFUSED_INPUT`
+  bounds into its text. A refused input is a 400 `REFUSED_INPUT`
   naming each field and zod's reason. A fault is a 500 `FAILED` with its message, as the MCP tool's text
   gives it, and no `retryable` until SMD-2461 — but capture's is a 503
   `STORE_UNAVAILABLE`, retryable, the verdict the session hook keys on. Every 503
@@ -978,7 +975,7 @@ bun test-server.ts        # 1136 — transport, auth, tool surface, OAuth discov
 bun test-auth.ts          # 191 — scoped, hashed, named keys; the same 191 with OB1_MCP_UNDER_TEST=client, against the MCP server as a REST client (mcp-server/, SMD-2287)
 bun test-rest.ts          # 470 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, and `bun api.ts` stopped mid-request
 bun test-plugins.ts       # 283 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's; the same 283 with OB1_MCP_UNDER_TEST=client (mcp-server/, SMD-2287)
-bun test-thoughts.ts      # 330 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
+bun test-thoughts.ts      # 518 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 225 — fully local provider, no credential
 bun run test:sql          # 262 — store conformance, real Postgres in a container

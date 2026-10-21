@@ -388,6 +388,33 @@ const plainText = (t: string) => oneLine(t).toLowerCase()
  */
 const forQuote = (t: string) => plainText(t).replace(/^[\s"'`.]+|[\s"'`.,;:]+$/g, "");
 
+/**
+ * Text as a reader sees it, its markdown folded away (SMD-3151). A model quoting a thought copies the words it reads,
+ * not the markup around them, so a quote across `**bold**`, a code span or a link must still be found. Applied to the
+ * quote and to the text alike, before plainText. The quote arrives on one line (oneLine), so a link's text, a strike
+ * and a code span may cross one line break, never a blank line, and a marker that opened a line may sit mid-quote. An
+ * inline link or image, `[text](target)`, keeps its text and loses its target; a bare URL or an autolink stays. Struck
+ * text goes with its `~~`, read as withdrawn, by GFM's rule: the markers flank the words and never sit in a code span,
+ * so a stray `~~` opens nothing. A heading's `#`s and a `>` run that opens a word go, a comparison's `>` among them
+ * (`p95 > 200` reads `p95 200`), but not `>=`. An escape loses its backslash. An opening bracket after a letter or
+ * digit reads as a space (`argv[2]`, a footnote's `[1]`), so the words either side stay apart. Asterisks, backticks,
+ * any bracket or `~~` left over and an underscore run at a word's edge go; one inside a word (`snake_case`, `a__b`)
+ * stays. Every run a rule may take is bounded (a link's text 200 characters, its target 1,000 and the space around it
+ * 16; a strike or a code span 1,000) or, a single character repeated, tried from its start alone, so each costs a
+ * linear scan: a run of spaces three parts of a link could each take (review pass 1) and an underscore run tried from
+ * each of its characters (pass 2) were quadratic.
+ */
+export function withoutMarkdown(t: string): string {
+  return t
+    .replace(/!?\[((?:[^[\]\n]|\n(?![ \t]*\n)){0,200})\]\(\s{0,16}<?[^\s()<>]{0,1000}>?(?:\s{1,16}"[^"\n]{0,200}")?\s{0,16}\)/g, "$1")
+    .replace(/`(?:[^`\n]|\n(?![ \t]*\n)){0,1000}`|~~(?=[^\s~])(?:[^~\n]|\n(?![ \t]*\n)){0,1000}(?<=[^\s~])~~/g, (m) => (m[0] === "~" ? "" : m))
+    .replace(/(^|\s)(?:#{1,6}(?=\s|$)|>+(?![=>]))/g, "$1")
+    .replace(/\\([\\`*_{}[\]()#+\-.!|>~])/g, "$1")
+    .replace(/(?<=[\p{L}\p{N}])\[/gu, " ")
+    .replace(/`+|\*+|~~|[[\]]/g, "")
+    .replace(/(?<![\p{L}\p{N}_])_+|(?<!_)_+(?![\p{L}\p{N}_])/gu, "");
+}
+
 /** Whether `q` occurs in `text` as whole words: no letter or digit on either side of it. */
 function holdsWords(text: string, q: string): boolean {
   const word = /[\p{L}\p{N}]/u;
@@ -404,12 +431,15 @@ function holdsWords(text: string, q: string): boolean {
  * Compared as whole words after plainText, so a line break, a capital or a
  * curly quote the model normalised does not fail it, and "done" is not found
  * in "abandoned"; anything shorter than three characters proves nothing and
- * is not found.
+ * is not found. Quote and texts are read without their markdown (SMD-3151):
+ * the model quotes the words it reads, not `**`, backticks or link syntax. A
+ * text is cut to what the model was sent before it is folded.
  */
 export function evidenceIn(evidence: string, content: string, other?: string): boolean {
-  const q = forQuote(evidence);
-  if (q.length < 3 || !holdsWords(plainText(content.slice(0, CONTENT_LIMIT_CHARS)), q)) return false;
-  return other === undefined || !holdsWords(plainText(other.slice(0, CONTENT_LIMIT_CHARS)), q);
+  const q = forQuote(withoutMarkdown(evidence));
+  const read = (t: string) => plainText(withoutMarkdown(t.slice(0, CONTENT_LIMIT_CHARS)));
+  if (q.length < 3 || !holdsWords(read(content), q)) return false;
+  return other === undefined || !holdsWords(read(other), q);
 }
 
 /**
@@ -669,13 +699,21 @@ export const MIN_COVERED = 0.5;
  * none, or only the first token's), or when the alternatives naming a verdict
  * held under half the token's mass (`covered`, so what the normalised share
  * stands for is not the model's choice), it is the written number. Rounded to
- * 029's numeric(3,2).
+ * 029's numeric(3,2), by outdatesConfidence.
  */
 export function proposalConfidence(j: Judgement): { confidence: number; source: "token" | "stated" } {
   const d = j.probabilities?.verdict;
   if (!d || d.covered < MIN_COVERED) return { confidence: j.confidence, source: "stated" };
-  const p = d.p;
-  return { confidence: Math.round(p.outdates * 100) / 100, source: "token" };
+  return { confidence: outdatesConfidence(d.p), source: "token" };
+}
+
+/**
+ * The mass on "outdates" as a proposal records it and the pass holds it to its floor: rounded to 029's
+ * numeric(3,2). Decide mode's writer gate reads it too, so a pair the writer is not asked about is one whose
+ * proposal the pass would not record (SMD-3151).
+ */
+export function outdatesConfidence(p: Record<Verdict, number>): number {
+  return Math.round(p.outdates * 100) / 100;
 }
 
 /** How many alternatives per token the pass asks for: enough that the five verdicts' first tokens are all among them. */

@@ -116,9 +116,9 @@ http://127.0.0.1:8000/mcp?key=<your key>
 publishes it (a devcontainer publishing 8000 on the podman VM was the case met);
 the URL, `smoke.sh` and the `lsof` line below follow it. It is the port in front
 of the proxy (the forwarder's, SMD-2583), and `/mcp` the server's path on it. A client configured before SMD-1846 at the
-root (`http://127.0.0.1:8000/?key=…`) still works, through the proxy's legacy
-route ("One origin" below), until v2.0.0; give new clients `/mcp`, and move
-the old ones ("Moving a client to /mcp").
+root (`http://127.0.0.1:8000/?key=…`) stopped working at v2.0.0, when the
+proxy's legacy route went (SMD-2532): give clients `/mcp` ("Moving a client to
+/mcp").
 
 That URL works from this machine and nowhere else, by default — a client on
 this machine, such as Claude Code at user scope
@@ -417,7 +417,7 @@ on it (SMD-2294): `/mcp` the stable tier's server, `/canary/mcp` and
 servers, REST cores, three Postgres services and shared Ollama publish nothing,
 and it has compose.yaml's networks, less the authorization server's.
 Nothing public routes to a REST core, and the root, `/.well-known` and `/api`
-are the proxy's 404: that stack has no legacy window, no authorization server
+are the proxy's 404: that stack never had compose.yaml's legacy route, and has no authorization server
 and no `/api`. It reads `SERVER_PORT` as this file does, so to run the two side
 by side set `SERVER_PORT` in the shell for one of them, which wins over
 `deploy/.env`. Its proxy waits on no tier and starts in compose's first wave,
@@ -491,12 +491,12 @@ paths today:
 | `/hooks` and everything under it | the proxy's bodiless 404 by default. With `compose.hooks-public.yaml` named ("Plugins' webhooks" below), `api` — the REST core — path kept: `/hooks/<plugin>/<name>` is a plugin's inbound webhook, served only for a plugin `OB1_HOOKS` names (SMD-2310) |
 | `/mcp` and everything under it | `server` — the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is the server's 405 |
 | `/grafana` and everything under it | the proxy's bodiless 404 by default. With `compose.grafana-public.yaml` named ("The observability profile" below), `lgtm` (`--profile observability`), as `lgtm.ob1.internal` on the `mesh` network — its Grafana, serving from `/grafana`, path kept, behind its own sign-in. With the profile off, or the container stopped or still starting, the proxy's bodiless 404 too, and so is a 502 of Grafana's own (a data source it cannot reach) |
-| every path starting with `/canary` or `/working`, in any letter case | the proxy's bodiless 404 (SMD-2874: a canary or a working tier is a brain of its own on its own port, and this stack routes none; from SMD-2294 to v2.0.0 a tier answered at `/canary/mcp` here, deprecated by SMD-3057 for a release before it went), so a client still given a tier's URL on this origin, in any spelling after the prefix (`/canary`, `/CANARY/mcp`, `/canary%2Fmcp`, an invisible space pasted after `canary`) never reaches this stack's server by the legacy route, where the same key would write to this brain. A typo of the prefix itself (`/canry/mcp`) still does, until SMD-2532 closes the legacy route |
+| every path starting with `/canary` or `/working`, in any letter case | the proxy's own 404 (SMD-2874: a canary or a working tier is a brain of its own on its own port, and this stack routes none; from SMD-2294 to v2.0.0 a tier answered at `/canary/mcp` here, deprecated by SMD-3057 for a release before it went). No router matches them, so a client still given a tier's URL here reaches nothing; until v2.0.0 `tier-off` kept them off the legacy route, and went with it (SMD-2532) |
 | `GET`/`HEAD`/`OPTIONS /health` | `server` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key; OPTIONS for a browser's CORS preflight |
 | `/.well-known/oauth-protected-resource/mcp` | `server` — the MCP server's protected-resource document while it advertises OAuth: the `auth` profile on, the request at the origin's `Host`, and the authorization server answering the server's probe on the mesh. Otherwise the server's 404, and a server that is down is the proxy's 404, never a 502 (SMD-2382). A claude.ai connector at `https://host/mcp` asks this at the origin root before it uses its key, and proceeds on the key only on a 404 (SMD-1246) |
-| `/register`, `/authorize`, `/token` | the proxy's bodiless 404: where an MCP client that found the document but no authorization-server metadata would register and sign in, at the issuer's root. Kept off the legacy route, which would hand the POST to the MCP server (SMD-2382). The authorization server's own are under `/auth` |
+| `/register`, `/authorize`, `/token` | the proxy's bodiless 404: where an MCP client that found the document but no authorization-server metadata would register and sign in, at the issuer's root. A router of its own since SMD-2382, when the legacy route would have handed the POST to the MCP server. The authorization server's own are under `/auth` |
 | `/.well-known` and everything else under it | the proxy: a 404. It carries none of the server's CORS headers; the MCP SDK's discovery reads a CORS failure as a 404 and goes on |
-| anything else | `server`, through the **legacy** route: what clients reach at the root today — `POST /?key=…`, `GET /` (the server's 405, which an MCP SDK client takes as "no stream here"; a 404 there made v1 and v2 clients report an error on every connect, measured), `/worker-status`, `/jobs/<id>`. It keeps every client configured before SMD-1846 working until v2.0.0, and every answer says so: a `Deprecation` header and a `Link` to "Moving a client to /mcp" below, where the server's line naming each key still on it is too (SMD-2306). SMD-2532 removes it, and `/` becomes the proxy's 404 |
+| anything else | the proxy's own 404 (body `404 page not found`), the origin root included: `POST /?key=…`, `GET /`, `/worker-status`, `/jobs/<id>`. Until v2.0.0 the **legacy** route sent these to `server`, so every client configured before SMD-1846 kept working, each answer deprecated (SMD-2306); SMD-2532 removed it. A client given the root moves to `/mcp` ("Moving a client to /mcp" below) |
 
 Every backend is dialled by its name on the `mesh` network — the server as
 `mcp.ob1.internal`, never `server`, because compose gives every container its
@@ -555,9 +555,11 @@ needs `up -d --remove-orphans`, or the forwarder, an orphan, keeps the port.
 **Upgrading a stack from before SMD-1846** is one plain `compose up -d --build`
 (with the `-f` files and profiles it runs with): compose recreates the server
 without its port, then starts the proxy on it — about 1.5 s with no answer on
-the port, measured on podman — and every client URL keeps working. The last
+the port, measured on podman. The last
 30–100 ms of it is the proxy's own 404, between its start and its routes
 loading; an SDK client connected across it saw one 404 and went on (measured).
+A client still configured at the root stops working there from v2.0.0: move it
+to `/mcp` first ("Moving a client to /mcp").
 On that first `up` name the proxy and the forwarder wherever you name the server
 (`up -d --build server proxy forwarder`): `up server` alone recreates the server
 without its port and never creates either. Once they run, recreating the server
@@ -571,8 +573,8 @@ proxy, now an orphan, keeps the port and the old server cannot bind it
 (measured: "address already in use", the stack down).
 
 **Adding a service** is two edits in `compose.yaml`: the service, with no
-`ports:`, and a router for its path in `x-proxy-routes`, at a priority above
-`legacy` (1). The same router, and its backend under `services:`, go in
+`ports:`, and a router for its path in `x-proxy-routes`, at a priority that
+orders it among the others. The same router, and its backend under `services:`, go in
 `PROXY_ROUTE_TABLE` in `scripts/check-fork-consistency.ts`, whose check 28
 holds the table byte for byte. A note on a route goes in the YAML comments
 above the block, never in it: Traefik renders a route file as a Go template
@@ -764,15 +766,15 @@ example plugin turned on for the step alone):
 
 Before SMD-1846 the server answered at the origin root, so every client was
 given the root: `http://127.0.0.1:8000/?key=…`, or `https://host/?key=…`
-through a tunnel. The proxy's legacy route still answers there, for a window
-that closes with **v2.0.0**, and no sooner than two weeks after the first
-release carrying this section (SMD-2306). After the window the root is the
-proxy's 404, and a client still on it stops working (SMD-2532). The port does
+through a tunnel. From SMD-1846 to v2.0.0 the proxy's legacy route kept the
+root answering, for a window (SMD-2306). **From v2.0.0 the window is closed**:
+the root is the proxy's own 404 (body `404 page not found`), and a client still
+on it stops working (SMD-2532). The port does
 not change: the forwarder publishes the same `SERVER_PORT` the proxy did. Only the path
 changes: add `/mcp`.
 
-**During the window.** Every answer through the legacy route carries two
-headers:
+**On a stack from v1.6.0 to v1.9.0,** still in the window, every answer
+through the legacy route carries two headers:
 
 ```
 Deprecation: @1790899200
@@ -799,19 +801,22 @@ is still on the root. The proxy's access log has a line for every such
 request, with `"RouterName":"legacy@file"`, the path, and the client's address
 but no key; a keyless request is only there. On podman for macOS that address
 is the VM's gateway, not the client. `smoke.sh` run with no URL probes the root
-without a key, so it adds no name, and expects both headers (check 11).
+without a key, so it adds no name: run that stack's own `smoke.sh`, from a
+v1.x checkout. A v2.0.0 checkout's check 11 expects the proxy's own 404 there
+and fails on an older stack's deprecated 200; on v2.0.0 a client still on the
+root reports that 404 itself.
 
 | Client | Before | After |
 | --- | --- | --- |
 | Claude Code (`claude mcp add`) | `http://127.0.0.1:<SERVER_PORT>/` | `claude mcp get open-brain` names the scope (and prints the key); then `claude mcp remove open-brain -s <scope>` and `claude mcp add --transport http --scope <scope> open-brain http://127.0.0.1:<SERVER_PORT>/mcp --header "x-brain-key: <key>"`. Without `--transport http` the add makes a stdio entry. A project-scope entry is the `url` in `.mcp.json`: edit it there |
 | Claude Desktop or claude.ai custom connector | `https://host/?key=…` | `https://host/mcp?key=…`: remove the connector and add it with the new URL |
-| The session-capture hook | `"url": "http://127.0.0.1:<port>/"` in `~/.config/open-brain/session-capture.json` (or the file `OB1_SESSION_CAPTURE_CONFIG` names) | `"url": "http://127.0.0.1:<port>/mcp"`, then `bun recipes/session-capture-hook/session-capture.mjs --check`, which warns while the url still answers through the legacy route. `OB1_BRAIN_URL` in the hook's environment overrides the file: move it too |
+| The session-capture hook | `"url": "http://127.0.0.1:<port>/"` in `~/.config/open-brain/session-capture.json` (or the file `OB1_SESSION_CAPTURE_CONFIG` names) | `"url": "http://127.0.0.1:<port>/mcp"`, then `bun recipes/session-capture-hook/session-capture.mjs --check`, which warns while the url answers through a pre-v2.0.0 stack's legacy route, and from v2.0.0 names the root as not the endpoint. `OB1_BRAIN_URL` in the hook's environment overrides the file: move it too |
 | `db/tier.ts --compare` (`db/brain-compare.ts`) | `http://127.0.0.1:<port>/`, or a connector name it reads with `claude mcp get` | `http://127.0.0.1:<port>/mcp`; a connector name follows the Claude Code row |
-| curl, a script, a monitor | `/worker-status`, `/jobs/<id>`, `POST /worker-retry-failed`, `/worker-release-leases`, `/worker-run`, `/health` at the root | the same under `/mcp` (`/mcp/worker-status`, …). `GET /health` at the root stays: it is the health route, not the legacy one. A `scan_thoughts` handle's links are now under the endpoint the call came to |
+| curl, a script, a monitor | `/worker-status`, `/jobs/<id>`, `POST /worker-retry-failed`, `/worker-release-leases`, `/worker-run`, `/health` at the root | the same under `/mcp` (`/mcp/worker-status`, …). `GET /health` at the root stays: it has a route of its own. A `scan_thoughts` handle's links are now under the endpoint the call came to |
 | n8n | `http://server:8000/` in a workflow node you built | no change needed: n8n reaches the server on the `egress` network, not through the proxy |
 | any other client: Codex or Cursor, an `mcp-remote` or `supergateway` bridge, a dashboard's `MCP_URL` | the root, with or without `?key=` | put `/mcp` before `?key=` (`https://host/mcp?key=…`), or at the end of a URL without one |
 
-A stack run with `compose.tiers.yaml` has no legacy window: since SMD-2294 its
+A stack run with `compose.tiers.yaml` never had the legacy route: since SMD-2294 its
 proxy answers the root with a 404, and each tier is `/mcp`, `/canary/mcp` or
 `/working/mcp` on the proxy's port. A client of that stack moves from the
 tier's old host port to its path.
@@ -850,9 +855,9 @@ Point an HTTP liveness probe at **`GET <base>/health`** (200, no key) —
 endpoint, or whatever URL you configure outside the proxy; the exact match rule
 is the comment above `server-portable/index.ts`'s `/health` route, whose test is
 `mcp-edge.ts`'s `HEALTH_PATH` (FORK.md change 75).
-The MCP endpoint serves POST only: `GET /mcp` answers 405 (and `GET /` too,
-through the legacy route; the proxy's 404 once SMD-2532 removes it), so a
-platform-default probe aimed at `/` marks a healthy server down. The image's own `HEALTHCHECK` is that keyless `GET /health` too —
+The MCP endpoint serves POST only: `GET /mcp` answers 405 (and `GET /` is the
+proxy's own 404 since v2.0.0, SMD-2532), so a platform-default probe aimed at
+`/` marks a healthy server down. The image's own `HEALTHCHECK` is that keyless `GET /health` too —
 not a POST to the endpoint, which the request log would write as a refusal every
 30 s (SMD-1849). Opening the connector URL in a browser shows `Method Not Allowed`,
 which is expected.
@@ -1087,7 +1092,7 @@ value that fails its rule is `?`, and a key with nothing to say is left out:
 | `tool` | the tool an MCP tool call names, a REST route runs or a mirror mirrors (the job routes' is `job_status`), from the manifest (`tools.ts`); a batch names none |
 | `agent` | the configured name of the key that authenticated — never the key; the single legacy `MCP_ACCESS_KEY` is named `MCP_ACCESS_KEY` |
 | `status` | the HTTP status (an MCP tool call is a 200 whatever the tool said). At the MCP endpoint, 0 when the client left before there was an answer — during the key check, the registry's answer, the body read or the transport's parse — and 408 when it was gone before the route ran; on an `abandoned` line from anywhere else, the status of the answer no one received (a REST body read the client cut off is the 500 it became), or 0 when the stop came before any answer |
-| `outcome` | on every line. A request the MCP server refuses at its key is `refused`, whatever its method and status — at its MCP endpoint with the refusal's code, at a keyed mirror (a 200 that shows the caller nothing — the keyless probe at `/health` aside, which is not logged) with `REVOKED` or `BUSY` where the registry said which, and none for a key missing, wrong or out of scope. An MCP tool call says the tool's: `ok`; `refused` (a refusal as a value); `error` (the tool threw, or the route did — a 500); `unrun` (a call that never ran to an end — the transport refused the request, the SDK its input, the key's scope does not hold the tool, or it was sent as a notification, with no `id`); a batch its worst call's (error, refused, unrun, ok). Any other request, and every REST request, says its answer's: `error` for a fault (a 5xx `FAILED` or `STORE_UNAVAILABLE`, or one with no code), `refused` for any other 4xx or 5xx (a 503 `BUSY` is a refusal for now, on both doors), else `ok` — so a JSON-RPC error inside a 200, an unknown method, is `ok`, and a capture saved without its vector is `refused` with `EMBEDDING_NOT_ATTACHED` on the MCP server and `ok` (a 201 whose body says so, which the line does not) on the REST core. A key whose scope lacks the tool, or an input the schema refuses, is `unrun` with no code on the MCP server, where the tool is not registered or the SDK refuses it, and `refused` with `FORBIDDEN` or `REFUSED_INPUT` on the REST core. `abandoned` is a client gone before a stream ended (an MCP answer, either job stream) — by its abort, or by letting go of the body — or before any other answer was handed over (one that leaves after keeps that answer's outcome); `cut` is a request the stop closed while its client was still there, on either server (status 0 where no answer had begun, 200 for a stream the server had begun — Bun sends its status line with the stream's first bytes, so a client cut before them received nothing), and one whose client had already left is `abandoned`; `stalled` a stream still running at the keepalive's ten minutes — written then, and its own end writes no second line. An abandoned or stalled call runs on to its end; whether a capture landed is `thought_audit`'s to say |
+| `outcome` | on every line. A request the MCP server refuses at its key is `refused`, whatever its method and status — at its MCP endpoint with the refusal's code, at a keyed mirror (a 200 that shows the caller nothing — the keyless probe at `/health` aside, which is not logged) with `REVOKED` or `BUSY` where the registry said which, and none for a key missing, wrong or out of scope. An MCP tool call says the tool's: `ok`; `refused` (a refusal as a value); `error` (the tool threw, or the route did — a 500); `unrun` (a call that never ran to an end — the transport refused the request, the SDK its input, the key's scope does not hold the tool, or it was sent as a notification, with no `id`); a batch its worst call's (error, refused, unrun, ok). Any other request, and every REST request, says its answer's: `error` for a fault (a 5xx `FAILED` or `STORE_UNAVAILABLE`, or one with no code), `refused` for any other 4xx or 5xx (a 503 `BUSY` is a refusal for now, on both doors), else `ok` — so a JSON-RPC error inside a 200, an unknown method, is `ok`. A key whose scope lacks the tool, or an input the schema refuses, is `unrun` with no code on the MCP server, where the tool is not registered or the SDK refuses it, and `refused` with `FORBIDDEN` or `REFUSED_INPUT` on the REST core. `abandoned` is a client gone before a stream ended (an MCP answer, either job stream) — by its abort, or by letting go of the body — or before any other answer was handed over (one that leaves after keeps that answer's outcome); `cut` is a request the stop closed while its client was still there, on either server (status 0 where no answer had begun, 200 for a stream the server had begun — Bun sends its status line with the stream's first bytes, so a client cut before them received nothing), and one whose client had already left is `abandoned`; `stalled` a stream still running at the keepalive's ten minutes — written then, and its own end writes no second line. An abandoned or stalled call runs on to its end; whether a capture landed is `thought_audit`'s to say |
 | `code` | a refusal's or a fault's code (`NOT_FOUND`, `FAILED`) — the MCP server's from the tool's reply, from a worker action's refusal (`RUN_WORKER_DRAIN_NOT_AVAILABLE`, `REFUSED_EMPTY_WORK_TYPE`), from a mirror's store fault (`FAILED`), or at the key, `UNAUTHORIZED`, `REVOKED`, `BUSY` or `AUTH_UNREACHABLE` (at a keyed mirror, `REVOKED` or `BUSY` where the registry said which); the REST core's from its 4xx or 5xx answer |
 | `ms` | milliseconds from arrival to the line: a stream (an MCP answer, either server's job stream) to its end, including the time a slow reader takes to drain it; any other answer to its handing over, before its body is sent |
 | `bytes` | the bytes of a stream that ran to its end — an MCP answer's, either server's job stream's — the server's own keepalive frames apart (the MCP SDK transport's, every 15 s of a long call, are in the stream it writes, and counted) |
@@ -1235,9 +1240,7 @@ has them, `ob1.rpc` only for what `mcp.method.name` cannot say (`batch`, or a
 method outside the schema's). No `url.*`: the path is a key's or an id's, and
 behind the proxy the scheme is not the server's to know. A tool call's span is
 `execute_tool <tool>` with `gen_ai.tool.name`, its outcome and its code — the
-operation's name is its request's alone, so a backend counts a single MCP call once (a REST operation's and a batch's calls carry none);
-a REST capture saved without its vector is an `ok` request (its 201) over a
-`refused` operation (`EMBEDDING_NOT_ATTACHED`), as the MCP tool says it. A
+operation's name is its request's alone, so a backend counts a single MCP call once (a REST operation's and a batch's calls carry none). A
 request's span is an ERROR for a 5xx it answered (a 503 `BUSY` refusal
 included, as the HTTP conventions have it) or an `error`, `stalled` or `cut`
 request, a tool call's for an `error` or a `cut`; `error.type` is its code, else
@@ -2558,7 +2561,17 @@ of the canary's opens stable. Its `MCP_ACCESS_KEYS` holds a write key `up`
 mints, named for the canary's project (`open-brain-canary:write:<sha256>`,
 or `open-brain-canary-2` and on when an entry of the canary's holds that name),
 and the raw key is the file's `OB1_CANARY_KEY`, which `up` smokes and
-registers the connector with and which no container is handed. For another
+registers the connector with and which no container is handed. Beside it
+`up` mints a forward key, `open-brain-canary-mcp-forwarder:forward:<sha256>`, the
+raw key in the file's `OB1_FORWARDER_KEY`: the MCP server's own for its calls
+on the canary's REST core (SMD-2287), never stable's, and refused as a caller
+like any forward key. A canary made before it gets one at its next `up`, which
+rewrites `MCP_ACCESS_KEYS` for it once: its other entries kept, comments in it
+dropped, and one written across lines refused until it is on one line. Any
+entry of stable's forward key goes with stable's keys, listed in stable's
+`MCP_ACCESS_KEYS` or not, and a re-mint takes out the forward entries an
+earlier one made (`open-brain-canary-mcp-forwarder`, `-2` and on), whose raw
+key is gone. For another
 client, mint a key with `bun server-portable/keygen.ts --name <client>
 --scope read|write` and add the line it prints to the canary's
 `MCP_ACCESS_KEYS`; `up` keeps any entry that is not stable's. A refresh copies
@@ -2731,9 +2744,9 @@ URL of the canary's: one of its ports on loopback (`127.0.0.1`,
 connector where it was, and says how to move it: that old port is no longer
 the canary's from the next run, so remove the connector first, then
 `up --connect`.
-One at the root of the canary's port, the URL from before `/mcp`, still
-answers through the deprecated root until v2.0.0 (SMD-2532), and `up` says
-so; `--connect` moves it to `/mcp`.
+One at the root of the canary's port, the URL from before `/mcp`, is one
+the canary no longer answers since v2.0.0, when the root became the proxy's
+404 (SMD-2532); `up` says so, and `--connect` moves it to `/mcp`.
 The canary's ports are `--port`, its env file's `SERVER_PORT`, and the one
 its forwarder publishes (its proxy's before SMD-2583), read from the
 container running or stopped (a reboot can leave it stopped: "After a
@@ -2772,9 +2785,9 @@ is the canary's life, in four `up`s:
   canary's forwarder must stay on loopback and stable's `/canary/mcp` be the
   proxy's 404; the thought put on stable just before it must reach the
   canary, and the smoke must fail on the floor;
-- a third `up`, with a connector at the port's root: named as on the
-  deprecated root, not as one the canary no longer answers, and the root
-  answering 200 with a `Deprecation` header;
+- a third `up`, with a connector at the port's root: named as one the
+  canary no longer answers, and the root the proxy's own 404 with no
+  `Deprecation` header (SMD-2532);
 - a fourth `up`, on `--port 8012`: written to the canary's env file (written
   mode 600, compose reading 8012), its forwarder moved, 8011 free, and a
   connector left at 8011 named, one `SERVER_PORT` line left; then 8013

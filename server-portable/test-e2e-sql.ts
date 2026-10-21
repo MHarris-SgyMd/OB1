@@ -35,10 +35,6 @@ if (!URL_) {
   process.exit(2);
 }
 
-/**
- * db/migrations/*.sql are templates — migrate.ts substitutes these at apply time.
- * Applying them raw fails with `syntax error at or near "{"`.
- */
 // Pinned, not inherited from the shipped defaults. This suite asserts the data
 // layer, not the model choice, and reading the default meant the schema it built
 // and the width the server expected drifted apart the moment the default changed.
@@ -46,11 +42,6 @@ const EMBEDDING_DIM = Number(process.env.OB1_EMBEDDING_DIM ?? 1536);
 const EMBEDDING_MODEL = process.env.OB1_EMBEDDING_MODEL ?? "openai/text-embedding-3-small";
 process.env.OB1_EMBEDDING_DIM = String(EMBEDDING_DIM);
 process.env.OB1_EMBEDDING_MODEL = EMBEDDING_MODEL;
-function subst(sql: string): string {
-  return sql
-    .replace(/\{\{EMBEDDING_DIM\}\}/g, String(EMBEDDING_DIM))
-    .replace(/\{\{EMBEDDING_MODEL\}\}/g, EMBEDDING_MODEL);
-}
 
 const { assert, report } = createAssert();
 
@@ -217,7 +208,7 @@ console.log("\n[2] capture_thought writes through SQL");
 {
   const out = await call("capture_thought", { content: "alpha thought about migrations" });
   assert(/Captured as/.test(out), `capture reports success (${out.split("\n")[0].slice(0, 50)}…)`);
-  assert(!/NOT appear in semantic search/.test(out), "no degraded-write warning");
+  assert(!/WITHOUT a vector|no vector was made|embedding call for this capture was not made/.test(out), "no degraded-write note");
 
   const sql = new SQL({ url: URL_, max: 1 });
   const [row] = await sql`SELECT content, metadata, embedding IS NOT NULL AS has, embedding_model AS m FROM thoughts`;
@@ -3650,7 +3641,7 @@ console.log("\n[22] A hit naming a ticket that moved since it was written says s
   const filed = await capture(`[22] stated-status: a note filed under LBL-2540\n\n${session(ended)}`, { metadata: { ticket: "LBL-2540" } });
   const quiet = await capture(`[22] stated-status: LBL-2541 is in the backlog, beside ${extra}\n\n${session(ended)}`);
   const wide = await capture(`[22] stated-status: LBL-2540 is in progress, then ${extra}\n\n${session(ended)}`);
-  // A duplicate's ticket row quoting LBL-2540: no lifecycle to node_state, still a ticket row.
+  // A duplicate's ticket row quoting LBL-2540: settled to node_state since 105 (SMD-2935), and a ticket row either way.
   const dup = await capture(`[22] stated-status: LBL-2542 — a duplicate of LBL-2540, in progress\n\n${session(ended)}`, { source: "linear", metadata: { issue: "LBL-2542", status: "Duplicate", status_type: "duplicate" } });
   try {
     const { TYPE_WORDS } = await import("./stated-status.ts");

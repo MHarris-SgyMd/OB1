@@ -103,7 +103,7 @@ export type ThoughtHybridMatch = {
   score: number;
   /** The hybrid's fused score before any weight; equal to `score` when nothing demoted the row. */
   fused: number;
-  /** Why prefer_current weighted the row: its ticket's status_type (completed, canceled) and/or "superseded". Empty when it did not (and always without the flag). */
+  /** Why prefer_current weighted the row: its ticket's status_type (completed, canceled, duplicate) and/or "superseded". Empty when it did not (and always without the flag). */
   demoted: string[];
   /**
    * Under prefer_current only (059, SMD-2255): the window the function re-ranked
@@ -636,12 +636,6 @@ export function normaliseProvenanceNode(r: Record<string, unknown>): ProvenanceN
 
 export type CaptureResult = {
   id: string;
-  /**
-   * Set when the row was written but its embedding could not be attached. No
-   * store sets it since the PostgREST store's two-step left (SMD-3152); SMD-3153
-   * removes it and its refusal.
-   */
-  embeddingFailed?: string;
   /**
    * Migration 035 (SMD-1453): true when the text was already captured — the
    * metadata merged, the vector and windows moved by 021/022's rules, and any

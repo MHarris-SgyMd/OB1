@@ -125,7 +125,7 @@ const oneOf = <W extends string>(words: readonly W[], v: unknown): W | null => (
  * the deciding keys, `references settled work (SMD-1, SMD-2)`; the structured
  * field says `references_settled` and leaves the words and keys to the text.
  */
-const DEMOTIONS = ["completed", "canceled", "superseded", "references_settled"] as const;
+const DEMOTIONS = ["completed", "canceled", "duplicate", "superseded", "references_settled"] as const;
 const demotionOf = (d: unknown) => oneOf(DEMOTIONS, typeof d === "string" && /^references settled work \(/.test(d) ? "references_settled" : d);
 
 /** A row's trust (073, SMD-1724): one of the ladder's words, else null — no trust recorded, or a word the stamp never writes. */
@@ -1114,9 +1114,6 @@ function captureRefusal(r: Refusal): string {
         : "a `derived_from` id";
       return `Refused: ${where} name${r.named.length > 1 ? "" : "s"} no thought. Each entry must be an existing thought id (the ID: line of a search result).`;
     }
-    case "EMBEDDING_NOT_ATTACHED":
-      return `Thought saved (id ${r.id}) but its embedding failed to attach: ` +
-        `${r.detail}. It will NOT appear in semantic search until re-captured.`;
     default: return unknownRefusal(r);
   }
 }
