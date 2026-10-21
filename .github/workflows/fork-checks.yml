@@ -1635,7 +1635,8 @@ jobs:
           trap 'rm -f compose.release.yaml .bun-view.*.json' EXIT
           # What each render must hold: beside the tables, the forwarder's
           # script and, with lgtm in the render, the dashboard and its
-          # provider (SMD-1849 PR 3c), each compose.yaml's. Labels are held on
+          # provider (SMD-1849 PR 3c) and the alert rules (SMD-3050), each
+          # compose.yaml's. Labels are held on
           # the substituted render alone: --no-interpolate leaves two files' labels a list,
           # and their environment one too, which `env` reads as a mapping
           # (compose.grafana-port.yaml sets one key of lgtm's, SMD-1849 PR 3a).
@@ -1645,11 +1646,12 @@ jobs:
             def rest: del(.services.proxy, .configs) | (.services[]? |= (if has("environment") then .environment |= env else . end)) | delpaths($declared) | with_entries(select(.key | startswith("x-") | not));
             ($p | del(.configs, .labels, .depends_on)) == ($base | del(.configs, .labels, .depends_on))
             and $p.configs == [$want[] | {source, target}]
-            and (($r.configs // {}) | keys) == ([$want[].source, "forwarder", (if $r.services.lgtm then "grafana-dashboard", "grafana-dashboard-provider" else empty end)] | sort)
+            and (($r.configs // {}) | keys) == ([$want[].source, "forwarder", (if $r.services.lgtm then "grafana-dashboard", "grafana-dashboard-provider", "grafana-alert-rules" else empty end)] | sort)
             and all($want[]; ($r.configs[.source] | keys) == ["content", "name"])
             and $r.configs.forwarder == $alone.configs.forwarder
             and $r.configs["grafana-dashboard"] == $alone.configs["grafana-dashboard"]
             and $r.configs["grafana-dashboard-provider"] == $alone.configs["grafana-dashboard-provider"]
+            and $r.configs["grafana-alert-rules"] == $alone.configs["grafana-alert-rules"]
             and ($r | rest) == ($alone | rest)
             and ([$r.networks[].name] | length == (unique | length))
             and ([$r.services[].ports[]? | if type == "object" then [.host_ip, .published] else . end] | length == (unique | length))'
@@ -2039,6 +2041,12 @@ jobs:
       # line, which a collector would lengthen. A capture citing a thought
       # that is not there makes the store's refusals line read above 0, and
       # one tool called once proves Prometheus's zero at a series' start.
+      # SMD-3050: compose's render of the alert rules is
+      # deploy/observability/alert-rules.yaml, Grafana holds exactly its
+      # rules, provisioned from it, and after the traffic the provider rule is
+      # pending (the stub's 404s) and the other four normal and healthy; then
+      # pg-exporter stops and the Postgres rule must go pending (check 38
+      # holds the rules' names and labels without a running profile).
       - name: The observability profile's dashboard reads every series it names
         working-directory: deploy
         run: |
@@ -2046,8 +2054,11 @@ jobs:
           printf 'GRAFANA_ADMIN_PASSWORD=ci-dummy-grafana-password\nOB1_MONITOR_DB_PASSWORD=ci-dummy-monitor-password-0123456789\nOTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm.ob1.internal.:4318\nOTEL_METRIC_EXPORT_INTERVAL=5000\n' >> .env
           # compose's render prints each `$` doubled again, as compose.yaml has it,
           # so it reads back as the file once undoubled (Grafana's mount has one).
-          docker compose -f compose.yaml --profile observability config --format json | jq -j '.configs["grafana-dashboard"].content | gsub("[$][$]"; "$")' | cmp - observability/dashboard.json \
+          docker compose -f compose.yaml --profile observability config --format json > /tmp/observability-render.json
+          jq -j '.configs["grafana-dashboard"].content | gsub("[$][$]"; "$")' /tmp/observability-render.json | cmp - observability/dashboard.json \
             || { echo "compose renders the grafana-dashboard config otherwise than deploy/observability/dashboard.json" >&2; exit 1; }
+          jq -j '.configs["grafana-alert-rules"].content | gsub("[$][$]"; "$")' /tmp/observability-render.json | cmp - observability/alert-rules.yaml \
+            || { echo "compose renders the grafana-alert-rules config otherwise than deploy/observability/alert-rules.yaml" >&2; exit 1; }
           # The disk read once lgtm's image (2.6 GB) is pulled and before Loki
           # starts on it: Loki refuses every record with the disk under lgtm-data
           # past 90% (PR 3c, measured), and the log query below would fail with
@@ -2165,6 +2176,57 @@ jobs:
             sleep 5
           done
           if ! { [[ "$born" =~ ^[0-9.]+$ ]] && awk -v b="$born" 'BEGIN { exit !(b > 0.5) }'; }; then said "worker_status, called once, increased by $born over 10 m: Prometheus no longer ingests a zero at a series' start (created-timestamp-zero-ingestion in compose.yaml's PROMETHEUS_EXTRA_ARGS), so a single failure reads 0 on every panel"; fi
+          # SMD-3050: the alert rules, as Grafana holds them — each of the
+          # file's, from the file (provisioned) — and their states, each rule's
+          # on a line: state, health, uid.
+          # shellcheck disable=SC2016 # as above
+          in_lgtm bash -c 'curl -fsS --max-time 10 -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/v1/provisioning/alert-rules' > /tmp/grafana-alert-rules.json || said "Grafana's alert rules did not answer"
+          rules_have=$(jq -r '[.[] | select(.provenance == "file") | .uid] | sort | join(" ")' /tmp/grafana-alert-rules.json)
+          rules_want=$({ grep -oP '^      - uid: \K\S+' observability/alert-rules.yaml || true; } | LC_ALL=C sort | paste -sd ' ')
+          # …in the dashboard's folder, not a second "Open Brain" beside it.
+          jq -e --slurpfile d /tmp/grafana-dashboard.json '. != [] and all(.[]; .folderUID == $d[0].meta.folderUid)' /tmp/grafana-alert-rules.json > /dev/null \
+            || said "Grafana's alert rules are not all in the dashboard's folder ($(jq -r '.meta.folderUid' /tmp/grafana-dashboard.json)): $(jq -c '[.[] | {uid, folderUID}]' /tmp/grafana-alert-rules.json)"
+          if [ -z "$rules_want" ] || [ "$rules_have" != "$rules_want" ]; then said "Grafana holds the provisioned alert rules '$rules_have' where deploy/observability/alert-rules.yaml has '${rules_want:-none (its uid lines were not read)}'"; fi
+          states() {
+            # shellcheck disable=SC2016 # as above
+            in_lgtm bash -c 'curl -fsS --max-time 10 -u "admin:$GF_SECURITY_ADMIN_PASSWORD" http://127.0.0.1:3000/grafana/api/prometheus/grafana/api/v1/rules' \
+              | jq -r '.data.groups[] | select(.name == "Open Brain") | .rules[] | "\(.state) \(.health) \(.uid)"'
+          }
+          prom() { in_lgtm curl -s --max-time 10 -G http://127.0.0.1:9090/api/v1/query --data-urlencode "query=$1" | jq -c '[.data.result[]? | {m: .metric, v: .value[1]}]' || true; }
+          # Every rule judged on one read: the provider rule pending or firing
+          # — the stub's 404 for each capture's metadata call is a provider
+          # failure, and about three in 10 m make it pending (firing 5 m on) —
+          # and the other four normal and healthy, nothing here making their
+          # conditions. Rules are evaluated every 30 s; a read from before the
+          # exporter's first scrape may still hold the Postgres rule's NoData,
+          # so the wait is for all of it, 18 rounds (about two minutes).
+          judged() {
+            local uid
+            grep -qE '^(pending|firing) ok ob1-provider-failures$' <<<"$st" || return 1
+            for uid in $rules_want; do
+              [ "$uid" = ob1-provider-failures ] || grep -qx "inactive ok $uid" <<<"$st" || return 1
+            done
+          }
+          for _ in $(seq 18); do
+            st=$(states) || st=""
+            judged && break
+            traffic > /dev/null || true
+            sleep 5
+          done
+          echo "$st"
+          judged || said "the alert rules are not the provider rule pending (the stub's 404s) and the other four normal and healthy after 18 rounds: $(tr '\n' ';' <<<"$st"); Prometheus's failed provider calls over 10 m: $(prom 'sum by (gen_ai_operation_name, error_type) (increase(gen_ai_client_operation_duration_seconds_count{error_type!="", ob1_probe=""}[10m]))')"
+          # The ticket's forced condition: the exporter stopped, the collector's
+          # next scrape reads up 0 (within its 30 s), and the Postgres rule is
+          # pending at an evaluation after it (22–61 s from the stop over three
+          # fresh runs, measured), firing a minute on.
+          docker compose -f compose.yaml --profile observability stop pg-exporter
+          for _ in $(seq 36); do
+            st=$(states) || st=""
+            grep -qE '^(pending|firing) ok ob1-postgres-unreached$' <<<"$st" && break
+            sleep 5
+          done
+          grep -qE '^(pending|firing) ok ob1-postgres-unreached$' <<<"$st" || said "the Postgres rule did not go pending within 3 minutes of pg-exporter's stop: $(tr '\n' ';' <<<"$st"); Prometheus's up and pg_up for the exporter: $(prom 'up{job="postgres"}') $(prom 'pg_up{job="postgres"}')"
+          echo "the Postgres rule pending after pg-exporter's stop"
           cp /tmp/env-before-observability .env
           docker compose -f compose.yaml --profile observability rm -sf lgtm pg-exporter pg-monitor-role
           docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 server api

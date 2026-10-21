@@ -248,32 +248,22 @@ type Outcome = { ok: true; value: unknown } | { ok: false; refusal: Refusal } | 
 
 /**
  * A REST answer as the outcome the in-process core would have handed
- * render.ts: a success's value; a refusal the forwarder slot carried whole
- * (a save whose vector did not attach among them, a 201 beside its
- * `refusal`); a fault — FAILED or capture's STORE_UNAVAILABLE — as the error
- * its message names, so the tool's fault words say it as they always have.
- * Anything else (a refusal of the key mid-call, an input the client
- * answered itself) is a fault naming its code.
+ * render.ts: a success's value whatever its fields — a plugin's may name one
+ * `refusal`; a refusal the forwarder slot carried whole; a fault — FAILED or
+ * capture's STORE_UNAVAILABLE — as the error its message names, so the tool's
+ * fault words say it as they always have. Anything else (a refusal of the
+ * key mid-call, an input the client answered itself) is a fault naming its
+ * code. No success carries a refusal since SMD-3153 took the 201 that did.
  */
 export function outcomeOf(a: Answer): Outcome {
+  if (a.ok) return { ok: true, value: a.body };
   const body = (a.body ?? {}) as { refusal?: Refusal; code?: string; message?: string; credential?: string; issues?: { path: string; message: string }[] };
   if (body.refusal && typeof body.refusal === "object") return { ok: false, refusal: body.refusal };
-  if (a.ok) return { ok: true, value: a.body };
   // This server's forwarder refused mid-call: its misconfiguration, whichever operation asked (review pass 5). Busy is the registry's (turned).
   if (body.credential === "forwarder" && a.status !== 503) return { fault: new ForwarderRefused(a.status, body.code) };
   if ((body.code === "FAILED" || body.code === "STORE_UNAVAILABLE") && typeof body.message === "string") return { fault: new Error(body.message) };
   if (body.code === "REFUSED_INPUT" && body.issues?.length) return { fault: new Error(body.issues.map((i) => `${i.path || "input"}: ${i.message}`).join("; ")) };
   return { fault: new Error(`the REST core answered ${a.status}${codeWord(body.code) ? ` ${codeWord(body.code)}` : ""}`) };
-}
-
-/**
- * A plugin operation's answer from the REST core as runOperation's outcome:
- * a success's value whatever its fields — a plugin may name one `refusal` —
- * else as a core operation's (outcomeOf): its refusal the forwarder slot
- * carried whole, a fault, or a fault naming the code.
- */
-export function pluginOutcomeOf(a: Answer): Outcome {
-  return a.ok ? { ok: true, value: a.body } : outcomeOf(a);
 }
 
 /** Two calls of one request under one JSON-RPC id: which arguments are whose cannot be told (review pass 3). */
@@ -420,7 +410,7 @@ function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller
         // Never the SDK's parse in its place, which the REST core would parse again (review pass 4: a body the SDK read and this server did not).
         if (!given) return faulted(null, () => say.failed(new Error(`this server could not read the arguments of call ${id} from its request`)), span);
         const sent = Object.fromEntries(Object.entries(given).filter(([field]) => Object.hasOwn(op.shape, field)));
-        const outcome = pluginOutcomeOf(await rest.callPath(op.method, op.path, sent, credOf(caller)));
+        const outcome = outcomeOf(await rest.callPath(op.method, op.path, sent, credOf(caller)));
         if ("fault" in outcome) return faulted(outcome.fault, () => say.failed(outcome.fault), span);
         const reply = say.renderPlugin(outcome as never);
         return ended(reply, reply.isError ? "refused" : "ok", span);

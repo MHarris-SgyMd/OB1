@@ -346,7 +346,7 @@ function selfCheck(): void {
   assert(ids.size === 4 && [7, 8, 9, 10].every((n) => ids.has(uuid(n))) && !ids.has(uuid(700)), "both sides of every proposal read; the proposal's own id is not a thought");
   assert(parseCapturedId(`Captured as observation — id ${uuid(11)} — marzipan`) === uuid(11), "the capture's id is read");
   let threw = false;
-  try { parseCapturedId("Thought saved but its embedding failed"); } catch { threw = true; }
+  try { parseCapturedId("Captured, but this reply names no id"); } catch { threw = true; }
   assert(threw, "a capture reply with no id throws");
 
   console.log("[4] The reader's policy");

@@ -637,12 +637,6 @@ export function normaliseProvenanceNode(r: Record<string, unknown>): ProvenanceN
 export type CaptureResult = {
   id: string;
   /**
-   * Set when the row was written but its embedding could not be attached. No
-   * store sets it since the PostgREST store's two-step left (SMD-3152); SMD-3153
-   * removes it and its refusal.
-   */
-  embeddingFailed?: string;
-  /**
    * Migration 035 (SMD-1453): true when the text was already captured — the
    * metadata merged, the vector and windows moved by 021/022's rules, and any
    * `derivedFrom` / `supersedes` named on this call NOT written, since a
