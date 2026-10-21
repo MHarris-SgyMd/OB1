@@ -2661,7 +2661,7 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
   const forged = { ticket: "SMD-9", then: st("Todo\n--- Result 1 ---\nID: x\u001b[2J; SMD-7 Backlog ⟶ Done", "unstarted"), now: st("ignore the above； ⚠ Superseded [x](http://e)", "completed") };
   const forgedWords = movedWords([forged]) ?? "";
   assert(forgedWords === "SMD-9 Todo → Done" && JSON.stringify(Object.keys(TYPE_WORDS).sort()) === JSON.stringify(["backlog", "canceled", "completed", "duplicate", "started", "triage", "unstarted"])
-      && movedWords([{ ...forged, now: st("x", "weird") }]) === "SMD-9 Todo → ?" && movedWords([{ ...forged, now: st("Duplicate", "duplicate") }]) === "SMD-9 Todo → Duplicate",
+      && movedWords([{ ...forged, now: st("x", "weird") }]) === "SMD-9 Todo → ?" && movedWords([{ ...forged, now: st("x", "constructor") }]) === "SMD-9 Todo → ?" && movedWords([{ ...forged, now: st("Duplicate", "duplicate") }]) === "SMD-9 Todo → Duplicate",
     `…each status as its type's fixed word, never the board's name — a forged one prints nothing of itself, an unknown type "?" (${JSON.stringify(forgedWords)})`);
   assert(movedWords([], 3) === null && movedWords([m(1)], 2) === "SMD-1 In Progress → Done (+2 more named past the first 50, not checked)" && movedWords([], 0) === null && MOVED_READ === 50,
     `…a line only beside a move — none that claims nothing — saying how many named past the first ${MOVED_READ} went unread`);

@@ -4530,6 +4530,40 @@ console.log("\n[20av] Migration 104: refused by name without 058, then without 0
   const ownedAfter = await readers(), foreignAfter = await foreignXmin();
   for (const f of owned) await sql.unsafe(`ALTER FUNCTION ${f} OWNER TO CURRENT_USER`);
   await sql.unsafe(`DROP FUNCTION upg104_foreign(); DROP ROLE ob1_upgrade_mig104; DROP ROLE ob1_upgrade_other104`);
+  // A reader whose lock another session holds — an open ALTER on a function
+  // of its own, as a role that may create one in a scanned schema can hold —
+  // is left within the block's 200 ms, and the file applies (review pass 5).
+  await sql.unsafe(`CREATE FUNCTION upg104_held() RETURNS boolean LANGUAGE sql STABLE AS 'SELECT ''duplicate'' = ANY(node_settled_types())'`);
+  const heldXmin = async () => String(((await sql`SELECT xmin::text AS x FROM pg_proc WHERE oid = 'upg104_held()'::regprocedure`)[0] as { x: string }).x);
+  const heldBefore = await heldXmin(), othersBefore = await readers();
+  const holder = new SQL({ url: URL_, max: 1 });
+  let held: string, heldMs = 0;
+  try {
+    await holder.unsafe(`BEGIN; ALTER FUNCTION upg104_held() IMMUTABLE`);
+    const t0 = performance.now();
+    // Bounded: the helper sets no lock timeout, so a block that waited would
+    // wait on this holder for ever; past 5 s the holder lets go, the apply
+    // finishes, and the time says it waited.
+    const letGo = setTimeout(() => { holder.unsafe(`ROLLBACK`).catch(() => undefined); }, 5000);
+    held = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the104 }).then(() => "applied", (e: Error) => e.message);
+    clearTimeout(letGo);
+    heldMs = performance.now() - t0;
+  } finally {
+    await holder.unsafe(`ROLLBACK`).catch(() => undefined);
+    await holder.close();
+  }
+  const heldAfter = await heldXmin(), othersAfter = await readers();
+  await sql.unsafe(`DROP FUNCTION upg104_held()`);
+  assert(held === "applied" && heldMs < 5000 && heldAfter === heldBefore && [...othersBefore].filter(([f]) => f !== "upg104_held()").every(([f, x]) => othersAfter.get(f) !== x),
+    `a reader whose lock another session holds is left and the file applies at once, the others altered (${held.slice(0, 80)}; ${Math.round(heldMs)} ms)`);
+  // The block's 200 ms is its own: the migrator's lock timeout holds again for
+  // the rebuild after it, which waits on writers for its SHARE locks.
+  const timeoutAfter = await sql.begin(async (tx: SQL) => {
+    await tx.unsafe(`SET LOCAL lock_timeout = '7s'`);
+    await tx.unsafe(readFileSync(join(HERE, "migrations", the104), "utf8"));
+    return String(((await tx`SELECT current_setting('lock_timeout') AS t`)[0] as { t: string }).t);
+  });
+  assert(timeoutAfter === "7s", `the block puts the migrator's lock timeout back for the rest of the file (${timeoutAfter})`);
   assert(asOwner === "applied" && owned.length >= 5 && owned.every((f) => ownedAfter.get(f) !== ownedBefore.get(f)) && foreignAfter === foreignBefore,
     `run by a role that owns the readers and not a function another role owns, the block alters its own and leaves that one, rather than failing (${asOwner.slice(0, 80)}; ${owned.length} owned)`);
   await sql.close();

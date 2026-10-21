@@ -1797,7 +1797,9 @@ known one: 16 rows on stable flip). Nothing else stored is computed from the
 sets. It also alters every function outside the system schemas that names a set
 (in its text, in any case, or by dependency) to the volatility it has, a no-op
 that invalidates the plans built on it in every session — a procedure is left,
-and one the migrating role cannot alter is named in a NOTICE and left: replacing
+and one the migrating role cannot alter, or whose lock another session holds
+past 200 ms, is named in a NOTICE (which psql shows and `migrate.ts` does not
+print) and left: replacing
 the sets alone left a server's pooled connection, once it had searched with
 `prefer_current` six times, demoting by 058's sets (review pass 1).
 graph-centrality's `LIFECYCLE_TYPES` and `--status done` follow (its equality

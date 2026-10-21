@@ -157,7 +157,7 @@ export function movedAmong(hits: readonly { id: string; content: string; created
  * status's name for a caller that wants it.
  */
 export const TYPE_WORDS: Readonly<Record<string, string>> = { triage: "Triage", backlog: "Backlog", unstarted: "Todo", started: "In Progress", completed: "Done", canceled: "Canceled", duplicate: "Duplicate" };
-const word = (type: string) => TYPE_WORDS[type] ?? "?";
+const word = (type: string) => (Object.hasOwn(TYPE_WORDS, type) ? TYPE_WORDS[type] : "?");
 
 /**
  * The moved tickets in words — `SMD-2306 In Progress → Done; …` — every one

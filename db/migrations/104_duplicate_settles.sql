@@ -27,7 +27,10 @@
 --   * Every function outside the system schemas that names either set (in its
 --     body, or by dependency) is altered to the volatility it has — a no-op
 --     that invalidates every session's plans built on it; one this role
---     cannot alter is named in a NOTICE and left. CREATE OR REPLACE alone did
+--     cannot alter, or whose lock another session holds past 200 ms, is
+--     named in a NOTICE and left (psql shows it; migrate.ts prints no
+--     notices, so restart the server and workers after 104 if any may have
+--     been left). CREATE OR REPLACE alone did
 --     not reach every cached plan: on PG 16 a session that had called
 --     search_thoughts_current (plpgsql) six times, its generic plan cached,
 --     kept demoting by 058's sets after 104 while a fresh session did not
@@ -39,9 +42,11 @@
 --     row, whether its thought's status_type is in node_lifecycle_types(),
 --     and says a migration that changes the set runs it (stable: 16 rows
 --     false → true). Its locks are SHARE on thoughts and thought_sources,
---     held to this file's commit (under --reapply, to the whole run's). No
---     other stored row is computed from the sets: ob1_ticket_head stores the
---     head's status_type as written.
+--     held to this file's commit (under --reapply, to the whole run's):
+--     writes wait for it, about 26 ms at 10,000 source rows and 4 s at a
+--     million (review pass 5; SMD-3160 asks a later set change to reconcile
+--     only the keys it moves). No other stored row is computed from the sets:
+--     ob1_ticket_head stores the head's status_type as written.
 --   * graph-centrality.ts's LIFECYCLE_TYPES and LIFECYCLE_FILTERS.done,
 --     board-findings.ts's closed(), the search reply's demotion words
 --     (server-portable/render.ts) and the label's fixed words
@@ -120,13 +125,18 @@ COMMENT ON FUNCTION node_settled_types() IS
 -- function in any schema but the system's whose body names a set — in any
 -- case, quoted or not — or that depends on one (a BEGIN ATOMIC body has no
 -- text to read). A procedure has no volatility to restate and is left; so is
--- a function this role cannot alter, said by name: refreshing plans is not
--- worth failing the sets over (review pass 2).
+-- a function this role cannot alter (review pass 2), and one whose lock
+-- another session holds past 200 ms — a role that may create a function in
+-- any schema scanned could otherwise hold one and fail the file (review
+-- pass 5). Each is said by name: refreshing plans is not worth failing the
+-- sets over. The migrator's own lock timeout is put back after.
 DO $touch$
 DECLARE
   r record;
   v_left text[] := '{}';
+  v_timeout text := current_setting('lock_timeout');
 BEGIN
+  PERFORM set_config('lock_timeout', '200ms', true);
   FOR r IN
     SELECT p.oid::regprocedure AS fn, pg_has_role(p.proowner, 'USAGE') AS may,
            CASE p.provolatile WHEN 'i' THEN 'IMMUTABLE' WHEN 's' THEN 'STABLE' ELSE 'VOLATILE' END AS vol
@@ -142,13 +152,18 @@ BEGIN
        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
   LOOP
     IF r.may THEN
-      EXECUTE format('ALTER FUNCTION %s %s', r.fn, r.vol);
+      BEGIN
+        EXECUTE format('ALTER FUNCTION %s %s', r.fn, r.vol);
+      EXCEPTION WHEN lock_not_available THEN
+        v_left := v_left || r.fn::text;
+      END;
     ELSE
       v_left := v_left || r.fn::text;
     END IF;
   END LOOP;
+  PERFORM set_config('lock_timeout', v_timeout, true);
   IF cardinality(v_left) > 0 THEN
-    RAISE NOTICE 'migration 104: this role cannot alter %, so a session that cached a plan through it keeps 058''s sets until it reconnects (restart the server and workers)', array_to_string(v_left, ', ');
+    RAISE NOTICE 'migration 104: % not altered (this role cannot, or another session holds its lock), so a session that cached a plan through it keeps 058''s sets until it reconnects (restart the server and workers)', array_to_string(v_left, ', ');
   END IF;
 END
 $touch$;
