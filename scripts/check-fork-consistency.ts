@@ -6490,7 +6490,7 @@ const PG_EXPORTER_SERVICE = {
     "env -i PATH=/bin httpd -f -p \"$$addr:9187\" -h /var/www &\n",
     "h=$$!\n",
     "while kill -0 \"$$e\" 2> /dev/null && kill -0 \"$$h\" 2> /dev/null; do sleep 5; done\n",
-    "echo \"pg-exporter: the exporter or its front (httpd) stopped; the container exits in 30 s and restarts\" >&2; sleep 30; exit 1\n",
+    "echo \"pg-exporter: the exporter or its front (httpd) stopped, its own line above saying why if it left one; the container exits in 30 s and restarts\" >&2; sleep 30; exit 1\n",
   ].join(""), "pg-exporter"],
   command: [
     "--collector.stat_statements",

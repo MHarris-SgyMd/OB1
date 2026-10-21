@@ -2201,7 +2201,7 @@ services:
         env -i PATH=/bin httpd -f -p "$$addr:9187" -h /var/www &
         h=$$!
         while kill -0 "$$e" 2> /dev/null && kill -0 "$$h" 2> /dev/null; do sleep 5; done
-        echo "pg-exporter: the exporter or its front (httpd) stopped; the container exits in 30 s and restarts" >&2; sleep 30; exit 1
+        echo "pg-exporter: the exporter or its front (httpd) stopped, its own line above saying why if it left one; the container exits in 30 s and restarts" >&2; sleep 30; exit 1
       - pg-exporter
     command: ["--collector.stat_statements", "--collector.stat_statements.include_query", "--collector.stat_statements.query_length=120", "--collector.stat_statements.limit=100", "--collector.stat_statements.exclude_users=ob1_monitor"]
     environment:
