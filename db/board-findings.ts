@@ -393,12 +393,12 @@ export async function findingsSchemaProblem(sql: SQL, opts: { write?: boolean } 
   if (!r.linked) return "migration 079 is not applied, so whether the board links two tickets cannot be asked (cd db && bun migrate.ts --url …)";
   if (!r.posted) return "migration 087 is not applied, so nothing posted could be recorded (cd db && bun migrate.ts --url …)";
   if (!r.sets) return "migration 058 is not applied, so whether a ticket is closed cannot be asked (cd db && bun migrate.ts --url …)";
-  // closed() reads node_settled_types(): before 104 a Duplicate ticket would
+  // closed() reads node_settled_types(): before 105 a Duplicate ticket would
   // read open, and a pair of finished tickets would be posted (SMD-2935). Its
   // own statement: in the one above, a schema without 058 would fail to parse
   // rather than be told so (review pass 1).
   const [d] = await sql`SELECT 'duplicate' = ANY(node_settled_types()) AS settles`;
-  if (!d.settles) return "migration 104 is not applied, or an older tree's --reapply undid it, so a Duplicate ticket would read as open (cd db && bun migrate.ts --url …; after an older tree's --reapply, this tree's --reapply)";
+  if (!d.settles) return "migration 105 is not applied, or an older tree's --reapply undid it, so a Duplicate ticket would read as open (cd db && bun migrate.ts --url …; after an older tree's --reapply, this tree's --reapply)";
   // 029's and 068's tables precede 087 in every tree, so they exist here.
   const [g] = await sql`SELECT has_table_privilege('board_findings_posted', 'SELECT') AS posted_read,
                                has_table_privilege('board_findings_posted', 'INSERT') AS posted_write,
@@ -423,7 +423,7 @@ export async function findingsSchemaProblem(sql: SQL, opts: { write?: boolean } 
 // the pair. A pair of closed tickets is not posted: a comment asking to link
 // two finished tickets is the least useful kind, and it spends the cap open
 // work could use (SMD-2932). Reopened, it is again. Closed is settled:
-// node_settled_types(), which holds `duplicate` since 104 (SMD-2935) — one
+// node_settled_types(), which holds `duplicate` since 105 (SMD-2935) — one
 // definition, node_state's.
 const closed = (k: string) => `coalesce(coalesce(
     (SELECT th.status_type FROM ob1_ticket_head th WHERE th.issue_key = md5(${k})::uuid AND th.status_type IS NOT NULL),

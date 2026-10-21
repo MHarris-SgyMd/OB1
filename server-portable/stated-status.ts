@@ -122,7 +122,7 @@ export type MovedInputs = { lifecycle: ReadonlySet<string>; heads: ReadonlyMap<s
  * and only the hits the measurement labelled: none `superseded` names (the
  * eval sampled no superseded thought) and none with a lifecycle of its own.
  * Nor a ticket row (`metadata.issue`) whose type gives it none: a duplicate's
- * row was lifecycle-less to node_state until 104 (16 of stable's 721 rows), so
+ * row was lifecycle-less to node_state until 105 (16 of stable's 721 rows), so
  * the measurement labelled the tickets its body quotes, but a ticket row tells
  * its own status, never others' — and a custom type still has none. Nor a hit
  * with no written time: the session line when it has one, else its stored time.
@@ -152,7 +152,7 @@ export function movedAmong(hits: readonly { id: string; content: string; created
  * thought's `By:` line, past the caller's min_trust, it would be words no one
  * vouched for; an allowlist leaves nothing to clean (the maintainer's call,
  * review pass 2). The seven are node_lifecycle_types() (058; `duplicate` since
- * 104, SMD-2935), the only types 095 returns; a custom state reads as its
+ * 105, SMD-2935), the only types 095 returns; a custom state reads as its
  * type's word ("In Review" as In Progress). The REST answer keeps each
  * status's name for a caller that wants it.
  */

@@ -13835,36 +13835,36 @@ if (want("41")) {
     // Closed is node_settled_types() (SMD-2935). Without the function the step
     // refuses naming 058 — its own statement, so the schema check is not a
     // parse error (review pass 1); with 058's set back, a Duplicate reads open,
-    // so it refuses naming 104; 104 re-applied, it runs. Put back in any case.
+    // so it refuses naming 105; 105 re-applied, it runs. Put back in any case.
     const SET058 = `CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{completed,canceled}'::text[] $$`;
-    const apply104 = () => applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_duplicate_settles.sql") });
-    let no058: string | null = "unread", before104: string | null = "unread", after104: string | null = "unread";
+    const apply105 = () => applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_duplicate_settles.sql") });
+    let no058: string | null = "unread", before105: string | null = "unread", after105: string | null = "unread";
     // And closed() reads that set, not a list of its own: a Done ticket and a
-    // Duplicate, unlinked, are a closed pair under 104's set and offered under
+    // Duplicate, unlinked, are a closed pair under 105's set and offered under
     // 058's, where the Duplicate reads open (review pass 3).
     const z78 = await ticketAs(78, "done c", "completed"), z79 = await ticketAs(79, "a duplicate too", "duplicate");
     await relate(z79, z78, "related", 0.85);
     const offered = async () => (await selectFindings(bsql)).some((f) => f.a === "ZQ-78" || f.b === "ZQ-78");
-    let pair104: boolean | null = null, pair058: boolean | null = null, pairBack: boolean | null = null;
+    let pair105: boolean | null = null, pair058: boolean | null = null, pairBack: boolean | null = null;
     try {
-      pair104 = await offered();
+      pair105 = await offered();
       await bsql`DROP FUNCTION node_settled_types()`;
       no058 = await findingsSchemaProblem(bsql).catch((e: Error) => `threw: ${e.message}`);
       await bsql.unsafe(SET058);
-      before104 = await findingsSchemaProblem(bsql);
+      before105 = await findingsSchemaProblem(bsql);
       pair058 = await offered();
-      await apply104();
-      after104 = await findingsSchemaProblem(bsql);
+      await apply105();
+      after105 = await findingsSchemaProblem(bsql);
       pairBack = await offered();
     } finally {
-      if (after104 !== null) { await bsql.unsafe(SET058); await apply104(); }
+      if (after105 !== null) { await bsql.unsafe(SET058); await apply105(); }
     }
     assert(no058 === "migration 058 is not applied, so whether a ticket is closed cannot be asked (cd db && bun migrate.ts --url …)"
-        && before104 === "migration 104 is not applied, or an older tree's --reapply undid it, so a Duplicate ticket would read as open (cd db && bun migrate.ts --url …; after an older tree's --reapply, this tree's --reapply)"
-        && after104 === null,
-      `closed() reads node_settled_types(): without it the step refuses naming 058, on a brain whose set lacks duplicate it refuses naming 104 and the remedy after an older tree's --reapply, and runs once 104 is applied (${JSON.stringify([no058, before104, after104])})`);
-    assert(pair104 === false && pair058 === true && pairBack === false,
-      `closed() reads node_settled_types(), not a list of its own: a Done ticket and a Duplicate are a closed pair under 104's set, offered under 058's, closed again after 104 (${JSON.stringify([pair104, pair058, pairBack])})`);
+        && before105 === "migration 105 is not applied, or an older tree's --reapply undid it, so a Duplicate ticket would read as open (cd db && bun migrate.ts --url …; after an older tree's --reapply, this tree's --reapply)"
+        && after105 === null,
+      `closed() reads node_settled_types(): without it the step refuses naming 058, on a brain whose set lacks duplicate it refuses naming 105 and the remedy after an older tree's --reapply, and runs once 105 is applied (${JSON.stringify([no058, before105, after105])})`);
+    assert(pair105 === false && pair058 === true && pairBack === false,
+      `closed() reads node_settled_types(), not a list of its own: a Done ticket and a Duplicate are a closed pair under 105's set, offered under 058's, closed again after 105 (${JSON.stringify([pair105, pair058, pairBack])})`);
 
     // 4. The egress gate, a dry run, a failed post, then the post.
     const z30 = await ticket(30, "gated a"), z31 = await ticket(31, "gated b");
