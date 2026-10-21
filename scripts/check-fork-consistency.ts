@@ -3349,6 +3349,12 @@ function checkServerEnvForwarded() {
   const knobs = documentedEnvKnobs(KNOB);
   if (knobs === null) return;
   const documented = new Set(knobs.map((k) => k.name));
+  // A required knob is a LIVE line, empty, for the operator to fill in: commented out, a copied .env meets compose's
+  // refusal at its first `up` instead (SMD-2287 PR 5b review pass 2). Check 13's ENV_EXAMPLE_LIVE admits the line.
+  const exampleText = readFileSync(join(ROOT, "deploy/.env.example"), "utf8");
+  for (const k of Object.keys(REQUIRED_KNOBS)) {
+    if (documented.has(k) && !new RegExp(`^${k}=$`, "m").test(exampleText)) fail("deploy/.env.example", `documents \`${k}\` only commented out, which compose refuses to run without (REQUIRED_KNOBS) — give it its live, empty \`${k}=\` line, which check 13's ENV_EXAMPLE_LIVE admits (SMD-2287)`);
+  }
   const exampleLine = (name: string) => knobs.find((k) => k.name === name)?.line;
 
   const sourcePath = join(ROOT, SERVER_ENV_SOURCE);
@@ -6408,13 +6414,6 @@ const DASHBOARD_PATH = "/otel-lgtm/open-brain-dashboard.json";
 const DASHBOARD_PROVIDER_PATH = "/otel-lgtm/grafana/conf/provisioning/dashboards/open-brain.yaml";
 /** Where lgtm's Grafana finds the provisioned alert rules (SMD-3050), mounted from the grafana-alert-rules config: its provisioning directory's alerting/, every file of which it reads for rules (and contact points, policies and templates, which check 38 refuses there). */
 const ALERT_RULES_PATH = "/otel-lgtm/grafana/conf/provisioning/alerting/open-brain.yaml";
-/**
- * compose.yaml's observability collector (SMD-1849 PR 3a) as Bun.YAML reads it, its `logging` (check 29's) and its labels (check 37's,
- * PR 3c) aside: the image by its digest,
- * Grafana's anonymous access off, the refusal of an empty or default admin password (30 s before it exits), the backends on the
- * container's loopback, every call out off, Loki's retention, the mesh and (PR 3b) telemetry. Its environment holds telemetry's sign-in and
- * exposure; a change to it is made here too, on purpose (review pass 1).
- */
 /** The OpenTelemetry knobs compose.yaml's x-otel-env forwards, each the SDK's own name (SMD-1849). */
 const OTEL_KEYS = ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_LOGS_EXPORTER", "OTEL_SDK_DISABLED", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG", "OTEL_METRIC_EXPORT_INTERVAL"];
 /**
@@ -6444,6 +6443,13 @@ const MCP_SERVICE = {
   networks: { mesh: { aliases: ["mcp.ob1.internal"] } },
   healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"], interval: "30s", timeout: "3s", start_period: "10s", retries: 3 },
 };
+/**
+ * compose.yaml's observability collector (SMD-1849 PR 3a) as Bun.YAML reads it, its `logging` (check 29's) and its labels (check 37's,
+ * PR 3c) aside: the image by its digest,
+ * Grafana's anonymous access off, the refusal of an empty or default admin password (30 s before it exits), the backends on the
+ * container's loopback, every call out off, Loki's retention, the mesh and (PR 3b) telemetry. Its environment holds telemetry's sign-in and
+ * exposure; a change to it is made here too, on purpose (review pass 1).
+ */
 const LGTM_SERVICE = {
   image: "docker.io/grafana/otel-lgtm:0.36.0@sha256:57c04cbd8e7022f32bb84c4ac005d79baf8b08e2c5be44facf11f5f1f9944ba2",
   profiles: ["observability"],
@@ -6840,6 +6846,7 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["the import runner mounting deploy/, which holds deploy/.env, as ../deploy (SMD-2685 review pass 3)", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ../deploy:/d:ro\n"],
   ["n8n mounting the authorization server's store", "compose.yaml", "      - n8n-data:/home/node/.n8n\n", "      - n8n-data:/home/node/.n8n\n      - auth-data:/auth-data\n"],
   ["the Postgres volume binding a host directory by its driver options", "compose.yaml", "\nvolumes:\n  pgdata:\n", "\nvolumes:\n  pgdata:\n    driver_opts: {type: none, o: bind, device: /var/run}\n"],
+  ["compose.yaml's mcp handed the database's URL (SMD-2287)", "compose.yaml", "    command: [\"../mcp-server/index.ts\"]\n    environment:\n", "    command: [\"../mcp-server/index.ts\"]\n    environment:\n      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/openbrain\n"],
   ["compose.yaml's proxy given a hosts entry for its backend's name", "compose.yaml", "    dns_search: [\".\"]\n    healthcheck:\n      test: [\"CMD\", \"traefik\", \"healthcheck\"]", "    dns_search: [\".\"]\n    extra_hosts: [\"mcp.ob1.internal:10.0.0.9\"]\n    healthcheck:\n      test: [\"CMD\", \"traefik\", \"healthcheck\"]"],
   // The forwarder and the proxy behind it (SMD-2583).
   ["compose.yaml's proxy publishing a port again, back on an outward network", "compose.yaml", "    networks:\n      front:\n        aliases: [proxy.ob1.internal]\n      mesh: {}\n", "    ports:\n      - \"127.0.0.1:8001:8000\"\n    networks:\n      edge: {}\n      front:\n        aliases: [proxy.ob1.internal]\n      mesh: {}\n"],
@@ -6870,14 +6877,15 @@ function checkRouteTables() {
   // What a release ships as its install, held here rather than by the generator's own self-check, which an edit to the generator edits too: the env asset becomes every install's .env, so pointing it at another file would publish what no check reads (SMD-2685 review pass 5).
   const assets: Record<string, string> = { "compose.yaml": "deploy/compose.yaml", "compose.release.yaml": "deploy/compose.release.yaml", "env.example": "deploy/.env.example", "compose.api-public.yaml": "deploy/compose.api-public.yaml", "compose.hooks-public.yaml": "deploy/compose.hooks-public.yaml", "compose.grafana-port.yaml": "deploy/compose.grafana-port.yaml", "compose.grafana-public.yaml": "deploy/compose.grafana-public.yaml" };
   if (canonJson(ASSETS) !== canonJson(assets)) fail("scripts/release-artifacts.ts", `ASSETS is ${JSON.stringify(ASSETS)} where check 28 holds ${JSON.stringify(assets)} — a release install's files are these, each held (the env asset by check 13, compose.yaml, compose.api-public.yaml, compose.hooks-public.yaml, compose.grafana-public.yaml and compose.grafana-port.yaml by check 28, the release's overlay by CI's "The proxy loads only the held route tables" and release.yml); a change to them is made in check 28 too, on purpose (SMD-2685)`);
-  // …and the commands its notes tell an operator to run: the downloads of those files and the two compose commands over them, nothing else — a third `-f` there (`oci://…` is fetched from a registry) would load what no check reads into every install (SMD-2685 review pass 6). Comments aside; a tag's notes and a rehearsal's.
+  // …and the commands its notes tell an operator to run: the downloads of those files, the two keys minted with the release's own image (SMD-2287: a release install has no checkout), and the two compose commands over them, nothing else — a third `-f` there (`oci://…` is fetched from a registry) would load what no check reads into every install (SMD-2685 review pass 6). Comments aside; a tag's notes and a rehearsal's.
   const run = (mode: "tag" | "rehearsal") => {
-    const notes = renderNotes({ facts: { mode, tag: "v9.9.9", version: "9.9.9" } as unknown as Parameters<typeof renderNotes>[0]["facts"], changelogSection: null, digests: {}, yieldText: "", yieldWindow: "" });
+    const notes = renderNotes({ facts: { mode, tag: "v9.9.9", version: "9.9.9", server_image: "ghcr.io/x/ob1-server:9.9.9" } as unknown as Parameters<typeof renderNotes>[0]["facts"], changelogSection: null, digests: {}, yieldText: "", yieldWindow: "" });
     return (/\n## Run it\n[^`]*```bash\n([^`]*)```/.exec(notes)?.[1] ?? "").split("\n").map((l) => l.replace(/(^|\s+)#.*$/, "")).filter(Boolean);
   };
   const compose = ["docker compose -f compose.yaml -f compose.release.yaml pull", "docker compose -f compose.yaml -f compose.release.yaml up -d --wait"];
   const download = (name: string) => `curl -fsSL${name === "env.example" ? " -o .env" : "O"} ${REPO_URL}/releases/download/v9.9.9/${name}`;
-  for (const [mode, want] of [["tag", [...Object.keys(assets).map(download), ...compose]], ["rehearsal", compose]] as const) {
+  const keygen = ["laptop --scope write", "mcp-forwarder --scope forward"].map((k) => `docker run --rm --entrypoint bun ghcr.io/x/ob1-server:9.9.9 keygen.ts --name ${k}`);
+  for (const [mode, want] of [["tag", [...Object.keys(assets).map(download), ...keygen, ...compose]], ["rehearsal", compose]] as const) {
     const got = run(mode);
     if (canonJson(got) !== canonJson(want)) fail("scripts/release-artifacts.ts", `renderNotes' "Run it" block, for a ${mode}, runs ${JSON.stringify(got)} where check 28 holds ${JSON.stringify(want)} — an install runs exactly the held files, so another -f, env file or variable there loads what no check reads (SMD-2685)`);
   }

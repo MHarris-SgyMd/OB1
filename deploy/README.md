@@ -168,7 +168,10 @@ curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/comp
 curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.hooks-public.yaml   # optional: plugins' webhooks at /hooks, another -f ("Plugins' webhooks" below)
 curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.grafana-port.yaml   # optional: Grafana on 127.0.0.1:3000, another -f ("The observability profile" below)
 curl -fsSLO https://github.com/MHarris-SgyMd/OB1/releases/download/v<X.Y.Z>/compose.grafana-public.yaml   # optional: Grafana at /grafana on the stack's origin, another -f (the same)
-# fill in .env as step 1 says, then:
+# fill in .env as step 1 says, minting its keys with the release's own image (no checkout needed):
+docker run --rm --entrypoint bun ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z> keygen.ts --name laptop --scope write          # its line in MCP_ACCESS_KEYS; keep the key
+docker run --rm --entrypoint bun ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z> keygen.ts --name mcp-forwarder --scope forward   # its line in MCP_ACCESS_KEYS too, the key OB1_FORWARDER_KEY
+# then:
 docker compose -f compose.yaml -f compose.release.yaml pull
 docker compose -f compose.yaml -f compose.release.yaml up -d --wait   # --profile local-models on both for the stack's own Ollama
 ```
@@ -558,23 +561,26 @@ container for a changed inline config alone (docker/compose#11900, measured on
 stack's env file — its hash line added to `MCP_ACCESS_KEYS` and the raw key as
 `OB1_FORWARDER_KEY=`. From a checkout, `bun server-portable/keygen.ts --name
 mcp-forwarder --scope forward`; on a release install, which has no checkout,
-the release's image mints it: `docker run --rm --entrypoint bun <its server
-image> keygen.ts --name mcp-forwarder --scope forward`. Then the stack's own
-`up`: `compose up -d --build` from a checkout, or the release's `pull` and
-`up -d --wait` with `compose.release.yaml` ("Pinning a release"), with its `-f`
-files and profiles. Without the key compose refuses every command on the
+the release's image mints it: `docker run --rm --entrypoint bun
+ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z> keygen.ts --name mcp-forwarder
+--scope forward`. Then the stack's own `up`: `compose up -d --build` from a
+checkout, or, on a release install, the new tag's `compose.yaml` and
+`compose.release.yaml` downloaded over the old ones and its `pull` and
+`up -d --wait` ("Pinning a release"), with its `-f` files and profiles. Without the key compose refuses every command on the
 stack, `ps`, `logs` and `down` among them, naming it, before anything changes:
 inspect or stop the old stack with the old `compose.yaml`, or hand one command
 `OB1_FORWARDER_KEY=x` in the shell. The `up` creates `mcp` and recreates
-`server` under its new mesh name and the proxy, which waits on both. Then
-`deploy/smoke.sh <origin>/mcp <key>`: a hash line missing or mistyped leaves
-`mcp` healthy and every tool call a 500 (the REST core refuses its forward
-key), which the smoke's tool checks catch and its log names. A canary gets its
-own key from `canary.sh up`. **Rolling back** to a `compose.yaml` from before
+`server` under its new mesh name and the proxy, which waits on all three
+servers. Then check the key took: `curl -s -H "x-brain-key: <a read or write
+key>" <origin>/mcp/health` answers the brain's JSON record, where a bare `ok`
+means the REST core refused the MCP server's forward key — a hash line missing
+or mistyped, which leaves `mcp` healthy and every tool call a 500, and
+`compose logs mcp` names (`deploy/smoke.sh <origin>/mcp <key>` from a checkout
+checks the same and more). A canary gets its own key from `canary.sh up`. **Rolling back** to a `compose.yaml` from before
 it needs `up -d --remove-orphans`, or `mcp`, an orphan, keeps the
 `mcp.ob1.internal` alias and answers part of `/mcp` beside the old server; a
-canary rolled back with an older `canary.sh` needs `compose -p <canary> rm -sf
-mcp` for the same reason.
+canary rolled back with an older `canary.sh` needs `docker rm -f
+<canary>-mcp-1` for the same reason.
 
 **Upgrading a stack from before SMD-2583's forwarder** is one plain `compose
 up -d` (with its `-f` files and profiles): compose recreates the proxy without
@@ -1040,8 +1046,8 @@ podman update --restart unless-stopped open-brain-tiers-stable-postgres-1   # an
 ```
 
 **To check after a reboot**, list the stack with the `-f` files and profiles
-it was brought up with: `postgres`, `server`, `api`, `proxy` and `forwarder`
-should be `Up`, and `/health` should answer 200. Whatever is still down, the same
+it was brought up with: `postgres`, `server`, `api`, `mcp`, `proxy` and
+`forwarder` should be `Up`, and `/health` should answer 200. Whatever is still down, the same
 `up -d` the stack was brought up with starts in order.
 
 ```bash
@@ -3295,8 +3301,8 @@ document and answers a keyless `/mcp` with the 401 challenge naming it.
 Below, `compose` stands for `podman compose -f deploy/compose.yaml --profile
 auth`, or docker compose, with whatever other `-f` files the stack was
 started with. It assumes the stack of step 1: compose reads the whole of
-`deploy/.env` for every service, so `POSTGRES_PASSWORD` and `MCP_ACCESS_KEYS`
-must be set even to start this one.
+`deploy/.env` for every service, so `POSTGRES_PASSWORD`, `MCP_ACCESS_KEYS` and
+`OB1_FORWARDER_KEY` must be set even to start this one.
 
 ```bash
 # deploy/.env: OB1_PUBLIC_ORIGIN=https://brain.example.com (yours; --init does not write it)

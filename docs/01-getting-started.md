@@ -337,7 +337,7 @@ That's it. Start a new conversation, and Claude will have access to your Open Br
 > [!TIP]
 > ChatGPT is less intuitive than Claude at picking the right MCP tool automatically. If it doesn't use your brain on its own, be explicit: "Use the Open Brain search_thoughts tool to find my notes about project planning." After it gets the pattern once or twice in a conversation, it usually picks up the habit.
 >
-> If ChatGPT says an Open Brain tool is unavailable and your server's log shows no request arriving, the connector did not reach your server. Refresh or recreate the ChatGPT app, start a fresh chat, select the Open Brain app in Developer Mode, and try a thinking model. On restricted Pro sessions, expect read tools, especially `search` and `fetch`, to be more reliable than the write tool (`capture_thought`).
+> If ChatGPT says an Open Brain tool is unavailable and the MCP server's log (`podman compose -f deploy/compose.yaml logs mcp api`) shows no request arriving, the connector did not reach your server. Refresh or recreate the ChatGPT app, start a fresh chat, select the Open Brain app in Developer Mode, and try a thinking model. On restricted Pro sessions, expect read tools, especially `search` and `fetch`, to be more reliable than the write tool (`capture_thought`).
 
 </details>
 
@@ -470,7 +470,7 @@ Your AI should retrieve the thought you just saved.
 <summary>❓ <strong>Troubleshooting</strong></summary>
 
 > [!TIP]
-> The server's log is the first place to look, whatever the symptom: `podman compose -f deploy/compose.yaml logs server`. A refused request, a failed capture and a misconfiguration all say why there.
+> The servers' logs are the first place to look, whatever the symptom: `podman compose -f deploy/compose.yaml logs mcp api` — the MCP server at `/mcp`, which logs every request, and the REST core behind it, which does the work. A refused request and a failed capture say why there; a misconfiguration says so in `logs server api` (preflight).
 
 **❌ `preflight FAILED` and the server stops**
 
@@ -494,7 +494,7 @@ First, confirm Developer Mode is enabled (Settings → Apps & Connectors → Adv
 
 **❌ ChatGPT says an Open Brain tool is unavailable**
 
-Check the server's log. If no request appears when ChatGPT fails, your server is not the problem — ChatGPT did not expose that tool to the current chat. Refresh or recreate the ChatGPT app so it pulls updated tool metadata, start a fresh chat, and try a thinking model. On Pro, the read-only `search`/`fetch` compatibility tools may work where `capture_thought` is hidden or blocked because full MCP/write access is plan-dependent.
+Check the MCP server's log (`podman compose -f deploy/compose.yaml logs mcp api`). If no request appears when ChatGPT fails, your server is not the problem — ChatGPT did not expose that tool to the current chat. Refresh or recreate the ChatGPT app so it pulls updated tool metadata, start a fresh chat, and try a thinking model. On Pro, the read-only `search`/`fetch` compatibility tools may work where `capture_thought` is hidden or blocked because full MCP/write access is plan-dependent.
 
 **❌ Getting 401 errors**
 
@@ -508,7 +508,7 @@ If the note says the embedding provider at some address **was unavailable**, the
 
 **❌ Search returns no results**
 
-Make sure you've captured at least one thought first (see Step 8). Try asking the AI to "search with threshold 0.3" for a wider net. If that still returns nothing, check the server's log for a model error.
+Make sure you've captured at least one thought first (see Step 8). Try asking the AI to "search with threshold 0.3" for a wider net. If that still returns nothing, check the REST core's log for a model error (`podman compose -f deploy/compose.yaml logs mcp api`).
 
 **❌ Tools work but responses are slow**
 

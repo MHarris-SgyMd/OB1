@@ -359,16 +359,19 @@ say() { printf '▸ %s\n' "$*"; }
 # that — `up`'s refusals, a `down` of a canary from before it — stable's, the
 # file the canary's is made from.
 # compose.yaml requires OB1_FORWARDER_KEY (SMD-2287), which `up` mints into
-# the canary's file only once the file is made or mended (set_canary_own):
-# until then — the model probe below, a `down` of a canary from before it,
-# stable's file read before the canary has one — a placeholder fills it for
-# that call alone, so compose can read the file at all. Never when the file
-# holds a key: the shell's value would win over the file's in the MCP server.
-# Every `up` of the MCP server comes after set_canary_own has written one.
+# the canary's file only once the file is made or mended (make_canary_env,
+# set_canary_own): until then — the model probe below, a `down` of a canary
+# from before it, stable's file read before the canary has one — a
+# placeholder fills it for that call alone, so compose can read the file at
+# all. Never once those have run (OWN_KEYS, below): their read-back has proved
+# compose reads the canary's own key, and the shell's value would win over the
+# file's in the MCP server, whatever spelling of the line a grep misses
+# (review pass 2). Nor before, where the file plainly holds one.
+OWN_KEYS=""
 canary_compose() {
   local env="$ENV_FILE" fwd=()
   [ ! -f "$CANARY_ENV" ] || env="$CANARY_ENV"
-  grep -qE "^[[:space:]]*(export[[:space:]]+)?OB1_FORWARDER_KEY=([^[:space:]#\"']|\"[^\"]|'[^'])" "$env" 2>/dev/null \
+  [ -n "$OWN_KEYS" ] || grep -qE "^[[:space:]]*(export[[:space:]]+)?OB1_FORWARDER_KEY=([^[:space:]#\"']|\"[^\"]|'[^'])" "$env" 2>/dev/null \
     || fwd=(OB1_FORWARDER_KEY=placeholder-until-canary-sh-mints-one)
   env ${fwd[@]+"${fwd[@]}"} SERVER_PORT="${PORT:-8000}" SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES="" OB1_GIT_SHA="$GIT_SHA" \
     "$RUNTIME" compose -p "$CANARY" --env-file "$env" -f "$HERE/compose.yaml" "$@"
@@ -1254,6 +1257,7 @@ esac
 # only), since a change to stable's no longer reaches the canary.
 if [ ! -f "$CANARY_ENV" ]; then
   make_canary_env
+  OWN_KEYS=1
   say "made the canary's env file, $CANARY_ENV, from $ENV_FILE: its database password, its port, $PORT, and its access keys are its own — $OWN_SAID"
 else
   drift="$(env_file drift "$ENV_FILE" "$CANARY_ENV" 2>/dev/null)" || drift=""
@@ -1262,6 +1266,7 @@ else
   # file made before SMD-2874 takes the canary's own address, tier, profiles
   # and keys where it held stable's.
   set_canary_own
+  OWN_KEYS=1
 fi
 # The canary's own write key (SMD-2874 PR 2), for the smoke and the
 # connector: stable's keys open it no more.
