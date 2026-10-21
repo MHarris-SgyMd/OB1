@@ -12,7 +12,7 @@ import * as say from "./render.ts";
 import { abandonedRequestLine, labelPart, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, withSseKeepalive } from "./sse.ts";
 import { beginRequest, cutOpenRequests, endsWithStream, flushTelemetry, outcomeOf, startTelemetry, traceOf, withToolSpan, type RequestOutcome, type ToolSpan } from "./telemetry.ts";
 import { authReachability, edgeSettings, edgeView, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, type EdgeSettings } from "./oauth-edge.ts";
-import { BUSY_MESSAGE, challengeResponse, corsHeaders, cutByStopLine, HEALTH_METHOD_NOT_ALLOWED_HEADERS, HEALTH_PATH, JSON_RPC_BUSY_CODE, MCP_METHODS, METHOD_NOT_ALLOWED_HEADERS, MIRROR_INPUT, MIRROR_WORDS, nameRoute, notCleared, noteLegacyRoute, notificationRefusedResponse, parsedBody, partsOf, rawPath, readBodyText, recordCall, REFUSAL_BODY_LIMIT, refusalTarget, RETRY_AFTER_SECONDS, REVOKED_MESSAGE, shownNothing, unauthorizedResponse, unavailableResponse, worseOutcome, type CallRecord, type RequestParts } from "./mcp-edge.ts";
+import { BUSY_MESSAGE, challengeResponse, corsHeaders, cutByStopLine, HEALTH_METHOD_NOT_ALLOWED_HEADERS, HEALTH_PATH, JSON_RPC_BUSY_CODE, MCP_METHODS, METHOD_NOT_ALLOWED_HEADERS, MIRROR_INPUT, MIRROR_WORDS, nameRoute, notCleared, notificationRefusedResponse, parsedBody, partsOf, rawPath, readBodyText, recordCall, REFUSAL_BODY_LIMIT, refusalTarget, RETRY_AFTER_SECONDS, REVOKED_MESSAGE, shownNothing, unauthorizedResponse, unavailableResponse, worseOutcome, type CallRecord, type RequestParts } from "./mcp-edge.ts";
 
 // What the suites import from the module they drive; each now lives beside the
 // core or the renderer it belongs to (SMD-2283).
@@ -21,7 +21,7 @@ export { actorLine, demotedLine, currentNote, currentSearchHint, ingestedNotice,
 export { HEALTH_DEADLINE_MS, BRAIN_INFO_TOOL_DEADLINE_MS } from "./core/reads.ts";
 export { abandonedRequestLine, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, stalledRequestLine, withSseKeepalive } from "./sse.ts";
 // The HTTP edge's names this module exported before they moved to mcp-edge.ts (SMD-2287 PR 2), the suites reading some.
-export { cutByStopLine, legacyRouteLine, recordCall, REFUSAL_BODY_LIMIT, type CallRecord, type RequestParts } from "./mcp-edge.ts";
+export { cutByStopLine, recordCall, REFUSAL_BODY_LIMIT, type CallRecord, type RequestParts } from "./mcp-edge.ts";
 
 // The core (SMD-2283): every tool's logic over the store and the model
 // provider, as functions of a principal and a typed input (core/index.ts). Built
@@ -481,7 +481,6 @@ app.get("*", async (c, next) => {
   ]);
   clearTimeout(timer);
   if (!identity || identity.status !== "ok") return notCleared(c, trace, identity);
-  noteLegacyRoute(c.req.raw, principal.name);
   return c.json({ ...(await info), oauth: await oauth }, 200, corsHeaders);
 });
 
@@ -509,7 +508,6 @@ app.get("*", async (c, next) => {
   ]);
   clearTimeout(timer);
   if (!identity || identity.status !== "ok") return notCleared(c, trace, identity);
-  noteLegacyRoute(c.req.raw, principal.name);
   try {
     // The operation answers an object (a tool result is one); this route has always answered the bare rows.
     const status = await core.workerStatus(principal, {});
@@ -556,7 +554,6 @@ app.post("*", async (c, next) => {
   ]);
   clearTimeout(timer);
   if (!identity || identity.status !== "ok") return notCleared(c, trace, identity);
-  noteLegacyRoute(c.req.raw, principal.name);
   const body = await c.req.json().catch(() => null);
   const args: Record<string, unknown> = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
   // The MCP tools' own operations (core/workers.ts): the same refusals, said
@@ -618,7 +615,6 @@ app.get("*", async (c, next) => {
   ]);
   clearTimeout(timer);
   if (!identity || identity.status !== "ok") return notCleared(c, trace, identity);
-  noteLegacyRoute(c.req.raw, principal.name);
   if (streamMatch) {
     const stream = await subscribeJob(principal, id);
     if (!stream) return c.json({ error: "not found" }, 404, corsHeaders);
@@ -685,8 +681,7 @@ app.on(MCP_METHODS, "*", async (c) => {
   };
 
   // Beside it, the human line for a client that closes the connection before
-  // the response is complete, named by method and tool, never by content (the
-  // root URL's line, noteLegacyRoute's, is once per key name). Registered
+  // the response is complete, named by method and tool, never by content. Registered
   // first, so a client that leaves during the key check, the registry resolve
   // or the body read is logged too (a listener added to a signal already
   // aborted never fires — so that case is checked by hand); the label is
@@ -787,7 +782,6 @@ app.on(MCP_METHODS, "*", async (c) => {
     }
     principal.agentId = identity.agentId;
     principal.agentUnresolved = identity.unresolved;
-    noteLegacyRoute(c.req.raw, principal.name);
 
     // The label, read once from the request body. v2's transport reads the raw
     // Request stream (v1's @hono/mcp read Hono's cached body, so a double-read was

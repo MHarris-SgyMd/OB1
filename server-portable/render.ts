@@ -125,7 +125,7 @@ const oneOf = <W extends string>(words: readonly W[], v: unknown): W | null => (
  * the deciding keys, `references settled work (SMD-1, SMD-2)`; the structured
  * field says `references_settled` and leaves the words and keys to the text.
  */
-const DEMOTIONS = ["completed", "canceled", "superseded", "references_settled"] as const;
+const DEMOTIONS = ["completed", "canceled", "duplicate", "superseded", "references_settled"] as const;
 const demotionOf = (d: unknown) => oneOf(DEMOTIONS, typeof d === "string" && /^references settled work \(/.test(d) ? "references_settled" : d);
 
 /** A row's trust (073, SMD-1724): one of the ladder's words, else null — no trust recorded, or a word the stamp never writes. */
@@ -418,16 +418,16 @@ export function lapsesLine(lapses: { id: string; onto: string }[], side: string)
     : `an accept that makes this side stand clears ${lapses.length} capture-only pointers, ${pairs}: each then no longer supersedes what it pointed at`;
 }
 
-/** The rows each way past which the listing leaves a side's takes and lapses unread (105, SMD-3036: ob1_listing_walk_fits). */
+/** The rows each way past which the listing leaves a side's takes and lapses unread (106, SMD-3036: ob1_listing_walk_fits). */
 export const WALK_CAP = 25;
 
 /**
- * A side the listing left unread (105, SMD-3036): its walks — the chain below
+ * A side the listing left unread (106, SMD-3036): its walks — the chain below
  * the other side, the rows above this one — pass the cap, so what an accept
  * would take and lapse is not shown; the accept guard reads it in full.
  */
 export function walkCappedLine(): string {
-  return `what an accept that makes this side stand would take and lapse was not read: a chain here passes ${WALK_CAP} rows (the listing's cap, migration 105); consolidate.ts --accept reads it in full`;
+  return `what an accept that makes this side stand would take and lapse was not read: a chain here passes ${WALK_CAP} rows (the listing's cap, migration 106); consolidate.ts --accept reads it in full`;
 }
 
 /** The side an accepted proposal's superseding_id names, in capitals, or null (SMD-2707: an accept may go against the verdict with --direction). */

@@ -53,11 +53,9 @@ name: open-brain-tiers
 # A canary or working tier that is stopped or still starting is a bare 404
 # (`tier-absent`, 502 rewritten); stable's /mcp and /health answer 502 then,
 # as compose.yaml's do. No route answers the root, /.well-known or /api: this stack has
-# no legacy window (SMD-2306), no authorization server and no public REST
-# path, so each is Traefik's own 404, and a tier is reached with keys.
-# `not-legacy` deletes compose.yaml's marker for the root URL's window, which
-# this stack does not have, so a client cannot have a key logged as a
-# straggler. The table holds no comment of its own: Traefik renders it as a
+# no legacy route (compose.yaml's went with v2.0.0, SMD-2532), no
+# authorization server and no public REST path, so each is Traefik's own 404,
+# and a tier is reached with keys. The table holds no comment of its own: Traefik renders it as a
 # Go template first, so a comment line there is not inert, and check 27 holds
 # it byte for byte.
 x-tier-routes: &tier-routes |
@@ -67,19 +65,18 @@ x-tier-routes: &tier-routes |
         rule: "Path(`/mcp`) || PathPrefix(`/mcp/`)"
         priority: 30
         entryPoints: [web]
-        middlewares: [not-legacy]
         service: stable
       canary:
         rule: "Path(`/canary/mcp`) || PathPrefix(`/canary/mcp/`)"
         priority: 30
         entryPoints: [web]
-        middlewares: [not-legacy, tier-absent]
+        middlewares: [tier-absent]
         service: canary
       working:
         rule: "Path(`/working/mcp`) || PathPrefix(`/working/mcp/`)"
         priority: 30
         entryPoints: [web]
-        middlewares: [not-legacy, tier-absent]
+        middlewares: [tier-absent]
         service: working
       tier-off:
         rule: "PathRegexp(`(?i)^/(canary|working)`)"
@@ -91,13 +88,8 @@ x-tier-routes: &tier-routes |
         rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))"
         priority: 20
         entryPoints: [web]
-        middlewares: [not-legacy]
         service: stable
     middlewares:
-      not-legacy:
-        headers:
-          customRequestHeaders:
-            X-OB1-Legacy-Route: ""
       tier-absent:
         errors:
           status: ["502"]

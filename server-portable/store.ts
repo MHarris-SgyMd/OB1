@@ -103,7 +103,7 @@ export type ThoughtHybridMatch = {
   score: number;
   /** The hybrid's fused score before any weight; equal to `score` when nothing demoted the row. */
   fused: number;
-  /** Why prefer_current weighted the row: its ticket's status_type (completed, canceled) and/or "superseded". Empty when it did not (and always without the flag). */
+  /** Why prefer_current weighted the row: its ticket's status_type (completed, canceled, duplicate) and/or "superseded". Empty when it did not (and always without the flag). */
   demoted: string[];
   /**
    * Under prefer_current only (059, SMD-2255): the window the function re-ranked
@@ -707,7 +707,7 @@ export type ProposalSide = {
   takes: boolean;
   /** The pointers an accept making this side stand over the other would clear (ob1_accept_lapses: 092's lapse, read): `id`'s pointer onto `onto`. None on an accepted row, or for an accept 029 would refuse or that writes nothing. */
   lapses: { id: string; onto: string }[];
-  /** The listing left `takes` and `lapses` unread: the chain below the other side or the rows above this one pass its cap (105, SMD-3036: ob1_listing_walk_fits). Never on an accepted row, which takes no accept (029); its unread takes reads false. */
+  /** The listing left `takes` and `lapses` unread: the chain below the other side or the rows above this one pass its cap (106, SMD-3036: ob1_listing_walk_fits). Never on an accepted row, which takes no accept (029); its unread takes reads false. */
   walkCapped: boolean;
 };
 
@@ -773,7 +773,7 @@ function proposalSide(r: Record<string, unknown>, side: "older" | "newer"): Prop
     supersededBy: by == null ? null : String(by),
     lapses: lapseList(r[`${side}_lapses`]),
     takes: r[`${side}_takes`] === true,
-    // 105: a NULL takes on a row that carries 094's columns is the cap's —
+    // 106: a NULL takes on a row that carries 094's columns is the cap's —
     // said only while an accept can still come (029 refuses one on an
     // accepted row, so "--accept reads it in full" would be wrong there).
     walkCapped: `${side}_capture_only` in r && r[`${side}_takes`] == null && r.status !== "accepted",

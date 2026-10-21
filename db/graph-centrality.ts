@@ -41,33 +41,34 @@
  * ── Lifecycle (SMD-1994) ────────────────────────────────────────────────────
  * board-sync (SMD-1954) stamps every synced ticket's metadata with Linear's
  * state — `status` ("Done"), `status_type` (triage / backlog / unstarted /
- * started / completed / canceled) and `linear_updated_at` — so a thought's
- * lifecycle is on the row, and this reads it. One rule carries both the filter
- * and the decay: every thought has a WEIGHT, and every count of thoughts is a
- * sum of weights. A thought whose status the filter keeps weighs 1; one it
- * drops weighs 0; under `--decay-done` a completed or canceled thought weighs
- * `DONE_WEIGHT` (0.25, pre-registered here, one weight, exact in binary so the
- * sums are too). A row's lifecycle is its TICKET's: a row carrying a ticket
- * (`issue`) or derived from one (`ticket` — SMD-2059's dated sections) takes
- * the status of the ticket's head — of the rows carrying that `issue`, one
- * nothing supersedes before one superseded, the newest sync before an older,
- * then the id — so a Done ticket's observations and its superseded earlier
- * rows are settled with it; a row with no ticket claim takes the status keys
- * on its own row, if any. A twin the sync chained under a head without an
- * `issue` of its own (a hand paste adopted after the fact) is such a row: it
- * keeps its own lifecycle, which is none. A thought with no status — a hand
- * capture, a status_type this file does not know — weighs 1 whatever the flags
- * say: it passes every filter, and the output counts how many did rather than
- * calling it open. So mentions, support, co_mentions and the per-relation
- * counts are weighted sums (whole numbers unless decay is on); degree counts
- * NEIGHBOURS, not evidence, so a filter removes an edge with no live evidence
- * and decay leaves it. A thought is listed when it weighs more than 0 and
- * ranks by its weight times its score. Default `--status all` without decay is
- * every weight 1 — today's counts, by construction.
+ * started / completed / canceled / duplicate) and `linear_updated_at` — so a
+ * thought's lifecycle is on the row, and this reads it. One rule carries both
+ * the filter and the decay: every thought has a WEIGHT, and every count of
+ * thoughts is a sum of weights. A thought whose status the filter keeps weighs
+ * 1; one it drops weighs 0; under `--decay-done` a completed, canceled or
+ * duplicate thought weighs `DONE_WEIGHT` (0.25, pre-registered here, one
+ * weight, exact in binary so the sums are too). A row's lifecycle is its
+ * TICKET's: a row carrying a ticket (`issue`) or derived from one (`ticket` —
+ * SMD-2059's dated sections) takes the status of the ticket's head — of the
+ * rows carrying that `issue`, one nothing supersedes before one superseded, the
+ * newest sync before an older, then the id — so a Done ticket's observations
+ * and its superseded earlier rows are settled with it; a row with no ticket
+ * claim takes the status keys on its own row, if any. A twin the sync chained
+ * under a head without an `issue` of its own (a hand paste adopted after the
+ * fact) is such a row: it keeps its own lifecycle, which is none. A thought
+ * with no status — a hand capture, a status_type this file does not know —
+ * weighs 1 whatever the flags say: it passes every filter, and the output
+ * counts how many did rather than calling it open. So mentions, support,
+ * co_mentions and the per-relation counts are weighted sums (whole numbers
+ * unless decay is on); degree counts NEIGHBOURS, not evidence, so a filter
+ * removes an edge with no live evidence and decay leaves it. A thought is
+ * listed when it weighs more than 0 and ranks by its weight times its score.
+ * Default `--status all` without decay is every weight 1 — today's counts, by
+ * construction.
  *
- *   open    = triage, backlog, unstarted, started   (not completed or canceled)
+ *   open    = triage, backlog, unstarted, started   (not settled)
  *   active  = unstarted, started                    (on the board and moving)
- *   done    = completed, canceled
+ *   done    = completed, canceled, duplicate        (settled; duplicate: 105)
  *
  * The status comes from migration 058: `node_lifecycle()` (`LIFECYCLE_CTE`), or
  * `node_state()` under a dependency flag (`STATE_CTE`) — below, "node_state".
@@ -84,19 +85,19 @@
  * Linear keeps a relation after a ticket completes — a Done ticket whose
  * blocker is still open is settled, not blocked, and weighs what its lifecycle
  * says. A blocker is open unless its own lifecycle, read through the
- * `lifecycle` rows above via `source_thought()` (053's resolver), is completed
- * or canceled: a settled blocker is not a blocker. Within a system that gates
- * (below: the board does), a blocker the brain does not hold, or one with no
- * status_type this file knows, still blocks — the source said "blocked" and
- * nothing here says it is settled — and the output counts such blockers rather
- * than hiding them. A row derived from a ticket (`ticket`) or carrying one
- * (`issue`) takes its ticket's blockers, as it takes its ticket's status. Only
- * an active link counts (`valid_until` unset — 053 closes a relation the source
- * dropped), and only `blocks` / `blocked_by`: a parent is not blocked by its
- * children (`child_of`), nor a ticket by what it relates to. A thought whose
- * ticket no gating dependency names counts as unblocked, and the output states
- * how many one does name. Without the flag (or `--decay-blocked`, below) the
- * dependency read is not in the SQL at all, so every other mode renders
+ * `lifecycle` rows above via `source_thought()` (053's resolver), is completed,
+ * canceled or duplicate: a settled blocker is not a blocker. Within a system
+ * that gates (below: the board does), a blocker the brain does not hold, or one
+ * with no status_type this file knows, still blocks — the source said "blocked"
+ * and nothing here says it is settled — and the output counts such blockers
+ * rather than hiding them. A row derived from a ticket (`ticket`) or carrying
+ * one (`issue`) takes its ticket's blockers, as it takes its ticket's status.
+ * Only an active link counts (`valid_until` unset — 053 closes a relation the
+ * source dropped), and only `blocks` / `blocked_by`: a parent is not blocked by
+ * its children (`child_of`), nor a ticket by what it relates to. A thought
+ * whose ticket no gating dependency names counts as unblocked, and the output
+ * states how many one does name. Without the flag (or `--decay-blocked`, below)
+ * the dependency read is not in the SQL at all, so every other mode renders
  * SMD-1994's report byte for byte (the JSON's `options` carries two more keys,
  * `startable` and `decayBlocked`, both false) and a role without
  * `thought_sources` runs it (below).
@@ -121,7 +122,7 @@
  * writes `blocks` / `blocked_by` for any system it is given, and both flags
  * read them. A blocker is settled by its row's lifecycle, and a row of another
  * system states one only if its source said so (an `--items` file, in
- * `facets.status_type`, one of the six types above). So a system GATES only
+ * `facets.status_type`, one of the seven types above). So a system GATES only
  * when some source row of it states, on its own metadata, a status_type this
  * file knows — a status a row borrows through a Linear ticket claim does not
  * count (first review pass). Under that rule its links are read exactly as the
@@ -143,10 +144,11 @@
  * blocks / blocked_by facets, active or closed, and whether each system
  * gates), `node_state()` (per thought, the lifecycle beside `open`,
  * `blocked`, `blockers`, `unknown_blockers`, `in_dependencies` and
- * `superseded_by`), and the two status sets, which must equal
- * `LIFECYCLE_TYPES` and `LIFECYCLE_FILTERS.done` — a brain whose 058 knows
- * others is refused (exit 2), as is one without 058. This file is their first
- * reader: without either dependency flag the rows are `node_lifecycle()`'s,
+ * `superseded_by`), and the two status sets (105 adds `duplicate` to both),
+ * which must equal `LIFECYCLE_TYPES` and `LIFECYCLE_FILTERS.done` — a brain
+ * whose sets differ, one before 105 among them, is refused (exit 2), as is
+ * one without 058. This file is their first reader: without either dependency
+ * flag the rows are `node_lifecycle()`'s,
  * which reads `thoughts` and, since 068, `ob1_ticket_head` (both the capture
  * group's), so a role without the `structure` group's `thought_sources` runs
  * every other mode; the flags read `node_state()`,
@@ -231,7 +233,7 @@ export type Scope = {
   excludeNumeric: boolean;
 };
 /** Linear's state types, as board-sync writes `metadata.status_type`; any other value is no lifecycle. */
-export const LIFECYCLE_TYPES = ["triage", "backlog", "unstarted", "started", "completed", "canceled"] as const;
+export const LIFECYCLE_TYPES = ["triage", "backlog", "unstarted", "started", "completed", "canceled", "duplicate"] as const;
 export type LifecycleType = (typeof LIFECYCLE_TYPES)[number];
 export type LifecycleFilter = "all" | "open" | "active" | "done";
 /** The status types each `--status` keeps at weight 1; the other known types weigh 0 (or DONE_WEIGHT under decay). */
@@ -239,9 +241,9 @@ export const LIFECYCLE_FILTERS: Record<LifecycleFilter, readonly LifecycleType[]
   all: LIFECYCLE_TYPES,
   open: ["triage", "backlog", "unstarted", "started"],
   active: ["unstarted", "started"],
-  done: ["completed", "canceled"],
+  done: ["completed", "canceled", "duplicate"],
 };
-/** What a completed or canceled thought weighs under `--decay-done`: pre-registered, one value, exact in binary. */
+/** What a completed, canceled or duplicate thought weighs under `--decay-done`: pre-registered, one value, exact in binary. */
 export const DONE_WEIGHT = 0.25;
 /** What a held thought's lifecycle weight is multiplied by under `--decay-blocked`: pre-registered before any number was read, one value, exact in binary. */
 export const BLOCKED_WEIGHT = 0.25;
@@ -252,9 +254,9 @@ export type Options = Scope & {
   edges: boolean;
   /** Which lifecycles weigh 1; the rest weigh 0. `all` is every thought at 1 — today's counts. */
   status: LifecycleFilter;
-  /** With `all`: a completed or canceled thought weighs DONE_WEIGHT instead of 1. Refused with any other filter. */
+  /** With `all`: a completed, canceled or duplicate thought weighs DONE_WEIGHT instead of 1. Refused with any other filter. */
   decayDone: boolean;
-  /** An unsettled thought whose ticket has an open blocker weighs 0; a completed or canceled one weighs what its lifecycle says. Off, with `decayBlocked` off too: no dependency is read. */
+  /** An unsettled thought whose ticket has an open blocker weighs 0; a completed, canceled or duplicate one weighs what its lifecycle says. Off, with `decayBlocked` off too: no dependency is read. */
   startable: boolean;
   /** As `startable`, but such a thought weighs BLOCKED_WEIGHT of its lifecycle weight, and names its blockers where it is listed. Refused with `startable`. */
   decayBlocked: boolean;
@@ -283,7 +285,7 @@ export type Coverage = {
   with_lifecycle: number;
   /** Thoughts carrying a status_type this file does not know — weighed 1, counted here rather than passed off as open. */
   unknown_status: number;
-  /** Thoughts completed or canceled. */
+  /** Thoughts completed, canceled or duplicate. */
   done: number;
   /** Thoughts weighing more than 0 under the run's flags — with `--status all`, every thought. */
   weighed: number;
@@ -355,9 +357,9 @@ export const LIFECYCLE_CTE = `lifecycle AS (SELECT thought_id, status, status_ty
  * `--decay-blocked`. `blockers` is the ticket's open blockers from its gating
  * systems' active links (a `linear` one bare, another system's `system:key`,
  * an unknown one kept), `blocked` the rule — blockers, and the thought not
- * completed or canceled — `unknown_blockers` those no known status settles,
- * `in_dependencies` whether a gating link names its ticket at all. The
- * lifecycle columns are node_lifecycle()'s, so every count reads one
+ * completed, canceled or duplicate — `unknown_blockers` those no known
+ * status settles, `in_dependencies` whether a gating link names its ticket at
+ * all. The lifecycle columns are node_lifecycle()'s, so every count reads one
  * lifecycle whichever of the two a run takes. The rules — which link blocks,
  * which system gates (SMD-2218), what settles a blocker — are the header's,
  * written once in 058.
@@ -396,11 +398,11 @@ export function weightsSql(opts: Pick<Options, "status" | "decayDone"> & Partial
   // the factor and `held`, and nothing else moves. node_state's `blocked` is
   // unsettled by definition — Linear keeps a relation after a ticket
   // completes, and a Done ticket whose blocker is still open is settled, not
-  // blocked — so the factor passes a completed or canceled row untouched, and
-  // `--status done` or the decay read it as without the flag (first review
-  // pass). `held` marks the rows the factor took from weight above 0 to 0, or
-  // to BLOCKED_WEIGHT of it under --decay-blocked — what the flag did in this
-  // run, which coverage counts.
+  // blocked — so the factor passes a completed, canceled or duplicate row
+  // untouched, and `--status done` or the decay read it as without the flag
+  // (first review pass). `held` marks the rows the factor took from weight
+  // above 0 to 0, or to BLOCKED_WEIGHT of it under --decay-blocked — what the
+  // flag did in this run, which coverage counts.
   // Under --decay-blocked the factor is BLOCKED_WEIGHT, a constant written as
   // SQL text as DONE_WEIGHT is, and `blockers` is carried for the held rows
   // alone — a settled ticket's leftover relation holds nothing, so it names
@@ -793,7 +795,7 @@ export function caveats(c: Coverage, opts: Options): string[] {
  * filter's weighed count, or the decay's weight.
  */
 export function lifecycleCaveat(c: Coverage, opts: Options): string {
-  const source = `Ticket status is read from synced metadata (board-sync, SMD-1954), as fresh as its last pass${c.last_sync ? ` — latest linear_updated_at ${c.last_sync}` : c.with_lifecycle ? " — no linear_updated_at is stamped beside them" : " — none is stamped here"}: ${c.with_lifecycle} of ${c.thoughts} thoughts carry a lifecycle, ${c.done} of them completed or canceled${c.unknown_status ? `, and ${c.unknown_status} carr${c.unknown_status === 1 ? "ies" : "y"} a status_type this tool does not know (weighed 1)` : ""}.`;
+  const source = `Ticket status is read from synced metadata (board-sync, SMD-1954), as fresh as its last pass${c.last_sync ? ` — latest linear_updated_at ${c.last_sync}` : c.with_lifecycle ? " — no linear_updated_at is stamped beside them" : " — none is stamped here"}: ${c.with_lifecycle} of ${c.thoughts} thoughts carry a lifecycle, ${c.done} of them completed, canceled or duplicate${c.unknown_status ? `, and ${c.unknown_status} carr${c.unknown_status === 1 ? "ies" : "y"} a status_type this tool does not know (weighed 1)` : ""}.`;
   // Under the dependency read the lifecycle is one factor of two: the line
   // states the lifecycle's rule as the lifecycle's, and the run's weighed
   // count carries both (second review pass: "every thought weighs 1" sat
@@ -801,7 +803,7 @@ export function lifecycleCaveat(c: Coverage, opts: Options): string {
   const rule = opts.status !== "all"
     ? ` --status ${opts.status}: ${c.weighed} of ${c.thoughts} thoughts weigh in this run (${LIFECYCLE_FILTERS[opts.status].join(", ")}, plus every thought without a lifecycle — it passes every filter${opts.startable ? "; less those --startable holds back" : opts.decayBlocked ? `; those with an open blocker at ${BLOCKED_WEIGHT}` : ""}).`
     : (opts.decayDone
-      ? ` --decay-done: a completed or canceled thought weighs ${DONE_WEIGHT} in every count (pre-registered, one weight); degree counts neighbours, not evidence, and is unchanged.`
+      ? ` --decay-done: a completed, canceled or duplicate thought weighs ${DONE_WEIGHT} in every count (pre-registered, one weight); degree counts neighbours, not evidence, and is unchanged.`
       : ` ${readsDependencies(opts) ? "By its lifecycle every" : "Every"} thought weighs 1: a Done ticket counts as a live one (--status open|active|done filters; --decay-done down-weights).`)
       + (opts.startable ? ` With --startable, ${c.weighed} of ${c.thoughts} thoughts weigh more than 0 in this run.` : "");
   return source + rule;
@@ -852,7 +854,7 @@ export function dependencyCaveat(c: Coverage, d: Dependencies, opts: Pick<Option
   // board's among them (first and second review passes).
   const ungated = d.systems.filter((s) => !s.gates);
   const gate = ungated.length ? ungatedClause(ungated) : "";
-  return `Dependencies are read from ${source}: ${d.facets} active dependency facet${d.facets === 1 ? "" : "s"}${moved}.${gate} ${d.in_dependencies} of ${c.thoughts} thoughts belong to a ticket a ${boardOnly ? "" : "gating "}dependency names; every other thought has ${boardOnly ? "none recorded" : "no gating dependency"} and counts as unblocked. ${held}; a completed or canceled ticket is settled, not blocked, a blocker completed or canceled does not block, and a parent is not blocked by its children.${unknown}`;
+  return `Dependencies are read from ${source}: ${d.facets} active dependency facet${d.facets === 1 ? "" : "s"}${moved}.${gate} ${d.in_dependencies} of ${c.thoughts} thoughts belong to a ticket a ${boardOnly ? "" : "gating "}dependency names; every other thought has ${boardOnly ? "none recorded" : "no gating dependency"} and counts as unblocked. ${held}; a completed, canceled or duplicate ticket is settled, not blocked, a blocker completed, canceled or duplicate does not block, and a parent is not blocked by its children.${unknown}`;
 }
 
 export type Report = {
@@ -1041,10 +1043,10 @@ export function parseArgs(argv: readonly string[]): Parsed | { error: string } {
   if (positional.some((p) => p.trim() === "")) return { error: "the subject is empty; leave it out for the whole graph" };
   // Counted, not repeated: a URL given without --url is a positional too (cli.ts's rule).
   if (positional.length > 1) return { error: `one subject at a time; got ${positional.length} — quote a name with spaces` };
-  // Decay weighs the completed and canceled thoughts; a filter other than
+  // Decay weighs the settled thoughts; a filter other than
   // `all` drops them or keeps only them, so the two are two answers to one
   // question — and under `done` a uniform weight would change nothing.
-  if (opts.decayDone && opts.status !== "all") return { error: `--decay-done weighs the completed and canceled thoughts at ${DONE_WEIGHT}; --status ${opts.status} already decides them — pass one or the other` };
+  if (opts.decayDone && opts.status !== "all") return { error: `--decay-done weighs the completed, canceled and duplicate thoughts at ${DONE_WEIGHT}; --status ${opts.status} already decides them — pass one or the other` };
   // Likewise the blocked thoughts: the filter drops them, the decay sinks them.
   if (opts.startable && opts.decayBlocked) return { error: `--decay-blocked weighs the blocked thoughts at ${BLOCKED_WEIGHT}; --startable already drops them — pass one or the other` };
   return { url, subject: positional[0] ?? null, opts, json };
@@ -1070,7 +1072,7 @@ export async function schemaProblem(run: Runner, opts: Pick<Options, "startable"
   const [{ known, settled }] = await run(`SELECT array_to_string(node_lifecycle_types(), ',') AS known, array_to_string(node_settled_types(), ',') AS settled`, []);
   const same = (sql: unknown, ts: readonly string[]) => String(sql).split(",").sort().join() === [...ts].sort().join();
   if (!same(known, LIFECYCLE_TYPES) || !same(settled, LIFECYCLE_FILTERS.done)) {
-    return `This script knows the status types ${LIFECYCLE_TYPES.join(",")} (settled: ${LIFECYCLE_FILTERS.done.join(",")}); this brain's migration 058 knows ${known} (settled: ${settled}). Update whichever is behind.`;
+    return `This script knows the status types ${LIFECYCLE_TYPES.join(",")} (settled: ${LIFECYCLE_FILTERS.done.join(",")}); this brain's node_lifecycle_types() and node_settled_types() (058, 105) hold ${known} (settled: ${settled}). Update whichever is behind: the brain with db/migrate.ts (105 adds duplicate; after an older tree's --reapply, this tree's --reapply), the script with a newer checkout.`;
   }
   return null;
 }

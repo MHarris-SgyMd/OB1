@@ -494,10 +494,9 @@ jobs:
       # Every vendored server is a consumer of this server's auth module — the
       # seven extensions (change 64) and the recipes' and integrations' MCP
       # servers, HTTP APIs, workers and webhook receiver (change 67) — through a
-      # _shared/auth.ts beside it, a byte copy. Their test runs in THIS job
-      # because main's ruleset requires it: a separate job would not gate a
-      # merge. One MCP stack across the tree's three installs — the test fails
-      # if server-portable's or the Kubernetes image's pins drift from these.
+      # _shared/auth.ts beside it, a byte copy. One MCP stack across the
+      # tree's three installs — the test fails if server-portable's or the
+      # Kubernetes image's pins drift from these.
       - name: Install the vendored servers' pinned test dependencies
         working-directory: extensions
         run: bun install --frozen-lockfile
@@ -981,9 +980,8 @@ jobs:
       # the floor evals/baselines.json records, and proves the floor has teeth
       # with a reader that ignores every label. Keyless, as the replay gate
       # is; here rather than its own job because the write path needs the
-      # server and this database, and a step in a required job gates a merge
-      # without a new name in the ruleset (SMD-1856). No install for evals/
-      # or db/: the eval, the workers it spawns (db/extract-entities.ts,
+      # server and this database. No install for evals/ or db/: the eval,
+      # the workers it spawns (db/extract-entities.ts,
       # db/consolidate.ts) and the db/ modules they share import only bun,
       # node and ../server-portable, whose packages the first step installed;
       # a package added to db/ or evals/ and imported on this path would fail
@@ -1807,16 +1805,12 @@ jobs:
       # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
       # commit the build arg above baked in, beside the version it asserts.
       # Through the proxy (SMD-1846): smoke.sh's default URL is the stack's
-      # endpoint, http://127.0.0.1:8010/mcp. Then again at the origin root,
-      # the URL every client configured before the proxy holds: the legacy
-      # router must answer it as the server did, the SDK's `GET /` probe's 405
-      # included (review pass 1: the proxy's 404 there made SDK clients report
-      # an error on every connect).
+      # endpoint, http://127.0.0.1:8010/mcp, and its check 11 holds the origin
+      # root, retired at v2.0.0, to the proxy's own 404 (SMD-2532).
       - name: Smoke-test it over MCP
         working-directory: deploy
         run: |
           ./smoke.sh
-          ./smoke.sh http://127.0.0.1:8010 "$OB1_SMOKE_KEY"
         env:
           OB1_SMOKE_COMMIT: ${{ github.sha }}
 
@@ -1846,9 +1840,9 @@ jobs:
           B=http://127.0.0.1:8010
           code() { curl -s -o /tmp/api-body -w '%{http_code}' --max-time 15 "$@"; }
           c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
-          [ "$c" = 404 ] || { echo "/api with the public route off answered $c: $(head -c 120 /tmp/api-body)" >&2; exit 1; }
+          { [ "$c" = 404 ] && [ ! -s /tmp/api-body ]; } || { echo "/api with the public route off answered $c: '$(head -c 120 /tmp/api-body)', not api-off's bodiless 404" >&2; exit 1; }
           c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{"content":"ci: never captured"}' "$B/api/v1/thoughts")
-          [ "$c" = 404 ] || { echo "a POST to /api with the route off answered $c, not the 404 — it may have reached the MCP server" >&2; exit 1; }
+          { [ "$c" = 404 ] && [ ! -s /tmp/api-body ]; } || { echo "a POST to /api with the route off answered $c '$(head -c 120 /tmp/api-body)', not api-off's bodiless 404" >&2; exit 1; }
           inside=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" http://api.ob1.internal.:8000/v1/whoami)
           jq -e '.scope == "write" and (.operations | index("capture_thought"))' <<<"$inside" >/dev/null || { echo "api.ob1.internal on the mesh did not answer whoami: ${inside:0:200}" >&2; exit 1; }
           # Forwarded on the mesh, as the MCP server will: the forwarder is the request's act (SMD-2284).
@@ -1907,7 +1901,7 @@ jobs:
             post -H "x-example-timestamp: $ts" -H "x-example-signature: $(printf %s "$ts.$1" | openssl dgst -sha256 -hmac "${3:-$SECRET}" -hex | sed 's/^.* //')" -d "$1" "$B/hooks/example/capture"
           }
           c=$(deliver "$BODY")
-          [ "$c" = 404 ] || { echo "/hooks with the overlay off answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
+          { [ "$c" = 404 ] && [ ! -s /tmp/hook-body ]; } || { echo "/hooks with the overlay off answered $c: '$(head -c 120 /tmp/hook-body)', not hooks-off's bodiless 404" >&2; exit 1; }
           docker compose -f compose.yaml -f compose.hooks-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
           c=$(deliver "$BODY" "" other)
           [ "$c" = 401 ] || { echo "a delivery signed with another secret answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
@@ -1928,11 +1922,11 @@ jobs:
           docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
           docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
           c=$(deliver "$BODY")
-          [ "$c" = 404 ] || { echo "/hooks still answered $c after the overlay and the plugin were dropped" >&2; exit 1; }
+          { [ "$c" = 404 ] && [ ! -s /tmp/hook-body ]; } || { echo "/hooks still answered $c '$(head -c 120 /tmp/hook-body)' after the overlay and the plugin were dropped, not hooks-off's bodiless 404" >&2; exit 1; }
 
       # SMD-1849 PR 3a: /grafana is the proxy's 404 unless
-      # compose.grafana-public.yaml is named — never the legacy route and the
-      # MCP server, a keyed POST included — and with the overlay named while
+      # compose.grafana-public.yaml is named — never the MCP server, a keyed
+      # POST included — and with the overlay named while
       # the observability profile is off (it is off here: PR 3c's step later
       # starts it and removes it again), Traefik's
       # 502 is the overlay's 404 (grafana-absent); dropped again, the base's.
@@ -2075,7 +2069,7 @@ jobs:
           [ "$used" -lt 90 ] || { echo "the runner's disk under Docker's root is ${used}% full: Loki refuses every record from 90% (lgtm-data is there), so the log query below could not pass" >&2; exit 1; }
           docker compose -f compose.yaml --profile observability up -d --wait --wait-timeout 300 lgtm pg-monitor-role pg-exporter
           docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 server api
-          ./smoke.sh http://127.0.0.1:8010 "$OB1_SMOKE_KEY" > /tmp/observability-smoke.log 2>&1 || { cat /tmp/observability-smoke.log; exit 1; }
+          ./smoke.sh http://127.0.0.1:8010/mcp "$OB1_SMOKE_KEY" > /tmp/observability-smoke.log 2>&1 || { cat /tmp/observability-smoke.log; exit 1; }
           # Each call's tool, status and, where the tool refused, isError;
           # curl's own failure as status 000.
           call() {
@@ -2240,9 +2234,10 @@ jobs:
       # routed /canary/mcp and /working/mcp to one on its mesh, deprecated by
       # SMD-3057 for a release first. Every path starting with either word, in
       # any case and whatever follows (an escaped slash, a `;`, a pasted
-      # zero-width space), is the proxy's bodiless 404 (`tier-off`, kept until
-      # SMD-2532 removes the legacy route) with no deprecation, and never
-      # falls to the legacy route, where the same key would write to stable.
+      # zero-width space), is the proxy's own 404 with no deprecation: no
+      # router matches it since SMD-2532 removed the legacy route (where the
+      # same key would have written to stable) and with it `tier-off`, which
+      # kept these paths off it.
       # A stand-in on stable's mesh under each tier's old name, and under
       # `server` as a tier's container once was, is reached by none of those
       # paths, and stable's /mcp still reaches stable beside them: from the
@@ -2254,18 +2249,18 @@ jobs:
         run: |
           B=http://127.0.0.1:8010
           code() { curl -sS -o /tmp/tier-body -D /tmp/tier-head -w '%{http_code}' --max-time 15 "$@"; }
-          bare404() { c=$(code "${@:2}") || c="no answer (curl exit $?)"; if ! { [ "$c" = 404 ] && [ ! -s /tmp/tier-body ]; }; then echo "$1 answered $c '$(head -c 80 /tmp/tier-body)', not the proxy's bodiless 404" >&2; exit 1; fi; }
-          # The tiers' deprecation (SMD-3057) went with their routes: tier-off's
-          # 404, read from the answer bare404 just read, carries none.
+          proxy404() { c=$(code "${@:2}") || c="no answer (curl exit $?)"; if ! { [ "$c" = 404 ] && [ "$(cat /tmp/tier-body)" = "404 page not found" ]; }; then echo "$1 answered $c '$(head -c 80 /tmp/tier-body)', not the proxy's own 404" >&2; exit 1; fi; }
+          # The tiers' deprecation (SMD-3057) went with their routes: the
+          # proxy's 404, read from the answer proxy404 just read, carries none.
           undeprecated() { if grep -qi '^deprecation:' /tmp/tier-head || grep -qi '^link:.*rel="deprecation"' /tmp/tier-head; then cat /tmp/tier-head >&2; echo "$1 carries a Deprecation header or a deprecation Link" >&2; exit 1; fi; }
           offprefix() {
             for p in /canary/mcp /canary/mcp/health /working/mcp /working/mcp/health /canary /canary/ /canary/health /canary/mcpx /CANARY/mcp /Canary/mcp/health /canary%2Fmcp /CANARY%2Fmcp '/canary;x' /canary%E2%80%8B/mcp /canary%5Cmcp /canaryx/mcp /working /working/ /working/x /working/mcpx /WORKING/mcp; do
-              bare404 "a keyed tools/list to $p$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+              proxy404 "a keyed tools/list to $p$1" -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
                 -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' "$B$p"
-              undeprecated "tier-off's 404 at $p$1"
+              undeprecated "the proxy's 404 at $p$1"
             done
-            bare404 "GET /canary/mcp/health$1" "$B/canary/mcp/health"
-            undeprecated "tier-off's 404 to GET /canary/mcp/health$1"
+            proxy404 "GET /canary/mcp/health$1" "$B/canary/mcp/health"
+            undeprecated "the proxy's 404 to GET /canary/mcp/health$1"
           }
           offprefix ""
           trap 'docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null 2>&1 || true' EXIT
@@ -2286,7 +2281,7 @@ jobs:
           { [ "$c" = 200 ] && [ "$(cat /tmp/tier-body)" = ok ]; } || { echo "stable's /mcp/health beside the stand-ins answered $c '$(head -c 80 /tmp/tier-body)', not ok: the proxy reached a stand-in claiming \`server\`" >&2; exit 1; }
           docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null
           # A router whose rule does not compile is dropped, its paths to the
-          # next router (legacy), and a route file Traefik cannot read takes
+          # proxy's own 404, and a route file Traefik cannot read takes
           # every route with it, with nothing but this line to say so. Traefik
           # colours the level whatever --no-color asks, hence ERR.* and no space.
           # An errors middleware's line about a Host it cannot parse is the
@@ -2707,16 +2702,12 @@ jobs:
       # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
       # commit the build arg above baked in, beside the version it asserts.
       # Through the proxy (SMD-1846): smoke.sh's default URL is the stack's
-      # endpoint, http://127.0.0.1:8010/mcp. Then again at the origin root,
-      # the URL every client configured before the proxy holds: the legacy
-      # router must answer it as the server did, the SDK's `GET /` probe's 405
-      # included (review pass 1: the proxy's 404 there made SDK clients report
-      # an error on every connect).
+      # endpoint, http://127.0.0.1:8010/mcp, and its check 11 holds the origin
+      # root, retired at v2.0.0, to the proxy's own 404 (SMD-2532).
       - name: Smoke-test it over MCP
         working-directory: deploy
         run: |
           ./smoke.sh
-          ./smoke.sh http://127.0.0.1:8010 "$OB1_SMOKE_KEY"
         env:
           OB1_SMOKE_COMMIT: ${{ github.sha }}
 
@@ -2944,9 +2935,9 @@ jobs:
       #   smoke fails on the 50% floor. A setting added to stable's .env before
       #   it is named as one the canary's file lacks, and neither run prints
       #   the canary's password.
-      # - A third `up`, with a connector at the port's root: named as on the
-      #   deprecated root, not as one the canary no longer answers, and the
-      #   root answers 200 with a Deprecation header (SMD-2661).
+      # - A third `up`, with a connector at the port's root: named as one the
+      #   canary no longer answers, and the root is the proxy's own 404 with
+      #   no Deprecation header, retired at v2.0.0 (SMD-2532).
       # - A fourth `up`, on --port 8012, then one after 8013 is edited into the
       #   file by hand, which names the connector left at 8012.
       #   On --port 8012: the port is written to the canary's
@@ -3188,16 +3179,16 @@ jobs:
           if grep -F "to the canary's env file" /tmp/canary-wrong.out; then echo "an up with no --port wrote to the canary's env file" >&2; exit 1; fi
           [ "$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8010/canary/mcp/health)" = 404 ] || { echo "stable's /canary/mcp answers with the canary on a port of its own" >&2; exit 1; }
           [ "$(cq "SELECT count(*) FROM thoughts WHERE content LIKE '%numbat almanac%'")" = 1 ] || { echo "the second up did not bring stable's new thought" >&2; exit 1; }
-          # A connector at the root of the canary's own port is not lost: the
-          # proxy's legacy route still hands a POST there to the canary,
-          # deprecated, until v2.0.0 (SMD-2532), and `up` says so (SMD-2661).
+          # A connector at the root of the canary's own port is one it no
+          # longer answers: the legacy route that handed a POST there to the
+          # canary went with v2.0.0, and the root is the proxy's own 404
+          # (SMD-2532).
           FAKE_URL='http://127.0.0.1:8011/?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-root.out
-          grep -F 'connector open-brain-canary points at http://127.0.0.1:8011/?…, the root, which this canary answers only through the deprecated legacy route until v2.0.0 (SMD-2532): move it to /mcp with --connect' /tmp/canary-root.out
-          if grep -F 'no longer answers' /tmp/canary-root.out; then echo "up called the canary's root URL one it no longer answers" >&2; exit 1; fi
-          root_h=$(curl -s --max-time 20 -D - -o /dev/null -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+          grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/?…, where this canary no longer answers: re-run with --connect' /tmp/canary-root.out
+          root_code=$(curl -s --max-time 20 -D /tmp/canary-root-head -o /tmp/canary-root-body -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
-            http://127.0.0.1:8011/ | tr -d '\r')
-          { grep -q '^HTTP/[0-9.]* 200' <<<"$root_h" && grep -qi '^deprecation: ' <<<"$root_h"; } || { echo "the canary's root did not answer 200 with a Deprecation header: $(head -n 1 <<<"$root_h")" >&2; exit 1; }
+            http://127.0.0.1:8011/) || root_code="no answer (curl exit $?)"
+          { [ "$root_code" = 404 ] && [ "$(cat /tmp/canary-root-body)" = "404 page not found" ] && ! grep -qi '^deprecation:' /tmp/canary-root-head; } || { echo "the canary's root answered HTTP $root_code '$(head -c 80 /tmp/canary-root-body)', not the proxy's own 404 with no Deprecation" >&2; exit 1; }
           # Another port (SMD-2874): written to the canary's env file, where
           # compose reads it from then on, its old port freed, and a connector
           # left there named.
@@ -3615,8 +3606,11 @@ jobs:
           got=$(at_mcp)
           [ "$got" = "200 -" ] || { echo "a keyless /mcp on loopback answered \"$got\", not today's 200"; exit 1; }
           [ "$(code_of http://127.0.0.1:8010/.well-known/oauth-protected-resource/mcp)" = 404 ] || { echo "the document is served at loopback's Host"; exit 1; }
+          # oauth-fallback-off's 404 is empty-bodied; with no router there the
+          # proxy's own 404 carries "404 page not found" (SMD-2532).
           for path in /register /authorize /token; do
-            [ "$(code_of "${O[@]}" -X POST -d '{}' "http://127.0.0.1:8010$path")" = 404 ] || { echo "POST $path at the origin root is not the proxy's 404"; exit 1; }
+            c=$(curl -s --max-time 10 -o /tmp/off-body -w '%{http_code}' "${O[@]}" -X POST -d '{}' "http://127.0.0.1:8010$path" || true)
+            { [ "$c" = 404 ] && [ ! -s /tmp/off-body ]; } || { echo "POST $path at the origin root answered $c '$(head -c 80 /tmp/off-body)', not oauth-fallback-off's bodiless 404"; exit 1; }
           done
           auth exec -T auth bun restart-check.ts --register > /tmp/auth-client.json
           auth restart auth
@@ -3743,16 +3737,11 @@ jobs:
       #   server — Traefik's 404 body, where the server's would be "Not
       #   Found" — so a claude.ai connector's discovery at the root gets its
       #   404 whatever the server does;
-      # - the connector form clients hold today still answers at the root:
-      #   `POST /?key=` (the legacy router, until SMD-2532 closes it);
-      # - its window (SMD-2306): a legacy answer carries the Deprecation
-      #   header (smoke.sh check 11 holds the POST's), and no /mcp, /health
-      #   or OPTIONS /health answer does; the server named the capture key
-      #   for its `POST /?key=` here, the query form, under a name nothing
-      #   before this step has used (the server says a name once, so a key an
-      #   earlier call had named would log nothing: review pass 2), and never
-      #   the read key, whose marker it set itself on /mcp and /health, which
-      #   the proxy deletes;
+      # - the origin root is retired (SMD-2532): `POST /?key=`, the connector
+      #   form clients held before the proxy, `GET /`, /worker-status and
+      #   /jobs at the root are the proxy's own 404 with no Deprecation header
+      #   (smoke.sh check 11 holds the POST's too); no /mcp, /health or
+      #   OPTIONS /health answer carries one;
       # - the access log never holds a query string or userinfo: after calls
       #   carrying the smoke key as `?key=`, `code=`, `state=` and as the user
       #   part of an absolute-form target, no log line carries it, and the
@@ -3782,34 +3771,25 @@ jobs:
           # server is gone.
           code=$(curl -s --max-time 10 -o /tmp/proxy-body -w '%{http_code}' "$B/.well-known/oauth-protected-resource/mcp")
           if ! { [ "$code" = 404 ] && [ "$(cat /tmp/proxy-body)" = "Not Found" ]; }; then echo "GET the document → HTTP $code '$(head -c 80 /tmp/proxy-body)', expected the MCP server's 404" >&2; exit 1; fi
-          stats=$(curl -s --max-time 20 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thought_stats","arguments":{}}}' "$B/?key=$OB1_SMOKE_KEY")
-          grep -qF 'Total thoughts: ' <<<"$stats" || { echo "POST /?key= at the root no longer reaches the brain: ${stats:0:200}" >&2; exit 1; }
-          # The status and how many Deprecation headers came back: "200 1".
+          # SMD-2532: the root is the proxy's own 404 with no Deprecation; the
+          # URL is shown without its query, so a key in it is never printed.
+          rootgone() {
+            rm -f /tmp/proxy-head /tmp/proxy-body
+            code=$(curl -s --max-time 10 -X "$1" -D /tmp/proxy-head -o /tmp/proxy-body -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' ${3:+-d "$3"} "$2") || code="no answer (curl exit $?)"
+            if ! { [ "$code" = 404 ] && [ "$(cat /tmp/proxy-body)" = "404 page not found" ] && ! grep -qi '^deprecation:' /tmp/proxy-head; }; then echo "$1 ${2%%\?*} → HTTP $code '$(head -c 80 /tmp/proxy-body)', expected the proxy's own 404 with no Deprecation: the old root URL is retired (SMD-2532)" >&2; exit 1; fi
+          }
+          rootgone POST "$B/?key=$OB1_SMOKE_CAPTURE_KEY" '{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}'
+          rootgone GET "$B/"
+          rootgone GET "$B/worker-status"
+          rootgone GET "$B/jobs/x"
+          # The status and how many Deprecation headers came back: "200 0".
           dep() { curl -s --max-time 10 -D - -o /dev/null "$@" | tr -d '\r' | awk 'NR == 1 { code = $2 } tolower($0) ~ /^deprecation: @/ { n++ } END { print code, n + 0 }'; }
-          got=$(dep "$B/worker-status")
-          [ "$got" = "200 1" ] || { echo "GET /worker-status through the legacy route: '$got', expected 200 with a Deprecation header" >&2; exit 1; }
           for probe in "$B/health" "$B/mcp/health"; do
             got=$(dep "$probe")
             [ "$got" = "200 0" ] || { echo "GET $probe: '$got', expected 200 with no Deprecation header" >&2; exit 1; }
           done
           got=$(dep -X OPTIONS -H 'Origin: https://client.example' -H 'Access-Control-Request-Method: GET' "$B/health")
-          [ "$got" = "200 0" ] || { echo "OPTIONS /health: '$got', expected 200 with no Deprecation header (the health route's, not the legacy route's)" >&2; exit 1; }
-          code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -H 'X-OB1-Legacy-Route: 1' \
-            -H "x-brain-key: $OB1_SMOKE_READ_KEY" -d '{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}' "$B/mcp")
-          [ "$code" = 200 ] || { echo "the read key's tools/list at /mcp got HTTP $code, so the absence of its line proves nothing" >&2; exit 1; }
-          [ "$(curl -s --max-time 10 -H 'X-OB1-Legacy-Route: 1' -H "x-brain-key: $OB1_SMOKE_READ_KEY" "$B/health" | head -c 1)" = "{" ] || { echo "the read key's GET /health got no record, so the absence of its line proves nothing" >&2; exit 1; }
-          code=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-            -d '{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}' "$B/?key=$OB1_SMOKE_CAPTURE_KEY")
-          [ "$code" = 200 ] || { echo "the capture key's POST /?key= got HTTP $code" >&2; exit 1; }
-          # Polled briefly: the server writes the line before it answers, but docker copies it into its log on its own time.
-          for _ in 1 2 3 4 5 6; do
-            SLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix server)"
-            grep -qF 'key "ci-capture" reached the brain at the old root URL (POST "/")' <<<"$SLOG" && break
-            sleep 0.5
-          done
-          grep -qF 'key "ci-capture" reached the brain at the old root URL (POST "/")' <<<"$SLOG" || { echo "the server did not name the capture key for its POST /?key= at the root:" >&2; grep 'old root URL' <<<"$SLOG" >&2; exit 1; }
-          if grep -qF 'key "ci-read" reached' <<<"$SLOG"; then echo "a marker the client set on /mcp or /health reached the server and was logged" >&2; exit 1; fi
+          [ "$got" = "200 0" ] || { echo "OPTIONS /health: '$got', expected 200 with no Deprecation header (the health route's)" >&2; exit 1; }
           curl -s --max-time 10 -o /dev/null "$B/auth/callback?code=code-$OB1_SMOKE_KEY&state=state-$OB1_SMOKE_KEY"
           # The server's JSON lines for a thought_stats call so far (SMD-1849),
           # so the absolute-form probe's own line is counted below, not an
@@ -4003,7 +3983,8 @@ jobs:
           echo "round-trip clean"
 
   # ── Commit + workflow linting (SMD-1808) ────────────────────────────────────
-  # Added as reporting jobs; making them required is SMD-1805's ruleset work.
+  # Both are required, as every job is, through "Fork Checks passed"
+  # (SMD-3168); commit-lint is the one job MAY_SKIP lets skip.
   commit-lint:
     name: Commit messages
     runs-on: ubuntu-24.04
@@ -4056,3 +4037,51 @@ jobs:
       # bodies they came from.
       - name: shellcheck on .github/ci's scripts
         run: shellcheck .github/ci/*.sh
+
+  # ── The one required check (SMD-3168) ───────────────────────────────────────
+  # main's ruleset requires this job alone. Every other job is required through
+  # its `needs:`, which check 20 holds to every job in this file, so a job
+  # added, renamed, split or run as a matrix needs no ruleset change. It runs
+  # `if: always()` because a job whose needs failed is otherwise skipped, and
+  # GitHub reads a skipped required check as passing; it fails unless every
+  # job succeeded, or was skipped where MAY_SKIP names it — commit-lint, whose
+  # own `if:` runs it on pull requests and the merge queue alone. The step is
+  # held verbatim by check 20, which runs it against its own cases.
+  fork-checks-passed:
+    name: Fork Checks passed
+    runs-on: ubuntu-24.04
+    if: always()
+    needs:
+      - repo-consistency
+      - portable-server
+      - db-schema
+      - replay-gate
+      - db-live
+      - db-live-sleep
+      - db-live-long
+      - db-live-extract
+      - data-layer
+      - deploy-stack
+      - deploy-stack-brains
+      - deploy-stack-auth
+      - auth-poc
+      - compat-shim
+      - commit-lint
+      - workflow-lint
+    steps:
+      - name: Every job succeeded, or was skipped where MAY_SKIP allows it
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          MAY_SKIP: commit-lint
+        run: |
+          # shellcheck disable=SC2016 # jq's variables, not the shell's
+          not_passed=$(jq -r --arg may_skip "$MAY_SKIP" '
+            ($may_skip | split(" ") | map(select(. != ""))) as $skip
+            | to_entries[]
+            | select(.value.result != "success" and (.value.result != "skipped" or (.key as $k | any($skip[]; . == $k) | not)))
+            | "\(.key): \(.value.result)"' <<<"$NEEDS")
+          if [ -n "$not_passed" ]; then
+            printf 'Not every job passed:\n%s\n' "$not_passed" >&2
+            exit 1
+          fi
+          echo "Every job passed: $(jq '[.[] | select(.result == "success")] | length' <<<"$NEEDS") succeeded, $(jq '[.[] | select(.result == "skipped")] | length' <<<"$NEEDS") skipped where MAY_SKIP allows."

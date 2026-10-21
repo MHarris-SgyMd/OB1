@@ -52,6 +52,7 @@ import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
 import { MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
+import { sweepOrphans } from "./rebuild.ts";
 import type { PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
 import { decideKey, DECIDE_PROMPT, DECIDE_VERSION, PART_RULE, RECORD_RULE } from "../server-portable/consolidate-decide.ts";
@@ -7886,7 +7887,7 @@ if (want("16")) {
         && newerDir.code === 1 && newerDir.out.includes("accept refused: an accept would make the NEWER side stand: its text is a capture-only key's")
         && olderDir.code === 0 && olderDir.out.includes(`accepted ${pu}: ${W6} now supersedes ${C6}`),
       `an undirected flagged row lists an accept per direction, --force on the flagged one; no --direction asks for one, the flagged one is refused, the other accepted (${[noDir.out, newerDir.out, olderDir.out].map((o) => o.trim().slice(0, 80)).join(" | ")})`);
-    // SMD-3036 (105): the listing caps its walks, the guard does not. One
+    // SMD-3036 (106): the listing caps its walks, the guard does not. One
     // key's two thoughts, the hook's S proposed to stand over the top of 25
     // of its own rows on the operator's B (planted with the check off, as a
     // brain from before 082 holds them): the accept would take S — its chain
@@ -7901,7 +7902,7 @@ if (want("16")) {
     const pc = await propose(top, S8);
     const bc = blk((await consolidate("--list")).out, pc);
     const refusedC = await consolidate("--accept", pc);
-    assert(bc.includes(`ID: ${S8}\n        By: hook-16 (agent) · trust agent · a capture-only key's text\n        what an accept that makes this side stand would take and lapse was not read: a chain here passes 25 rows (the listing's cap, migration 105); consolidate.ts --accept reads it in full`)
+    assert(bc.includes(`ID: ${S8}\n        By: hook-16 (agent) · trust agent · a capture-only key's text\n        what an accept that makes this side stand would take and lapse was not read: a chain here passes 25 rows (the listing's cap, migration 106); consolidate.ts --accept reads it in full`)
         && !/WRITER|writer:/.test(bc)
         && refusedC.code === 1 && refusedC.out.includes("accept refused: an accept would make the NEWER side stand: its text is a capture-only key's — the other side's key too, but the accept would take this side from it")
         && (await supersedesOf(S8)) === null,
@@ -7910,7 +7911,7 @@ if (want("16")) {
     // the rest answers as before.
     await sql`DROP FUNCTION list_proposal_writers(uuid[])`;
     const plainR = await consolidate("--accept", pr);
-    // 094 put back, and 105 after it: the listing as shipped.
+    // 094 put back, and 106 after it: the listing as shipped.
     await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("094_") || f.endsWith("_listing_caps_its_walks.sql") });
     assert(plainR.code === 0 && plainR.out.includes(`accepted ${pr}: ${W2} now supersedes ${C2}`) && !/lapsed:/.test(plainR.out) && plainR.stderr.includes("The writer check did not run"),
       `…and on a brain short of 094 an accept says the writer check did not run, and is answered as before (${plainR.stderr.trim().slice(0, 160)})`);
@@ -10575,6 +10576,20 @@ if (want("31")) {
     `--status reads the census back: the marks, the stale proposal, the pools (${st.out.trim().split("\n").slice(0, 7).join(" / ").slice(0, 300)})`);
   // A raw delete of the windows leaves an orphan row: the sweep deletes it.
   await sql`DELETE FROM thought_chunks WHERE thought_id = ${newer.id}::uuid`;
+  // A dry sweep keeps the row: the CLI's, and sweepOrphans' on a pool of its
+  // own (SMD-2679). What sends its call through one transaction is held by
+  // review, not here: an idle pool hands sequential queries one connection.
+  const drySweep = await rebuildTs("--orphans", "--dry-run");
+  assert(drySweep.code === 0 && /dry run: each call runs and rolls back/.test(drySweep.out) && /deleted:\s+1 lineage row\(s\) over 1 thought\(s\) \(rolled back\)/.test(drySweep.out) && (await marksOf(newer.id)) === "chunks:live: edit,entities:live: edit,vector:live: edit",
+    `--orphans --dry-run reports the delete and keeps the row (exit ${drySweep.code}: ${drySweep.out.trim().split("\n").slice(0, 3).join(" / ")}; ${await marksOf(newer.id)})`);
+  const sweepPool = new SQL({ url: URL_!, max: 3 });
+  try {
+    const r = await sweepOrphans(sweepPool, { dryRun: true, writer: { out: () => {}, err: () => {} } });
+    assert(r.thoughts === 1 && r.deleted === 1 && r.refused === 0 && !r.windowed && (await marksOf(newer.id)) === "chunks:live: edit,entities:live: edit,vector:live: edit",
+      `…and sweepOrphans' dry run on a pool of three keeps it too, the window not reached (${JSON.stringify(r)}; ${await marksOf(newer.id)})`);
+  } finally {
+    await sweepPool.close();
+  }
   const sweep = await rebuildTs("--orphans");
   assert(sweep.code === 0 && /orphans:\s+1 thought\(s\)/.test(sweep.out) && /deleted:\s+1 lineage row\(s\) over 1 thought\(s\)/.test(sweep.out) && (await marksOf(newer.id)) === "entities:live: edit,vector:live: edit",
     `--orphans deletes the chunks row whose windows are gone and leaves the rest (exit ${sweep.code}: ${sweep.out.trim().split("\n").slice(0, 2).join(" / ")})`);
@@ -14150,6 +14165,39 @@ if (want("41")) {
     const rc3 = await run();
     assert(head76 === null && rc3.posted.every((p) => p.on !== "ZQ-76" && p.on !== "ZQ-77") && (await rowsOf("ZQ-76", "ZQ-77")).length === 0 && !(await selectFindings(bsql)).some((f) => f.a === "ZQ-76"),
       `a ticket whose head is a hand capture with no status is still closed, read from its newest Linear row, so two closed tickets stay unposted (head ${head76}; ${summaryLine(rc3, 10, false).trim()})`);
+    // Closed is node_settled_types() (SMD-2935). Without the function the step
+    // refuses naming 058 — its own statement, so the schema check is not a
+    // parse error (review pass 1); with 058's set back, a Duplicate reads open,
+    // so it refuses naming 105; 105 re-applied, it runs. Put back in any case.
+    const SET058 = `CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{completed,canceled}'::text[] $$`;
+    const apply105 = () => applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_duplicate_settles.sql") });
+    let no058: string | null = "unread", before105: string | null = "unread", after105: string | null = "unread";
+    // And closed() reads that set, not a list of its own: a Done ticket and a
+    // Duplicate, unlinked, are a closed pair under 105's set and offered under
+    // 058's, where the Duplicate reads open (review pass 3).
+    const z78 = await ticketAs(78, "done c", "completed"), z79 = await ticketAs(79, "a duplicate too", "duplicate");
+    await relate(z79, z78, "related", 0.85);
+    const offered = async () => (await selectFindings(bsql)).some((f) => f.a === "ZQ-78" || f.b === "ZQ-78");
+    let pair105: boolean | null = null, pair058: boolean | null = null, pairBack: boolean | null = null;
+    try {
+      pair105 = await offered();
+      await bsql`DROP FUNCTION node_settled_types()`;
+      no058 = await findingsSchemaProblem(bsql).catch((e: Error) => `threw: ${e.message}`);
+      await bsql.unsafe(SET058);
+      before105 = await findingsSchemaProblem(bsql);
+      pair058 = await offered();
+      await apply105();
+      after105 = await findingsSchemaProblem(bsql);
+      pairBack = await offered();
+    } finally {
+      if (after105 !== null) { await bsql.unsafe(SET058); await apply105(); }
+    }
+    assert(no058 === "migration 058 is not applied, so whether a ticket is closed cannot be asked (cd db && bun migrate.ts --url …)"
+        && before105 === "migration 105 is not applied, or an older tree's --reapply undid it, so a Duplicate ticket would read as open (cd db && bun migrate.ts --url …; after an older tree's --reapply, this tree's --reapply)"
+        && after105 === null,
+      `closed() reads node_settled_types(): without it the step refuses naming 058, on a brain whose set lacks duplicate it refuses naming 105 and the remedy after an older tree's --reapply, and runs once 105 is applied (${JSON.stringify([no058, before105, after105])})`);
+    assert(pair105 === false && pair058 === true && pairBack === false,
+      `closed() reads node_settled_types(), not a list of its own: a Done ticket and a Duplicate are a closed pair under 105's set, offered under 058's, closed again after 105 (${JSON.stringify([pair105, pair058, pairBack])})`);
 
     // 4. The egress gate, a dry run, a failed post, then the post.
     const z30 = await ticket(30, "gated a"), z31 = await ticket(31, "gated b");

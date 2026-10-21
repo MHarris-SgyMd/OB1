@@ -1,7 +1,6 @@
 # The plugins' webhooks at the proxy's /hooks (SMD-2310): an overlay, as
 # compose.api-public.yaml is for /api. The base route table answers /hooks
-# with a bare 404 (compose.yaml's hooks-off), so no delivery falls to the
-# legacy route and the MCP server; this file adds a router of higher priority
+# with a bare 404 (compose.yaml's hooks-off); this file adds a router of higher priority
 # that takes /hooks/<plugin>/<name> to the REST core on the mesh, path kept.
 #
 #   docker compose -f compose.yaml -f compose.hooks-public.yaml up -d
@@ -12,7 +11,7 @@
 # against the secret OB1_HOOK_SECRETS gives its plugin, and runs as a caller of
 # capture scope alone. The forwarder slot (x-brain-forwarder) is deleted on the
 # way in, as /api's is (`hooks-no-forwarder`: an empty value deletes the
-# header, as compose.yaml's not-legacy does). Nothing limits the rate of
+# header). Nothing limits the rate of
 # deliveries here; a sender
 # that floods one is the plugin's to refuse. Dropping the file and running
 # `up -d` again recreates the proxy without it (the label below changes,
