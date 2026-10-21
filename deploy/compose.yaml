@@ -19,15 +19,15 @@
 # What the host can reach: only the forwarder, in front of the proxy (and
 # n8n, under --profile orchestration), and only from the host itself; the
 # authorization server (--profile auth) publishes nothing. The proxy is the
-# stack's one origin: each service is a path on it (`/mcp` the server), not a
+# stack's one origin: each service is a path on it (`/mcp` the MCP server), not a
 # port of its own (SMD-1846), and it is on internal networks alone behind the
 # forwarder, which holds the port (SMD-2583). Every
 # published port here names its address, `127.0.0.1` unless the operator sets
 # the `*_BIND` knob, because an address-less `"8000:8000"` binds 0.0.0.0 — every
 # interface — and this stack holds a brain (personal data at rest) behind one
 # password and one key over plain HTTP. Postgres, Ollama and the server publish
-# nothing; the proxy reaches the server by its name on the mesh network, the
-# server reaches Postgres on the internal `data` network and Ollama on `egress`
+# nothing; the proxy reaches the MCP server by its name on the mesh network,
+# the servers reach Postgres on the internal `data` network and Ollama on `egress`
 # by service name (the networks at the end of this file), and a tool run from
 # a checkout gets them through compose.host-ports.yaml (a second -f),
 # loopback again unless told otherwise. scripts/check-fork-consistency.ts
@@ -79,14 +79,15 @@ x-hook-env: &hook-env
   OB1_HOOKS: ${OB1_HOOKS:-}
   OB1_HOOK_SECRETS: ${OB1_HOOK_SECRETS:-}
 
-# The servers' OpenTelemetry settings (SMD-1849), merged by the three servers
-# alone: the workers send no telemetry. Each is the SDK's own
+# The servers' OpenTelemetry settings (SMD-1849), merged by the MCP server and
+# the REST core alone: the workers send no telemetry, nor `server`, n8n's, which
+# is off the mesh the collector is on (SMD-2287). Each is the SDK's own
 # variable, passed as deploy/.env gives it; unset, it is empty, which the
 # servers read as unset (measured: no line, no change), so nothing is sent until
 # OTEL_EXPORTER_OTLP_ENDPOINT names a collector — the observability profile's
 # below is http://lgtm.ob1.internal.:4318 — and each server keeps its own
-# service name (open-brain-mcp, open-brain-api, open-brain): no
-# OTEL_SERVICE_NAME here, which would give all three one. OB1_OTEL_TRUST_TRACEPARENT stays out on purpose (check
+# service name (open-brain-mcp, open-brain-api): no OTEL_SERVICE_NAME here,
+# which would give both one. OB1_OTEL_TRUST_TRACEPARENT stays out on purpose (check
 # 14's NOT_FORWARDED): no proxy in this stack sets a traceparent to trust. The
 # three-brain stack leaves them out (check 27's TIER_OMITTED_ENV);
 # deploy/README.md, "Traces, metrics and log records", says what each does.
@@ -838,10 +839,11 @@ services:
       OB1_AGENT_CACHE_TTL_MS: ${OB1_AGENT_CACHE_TTL_MS:-}
       OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
       # The stack's configured state and its public origin, as the
-      # authorization server gets them (below): the server advertises OAuth at
-      # <origin>/mcp only while COMPOSE_PROFILES names auth, the request's
-      # Host is the origin's, and the authorization server answers its probe
-      # on the mesh (SMD-2382, oauth-edge.ts). The REST core below takes this
+      # authorization server gets them (below): the MCP server (the `mcp`
+      # service, which lists them itself) advertises OAuth at <origin>/mcp only
+      # while COMPOSE_PROFILES names auth, the request's Host is the origin's,
+      # and the authorization server answers its probe on the mesh (SMD-2382,
+      # oauth-edge.ts); `server`, off the mesh, advertises nothing. The REST core below takes this
       # block too, and accepts the authorization server's tokens only while
       # both are set (SMD-2286, oauth-token.ts): drop them from it and it takes
       # keys alone. Its preflight prints the same `public origin` row, naming
@@ -865,7 +867,7 @@ services:
       OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
       PORT: "8000"
     environment:
-      <<: [*server-env, *plugin-env, *otel-env]
+      <<: [*server-env, *plugin-env]
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     # No `ports:`, and no route through the proxy since SMD-2532: n8n reaches
     # it as `server:8000` on `egress`.
@@ -1130,8 +1132,9 @@ services:
       timeout: 3s
       retries: 5
     # Started after the MCP server and the REST core behind it, so `up proxy`
-    # brings the brain, and `up forwarder`, which waits on the proxy, its
-    # port too; not held for their health: while the MCP server is down the
+    # brings the brain once its image is built (the `server` service builds
+    # it: name `server` with `--build`, as the commands below do), and
+    # `up forwarder`, which waits on the proxy, its port too; not held for their health: while the MCP server is down the
     # proxy answers 502, and it answers again when the server does. So the
     # documented `up -d --build server proxy forwarder` recreates both on the
     # server's new image rather than leaving them on the old one (SMD-2284
@@ -2084,7 +2087,7 @@ services:
     # (docker/compose#11900, as with the proxy's table), so an upgrade that
     # changes the dashboard or a rule reaches Grafana on its `up -d`.
     labels:
-      ob1.grafana-dashboard: "sha256:9842c3978da5f38ae74dd9e53fa648b515b0622ec431ab1ff4449e4e02f49cae"
+      ob1.grafana-dashboard: "sha256:2ecb3dae2a5eea17dbf05039d71f35b9f6dd360e36ff2adf1b62eac2f4cb6bc8"
       ob1.grafana-alert-rules: "sha256:b49651cf40cccc8943b6525e8351df4254ff558a37609bb61453f5181b47ac95"
       ob1.grafana-dashboard-provider: "sha256:2a13b2862670670482aadbadfcf7a864e28fe4d3c9704faa9ac75ff66b9d021d"
     # `mesh` as lgtm.ob1.internal: the two servers send to it there, and
@@ -2263,7 +2266,7 @@ configs:
             {
               "name": "service",
               "label": "Server",
-              "description": "open-brain-mcp is the MCP server at /mcp, open-brain-api the REST core, open-brain the server n8n reaches: each server's own service.name.",
+              "description": "open-brain-mcp is the MCP server at /mcp, open-brain-api the REST core: each server's own service.name.",
               "type": "query",
               "datasource": {"type": "prometheus", "uid": "prometheus"},
               "query": {

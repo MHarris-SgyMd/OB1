@@ -1422,7 +1422,7 @@ jobs:
           # OpenTelemetry settings, each empty unless deploy/.env sets it, and no
           # service name; no other service takes any, under every profile.
           docker compose -f compose.yaml --profile observability config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and (.services.lgtm | (has("ports") | not) and ((.networks | keys) == ["mesh", "telemetry"])) and (.services["pg-exporter"] | (has("ports") | not) and ((.networks | keys) == ["data", "telemetry"])) and all(.services.server, .services.api, .services.mcp; ([.environment | to_entries[] | select(.key | startswith("OTEL_"))] | (map(.key) | sort) == ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_LOGS_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_METRIC_EXPORT_INTERVAL", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG"] and all(.value == "")))'
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.lgtm | (has("ports") | not) and ((.networks | keys) == ["mesh", "telemetry"])) and (.services["pg-exporter"] | (has("ports") | not) and ((.networks | keys) == ["data", "telemetry"])) and all(.services.api, .services.mcp; ([.environment | to_entries[] | select(.key | startswith("OTEL_"))] | (map(.key) | sort) == ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_LOGS_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_METRIC_EXPORT_INTERVAL", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG"] and all(.value == "")))'
           docker compose -f compose.yaml -f compose.grafana-port.yaml --profile observability config --format json \
             | jq -e '([.services[].ports[]?] | length == 2) and (.services.lgtm.ports | length == 1 and .[0].host_ip == "127.0.0.1" and .[0].published == "3000" and .[0].target == 3000) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh", "telemetry"]) and .services.lgtm.environment.LGTM_ORIGIN == "http://127.0.0.1:3000"'
           # SMD-2583, the network move, as compose renders each stack with
@@ -1449,7 +1449,7 @@ jobs:
               and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "pg-exporter", "pg-monitor-role", "postgres", "server", "sleep"])
               and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "server", "sleep"])
               and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "auth", "lgtm", "mcp", "proxy"]) and (on("telemetry") == ["lgtm", "pg-exporter"]) and .networks.telemetry.internal == true
-              and ([.services | to_entries[] | select((.value.environment // {}) | keys | any(startswith("OTEL_"))) | .key] == ["api", "mcp", "server"])'
+              and ([.services | to_entries[] | select((.value.environment // {}) | keys | any(startswith("OTEL_"))) | .key] == ["api", "mcp"])'
           docker compose -f compose.yaml -f compose.host-ports.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data", "postgres-port"]) and (on("postgres-port") == ["postgres"])'
           docker compose -f compose.yaml -f compose.grafana-port.yaml "${all[@]}" config --format json \
@@ -2232,7 +2232,7 @@ jobs:
           cp /tmp/env-before-observability .env
           docker compose -f compose.yaml --profile observability rm -sf lgtm pg-exporter pg-monitor-role
           docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 server api mcp
-          for s in server api mcp; do
+          for s in api mcp; do
             endpoint=$(docker compose -f compose.yaml exec -T "$s" printenv OTEL_EXPORTER_OTLP_ENDPOINT) || { echo "could not read $s's OTEL_EXPORTER_OTLP_ENDPOINT after the step" >&2; exit 1; }
             [ -z "$endpoint" ] || { echo "$s still sends to the collector after the step" >&2; exit 1; }
           done
@@ -2250,7 +2250,8 @@ jobs:
       # `server` as a tier's container once was and `mcp`, the compose name of
       # the service /mcp reaches since SMD-2287, is reached by none of those
       # paths, and stable's /mcp still reaches stable beside them: from the
-      # mesh each name then names more than one container, the collision the
+      # mesh each name then names more than one container (`server` only the
+      # stand-ins' since stable's left the mesh, SMD-2287), the collision the
       # route table's rooted mesh names avoid. Check 28's PROXY_ROUTE_TABLE
       # (scripts/check-fork-consistency.ts) holds the table.
       - name: Stable routes no tier, and nothing under a tier's prefix reaches stable

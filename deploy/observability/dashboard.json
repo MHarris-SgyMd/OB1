@@ -14,7 +14,7 @@
       {
         "name": "service",
         "label": "Server",
-        "description": "open-brain-mcp is the MCP server at /mcp, open-brain-api the REST core, open-brain the server n8n reaches: each server's own service.name.",
+        "description": "open-brain-mcp is the MCP server at /mcp, open-brain-api the REST core: each server's own service.name.",
         "type": "query",
         "datasource": {"type": "prometheus", "uid": "prometheus"},
         "query": {

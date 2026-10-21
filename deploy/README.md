@@ -416,7 +416,7 @@ network of its own, `postgres-port`, for its loopback port, and
 | `sleep` (`--profile sleep`) | Listens on nothing; dials `postgres:5432` on `data` and the model provider on `egress` | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678` on `egress`, which nothing in the stack dials; n8n dials `server:8000`, `orchestration-runner:8090` and the vendors its workflows name, all on `egress`. Not the mesh, where every backend the proxy reaches is (a tier of another project joined it, its server `server` too, from SMD-2294 to SMD-2874) | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090` on `egress`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` on `data` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
-| `lgtm` (`--profile observability`) | `lgtm.ob1.internal` on the `mesh` network: the three servers send their OTLP to `:4318` there, and with `compose.grafana-public.yaml` the proxy dials its Grafana at `:3000` for `/grafana`. On the internal `telemetry` network its collector scrapes `pg-exporter` every 30 s. Its Prometheus, Tempo, Loki and Pyroscope listen on its own loopback. It dials nothing else by itself — a data source its admin adds reaches any name on `mesh` or `telemetry` ("The observability profile" below) — and shares no network with Postgres or the model providers, though `pg-exporter`'s `/probe` dials Postgres for whoever on `telemetry` names it a target (SMD-3023) | Nothing by default. `compose.grafana-port.yaml` publishes its Grafana on `${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}`, an origin of its own; `compose.grafana-public.yaml` routes `/grafana` on the proxy's port | Grafana's own sign-in, anonymous access off: through a TLS proxy to the loopback port (`GRAFANA_ORIGIN` its https origin), or at `/grafana` with `compose.grafana-public.yaml`, which shares the stack's origin ("The observability profile" below) |
+| `lgtm` (`--profile observability`) | `lgtm.ob1.internal` on the `mesh` network: the MCP server and the REST core send their OTLP to `:4318` there (`server`, off the mesh, sends none), and with `compose.grafana-public.yaml` the proxy dials its Grafana at `:3000` for `/grafana`. On the internal `telemetry` network its collector scrapes `pg-exporter` every 30 s. Its Prometheus, Tempo, Loki and Pyroscope listen on its own loopback. It dials nothing else by itself — a data source its admin adds reaches any name on `mesh` or `telemetry` ("The observability profile" below) — and shares no network with Postgres or the model providers, though `pg-exporter`'s `/probe` dials Postgres for whoever on `telemetry` names it a target (SMD-3023) | Nothing by default. `compose.grafana-port.yaml` publishes its Grafana on `${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}`, an origin of its own; `compose.grafana-public.yaml` routes `/grafana` on the proxy's port | Grafana's own sign-in, anonymous access off: through a TLS proxy to the loopback port (`GRAFANA_ORIGIN` its https origin), or at `/grafana` with `compose.grafana-public.yaml`, which shares the stack's origin ("The observability profile" below) |
 | `pg-exporter` (`--profile observability`) | `pg-exporter.ob1.internal:9187` on the internal `telemetry` network, where lgtm's collector scrapes it; it dials `postgres:5432` on `data` as `ob1_monitor` (a member of `pg_monitor` alone). Its port answers on `data` too, and its `/probe` dials any target and credentials its caller names (SMD-3023). It shares no network with the model providers or the mesh | Nothing | Nothing |
 | `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on `auth-egress`, its own, through its fetch guard. It shares no network with Postgres, Ollama, Jev, n8n or the workers, and holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
@@ -1222,7 +1222,7 @@ traces, which would refuse the rest and have their losses said every minute.
 | `OTEL_BSP_SCHEDULE_DELAY`, `OTEL_BLRP_SCHEDULE_DELAY`, `OTEL_BSP_EXPORT_TIMEOUT`, `OTEL_BLRP_EXPORT_TIMEOUT` | each batch's delay (5 s for spans, 1 s for log records; 0 sends each as it comes) and export timeout (30 s), each held to 2,147,483,647 ms, past which a timer fires at once |
 | `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_METRIC_EXPORT_TIMEOUT` | how often the metrics are sent (60 s; a value under 1 s is ignored for the 60 s, one past 2,147,483,647 ms held there) and each export's timeout (30 s, at most the interval) |
 | `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` | cumulative by default; `delta` for a backend that wants it |
-| `OTEL_SERVICE_NAME` | the service's name; by default `open-brain-mcp` (the MCP server at `/mcp`, `mcp-server/`, SMD-2287), `open-brain-api` (the REST core), or `open-brain` (`server`, which n8n reaches) |
+| `OTEL_SERVICE_NAME` | the service's name; by default `open-brain-mcp` (the MCP server at `/mcp`, `mcp-server/`, SMD-2287), `open-brain-api` (the REST core), or `open-brain` (server-portable's own default; compose's `server`, n8n's, is off the mesh and sends none) |
 | `OTEL_RESOURCE_ATTRIBUTES` | more of the resource (`deployment.environment.name=home` on a plain brain; a `service.namespace` would make Prometheus's `job` `<namespace>/<name>`); a key it names wins, `service.version` included — but not over a pipeline tier's `deployment.environment.name`, which a canary's env file would otherwise take from stable's |
 | `OTEL_TRACES_SAMPLER` | the SDK's sampler; by default `parentbased_always_on`. A request's own trace is a root, so a caller decides nothing — unless its `traceparent` is trusted, when the `parentbased_` samplers follow its sampled flag and `traceidratio` reads its trace id; the REST core trusts its forwarder's, so it samples the MCP server's tool calls as the MCP server does. Under `always_off` a line names a trace no span was exported for |
 
@@ -1526,8 +1526,8 @@ that runs can do.
 What it holds, from the servers (the workers send nothing, SMD-2910):
 - **Traces** in Tempo: one per request, `tools/call capture_thought` and the
   like, under `service.name` `open-brain-mcp` (the MCP server at `/mcp`, its
-  tool call the parent of the REST core's operation, one trace), `open-brain-api`
-  (the REST core) or `open-brain` (`server`, n8n's), with each tool
+  tool call the parent of the REST core's operation, one trace) or
+  `open-brain-api` (the REST core), with each tool
   call, provider call and store operation beneath it, and each job's body a
   trace of its own.
 - **Metrics** in Prometheus, under this pin's OTLP names, underscored with
@@ -1631,7 +1631,7 @@ panel saying what it counts:
   and records the collector refused or could not store, per second and in
   total since `lgtm` started.
 
-Its variables pick the server (`open-brain-mcp`, `open-brain-api`, `open-brain`, each server's
+Its variables pick the server (`open-brain-mcp`, `open-brain-api`, each server's
 own `service.name`), a pipeline tier (for the request, provider, store and job
 rows; a stack that is no tier sends none, so All takes a path-mode canary's
 beside stable's and stable alone cannot be picked) and the database (All takes
@@ -1774,7 +1774,7 @@ which says only that it is up) answer: Prometheus, Tempo, Loki and Pyroscope
 listen on the container's own loopback, server, gRPC and gossip ports alike
 (each port probed from the mesh). Grafana's data-source proxy is held to those
 four, but a data source's own queries are not: Grafana's admin reaches every
-name on `mesh` — the three servers, the authorization server, a joined tier
+name on `mesh` — the MCP server, the REST core, the authorization server, a joined tier
 (measured: a data source at the REST core) — where the servers ask for a key
 and the authorization server for the operator's password, its discovery and
 registration aside; with `compose.grafana-port.yaml`, the LAN and the host
