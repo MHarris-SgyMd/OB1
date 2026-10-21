@@ -4217,13 +4217,17 @@ notwithstanding. The reason: the misses are on pairs migration 079 keeps out of
 the pass, and only the canary's review queue can say what the writer proposes
 on the candidates the pass does judge. It is the pass's decide mode
 (`OB1_CONSOLIDATE_DECIDER`, `server-portable/consolidate-decide.ts`): the
-question, the writer's prompt and the quote checks are the ones measured here,
-moved out of this eval, which imports them back. The pass adds one floor that
+question, the writer's prompt and the quote checks were the ones measured here,
+moved out of this eval, which imports them back (decide version 3 has changed
+the quote checks since, below). The pass adds one floor that
 this eval did not apply: a proposal is recorded at H2O's P(outdates) and only at
 0.5 or more. On the third set that drops 5 of the adopted writer's 81 proposals:
 3 true supersessions, 1 false proposal and 1 unlabelled candidate. The writer
 without the part rule would lose 8 of 64 on the first set and 5 of 116 on the
-confirmation.
+confirmation. Since decide version 3 (SMD-3151, 2026-10-20) the quote checks
+read quote and text without their markdown, and this eval re-scores recorded
+answers through them, so the tables above, scored before, no longer reproduce
+from a later tree; the pass also asks the writer only at the floor.
 
 **The record rule (decide version 2).** The canary's first decide-mode
 proposals answered the question these sets could not: what the writer proposes
@@ -4235,8 +4239,9 @@ on the candidates the pass judges.
   understanding, as a session summary or a change record does. Any later
   source can outdate what it understood, by saying something different about
   the same subject, but never by reporting its work done.
-- `--record-rule` adds that to the writer (`RECORD_RULE`), and decide mode
-  runs it from version 2.
+- `--record-rule` adds that to the writer (`RECORD_RULE`), and decide
+  version 2 ran it (shelved; the pass runs version 3, version 1's writer with
+  its quotes read without markdown, asked only at the floor, SMD-3151).
 - **The first measurement**, with the bar fixed first, was on the canary's 54
   proposals, labelled before the run. The rule kept 6 of 10 true and 6 of 40
   false, where the writer without it kept all 54. That missed the bar of 8

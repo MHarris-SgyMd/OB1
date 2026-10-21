@@ -3865,7 +3865,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   ].join(" / "), `an export size of 0: the stop returns, and the shutdown's failed export is said inside the window (${zeroStopped}; ${zeroSaid.join(" / ")})`);
 
   const exporter = new InMemorySpanExporter();
-  const { AggregationTemporality: Temporality, InMemoryMetricExporter } = await import("@opentelemetry/sdk-metrics");
+  const { AggregationTemporality: Temporality, DataPointType, InMemoryMetricExporter } = await import("@opentelemetry/sdk-metrics");
   const metricsOut = new InMemoryMetricExporter(Temporality.CUMULATIVE);
   const tracing = setUpTelemetry("open-brain-test", { exporter, metrics: metricsOut });
   const { beginRequest, cutOpenRequests, withToolSpan } = await import("./telemetry.ts");
@@ -3946,6 +3946,11 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     await tracing.flush();
     const mirrorPoints = durationPoints(metricsOut).filter((pt) => pt.attributes["http.route"] === "/worker-status" && pt.attributes["ob1.outcome"] === "refused");
     assert(mirrorPoints.length === 1 && !("ob1.tool" in mirrorPoints[0].attributes), `a keyless mirror's refusal: its point labels no tool (${JSON.stringify(mirrorPoints.map((pt) => pt.attributes))})`);
+    // The uptime gauge (SMD-3050): every export carries process.uptime, a gauge in seconds with no labels of its own, the process's.
+    const uptimes = (metricsOut.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === "process.uptime");
+    const uptime = uptimes[0]?.dataPoints[0] as { value: number; attributes: Record<string, unknown> } | undefined;
+    assert(uptimes.length === 1 && uptimes[0].dataPointType === DataPointType.GAUGE && uptimes[0].descriptor.unit === "s" && uptimes[0].dataPoints.length === 1 && uptime !== undefined && Object.keys(uptime.attributes).length === 0 && uptime.value > 0 && uptime.value <= process.uptime() && process.uptime() - uptime.value < 30,
+      `the export carries the uptime gauge: process.uptime, a gauge in s, one point with no labels, the process's uptime, read at the export (${JSON.stringify(uptimes.map((m) => [m.descriptor.unit, m.dataPoints]))})`);
     // …and a key the registry did not clear (revoked) is refused at its key too (review pass 4).
     const { agents: mirrorRegistryOf } = await import("./root.ts");
     const mirrorRegistry = mirrorRegistryOf();

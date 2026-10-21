@@ -591,10 +591,6 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
       }
       if (outcome.ok) return answered(c, name, route.ok, outcome.value, p);
       const r = outcome.refusal as Refusal;
-      // Saved, but its vector did not attach (no store says so since SMD-3152; SMD-3153 removes this): the row
-      // is there, so the answer is the creation, flagged — a client that read a
-      // refusal as "not written" would capture again.
-      if (r.code === "EMBEDDING_NOT_ATTACHED") return c.json({ id: r.id, embeddingAttached: false, ...wholeFor(p, r) }, 201, { Location: `${linkBase(c)}/v1/thoughts/${r.id}` });
       const status = REFUSAL_STATUS[r.code];
       return answerError(c, { ...refusalValue(r), ...wholeFor(p, r) }, status, status === 503 ? RETRY_AFTER : {});
     });

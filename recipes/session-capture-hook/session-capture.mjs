@@ -120,11 +120,11 @@ const GENERIC_TOOLS = ["search", "fetch"];
 // substring: a `brainstorm` server's search is not the brain's (ninth review pass).
 const BRAIN_TOOL_RE = new RegExp(`(?:(?:^|__|[/.:])(?:${BRAIN_TOOLS.join("|")})|^(?:[^]*[^a-z0-9])?brain(?:[^a-z0-9][^]*)?(?:__|[/.:])(?:${GENERIC_TOOLS.join("|")}))$`, "i");
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-// `ID: <uuid>` is how every read tool prints a thought's id (SMD-1248); a capture answers `Captured as … — id <uuid>` or `Thought saved (id <uuid>)`.
+// `ID: <uuid>` is how every read tool prints a thought's id (SMD-1248); a capture answers `Captured as … — id <uuid>`.
 // Each at a line's start, as the server prints it: a thought's text is fenced (`│ ` before its every
 // line, SMD-2483), so an id line its text quotes is not one, and is never claimed as provenance.
 const RETRIEVED_ID_RE = new RegExp(`^[ \\t]*ID:\\s*(${UUID})\\b`, "gim");
-const CAPTURED_ID_RE = new RegExp(`^(?:Captured as [^\\n]*?\\bid |Thought saved \\(id )(${UUID})\\b`, "gim");
+const CAPTURED_ID_RE = new RegExp(`^Captured as [^\\n]*?\\bid (${UUID})\\b`, "gim");
 /** Tool names whose input names a file the session changed (Claude Code). */
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 
@@ -1527,7 +1527,7 @@ export function verdictOf(result, text) {
 }
 
 /**
- * capture_thought over MCP. Returns { id, note } on success. A refusal of a
+ * capture_thought over MCP. Returns { id, note, sent } on success. A refusal of a
  * pointer — a derived_from id the server does not know (a thought since
  * deleted, a result this parser misread), or a supersedes the server refuses
  * (the earlier summary deleted; a key that may not replace it) — or of the
@@ -1584,8 +1584,9 @@ export async function postCapture(cfg, payload) {
     result = await call();
     text = textOfResult(result);
   }
-  const id = new RegExp(`(?:\\bid |\\(id )(${UUID})`, "i").exec(text)?.[1];
-  if (result.isError && !id) {
+  // An error saved nothing, whatever id its words name (SMD-3153: the one
+  // that did, a save whose vector did not attach, left with its code).
+  if (result.isError) {
     // Final vs kept is the verdict's `retryable` (SMD-1978): a refusal is dead,
     // a transient — the store not answering, a pointer it could not judge — is
     // worth keeping (first review pass: every isError was "refused", and a brain
@@ -1597,7 +1598,7 @@ export async function postCapture(cfg, payload) {
     if (v.on === "supersedes") err.on = "supersedes";
     throw err;
   }
-  if (result.isError) notes.push(oneLine(text).slice(0, 160));
+  const id = new RegExp(`\\bid (${UUID})`, "i").exec(text)?.[1];
   if (!id) throw new CaptureError("failed", `capture answered without an id: ${oneLine(text).slice(0, 200)}`);
   // `sent`: the pointer the post that landed named — none when a mend dropped
   // it, which is what the captured line reports (SMD-2473 PR 2 review pass 1).
