@@ -188,9 +188,9 @@ export function answerTo(body: string, id: number): Record<string, any> | null {
  * A tool call's outcome from its answer: ok only for a result that is not an
  * error. A capture is not ok when it saved without a vector, when its tagging
  * did not happen, or when it was a re-capture (the text was already a thought).
- * A capture's id comes back for every probe that landed — a refusal that saved
- * the thought (EMBEDDING_NOT_ATTACHED) included — so it is deleted with the
- * rest; never a re-capture's, which was there before the run.
+ * A capture's id comes back for every probe that landed, so it is deleted with
+ * the rest; never a refusal's, which saved nothing (SMD-3153 took the one that
+ * did), nor a re-capture's, which was there before the run.
  */
 export function outcomeOf(status: number, msg: Record<string, any> | null, tool: string): Outcome & { id?: string } {
   if (status !== 200) return { ok: false, status, error: `HTTP ${status}` };
@@ -200,8 +200,8 @@ export function outcomeOf(status: number, msg: Record<string, any> | null, tool:
   if (result === undefined) return { ok: false, status, error: "answer has no result" };
   const text = (result.content ?? []).map((c: { text?: string }) => c.text ?? "").join("\n");
   const sc = result.structuredContent ?? {};
+  if (result.isError === true) return { ok: false, status, error: text.slice(0, 200) };
   const id = tool === "capture_thought" && typeof sc.id === "string" ? sc.id : undefined;
-  if (result.isError === true) return { ok: false, status, id, error: text.slice(0, 200) };
   if (tool !== "capture_thought") return { ok: true, status };
   if (sc.existed === true) return { ok: false, status, error: "a re-capture: the text was already a thought (not a probe, so not deleted)" };
   if (!id) return { ok: false, status, error: "capture answered without an id" };
@@ -587,7 +587,7 @@ export function selfCheck(): number {
     ["saved without a vector: the provider failed (SMD-2888)", captured({ vectorFailed: { reason: "provider_timeout", detail: "timed out", base: "http://provider/v1" } }), false, true],
     ["a re-capture of text already held", captured({ existed: true }), false, false],
     ["a re-capture whose tagging failed", captured({ tags: metadataUnavailable("provider_unreachable"), existed: true }), false, false],
-    ["saved, but its vector did not attach (a refusal)", replyBody(renderCapture(refuse({ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id, detail: "store error" }) as never)), false, true],
+    ["a refusal saves nothing", replyBody(renderCapture(refuse({ code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "registry_away" }) as never)), false, false],
     ["a capture answered without an id", replyBody({ content: [{ type: "text", text: "Captured." }], structuredContent: { embeddingCall: true, chunks: 0, contextFailures: 0, text: "Captured." } }), false, false],
   ];
   for (const [name, body, expectOk, expectId] of captures) {

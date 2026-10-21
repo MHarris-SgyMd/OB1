@@ -42,7 +42,7 @@ delete process.env.OB1_CAPTURE_KEY;
 
 const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, provenanceOf,
-  scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, parseRpcBody, postCapture, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX, verdictOf,
+  scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, parseRpcBody, postCapture, CaptureError, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX, verdictOf,
   loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt, endpointOf, shownUrl,
 } = await import(SCRIPT);
 
@@ -72,7 +72,7 @@ const runHook = (input, env = {}, args = [], raw = false) => spawnScript(args, {
 // tools/call answers as an SSE frame, tools/list as raw JSON, so both shapes
 // the client must parse are exercised. Behaviour markers in the content:
 //   [[refuse-derived]]   the first attempt with derived_from is refused as the server refuses an unknown id
-//   [[embedding-failed]] saved, but isError with the "embedding failed to attach" text and the id
+//   [[refused-naming-id]] a refusal whose words name an id: refused, never read as a save (SMD-3153)
 //   [[store-down]]       the server answered, its store did not: isError "Error: Failed to connect" — not a refusal
 //   [[fn-missing]]       a store error phrased with "not found" — still not a refusal
 //   [[refuse-hard]]      a refusal the hook cannot mend: isError "Refused: …" naming no pointer → dead
@@ -147,7 +147,7 @@ const fake = Bun.serve({
       if (/\[\[slow-down\]\]/.test(content)) { await sleep(2500); return err("Error: Failed to connect", { code: "STORE_UNAVAILABLE", retryable: true }); }
       if (/\[\[slow\]\]/.test(content)) await sleep(2500);
       const id = uuid(1000 + n);
-      if (/\[\[embedding-failed\]\]/.test(content)) return sse({ result: { isError: true, content: [{ type: "text", text: `Thought saved (id ${id}) but its embedding failed to attach: stub. It will NOT appear in semantic search until re-captured.` }] } });
+      if (/\[\[refused-naming-id\]\]/.test(content)) return err(`Refused: the thought with id ${id} will not hold this.`, { code: "REFUSED", retryable: false });
       return sse({ result: { content: [{ type: "text", text: `Captured as observation — id ${id} — topics` }] } });
     }
     return json({ error: { code: -32601, message: "Method not found" } });
@@ -1035,10 +1035,10 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   assert(received.at(-1).args.derived_from === undefined && received.at(-2).args.derived_from?.length === 1, "…two calls, the second bare — the one source was the one refused");
   const r1old = await postCapture(cfg, { text: "[[refuse-derived-old]] summary", harness: "codex", derived_from: [uuid(51), uuid(52)] });
   assert(r1old.id && /provenance dropped/.test(r1old.note) && received.at(-1).args.derived_from === undefined, "a server that names no position (before this pass) gets the whole list dropped");
-  const r2 = await postCapture(cfg, { text: "[[embedding-failed]] summary", harness: "codex", derived_from: [] });
-  assert(r2.id === uuid(1000 + received.length) && /embedding failed/.test(r2.note), "a saved-but-vectorless answer is a capture with a note");
-  const r2s = await postCapture(cfg, { text: "[[embedding-failed]] a summary with a pointer", harness: "codex", derived_from: [], supersedes: uuid(49) });
-  assert(r2s.id && /embedding failed/.test(r2s.note) && r2s.sent === uuid(49), "…and still says the pointer it sent, which the row was written with (SMD-2473 PR 2 review pass 2)");
+  // An error is never a save, whatever id its words name (SMD-3153: the one
+  // error that saved a thought, a save whose vector did not attach, left with its code).
+  const r2 = await postCapture(cfg, { text: "[[refused-naming-id]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
+  assert(r2 instanceof CaptureError && r2.kind === "refused" && r2.id === undefined, `a refusal whose words name an id is refused, not read as a save (${r2?.kind ?? JSON.stringify(r2)})`);
   // Unauthorized is dead at once; a closed port is kept for a later run and then delivered.
   const bad = prepare({ session_id: "s-bad", transcript_path: CODEX_T, hook_event_name: "SessionEnd" });
   const [b] = await postPending({ url: URL_, key: "wrong" }, bad.payloadPath);
@@ -2043,7 +2043,6 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
       [{ code: "REFUSED_DERIVED_FROM_SHAPE", retryable: false }, 'Refused: every `derived_from` entry must be a thought id (the ID: line of a search result), not "nope".'],
       [{ code: "REFUSED_METADATA_SHAPE", retryable: false, problem: "reserved_key", key: "trust" }, "Refused: `metadata.trust` is set by the server, not the caller — use the `source` argument for the origin label; drop the rest."],
       [{ code: "REFUSED_METADATA_SHAPE", retryable: false, problem: "too_many_keys" }, "Refused: `metadata` carries 9 keys — at most 8."],
-      [{ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "11111111-1111-4111-8111-111111111111" }, "Thought saved (id 11111111-1111-4111-8111-111111111111) but its embedding failed to attach: the metadata column refused it. It will NOT appear in semantic search until re-captured."],
     ];
     for (const [sc, text] of coded) {
       const [a, b] = [vc(sc, text), vp(text)];

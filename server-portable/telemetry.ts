@@ -657,6 +657,7 @@ export function startTelemetry(
   serviceName: string,
   log: (line: string) => void = (line) => console.warn(line),
   load: () => Promise<Pick<typeof import("./otel-setup.ts"), "setUpTelemetry">> = () => import("./otel-setup.ts"),
+  { oneShot = false }: { oneShot?: boolean } = {},
 ): Promise<boolean> {
   if (starting) return starting;
   const plan = planTelemetry();
@@ -665,7 +666,7 @@ export function startTelemetry(
   const own = generation;
   // After a stop still in progress, so this start's SDK is never the one it shuts down (review pass 7).
   starting = (stopping ?? Promise.resolve()).then(load).then(async ({ setUpTelemetry }) => {
-    const set = setUpTelemetry(serviceName, { report: { warn: log }, urls: plan.urls });
+    const set = setUpTelemetry(serviceName, { report: { warn: log }, urls: plan.urls, oneShot });
     // A stop came while this loaded: this start is not the SDK's, and goes before the stop returns (review passes 6–7).
     if (own !== generation) {
       await set.shutdown();
