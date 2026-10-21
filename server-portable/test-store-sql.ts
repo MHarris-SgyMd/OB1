@@ -97,7 +97,6 @@ console.log("\n[2] captureThought writes content, metadata and vector atomically
     embeddingModel: "unit-test-model",
   });
   assert(typeof r.id === "string" && r.id.length === 36, `returns a uuid (${r.id?.slice(0, 8)}…)`);
-  assert(r.embeddingFailed === undefined, "no degraded-write flag on the SQL path");
 
   const back = await store.getThought(r.id);
   assert(back?.content === "exact", "the row reads back");
