@@ -5648,8 +5648,7 @@ planted error went unseen.
 
 **The gate.** `--gate` runs the default arm and the blind reader in the
 data-layer job, keyless as the replay gate is (a step there rather than its
-own job: the write path needs the server and that database, and a step in a
-required job gates a merge with no new name in the ruleset, SMD-1856). It
+own job: the write path needs the server and that database). It
 runs the corpus's shape rules, checks the record was made on this corpus at
 this k, then fails when the default arm's survival, catch or coverage falls
 below the recorded counts or is measured over a different population
