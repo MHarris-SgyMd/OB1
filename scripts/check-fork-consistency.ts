@@ -6681,7 +6681,7 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["a Go template on a comment line in compose.yaml's table, which Traefik renders as a catch-all router", "compose.yaml", "    routers:\n      auth:\n", "    routers:\n      # {{ \"\\n    all:\\n      rule: \\\"PathPrefix(`/`)\\\"\\n      priority: 100\\n      service: canary\" }}\n      auth:\n"],
   ["a catch-all router on a line led by a no-break space in compose.yaml's table, a key to YAML and a comment to a reader", "compose.yaml", "    routers:\n      auth:\n", "    routers:\n      \u00a0#all: {rule: \"PathPrefix(`/`)\", priority: 100, entryPoints: [web], service: canary}\n      auth:\n"],
   ["a comment line in compose.yaml's table", "compose.yaml", "      auth-absent:\n        errors:\n", "      # a note\n      auth-absent:\n        errors:\n"],
-  ["the health router over /mcp", "compose.yaml", "        priority: 20\n", "        priority: 50\n"],
+  ["a catch-all router back under every unrouted path, as the legacy route was (SMD-2532)", "compose.yaml", "      health:\n        rule:", "      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [not-legacy]\n        service: server\n      health:\n        rule:"],
   ["Grafana's anonymous access on in the observability collector", "compose.yaml", "      GF_AUTH_ANONYMOUS_ENABLED: \"false\"\n", "      GF_AUTH_ANONYMOUS_ENABLED: \"true\"\n"],
   ["the proxy's label its own table", "compose.yaml", "      ob1.proxy-routes: *proxy-routes\n", "      ob1.proxy-routes: \"http: {}\"\n"],
   ["the mounted config its own table", "compose.yaml", "    content: *proxy-routes\n", "    content: \"http: {}\"\n"],

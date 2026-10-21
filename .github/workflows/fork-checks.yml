@@ -1840,9 +1840,9 @@ jobs:
           B=http://127.0.0.1:8010
           code() { curl -s -o /tmp/api-body -w '%{http_code}' --max-time 15 "$@"; }
           c=$(code -H "x-brain-key: $OB1_SMOKE_KEY" "$B/api/v1/whoami")
-          [ "$c" = 404 ] || { echo "/api with the public route off answered $c: $(head -c 120 /tmp/api-body)" >&2; exit 1; }
+          { [ "$c" = 404 ] && [ ! -s /tmp/api-body ]; } || { echo "/api with the public route off answered $c: '$(head -c 120 /tmp/api-body)', not api-off's bodiless 404" >&2; exit 1; }
           c=$(code -X POST -H "x-brain-key: $OB1_SMOKE_KEY" -H 'content-type: application/json' -d '{"content":"ci: never captured"}' "$B/api/v1/thoughts")
-          [ "$c" = 404 ] || { echo "a POST to /api with the route off answered $c, not the 404 — it may have reached the MCP server" >&2; exit 1; }
+          { [ "$c" = 404 ] && [ ! -s /tmp/api-body ]; } || { echo "a POST to /api with the route off answered $c '$(head -c 120 /tmp/api-body)', not api-off's bodiless 404" >&2; exit 1; }
           inside=$(docker compose -f compose.yaml exec -T proxy wget -qO- --header "x-brain-key: $OB1_SMOKE_KEY" http://api.ob1.internal.:8000/v1/whoami)
           jq -e '.scope == "write" and (.operations | index("capture_thought"))' <<<"$inside" >/dev/null || { echo "api.ob1.internal on the mesh did not answer whoami: ${inside:0:200}" >&2; exit 1; }
           # Forwarded on the mesh, as the MCP server will: the forwarder is the request's act (SMD-2284).
@@ -1901,7 +1901,7 @@ jobs:
             post -H "x-example-timestamp: $ts" -H "x-example-signature: $(printf %s "$ts.$1" | openssl dgst -sha256 -hmac "${3:-$SECRET}" -hex | sed 's/^.* //')" -d "$1" "$B/hooks/example/capture"
           }
           c=$(deliver "$BODY")
-          [ "$c" = 404 ] || { echo "/hooks with the overlay off answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
+          { [ "$c" = 404 ] && [ ! -s /tmp/hook-body ]; } || { echo "/hooks with the overlay off answered $c: '$(head -c 120 /tmp/hook-body)', not hooks-off's bodiless 404" >&2; exit 1; }
           docker compose -f compose.yaml -f compose.hooks-public.yaml up -d --no-deps --wait --wait-timeout 120 proxy
           c=$(deliver "$BODY" "" other)
           [ "$c" = 401 ] || { echo "a delivery signed with another secret answered $c: $(head -c 120 /tmp/hook-body)" >&2; exit 1; }
@@ -1922,7 +1922,7 @@ jobs:
           docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
           docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 proxy
           c=$(deliver "$BODY")
-          [ "$c" = 404 ] || { echo "/hooks still answered $c after the overlay and the plugin were dropped" >&2; exit 1; }
+          { [ "$c" = 404 ] && [ ! -s /tmp/hook-body ]; } || { echo "/hooks still answered $c '$(head -c 120 /tmp/hook-body)' after the overlay and the plugin were dropped, not hooks-off's bodiless 404" >&2; exit 1; }
 
       # SMD-1849 PR 3a: /grafana is the proxy's 404 unless
       # compose.grafana-public.yaml is named — never the MCP server, a keyed
@@ -3468,8 +3468,11 @@ jobs:
           got=$(at_mcp)
           [ "$got" = "200 -" ] || { echo "a keyless /mcp on loopback answered \"$got\", not today's 200"; exit 1; }
           [ "$(code_of http://127.0.0.1:8010/.well-known/oauth-protected-resource/mcp)" = 404 ] || { echo "the document is served at loopback's Host"; exit 1; }
+          # oauth-fallback-off's 404 is empty-bodied; with no router there the
+          # proxy's own 404 carries "404 page not found" (SMD-2532).
           for path in /register /authorize /token; do
-            [ "$(code_of "${O[@]}" -X POST -d '{}' "http://127.0.0.1:8010$path")" = 404 ] || { echo "POST $path at the origin root is not the proxy's 404"; exit 1; }
+            c=$(curl -s --max-time 10 -o /tmp/off-body -w '%{http_code}' "${O[@]}" -X POST -d '{}' "http://127.0.0.1:8010$path" || true)
+            { [ "$c" = 404 ] && [ ! -s /tmp/off-body ]; } || { echo "POST $path at the origin root answered $c '$(head -c 80 /tmp/off-body)', not oauth-fallback-off's bodiless 404"; exit 1; }
           done
           auth exec -T auth bun restart-check.ts --register > /tmp/auth-client.json
           auth restart auth
@@ -3635,7 +3638,7 @@ jobs:
           # SMD-2532: the root is the proxy's own 404 with no Deprecation; the
           # URL is shown without its query, so a key in it is never printed.
           rootgone() {
-            code=$(curl -s --max-time 10 -X "$1" -D /tmp/proxy-head -o /tmp/proxy-body -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' ${3:+-d "$3"} "$2")
+            code=$(curl -s --max-time 10 -X "$1" -D /tmp/proxy-head -o /tmp/proxy-body -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' ${3:+-d "$3"} "$2") || code="no answer (curl exit $?)"
             if ! { [ "$code" = 404 ] && [ "$(cat /tmp/proxy-body)" = "404 page not found" ] && ! grep -qi '^deprecation:' /tmp/proxy-head; }; then echo "$1 ${2%%\?*} → HTTP $code '$(head -c 80 /tmp/proxy-body)', expected the proxy's own 404 with no Deprecation: the old root URL is retired (SMD-2532)" >&2; exit 1; fi
           }
           rootgone POST "$B/?key=$OB1_SMOKE_CAPTURE_KEY" '{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}'
@@ -3654,9 +3657,14 @@ jobs:
             -H "x-brain-key: $OB1_SMOKE_READ_KEY" -d '{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}' "$B/mcp")
           [ "$code" = 200 ] || { echo "the read key's tools/list at /mcp got HTTP $code, so the absence of its line proves nothing" >&2; exit 1; }
           [ "$(curl -s --max-time 10 -H 'X-OB1-Legacy-Route: 1' -H "x-brain-key: $OB1_SMOKE_READ_KEY" "$B/health" | head -c 1)" = "{" ] || { echo "the read key's GET /health got no record, so the absence of its line proves nothing" >&2; exit 1; }
-          sleep 1
-          SLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix server)"
-          if grep -F 'reached the brain at the old root URL' <<<"$SLOG" >&2; then echo "the server named a key at the old root URL (above): a request reached it there, or a marker a client set on /mcp or /health was not deleted" >&2; exit 1; fi
+          # Read for 3 s, as docker copies the server's lines on its own time;
+          # "old root URL" is the phrase of the line test-server [19] holds.
+          for _ in 1 2 3 4 5 6; do
+            SLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix server)"
+            grep -qF 'old root URL' <<<"$SLOG" && break
+            sleep 0.5
+          done
+          if grep -F 'old root URL' <<<"$SLOG" >&2; then echo "the server named a key at the old root URL (above): a request reached it there, or a marker a client set on /mcp or /health was not deleted" >&2; exit 1; fi
           curl -s --max-time 10 -o /dev/null "$B/auth/callback?code=code-$OB1_SMOKE_KEY&state=state-$OB1_SMOKE_KEY"
           # The server's JSON lines for a thought_stats call so far (SMD-1849),
           # so the absolute-form probe's own line is counted below, not an
