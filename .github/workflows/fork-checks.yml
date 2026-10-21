@@ -3665,8 +3665,10 @@ jobs:
           # time), the read key's marker, set on /mcp and /health through the
           # proxy, which deletes it, is judged by its absence. Until PR 2 drops
           # the server's reading of the marker (SMD-2532).
-          docker compose -f compose.yaml exec -T -e KEY="$OB1_SMOKE_CAPTURE_KEY" server bun \
-            -e 'const r = await fetch("http://127.0.0.1:8000/", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-ob1-legacy-route": "1", "x-brain-key": process.env.KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/list", params: {} }) }); if (!r.ok) { console.error(`the server answered the marked control request ${r.status}: ${(await r.text()).slice(0, 160)}`); process.exit(1); }' \
+          # The key by name from the environment, never on the command line;
+          # a refused key is a 200 with a JSON-RPC error, so the body is read.
+          KEY="$OB1_SMOKE_CAPTURE_KEY" docker compose -f compose.yaml exec -T -e KEY server bun \
+            -e 'const r = await fetch("http://127.0.0.1:8000/", { method: "POST", signal: AbortSignal.timeout(15000), headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-ob1-legacy-route": "1", "x-brain-key": process.env.KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/list", params: {} }) }); const t = await r.text(); if (!r.ok || /"error"\s*:/.test(t)) { console.error(`the server answered the marked control request ${r.status}: ${t.slice(0, 160)}`); process.exit(1); } process.exit(0)' \
             || { echo "the marked control request failed (above)" >&2; exit 1; }
           for _ in $(seq 1 20); do
             SLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix server)"
