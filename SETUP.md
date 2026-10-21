@@ -480,7 +480,7 @@ bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile loca
 ```
 
 Seven services in order (nine with `local-models`): Postgres with pgvector, a migration job that applies the
-schema and exits, then the server that answers the old root URL, the REST core (internal unless
+schema and exits, then the server n8n reaches, the REST core (internal unless
 `deploy/compose.api-public.yaml` is named), the MCP server at `/mcp`, which hands every tool call to the REST
 core, and the proxy in front of them with the forwarder that publishes its port. The server runs `preflight.ts` before it
 serves, so a misconfiguration crashloops rather than starting and failing on your
@@ -512,9 +512,10 @@ sees it:
 claude mcp add --transport http --scope user open-brain http://127.0.0.1:8000/mcp --header "x-brain-key: <your-raw-key>"
 ```
 
-`/mcp` is the server's path on the stack's proxy. The bare root still answers
-until v2.0.0, with a `Deprecation` header, for clients configured before the
-proxy; move those with `deploy/README.md`, "Moving a client to /mcp".
+`/mcp` is the server's path on the stack's proxy. The bare root, which
+answered until v2.0.0 for clients configured before the proxy, is the proxy's
+404 since (SMD-2532); move those with `deploy/README.md`, "Moving a client to
+/mcp".
 `127.0.0.1` rather than `localhost`, since the port binds the IPv4 loopback
 only. By default nothing outside your machine can reach it: the port in front
 of the proxy is the one the stack publishes without its opt-in profiles (n8n's profile adds

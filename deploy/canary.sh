@@ -127,9 +127,9 @@
 #      stable had one: then its vectors were emptied, and the smoke fails;
 #   6. with --connect, registers the Claude Code connector (user scope) under
 #      its own key, OB1_CANARY_KEY, at http://127.0.0.1:<port>/mcp; without it, names a
-#      connector left at another of the canary's ports or at /canary/mcp on
-#      stable's origin, and one at its port's
-#      root, which still answers, deprecated, until v2.0.0.
+#      connector left at another of the canary's ports, at its port's root
+#      (the proxy's 404 since v2.0.0, SMD-2532), or at /canary/mcp on
+#      stable's origin.
 #
 # `down` removes the canary's containers and its own networks. It deregisters
 # the connector when `claude` has it at user scope and at a URL of the
@@ -1567,15 +1567,13 @@ else
   # Without --connect a connector at another of the canary's ports is left as
   # it was, at a URL this canary no longer answers on: by port and path, so
   # another spelling of this host (localhost) is no move. The port's root is
-  # the exception: the proxy's legacy route still hands it to the canary,
-  # deprecated, until v2.0.0 (SMD-2532). So is one left at /canary/mcp on
-  # stable's origin, where the canary answered before SMD-2874.
+  # one: its legacy route went with v2.0.0, and the proxy answers it 404
+  # (SMD-2532). So is one left at /canary/mcp on stable's origin, where the
+  # canary answered before SMD-2874.
   read_connector
   at="$(endpoint_of "$CONN_URL")"
   if [ -n "$CONN_URL" ] && ours "$CONN_URL"; then
-    if [ "$at" = "$PORT " ]; then
-      say "connector $NAME points at $(shown "$CONN_URL"), the root, which this canary answers only through the deprecated legacy route until v2.0.0 (SMD-2532): move it to /mcp $RECONNECT"
-    elif [ "${at%% *}" = "$PORT" ] && [ "$at" != "$(endpoint_of "$BASE")" ]; then
+    if [ "${at%% *}" = "$PORT" ] && [ "$at" != "$(endpoint_of "$BASE")" ]; then
       say "connector $NAME still points at $(shown "$CONN_URL"), where this canary no longer answers: re-run $RECONNECT"
     elif [ "$at" != "$(endpoint_of "$BASE")" ]; then
       # Another port, the canary's until this run: from the next one it is

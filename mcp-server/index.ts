@@ -1,6 +1,6 @@
 // The MCP server's entry (SMD-2287): `bun index.ts` serves app.ts on PORT —
 // as mcp.ob1.internal on the stack's mesh and at /mcp through the proxy, as
-// compose.yaml's `mcp` service (PR 5b; server-portable's keeps the legacy route).
+// compose.yaml's `mcp` service (PR 5b; server-portable's, n8n's alone, routed nowhere).
 // It calls the REST core at OB1_REST_URL with OB1_FORWARDER_KEY — a
 // forward-scope key MCP_ACCESS_KEYS holds (`bun keygen.ts --name <name> --scope forward`) —
 // beside each caller's key, and reads OB1_PLUGINS as the REST core does, for
@@ -26,8 +26,8 @@ export const DEFAULT_REST_URL = "http://api.ob1.internal.:8000";
 
 /**
  * The service its signals are named for, unless OTEL_SERVICE_NAME says: apart
- * from `index.ts`'s `open-brain` while both serve (the `mcp` service runs beside
- * the legacy route's), and from the REST core's `open-brain-api`.
+ * from `index.ts`'s `open-brain` while both run (`server`, n8n's, until PR 6),
+ * and from the REST core's `open-brain-api`.
  */
 export const SERVICE_NAME = "open-brain-mcp";
 

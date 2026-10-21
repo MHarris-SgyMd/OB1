@@ -1,7 +1,6 @@
 # The plugins' webhooks at the proxy's /hooks (SMD-2310): an overlay, as
 # compose.api-public.yaml is for /api. The base route table answers /hooks
-# with a bare 404 (compose.yaml's hooks-off), so no delivery falls to the
-# legacy route and the MCP server; this file adds a router of higher priority
+# with a bare 404 (compose.yaml's hooks-off); this file adds a router of higher priority
 # that takes /hooks/<plugin>/<name> to the REST core on the mesh, path kept.
 #
 #   docker compose -f compose.yaml -f compose.hooks-public.yaml up -d

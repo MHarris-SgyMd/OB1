@@ -35,7 +35,7 @@
  * answered 401 `invalid_token` here. The REST core checks the authorization
  * server's tokens (SMD-2286 PR 1, oauth-token.ts), and mcp-server/ trades
  * each at the hop (PR 2, mcp-server/exchange.ts), serving the compose stack's
- * /mcp since SMD-2287 PR 5b; index.ts keeps the legacy root route.
+ * /mcp since SMD-2287 PR 5b; the proxy routes nothing to index.ts since SMD-2532.
  */
 
 import { queryOf } from "./auth.ts";

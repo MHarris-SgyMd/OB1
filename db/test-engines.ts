@@ -39,8 +39,10 @@ function ok(cond: boolean, msg: string): void {
 
 const HERE = import.meta.dir;
 const MARK = "SECRET-2304";
-/** The engines, one more per SMD-2304 PR, and the sleep scheduler that drives two of them (SMD-1794). */
-const ENGINES = ["migrate.ts", "extract-entities.ts", "consolidate.ts", "reembed.ts", "sleep.ts"] as const;
+/** The engines, one more per SMD-2304 PR, the sleep scheduler that drives two of them (SMD-1794), and rebuild_derived's door (SMD-2679). */
+const ENGINES = ["migrate.ts", "extract-entities.ts", "consolidate.ts", "reembed.ts", "sleep.ts", "rebuild.ts"] as const;
+/** The control's run, by engine: a dry run, but for rebuild.ts, whose dry run needs a mode — its --status only reads. */
+const CONTROL: Partial<Record<(typeof ENGINES)[number], string>> = { "rebuild.ts": "status: true" };
 
 /** A child's environment: this one without a database URL, any OB1_* knob or PG* variable; no .env file read. */
 const BASE_ENV: Record<string, string> = {};
@@ -87,7 +89,7 @@ for (const engine of ENGINES) {
   ok(r.code === 0 && r.out === "function\n" && r.err === "" && r.seen === 0, `${engine} imports with no side effect: run is exported, nothing printed, no connection opened with DATABASE_URL set (exit ${r.code}, out ${JSON.stringify(r.out)}, err ${JSON.stringify(r.err.slice(0, 120))}, ${r.seen} connection(s))`);
   // The control: the same import, run, does reach the listener — so the zero
   // above counts. A dry run: extract's egress gate refuses a real one first here.
-  const control = await counted(["-e", `const m = await import("./${engine}"); await m.run({ url: ${JSON.stringify(AT)}, dryRun: true });`], {}, true);
+  const control = await counted(["-e", `const m = await import("./${engine}"); await m.run({ url: ${JSON.stringify(AT)}, ${CONTROL[engine] ?? "dryRun: true"} });`], {}, true);
   ok(control.seen > 0, `…the control: ${engine}'s run() on that URL does connect (${control.seen} connection(s))`);
 
   const before = listenerCounts();
@@ -556,6 +558,94 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
   // Returned, or an arrow's body (refuseCurrent's own call), which is.
   const unreturned = calls.filter((before) => !/\breturn$/.test(before) && !/=>$/.test(before));
   ok(calls.length >= 15 && unreturned.length === 0, `every refuse() call in reembed.ts is returned (${calls.length} calls, ${unreturned.length} not)`);
+}
+
+// ---------------------------------------------------------------------------
+// rebuild.ts: run() refuses in the CLI's words, before connecting (SMD-2679).
+// ---------------------------------------------------------------------------
+{
+  const { run } = await import("./rebuild.ts");
+  const inProcess = async (opts: Record<string, unknown>) => {
+    seen = 0;
+    const w = capture();
+    const code = await run({ ...opts, writer: w } as never);
+    await Bun.sleep(50);
+    const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
+    return { code, out: lines(w.outs), err: lines(w.errs), seen };
+  };
+  const ID = "00000000-0000-0000-0000-000000000001";
+  // The CLI hands run() --fingerprints split on its commas, and --limit as its number. Each case is held to
+  // main's own first line of stderr: the CLI goes through run() now, so the two agreeing pins nothing alone —
+  // a refusal reworded, or two swapped where a command breaks both, changed both sides (review pass 1, mutants).
+  const MODES = "Say one thing: --input <id> [--reason …] [--gone [--fingerprints …]] [--force] [--dry-run] | --orphans [--limit N] [--dry-run] | --status";
+  const WITH_INPUT = "--gone, --force and --fingerprints go with --input";
+  const WITH_GONE = "--fingerprints goes with --gone: the earlier texts' fingerprints are what a leaving thought's snapshot rows are found by";
+  const REASON_OUT = "--reason goes with --input: the sweep marks no row and --status writes nothing, so there is nothing to record it on";
+  const LIMIT_OUT = "--limit goes with --orphans";
+  const DRY_STATUS = "--dry-run goes with --input or --orphans: --status writes nothing";
+  const DIGITS = "--limit must be a decimal integer >= 0";
+  const cases: [string, Record<string, unknown>, string[], string][] = [
+    ["no URL", { status: true }, ["--status"], NO_DATABASE_URL.split("\n")[0]],
+    ["an unparseable URL", { url: `postgres://u:${MARK}/x@127.0.0.1:1/x`, status: true }, ["--url", `postgres://u:${MARK}/x@127.0.0.1:1/x`, "--status"], UNPARSEABLE_DATABASE_URL.split("\n")[0]],
+    ["no mode", { url: AT }, ["--url", AT], MODES],
+    ["two modes", { url: AT, status: true, orphans: true }, ["--url", AT, "--status", "--orphans"], MODES],
+    ["--input and --orphans", { url: AT, input: ID, orphans: true }, ["--url", AT, "--input", ID, "--orphans"], MODES],
+    ["--input not a UUID", { url: AT, input: `postgres://u:${MARK}@h/db` }, ["--url", AT, "--input", `postgres://u:${MARK}@h/db`], "--input takes a thought id (a UUID)"],
+    ["--gone without --input", { url: AT, orphans: true, gone: true }, ["--url", AT, "--orphans", "--gone"], WITH_INPUT],
+    ["--force without --input", { url: AT, status: true, force: true }, ["--url", AT, "--status", "--force"], WITH_INPUT],
+    ["--fingerprints without --input (nor --gone)", { url: AT, orphans: true, fingerprints: ["a"] }, ["--url", AT, "--orphans", "--fingerprints", "a"], WITH_INPUT],
+    ["--fingerprints without --gone", { url: AT, input: ID, fingerprints: ["a", "b"] }, ["--url", AT, "--input", ID, "--fingerprints", "a,b"], WITH_GONE],
+    // `--fingerprints ","` splits to no fingerprint, which is still the flag given: refused, as main refused it.
+    ["--fingerprints \",\" without --gone", { url: AT, input: ID, fingerprints: [] }, ["--url", AT, "--input", ID, "--fingerprints", ","], WITH_GONE],
+    ["--reason on the sweep", { url: AT, orphans: true, reason: "why" }, ["--url", AT, "--orphans", "--reason", "why"], REASON_OUT],
+    ["--limit outside --orphans", { url: AT, status: true, limit: 5 }, ["--url", AT, "--status", "--limit", "5"], LIMIT_OUT],
+    ["--dry-run with --status", { url: AT, status: true, dryRun: true }, ["--url", AT, "--status", "--dry-run"], DRY_STATUS],
+    ["--reason blank", { url: AT, input: ID, reason: "  " }, ["--url", AT, "--input", ID, "--reason", "  "], "--reason is empty; give it a value"],
+    // Two rules broken at once: the first in main's order wins.
+    ["no URL and --reason blank", { status: true, reason: "  " }, ["--status", "--reason", "  "], "--reason is empty; give it a value"],
+    ["no URL and --limit 1.5", { status: true, limit: 1.5 }, ["--status", "--limit", "1.5"], NO_DATABASE_URL.split("\n")[0]],
+    ["--limit 1.5 and two modes", { url: AT, limit: 1.5, status: true, orphans: true }, ["--url", AT, "--limit", "1.5", "--status", "--orphans"], DIGITS],
+    ["two modes and --input not a UUID", { url: AT, input: "nope", orphans: true }, ["--url", AT, "--input", "nope", "--orphans"], MODES],
+    ["--reason and --limit outside their modes", { url: AT, status: true, reason: "why", limit: 5 }, ["--url", AT, "--status", "--reason", "why", "--limit", "5"], REASON_OUT],
+    ["--limit outside --orphans and --dry-run with --status", { url: AT, status: true, limit: 5, dryRun: true }, ["--url", AT, "--status", "--limit", "5", "--dry-run"], LIMIT_OUT],
+    // …and pairs further apart in it, so a rule moved past more than one neighbour is seen too (review pass 2).
+    ["--gone without --input and --reason on the sweep", { url: AT, orphans: true, gone: true, reason: "why" }, ["--url", AT, "--orphans", "--gone", "--reason", "why"], WITH_INPUT],
+    ["--force without --input and --limit outside --orphans", { url: AT, status: true, force: true, limit: 5 }, ["--url", AT, "--status", "--force", "--limit", "5"], WITH_INPUT],
+    ["--force without --input and --dry-run with --status", { url: AT, status: true, force: true, dryRun: true }, ["--url", AT, "--status", "--force", "--dry-run"], WITH_INPUT],
+    ["--reason outside --input and --dry-run with --status", { url: AT, status: true, reason: "why", dryRun: true }, ["--url", AT, "--status", "--reason", "why", "--dry-run"], REASON_OUT],
+    ["--fingerprints without --gone and --limit outside --orphans", { url: AT, input: ID, fingerprints: ["a"], limit: 5 }, ["--url", AT, "--input", ID, "--fingerprints", "a", "--limit", "5"], WITH_GONE],
+  ];
+  for (const [what, opts, argv, first] of cases) {
+    const r = await inProcess(opts);
+    const cli = await counted(["rebuild.ts", ...argv]);
+    ok(r.code === 2 && cli.code === 2, `rebuild run() with ${what}: exit 2, as the CLI (${r.code}, ${cli.code})`);
+    ok(r.out === cli.out && r.err === cli.err && cli.err.split("\n")[0] === first, `…in main's words, the whole of both streams alike (${JSON.stringify(cli.err.trim().split("\n")[0].slice(0, 90))}${r.err === cli.err ? "" : ` — run() said ${JSON.stringify(r.err.slice(0, 90))}`})`);
+    ok(r.seen === 0 && cli.seen === 0 && !(r.out + r.err + cli.out + cli.err).includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);
+  }
+  // A caller's client: queried, never closed; a URL beside it held to the rule; null read as absent.
+  let closed = false;
+  const stub = () => Object.assign(() => { throw new Error("stub queried"); }, { options: { max: 1 }, close: async () => { closed = true; }, unsafe: () => { throw new Error("stub queried"); } });
+  const queried = await inProcess({ sql: stub(), status: true });
+  ok(queried.code === 1 && queried.err === "  failed: stub queried\n", `rebuild run() runs on a caller's client alone, its error the CLI's "failed" line (exit ${queried.code}: ${JSON.stringify(queried.err.slice(0, 40))})`);
+  const beside = await inProcess({ sql: stub(), url: "mysql://h/x", status: true });
+  ok(beside.code === 2 && beside.err === `${UNPARSEABLE_DATABASE_URL}\n`, `…refuses a bad URL beside a caller's client (exit ${beside.code})`);
+  const nullUrl = await inProcess({ url: null, status: true });
+  ok(nullUrl.code === 2 && nullUrl.err === `${NO_DATABASE_URL}\n`, `…reads a null url as absent (exit ${nullUrl.code})`);
+  // Read as present, a null input was a second mode, a null reason or limit a flag outside its mode, a null fingerprint list a flag without --input.
+  const nulls = await inProcess({ sql: stub(), status: true, input: null, reason: null, fingerprints: null, limit: null });
+  ok(nulls.code === 1 && nulls.err === "  failed: stub queried\n", `…and a null input, reason, fingerprints or limit: --status runs on (exit ${nulls.code}: ${JSON.stringify(nulls.err.slice(0, 50))})`);
+  // A transaction's handle cannot hold the dry run's own transaction: refused before a query, by run() and by sweepOrphans.
+  const tx = () => Object.assign(stub(), { savepoint: async () => {} });
+  const inTx = await inProcess({ sql: tx(), orphans: true, dryRun: true });
+  ok(inTx.code === 2 && /dry run is a transaction of its own, rolled back: pass the client itself or a reserved connection, not a transaction's handle/.test(inTx.err) && inTx.out === "", `rebuild run() refuses a dry run on a transaction's handle before querying it (exit ${inTx.code}: ${inTx.err.slice(0, 60)})`);
+  const txRun = await inProcess({ sql: tx(), status: true });
+  ok(txRun.code === 1 && txRun.err === "  failed: stub queried\n", `…and runs a mode that is no dry run on one (exit ${txRun.code})`);
+  const { sweepOrphans } = await import("./rebuild.ts");
+  const swept = (o: Record<string, unknown>, sql: unknown = stub()) => sweepOrphans(sql as never, { writer: capture(), ...o }).then(() => "resolved", (e: Error) => e.message);
+  const [txSweep, fraction, nan, plain] = await Promise.all([swept({ dryRun: true }, tx()), swept({ limit: 1.5 }), swept({ limit: NaN }), swept({ limit: 0 })]);
+  ok(/not a transaction's handle/.test(txSweep) && /limit must be an integer \(1\.5\)/.test(fraction) && /limit must be an integer \(NaN\)/.test(nan) && plain === "stub queried",
+     `sweepOrphans refuses a dry run on a transaction's handle and a limit that is no integer before querying, and queries for 0 (${[txSweep, fraction, nan, plain].map((m) => m.slice(0, 30)).join(" | ")})`);
+  ok(!closed, "…and never closes the caller's client");
 }
 
 // config.mjs's embeddingContract: the constants' rule over any record — over

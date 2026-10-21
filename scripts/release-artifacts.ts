@@ -342,6 +342,7 @@ export function renderNotes(n: NotesInput): string {
   if (!rehearsal) {
     lines.push(`docker run --rm --entrypoint bun ${names.server} keygen.ts --name laptop --scope write          # its line in MCP_ACCESS_KEYS; keep the key`);
     lines.push(`docker run --rm --entrypoint bun ${names.server} keygen.ts --name mcp-forwarder --scope forward   # its line in MCP_ACCESS_KEYS too, the key OB1_FORWARDER_KEY`);
+    lines.push("# then put both lines, comma-separated, in .env's MCP_ACCESS_KEYS and the second key in OB1_FORWARDER_KEY, and:");
   }
   lines.push("docker compose -f compose.yaml -f compose.release.yaml pull");
   lines.push("docker compose -f compose.yaml -f compose.release.yaml up -d --wait");
