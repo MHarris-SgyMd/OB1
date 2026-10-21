@@ -271,6 +271,10 @@ export function renderComposeOverlay(o: OverlayInput): string {
     "  api:",
     `    image: ${pinned(o.images.server.ref, o.images.server.digest)}`,
     "    pull_policy: missing",
+    "  # So does the MCP server built on it (SMD-2287).",
+    "  mcp:",
+    `    image: ${pinned(o.images.server.ref, o.images.server.digest)}`,
+    "    pull_policy: missing",
     "  migrate:",
     `    image: ${pinned(o.images.migrate.ref, o.images.migrate.digest)}`,
     "    pull_policy: missing",
@@ -332,7 +336,7 @@ export function renderNotes(n: NotesInput): string {
   lines.push("```bash");
   if (rehearsal) lines.push("# (a rehearsal publishes no assets — from a checkout at this commit, in deploy/)");
   else {
-    for (const name of Object.keys(ASSETS)) lines.push(name === "env.example" ? `curl -fsSL -o .env ${download(name)}    # then set POSTGRES_PASSWORD, MCP_ACCESS_KEYS and a model provider` : name === "compose.api-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the REST core public at /api, a third -f on both commands` : name === "compose.hooks-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the plugins' webhooks public at /hooks, another -f on both commands` : name === "compose.grafana-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the observability profile's Grafana at /grafana on the stack's origin, beside /auth's sign-in (deploy/README.md says what that shares), another -f on every command` : name === "compose.grafana-port.yaml" ? `curl -fsSLO ${download(name)}    # optional: the observability profile's Grafana on 127.0.0.1:3000, an origin of its own (observability in COMPOSE_PROFILES, with GRAFANA_ADMIN_PASSWORD and OB1_MONITOR_DB_PASSWORD), another -f on every command` : `curl -fsSLO ${download(name)}`);
+    for (const name of Object.keys(ASSETS)) lines.push(name === "env.example" ? `curl -fsSL -o .env ${download(name)}    # then set POSTGRES_PASSWORD, MCP_ACCESS_KEYS, OB1_FORWARDER_KEY and a model provider` : name === "compose.api-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the REST core public at /api, a third -f on both commands` : name === "compose.hooks-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the plugins' webhooks public at /hooks, another -f on both commands` : name === "compose.grafana-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the observability profile's Grafana at /grafana on the stack's origin, beside /auth's sign-in (deploy/README.md says what that shares), another -f on every command` : name === "compose.grafana-port.yaml" ? `curl -fsSLO ${download(name)}    # optional: the observability profile's Grafana on 127.0.0.1:3000, an origin of its own (observability in COMPOSE_PROFILES, with GRAFANA_ADMIN_PASSWORD and OB1_MONITOR_DB_PASSWORD), another -f on every command` : `curl -fsSLO ${download(name)}`);
   }
   lines.push("docker compose -f compose.yaml -f compose.release.yaml pull");
   lines.push("docker compose -f compose.yaml -f compose.release.yaml up -d --wait");
@@ -460,6 +464,7 @@ function selfCheck(): number {
   const unpinned = built.filter(([name, kind]) => parsed.services[name]?.image !== parsed.services[kind].image || parsed.services[name]?.pull_policy !== "missing").map(([name]) => name);
   ok(built.length >= 5 && unpinned.length === 0, `every service compose.yaml runs the server's or the migrator's checkout build in (${built.map(([n]) => n).join(", ")}) runs the release's image, pullable: ${unpinned.join(", ") || "none unpinned"}`);
   ok(parsed.services.api?.image === parsed.services.server.image && parsed.services.api?.pull_policy === "missing", "the REST core runs the release's server image, pullable — a release install has no checkout to build it from (SMD-2284 review pass 1)");
+  ok(parsed.services.mcp?.image === parsed.services.server.image && parsed.services.mcp?.pull_policy === "missing", "the MCP server built on the REST core runs the release's server image, pullable (SMD-2287)");
   ok(parsed.services.ollama.image === "ollama/ollama@sha256:cc" && parsed.services["ollama-pull"].image === "ollama/ollama@sha256:cc" && overlay.includes("ollama/ollama:0.34.3 at release time"), "Ollama is pinned by digest for both services, the tag it came from beside it");
   ok(overlay.startsWith("# Open Brain — release 1.0.0+upstream.9543c29 (tag v1.0.0)"), "the overlay's header names the release");
   // What the overlay sets beside the images and their pull policy, on any service but the proxy and its forwarder (SMD-2583), which carry every client's bytes: nothing. The workflows hold the same of a render, each on its own terms (SMD-2685), so a list here cannot widen them.

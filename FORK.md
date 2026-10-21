@@ -1063,9 +1063,9 @@ Deliberate. Recorded so nobody assumes they were missed.
   [PR #238](https://github.com/NateBJones-Projects/OB1/pull/238) (OAuth 2.1) were
   the upstream answer; the fork has its own OAuth path now. The `auth` profile runs
   an authorization server (SMD-2285), and on a stack configured with a stable
-  public origin the MCP server advertises it at that origin (SMD-2382). It is a
-  preview until `mcp-server/`, which trades the token it issues (SMD-2286), serves
-  `/mcp` (SMD-2287 PR 5), and keys
+  public origin the MCP server advertises it at that origin (SMD-2382).
+  `mcp-server/`, which serves `/mcp` since SMD-2287 PR 5b, trades the token it
+  issues at the hop (SMD-2286), and keys
   keep working beside it (a claude.ai connector at that origin is asked to sign
   in first). Change 42 is adjacent, not a substitute: it makes the claude.ai
   connector *reach* the key path at all (upstream

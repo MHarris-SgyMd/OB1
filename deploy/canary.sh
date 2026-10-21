@@ -1371,6 +1371,10 @@ canary_compose up -d --no-deps --force-recreate server
 # The REST core runs the server's image by name: recreated after it, it runs
 # the build just made, not the one it was stopped on.
 canary_compose up -d --no-deps --force-recreate api
+# And the MCP server built on it (SMD-2287), which /mcp reaches, on the same
+# image: recreated last, on the build just made and the env file's own
+# OB1_FORWARDER_KEY. It writes nothing, so it was not stopped for the refresh.
+canary_compose up -d --no-deps --force-recreate mcp
 # Its own proxy (SMD-1846) and the forwarder that publishes its port
 # (SMD-2583), left running across a refresh: while the server is stopped the
 # proxy answers 502, and the server's new container is the same name on the
@@ -1380,20 +1384,23 @@ canary_compose up -d --no-deps proxy
 canary_compose up -d --no-deps forwarder
 BASE="http://127.0.0.1:$PORT/mcp"
 say "canary at $BASE"
+# Up when its keyed /health is the REST core's record: the MCP server built on
+# it answers keyless liveness on its own, and a key's /health is `ok` until the
+# REST core behind it answers (SMD-2287), so the key's JSON is both up.
+ready() { [ "$(curl -s --max-time 5 -H "x-brain-key: $KEY" "$BASE/health" 2>/dev/null | head -c 1 || true)" = "{" ]; }
 for _ in $(seq 1 60); do
-  [ "$(curl -s --max-time 2 "$BASE/health" || true)" = ok ] && break
+  ready && break
   sleep 2
 done
-if [ "$(curl -s --max-time 2 "$BASE/health" || true)" != ok ]; then
-  echo "the canary server did not answer $BASE/health in 60 tries (2 to 4 minutes). Its log, then the log of its proxy:" >&2
-  canary_compose logs --no-color --tail 40 server >&2 || true
+if ! ready; then
+  echo "the canary did not answer its keyed $BASE/health with the REST core's record in 60 tries (2 to 7 minutes). The logs of its REST core and MCP server, then of its proxy:" >&2
+  canary_compose logs --no-color --tail 40 api mcp >&2 || true
   canary_compose logs --no-color --tail 10 proxy forwarder >&2 || true
-  # restart: unless-stopped would otherwise restart it without end (hundreds
-  # of times a minute under podman), and a registered connector points at it.
-  # The REST core, recreated above on the same image and environment, would too.
-  canary_compose stop server api >/dev/null 2>&1 || true
+  # restart: unless-stopped would otherwise restart them without end (hundreds
+  # of times a minute under podman), and a registered connector points at them.
+  canary_compose stop server api mcp >/dev/null 2>&1 || true
   ADVISED=1
-  echo "the canary's server and REST core are stopped; fix the cause above and re-run $RERUN.$SLEEP_SAID" >&2
+  echo "the canary's server, REST core and MCP server are stopped; fix the cause above and re-run $RERUN.$SLEEP_SAID" >&2
   exit 1
 fi
 

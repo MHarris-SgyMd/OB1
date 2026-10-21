@@ -2463,7 +2463,7 @@ const PORT_PROBES: [string, string[], string[]][] = [
 ];
 
 /** The keys deploy/.env.example sets on a live line, each written `KEY=` with nothing after it: the ones an operator fills in. Any other setting there is commented. */
-const ENV_EXAMPLE_LIVE = ["POSTGRES_PASSWORD", "MCP_ACCESS_KEYS", "OPENROUTER_API_KEY"];
+const ENV_EXAMPLE_LIVE = ["POSTGRES_PASSWORD", "MCP_ACCESS_KEYS", "OB1_FORWARDER_KEY", "OPENROUTER_API_KEY"];
 /** Each line of an env file that is neither blank, a comment (`#` after spaces or tabs alone), nor exactly `KEY=` for one of ENV_EXAMPLE_LIVE's keys, as [line, text]. Exactly, because compose's dotenv reader goes on after a closing quote (`MCP_ACCESS_KEYS="" COMPOSE_FILE=…` sets both, and a quoted value runs on over a line that reads as a comment: SMD-2685 review pass 4), and reads `export KEY=` and `KEY: value` too; with no value on a live line, no quote opens. */
 function envExampleLive(text: string): [number, string][] {
   return text.split("\n").flatMap((l, i): [number, string][] => /^([ \t]*#.*|)$/.test(l) || ENV_EXAMPLE_LIVE.some((k) => l === `${k}=`) ? [] : [[i + 1, l]]);
@@ -2959,6 +2959,16 @@ const SERVER_ENV_SOURCE = "server-portable/root.ts";
 const KNOB = /^(OB1_|OPEN_BRAIN_)[A-Z0-9_]+$/;
 /** The one shape a knob is forwarded in — `${NAME}` or `${NAME:-default}` — with the default captured; the fallback rule reads the capture. */
 const HOUSE_FORM = (k: string) => new RegExp(`^\\$\\{${k}(?::-([^$}]*))?\\}$`);
+/**
+ * Knobs with no default anywhere, which compose must refuse to run without: forwarded as `${NAME:?the fix}`
+ * and in no other form, so a stack missing one stops at `up`, naming the fix, rather than starting a
+ * service that exits at once behind the proxy's 502. Each with why it has no default.
+ */
+const REQUIRED_KNOBS: Record<string, string> = {
+  OB1_FORWARDER_KEY: "the MCP server's forward-scope key (SMD-2287): mcp-server/index.ts exits 2 without it, and no default can be one, since its hash must be in the stack's own MCP_ACCESS_KEYS",
+};
+/** The one shape a required knob is forwarded in: `${NAME:?message}`, the message naming the fix. */
+const REQUIRED_FORM = (k: string) => new RegExp(`^\\$\\{${k}:\\?[^$}]+\\}$`);
 /** Knobs the server declares that compose.yaml must NOT forward, with the reason its own comment gives. */
 const NOT_FORWARDED: Record<string, string> = {
   OB1_OTEL_TRUST_TRACEPARENT: "trusting a caller's traceparent (SMD-1849 PR 2b) is a proxy deployment's to say, by an operator's own -f file outside deploy/, not any stack here: forwarded by the server, it would be one setting in deploy/.env from continuing every caller's trace",
@@ -3176,7 +3186,7 @@ type ServerEnvGap =
  * the server, its declaration and excuse; then the base file's universe;
  * stale excuses; dead switches; the fallback.
  */
-function serverEnvGapsIn(declared: string[], documented: Set<string>, files: ComposeFile[], excused: Record<string, string> = NOT_FORWARDED, fileOnly: Record<string, string> = FILE_ONLY) {
+function serverEnvGapsIn(declared: string[], documented: Set<string>, files: ComposeFile[], excused: Record<string, string> = NOT_FORWARDED, fileOnly: Record<string, string> = FILE_ONLY, required: Record<string, string> = REQUIRED_KNOBS) {
   const gaps: ServerEnvGap[] = [];
   const anywhere = new Set<string>();
   const forwardedBy = new Map<string, Map<string, ServiceEnv>>(); // file name → its services' environments, read once
@@ -3192,7 +3202,7 @@ function serverEnvGapsIn(declared: string[], documented: Set<string>, files: Com
         if (!KNOB.test(k)) continue;
         anywhere.add(k);
         if (v === null) gaps.push(["bare-item", name, service, k, ""]);
-        else if (!HOUSE_FORM(k).test(v)) gaps.push(["not-house-form", name, service, k, v]);
+        else if (k in required ? !REQUIRED_FORM(k).test(v) : !HOUSE_FORM(k).test(v)) gaps.push(["not-house-form", name, service, k, v]);
         if (service === "server") {
           if (!declared.includes(k)) gaps.push(["undeclared", name, "server", k, v]);
           else if (k in excused) gaps.push(["excused-forwarded", name, "server", k, excused[k]]);
@@ -3248,8 +3258,11 @@ function serverEnvGapsIn(declared: string[], documented: Set<string>, files: Com
 const BASE = (yaml: string) => ({ name: "compose.yaml", yaml });
 const OVERLAY = (yaml: string) => ({ name: "compose.x.yaml", yaml });
 const SRV = (env: string) => `services:\n  server:\n    environment:\n${env}`;
-const DECISION_PROBES: [string[], string[], { name: string; yaml: string }[], string[], Record<string, string>?, Record<string, string>?][] = [
-  // [declared, documented, files, expected "kind:name" list, excused (none unless given), file-only (none unless given)]
+const DECISION_PROBES: [string[], string[], { name: string; yaml: string }[], string[], Record<string, string>?, Record<string, string>?, Record<string, string>?][] = [
+  // [declared, documented, files, expected "kind:name" list, excused (none unless given), file-only (none unless given), required (none unless given)]
+  // A required knob is forwarded as `${X:?…}` and in no other form; another service may forward it (SMD-2287).
+  [["OB1_A"], ["OB1_A", "OB1_R"], [BASE(`${SRV("      OB1_A: ${OB1_A:-}\n")}  mcp:\n    environment:\n      OB1_R: \${OB1_R:?set OB1_R}\n`)], [], undefined, undefined, { OB1_R: "why" }],
+  [["OB1_A"], ["OB1_A", "OB1_R"], [BASE(`${SRV("      OB1_A: ${OB1_A:-}\n")}  mcp:\n    environment:\n      OB1_R: \${OB1_R:-}\n`)], ["not-house-form:OB1_R"], undefined, undefined, { OB1_R: "why" }],
   [["OB1_A"], ["OB1_A", "OB1_P"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n"))], [], undefined, { OB1_P: "why" }],
   [["OB1_A"], ["OB1_A", "OB1_P"], [BASE(`${SRV("      OB1_A: ${OB1_A:-}\n")}  other:\n    environment:\n      OB1_P: \${OB1_P:-}\n`)], ["file-only-forwarded:OB1_P"], undefined, { OB1_P: "why" }],
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n"))], ["file-only-stale:OB1_P"], undefined, { OB1_P: "why" }],
@@ -3324,9 +3337,9 @@ function checkServerEnvForwarded() {
       fail(SELF, `forwarded-env reader no longer reports ${JSON.stringify(kinds)} / ${JSON.stringify(server)} for its probe (reported ${JSON.stringify(gotKinds)} / ${JSON.stringify(gotServer)}): ${JSON.stringify(yaml)}`);
     }
   }
-  for (const [declared, documented, probeFiles, expected, excused, fileOnly] of DECISION_PROBES) {
+  for (const [declared, documented, probeFiles, expected, excused, fileOnly, required] of DECISION_PROBES) {
     const files = probeFiles.map(({ name, yaml }) => ({ name, doc: Bun.YAML.parse(yaml) as YamlValue }));
-    const got = serverEnvGapsIn(declared, new Set(documented), files, excused ?? {}, fileOnly ?? {}).map(([kind, , , name]) => `${kind}:${name ?? ""}`);
+    const got = serverEnvGapsIn(declared, new Set(documented), files, excused ?? {}, fileOnly ?? {}, required ?? {}).map(([kind, , , name]) => `${kind}:${name ?? ""}`);
     if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 14's decision no longer reports ${JSON.stringify(expected)} for its probe (reported ${JSON.stringify(got)}): declared ${JSON.stringify(declared)}, documented ${JSON.stringify(documented)}, ${probeFiles.map((f) => f.name).join(" + ")}`);
   }
 
@@ -3395,7 +3408,9 @@ function checkServerEnvForwarded() {
       case "environment-not-mapping": fail(at(file, service, "environment"), `service \`${service}\` has \`environment: ${detail}\`, neither a mapping nor a list (SMD-1843)`); break;
       case "environment-item-not-string": fail(at(file, service, "environment"), `service \`${service}\` has ${detail} as an \`environment:\` list item — an item is \`NAME=value\`; a mapping there is the slip compose rejects, and this rule would otherwise count its knob as missing (SMD-1843)`); break;
       case "bare-item": fail(at(file, service, name), `\`${name}\` under \`${service}\` has no value — a bare \`- ${name}\` item, or \`${name}:\` with nothing after it — which compose fills from its own environment: absent in the container when nothing is set, where every other knob here is "", and the runners differ in what that environment is (docker-compose reads deploy/.env for it; measured) — write \`${name}: \${${name}:-}\` (in a list, \`- ${name}=\${${name}:-}\`) (SMD-1843)`); break;
-      case "not-house-form": fail(at(file, service, name), `\`${name}: ${detail}\` under \`${service}\` — ${forwardForm(detail, name)}; a knob is forwarded as ${HOUSE(name)}, the operator's value under its own name (SMD-1843)`); break;
+      case "not-house-form": fail(at(file, service, name), name in REQUIRED_KNOBS
+        ? `\`${name}: ${detail}\` under \`${service}\` — REQUIRED_KNOBS holds it required: ${REQUIRED_KNOBS[name]}; it is forwarded as \`\${${name}:?<the fix>}\`, so compose refuses a stack without it and names the fix (SMD-2287)`
+        : `\`${name}: ${detail}\` under \`${service}\` — ${forwardForm(detail, name)}; a knob is forwarded as ${HOUSE(name)}, the operator's value under its own name (SMD-1843)`); break;
       case "undeclared": fail(at(file, "server", name), `\`server.environment\` forwards \`${name}\`, which ${SERVER_ENV_SOURCE} does not declare — \`type Env\` there is the one list of what the container's process reads, so this is a typo, a knob that died, or a knob a module reads without declaring (two were, when this rule first ran): declare it there with what it does, or drop it here (SMD-1843)`); break;
       case "excused-forwarded": fail(at(file, "server", name), `forwards \`${name}\`, which NOT_FORWARDED in ${SELF} says the stack must not: ${detail} (SMD-1843)`); break;
       case "no-server": fail(`deploy/${file}`, `has no \`server\` service — check 14 reads what it forwards to the server (SMD-1843)`); break;
@@ -6044,7 +6059,10 @@ function tierStack(compose: Mapping): Mapping {
     // compose.yaml's postgres and migrate are the tier's; the services this stack does not run go.
     const toTier = (k: string) => TIER_ABSENT_SERVICES.includes(k) ? undefined : k === "postgres" || k === "migrate" ? `${t}-${k}` : k;
     const image = `\${COMPOSE_PROJECT_NAME:-open-brain-tiers}-${t}-server`;
-    const tierServer = (svc: Mapping | undefined, kind: "mcp" | "api") => {
+    // `from` is the mesh name compose.yaml gives the service; each tier's answers as its own of `kind`. compose.yaml's
+    // `server` answers its legacy route as server.ob1.internal since SMD-2287 PR 5b, its /mcp the `mcp` service's, which
+    // the tiers do not run: a tier's server still answers its /mcp as mcp.<tier>.ob1.internal.
+    const tierServer = (svc: Mapping | undefined, kind: "mcp" | "api", from: string) => {
       const networks = (svc?.networks ?? {}) as Mapping;
       return {
         // An extension key (compose.yaml's server anchors its block under x-env) is compose.yaml's own, not the tier's.
@@ -6052,14 +6070,14 @@ function tierStack(compose: Mapping): Mapping {
         image,
         environment: { ...omitKeys(svc?.environment, TIER_OMITTED_ENV), DATABASE_URL: db(svc?.environment), OB1_TIER: `\${OB1_TIER:-${t}}` },
         depends_on: renameKeys(svc?.depends_on, toTier),
-        networks: { ...networks, mesh: { ...(networks.mesh as Mapping), aliases: (((networks.mesh as Mapping)?.aliases ?? []) as string[]).map((a) => a === tierMeshName(kind, "stable") ? tierMeshName(kind, t) : a) } },
+        networks: { ...networks, mesh: { ...(networks.mesh as Mapping), aliases: (((networks.mesh as Mapping)?.aliases ?? []) as string[]).map((a) => a === from ? tierMeshName(kind, t) : a) } },
       };
     };
     services[`${t}-postgres`] = { ...c.postgres, volumes: ((c.postgres?.volumes ?? []) as unknown[]).map((v) => typeof v === "string" ? v.replace(/^pgdata:/, `${t}-pgdata:`) : isMapping(v) && v.source === "pgdata" ? { ...v, source: `${t}-pgdata` } : v) };
     // Each tier builds its own migrator under compose's default name, so compose.yaml's image name and pull policy go.
     services[`${t}-migrate`] = { ...omitKeys(c.migrate, ["image", "pull_policy"]), environment: { ...omitKeys(c.migrate?.environment, TIER_OMITTED_ENV), DATABASE_URL: db(c.migrate?.environment) }, depends_on: renameKeys(c.migrate?.depends_on, toTier) };
-    services[`${t}-server`] = tierServer(c.server, "mcp");
-    services[`${t}-api`] = tierServer(c.api, "api");
+    services[`${t}-server`] = tierServer(c.server, "mcp", "server.ob1.internal");
+    services[`${t}-api`] = tierServer(c.api, "api", "api.ob1.internal");
   }
   const volumes = (compose.volumes ?? {}) as Mapping;
   const networks = (compose.networks ?? {}) as Mapping;
@@ -6193,7 +6211,7 @@ const TIER_COMPOSE_PROBES: [string, string, string][] = [
   ["compose.yaml's data network given a fixed name, one database network for every tier (SMD-2583)", "  data:\n    internal: true\n  egress: {}\n", "  data:\n    internal: true\n    name: ob1-data\n  egress: {}\n"],
   ["compose.yaml's Postgres on a bind mount", "      - pgdata:/var/lib/postgresql/data\n", "      - ${PGDATA_DIR:-./pgdata}:/var/lib/postgresql/data\n"],
   ["compose.yaml's server dialling the REST core by stable's mesh name", "      PORT: \"8000\"\n", "      PORT: \"8000\"\n      OB1_REST_URL: ${OB1_REST_URL:-http://api.ob1.internal.:8000}\n"],
-  ["compose.yaml's server under a second mesh alias", "        aliases: [mcp.ob1.internal]\n", "        aliases: [mcp.ob1.internal, brain.ob1.internal]\n"],
+  ["compose.yaml's server under a second mesh alias", "        aliases: [server.ob1.internal]\n", "        aliases: [server.ob1.internal, brain.ob1.internal]\n"],
 ];
 function checkTierStack() {
   const tiersPath = join(ROOT, "deploy", "compose.tiers.yaml");
@@ -6298,18 +6316,19 @@ checkTierStack();
 /** compose.yaml's route table, byte for byte, as Bun.YAML reads the block. */
 const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("auth", "Path(`/auth`) || PathPrefix(`/auth/`) || Path(`/.well-known/oauth-authorization-server/auth`) || Path(`/.well-known/openid-configuration/auth`) || Path(`/.well-known/oauth-authorization-server`)", 40, "auth-absent", "auth")
-  + routeRouter("resource", "Path(`/.well-known/oauth-protected-resource/mcp`)", 40, "not-legacy, auth-absent", "server")
+  + routeRouter("resource", "Path(`/.well-known/oauth-protected-resource/mcp`)", 40, "not-legacy, auth-absent", "mcp")
   + routeRouter("oauth-fallback-off", "Path(`/register`) || Path(`/authorize`) || Path(`/token`)", 35, "not-served", "noop@internal")
   + routeRouter("api-off", "Path(`/api`) || PathPrefix(`/api/`)", 35, "api-off", "noop@internal")
   + routeRouter("hooks-off", "Path(`/hooks`) || PathPrefix(`/hooks/`)", 35, "not-served", "noop@internal")
   + routeRouter("grafana-off", "Path(`/grafana`) || PathPrefix(`/grafana/`)", 35, "not-served", "noop@internal")
-  + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "not-legacy", "server")
-  + ROUTE_TIER_OFF + routeHealth("server")
+  + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "not-legacy", "mcp")
+  + ROUTE_TIER_OFF + routeHealth("mcp")
   + routeRouter("legacy", "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))", 1, "legacy-window", "server")
   + "  middlewares:\n"
   + "    legacy-window:\n      headers:\n        customRequestHeaders:\n          X-OB1-Legacy-Route: \"1\"\n        customResponseHeaders:\n          Deprecation: \"@1790899200\"\n          Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#moving-a-client-to-mcp>; rel=\"deprecation\"; type=\"text/html\"'\n"
   + ROUTE_NOT_LEGACY + routeErrors("auth-absent", "502") + routeErrors("api-off", "418") + routeErrors("not-served", "418")
-  + "  services:\n" + routeService("server", `http://${tierMeshName("mcp", "stable")}.:8000`)
+  + "  services:\n" + routeService("mcp", `http://${tierMeshName("mcp", "stable")}.:8000`)
+  + routeService("server", "http://server.ob1.internal.:8000")
   + routeService("auth", "http://auth.ob1.internal.:3000");
 /** compose.api-public.yaml's route table, byte for byte, as Bun.YAML reads the block. */
 const API_ROUTE_TABLE = "http:\n  routers:\n"
@@ -6359,7 +6378,7 @@ const PROXY_SERVICE = {
   networks: { front: { aliases: ["proxy.ob1.internal"] }, mesh: {} },
   dns_search: ["."],
   healthcheck: { test: ["CMD", "traefik", "healthcheck"], interval: "5s", timeout: "3s", retries: 5 },
-  depends_on: { server: { condition: "service_started" }, api: { condition: "service_started" } },
+  depends_on: { server: { condition: "service_started" }, api: { condition: "service_started" }, mcp: { condition: "service_started" } },
   restart: "unless-stopped",
 };
 /** The forwarder's script (SMD-2583), deploy/forwarder.ts: compose.yaml carries it inline as x-forwarder, in its `forwarder` config and its label, each held to this byte for byte — the file CI runs --self-check on. It holds no `$`, which compose would read as a variable from deploy/.env or the shell, so the copy compose runs is this file (review pass 1: `${X:-…}` steered the script and passed), and no `!`, which check 27 refuses in compose.tiers.yaml. */
@@ -6547,8 +6566,10 @@ const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
   "compose.yaml": {
     postgres: ["data"],
     migrate: ["data"],
-    server: { data: {}, egress: {}, mesh: { aliases: [tierMeshName("mcp", "stable")] } },
+    // The legacy route's server under a name of its own; /mcp is the MCP server built on the REST core's, on the mesh alone (SMD-2287).
+    server: { data: {}, egress: {}, mesh: { aliases: ["server.ob1.internal"] } },
     api: { data: {}, egress: {}, mesh: { aliases: [tierMeshName("api", "stable")] } },
+    mcp: { mesh: { aliases: [tierMeshName("mcp", "stable")] } },
     "board-sync": ["data", "egress"],
     extract: ["data", "egress"],
     consolidate: ["data", "egress"],
@@ -7249,7 +7270,7 @@ await checkPlugins();
 // so this file is the one to read.
 /** Each compose.yaml service's `restart`, exactly. */
 const RESTART_POLICIES: Record<string, string> = {
-  postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
+  postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", mcp: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
   "board-sync": "on-failure:3", extract: "on-failure:3", consolidate: "on-failure:3", sleep: "on-failure:3",
   ollama: "unless-stopped", "ollama-pull": "no", jev: "on-failure:3",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",

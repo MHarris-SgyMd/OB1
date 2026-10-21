@@ -117,10 +117,10 @@ x-otel-env: &otel-env
 # named volumes in SERVICE_KEYS, SERVICE_MOUNTS, SERVICE_BUILDS, CONFINEMENT
 # and COMPOSE_VOLUMES; the proxy itself is PROXY_SERVICE there (SMD-2685).
 #
-# A request's path reaches the server as it came (no prefix stripped): the
-# server answers POST at every path and /health under any prefix
-# (server-portable/index.ts's /health route, mcp-edge.ts's HEALTH_PATH), so
-# `/mcp` needs no setting there.
+# A request's path reaches the MCP server as it came (no prefix stripped):
+# the `mcp` service (mcp-server/, SMD-2287) answers POST at every path and
+# /health under any prefix (mcp-edge.ts's HEALTH_PATH), as `server`'s
+# index.ts does for the legacy route, so `/mcp` needs no setting there.
 # The routers, highest priority first, each on the one public entrypoint
 # (`web`): a router that names none is on every entrypoint, the ping one
 # included, and so would be any entrypoint added later:
@@ -144,7 +144,7 @@ x-otel-env: &otel-env
 #           (the proxy's dns_search);
 #   resource the MCP server's protected-resource document,
 #           /.well-known/oauth-protected-resource/mcp (RFC 9728), to the
-#           server, which serves it only while the stack is configured, the
+#           `mcp` service, which serves it only while the stack is configured, the
 #           request's Host is the origin's and the authorization server
 #           answers it on the mesh, and answers 404 otherwise (SMD-2382;
 #           server-portable/oauth-edge.ts). A server that is down is
@@ -171,7 +171,8 @@ x-otel-env: &otel-env
 #           Grafana (SMD-1849 PR 3a). Off by default: Grafana on this
 #           origin shares it with /auth, so a script running in a Grafana
 #           page could act on the authorization server's session;
-#   mcp     /mcp and everything under it — the endpoint clients are given;
+#   mcp     /mcp and everything under it — the endpoint clients are given —
+#           to the `mcp` service as mcp.ob1.internal (SMD-2287);
 #   tier-off every path that starts with /canary or /working, in any case
 #           and whatever follows: a bare 404 (`not-served`). A canary or a
 #           working tier is a brain of its own on its own port (SMD-2874;
@@ -187,7 +188,7 @@ x-otel-env: &otel-env
 #           left some character through (SMD-2294 review passes 2-4), and
 #           nothing this stack serves starts with either word;
 #   health  GET, HEAD and OPTIONS /health at the origin root, for a GET-only
-#           probe and a browser's CORS preflight;
+#           probe and a browser's CORS preflight, to the `mcp` service too;
 #   legacy  everything but /.well-known — what clients reach today at the root
 #           (`POST /?key=`, /worker-status, /jobs/<id>, and
 #           `GET /`, whose 405 an MCP SDK client takes as "no stream here";
@@ -196,7 +197,9 @@ x-otel-env: &otel-env
 #           breaks no configured client. Its window (SMD-2306): every answer
 #           carries a Deprecation header and a Link to the upgrade guide, and
 #           the server names each key still on it; it closes with v2.0.0,
-#           when SMD-2532 removes it and `/` is the proxy's 404 too.
+#           when SMD-2532 removes it and `/` is the proxy's 404 too. It
+#           alone still reaches `server`, server-portable/index.ts, as
+#           server.ob1.internal: the MCP server the stack had before SMD-2287.
 # No router matches /.well-known or anything under it but the auth router's
 # three and the resource router's one, so the proxy answers the rest 404
 # itself and the server never sees them: a claude.ai connector at
@@ -249,7 +252,7 @@ x-proxy-routes: &proxy-routes |
         priority: 40
         entryPoints: [web]
         middlewares: [not-legacy, auth-absent]
-        service: server
+        service: mcp
       oauth-fallback-off:
         rule: "Path(`/register`) || Path(`/authorize`) || Path(`/token`)"
         priority: 35
@@ -279,7 +282,7 @@ x-proxy-routes: &proxy-routes |
         priority: 30
         entryPoints: [web]
         middlewares: [not-legacy]
-        service: server
+        service: mcp
       tier-off:
         rule: "PathRegexp(`(?i)^/(canary|working)`)"
         priority: 25
@@ -291,7 +294,7 @@ x-proxy-routes: &proxy-routes |
         priority: 20
         entryPoints: [web]
         middlewares: [not-legacy]
-        service: server
+        service: mcp
       legacy:
         rule: "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))"
         priority: 1
@@ -329,10 +332,14 @@ x-proxy-routes: &proxy-routes |
           statusRewrites:
             "418": 404
     services:
-      server:
+      mcp:
         loadBalancer:
           servers:
             - url: "http://mcp.ob1.internal.:8000"
+      server:
+        loadBalancer:
+          servers:
+            - url: "http://server.ob1.internal.:8000"
       auth:
         loadBalancer:
           servers:
@@ -941,9 +948,10 @@ services:
     # providers (the stack's Ollama and Jev by name, a host or hosted one
     # outward) and n8n reaches it; and `mesh`, where it reaches the
     # authorization server's health check as auth.ob1.internal (SMD-2382) and
-    # answers the proxy as mcp.ob1.internal. The ADR has the MCP server on the
-    # mesh alone; it joins the other two while it embeds and writes itself,
-    # not through the REST core (SMD-2287). No dns_search here, unlike the
+    # answers the proxy's legacy route as server.ob1.internal. /mcp is the
+    # `mcp` service's below since SMD-2287 PR 5b, which is on the mesh alone,
+    # as the ADR has it: this one embeds and writes itself, not through the
+    # REST core, until it retires (PR 6). No dns_search here, unlike the
     # proxy: the probe's name is written rooted, which no search domain is
     # tried under, and an operator's model endpoint may be a short name their
     # resolver completes.
@@ -951,7 +959,7 @@ services:
       data: {}
       egress: {}
       mesh:
-        aliases: [mcp.ob1.internal]
+        aliases: [server.ob1.internal]
     logging: *logging
 
   # The REST core (SMD-2284): every operation the MCP tools expose, as JSON,
@@ -993,6 +1001,60 @@ services:
     # The image's own check, the same keyless GET of /health (SMD-1849), named
     # here too: a server image from before it POSTs to the MCP endpoint at /,
     # which the REST core answers 404 (NO_ROUTE).
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    logging: *logging
+
+  # The MCP server built on the REST core (SMD-2287): `/mcp`, `/health` and
+  # the protected-resource document through the proxy, which reaches it as
+  # mcp.ob1.internal on the mesh. The server's image run as
+  # `bun ../mcp-server/index.ts`, without the image's preflight: it reads no
+  # store and holds no key list. Each tool is a call on the REST core at
+  # api.ob1.internal, the caller's key beside this server's own
+  # forward-scope key, OB1_FORWARDER_KEY, whose hash MCP_ACCESS_KEYS holds and
+  # which the REST core refuses as a caller. On the mesh alone: no Postgres,
+  # no model provider, nothing outward. On a stack configured with the
+  # authorization server it trades each OAuth token there as the `mcp`
+  # client, OB1_AUTH_SECRET_MCP (SMD-2286). Its spans are open-brain-mcp's.
+  # Not the plugins' login password (plugin-env): it runs no plugin SQL, only
+  # their tools' schemas, which OB1_PLUGINS names.
+  mcp:
+    # The server's image, by the server's name, never pulled or built here,
+    # as the REST core's; the release overlay pins it to the release's.
+    image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
+    pull_policy: never
+    # Bun with auto-install off: the image's own packages are all it loads,
+    # as CI's image step holds by running it offline (SMD-2978).
+    entrypoint: ["bun", "--no-install"]
+    command: ["../mcp-server/index.ts"]
+    environment:
+      <<: *otel-env
+      # Required: without it the server stops at once (exit 2), and /mcp
+      # would answer the proxy's 502. deploy/canary.sh mints a canary's own.
+      OB1_FORWARDER_KEY: ${OB1_FORWARDER_KEY:?set OB1_FORWARDER_KEY in deploy/.env — the MCP server's forward-scope key, minted with server-portable/keygen.ts --name mcp-forwarder --scope forward, its hash in MCP_ACCESS_KEYS}
+      OB1_PLUGINS: ${OB1_PLUGINS:-}
+      OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:-}
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+      OB1_AUTH_SECRET_MCP: ${OB1_AUTH_SECRET_MCP:-}
+      OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
+    stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    # After the REST core, so `up mcp` brings it; not held for its health:
+    # while it is down a tool call is the MCP server's own 500 or 503, and
+    # liveness answers regardless.
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      mesh:
+        aliases: [mcp.ob1.internal]
+    # The image's check, a keyless GET of /health, named here as the REST
+    # core's is: podman builds the image in OCI form, which keeps no
+    # HEALTHCHECK (SMD-2287 PR 5a review). It asks the REST core nothing.
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"]
       interval: 30s
@@ -1123,13 +1185,16 @@ services:
     # the server's health: while the server is down or in preflight the proxy
     # answers 502, and it answers again when the server does. It also means
     # `up server` alone never starts the proxy: name both (deploy/README.md,
-    # "One origin"). The REST core too, so the documented `up -d --build
-    # server proxy forwarder` recreates it on the server's new image rather
-    # than leaving it on the old one (SMD-2284 review pass 1).
+    # "One origin"). The REST core and the MCP server built on it too, so
+    # the documented `up -d --build server proxy forwarder` recreates them on
+    # the server's new image rather than leaving them on the old one
+    # (SMD-2284 review pass 1; SMD-2287).
     depends_on:
       server:
         condition: service_started
       api:
+        condition: service_started
+      mcp:
         condition: service_started
     restart: unless-stopped
     logging: *logging
