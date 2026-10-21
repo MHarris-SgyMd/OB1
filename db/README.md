@@ -3423,6 +3423,20 @@ extraction, and the server group's `SELECT` on `ob1_config`), so the role needs
 every group `migrate.ts --grant` issues — the worker group gained `DELETE`
 on the snapshot for it (the grants table). test-live [31] drives it.
 
+It is an engine (SMD-2679, SMD-2304's shape): `run({ url, sql, input, reason,
+fingerprints, limit, gone, force, orphans, status, dryRun, writer })` is the
+CLI's run in-process, its refusals the CLI's own words and code before any
+connection (`fingerprints` the list the CLI splits from its commas), a
+caller's client used and never closed. `sweepOrphans(sql, { limit, dryRun,
+writer, onFound })` is `--orphans` alone on the caller's client — for the
+sleep scheduler's re-derive pass, a later PR of SMD-2679 — returning the
+thoughts read, those touched, the rows deleted, the calls refused as a value,
+and `windowed` when the lineage table holds more than the 10,001 rows the
+read takes (none found is then not a clean table). A dry run's call is a
+transaction of its own, so it holds on a pooled client or a reserved
+connection with no transaction of the caller's open (its rollback would end
+one a raw `BEGIN` opened); a transaction's handle is refused for one.
+
 ## Sleep: the passes while the brain is quiet (SMD-1794)
 
 `sleep.ts` runs extraction and consolidation while the brain is quiet, and
@@ -4983,15 +4997,15 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2959 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1461 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 893 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1463 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 895 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 57 assertions: the shards SHARDS lists in test-live.ts, each its own job
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 237 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
-bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts) import with no side effect, refuse through run() — no database
+bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts, sleep.ts, rebuild.ts) import with no side effect, refuse through run() — no database
 bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap, and the outage rules and probe, through worker-bootstrap.ts — no database
 bun test-weekly-digest.ts                   # the digest's ranking, chunking and its egress subject/gate — no database
 bun test-board-findings.ts                  # the findings poster's grouping, comment, marker, cap and egress subject, and what became of a finding posted (SMD-2682) — no database

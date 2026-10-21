@@ -52,6 +52,7 @@ import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
 import { MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
+import { sweepOrphans } from "./rebuild.ts";
 import type { PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
 import { decideKey, DECIDE_PROMPT, DECIDE_VERSION, PART_RULE, RECORD_RULE } from "../server-portable/consolidate-decide.ts";
@@ -10554,6 +10555,20 @@ if (want("31")) {
     `--status reads the census back: the marks, the stale proposal, the pools (${st.out.trim().split("\n").slice(0, 7).join(" / ").slice(0, 300)})`);
   // A raw delete of the windows leaves an orphan row: the sweep deletes it.
   await sql`DELETE FROM thought_chunks WHERE thought_id = ${newer.id}::uuid`;
+  // A dry sweep keeps the row: the CLI's, and sweepOrphans' on a pool of its
+  // own (SMD-2679). What sends its call through one transaction is held by
+  // review, not here: an idle pool hands sequential queries one connection.
+  const drySweep = await rebuildTs("--orphans", "--dry-run");
+  assert(drySweep.code === 0 && /dry run: each call runs and rolls back/.test(drySweep.out) && /deleted:\s+1 lineage row\(s\) over 1 thought\(s\) \(rolled back\)/.test(drySweep.out) && (await marksOf(newer.id)) === "chunks:live: edit,entities:live: edit,vector:live: edit",
+    `--orphans --dry-run reports the delete and keeps the row (exit ${drySweep.code}: ${drySweep.out.trim().split("\n").slice(0, 3).join(" / ")}; ${await marksOf(newer.id)})`);
+  const sweepPool = new SQL({ url: URL_!, max: 3 });
+  try {
+    const r = await sweepOrphans(sweepPool, { dryRun: true, writer: { out: () => {}, err: () => {} } });
+    assert(r.thoughts === 1 && r.deleted === 1 && r.refused === 0 && !r.windowed && (await marksOf(newer.id)) === "chunks:live: edit,entities:live: edit,vector:live: edit",
+      `…and sweepOrphans' dry run on a pool of three keeps it too, the window not reached (${JSON.stringify(r)}; ${await marksOf(newer.id)})`);
+  } finally {
+    await sweepPool.close();
+  }
   const sweep = await rebuildTs("--orphans");
   assert(sweep.code === 0 && /orphans:\s+1 thought\(s\)/.test(sweep.out) && /deleted:\s+1 lineage row\(s\) over 1 thought\(s\)/.test(sweep.out) && (await marksOf(newer.id)) === "entities:live: edit,vector:live: edit",
     `--orphans deletes the chunks row whose windows are gone and leaves the rest (exit ${sweep.code}: ${sweep.out.trim().split("\n").slice(0, 2).join(" / ")})`);
