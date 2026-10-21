@@ -1114,9 +1114,6 @@ function captureRefusal(r: Refusal): string {
         : "a `derived_from` id";
       return `Refused: ${where} name${r.named.length > 1 ? "" : "s"} no thought. Each entry must be an existing thought id (the ID: line of a search result).`;
     }
-    case "EMBEDDING_NOT_ATTACHED":
-      return `Thought saved (id ${r.id}) but its embedding failed to attach: ` +
-        `${r.detail}. It will NOT appear in semantic search until re-captured.`;
     default: return unknownRefusal(r);
   }
 }

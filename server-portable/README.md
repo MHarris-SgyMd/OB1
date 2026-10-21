@@ -826,8 +826,7 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   `SUPERSEDES_UNJUDGED`; a capture-only key's `supersedes` it cannot prove its
   own is dropped, not refused, SMD-2473, and a thought another key or board-sync
   has since taken, or that something already supersedes, is not its own, a
-  pointer written before the taking lapsing, migration 082, SMD-2638), and
-  `EMBEDDING_NOT_ATTACHED` (saved without its vector; retryable, with the `id`). An
+  pointer written before the taking lapsing, migration 082, SMD-2638). An
   edit's and a delete's: `NOT_FOUND`, `REFUSED_NOTHING_TO_UPDATE`,
   `REFUSED_SUPERSEDES_SHAPE`, `REFUSED_STALE_READ` (with the row's
   `currentUpdatedAt`, to retry from without a re-read), `REFUSED_DUPLICATE_CONTENT`,
@@ -926,10 +925,7 @@ stripped (`X-Forwarded-Prefix`).
   store's or the egress gate's — so the MCP server says it as it always has
   (SMD-2287). It is the refusal as the operation made it for that caller, the
   existence-oracle rule applied: what `render.ts` has always been handed, and
-  bounds into its text. A
-  save whose vector did not attach (the retired PostgREST store's two-step; no producer since SMD-3152, SMD-3153 removes it) is a 201 with
-  `embeddingAttached: false`, not a refusal, so a client does not capture again
-  (forwarded, its `refusal` beside it). A refused input is a 400 `REFUSED_INPUT`
+  bounds into its text. A refused input is a 400 `REFUSED_INPUT`
   naming each field and zod's reason. A fault is a 500 `FAILED` with its message, as the MCP tool's text
   gives it, and no `retryable` until SMD-2461 — but capture's is a 503
   `STORE_UNAVAILABLE`, retryable, the verdict the session hook keys on. Every 503

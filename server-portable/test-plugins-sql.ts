@@ -459,7 +459,7 @@ console.log("\n[6b] The example's webhook through the REST core: a signed delive
     assert(failing.status === 202 && (await rowOf(failingId)) === undefined && JSON.stringify(deferredFaults) === JSON.stringify([`delivery ${failingId} (its id given back): embedder down`]),
       `a deferred capture that throws: answered 202 all the same, its claim given back, one fault naming the delivery (${failing.status}, ${JSON.stringify(deferredFaults)})`);
     const refusedId = `evt-${RUN}-later-refused`;
-    const refused = await deferredVia(refusedId, async () => coreRefuse({ code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: thought, detail: "d" } as never));
+    const refused = await deferredVia(refusedId, async () => coreRefuse({ code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "registry_away" }));
     await Promise.all(tracked);
     assert(refused.status === 202 && (await rowOf(refusedId)) === undefined && deferredFaults.at(-1) === `delivery ${refusedId} (its id given back): no thought captured`,
       `a deferred capture the core refuses: its claim given back and a fault naming the delivery, not lost without a word (${JSON.stringify(deferredFaults.at(-1))})`);
