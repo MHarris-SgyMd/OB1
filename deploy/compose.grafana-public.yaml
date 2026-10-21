@@ -1,8 +1,7 @@
 # The observability profile's Grafana at the proxy's /grafana (SMD-1849 PR 3a):
 # an overlay, as compose.api-public.yaml is for /api. The base route table
-# answers /grafana with a bare 404 (compose.yaml's grafana-off), so nothing
-# under it falls to the legacy route and the MCP server; this file adds a
-# router of higher priority that takes /grafana and everything under it to
+# answers /grafana with a bare 404 (compose.yaml's grafana-off); this file
+# adds a router of higher priority that takes /grafana and everything under it to
 # Grafana on the mesh as lgtm.ob1.internal, path kept (Grafana serves from that
 # sub-path).
 #
