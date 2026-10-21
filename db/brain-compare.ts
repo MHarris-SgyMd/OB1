@@ -399,7 +399,7 @@ export type ReplayArm = "keyword" | "hybrid" | "current";
 
 /**
  * The ids a brain returns for one query on one arm, in rank order (parsed from
- * the `ID:` lines). A search the brain answered by exact literals alone,
+ * the `ID:` lines). A search the brain answered by exact matches alone,
  * because its embedding provider did not answer (its typed `vectorFailed`,
  * SMD-2891), is that brain failing the search, as it was when such a search
  * was an error: its ids are no ranking to compare, and two brains whose
@@ -409,7 +409,7 @@ export async function searchIds(ep: BrainEndpoint, arm: ReplayArm, query: string
   const tool = arm === "keyword" ? "search_thoughts_keyword" : "search_thoughts";
   const { text, structured } = await callToolReply(ep, tool, arm === "current" ? { query, prefer_current: true } : { query });
   const failed = structured?.vectorFailed;
-  if (failed !== undefined && failed !== null) throw new Error(`${ep.label}: ${tool} was answered by exact literals alone — the brain's embedding provider did not answer (${String(failed)})`);
+  if (failed !== undefined && failed !== null) throw new Error(`${ep.label}: ${tool} was answered by exact matches alone — the brain's embedding provider did not answer (${String(failed)})`);
   return parseResultIds(text);
 }
 
@@ -1048,7 +1048,7 @@ export function replayGateLines(r: NonNullable<Comparison["retrieval"]>, labels:
   const window = since !== undefined ? `since ${since} (--since)` : `in the most recent page of ${labels.stable}'s log`;
   // Searches are counted once per (query, arm); one logged before migration 045 has no arm to replay on,
   // and one answered by exact literals while the provider was down (arm literal, 104) none a replay can take.
-  const apart = [noArm ? `${noArm} more logged with no arm, before migration 045` : "", literal ? `${literal} more answered by exact literals alone while the embedding provider was down (arm literal)` : ""].filter(Boolean);
+  const apart = [noArm ? `${noArm} more logged with no arm, before migration 045` : "", literal ? `${literal} more answered by exact matches alone while the embedding provider was down (arm literal)` : ""].filter(Boolean);
   const lines = [`replayed ${ran.length} of ${r.queries} distinct logged searches ${window} (${skipped} skipped${oneSided ? `, ${oneSided} failed on one brain` : ""}${apart.length ? `; ${apart.join(", and ")}, not replayed` : ""})`];
   const moved = ran.filter((row) => row.changed).length;
   if (verdict === "failed") {
@@ -1059,7 +1059,7 @@ export function replayGateLines(r: NonNullable<Comparison["retrieval"]>, labels:
   } else if (verdict === "empty") {
     lines.push(r.queries === 0
       ? noArm || literal
-        ? `nothing to compare: every search in the window was ${[noArm ? "logged before migration 045, with no arm to replay it on" : "", literal ? "answered by exact literals alone while the embedding provider was down" : ""].filter(Boolean).join(", or ")}.`
+        ? `nothing to compare: every search in the window was ${[noArm ? "logged before migration 045, with no arm to replay it on" : "", literal ? "answered by exact matches alone while the embedding provider was down" : ""].filter(Boolean).join(", or ")}.`
         : `nothing to compare: ${labels.stable} logged no searches in the window. A brain logs them only with OB1_QUERY_LOG=on${since !== undefined ? ", and an earlier --since widens the window" : ""}.`
       : "nothing to compare: both brains failed every search in the window.");
   } else if (verdict === "unmoved") {

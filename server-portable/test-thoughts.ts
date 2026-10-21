@@ -1047,7 +1047,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   const asked: Record<string, unknown>[] = [];
   const searchStore = {
     hybridThoughts: async (o: Record<string, unknown>) => { asked.push(o); return []; },
-    literalFacts: async (q: string) => { asked.push({ literalFacts: q }); return [{ needle: "X-2891", common: false }, { needle: "Y-2891", common: true }]; },
+    literalFacts: async (q: string) => { asked.push({ literalFacts: q }); return { literals: [{ needle: "X-2891", common: false }, { needle: "Y-2891", common: true }], textable: false }; },
   };
   const sctx = createContext({
     env: () => ({ OB1_LLM_BASE_URL: `http://user:hunter2@127.0.0.1:${closedNow()}/v1`, OB1_LLM_LOCAL: "1" }),
@@ -1065,7 +1065,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
     console.error = realError;
   }
   // The server's line: which tool, the endpoint masked, what happened — never the query (review pass 2).
-  assert(errLines.length === 1 && /^search_thoughts: the embedding provider at http:\/\/\*\*\*@127\.0\.0\.1:\d+\/v1 was unavailable: the connection was refused; answered by exact literals alone$/.test(errLines[0]) && !errLines[0].includes("X-2891"),
+  assert(errLines.length === 1 && /^search_thoughts: the embedding provider at http:\/\/\*\*\*@127\.0\.0\.1:\d+\/v1 was unavailable: the connection was refused; answered by exact matches alone$/.test(errLines[0]) && !errLines[0].includes("X-2891"),
     `the server says so once on stderr, the endpoint masked and the query left out (${JSON.stringify(errLines)})`);
   const sv = sr.ok ? sr.value : undefined;
   assert(sv?.vectorFailed?.reason === "provider_unreachable" && sv.vectorFailed.base.includes("***@") && !sv.vectorFailed.base.includes("hunter2"),
@@ -1077,7 +1077,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   const asked2: Record<string, unknown>[] = [];
   const textStore = {
     hybridThoughts: async (o: Record<string, unknown>) => { asked2.push({ hybrid: o.embedding }); return []; },
-    literalFacts: async () => { asked2.push({ literalFacts: true }); return []; },
+    literalFacts: async () => { asked2.push({ literalFacts: true }); return { literals: [], textable: true }; },
     keywordThoughts: async (o: Record<string, unknown>) => { asked2.push({ keyword: o.query, limit: o.limit, filter: o.filter }); return [{ id: "00000000-0000-4000-8000-0000000000c1", content: "alpha words", metadata: {}, created_at: "2026-10-21T00:00:00.000Z", occurrences: 1, totalCount: 1 }]; },
 
     supersededAmong: async () => ({}),

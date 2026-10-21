@@ -1363,7 +1363,7 @@ export type QuerySearchLog = {
   filter: Record<string, unknown>;
   resultIds: string[];
   resultScores: (number | null)[];
-  /** Which retrieval arm served the row: 'hybrid', 'keyword' (SMD-1490), 'current' — search_thoughts with prefer_current (059, SMD-2255) — or 'literal': search or search_thoughts answered by the exact-literal arm alone while the provider could not embed the query (104, SMD-2891). */
+  /** Which retrieval arm served the row: 'hybrid', 'keyword' (SMD-1490), 'current' — search_thoughts with prefer_current (059, SMD-2255) — or 'literal': search or search_thoughts answered by its exact matches alone — its literals, then the query as one text — while the provider could not embed the query (104, SMD-2891). */
   arm?: string;
   /** The tier the writing server runs as: stable|canary|working, else absent (SMD-1806). */
   tier?: string;
@@ -1421,9 +1421,12 @@ export interface ThoughtStore {
    * matched an unfiltered search, so each is absent or too common there. Never
    * a count (review pass 2: a count read the whole match set, seconds per
    * needle), and never a bare first-row probe (review pass 3: it plans a
-   * sequential scan, the whole table for an absent needle).
+   * sequential scan, the whole table for an absent needle). `textable`: whether
+   * the whole query may be matched as one text — at least three characters and
+   * a word the English parser keeps, 017's rule for a quoted span, so `the`,
+   * `of the` and `AI` are not substrings of nearly every thought (review pass 5).
    */
-  literalFacts(query: string): Promise<{ needle: string; common: boolean }[]>;
+  literalFacts(query: string): Promise<{ literals: { needle: string; common: boolean }[]; textable: boolean }>;
 
   /**
    * The two above fused (migration 017): rank on the vector arm, presence per

@@ -3702,12 +3702,14 @@ console.log("\n[22] A hit naming a ticket that moved since it was written says s
   }
 }
 
-console.log("\n[23] A search the provider does not answer for is answered by the exact-literal arm alone, said so and logged as arm literal — search_thoughts with and without prefer_current and min_trust, and the compat search; a query with no literal finds nothing and says why; a misconfigured provider still fails it; the provider back, nothing changed (SMD-2891)");
+console.log("\n[23] A search the provider does not answer for is answered by the exact-literal arm alone, said so and logged as arm literal — search_thoughts with and without prefer_current and min_trust, and the compat search; a query whose literals match nothing is matched as one text, and an empty answer says why; the compat search with nothing found is refused; a misconfigured provider still fails it; the provider back, nothing changed (SMD-2891)");
 {
   const sql = new SQL({ url: URL_, max: 1 });
   const idIn = (s: string) => /id ([0-9a-f-]{36})/.exec(s)?.[1];
   const lastArm = async (tool: string, query: string) => (await sql`SELECT arm FROM query_log WHERE kind = 'search' AND tool = ${tool} AND query = ${query} ORDER BY logged_at DESC LIMIT 1`)[0]?.arm as string | undefined;
   const marked = /Semantic search is unavailable — the embedding provider at https:\/\/stub\.invalid\/v1 failed: the connection was refused\. So the query was matched only by its identifiers and quoted spans, exactly — not by meaning\. search_thoughts_keyword finds any word or phrase a thought contains; semantic search returns once the provider answers\./;
+  // Its literals matched nothing, so the whole query was matched as one text too (review pass 5).
+  const asText = /Semantic search is unavailable — the embedding provider at https:\/\/stub\.invalid\/v1 failed: the connection was refused\. So the query was matched by its identifiers and quoted spans, if any, and then as one text, exactly \(case aside\) — not by meaning\./;
   stubDown = null;
   const named = idIn(await call("capture_thought", { content: "[23] DOWN-2891 names the outage arm" }))!;
   const plain = idIn(await call("capture_thought", { content: "[23] alpha words with no identifier in them" }))!;
@@ -3740,18 +3742,17 @@ console.log("\n[23] A search the provider does not answer for is answered by the
         && (current.sc?.window as { exact?: boolean } | null)?.exact === true,
       `prefer_current: the same through 059's function — its window read, the hit, the mark, arm literal (${current.text.slice(0, 120)} ${JSON.stringify(current.sc?.window)})`);
     const currentFloor = await result("search_thoughts", { query: q + " now at a floor", prefer_current: true, min_trust: "ingested" });
-    assert(!currentFloor.isError && marked.test(currentFloor.text) && ((currentFloor.sc?.hits ?? []) as unknown[]).length === 0 && /Held only by thoughts outside/.test(currentFloor.text) && !/Too common/.test(currentFloor.text),
+    assert(!currentFloor.isError && asText.test(currentFloor.text) && ((currentFloor.sc?.hits ?? []) as unknown[]).length === 0 && /Held only by thoughts outside/.test(currentFloor.text) && !/Too common/.test(currentFloor.text),
       `prefer_current with min_trust: 075's eight-argument current form, no vector, the floor holding (${currentFloor.text.slice(0, 160)})`);
     // min_trust through 075's form: the floor holds without a vector too — the row
     // the e2e key wrote has no trust recorded, below every word, so it is kept out.
     const floor = await result("search_thoughts", { query: q + " at a floor", min_trust: "ingested" });
-    assert(!floor.isError && marked.test(floor.text) && ((floor.sc?.hits ?? []) as unknown[]).length === 0 && (await lastArm("search_thoughts", q + " at a floor")) === undefined,
+    assert(!floor.isError && asText.test(floor.text) && ((floor.sc?.hits ?? []) as unknown[]).length === 0 && (await lastArm("search_thoughts", q + " at a floor")) === undefined,
       `min_trust: answered and marked through 075's form, the floor keeping out the row with no trust, and not logged, as a min_trust search never is (${floor.text.slice(0, 160)})`);
     assert(/Held only by thoughts outside this search's filter, said_by, actor or min_trust: DOWN-2891 \(in 1 thought\)\./.test(floor.text) && !/Too common|No thought contains/.test(floor.text),
       `…and says the literal is held, by thoughts outside the floor — not absent, not too common (review pass 2) (${floor.text.replace(/\n+/g, " / ").slice(-220)})`);
 
     // A query with no literal is matched as one text, as the keyword arm matches it (review pass 4, the maintainer's call).
-    const asText = /Semantic search is unavailable — the embedding provider at https:\/\/stub\.invalid\/v1 failed: the connection was refused\. So the query, which holds no identifier or quoted span, was matched as one text, exactly \(case aside\) — not by meaning\./;
     const words = await result("search_thoughts", { query: "Alpha Words" });
     assert(!words.isError && asText.test(words.text) && ((words.sc?.hits ?? []) as { id: string; similarity: number | null }[]).some((h) => h.id === plain && h.similarity === null) && /Contains: Alpha Words/.test(words.text) && words.sc?.vectorFailed === "provider_unreachable"
         && (await lastArm("search_thoughts", "Alpha Words")) === "literal",
@@ -3762,12 +3763,30 @@ console.log("\n[23] A search the provider does not answer for is answered by the
     const wordsFloor = await result("search_thoughts", { query: "alpha words", min_trust: "ingested" });
     assert(!wordsFloor.isError && /Held only by thoughts outside this search's filter, said_by, actor or min_trust: alpha words \(in 1 thought\)\./.test(wordsFloor.text),
       `…and one held only outside the floor, said so (${wordsFloor.text.replace(/\n+/g, " / ").slice(-200)})`);
+    // …and outside a filter, which the text match keeps as the literal arm does (review pass 5: dropping it passed every suite).
+    const wordsFilter = await result("search_thoughts", { query: "alpha words", filter: { type: "no-such-type" } });
+    assert(!wordsFilter.isError && ((wordsFilter.sc?.hits ?? []) as unknown[]).length === 0 && /Held only by thoughts outside this search's filter, said_by, actor or min_trust: alpha words \(in 1 thought\)\./.test(wordsFilter.text),
+      `a text match keeps the filter: nothing in its scope, the one holder outside it said (${wordsFilter.text.replace(/\n+/g, " / ").slice(-200)})`);
+    // prefer_current ranks no text match, and says so (review pass 5).
+    const wordsCurrent = await result("search_thoughts", { query: "alpha words", prefer_current: true });
+    assert(!wordsCurrent.isError && /prefer_current does not rank a text match: these are in its order, a superseded one labelled\./.test(wordsCurrent.text), `prefer_current over a text match: said not to rank it (${wordsCurrent.text.slice(0, 300)})`);
+    // A query too short, or only common words, matches nothing as text (review pass 5: `the` counted every thought).
+    const tooThin = await result("search_thoughts", { query: "the" });
+    assert(!tooThin.isError && /So nothing could be matched: the query holds no identifier or quoted span, and is too short or only common words to match as one text\./.test(tooThin.text) && ((tooThin.sc?.hits ?? []) as unknown[]).length === 0,
+      `"the": nothing matched, and why (${tooThin.text.slice(0, 260)})`);
+    const tooShort = await result("search_thoughts", { query: "zq" });
+    assert(!tooShort.isError && /So nothing could be matched: the query holds no identifier or quoted span, and is too short or only common words to match as one text\./.test(tooShort.text),
+      `"zq", a word under three characters: nothing matched, and why (${tooShort.text.slice(0, 260)})`);
+    // A too-common identifier alone is matched as one text, the count past the limit said (review pass 5: it was refused).
+    const commonAlone = await result("search_thoughts", { query: "COMMON-2891" });
+    assert(!commonAlone.isError && asText.test(commonAlone.text) && ((commonAlone.sc?.hits ?? []) as unknown[]).length === 10 && /It is in 120 thoughts; these are the first 10 — raise limit or page with search_thoughts_keyword\./.test(commonAlone.text),
+      `a too-common identifier alone: its first ten holders as text, the 120 said (${commonAlone.text.slice(0, 400)})`);
     // A literal too common to match exactly is said to be that, not absent (review pass 1: the probe has no row for it without a vector).
     const common = await result("search_thoughts", { query: "what about COMMON-2891" });
-    assert(!common.isError && marked.test(common.text) && /Too common to match exactly \(more thoughts contain it than one keyword page returns\): COMMON-2891 — use search_thoughts_keyword to page through them\./.test(common.text) && !/No thought contains|Held only|has no identifier/.test(common.text) && JSON.stringify(common.sc?.literalOnly) === "null",
+    assert(!common.isError && asText.test(common.text) && /Too common to match exactly \(more thoughts contain it than one keyword page returns\): COMMON-2891 — use search_thoughts_keyword to page through them\./.test(common.text) && !/No thought contains|Held only|has no identifier/.test(common.text) && JSON.stringify(common.sc?.literalOnly) === "null",
       `a too-common literal: nothing found, said too common, not absent (${common.text.replace(/\n+/g, " / ").slice(0, 400)})`);
     const absent = await result("search_thoughts", { query: "what about NOPE-28910" });
-    assert(!absent.isError && marked.test(absent.text) && /No thought contains: NOPE-28910\./.test(absent.text) && !/Too common/.test(absent.text),
+    assert(!absent.isError && asText.test(absent.text) && /No thought contains: NOPE-28910\./.test(absent.text) && !/Too common/.test(absent.text),
       `an absent literal: said absent, by name (${absent.text.replace(/\n+/g, " / ").slice(0, 300)})`);
     const decoy = await result("search_thoughts", { query: "what about ZQ_DECOY-9 and 50%_OFF-9 and X\\Y_2" });
     assert(!decoy.isError && /No thought contains: ZQ_DECOY-9, 50%_OFF-9\./.test(decoy.text) && /Too common to match exactly .*: X\\Y_2 — /.test(decoy.text),
@@ -3784,13 +3803,16 @@ console.log("\n[23] A search the provider does not answer for is answered by the
     // Nothing found is refused, as the outage was before (review pass 4, the maintainer's call): an empty list reads as
     // "nothing stored". Lower case: the probe folds case as the keyword arm does (review pass 3: LIKE passed every suite).
     const refusedAs = async (query: string) => { const r = await result("search", { query }); return { r, text: r.text, sc: r.sc ?? {} }; };
-    const [cCommon, cAbsent, cSentence] = [await refusedAs("common-2891"), await refusedAs("NOPE-28910"), await refusedAs("the meaning of all this")];
-    assert([cCommon, cAbsent, cSentence].every((c) => c.r.isError && c.sc.code === "EMBEDDING_PROVIDER_UNAVAILABLE" && c.sc.retryable === true && c.sc.reason === "provider_unreachable" && /^Found nothing\. Semantic search is unavailable — the embedding provider at https:\/\/stub\.invalid\/v1 failed: the connection was refused\./.test(c.text))
-        && cCommon.sc.matched === "literals" && /Too common to match exactly .*: common-2891 — the brain's search_thoughts_keyword tool pages through them\.$/.test(cCommon.text)
-        && /No thought contains: NOPE-28910\.$/.test(cAbsent.text) && cSentence.sc.matched === "text" && /No thought contains: the meaning of all this\.$/.test(cSentence.text),
-      `search's empty answers: refused, retryable, naming the endpoint and what was matched — too common, absent, a sentence held by none (${[cCommon, cAbsent, cSentence].map((c) => c.text.slice(-80)).join(" | ")})`);
+    const [cCommon, cAbsent, cSentence, cThin] = [await refusedAs("what about common-2891"), await refusedAs("NOPE-28910"), await refusedAs("the meaning of all this"), await refusedAs("of the")];
+    assert([cCommon, cAbsent, cSentence, cThin].every((c) => c.r.isError && c.sc.code === "EMBEDDING_PROVIDER_UNAVAILABLE" && c.sc.retryable === true && c.sc.reason === "provider_unreachable" && /^Found nothing\. Semantic search is unavailable — the embedding provider at https:\/\/stub\.invalid\/v1 failed: the connection was refused\./.test(c.text))
+        && cCommon.sc.matched === "text" && /Too common to match exactly .*: common-2891 — the brain's search_thoughts_keyword tool pages through them\.$/.test(cCommon.text)
+        && /No thought contains: NOPE-28910\.$/.test(cAbsent.text) && cSentence.sc.matched === "text" && /No thought contains: the meaning of all this\.$/.test(cSentence.text)
+        && cThin.sc.matched === "none" && /nothing could be matched/.test(cThin.text),
+      `search's empty answers: refused, retryable, naming the endpoint and what was matched — too common, absent, a sentence held by none, stopwords (${[cCommon, cAbsent, cSentence, cThin].map((c) => c.text.slice(-80)).join(" | ")})`);
+    const cAlone = await result("search", { query: "common-2891" });
+    assert(!cAlone.isError && ((cAlone.sc?.results ?? []) as unknown[]).length === 10, `search for a too-common identifier alone: its holders as text, not refused (${cAlone.text.slice(0, 120)})`);
     const cWords = await result("search", { query: "alpha words" });
-    assert(!cWords.isError && ((cWords.sc?.results ?? []) as { id: string; title: string }[]).some((x) => x.id === plain && x.title.startsWith("[exact match — semantic search unavailable] ")) && /was matched as one text/.test(String(cWords.sc?.note)),
+    assert(!cWords.isError && ((cWords.sc?.results ?? []) as { id: string; title: string }[]).some((x) => x.id === plain && x.title.startsWith("[exact match — semantic search unavailable] ")) && /and then as one text/.test(String(cWords.sc?.note)),
       `search with plain words: the thought holding them as one text, marked (${cWords.text.slice(0, 200)})`);
 
     // A 503 is an outage too; a 400 says the request is wrong, so the search fails as before.

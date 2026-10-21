@@ -556,11 +556,13 @@ function providerUnavailable(r: Extract<Refusal, { code: "EMBEDDING_PROVIDER_UNA
  * `search`'s caller may not have, so it is named there as the brain's.
  */
 export function literalOnlyNote(f: Pick<QueryVectorFailed, "base" | "detail" | "matched">, tool: "search" | "search_thoughts"): string {
-  // The query's literals, or — holding none — the query as one text (review pass 4).
+  // Its literals; then, those matching nothing, the query as one text; or nothing could be (review passes 4 and 5).
   const how = f.matched === "text"
-    ? "the query, which holds no identifier or quoted span, was matched as one text, exactly (case aside)"
-    : "the query was matched only by its identifiers and quoted spans, exactly";
-  return `Semantic search is unavailable — the embedding provider at ${f.base} failed: ${f.detail}. So ${how} — not by meaning. ` +
+    ? "the query was matched by its identifiers and quoted spans, if any, and then as one text, exactly (case aside) — not by meaning"
+    : f.matched === "none"
+      ? "nothing could be matched: the query holds no identifier or quoted span, and is too short or only common words to match as one text"
+      : "the query was matched only by its identifiers and quoted spans, exactly — not by meaning";
+  return `Semantic search is unavailable — the embedding provider at ${f.base} failed: ${f.detail}. So ${how}. ` +
     `${tool === "search" ? "The brain's search_thoughts_keyword tool" : "search_thoughts_keyword"} finds any word or phrase a thought contains; semantic search returns once the provider answers.`;
 }
 
@@ -658,7 +660,11 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     const absent = head.needles.filter((n, i) => head.needleCounts[i] === 0);
     const truncated = head.needles.filter((n, i) => head.needleCounts[i] > 0 && !matchedAny.has(n));
     const notes: string[] = literal ? [literal] : [];
+    // A text match (review pass 5): no ranking for prefer_current to demote in, and a count past the limit said, as a literal's is.
+    const asText = vectorFailed?.matched === "text";
     if (head.needles.length) notes.push(`Searched exactly for: ${head.needles.join(", ")}.`);
+    if (asText && head.needleCounts[0] > data.length) notes.push(`It is in ${head.needleCounts[0]} thoughts; these are the first ${data.length} — raise limit or page with search_thoughts_keyword.`);
+    if (asText && v.preferCurrent) notes.push("prefer_current does not rank a text match: these are in its order, a superseded one labelled.");
     if (absent.length) notes.push(`No thought contains: ${absent.join(", ")}.`);
     if (truncated.length) notes.push(`Outside the top ${data.length}${v.preferCurrent ? " (or demoted past it)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")} — raise limit or use search_thoughts_keyword.`);
     if (head.commonNeedles.length) notes.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${head.commonNeedles.join(", ")}.`);

@@ -59,7 +59,7 @@ interface FakeConfig {
   hits: Record<string, string[]>;
   /** queries this brain refuses (an egress-gated embedding) — the search tool returns isError. */
   refuse?: string[];
-  /** queries this brain answers by exact literals alone, its embedding provider down (SMD-2891) — the reply carries `vectorFailed`. */
+  /** queries this brain answers by exact matches alone, its embedding provider down (SMD-2891) — the reply carries `vectorFailed`. */
   literal?: string[];
   /** the brain's thought-id set for list_thought_ids; omit to make the tool absent (a brain older than SMD-2244). */
   corpus?: { ids: string[]; digest?: string | null; pageCap?: number; fail?: string; failAfter?: boolean; badShape?: boolean; stuckCursor?: boolean; fakeTotal?: number };
@@ -952,23 +952,23 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   ok(noArmSome.code === 0 && noArmSome.out.includes("replayed 1 of 1 distinct logged searches") && noArmSome.out.includes("1 more logged with no arm"), `…and beside a replayed one, counts it (${noArmSome.code})`);
   // Searches answered by exact literals while the provider was down (arm literal, 104) are counted apart too (SMD-2891).
   const literalOnly = await gate({ log: logged(["q", "literal"], ["q", "literal"], ["r", null]) }, {});
-  ok(literalOnly.code === 3 && literalOnly.out.includes("(0 skipped; 1 more logged with no arm, before migration 045, and 1 more answered by exact literals alone while the embedding provider was down (arm literal), not replayed)")
-      && literalOnly.out.includes("nothing to compare: every search in the window was logged before migration 045, with no arm to replay it on, or answered by exact literals alone while the embedding provider was down."),
+  ok(literalOnly.code === 3 && literalOnly.out.includes("(0 skipped; 1 more logged with no arm, before migration 045, and 1 more answered by exact matches alone while the embedding provider was down (arm literal), not replayed)")
+      && literalOnly.out.includes("nothing to compare: every search in the window was logged before migration 045, with no arm to replay it on, or answered by exact matches alone while the embedding provider was down."),
     `--diff over a log of literal and pre-045 rows counts each, distinct, and says why nothing was compared (${literalOnly.out.split("\n").slice(-2).join(" / ")})`);
   const literalSome = await gate({ log: logged(["q", "literal"], ["r", "keyword"]), hits: { r: [uid(2)] } }, { hits: { r: [uid(2)] } });
-  ok(literalSome.code === 0 && literalSome.out.includes("replayed 1 of 1 distinct logged searches") && literalSome.out.includes("; 1 more answered by exact literals alone while the embedding provider was down (arm literal), not replayed)"), `…and beside a replayed one, counts it (${literalSome.code})`);
+  ok(literalSome.code === 0 && literalSome.out.includes("replayed 1 of 1 distinct logged searches") && literalSome.out.includes("; 1 more answered by exact matches alone while the embedding provider was down (arm literal), not replayed)"), `…and beside a replayed one, counts it (${literalSome.code})`);
   // A log of literal rows alone: nothing to compare, and the reason is the outage, not an empty log (review pass 1: a mutant dropping it survived beside a no-arm row).
   const literalAlone = await gate({ log: logged(["q", "literal"]) }, {});
-  ok(literalAlone.code === 3 && literalAlone.out.includes("nothing to compare: every search in the window was answered by exact literals alone while the embedding provider was down.") && !/nothing to compare: \S+ logged no searches/.test(literalAlone.out),
+  ok(literalAlone.code === 3 && literalAlone.out.includes("nothing to compare: every search in the window was answered by exact matches alone while the embedding provider was down.") && !/nothing to compare: \S+ logged no searches/.test(literalAlone.out),
     `--diff over a log of literal rows alone says why nothing was compared (${literalAlone.code}: ${literalAlone.out.replace(/\n/g, " / ").slice(-400)})`);
   // A query logged literal once and hybrid once is replayed, not counted apart too (review pass 1).
   const both = await gate({ log: logged(["q", "literal"], ["q", "hybrid"]), hits: { q: [uid(2)] } }, { hits: { q: [uid(2)] } });
   ok(both.code === 0 && both.out.includes("replayed 1 of 1 distinct logged searches") && !both.out.includes("answered by exact literals"), `a query replayed on its hybrid row is not also counted as a literal one (${both.out.split("\n").slice(-2).join(" / ")})`);
-  // A replay a brain answers by exact literals alone — its provider down now — is that brain failing the search, not a ranking (review pass 1: both down read as unmoved, exit 0).
+  // A replay a brain answers by exact matches alone — its provider down now — is that brain failing the search, not a ranking (review pass 1: both down read as unmoved, exit 0).
   const bothDown = await gate({ log: logged(["q", "hybrid"]), hits: { q: [uid(2)] }, literal: ["q"] }, { hits: { q: [uid(2)] }, literal: ["q"] });
   ok(bothDown.code === 3 && bothDown.out.includes("nothing to compare: both brains failed every search in the window."), `both brains answering by literals alone: nothing compared, exit 3, not a pass (${bothDown.code}: ${bothDown.out.split("\n").slice(-1)})`);
   const canaryDown = await gate({ log: logged(["q", "hybrid"]), hits: { q: [uid(2)] } }, { hits: { q: [uid(2)] }, literal: ["q"] });
-  ok(canaryDown.code === 1 && /failed 1 that .* answered/.test(canaryDown.out) && canaryDown.out.includes("answered by exact literals alone"), `the canary alone answering by literals: a failure on its side, exit 1, saying why (${canaryDown.code}: ${canaryDown.out.split("\n").filter((l) => /literals|failed/.test(l)).join(" / ").slice(0, 300)})`);
+  ok(canaryDown.code === 1 && /failed 1 that .* answered/.test(canaryDown.out) && canaryDown.out.includes("answered by exact matches alone"), `the canary alone answering by literals: a failure on its side, exit 1, saying why (${canaryDown.code}: ${canaryDown.out.split("\n").filter((l) => /literals|failed/.test(l)).join(" / ").slice(0, 300)})`);
   // The servers frame tools/call as SSE, and a current-arm row replays through search_thoughts too (review pass 2: both survived as mutants).
   const sseCurrent = await gate({ log: logged(["q", "current"]), hits: { "q#current": [uid(2)] }, literal: ["q"], sse: true }, { hits: { "q#current": [uid(2)] }, literal: ["q"], sse: true });
   ok(sseCurrent.code === 3 && sseCurrent.out.includes("nothing to compare: both brains failed every search in the window."), `an SSE-framed literal answer on a current-arm replay is a failed search too (${sseCurrent.code})`);

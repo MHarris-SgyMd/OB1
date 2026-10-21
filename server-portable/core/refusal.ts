@@ -25,7 +25,7 @@ export type Refusal =
   | { code: "REFUSED_CURSOR"; retryable: false; value: string }       // list_thought_ids' `after` is not a thought id
   // The compat search found nothing while its query's embedding provider did not answer (SMD-2891): what was
   // matched without a vector (the query's literals, or with none the query as one text) and why nothing came of it.
-  | { code: "EMBEDDING_PROVIDER_UNAVAILABLE"; retryable: true; reason: string; detail: string; base: string; matched: "literals" | "text"; needles: string[]; commonNeedles: string[] }
+  | { code: "EMBEDDING_PROVIDER_UNAVAILABLE"; retryable: true; reason: string; detail: string; base: string; matched: "literals" | "text" | "none"; needles: string[]; commonNeedles: string[] }
   // capture_thought's shapes, refused before any model call (032, SMD-2014).
   | { code: "REFUSED_SUPERSEDES_SHAPE"; retryable: false; value: string; orNull: boolean } // `supersedes` is not a thought id (update_thought's also takes null)
   | { code: "REFUSED_DERIVED_FROM_SHAPE"; retryable: false; value: string }               // a `derived_from` entry is not a thought id

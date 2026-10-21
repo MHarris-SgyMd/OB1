@@ -253,21 +253,23 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r: Record<string, unknown>) => normaliseHybridRow(r));
   }
 
-  async literalFacts(query: string): Promise<{ needle: string; common: boolean }[]> {
+  async literalFacts(query: string): Promise<{ literals: { needle: string; common: boolean }[]; textable: boolean }> {
     // 017's needles, each probed for its 101st matching row exactly as 075's
     // hybrid probes it — the pattern escaped as 012 escapes it (test-e2e-sql
     // [23] plants decoys only an unescaped `_`, `%` or `\` gets wrong), and the
     // OFFSET that plans it through the trigram index: a bare EXISTS plans a
     // sequential scan, the whole table for an absent needle (SMD-2891, review
     // pass 3: 150 ms a needle at 200,000 thoughts, 1 ms this way).
-    const rows = await this.sql`
-      SELECT n.needle,
-             EXISTS (SELECT 1 FROM thoughts t
-                     WHERE t.content ILIKE '%' || replace(replace(replace(n.needle, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%'
-                     OFFSET 100 LIMIT 1) AS common
-      FROM unnest(extract_search_needles(${query}::text)) WITH ORDINALITY AS n(needle, ord)
-      ORDER BY n.ord`;
-    return rows.map((r: { needle: string; common: boolean }) => ({ needle: String(r.needle), common: r.common === true }));
+    // `textable` is 017's rule for a quoted span, on the whole query (review pass 5).
+    const [row] = await this.sql`
+      SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('needle', n.needle, 'common',
+                         EXISTS (SELECT 1 FROM thoughts t
+                                 WHERE t.content ILIKE '%' || replace(replace(replace(n.needle, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%'
+                                 OFFSET 100 LIMIT 1)) ORDER BY n.ord)
+                       FROM unnest(extract_search_needles(${query}::text)) WITH ORDINALITY AS n(needle, ord)), '[]'::jsonb) AS literals,
+             length(btrim(${query}::text)) >= 3 AND length(to_tsvector('english', ${query}::text)) > 0 AS textable`;
+    const literals = (typeof row.literals === "string" ? JSON.parse(row.literals) : row.literals) as { needle: string; common: boolean }[];
+    return { literals: literals.map((l) => ({ needle: String(l.needle), common: l.common === true })), textable: row.textable === true };
   }
 
   /** hybridThoughts with min_trust: 075's 8-argument forms, the same columns as the 7's. */

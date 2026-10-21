@@ -1797,9 +1797,9 @@ With the embedding provider down, `search_thoughts` and the compat `search`
 failed with the runtime's raw "Unable to connect", though the exact-literal
 arm they fuse needs no model. They now call the same hybrid function with no
 vector — `match_thoughts` finds nothing on NULL, so the rows are the
-identifiers and quoted spans the query names, matched exactly; a query holding
-none is matched as one text, case aside, as `search_thoughts_keyword` matches
-it — and the reply says so. The function reports its needle facts only on a row, so when nothing
+identifiers and quoted spans the query names, matched exactly; those matching
+nothing, the whole query is matched as one text, case aside, as
+`search_thoughts_keyword` matches it — and the reply says so. The function reports its needle facts only on a row, so when nothing
 matched the server reads them on their own (`extract_search_needles`, and each
 literal probed for its 101st row as 075's hybrid probes it): asked only where
 no literal matched an unfiltered search, a literal is absent there or too
