@@ -3,9 +3,8 @@
 // CORS headers, the JSON-RPC refusal envelopes and a notification's bare
 // 202/503 (SMD-2106), the public origin's challenge and its 503 (SMD-2382), the
 // bounded read of a refused body (SMD-2309), a request's parts and its calls'
-// record for its line (SMD-1849), the stop's cut line (SMD-2250), the old root
-// URL's line (SMD-2306), and the keyed mirrors' answers to a caller they show
-// nothing. Moved out of index.ts as it was, so the MCP server as a REST client
+// record for its line (SMD-1849), the stop's cut line (SMD-2250), and the
+// keyed mirrors' answers to a caller they show nothing. Moved out of index.ts as it was, so the MCP server as a REST client
 // (mcp-server/, SMD-2287) answers at its edge as this one does. HTTP alone: no
 // store, no provider, no environment.
 
@@ -64,13 +63,12 @@ export const corsHeaders = {
   // Retry-After is not a CORS-safelisted response header, so a browser-hosted
   // client (claude.ai, the Claude Desktop connector) cannot read it off a fetch
   // without this. The headers the fork means such a client to read are
-  // exposed: Retry-After, the busy refusal's retry delay (SMD-2106);
-  // Deprecation and Link, which the proxy's legacy route adds to the server's
-  // answer (SMD-2306) while its headers middleware leaves this one alone, so
-  // this must name them; and WWW-Authenticate, the challenge at the public
-  // origin that names the protected-resource document a client signs in from
-  // (SMD-2382). On a response that carries none of them this says nothing.
-  "Access-Control-Expose-Headers": "Retry-After, Deprecation, Link, WWW-Authenticate",
+  // exposed: Retry-After, the busy refusal's retry delay (SMD-2106); and
+  // WWW-Authenticate, the challenge at the public origin that names the
+  // protected-resource document a client signs in from (SMD-2382). On a
+  // response that carries neither this says nothing. (Deprecation and Link,
+  // which the proxy's legacy route added until v2.0.0, went with it: SMD-2532.)
+  "Access-Control-Expose-Headers": "Retry-After, WWW-Authenticate",
 };
 
 // The two 405 header sets, built once; the refusal path spreads nothing per request.
@@ -295,34 +293,6 @@ export function edgeRefusal(status: number, extra: Record<string, string>, targe
  * as a raw quote or space (SMD-2306 review pass 1).
  */
 export const rawPath = (req: Request): string => new URL(req.url).pathname;
-
-/**
- * The root URL's compatibility window (SMD-2306). The proxy's legacy route
- * marks what it forwards with this header and its /mcp and health routes
- * delete it, so it is present only on a request that came to the old root URL
- * through the stack's proxy; a server with no proxy in front never sees it,
- * and its root is still the right URL. Every keyed route in index.ts calls
- * noteLegacyRoute once its key has passed (the MCP endpoint, /health under a
- * prefix, /worker-status, the worker actions, /jobs), so a script on the root
- * is named as an MCP client is. Logged once per key name per process: the
- * names are the configured keys', so the set is bounded by the configuration.
- * The path is the raw one, quoted and cut at 200 characters, so a client
- * cannot write its own text into the line.
- */
-export const LEGACY_ROUTE_HEADER = "x-ob1-legacy-route";
-const legacyNamesLogged = new Set<string>();
-export function legacyRouteLine(name: string, method: string, path: string): string {
-  const shown = JSON.stringify(path.length > 200 ? `${path.slice(0, 200)}…` : path);
-  return `key "${name}" reached the brain at the old root URL (${method} ${shown}) through the proxy's legacy route — move its client to /mcp; the root stops answering at v2.0.0 (SMD-2306; deploy/README.md, "Moving a client to /mcp")`;
-}
-export function noteLegacyRoute(req: Request, name: string): void {
-  if (req.headers.get(LEGACY_ROUTE_HEADER) !== "1" || legacyNamesLogged.has(name)) return;
-  // The line first, so a throw here leaves the name unsaid. rawPath cannot
-  // throw through the entry, which hands on only URLs that parse (auth.ts routable).
-  const line = legacyRouteLine(name, req.method, rawPath(req));
-  legacyNamesLogged.add(name);
-  console.warn(line);
-}
 
 /**
  * A keyed mirror whose key the registry did not clear — revoked, busy, or no

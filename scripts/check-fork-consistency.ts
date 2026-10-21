@@ -6309,23 +6309,21 @@ const tierMeshName = (kind: "mcp" | "api", tier: string) => tier === "stable" ? 
 // A route table's parts, as Bun.YAML reads the block; check 28 builds
 // compose.yaml's, compose.api-public.yaml's and compose.hooks-public.yaml's
 // tables from them too.
+/** A router, its `middlewares:` line left out when `mw` is "" (a router with none, as /mcp and /health have had since SMD-2532 took not-legacy away). */
 const routeRouter = (name: string, rule: string, priority: number, mw: string, service: string) =>
-  `    ${name}:\n      rule: "${rule}"\n      priority: ${priority}\n      entryPoints: [web]\n      middlewares: [${mw}]\n      service: ${service}\n`;
+  `    ${name}:\n      rule: "${rule}"\n      priority: ${priority}\n      entryPoints: [web]\n${mw ? `      middlewares: [${mw}]\n` : ""}      service: ${service}\n`;
 const routeErrors = (name: string, status: string) =>
   `    ${name}:\n      errors:\n        status: ["${status}"]\n        service: noop@internal\n        statusRewrites:\n          "${status}": 404\n`;
 const routeService = (name: string, url: string) => `    ${name}:\n      loadBalancer:\n        servers:\n          - url: "${url}"\n`;
-/** The 404 for every path under /canary or /working, in compose.tiers.yaml's table after its tier routers; compose.yaml's carried it from SMD-2874 until SMD-2532 removed the legacy route it kept those paths off. */
-const ROUTE_TIER_OFF = routeRouter("tier-off", "PathRegexp(`(?i)^/(canary|working)`)", 25, "not-served", "noop@internal");
-/** compose.tiers.yaml's canary and working routers, and the 404 for the rest of their prefixes: the three-brain stack's alone since SMD-2874 took them out of compose.yaml's (SMD-2878 decides that stack's future). */
-const ROUTE_TIER_PATHS = TIERS.filter((t) => t !== "stable").map((t) => routeRouter(t, `Path(\`/${t}/mcp\`) || PathPrefix(\`/${t}/mcp/\`)`, 30, "not-legacy, tier-absent", t)).join("")
-  + ROUTE_TIER_OFF;
-const routeHealth = (service: string) => routeRouter("health", "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))", 20, "not-legacy", service);
-const ROUTE_NOT_LEGACY = "    not-legacy:\n      headers:\n        customRequestHeaders:\n          X-OB1-Legacy-Route: \"\"\n";
+/** compose.tiers.yaml's canary and working routers, and its 404 (`tier-off`) for the rest of their prefixes: the three-brain stack's alone since SMD-2874 took the routers out of compose.yaml's, and SMD-2532 its tier-off (SMD-2878 decides that stack's future). */
+const ROUTE_TIER_PATHS = TIERS.filter((t) => t !== "stable").map((t) => routeRouter(t, `Path(\`/${t}/mcp\`) || PathPrefix(\`/${t}/mcp/\`)`, 30, "tier-absent", t)).join("")
+  + routeRouter("tier-off", "PathRegexp(`(?i)^/(canary|working)`)", 25, "not-served", "noop@internal");
+const routeHealth = (service: string) => routeRouter("health", "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))", 20, "", service);
 /** compose.tiers.yaml's route table, byte for byte, as Bun.YAML reads the block. */
 const TIER_ROUTE_TABLE = "http:\n  routers:\n"
-  + routeRouter("stable", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "not-legacy", "stable")
+  + routeRouter("stable", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "", "stable")
   + ROUTE_TIER_PATHS + routeHealth("stable")
-  + "  middlewares:\n" + ROUTE_NOT_LEGACY + routeErrors("tier-absent", "502") + routeErrors("not-served", "418")
+  + "  middlewares:\n" + routeErrors("tier-absent", "502") + routeErrors("not-served", "418")
   + "  services:\n" + TIERS.map((t) => routeService(t, `http://${tierMeshName("mcp", t)}.:8000`)).join("");
 /** The control, format and separator characters in a text other than the space and the line feed, each as `line (U+XXXX)` — compose and Bun.YAML part lines, comments and indentation differently around them. */
 const oddCharacters = (text: string) => [...new Set([...text.matchAll(/(?![ \n])[\p{Cc}\p{Cf}\p{Z}]/gu)].map((m) => `${text.slice(0, m.index).split("\n").length} (U+${m[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")})`))];
@@ -6483,8 +6481,8 @@ const TIER_STACK_PROBES: [string, ...[string, string, number?][]][] = [
   ["a Go template on a route table comment, which Traefik renders", ["    middlewares:\n", "    middlewares:\n      # {{ \"note\" }}\n"]],
   ["a variable on a route table comment, which compose interpolates", ["    middlewares:\n", "    middlewares:\n      # ${OB1_ROUTE_NOTE:-}\n"]],
   // The parsed file against the generated stack.
-  ["a duplicate canary router, after health", ["        service: stable\n    middlewares:", "        service: stable\n      canary:\n        rule: \"Path(`/canary/mcp`)\"\n        priority: 30\n        entryPoints: [web]\n        middlewares: [not-legacy]\n        service: stable\n    middlewares:"]],
-  ["an extra catch-all router", ["    routers:\n", "    routers:\n      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [not-legacy]\n        service: working\n"]],
+  ["a duplicate canary router, after health", ["        service: stable\n    middlewares:", "        service: stable\n      canary:\n        rule: \"Path(`/canary/mcp`)\"\n        priority: 30\n        entryPoints: [web]\n        middlewares: [tier-absent]\n        service: stable\n    middlewares:"]],
+  ["an extra catch-all router", ["    routers:\n", "    routers:\n      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [tier-absent]\n        service: working\n"]],
   ["tier-absent rewriting to 200", ["          statusRewrites:\n            \"502\": 404", "          statusRewrites:\n            \"502\": 200"]],
   ["an include beside the services", ["\nvolumes:\n", "\ninclude: [other.yaml]\n\nvolumes:\n"]],
   ["another project's name", ["name: open-brain-tiers\n", "name: open-brain\n"]],
@@ -6614,15 +6612,15 @@ checkTierStack();
 /** compose.yaml's route table, byte for byte, as Bun.YAML reads the block. */
 const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("auth", "Path(`/auth`) || PathPrefix(`/auth/`) || Path(`/.well-known/oauth-authorization-server/auth`) || Path(`/.well-known/openid-configuration/auth`) || Path(`/.well-known/oauth-authorization-server`)", 40, "auth-absent", "auth")
-  + routeRouter("resource", "Path(`/.well-known/oauth-protected-resource/mcp`)", 40, "not-legacy, auth-absent", "server")
+  + routeRouter("resource", "Path(`/.well-known/oauth-protected-resource/mcp`)", 40, "auth-absent", "server")
   + routeRouter("oauth-fallback-off", "Path(`/register`) || Path(`/authorize`) || Path(`/token`)", 35, "not-served", "noop@internal")
   + routeRouter("api-off", "Path(`/api`) || PathPrefix(`/api/`)", 35, "api-off", "noop@internal")
   + routeRouter("hooks-off", "Path(`/hooks`) || PathPrefix(`/hooks/`)", 35, "not-served", "noop@internal")
   + routeRouter("grafana-off", "Path(`/grafana`) || PathPrefix(`/grafana/`)", 35, "not-served", "noop@internal")
-  + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "not-legacy", "server")
+  + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "", "server")
   + routeHealth("server")
   + "  middlewares:\n"
-  + ROUTE_NOT_LEGACY + routeErrors("auth-absent", "502") + routeErrors("api-off", "418") + routeErrors("not-served", "418")
+  + routeErrors("auth-absent", "502") + routeErrors("api-off", "418") + routeErrors("not-served", "418")
   + "  services:\n" + routeService("server", `http://${tierMeshName("mcp", "stable")}.:8000`)
   + routeService("auth", "http://auth.ob1.internal.:3000");
 /** compose.api-public.yaml's route table, byte for byte, as Bun.YAML reads the block. */
@@ -7014,7 +7012,7 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["a Go template on a comment line in compose.yaml's table, which Traefik renders as a catch-all router", "compose.yaml", "    routers:\n      auth:\n", "    routers:\n      # {{ \"\\n    all:\\n      rule: \\\"PathPrefix(`/`)\\\"\\n      priority: 100\\n      service: canary\" }}\n      auth:\n"],
   ["a catch-all router on a line led by a no-break space in compose.yaml's table, a key to YAML and a comment to a reader", "compose.yaml", "    routers:\n      auth:\n", "    routers:\n      \u00a0#all: {rule: \"PathPrefix(`/`)\", priority: 100, entryPoints: [web], service: canary}\n      auth:\n"],
   ["a comment line in compose.yaml's table", "compose.yaml", "      auth-absent:\n        errors:\n", "      # a note\n      auth-absent:\n        errors:\n"],
-  ["a catch-all router back under every unrouted path, as the legacy route was (SMD-2532)", "compose.yaml", "      health:\n        rule:", "      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [not-legacy]\n        service: server\n      health:\n        rule:"],
+  ["a catch-all router back under every unrouted path, as the legacy route was (SMD-2532)", "compose.yaml", "      health:\n        rule:", "      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [auth-absent]\n        service: server\n      health:\n        rule:"],
   ["Grafana's anonymous access on in the observability collector", "compose.yaml", "      GF_AUTH_ANONYMOUS_ENABLED: \"false\"\n", "      GF_AUTH_ANONYMOUS_ENABLED: \"true\"\n"],
   ["the proxy's label its own table", "compose.yaml", "      ob1.proxy-routes: *proxy-routes\n", "      ob1.proxy-routes: \"http: {}\"\n"],
   ["the mounted config its own table", "compose.yaml", "    content: *proxy-routes\n", "    content: \"http: {}\"\n"],
