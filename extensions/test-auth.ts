@@ -525,7 +525,9 @@ console.log("\n[mcpReply: a call slower than the idle timeout is answered, and a
 // ── mcpReply's edges ─────────────────────────────────────────────────────────
 //
 // What passes untouched, a client gone before the call or mid-upload (at a
-// vendored server's real route and transport), and the line at the ceiling.
+// vendored server's real route and transport), the line at the ceiling and
+// mcpReply's wiring of it, and the real transport's answer the slow probe's
+// stand-in copies.
 const MID_UPLOAD = SERVERS.find((s) => s.file === "recipes/ob-graph/index.ts")!;
 {
   // mcpReply's edges, on a context as a route hands it: `c.req.raw` and a body reader.
@@ -575,6 +577,20 @@ const MID_UPLOAD = SERVERS.find((s) => s.file === "recipes/ob-graph/index.ts")!;
     await withSseKeepalive(silent, { intervalMs: 20, maxMs: 100, label: "tools/call slow_one", stalledLine: vendoredStalledLine }).text();
     assert(warned.length === 1 && warned[0].startsWith("request still running after 0 s: tools/call slow_one — ") && !/OB1_LLM_TIMEOUT|look at the database/.test(warned[0]),
       `a stall is logged in the line given, which names no core-only bound (${warned[0]?.slice(0, 120)})`);
+    // …and mcpReply gives its stream that line: the ceiling is ten minutes, so the wiring is read
+    // from the module's text (review pass 2), between mcpReply's head and its end.
+    const sse = readFileSync(join(HERE, "_shared/sse.ts"), "utf8");
+    const replyBody = sse.slice(sse.indexOf("export async function mcpReply("), sse.indexOf("\n}\n", sse.indexOf("export async function mcpReply(")));
+    assert(/return withSseKeepalive\(response, \{[^}]*\bstalledLine: vendoredStalledLine\b[^}]*\}\);/.test(replyBody),
+      "mcpReply hands its stream to withSseKeepalive with the vendored line for the ceiling");
+    // The stand-in the slow probe above serves is the real transport's shape (review pass 2): a
+    // vendored server's POST is answered on an event stream, which is what mcpReply keeps alive.
+    env(MID_UPLOAD, KEYS);
+    const real = await handlers[SERVERS.indexOf(MID_UPLOAD)](new Request("http://extension.test/mcp",
+      { method: "POST", headers: { ...RPC, "x-access-key": READ_KEY }, body: JSON.stringify(LIST) }));
+    assert(real.status === 200 && /^text\/event-stream\b/.test(real.headers.get("content-type") ?? ""),
+      `${MID_UPLOAD.file} answers a POST on an event stream, as the slow probe's stand-in does (${real.status}, ${real.headers.get("content-type")})`);
+    await real.text();
   } finally {
     console.warn = realWarn;
   }
@@ -978,8 +994,9 @@ const builtPerRequest = (text: string) =>
  * SMD-2001: the transport's reply leaves through _shared/sse.ts's mcpReply,
  * and by no other way. @hono/mcp answers a POST on an event stream it writes
  * nothing to until the tool returns, and Bun closes a stream silent for 8–12 s
- * (SMD-1864); mcpReply keeps it alive and logs a client that leaves. Its
- * edges above and test-server.ts [17] are the proof; this holds every server to the shape.
+ * (SMD-1864); mcpReply keeps it alive and logs a client that leaves. The
+ * probe above ("mcpReply: a call slower than the idle timeout") and its edges are
+ * the proof; this holds every server to the shape.
  */
 const KEPT_ALIVE = /mcpReply\(c, \(\) => transport\.handleRequest\(c\)\)/;
 const repliesKeptAlive = (text: string) =>
@@ -1099,9 +1116,22 @@ for (const s of SERVERS) {
 // text publishes a list in any spelling this knows must be one the rule read. The rule itself is held on
 // two lists of its own: one naming both headers, one leaving one out.
 {
-  const LIST_SPELLINGS = /access-control-allow-headers|\ballowHeaders\b|\bcors\(/i;
-  const unread = SERVERS.filter((s) => s.kind === "mcp" && LIST_SPELLINGS.test(readFileSync(join(ROOT, s.file), "utf8")) && !HELD_ALLOW_LISTS.includes(s.file)).map((s) => s.file);
+  // Code only, comments out, so prose that names the header is not a list (review pass 2); counted, so a
+  // list the rule reads does not hide a second it cannot, a cors() beside it, in the same file.
+  const LIST_SPELLINGS = /access-control-allow-headers|\ballowHeaders\b|\bcors\(/gi;
+  // A comment line (`//`, `/*`, ` *`) and a trailing ` // …` go; a route's "/mcp/*" and a URL's // stay.
+  const code = (text: string) => text.split("\n").filter((l) => !/^\s*(?:\/\/|\/\*|\*)/.test(l)).join("\n").replace(/\s\/\/ [^\n]*/g, "");
+  const unread = SERVERS.filter((s) => s.kind === "mcp").filter((s) => {
+    const text = code(readFileSync(join(ROOT, s.file), "utf8"));
+    return (text.match(LIST_SPELLINGS) ?? []).length > (text.match(new RegExp(ALLOW_HEADERS.source, "g")) ?? []).length;
+  }).map((s) => s.file);
   assert(unread.length === 0, `every MCP server's allow-list is one the rule read (${HELD_ALLOW_LISTS.length} read; unread: ${unread.join(", ") || "none"})`);
+  const stripped = code("// no Access-Control-Allow-Headers here\n * unlike cors()\napp.all(\"/mcp/*\", h); // hono's cors() is not used\nconst u = \"http://x\";");
+  assert(stripped.match(LIST_SPELLINGS) === null && stripped.includes('app.all("/mcp/*", h);') && stripped.includes('"http://x"'),
+    `…and a comment that names the header is not a list, while a route's /* and a URL's // are kept (its own probe: ${JSON.stringify(stripped)})`);
+  const twice = code('  "Access-Control-Allow-Headers":\n    "mcp-protocol-version, last-event-id",\napp.use(cors({ allowHeaders: ["x"] }));');
+  assert((twice.match(LIST_SPELLINGS) ?? []).length === 3 && (twice.match(new RegExp(ALLOW_HEADERS.source, "g")) ?? []).length === 1,
+    "…and a cors() list beside one the rule reads is counted, not hidden (its own probe)");
   const list = (names: string) => `  "Access-Control-Allow-Headers":\n    "${names}",`;
   const whole = browserHeadersMissing(list("Content-Type, Authorization, mcp-session-id, mcp-protocol-version, last-event-id"));
   assert(whole !== null && whole.length === 0, `the rule passes a list that names both headers (its own probe: ${whole === null ? "unread" : whole.join(", ") || "none missing"})`);
@@ -1153,7 +1183,7 @@ for (const t of TEXT_ONLY) {
   assert(stack.map(([n]) => n).sort().join() === [...STACK].sort().join(), `extensions/package.json installs the ${STACK.length} packages of the MCP stack (${stack.map(([n]) => n).join(", ") || "none"})`);
   // server-portable is on the v2 stack (SMD-2278). It shares hono+zod with the
   // vendored servers — held to extensions' versions — pins the v2 MCP packages to
-  // SERVER_V2_PINS (the independent truth while it is the sole v2 install), and the
+  // SERVER_V2_PINS (the independent truth while server-portable and mcp-server are the v2 installs), and the
   // v1 MCP packages must be gone. It installs packages beside the stack, so its set
   // is a superset (no exact check). The
   // MCP server as a REST client (mcp-server/, SMD-2287) installs the same
