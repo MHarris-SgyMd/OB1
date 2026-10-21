@@ -5245,9 +5245,12 @@ console.log("\n[31] A search answered without a vector says so — search_though
     `search_thoughts: the header leads with what the rows are, before the literals searched for, and no note ranks the rest by similarity (${text.slice(0, 200)})`);
   assert(/--- Result 1 \(exact match\) ---/.test(text) && !/no vector/.test(text), "…and a hit is an exact match, not said to have no vector of its own: no query vector was made");
   assert((st.structuredContent as { vectorFailed?: unknown }).vectorFailed === "provider_unreachable", "…and the typed result carries the marker word alone");
-  const none = renderSearchThoughts({ ok: true, value: { query: "plain words", preferCurrent: false, hits: [], facts: { needles: [], needleCounts: [], commonNeedles: [], literalOnly: null }, window: null, vectorFailed: vf } } as never, false).content[0].text;
-  assert(none === `No thoughts found matching "plain words". ${lead}search_thoughts_keyword finds any word or phrase a thought contains; semantic search returns once the provider answers. The query has no identifier or quoted span, so nothing could be matched without a vector.`,
-    `nothing found, the query holding no literal: why — nothing could be matched without a vector (${none})`);
+  const none = renderSearchThoughts({ ok: true, value: { query: "plain words", preferCurrent: false, hits: [], facts: { needles: ["plain words"], needleCounts: [0], commonNeedles: [], literalOnly: null }, window: null, vectorFailed: { ...vf, matched: "text" } } } as never, false).content[0].text;
+  assert(none === 'No thoughts found matching "plain words". Semantic search is unavailable — the embedding provider at http://ollama:11434/v1 failed: the connection was refused. So the query, which holds no identifier or quoted span, was matched as one text, exactly (case aside) — not by meaning. search_thoughts_keyword finds any word or phrase a thought contains; semantic search returns once the provider answers. No thought contains: plain words.',
+    `nothing found, the query holding no literal: matched as one text, held by none (review pass 4) (${none})`);
+  // A vector search with no literal and nothing above a threshold says nothing of matching without a vector (review pass 4: a mutant printed it).
+  const vectored = renderSearchThoughts({ ok: true, value: { query: "plain words", preferCurrent: false, hits: [], facts: { needles: [], needleCounts: [], commonNeedles: [], literalOnly: false }, window: null } } as never, false).content[0].text;
+  assert(vectored === 'No thoughts found matching "plain words".', `…with a vector, nothing but the plain answer (${vectored})`);
   const common = renderSearchThoughts({ ok: true, value: { query: "COMMON-1", preferCurrent: false, hits: [], facts: { needles: [], needleCounts: [], commonNeedles: ["COMMON-1"], literalOnly: null }, window: null, vectorFailed: vf } } as never, false);
   assert(/Too common to match exactly \(more thoughts contain it than one keyword page returns\): COMMON-1 — use search_thoughts_keyword/.test(common.content[0].text) && !/No thought contains|has no identifier|Held only/.test(common.content[0].text) && (common.structuredContent as { literalOnly?: unknown }).literalOnly === null,
     `nothing found, the literal too common: said so, not absent, and literalOnly unknown in the typed result (${common.content[0].text.slice(-160)})`);
@@ -5271,12 +5274,11 @@ console.log("\n[31] A search answered without a vector says so — search_though
   const titles = (JSON.parse(marks.content[0].text) as { results: { title: string }[] }).results.map((r) => r.title);
   assert(JSON.stringify(titles) === JSON.stringify(["[ingested] [moved since written: SMD-1 In Progress → Done] [exact match — semantic search unavailable] a page", "[moved since written: SMD-2 In Progress → Done] [exact match — semantic search unavailable] a note"]),
     `search: the mark on an ingested and a moved result too, after their prefixes (${JSON.stringify(titles)})`);
-  // An empty answer without a vector names each literal absent or too common, or the query's having none (review pass 2).
-  const emptyNote = (facts: unknown) => (JSON.parse(renderSearch({ ok: true, value: { results: [], vectorFailed: vf, facts } } as never).content[0].text) as { note: string }).note;
-  assert(emptyNote({ needles: ["GONE-1"], needleCounts: [0], commonNeedles: ["COMMON-1"], literalOnly: null }).endsWith(" No thought contains: GONE-1. Too common to match exactly (more thoughts contain it than one keyword page returns): COMMON-1 — the brain's search_thoughts_keyword tool pages through them.")
-      && emptyNote({ needles: [], needleCounts: [], commonNeedles: [], literalOnly: null }).endsWith(" The query has no identifier or quoted span, so nothing could be matched without a vector.")
-      && !emptyNote(undefined).includes("No thought contains"),
-    `search: an empty answer's note says which literals are absent and which too common, or that there are none (${emptyNote({ needles: ["GONE-1"], needleCounts: [0], commonNeedles: ["COMMON-1"], literalOnly: null }).slice(-200)})`);
+  // Nothing found without a vector is refused, as the outage was before (review pass 4): what was matched, each literal absent or too common.
+  const unavailable = renderSearch({ ok: false, refusal: { code: "EMBEDDING_PROVIDER_UNAVAILABLE", retryable: true, ...vf, matched: "literals", needles: ["GONE-1"], commonNeedles: ["COMMON-1"] } } as never);
+  assert(unavailable.isError === true && unavailable.content[0].text === `Found nothing. ${lead}The brain's search_thoughts_keyword tool finds any word or phrase a thought contains; semantic search returns once the provider answers. No thought contains: GONE-1. Too common to match exactly (more thoughts contain it than one keyword page returns): COMMON-1 — the brain's search_thoughts_keyword tool pages through them.`
+      && JSON.stringify(Object.keys(unavailable.structuredContent)) === JSON.stringify(["code", "retryable", "reason", "matched", "text"]) && unavailable.structuredContent.reason === "provider_unreachable",
+    `search: nothing found without a vector is an error naming the endpoint, what was matched and why nothing came of it; its value the code, the word and what was matched (${unavailable.content[0].text.slice(-200)})`);
   const plainCompat = renderSearch({ ok: true, value: { results: [] } } as never);
   assert(plainCompat.content[0].text === '{"results":[]}', "…and with a vector, the shape exactly");
 }

@@ -300,12 +300,12 @@ console.log("\n[8b] Review pass 1: a capture key's capture, a reply that cannot 
   const compat = await tool("search", { query: "SMD-1" }, "write-raw");
   assert(!compat.isError && expectReply(compat, say.renderSearch(ok(literal) as never)) && /"note":"Semantic search is unavailable/.test(compat.text) && compat.text.includes("[exact match — semantic search unavailable] SMD-1 names it") && compat.sc.vectorFailed === "provider_unreachable",
     `search answered without a vector said as in-process, its note and field (${compat.text.slice(0, 160)})`);
-  // An empty compat answer's facts reach the note through the forwarder too (review pass 3).
-  const emptyLiteral = { results: [], vectorFailed: vf, facts: { needles: [], needleCounts: [], commonNeedles: ["COMMON-1"], literalOnly: null } };
-  answer = (n) => (n === "search" ? ok(emptyLiteral) : ok({}));
+  // An empty compat answer without a vector is refused (review pass 4); the forwarder carries the refusal whole and says it as in-process.
+  const unavailable = { code: "EMBEDDING_PROVIDER_UNAVAILABLE", retryable: true, ...vf, matched: "literals", needles: [], commonNeedles: ["COMMON-1"] } as const;
+  answer = (n) => (n === "search" ? { ok: false, refusal: unavailable } as never : ok({}));
   const emptyCompat = await tool("search", { query: "COMMON-1" }, "write-raw");
-  assert(!emptyCompat.isError && expectReply(emptyCompat, say.renderSearch(ok(emptyLiteral) as never)) && /Too common to match exactly .*: COMMON-1/.test(String(emptyCompat.sc.note)),
-    `an empty search answered without a vector: its literal facts worded in the note, as in-process (${String(emptyCompat.sc.note).slice(-120)})`);
+  assert(emptyCompat.isError && expectReply(emptyCompat, say.renderSearch({ ok: false, refusal: unavailable } as never)) && emptyCompat.sc.code === "EMBEDDING_PROVIDER_UNAVAILABLE" && /Too common to match exactly .*: COMMON-1/.test(emptyCompat.text),
+    `an empty search answered without a vector: refused, said as in-process (${emptyCompat.text.slice(-120)})`);
   // A value render.ts cannot say is the tool's fault, coded, as index.ts's run catches it — never the SDK's uncoded error.
   answer = (n) => (n === "thoughtStats" ? ok({}) : ok({}));
   const unsayable = await tool("thought_stats", {});

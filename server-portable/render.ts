@@ -276,6 +276,7 @@ function refuseQuery(r: Extract<Refusal, { code: "REFUSED_EGRESS" }>): string {
 /** The refusals the search tools share: the gate's, and a filter's (said as the fault it was, `Error:`). */
 function searchRefusal(r: Refusal, hint?: (msg: string) => string): string {
   if (r.code === "REFUSED_EGRESS") return refuseQuery(r);
+  if (r.code === "EMBEDDING_PROVIDER_UNAVAILABLE") return providerUnavailable(r);
   if (r.code === "REFUSED_FILTER") return `Error: ${r.message}${hint ? hint(r.message) : ""}`;
   return unknownRefusal(r);
 }
@@ -532,21 +533,20 @@ export const renderSearch = (o: Outcome<SearchResult>): Reply =>
   // …and the whole answer says so beside the results, for a surface that
   // reads the shape and for an empty answer, which has no title to mark: the
   // marker word, as search_thoughts' typed result carries it, and a note.
-  ...(o.value.vectorFailed ? { vectorFailed: o.value.vectorFailed.reason, note: literalOnlyNote(o.value.vectorFailed, "search") + emptyLiteralWords(o.value.facts) } : {}) }) : o,
+  ...(o.value.vectorFailed ? { vectorFailed: o.value.vectorFailed.reason, note: literalOnlyNote(o.value.vectorFailed, "search") } : {}) }) : o,
     (v) => JSON.stringify(v), searchRefusal, AS_JSON);
 
 /**
- * The compat search's empty answer without a vector, in words (review pass 2):
- * each literal absent or too common, or that the query has none. The facts
- * come only on an empty answer, so this is nothing beside results.
+ * The compat search refused while its provider was down and nothing matched
+ * (SMD-2891; review pass 4: an error, as before, since an empty list reads as
+ * "nothing stored"): what was matched, and of each literal whether it is
+ * absent or too common (review pass 2).
  */
-function emptyLiteralWords(f: SearchResult["facts"]): string {
-  if (!f) return "";
-  const words: string[] = [];
-  if (f.needles.length) words.push(`No thought contains: ${f.needles.join(", ")}.`);
-  if (f.commonNeedles.length) words.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${f.commonNeedles.join(", ")} — the brain's search_thoughts_keyword tool pages through them.`);
-  if (!f.needles.length && !f.commonNeedles.length) words.push("The query has no identifier or quoted span, so nothing could be matched without a vector.");
-  return ` ${words.join(" ")}`;
+function providerUnavailable(r: Extract<Refusal, { code: "EMBEDDING_PROVIDER_UNAVAILABLE" }>): string {
+  const words = [`Found nothing. ${literalOnlyNote(r, "search")}`];
+  if (r.needles.length) words.push(`No thought contains: ${r.needles.join(", ")}.`);
+  if (r.commonNeedles.length) words.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${r.commonNeedles.join(", ")} — the brain's search_thoughts_keyword tool pages through them.`);
+  return words.join(" ");
 }
 
 /**
@@ -555,8 +555,12 @@ function emptyLiteralWords(f: SearchResult["facts"]): string {
  * the tool that matches any word — search_thoughts_keyword, which the compat
  * `search`'s caller may not have, so it is named there as the brain's.
  */
-export function literalOnlyNote(f: QueryVectorFailed, tool: "search" | "search_thoughts"): string {
-  return `Semantic search is unavailable — the embedding provider at ${f.base} failed: ${f.detail}. So the query was matched only by its identifiers and quoted spans, exactly — not by meaning. ` +
+export function literalOnlyNote(f: Pick<QueryVectorFailed, "base" | "detail" | "matched">, tool: "search" | "search_thoughts"): string {
+  // The query's literals, or — holding none — the query as one text (review pass 4).
+  const how = f.matched === "text"
+    ? "the query, which holds no identifier or quoted span, was matched as one text, exactly (case aside)"
+    : "the query was matched only by its identifiers and quoted spans, exactly";
+  return `Semantic search is unavailable — the embedding provider at ${f.base} failed: ${f.detail}. So ${how} — not by meaning. ` +
     `${tool === "search" ? "The brain's search_thoughts_keyword tool" : "search_thoughts_keyword"} finds any word or phrase a thought contains; semantic search returns once the provider answers.`;
 }
 
@@ -583,8 +587,6 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         const outside = facts.needles.map((n, i) => [n, facts.needleCounts[i]] as const).filter(([, c]) => c > 0);
         if (outside.length) why.push(`Held only by thoughts outside this search's filter, said_by, actor or min_trust: ${outside.map(([n, c]) => `${n} (in ${c} thought${c === 1 ? "" : "s"})`).join(", ")}.`);
         if (facts.commonNeedles.length) why.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${facts.commonNeedles.join(", ")} — use search_thoughts_keyword to page through them.`);
-        // Without a vector only a literal can match (SMD-2891), and this query has none.
-        if (literal && facts.needles.length === 0 && facts.commonNeedles.length === 0) why.push("The query has no identifier or quoted span, so nothing could be matched without a vector.");
       }
       return `No thoughts found matching "${query}".${why.length ? ` ${why.join(" ")}` : ""}`;
     }

@@ -10,11 +10,11 @@
 --   fuse needs no model (measured 2026-10-11, SMD-2887). They now call the
 --   same hybrid function with no vector: match_thoughts finds nothing on
 --   NULL, so the rows are the identifiers and quoted spans the query names,
---   matched exactly, with the needle facts as ever — no function changes.
+--   matched exactly — no function changes. A query holding none is matched
+--   as one text by search_thoughts_keyword's function instead.
 --   The ticket asks that the query log say which arm actually ran. It is
 --   none of the three 059 allows: `hybrid` and `current` would replay with a
---   vector, and `keyword` (search_thoughts_keyword) would replay the whole
---   query as one substring.
+--   vector, and `keyword` is another tool's search, with its paging.
 --
 -- WHAT
 --   * query_log_arm_check gains `literal`, as 059 gained `current`.
@@ -51,4 +51,4 @@ ALTER TABLE query_log DROP CONSTRAINT IF EXISTS query_log_arm_check;
 ALTER TABLE query_log ADD CONSTRAINT query_log_arm_check CHECK (arm IS NULL OR arm IN ('hybrid', 'keyword', 'current', 'literal'));
 
 COMMENT ON COLUMN query_log.arm IS
-  'Which retrieval arm served a search row: hybrid (search, search_thoughts — the vector arm fused with the exact-literal arm, migration 017), keyword (search_thoughts_keyword — exact substring, migration 012), current (search_thoughts with prefer_current — the hybrid with settled and superseded thoughts ranked below current ones, migration 059, SMD-2255) or literal (search or search_thoughts while the embedding provider did not answer for the query — the exact-literal arm alone, through the same function with no vector, migration 104, SMD-2891; not replayable). NULL on an action row. The tool column names the MCP tool; arm names the retrieval path, so a per-arm report can group across tools and tell two arms of one tool apart (SMD-1490, for SMD-1735/1737). Keyword searches are logged from SMD-1490 on — 034 logged only the semantic path, and the search tools now share one search operation that is the single writer.';
+  'Which retrieval arm served a search row: hybrid (search, search_thoughts — the vector arm fused with the exact-literal arm, migration 017), keyword (search_thoughts_keyword — exact substring, migration 012), current (search_thoughts with prefer_current — the hybrid with settled and superseded thoughts ranked below current ones, migration 059, SMD-2255) or literal (search or search_thoughts while the embedding provider did not answer for the query — the exact-literal arm alone, through the same function with no vector, or for a query holding no literal the whole query as one text, migration 104, SMD-2891; not replayable). NULL on an action row. The tool column names the MCP tool; arm names the retrieval path, so a per-arm report can group across tools and tell two arms of one tool apart (SMD-1490, for SMD-1735/1737). Keyword searches are logged from SMD-1490 on — 034 logged only the semantic path, and the search tools now share one search operation that is the single writer.';

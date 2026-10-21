@@ -3750,9 +3750,18 @@ console.log("\n[23] A search the provider does not answer for is answered by the
     assert(/Held only by thoughts outside this search's filter, said_by, actor or min_trust: DOWN-2891 \(in 1 thought\)\./.test(floor.text) && !/Too common|No thought contains/.test(floor.text),
       `…and says the literal is held, by thoughts outside the floor — not absent, not too common (review pass 2) (${floor.text.replace(/\n+/g, " / ").slice(-220)})`);
 
-    const words = await result("search_thoughts", { query: "alpha words" });
-    assert(!words.isError && /^No thoughts found matching "alpha words"\./.test(words.text) && marked.test(words.text) && /The query has no identifier or quoted span, so nothing could be matched without a vector\./.test(words.text) && words.sc?.vectorFailed === "provider_unreachable",
-      `a query of plain words: nothing found, and why — no literal to match without a vector (${words.text.replace(/\n+/g, " / ").slice(0, 300)})`);
+    // A query with no literal is matched as one text, as the keyword arm matches it (review pass 4, the maintainer's call).
+    const asText = /Semantic search is unavailable — the embedding provider at https:\/\/stub\.invalid\/v1 failed: the connection was refused\. So the query, which holds no identifier or quoted span, was matched as one text, exactly \(case aside\) — not by meaning\./;
+    const words = await result("search_thoughts", { query: "Alpha Words" });
+    assert(!words.isError && asText.test(words.text) && ((words.sc?.hits ?? []) as { id: string; similarity: number | null }[]).some((h) => h.id === plain && h.similarity === null) && /Contains: Alpha Words/.test(words.text) && words.sc?.vectorFailed === "provider_unreachable"
+        && (await lastArm("search_thoughts", "Alpha Words")) === "literal",
+      `a query of plain words: the thought holding them as one text, case aside, said so, arm literal (${words.text.replace(/\n+/g, " / ").slice(0, 300)})`);
+    const sentence = await result("search_thoughts", { query: "what did we decide about the meaning of all this" });
+    assert(!sentence.isError && asText.test(sentence.text) && /No thought contains: what did we decide about the meaning of all this\./.test(sentence.text),
+      `a sentence: held verbatim by no thought, and said so (${sentence.text.replace(/\n+/g, " / ").slice(-200)})`);
+    const wordsFloor = await result("search_thoughts", { query: "alpha words", min_trust: "ingested" });
+    assert(!wordsFloor.isError && /Held only by thoughts outside this search's filter, said_by, actor or min_trust: alpha words \(in 1 thought\)\./.test(wordsFloor.text),
+      `…and one held only outside the floor, said so (${wordsFloor.text.replace(/\n+/g, " / ").slice(-200)})`);
     // A literal too common to match exactly is said to be that, not absent (review pass 1: the probe has no row for it without a vector).
     const common = await result("search_thoughts", { query: "what about COMMON-2891" });
     assert(!common.isError && marked.test(common.text) && /Too common to match exactly \(more thoughts contain it than one keyword page returns\): COMMON-2891 — use search_thoughts_keyword to page through them\./.test(common.text) && !/No thought contains|Held only|has no identifier/.test(common.text) && JSON.stringify(common.sc?.literalOnly) === "null",
@@ -3772,11 +3781,17 @@ console.log("\n[23] A search the provider does not answer for is answered by the
       `search: ChatGPT's shape with the literal's thought, its title marked, the marker word and a note naming the endpoint and the brain's keyword tool (${compat.text.slice(0, 300)})`);
     assert((await lastArm("search", "DOWN-2891")) === "literal", "…logged as arm literal");
     // Its empty answers say why, as search_thoughts' do (review pass 2: ChatGPT read "none" for a literal 120 thoughts hold).
-    const noteOf = async (query: string) => String((await result("search", { query })).sc?.note);
-    // Lower case: the probe folds case as the keyword arm does (review pass 3: LIKE passed every suite).
-    const [cCommon, cAbsent, cWords] = [await noteOf("common-2891"), await noteOf("NOPE-28910"), await noteOf("alpha words")];
-    assert(/Too common to match exactly .*: common-2891 — the brain's search_thoughts_keyword tool pages through them\.$/.test(cCommon) && /No thought contains: NOPE-28910\.$/.test(cAbsent) && /has no identifier or quoted span/.test(cWords),
-      `search's empty answers: too common, absent, no literal — each said (${[cCommon, cAbsent, cWords].map((n) => n.slice(-90)).join(" | ")})`);
+    // Nothing found is refused, as the outage was before (review pass 4, the maintainer's call): an empty list reads as
+    // "nothing stored". Lower case: the probe folds case as the keyword arm does (review pass 3: LIKE passed every suite).
+    const refusedAs = async (query: string) => { const r = await result("search", { query }); return { r, text: r.text, sc: r.sc ?? {} }; };
+    const [cCommon, cAbsent, cSentence] = [await refusedAs("common-2891"), await refusedAs("NOPE-28910"), await refusedAs("the meaning of all this")];
+    assert([cCommon, cAbsent, cSentence].every((c) => c.r.isError && c.sc.code === "EMBEDDING_PROVIDER_UNAVAILABLE" && c.sc.retryable === true && c.sc.reason === "provider_unreachable" && /^Found nothing\. Semantic search is unavailable — the embedding provider at https:\/\/stub\.invalid\/v1 failed: the connection was refused\./.test(c.text))
+        && cCommon.sc.matched === "literals" && /Too common to match exactly .*: common-2891 — the brain's search_thoughts_keyword tool pages through them\.$/.test(cCommon.text)
+        && /No thought contains: NOPE-28910\.$/.test(cAbsent.text) && cSentence.sc.matched === "text" && /No thought contains: the meaning of all this\.$/.test(cSentence.text),
+      `search's empty answers: refused, retryable, naming the endpoint and what was matched — too common, absent, a sentence held by none (${[cCommon, cAbsent, cSentence].map((c) => c.text.slice(-80)).join(" | ")})`);
+    const cWords = await result("search", { query: "alpha words" });
+    assert(!cWords.isError && ((cWords.sc?.results ?? []) as { id: string; title: string }[]).some((x) => x.id === plain && x.title.startsWith("[exact match — semantic search unavailable] ")) && /was matched as one text/.test(String(cWords.sc?.note)),
+      `search with plain words: the thought holding them as one text, marked (${cWords.text.slice(0, 200)})`);
 
     // A 503 is an outage too; a 400 says the request is wrong, so the search fails as before.
     stubDown = 503;

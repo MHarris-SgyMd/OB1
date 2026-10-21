@@ -1070,9 +1070,37 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   const sv = sr.ok ? sr.value : undefined;
   assert(sv?.vectorFailed?.reason === "provider_unreachable" && sv.vectorFailed.base.includes("***@") && !sv.vectorFailed.base.includes("hunter2"),
     `a search with the provider down: answered, the endpoint named with its userinfo masked (${JSON.stringify(sv?.vectorFailed)})`);
-  assert(asked.length === 3 && asked[0].embedding === null && asked[1].embedding === null && asked[1].threshold === -1 && JSON.stringify(asked[2]) === JSON.stringify({ literalFacts: "about X-2891" })
+  assert(asked.length === 3 && asked[0].embedding === null && JSON.stringify(asked[1]) === JSON.stringify({ literalFacts: "about X-2891" }) && asked[2].embedding === null && asked[2].threshold === -1
       && JSON.stringify(sv?.facts) === JSON.stringify({ needles: ["X-2891"], needleCounts: [0], commonNeedles: ["Y-2891"], literalOnly: null }),
-    `…the literal arm asked with no vector, the probe too, then the literals' facts in the hybrid's terms: a literal none holds a needle counted 0, a held one common alone (${JSON.stringify(sv?.facts)})`);
+    `…the literal arm asked with no vector, then the literals' facts, then the probe: the facts in the hybrid's terms, a literal none holds a needle counted 0, a held one common alone (${JSON.stringify(sv?.facts)})`);
+  // A query holding no literal: the keyword arm, the whole query as one text (review pass 4); the endpoint named is the embeddings', with a chat endpoint of its own beside it.
+  const asked2: Record<string, unknown>[] = [];
+  const textStore = {
+    hybridThoughts: async (o: Record<string, unknown>) => { asked2.push({ hybrid: o.embedding }); return []; },
+    literalFacts: async () => { asked2.push({ literalFacts: true }); return []; },
+    keywordThoughts: async (o: Record<string, unknown>) => { asked2.push({ keyword: o.query, limit: o.limit, filter: o.filter }); return [{ id: "00000000-0000-4000-8000-0000000000c1", content: "alpha words", metadata: {}, created_at: "2026-10-21T00:00:00.000Z", occurrences: 1, totalCount: 1 }]; },
+
+    supersededAmong: async () => ({}),
+    ticketStatusInputs: async () => null,
+  };
+  const embedPort2 = closedNow();
+  const tctx = createContext({
+    env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${embedPort2}/v1`, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: "http://127.0.0.1:9/v1", OB1_CHAT_LOCAL: "1" }),
+    store: async () => textStore as never,
+    door: "test",
+  });
+  const realError2 = console.error;
+  console.error = () => {};
+  let tr: Awaited<ReturnType<typeof searchThoughts>>;
+  try {
+    tr = await searchThoughts(tctx, { name: "reader", scope: "read", keyHash: "h" } as never, { query: "alpha words", limit: 5, threshold: 0, recency_weight: 0, prefer_current: false } as never);
+  } finally {
+    console.error = realError2;
+  }
+  const tv = tr.ok ? tr.value : undefined;
+  assert(tv?.vectorFailed?.matched === "text" && tv.vectorFailed.base === `http://127.0.0.1:${embedPort2}/v1` && tv.hits.length === 1 && tv.hits[0].similarity === null && JSON.stringify(tv.hits[0].matchedNeedles) === JSON.stringify(["alpha words"])
+      && JSON.stringify(asked2) === JSON.stringify([{ hybrid: null }, { literalFacts: true }, { keyword: "alpha words", limit: 5, filter: {} }]),
+    `a query with no literal: the keyword arm asked for the whole query, its row the hit, matched as text, the embeddings endpoint named (${JSON.stringify({ vf: tv?.vectorFailed, asked2 })})`);
 }
 
 console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vector through update_thought with the stamp it read; two outages in a row stop the tick, and two such ticks running are the provider away; the gate is asked the question the row's writer asked; a failing row is held for doubling sweeps and holds back nothing; a tick acts only under the leader lock");

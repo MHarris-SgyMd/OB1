@@ -83,13 +83,15 @@ storing the new text would clear a vector the thought had.
 A search whose query embedding the provider does not answer (the same
 `providerDown` outages) is answered by the hybrid's exact-literal arm alone —
 the identifiers and quoted spans in the query, through the same function with
-no vector (SMD-2891). `search_thoughts` says so first, names the endpoint and
+no vector — or, for a query holding none, by the whole query matched as one
+text, case aside, as `search_thoughts_keyword` matches it (SMD-2891). `search_thoughts` says so first, names the endpoint and
 `search_thoughts_keyword`, and carries `vectorFailed`; with nothing found it
 says whether the query's literals are absent, too common to match exactly,
 held only by thoughts outside the search's filter, `said_by`, `actor` or
-`min_trust`, or none. The compat `search` marks each title `[exact match —
-semantic search unavailable]` and adds `vectorFailed` and a `note`, which on an
-empty answer says the same of its literals. The query log records the
+`min_trust`. The compat `search` marks each title `[exact match — semantic
+search unavailable]` and adds `vectorFailed` and a `note`; with nothing found it
+is refused `EMBEDDING_PROVIDER_UNAVAILABLE` (retryable; REST 503), saying the
+same of its literals, since an empty list would read as nothing stored. The query log records the
 search as arm `literal` (migration 104). Any other embedding failure still
 fails the search.
 

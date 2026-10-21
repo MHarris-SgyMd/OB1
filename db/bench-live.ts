@@ -202,6 +202,9 @@ export function outcomeOf(status: number, msg: Record<string, any> | null, tool:
   const sc = result.structuredContent ?? {};
   const id = tool === "capture_thought" && typeof sc.id === "string" ? sc.id : undefined;
   if (result.isError === true) return { ok: false, status, id, error: text.slice(0, 200) };
+  // A search the provider did not answer for is answered by exact literals
+  // alone (SMD-2891): no vector search ran, so its latency is no sample of one.
+  if ((tool === "search_thoughts" || tool === "search") && sc.vectorFailed !== undefined && sc.vectorFailed !== null) return { ok: false, status, error: `degraded: answered by exact literals alone, the embedding provider down (${String(sc.vectorFailed)})` };
   if (tool !== "capture_thought") return { ok: true, status };
   if (sc.existed === true) return { ok: false, status, error: "a re-capture: the text was already a thought (not a probe, so not deleted)" };
   if (!id) return { ok: false, status, error: "capture answered without an id" };
@@ -563,6 +566,9 @@ export function selfCheck(): number {
     const o = outcomeOf(status, answerTo(body, 7), "search_thoughts");
     ok(o.ok === expectOk, `${name}: ok is ${o.ok}, expected ${expectOk}`);
   }
+  // A search answered without a vector is degraded, not a latency sample (SMD-2891, review pass 4).
+  const literalOnly = outcomeOf(200, answerTo("data: " + res({ result: { content: [{ type: "text", text: "Found 1 thought(s)" }], structuredContent: { vectorFailed: "provider_503" } } }), 7), "search_thoughts");
+  ok(!literalOnly.ok && /degraded: answered by exact literals alone, the embedding provider down \(provider_503\)/.test(literalOnly.error ?? ""), `a search answered by literals alone is degraded (${literalOnly.error})`);
 
   const id = "0c057ac3-bad2-4621-b74c-4a394bbf2b7b";
   const base = {
