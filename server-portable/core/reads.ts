@@ -258,15 +258,15 @@ const factsOf = (r: ThoughtHybridMatch | undefined): QueryFacts | null =>
 
 /**
  * The query's facts when no row reports them and no vector was made
- * (SMD-2891), in the hybrid's own terms: a literal no thought holds is a
- * needle counted 0; one held by any thought, unmatched, was too common, and
- * is a common needle alone, as the hybrid never lists a common one among its
- * needles (review pass 2).
+ * (SMD-2891), in the hybrid's own terms: asked only where no literal matched
+ * an unfiltered search, so a literal is absent — a needle counted 0 — or too
+ * common, a common needle alone, as the hybrid never lists a common one among
+ * its needles (review pass 2).
  */
 async function literalFactsOf(store: Pick<ThoughtStore, "literalFacts">, query: string): Promise<QueryFacts> {
   const lits = await store.literalFacts(query);
-  const absent = lits.filter((l) => !l.held).map((l) => l.needle);
-  return { needles: absent, needleCounts: absent.map(() => 0), commonNeedles: lits.filter((l) => l.held).map((l) => l.needle), literalOnly: null };
+  const absent = lits.filter((l) => !l.common).map((l) => l.needle);
+  return { needles: absent, needleCounts: absent.map(() => 0), commonNeedles: lits.filter((l) => l.common).map((l) => l.needle), literalOnly: null };
 }
 
 /**
@@ -335,10 +335,10 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
     const store = await ctx.store();
     const probe = await store.hybridThoughts({ query, embedding: r.embedding, threshold: -1, limit: 1, filter: {} });
     // Without a vector (SMD-2891) the probe has a row only where a literal
-    // matched, and none for one too common to match: the needles and their
-    // counts are read on their own then, so a literal more thoughts hold than
-    // one keyword page is said to be that, not absent (review pass 1). Unmatched
-    // with a count above zero is the rarity rule's refusal, whatever its bound.
+    // matched, and none for one too common to match: each needle's rarity is
+    // probed on its own then, as the hybrid probes it, so a literal more
+    // thoughts hold than one keyword page is said to be that, not absent
+    // (review pass 1).
     const facts = factsOf(probe[0]) ?? (r.vectorFailed ? await literalFactsOf(store, query) : null);
     return ok({ query, preferCurrent: prefer_current, hits: [], facts, window: null, ...failed });
   }

@@ -253,18 +253,21 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r: Record<string, unknown>) => normaliseHybridRow(r));
   }
 
-  async literalFacts(query: string): Promise<{ needle: string; held: boolean }[]> {
-    // 017's needles, each probed for one matching row, as 075's hybrid probes
-    // a needle for its 101st: the pattern escaped exactly as 012 escapes it
-    // (test-e2e-sql [23] plants a decoy only an unescaped pattern matches),
-    // and the trigram index answering it (SMD-2891, review pass 2).
+  async literalFacts(query: string): Promise<{ needle: string; common: boolean }[]> {
+    // 017's needles, each probed for its 101st matching row exactly as 075's
+    // hybrid probes it — the pattern escaped as 012 escapes it (test-e2e-sql
+    // [23] plants decoys only an unescaped `_`, `%` or `\` gets wrong), and the
+    // OFFSET that plans it through the trigram index: a bare EXISTS plans a
+    // sequential scan, the whole table for an absent needle (SMD-2891, review
+    // pass 3: 150 ms a needle at 200,000 thoughts, 1 ms this way).
     const rows = await this.sql`
       SELECT n.needle,
              EXISTS (SELECT 1 FROM thoughts t
-                     WHERE t.content ILIKE '%' || replace(replace(replace(n.needle, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%') AS held
+                     WHERE t.content ILIKE '%' || replace(replace(replace(n.needle, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%'
+                     OFFSET 100 LIMIT 1) AS common
       FROM unnest(extract_search_needles(${query}::text)) WITH ORDINALITY AS n(needle, ord)
       ORDER BY n.ord`;
-    return rows.map((r: { needle: string; held: boolean }) => ({ needle: String(r.needle), held: r.held === true }));
+    return rows.map((r: { needle: string; common: boolean }) => ({ needle: String(r.needle), common: r.common === true }));
   }
 
   /** hybridThoughts with min_trust: 075's 8-argument forms, the same columns as the 7's. */

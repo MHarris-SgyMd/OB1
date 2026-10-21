@@ -3713,8 +3713,10 @@ console.log("\n[23] A search the provider does not answer for is answered by the
   const plain = idIn(await call("capture_thought", { content: "[23] alpha words with no identifier in them" }))!;
   // More thoughts holding one literal than a keyword page returns, so it is too common to match exactly (raw rows: no model call needed).
   await sql`INSERT INTO thoughts (content) SELECT '[23] COMMON-2891 row ' || g FROM generate_series(1, 120) g`;
-  // A decoy only an unescaped pattern matches: `_` is any one character to ILIKE (review pass 2: literalFacts escapes as 012 does).
-  await sql`INSERT INTO thoughts (content) VALUES ('[23] ZQXDECOY-9 is no underscore')`;
+  // Decoys only an unescaped pattern gets wrong, a keyword page's worth and one more each, as literalFacts probes the 101st row:
+  // `_` and `%` match any character to ILIKE, so ZQXDECOY-9 and 50ABC_OFF-9 rows are no holders of ZQ_DECOY-9 or 50%_OFF-9;
+  // and X\Y_2 rows hold X\Y_2, which an unescaped `\` reads as X then Y (review passes 2 and 3).
+  await sql`INSERT INTO thoughts (content) SELECT '[23] decoy ' || g || ' ZQXDECOY-9 50ABC_OFF-9 ' || chr(88) || chr(92) || 'Y_2' FROM generate_series(1, 101) g`;
   try {
     const q = "what was said about DOWN-2891";
     const up = await result("search_thoughts", { query: q });
@@ -3758,20 +3760,22 @@ console.log("\n[23] A search the provider does not answer for is answered by the
     const absent = await result("search_thoughts", { query: "what about NOPE-28910" });
     assert(!absent.isError && marked.test(absent.text) && /No thought contains: NOPE-28910\./.test(absent.text) && !/Too common/.test(absent.text),
       `an absent literal: said absent, by name (${absent.text.replace(/\n+/g, " / ").slice(0, 300)})`);
-    const decoy = await result("search_thoughts", { query: "what about ZQ_DECOY-9" });
-    assert(!decoy.isError && /No thought contains: ZQ_DECOY-9\./.test(decoy.text) && !/Too common/.test(decoy.text),
-      `a literal with an underscore that only an unescaped pattern would find: absent, not too common (${decoy.text.replace(/\n+/g, " / ").slice(-200)})`);
+    const decoy = await result("search_thoughts", { query: "what about ZQ_DECOY-9 and 50%_OFF-9 and X\\Y_2" });
+    assert(!decoy.isError && /No thought contains: ZQ_DECOY-9, 50%_OFF-9\./.test(decoy.text) && /Too common to match exactly .*: X\\Y_2 — /.test(decoy.text),
+      `literals only an unescaped pattern gets wrong: the underscore's and the percent's absent, the backslash's too common, each in its own list (${decoy.text.replace(/\n+/g, " / ").slice(-260)})`);
 
     const compat = await result("search", { query: "DOWN-2891" });
     const mine = ((compat.sc?.results ?? []) as { id: string; title: string }[]).find((r) => r.id === named);
     assert(!compat.isError && compat.text === JSON.stringify(compat.sc) && mine?.title.startsWith("[exact match — semantic search unavailable] ") === true
-        && compat.sc?.vectorFailed === "provider_unreachable" && /https:\/\/stub\.invalid\/v1 failed: the connection was refused/.test(String(compat.sc?.note)) && /The brain's search_thoughts_keyword tool finds any word or phrase/.test(String(compat.sc?.note)),
+        && compat.sc?.vectorFailed === "provider_unreachable" && /https:\/\/stub\.invalid\/v1 failed: the connection was refused/.test(String(compat.sc?.note)) && /The brain's search_thoughts_keyword tool finds any word or phrase/.test(String(compat.sc?.note))
+        && !/Too common|No thought contains|has no identifier/.test(String(compat.sc?.note)),
       `search: ChatGPT's shape with the literal's thought, its title marked, the marker word and a note naming the endpoint and the brain's keyword tool (${compat.text.slice(0, 300)})`);
     assert((await lastArm("search", "DOWN-2891")) === "literal", "…logged as arm literal");
     // Its empty answers say why, as search_thoughts' do (review pass 2: ChatGPT read "none" for a literal 120 thoughts hold).
     const noteOf = async (query: string) => String((await result("search", { query })).sc?.note);
-    const [cCommon, cAbsent, cWords] = [await noteOf("COMMON-2891"), await noteOf("NOPE-28910"), await noteOf("alpha words")];
-    assert(/Too common to match exactly .*: COMMON-2891 — the brain's search_thoughts_keyword tool pages through them\.$/.test(cCommon) && /No thought contains: NOPE-28910\.$/.test(cAbsent) && /has no identifier or quoted span/.test(cWords),
+    // Lower case: the probe folds case as the keyword arm does (review pass 3: LIKE passed every suite).
+    const [cCommon, cAbsent, cWords] = [await noteOf("common-2891"), await noteOf("NOPE-28910"), await noteOf("alpha words")];
+    assert(/Too common to match exactly .*: common-2891 — the brain's search_thoughts_keyword tool pages through them\.$/.test(cCommon) && /No thought contains: NOPE-28910\.$/.test(cAbsent) && /has no identifier or quoted span/.test(cWords),
       `search's empty answers: too common, absent, no literal — each said (${[cCommon, cAbsent, cWords].map((n) => n.slice(-90)).join(" | ")})`);
 
     // A 503 is an outage too; a 400 says the request is wrong, so the search fails as before.
@@ -3790,7 +3794,7 @@ console.log("\n[23] A search the provider does not answer for is answered by the
       `the provider back: no mark, rows with a similarity again, arm hybrid (${back.text.slice(0, 80)})`);
   } finally {
     stubDown = null;
-    await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([named, plain], "TEXT")}::uuid[]) OR content LIKE '[23] COMMON-2891 row %' OR content = '[23] ZQXDECOY-9 is no underscore'`;
+    await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([named, plain], "TEXT")}::uuid[]) OR content LIKE '[23] COMMON-2891 row %' OR content LIKE '[23] decoy %'`;
     await sql.close();
   }
 }

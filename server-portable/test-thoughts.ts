@@ -1047,7 +1047,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   const asked: Record<string, unknown>[] = [];
   const searchStore = {
     hybridThoughts: async (o: Record<string, unknown>) => { asked.push(o); return []; },
-    literalFacts: async (q: string) => { asked.push({ literalFacts: q }); return [{ needle: "X-2891", held: false }, { needle: "Y-2891", held: true }]; },
+    literalFacts: async (q: string) => { asked.push({ literalFacts: q }); return [{ needle: "X-2891", common: false }, { needle: "Y-2891", common: true }]; },
   };
   const sctx = createContext({
     env: () => ({ OB1_LLM_BASE_URL: `http://user:hunter2@127.0.0.1:${closedNow()}/v1`, OB1_LLM_LOCAL: "1" }),

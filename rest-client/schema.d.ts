@@ -490,7 +490,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The operation's value; with `vectorFailed` — the provider's marker word, what happened there and its endpoint — when the embedding provider did not answer for the query, and the results are the exact-literal arm's alone (SMD-2891). */
+            /** @description The operation's value; with `vectorFailed` — the provider's marker word, what happened there and its endpoint — when the embedding provider did not answer for the query, and the results are the exact-literal arm's alone (SMD-2891); with nothing found then, `facts` too — each literal absent (`needles`) or too common to match exactly (`commonNeedles`). */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -968,7 +968,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The operation's value; with `vectorFailed` — the provider's marker word, what happened there and its endpoint — when the embedding provider did not answer for the query, and the results are the exact-literal arm's alone (SMD-2891). */
+            /** @description The operation's value; with `vectorFailed` — the provider's marker word, what happened there and its endpoint — when the embedding provider did not answer for the query, and the results are the exact-literal arm's alone (SMD-2891); with nothing found then, `facts` too — each literal absent (`needles`) or too common to match exactly (`commonNeedles`). */
             200: {
                 headers: {
                     [name: string]: unknown;
