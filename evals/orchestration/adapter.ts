@@ -44,10 +44,14 @@ export type Adapter = {
   scheduledRuns(env: Record<string, string>, since: string): Promise<number>;
   /** The candidate's own MCP endpoint and the header an AI client presents. */
   mcpServer(env: Record<string, string>): Promise<{ url: string; headers: Record<string, string> }>;
-  /** What carries the capture to the brain: the tool's own MCP-client step, or a script of ours where it has none. */
-  mcpClient: string;
-  /** Is that the tool's own MCP client? C2 as posted asks for it; a script of ours standing in does not pass. */
-  nativeMcpClient: boolean;
+  /**
+   * What carries the capture to the brain's REST core: the tool's own HTTP
+   * step, or a script of ours where it has none. Until SMD-2295 this was the
+   * tool's MCP-client step against the brain's MCP server.
+   */
+  httpClient: string;
+  /** Is that the tool's own HTTP step? C2 asks for it (SMD-2295's wording of the posted "the tool's own MCP client"); a script of ours standing in does not pass. */
+  nativeHttpClient: boolean;
   /** The two tool names that endpoint must list: the brain read, the vendor act. */
   tools: { search: string; act: string };
   version(): string;

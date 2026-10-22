@@ -36,11 +36,13 @@
  *       waits (up to 20 min, the schedule is every 15) for a run the SCHEDULE
  *       started since the verify began to succeed, by the tool's run history.
  *   C2  capture: those rows' writer is `orch-capture`, a CAPTURE-scope record
- *       in MCP_ACCESS_KEYS, carried by the TOOL's own MCP client — as the
- *       criteria were posted; a script of ours standing in where the tool has
- *       no such step (Windmill) is reported and does not pass. Read: the brain
- *       search on the candidate's endpoint answers, and the only credential on
- *       that path is `orch-read`.
+ *       in MCP_ACCESS_KEYS, carried by the TOOL's own HTTP client to the
+ *       brain's REST core (`api:8000`). As posted it read "the TOOL's own MCP
+ *       client" against the brain's MCP server; SMD-2295 moved n8n, and so
+ *       the kit, to the REST core (the maintainer's wording). A script of ours
+ *       standing in where the tool has no such step (Windmill) is reported and
+ *       does not pass. Read: the brain search on the candidate's endpoint
+ *       answers, and the only credential on that path is `orch-read`.
  *   C3  the candidate's own MCP endpoint lists both tools, the brain search
  *       returns thoughts, the Linear lookup returns SMD-1863 with an
  *       `updatedAt` timestamp as values (the request carries both as text), and
@@ -91,7 +93,7 @@ function selfCheck(): number {
   const base = [
     "tcpdump: verbose output suppressed, use -v[v]... for full protocol decode",
     "listening on any, link-type LINUX_SLL2 (Linux cooked v2), snapshot length 262144 bytes",
-    `${T}eth0  Out IP 10.89.4.2.39771 > 10.89.4.1.53: 59194+ A? server.dns.podman. (35)`,
+    `${T}eth0  Out IP 10.89.4.2.39771 > 10.89.4.1.53: 59194+ A? api.dns.podman. (32)`,
     `${T}eth0  In  IP 10.89.4.1.53 > 10.89.4.2.39771: 59194 1/0/0 A 10.89.4.3 (51)`,
     `${T}eth0  Out IP 10.89.4.2.51086 > 10.89.4.3.8000: Flags [S], seq 1, win 64240, length 0`,
     `${T}eth0  In  IP 10.89.4.4.40026 > 10.89.4.2.5678: Flags [S], seq 2, win 64240, length 0`,
@@ -102,14 +104,16 @@ function selfCheck(): number {
   const out = (rest: string, iface = "eth0") => `${T}${iface}  Out IP 10.89.4.2.5555 > ${rest}`;
   // [what, lines, pass, detail must match, facts]
   const cases: [string, string[], boolean, RegExp, (typeof facts & { runner?: string[]; problem?: string })?][] = [
-    ["the recorded shape passes", base, true, /the network's own names: server\.dns\.podman ×1/],
-    ["a host search-domain expansion is reported apart, and passes", [...base, out("10.89.4.1.53: 7+ AAAA? server.cerberus-gondola.ts.net. (48)")], true, /search-domain expansions: server\.cerberus-gondola\.ts\.net ×1/],
+    ["the recorded shape passes", base, true, /the network's own names: api\.dns\.podman ×1/],
+    // The brain is the REST core since SMD-2295: a question for the old server's name is no service's.
+    ["a question for `server`, no longer the brain, fails", [...base, out("10.89.4.1.53: 8+ A? server.dns.podman. (35)")], false, /NOT A TEMPLATE'S HOST: server\.dns\.podman/],
+    ["a host search-domain expansion is reported apart, and passes", [...base, out("10.89.4.1.53: 7+ AAAA? api.cerberus-gondola.ts.net. (45)")], true, /search-domain expansions: api\.cerberus-gondola\.ts\.net ×1/],
     ["a TCP DNS connection to the resolver passes while its segments are empty", [...base, out("10.89.4.1.53: Flags [S], seq 9, length 0"), out("10.89.4.1.53: Flags [.], ack 1, win 63, length 0")], true, /DNS only to 10\.89\.4\.1/],
     ["an inbound SYN to n8n (the host's poll) is not n8n's dial", [...base, `${T}eth0  P   IP 192.168.127.1.62396 > 10.89.4.2.8000: Flags [S], seq 5, length 0`], true, /./],
     ["a raw-IP dial fails", [...base, out("9.9.9.9.443: Flags [S], seq 4, length 0")], false, /DIALLED OUTSIDE THE COMPOSE NETWORK: 9\.9\.9\.9:443 \(tcp\)/],
     ["a dial on another interface fails", [...base, out("9.9.9.9.443: Flags [S], seq 4, length 0", "eth1")], false, /9\.9\.9\.9:443/],
     ["n8n's own domain fails as a name", [...base, out("10.89.4.1.53: 1+ A? n8n.io. (24)")], false, /NOT A TEMPLATE'S HOST: n8n\.io/],
-    ["a name that starts like a service fails", [...base, out("10.89.4.1.53: 2+ A? server.9.9.9.9.nip.io. (39)")], false, /NOT A TEMPLATE'S HOST: server\.9\.9\.9\.9\.nip\.io/],
+    ["a name that starts like a service fails", [...base, out("10.89.4.1.53: 2+ A? api.9.9.9.9.nip.io. (36)")], false, /NOT A TEMPLATE'S HOST: api\.9\.9\.9\.9\.nip\.io/],
     ["an EDNS query is read", [...base, out("10.89.4.1.53: 3+ [1au] A? api.n8n.io. (39)")], false, /NOT A TEMPLATE'S HOST: api\.n8n\.io/],
     ["an NS query is read", [...base, out("10.89.4.1.53: 4+ NS? example.com. (29)")], false, /NOT A TEMPLATE'S HOST: example\.com/],
     // The next four are tcpdump's own lines, from pass 3's run on a sealed network made non-internal, where the resolver forwarded each.
@@ -138,7 +142,7 @@ function selfCheck(): number {
     ["a capture that restarted (two headers) fails", [...base, base[1]], false, /CANNOT JUDGE: the watcher's capture opened 2 times/],
     ["a capture that never opened fails", base.filter((l) => !l.startsWith("listening on")), false, /opened 0 times/],
     ["a capture that ended before it was read fails", [...base, "92 packets captured", "92 packets received by filter", "0 packets dropped by kernel"], false, /capture ended before it was read/],
-    ["a question line without its length is unreadable", [...base, out("10.89.4.1.53: 4242+ A? server.dns.podman.")], false, /UNREADABLE PACKET LINES/],
+    ["a question line without its length is unreadable", [...base, out("10.89.4.1.53: 4242+ A? api.dns.podman.")], false, /UNREADABLE PACKET LINES/],
     // The import runner (SMD-2212): an import template's one internal peer besides the brain.
     ["a connection to the import runner's :8090 passes", [...base, out("10.89.4.1.53: 11+ A? orchestration-runner.dns.podman. (49)"), out("10.89.4.5.8090: Flags [S], seq 12, length 0")], true, /to the import runner \(10\.89\.4\.5:8090\): 1/, { ...facts, runner: ["10.89.4.5"] }],
     ["port 8090 on another host is not the runner", [...base, out("9.9.9.9.8090: Flags [S], seq 13, length 0")], false, /9\.9\.9\.9:8090/, { ...facts, runner: ["10.89.4.5"] }],
@@ -215,9 +219,14 @@ async function up(): Promise<void> {
   // and compose started the old one: a brain two migrations behind the tree,
   // with `--build` in the command (SMD-2210, measured).
   const stamp = `${run(["git", "rev-parse", "--short=12", "HEAD"]).out.trim() || "nogit"}+orch${Date.now()}`;
-  // The proxy too: the brain's only published port is its (SMD-1846), and
-  // nothing the named services wait on starts it.
-  const r = compose(tool, ["up", "-d", "--build", "postgres", "migrate", "server", "proxy", ...adapter.services, ...variantServices], { OB1_GIT_SHA: stamp });
+  // The proxy and its forwarder too: the brain's only published port is the
+  // forwarder's in front of the proxy (SMD-1846, SMD-2583), and nothing the
+  // named services wait on starts either; the forwarder waits on the proxy,
+  // so naming the proxy alone left 8012 closed. `api` is the REST core the
+  // candidates call (SMD-2295). `server` is named because its service alone
+  // builds the image `api` and `mcp` run, until SMD-2287 PR 6 retires it;
+  // nothing calls it.
+  const r = compose(tool, ["up", "-d", "--build", "postgres", "migrate", "server", "api", "proxy", "forwarder", ...adapter.services, ...variantServices], { OB1_GIT_SHA: stamp });
   if (r.code !== 0) throw new Error(`compose up failed:\n${r.err.slice(-2000)}`);
   await waitFor("the brain's /health", brainHealthy);
   const reported = await fetch("http://127.0.0.1:8012/health", { headers: { "x-brain-key": env.ORCH_BRAIN_READ_KEY } }).then((h) => h.json()).then((j: any) => String(j.commit), () => "unreadable");
@@ -322,8 +331,8 @@ async function verify(): Promise<void> {
     && /"updatedAt\\?"\s*:\s*\\?"\d{4}-\d\d-\d\dT/.test(act.text);
   checks.push({
     id: "C2",
-    pass: adapter.nativeMcpClient && first.after.rows === EXPECTED_ISSUES && captureScoped && searchOk,
-    detail: `capture: ${first.after.rows} rows by ${WRITER} (${captureScoped ? "a capture-scope record" : "NOT a capture-scope record"}) through ${adapter.mcpClient}${adapter.nativeMcpClient ? "" : " — not the tool's MCP client, which C2 as posted requires"}; read: brain search through orch-read ${searchOk ? "answered" : "FAILED"}`,
+    pass: adapter.nativeHttpClient && first.after.rows === EXPECTED_ISSUES && captureScoped && searchOk,
+    detail: `capture: ${first.after.rows} rows by ${WRITER} (${captureScoped ? "a capture-scope record" : "NOT a capture-scope record"}) through ${adapter.httpClient}${adapter.nativeHttpClient ? "" : " — not the tool's own HTTP step, which C2 requires"}; read: brain search through orch-read ${searchOk ? "answered" : "FAILED"}`,
   });
   // Sealed, the brain-side half must pass and the act tool must not: Linear
   // answering means the seal leaked. The tool must still be listed, so a

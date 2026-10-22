@@ -14,7 +14,9 @@
  * encryption key, and two brain keys minted the way keygen.ts mints them —
  * `orch-capture` (capture scope: the ingestion workflow's, can add, cannot
  * read) and `orch-read` (read scope: the retrieval tool's). Only their hashes
- * reach MCP_ACCESS_KEYS. The profile's keys sit there under deploy/.env's
+ * reach MCP_ACCESS_KEYS. Beside them, the MCP server's own forward-scope key,
+ * `orch-mcp-forwarder`, its raw value in OB1_FORWARDER_KEY, which compose
+ * requires since SMD-2287 PR 5b (the stack's `mcp` service holds it). The profile's keys sit there under deploy/.env's
  * names (profileKeys, and the profile's own --init). LINEAR_API_KEY is not copied into it: the driver reads
  * it from the usual search path (db/env.ts) and each adapter hands it to its
  * tool's credential store; compose never sees it.
@@ -32,13 +34,16 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "../../server-portable/auth.ts";
 import { parseEnv } from "../../db/env.ts";
-import { setEnvValue as setEnvFileValue } from "../../deploy/orchestration/provision.ts";
+import { setEnvValue as setEnvFileValue, setEnvValues } from "../../deploy/orchestration/provision.ts";
 
 export const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..", "..");
 export const ENV_FILE = join(HERE, ".env");
 
-type Keys = { capture: string; read: string };
+type Keys = { capture: string; read: string; forward: string };
+
+/** The MCP server's forward-scope record, as keygen.ts --scope forward prints it. */
+const forwardRecord = (key: string) => `orch-mcp-forwarder:forward:${hashKey(key)}`;
 
 /** What docker and compose need from the caller's environment to reach the engine — and nothing else. */
 const PASS_THROUGH = [
@@ -62,13 +67,16 @@ export function ensureEnv(): Record<string, string> {
     // database passwords are the ones the volume was initialised with.
     const later: Record<string, () => string> = { ORCH_MCP_KEY: () => hex(32), ORCH_KEY16: () => hex(16), ORCH_JWT_SECRET: () => hex(32), ...profileKeys(env) };
     const missing = Object.keys(later).filter((k) => !env[k]);
-    if (missing.length) {
-      writeFileSync(ENV_FILE, readFileSync(ENV_FILE, "utf8") + missing.map((k) => `${k}=${later[k]()}\n`).join(""), { mode: 0o600 });
-      return parseEnv(readFileSync(ENV_FILE, "utf8"));
+    if (missing.length) writeFileSync(ENV_FILE, readFileSync(ENV_FILE, "utf8") + missing.map((k) => `${k}=${later[k]()}\n`).join(""), { mode: 0o600 });
+    // A file from before SMD-2287 PR 5b has no forward key: minted once, its
+    // record added to the key list in the same write.
+    if (!env.OB1_FORWARDER_KEY) {
+      const forward = hex(32);
+      setEnvValues(ENV_FILE, { OB1_FORWARDER_KEY: forward, MCP_ACCESS_KEYS: `${env.MCP_ACCESS_KEYS},${forwardRecord(forward)}` });
     }
-    return env;
+    return missing.length || !env.OB1_FORWARDER_KEY ? parseEnv(readFileSync(ENV_FILE, "utf8")) : env;
   }
-  const keys: Keys = { capture: hex(32), read: hex(32) };
+  const keys: Keys = { capture: hex(32), read: hex(32), forward: hex(32) };
   const lines = [
     "# SMD-1863 orchestration POC — throwaway brain + candidate. Generated; gitignored.",
     `POSTGRES_PASSWORD=${hex(16)}`,
@@ -80,7 +88,8 @@ export function ensureEnv(): Record<string, string> {
     `ORCH_ADMIN_PASSWORD=Orch-${hex(8)}`,
     // The candidate's own MCP endpoint's key — what an AI client presents to it.
     `ORCH_MCP_KEY=${hex(32)}`,
-    `MCP_ACCESS_KEYS=orch-capture:capture:${hashKey(keys.capture)},orch-read:read:${hashKey(keys.read)}`,
+    `MCP_ACCESS_KEYS=orch-capture:capture:${hashKey(keys.capture)},orch-read:read:${hashKey(keys.read)},${forwardRecord(keys.forward)}`,
+    `OB1_FORWARDER_KEY=${keys.forward}`,
     `ORCH_BRAIN_CAPTURE_KEY=${keys.capture}`,
     `ORCH_BRAIN_READ_KEY=${keys.read}`,
     // The brain's models: the host's Ollama, declared local to the egress gate.

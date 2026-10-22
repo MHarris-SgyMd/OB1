@@ -11,7 +11,9 @@
       "pieceName": "@activepieces/piece-schedule",
       "pieceVersion": "~0.1.22",
       "triggerName": "every_x_minutes",
-      "input": { "minutes": 15 },
+      "input": {
+        "minutes": 15
+      },
       "propertySettings": {}
     },
     "nextAction": {
@@ -29,7 +31,14 @@
           "variables": {}
         },
         "propertySettings": {},
-        "errorHandlingOptions": { "continueOnFailure": { "value": false }, "retryOnFailure": { "value": false } }
+        "errorHandlingOptions": {
+          "continueOnFailure": {
+            "value": false
+          },
+          "retryOnFailure": {
+            "value": false
+          }
+        }
       },
       "nextAction": {
         "name": "step_2",
@@ -37,35 +46,71 @@
         "displayName": "One thought per issue",
         "type": "CODE",
         "settings": {
-          "input": { "issues": "{{step_1.data.issues.nodes}}" },
+          "input": {
+            "issues": "{{step_1.data.issues.nodes}}"
+          },
           "sourceCode": {
             "packageJson": "{}",
             "code": "export const code = async (inputs) => inputs.issues.map((i) => ({ content: [\n  `${i.identifier} — ${i.title}`,\n  `State: ${i.state?.name ?? ''} · Project: ${i.project?.name ?? ''}`,\n  i.url,\n  '',\n  i.description ?? '',\n].join('\\n').trim() }));"
           },
-          "errorHandlingOptions": { "continueOnFailure": { "value": false }, "retryOnFailure": { "value": false } }
+          "errorHandlingOptions": {
+            "continueOnFailure": {
+              "value": false
+            },
+            "retryOnFailure": {
+              "value": false
+            }
+          }
         },
         "nextAction": {
           "name": "step_3",
           "valid": true,
           "displayName": "For each issue",
           "type": "LOOP_ON_ITEMS",
-          "settings": { "items": "{{step_2}}" },
+          "settings": {
+            "items": "{{step_2}}"
+          },
           "firstLoopAction": {
             "name": "step_4",
             "valid": true,
             "displayName": "Capture into the brain",
             "type": "PIECE",
             "settings": {
-              "pieceName": "@activepieces/piece-mcp-client",
-              "pieceVersion": "~0.0.3",
-              "actionName": "call-tool",
+              "pieceName": "@activepieces/piece-http",
+              "pieceVersion": "~0.13.0",
+              "actionName": "send_request",
               "input": {
-                "auth": "{{connections['brain-capture']}}",
-                "tool": "capture_thought",
-                "args": { "content": "{{step_3.item.content}}" }
+                "method": "POST",
+                "url": "http://api:8000/v1/thoughts",
+                "headers": {
+                  "x-brain-key": "__OB1_BRAIN_CAPTURE_KEY__",
+                  "content-type": "application/json"
+                },
+                "queryParams": {},
+                "authType": "NONE",
+                "authFields": {},
+                "body_type": "json",
+                "body": {
+                  "data": {
+                    "content": "{{step_3.item.content}}",
+                    "source": "activepieces"
+                  }
+                },
+                "response_is_binary": false,
+                "use_proxy": false,
+                "timeout": 120,
+                "followRedirects": false,
+                "failureMode": "continue_none"
               },
               "propertySettings": {},
-              "errorHandlingOptions": { "continueOnFailure": { "value": false }, "retryOnFailure": { "value": false } }
+              "errorHandlingOptions": {
+                "continueOnFailure": {
+                  "value": false
+                },
+                "retryOnFailure": {
+                  "value": false
+                }
+              }
             }
           }
         }

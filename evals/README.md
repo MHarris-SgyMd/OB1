@@ -6681,11 +6681,13 @@ step, its credentials in its own encrypted store, and gets the same work:
 
 - **Ingestion** — every 15 minutes (and on demand): ten SMD issues from Linear's
   GraphQL API with the Linear key the tool holds, one thought each, captured
-  through the candidate's MCP client with the capture key.
+  through the candidate's MCP client with the capture key (through its HTTP
+  step against the brain's REST core since SMD-2295, below).
 - **MCP server** — the candidate's own MCP endpoint offers two tools an AI
   client can call: `brain_search` (the brain's `search_thoughts`, through the
-  tool's MCP client with the read key — remember) and `linear_issue` (a live
-  Linear lookup with the tool's Linear key — act).
+  tool's MCP client with the read key — remember; `POST /v1/search` on the
+  REST core since SMD-2295) and `linear_issue` (a live Linear lookup with the
+  tool's Linear key — act).
 
 ```sh
 cd evals
@@ -6743,6 +6745,38 @@ values (the request carries both as text, so an echoed error cannot pass), and a
 session with no key and one whose key differs in its last character are each
 refused with 401 or 403 (any other error counts as not refused). C4: every
 step below was an API or CLI call.
+
+**Through the REST core (SMD-2295, 2026-10-22).** n8n's brain calls go to the
+REST core under the surface ADR's decision 1 (`../docs/orchestration-tool.md`,
+"Amended by SMD-2295"), and the kit follows. Each candidate's capture is its
+own HTTP step, `POST http://api:8000/v1/thoughts` with the capture key in
+`x-brain-key` and a `source` naming the tool, and its `brain_search` tool is
+`POST /v1/search` with the read key:
+
+- **n8n:** HTTP Request nodes. Both brain credentials are pinned to `api`, and
+  provisioning refuses a brain credential pinned anywhere else.
+- **Activepieces:** the HTTP piece (`~0.13.0`, the version 0.91.3's catalogue
+  offers). The piece takes no connection, so the brain keys are filled into
+  the flows' steps at import and sit in the flow, not the connection store.
+- **Windmill:** its scripts call `fetch`.
+
+C2 reads "the tool's own HTTP client" where it read "the tool's own MCP
+client" (the maintainer's wording). `vendor`'s pipeline and E's judge name
+`api:8000`, and `--up` now also starts `api` and the forwarder. The kit had
+stopped coming up twice since its last run: no forward key after SMD-2287 PR
+5b, and the forwarder never started after SMD-2583. One clean cycle each on
+the dogfood Mac (podman 6.1.4; the netavark cleanup of SMD-2929 run before
+each `--up`):
+
+| candidate | C1 | C1s | C2 | C3 | the tool's own |
+| --- | --- | --- | --- | --- | --- |
+| n8n 2.40.6 | PASS: 10, +10 / 10, +0 | PASS: seen after 541 s | PASS: n8n's HTTP Request node | PASS | K, P, A, I PASS |
+| n8n 2.40.6, sealed | PASS: 10, +10 / 10, +0 | not run (sealed) | PASS | PASS (the act fails, as sealed it must) | K, P, A, I PASS; E PASS: `api.dns.podman` ×42 and the runner's name inside, only `api.linear.app` outside, 21 connections to `api:8000` |
+| activepieces 0.91.3 | PASS: 10, +10 / 10, +0 | PASS: seen after 812 s | PASS: the HTTP piece's send-request action | PASS | — |
+| windmill CE v1.817.0 | PASS: 10, +10 / 10, +0 | not measured (the stack was taken down mid-wait) | FAIL, as posted: a script of ours calling `fetch` (Windmill has no HTTP step outside a script) | PASS | — |
+
+Every capture's audit row reads `origin` `open-brain-api` and the tool's own
+`source` (`n8n`, `activepieces`): the REST door, not the MCP server's.
 
 Memory is `docker stats`' usage per container — the cgroup's, page cache
 included, not a resident set — read when `--verify` starts (after `--up`, and
@@ -7203,11 +7237,11 @@ Ollama. The runner then reported its rows written and reembed failed, which
 is its answer to a provider outage.
 
 **Emitter egress (SMD-2289).** The kit's allowlist gains a fourth pipeline,
-`vendor`, whose line names `server:8000`, and I two more demands:
+`vendor`, whose line names `server:8000` (`api:8000` since SMD-2295), and I two more demands:
 - `snoop` must also reach nothing: no DNS answer, not the host alias's
   Ollama, Postgres, n8n, 1.1.1.1 or the runner's own port. Its run takes
   about 15 s, most of it the lookups that get no answer;
-- `vendor` must reach `server:8000` through its proxy with TLS naming it:
+- `vendor` must reach `server:8000` (now `api:8000`) through its proxy with TLS naming it:
   the brain answers the ClientHello in plain HTTP, which Python reports as a
   wrong TLS version, and that is proof it arrived. TLS naming `other.example`
   through the same tunnel must be cut off before it reaches anything (review
