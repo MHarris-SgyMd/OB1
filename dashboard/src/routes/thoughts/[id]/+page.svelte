@@ -37,7 +37,7 @@
 		{#if fields.length === 0}
 			<p class="text-sm text-text-muted">None.</p>
 		{:else}
-			<dl class="grid grid-cols-[minmax(8rem,auto)_1fr] gap-x-6 gap-y-2 text-sm">
+			<dl class="grid grid-cols-1 sm:grid-cols-[minmax(8rem,auto)_1fr] gap-x-6 gap-y-1 sm:gap-y-2 text-sm">
 				{#each fields as [k, v] (k)}
 					<dt class="text-text-muted">{k}</dt>
 					<dd class="min-w-0 font-mono whitespace-pre-wrap [overflow-wrap:anywhere]">{shown(v)}</dd>

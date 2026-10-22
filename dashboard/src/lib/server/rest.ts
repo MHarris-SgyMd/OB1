@@ -56,5 +56,7 @@ export async function read<K extends CallableOperation>(event: RequestEvent, ses
 	}
 	const code = codeOf(answer.body);
 	if (answer.status >= 500) console.error(`[dashboard] ${name}: ${answer.status} ${code ?? ''}`.trimEnd());
-	throw error(answer.status, code ? `The brain refused: ${code}` : `The brain answered ${answer.status}`);
+	// In words where they are known; the core's code otherwise, for the operator's log (review pass 6).
+	if (answer.status === 404 && name === 'fetch') throw error(404, 'The brain holds no thought with that id.');
+	throw error(answer.status, code ? `The brain refused the read (${code}).` : `The brain answered ${answer.status}.`);
 }

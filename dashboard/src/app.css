@@ -14,6 +14,12 @@
 	--font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* A focused link scrolls clear of the sticky header, which wraps to two or
+   three lines on a phone (review pass 6: links hid behind it). */
+html {
+	scroll-padding-top: 8rem;
+}
+
 body {
 	background-color: var(--color-bg);
 	color: var(--color-text);

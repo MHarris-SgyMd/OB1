@@ -92,6 +92,27 @@ const signOut = async () => {
   takeCookie(r);
   return r;
 };
+/**
+ * The keys of the overview's `recent` items in its __data.json, sorted and joined, the same for every item, or what
+ * differs. SvelteKit's data is devalue's flat array: the node's root object maps each key to an index, so object keys
+ * are the payload's structure and a thought's text is only ever a string element.
+ */
+function recentKeys(json: string): string {
+  try {
+    const doc = JSON.parse(json) as { nodes?: ({ data?: unknown[] } | null)[] };
+    for (const node of doc.nodes ?? []) {
+      const data = node?.data;
+      const root = data?.[0] as Record<string, number> | undefined;
+      if (!data || !root || typeof root !== "object" || !("recent" in root)) continue;
+      const items = (data[root.recent] as number[]).map((i) => Object.keys(data[i] as object).sort().join(","));
+      const kinds = [...new Set(items)];
+      return items.length === 0 ? "no items listed" : kinds.length === 1 ? kinds[0] : `items differ: ${kinds.join(" | ")}`;
+    }
+    return "no recent in the data";
+  } catch (err) {
+    return `unreadable: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
 const toSignin = (r: { status: number; location: string }) => r.status === 303 && r.location === "/dashboard/signin";
 /** Every page the GUI renders, by its path under the base. */
 const PAGES = ["/", "/status", "/thoughts/00000000-0000-0000-0000-000000000000"];
@@ -207,7 +228,9 @@ let thoughtId = "";
   }
   assert(pages[2].status === 200 && pages[3].status === 200, `the pages' navigation data answers for the session (${pages[2].status}, ${pages[3].status})`);
   // The overview sends each thought's first line, not its content: ten large thoughts made it 18.8 MB (review pass 4).
-  assert(!home.html.includes('"content"') && !home.html.includes("content:") && !pages[2].html.includes('"content"'), "the overview's page and data carry no thought's content, its first lines alone");
+  // Held by the data's structure — each listed thought's keys — not by a word, which a thought's own text can hold
+  // (review pass 6: a first line reading `content:` failed a search for the word).
+  assert(recentKeys(pages[2].html) === "created_at,id,line,superseded", `the overview's data lists each thought as its id, first line, time and flag alone (${recentKeys(pages[2].html)})`);
   assert(!leaked && scripts.size > 2, `no page, header, navigation data or script (${scripts.size} modules) holds the key`);
 
   const out = await signOut();

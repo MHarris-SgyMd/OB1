@@ -14,11 +14,12 @@
 </script>
 
 <div class="min-h-screen flex flex-col">
-	<header class="border-b border-white/10 bg-bg-elevated/50 sticky top-0 z-50">
+	<a href="#main" class="sr-only focus:not-sr-only focus:absolute focus:z-[60] focus:m-2 focus:px-3 focus:py-2 focus:rounded focus:bg-bg-card">Skip to content</a>
+	<!-- Opaque: a see-through header let the page scrolled under it read through (review pass 6). -->
+	<header class="border-b border-white/10 bg-bg-elevated sticky top-0 z-50">
 		<div class="max-w-5xl mx-auto px-6 py-4 flex flex-wrap items-center justify-between gap-3">
-			<a href={HOME} class="flex items-center gap-3">
-				<h1 class="text-xl font-bold">Open Brain</h1>
-			</a>
+			<!-- The brand is no heading: each page has its one h1 (review pass 6). -->
+			<a href={HOME} class="flex items-center gap-3 text-xl font-bold">Open Brain</a>
 			{#if data.signedIn}
 				<nav class="flex items-center gap-4 text-sm" aria-label="Views">
 					{#each nav as item (item.href)}
@@ -29,7 +30,7 @@
 						>
 					{/each}
 					{#if data.grafana}
-						<a href={data.grafana} class="text-text-muted hover:text-text" rel="noopener noreferrer" target="_blank">Grafana ↗</a>
+						<a href={data.grafana} class="text-text-muted hover:text-text" rel="noopener noreferrer" target="_blank">Grafana<span aria-hidden="true"> ↗</span><span class="sr-only"> (opens a new tab)</span></a>
 					{/if}
 				</nav>
 				<div class="flex items-center gap-3 text-sm">
@@ -42,7 +43,7 @@
 		</div>
 	</header>
 
-	<main class="flex-1 max-w-5xl w-full mx-auto px-6 py-8">
+	<main id="main" class="flex-1 max-w-5xl w-full mx-auto px-6 py-8">
 		{@render children()}
 	</main>
 </div>

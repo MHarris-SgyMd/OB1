@@ -21,9 +21,11 @@
 				class="space-y-4"
 				use:enhance={() => {
 					loading = true;
-					return async ({ update }) => {
+					return async ({ result, update }) => {
 						await update();
 						loading = false;
+						// The disabled button dropped focus out of the form; a refusal puts it back on the field (review pass 6).
+						if (result.type === 'failure') document.getElementById('key')?.focus();
 					};
 				}}
 			>
@@ -33,21 +35,24 @@
 						id="key"
 						name="key"
 						type="password"
-						placeholder="the key keygen.ts printed once"
 						autocomplete="current-password"
 						required
-						class="mt-2 w-full bg-bg-elevated border border-white/10 rounded-lg px-3 py-2 focus:outline-none focus:border-primary"
+						aria-invalid={form?.error ? 'true' : undefined}
+						aria-describedby={form?.error ? 'key-error' : 'key-help'}
+						class="mt-2 w-full bg-bg-elevated border border-white/40 rounded-lg px-3 py-2 focus:outline-none focus:border-primary"
 					/>
 				</div>
 
+				<p id="key-help" class="text-xs text-text-muted">The raw key <code>keygen.ts</code> printed once when the key was made.</p>
+
 				{#if form?.error}
-					<div class="text-sm text-red-400" role="alert">{form.error}</div>
+					<div id="key-error" class="text-sm text-red-400" role="alert">{form.error}</div>
 				{/if}
 
 				<button
 					type="submit"
 					disabled={loading}
-					class="w-full py-2.5 rounded-lg bg-primary hover:bg-primary-light disabled:opacity-60 text-white font-medium"
+					class="w-full py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white font-medium"
 				>
 					{loading ? 'Signing in…' : 'Sign in'}
 				</button>

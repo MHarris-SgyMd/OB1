@@ -61,7 +61,11 @@ const deadlineMs = Math.min(drain.drainBoundMs + 1000, drain.graceS * 1000 - 250
 let stopping = false;
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.on(signal, () => {
-    if (stopping) return;
+    // A second signal ends the wait, as the servers' drainOnSignal does (review pass 6).
+    if (stopping) {
+      console.error(`dashboard: a second ${signal} during the stop; exit`);
+      process.exit(1);
+    }
     stopping = true;
     setTimeout(() => {
       console.error(`dashboard: a request still open ${deadlineMs} ms into the stop, past the drain; exit`);

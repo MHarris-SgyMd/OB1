@@ -13,6 +13,7 @@
 
 <svelte:head><title>Overview · Open Brain</title></svelte:head>
 
+<h1 class="sr-only">Overview</h1>
 <section class="space-y-8">
 	<div class="grid gap-4 sm:grid-cols-3">
 		<div class="bg-bg-card border border-white/10 rounded-xl p-5">
@@ -55,8 +56,9 @@
 			     A full load on a click: the thought page is the server's alone (csr false), which a client-side navigation bypassed (review pass 5). -->
 			<ul class="divide-y divide-white/5" data-testid="recent" data-sveltekit-preload-data="off" data-sveltekit-reload>
 				{#each data.recent as t (t.id)}
-					<li class="py-2">
-						<a class="hover:text-primary-light" href="{base}/thoughts/{t.id}">{t.line}</a>
+					<li class="py-2 min-w-0">
+						<!-- Wraps anywhere: a URL or hash in a first line scrolled the page sideways (review pass 6). -->
+						<a class="hover:text-primary-light [overflow-wrap:anywhere]" href="{base}/thoughts/{t.id}">{t.line}</a>
 						<div class="text-xs text-text-muted">{t.created_at ? when(t.created_at) : 'undated'}{t.superseded ? ' · superseded' : ''}</div>
 					</li>
 				{/each}
