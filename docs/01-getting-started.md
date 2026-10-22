@@ -420,7 +420,7 @@ Every MCP client handles remote servers slightly differently. The server accepts
 ```
 
 > [!NOTE]
-> The bridge is a process on your machine, but it is only a bridge: the server it reaches is still the one HTTP process from Step 4.
+> The bridge is a process on your machine, but it is only a bridge: the server it reaches is still the stack's `/mcp` from Step 4, by its URL.
 
 </details>
 
@@ -523,9 +523,9 @@ The metadata extraction is best-effort — the LLM is making its best guess with
 <details>
 <summary>🔍 <strong>How It Works Under the Hood</strong></summary>
 
-**When you capture from any AI via MCP:** your AI client sends the text to the `capture_thought` tool → the MCP server asks the embedding model for a vector of its meaning (1024 numbers, with the local default) AND asks the chat model for metadata, in parallel → both get stored as a single row in Postgres, in one statement → confirmation returned to your AI.
+**When you capture from any AI via MCP:** your AI client sends the text to the `capture_thought` tool → the MCP server at `/mcp` hands the call to the REST core → the REST core asks the embedding model for a vector of its meaning (1024 numbers, with the local default) AND asks the chat model for metadata, in parallel → both get stored as a single row in Postgres, in one statement → confirmation returned to your AI.
 
-**When you search your brain:** your AI client sends the query to the MCP server → the server embeds your question → Postgres (pgvector) matches it against every stored thought by vector similarity → results come back ranked by meaning, not keywords.
+**When you search your brain:** your AI client sends the query to the MCP server → the REST core behind it embeds your question → Postgres (pgvector) matches it against every stored thought by vector similarity → results come back ranked by meaning, not keywords.
 
 The embedding is what makes retrieval powerful. "Sarah's thinking about leaving" and "What did I note about career changes?" match semantically even though they share zero keywords. The metadata is a bonus layer for structured filtering on top.
 
@@ -546,7 +546,7 @@ Your MCP server handles both reading and writing. But if you want a quick-captur
 - **[Telegram Capture](../integrations/telegram-capture/)** — Message a bot, get a thought
 - More integrations in [`/integrations`](../integrations/)
 
-Each one is another small server run the same way as this one — [`primitives/deploy-remote-mcp/`](../primitives/deploy-remote-mcp/) is the pattern.
+Each one is a small server of its own that runs beside the stack — [`primitives/deploy-remote-mcp/`](../primitives/deploy-remote-mcp/) is the pattern.
 
 </details>
 
@@ -555,7 +555,7 @@ Each one is another small server run the same way as this one — [`primitives/d
 
 You just used three free tools, one command and one settings file to build a personal knowledge system with semantic search, an open write protocol, and an open read protocol — on your own machine, with the models on your own machine. No CS degree. No account with anyone. No monthly SaaS fee.
 
-Here's the thing worth noticing: every piece of it is ordinary infrastructure you can read. The schema is `db/migrations/`. The server is one file, `server-portable/index.ts`. The models are two names in a settings file. Want to add a new capture source? [`primitives/deploy-remote-mcp/`](../primitives/deploy-remote-mcp/) is the shape, and the [integrations](../integrations/) are worked examples. Want to add a field to your thoughts? [`db/README.md`](../db/README.md) explains the migrations. Want to share part of your brain with a teammate? [`primitives/shared-mcp/`](../primitives/shared-mcp/) is a second server with its own keys.
+Here's the thing worth noticing: every piece of it is ordinary infrastructure you can read. The schema is `db/migrations/`. The MCP server is `mcp-server/`, and the REST core it calls is `server-portable/`. The models are two names in a settings file. Want to add a new capture source? [`primitives/deploy-remote-mcp/`](../primitives/deploy-remote-mcp/) is the shape, and the [integrations](../integrations/) are worked examples. Want to add a field to your thoughts? [`db/README.md`](../db/README.md) explains the migrations. Want to share part of your brain with a teammate? [`primitives/shared-mcp/`](../primitives/shared-mcp/) is a second server with its own keys.
 
 You just built AI infrastructure using AI. That pattern doesn't stop here.
 

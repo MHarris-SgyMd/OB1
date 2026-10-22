@@ -1426,24 +1426,64 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   await Bun.file(suicide).delete();
   assert(!killed.up && killedMs < 3_000, `a child killed by a signal: not up, seen in ${Math.round(killedMs)} ms`);
 
-  // An export already on its way when the stop comes: the flush waits for it,
-  // and a collector slower than the bound is said as such — not read as sent
-  // because nothing was left in the batch (review pass 2).
-  const slowCollector = Bun.serve({ port: 0, fetch: async () => { await Bun.sleep(3_000); return Response.json({}); } });
-  const slowPort = slowCollector.port;
+  // An export already on its way when the stop comes: the flush waits for it, under a bound of its own (SMD-2902) —
+  // its budget inside what OB1_STOP_GRACE leaves less a second, here a 4 s grace's — not the pool's second (review
+  // pass 2, SMD-2902). A collector that answers in 1.5 s gets everything; one that never answers is cut at the bound,
+  // and what each signal held is said by count before the stop's line, not read as sent because the batch was empty.
   // The batch's delay at 200 ms (OTEL_BSP_SCHEDULE_DELAY), so its export is on its way well before the stop.
-  const late = await serveChild(import.meta.dir, "api.ts", { ...STUB, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${slowPort}`, OTEL_BSP_SCHEDULE_DELAY: "200" }, { waitForSdk: true });
-  let lateOut = "";
-  try {
-    await fetch(`http://127.0.0.1:${late.port}/v1/whoami`).then((r) => r.text());
-    await Bun.sleep(700); // past the batch's delay: its export is on its way, the batch empty
-    lateOut = await late.stop();
-  } finally {
-    late.kill();
-    slowCollector.stop(true);
-  }
-  const lateStop = lateOut.split("\n").find((l) => l.startsWith("SIGTERM: stopped")) ?? "";
-  assert(late.up && late.sdk && /; telemetry not all sent within \d+ ms; exit 0$/.test(lateStop), `an export on its way at the stop is waited for, not read as sent (${lateStop})`);
+  const stopWith = async (answer: () => Promise<Response>, env: Record<string, string> = {}, more = 0) => {
+    const collector = Bun.serve({ port: 0, idleTimeout: 0, fetch: answer });
+    // Read before the stop: a stopped server's port is not its port.
+    const port = collector.port;
+    const child = await serveChild(import.meta.dir, "api.ts", { ...STUB, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${port}`, OTEL_BSP_SCHEDULE_DELAY: "200", OB1_STOP_GRACE: "4", ...env }, { waitForSdk: true });
+    let out = "";
+    try {
+      const hit = () => fetch(`http://127.0.0.1:${child.port}/v1/whoami`).then((r) => r.text());
+      await hit();
+      await Bun.sleep(700); // past the batch's delay: its export is on its way, the batch empty
+      await Promise.all(Array.from({ length: more }, hit)); // then more, at once, behind it
+      out = await child.stop();
+    } finally {
+      child.kill();
+      collector.stop(true);
+    }
+    return { up: child.up && child.sdk, out, port, line: out.split("\n").find((l) => l.startsWith("SIGTERM: stopped")) ?? "" };
+  };
+  const slow = await stopWith(async () => { await Bun.sleep(1_500); return Response.json({}); });
+  const hung = await stopWith(() => new Promise<Response>(() => {}));
+  const within = Number(/telemetry not all sent within (\d+) ms; exit 0$/.exec(hung.line)?.[1] ?? NaN);
+  const stoppedIn = Number(/stopped in ([\d.]+) s/.exec(hung.line)?.[1] ?? NaN);
+  const cutLines = hung.out.split("\n").filter((l) => l.includes(`not sent to http://127.0.0.1:${hung.port} (on its way or batched when the flush's ${within} ms ran out)`));
+  assert(slow.up && /; no database pool was opened; telemetry sent; exit 0$/.test(slow.line),
+    `a collector that answers in 1.5 s gets the stop's telemetry, under the flush's own bound (${slow.line})`);
+  // Each signal's line: the span and the log record the request made, and the metric reading the flush sent. The order
+  // against the stop's line is test-server [13d]'s to hold: serveChild returns stdout, then stderr.
+  assert(hung.up && within >= 2_500 && within <= 3_000 && stoppedIn < 3.5 && ["1 span", "1 log record", "1 metric export"].every((n) => cutLines.some((l) => l.startsWith(`telemetry: ${n} not sent`))),
+    `a collector that never answers: the stop cuts its flush at what a 4 s grace leaves (${within} ms, stopped in ${stoppedIn} s), and says by signal what was still on its way (${cutLines.join(" / ") || hung.out.split("\n").filter((l) => l.includes("not sent")).join(" / ")})`);
+  // What the batches still held, and what their full queues dropped, each counted once (review pass 1's mutants): queues
+  // of one, four requests at once behind the first one's exports, which hang. Every span and every log record is said
+  // exactly once — dropped (queue full) or cut (on its way or still batched: the log batch holds its queue behind an
+  // export on its way) — so each signal's lines add up to the five requests, the drops among them.
+  const crowded = await stopWith(() => new Promise<Response>(() => {}), {
+    OTEL_BLRP_SCHEDULE_DELAY: "200", OTEL_BSP_MAX_QUEUE_SIZE: "1", OTEL_BSP_MAX_EXPORT_BATCH_SIZE: "1", OTEL_BLRP_MAX_QUEUE_SIZE: "1", OTEL_BLRP_MAX_EXPORT_BATCH_SIZE: "1",
+  }, 4);
+  const tally = (noun: "span" | "log record") => {
+    const by: Record<string, number> = {};
+    for (const l of crowded.out.split("\n")) {
+      const m = new RegExp(`^telemetry: (\\d+) ${noun}s? not sent to http://127\\.0\\.0\\.1:${crowded.port} \\((.+)\\) \\(SMD-1849\\)$`).exec(l);
+      if (!m) continue;
+      // A line names one kind, or several as "kind: n, kind: n" — each part a kind and a count (review pass 2: the cut's
+      // kind leads such a line when it is the larger, and holds no ": " of its own).
+      const several = m[2].split(", ").map((p) => /^(.+): (\d+)$/.exec(p));
+      const parts = several.length > 1 && several.every(Boolean) ? several.map((p) => [p![1], p![2]]) : [[m[2], m[1]]];
+      for (const [kind, n] of parts) by[kind.startsWith("on its way") ? "cut" : kind] = (by[kind.startsWith("on its way") ? "cut" : kind] ?? 0) + Number(n);
+    }
+    return by;
+  };
+  const spansSaid = tally("span"), logsSaid = tally("log record");
+  const total = (by: Record<string, number>) => Object.values(by).reduce((a, b) => a + b, 0);
+  assert(crowded.up && total(spansSaid) === 5 && total(logsSaid) === 5 && (spansSaid["queue full"] ?? 0) >= 1 && (logsSaid["queue full"] ?? 0) >= 1 && (spansSaid.cut ?? 0) >= 1 && (logsSaid.cut ?? 0) >= 1,
+    `with full queues and batches still holding, each of five requests' span and log record is said once, dropped or cut (spans ${JSON.stringify(spansSaid)}, log records ${JSON.stringify(logsSaid)})`);
 }
 
 console.log("\n[16] The served idle timeout is Bun's ceiling: its 10 s default cuts a GET whose handler has not answered (SMD-2287 PR 3a review pass 3)");

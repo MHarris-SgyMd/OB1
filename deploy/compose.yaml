@@ -1162,6 +1162,10 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     command: ["bun", "/forwarder.ts"]
+    # Bun as PID 1 ignores SIGTERM, which the script does not handle, so
+    # without init each stop, recreate and `down` would wait out the 10 s
+    # grace (SMD-3193); under it bun takes the signal's default and exits.
+    init: true
     configs:
       - source: forwarder
         target: /forwarder.ts
