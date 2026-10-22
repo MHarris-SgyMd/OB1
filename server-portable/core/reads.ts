@@ -7,7 +7,7 @@
 import { thoughtTitle, thoughtUrl } from "../thoughts.ts";
 import { mayLeaveBox, type EgressSubject } from "../egress.ts";
 import { providerDown, shownBase } from "../embed.ts";
-import { storeKind, UUID_RE, type AuditChange, type ListPosition, type ListSort, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
+import { ListCursorRefused, storeKind, UUID_RE, type AuditChange, type ListPosition, type ListSort, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
 import { keysInOrder, MOVED_READ, movedAmong, typesOf, type Moved, type MovedHit, type MovedType } from "../stated-status.ts";
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
 import { brainInfo as readBrain, type BrainInfo, type ReadOptions, type ServerFacts } from "../brain-info.ts";
@@ -17,6 +17,7 @@ import type { Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
 import { FilterError, parseFilter, trustAtOrAbove, withActorFilter, type Trust } from "./filter.ts";
 import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
+import { listCursor, parseListCursor } from "./list-cursor.ts";
 import { SCAN_DEFAULT, SCAN_MAX, type Input } from "./schemas.ts";
 
 // ── The one search operation ─────────────────────────────────────────────────
@@ -446,54 +447,6 @@ export type ListedThought = ThoughtListItem & { supersededBy: string | null };
 /** A page (SMD-2995): the thoughts, the sort they are in, and the cursor for the next page — null when no more follow. */
 export type ListThoughtsResult = { thoughts: ListedThought[]; sort: ListSort; cursor: string | null };
 
-/**
- * list_thoughts' cursor (SMD-2995): the sort it was made under and the place
- * the page ended, as base64url of `[sort, at, id]` — opaque to a caller, who
- * passes it back as it came. `at` is Postgres's own text of `created_at`, or
- * null for an undated row (store.ts ListPosition).
- */
-export function listCursor(sort: ListSort, at: string | null, id: string): string {
-  return Buffer.from(JSON.stringify([sort, at, id])).toString("base64url");
-}
-
-/**
- * A list_thoughts cursor read back, or null for anything that is not one: the
- * sort a word of the two, the id a uuid, and `at` null or timestamptz's text
- * as Postgres writes it (a date, a clock to the microsecond, an offset, a BC,
- * or ±infinity), held to a shape and a date that exists before it reaches the
- * SQL, so a forged one is this refusal, not a cast error.
- */
-export function parseListCursor(raw: string): { sort: ListSort; at: string | null; id: string } | null {
-  const text = raw.trim();
-  if (!/^[A-Za-z0-9_-]{1,512}$/.test(text)) return null;
-  let v: unknown;
-  try {
-    v = JSON.parse(Buffer.from(text, "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(v) || v.length !== 3) return null;
-  const [sort, at, id] = v as unknown[];
-  if (sort !== "newest" && sort !== "oldest") return null;
-  if (typeof id !== "string" || !UUID_RE.test(id)) return null;
-  if (at === null) return { sort, at: null, id: id.toLowerCase() };
-  if (typeof at !== "string") return null;
-  if (at === "infinity" || at === "-infinity") return { sort, at, id: id.toLowerCase() };
-  const m = /^(\d{4,})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(\.\d{1,6})?[+-]\d{2}(?::\d{2}){0,2}( BC)?$/.exec(at);
-  if (!m) return null;
-  const [y, mo, d, h, mi, s] = m.slice(1, 7).map(Number);
-  const day = new Date(Date.UTC(2000, mo - 1, d));
-  // The day exists in its month (a leap day checked against a leap year's calendar), the clock is a clock.
-  if (mo < 1 || mo > 12 || day.getUTCMonth() !== mo - 1 || day.getUTCDate() !== d || (mo === 2 && d === 29 && !leap(y, Boolean(m[8]))) || h > 23 || mi > 59 || s > 59) return null;
-  return { sort, at, id: id.toLowerCase() };
-}
-
-/** Whether year `y` (BC when `bc`) is a leap year in Postgres's proleptic Gregorian calendar: 1 BC is year 0. */
-const leap = (y: number, bc: boolean) => {
-  const n = bc ? 1 - y : y;
-  return n % 4 === 0 && (n % 100 !== 0 || n % 400 === 0);
-};
-
 export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, type, topic, person, days, said_by, actor, min_trust, sort, after }: Input<"list_thoughts">): Promise<Outcome<ListThoughtsResult>> {
   // SMD-2995: the cursor is decided here, before any call: a string that is no
   // cursor of this tool's, or one made under the other sort, is refused, the
@@ -507,7 +460,14 @@ export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, typ
   }
   // min_trust (SMD-1724) as the ladder's words at or above it: a containment
   // clause's sibling (no ob1_trust_rank call).
-  const page = await (await ctx.store()).listThoughts({ limit, type, topic, person, days, saidBy: said_by, actor, trustIn: min_trust === undefined ? undefined : trustAtOrAbove(min_trust), sort, after: from });
+  let page;
+  try {
+    page = await (await ctx.store()).listThoughts({ limit, type, topic, person, days, saidBy: said_by, actor, trustIn: min_trust === undefined ? undefined : trustAtOrAbove(min_trust), sort, after: from });
+  } catch (e) {
+    // A cursor of the right shape whose time Postgres cannot read (review pass 1): the same refusal, not a fault quoting it.
+    if (e instanceof ListCursorRefused && after !== undefined) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after, reason: "shape" });
+    throw e;
+  }
   const cursor = page.next ? listCursor(sort, page.next.at, page.next.id) : null;
   if (!page.thoughts.length) return ok({ thoughts: [], sort, cursor });
   // 025 (SMD-1253): mark the listed thoughts a newer thought supersedes,

@@ -1135,7 +1135,10 @@
             "required": false,
             "schema": {
               "default": 10,
-              "type": "number"
+              "description": "Thoughts per page, 1–1000 (default 10)",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
             }
           },
           {
@@ -1170,7 +1173,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "description": "Only thoughts from the last N days",
+              "description": "Only thoughts from the last N days, counted from each call: a window that moves while you page, so its oldest can leave it between pages",
               "type": "number"
             }
           },

@@ -24,6 +24,7 @@ import { SQL } from "bun";
 import { createAssert, resetSchema } from "../db/test-support.ts";
 import { hashKey } from "./auth.ts";
 import { ok } from "./core/refusal.ts";
+import { listCursor } from "./core/list-cursor.ts";
 import * as say from "./render.ts";
 import { REFUSAL_STATUS } from "./rest/app.ts";
 import { TOOL_NAMES } from "./tools.ts";
@@ -209,8 +210,13 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     const nextId = ((r.body.thoughts ?? []) as { id: string }[])[0]?.id;
     assert(r.status === 200 && !m.isError && nextId !== undefined && nextId !== firstId, `list_thoughts ${sort}: the cursor takes both doors on to the next thought (${r.status}, ${nextId !== firstId ? "another" : "the same"})`);
     assert(out.content[0].text === m.text && same(out.structuredContent, m.sc), `…the same page through either door, its cursor among it (first difference: ${firstDiff(out.structuredContent, m.sc)})`);
+    // The cursor itself in structuredContent, as REST gives it — not a value the guard nulled on both sides alike (review pass 1).
+    const m1 = await mcp("list_thoughts", { limit: 1, sort });
+    assert(typeof m1.sc.cursor === "string" && m1.sc.cursor === cursor, `…and MCP's structuredContent carries the first page's cursor as REST does, a string (${typeof m1.sc.cursor})`);
     const other = sort === "newest" ? "oldest" : "newest";
-    for (const [why, after, s2, facts] of [["a cursor that is none", "not-a-cursor", sort, { reason: "shape" }], ["a cursor made under the other sort", String(cursor), other, { reason: "sort", sort }]] as const) {
+    // A cursor of the right shape whose time Postgres's cast cannot read (an offset past ±15:59): refused alike, not a fault quoting it (review pass 1).
+    const unreadable = listCursor(sort, "2026-01-01 00:00:00+16", "00000000-0000-4000-8000-000000000000");
+    for (const [why, after, s2, facts] of [["a cursor that is none", "not-a-cursor", sort, { reason: "shape" }], ["a cursor whose time Postgres cannot read", unreadable, sort, { reason: "shape" }], ["a cursor made under the other sort", String(cursor), other, { reason: "sort", sort }]] as const) {
       const rr = await rest("GET", `/v1/thoughts?limit=1&sort=${s2}&after=${encodeURIComponent(after)}`);
       const mm = await mcp("list_thoughts", { limit: 1, sort: s2, after });
       const refusal = { code: "REFUSED_CURSOR" as const, retryable: false as const, value: after, ...facts };
@@ -219,6 +225,11 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
         `list_thoughts ${sort}, ${why}: REST refuses it 400 REFUSED_CURSOR with its reason${"sort" in facts ? " and the sort it was made under" : ""}, never echoing it (${rr.status} ${String(rr.body.code)} ${String(rr.body.reason)})`);
       assert(mm.isError && mm.text === said.content[0].text, `…and MCP words that refusal as render.ts does (${mm.text.slice(0, 70)})`);
     }
+  }
+  // A limit is a whole number of thoughts, 1 to 1000: 0, -1, 1.5 and 1001 are the schema's refusal, not an empty page (review pass 1).
+  for (const bad of ["0", "-1", "1.5", "1001"]) {
+    const r = await rest("GET", `/v1/thoughts?limit=${bad}`);
+    assert(r.status === 400 && r.body.code === "REFUSED_INPUT", `list_thoughts limit=${bad}: REST's 400 REFUSED_INPUT (${r.status} ${String(r.body.code)})`);
   }
   const reads = ["search", "fetch", "search_thoughts", "search_thoughts_keyword", "list_thoughts", "list_thought_ids", "list_logged_searches", "list_supersession_proposals", "thought_stats", "thought_changes", "worker_status", "brain_info"];
   assert(reads.every((t) => covered.has(t)), "every read operation but the job pair is compared here; the job pair is [4]");

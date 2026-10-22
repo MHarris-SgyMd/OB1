@@ -181,11 +181,12 @@ export const SPECS = {
       readOnlyHint: true,
     },
     inputSchema: {
-      limit: z.number().optional().default(10),
+      // A whole number from 1 (SMD-2995 review pass 1): 0 or -1 read as an empty brain, 1.5 rounded, and 2^31-1 overflowed the row read past the page.
+      limit: z.number().int().min(1).max(1000).optional().default(10).describe("Thoughts per page, 1–1000 (default 10)"),
       type: z.string().optional().describe("Filter by type: observation, task, idea, reference, person_note"),
       topic: z.string().optional().describe("Filter by topic tag"),
       person: z.string().optional().describe("Filter by person mentioned"),
-      days: z.number().optional().describe("Only thoughts from the last N days"),
+      days: z.number().optional().describe("Only thoughts from the last N days, counted from each call: a window that moves while you page, so its oldest can leave it between pages"),
       // SMD-1726: who wrote it — the two keys 050 stamps, as containment
       // clauses beside type, topic and person.
       said_by: saidByInput,

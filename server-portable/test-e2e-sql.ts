@@ -35,6 +35,7 @@ import { fileURLToPath } from "node:url";
 import { mcpTarget, mcpUnderTest, servedAsNamed, SUITE_CARRIER } from "./test-support.ts";
 import { createCore, newMendState } from "./core/index.ts";
 import { createStore, type ThoughtStore } from "./store.ts";
+import { parseListCursor } from "./core/list-cursor.ts";
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -3056,6 +3057,8 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
 // that break it.
 const SHAPE = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[+-]?\d{4,6}-\d{2}-\d{2}(?:T[\d:.]+(?:Z|[+-]\d{2}(?::?\d{2})?)?)?|-?infinity|[A-Za-z][A-Za-z0-9_-]{0,39})$/i;
 const wordless = (v: unknown, at = ""): string[] => {
+  // list_thoughts' cursor (SMD-2995) is a token by construction: what it decodes to is a sort word, a time and a uuid, read by the core's own rule.
+  if (typeof v === "string" && at === "cursor" && parseListCursor(v)) return [];
   if (typeof v === "string") return SHAPE.test(v) ? [] : [at || "(root)"];
   if (Array.isArray(v)) return v.flatMap((x, i) => wordless(x, `${at}[${i}]`));
   if (v && typeof v === "object") return Object.entries(v).flatMap(([k, x]) => (at === "" && k === "text" ? [] : wordless(x, at ? `${at}.${k}` : k)));
