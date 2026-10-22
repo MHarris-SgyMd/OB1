@@ -37,7 +37,7 @@ Solutions for issues that come up across any Open Brain extension. If your probl
 - `EADDRINUSE`: the port is taken. `PORT` unset is 8000 — the compose stack's, and on macOS podman's `gvproxy` holds it too. Pick another port.
 - `Cannot find package 'hono'`: run `(cd extensions && bun install)` once; an integration or recipe server reaches that same install through the `node_modules` link in `integrations/` or `recipes/`
 - A missing environment variable: the server names it and exits. The extension's README lists what it reads.
-- The core server exits with `preflight FAILED`: read the failing row — it names the setting and the fix (`deploy/README.md`, "Why the server runs preflight before serving")
+- The stack's `server` or `api` service exits with `preflight FAILED` (the image runs it before either): read the failing row — it names the setting and the fix (`deploy/README.md`, "Why the server runs preflight before serving")
 
 **The server starts but tool calls error**
 - Read the server's output: a failed tool call logs its cause there
