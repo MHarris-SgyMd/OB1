@@ -1,6 +1,6 @@
 # Subject-anchored claims: a claim is read against its subject's own timeline (SMD-3203)
 
-An architecture decision record. **Decided 2026-10-22 by the maintainer**: two thoughts linked only by a subject that neither is about are distinct, and that subject's staleness is shown when either thought is read, from the subject's own timeline, as SMD-2540 does for the tickets a thought names. Code artifacts are the next subject to get a timeline, a spike first (SMD-3207). The pass change SMD-3203 proposed, its item 3, waits until this record says what consolidation writes for a mediated pair: it says so here for a full pair, not yet for a half pair.
+An architecture decision record. **Decided 2026-10-22 by the maintainer**: two thoughts linked only by a subject that neither is about are distinct, and that subject's staleness is shown when either thought is read, from the subject's own timeline, as SMD-2540 does for the tickets a thought names. A pair in which one thought names the other's subject only in passing is related at most. Code artifacts are the next subject to get a timeline, a spike first (SMD-3207). The pass change SMD-3203 proposed, its item 3, waited until this record said what consolidation writes for a mediated pair; it now does, and whether to build it is the maintainer's call.
 
 The decision table marks which rows the maintainer decided, which follow from them, which this record proposes, and which are built.
 
@@ -49,8 +49,8 @@ The question was how far that shape goes beyond tickets, and what consolidation 
 | # | Decided | Status | Chosen over |
 |---|---|---|---|
 | 1 | **A thought's claim about a subject is read against the subject's own timeline, when the thought is read.** The subject's state when the thought was written is set beside its state now, and the hit is labelled. Reading the timeline writes nothing. | decided by the maintainer (2026-10-22) for a pair's third subject (row 2) and for code artifacts (row 6); built for tickets (SMD-2540) | relating two thoughts pairwise because each reports the same third subject, as pair 16 was labelled; reading the state a thought states (SMD-2540's eval) |
-| 2 | **A pair whose only link is a third subject is distinct.** The pass's verdict concerns the pair's own subjects. Two thoughts about different tickets that each report a third ticket's state, or its blockers' as in pair 16, are not joined through it. The pass stores distinct when its verdict clears the floor (migration 102). | decided by the maintainer (2026-10-22) | a relation naming the third subject in a new payload key (a writer change, a new decide version and a re-judge); recording nothing, not even distinct |
-| 3 | **Decide mode proposes no supersession through a third subject.** | proposed here; not built. SMD-3203's item 3 would build it, and waits (the maintainer, 2026-10-22) | a proposal whose only evidence is a third subject's state |
+| 2 | **A full pair is distinct, and a half pair is related at most.** The pass's verdict concerns the pair's own subjects. Two thoughts about different tickets that each report a third ticket's state, or its blockers' as in pair 16, are not joined through it. In a half pair one thought names the other's subject only in passing, so neither continues or settles the other's own subject: evolves and the settling labels overstate it, and related or distinct is right. The pass stores a relation when its verdict clears the floor (migrations 084 and 102). | decided by the maintainer (2026-10-22); not built: SMD-3203's item 3 would build it | for a full pair, a relation naming the third subject in a new payload key (a writer change, a new decide version and a re-judge), or recording nothing, not even distinct; for a half pair, distinct as for a full pair, or leaving it open |
+| 3 | **Decide mode proposes no supersession through a third subject.** | proposed here; not built: SMD-3203's item 3 would build it | a proposal whose only evidence is a third subject's state |
 | 4 | **SMD-3116's via slot is a labelling device** for review and measurement. No relation stores a third subject. | follows from 2 | a `via` key in the relation payload |
 | 5 | **A subject has a timeline when its state at a past time can be read from a record of the subject itself,** not from the thoughts that mention it. For a ticket, that record is its board-sync rows: 068's head, and the audit history of the rows carrying its key (095). | proposed here; built for tickets (068, 095, 098) | a subject's state taken from the thoughts that mention it |
 | 6 | **Code artifacts are the next subject to get a timeline**, a spike first. A note that names a code artifact is read against when the artifact changed. What counts as an artifact, and at what grain, is for the spike to decide. | decided by the maintainer (2026-10-22); the spike is SMD-3207, its bar to be fixed before the run | deployed brains; pull requests through a GitHub sync; tickets alone until SMD-1729's claim log |
@@ -88,12 +88,12 @@ The method and bars were fixed on SMD-3203 before the draw.
 - **5 of the 80 evolves and related pairs are mediated:** 6.25%, with a Wilson 95% interval of 2.7–13.8%. All five are half, so none runs through a third subject.
 - **Four pairs turned on conventions set while labelling, not with the bars.**
   - Two pairs of tickets on one component, and two pairs where one thought extends the other's mechanism and cites it as its basis, were counted as direct.
-  - In one of the component pairs, each thought also relays the same third ticket's state, the full shape; it is stored as evolves.
+  - In one of the component pairs, each thought also relays the same third ticket's state: the full shape, which row 2 makes distinct. It is stored as evolves.
   - Read as mediated, the four would make the share 9 of 80 (11.25%, interval 6.0–20.0%), over the 10% line.
-- **The decision rule** fixed with the bars: at 10% or more, item 3 would be built next, beside the ADR; under 5%, item 3 would wait and the ADR come first; between, the maintainer decides. The 6.25% fell between, and the interval spans all three bands. The maintainer chose the ADR first, with item 3 waiting.
+- **The decision rule** fixed with the bars: at 10% or more, item 3 would be built next, beside the ADR; under 5%, item 3 would wait and the ADR come first; between, the maintainer decides. The 6.25% fell between, and the interval spans all three bands. The maintainer chose the ADR first, with item 3 waiting, and kept that choice once the four pairs above were disclosed.
 - **The one pair labelled full** has pair 16's shape: two thoughts about different subjects each relay a third ticket's state at a different time. It is stored as distinct, as row 2 makes the rule.
 - **What the 7 mediated pairs relate through** (6 half, 1 full; for a half pair, one thought's own subject): tickets 3, a deployed brain 1, code artifacts 2 (a table and a function) and a method 1. No pull request, release or metric appears.
-- **The 6 half pairs are stored as related (3), evolves (2) and distinct (1).** What the pass should record for a half pair is not decided here.
+- **The 6 half pairs are stored as related (3), evolves (2) and distinct (1).** Under row 2, the two stored as evolves overstate their pairs.
 
 ### What each subject has today (main, 2026-10-22)
 
@@ -109,7 +109,7 @@ The method and bars were fixed on SMD-3203 before the draw.
 
 - **SMD-3203's title** proposed superseding a claim about a third subject on that subject's timeline. Row 1 reads the timeline instead, and writes nothing.
 - **SMD-3116's via slot** labels a pair that relates through a third subject until this record carries it. Row 2 carries it as distinct, and row 4 keeps the slot for review. The blind sample also gave half pairs a via subject, which is one thought's own subject.
-- **SMD-3203's item 3,** decide mode treating a mediated pair explicitly, waits until this record says what consolidation writes for a mediated pair (the maintainer, 2026-10-22). Rows 2 and 3 say it for a full pair. A half pair is not decided here, so item 3 still waits.
+- **SMD-3203's item 3,** decide mode treating a mediated pair explicitly, waited until this record said what consolidation writes for a mediated pair (the maintainer, 2026-10-22). Row 2 now says it for both shapes, so the wait is over; whether to build item 3 is the maintainer's call.
 
 ## The path
 
@@ -121,13 +121,12 @@ The method and bars were fixed on SMD-3203 before the draw.
    - label a hit `Changed since written: …`;
    - measure it on the canary, against a bar fixed before the run. The canary holds the fork's change records, which SMD-3006 ingested, as canary-only rows; it holds no commits.
 3. If the spike passes, the label is built beside SMD-2540's, and applied only when a thought is read.
-4. SMD-3203's item 3, once this record says what the pass writes for a half pair. Whether to build it is the maintainer's.
+4. SMD-3203's item 3, if the maintainer chooses to build it: rows 2 and 3 in decide mode, with a new decide version and a re-judge.
 
 ## Not decided here
 
 - **How a code artifact is found in a note** (an entity mention, a path in the text, or both), **at what grain** (a file or a function), **and from which source.** SMD-3207 decides these.
-- **What the pass records for a half pair.** In the sample it had stored related, evolves or distinct. Item 3 waits on it.
-- **Whether to build row 3** (SMD-3203's item 3).
+- **Whether to build SMD-3203's item 3,** which puts rows 2 and 3 into decide mode.
 - **Whether a moved label ever demotes.** For tickets, that is SMD-3054's measurement.
 - **Timelines for deployed brains and pull requests.** Another brain's state is an HTTP read through the edge (SMD-2872).
 - **Entities' state in general,** which would come from claims about them in SMD-1729's claim log.
