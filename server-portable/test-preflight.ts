@@ -11,10 +11,11 @@
  * cases need DATABASE_URL; without one they are skipped, not silently passed.
  *
  * CI runs this suite beside db/test-upgrade.ts, each in its own database of one
- * Postgres, as the same role (SMD-2219). What the cluster shares — a role and
- * its settings, pg_locks, pg_stat_activity — is scoped here to the current
- * database, or named for this suite (ob1_pf_capture, pf_reader, pf_nologin,
- * pf_stray_reader, "pf reader's").
+ * Postgres, as the same role (SMD-2219), a Postgres the two have to themselves
+ * while the data-layer job's other suites run (SMD-3195). What the cluster
+ * shares — a role and its settings, pg_locks, pg_stat_activity — is scoped
+ * here to the current database, or named for this suite (pf_*,
+ * ob1_pf_capture, "pf reader's").
  */
 
 import { join, dirname } from "node:path";
