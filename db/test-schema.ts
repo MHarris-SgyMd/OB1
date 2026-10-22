@@ -15335,7 +15335,7 @@ console.log("\n[94] Migration 105: Linear's duplicate status type known and sett
   await db.query(`DELETE FROM thoughts WHERE content LIKE '[94]%'`);
 }
 
-console.log("\n[95] Migration 107: a keyed rebuild of 071's gate mirror for a status-set change (SMD-3160) — a set change simulated each way: the moved type's rows reconciled and no other, an unrelated drift left for the full rebuild; empty and NULL touch nothing; refused outside READ COMMITTED; a re-apply a no-op");
+console.log("\n[95] Migration 107: a keyed rebuild of 071's gate mirror for a status-set change (SMD-3160) — a set change simulated each way: the moved type's rows reconciled and no other, an unrelated drift left for the full rebuild; empty, NULL, all-NULL and repeated types; refused outside READ COMMITTED; the plan refresh altering every reader of the sets; a re-apply a no-op, and each set's comment giving the recipe and the grep that lists its copies");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   // By name, not number: main may take the number.

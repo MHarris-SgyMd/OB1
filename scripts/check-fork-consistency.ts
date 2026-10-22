@@ -9215,7 +9215,7 @@ function lastSetIn(code: string, blanked: string, fn: string): { set: Set<string
   const lines = [...blanked.matchAll(new RegExp(`^CREATE OR REPLACE FUNCTION ${fn}\\(\\)`, "gm"))];
   const unread = { set: null, after: "", afterBlanked: "" };
   if (lines.length !== defs) return unread;
-  const at = lines[lines.length - 1].index! + lines[lines.length - 1][0].length;
+  const last = lines.at(-1)!, at = last.index! + last[0].length;
   const restB = blanked.slice(at);
   let open = -1, tag: string | null = null;
   for (let k = 0; k < restB.length && restB[k] !== ";"; k++) if ((tag = dollarAt(restB, k))) { open = k; break; }
@@ -9237,7 +9237,7 @@ function lastSetIn(code: string, blanked: string, fn: string): { set: Set<string
   if (literals.length !== 1 || !shapes.some((s) => s.test(body.replace(SET_LITERAL, "SET")))) return unread;
   return { set: setOf(literals[0][1]), after: code.slice(at + endAt), afterBlanked: restB.slice(endAt) };
 }
-const symmetric = (a: Set<string>, b: Set<string>) => [...new Set([...[...b].filter((t) => !a.has(t)), ...[...a].filter((t) => !b.has(t))])].sort();
+const symmetric = (a: Set<string>, b: Set<string>) => [...[...b].filter((t) => !a.has(t)), ...[...a].filter((t) => !b.has(t))].sort();
 /** Each migration (in order) that changes a set without its follow-up lines after the definition: the refresh (from the file that defines it on), and for node_lifecycle_types() a rebuild of exactly what it moves. */
 function setChangeProblems(files: readonly { name: string; text: string }[]): [SetChangeRule, string, string][] {
   const out: [SetChangeRule, string, string][] = [];

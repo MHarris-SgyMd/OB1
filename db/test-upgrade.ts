@@ -4629,7 +4629,7 @@ console.log("\n[20ax] Migration 106: refused by name without 045; onto a brain a
   await sql.close();
 }
 
-console.log("\n[20ay] Migration 107: refused by name without 071; onto a populated brain at the file before it — the keyed rebuild there, no thought, audit or gate row moved by the file; a status write and a source row's write wait for the keyed form's locks, as for the full rebuild's; a re-apply a no-op (SMD-3160)");
+console.log("\n[20ay] Migration 107: refused by name without 071; onto a populated brain at the file before it — the keyed rebuild there, no thought, audit or gate row moved by the file; a status write and a source row's write wait for the keyed form's locks, as for the full rebuild's; a set change run by the recipe reaching a session that searched eight times before it; a re-apply a no-op (SMD-3160)");
 {
   const the107 = MIGRATIONS.find((f) => f.endsWith("_source_gate_keyed_rebuild.sql"))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
