@@ -6891,11 +6891,13 @@ const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("hooks-off", "Path(`/hooks`) || PathPrefix(`/hooks/`)", 35, "not-served", "noop@internal")
   + routeRouter("grafana-off", "Path(`/grafana`) || PathPrefix(`/grafana/`)", 35, "not-served", "noop@internal")
   + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "", "mcp")
+  + routeRouter("dashboard", "Path(`/dashboard`) || PathPrefix(`/dashboard/`)", 30, "", "app")
   + routeHealth("mcp")
   + "  middlewares:\n"
   + routeErrors("auth-absent", "502") + routeErrors("api-off", "418") + routeErrors("not-served", "418")
   + "  services:\n" + routeService("mcp", `http://${tierMeshName("mcp", "stable")}.:8000`)
-  + routeService("auth", "http://auth.ob1.internal.:3000");
+  + routeService("auth", "http://auth.ob1.internal.:3000")
+  + routeService("app", "http://app.ob1.internal.:8000");
 /** compose.api-public.yaml's route table, byte for byte, as Bun.YAML reads the block. */
 const API_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("api-public", "Path(`/api`) || PathPrefix(`/api/`)", 36, "api-no-forwarder, api-strip", "api")
@@ -6944,7 +6946,7 @@ const PROXY_SERVICE = {
   networks: { front: { aliases: ["proxy.ob1.internal"] }, mesh: {} },
   dns_search: ["."],
   healthcheck: { test: ["CMD", "traefik", "healthcheck"], interval: "5s", timeout: "3s", retries: 5 },
-  depends_on: { api: { condition: "service_started" }, mcp: { condition: "service_started" } },
+  depends_on: { api: { condition: "service_started" }, mcp: { condition: "service_started" }, app: { condition: "service_started" } },
   restart: "unless-stopped",
 };
 /** The forwarder's script (SMD-2583), deploy/forwarder.ts: compose.yaml carries it inline as x-forwarder, in its `forwarder` config and its label, each held to this byte for byte — the file CI runs --self-check on. It holds no `$`, which compose would read as a variable from deploy/.env or the shell, so the copy compose runs is this file (review pass 1: `${X:-…}` steered the script and passed), and no `!`, which check 27 refuses in compose.tiers.yaml. */
@@ -6996,6 +6998,34 @@ const MCP_SERVICE = {
   restart: "unless-stopped",
   networks: { mesh: { aliases: ["mcp.ob1.internal"] } },
   healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"], interval: "30s", timeout: "3s", start_period: "10s", retries: 3 },
+};
+/**
+ * compose.yaml's `app`, the operator GUI (SMD-2280), whole, its logging aside: the server's image run as
+ * `bun ../dashboard/serve.ts` with auto-install off, holding no key and no secret — only the origin and the
+ * configured switch its sign-in reads (COMPOSE_PROFILES naming auth turns key sign-in off, ADR decision 16, so
+ * dropping or pinning it would reopen that door) — on the mesh alone, its files read-only and no capability, its
+ * health on its own path, and its wait on the REST core. A change to it is made here too, on purpose (review pass 1:
+ * a key list, a forwarder key, `user: root`, another image and COMPOSE_PROFILES dropped each passed the per-key rules).
+ */
+const APP_SERVICE = {
+  image: "${COMPOSE_PROJECT_NAME:-open-brain}-server",
+  pull_policy: "never",
+  entrypoint: ["bun", "--no-install"],
+  command: ["../dashboard/serve.ts"],
+  environment: {
+    OB1_PUBLIC_ORIGIN: "${OB1_PUBLIC_ORIGIN:-}",
+    COMPOSE_PROFILES: "${COMPOSE_PROFILES:-}",
+    OB1_STOP_GRACE: "${OB1_STOP_GRACE:-}",
+  },
+  stop_grace_period: "${OB1_STOP_GRACE:-10}s",
+  depends_on: { api: { condition: "service_started" } },
+  restart: "unless-stopped",
+  networks: { mesh: { aliases: ["app.ob1.internal"] } },
+  read_only: true,
+  tmpfs: ["/tmp"],
+  cap_drop: ["ALL"],
+  security_opt: ["no-new-privileges:true"],
+  healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/dashboard/health >/dev/null || exit 1"], interval: "30s", timeout: "3s", start_period: "10s", retries: 3 },
 };
 /**
  * compose.yaml's observability collector (SMD-1849 PR 3a) as Bun.YAML reads it, its `logging` (check 29's) and its labels (check 37's,
@@ -7130,17 +7160,22 @@ const PG_MONITOR_ROLE_SERVICE = {
 };
 /** compose.grafana-port.yaml's environment on lgtm, by value: Grafana's origin, its loopback port unless GRAFANA_ORIGIN names one, and nothing else — any other key there is Grafana's configuration, its anonymous access included (SMD-1849 PR 3a review passes 3, 6). */
 const GRAFANA_PORT_LGTM_ENV = { LGTM_ORIGIN: "${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}" };
+/** The operator GUI's link to Grafana (SMD-2280), by the overlay that reaches it, by value: the one key each sets on `app`. */
+const GRAFANA_APP_ENV: Record<string, Mapping> = {
+  "compose.grafana-public.yaml": { GRAFANA_ROUTE: "/grafana/" },
+  "compose.grafana-port.yaml": { GRAFANA_LINK: "${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}/grafana/" },
+};
 /** Each overlay, by file: the keys it sets on each service it names (an overlay that carries a table sets only its mount, label and wait on the proxy), and its top-level keys beside `services` (x-* anchors aside). CI's "The proxy loads only the held route tables" holds the same of each combination, in its `declared` paths. */
 const OVERLAYS: Record<string, { services: Record<string, string[]>; top: string[] }> = {
   // The proxy: its table's mount, its label and its wait.
   "compose.api-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
   "compose.hooks-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
   // No wait: the proxy starts with the profile off, and its 502 is a 404 (SMD-1849 PR 3a).
-  "compose.grafana-public.yaml": { services: { proxy: ["configs", "labels"] }, top: ["configs"] },
+  "compose.grafana-public.yaml": { services: { proxy: ["configs", "labels"], app: ["environment"] }, top: ["configs"] },
   // Postgres's port, and the outward network it is published on (SMD-2583); Grafana's, the same way (SMD-1849 PR 3a).
   "compose.host-ports.yaml": { services: { postgres: ["networks", "ports"], ollama: ["ports"], jev: ["ports"] }, top: ["networks"] },
   // Grafana's loopback port: its network, its port and its origin, held by value (GRAFANA_PORT_LGTM_ENV).
-  "compose.grafana-port.yaml": { services: { lgtm: ["networks", "ports", "environment"] }, top: ["networks"] },
+  "compose.grafana-port.yaml": { services: { lgtm: ["networks", "ports", "environment"], app: ["environment"] }, top: ["networks"] },
 };
 /** compose.yaml's top-level keys, x-* anchors aside. */
 const COMPOSE_TOP = ["name", "services", "networks", "volumes", "configs"];
@@ -7152,6 +7187,8 @@ const SERVICE_KEYS = ["build", "image", "pull_policy", "profiles", "command", "e
 const CONFINEMENT: Record<string, Mapping> = {
   "orchestration-runner": { cap_drop: ["ALL"], cap_add: ["SETUID", "SETGID", "KILL", "NET_ADMIN", "SETPCAP"], security_opt: ["no-new-privileges:true"] },
   auth: { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
+  // The operator GUI (SMD-2280): the first service a browser reaches, so the image's files read-only and no capability.
+  app: { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
   lgtm: { cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
   "pg-exporter": { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
 };
@@ -7196,6 +7233,8 @@ const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
     server: { data: {}, egress: {} },
     api: { data: {}, egress: {}, mesh: { aliases: [tierMeshName("api", "stable")] } },
     mcp: { mesh: { aliases: [tierMeshName("mcp", "stable")] } },
+    // The operator GUI (SMD-2280): a client of the REST core, reached by the proxy alone.
+    app: { mesh: { aliases: ["app.ob1.internal"] } },
     "board-sync": ["data", "egress"],
     extract: ["data", "egress"],
     consolidate: ["data", "egress"],
@@ -7264,6 +7303,11 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
     const mdiffs: string[] = [];
     pathDiffs(JSON.parse(JSON.stringify(omitKeys(mcp, ["logging"]))), MCP_SERVICE, "services.mcp", mdiffs);
     if (mdiffs.length) flag("proxy", `${mdiffs.slice(0, 6).join("; ")}${mdiffs.length > 6 ? `; and ${mdiffs.length - 6} more` : ""} — compose.yaml's mcp is check 28's MCP_SERVICE: it is on the mesh beside the proxy with none of the server's secrets, so a knob handed to it, its entrypoint, its health or its wait on the REST core is changed there too, on purpose (SMD-2287)`);
+    // The operator GUI, whole (SMD-2280): what it holds, how it starts, its confinement, its health.
+    const app = isMapping(services.app) ? services.app : undefined;
+    const adiffs: string[] = [];
+    pathDiffs(JSON.parse(JSON.stringify(omitKeys(app, ["logging"]))), APP_SERVICE, "services.app", adiffs);
+    if (adiffs.length) flag("proxy", `${adiffs.slice(0, 6).join("; ")}${adiffs.length > 6 ? `; and ${adiffs.length - 6} more` : ""} — compose.yaml's app is check 28's APP_SERVICE: the browser's way into the brain, holding no key, so a knob handed to it, its image, user, confinement, health or wait is changed there too, on purpose — and COMPOSE_PROFILES is what turns its key sign-in off while the stack is configured (SMD-2280)`);
     // The observability collector, whole (SMD-1849 PR 3a): Grafana's sign-in, its exposure and what it calls out to are its environment.
     const lgtm = isMapping(services.lgtm) ? services.lgtm : undefined;
     const ldiffs: string[] = [];
@@ -7312,6 +7356,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
       const extra = Object.keys(svc).filter((k) => !may.includes(k));
       if (extra.length) flag("keys", `sets ${extra.map((k) => `services.${name}.${k}`).join(", ")} — an overlay sets only what its OVERLAYS entry declares${may.length ? ` (${name}: ${may.join(", ")})` : ""}; anything else it set would reach the stack in a review of this file alone (a mesh alias, a sidecar in the proxy's PID namespace: SMD-2685)`);
       if (file === "compose.grafana-port.yaml" && name === "lgtm" && canonJson(svc.environment ?? null) !== canonJson(GRAFANA_PORT_LGTM_ENV)) flag("keys", `sets services.lgtm.environment ${JSON.stringify(svc.environment ?? null)} where check 28's GRAFANA_PORT_LGTM_ENV holds ${JSON.stringify(GRAFANA_PORT_LGTM_ENV)} — the loopback port names Grafana's origin and nothing else: any other key there is Grafana's configuration, its anonymous access included`);
+      if (name === "app" && file in GRAFANA_APP_ENV && canonJson(svc.environment ?? null) !== canonJson(GRAFANA_APP_ENV[file])) flag("keys", `sets services.app.environment ${JSON.stringify(svc.environment ?? null)} where check 28's GRAFANA_APP_ENV holds ${JSON.stringify(GRAFANA_APP_ENV[file])} — the overlay names the operator GUI's link to the Grafana it reaches and nothing else: any other key there steers the GUI, its origin or its REST core included (SMD-2280)`);
       continue;
     }
     if (name === "proxy" || name === "forwarder") continue;
@@ -7909,7 +7954,7 @@ await checkPlugins();
 // so this file is the one to read.
 /** Each compose.yaml service's `restart`, exactly. */
 const RESTART_POLICIES: Record<string, string> = {
-  postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", mcp: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
+  postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", mcp: "unless-stopped", app: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
   "board-sync": "unless-stopped", extract: "unless-stopped", consolidate: "unless-stopped", sleep: "unless-stopped",
   ollama: "unless-stopped", "ollama-pull": "no", jev: "on-failure:3",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",

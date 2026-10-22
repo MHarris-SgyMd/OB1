@@ -1491,7 +1491,17 @@ export function findingsLine(db: Pick<DatabaseSummary, "findings" | "unread">): 
 
 /** The record as the tool's short table: one fact per line, a label and a value. */
 export function renderBrainInfo(info: BrainInfo): string {
-  const row = (label: string, value: string) => `${`${label}:`.padEnd(16)} ${value}`;
+  return brainInfoRows(info).map(([label, value]) => `${`${label}:`.padEnd(16)} ${value}`).join("\n");
+}
+
+/**
+ * The record's facts as [label, value] rows, in the tool's order and words:
+ * the one wording of each judgement (ledger current or behind, a worker's
+ * state, the proposal queue, a size), which the operator GUI renders as a
+ * table of its own (SMD-2280) and renderBrainInfo lays out as text.
+ */
+export function brainInfoRows(info: BrainInfo): [label: string, value: string][] {
+  const row = (label: string, value: string): [string, string] => [label, value];
   const tail = info.unreleased ? `; this tree adds ${info.unreleased[0] === info.unreleased[1] ? pad3(info.unreleased[0]) : `${pad3(info.unreleased[0])}–${pad3(info.unreleased[1])}`}, unreleased` : "";
   const release = info.releaseRange ? `release range ${pad3(info.releaseRange[0])}–${pad3(info.releaseRange[1])}${tail}` : "no release range recorded";
   const lines = [
@@ -1503,7 +1513,7 @@ export function renderBrainInfo(info: BrainInfo): string {
   const db = info.database;
   if ("error" in db) {
     lines.push(row("Database", `unavailable — ${db.error}`));
-    return lines.join("\n");
+    return lines;
   }
   const counts = db.counts;
   // A count is null when its table is absent (no entry in unread) or its read did not answer.
@@ -1550,5 +1560,5 @@ export function renderBrainInfo(info: BrainInfo): string {
   const unread = Object.entries(db.unread);
   // A deadline's message is its words; every other reason adds the database's.
   if (unread.length) lines.push(row("Not read", unread.map(([k, u]) => `${k} — ${unreadWords(u)}${u.reason === "deadline" ? "" : `: ${u.message}`}`).join("; ")));
-  return lines.join("\n");
+  return lines;
 }

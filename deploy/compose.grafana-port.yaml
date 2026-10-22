@@ -31,6 +31,11 @@ services:
       - "${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
     environment:
       LGTM_ORIGIN: "${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}"
+  # The operator GUI's link to Grafana (SMD-2280): its origin, as above, and
+  # the path it serves from there too.
+  app:
+    environment:
+      GRAFANA_LINK: "${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}/grafana/"
 
 networks:
   grafana-port: {}
