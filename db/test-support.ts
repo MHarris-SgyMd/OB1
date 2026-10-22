@@ -635,7 +635,8 @@ export const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 /**
  * The MCP stack — the four packages extensions/package.json installs for the
  * vendored servers, one list (SMD-1800): extensions/test-auth.ts's pin guard
- * holds server-portable's and the Kubernetes image's package.json to them. The
+ * holds that install to them, and server-portable's and mcp-server's to the
+ * two they share (the Kubernetes image's, held exactly, retired: SMD-2288). The
  * recipes and integrations reach that install through the committed
  * recipes/node_modules and integrations/node_modules links (SMD-1991). A name
  * added here alone reaches every reader.
@@ -647,16 +648,17 @@ export const STACK: readonly string[] = ["hono", "zod", "@hono/mcp", "@modelcont
  * migration (docs/mcp-sdk-v2-migration.md). The v1 single package
  * `@modelcontextprotocol/sdk` and the third-party `@hono/mcp` gave way to the v2
  * scoped packages `@modelcontextprotocol/core` + `@modelcontextprotocol/server`;
- * `hono` and `zod` are shared with STACK. The vendored servers (extensions) and
- * the Kubernetes image stay on STACK until stages 2 and 3 (SMD-2279, SMD-2281), so
+ * `hono` and `zod` are shared with STACK. The vendored servers (extensions) stay
+ * on STACK until stages 2 and 3 (SMD-2279, SMD-2281), so
  * during the window the two stacks coexist and extensions/test-auth.ts's pin guard
  * holds each install to its own.
  */
 export const SERVER_STACK: readonly string[] = ["hono", "zod", "@modelcontextprotocol/core", "@modelcontextprotocol/server"];
 /**
  * The v2 packages' pinned versions — the independent truth the drift guard holds
- * server-portable to while it is the sole v2 install. Stage 3 (SMD-2281) moves the
- * Kubernetes image onto these too and the cross-install version check resumes.
+ * server-portable and mcp-server to while they are the v2 installs. Stages 2 and
+ * 3 (SMD-2279, SMD-2281) move the vendored servers onto these too and the
+ * cross-install version check resumes.
  */
 export const SERVER_V2_PINS: Readonly<Record<string, string>> = {
   "@modelcontextprotocol/core": "2.1.0",

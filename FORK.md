@@ -828,7 +828,6 @@ git rebase -X ignore-space-change upstream/main   # every vendored server's head
 cd server-portable
 bun install --frozen-lockfile && bun test-server.ts && bunx tsc --noEmit
 bun run test:sql && bun run test:e2e            # needs podman or docker
-bunx wrangler deploy --dry-run --outdir=.cf-out   # Workers target still builds
 cd ../db && bun install --frozen-lockfile && bun test-schema.ts
 ./with-postgres.sh bun test-live.ts               # needs podman or docker
 cd .. && bun scripts/check-fork-consistency.ts   # CI runs it too (change 58)

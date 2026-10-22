@@ -40,7 +40,9 @@ echo "OB1_SMOKE_FORWARD_KEY=$FORWARD_KEY" >> "$GITHUB_ENV"
 # needs no credential (preflight decides). Preflight dials it
 # (GET /models, SMD-1875), and the steps that seed or search thoughts
 # embed through it (POST /v1/embeddings: deploy-stack-brains' tier and
-# canary steps, deploy-stack-auth's stream probe); smoke.sh captures nothing and preflight
+# canary steps, deploy-stack-auth's stream probe, the observability job's
+# traffic, whose capture's metadata call is the stub's 404 that its
+# provider panels and alert read); smoke.sh captures nothing and preflight
 # runs without --deep, so a listener on the runner answering those
 # two is the whole provider: the runner is the container's
 # host.docker.internal (compose.yaml's extra_hosts host-gateway), and
