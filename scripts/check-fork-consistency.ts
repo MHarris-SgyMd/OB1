@@ -6720,7 +6720,7 @@ const PROXY_SERVICE = {
 };
 /** The forwarder's script (SMD-2583), deploy/forwarder.ts: compose.yaml carries it inline as x-forwarder, in its `forwarder` config and its label, each held to this byte for byte — the file CI runs --self-check on. It holds no `$`, which compose would read as a variable from deploy/.env or the shell, so the copy compose runs is this file (review pass 1: `${X:-…}` steered the script and passed), and no `!`, which check 27 refuses in compose.tiers.yaml. */
 const FORWARDER_SCRIPT = readFileSync(join(ROOT, "deploy", "forwarder.ts"), "utf8");
-/** compose.yaml's forwarder (SMD-2583), whole but for its label (the script's, held below) and its logging (check 29's): the stack's published port, on `edge` and `front` alone, in front of the proxy. */
+/** compose.yaml's forwarder (SMD-2583), whole but for its label (the script's, held below) and its logging (check 29's): the stack's published port, on `edge` and `front` alone, in front of the proxy, under an init so a stop ends it at once (SMD-3193). */
 const FORWARDER_SERVICE = {
   image: "docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373",
   user: "65534:65534",
