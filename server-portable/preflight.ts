@@ -4619,6 +4619,10 @@ if (configFailed) {
                 // Held by its supervisor, which runs it again on its own (SMD-3214).
                 const held = heldFix(h, name);
                 if (held !== null) return held;
+                // Ended on its start's refusal, by its own word (SMD-3214): the
+                // cause first, as the sleep row's is — started as it was, it
+                // refuses again.
+                if (h.ended && h.outcome === "failed" && h.refused) return `${name} ended ${ago(h.ageS)} ago on its start's refusal (${h.refused}): ${startRefusalRemedy(h.refused)} — its log says more. Then start it again — ${restartCommand(h.worker, h.job)}${h.refused === "lookup" ? "" : "; started before that, it refuses again"}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
                 if (h.stale || h.ended) return `${name} ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again${checkModel} — ${restartCommand(h.worker, h.job)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
                 if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266). The row carries the block until the follower judges its next block (48 answers or more). A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers.`;
                 // Waiting mid-pass, by its own word: the provider stopped answering (SMD-2905).
