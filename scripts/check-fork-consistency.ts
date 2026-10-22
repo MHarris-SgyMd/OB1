@@ -5917,6 +5917,8 @@ const POSTGREST_PROBES: [string, string, boolean][] = [
 const POSTGREST = (what: string, ticket: string, lines: number): CountedException => ({ why: `${what} — ${ticket}`, lines });
 const IMPORT = "an import that embeds the text itself and POSTs the row raw; it emits ingestion-contract items for `bun db/ingest-records.ts --source items --items` (SMD-2136)";
 const SHIM = "a maintenance script; it moves onto compat/supabase-sql under bun";
+/** SMD-3216 (2026-10-22): the shim retires, so the scripts still to port become clients of the REST core instead. */
+const REST_CLIENT = "a script still to port; it becomes a REST-core client through rest-client/ (SMD-3216), naming any core operation it lacks";
 /**
  * file → the ticket that ports or retires it, and the exact count of lines that speak PostgREST. Thirty files in
  * twenty-one recipes (SMD-2126's survey of f7693c4c, re-measured on d8e3de60); two more of the thirty —
@@ -5939,26 +5941,26 @@ const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   ["recipes/perplexity-conversation-import/import-perplexity.py", POSTGREST(IMPORT, "SMD-2148", 1)],
   ["recipes/readwise-import/import-readwise.py", POSTGREST("an import on supabase-py that already captures through upsert_thought (SMD-1524) over a transport the fork lacks; it emits contract items", "SMD-2149", 2)],
   ["recipes/google-activity-import/import-google-activity.mjs", POSTGREST(IMPORT, "SMD-2150", 1)],
-  ["recipes/email-history-import/pull-gmail.ts", POSTGREST(IMPORT, "SMD-2021", 2)],
+  ["recipes/email-history-import/pull-gmail.ts", POSTGREST(REST_CLIENT, "SMD-2021", 2)],
   // Retire: the fork's core owns the capability.
   ["recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs", POSTGREST("superseded by migration 023; the file is removed", "SMD-2145", 1)],
   // Maintenance scripts → the shim under bun.
   ["recipes/fingerprint-dedup-backfill/delete-duplicates.mjs", POSTGREST(`${SHIM}, its deletes through delete_thought`, "SMD-2145", 1)],
-  ["recipes/atomizer/audit-gmail-pipeline.mjs", POSTGREST(SHIM, "SMD-2140", 2)],
-  ["recipes/atomizer/lib/entity-resolver.mjs", POSTGREST(`${SHIM} (backfill-gmail-correspondents.mjs reaches the gateway through it)`, "SMD-2140", 2)],
-  ["recipes/atomizer/re-atomize-gmail-thought.mjs", POSTGREST(`${SHIM}, its thought writes through upsert_thought and delete_thought`, "SMD-2140", 2)],
-  ["recipes/authorship-edges/lib/author-edges.mjs", POSTGREST(`${SHIM} (backfill-authorship.mjs reaches the gateway through it)`, "SMD-2141", 2)],
-  ["recipes/typed-edge-classifier/classify-edges.mjs", POSTGREST(SHIM, "SMD-2141", 1)],
-  ["recipes/provenance-chains/backfill.mjs", POSTGREST(SHIM, "SMD-2142", 1)],
-  ["recipes/provenance-chains/eval.mjs", POSTGREST(SHIM, "SMD-2142", 1)],
-  ["recipes/wiki-synthesis/scripts/synthesize-wiki.mjs", POSTGREST(SHIM, "SMD-2143", 1)],
-  ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", POSTGREST(`${SHIM}, its page deletes through delete_thought`, "SMD-2143", 1)],
-  ["recipes/entity-wiki/generate-wiki.mjs", POSTGREST(SHIM, "SMD-2143", 1)],
+  ["recipes/atomizer/audit-gmail-pipeline.mjs", POSTGREST(REST_CLIENT, "SMD-2140", 2)],
+  ["recipes/atomizer/lib/entity-resolver.mjs", POSTGREST(`${REST_CLIENT} (backfill-gmail-correspondents.mjs reaches the gateway through it)`, "SMD-2140", 2)],
+  ["recipes/atomizer/re-atomize-gmail-thought.mjs", POSTGREST(`${REST_CLIENT}, its thought writes through upsert_thought and delete_thought`, "SMD-2140", 2)],
+  ["recipes/authorship-edges/lib/author-edges.mjs", POSTGREST(`${REST_CLIENT} (backfill-authorship.mjs reaches the gateway through it)`, "SMD-2141", 2)],
+  ["recipes/typed-edge-classifier/classify-edges.mjs", POSTGREST(REST_CLIENT, "SMD-2141", 1)],
+  ["recipes/provenance-chains/backfill.mjs", POSTGREST(REST_CLIENT, "SMD-2142", 1)],
+  ["recipes/provenance-chains/eval.mjs", POSTGREST(REST_CLIENT, "SMD-2142", 1)],
+  ["recipes/wiki-synthesis/scripts/synthesize-wiki.mjs", POSTGREST(REST_CLIENT, "SMD-2143", 1)],
+  ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", POSTGREST(`${REST_CLIENT}, its page deletes through delete_thought`, "SMD-2143", 1)],
+  ["recipes/entity-wiki/generate-wiki.mjs", POSTGREST(REST_CLIENT, "SMD-2143", 1)],
   // Not a maintenance script but a sink: it pages thought text and posts it to Telegram, which a shim
   // port would do from below the server's egress gate — the orchestration ADR's decision 9, written for
   // templates, is read to cover it. Its
   // two read-only siblings, brain-backup and lint-sweep, are on the shim (SMD-2144, rescoped 2026-09-26).
-  ["recipes/source-filtering/backfill-metadata.ts", POSTGREST(SHIM, "SMD-2021", 2)],
+  ["recipes/source-filtering/backfill-metadata.ts", POSTGREST(REST_CLIENT, "SMD-2021", 2)],
 ]);
 function checkPostgrestClients() {
   for (const name of ["x.ts", "x.tsx", "x.mts", "x.cts", "x.js", "x.jsx", "x.mjs", "x.cjs", "x.py", "x.sh"]) if (!POSTGREST_CODE_FILE.test(name)) fail(SELF, `check 24's POSTGREST_CODE_FILE no longer reads ${name} (its own probe)`);
@@ -6470,7 +6472,7 @@ const TRUST_PROBES: [string, string, number, number, boolean][] = [
 
 const RAW_IMPORT = (ticket: string): CountedException["why"] =>
   `an import that POSTs its rows raw, so they carry no declared trust (073's trigger strips a payload's, and PostgREST sets no event handoff); its port onto the ingestion contract (${ticket}) writes through db/ingest-records.ts, whose rows take the ingester key's kind — classify that key \`ingested\``;
-const RAW_FALLBACK = "the plain insert its upsert_thought call falls back to on a brain without the function; that call declares, the raw row cannot (SMD-2143 moves the script onto the shim)";
+const RAW_FALLBACK = "the plain insert its upsert_thought call falls back to on a brain without the function; that call declares, the raw row cannot (SMD-2143 makes the script a REST-core client, SMD-3216)";
 const RAW_OWN_DATABASE = "a deployment with a database of its own and none of the fork's migrations: no 073, so no trust to declare (check 10 counts the same insert)";
 /**
  * file → why its raw captures cannot declare, and the exact count of their lines. A line past the count fails (a
