@@ -21,12 +21,13 @@ import { displayDate } from "./thoughts.ts";
 import { movedWords, typesOf, type Moved } from "./stated-status.ts";
 import { cutByCodePoint, LINE_BREAK, oneLine, REASON_MAX, UNSHOWN } from "./consolidate.ts";
 import type { ActorStamp, AuditChange, DryRunClaimResult, LoggedSearchPage, ProposalSide, ProposalWriter, ReleaseLeasesResult, RetryFailedResult, ThoughtHybridMatch, ThoughtIdPage, ThoughtStats } from "./store.ts";
+import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
 import { SAID_BY, TRUST } from "./core/filter.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
-import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
+import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { Captured, Deleted, HeadWindow, KeptKey, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
 
@@ -142,6 +143,8 @@ const movedField = (moved: readonly Moved[] | null | undefined) => typesOf(moved
 /** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, why it was demoted, its trust and its moved tickets; the window prefer_current read. */
 const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
   preferCurrent: v.preferCurrent,
+  // The marker word alone, as a capture's (SMD-2891): the words are in the text.
+  ...(v.vectorFailed ? { vectorFailed: v.vectorFailed.reason } : {}),
   // Unknown, not false, when the brain had no row to report the query's facts on (review pass 6).
   literalOnly: v.facts?.literalOnly ?? null,
   window: v.window,
@@ -177,6 +180,7 @@ const safeSide = (s: ProposalSide) => ({
   id: s.id, created_at: s.created_at, edited: s.edited,
   ...(s.writer ? { trust: oneOf(TRUST, s.writer.trust), captureOnly: s.writer.captureOnly } : {}),
   supersededBy: s.supersededBy ?? null, lapses: s.lapses ?? [],
+  ...(s.walkCapped ? { walkCapped: true } : {}),
 });
 /** thought_stats: the totals and the date range — the breakdowns' keys are extracted words, in the text's top ten. */
 const safeStats: Safe<ThoughtStats> = (v) => ({ total: v.total, aggregated: v.aggregated, oldest: v.oldest, newest: v.newest });
@@ -274,6 +278,7 @@ function refuseQuery(r: Extract<Refusal, { code: "REFUSED_EGRESS" }>): string {
 /** The refusals the search tools share: the gate's, and a filter's (said as the fault it was, `Error:`). */
 function searchRefusal(r: Refusal, hint?: (msg: string) => string): string {
   if (r.code === "REFUSED_EGRESS") return refuseQuery(r);
+  if (r.code === "EMBEDDING_PROVIDER_UNAVAILABLE") return providerUnavailable(r);
   if (r.code === "REFUSED_FILTER") return `Error: ${r.message}${hint ? hint(r.message) : ""}`;
   return unknownRefusal(r);
 }
@@ -417,6 +422,18 @@ export function lapsesLine(lapses: { id: string; onto: string }[], side: string)
     : `an accept that makes this side stand clears ${lapses.length} capture-only pointers, ${pairs}: each then no longer supersedes what it pointed at`;
 }
 
+/** The rows each way past which the listing leaves a side's takes and lapses unread (107, SMD-3036: ob1_listing_walk_fits). */
+export const WALK_CAP = 25;
+
+/**
+ * A side the listing left unread (107, SMD-3036): its walks — the chain below
+ * the other side, the rows above this one — pass the cap, so what an accept
+ * would take and lapse is not shown; the accept guard reads it in full.
+ */
+export function walkCappedLine(): string {
+  return `what an accept that makes this side stand would take and lapse was not read: a chain here passes ${WALK_CAP} rows (the listing's cap, migration 107); consolidate.ts --accept reads it in full`;
+}
+
 /** The side an accepted proposal's superseding_id names, in capitals, or null (SMD-2707: an accept may go against the verdict with --direction). */
 export function stoodSide(p: { status: string; supersedingId: string | null; older: { id: string }; newer: { id: string } }): string | null {
   return p.status !== "accepted" || !p.supersedingId ? null : p.supersedingId === p.newer.id ? "NEWER" : p.supersedingId === p.older.id ? "OLDER" : null;
@@ -523,10 +540,48 @@ export const renderSearch = (o: Outcome<SearchResult>): Reply =>
   render(o.ok ? ok({ results: o.value.results.map(({ trust, moved, movedNotRead, ...r }) => {
     const words = movedWords(moved ?? [], movedNotRead ?? 0);
     // A prefix, as `[ingested]`: the title's tail is the thought's own first words, which could forge a label there (review pass 4).
-    const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${words ? `[moved since written: ${words}] ` : ""}${r.title}`;
+    // A provider that did not answer (SMD-2891): every result is a literal's exact match, and the title is what every surface hands the model.
+    const title = `${oneOf(TRUST, trust) === "ingested" ? "[ingested] " : ""}${words ? `[moved since written: ${words}] ` : ""}${o.value.vectorFailed ? "[exact match — semantic search unavailable] " : ""}${r.title}`;
     return words ? { ...r, title, moved, ...(movedNotRead ? { movedNotRead } : {}) } : { ...r, title };
-  }) }) : o,
+  }),
+  // …and the whole answer says so beside the results, for a surface that
+  // reads the shape and for an empty answer, which has no title to mark: the
+  // marker word, as search_thoughts' typed result carries it, and a note.
+  ...(o.value.vectorFailed ? { vectorFailed: o.value.vectorFailed.reason, note: literalOnlyNote(o.value.vectorFailed, "search") } : {}) }) : o,
     (v) => JSON.stringify(v), searchRefusal, AS_JSON);
+
+/**
+ * The compat search refused while its provider was down and nothing matched
+ * (SMD-2891; review pass 4: an error, as before, since an empty list reads as
+ * "nothing stored"): what was matched, and of each literal whether it is
+ * absent or too common (review pass 2).
+ */
+function providerUnavailable(r: Extract<Refusal, { code: "EMBEDDING_PROVIDER_UNAVAILABLE" }>): string {
+  const words = [`Found nothing. ${literalOnlyNote(r, "search")}`];
+  if (r.needles.length) words.push(`No thought contains: ${r.needles.join(", ")}.`);
+  if (r.commonNeedles.length) words.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${r.commonNeedles.join(", ")} — the brain's search_thoughts_keyword tool pages through them.`);
+  return words.join(" ");
+}
+
+/** A count of thoughts in words; a text match's bounded count past its page is "more than" it (SMD-2891, review pass 8). */
+const thoughtCount = (n: number) => n > TEXT_PAGE ? `more than ${TEXT_PAGE} thoughts` : `${n} thought${n === 1 ? "" : "s"}`;
+
+/**
+ * What a search answered without a vector says (SMD-2891): the provider and
+ * what happened there, that the matches are the query's literals only, and
+ * the tool that matches any word — search_thoughts_keyword, which the compat
+ * `search`'s caller may not have, so it is named there as the brain's.
+ */
+function literalOnlyNote(f: Pick<QueryVectorFailed, "base" | "detail" | "matched">, tool: "search" | "search_thoughts"): string {
+  // Its literals; then, those matching nothing, the query as one text; or nothing could be (review passes 4 and 5).
+  const how = f.matched === "text"
+    ? "the query was matched by its identifiers and quoted spans, if any, and then as one text, exactly (case aside) — not by meaning"
+    : f.matched === "none"
+      ? "nothing could be matched: the query holds no identifier or quoted span, and is too short, longer than 64 characters, or only common words to match as one text"
+      : "the query was matched only by its identifiers and quoted spans, exactly — not by meaning";
+  return `Semantic search is unavailable — the embedding provider at ${f.base} failed: ${f.detail}. So ${how}. ` +
+    `${tool === "search" ? "The brain's search_thoughts_keyword tool" : "search_thoughts_keyword"} finds any word or phrase a thought contains; semantic search returns once the provider answers.`;
+}
 
 export const renderFetch = (o: Outcome<FetchedThought>): Reply =>
   render(o.ok && ingestedNotice(o.value.metadata) ? ok({ ...o.value, title: `[ingested] ${o.value.title}`, text: `${INGESTED_NOTICE}\n\n${o.value.text}` }) : o,
@@ -534,14 +589,25 @@ export const renderFetch = (o: Outcome<FetchedThought>): Reply =>
 
 export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPreferCurrent: boolean): Reply {
   return render(o, (v) => {
-    const { query, hits: data, facts } = v;
+    const { query, hits: data, facts, vectorFailed } = v;
+    // The provider did not answer for the query (SMD-2891): first, what the
+    // rows are — exact-literal matches only, no similarity behind them.
+    const literal = vectorFailed ? literalOnlyNote(vectorFailed, "search_thoughts") : null;
     if (data.length === 0) {
-      // Nothing cleared the threshold and no literal matched; the probe's
-      // facts (core/reads.ts) say why, when the brain had a row to say it on.
-      const why: string[] = [];
+      // Nothing cleared the threshold and no literal matched; the facts
+      // (core/reads.ts: the probe's, or without a vector answerWithoutVector's)
+      // say why, when there are any.
+      const why: string[] = literal ? [literal] : [];
       if (facts) {
         const absent = facts.needles.filter((_, i) => facts.needleCounts[i] === 0);
         if (absent.length) why.push(`No thought contains: ${absent.join(", ")}.`);
+        // A literal some thought holds that matched nothing here: the probe is
+        // unfiltered and an exact hit clears any threshold, so its thoughts are
+        // outside the search's filter, said_by, actor or min_trust. Said only
+        // without a vector: with one, a scoped count is SMD-3185's to word, and
+        // the provider up changes nothing here (review pass 10).
+        const outside = literal ? facts.needles.map((n, i) => [n, facts.needleCounts[i]] as const).filter(([, c]) => c > 0) : [];
+        if (outside.length) why.push(`Held only by thoughts outside this search's filter, said_by, actor or min_trust: ${outside.map(([n, c]) => `${n} (in ${thoughtCount(c)})`).join(", ")}.`);
         if (facts.commonNeedles.length) why.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${facts.commonNeedles.join(", ")} — use search_thoughts_keyword to page through them.`);
       }
       return `No thoughts found matching "${query}".${why.length ? ` ${why.join(" ")}` : ""}`;
@@ -552,7 +618,8 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
         const m = t.metadata || {};
         // A keyword hit with no vector has no similarity to report; it is
         // here because it contains the literal, and the header says which.
-        const match = t.similarity == null ? "exact match, no vector" : `${(t.similarity * 100).toFixed(1)}% match`;
+        // Without a query vector (SMD-2891) every hit is one, whether or not it has a vector of its own.
+        const match = t.similarity == null ? (literal ? "exact match" : "exact match, no vector") : `${(t.similarity * 100).toFixed(1)}% match`;
         const parts = [
           `--- Result ${i + 1} (${match}) ---`,
           // The id, so update_thought and delete_thought can be aimed at a hit
@@ -612,15 +679,23 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     // once reported as "no thought contains" (review pass).
     const absent = head.needles.filter((n, i) => head.needleCounts[i] === 0);
     const truncated = head.needles.filter((n, i) => head.needleCounts[i] > 0 && !matchedAny.has(n));
-    const notes: string[] = [];
+    const notes: string[] = literal ? [literal] : [];
+    // A text match (review pass 5): no ranking for prefer_current to demote in, and a count past the limit said, as a literal's is.
+    const asText = vectorFailed?.matched === "text";
     if (head.needles.length) notes.push(`Searched exactly for: ${head.needles.join(", ")}.`);
+    // Past the page the shown are the newest of the first rows the scan met, not of every holder (review pass 9).
+    if (asText && head.needleCounts[0] > data.length) notes.push(head.needleCounts[0] > TEXT_PAGE
+      ? `It is in ${thoughtCount(head.needleCounts[0])}; these ${data.length} are the newest of the first ${TEXT_PAGE + 1} the scan found, not of all — page with search_thoughts_keyword.`
+      : `It is in ${thoughtCount(head.needleCounts[0])}; these are the newest ${data.length} — raise limit or page with search_thoughts_keyword.`);
+    if (asText && v.preferCurrent) notes.push("prefer_current does not rank a text match: these are in its order, a superseded one labelled.");
     if (absent.length) notes.push(`No thought contains: ${absent.join(", ")}.`);
     if (truncated.length) notes.push(`Outside the top ${data.length}${v.preferCurrent ? " (or demoted past it)" : ""}: ${truncated.map((n, ) => `${n} (in ${head.needleCounts[head.needles.indexOf(n)]} thought${head.needleCounts[head.needles.indexOf(n)] === 1 ? "" : "s"})`).join(", ")} — raise limit or use search_thoughts_keyword.`);
     if (head.commonNeedles.length) notes.push(`Too common to match exactly (more thoughts contain it than one keyword page returns): ${head.commonNeedles.join(", ")}.`);
     // prefer_current's window rides the value once; the note reads it off the first row.
     const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })));
     if (current) notes.push(current);
-    if (head.literalOnly) {
+    // Without a vector there is no similarity to rank the rest by (SMD-2891).
+    if (head.literalOnly && !literal) {
       notes.push(matchedAny.size
         ? "The query is only literals, so exact matches are ranked first and the rest by similarity."
         : head.commonNeedles.length
@@ -750,7 +825,8 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
       return `\n${notice ? `${head} ${notice}\n      text: ${snip(s.content)}` : `${head}: ${snip(s.content)}`}\n      ID: ${s.id}` +
         (s.writer ? `\n      ${proposalWriterLine(s.writer)}` : "") +
         (s.supersededBy ? `\n      ${supersededLine(s.supersededBy)}` : "") +
-        (s.lapses?.length ? `\n      ${lapsesLine(s.lapses, s.id)}` : "");
+        (s.lapses?.length ? `\n      ${lapsesLine(s.lapses, s.id)}` : "") +
+        (s.walkCapped ? `\n      ${walkCappedLine()}` : "");
     };
     const results = data.map((p, i) => {
       const edited = p.older.edited || p.newer.edited;
