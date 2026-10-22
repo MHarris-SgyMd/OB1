@@ -160,9 +160,11 @@ const safeKeyword: Safe<KeywordResult> = (v) => ({
   offset: v.offset, total: v.total,
   hits: v.hits.map((h) => ({ id: h.id, created_at: h.created_at, occurrences: h.occurrences, trust: trustOf(h.metadata) })),
 });
-/** list_thoughts: per thought its id, date, the newer thought that supersedes it, and its trust. */
+/** list_thoughts: per thought its id, date, the newer thought that supersedes it, and its trust; the page's sort and the next page's cursor (SMD-2995). */
 const safeList: Safe<ListThoughtsResult> = (v) => ({
   thoughts: v.thoughts.map((t) => ({ id: t.id, created_at: t.created_at, supersededBy: t.supersededBy, trust: trustOf(t.metadata) })),
+  sort: v.sort,
+  cursor: v.cursor,
 });
 /** list_supersession_proposals: per proposal its ids, verdict, numbers and dates — the sides, the reason and the judge are in the text. */
 const safeProposals: Safe<ProposalsResult> = (v) => ({
@@ -753,7 +755,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
 }
 
 export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
-  return render(o, ({ thoughts: data }) => {
+  return render(o, ({ thoughts: data, sort, cursor }) => {
     if (!data.length) return "No thoughts found.";
     const results = data.map(
       (t, i) => {
@@ -782,8 +784,14 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
         return `${i + 1}. [${displayDate(t.created_at) ?? "undated"}] (${metaText(m.type, TYPE_MAX) || "??"}${tags ? " - " + tags : ""})${warn}\n${fenceText(t.content, "   ")}\n   ID: ${t.id}${who}${mark}`;
       }
     );
-    return `${data.length} recent thought(s):\n\n${results.join("\n\n")}`;
-  }, unknownRefusal, safeList);
+    // SMD-2995: the next page's cursor, last, when more follow — what a caller passes as `after`.
+    const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\`${sort === "oldest" ? ", with `sort: oldest`," : ""} with the same filters for the next page.` : "";
+    return `${data.length} ${sort === "oldest" ? "oldest" : "recent"} thought(s):\n\n${results.join("\n\n")}${more}`;
+  }, (r) => r.code === "REFUSED_CURSOR"
+    ? r.reason === "sort"
+      ? `Refused: that cursor was made with \`sort: ${r.sort}\` — pass the same sort with it, or leave out \`after\` to start the list again.`
+      : "Refused: `after` is not a list_thoughts cursor — pass the `cursor` a previous page ended with, as it was given, or leave it out for the first page."
+    : unknownRefusal(r), safeList);
 }
 
 export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply {

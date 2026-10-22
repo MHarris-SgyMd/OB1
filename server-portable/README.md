@@ -651,6 +651,13 @@ discovers through `tools/list` (a capture-only key sees none of them):
 
 - **`list_thought_ids`** (SMD-2244) — the corpus's thought ids, id-only, keyset-paged,
   with a first-page md5 digest, for a cheap cross-brain id-set diff.
+- **`list_thoughts`**, a page at a time (SMD-2995) — `sort` newest (the default) or
+  oldest, and `after`, the cursor the previous page ended with, keyset on
+  `(created_at, id)` in `thoughts_created_at_idx`'s order (undated first, newest
+  first). The cursor holds the sort it was made under and Postgres's own text of the
+  last `created_at`, so a walk sees each thought once, to the microsecond, whatever is
+  captured meanwhile; a cursor of the other sort, or none of this tool's, is
+  `REFUSED_CURSOR`. The reply's `cursor` is null when no more follow.
 - **`list_logged_searches`** (SMD-2245) — the `query_log` search rows (query, arm,
   arguments), most recent first and `since`-windowed, for a log-sourced replay.
 - **`worker_status`** (SMD-2131) — the background-work queues over

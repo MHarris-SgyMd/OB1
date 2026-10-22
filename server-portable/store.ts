@@ -293,6 +293,25 @@ export type ThoughtListItem = {
 };
 
 /**
+ * list_thoughts' order (SMD-2995): by `created_at`, ties by id, in
+ * thoughts_created_at_idx's order (`created_at DESC`, undated first) or its
+ * reverse. An undated thought sorts as the newest, where 001's index puts it.
+ */
+export type ListSort = "newest" | "oldest";
+
+/**
+ * A row's place in that order: its `created_at` as Postgres writes it
+ * (`created_at::text`, which `::timestamptz` reads back exactly — microseconds,
+ * `infinity` and a BC date included; a JS Date keeps milliseconds, and a cursor
+ * built from one would skip or repeat rows inside a millisecond), null when
+ * undated, and its id.
+ */
+export type ListPosition = { at: string | null; id: string };
+
+/** A page of list_thoughts: the thoughts, and the last one's place when more follow (else null). */
+export type ThoughtListPage = { thoughts: ThoughtListItem[]; next: ListPosition | null };
+
+/**
  * The stats walk's row. `created_at` is nullable here and nowhere else in the
  * interface (SMD-1328 decides the rest): the column allows NULL, NULLs sort
  * first under `ORDER BY created_at DESC`, and a fabricated epoch in the first
@@ -580,6 +599,10 @@ export type ListFilters = {
    * list. Absent: every row.
    */
   trustIn?: string[];
+  /** SMD-2995: newest (the default) or oldest first. */
+  sort?: ListSort;
+  /** SMD-2995: the place the previous page ended — the rows after it, in `sort`'s order. */
+  after?: ListPosition | null;
 };
 
 /**
@@ -1480,7 +1503,7 @@ export interface ThoughtStore {
 
   getThought(id: string): Promise<ThoughtRecord | null>;
 
-  listThoughts(filters: ListFilters): Promise<ThoughtListItem[]>;
+  listThoughts(filters: ListFilters): Promise<ThoughtListPage>;
 
   /** Exact row count of the whole corpus. */
   countThoughts(): Promise<number>;
