@@ -636,14 +636,18 @@ function callText(text: string, from: number): string {
   for (const s of [`import { SQL } from "bun"; async function f(sql: SQL) {}`, `import { type SQL as T } from "bun"`])
     ok(!BUILDS_CLIENT.test(s), `…and not a type-only use: ${s}`);
 
-  // A script that takes --url resolves it through databaseUrl, and reads it nowhere else.
+  // A script that takes --url resolves it through databaseUrl, and reads it
+  // nowhere else — or through databaseUrlIfAny, connect.ts's resolver that
+  // returns null rather than exit, for a heartbeat written before a refusal's
+  // own exit (sync-linear.ts, SMD-3214).
   const withUrl = sources.filter((f) => /\burl: "one"/.test(read(f)));
   ok(withUrl.length >= 9, `the census finds the scripts that take --url (${withUrl.length}: ${withUrl.join(", ")})`);
   for (const f of withUrl) {
     const text = read(f);
     const reads = (text.match(/\bcli\.value\("url"\)|\bparsed\.url\b/g) ?? []).length;
-    const resolved = (text.match(/databaseUrl\((cli\.value\("url"\)|parsed\.url)\)/g) ?? []).length;
-    ok(resolved >= 1 && reads === resolved, `${f} resolves --url through databaseUrl and reads it nowhere else (${resolved} of ${reads} reads)`);
+    const resolved = (text.match(/databaseUrl(?:IfAny)?\((cli\.value\("url"\)|parsed\.url)\)/g) ?? []).length;
+    const exiting = (text.match(/databaseUrl\((cli\.value\("url"\)|parsed\.url)\)/g) ?? []).length;
+    ok(exiting >= 1 && reads === resolved, `${f} resolves --url through databaseUrl (or databaseUrlIfAny) and reads it nowhere else (${resolved} of ${reads} reads)`);
   }
   // The loopback names are spelled once, in db/'s and evals/'s TypeScript,
   // suites included: a second spelling is a second rule (eval-quant.ts had

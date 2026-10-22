@@ -42,13 +42,14 @@ export function databaseUrl(flag: string | undefined, env: Record<string, string
 }
 
 /**
- * DATABASE_URL when it is set and parses, else null: for db/supervise.ts,
- * which writes its follower's heartbeat when it can and must never exit for
- * want of a URL — the container would exit, and the runtime restart it in a
- * loop (SMD-3214). Never printed.
+ * The script's `--url`, else DATABASE_URL, when one is set and parses; else
+ * null. For a heartbeat written when it can be, never a reason to exit:
+ * db/supervise.ts's, whose container would exit and be restarted in a loop,
+ * and board-sync's refusal, which names its kind on its row before its own
+ * exit 2 (SMD-3214). Never printed.
  */
-export function databaseUrlIfAny(env: Record<string, string | undefined> = process.env): string | null {
-  const url = env.DATABASE_URL;
+export function databaseUrlIfAny(flag?: string, env: Record<string, string | undefined> = process.env): string | null {
+  const url = flag ?? env.DATABASE_URL;
   return url === undefined || url.trim() === "" || databaseUrlProblem(url) !== null ? null : url;
 }
 
