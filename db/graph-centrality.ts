@@ -122,7 +122,7 @@
  * writes `blocks` / `blocked_by` for any system it is given, and both flags
  * read them. A blocker is settled by its row's lifecycle, and a row of another
  * system states one only if its source said so (an `--items` file, in
- * `facets.status_type`, one of the seven types above). So a system GATES only
+ * `facets.status_type`, one of the types above). So a system GATES only
  * when some source row of it states, on its own metadata, a status_type this
  * file knows — a status a row borrows through a Linear ticket claim does not
  * count (first review pass). Under that rule its links are read exactly as the

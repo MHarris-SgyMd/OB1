@@ -15362,7 +15362,7 @@ console.log("\n[95] Migration 107: a keyed rebuild of 071's gate mirror for a st
   await q(`UPDATE ob1_source_gate SET gates = false WHERE thought_id = $1`, [d1]);
   const before = await drift();
   // The moved type second, behind one no row holds, and named twice: every
-  // type given is read, each once.
+  // type given is read.
   const added = await keyed(["kgnone", "kgweird", "kgweird"]);
   const g1 = await gates(), after = await drift();
   assert(before === 3 && added.written === 2 && added.deleted === 0 && g1.get(w1) === true && g1.get(w2) === true && g1.get(s1) === true && g1.get(d1) === false && after === 1,
@@ -15406,8 +15406,9 @@ console.log("\n[95] Migration 107: a keyed rebuild of 071's gate mirror for a st
   const [c] = await q<{ k: string; f: string; s: string; st: string }>(`SELECT obj_description('ob1_rebuild_source_gate_for_types(text[])'::regprocedure, 'pg_proc') AS k, obj_description('ob1_rebuild_source_gate()'::regprocedure, 'pg_proc') AS f, obj_description('node_lifecycle_types()'::regprocedure, 'pg_proc') AS s, obj_description('node_settled_types()'::regprocedure, 'pg_proc') AS st`);
   assert(reapplied.endsWith("_source_gate_keyed_rebuild.sql") && (await drift()) === 0 && /Migration 107 \/ SMD-3160/.test(c.k) && /ob1_rebuild_source_gate_for_types/.test(c.f) && /Migrations 071, 107/.test(c.f)
       && /ob1_rebuild_source_gate_for_types/.test(c.s) && /ob1_refresh_set_readers/.test(c.s) && /Migration 058 \/ SMD-2074/.test(c.s) && /SMD-2935/.test(c.s)
-      && /ob1_refresh_set_readers/.test(c.st) && !/ob1_rebuild_source_gate/.test(c.st) && /board-findings\.ts reads it/.test(c.st) && /Migration 058 \/ SMD-2074/.test(c.st) && /SMD-2935/.test(c.st),
-    `a re-apply of 107 is a no-op; its function's comment names it, the full rebuild's names the keyed form for a set change, and each set's own says what a change to it runs — the settled set's the refresh alone — 058's and 105's words kept (${reapplied.slice(0, 60)})`);
+      && /ob1_refresh_set_readers/.test(c.st) && !/ob1_rebuild_source_gate/.test(c.st) && /board-findings\.ts reads it/.test(c.st) && /Migration 058 \/ SMD-2074/.test(c.st) && /SMD-2935/.test(c.st)
+      && [c.s, c.st].every((x) => x.includes("grep -nwE 'canceled|unstarted' -- ':!db/migrations'")),
+    `a re-apply of 107 is a no-op; its function's comment names it, the full rebuild's names the keyed form for a set change, and each set's own says what a change to it runs — the settled set's the refresh alone — and how to list every copy of it, 058's and 105's tags kept (${reapplied.slice(0, 60)})`);
 
   // The plan refresh as a call: each of the brain's readers of the sets is
   // altered (its catalog row rewritten), the refresh itself and the sets not,

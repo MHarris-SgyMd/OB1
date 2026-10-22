@@ -14150,8 +14150,9 @@ if (want("41")) {
     // so it refuses naming 105; 105 re-applied, it runs. Put back in any case.
     const SET058 = `CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{completed,canceled}'::text[] $$`;
     const apply105 = () => applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_duplicate_settles.sql") });
-    // Put back as this tree ships them: each set's last definer, so a later
-    // migration that changes a set is not undone by 105 (SMD-3160 review pass 4).
+    // The sets put back as this tree ships them — each set's last definer, so
+    // a later migration that changes a set is not undone by 105 (SMD-3160
+    // review pass 4). Their comments stay 105's: nothing here reads them.
     const setDefiners = ["node_lifecycle_types", "node_settled_types"].map((fn) => readdirSync(join(HERE, "migrations")).filter((f) => f.endsWith(".sql")
       && new RegExp(`^CREATE OR REPLACE FUNCTION ${fn}\\(\\)`, "m").test(readFileSync(join(HERE, "migrations", f), "utf8"))).sort().at(-1));
     const applyShippedSets = () => applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => setDefiners.some((d) => d !== undefined && f.endsWith(d)) });

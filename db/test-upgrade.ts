@@ -4684,8 +4684,8 @@ console.log("\n[20ay] Migration 107: refused by name without 071; onto a populat
   // A set change as the recipe runs it, against a server's pooled
   // connection: a session that searched eight times with prefer_current
   // before it (a cached generic plan) demotes a ticket of the newly settled
-  // type after it — the refresh is what reaches it (review pass 3; [20aw]
-  // holds the same for 105's own block).
+  // type after it — the refresh is what reaches it, as [20aw] shows a session
+  // without 105's block keeps the old set (review pass 3).
   const VEC = `[${Array.from({ length: OPTS.dim }, (_, i) => (i === 0 ? 1 : 0)).join(",")}]`;
   const [{ id: kdone }] = await sql`INSERT INTO thoughts (content, metadata, embedding) VALUES ('upgrade 107: UPK-9', ${{ source: "linear", issue: "UPK-9", status: "Kgdone", status_type: "kgdone" }}::jsonb, ${VEC}::vector) RETURNING id::text AS id`;
   await sql`SELECT record_thought_source(${kdone}::uuid, 'linear', 'UPK-9', 'UPK-9', 'text/markdown')`;

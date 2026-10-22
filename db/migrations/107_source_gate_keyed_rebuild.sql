@@ -14,7 +14,8 @@
 --   for as long as that takes, not for the rows the change moves — measured on
 --   PG 16 at compose defaults (SMD-2935 review pass 5): 26 ms at 10,000
 --   source rows, 221 ms at 100,000, 3.3–4.4 s at a million (2M thoughts),
---   heading for minutes at the 1B horizon (SMD-2754, SMD-2758). A set change
+--   an hour or so at the 1B horizon if it stays linear (SMD-2754,
+--   SMD-2758). A set change
 --   moves only the rows of the types it adds or drops: stable had 16.
 --
 -- WHAT
@@ -28,8 +29,8 @@
 --     with 071's ob1_source_gate_reconcile(ids). It returns what it wrote
 --     and deleted, as the full rebuild does. No advisory lock: SHARE holds
 --     off every writer of either table, whose triggers are the mirror's only
---     other writers — the full rebuild takes none either. An empty or NULL
---     array touches nothing.
+--     other writers — the full rebuild takes none either. An empty, NULL or
+--     all-NULL array returns 0, 0 before any of it: no refusal, no lock.
 --   * The full rebuild stays, for repair after a write made with the tables'
 --     triggers disabled; its comment now names the keyed form for a set
 --     change. 071's header still says to run the full rebuild — the file is
@@ -50,9 +51,9 @@
 --   A change to node_settled_types() alone runs the first and needs no mirror
 --   work: the mirror reads node_lifecycle_types() only. Check 39 of
 --   scripts/check-fork-consistency.ts holds both for a lifecycle change and
---   the first for a settled one, as lines after the set. What follows each
---   set by hand, and the tests that pin it, are named in that set's comment,
---   where the next change is made (re-commented here; 105's words kept).
+--   the first for a settled one, as lines after the set. Each set's comment,
+--   re-made here with 058's and 105's tags, says how to list every copy that
+--   follows it by hand (they all name canceled or unstarted) and which the code reads.
 --   No table, column or grant. MINOR under the version rules.
 --
 -- NOT HERE
@@ -71,7 +72,8 @@
 -- call took its locks): with 21,212 rows of the moved type the capture waited
 -- 1.39 s for the keyed form against 8.9 s for the full rebuild; with 16
 -- (stable's count), 29 ms against 6.2 s. A full reconcile after it found
--- nothing to fix in every run.
+-- nothing to fix in every run. The host was busier than SMD-2935 pass 5's
+-- (the full rebuild 1.4–2.7× its times above); the ratio is what holds.
 --
 -- Expected outcome
 --   SELECT * FROM ob1_rebuild_source_gate_for_types('{duplicate}');  → 0, 0
@@ -137,8 +139,8 @@ BEGIN
 END
 $$;
 
--- The plan refresh, as a call: 105's DO $touch$ block, word for word in its
--- rule, so the next set change runs it by name and check 39 can require it.
+-- The plan refresh, as a call: 105's DO $touch$ block, its rule word for word
+-- but for leaving itself out, so the next set change runs it by name and check 39 can require it.
 -- Without it a pooled session keeps a plan built on the old set — its
 -- searches, its node_state, and 071's own gate triggers, which would go on
 -- writing gates from it — and drift() itself reads the old set there (review
@@ -177,16 +179,18 @@ COMMENT ON FUNCTION ob1_refresh_set_readers() IS
   'Alters each of the brain''s own functions that name node_lifecycle_types() or node_settled_types() (their schema and owner; by text, in any case, or by dependency) to the volatility it has — a no-op that drops every session''s plans built on it — and returns how many. A reader in another schema or with another owner is not touched, nor a server''s own cached statements: those take the new set when the server and workers restart. 105''s DO $touch$ block as a call: a migration that changes either set runs it after the change, then, for a change to node_lifecycle_types(), ob1_rebuild_source_gate_for_types(<the types it adds and drops>). Migration 107 / SMD-3160.';
 
 COMMENT ON FUNCTION ob1_rebuild_source_gate_for_types(text[]) IS
-  'Reconciles ob1_source_gate for the sourced thoughts whose status_type is one of the types given — what a change to node_lifecycle_types() that adds or drops them moves — under the full rebuild''s SHARE locks on thoughts and thought_sources, and returns what it wrote and deleted. Each type is one probe of 001''s GIN index on thoughts.metadata, so the cost follows those rows, not the table. Refuses to run outside READ COMMITTED; an empty or NULL array touches nothing. Migration 107 / SMD-3160.';
+  'Reconciles ob1_source_gate for the sourced thoughts whose status_type is one of the types given — what a change to node_lifecycle_types() that adds or drops them moves — under the full rebuild''s SHARE locks on thoughts and thought_sources, and returns what it wrote and deleted. Each type is one probe of 001''s GIN index on thoughts.metadata, so the cost follows those rows, not the table. Refuses to run outside READ COMMITTED; an empty, NULL or all-NULL array returns 0, 0 first, touching and locking nothing. Migration 107 / SMD-3160.';
 
 COMMENT ON FUNCTION ob1_rebuild_source_gate() IS
   'Reconciles the whole of ob1_source_gate under SHARE locks on thoughts and thought_sources and returns what it wrote and deleted — zeros when it was exact. Refuses to run outside READ COMMITTED. 071''s seed and the repair after a write made with either table''s user triggers disabled (beside ob1_rebuild_node_projection(), 068''s). A migration that changes node_lifecycle_types() runs ob1_rebuild_source_gate_for_types(<the types it adds and drops>) instead, whose cost follows those rows (107). Migrations 071, 107 / SMD-2267, SMD-3160.';
 
 -- Where the next set change is made: each set's own comment says what follows
--- it (105's words kept, then this). The lists are what the next author's walk
--- found red (review passes 3 and 4).
+-- it. Not an inventory of the copies — three review passes running found one
+-- incomplete — but how to list them: every copy outside the migrations names
+-- canceled or unstarted, and none counts the types (review pass 5 took the counts out).
+-- 058's and 105's tags kept.
 COMMENT ON FUNCTION node_lifecycle_types() IS
-  'The status types node_state knows — Linear''s state types, in board order. A status_type outside them is unknown: no lifecycle, no claim that a blocker is settled. A migration that changes it, after the change: SELECT ob1_refresh_set_readers(); then SELECT * FROM ob1_rebuild_source_gate_for_types(''{<each type it adds or drops>}''); — check 39 holds both. What follows the set by hand: graph-centrality.ts''s LIFECYCLE_TYPES, LIFECYCLE_FILTERS (open, active, done) and its refusal''s words for the migrations, stated-status.ts''s TYPE_WORDS (a word for the type), the README''s count of the sets, and for a settled change node_settled_types() and what its comment names; the tests that pin it: test-schema [44] (the --status open caveat), [54] (the sets, and the refusal''s words), [94], test-e2e-sql [22] and test-server [16m] (TYPE_WORDS'' keys). Migration 058 / SMD-2074; duplicate since migration 105 / SMD-2935; the recipe, 107 / SMD-3160.';
+  'The status types node_state knows — Linear''s state types, in board order. A status_type outside them is unknown: no lifecycle, no claim that a blocker is settled. A migration that changes it, after the change: SELECT ob1_refresh_set_readers(); then SELECT * FROM ob1_rebuild_source_gate_for_types(''{<each type it adds or drops>}''); — check 39 holds both. Every copy of it outside the migrations names canceled or unstarted (a list of the open types names no settled one), so git grep -nwE ''canceled|unstarted'' -- '':!db/migrations'' '':!changes'' '':!CHANGELOG.md'' '':!integrations'' lists them all, code, prose and the tests that pin them. The code''s, which must equal it: graph-centrality.ts''s LIFECYCLE_TYPES and LIFECYCLE_FILTERS, stated-status.ts''s TYPE_WORDS, and evals/eval-stated-status.ts''s TYPES (a type is appended there: its fixture indexes the list by position). Migration 058 / SMD-2074; duplicate since migration 105 / SMD-2935; the recipe, 107 / SMD-3160.';
 
 COMMENT ON FUNCTION node_settled_types() IS
-  'The status types that settle a node: a settled blocker blocks nothing and a settled thought is not blocked. graph-centrality.ts''s LIFECYCLE_FILTERS.done must equal it, and db/board-findings.ts reads it for a closed ticket. A migration that changes it, after the change: SELECT ob1_refresh_set_readers(); — check 39 holds it (the mirror reads node_lifecycle_types() only). What follows the set by hand: graph-centrality.ts''s LIFECYCLE_FILTERS.done and .open (the known types less these) and its refusal''s words, render.ts''s DEMOTIONS (which must hold each settled type), board-findings.ts''s comments that name the closed types; the tests that pin it: test-schema [44], [54], [55], [69], [94] and test-live [41]. Migration 058 / SMD-2074; duplicate since migration 105 / SMD-2935; the recipe, 107 / SMD-3160.';
+  'The status types that settle a node: a settled blocker blocks nothing and a settled thought is not blocked. graph-centrality.ts''s LIFECYCLE_FILTERS.done must equal it, and db/board-findings.ts reads it for a closed ticket. A migration that changes it, after the change: SELECT ob1_refresh_set_readers(); — check 39 holds it (the mirror reads node_lifecycle_types() only). Every copy of it outside the migrations names canceled or unstarted (a list of the open types names no settled one), so git grep -nwE ''canceled|unstarted'' -- '':!db/migrations'' '':!changes'' '':!CHANGELOG.md'' '':!integrations'' lists them all, code, prose and the tests that pin them. The code''s: LIFECYCLE_FILTERS.done and .open (the known types less these), render.ts''s DEMOTIONS (which must hold each settled type); and 105''s own probes test duplicate alone — board-findings.ts''s refusal and graph-centrality.ts''s — so a change dropping duplicate rewrites them. Migration 058 / SMD-2074; duplicate since migration 105 / SMD-2935; the recipe, 107 / SMD-3160.';

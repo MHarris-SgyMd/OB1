@@ -534,7 +534,7 @@ server — which cannot import a `db/` script, and whose PostgREST store (retire
 in SMD-3152) reached only RPCs — could not share them. Five functions, all `LANGUAGE sql`, SECURITY
 INVOKER, no SET, not STRICT, so a caller's planner inlines them:
 `node_lifecycle_types()` and `node_settled_types()` (the six status types this
-schema knows, and the two that settle a node — seven and three since 105);
+schema knows, and the two that settle a node — `duplicate` in both since 105);
 `node_lifecycle()` (per thought: status, status_type, the source watermark
 `synced_at` and `created_at` — a row carrying `ticket` or `issue` reads its
 ticket's head; it read `thoughts` alone until 068 stored the heads);
@@ -1901,21 +1901,22 @@ that changes `node_lifecycle_types()` to run the full
 `ob1_rebuild_source_gate()`, which joins every source row to its thought under
 SHARE locks on `thoughts` and `thought_sources`, so writes wait for as long as
 that takes — 26 ms at 10,000 source rows, 3.3–4.4 s at a million (105, SMD-2935
-review pass 5), minutes at the 1B horizon — though a change moves only the rows
-of the types it adds or drops. The keyed form takes the same locks after the
-same READ COMMITTED refusal, finds the sourced thoughts whose `status_type` is
-one of the types given, each type once (a probe of 001's GIN index on
-`thoughts.metadata` per type; a type held by a large share of rows is scanned,
-at about the full rebuild's cost), and reconciles those alone with 071's
-`ob1_source_gate_reconcile(ids)`, returning what it wrote and deleted; an empty,
-NULL or all-NULL array touches nothing and takes no lock. No advisory lock:
-SHARE holds off every writer whose triggers could touch the mirror, as the full
-rebuild relies on. At a million source rows a capture waited 1.39 s behind it
-against 8.9 s behind the full rebuild with 21,212 rows of the type, 29 ms
-against 6.2 s with 16. The full rebuild stays for repair after a write with
-triggers disabled, and its comment now names the keyed form; 071's own header is
-not edited. 107 also adds `ob1_refresh_set_readers()`, 105's `DO $touch$` block
-as a call: it alters each of the brain's own functions that name a set to the
+review pass 5), an hour or so at the 1B horizon if it stays linear — though a
+change moves only the rows of the types it adds or drops. The keyed form takes
+the same locks after the same READ COMMITTED refusal, finds the sourced thoughts
+whose `status_type` is one of the types given, each type once (a probe of 001's
+GIN index on `thoughts.metadata` per type; a type held by a large share of rows
+is scanned, at about the full rebuild's cost), and reconciles those alone with
+071's `ob1_source_gate_reconcile(ids)`, returning what it wrote and deleted; an
+empty, NULL or all-NULL array touches nothing and takes no lock. No advisory
+lock: SHARE holds off every writer whose triggers could touch the mirror, as the
+full rebuild relies on. At a million source rows a capture waited 1.39 s behind
+it against 8.9 s behind the full rebuild with 21,212 rows of the type, 29 ms
+against 6.2 s with 16, on a host busier than SMD-2935 pass 5's (the ratio is
+what holds). The full rebuild stays for repair after a write with triggers
+disabled, and its comment now names the keyed form; 071's own header is not
+edited. 107 also adds `ob1_refresh_set_readers()`, 105's `DO $touch$` block as a
+call: it alters each of the brain's own functions that name a set to the
 volatility it has, dropping every session's plans built on it, and returns how
 many — without it a pooled session, 071's gate triggers among them, keeps the
 old set, and `drift()` itself reads the old set there (12 phantom rows in a
@@ -1925,23 +1926,24 @@ ob1_refresh_set_readers();` and `SELECT * FROM
 ob1_rebuild_source_gate_for_types('{<each type it adds or drops>}');`; a change
 to `node_settled_types()` alone runs only the first. Check 39 of
 `scripts/check-fork-consistency.ts` holds both for a lifecycle change and the
-first for a settled one, reading canonical forms only — the set as
-`'{…}'::text[]` in the body (to its closing dollar quote) of a line starting
-`CREATE OR REPLACE FUNCTION node_lifecycle_types()` or `node_settled_types()`,
-the calls as lines after it outside any dollar-quoted body — and reporting any
-other. What follows each set by hand (graph-centrality's `LIFECYCLE_TYPES`,
-`LIFECYCLE_FILTERS` and its refusal's words, stated-status's `TYPE_WORDS`,
-render's `DEMOTIONS`, board-findings' comments, this README's count of the sets)
-and the tests that pin it (test-schema [44], [54], [55], [69] and [94],
-test-e2e-sql [22], test-server [16m], test-live [41]) are named in that set's
-comment, where the next change is made; [94] and test-live [41], which re-apply
-105, put the shipped sets back after. Refuses by name without 071; a re-apply is
-a no-op. test-schema [95] (a set change simulated each way: the moved type's
-rows fixed, an unrelated drift left for the full rebuild; empty, NULL, all-NULL
-and repeated types; the READ COMMITTED refusal; the refresh altering every
-reader), test-upgrade [20ay] (onto a populated brain; a status write and a
-source-row write wait for it; a set change run by the recipe reaches a warmed
-session).
+first for a settled one. It reads canonical forms only, with every literal's
+inside blanked: each definition of a set anywhere in the file — a string, a
+body, a qualified name or a `RENAME TO` included — must be a line starting
+`CREATE OR REPLACE FUNCTION node_lifecycle_types()` (or `node_settled_types()`)
+whose body is exactly `SELECT '{…}'::text[]` (or a plpgsql `BEGIN RETURN
+'{…}'::text[]; END`), and the calls lines after the last one outside any
+literal; anything else is reported. Each set's comment says how to list every
+copy that follows it by hand — they all name canceled or unstarted, so `git grep
+-nwE 'canceled|unstarted' -- ':!db/migrations' ':!changes' ':!CHANGELOG.md'
+':!integrations'` finds them, the tests that pin them among them — and which the
+code reads; no sentence counts the types any more. [94] and test-live [41],
+which re-apply 105, put the shipped sets back after. Refuses by name without
+071; a re-apply is a no-op. test-schema [95] (a set change simulated each way:
+the moved type's rows fixed, an unrelated drift left for the full rebuild;
+empty, NULL, all-NULL and repeated types; the READ COMMITTED refusal; the
+refresh altering every reader), test-upgrade [20ay] (onto a populated brain; a
+status write and a source-row write wait for it; a set change run by the recipe
+reaches a warmed session).
 
 ## What changed relative to the guide
 
@@ -3071,7 +3073,7 @@ and is unchanged by it. The JSON's `options` gains `decayBlocked: false`.
 `ingest-records.ts --items` writes `blocks` / `blocked_by` for any system, and
 both flags read them. A blocker is settled by its row's lifecycle, which a row
 of another system has only if its source stated one (an items file, in
-`facets.status_type`, one of the seven types). So a system gates only when some
+`facets.status_type`, one of the known types). So a system gates only when some
 source row of it states a known status_type in its own metadata — a status a row
 borrows through a Linear ticket claim does not count — and is then read exactly
 as the board is, an unknown blocker blocking. A system that states none cannot
