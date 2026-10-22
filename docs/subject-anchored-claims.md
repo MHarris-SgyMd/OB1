@@ -1,6 +1,9 @@
 # Subject-anchored claims: a claim is read against its subject's own timeline (SMD-3203)
 
-An architecture decision record. **Decided 2026-10-22 by the maintainer**: two thoughts linked only by a subject that neither is about are distinct, and that subject's staleness is shown when either thought is read, from the subject's own timeline, as SMD-2540 does for the tickets a thought names. A pair in which one thought names the other's subject only in passing is related at most. Code artifacts are the next subject to get a timeline, a spike first (SMD-3207). The pass change SMD-3203 proposed, its item 3, waited until this record said what consolidation writes for a mediated pair, and this record now says it. By the rule fixed before a second blind rater ran (10% or more: item 3 is built next), its count, 53 of the 80 evolves and related relations sampled, puts item 3 next. The two raters agreed on which pairs are mediated little better than chance, so this record proposes that item 3 begin by fixing a test of what makes a pair mediated.
+An architecture decision record. **Decided 2026-10-22 by the maintainer**: two thoughts linked only by a subject that neither is about are distinct, and that subject's staleness is shown when either thought is read, from the subject's own timeline, as SMD-2540 does for the tickets a thought names. A pair in which one thought names the other's subject only in passing is related at most. Code artifacts are the next subject to get a timeline, a spike first (SMD-3207). The pass change SMD-3203 proposed, its item 3, waited until this record said what consolidation writes for a mediated pair, and this record now says it. By the rule fixed before a second blind rater ran (10% or more: item 3 is built next), its count, 53 of the 80 evolves and related relations sampled, puts item 3 next. The two raters agreed on which pairs are mediated little better than chance, so this record proposes that item 3 begin by fixing a test of what makes a pair mediated. Amended 2026-10-22 (SMD-3203 item 3, step 1): that test is fixed, and two fresh raters applied it to a new sample with κ 0.97. On it, the maintainer mapped rows 2 and 3:
+- the distinct rule above holds where both thoughts give the same third subject's state, pair 16's shape;
+- a pair that only shares a third subject's name, or a half pair, is related at most;
+- no mediated pair gets a supersession proposal.
 
 The decision table marks which rows the maintainer decided, which follow from them, which this record proposes, and which are built.
 
@@ -23,6 +26,7 @@ The decision table marks which rows the maintainer decided, which follow from th
   - A pair it does not propose may get a standing relation facet: related, evolves or duplicate (migration 084), or distinct (migration 102, SMD-3117). A relation is stored only when the verdict clears the floor: for related, evolves or duplicate, the three words' combined probability; for distinct, its own. Below it, the pair's edge closes.
   - The canary ran decide version 1 (pass keys ending `@p4d1`) until 2026-10-21, and version 3 (`@p4d3`, SMD-3151) since. Version 2 was measured and shelved.
 - **SMD-3203's item 3** is the pass change the ticket proposed: decide mode treating a mediated pair explicitly, which needs a new decide version and a re-judge.
+- **The mediated-pair test** labels a pair D, H-state, H-name, F-state, F-name or N, refining the four paths with rules for the cases the first two raters split on. Its text is the section of that name below.
 
 ## Why
 
@@ -50,14 +54,48 @@ The question was how far that shape goes beyond tickets, and what consolidation 
 | # | Decided | Status | Chosen over |
 |---|---|---|---|
 | 1 | **A thought's claim about a subject is read against the subject's own timeline, when the thought is read.** The subject's state when the thought was written is set beside its state now, and the hit is labelled. Reading the timeline writes nothing. | proposed here; decided by the maintainer (2026-10-22) for a third subject a pair shares, beside row 2's rule for the pair; for code artifacts, a spike first (row 6); built for tickets (SMD-2540) | relating two thoughts pairwise because each reports the same third subject, as pair 16 was labelled; reading the state a thought states (SMD-2540's eval) |
-| 2 | **A full pair is distinct, and a half pair is related at most.** The pass's verdict concerns the pair's own subjects. Two thoughts about different tickets that each report a third ticket's state, or its blockers' as in pair 16, are not joined through it. In a half pair one thought names the other's subject only in passing, so neither continues nor settles the other's own subject: evolves and the settling labels overstate it, and related or distinct is right. Like any relation, it is stored only when the verdict clears the pass's floor. | decided by the maintainer (2026-10-22); not built: SMD-3203's item 3 would build it | for a full pair, a relation naming the third subject in a new payload key (a writer change, a new decide version and a re-judge), or recording nothing, not even distinct; for a half pair, always distinct, as a full pair is, or leaving it open |
-| 3 | **Decide mode proposes no supersession through a third subject.** | proposed here; not built: SMD-3203's item 3 would build it | a proposal whose only evidence is a third subject's state |
+| 2 | **A pair whose thoughts both give the same third subject's state (F-state) is distinct; a pair that only shares a third subject's name (F-name), or a half pair (H-state or H-name), is related at most.** The pass's verdict concerns the pair's own subjects. Two thoughts about different tickets that each report a third ticket's state, or its blockers' as in pair 16, are not joined through it. A shared name, or one thought's subject named in passing by the other, is a real link but not a continuation: evolves and the settling labels overstate it, and related or distinct is right. Like any relation, it is stored only when the verdict clears the pass's floor. | decided by the maintainer (2026-10-22), mapped onto the mediated-pair test the same day; not built: SMD-3203's item 3 would build it | for a full pair, a relation naming the third subject in a new payload key (a writer change, a new decide version and a re-judge), or recording nothing, not even distinct; for a half pair, always distinct, or leaving it open; for the mapping, every full pair distinct, F-name included, or F-name left to the pass's verdict |
+| 3 | **Decide mode proposes no supersession for a mediated pair** (F-state, F-name, H-state or H-name). | decided by the maintainer (2026-10-22), widened from a third subject to every mediated pair; not built: SMD-3203's item 3 would build it | a proposal whose only evidence is a third subject's state or a passing mention |
 | 4 | **SMD-3116's via slot is a labelling device** for review and measurement. No relation stores a third subject. | follows from 2 | a `via` key in the relation payload |
 | 5 | **A subject has a timeline when its state at a past time can be read from a record of the subject itself,** not from the thoughts that mention it. For a ticket, that record is its board-sync rows: 068's head, and the audit history of the rows carrying its key (095). | proposed here; built for tickets (068, 095, 098) | a subject's state taken from the thoughts that mention it |
 | 6 | **Code artifacts are the next subject to get a timeline**, a spike first. A note that names a code artifact would be read against when the artifact changed; the spike measures that first. Whether that is a file, a function or both, and how one is found in a note, is for the spike to decide. | decided by the maintainer (2026-10-22); the spike is SMD-3207, its bar to be fixed before the run | deployed brains; pull requests through a GitHub sync; tickets alone until SMD-1729's claim log |
 | 7 | **Deployed brains, pull requests and other entities wait.** | follows from 6 | building a timeline for each now |
 
 Code artifacts are entities by the maintainer's decision of 2026-09-24 (`evals/README.md`, where rubric v2 counts them). Files, scripts, tables, functions, environment variables, branches and CI jobs belong in the brain's graph as tools (or as projects, for a directory of work).
+
+## The mediated-pair test (version 1)
+
+Fixed on SMD-3203 before its raters labelled (comment 833bdc3e). Rows 2 and 3 act on its labels. Its raters met their bar (Measured).
+
+**Step 1: each thought's own subject.** This is the specific thing the thought is about:
+- for a ticket row, the ticket it is;
+- for a session summary, the work the session did: usually the ticket its header names, or, if the header names several, the one or ones its outcome is about;
+- for a change record, the ticket it records;
+- for any other note, its main topic.
+
+A component, file, function, table, corpus, test suite, check or setting is not a thought's own subject unless the thought is mainly about that thing, even when its work changes, uses or measures it. Such a thing counts as a third subject under step 2 when both thoughts name it.
+
+**Step 2: the link.** The first of these that fits:
+1. **D, direct:** the two thoughts share their own subject, or one is about the other's. That covers continuing, building on, extending, fixing, testing, hardening, measuring, deciding, reviewing, reverting or recording it.
+2. **H, half:** the own subjects differ, and one thought's own subject appears in the other only in passing (a list entry, a parent or context reference, an aside, a follow-up named but not worked, or a relayed status).
+   - **H-state** if that mention gives the subject's state: a status, done, blocked, merged, or a value.
+   - **H-name** if it only names it.
+3. **F, full:** the own subjects differ, neither is about the other's, and both mention the same third subject. That can be a ticket, PR, release, deployed brain, metric, document, component, file, function, table, corpus, suite or check.
+   - **F-state** if both give its state, as pair 16's two sessions each report a third ticket's blockers.
+   - **F-name** if not: a shared citation, a common parent epic, or a component both thoughts' work touches.
+4. **N, none:** only an area, a theme or common words.
+
+**The cases that need a rule:**
+
+| Case | Label |
+|---|---|
+| Sibling tickets under one epic or component | F-name if both name it; N if they share only the area |
+| Both cite the same ticket, benchmark, document or corpus | F-name, or F-state if both give its state |
+| One builds on, tests, hardens, changes or extends the other's deliverable, or cites its mechanism as the precedent it extends | D |
+| One only cites the other's mechanism | H-name |
+| One names the other's subject once (in a list, as a follow-up, a parent or context) without working on it | H-name, or H-state if it gives that subject's state |
+| A session whose header names another ticket but whose work is on this one | D |
+| A link through the other's own subject plus a shared third subject | the closer one: H over F |
 
 ## Measured
 
@@ -118,6 +156,40 @@ The maintainer chose a second blind rater on all 80 evolves and related pairs on
   - The bars' words admit both readings: they fix neither the grain of a piece of work nor where being about the other's subject ends.
 - **What its mediated pairs relate through,** across the three words: tickets 30, other 28 (by its notes, mostly components, corpora, suites and checks), a deployed brain 1, a pull request 1.
 
+### The mediated-pair test's agreement (2026-10-22)
+
+The test, the sample, the bars and the scorer were fixed on SMD-3203 before any label (comment 833bdc3e).
+- **The sample:** a fresh 40 evolves, 40 related and 20 distinct from the same 4,356 standing `@p4d3` facets. It was taken in `md5('smd3203-item3-2026-10-22:' || facet id)` order, skipping the 506 pairs read in any earlier sample (12 were skipped).
+- **The raters:** two fresh model instances, each in its own directory with only the test and the same reader. Each was blind to the stored word, to the other, to every earlier label, and to what the counts decide.
+- **The bars:**
+  - the test qualifies at κ ≥ 0.6 on mediated or not over the 80 evolves and related pairs;
+  - a sub-category qualifies for the pass's use at κ ≥ 0.6 against the rest over all 100, with at least 5 pairs from either rater.
+
+**Both bars are met.**
+- On mediated or not, the raters agree for 79 of the 80 (κ 0.97), and for 98 of all 100 (κ 0.96).
+- On all six labels over 100, they agree for 94 (κ 0.92).
+- The one pair split on mediated is direct for one rater and H-state for the other.
+
+| Sub-category | First rater | Second rater | Either | Both | κ |
+|---|---|---|---|---|---|
+| F-state | 13 | 12 | 14 | 11 | 0.86 |
+| F-name | 30 | 31 | 32 | 29 | 0.93 |
+| H-state | 6 | 7 | 8 | 5 | 0.75 |
+| H-name | 4 | 5 | 5 | 4 | 0.88 |
+
+- **Shares of the 80 by mapping** (first rater / second rater):
+  - F-state alone, pair 16's shape: 11 / 10, about 13%;
+  - F-state or F-name: 34 / 33, about 42%;
+  - H-state or H-name: 9 / 11, about 13%;
+  - any of the four: 43 / 44, about 54%.
+- **The mapping.** On these counts, the maintainer chose row 2's and row 3's mapping (2026-10-22). Under it, about 13% of the stored evolves and related sampled would become distinct. About 40% would be capped at related, which is roughly 18 of the 40 evolves.
+- **The test's wording needs a next version** in four places, which the raters flagged:
+  - what counts as a state for a component, model or mechanism (both counted an explicit status or a measured or current value, not a fixed spec or a description of behaviour);
+  - whether two sessions of the same work cover a repeated task;
+  - a session header whose one ticket comes from the branch, not the work;
+  - the reader missed bare ticket numbers, which both raters found by search.
+- **Caveat.** Both raters are instances of one model family. Their agreement shows the test is clear to a model, which is what the pass would run, but it is not independent human agreement.
+
 ### What each subject has today (main, 2026-10-22)
 
 | Subject | Identity | State at a past time | Where |
@@ -132,12 +204,15 @@ The maintainer chose a second blind rater on all 80 evolves and related pairs on
 
 - **SMD-3203's title** proposed superseding a claim about a third subject on that subject's timeline. Row 1 reads the timeline instead, and writes nothing.
 - **SMD-3116's via slot** was to mark a pair that relates through a third subject until SMD-3203's model carried it. Row 2 now makes such a pair distinct, though it is not built yet, and row 4 keeps the slot for review. The blind sample also gave half pairs a via subject, which is one thought's own subject.
-- **SMD-3203's item 3,** decide mode treating a mediated pair explicitly, waited until this record said what consolidation writes for a mediated pair (the maintainer, 2026-10-22). Row 2 now says it for both shapes, so the wait is over, and the second rater's count puts item 3 next.
+- **SMD-3203's item 3,** decide mode treating a mediated pair explicitly, waited until this record said what consolidation writes for a mediated pair (the maintainer, 2026-10-22). Row 2 now says it for both shapes, so the wait is over, and the second rater's count puts item 3 next. Its first step, the mediated-pair test, met its bar, and rows 2 and 3 are mapped onto it (amended 2026-10-22).
 
 ## The path
 
 1. This record.
-2. **SMD-3203's item 3,** next by the rule; it does not wait on the spike: rows 2 and 3 in decide mode, with a new decide version and a re-judge. Proposed here: two raters applying the bars' words agreed little better than chance on which pairs are mediated, so item 3 first fixes a test of what makes a pair mediated, a third subject (full) or a passing mention (half), and measures how well raters agree on it, against a bar fixed before they label. If the bar is missed, whether decide mode applies rows 2 and 3 goes back to the maintainer.
+2. **SMD-3203's item 3,** next by the rule; it does not wait on the spike: rows 2 and 3 in decide mode, with a new decide version and a re-judge.
+   - **Done:** its first step. Two raters applying the bars' words had agreed little better than chance on which pairs are mediated, so item 3 first fixed the mediated-pair test and measured how well raters agree on it, against a bar fixed before they labelled. The bar was met (κ 0.97), and the maintainer mapped rows 2 and 3 onto the test (amended 2026-10-22).
+   - **Next:** decide version 4. How the pass asks the test's question is measured against the two raters' labels, by a bar fixed first, before it is built with rows 2 and 3.
+   - **Then:** a canary re-judge, and SMD-3203's last Verify item.
 3. **SMD-3207, the spike:**
    - read the code artifacts a note names;
    - take each one's change times from git, or from the commit source extended with file lists;
@@ -149,7 +224,7 @@ The maintainer chose a second blind rater on all 80 evolves and related pairs on
 ## Not decided here
 
 - **How a code artifact is found in a note** (an entity mention, a path in the text, or both), **at what grain** (a file or a function), **and from which source.** SMD-3207 decides these.
-- **How the pass tells a third subject, or a passing mention, from a pair's own subject.** The bars' words did not settle it between two raters; item 3's first step is proposed in the path.
+- **How the pass asks the mediated-pair test's question:** which model, prompt and reading. Decide version 4 measures it against the two raters' labels first, and the test's next version settles the four points its raters flagged.
 - **Whether a moved label ever demotes.** For tickets, that is SMD-3054's measurement.
 - **Timelines for deployed brains and pull requests.** Another brain's state is an HTTP read through the edge (SMD-2872).
 - **Entities' state in general,** which would come from claims about them in SMD-1729's claim log.
