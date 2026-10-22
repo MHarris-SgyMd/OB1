@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 104: the query log's arm `literal` — a search the embedding
+-- Migration 106: the query log's arm `literal` — a search the embedding
 --                provider did not answer for is answered by the exact-literal
 --                arm alone, and logged as that (SMD-2891)
 -- =============================================================================
@@ -43,7 +43,7 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_attribute
                   WHERE attrelid = to_regclass('query_log') AND attname = 'arm' AND NOT attisdropped) THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 104 needs query_log (034) and its arm column (045); this schema lacks them',
+      MESSAGE = 'migration 106 needs query_log (034) and its arm column (045); this schema lacks them',
       HINT = 'Apply db/migrations 034 and 045 first — bun migrate.ts applies every pending file in order.';
   END IF;
 END
@@ -53,4 +53,4 @@ ALTER TABLE query_log DROP CONSTRAINT IF EXISTS query_log_arm_check;
 ALTER TABLE query_log ADD CONSTRAINT query_log_arm_check CHECK (arm IS NULL OR arm IN ('hybrid', 'keyword', 'current', 'literal'));
 
 COMMENT ON COLUMN query_log.arm IS
-  'Which retrieval arm served a search row: hybrid (search, search_thoughts — the vector arm fused with the exact-literal arm, migration 017), keyword (search_thoughts_keyword — exact substring, migration 012), current (search_thoughts with prefer_current — the hybrid with settled and superseded thoughts ranked below current ones, migration 059, SMD-2255) or literal (search or search_thoughts while the embedding provider did not answer for the query — the exact-literal arm alone, through the same function with no vector, then, those matching nothing, the whole query as one text, migration 104, SMD-2891; not replayable). NULL on an action row. The tool column names the MCP tool; arm names the retrieval path, so a per-arm report can group across tools and tell two arms of one tool apart (SMD-1490, for SMD-1735/1737). Keyword searches are logged from SMD-1490 on — 034 logged only the semantic path, and the search tools now share one search operation that is the single writer.';
+  'Which retrieval arm served a search row: hybrid (search, search_thoughts — the vector arm fused with the exact-literal arm, migration 017), keyword (search_thoughts_keyword — exact substring, migration 012), current (search_thoughts with prefer_current — the hybrid with settled and superseded thoughts ranked below current ones, migration 059, SMD-2255) or literal (search or search_thoughts while the embedding provider did not answer for the query — the exact-literal arm alone, through the same function with no vector, then, those matching nothing, the whole query as one text, migration 106, SMD-2891; not replayable). NULL on an action row. The tool column names the MCP tool; arm names the retrieval path, so a per-arm report can group across tools and tell two arms of one tool apart (SMD-1490, for SMD-1735/1737). Keyword searches are logged from SMD-1490 on — 034 logged only the semantic path, and the search tools now share one search operation that is the single writer.';

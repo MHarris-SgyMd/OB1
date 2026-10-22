@@ -585,7 +585,7 @@ export async function fetchLoggedSearches(ep: BrainEndpoint, since: string | nul
 /**
  * A replay plan from logged searches: each search on the arm that ran it, a
  * null-arm row skipped (pre-045 rows carry no arm, so which one produced the ids
- * is unknown — as the SQL replay skips them), a `literal` row skipped too (104,
+ * is unknown — as the SQL replay skips them), a `literal` row skipped too (106,
  * SMD-2891: answered with no vector, which no brain whose provider answers
  * repeats), an empty query skipped, and identical
  * (query, arm) pairs collapsed so a query logged a hundred times replays once.
@@ -1047,7 +1047,7 @@ export function replayGateLines(r: NonNullable<Comparison["retrieval"]>, labels:
   // The window as stable's log gives it: --since's, else its most recent page.
   const window = since !== undefined ? `since ${since} (--since)` : `in the most recent page of ${labels.stable}'s log`;
   // Searches are counted once per (query, arm); one logged before migration 045 has no arm to replay on,
-  // and one answered by exact literals while the provider was down (arm literal, 104) none a replay can take.
+  // and one answered by exact literals while the provider was down (arm literal, 106) none a replay can take.
   const apart = [noArm ? `${noArm} more logged with no arm, before migration 045` : "", literal ? `${literal} more answered by exact matches alone while the embedding provider was down (arm literal)` : ""].filter(Boolean);
   const lines = [`replayed ${ran.length} of ${r.queries} distinct logged searches ${window} (${skipped} skipped${oneSided ? `, ${oneSided} failed on one brain` : ""}${apart.length ? `; ${apart.join(", and ")}, not replayed` : ""})`];
   const moved = ran.filter((row) => row.changed).length;

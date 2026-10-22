@@ -8,7 +8,7 @@
 // body, so it never sits in a URL a log or a proxy may keep.
 
 import type { ToolName } from "../tools.ts";
-import { CALLS, type Call, type CallOptions } from "../core/index.ts";
+import { CALLS, type Call } from "../core/index.ts";
 import type { RefusalCode } from "../core/refusal.ts";
 
 export type { CallOptions } from "../core/index.ts";
@@ -33,8 +33,6 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   SUPERSEDES_UNJUDGED: 503,
   REFUSED_SUPERSEDES_UNKNOWN: 422,
   DERIVED_FROM_MISSING: 422,
-  // Never answered as a refusal: the row is saved, so it is a creation (below).
-  EMBEDDING_NOT_ATTACHED: 503,
   REFUSED_NOTHING_TO_UPDATE: 400,
   REFUSED_STALE_READ: 409,
   REFUSED_DUPLICATE_CONTENT: 409,

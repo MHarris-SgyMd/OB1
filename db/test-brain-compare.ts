@@ -739,7 +739,7 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   // 059's arm (SMD-2255): a prefer_current search is replayed as one, not dropped.
   const withCurrent = replayPlanFromLog([{ query: "d", arm: "current" }, { query: "d", arm: "hybrid" }]);
   ok(withCurrent.length === 2 && withCurrent[0].arm === "current" && withCurrent[1].arm === "hybrid", `a logged current search is its own replay entry beside the hybrid one (${JSON.stringify(withCurrent)})`);
-  // 104's arm (SMD-2891): a search answered with no vector is no replay — a brain whose provider answers runs it with one.
+  // 106's arm (SMD-2891): a search answered with no vector is no replay — a brain whose provider answers runs it with one.
   const withLiteral = replayPlanFromLog([{ query: "e", arm: "literal" }, { query: "e", arm: "hybrid" }]);
   ok(withLiteral.length === 1 && withLiteral[0].arm === "hybrid", `a logged literal search is left out, the same query's hybrid row replayed (${JSON.stringify(withLiteral)})`);
 }
@@ -950,7 +950,7 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
     `--diff over a log of pre-045 rows says so, not that nothing was logged (${noArmOnly.out.split("\n").slice(-1)})`);
   const noArmSome = await gate({ log: logged(["q", null], ["r", "keyword"]), hits: { r: [uid(2)] } }, { hits: { r: [uid(2)] } });
   ok(noArmSome.code === 0 && noArmSome.out.includes("replayed 1 of 1 distinct logged searches") && noArmSome.out.includes("1 more logged with no arm"), `…and beside a replayed one, counts it (${noArmSome.code})`);
-  // Searches answered by exact literals while the provider was down (arm literal, 104) are counted apart too (SMD-2891).
+  // Searches answered by exact literals while the provider was down (arm literal, 106) are counted apart too (SMD-2891).
   const literalOnly = await gate({ log: logged(["q", "literal"], ["q", "literal"], ["r", null]) }, {});
   ok(literalOnly.code === 3 && literalOnly.out.includes("(0 skipped; 1 more logged with no arm, before migration 045, and 1 more answered by exact matches alone while the embedding provider was down (arm literal), not replayed)")
       && literalOnly.out.includes("nothing to compare: every search in the window was logged before migration 045, with no arm to replay it on, or answered by exact matches alone while the embedding provider was down."),

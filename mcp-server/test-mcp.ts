@@ -150,11 +150,6 @@ console.log("\n[3] A refusal is said as server-portable says it: the refusal who
     const got = await tool(name, args);
     assert(got.isError && expectReply(got, render({ ok: false, refusal } as never)), `${name} ${refusal.code}: the words in-process (${got.text.slice(0, 70)})`);
   }
-  // A save whose vector did not attach: a 201 with the refusal beside it, said as the refusal.
-  const unattached = { code: "EMBEDDING_NOT_ATTACHED", retryable: true, id: "00000000-0000-4000-8000-000000000003", detail: "the vector write failed" } as const;
-  answer = (n) => (n === "capture" ? refuse(unattached) : ok({}));
-  const saved = await tool("capture_thought", { content: "y" });
-  assert(expectReply(saved, say.renderCapture({ ok: false, refusal: unattached } as never)), `capture saved without its vector: the in-process words (${saved.text.slice(0, 60)})`);
 }
 
 console.log("\n[4] A fault is the tool's fault words: FAILED, capture's STORE_UNAVAILABLE, and the REST core away");

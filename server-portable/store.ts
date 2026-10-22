@@ -103,7 +103,7 @@ export type ThoughtHybridMatch = {
   score: number;
   /** The hybrid's fused score before any weight; equal to `score` when nothing demoted the row. */
   fused: number;
-  /** Why prefer_current weighted the row: its ticket's status_type (completed, canceled) and/or "superseded". Empty when it did not (and always without the flag). */
+  /** Why prefer_current weighted the row: its ticket's status_type (completed, canceled, duplicate) and/or "superseded". Empty when it did not (and always without the flag). */
   demoted: string[];
   /**
    * Under prefer_current only (059, SMD-2255): the window the function re-ranked
@@ -447,7 +447,7 @@ export function normaliseVectorlessRow(r: Record<string, unknown>): VectorlessRo
  */
 export type LoggedSearchRow = {
   query: string;
-  /** 045's arms, 059's current, 104's literal (SMD-2891); null before 045. */
+  /** 045's arms, 059's current, 106's literal (SMD-2891); null before 045. */
   arm: "hybrid" | "keyword" | "current" | "literal" | null;
   tier: string | null;
   loggedAt: string | null;
@@ -640,12 +640,6 @@ export function normaliseProvenanceNode(r: Record<string, unknown>): ProvenanceN
 
 export type CaptureResult = {
   id: string;
-  /**
-   * Set when the row was written but its embedding could not be attached. No
-   * store sets it since the PostgREST store's two-step left (SMD-3152); SMD-3153
-   * removes it and its refusal.
-   */
-  embeddingFailed?: string;
   /**
    * Migration 035 (SMD-1453): true when the text was already captured — the
    * metadata merged, the vector and windows moved by 021/022's rules, and any
@@ -1366,7 +1360,7 @@ export type QuerySearchLog = {
   filter: Record<string, unknown>;
   resultIds: string[];
   resultScores: (number | null)[];
-  /** Which retrieval arm served the row: 'hybrid', 'keyword' (SMD-1490), 'current' — search_thoughts with prefer_current (059, SMD-2255) — or 'literal': search or search_thoughts answered by its exact matches alone — its literals, then the query as one text — while the provider could not embed the query (104, SMD-2891). */
+  /** Which retrieval arm served the row: 'hybrid', 'keyword' (SMD-1490), 'current' — search_thoughts with prefer_current (059, SMD-2255) — or 'literal': search or search_thoughts answered by its exact matches alone — its literals, then the query as one text — while the provider could not embed the query (106, SMD-2891). */
   arm?: string;
   /** The tier the writing server runs as: stable|canary|working, else absent (SMD-1806). */
   tier?: string;

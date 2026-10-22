@@ -153,16 +153,14 @@ x-otel-env: &otel-env
 #   oauth-fallback-off  /register, /authorize and /token at the origin root:
 #           a bare 404 (`not-served`). An MCP client that finds the document
 #           but no authorization-server metadata registers and signs in at the
-#           issuer's root, and the legacy route would hand that POST to the
-#           MCP server, whose 200 envelope the client cannot read (SMD-2382
-#           review). The authorization server's own are under /auth;
+#           issuer's root (SMD-2382 review); until v2.0.0 the legacy route
+#           handed that POST to the MCP server, whose 200 envelope the client
+#           cannot read. The authorization server's own are under /auth;
 #   api-off /api and everything under it. Unless the operator names
 #           deploy/compose.api-public.yaml, whose router (priority 36) wins
-#           over this one (SMD-2284), a bare 404 (`api-off`) rather than the
-#           legacy route, where the MCP server takes a POST at every path;
-#   hooks-off  /hooks and everything under it: a bare 404 (`not-served`), so
-#           a delivery to a plugin's webhook never falls to the legacy route
-#           and the MCP server, until the operator names
+#           over this one (SMD-2284), a bare 404 (`api-off`);
+#   hooks-off  /hooks and everything under it: a bare 404 (`not-served`)
+#           until the operator names
 #           deploy/compose.hooks-public.yaml, whose router (priority 36) takes
 #           it to the REST core (SMD-2310);
 #   grafana-off  /grafana and everything under it: a bare 404 (`not-served`)
@@ -172,53 +170,30 @@ x-otel-env: &otel-env
 #           origin shares it with /auth, so a script running in a Grafana
 #           page could act on the authorization server's session;
 #   mcp     /mcp and everything under it — the endpoint clients are given;
-#   tier-off every path that starts with /canary or /working, in any case
-#           and whatever follows: a bare 404 (`not-served`). A canary or a
-#           working tier is a brain of its own on its own port (SMD-2874;
-#           docs/one-brain-per-stack.md), and this stack routes none; from
-#           SMD-2294 to v2.0.0 a tier answered at /canary/mcp here,
-#           deprecated by SMD-3057 for a release before it went. Kept
-#           until SMD-2532 removes the legacy route, so a client still given
-#           a tier's URL on this origin, in any spelling after the prefix
-#           (its case, an escaped slash, a pasted invisible space), never
-#           reaches this stack's server by the legacy route, to write with
-#           the same key (a typo of the prefix itself, `/canry/mcp`, still
-#           does until then). No boundary after the prefix: each one tried
-#           left some character through (SMD-2294 review passes 2-4), and
-#           nothing this stack serves starts with either word;
 #   health  GET, HEAD and OPTIONS /health at the origin root, for a GET-only
-#           probe and a browser's CORS preflight;
-#   legacy  everything but /.well-known — what clients reach today at the root
-#           (`POST /?key=`, /worker-status, /jobs/<id>, and
-#           `GET /`, whose 405 an MCP SDK client takes as "no stream here";
-#           the proxy's 404 there made v1 and v2 clients report an error on
-#           every connect, measured), kept so the upgrade that lands the proxy
-#           breaks no configured client. Its window (SMD-2306): every answer
-#           carries a Deprecation header and a Link to the upgrade guide, and
-#           the server names each key still on it; it closes with v2.0.0,
-#           when SMD-2532 removes it and `/` is the proxy's 404 too.
-# No router matches /.well-known or anything under it but the auth router's
-# three and the resource router's one, so the proxy answers the rest 404
-# itself and the server never sees them: a claude.ai connector at
+#           probe and a browser's CORS preflight.
+# Nothing else is routed, so the proxy answers every other path itself, with
+# Traefik's own 404 (body `404 page not found`): the origin root — `/`,
+# `GET /`, `POST /?key=`, /worker-status, /jobs/<id> — and every path under
+# /canary or /working. Until v2.0.0 a priority-1 `legacy` router sent all but
+# /.well-known to the server, so the clients configured at the root before
+# the proxy kept working, each answer marked deprecated (SMD-2306); SMD-2532
+# removed it, and with it `tier-off`, which kept a tier's URL on this origin
+# (from SMD-2294 to v2.0.0 a tier answered at /canary/mcp here) off that
+# route. A client given the root moves to /mcp (deploy/README.md, "Moving a
+# client to /mcp"). Of /.well-known, the auth router's three paths and the
+# resource router's one are routed, and the rest is that 404: a claude.ai connector at
 # https://host/mcp asks /.well-known/oauth-protected-resource/mcp at the
 # origin root, and proceeds on the key only on a 404 (SMD-1246, FORK.md
 # change 42) — the server's 404 there, unless OAuth is advertised (SMD-2382).
 # Traefik matches the cleaned, decoded path, so `//.well-known/`,
 # `/%2ewell-known/` and `/x/../.well-known/` are refused too (measured on
-# v3.7.13) — all but an encoded slash, which it leaves encoded:
-# `/.well-known%2Fx` reaches the server's 405, as it did before the proxy, and
-# no discovery client sends it. Its 404 carries
+# v3.7.13) — and an encoded slash, which it leaves encoded,
+# `/.well-known%2Fx`, matches no router either. Its 404 carries
 # none of the server's CORS headers; the SDK's discovery reads a CORS failure
 # as a 404 and goes on. The resource router's 404 is the server's, with them,
 # while the server is up; with it down, auth-absent's bare 404 has none.
 # The middlewares:
-#   legacy-window  marks the request for the server, which logs each key
-#           name still on the root once (X-OB1-Legacy-Route, set, so a
-#           client's own value is replaced), and adds to every answer a
-#           Deprecation header (RFC 9745) dated 2026-10-02 and a Link to the
-#           upgrade guide;
-#   not-legacy  deletes that marker (an empty value deletes the header), so a
-#           client cannot send it on /mcp and be logged as a straggler;
 #   auth-absent  any 502 — Traefik's own: no such name, nothing
 #           listening, or a request the server dropped mid-flight, as its
 #           registration stall does at 30 s; the server never answers 502
@@ -248,7 +223,7 @@ x-proxy-routes: &proxy-routes |
         rule: "Path(`/.well-known/oauth-protected-resource/mcp`)"
         priority: 40
         entryPoints: [web]
-        middlewares: [not-legacy, auth-absent]
+        middlewares: [auth-absent]
         service: server
       oauth-fallback-off:
         rule: "Path(`/register`) || Path(`/authorize`) || Path(`/token`)"
@@ -278,38 +253,13 @@ x-proxy-routes: &proxy-routes |
         rule: "Path(`/mcp`) || PathPrefix(`/mcp/`)"
         priority: 30
         entryPoints: [web]
-        middlewares: [not-legacy]
         service: server
-      tier-off:
-        rule: "PathRegexp(`(?i)^/(canary|working)`)"
-        priority: 25
-        entryPoints: [web]
-        middlewares: [not-served]
-        service: noop@internal
       health:
         rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))"
         priority: 20
         entryPoints: [web]
-        middlewares: [not-legacy]
-        service: server
-      legacy:
-        rule: "!(Path(`/.well-known`) || PathPrefix(`/.well-known/`))"
-        priority: 1
-        entryPoints: [web]
-        middlewares: [legacy-window]
         service: server
     middlewares:
-      legacy-window:
-        headers:
-          customRequestHeaders:
-            X-OB1-Legacy-Route: "1"
-          customResponseHeaders:
-            Deprecation: "@1790899200"
-            Link: '<https://github.com/MHarris-SgyMd/OB1/blob/main/deploy/README.md#moving-a-client-to-mcp>; rel="deprecation"; type="text/html"'
-      not-legacy:
-        headers:
-          customRequestHeaders:
-            X-OB1-Legacy-Route: ""
       auth-absent:
         errors:
           status: ["502"]
@@ -1169,8 +1119,9 @@ services:
       # Loopback unless SERVER_BIND says otherwise: the one published port of
       # the stack without its opt-in profiles. The knobs keep the server's
       # names, which they were until SMD-1846, so a deploy/.env written
-      # before it publishes the same address and port and every client's URL
-      # still answers. A remote client — a claude.ai connector, another
+      # before it publishes the same address and port; a client's URL moves
+      # from the root to /mcp, the root the proxy's 404 since v2.0.0
+      # (SMD-2532). A remote client — a claude.ai connector, another
       # machine — goes through a TLS proxy or a tunnel; one on this host dials
       # 127.0.0.1 and needs no change here. `SERVER_BIND=0.0.0.0` is for a
       # proxy on another machine, and puts the key on the wire in clear on
@@ -1951,7 +1902,8 @@ services:
   # DASHBOARD_DATASOURCES (the dashboard's rate window also rests on this
   # image's Prometheus data source, timeInterval 60s) and runs CI's "The
   # observability profile's dashboard reads every series it names", which
-  # also fails should Prometheus stop taking created-timestamp-zero-ingestion.
+  # also fails should Prometheus stop taking created-timestamp-zero-ingestion,
+  # or Grafana stop loading or evaluating the alert rules (SMD-3050, check 38).
   # Check 28 (scripts/check-fork-consistency.ts, LGTM_SERVICE) holds this
   # service whole but its labels, which check 37 holds.
   #
@@ -2047,28 +1999,33 @@ services:
       TEMPO_EXTRA_ARGS: "-config.file=/tmp/tempo-config.yaml -reporting.enabled=false"
       PYROSCOPE_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -memberlist.bind-addr=127.0.0.1 -usage-stats.enabled=false"
       # The collector scrapes pg-exporter every 30 s on `telemetry` into its
-      # metrics pipeline, beside OTLP and its own (SMD-1849 PR 3b): a second
+      # metrics pipeline, beside OTLP and its own (SMD-1849 PR 3b), at its
+      # front's one path, /cgi-bin/metrics (SMD-3023, pg-exporter below): a second
       # config the image's run-otelcol.sh appends, as one argument — no space
       # in it, since the script splits OTELCOL_EXTRA_ARGS on whitespace; the
       # pipeline's receivers are the image's two and this one.
-      OTELCOL_EXTRA_ARGS: '--config=yaml:{"receivers":{"prometheus/postgres":{"config":{"scrape_configs":[{"job_name":"postgres","scrape_interval":"30s","static_configs":[{"targets":["pg-exporter.ob1.internal.:9187"]}]}]}}},"service":{"pipelines":{"metrics":{"receivers":["otlp","prometheus/collector","prometheus/postgres"]}}}}'
+      OTELCOL_EXTRA_ARGS: '--config=yaml:{"receivers":{"prometheus/postgres":{"config":{"scrape_configs":[{"job_name":"postgres","scrape_interval":"30s","metrics_path":"/cgi-bin/metrics","static_configs":[{"targets":["pg-exporter.ob1.internal.:9187"]}]}]}}},"service":{"pipelines":{"metrics":{"receivers":["otlp","prometheus/collector","prometheus/postgres"]}}}}'
     # Prometheus's, Tempo's, Loki's, Pyroscope's and Grafana's data, in one volume.
     volumes:
       - lgtm-data:/data
-    # The dashboard and its provider (PR 3c), the last two of the configs at
-    # the end of this file: Grafana reads every file in its provisioning
-    # directory's dashboards/ as a provider.
+    # The dashboard and its provider (PR 3c) and the alert rules (SMD-3050),
+    # the last three of the configs at the end of this file: Grafana reads
+    # every file in its provisioning directory's dashboards/ as a provider,
+    # and every file in its alerting/ as rules.
     configs:
       - source: grafana-dashboard
         target: /otel-lgtm/open-brain-dashboard.json
       - source: grafana-dashboard-provider
         target: /otel-lgtm/grafana/conf/provisioning/dashboards/open-brain.yaml
+      - source: grafana-alert-rules
+        target: /otel-lgtm/grafana/conf/provisioning/alerting/open-brain.yaml
     # Each config's sha256 (check 37 holds them): compose recreates a
     # container when a label changes, and not when only an inline config does
     # (docker/compose#11900, as with the proxy's table), so an upgrade that
-    # changes the dashboard reaches Grafana on its `up -d`.
+    # changes the dashboard or a rule reaches Grafana on its `up -d`.
     labels:
       ob1.grafana-dashboard: "sha256:d5d2486a57a6101b14c533e238956aacfc2b633017402524593ed82fe30cbb83"
+      ob1.grafana-alert-rules: "sha256:b49651cf40cccc8943b6525e8351df4254ff558a37609bb61453f5181b47ac95"
       ob1.grafana-dashboard-provider: "sha256:2a13b2862670670482aadbadfcf7a864e28fe4d3c9704faa9ac75ff66b9d021d"
     # `mesh` as lgtm.ob1.internal: the two servers send to it there, and
     # compose.grafana-public.yaml's proxy reaches its Grafana there; and
@@ -2136,12 +2093,67 @@ services:
   # Postgres row reads its names (check 37's DASHBOARD_IMAGE_SERIES, measured
   # on this pin): a bump re-measures them, and CI's "The observability
   # profile's dashboard reads every series it names" runs each query.
+  #
+  # The exporter listens on loopback alone (SMD-3023): its /probe, which no
+  # flag turns off, dials whatever Postgres target and credentials its caller
+  # names. What answers on 9187 is the image's busybox httpd, bound to the
+  # container's address on `telemetry` alone — the address its alias
+  # resolves to there — so nothing on `data` reaches it, and serving one CGI,
+  # /cgi-bin/metrics, the collector's scrape path, which makes a request of
+  # its own to the exporter's /metrics; every other path is httpd's 404. Not
+  # httpd's proxy (`P:`): it reads the first request's line and then pipes
+  # the connection, so a /probe sent after it on the same connection reached
+  # the exporter (measured). httpd's environment is PATH alone, so its CGI's
+  # holds no password. The CGI lives on a tmpfs of its own, /var/www, mounted
+  # exec: Docker mounts a tmpfs noexec unless told (podman does not), and
+  # httpd then answers its 404 for a CGI it cannot run (measured under those
+  # options); its mode is Docker's default, which podman, copying the image's
+  # root-owned 755 directory, does not give it (measured). /tmp, where each
+  # scrape's copy goes, keeps the engine's defaults. Either process ending
+  # ends the container within 35 s, for its restart — polled every 5 s, since
+  # busybox's `wait -n` misses a process a signal ends (measured), then 30 s
+  # on. init hands the stop's signal to the shell, and the two processes end
+  # with the container.
   pg-exporter:
     image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
     profiles: ["observability"]
     read_only: true
+    tmpfs: [/tmp, "/var/www:exec,mode=1777"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    init: true
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        addr=
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+          addr=$$(nslookup pg-exporter.ob1.internal. 2> /dev/null | awk '/^Name:/ { n = 1 } n && /^Address:? *[0-9.]+$$/ { print $$NF; exit }')
+          [ -n "$$addr" ] && break
+          sleep 1
+        done
+        if [ -z "$$addr" ]; then
+          echo "pg-exporter: pg-exporter.ob1.internal resolves to no address, and the exporter's front listens on that one alone: compose.yaml gives this container that name on telemetry" >&2; sleep 30; exit 1
+        fi
+        if ! { mkdir -p /var/www/cgi-bin && cat > /var/www/cgi-bin/metrics && chmod 555 /var/www/cgi-bin/metrics; } << 'CGI'
+        #!/bin/sh
+        if f=$$(mktemp) && wget -q -T 10 -O "$$f" http://127.0.0.1:9188/metrics; then
+          printf 'Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n\r\n'; cat "$$f"
+        else
+          printf 'HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\n\r\nno answer from the exporter, or no room in /tmp for it\n'
+        fi
+        rm -f "$$f"
+        CGI
+        then
+          echo "pg-exporter: could not write its CGI to /var/www, the tmpfs compose.yaml gives it: the collector would scrape nothing" >&2; sleep 30; exit 1
+        fi
+        /bin/postgres_exporter --web.listen-address=127.0.0.1:9188 "$$@" &
+        e=$$!
+        env -i PATH=/bin httpd -f -p "$$addr:9187" -h /var/www &
+        h=$$!
+        while kill -0 "$$e" 2> /dev/null && kill -0 "$$h" 2> /dev/null; do sleep 5; done
+        echo "pg-exporter: the exporter or its front (httpd) stopped, its own line above saying why if it left one; the container exits in 30 s and restarts" >&2; sleep 30; exit 1
+      - pg-exporter
     command: ["--collector.stat_statements", "--collector.stat_statements.include_query", "--collector.stat_statements.query_length=120", "--collector.stat_statements.limit=100", "--collector.stat_statements.exclude_users=ob1_monitor"]
     environment:
       DATA_SOURCE_URI: "postgres:5432/openbrain?sslmode=disable"
@@ -2154,9 +2166,10 @@ services:
       data: {}
       telemetry:
         aliases: [pg-exporter.ob1.internal]
-    # Its landing page, which reads nothing from Postgres; a scrape would.
+    # Its landing page on loopback, which reads nothing from Postgres; a
+    # scrape would. httpd is watched by the entrypoint's loop.
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9187/"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9188/"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -2991,3 +3004,143 @@ configs:
           options:
             path: /otel-lgtm/open-brain-dashboard.json
             foldersFromFilesStructure: false
+  # The observability profile's alert rules (SMD-3050), which lgtm's Grafana
+  # loads at its start into the dashboard's folder: deploy/observability/alert-rules.yaml,
+  # inline as the dashboard is, each dollar sign doubled. No contact point:
+  # a rule that fires is in Grafana's alert list, and nothing leaves the
+  # machine until an operator adds one (deploy/README.md, "Alerts"). Check 38
+  # holds it to that file, and each query to the names the stack writes.
+  grafana-alert-rules:
+    content: |
+      apiVersion: 1
+      groups:
+        - orgId: 1
+          name: Open Brain
+          folder: Open Brain
+          interval: 30s
+          rules:
+            - uid: ob1-server-silent
+              title: A server stopped sending metrics
+              condition: B
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 86400, to: 0 }
+                  datasourceUid: prometheus
+                  model:
+                    refId: A
+                    instant: true
+                    expr: group by (service_name, deployment_environment_name) (group by (service_name, deployment_environment_name) (max_over_time(process_uptime_seconds[1d])) unless group by (service_name, deployment_environment_name) (max_over_time(process_uptime_seconds[10m])))
+                - refId: B
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: threshold
+                    expression: A
+                    conditions:
+                      - evaluator: { type: gt, params: [0] }
+              noDataState: OK
+              execErrState: Error
+              for: 2m
+              annotations:
+                summary: "{{ $$labels.service_name }} sent metrics in the last day and none in the last 10 minutes"
+                description: "A running server sends process.uptime at every export from its start, so it has stopped, or cannot reach the collector. Stopped or renamed on purpose, it clears a day later. deploy/README.md, The observability profile, Alerts."
+            - uid: ob1-server-failures
+              title: The server failed requests
+              condition: B
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: prometheus
+                  model:
+                    refId: A
+                    instant: true
+                    expr: max by (service_name, deployment_environment_name) ((sum by (service_name, deployment_environment_name) (rate(http_server_request_duration_seconds_count{ob1_outcome=~"error|stalled|cut"}[10m])) / sum by (service_name, deployment_environment_name) (rate(http_server_request_duration_seconds_count[10m]))) and on (service_name, deployment_environment_name) (sum by (service_name, deployment_environment_name) (increase(http_server_request_duration_seconds_count{ob1_outcome=~"error|stalled|cut"}[10m])) > 2.5))
+                - refId: B
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: threshold
+                    expression: A
+                    conditions:
+                      - evaluator: { type: gt, params: [0.05] }
+              noDataState: OK
+              execErrState: Error
+              for: 5m
+              annotations:
+                summary: "{{ $$labels.service_name }} failed {{ humanizePercentage $$values.A.Value }} of its requests over the last 10 minutes"
+                description: "Outcomes error, stalled and cut: the dashboard's Server failures, by error type says which. deploy/README.md, The observability profile, Alerts."
+            - uid: ob1-provider-failures
+              title: The model provider failed calls
+              condition: B
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 600, to: 0 }
+                  datasourceUid: prometheus
+                  model:
+                    refId: A
+                    instant: true
+                    expr: sum by (service_name, deployment_environment_name, gen_ai_operation_name, error_type) (increase(gen_ai_client_operation_duration_seconds_count{error_type!="", ob1_probe=""}[10m]))
+                - refId: B
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: threshold
+                    expression: A
+                    conditions:
+                      - evaluator: { type: gt, params: [2.5] }
+              noDataState: OK
+              execErrState: Error
+              for: 5m
+              annotations:
+                summary: "{{ $$labels.service_name }}'s {{ $$labels.gen_ai_operation_name }} calls failed with {{ $$labels.error_type }} about {{ humanize $$values.A.Value }} times in 10 minutes"
+                description: "An HTTP status, a timeout or another kind, as the dashboard's Provider failures, by error type shows. deploy/README.md, The observability profile, Alerts."
+            - uid: ob1-postgres-unreached
+              title: The exporter does not reach Postgres
+              condition: B
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 300, to: 0 }
+                  datasourceUid: prometheus
+                  model:
+                    refId: A
+                    instant: true
+                    expr: min (min(up{job="postgres"}) * (min(pg_up{job="postgres"}) or on () vector(0)))
+                - refId: B
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: threshold
+                    expression: A
+                    conditions:
+                      - evaluator: { type: lt, params: [1] }
+              noDataState: Alerting
+              execErrState: Error
+              for: 1m
+              annotations:
+                summary: "The collector does not reach pg-exporter, or pg-exporter does not reach Postgres"
+                description: "The dashboard's Exporter reaching Postgres reads 0; no series at all means the collector is scraping nothing. deploy/README.md, The observability profile, Alerts."
+            - uid: ob1-telemetry-lost
+              title: The collector is losing telemetry
+              condition: B
+              data:
+                - refId: A
+                  relativeTimeRange: { from: 300, to: 0 }
+                  datasourceUid: prometheus
+                  model:
+                    refId: A
+                    instant: true
+                    expr: sum ((sum(rate(otelcol_exporter_send_failed_spans_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_send_failed_metric_points_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_send_failed_log_records_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_enqueue_failed_spans_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_enqueue_failed_metric_points_total[5m])) or vector(0)) + (sum(rate(otelcol_exporter_enqueue_failed_log_records_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_refused_spans_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_refused_metric_points_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_refused_log_records_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_failed_spans_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_failed_metric_points_total[5m])) or vector(0)) + (sum(rate(otelcol_receiver_failed_log_records_total[5m])) or vector(0)))
+                - refId: B
+                  datasourceUid: __expr__
+                  model:
+                    refId: B
+                    type: threshold
+                    expression: A
+                    conditions:
+                      - evaluator: { type: gt, params: [0] }
+              noDataState: OK
+              execErrState: Error
+              for: 10m
+              annotations:
+                summary: "The collector has refused, failed to queue or could not store telemetry for 10 minutes ({{ humanize $$values.A.Value }} items a second)"
+                description: "Loki refuses every record once the disk under lgtm-data passes 90% full. The dashboard's Telemetry the collector could not store says which signal. deploy/README.md, The observability profile, Alerts."

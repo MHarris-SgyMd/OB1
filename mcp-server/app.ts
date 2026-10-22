@@ -25,7 +25,7 @@ import { atOriginHost, authReachability, edgeSettings, edgeView, forPublicDocume
 import { codeWord, ExchangeMisconfigured, type Exchanger } from "./exchange.ts";
 import {
   BUSY_MESSAGE, challengeResponse, corsHeaders, cutByStopLine, edgeRefusal, HEALTH_METHOD_NOT_ALLOWED_HEADERS, HEALTH_PATH, JSON_RPC_BUSY_CODE, JSON_RPC_UNAUTHORIZED_CODE, MCP_METHODS,
-  METHOD_NOT_ALLOWED_HEADERS, MIRROR_INPUT, MIRROR_WORDS, nameRoute, notCleared, noteLegacyRoute, notificationRefusedResponse, parsedBody,
+  METHOD_NOT_ALLOWED_HEADERS, MIRROR_INPUT, MIRROR_WORDS, nameRoute, notCleared, notificationRefusedResponse, parsedBody,
   partsOf, rawPath, readBodyText, recordCall, REFUSAL_BODY_LIMIT, refusalTarget, RETRY_AFTER_SECONDS, REVOKED_MESSAGE, shownNothing,
   unauthorizedResponse, unavailableResponse, worseOutcome, type CallRecord, type MirrorTool, type RefusalTarget, type RequestParts,
 } from "../server-portable/mcp-edge.ts";
@@ -248,32 +248,22 @@ type Outcome = { ok: true; value: unknown } | { ok: false; refusal: Refusal } | 
 
 /**
  * A REST answer as the outcome the in-process core would have handed
- * render.ts: a success's value; a refusal the forwarder slot carried whole
- * (a save whose vector did not attach among them, a 201 beside its
- * `refusal`); a fault — FAILED or capture's STORE_UNAVAILABLE — as the error
- * its message names, so the tool's fault words say it as they always have.
- * Anything else (a refusal of the key mid-call, an input the client
- * answered itself) is a fault naming its code.
+ * render.ts: a success's value whatever its fields — a plugin's may name one
+ * `refusal`; a refusal the forwarder slot carried whole; a fault — FAILED or
+ * capture's STORE_UNAVAILABLE — as the error its message names, so the tool's
+ * fault words say it as they always have. Anything else (a refusal of the
+ * key mid-call, an input the client answered itself) is a fault naming its
+ * code. No success carries a refusal since SMD-3153 took the 201 that did.
  */
 export function outcomeOf(a: Answer): Outcome {
+  if (a.ok) return { ok: true, value: a.body };
   const body = (a.body ?? {}) as { refusal?: Refusal; code?: string; message?: string; credential?: string; issues?: { path: string; message: string }[] };
   if (body.refusal && typeof body.refusal === "object") return { ok: false, refusal: body.refusal };
-  if (a.ok) return { ok: true, value: a.body };
   // This server's forwarder refused mid-call: its misconfiguration, whichever operation asked (review pass 5). Busy is the registry's (turned).
   if (body.credential === "forwarder" && a.status !== 503) return { fault: new ForwarderRefused(a.status, body.code) };
   if ((body.code === "FAILED" || body.code === "STORE_UNAVAILABLE") && typeof body.message === "string") return { fault: new Error(body.message) };
   if (body.code === "REFUSED_INPUT" && body.issues?.length) return { fault: new Error(body.issues.map((i) => `${i.path || "input"}: ${i.message}`).join("; ")) };
   return { fault: new Error(`the REST core answered ${a.status}${codeWord(body.code) ? ` ${codeWord(body.code)}` : ""}`) };
-}
-
-/**
- * A plugin operation's answer from the REST core as runOperation's outcome:
- * a success's value whatever its fields — a plugin may name one `refusal` —
- * else as a core operation's (outcomeOf): its refusal the forwarder slot
- * carried whole, a fault, or a fault naming the code.
- */
-export function pluginOutcomeOf(a: Answer): Outcome {
-  return a.ok ? { ok: true, value: a.body } : outcomeOf(a);
 }
 
 /** Two calls of one request under one JSON-RPC id: which arguments are whose cannot be told (review pass 3). */
@@ -420,7 +410,7 @@ function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller
         // Never the SDK's parse in its place, which the REST core would parse again (review pass 4: a body the SDK read and this server did not).
         if (!given) return faulted(null, () => say.failed(new Error(`this server could not read the arguments of call ${id} from its request`)), span);
         const sent = Object.fromEntries(Object.entries(given).filter(([field]) => Object.hasOwn(op.shape, field)));
-        const outcome = pluginOutcomeOf(await rest.callPath(op.method, op.path, sent, credOf(caller)));
+        const outcome = outcomeOf(await rest.callPath(op.method, op.path, sent, credOf(caller)));
         if ("fault" in outcome) return faulted(outcome.fault, () => say.failed(outcome.fault), span);
         const reply = say.renderPlugin(outcome as never);
         return ended(reply, reply.isError ? "refused" : "ok", span);
@@ -688,7 +678,6 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (!body || (Object.keys(body).length === 1 && body.status === "ok")) return notCleared(c, traceOf(c.req.raw), null);
     // An answer that is no object is no record (review pass 3: a string's characters were served as its fields).
     if (typeof body !== "object" || Array.isArray(body)) return recordFault(new Error("the REST core answered /health with no record"));
-    noteLegacyRoute(c.req.raw, caller.name);
     return c.json({ ...body, oauth: await oauth }, 200, corsHeaders);
   });
 
@@ -699,7 +688,6 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (c.req.method === "HEAD" && presentedKeys(c.req.raw).length > 0) return headAtOnce(c, "/worker-status", "worker_status");
     const caller = await keyedCaller(c, "/worker-status", "worker_status");
     if (caller instanceof Response) return caller;
-    noteLegacyRoute(c.req.raw, caller.name);
     try {
       const answered = await deps.rest.call("worker_status", {}, credOf(caller));
       const word = turned(answered);
@@ -725,7 +713,6 @@ export function createMcpApp(deps: McpDeps): Hono {
     const [, tool, route] = mirror;
     const caller = await keyedCaller(c, route, tool);
     if (caller instanceof Response) return caller;
-    noteLegacyRoute(c.req.raw, caller.name);
     const body = await c.req.json().catch(() => null);
     const args: Record<string, unknown> = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
     try {
@@ -757,7 +744,6 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (c.req.method === "HEAD" && presentedKeys(c.req.raw).length > 0) return headAtOnce(c, route, "job_status");
     const caller = await keyedCaller(c, route, "job_status");
     if (caller instanceof Response) return caller;
-    noteLegacyRoute(c.req.raw, caller.name);
     if (streamMatch) {
       const upstream = await deps.rest.stream(id, { ...credOf(caller), signal: c.req.raw.signal });
       if (upstream.status !== 200 || !upstream.body) {
@@ -887,7 +873,6 @@ export function createMcpApp(deps: McpDeps): Hono {
       }
       // Named from here on, so a line written later — the client gone, a throw — says whose key it was.
       trace.agent = standing.name;
-      noteLegacyRoute(c.req.raw, standing.name);
       noteUntooled(standing.operations);
       // The body read once and handed to the transport rebuilt: v2's transport reads the raw stream (SMD-2278).
       const rawBody = await c.req.text().catch(() => null);

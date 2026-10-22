@@ -98,7 +98,7 @@ const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
     const base = shownBase(ctx.embedConfig().embeddings);
     console.error(`${opts.tool}: the embedding provider at ${base} was unavailable: ${down.detail}; answered by exact matches alone`);
     const a = await answerWithoutVector(await ctx.store(), opts, { ...down, base });
-    // Logged as arm `literal` (104): no arm a replay could take, since a
+    // Logged as arm `literal` (106): no arm a replay could take, since a
     // replay's provider answers; db/brain-compare.ts leaves it out of a plan.
     if (logged) await ctx.logSearch(principal, opts.tool, { query: opts.query, limit: opts.limit, threshold: opts.threshold ?? 0, recencyWeight: opts.recencyWeight ?? 0, filter: opts.filter, arm: "literal" }, a.rows);
     return { rows: a.rows, embedding: null, vectorFailed: a.vectorFailed, ...(a.facts ? { facts: a.facts } : {}) };

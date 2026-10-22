@@ -76,7 +76,7 @@
  * search a brain answers by exact literals alone because its embedding
  * provider did not answer counts as that brain's failure (SMD-2891). Rows
  * logged before migration 045 have no arm, and rows logged as arm literal
- * (104) ran without a vector; both are counted apart, not replayed. The replays are real searches, which a brain running with
+ * (106) ran without a vector; both are counted apart, not replayed. The replays are real searches, which a brain running with
  * OB1_QUERY_LOG=on logs. Both verbs print --compare's report, then the window
  * and how many searches were replayed and skipped. A window that replayed none
  * compared nothing, so --diff exits 3 on it rather than passing (SMD-2182).
