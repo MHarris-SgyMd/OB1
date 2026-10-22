@@ -19,6 +19,10 @@ x-bun: &bun
   image: ob1-auth-poc:local
   pull_policy: build
   restart: "no"
+  # Bun as PID 1 ignores SIGTERM, and none of these scripts handles it, so
+  # without init each `--down` would wait out the 10 s grace (SMD-3193);
+  # under it bun takes the signal's default and exits.
+  init: true
   environment: &env
     OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:?run bun evals/eval-auth.ts --up}
 

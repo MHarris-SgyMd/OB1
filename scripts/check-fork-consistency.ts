@@ -6727,6 +6727,7 @@ const FORWARDER_SERVICE = {
   cap_drop: ["ALL"],
   security_opt: ["no-new-privileges:true"],
   command: ["bun", "/forwarder.ts"],
+  init: true,
   configs: [{ source: "forwarder", target: "/forwarder.ts" }],
   ports: ["${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"],
   networks: ["edge", "front"],
