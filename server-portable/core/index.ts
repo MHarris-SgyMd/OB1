@@ -68,11 +68,9 @@ export function createCore(deps: CoreDeps) {
     mendOnce: bind(ctx, mend.mendOnce),
     /**
      * The provider's re-probe loop (SMD-2890): both servers start one at boot,
-     * under OB1_PROVIDER_REPROBE_INTERVAL — for a local provider, a probe at
-     * once, then one each interval while it does not answer (none after the
-     * first with the knob off; none at all for a hosted one). An outage only a
-     * call can see is probed by one: the server's own embedding of PROBE_WORD,
-     * through the egress gate as a query (review pass 3).
+     * under OB1_PROVIDER_REPROBE_INTERVAL. What it probes, when, and how each
+     * outage ends is startProviderReprobe's; the call it may spend is made
+     * here, the server's own embedding of PROBE_WORD as a query.
      */
     startProviderReprobe: (intervalS: number) => {
       // The probe's call is asked of the gate once, here, as the call itself

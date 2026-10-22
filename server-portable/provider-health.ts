@@ -6,10 +6,10 @@
 // was missing is the server saying so: preflight let it start ("nothing
 // answers … yet"), and nothing after that told an operator the brain was
 // degraded or when it stopped being. This is that state — fed by every real
-// embedding call (the capture, the search, the mender) and, while the provider
-// is away, by a re-probe of a local endpoint — read by the keyed /health and
-// brain_info (ServerFacts.provider). The keyless /health stays liveness: a
-// degraded brain is a brain to keep running, not to restart.
+// embedding call (the capture, the edit, the search, the mender) and, while
+// the provider is away, by a re-probe of a local endpoint — read by the keyed
+// /health and brain_info (ServerFacts.provider). The keyless /health stays
+// liveness: a degraded brain is a brain to keep running, not to restart.
 
 import { existsSync } from "node:fs";
 import { isLocalHostname, LOCAL_PROVIDER_SERVICES } from "../db/config.mjs";
@@ -23,14 +23,12 @@ const MAX_REPROBE_INTERVAL_S = 3_600;
 export const PROBE_WORD = "probe";
 /** A probe's bound: preflight's, so the two agree on what "answers" means. */
 export const PROVIDER_PROBE_TIMEOUT_MS = 2_500;
-/** setTimeout's ceiling (Bun, as Node). */
-const MAX_TIMER_MS = 2_147_483_647;
 
 /**
  * OB1_PROVIDER_REPROBE_INTERVAL: whole seconds between re-probes of a local
  * provider that does not answer, 1 to an hour; `0` or `off` for the probe at
- * start alone (the state then moves only with real calls). A value that does not read falls back to
- * the default and says so.
+ * start alone (the state then moves only with real calls). A value that does
+ * not read falls back to the default and says so.
  */
 export function reprobeIntervalFrom(raw: string | undefined): { intervalS: number; problem: string | null } {
   const v = raw?.trim().toLowerCase();
@@ -280,7 +278,7 @@ export function startProviderReprobe(health: ProviderHealth, opts: { endpoint: (
       }
     }
     if (stopped || opts.intervalS === 0) return;
-    timer = setTimeout(() => void tick(), Math.min(opts.intervalS * 1000, MAX_TIMER_MS));
+    timer = setTimeout(() => void tick(), opts.intervalS * 1000);
     (timer as { unref?: () => void }).unref?.();
   };
   void tick();
