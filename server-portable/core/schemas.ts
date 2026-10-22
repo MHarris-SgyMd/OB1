@@ -186,7 +186,8 @@ export const SPECS = {
       type: z.string().optional().describe("Filter by type: observation, task, idea, reference, person_note"),
       topic: z.string().optional().describe("Filter by topic tag"),
       person: z.string().optional().describe("Filter by person mentioned"),
-      days: z.number().optional().describe("Only thoughts from the last N days, counted from each call: a window that moves while you page, so its oldest can leave it between pages"),
+      // Positive and at most a thousand years (SMD-2995 review pass 2): a larger window put `since` past timestamptz's range, a 500 quoting it.
+      days: z.number().positive().max(365_000).optional().describe("Only thoughts from the last N days, counted from each call: a window that moves while you page, so its oldest can leave it between pages"),
       // SMD-1726: who wrote it — the two keys 050 stamps, as containment
       // clauses beside type, topic and person.
       said_by: saidByInput,

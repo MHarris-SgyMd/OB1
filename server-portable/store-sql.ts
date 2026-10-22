@@ -388,16 +388,20 @@ export class SqlStore implements ThoughtStore {
       ? after?.at === null ? [(n) => undated(after.id, n)] : [(n) => dated(after, n), (n) => undated(null, n)]
       : after === null ? [(n) => undated(null, n), (n) => dated(null, n)]
         : after.at === null ? [(n) => undated(after.id, n), (n) => dated(null, n)] : [(n) => dated(after, n)];
+    // The cursor's time read alone first: a value of the right shape Postgres cannot read is the caller's, refused.
+    // Alone, so a cast error of anything else — `days` read back as a time — is never taken for the cursor's (review pass 2).
+    if (after?.at) {
+      try {
+        await this.sql`SELECT ${after.at}::timestamptz`;
+      } catch (e) {
+        if (["22007", "22008", "22009"].includes(String((e as { errno?: unknown }).errno ?? ""))) throw new ListCursorRefused();
+        throw e;
+      }
+    }
     const rows: Record<string, unknown>[] = [];
     for (const run of runs) {
       if (rows.length >= want) break;
-      try {
-        rows.push(...(await run(want - rows.length)));
-      } catch (e) {
-        // The cursor's time cast: a value of the right shape Postgres cannot read is the caller's, refused.
-        if (after?.at && ["22007", "22008", "22009"].includes(String((e as { errno?: unknown }).errno ?? ""))) throw new ListCursorRefused();
-        throw e;
-      }
+      rows.push(...(await run(want - rows.length)));
     }
     const shown = rows.slice(0, f.limit);
     const last = shown[shown.length - 1];

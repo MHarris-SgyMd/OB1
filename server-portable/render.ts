@@ -72,7 +72,7 @@ const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|sup
  */
 function guard(v: unknown, key = ""): unknown {
   // list_thoughts' cursor (SMD-2995): not a uuid, but held to its own shape, which carries no sentence.
-  if (typeof v === "string" && key === "cursor" && parseListCursor(v)) return v;
+  if (typeof v === "string" && key === "cursor" && v === v.trim() && parseListCursor(v)) return v;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -788,7 +788,7 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
       }
     );
     // SMD-2995: the next page's cursor, last, when more follow — what a caller passes as `after`.
-    const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\`${sort === "oldest" ? ", with `sort: oldest`," : ""} with the same filters for the next page.` : "";
+    const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\`${sort === "oldest" ? " with `sort: oldest` and" : " with"} the same filters for the next page.` : "";
     return `${data.length} ${sort === "oldest" ? "oldest" : "recent"} thought(s):\n\n${results.join("\n\n")}${more}`;
   }, (r) => r.code === "REFUSED_CURSOR"
     ? r.reason === "sort"

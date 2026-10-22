@@ -227,6 +227,13 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     }
   }
   // A limit is a whole number of thoughts, 1 to 1000: 0, -1, 1.5 and 1001 are the schema's refusal, not an empty page (review pass 1).
+  // A `days` past a thousand years is the schema's refusal, never taken for the cursor's beside it (review pass 2: a large
+  // one put `since` past timestamptz's range, and with a cursor set the cast error read as REFUSED_CURSOR).
+  {
+    const first = await rest("GET", "/v1/thoughts?limit=1");
+    const r = await rest("GET", `/v1/thoughts?limit=1&days=1000000&after=${encodeURIComponent(String(first.body.cursor))}`);
+    assert(r.status === 400 && r.body.code === "REFUSED_INPUT", `list_thoughts days=1000000 beside a cursor: REST's 400 REFUSED_INPUT, not REFUSED_CURSOR (${r.status} ${String(r.body.code)})`);
+  }
   for (const bad of ["0", "-1", "1.5", "1001"]) {
     const r = await rest("GET", `/v1/thoughts?limit=${bad}`);
     assert(r.status === 400 && r.body.code === "REFUSED_INPUT", `list_thoughts limit=${bad}: REST's 400 REFUSED_INPUT (${r.status} ${String(r.body.code)})`);
