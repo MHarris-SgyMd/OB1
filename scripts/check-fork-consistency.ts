@@ -7947,16 +7947,17 @@ await checkPlugins();
 // down after a podman machine restart (SMD-3214). They are `unless-stopped`
 // now, through db/supervise.ts, which holds a refusal itself: a follower run
 // any other way under that policy is the crash loop again, so
-// supervisorGapsIn holds each one's command. jev stays `on-failure:3` until
-// it retries its own fetch. A service added, or a policy changed, is a change
-// there on purpose. compose.tiers.yaml takes compose.yaml's postgres and Ollama
+// supervisorGapsIn holds each one's command. jev is `unless-stopped` too,
+// since it retries its own start (jev/serve.ts, SMD-3214 PR 3): it is no
+// db/ follower, and its image has no db/. A service added, or a policy
+// changed, is a change there on purpose. compose.tiers.yaml takes compose.yaml's postgres and Ollama
 // through check 27, and the overlays name no restart (check 28's OVERLAYS),
 // so this file is the one to read.
 /** Each compose.yaml service's `restart`, exactly. */
 const RESTART_POLICIES: Record<string, string> = {
   postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", mcp: "unless-stopped", app: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
   "board-sync": "unless-stopped", extract: "unless-stopped", consolidate: "unless-stopped", sleep: "unless-stopped",
-  ollama: "unless-stopped", "ollama-pull": "no", jev: "on-failure:3",
+  ollama: "unless-stopped", "ollama-pull": "no", jev: "unless-stopped",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",
   lgtm: "unless-stopped", "pg-monitor-role": "no", "pg-exporter": "unless-stopped",
 };
