@@ -1,6 +1,6 @@
 # Subject-anchored claims: a claim is read against its subject's own timeline (SMD-3203)
 
-An architecture decision record. **Decided 2026-10-22 by the maintainer**: two thoughts linked only by a subject that neither is about are distinct, and that subject's staleness is shown when either thought is read, from the subject's own timeline, as SMD-2540 does for the tickets a thought names. A pair in which one thought names the other's subject only in passing is related at most. Code artifacts are the next subject to get a timeline, a spike first (SMD-3207). The pass change SMD-3203 proposed, its item 3, waited until this record said what consolidation writes for a mediated pair, and this record now says it. A second blind rater's count decides whether item 3 is built next: at 10% or more it is; under that, it stays the maintainer's call.
+An architecture decision record. **Decided 2026-10-22 by the maintainer**: two thoughts linked only by a subject that neither is about are distinct, and that subject's staleness is shown when either thought is read, from the subject's own timeline, as SMD-2540 does for the tickets a thought names. A pair in which one thought names the other's subject only in passing is related at most. Code artifacts are the next subject to get a timeline, a spike first (SMD-3207). The pass change SMD-3203 proposed, its item 3, waited until this record said what consolidation writes for a mediated pair, and this record now says it. By the rule fixed before a second blind rater ran, its count, 53 of the 80 evolves and related relations sampled, puts item 3 next.
 
 The decision table marks which rows the maintainer decided, which follow from them, which this record proposes, and which are built.
 
@@ -77,8 +77,10 @@ So 2 of the 138 settling pairs (1.4%) are mediated, and 1 (0.7%) runs through a 
 
 The method and bars were fixed on SMD-3203 before the draw.
 - **The draw:** 40 evolves, 40 related and 20 distinct, from the canary's 4,356 standing `@p4d3` facets with those words (1,050 evolves, 923 related, 2,383 distinct). Each set was taken in `md5('smd3203-mediated-2026-10-22:' || facet id)` order, lowest first, skipping pairs read in earlier samples: 6 were skipped, all from SMD-3116's.
-- **The blinding:** the scoring script was fixed before any label, and every pair was labelled before the file holding its stored word was opened. One rater labelled them all.
+- **The blinding:** each rater's scoring script was fixed before that rater's first label, and every pair was labelled before the file holding its stored word was opened.
 - **The record:** the texts and labels stay local, as brain text.
+
+#### The first rater
 
 | Stored word | direct | half | full | none |
 |---|---|---|---|---|
@@ -94,10 +96,27 @@ The method and bars were fixed on SMD-3203 before the draw.
   - Read as mediated, all six would make it 11 of 80 (13.75%, interval 7.9–23.0%).
   - The labels record no convention field, so other calls may rest on similar readings.
 - **The decision rule** fixed with the bars: at 10% or more, item 3 would be built next, beside this record; under 5%, item 3 would wait and this record come first; between, the maintainer decides. The 6.25% fell between, and the interval spans all three bands. The maintainer chose this record first, with item 3 waiting, and kept that choice when four of the six pairs were disclosed.
-- **A second blind rater** labels the same pairs by the bars' wording alone: the maintainer's choice once all six were disclosed. The rule applies to its count of the 80 (SMD-3203, comment d6a37789).
 - **The one pair labelled full** has pair 16's shape: two thoughts about different subjects each relay a third ticket's state at a different time. It is stored as distinct, as row 2 makes the rule.
 - **What the 7 mediated pairs relate through** (6 half, 1 full; for a half pair, one thought's own subject): tickets 3, a deployed brain 1, code artifacts 2 (a table and a function) and a technique 1. No pull request, release or metric appears.
 - **The 6 half pairs are stored as related (3), evolves (2) and distinct (1).** Under row 2, the two stored as evolves overstate their pairs.
+
+#### The second rater
+
+A second blind rater, a separate model instance, labelled the same 100 pairs by the bars' wording alone, without the conventions: the maintainer's choice once all six were disclosed. Its method, and the rule applied to its count, were fixed on SMD-3203 before its first label (comment d6a37789).
+
+| Stored word | direct | half | full | none |
+|---|---|---|---|---|
+| evolves (40) | 8 | 15 | 13 | 4 |
+| related (40) | 13 | 15 | 10 | 2 |
+| distinct (20) | 0 | 0 | 7 | 13 |
+
+- **53 of the 80 evolves and related pairs are mediated:** 66.25%, with a Wilson 95% interval of 55.4–75.7%; 23 full and 30 half. By the rule, item 3 is built next.
+- **The two raters agree little better than chance on which pairs are mediated:** on 32 of the 80 (κ 0.07). On the four paths over all 100, they agree on 46 (κ 0.32). In each of the 48 pairs they split on, the first rater said direct or none and the second half or full; the second counted all five of the first rater's mediated pairs as mediated too.
+- **The second rater read the bars' words more widely.**
+  - It took "peripheral to both" as "neither thought's own subject": a component that a ticket changes is a third subject, and a shared eval corpus, suite or check makes a pair full.
+  - It counted a thought that changes, tests or hardens another's deliverable as relaying that subject "in passing", which makes a pair half.
+  - The bars' words admit both readings.
+- **What its mediated pairs relate through,** across the three words: tickets 30, other 28, a deployed brain 1, a pull request 1.
 
 ### What each subject has today (main, 2026-10-22)
 
@@ -113,7 +132,7 @@ The method and bars were fixed on SMD-3203 before the draw.
 
 - **SMD-3203's title** proposed superseding a claim about a third subject on that subject's timeline. Row 1 reads the timeline instead, and writes nothing.
 - **SMD-3116's via slot** marked a pair that relates through a third subject, until this record carried it. Row 2 now records such a pair as distinct, and row 4 keeps the slot for review. The blind sample also gave half pairs a via subject, which is one thought's own subject.
-- **SMD-3203's item 3,** decide mode treating a mediated pair explicitly, waited until this record said what consolidation writes for a mediated pair (the maintainer, 2026-10-22). Row 2 now says it for both shapes, so the wait is over. Whether item 3 is built next turns on the second rater's count.
+- **SMD-3203's item 3,** decide mode treating a mediated pair explicitly, waited until this record said what consolidation writes for a mediated pair (the maintainer, 2026-10-22). Row 2 now says it for both shapes, so the wait is over, and the second rater's count puts item 3 next.
 
 ## The path
 
@@ -125,12 +144,12 @@ The method and bars were fixed on SMD-3203 before the draw.
    - label a hit `Changed since written: …`;
    - measure it on the canary, against a bar fixed before the run. The canary holds the fork's change records, which SMD-3006 ingested, as canary-only rows; it holds no commits.
 3. If the spike passes, the label is built beside SMD-2540's, and applied only when a thought is read.
-4. SMD-3203's item 3, if the second rater's count reaches 10% or the maintainer chooses to build it: rows 2 and 3 in decide mode, with a new decide version and a re-judge.
+4. SMD-3203's item 3, next by the rule: rows 2 and 3 in decide mode, with a new decide version and a re-judge. Proposed here: two raters applying the bars' words agreed little better than chance on which pairs are mediated, so item 3 first fixes a test of a third subject and measures how well raters agree on it, before decide mode applies rows 2 and 3.
 
 ## Not decided here
 
 - **How a code artifact is found in a note** (an entity mention, a path in the text, or both), **at what grain** (a file or a function), **and from which source.** SMD-3207 decides these.
-- **Whether to build SMD-3203's item 3,** should the second rater's count stay under 10%.
+- **How the pass tells a third subject from a pair's own.** The bars' words did not settle it between two raters; item 3's first step is proposed in the path.
 - **Whether a moved label ever demotes.** For tickets, that is SMD-3054's measurement.
 - **Timelines for deployed brains and pull requests.** Another brain's state is an HTTP read through the edge (SMD-2872).
 - **Entities' state in general,** which would come from claims about them in SMD-1729's claim log.
