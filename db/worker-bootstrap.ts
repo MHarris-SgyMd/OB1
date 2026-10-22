@@ -260,9 +260,12 @@ export function databaseUnavailable(e: unknown): boolean {
  * answer of another shape — under a policy that admits that actor alone
  * (`lookup`). The sleep scheduler ends on the ones no retry mends, and
  * retries `model`, `provider` and `lookup`, which a re-pull, a top-up or a
- * quieter database can (review pass 1).
+ * quieter database can (review pass 1). board-sync's two of its own end its
+ * row too (SMD-3214): no LINEAR_API_KEY (`linear-key`), and an initiative
+ * that is not one board (`board`); its bad interval or findings cap is
+ * `usage`, its endpoint refused wholesale `egress`.
  */
-export const START_REFUSALS = ["usage", "egress", "tables", "model", "provider", "identity", "key", "lookup"] as const;
+export const START_REFUSALS = ["usage", "egress", "tables", "model", "provider", "identity", "key", "lookup", "linear-key", "board"] as const;
 export type StartRefusal = (typeof START_REFUSALS)[number];
 
 /** A pass's start, as its run reports it to `onStart`: through, with the provider answering at its probe or not yet; or refused, and why. */

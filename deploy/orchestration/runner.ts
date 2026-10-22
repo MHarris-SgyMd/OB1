@@ -89,12 +89,16 @@ export function emitterUid(name: string): number {
 export const EMITTER_UIDS = [20000, 59999] as const;
 const DEFAULT_PORT = 8090;
 export const DEFAULT_TIMEOUT_S = 3600;
-/** After a step's first SIGTERM, how long before SIGKILL. */
-const KILL_GRACE_MS = 6000;
-/** reembed stops after the thought in hand on a first SIGTERM, which can be a 120 s provider call, and hands its leased rows back on a second; SIGKILL left them leased for its 900 s lease (review pass 3). So a step gets a second SIGTERM this long after the first. */
-const SECOND_TERM_MS = 1000;
-/** After a step exits, how long its pipes may stay open (a child it left holding them) before they are abandoned. */
-const DRAIN_MS = 2000;
+/** How a step is stopped and drained: the service's are STEP_TIMINGS; the self-check shortens them, so its cases do not wait out the service's (SMD-3198). */
+export type StepTimings = {
+  /** After a step's first SIGTERM, how long before SIGKILL. */
+  killGraceMs: number;
+  /** reembed stops after the thought in hand on a first SIGTERM, which can be a 120 s provider call, and hands its leased rows back on a second; SIGKILL left them leased for its 900 s lease (review pass 3). So a step gets a second SIGTERM this long after the first. */
+  secondTermMs: number;
+  /** After a step exits, how long its pipes may stay open (a child it left holding them) before they are abandoned. */
+  drainMs: number;
+};
+const STEP_TIMINGS: StepTimings = { killGraceMs: 6000, secondTermMs: 1000, drainMs: 2000 };
 
 /** The steps running now, so that a runner being stopped can stop them the way a deadline does (review pass 4). */
 const live = new Set<{ stop: () => void; exited: Promise<number> }>();
@@ -333,6 +337,8 @@ export type Config = {
   proxyPort: (p: Pipeline) => number;
   /** Whether a named host may resolve to a loopback or link-local address: only the self-check's stand-in upstream, on 127.0.0.1. */
   allowLocal: boolean;
+  /** How each step is stopped and drained: STEP_TIMINGS in the service. */
+  timings: StepTimings;
 };
 
 /** Whatever a step printed, cut to its end: enough to say why, not a copy of what it read. */
@@ -348,15 +354,15 @@ type Step = { code: number; bytes: Uint8Array; out: string; err: string; timedOu
  * waiting (review pass 1, run-it: an emitter that daemonised a child held its
  * pipeline at 409 until the runner restarted).
  */
-async function step(argv: string[], o: { cwd: string; env: Record<string, string | undefined>; stdin?: Uint8Array; deadline: number; maxBytes?: number; errBytes?: number }): Promise<Step> {
+async function step(argv: string[], o: { cwd: string; env: Record<string, string | undefined>; stdin?: Uint8Array; deadline: number; timings: StepTimings; maxBytes?: number; errBytes?: number }): Promise<Step> {
   const proc = Bun.spawn(argv, { cwd: o.cwd, env: o.env, stdin: o.stdin ?? "ignore", stdout: "pipe", stderr: "pipe" });
   let timedOut = false, overflow = false;
   let killer: ReturnType<typeof setTimeout> | undefined;
   const stop = () => {
     try { proc.kill("SIGTERM"); } catch {}
     if (killer) return;
-    setTimeout(() => { try { proc.kill("SIGTERM"); } catch {} }, SECOND_TERM_MS);
-    killer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, KILL_GRACE_MS);
+    setTimeout(() => { try { proc.kill("SIGTERM"); } catch {} }, o.timings.secondTermMs);
+    killer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, o.timings.killGraceMs);
   };
   const timer = setTimeout(() => { timedOut = true; stop(); }, Math.max(0, o.deadline - Date.now()));
   const handle = { stop, exited: proc.exited };
@@ -385,7 +391,7 @@ async function step(argv: string[], o: { cwd: string; env: Record<string, string
   live.delete(handle);
   clearTimeout(timer);
   if (killer) clearTimeout(killer);
-  await Promise.race([reading, Bun.sleep(DRAIN_MS)]);
+  await Promise.race([reading, Bun.sleep(o.timings.drainMs)]);
   for (const r of readers) r.cancel().catch(() => {});
   const bytes = Buffer.concat(chunks);
   return { code, bytes, out: new TextDecoder().decode(bytes), err: errTail, timedOut, overflow };
@@ -693,14 +699,14 @@ async function runSteps(c: Config, p: Pipeline, proxy: Proxy | undefined): Promi
   if (typeof where === "object") return { pipeline: p.name, ok: false, stage: "emitter", exit: null, why: `${input} cannot be read as a directory (${where.code}): is IMPORTS_DIR a directory? — deploy/imports/README.md`, emitted: 0 };
   if (where === "present") {
     const probe = c.probe(p, input);
-    const readable = probe ? (await step(probe, { cwd: c.cwd, env: EMITTER_ENV(c.env), deadline: Date.now() + 5000 })).code === 0 : canRead(input);
+    const readable = probe ? (await step(probe, { cwd: c.cwd, env: EMITTER_ENV(c.env), deadline: Date.now() + 5000, timings: c.timings })).code === 0 : canRead(input);
     if (!readable) return { pipeline: p.name, ok: false, stage: "emitter", exit: null, why: `${p.name}'s emitter${probe ? ` runs as uid ${emitterUid(p.name)}, which` : ""} cannot read ${input}: make the export readable to it (deploy/imports/README.md)`, emitted: 0 };
   }
   const argv = [...c.asEmitter(p), ...p.emitter.map((a) => a.replaceAll("{input}", input))];
-  const e = await step(argv, { cwd: c.cwd, env: EMITTER_ENV(c.env, proxy), deadline, maxBytes: c.maxBytes });
+  const e = await step(argv, { cwd: c.cwd, env: EMITTER_ENV(c.env, proxy), deadline, timings: c.timings, maxBytes: c.maxBytes });
   // Whatever the emitter left running as its uid is stopped, whether it exited well or not (review pass 2).
   const sweep = c.sweep(p);
-  if (sweep) await step(sweep, { cwd: c.cwd, env: EMITTER_ENV(c.env), deadline: Date.now() + 5000 });
+  if (sweep) await step(sweep, { cwd: c.cwd, env: EMITTER_ENV(c.env), deadline: Date.now() + 5000, timings: c.timings });
   if (e.timedOut || e.overflow || e.code !== 0) {
     const why = e.timedOut ? `the emitter ${past}` : e.overflow ? `the emitter printed more than ${c.maxBytes} bytes and was stopped` : `the emitter exited ${e.code}`;
     return { pipeline: p.name, ok: false, stage: "emitter", exit: e.timedOut || e.overflow ? null : e.code, why, emitted: 0, notes: shownTail(e.err) };
@@ -709,7 +715,7 @@ async function runSteps(c: Config, p: Pipeline, proxy: Proxy | undefined): Promi
   const stray = strayLines(e.bytes, p);
   if (stray.length) return { pipeline: p.name, ok: false, stage: "one-source", why: `${stray.length} line(s) are not ${p.name}'s source — the batch is refused whole; nothing written`, emitted, notes: stray.slice(0, 20) };
   if (emitted === 0) return { pipeline: p.name, ok: true, emitted, counts: null, report: [`${p.name}: the emitter printed nothing — no export under ${input}?`] };
-  const ing = await step([...c.asPipeline, ...c.commands.ingest(p)], { cwd: c.cwd, env: c.env, stdin: e.bytes, deadline });
+  const ing = await step([...c.asPipeline, ...c.commands.ingest(p)], { cwd: c.cwd, env: c.env, stdin: e.bytes, deadline, timings: c.timings });
   if (ing.code !== 0 && passwordRefused(ing.err)) return { pipeline: p.name, ok: false, stage: "ingest", exit: ing.code, emitted, why: RUNNER_PASSWORD_WHY };
   // The ingester's own "next: bun db/reembed.ts" is the runner's next step, not the reader's.
   const base = { pipeline: p.name, emitted, counts: parseTally(ing.out), report: redactAll(lines(ing.out).filter((l) => !/^\s*next: /.test(l))), notes: shownTail(ing.err, 8000) };
@@ -724,7 +730,7 @@ async function runSteps(c: Config, p: Pipeline, proxy: Proxy | undefined): Promi
   let re: Step, unembedded: number;
   try {
     if (!ours) return { ...base, ok: false, stage: "reembed", exit: null, why: `the rows are written; the run's ${c.timeoutS} s ran out waiting for another pipeline's reembed, and the next run embeds them` };
-    try { re = await step([...c.asPipeline, ...c.commands.reembed()], { cwd: c.cwd, env: c.env, deadline }); }
+    try { re = await step([...c.asPipeline, ...c.commands.reembed()], { cwd: c.cwd, env: c.env, deadline, timings: c.timings }); }
     catch (err) { return { ...base, ok: false, stage: "reembed", exit: null, why: `the rows are written, and reembed could not be started: ${(err as Error).message}` }; }
     // reembed exits 1 for any failed row it holds from any earlier pass, and
     // for another pass's leases (review pass 1: every import then failed for
@@ -931,6 +937,7 @@ function configFrom(env: Record<string, string | undefined>, uid = process.getui
     probe: (p, dir) => (uid === 0 ? [SU_EXEC!, `${emitterUid(p.name)}:${emitterUid(p.name)}`, "python3", "-c", "import os, sys; sys.exit(0 if os.access(sys.argv[1], os.R_OK | os.X_OK) else 1)", dir] : null),
     proxyPort: (p) => (uid === 0 ? emitterUid(p.name) : 0),
     allowLocal: false,
+    timings: STEP_TIMINGS,
   };
 }
 
@@ -965,7 +972,7 @@ async function emittersReach(): Promise<"reached" | "refused" | Error> {
   await new Promise<void>((ok) => listener.listen(0, "127.0.0.1", ok));
   try {
     const port = (listener.address() as { port: number }).port;
-    const r = await step([SU_EXEC!, `${EMITTER_UIDS[1]}:${EMITTER_UIDS[1]}`, "python3", "-c", EMITTER_PROBE, String(port)], { cwd: "/", env: EMITTER_ENV(process.env), deadline: Date.now() + 10_000 });
+    const r = await step([SU_EXEC!, `${EMITTER_UIDS[1]}:${EMITTER_UIDS[1]}`, "python3", "-c", EMITTER_PROBE, String(port)], { cwd: "/", env: EMITTER_ENV(process.env), deadline: Date.now() + 10_000, timings: STEP_TIMINGS });
     return r.code === 0 ? "reached" : r.code === 3 ? "refused" : new Error(`the probe as uid ${EMITTER_UIDS[1]} exited ${r.code}${r.timedOut ? " (timed out)" : ""}: ${tail(r.err, 300).trim()}`);
   } finally {
     listener.close();
@@ -1004,6 +1011,10 @@ const EMITTER_PROBE = [
  *   to the named host, what it refuses and reports, the bounds on a
  *   connection and a tunnel, half-open tunnels, and what a host that never
  *   closes or ends first does to them.
+ * The timed cases run on shortened stop and drain bounds (Config.timings),
+ * and the bounded runs and the proxy's four groups each side by side, where
+ * they share no state: about 12 s, where in series on the service's bounds
+ * it was 41 (SMD-3198).
  * Running as another user, and the egress rules themselves, are the image's,
  * and the eval kit holds them live (evals/orchestration/n8n.ts, I).
  */
@@ -1134,7 +1145,7 @@ async function selfCheck(): Promise<number> {
     reembed: () => ["bun", "-e", `console.log("reembed ran"); process.exit(${reembedExit})`],
     unembedded: async (x) => leftWithout.get(x.name) ?? 0,
   };
-  const config = (over: Partial<Config>): Config => ({ key, pipelines, importsDir: dir, cwd: REPO, commands, timeoutS: 30, maxBytes: 1 << 20, env: { ...process.env, DATABASE_URL: "postgres://secret@db/x", OB1_RUNNER_KEY: key }, asEmitter: () => [], asPipeline: [], sweep: () => null, probe: () => null, proxyPort: () => 0, allowLocal: true, ...over });
+  const config = (over: Partial<Config>): Config => ({ key, pipelines, importsDir: dir, cwd: REPO, commands, timeoutS: 30, maxBytes: 1 << 20, env: { ...process.env, DATABASE_URL: "postgres://secret@db/x", OB1_RUNNER_KEY: key }, asEmitter: () => [], asPipeline: [], sweep: () => null, probe: () => null, proxyPort: () => 0, allowLocal: true, timings: STEP_TIMINGS, ...over });
   const server = await serve(config({}), 0);
   const url = (path: string) => `http://127.0.0.1:${server.port}${path}`;
   const post = (path: string, headers: Record<string, string> = { "x-runner-key": key }) => fetch(url(path), { method: "POST", headers });
@@ -1184,33 +1195,36 @@ async function selfCheck(): Promise<number> {
 
   // The bounds on one run: a second call while one is going, a step past the
   // deadline, one that ignores SIGTERM, one that leaves a child holding its
-  // pipes, and an emitter printing past the cap. None reaches the ingester.
+  // pipes, and an emitter printing past the cap. Only the first slow run
+  // reaches the ingester. On shortened bounds, each case's asserted bound
+  // written in them, so the cases do not wait out the service's 6 s grace and
+  // 2 s drain; and side by side, each its own pipeline (SMD-3198: 41 s, nearly
+  // all timers, twice a Fork Checks run).
+  const quick: StepTimings = { killGraceMs: 1000, secondTermMs: 200, drainMs: 300 };
+  const T = 2;
   const bounded = each([
-    { ...good, name: "slow", emitter: emit(`await Bun.sleep(1500); console.log(${JSON.stringify(item("fixture"))})`) },
+    { ...good, name: "slow", emitter: emit(`await Bun.sleep(600); console.log(${JSON.stringify(item("fixture"))})`) },
     { ...good, name: "hangs", emitter: emit(`await Bun.sleep(20000)`) },
     { ...good, name: "deaf", emitter: emit(`process.on("SIGTERM", () => {}); await Bun.sleep(30000)`) },
-    { ...good, name: "twice", emitter: emit(`let n = 0; process.on("SIGTERM", () => { if (++n === 2) process.exit(0); }); await Bun.sleep(30000)`) },
+    // It says so as it goes, which a SIGKILL would not let it: the second SIGTERM is told from the kill by that, not by a time.
+    { ...good, name: "twice", emitter: emit(`let n = 0; process.on("SIGTERM", () => { if (++n === 2) process.stderr.write("handed back on the second SIGTERM\\n", () => process.exit(0)); }); await Bun.sleep(30000)`) },
     { ...good, name: "orphans", emitter: emit(`Bun.spawn(["bun", "-e", "await Bun.sleep(30000)"], { stdout: "inherit", stderr: "inherit" }).unref(); process.exit(0)`) },
     { ...good, name: "floods", emitter: emit(`const l = ${JSON.stringify(item("fixture"))} + "\\n"; for (let i = 0; i < 200; i++) process.stdout.write(l)`) },
   ]);
   const before = ingested;
-  const small = await serve(config({ pipelines: bounded, timeoutS: 3, maxBytes: 2000, env: process.env }), 0);
+  const small = await serve(config({ pipelines: bounded, timeoutS: T, timings: quick, maxBytes: 2000, env: process.env }), 0);
   const at = (path: string) => fetch(`http://127.0.0.1:${small.port}${path}`, { method: "POST", headers: { "x-runner-key": key } });
   try {
     const [a, b] = await Promise.all([at("/run/slow"), Bun.sleep(300).then(() => at("/run/slow"))]);
     expect(`a second run of a pipeline already going is 409, and the first finishes (${a.status}, ${b.status})`, a.status === 200 && b.status === 409);
     const timed = async (name: string) => { const t0 = Date.now(); const res = await at(`/run/${name}`); return { res, rep: await res.json() as Report, s: (Date.now() - t0) / 1000 }; };
-    const h = await timed("hangs");
-    expect(`an emitter past the deadline is stopped and refused (${h.res.status}, ${h.s.toFixed(1)} s, ${h.rep.why})`, h.res.status === 422 && /ran past the run's 3 s/.test(h.rep.why ?? "") && h.s < 6);
-    const tw = await timed("twice");
-    expect(`a step that hands back on a second SIGTERM gets one, well before SIGKILL (${tw.s.toFixed(1)} s)`, tw.res.status === 422 && tw.s < 3 + SECOND_TERM_MS / 1000 + 2);
-    const d = await timed("deaf");
-    expect(`an emitter that ignores SIGTERM is killed after the grace (${d.res.status}, ${d.s.toFixed(1)} s)`, d.res.status === 422 && d.s < 3 + KILL_GRACE_MS / 1000 + 3);
-    const o = await timed("orphans");
-    expect(`an emitter that leaves a child holding its pipes still answers (${o.res.status}, ${o.s.toFixed(1)} s)`, o.s < DRAIN_MS / 1000 + 3);
+    const [h, tw, d, o, fl] = await Promise.all(["hangs", "twice", "deaf", "orphans", "floods"].map(timed));
+    expect(`an emitter past the deadline is stopped and refused (${h.res.status}, ${h.s.toFixed(1)} s, ${h.rep.why})`, h.res.status === 422 && (h.rep.why ?? "").includes(`ran past the run's ${T} s`) && h.s < T + 3);
+    expect(`a step that hands back on a second SIGTERM gets one, before SIGKILL (${tw.s.toFixed(1)} s, ${JSON.stringify(tw.rep.notes)})`, tw.res.status === 422 && (tw.rep.notes ?? []).includes("handed back on the second SIGTERM") && tw.s < T + quick.killGraceMs / 1000 + 2);
+    expect(`an emitter that ignores SIGTERM is killed after the grace, not before it (${d.res.status}, ${d.s.toFixed(1)} s)`, d.res.status === 422 && d.s >= T + quick.killGraceMs / 1000 - 0.1 && d.s < T + quick.killGraceMs / 1000 + 3);
+    expect(`an emitter that leaves a child holding its pipes still answers (${o.res.status}, ${o.s.toFixed(1)} s)`, o.s < quick.drainMs / 1000 + 3);
     const again = await at("/run/orphans");
     expect(`…and its pipeline is free for the next run, not held at 409 (${again.status})`, again.status !== 409);
-    const fl = await timed("floods");
     expect(`an emitter past the output cap is stopped and refused (${fl.res.status}, ${fl.rep.why})`, fl.res.status === 422 && /more than 2000 bytes/.test(fl.rep.why ?? ""));
     expect("of the bounded runs only the slow one reached the ingester", ingested === before + 1);
   } finally {
@@ -1259,11 +1273,11 @@ async function selfCheck(): Promise<number> {
   const swept = () => (existsSync(marker) ? readFileSync(marker, "utf8").split("\n").filter(Boolean) : []);
   const two = each([
     { ...good, name: "first", emitter: emit(`console.log(${JSON.stringify(item("fixture"))})`) },
-    { ...good, name: "second", emitter: emit(`await Bun.sleep(200); console.log(${JSON.stringify(item("fixture"))})`) },
+    { ...good, name: "second", emitter: emit(`await Bun.sleep(400); console.log(${JSON.stringify(item("fixture"))})`) },
     { ...good, name: "broken", emitter: emit(`process.exit(4)`) },
   ]);
   const waits = await serve(config({
-    pipelines: two, timeoutS: 3, env: process.env,
+    pipelines: two, timeoutS: T, timings: quick, env: process.env,
     // A reembed that outlasts the other run's deadline: it ignores SIGTERM, so it holds the turn until SIGKILL.
     commands: { ...commands, reembed: () => ["bun", "-e", "process.on('SIGTERM', () => {}); await Bun.sleep(20000)"] },
     sweep: (x) => ["bun", "-e", `require("fs").appendFileSync(${JSON.stringify(marker)}, ${JSON.stringify(`${x.name}\n`)})`],
@@ -1275,7 +1289,7 @@ async function selfCheck(): Promise<number> {
     const timedOn = async (path: string) => { const res = await on(path); return { res, rep: await res.json() as Report, s: (Date.now() - t0) / 1000 }; };
     const [{ res: a, rep: ar }, { res: b, rep: br, s }] = await Promise.all([timedOn("/run/first"), timedOn("/run/second")]);
     expect(`the sweep runs after every emitter step, a failed one included (${swept().join(",")})`, ["broken", "first", "second"].every((n) => swept().includes(n)));
-    expect(`a run waiting on another pipeline's reembed gives up at its own deadline, and says so (${b.status}: ${br.why}; ${s.toFixed(1)} s)`, /ran out waiting for another pipeline's reembed/.test(br.why ?? "") && s < 3 + 2 && a.status === 200 && ar.ok);
+    expect(`a run waiting on another pipeline's reembed gives up at its own deadline, and says so (${b.status}: ${br.why}; ${s.toFixed(1)} s)`, /ran out waiting for another pipeline's reembed/.test(br.why ?? "") && s < T + 2 && a.status === 200 && ar.ok);
   } finally {
     waits.stop(true);
     rmSync(marker, { force: true });
@@ -1418,115 +1432,130 @@ async function selfCheck(): Promise<number> {
   const loose = await startProxy({ ...reaches, network: [{ host: "127.0.0.1", port: gonePort }] }, 0, { allowLocal: true });
   const ok200 = "HTTP/1.1 200 Connection Established\r\n\r\n";
   try {
-    expect(`the proxy listens on 127.0.0.1 alone (${own.url})`, own.url === `http://127.0.0.1:${own.port}`);
-    const named = await session(own.port, [[0, connectTo("up.test")], [0, clientHello("up.test")], [0, "ping"], [50, "END"]]);
-    expect(`TLS naming the named host reaches it, at the address checked, and a client that shuts its write side still gets the answer (${JSON.stringify(named.text.slice(-12))})`, named.text.startsWith(ok200) && named.text.endsWith("pingBYE") && own.take().length === 0);
-    const early = await session(own.port, [[0, connectTo("up.test")], [30, clientHello("up.test")], [0, "ping"], [0, "END"]]);
-    expect(`a ClientHello sent while the name is still resolving is kept, not dropped (${JSON.stringify(early.text.slice(-12))})`, early.text.endsWith("pingBYE"));
-    const other = await session(own.port, [[0, connectTo("up.test")], [0, clientHello("other.example")], [0, "ping"], [0, "END"]]);
-    const none = await session(own.port, [[0, connectTo("up.test")], [0, clientHello(null)], [0, "END"]]);
-    const refusedSni = own.take();
-    expect(`a ClientHello naming another server, or none, closes the tunnel before anything reaches the host, and is named (${JSON.stringify(refusedSni)})`,
-      other.text === ok200 && none.text === ok200 && refusedSni.length === 2 && /^CONNECT up\.test:\d+: the TLS ClientHello names other\.example, not up\.test$/.test(refusedSni[0]) && /names no server, not up\.test$/.test(refusedSni[1]));
-    const literal = await session(own.port, [[0, connectTo("10.9.9.9")], [0, clientHello(null)], [0, "ping"], [0, "END"]]);
-    expect(`a named IPv4 address takes a ClientHello naming no server (${JSON.stringify(literal.text.slice(-12))})`, literal.text.endsWith("pingBYE"));
-    const port2 = await session(own.port, [[0, connectTo("up.test", echoPort + 1)]]);
-    expect(`a named host on a port it does not name is 403 (${port2.text.split("\r\n")[0]})`, port2.text.startsWith("HTTP/1.1 403") && /not a host reaches names/.test(own.take()[0] ?? ""));
-    const idle = await session(own.port, [[0, connectTo("up.test")], [0, clientHello("up.test")], [700, "late"], [0, "END"]]);
-    expect(`an open tunnel outlives the request's 400 ms bound (${JSON.stringify(idle.text.slice(-12))})`, idle.text.endsWith("lateBYE"));
-    const mute = await session(own.port, []);
-    expect(`a connection that sends no request is closed at the bound, and the report says so (${mute.closedAt} ms)`, mute.text === "" && mute.closedAt >= 350 && mute.closedAt < 1500 && /^a connection sent no whole request in 0\.4 s of quiet/.test(own.take()[0] ?? ""));
-    // Review pass 3: a quiet cut says where the connection was, and a refused client that stays is let go without a second note.
-    const slow = await session(own.port, [[0, connectTo("slow.test")]]);
-    const hushed = await session(own.port, [[0, connectTo("up.test")]]);
-    // Cut while its name resolves to nothing: the cut is its one note, not a "did not resolve" after it (review pass 4).
-    await session(own.port, [[0, connectTo("slow-empty.test")]]);
-    await Bun.sleep(400);
-    const stages = own.take();
-    expect(`a quiet cut says where the connection was: the proxy's own lookup and dial, the ClientHello (${JSON.stringify(stages)}; ${slow.closedAt}, ${hushed.closedAt} ms)`,
-      stages.length === 3 && /^CONNECT slow\.test:\d+: resolving and dialling it took past 0\.4 s of quiet/.test(stages[0]) && /^CONNECT up\.test:\d+: no whole ClientHello in 0\.4 s of quiet/.test(stages[1])
-      && /^CONNECT slow-empty\.test:\d+: resolving and dialling it took past/.test(stages[2]));
-    const patient = await startProxy({ ...reaches, network: [{ host: "up.test", port: echoPort }] }, 0, { allowLocal: true, lookup: standIn, headMs: 5000 });
-    try {
-      const stayed = await session(patient.port, [[0, connectTo("elsewhere.test")], [1500, "x"], [300, "x"]], 3500, true);
-      const once = patient.take();
-      expect(`a refused client that stays is let go after a second, not held to the quiet bound, and noted once (${stayed.closedAt} ms; ${JSON.stringify(once)})`, stayed.text.startsWith("HTTP/1.1 403") && stayed.closedAt >= 1400 && stayed.closedAt < 2600 && once.length === 1);
-    } finally {
-      patient.close();
-    }
-    const empty = await session(own.port, [[0, connectTo("empty.test")]]);
-    expect(`a named host that resolves to no address is 502, never dialled (${empty.text.split("\r\n")[0]})`, empty.text.startsWith("HTTP/1.1 502") && /empty\.test did not resolve/.test(own.take()[0] ?? ""));
-    const ipSni = await session(own.port, [[0, connectTo("10.9.9.9")], [0, clientHello("up.test")], [0, "ping"], [0, "END"]]);
-    expect(`a named IPv4 address with TLS naming another server is cut off: a CDN's address is not a way to the names it serves (${JSON.stringify(ipSni.text.slice(-12))})`, ipSni.text === ok200 && /names up\.test, not 10\.9\.9\.9$/.test(own.take()[0] ?? ""));
-    const v6 = await session(own.port, [[0, connectTo("v6first.test")], [0, clientHello("v6first.test")], [0, "ping"], [0, "END"]]);
-    expect(`of a name's addresses, IPv4 is dialled first (${JSON.stringify(v6.text.slice(-12))})`, v6.text.endsWith("pingBYE"));
-    const dark = await session(own.port, [[0, connectTo("dark.test")]]);
-    const darkNote = own.take()[0] ?? "";
-    expect(`a named host that does not answer the dial is 504, named (${dark.text.split("\r\n")[0]}; ${darkNote})`, (dark.text.startsWith("HTTP/1.1 504") && /did not answer within 0\.2 s/.test(darkNote)) || (dark.text.startsWith("HTTP/1.1 502") && /unreach/i.test(darkNote)));
-    const held = await Promise.all([0, 1, 2, 3, 4].map((i) => session(own.port, [[i * 20, ""]], 250)));
-    expect(`the proxy holds ${4} connections at once and closes the next, and the report says so (${held.map((h) => h.closedAt).join(", ")} ms)`, held.filter((h) => h.closedAt < 150).length === 1 && held.filter((h) => h.closedAt >= 240).length === 4 && own.take().some((x) => /past the proxy's 4 at once/.test(x)));
-    // A named host that never closes and never answers: a half-closed tunnel to it is let go after the quiet bound, and a client that resets takes its upstream with it (review pass 2).
-    // It reads, but never answers and keeps its own side open whatever the proxy does, so what is counted is each tunnel it saw end (a FIN, a reset or a close).
-    let silentEnds = 0;
-    let silentConns = 0;
-    const silent = createServer({ allowHalfOpen: true }, (x) => { silentConns++; let seen = false; const count = () => { if (!seen) { seen = true; silentEnds++; } }; x.resume(); x.on("end", count); x.on("error", count); x.on("close", count); });
-    await new Promise<void>((ok) => silent.listen(0, "127.0.0.1", ok));
-    const silentPort = (silent.address() as { port: number }).port;
-    // A named host that ends its side first and still reads: what the client sends after that must arrive.
-    let lateBytes = "";
-    const shut = createServer({ allowHalfOpen: true }, (x) => { x.once("data", () => x.end("BYE")); x.on("data", (d) => (lateBytes += d.toString("latin1"))); x.on("error", () => {}); });
-    await new Promise<void>((ok) => shut.listen(0, "127.0.0.1", ok));
-    const shutPort = (shut.address() as { port: number }).port;
-    const tight = await startProxy({ ...reaches, network: [{ host: "up.test", port: silentPort }, { host: "up.test", port: shutPort }, { host: "late.test", port: silentPort }] }, 0, { allowLocal: true, lookup: standIn, headMs: 600, maxConnections: 8 });
-    const screened = await startProxy({ ...reaches, network: [{ host: "mixed.test", port: echoPort }] }, 0, { lookup: standIn });
-    try {
-      // Eight clients send the request and the ClientHello in one write and shut their write side 20 ms in, while late.test is still resolving (300 ms): each end must still reach the host. Bun hands a paused socket's end on at once only when nothing is buffered, so the hello must not trail in a read of its own (review pass 4: sent apart, the fix's mutant survived 2 of 5 runs under load).
-      const halves = await Promise.all([0, 1, 2, 3, 4, 5, 6, 7].map(() => session(tight.port, [[0, Buffer.concat([Buffer.from(connectTo("late.test", silentPort)), clientHello("late.test")])], [20, "END"]], 3000)));
-      await Bun.sleep(100);
-      const sawEnds = silentEnds;
-      const after = await session(tight.port, [[0, connectTo("up.test", silentPort)]], 400);
-      expect(`a half-closed tunnel to a host that never closes is let go after the quiet bound, its end passed on, and the proxy's connections freed (closed after ${halves.map((h) => h.closedAt).join(", ")} ms; the host saw ${sawEnds} end; the next request ${JSON.stringify(after.text.split("\r\n")[0])})`,
-        halves.every((h) => h.closedAt >= 600 && h.closedAt < 2500) && sawEnds === 8 && after.text.startsWith(ok200));
-      tight.take();
-      await Bun.sleep(100);
-      const reset = tcpConnect(tight.port, "127.0.0.1", () => reset.write(Buffer.concat([Buffer.from(connectTo("up.test", silentPort)), clientHello("up.test")])));
-      reset.on("error", () => {});
-      await Bun.sleep(300);
-      const endsBefore = silentEnds;
-      reset.resetAndDestroy();
-      await Bun.sleep(150);
-      expect(`a client that resets takes its upstream with it (the host saw ${silentEnds - endsBefore} end)`, silentEnds - endsBefore === 1);
-      const shutSaid = await session(tight.port, [[0, connectTo("up.test", shutPort)], [0, clientHello("up.test")], [150, "more"], [50, "END"]], 1500, true);
-      await Bun.sleep(100);
-      expect(`a host that ends its side first still gets what the client sends after (${JSON.stringify(shutSaid.text.slice(-3))}, it read ${JSON.stringify(lateBytes.slice(-4))})`, shutSaid.text.endsWith("BYE") && lateBytes.endsWith("more"));
-      const connsBefore = silentConns;
-      const gone = tcpConnect(tight.port, "127.0.0.1", () => gone.write(connectTo("up.test", silentPort)));
-      gone.on("error", () => {});
-      await Bun.sleep(20);
-      gone.resetAndDestroy();
-      await Bun.sleep(250);
-      expect(`a client gone while its name resolves is not dialled for (${silentConns - connsBefore} dialled)`, silentConns === connsBefore);
-      // The client stays silent, half-open; a write it sends at 1.3 s is reset only if the proxy has let the tunnel go (its bound here is 600 ms).
-      const silentClient = await session(tight.port, [[0, connectTo("up.test", shutPort)], [0, clientHello("up.test")], [1300, "x"], [200, "x"]], 3500, true);
-      expect(`a host that ends first while its client stays silent is let go after the quiet bound (the client's late write reset at ${silentClient.closedAt} ms)`, silentClient.text.endsWith("BYE") && silentClient.closedAt >= 1250 && silentClient.closedAt < 2800);
-      const mixed = await session(screened.port, [[0, connectTo("mixed.test")]]);
-      expect(`a name whose answer mixes a public address with a loopback one is refused (${mixed.text.split("\r\n")[0]})`, mixed.text.startsWith("HTTP/1.1 403") && /mixed\.test resolves to 127\.0\.0\.1/.test(screened.take()[0] ?? ""));
-    } finally {
-      tight.close();
-      screened.close();
-      silent.close();
-      shut.close();
-    }
-    const lo = await session(strict.port, [[0, connectTo("localhost")]]);
-    expect(`a named host that resolves to a loopback address is refused (${lo.text.split("\r\n")[0]})`, lo.text.startsWith("HTTP/1.1 403") && /resolves to (127\.0\.0\.1|::1), a loopback, link-local or metadata address/.test(strict.take()[0] ?? ""));
-    const down = await session(loose.port, [[0, connectTo("127.0.0.1", gonePort)]]);
-    expect(`a named host that refuses the dial is 502, named (${down.text.split("\r\n")[0]})`, down.text.startsWith("HTTP/1.1 502") && /^CONNECT 127\.0\.0\.1:\d+: /.test(loose.take()[0] ?? ""));
-    for (let i = 0; i < REFUSALS_SHOWN + 5; i++) await session(strict.port, [[0, connectTo(`x${i}.example`, 443)]]);
-    const many = strict.take();
-    expect(`one report lists ${REFUSALS_SHOWN} refusals and counts the rest, and take() clears them (${many.length}: ${many.at(-1)})`, many.length === REFUSALS_SHOWN + 1 && many.at(-1) === "…and 5 more" && strict.take().length === 0);
-    const long = await session(strict.port, [[0, "A".repeat(9000)]]);
-    const whole = await session(strict.port, [[0, `CONNECT localhost:${echoPort} HTTP/1.1\r\nx-pad: ${"a".repeat(9000)}\r\n\r\n`]]);
-    expect(`a request past 8 KB of headers is refused, not buffered, whether or not its end has arrived (${long.text.split("\r\n")[0]}; whole, in one write: ${whole.text.split("\r\n")[0]})`, long.text.startsWith("HTTP/1.1 431") && whole.text.startsWith("HTTP/1.1 431"));
+    // Four groups side by side, each on proxies of its own, so each reads its
+    // own refusals in order: the main proxy's cases; a refused client that
+    // stays; tunnels to hosts that never close or end first; and the strict
+    // and loose proxies (SMD-3198: in series they were 9.6 s, nearly all
+    // quiet bounds).
+    await Promise.all([
+      (async () => {
+        expect(`the proxy listens on 127.0.0.1 alone (${own.url})`, own.url === `http://127.0.0.1:${own.port}`);
+        const named = await session(own.port, [[0, connectTo("up.test")], [0, clientHello("up.test")], [0, "ping"], [50, "END"]]);
+        expect(`TLS naming the named host reaches it, at the address checked, and a client that shuts its write side still gets the answer (${JSON.stringify(named.text.slice(-12))})`, named.text.startsWith(ok200) && named.text.endsWith("pingBYE") && own.take().length === 0);
+        const early = await session(own.port, [[0, connectTo("up.test")], [30, clientHello("up.test")], [0, "ping"], [0, "END"]]);
+        expect(`a ClientHello sent while the name is still resolving is kept, not dropped (${JSON.stringify(early.text.slice(-12))})`, early.text.endsWith("pingBYE"));
+        const other = await session(own.port, [[0, connectTo("up.test")], [0, clientHello("other.example")], [0, "ping"], [0, "END"]]);
+        const none = await session(own.port, [[0, connectTo("up.test")], [0, clientHello(null)], [0, "END"]]);
+        const refusedSni = own.take();
+        expect(`a ClientHello naming another server, or none, closes the tunnel before anything reaches the host, and is named (${JSON.stringify(refusedSni)})`,
+          other.text === ok200 && none.text === ok200 && refusedSni.length === 2 && /^CONNECT up\.test:\d+: the TLS ClientHello names other\.example, not up\.test$/.test(refusedSni[0]) && /names no server, not up\.test$/.test(refusedSni[1]));
+        const literal = await session(own.port, [[0, connectTo("10.9.9.9")], [0, clientHello(null)], [0, "ping"], [0, "END"]]);
+        expect(`a named IPv4 address takes a ClientHello naming no server (${JSON.stringify(literal.text.slice(-12))})`, literal.text.endsWith("pingBYE"));
+        const port2 = await session(own.port, [[0, connectTo("up.test", echoPort + 1)]]);
+        expect(`a named host on a port it does not name is 403 (${port2.text.split("\r\n")[0]})`, port2.text.startsWith("HTTP/1.1 403") && /not a host reaches names/.test(own.take()[0] ?? ""));
+        const idle = await session(own.port, [[0, connectTo("up.test")], [0, clientHello("up.test")], [700, "late"], [0, "END"]]);
+        expect(`an open tunnel outlives the request's 400 ms bound (${JSON.stringify(idle.text.slice(-12))})`, idle.text.endsWith("lateBYE"));
+        const mute = await session(own.port, []);
+        expect(`a connection that sends no request is closed at the bound, and the report says so (${mute.closedAt} ms)`, mute.text === "" && mute.closedAt >= 350 && mute.closedAt < 1500 && /^a connection sent no whole request in 0\.4 s of quiet/.test(own.take()[0] ?? ""));
+        // Review pass 3: a quiet cut says where the connection was, and a refused client that stays is let go without a second note.
+        const slow = await session(own.port, [[0, connectTo("slow.test")]]);
+        const hushed = await session(own.port, [[0, connectTo("up.test")]]);
+        // Cut while its name resolves to nothing: the cut is its one note, not a "did not resolve" after it (review pass 4).
+        await session(own.port, [[0, connectTo("slow-empty.test")]]);
+        await Bun.sleep(400);
+        const stages = own.take();
+        expect(`a quiet cut says where the connection was: the proxy's own lookup and dial, the ClientHello (${JSON.stringify(stages)}; ${slow.closedAt}, ${hushed.closedAt} ms)`,
+          stages.length === 3 && /^CONNECT slow\.test:\d+: resolving and dialling it took past 0\.4 s of quiet/.test(stages[0]) && /^CONNECT up\.test:\d+: no whole ClientHello in 0\.4 s of quiet/.test(stages[1])
+          && /^CONNECT slow-empty\.test:\d+: resolving and dialling it took past/.test(stages[2]));
+        const empty = await session(own.port, [[0, connectTo("empty.test")]]);
+        expect(`a named host that resolves to no address is 502, never dialled (${empty.text.split("\r\n")[0]})`, empty.text.startsWith("HTTP/1.1 502") && /empty\.test did not resolve/.test(own.take()[0] ?? ""));
+        const ipSni = await session(own.port, [[0, connectTo("10.9.9.9")], [0, clientHello("up.test")], [0, "ping"], [0, "END"]]);
+        expect(`a named IPv4 address with TLS naming another server is cut off: a CDN's address is not a way to the names it serves (${JSON.stringify(ipSni.text.slice(-12))})`, ipSni.text === ok200 && /names up\.test, not 10\.9\.9\.9$/.test(own.take()[0] ?? ""));
+        const v6 = await session(own.port, [[0, connectTo("v6first.test")], [0, clientHello("v6first.test")], [0, "ping"], [0, "END"]]);
+        expect(`of a name's addresses, IPv4 is dialled first (${JSON.stringify(v6.text.slice(-12))})`, v6.text.endsWith("pingBYE"));
+        const dark = await session(own.port, [[0, connectTo("dark.test")]]);
+        const darkNote = own.take()[0] ?? "";
+        expect(`a named host that does not answer the dial is 504, named (${dark.text.split("\r\n")[0]}; ${darkNote})`, (dark.text.startsWith("HTTP/1.1 504") && /did not answer within 0\.2 s/.test(darkNote)) || (dark.text.startsWith("HTTP/1.1 502") && /unreach/i.test(darkNote)));
+        const held = await Promise.all([0, 1, 2, 3, 4].map((i) => session(own.port, [[i * 20, ""]], 250)));
+        expect(`the proxy holds ${4} connections at once and closes the next, and the report says so (${held.map((h) => h.closedAt).join(", ")} ms)`, held.filter((h) => h.closedAt < 150).length === 1 && held.filter((h) => h.closedAt >= 240).length === 4 && own.take().some((x) => /past the proxy's 4 at once/.test(x)));
+      })(),
+      (async () => {
+        const patient = await startProxy({ ...reaches, network: [{ host: "up.test", port: echoPort }] }, 0, { allowLocal: true, lookup: standIn, headMs: 5000 });
+        try {
+          const stayed = await session(patient.port, [[0, connectTo("elsewhere.test")], [1500, "x"], [300, "x"]], 3500, true);
+          const once = patient.take();
+          expect(`a refused client that stays is let go after a second, not held to the quiet bound, and noted once (${stayed.closedAt} ms; ${JSON.stringify(once)})`, stayed.text.startsWith("HTTP/1.1 403") && stayed.closedAt >= 1400 && stayed.closedAt < 2600 && once.length === 1);
+        } finally {
+          patient.close();
+        }
+      })(),
+      (async () => {
+        // A named host that never closes and never answers: a half-closed tunnel to it is let go after the quiet bound, and a client that resets takes its upstream with it (review pass 2).
+        // It reads, but never answers and keeps its own side open whatever the proxy does, so what is counted is each tunnel it saw end (a FIN, a reset or a close).
+        let silentEnds = 0;
+        let silentConns = 0;
+        const silent = createServer({ allowHalfOpen: true }, (x) => { silentConns++; let seen = false; const count = () => { if (!seen) { seen = true; silentEnds++; } }; x.resume(); x.on("end", count); x.on("error", count); x.on("close", count); });
+        await new Promise<void>((ok) => silent.listen(0, "127.0.0.1", ok));
+        const silentPort = (silent.address() as { port: number }).port;
+        // A named host that ends its side first and still reads: what the client sends after that must arrive.
+        let lateBytes = "";
+        const shut = createServer({ allowHalfOpen: true }, (x) => { x.once("data", () => x.end("BYE")); x.on("data", (d) => (lateBytes += d.toString("latin1"))); x.on("error", () => {}); });
+        await new Promise<void>((ok) => shut.listen(0, "127.0.0.1", ok));
+        const shutPort = (shut.address() as { port: number }).port;
+        const tight = await startProxy({ ...reaches, network: [{ host: "up.test", port: silentPort }, { host: "up.test", port: shutPort }, { host: "late.test", port: silentPort }] }, 0, { allowLocal: true, lookup: standIn, headMs: 600, maxConnections: 8 });
+        const screened = await startProxy({ ...reaches, network: [{ host: "mixed.test", port: echoPort }] }, 0, { lookup: standIn });
+        try {
+          // Eight clients send the request and the ClientHello in one write and shut their write side 20 ms in, while late.test is still resolving (300 ms): each end must still reach the host. Bun hands a paused socket's end on at once only when nothing is buffered, so the hello must not trail in a read of its own (review pass 4: sent apart, the fix's mutant survived 2 of 5 runs under load).
+          const halves = await Promise.all([0, 1, 2, 3, 4, 5, 6, 7].map(() => session(tight.port, [[0, Buffer.concat([Buffer.from(connectTo("late.test", silentPort)), clientHello("late.test")])], [20, "END"]], 3000)));
+          await Bun.sleep(100);
+          const sawEnds = silentEnds;
+          const after = await session(tight.port, [[0, connectTo("up.test", silentPort)]], 400);
+          expect(`a half-closed tunnel to a host that never closes is let go after the quiet bound, its end passed on, and the proxy's connections freed (closed after ${halves.map((h) => h.closedAt).join(", ")} ms; the host saw ${sawEnds} end; the next request ${JSON.stringify(after.text.split("\r\n")[0])})`,
+            halves.every((h) => h.closedAt >= 600 && h.closedAt < 2500) && sawEnds === 8 && after.text.startsWith(ok200));
+          tight.take();
+          await Bun.sleep(100);
+          const reset = tcpConnect(tight.port, "127.0.0.1", () => reset.write(Buffer.concat([Buffer.from(connectTo("up.test", silentPort)), clientHello("up.test")])));
+          reset.on("error", () => {});
+          await Bun.sleep(300);
+          const endsBefore = silentEnds;
+          reset.resetAndDestroy();
+          await Bun.sleep(150);
+          expect(`a client that resets takes its upstream with it (the host saw ${silentEnds - endsBefore} end)`, silentEnds - endsBefore === 1);
+          const shutSaid = await session(tight.port, [[0, connectTo("up.test", shutPort)], [0, clientHello("up.test")], [150, "more"], [50, "END"]], 1500, true);
+          await Bun.sleep(100);
+          expect(`a host that ends its side first still gets what the client sends after (${JSON.stringify(shutSaid.text.slice(-3))}, it read ${JSON.stringify(lateBytes.slice(-4))})`, shutSaid.text.endsWith("BYE") && lateBytes.endsWith("more"));
+          const connsBefore = silentConns;
+          const gone = tcpConnect(tight.port, "127.0.0.1", () => gone.write(connectTo("up.test", silentPort)));
+          gone.on("error", () => {});
+          await Bun.sleep(20);
+          gone.resetAndDestroy();
+          await Bun.sleep(250);
+          expect(`a client gone while its name resolves is not dialled for (${silentConns - connsBefore} dialled)`, silentConns === connsBefore);
+          // The client stays silent, half-open; a write it sends at 1.3 s is reset only if the proxy has let the tunnel go (its bound here is 600 ms).
+          const silentClient = await session(tight.port, [[0, connectTo("up.test", shutPort)], [0, clientHello("up.test")], [1300, "x"], [200, "x"]], 3500, true);
+          expect(`a host that ends first while its client stays silent is let go after the quiet bound (the client's late write reset at ${silentClient.closedAt} ms)`, silentClient.text.endsWith("BYE") && silentClient.closedAt >= 1250 && silentClient.closedAt < 2800);
+          const mixed = await session(screened.port, [[0, connectTo("mixed.test")]]);
+          expect(`a name whose answer mixes a public address with a loopback one is refused (${mixed.text.split("\r\n")[0]})`, mixed.text.startsWith("HTTP/1.1 403") && /mixed\.test resolves to 127\.0\.0\.1/.test(screened.take()[0] ?? ""));
+        } finally {
+          tight.close();
+          screened.close();
+          silent.close();
+          shut.close();
+        }
+      })(),
+      (async () => {
+        const lo = await session(strict.port, [[0, connectTo("localhost")]]);
+        expect(`a named host that resolves to a loopback address is refused (${lo.text.split("\r\n")[0]})`, lo.text.startsWith("HTTP/1.1 403") && /resolves to (127\.0\.0\.1|::1), a loopback, link-local or metadata address/.test(strict.take()[0] ?? ""));
+        const down = await session(loose.port, [[0, connectTo("127.0.0.1", gonePort)]]);
+        expect(`a named host that refuses the dial is 502, named (${down.text.split("\r\n")[0]})`, down.text.startsWith("HTTP/1.1 502") && /^CONNECT 127\.0\.0\.1:\d+: /.test(loose.take()[0] ?? ""));
+        for (let i = 0; i < REFUSALS_SHOWN + 5; i++) await session(strict.port, [[0, connectTo(`x${i}.example`, 443)]]);
+        const many = strict.take();
+        expect(`one report lists ${REFUSALS_SHOWN} refusals and counts the rest, and take() clears them (${many.length}: ${many.at(-1)})`, many.length === REFUSALS_SHOWN + 1 && many.at(-1) === "…and 5 more" && strict.take().length === 0);
+        const long = await session(strict.port, [[0, "A".repeat(9000)]]);
+        const whole = await session(strict.port, [[0, `CONNECT localhost:${echoPort} HTTP/1.1\r\nx-pad: ${"a".repeat(9000)}\r\n\r\n`]]);
+        expect(`a request past 8 KB of headers is refused, not buffered, whether or not its end has arrived (${long.text.split("\r\n")[0]}; whole, in one write: ${whole.text.split("\r\n")[0]})`, long.text.startsWith("HTTP/1.1 431") && whole.text.startsWith("HTTP/1.1 431"));
+      })(),
+    ]);
   } finally {
     own.close();
     strict.close();

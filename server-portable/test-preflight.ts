@@ -3703,7 +3703,7 @@ else {
     // Its guard's refusal: no next try, the kind's remedy and the recreate it waits for.
     await beat("heartbeat:board-sync", v({ outcome: "failed", ended: true, every_s: 60, refused: "usage", restart: { in_s: null, code: 2, tries: 0 } }), 10);
     const guardFix = fix((await run(SQL_ENV)).out, "workers");
-    assert(/board-sync is held by its supervisor, never started: a setting its log names is not decimal digits — set it in deploy\/\.env, then recreate the service .*That is deploy\/\.env's to mend, so recreate it then — podman compose -f deploy\/compose\.yaml --profile board-sync up -d --no-deps board-sync/.test(guardFix),
+    assert(/board-sync is held by its supervisor, never started: a setting its log names is not one the service takes — decimal digits, in its range .*set it in deploy\/\.env, then recreate the service.*That is deploy\/\.env's to mend, so recreate it then — podman compose -f deploy\/compose\.yaml --profile board-sync up -d --no-deps board-sync/.test(guardFix),
       `a follower its guard holds gives the kind's remedy and the recreate (${guardFix})`);
     // Long past its try with nothing stamped: the supervisor is taken for gone, the start and the retire named.
     await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
@@ -3711,6 +3711,19 @@ else {
     const goneFix = fix((await run(SQL_ENV)).out, "workers");
     assert(/extract:qwen2\.5:7b@p2's supervisor was due to run it again 20 min ago, and nothing has stamped since: if its container is gone, start it — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract.*Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2'\./.test(goneFix),
       `a held row long past its try names the start and the retire (${goneFix})`);
+    // Ended on its start's refusal with no supervisor's word (a run from a
+    // checkout): the kind and its remedy, then the start (SMD-3214 PR 2).
+    await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "failed", ended: true, refused: "model" }), 40);
+    const refusedRun = await run(SQL_ENV);
+    assert(/!\s+workers\s+extract:qwen2\.5:7b@p2 ended on a failure, refused at its start \(model\) \(last stamped 40 s ago, every 60 s\)$/.test(row(refusedRun.out, "workers"))
+           && /extract:qwen2\.5:7b@p2 ended 40 s ago on its start's refusal \(model\): pull the model its log names.*Then start it again — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract.*; started before that, it refuses again\./.test(fix(refusedRun.out, "workers")),
+      `a follower ended on its start's refusal names the kind and its remedy before the start (${row(refusedRun.out, "workers")} | ${fix(refusedRun.out, "workers")})`);
+    await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract:%'`;
+    await beat("heartbeat:board-sync", v({ every_s: 300, outcome: "failed", ended: true, refused: "board" }), 20);
+    const boardFix = fix((await run(SQL_ENV)).out, "workers");
+    assert(/board-sync ended 20 s ago on its start's refusal \(board\): OB1_LINEAR_INITIATIVE \(unset: "Open Brain"\) must name exactly one Linear initiative/.test(boardFix),
+      `board-sync's own refusal kind gives its remedy (${boardFix})`);
+    await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
 
     // The sleep scheduler's own row (SMD-2678): its heartbeat leaves the
     // workers row; the row says asleep or awake with its last sleep, and what

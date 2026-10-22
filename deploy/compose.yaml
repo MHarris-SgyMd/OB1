@@ -173,6 +173,9 @@ x-otel-env: &otel-env
 #           page could act on the authorization server's session;
 #   mcp     /mcp and everything under it — the endpoint clients are given —
 #           to the `mcp` service as mcp.ob1.internal (SMD-2287);
+#   dashboard  /dashboard and everything under it, the path kept, to the
+#           operator GUI, the `app` service, as app.ob1.internal (SMD-2280),
+#           which serves under that base and scopes its cookie to it;
 #   health  GET, HEAD and OPTIONS /health at the origin root, for a GET-only
 #           probe and a browser's CORS preflight, to the `mcp` service too.
 # Nothing else is routed, so the proxy answers every other path itself, with
@@ -257,6 +260,11 @@ x-proxy-routes: &proxy-routes |
         priority: 30
         entryPoints: [web]
         service: mcp
+      dashboard:
+        rule: "Path(`/dashboard`) || PathPrefix(`/dashboard/`)"
+        priority: 30
+        entryPoints: [web]
+        service: app
       health:
         rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))"
         priority: 20
@@ -290,6 +298,10 @@ x-proxy-routes: &proxy-routes |
         loadBalancer:
           servers:
             - url: "http://auth.ob1.internal.:3000"
+      app:
+        loadBalancer:
+          servers:
+            - url: "http://app.ob1.internal.:8000"
 
 # The forwarder's script (SMD-2583): the stack's published port, in front of
 # the proxy, which is on internal networks alone. Inline here, as the route
@@ -1004,6 +1016,50 @@ services:
       retries: 3
     logging: *logging
 
+  # The operator GUI (SMD-2280; docs/operator-surface-tiers.md, decision 2):
+  # `/dashboard` through the proxy, which reaches it as app.ob1.internal on
+  # the mesh. The server's image run as `bun ../dashboard/serve.ts`, without
+  # the image's preflight, as the MCP server is: it reads no store and holds
+  # no key. A visitor signs in with an access key, which the REST core's whoami
+  # checks, and every page is a read on the REST core at api.ob1.internal
+  # under that key, held in the service's memory and never in the browser; a
+  # restart signs everyone out. Key sign-in is off while COMPOSE_PROFILES
+  # names auth (ADR decision 16). OB1_PUBLIC_ORIGIN is the origin its forms
+  # and cookie are judged by behind TLS (dashboard/serve.ts); unset, each
+  # request's own, over plain HTTP. A stop drains within OB1_STOP_GRACE, as
+  # the servers' does. On the mesh alone: nothing outward, no Postgres. Its
+  # files are the image's, read-only, and it keeps no capability.
+  app:
+    image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
+    pull_policy: never
+    entrypoint: ["bun", "--no-install"]
+    command: ["../dashboard/serve.ts"]
+    environment:
+      OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:-}
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+      OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
+    stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    # After the REST core, so `up app` brings it; not held for its health:
+    # while it is down a page is the GUI's own 502.
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      mesh:
+        aliases: [app.ob1.internal]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/dashboard/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    logging: *logging
+
   # The stack's one origin (SMD-1846): a reverse proxy, reached through the
   # forwarder below, which holds the stack's published port (SMD-2583). Each
   # service is a path on it —
@@ -1093,6 +1149,7 @@ services:
     # reaches it as proxy.ob1.internal and nothing else is, and `mesh`, where
     # it reaches every backend — the MCP server as mcp.ob1.internal
     # (SMD-2287), the REST core as api.ob1.internal (SMD-2284), the
+    # operator GUI as app.ob1.internal (SMD-2280), the
     # authorization server as auth.ob1.internal. Until v2.0.0 it also
     # reached a tier's MCP server there as mcp.<tier>.ob1.internal
     # (SMD-2294); a tier is a brain of its own since SMD-2874, and this
@@ -1121,7 +1178,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-    # Started after the MCP server and the REST core behind it, so `up proxy`
+    # Started after the MCP server, the operator GUI and the REST core behind them, so `up proxy`
     # brings the brain once its image is built (the `server` service builds
     # it: name `server` with `--build`, as the commands below do), and
     # `up forwarder`, which waits on the proxy, its port too; not held for their health: while the MCP server is down the
@@ -1134,6 +1191,8 @@ services:
       api:
         condition: service_started
       mcp:
+        condition: service_started
+      app:
         condition: service_started
     restart: unless-stopped
     logging: *logging
@@ -1603,10 +1662,15 @@ services:
       # unhealthy and the server, which waits for it, does not start.
       # Pre-pull on a slow link: compose --profile jev run --rm jev --fetch-only.
       start_period: 600s
-    # A fetch that fails or a file that hashes wrong exits 1 with the file
-    # named; three tries cover a network that was not up yet, then the service
-    # stops and `ps` says so rather than looping (the board-sync rule above).
-    restart: on-failure:3
+    # `unless-stopped`, so it comes back after a reboot (SMD-3214): neither
+    # runtime starts an `on-failure` container at boot, and with
+    # OB1_JEV_BASE_URL naming this service the servers' preflight fails until
+    # it serves (SMD-2834). Serving never exits on its own, so the restart
+    # cannot loop: a fetch that fails or a file that hashes wrong — the file
+    # named — an engine that does not load and a port taken are tried again
+    # after 1, 2, 4, 8, then every 15 minutes, unhealthy meanwhile; a bad
+    # JEV_THREADS holds until a recreate (jev/serve.ts).
+    restart: unless-stopped
     logging: *logging
 
   # The orchestration tool (SMD-2210; docs/orchestration-tool.md, SMD-1863's
@@ -2285,7 +2349,7 @@ networks:
   # the network move built them (SMD-2583). Every service names its own, so
   # compose makes no default network and nothing joins one.
   #   mesh   internal: the proxy, the MCP server (mcp.ob1.internal), the REST
-  #          core (api.ob1.internal), the authorization server
+  #          core (api.ob1.internal), the operator GUI (app.ob1.internal), the authorization server
   #          (auth.ob1.internal) and the observability profile's collector
   #          (lgtm.ob1.internal), each called by that name. No other
   #          project joins it: a canary is a brain of its own, on its own
