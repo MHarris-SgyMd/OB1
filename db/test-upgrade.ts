@@ -16,10 +16,12 @@
  * generalises it, so the next migration is covered before it is written.
  *
  * CI runs this suite beside test-preflight.ts, each in its own database of one
- * Postgres, as the same role (SMD-2219). What the cluster shares — a role and
- * its settings, pg_locks, pg_stat_activity — is scoped here to the current
- * database, or named for this suite (ob1_upgrade_*, ob1_notemp). [12] opens
- * a session in `postgres` on purpose, to hold a lock its count must not see.
+ * Postgres, as the same role (SMD-2219), a Postgres the two have to themselves
+ * while the data-layer job's other suites run (SMD-3195). What the cluster
+ * shares — a role and its settings, pg_locks, pg_stat_activity — is scoped
+ * here to the current database, or named for this suite (ob1_upgrade_*,
+ * ob1_notemp, tu_*). [12] opens a session in `postgres` on purpose, to hold a
+ * lock its count must not see.
  *
  *   ./with-postgres.sh bun test-upgrade.ts
  */
@@ -3642,14 +3644,18 @@ console.log("\n[20ad] Migration 080: refused by name without 073; onto a populat
     });
     await rawIn;
     const payload = { metadata: { source: "codex", probe_note: "raced" }, actor: HOOK, embedding_model: OPTS.model, recapture: "keep", lineage: { metadata: { deterministic: false, model: "probe-model" } } };
+    const capPid = Number((await sql`SELECT pg_backend_pid() AS p`)[0].p);
     const capture = (form === "three"
       ? sql`SELECT upsert_thought(${rawText}::text, ${payload}::jsonb, ${vec(2)}::vector) AS r`
       : sql`SELECT upsert_thought(${rawText}::text, ${payload}::jsonb) AS r`).execute();  // sent now, not at the await
     // Wait until the capture is blocked on the raw row's index entry — its
-    // fresh path taken — before the raw writer commits.
+    // fresh path taken — before the raw writer commits. Its own backend, by
+    // pid: any other backend waiting in an upsert_thought, in this database
+    // or another, released the raw writer early, and the fallback went
+    // untested with every assertion passing (SMD-3195, review pass 1 mutant).
     let blocked = false;
     for (let i = 0; i < 100 && !blocked; i++) {
-      [{ blocked }] = await watch`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%upsert_thought%' AND pid <> pg_backend_pid()) AS blocked`;
+      [{ blocked }] = await watch`SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = ${capPid} AND wait_event_type = 'Lock') AS blocked`;
       if (!blocked) await Bun.sleep(50);
     }
     release();
