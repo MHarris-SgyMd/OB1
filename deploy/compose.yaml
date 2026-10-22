@@ -1410,7 +1410,13 @@ services:
   # searches (OB1_QUERY_LOG=on) and this role may read the log (the owner, or
   # the opt-in `sleep` grant group), no search — and hard-stops both within
   # OB1_SLEEP_POLL seconds (unset, 5) of the next live call, every lease
-  # returned. Followers outside it do not yield, so it will not run (exit 2)
+  # returned. A sleep runs at most OB1_SLEEP_BUDGET minutes (unset, 60; 0 for
+  # no clock), then its passes stop after the thought in hand and the next
+  # sleep waits for a live call; each pass's connections run under
+  # OB1_SLEEP_STATEMENT_TIMEOUT seconds (unset, 300), OB1_SLEEP_WORK_MEM and
+  # OB1_SLEEP_MAINTENANCE_WORK_MEM MB (unset, 4 and 64) — a statement past its
+  # timeout stops the sleep, not the scheduler (SMD-2679). Followers outside
+  # it do not yield, so it will not run (exit 2)
   # while the workers profile's heartbeats are fresh: at its start, before
   # each sleep, and within a poll while asleep — so both profiles brought up
   # at once end it too.
@@ -1434,13 +1440,18 @@ services:
       OB1_SLEEP_QUIET: ${OB1_SLEEP_QUIET:-}
       OB1_SLEEP_POLL: ${OB1_SLEEP_POLL:-}
       OB1_SLEEP_WORKERS: ${OB1_SLEEP_WORKERS:-}
+      OB1_SLEEP_BUDGET: ${OB1_SLEEP_BUDGET:-}
+      OB1_SLEEP_STATEMENT_TIMEOUT: ${OB1_SLEEP_STATEMENT_TIMEOUT:-}
+      OB1_SLEEP_WORK_MEM: ${OB1_SLEEP_WORK_MEM:-}
+      OB1_SLEEP_MAINTENANCE_WORK_MEM: ${OB1_SLEEP_MAINTENANCE_WORK_MEM:-}
     command:
       - sh
       - -c
       - |
         [ -n "$$OB1_WORKER_KEY" ] || { echo "sleep: OB1_WORKER_KEY is not set in deploy/.env — mint a key (cd server-portable && bun keygen.ts --name workers --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY" >&2; exit 2; }
         case "$$OB1_SLEEP_QUIET$$OB1_SLEEP_POLL$$OB1_SLEEP_WORKERS" in *[!0-9]*) echo "sleep: OB1_SLEEP_QUIET ('$$OB1_SLEEP_QUIET'), OB1_SLEEP_POLL ('$$OB1_SLEEP_POLL') and OB1_SLEEP_WORKERS ('$$OB1_SLEEP_WORKERS') take digits only" >&2; exit 2;; esac
-        exec bun db/sleep.ts --follow --quiet "$${OB1_SLEEP_QUIET:-300}" --poll "$${OB1_SLEEP_POLL:-5}" --workers "$${OB1_SLEEP_WORKERS:-1}"
+        case "$$OB1_SLEEP_BUDGET$$OB1_SLEEP_STATEMENT_TIMEOUT$$OB1_SLEEP_WORK_MEM$$OB1_SLEEP_MAINTENANCE_WORK_MEM" in *[!0-9]*) echo "sleep: OB1_SLEEP_BUDGET ('$$OB1_SLEEP_BUDGET'), OB1_SLEEP_STATEMENT_TIMEOUT ('$$OB1_SLEEP_STATEMENT_TIMEOUT'), OB1_SLEEP_WORK_MEM ('$$OB1_SLEEP_WORK_MEM') and OB1_SLEEP_MAINTENANCE_WORK_MEM ('$$OB1_SLEEP_MAINTENANCE_WORK_MEM') take digits only" >&2; exit 2;; esac
+        exec bun db/sleep.ts --follow --quiet "$${OB1_SLEEP_QUIET:-300}" --poll "$${OB1_SLEEP_POLL:-5}" --workers "$${OB1_SLEEP_WORKERS:-1}" --budget "$${OB1_SLEEP_BUDGET:-60}" --statement-timeout "$${OB1_SLEEP_STATEMENT_TIMEOUT:-300}" --work-mem "$${OB1_SLEEP_WORK_MEM:-4}" --maintenance-work-mem "$${OB1_SLEEP_MAINTENANCE_WORK_MEM:-64}"
     extra_hosts: *host-alias
     # The workers': Postgres on `data`, the model provider on `egress`
     # (SMD-2583). On compose's default network it would wait for a database it
