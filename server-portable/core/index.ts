@@ -10,6 +10,7 @@ import * as writes from "./writes.ts";
 import * as workers from "./workers.ts";
 import * as mend from "./mend.ts";
 import { PROBE_WORD, startProviderReprobe } from "../provider-health.ts";
+import { mayLeaveBox } from "../egress.ts";
 import { resolveJevConfig } from "../jev.ts";
 import type { PluginSql } from "../store.ts";
 
@@ -74,12 +75,21 @@ export function createCore(deps: CoreDeps) {
      * through the egress gate as a query (review pass 3).
      */
     startProviderReprobe: (intervalS: number) => {
+      // The probe's call is asked of the gate once, here, as the call itself
+      // would be: refused (a probeable endpoint not declared local, under deny
+      // with terms the word cannot meet), it is not made, and the state's
+      // words say so (review pass 4: made and refused, it said nothing, and
+      // the outage it was there to end stood).
+      const cfg = ctx.embedConfig();
+      const subject = { kind: "query" as const, content: PROBE_WORD };
+      const callAllowed = mayLeaveBox(subject, cfg.embeddings, cfg.egress).allowed;
       const loop = startProviderReprobe(ctx.providerHealth, {
         endpoint: () => ctx.embedConfig().embeddings,
         intervalS,
-        call: () => ctx.embedder.getEmbedding(PROBE_WORD, { kind: "query", content: PROBE_WORD }, "query"),
+        ...(callAllowed ? { call: () => ctx.embedder.getEmbedding(PROBE_WORD, subject, "query") } : {}),
       });
       ctx.reprobeS = loop.reprobeS;
+      ctx.reprobeByCall = loop.byCall;
       return loop;
     },
     /** The provider's state, for a suite. */

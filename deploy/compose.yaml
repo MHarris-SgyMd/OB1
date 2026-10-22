@@ -859,8 +859,10 @@ services:
       # core read it; a leader lock lets one mend at a time.
       OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
       # Seconds between re-probes of a local embedding provider that does not
-      # answer, 1 to 3600, 0 or off for the start's probe alone: the server starts degraded when
-      # it is not up yet and leaves degraded when it answers (SMD-2890). Unset, 15.
+      # answer (GET /models; one embedding of "probe" where a call failed in a
+      # way /models cannot show), 1 to 3600, 0 or off for the start's probe
+      # alone: the server starts degraded when it is not up yet and leaves
+      # degraded when it answers (SMD-2890). Unset, 15.
       OB1_PROVIDER_REPROBE_INTERVAL: ${OB1_PROVIDER_REPROBE_INTERVAL:-}
       PORT: "8000"
     environment:

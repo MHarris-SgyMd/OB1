@@ -407,7 +407,11 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
     // OUTAGE_TICKS, the provider away.
     if (outages > 0 && !answered) {
       tick.down = lastOutage;
-      if (lastOutage) ctx.providerHealth.noteDown(lastOutage, { by: "call", startedAt: lastOutageStarted });
+      // A broken body is an outage for the mender's holds (a proxy's page), an
+      // answered call with a fault for the provider's state, as on every
+      // other path (heardFrom; review pass 4).
+      if (lastOutage?.reason === "provider_body") ctx.providerHealth.noteUp({ by: "call", fault: "its answer was not JSON" });
+      else if (lastOutage) ctx.providerHealth.noteDown(lastOutage, { by: "call", startedAt: lastOutageStarted });
       if (freshOutages > 0 && ++state.unanswered >= OUTAGE_TICKS) state.down = true;
     }
     return tick;

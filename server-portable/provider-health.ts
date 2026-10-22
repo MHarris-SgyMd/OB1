@@ -41,16 +41,26 @@ export function reprobeIntervalFrom(raw: string | undefined): { intervalS: numbe
 }
 
 /**
- * The provider as last seen: not yet called or probed; answering (`at`, the
- * last call or probe it answered); or unreachable since `since` (the first
- * outage of this run of them), `at` the latest, with providerDown's word and
- * words — never the text, nor the base — and `by`, whether a real call or the
- * probe saw the latest.
+ * The provider as last seen (review pass 4 settled the definition):
+ * - `unknown`: not yet called or probed.
+ * - `answering`: the last call or probe was answered, at `at`; `by` says
+ *   which — a probe's GET /models answering says the provider is reachable,
+ *   a call's that it embeds. `fault`, when set, is an answered call the
+ *   provider refused or answered unusably (a 4xx — a model not pulled, a
+ *   key refused —, a body that is not JSON, a vector of the wrong width):
+ *   the provider is there, and a capture fails outright, not degraded.
+ * - `unreachable`: an outage since `since` (the first of this run of them),
+ *   `at` the latest, with providerDown's word and words for the latest —
+ *   never the text, nor the base — and `clears`, what evidence may end it:
+ *   `probe` for an outage a GET /models can see (the probe's own, a call's
+ *   failed connection), `call` once a call has failed where GET /models is
+ *   blind (a 5xx, 408, 429, a timeout). Set when it opens, escalated by a
+ *   call, reset by an answer.
  */
 export type ProviderState =
   | { status: "unknown" }
-  | { status: "answering"; at: string }
-  | { status: "unreachable"; since: string; at: string; reason: string; detail: string; by: "call" | "probe" };
+  | { status: "answering"; at: string; by: "call" | "probe"; fault?: string }
+  | { status: "unreachable"; since: string; at: string; reason: string; detail: string; clears: "call" | "probe" };
 
 /**
  * Who saw an outage, and when the call that saw it began — on the monotonic
@@ -59,65 +69,89 @@ export type ProviderState =
  */
 export type DownSeen = { by?: "call" | "probe"; startedAt?: number };
 
+/** The outages a GET /models can see: a connection that failed. A call's timeout is not one — the socket took the request. */
+const SOCKET_REASONS = new Set(["provider_unreachable"]);
+/** The outages whose words are "does not answer" rather than "fails its calls". */
+const SILENT_REASONS = new Set(["provider_unreachable", "provider_timeout"]);
+
 export interface ProviderHealth {
   state(): ProviderState;
   /**
    * A call or probe the provider did not answer (providerDown's outcome). One
    * that began before the provider was last seen answering is passed over: a
    * request that timed out after the provider came back says nothing about
-   * now (review pass 1). A probe's outage on an outage only a call can end
-   * (probeClears) moves `at` alone: the call's word stands, and a probe that
-   * took the outage over could end it while the calls still fail (review
-   * pass 2).
+   * now (review pass 1) — for an outage only a call can see, before a CALL
+   * last answered, since a probe's answer does not say the calls work
+   * (review pass 4).
    */
   noteDown(down: { reason: string; detail: string }, seen?: DownSeen): void;
-  /** A call or probe it answered. */
-  noteUp(): void;
+  /** A call or probe it answered; `fault` an answered call it refused or answered unusably. */
+  noteUp(seen?: { by?: "call" | "probe"; fault?: string }): void;
 }
 
 /**
- * The tracker. A change of state is logged once — degraded, and back — never
- * each call: an outage under traffic is one line, not one per capture.
+ * The tracker. A change of state is logged once — degraded, back, a fault
+ * and its end — never each call: an outage under traffic is one line, not
+ * one per capture.
  */
 export function createProviderHealth(opts: { base: () => string; log?: (line: string) => void; now?: () => Date; mono?: () => number } = { base: () => "" }): ProviderHealth {
   const log = opts.log ?? ((line: string) => console.error(line));
   const now = opts.now ?? (() => new Date());
   const mono = opts.mono ?? (() => performance.now());
   let s: ProviderState = { status: "unknown" };
-  /** When it was last seen answering, on the monotonic clock: what a late outage is judged by. */
+  /** When it was last seen answering, and last answered a call, on the monotonic clock: what a late outage is judged by. */
   let answeredMono = -Infinity;
+  let callAnsweredMono = -Infinity;
   return {
     state: () => s,
     noteDown(down, seen = {}) {
-      if (s.status === "answering" && seen.startedAt !== undefined && seen.startedAt < answeredMono) return;
-      const at = now().toISOString();
       const by = seen.by ?? "call";
-      if (s.status === "unreachable" && by === "probe" && !probeClears(s)) { s = { ...s, at }; return; }
-      if (s.status === "unreachable") { s = { ...s, at, reason: down.reason, detail: down.detail, by }; return; }
-      s = { status: "unreachable", since: at, at, reason: down.reason, detail: down.detail, by };
-      log(`provider: the embedding provider at ${opts.base()} does not answer (${down.detail}) — serving degraded: a capture lands without its vector, a search answers by exact matches, until it answers`);
+      const callOnly = by === "call" && !SOCKET_REASONS.has(down.reason);
+      if (s.status === "answering" && seen.startedAt !== undefined && seen.startedAt < (callOnly ? callAnsweredMono : answeredMono)) return;
+      const at = now().toISOString();
+      if (s.status === "unreachable") {
+        s = { ...s, at, reason: down.reason, detail: down.detail, clears: s.clears === "call" || callOnly ? "call" : "probe" };
+        return;
+      }
+      s = { status: "unreachable", since: at, at, reason: down.reason, detail: down.detail, clears: callOnly ? "call" : "probe" };
+      const what = SILENT_REASONS.has(down.reason) ? "does not answer" : "fails its calls";
+      log(`provider: the embedding provider at ${opts.base()} ${what} (${down.detail}) — serving degraded: a capture lands without its vector, a search answers by exact matches, until it answers`);
     },
-    noteUp() {
-      const was = s.status;
+    noteUp(seen = {}) {
+      const was = s;
+      const by = seen.by ?? "call";
       answeredMono = mono();
-      s = { status: "answering", at: now().toISOString() };
-      if (was === "unreachable") log(`provider: the embedding provider at ${opts.base()} answers again — no longer degraded`);
+      if (by === "call") callAnsweredMono = answeredMono;
+      s = { status: "answering", at: now().toISOString(), by, ...(seen.fault ? { fault: seen.fault } : {}) };
+      const hadFault = was.status === "answering" && was.fault !== undefined;
+      if (seen.fault && (was.status !== "answering" || !hadFault)) log(`provider: the embedding provider at ${opts.base()} answers, but refuses its embedding calls (${seen.fault}) — a capture fails outright until that is fixed`);
+      else if (was.status === "unreachable") log(`provider: the embedding provider at ${opts.base()} answers again — no longer degraded`);
+      else if (hadFault && by === "call" && !seen.fault) log(`provider: the embedding provider at ${opts.base()} embeds again`);
     },
   };
 }
 
 /**
- * What one real embedding call, begun at `startedAt` (performance.now()), says of the provider:
- * answered — a vector, or an HTTP refusal of the input that is no outage (a
- * 4xx: the provider is there, as the mender counts it) — or down, in
- * providerDown's terms. An egress refusal (no call made) and a failure that
- * is neither (a width mismatch, a body that is not JSON) say nothing.
+ * What one real embedding call, begun at `startedAt` (performance.now()),
+ * says of the provider: answered — a vector —; answered with a fault — a 4xx
+ * (a model not pulled, a key refused), a body that is not JSON, or an answer
+ * the call could not use (a vector of the wrong width: a plain Error raised
+ * after the exchange) —; or down, in providerDown's terms. An egress refusal
+ * (no call made) says nothing (review pass 4: one rule for every path; the
+ * mender counts a broken body an outage for its holds, not for this state).
  */
 export function heardFrom(health: ProviderHealth, startedAt: number, e?: unknown): void {
-  if (e === undefined) { health.noteUp(); return; }
+  if (e === undefined) { health.noteUp({ by: "call" }); return; }
   const down = providerDown(e);
-  if (down) health.noteDown(down, { by: "call", startedAt });
-  else if (e instanceof ProviderError && e.kind === "http") health.noteUp();
+  if (down) { health.noteDown(down, { by: "call", startedAt }); return; }
+  if (e instanceof ProviderError) {
+    if (e.kind === "http") health.noteUp({ by: "call", fault: `it answered ${e.status}` });
+    else if (e.kind === "body") health.noteUp({ by: "call", fault: "its answer was not JSON" });
+    return;
+  }
+  // A runtime error carries a code (the socket's); one with none was raised on an answer.
+  const code = typeof e === "object" && e !== null ? (e as { code?: unknown }).code : undefined;
+  if (code === undefined) health.noteUp({ by: "call", fault: "its answer could not be used" });
 }
 
 /** What preflight's probe of a local endpoint found, by kind (preflight.ts probeFailure). */
@@ -194,62 +228,61 @@ export async function probeProvider(at: Pick<ProviderEndpoint, "base">): Promise
 }
 
 /**
- * Whether the probe may end this outage by an answer. The probe sees the
- * socket and GET /models, not the call: an outage it saw itself, or a call's
- * connection that failed (refused, reset, unroutable, unresolved), it may end;
- * a call's 5xx, timeout or broken body it may not — a proxy whose backend is
- * down answers /models and fails /embeddings, and a probe that cleared that
- * flapped the state on every capture (review pass 1). Those end with a call
- * that is answered: a capture's, an edit's, a search's, the vector mender's,
- * or the loop's own call-shaped probe (review pass 3: with two servers the
- * mender's call is often the other process's, and a quiet brain makes none).
+ * Whether a GET /models answer may end this outage: one whose `clears` is
+ * `probe`. The probe sees the socket and /models, not the call: a call's
+ * 5xx or timeout it cannot end — a proxy whose backend is down answers
+ * /models and fails /embeddings, and a probe that cleared that flapped the
+ * state on every capture (review pass 1). Those end with a call that is
+ * answered: a capture's, an edit's, a search's, the vector mender's, or the
+ * loop's own call-shaped probe (review pass 3).
  */
 export function probeClears(s: ProviderState): boolean {
-  return s.status !== "unreachable" || s.by === "probe" || s.reason === "provider_unreachable";
+  return s.status !== "unreachable" || s.clears === "probe";
 }
 
 /**
- * The re-probe loop: once at start, so a server started with its provider
- * down says so at once (preflight's warning is another process's) — with the
- * knob off too, then never again (review pass 2: preflight's row promised the
- * state); then every `intervalS` while the state is not answering — a real
- * call that meets an outage turns it back on, one that is answered leaves it
- * idle. An outage the GET /models probe can end (probeClears) is probed so;
- * one only a call can see — a call's 5xx, timeout or broken body — by `call`,
- * when given: one real embedding of PROBE_WORD, fed to the state as any call
- * is (heardFrom), so each process ends its own outage whether or not its
- * mender holds the lock, and a silent provider a call timed out on is still
- * re-probed (review pass 3). It costs a model call an interval, only while
- * calls fail, only to a local endpoint. Only a local endpoint is probed at
- * all: a hosted one costs a credential to ask, and its state moves with real
- * calls alone. Timers are unref'd, never overlap, and stop() starts no
- * further probe and writes nothing a probe in flight finds.
+ * The re-probe loop, for a local endpoint (a hosted one costs a credential
+ * to ask, and its state moves with real calls alone): a GET /models at start,
+ * so a server started with its provider down says so at once (preflight's
+ * warning is another process's) — with the knob off too, then never again
+ * (review pass 2). Then every `intervalS` while the state is unreachable:
+ * GET /models first; an answer ends an outage the probe can see; for one
+ * only a call can see, an answer spends `call`, when given — one real
+ * embedding of PROBE_WORD, fed to the state as any call is (heardFrom) — so
+ * each process ends its own outage whether or not its mender holds the lock,
+ * on a quiet brain too (review pass 3), and a silent provider costs the
+ * cheap probe's 2.5 s, not a call's request timeout (review pass 4). `call`
+ * is not given when the egress gate refuses it; the state's words then say
+ * only a call that is answered ends such an outage. While answering, nothing
+ * is probed. Timers are unref'd, never overlap, and stop() starts no further
+ * probe and writes nothing a probe in flight finds.
  */
-export function startProviderReprobe(health: ProviderHealth, opts: { endpoint: () => ProviderEndpoint; intervalS: number; call?: () => Promise<unknown> }): { stop: () => void; reprobeS: number | null } {
+export function startProviderReprobe(health: ProviderHealth, opts: { endpoint: () => ProviderEndpoint; intervalS: number; call?: () => Promise<unknown> }): { stop: () => void; reprobeS: number | null; byCall: boolean } {
   const at = opts.endpoint();
-  if (!probeable(at)) return { stop: () => {}, reprobeS: null };
+  if (!probeable(at)) return { stop: () => {}, reprobeS: null, byCall: false };
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const tick = async (first: boolean) => {
+  const tick = async () => {
     if (stopped) return;
     const s = health.state();
-    if (s.status === "unreachable" && !probeClears(s) && opts.call) {
-      const startedAt = performance.now();
-      let failed: { e: unknown } | null = null;
-      try { await opts.call(); } catch (e) { failed = { e }; }
-      if (stopped) return;
-      heardFrom(health, startedAt, failed ? failed.e : undefined);
-    } else if (first || (s.status !== "answering" && probeClears(s))) {
+    if (s.status !== "answering") {
       const startedAt = performance.now();
       const down = await probeProvider(opts.endpoint());
       if (stopped) return;
       if (down) health.noteDown(down, { by: "probe", startedAt });
-      else if (probeClears(health.state())) health.noteUp();
+      else if (probeClears(health.state())) health.noteUp({ by: "probe" });
+      else if (opts.call) {
+        const callStarted = performance.now();
+        let failed: { e: unknown } | null = null;
+        try { await opts.call(); } catch (e) { failed = { e }; }
+        if (stopped) return;
+        heardFrom(health, callStarted, failed ? failed.e : undefined);
+      }
     }
     if (stopped || opts.intervalS === 0) return;
-    timer = setTimeout(() => void tick(false), Math.min(opts.intervalS * 1000, MAX_TIMER_MS));
+    timer = setTimeout(() => void tick(), Math.min(opts.intervalS * 1000, MAX_TIMER_MS));
     (timer as { unref?: () => void }).unref?.();
   };
-  void tick(true);
-  return { stop: () => { stopped = true; if (timer) clearTimeout(timer); }, reprobeS: opts.intervalS === 0 ? null : opts.intervalS };
+  void tick();
+  return { stop: () => { stopped = true; if (timer) clearTimeout(timer); }, reprobeS: opts.intervalS === 0 ? null : opts.intervalS, byCall: opts.intervalS !== 0 && opts.call !== undefined };
 }

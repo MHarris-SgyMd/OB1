@@ -48,6 +48,8 @@ export interface Ctx {
   providerHealth: ProviderHealth;
   /** Seconds between re-probes of a provider that does not answer, once the server started its loop; null for none (a hosted endpoint, or OB1_PROVIDER_REPROBE_INTERVAL=off). */
   reprobeS: number | null;
+  /** Whether that loop probes an outage only a call can see by a call: false when off, hosted, or the egress gate refuses the probe's call (SMD-2890 review pass 4). */
+  reprobeByCall: boolean;
 }
 
 export type SearchLogArgs = { query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; arm: string };
@@ -148,5 +150,6 @@ export function createContext(deps: CoreDeps): Ctx {
     logActions,
     providerHealth: createProviderHealth({ base: () => shownBase(embedConfig().embeddings) }),
     reprobeS: null,
+    reprobeByCall: false,
   };
 }

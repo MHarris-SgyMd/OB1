@@ -1402,22 +1402,34 @@ export function findingsLine(db: Pick<DatabaseSummary, "findings" | "unread">): 
   return `${f.posted} posted in ${f.comments} comment(s): ${f.accepted} accepted, ${f.rejected} rejected, ${f.unanswered} unanswered after ${f.windowDays} d, ${f.open} open, ${f.withdrawn} withdrawn — ${rate}${found}`;
 }
 
-/** The embedding provider's state, as provider-health.ts keeps it, with the re-probe interval (SMD-2890); restated here, as this file imports nothing. */
+/** The embedding provider's state, as provider-health.ts keeps it, with how its loop re-probes (SMD-2890); restated here, as this file imports nothing. */
 export type ProviderFact = (
   | { status: "unknown" }
-  | { status: "answering"; at: string }
-  | { status: "unreachable"; since: string; at: string; reason: string; detail: string; by: "call" | "probe" }
-) & { reprobeS: number | null };
+  | { status: "answering"; at: string; by: "call" | "probe"; fault?: string }
+  | { status: "unreachable"; since: string; at: string; reason: string; detail: string; clears: "call" | "probe" }
+) & { reprobeS: number | null; reprobeByCall: boolean };
 
-/** The provider row's words (SMD-2890): a brain serving degraded says so, since when, why, and what still works. */
+/**
+ * The provider row's words (SMD-2890; review pass 4 made each say what is
+ * true of its case): whether the provider embeds, is only reachable, refuses
+ * its calls, does not answer, or fails its calls — since when, why, what
+ * still works — and what ends an outage: the re-probe (by GET /models, or by
+ * one embedding call where GET /models is blind), or only a call that is
+ * answered, and why.
+ */
 export function providerWords(p: NonNullable<ServerFacts["provider"]>): string {
   if (p.status === "unknown") return "not called yet";
-  if (p.status === "answering") return `answering (last answered ${p.at})`;
-  // The probe ends only what it can see (provider-health.ts probeClears, restated): its own outage, or a call's failed connection.
-  const reprobe = p.reprobeS === null ? "it is not re-probed, so a call that is answered clears this"
-    : p.by === "probe" || p.reason === "provider_unreachable" ? `re-probed every ${p.reprobeS} s`
-    : `a call failed in a way the probe (every ${p.reprobeS} s) cannot see, so only a call that is answered clears this`;
-  return `unreachable since ${p.since} (${p.detail}) — serving degraded: a capture lands without its vector, a search answers by exact matches; ${reprobe}`;
+  if (p.status === "answering") {
+    if (p.fault) return `answering, but refusing its embedding calls (${p.fault}, ${p.at}) — a capture fails outright until that is fixed: check the model is pulled and the key`;
+    return p.by === "call" ? `answering (an embedding call answered ${p.at})` : `reachable (GET /models answered ${p.at}); no embedding call made since`;
+  }
+  const silent = p.reason === "provider_unreachable" || p.reason === "provider_timeout";
+  const lead = `${silent ? "unreachable" : "failing its calls"} since ${p.since} (${p.detail}) — serving degraded: a capture lands without its vector, a search answers by exact matches`;
+  const ends = p.reprobeS === null ? "it is not re-probed, so a call that is answered clears this"
+    : p.clears === "probe" ? `re-probed every ${p.reprobeS} s by GET /models`
+    : p.reprobeByCall ? `re-probed every ${p.reprobeS} s by one embedding call, as GET /models cannot see a call's ${p.reason.replace(/^provider_/, "")}`
+    : `GET /models cannot see a call's ${p.reason.replace(/^provider_/, "")} and the egress gate refuses the probe's embedding call, so only a call that is answered clears this`;
+  return `${lead}; ${ends}`;
 }
 
 /** The record as the tool's short table: one fact per line, a label and a value. */

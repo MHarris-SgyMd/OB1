@@ -610,7 +610,7 @@ function serverFacts(ctx: Ctx): ServerFacts {
     store: storeKind(ctx.env()),
     tier: ctx.env().OB1_TIER || null,
     embedding: { model: cfg.embeddingModel, dim: cfg.embeddingDim },
-    provider: { ...ctx.providerHealth.state(), reprobeS: ctx.reprobeS },
+    provider: { ...ctx.providerHealth.state(), reprobeS: ctx.reprobeS, reprobeByCall: ctx.reprobeByCall },
   };
 }
 

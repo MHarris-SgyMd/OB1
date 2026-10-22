@@ -593,7 +593,7 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
     const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
     return { text: (b.result?.content ?? []).map((c: { text?: string }) => c.text ?? "").join("\n") as string, isError: b.result?.isError === true };
   };
-  type Provider = { status: string; since?: string; reason?: string; by?: string; reprobeS?: number | null };
+  type Provider = { status: string; since?: string; reason?: string; clears?: string; by?: string; reprobeS?: number | null; reprobeByCall?: boolean };
   // A keyed /health that misses its deadline answers plain `ok`: no record, said as such rather than thrown (review pass 1).
   const keyed = async (): Promise<Provider | undefined> => {
     const t = await (await fetch(`${at}/health`, { headers: { "x-brain-key": OPEN_KEY } })).text();
@@ -627,7 +627,7 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
     const sem = await rpc("search_thoughts", { query: "DGV-2890", limit: 5 });
     assert(!sem.isError && sem.text.includes(id!), `search_thoughts answers by its exact match (${sem.text.replace(/\n+/g, " / ").slice(0, 160)})`);
     const info = await rpc("brain_info", {});
-    assert(/^Provider:\s+unreachable since \S+ \(the connection was refused\) — serving degraded: .*; re-probed every 1 s$/m.test(info.text), `brain_info's Provider row says so (${info.text.split("\n").find((l) => l.startsWith("Provider:"))})`);
+    assert(/^Provider:\s+unreachable since \S+ \(the connection was refused\) — serving degraded: .*; re-probed every 1 s by GET \/models$/m.test(info.text), `brain_info's Provider row says so (${info.text.split("\n").find((l) => l.startsWith("Provider:"))})`);
     // The provider comes up on its port: no call is made (the mender off, no
     // capture, no search), so only the re-probe can see it.
     provider = Bun.serve({ port: providerPort, fetch: async (req) => {
@@ -656,7 +656,7 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
     embeds503 = true;
     const cap2 = await rpc("capture_thought", { content: "degraded-verify-marker DGV-2890b: captured while the embeddings call answers 503" });
     const p2 = await keyed();
-    assert(!cap2.isError && /saved WITHOUT a vector/.test(cap2.text) && p2?.status === "unreachable" && p2.by === "call" && p2.reason === "provider_503",
+    assert(!cap2.isError && /saved WITHOUT a vector/.test(cap2.text) && p2?.status === "unreachable" && p2.clears === "call" && p2.reason === "provider_503" && p2.reprobeByCall === true,
       `a capture's 503: saved without its vector, the state a call's outage (${JSON.stringify(p2)})`);
     const modelsAt = models;
     const probesAt = probeCalls;
@@ -668,7 +668,7 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
       back = (await keyed())?.status === "answering";
       if (!back) await Bun.sleep(100);
     }
-    assert(back && models === modelsAt, `the embeddings call back: answering within the interval, by the call-shaped probe, no GET /models spent on it (${models - modelsAt})`);
+    assert(back && models - modelsAt >= probeCalls - probesAt, `the embeddings call back: answering within the interval, by the call-shaped probe, each after a GET /models that answered (${models - modelsAt} GET, ${probeCalls - probesAt} call(s))`);
     assert(child.exitCode === null && !child.killed, "the same process throughout: no exit, no restart");
   } finally {
     child.kill();
@@ -678,7 +678,7 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
     provider?.stop(true);
     const said = (await new Response(child.stdout).text()) + (await new Response(child.stderr).text());
     const lines = said.split("\n").filter((l) => /^provider: /.test(l));
-    assert(lines.length === 4 && /does not answer \(the connection was refused\) — serving degraded/.test(lines[0]) && /answers again — no longer degraded/.test(lines[1]) && /does not answer \(it answered 503\)/.test(lines[2]) && /answers again/.test(lines[3]),
+    assert(lines.length === 4 && /does not answer \(the connection was refused\) — serving degraded/.test(lines[0]) && /answers again — no longer degraded/.test(lines[1]) && /fails its calls \(it answered 503\)/.test(lines[2]) && /answers again/.test(lines[3]),
       `the server said each change once — degraded, back, degraded on the 503, back — though captured, searched and probed meanwhile (${lines.join(" / ")})`);
     assert(code === 0, `it stops cleanly (exit ${code})`);
     if (!cleared) console.log(said.split("\n").slice(-15).map((l) => `      ${l}`).join("\n"));

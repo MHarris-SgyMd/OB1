@@ -166,40 +166,54 @@ change or a whole brain at once.
 
 Together these are a brain **serving degraded** (`provider-health.ts`,
 SMD-2890): its embedding provider away, it still captures, searches by exact
-matches and mends after, and it says so. Every embedding call — a capture's, an
-edit's, a search's, a mender tick's — tells the server whether the provider
-answered (a 4xx is an answer: the provider is there);
-the first outage after an answer is `unreachable since <t>`, said once in the
-log (`provider: … does not answer … serving degraded`), and the first answer
-after it is the return, said once (`… answers again`). A local endpoint (the
-local rule preflight dials by, below) is probed at start — so a server started
-with its provider down says so before any call — and, while it does not answer,
-every `OB1_PROVIDER_REPROBE_INTERVAL` seconds (15 unless set, 1 to 3600; `0` or
-`off` for the start's probe alone, when only a call that is answered ends it): `GET /models`, no
-credential, no redirect followed, 2.5 s, any HTTP answer the provider back but
-a 5xx, 408 or 429; an answering provider is not probed, and probes never
-overlap. That probe sees the socket and `/models`, not the call, so it ends
-only an outage it saw itself or a call's failed connection. A call's 5xx,
-timeout or broken body — a proxy that answers `/models` while its backend is
-down, a silent provider a capture timed out on — ends only with a call that
-is answered, so while one stands the loop probes with a call instead: one
-embedding of the word `probe` per interval, through the server's own
-embedder and the egress gate, as a query (as preflight's `--deep` sends
-`preflight`). Each process so ends its own outage, whether or not its mender
-holds the lock, on a brain with no traffic too; it costs a model call an
-interval, only while calls fail, and that call is a `gen_ai` span like any
-other, so a provider failing it counts toward the provider-failures alert,
-as its failing captures do (the `GET /models` probe makes no span). A probe's
-own outage on top of such an outage moves its time alone. A call that began before the provider was last seen answering is not
-counted against it (judged on the monotonic clock, so a wall-clock step
-changes nothing). A hosted endpoint is not probed — asking it
-costs a credential — and its state moves with real calls alone. A keyed
-`/health` (`provider`: `status` `unknown`, `answering` with `at`, or
-`unreachable` with `since`, `at`, the `reason` word, its `detail` and `by`,
-whether a call or the probe opened it; and `reprobeS`) and `brain_info` (its `Provider` row) report it; the keyless
-`/health` stays `ok`, liveness alone, so a container's health check never
-restarts a brain that is serving degraded. The state is the process's: each
-server keeps its own, and a restart starts it at `unknown`.
+matches and mends after, and it says so. The server keeps the provider's
+state, fed by every embedding call — a capture's, an edit's, a search's, a
+mender tick's — and by its own probes:
+
+- `answering`, at `at`, `by` a call (it embeds) or by the probe (`GET /models`
+  answered: reachable, nothing yet said of the calls). With a `fault`, a call
+  the provider answered and refused or answered unusably — a 4xx (a model not
+  pulled, a key refused), a body that is not JSON, a vector of the wrong
+  width: the provider is there, and a capture fails outright until it is fixed.
+- `unreachable` since `since` (the first outage of the run), `at` the latest,
+  the `reason` word and its `detail` for the latest, and `clears`: `probe`
+  for an outage a `GET /models` can see (the probe's own, a call's failed
+  connection), `call` once a call has failed where `GET /models` is blind (a
+  5xx, 408, 429, a timeout — a proxy that answers `/models` while its backend
+  is down). Set when the outage opens, escalated by a call, reset by an answer.
+  The words say "unreachable" for a connection or a timeout, "failing its
+  calls" for the rest.
+
+Each change is said once in the log (`provider: … does not answer …` or `…
+fails its calls … serving degraded`; `… answers again`; `… refuses its
+embedding calls (…)`). A call that began before the provider was last seen
+answering is not counted against it — before a call last answered, for an
+outage only a call can see — judged on the monotonic clock. A local endpoint
+(the local rule preflight dials by, below) is probed: `GET /models` at start,
+so a server started with its provider down says so before any call, then,
+while unreachable, every `OB1_PROVIDER_REPROBE_INTERVAL` seconds (15 unless
+set, 1 to 3600; `0` or `off` for the start's probe alone): `GET /models`, no
+credential, no redirect followed, 2.5 s, a 5xx, 408 or 429 an outage. Its
+answer ends an outage whose `clears` is `probe`; for one whose `clears` is
+`call` it spends one real call — an embedding of the word `probe`, through the
+server's own embedder, as a query (as preflight's `--deep` sends
+`preflight`) — and that call's answer ends it. So a silent provider costs the
+cheap probe's 2.5 s a round, not a request timeout, and each process ends its
+own outage whether or not its mender holds the lock, on a brain with no
+traffic too. That call costs a model call an interval, only while calls fail;
+it is a `gen_ai` span like any other (the `GET /models` probe makes none), so a
+provider failing it counts toward the provider-failures alert as its failing
+captures do. The egress gate is asked for it once, at start: refused (a
+probeable endpoint not declared local, under deny with terms the word cannot
+meet) it is not made, and the `Provider` row says only a call that is
+answered ends such an outage, and why. An answering provider is not probed;
+probes never overlap. A hosted endpoint is not probed — asking it costs a
+credential — and its state moves with real calls alone. A keyed `/health`
+(`provider`: the state, with `reprobeS` and `reprobeByCall`) and `brain_info`
+(its `Provider` row) report it; the keyless `/health` stays `ok`, liveness
+alone, so a container's health check never restarts a brain that is serving
+degraded. The state is the process's: each server keeps its own (the `/mcp`
+service shows the REST core's), and a restart starts it at `unknown`.
 
 A call the **egress gate** refuses is neither (`egress.ts`, SMD-1903). The
 server asks the gate before either call and makes only the ones it allows: a

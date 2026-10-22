@@ -840,7 +840,7 @@ async function probeLocal(row: string, at: ProviderEndpoint, knob: string, degra
     const addresses = IN_CONTAINER ? await Bun.dns.lookup(host).then((rs) => rs.map((r) => r.address), () => [] as string[]) : [];
     if (startsDegraded(kind, { host, proxy: proxy !== null, container: IN_CONTAINER, addresses })) {
       add(row, "warn", `nothing answers at ${shown} yet — ${why} (GET /models, ${LOCAL_PROBE_SECONDS} timeout); ${degraded(kind === "silent")}`,
-          `Start the provider; the server needs no restart. If nothing is meant to answer there: ${probeRemedy(at.base, knob)}`);
+          `Start the provider if it is not running; the server needs no restart. If it is running, or nothing is meant to answer there: ${probeRemedy(at.base, knob)}`);
       return;
     }
     // Failed only for being in a container: the loopback there is the container's own, where nothing will start.

@@ -1466,18 +1466,27 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
 // The Provider row (SMD-2890): not called yet, answering, or degraded since when, why, and what still works.
 {
   const { providerWords, renderBrainInfo } = await import("./brain-info.ts");
-  assert(providerWords({ status: "unknown", reprobeS: 15 }) === "not called yet", "unknown: not called yet");
-  assert(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", reprobeS: 15 }) === "answering (last answered 2026-10-22T00:00:00.000Z)", "answering: when it last answered");
-  const down = { status: "unreachable" as const, since: "2026-10-22T00:00:00.000Z", at: "2026-10-22T00:01:00.000Z", reason: "provider_unreachable", detail: "the connection was refused", by: "call" as const };
-  assert(providerWords({ ...down, reprobeS: 15 }) === "unreachable since 2026-10-22T00:00:00.000Z (the connection was refused) — serving degraded: a capture lands without its vector, a search answers by exact matches; re-probed every 15 s",
-    `unreachable: since its first outage, why, what still works, the re-probe (${providerWords({ ...down, reprobeS: 15 })})`);
-  assert(/; it is not re-probed, so a call that is answered clears this$/.test(providerWords({ ...down, reprobeS: null })), "…and with no re-probe, what clears it");
-  // A call's 5xx the probe cannot see (a proxy answering /models, its backend down; review pass 1): only a call clears it. The probe's own 5xx it can.
-  const proxied = { ...down, reason: "provider_503", detail: "it answered 503", reprobeS: 15 };
-  assert(/; a call failed in a way the probe \(every 15 s\) cannot see, so only a call that is answered clears this$/.test(providerWords(proxied)) && /; re-probed every 15 s$/.test(providerWords({ ...proxied, by: "probe" })),
-    `a call's 503: only a call clears it; the probe's own 503: the re-probe (${providerWords(proxied)})`);
+  const R = { reprobeS: 15, reprobeByCall: true };
+  assert(providerWords({ status: "unknown", ...R }) === "not called yet", "unknown: not called yet");
+  // What answered says what is known (review pass 4): a call embeds; GET /models only reaches; a call refused or unusable is a fault.
+  assert(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "call", ...R }) === "answering (an embedding call answered 2026-10-22T00:00:00.000Z)", "answering by a call: it embeds");
+  assert(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "probe", ...R }) === "reachable (GET /models answered 2026-10-22T00:00:00.000Z); no embedding call made since", "answering by the probe: reachable, nothing said of the calls");
+  assert(/^answering, but refusing its embedding calls \(it answered 404, 2026-10-22T00:00:00\.000Z\) — a capture fails outright until that is fixed: check the model is pulled and the key$/.test(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "call", fault: "it answered 404", ...R })),
+    "a fault: the provider there, a capture failing outright, what to check");
+  const down = { status: "unreachable" as const, since: "2026-10-22T00:00:00.000Z", at: "2026-10-22T00:01:00.000Z", reason: "provider_unreachable", detail: "the connection was refused", clears: "probe" as const };
+  assert(providerWords({ ...down, ...R }) === "unreachable since 2026-10-22T00:00:00.000Z (the connection was refused) — serving degraded: a capture lands without its vector, a search answers by exact matches; re-probed every 15 s by GET /models",
+    `unreachable: since its first outage, why, what still works, the re-probe (${providerWords({ ...down, ...R })})`);
+  assert(/; it is not re-probed, so a call that is answered clears this$/.test(providerWords({ ...down, reprobeS: null, reprobeByCall: false })), "…and with no re-probe, what clears it");
+  // A call's 5xx GET /models cannot see (a proxy answering /models, its backend down): "failing its calls", re-probed by a call — or, the gate refusing that call, only a call ends it.
+  const proxied = { ...down, reason: "provider_503", detail: "it answered 503", clears: "call" as const };
+  assert(/^failing its calls since .*; re-probed every 15 s by one embedding call, as GET \/models cannot see a call's 503$/.test(providerWords({ ...proxied, ...R })),
+    `a call's 503: failing, re-probed by a call (${providerWords({ ...proxied, ...R })})`);
+  assert(/; GET \/models cannot see a call's 503 and the egress gate refuses the probe's embedding call, so only a call that is answered clears this$/.test(providerWords({ ...proxied, reprobeS: 15, reprobeByCall: false })),
+    "…and with the gate refusing the probe's call, only a call clears it, and why");
+  assert(/^unreachable since .*re-probed every 15 s by one embedding call, as GET \/models cannot see a call's timeout$/.test(providerWords({ ...proxied, reason: "provider_timeout", detail: "the request timed out (OB1_LLM_TIMEOUT)", ...R })),
+    "a call's timeout: unreachable, re-probed by a call");
   const base = { version: "1.0.0", releaseRange: null, latestMigration: 1, commit: "c", store: "sql", tier: null, embedding: { model: "m", dim: 4 }, database: { error: "x" }, ledgerStatus: null } as never;
-  const shown = renderBrainInfo({ ...(base as object), provider: { ...down, reprobeS: 15 } } as never);
+  const shown = renderBrainInfo({ ...(base as object), provider: { ...down, ...R } } as never);
   const lines = shown.split("\n");
   const at = lines.findIndex((l) => l.startsWith("Embedding:"));
   assert(/^Provider:\s+unreachable since 2026-10-22T00:00:00\.000Z/.test(lines[at + 1] ?? ""), `the row follows Embedding (${lines[at + 1]})`);
