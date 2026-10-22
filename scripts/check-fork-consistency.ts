@@ -6975,7 +6975,7 @@ const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
   "compose.yaml": {
     postgres: ["data"],
     migrate: ["data"],
-    // Not on the mesh: nothing routes to it since SMD-2532, and /mcp is the MCP server built on the REST core's, on the mesh alone (SMD-2287); n8n reaches it on egress.
+    // Not on the mesh: nothing routes to it since SMD-2532, and /mcp is the MCP server built on the REST core's, on the mesh alone (SMD-2287); no shipped template calls it (n8n's brain calls go to the REST core, SMD-2295), the orchestration eval until SMD-2295's second PR.
     server: { data: {}, egress: {} },
     api: { data: {}, egress: {}, mesh: { aliases: [tierMeshName("api", "stable")] } },
     mcp: { mesh: { aliases: [tierMeshName("mcp", "stable")] } },
@@ -9126,11 +9126,11 @@ checkAlertRules();
 // ── Check 39: a status-set change runs the refresh and rebuilds the gate it moves (SMD-3160) ──
 // 071's ob1_source_gate stores, per source row, whether its thought's
 // status_type is in node_lifecycle_types(). A migration that changes the set
-// leaves those rows wrong until a rebuild after it — the full one, or 107's
+// leaves those rows wrong until a rebuild after it — the full one, or 108's
 // keyed one, which reconciles only the types it is given (a type left out
 // stays wrong on every brain, and only drift() would say so) — and a change to
 // either set leaves every pooled session on the old set until
-// ob1_refresh_set_readers() (107) drops their plans. The rule reads canonical
+// ob1_refresh_set_readers() (108) drops their plans. The rule reads canonical
 // forms only and refuses any other: two passes of a statement parser found a
 // seam each, and a loud refusal costs an author a rewrite where a quiet miss
 // costs every brain (review pass 3).

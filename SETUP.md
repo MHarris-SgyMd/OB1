@@ -480,7 +480,7 @@ bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile loca
 ```
 
 Seven services in order (nine with `local-models`): Postgres with pgvector, a migration job that applies the
-schema and exits, then the server n8n reaches, the REST core (internal unless
+schema and exits, then `server` (no shipped template calls it; it retires in SMD-2287 PR 6), the REST core (internal unless
 `deploy/compose.api-public.yaml` is named), the MCP server at `/mcp`, which hands every tool call to the REST
 core, and the proxy in front of them with the forwarder that publishes its port. The server runs `preflight.ts` before it
 serves, so a misconfiguration crashloops rather than starting and failing on your
@@ -539,10 +539,10 @@ new thought's id, which is what the other two take.
 
 For ingestion that runs on its own — a mailbox polled on a schedule, a
 tracker synced — the `orchestration` profile runs n8n beside the stack
-(`docs/orchestration-tool.md`). n8n reaches the brain through its MCP
-endpoint, with no write key. The profile's import runner is the one part that
-writes brain tables, as the pipeline does from a checkout, behind a key its
-allowlist bounds. Two kinds of template ship (SMD-2212):
+(`docs/orchestration-tool.md`). n8n reaches the brain through its REST
+core, `http://api:8000` (SMD-2295), with no write key. The profile's
+import runner is the one part that writes brain tables, as the pipeline
+does from a checkout, behind a key its allowlist bounds. Two kinds of template ship (SMD-2212):
 - **An act tool:** `linear_file_issue` on `/mcp/ob1-act`. It loads when
   `N8N_LINEAR_API_KEY` is set.
 - **The import template:** one instance per pipeline in
@@ -556,7 +556,9 @@ of its own, not board-sync's) before provisioning, or provision again after.
 A capture key is optional until a template captures into the brain; none
 ships yet. It is made with `cd server-portable && bun keygen.ts --name n8n
 --scope capture && cd ..`: the key goes in as `N8N_BRAIN_CAPTURE_KEY`, and
-the line it prints is appended to `MCP_ACCESS_KEYS`, comma-separated. Then:
+the line it prints is appended to `MCP_ACCESS_KEYS`, comma-separated. A
+template sends it to the REST core, `http://api:8000`, as `x-brain-key`
+(SMD-2295). Then:
 
 ```bash
 bun deploy/orchestration/provision.ts --init

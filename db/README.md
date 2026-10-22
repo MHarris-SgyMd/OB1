@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2981 assertions: 2981 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and seven (107) migrations applied, and
+`bun test-schema.ts` prints `2993 assertions: 2993 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and eight (108) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3160).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1005,7 +1005,7 @@ every status move between known and unknown (a source row's delete and a
 re-record that changes nothing run; the delete raises 40001 if its thought's
 status moved since the snapshot). `ob1_rebuild_source_gate()` repairs the mirror after a write made with
 triggers disabled, and `ob1_node_projection_drift()` gains a `source_gate` arm
-(a status-set change runs 107's keyed form, not the full rebuild).
+(a status-set change runs 108's keyed form, not the full rebuild).
 `node_dependencies()` keeps its rows and tests each link's system against the
 gating systems, read once per call, instead of grouping every source row with
 its thought. `source_thought()` keeps its
@@ -1517,8 +1517,8 @@ re-applied in order met a form it could not replace). The stores and `--list`
 call the listing, then `list_proposal_writers` with the page's ids (a row it
 does not return is a proposal gone in between, dropped); the CLI's accept
 guard calls it alone. Each listed proposal reads both sides' takes and lapses,
-so a page costs with its chains: 20-30 ms for a realistic page of 200, about
-7 s for 200 proposals each under a 1,000-link chain. Both listings print each
+so a page costs with its chains; since 107 the listing reads them only where a
+side's walks fit 25 rows, and the guard reads its row's in full. Both listings print each
 side's `By:` line, the ingested notice before an ingested side's text
 (SMD-2480's proposals half), the superseder and what an accept would lapse. A proposal is flagged WRITER when the side that
 stands is a capture-only key's text and the accept would pass another's
@@ -1895,7 +1895,39 @@ vector, and `keyword` is another tool's search. 106
 changes no function and rewrites no row; it refuses to apply without 045's
 arm column. test-upgrade [20ax].
 
-Migration 107 adds a keyed rebuild of 071's gate mirror for a status-set change
+Migration 107 caps the walks the review listing runs (SMD-3036). For every
+listed proposal and each side, 094's `list_proposal_writers` runs
+`ob1_accept_takes` (a walk down the chain below the other side) and
+`ob1_accept_lapses` (a loop check down that chain, then 097's lapse walk up
+the tree above the side), each to 1,000 rows with audit probes at every row.
+Measured with every column read, as the stores read them: the stable and
+canary brains list 200 proposals in 78–135 ms (their longest chain is 7 rows,
+and no side has more than one row above it); on a throwaway brain, ANALYZEd,
+200 proposals over 1,000-row chains took 3.3–4.0 s, and one side with 1,000
+re-captured capture-only pointers above it, proposed over 200 others, 17–19 s,
+the default page of 10 0.8–0.9 s.
+`ob1_listing_walk_fits(side, other)` counts, by `supersedes` and its index
+alone, one equality read a row, the other side and the rows below it and the
+rows whose chain reaches the side, each to 26; the listing reads a side's
+takes and lapses only when both counts are 25 or fewer, and returns both NULL
+past it, the rest of the row read. Each count holds what the walks can visit,
+so 25 bounds them: at 25 rows 0.14–0.36 s for 200 proposals (104: 0.11–0.30 s)
+and 16 ms at most for 10; past the cap 40–75 ms for 200 and 3–5 ms for 10. Both
+listings print, under a side left unread, that what an accept would take and
+lapse was not read and that `consolidate.ts --accept` reads it in full; the
+reply's value marks it `walkCapped`. The accept guard reads its one row's
+takes and lapses through `ob1_accept_takes` and `ob1_accept_lapses` itself,
+so its WRITER refusal and the pointers it names are never the cap's; a
+listing's WRITER flag reads an unread takes as false. The count reads
+nothing the lapse trigger reads: a cap passed into 097's walk would have
+given the trigger a second answer. An accepted row's lapses stay `[]`, and no unread line shows on it (029 refuses its accept). It
+refuses to apply without 094; 094 re-applied puts back its uncapped listing
+and 107 after it the cap. test-schema [95] (25 and 26 rows below and above,
+the rows above counted and not the depth, a raw cycle, an accepted row),
+test-live [16] (past the cap `--list` flags nothing and the guard refuses
+the taking), test-upgrade [20ay], test-server [16l].
+
+Migration 108 adds a keyed rebuild of 071's gate mirror for a status-set change
 (SMD-3160): `ob1_rebuild_source_gate_for_types(text[])`. 071 asked a migration
 that changes `node_lifecycle_types()` to run the full
 `ob1_rebuild_source_gate()`, which joins every source row to its thought under
@@ -1915,7 +1947,7 @@ it against 8.9 s behind the full rebuild with 21,212 rows of the type, 29 ms
 against 6.2 s with 16, on a host busier than SMD-2935 pass 5's (the ratio is
 what holds). The full rebuild stays for repair after a write with triggers
 disabled, and its comment now names the keyed form; 071's own header is not
-edited. 107 also adds `ob1_refresh_set_readers()`, 105's `DO $touch$` block as a
+edited. 108 also adds `ob1_refresh_set_readers()`, 105's `DO $touch$` block as a
 call: it alters each of the brain's own functions that name a set to the
 volatility it has, dropping every session's plans built on it, and returns how
 many — without it a pooled session, 071's gate triggers among them, keeps the
@@ -1938,10 +1970,10 @@ copy that follows it by hand — they all name canceled or unstarted, so `git gr
 ':!integrations'` finds them, the tests that pin them among them — and which the
 code reads; no sentence counts the types any more. [94] and test-live [41],
 which re-apply 105, put the shipped sets back after. Refuses by name without
-071; a re-apply is a no-op. test-schema [95] (a set change simulated each way:
+071; a re-apply is a no-op. test-schema [96] (a set change simulated each way:
 the moved type's rows fixed, an unrelated drift left for the full rebuild;
 empty, NULL, all-NULL and repeated types; the READ COMMITTED refusal; the
-refresh altering every reader), test-upgrade [20ay] (onto a populated brain; a
+refresh altering every reader), test-upgrade [20az] (onto a populated brain; a
 status write and a source-row write wait for it; a set change run by the recipe
 reaches a warmed session).
 
@@ -5100,9 +5132,9 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2981 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1465 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 895 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+bun test-schema.ts                          # 2993 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1466 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 896 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 57 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 239 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
