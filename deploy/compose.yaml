@@ -1662,10 +1662,15 @@ services:
       # unhealthy and the server, which waits for it, does not start.
       # Pre-pull on a slow link: compose --profile jev run --rm jev --fetch-only.
       start_period: 600s
-    # A fetch that fails or a file that hashes wrong exits 1 with the file
-    # named; three tries cover a network that was not up yet, then the service
-    # stops and `ps` says so rather than looping (the board-sync rule above).
-    restart: on-failure:3
+    # `unless-stopped`, so it comes back after a reboot (SMD-3214): neither
+    # runtime starts an `on-failure` container at boot, and with
+    # OB1_JEV_BASE_URL naming this service the servers' preflight fails until
+    # it serves (SMD-2834). Serving never exits on its own, so the restart
+    # cannot loop: a fetch that fails or a file that hashes wrong — the file
+    # named — an engine that does not load and a port taken are tried again
+    # after 1, 2, 4, 8, then every 15 minutes, unhealthy meanwhile; a bad
+    # JEV_THREADS holds until a recreate (jev/serve.ts).
+    restart: unless-stopped
     logging: *logging
 
   # The orchestration tool (SMD-2210; docs/orchestration-tool.md, SMD-1863's

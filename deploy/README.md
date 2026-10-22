@@ -984,10 +984,10 @@ restarts is each container's restart policy; compose is not involved. In
 the proxy, the forwarder that publishes its port, Ollama, n8n, the
 orchestration runner, the authorization server and the observability
 profile's `lgtm` and `pg-exporter` — and, since SMD-3214, `board-sync`, the
-two workers and the sleep scheduler. What runs once is `"no"`: the migrator,
+two workers, the sleep scheduler and `jev`. What runs once is `"no"`: the migrator,
 `ollama-pull`, the runner's role job and the exporter's.
 
-The four followers were `on-failure:3`, so that a configuration a restart does
+The four followers and `jev` were `on-failure:3`, so that a configuration a restart does
 not fix stopped them rather than looped; but neither runtime starts that
 policy at boot, so every reboot left a brain serving and not sleeping (on
 2026-10-22 both dogfood brains' `sleep` and stable's `board-sync` stayed down
@@ -1002,11 +1002,13 @@ not digits, holds it until that recreate, the follower never started.
 Preflight's `workers` and `sleep` rows say a held service is held, its cause
 and its next try, rather than "start it again".
 
-`jev` is still `on-failure:3`, so count on neither runtime to start it at
-boot. The servers can need it: with `OB1_JEV_BASE_URL` naming the `jev`
-service, their preflight fails ("The jev service is not running") until it
-runs, so after a reboot start it by hand, `compose --profile jev up -d jev`
-with the stack's `-f` files (SMD-2834). Check 32
+`jev` is `unless-stopped` as well, and needs no supervisor: serving, it
+never exits on its own. A fetch that fails or hashes wrong, an engine that does
+not load and a port taken are tried again on the same clock, the service
+unhealthy meanwhile; a bad `JEV_THREADS` holds it until a recreate. The servers
+can need it — with `OB1_JEV_BASE_URL` naming the `jev` service, their preflight
+fails ("The jev service is not running") until it serves — and after a reboot
+it now comes back without a hand start (SMD-2834). Check 32
 of `scripts/check-fork-consistency.ts` holds every service's policy, and that
 each follower runs through the supervisor. Postgres
 had none until SMD-2760, so on Docker a reboot would bring the servers back
@@ -2973,7 +2975,11 @@ The first start fetches the pinned weights (606 MB, about 20 s here) into the
 healthcheck's ten-minute start period and the server, which waits for a
 healthy `jev`, does not start: pre-pull with
 `podman compose -f deploy/compose.yaml --profile jev run --rm jev --fetch-only`; every start verifies each file's sha256 and replaces one
-that does not match (a verify-only restart serves in about a second). About
+that does not match (a verify-only restart serves in about a second). A
+fetch that fails — no network yet after a reboot, the hub down, a file that
+hashes wrong — does not end the service: it is tried again after 1, 2, 4, 8,
+then every 15 minutes, `jev` unhealthy meanwhile, and a bad `JEV_THREADS`
+holds it until a recreate (SMD-3214); `--fetch-only` still exits on either. About
 1 GB resident, outside Ollama's scheduler. With `OB1_JEV_BASE_URL` set the
 server's preflight dials the tier and fails the start when it does not answer,
 so set the knob with the profile, not before it; with the profile the server
