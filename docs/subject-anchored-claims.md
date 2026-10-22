@@ -7,7 +7,7 @@ An architecture decision record. **Decided 2026-10-22 by the maintainer**: two t
 
 Amended 2026-10-22 (SMD-3203 item 3 PR 2a): the test is now version 2, with five rules for the points its raters flagged, and the way the pass could ask it is measured.
 - **The writer's link step finds mediated pairs** (κ 0.64 with the raters).
-- **No state step tells F-state from F-name.**
+- **No state step meets the bars for F-state.** The best, the tier asked about the subject the writer named, got 4 of its 10 F-state calls right.
 
 So the maintainer chose to build the cap. Decide version 4 will ask the writer's link step of a pair it would store as evolves or propose as outdates. An H or F link is then related at most and gets no supersession, an F-state pair included. Row 2's distinct waits for a state step that meets its bar.
 
@@ -231,7 +231,8 @@ The test, the sample, its bars and the scorer were fixed on SMD-3203 before any 
 - **Caveat.** Both raters are instances of one model family, not the pass's.
   - Their agreement shows that family applies the test alike.
   - It is not human agreement.
-  - It doesn't show that the labels are right, or that the pass's model can apply the test; the next subsection measures that.
+  - It doesn't show that the labels are right. Nothing here measures that.
+  - Nor does it show that the pass's models can apply the test; the next subsection measures that.
 
 ### How the pass could ask the test (2026-10-22)
 
@@ -248,15 +249,21 @@ Each round's candidates, prompts and bar were fixed on SMD-3203 before any model
 | | writer (qwen3.8:27b), the test's text | 75.9%, 0.51 | 0.36 | 0 / 0 | 14.1 s |
 | version 2, two steps | tier for both steps | 59.5%, 0.21 | 0.10 | 1 / 0 | 2.6 s |
 | | writer's link, tier's state | **82.3%, 0.64** | 0.47 | 10 / 4 | 15.2 s |
-| | writer for both steps | **82.3%, 0.64** | 0.42 | 5 / 0 | 19.2 s |
+| | writer for both steps | **82.3%, 0.64** | 0.42 | 5 / 0 | 18.9 s |
 
 - **No candidate qualifies.**
   - The writer's link step, shared by the last two candidates, meets bar 1.
-  - No state step meets bar 2 or 3. Version 1's writer called 10 of the 11 gold F-state pairs F-name. Asked the state alone, the tier said no for 38 of the 39 pairs it linked F.
+  - No state step meets bar 2 or 3.
+    - Round 2's writer, at its own state step, called 10 of the 11 gold F-state pairs F-name, as round 1's had.
+    - The tier asked about the writer's subject got 4 of its 10 F-state calls right.
+    - The tier alone, link and state in one request, said no to the state for 38 of the 39 pairs it linked F.
+  - The tier's four link options are worded from step 2. Version 2's rules reach the tier only through step B's definition of a state.
+  - Round 2's link prompt carried round 1's injection guard, whose answer named round 1's key. No answer in either round invoked the guard. The eval's link step now has a guard of its own, which answers F, so a steered pair is capped; decide version 4 adopts it.
+  - The gold is version 1's raters', not re-rated under version 2. Only rule 1 is known to match both raters' working definitions, and one gold F-state pair rests on rater 1 counting a fixed spec as a value, which rule 1 calls a name.
 - **The maintainer's choice (2026-10-22, comment 0f41de5b): build the cap.**
   - Decide version 4 asks the writer's link step of a pair it would store as evolves or propose as outdates. An H or F link is related at most, with no supersession, an F-state pair included.
   - Row 2's distinct waits for a state step that meets its bar.
-  - The cost is the 27B's link step, about 14 s per pair checked.
+- **The cost, measured:** the writer's link step alone takes a median 14.3 s a pair. Decide version 4 adds it to each pair it checks.
 
 ### What each subject has today (main, 2026-10-22)
 
@@ -279,7 +286,7 @@ Each round's candidates, prompts and bar were fixed on SMD-3203 before any model
 1. This record.
 2. **SMD-3203's item 3,** next by the rule; it does not wait on the spike: rows 2 and 3 in decide mode, with a new decide version and a re-judge.
    - **Done:** its first step. Two raters applying the bars' words had agreed little better than chance on which pairs are mediated, so item 3 first fixed the mediated-pair test and measured how well raters agree on it, against a bar fixed before they labelled. The bar was met (κ 0.97), and the maintainer mapped rows 2 and 3 onto the test (amended 2026-10-22).
-   - **Done, too:** how the pass could ask the test, measured against the raters' labels in two rounds (amended 2026-10-22, PR 2a). The writer's link step finds mediated pairs; no state step finds F-state.
+   - **Done, too:** how the pass could ask the test, measured against the raters' labels in two rounds (amended 2026-10-22, PR 2a). The writer's link step finds mediated pairs; no state step meets the bars for F-state.
    - **Next:** decide version 4 builds the cap on the writer's link step, as the maintainer chose.
    - **Then:** a canary re-judge.
    - **SMD-3203's last Verify item** also waits on a subject with a timeline beyond tickets (steps 3 and 4). In it, a planted thought reads as stale once a non-ticket subject's state moves, and no pair whose thoughts share only that subject's state is joined.

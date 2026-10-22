@@ -375,11 +375,11 @@ jobs:
         working-directory: evals
         run: bun eval-judge-propose.ts --self-check
 
-      # How the pass asks the mediated-pair test's question (SMD-3203 item 3):
-      # row 2's mapping (F-state distinct, the rest of the mediated capped), the
-      # tier's six options, the writer's prompt read word for word from the
-      # ADR's test, the gold where both raters agree, the scoring and the bar.
-      # No tier, no model.
+      # How the pass could ask the mediated-pair test's question (SMD-3203
+      # item 3): row 2's mapping (F-state distinct, the rest of the mediated
+      # capped), both versions' questions (the writer's read word for word from
+      # the ADR's test, pinned by hash), the gold where both raters agree, κ,
+      # the median, the scoring and the bar at its edges. No tier, no model.
       - name: Mediated-pair rules
         working-directory: evals
         run: bun eval-mediated-pairs.ts --self-check
