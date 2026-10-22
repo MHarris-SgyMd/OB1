@@ -11,7 +11,10 @@
  * fingerprint the provenance carries. [5] holds the engine over a fake
  * tokenizer and runner, and its refusals; [5b] the HTTP handler over a fake
  * engine: every status the contract names, the caps, one request at a time. [6] holds the verified fetch against a stub hub: a file
- * that does not hash to its pin is refused and nothing of it kept. [7]–[8]
+ * that does not hash to its pin is refused and nothing of it kept. [6b]
+ * holds serving's start (SMD-3214): a failed one tried again on the clock, a
+ * real serve.ts against a hub nothing listens on still running and ended at
+ * once by a stop, a bad knob held, --fetch-only's exits kept. [7]–[8]
  * hold the client against a stub tier that counts requests: a refused
  * decision is a ProviderError of kind `egress` and the stub sees NOTHING; a
  * batch splits and keeps order; a bad decision at index 66 sends nothing; an
@@ -45,7 +48,8 @@
  * engine ignoring the caller's signal ([5b]); a flat deadline again ([8]); a
  * hub that never connects saying only Bun's words ([6]). Seventh review
  * pass: jevInfo checking the contract's name only, the gate reading
- * decisions before they are validated ([7]–[8]).
+ * decisions before they are validated ([7]–[8]). SMD-3214, run and killed:
+ * untilReady rethrowing its first failure, as serving exited 1 before ([6b]).
  *
  *   bun test-jev.ts
  */
@@ -57,7 +61,7 @@ import { INSUFFICIENT_EVIDENCE, JEV_CONTRACT, JEV_MAX_BATCH, JEV_MAX_BODY_BYTES,
 import { jevAnswerProblem, jevChoose, jevDecide, jevDecideMany, jevInfo, requestTimeoutMs, resolveJevConfig } from "../server-portable/jev.ts";
 import { ProviderError } from "../server-portable/embed.ts";
 import { ensureModel, sha256File, STALE_PART_MS, type ModelPins } from "./fetch-model.ts";
-import { createHandler } from "./serve.ts";
+import { createHandler, intKnob, RETRY_MS, retryWait, untilReady } from "./serve.ts";
 import { buildPrompt, createEngine, createVerdictEngine, DecisionRefused, INFO, MARKER_IDS, MAX_TOKENS, MODEL_INFO, resultFrom, softmax, temperatureFor, truncate, VERDICT, type Engine } from "./verdict.ts";
 
 const { assert, skip, report } = createAssert();
@@ -324,6 +328,67 @@ section("[6] ensureModel — fetch the pinned bytes or nothing");
   const left = (await readdir(dir)).sort().join();
   assert(left === "m.bin,m.bin.part-2-live", `a stale part is removed at the next start and a live one left alone (${left})`);
   hub.stop(true);
+  await rm(dir, { recursive: true, force: true });
+}
+
+// ── [6b] Serving never exits on its own (SMD-3214) ──────────────────────────
+section("[6b] serve.ts — a failed start tried again on a clock of minutes, a bad knob held, --fetch-only still a one-shot");
+{
+  assert(JSON.stringify([1, 2, 3, 4, 5, 6, 40].map((t) => retryWait(t))) === JSON.stringify([60_000, 120_000, 240_000, 480_000, 900_000, 900_000, 900_000]) && RETRY_MS.first === 60_000,
+    "the waits double from a minute to a cap of 15 minutes, as db/supervise.ts's do");
+  assert(intKnob("JEV_THREADS", 4, 256, {}) === 4 && intKnob("JEV_THREADS", 4, 256, { JEV_THREADS: "8" }) === 8
+      && JSON.stringify(intKnob("JEV_THREADS", 4, 256, { JEV_THREADS: "0x8" })) === JSON.stringify({ error: "JEV_THREADS=0x8 is not a whole number from 1 to 256" }),
+    "a knob reads digits only, its refusal returned rather than exited on");
+  // Two failures, then a start: each failure said with its wait, the waits the clock's.
+  const said: string[] = [];
+  const slept: number[] = [];
+  let tries = 0;
+  const ready = await untilReady(async () => { if (++tries < 3) throw new Error(`fetch ${tries} failed`); return "serving"; }, { err: (l) => void said.push(l), waits: { first: 10, max: 15 }, sleep: async (ms) => void slept.push(ms) });
+  assert(ready === "serving" && tries === 3 && JSON.stringify(slept) === JSON.stringify([10, 15])
+      && said[0] === "jev: fetch 1 failed" && /^jev: not serving — tried again in 0 s \(failure 1 in a row\)/.test(said[1]) && said[2] === "jev: fetch 2 failed" && said.length === 4,
+    `a failed start is said and tried again on the clock until one holds (${JSON.stringify(slept)}; ${said[1]?.slice(0, 60)})`);
+
+  // The real process. A hub nothing listens on: serving waits, still running,
+  // and a stop ends it at once; --fetch-only exits 1 as it always did.
+  const dir = await mkdtemp(`${tmpdir()}/ob1-jev-retry-`);
+  const env = { ...(process.env as Record<string, string>), JEV_MODEL_DIR: dir, JEV_HUB: "http://127.0.0.1:1", JEV_PORT: String(20_000 + Math.floor(Math.random() * 20_000)) };
+  const serve = (extra: Record<string, string>, ...args: string[]) => Bun.spawn(["bun", "serve.ts", ...args], { cwd: import.meta.dir, env: { ...env, ...extra }, stdout: "pipe", stderr: "pipe" });
+  /** Reads the child's stderr until `want` appears or `ms` pass; the text so far. */
+  const until = async (child: ReturnType<typeof serve>, want: RegExp, ms: number): Promise<string> => {
+    let text = "";
+    const reader = (child.stderr as ReadableStream<Uint8Array>).getReader();
+    const stop = Date.now() + ms;
+    while (!want.test(text) && Date.now() < stop) {
+      const next = await Promise.race([reader.read(), Bun.sleep(Math.max(1, stop - Date.now())).then(() => null)]);
+      if (next === null || next.done) break;
+      text += new TextDecoder().decode(next.value);
+    }
+    reader.releaseLock();
+    return text;
+  };
+  const failing = serve({});
+  const failText = await until(failing, /tried again in 60 s \(failure 1 in a row\)/, 20_000);
+  await Bun.sleep(300);
+  const stillUp = failing.exitCode === null;
+  const t0 = Date.now();
+  failing.kill("SIGTERM");
+  const failCode = await failing.exited;
+  assert(stillUp && /fetching .* from http:\/\/127\.0\.0\.1:1\/.* failed/.test(failText) && /not serving — tried again in 60 s \(failure 1 in a row\)/.test(failText) && failCode === 143 && Date.now() - t0 < 3000,
+    `a fetch that fails leaves the service waiting to try again, not exited, and a stop ends it at once (running ${stillUp}, exit ${failCode} after ${Date.now() - t0} ms: ${failText.split("\n").find((l) => /not serving/.test(l))?.slice(0, 80)})`);
+  const once = serve({}, "--fetch-only");
+  const onceCode = await once.exited;
+  assert(onceCode === 1, `--fetch-only on a hub that cannot be reached still exits 1, so \`serve.ts --fetch-only && …\` stops there (exit ${onceCode})`);
+  // A bad knob: held, idle, until a stop; --fetch-only exits 2 on it, as it always did.
+  const held = serve({ JEV_THREADS: "eight" });
+  const heldText = await until(held, /held, not serving/, 20_000);
+  await Bun.sleep(300);
+  const heldUp = held.exitCode === null;
+  held.kill("SIGTERM");
+  const heldCode = await held.exited;
+  const heldOnce = serve({ JEV_THREADS: "eight" }, "--fetch-only");
+  const heldOnceCode = await heldOnce.exited;
+  assert(heldUp && /JEV_THREADS=eight is not a whole number from 1 to 256/.test(heldText) && /held, not serving/.test(heldText) && !/fetching/.test(heldText) && heldCode === 143 && heldOnceCode === 2,
+    `a bad knob holds the service unfetched until a stop, and --fetch-only still exits 2 on it (running ${heldUp}, exit ${heldCode}; --fetch-only ${heldOnceCode})`);
   await rm(dir, { recursive: true, force: true });
 }
 
