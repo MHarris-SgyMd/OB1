@@ -563,9 +563,10 @@ export async function readTicketRows(sql: SQL, opts: { scanHeaders: boolean; cla
 }
 
 /**
- * The one projection of a thought as a BrainRow — readTicketRows' two queries
- * and main's holderOf all select it, so a field added to BrainRow reaches every
- * row that enters syncIssue (sixth review pass). `created_at` is spelled in
+ * The one projection of a thought as a BrainRow — readTicketRows' two queries,
+ * main's holderOf and holderOfIdentity, and test-live's sync harness all select
+ * it, so a field added to BrainRow reaches every row that enters syncIssue
+ * (sixth review pass). `created_at` is spelled in
  * UTC: the `::text` of a timestamptz carries the session's offset, and across a
  * DST change that text does not sort as the instants do, which would have made
  * the older of two pastes the head.
@@ -578,7 +579,7 @@ export async function readTicketRows(sql: SQL, opts: { scanHeaders: boolean; cla
  * again here. A brain from before 082 marks no capture scope, and the column
  * reads false there.
  */
-function rowColumns(sql: SQL) {
+export function rowColumns(sql: SQL) {
   return sql`id::text AS id, content, metadata, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint,
     (supersedes IS NOT NULL
      AND EXISTS (SELECT 1 FROM thought_audit c
@@ -1283,27 +1284,25 @@ function selfCheck(): Promise<number> {
   ok(dp([row("c", text, {}, null, "x"), row("b", text, {}, null, null)]) === "c→b b→x", "a pointer to a thought outside the group moves to the chain's tail, not erased");
   ok(dp([row("T1", text, {}, null, null), row("C", text, {}, null, "T0"), row("T0", text, {}, null, "T1")]) === "T1→C T0→null", "the holder at the head: C→T0 stands, T0's pointer at the new head clears, the head points at C");
   // A capture-only key's outside pointer is never moved to another row: 082's
-  // lapse clears it only where its capture wrote it (SMD-2670).
+  // lapse clears it only where its capture wrote it (SMD-2670). One string
+  // per change: the pointer, and the outside pointer it drops or does not carry.
   const keyed = (id: string, supersedes: string): BrainRow => ({ ...row(id, text, {}, null, supersedes), capture_pointer: true });
-  {
-    const mid = desiredPointers([row("H", text, {}, null, "O"), keyed("S", "T"), row("O", text, {}, null, null)]);
-    ok(dp([row("H", text, {}, null, "O"), keyed("S", "T"), row("O", text, {}, null, null)]) === "H→S S→O" && mid.find((c) => c.row.id === "S")?.notCarried === "T" && mid.every((c) => c.dropped === undefined),
-      `a key's paste in the middle: its pointer onto T is not carried to the tail O, and is named as not carried on its own change (${JSON.stringify(mid.map((c) => [c.row.id, c.wanted, c.notCarried ?? null]))})`);
-    const head = desiredPointers([keyed("S", "T"), row("H", text, {}, null, null)]);
-    ok(dp([keyed("S", "T"), row("H", text, {}, null, null)]) === "S→H" && head[0].notCarried === "T", "…at the head (the ticket's text moved): S→H, and H is not pointed at T");
-    ok(dp([row("H", text, {}, null, null), keyed("S", "T")]) === "H→S", "…at the tail: it stays where its capture wrote it, untouched, and lapses there");
-    const both = desiredPointers([row("H", text, {}, null, "X"), keyed("S", "T")]);
-    ok(dp([row("H", text, {}, null, "X"), keyed("S", "T")]) === "H→S" && both.length === 1 && both[0].dropped?.join() === "X",
-      `…at the tail behind another row's outside pointer: the key's stays, untouched, and the other is named as DROPPED on its own row's change (${JSON.stringify(both.map((c) => [c.row.id, c.wanted, c.dropped ?? null]))})`);
-    const mixed = desiredPointers([keyed("K", "T"), row("H", text, {}, null, "X"), row("O", text, {}, null, null)]);
-    ok(dp([keyed("K", "T"), row("H", text, {}, null, "X"), row("O", text, {}, null, null)]) === "K→H H→O O→X" && mixed[0].notCarried === "T" && mixed.every((c) => c.dropped === undefined),
-      "…ahead of another row's outside pointer: that one goes to the tail, the key's is not carried, nothing else dropped");
+  const plain = (id: string, supersedes: string | null = null) => row(id, text, {}, null, supersedes);
+  const dpn = (order: BrainRow[]) => desiredPointers(order).map((c) => `${c.row.id}→${c.wanted}${c.dropped ? ` dropped:${c.dropped.join()}` : ""}${c.notCarried ? ` notCarried:${c.notCarried}` : ""}`).join(" ");
+  for (const [order, want, label] of [
+    [[plain("H", "O"), keyed("S", "T"), plain("O")], "H→S S→O notCarried:T", "a key's paste in the middle: its pointer onto T is not carried to the tail O, and is named as not carried on its own change"],
+    [[keyed("S", "T"), plain("H")], "S→H notCarried:T", "…at the head (the ticket's text moved): S→H, and H is not pointed at T"],
+    [[plain("H"), keyed("S", "T")], "H→S", "…at the tail: it stays where its capture wrote it, untouched, and lapses there"],
+    [[plain("H", "X"), keyed("S", "T")], "H→S dropped:X", "…at the tail behind another row's outside pointer: the key's stays, untouched, and the other is named as DROPPED on its own row's change"],
+    [[keyed("K", "T"), plain("H", "X"), plain("O")], "K→H notCarried:T H→O O→X", "…ahead of another row's outside pointer: that one goes to the tail, the key's is not carried, nothing else dropped"],
     // A pointer onto the thought the tail keeps is not named as dropped (review pass 2).
-    const same = (o: BrainRow[]) => desiredPointers(o).map((c) => `${c.row.id}:${c.dropped?.join() ?? "-"}:${c.notCarried ?? "-"}`).join(" ");
-    ok(same([row("A", text, {}, null, "X"), row("B", text, {}, null, "X")]) === "A:-:-" && same([row("H", text, {}, null, "T"), keyed("S", "T")]) === "H:-:-"
-        && same([keyed("K", "X"), row("J", text, {}, null, "X"), keyed("S", "T")]) === "K:-:X J:X:-",
-      `…two rows onto one outside thought: the one kept at the tail is not called dropped; a key's and another's onto X behind a key's tail: X named dropped on the other's change, not carried on the key's (${same([keyed("K", "X"), row("J", text, {}, null, "X"), keyed("S", "T")])})`);
-    ok(dp([row("H", text, {}, null, null), row("S", text, {}, null, "T"), row("O", text, {}, null, null)]) === "H→S S→O O→T", "…and a pointer no capture-only key's capture wrote still moves to the tail");
+    [[plain("A", "X"), plain("B", "X")], "A→B", "…two rows onto one outside thought: the one the tail keeps is not called dropped"],
+    [[plain("H", "T"), keyed("S", "T")], "H→S", "…nor when the tail keeping it is a key's"],
+    [[keyed("K", "X"), plain("J", "X"), keyed("S", "T")], "K→J notCarried:X J→S dropped:X", "…a key's and another's onto X behind a key's tail: X named dropped on the other's change, not carried on the key's"],
+    [[plain("H"), plain("S", "T"), plain("O")], "H→S S→O O→T", "…and a pointer no capture-only key's capture wrote still moves to the tail"],
+  ] as [BrainRow[], string, string][]) {
+    const got = dpn(order);
+    ok(got === want, `${label} (${got})`);
   }
 
   // The write decisions, against a recording store.

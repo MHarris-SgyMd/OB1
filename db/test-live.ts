@@ -62,7 +62,7 @@ import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.t
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
-import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
+import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, rowColumns, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import { passStamper, stampKey } from "./pass-stamp.ts";
 import { run as runSleep } from "./sleep.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
@@ -8412,8 +8412,8 @@ function syncHarness(unitIndex: number) {
     embed: async () => { calls.push("embed"); return { embedding: JSON.parse(unit(unitIndex)) as number[], model: EMBEDDING_MODEL, chunks: [] }; },
     tags: async () => { calls.push("tags"); return { type: "task", topics: ["zqtopic"] }; },
     fingerprintOf: async (t) => (await sql`SELECT content_fingerprint_of(${t}) AS f`)[0].f as string,
-    holderOf: (fp) => brainRow(sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`),
-    holderOfIdentity: (system, key) => brainRow(sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE id = source_thought(${system}, ${key})`),
+    holderOf: (fp) => brainRow(sql`SELECT ${rowColumns(sql)} FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`),
+    holderOfIdentity: (system, key) => brainRow(sql`SELECT ${rowColumns(sql)} FROM thoughts WHERE id = source_thought(${system}, ${key})`),
     actor: { name: SYNC_ACTOR, via: "test-live" },
     dryRun: false,
     log: () => {},
