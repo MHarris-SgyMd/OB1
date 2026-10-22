@@ -18,7 +18,8 @@
 //     is refused as cross-site.
 // It reads OB1_REST_URL (the REST core, api.ob1.internal on the mesh unless
 // set), COMPOSE_PROFILES (key sign-in is off while it names auth) and
-// GRAFANA_LINK (the Grafana link, set by the overlays that reach Grafana).
+// GRAFANA_LINK or GRAFANA_ROUTE (the Grafana link, set by the overlays that
+// reach Grafana).
 // It holds no key and no secret of its own: each visitor's key is the call's.
 
 import { createRestClient, DEFAULT_REST_URL } from "../rest-client/index.ts";

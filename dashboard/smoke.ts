@@ -7,17 +7,21 @@
  *
  * With one cookie jar, it asserts:
  *   - signed out, every page and the sign-out redirect to /signin, and
- *     /health answers;
+ *     /health answers; the pages' CSP, framing and Referrer-Policy headers;
  *   - a wrong key and a capture-only key are refused at /signin and set no
- *     cookie; a cookie the server never issued is no session;
+ *     cookie; a cookie the server never issued is no session; a sign-in
+ *     posted from another origin or with Origin null is refused;
  *   - the write key signs in: a cookie scoped to /dashboard, httpOnly,
  *     SameSite=Lax, a day, Secure only on https; and the overview, the
  *     status page and a thought's page render from the REST core, naming
  *     what the core answers on its own (the total, the version, a thought's
- *     text);
- *   - no page, script or cookie holds the key;
- *   - sign-out ends the session on the server: the old cookie, presented
- *     again, is no session;
+ *     text — required with --require-thought); the thought links are not
+ *     preloaded; a wrong key from the signed-in tab is refused in words;
+ *   - no page, header, navigation data (__data.json) or script module holds
+ *     the key;
+ *   - sign-out ends the session on the server, and so does a second sign-in
+ *     over it; one key's 21st sign-in ends its own oldest session, not
+ *     another key's;
  *   - the read key signs in as a read key, and a thought the brain does not
  *     hold is a 404.
  *

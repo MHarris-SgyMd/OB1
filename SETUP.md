@@ -547,7 +547,10 @@ Sign in with a read or write key: the brain's counts and newest thoughts, its
 status (version, migrations, sizes, the workers' heartbeats) and any thought.
 A capture-only key is refused there, since it reads nothing. Behind a TLS proxy
 or tunnel, set `OB1_PUBLIC_ORIGIN` in `deploy/.env` to the https origin first,
-or the sign-in form is refused as cross-site (`dashboard/README.md`).
+or the sign-in form is refused as cross-site; once it is set, sign in there and
+not at `127.0.0.1`, where the form is refused the same way. A stack configured
+with the authorization server (`COMPOSE_PROFILES` naming `auth`) offers no key
+sign-in yet: its sign-in is still to come (`dashboard/README.md`).
 
 ### 6. Optional: workflows beside the brain (n8n)
 

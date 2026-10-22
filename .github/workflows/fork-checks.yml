@@ -1747,7 +1747,8 @@ jobs:
       # capture-only key refused, a cookie the server never issued and a
       # cross-site sign-in refused, the session cookie's attributes and the
       # pages' headers, the overview, the status and a thought rendered from
-      # the REST core under the write key and the read key, the key in no
+      # the REST core under the write key (the overview and a 404 under the
+      # read key), the key in no
       # page, header, script or cookie, and sign-out and a second sign-in
       # each ending a session on the server (dashboard/smoke.ts). Here, not
       # after the next step: that one configures the authorization server,
@@ -2844,6 +2845,16 @@ jobs:
           [ "${#CANARY_KEY}" = 64 ] || { echo "the canary's env file holds no minted OB1_CANARY_KEY" >&2; exit 1; }
           CANARY_FORWARD="$(canary_forward)"
           [ "${#CANARY_FORWARD}" = 64 ] || { echo "the canary's env file holds no minted OB1_FORWARDER_KEY" >&2; exit 1; }
+          # SMD-2280: stable's .env names a public origin here (auth-settings.sh),
+          # and the canary takes none: its file carries no OB1_PUBLIC_ORIGIN, its
+          # operator GUI holds an empty one, and a key sign-in at its loopback
+          # port is taken — with stable's origin it was refused as cross-site.
+          if grep -q '^OB1_PUBLIC_ORIGIN=' .env.canary.local; then echo "the canary's env file carries OB1_PUBLIC_ORIGIN" >&2; exit 1; fi
+          docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose -p open-brain-canary -f compose.yaml ps -q app)" | grep -qx 'OB1_PUBLIC_ORIGIN=' \
+            || { echo "the canary's operator GUI holds a public origin" >&2; exit 1; }
+          gui=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 15 -X POST -H 'content-type: application/x-www-form-urlencoded' -H 'accept: text/html' \
+            -H 'origin: http://127.0.0.1:8011' --data-urlencode "key=$CANARY_KEY" http://127.0.0.1:8011/dashboard/signin)
+          [ "$gui" = "303 http://127.0.0.1:8011/dashboard/" ] || { echo "the canary's operator GUI did not sign its key in at its port: $gui" >&2; exit 1; }
           [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "$(own_keys_with "$CANARY_FORWARD")" ] || { echo "the canary's MCP_ACCESS_KEYS is not its own two keys alone" >&2; exit 1; }
           grep -F "minted the canary's own write key, open-brain-canary" /tmp/canary-up.out
           grep -F "minted the canary's own forward key, open-brain-canary-mcp-forwarder" /tmp/canary-up.out

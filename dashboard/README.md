@@ -31,8 +31,10 @@ cookie is scoped to it. The image builds it (`server-portable/Dockerfile`'s
 nothing for it. A release's compose overlay runs the release's server image here too.
 
 Open `http://127.0.0.1:8000/dashboard` (the stack's published port), or
-`https://<host>/dashboard` through the TLS proxy or tunnel in front of it, and sign in
-with an access key.
+`https://<host>/dashboard` through the TLS proxy or tunnel in front of it once
+`OB1_PUBLIC_ORIGIN` names that origin, and sign in with an access key. One or the
+other: with `OB1_PUBLIC_ORIGIN` set, a sign-in at the loopback address is refused as
+cross-site ("The origin", below).
 
 ## Signing in
 
@@ -68,7 +70,10 @@ https. So the server must know the origin a browser sees:
 
 - **`OB1_PUBLIC_ORIGIN`**, when it is a sound public origin (the authorization
   server's rules: https, or http on a loopback host, and an origin alone). Set it when
-  a TLS proxy or tunnel serves the stack: the stack's own proxy sees plain HTTP. An
+  a TLS proxy or tunnel serves the stack: the stack's own proxy sees plain HTTP. It is
+  then the only origin the GUI takes a form from, as it is the one the authorization
+  server and every redirect name: sign in there, not at `127.0.0.1`. (A loopback sign-in
+  beside a public origin is the break-glass listener of SMD-2280's fourth PR.) An
   unsound one is warned of and passed over.
 - Otherwise each request's `Host`, with the scheme the stack's proxy saw (its
   `X-Forwarded-Proto`, which Traefik sets itself): plain HTTP on the loopback or a

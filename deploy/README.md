@@ -410,7 +410,7 @@ network of its own, `postgres-port`, for its loopback port, and
 | `proxy` | `proxy.ob1.internal:8000` on `front`, which the forwarder dials, and `proxy:8000` on `mesh`; it dials every backend on the `mesh` network, by a name resolved with no search domains: the MCP server (`mcp`) as `mcp.ob1.internal:8000`, the operator GUI (`app`) as `app.ob1.internal:8000`, `auth.ob1.internal:3000`, and — with `compose.api-public.yaml` named — `api.ob1.internal:8000`, and with `compose.grafana-public.yaml` `lgtm.ob1.internal:3000` | Nothing of its own: the forwarder's port | Through the forwarder |
 | `server` | `server:8000` on `egress`, which no shipped template dials (n8n's brain calls go to the REST core, SMD-2295; the orchestration eval still calls it until SMD-2295's second PR); not on `mesh`: the proxy routes nothing to it since SMD-2532 closed the root, and `/mcp` is `mcp`'s. It dials `postgres:5432` on `data` and the model provider on `egress`. The MCP server the stack had before SMD-2287; it retires in SMD-2287 PR 6 | Nothing | Never |
 | `mcp` | `mcp.ob1.internal:8000` on the `mesh` network alone — the proxy. It dials the REST core as `api.ob1.internal:8000` and, on a stack configured with the authorization server, `auth.ob1.internal:3000` to trade a token, both on the mesh: no Postgres, no model provider, nothing outward (SMD-2287) | Nothing of its own: `/mcp`, `/health` and the protected-resource document on the proxy's port | Through the proxy |
-| `app` | `app.ob1.internal:8000` on the `mesh` network alone — the proxy. It dials the REST core as `api.ob1.internal:8000` with each visitor's own key: no Postgres, no model provider, nothing outward (SMD-2280) | Nothing of its own: `/dashboard` on the proxy's port | Through the proxy; behind TLS, set `OB1_PUBLIC_ORIGIN`, or its sign-in form is refused as cross-site (`dashboard/README.md`, "The origin") |
+| `app` | `app.ob1.internal:8000` on the `mesh` network alone — the proxy. It dials the REST core as `api.ob1.internal:8000` with each visitor's own key: no Postgres, no model provider, nothing outward (SMD-2280) | Nothing of its own: `/dashboard` on the proxy's port. With `OB1_PUBLIC_ORIGIN` set, sign-in works at that origin only, not here | Through the proxy; behind TLS, set `OB1_PUBLIC_ORIGIN`, or its sign-in form is refused as cross-site (`dashboard/README.md`, "The origin") |
 | `api` | `api.ob1.internal:8000` on the `mesh` network, and `api:8000` on `data` and `egress`, which every container there can reach — a key is still required for anything but `/health` and `/openapi.json`. It dials `postgres:5432` and the model provider as the server does | Nothing of its own: `/api` on the proxy's port, only with `compose.api-public.yaml` named ("The REST core" below) | Through the proxy, as the server, when `/api` is on |
 | `postgres` | `postgres:5432` on `data` alone — the migrator, the two servers, board-sync, the workers, the sleep scheduler and the import runner; from `egress` the name does not resolve and its address does not answer (CI's "Postgres answers on the data network alone") | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` and `api` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` on `egress` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
@@ -2606,9 +2606,11 @@ setting, each with the value compose read, quoted afresh, but for these:
   own, `SERVER_PORT` its `--port`, `SERVER_BIND="127.0.0.1"`,
   `OB1_TIER="canary"` and `COMPOSE_PROFILES=""` (SMD-2874), which canary.sh
   also hands compose in the shell on every call, with an empty
-  `OB1_PUBLIC_ORIGIN`, which the file never carries: the canary is loopback
-  alone, and stable's origin would have its operator GUI refuse sign-in as
-  cross-site (SMD-2280);
+  `OB1_PUBLIC_ORIGIN`: the canary is loopback alone, and stable's origin would
+  have its operator GUI refuse sign-in as cross-site (SMD-2280). A file written
+  since carries none; one written before may hold stable's, which canary.sh's own
+  calls override, but compose run by hand with that file does not: delete the
+  line;
 - **nothing else**: the file is kept only if compose reads every value in it
   as stable's file reads it, less those, and no value carries stable's
   database password (a `DATABASE_URL` holding it, say, is refused, naming the
@@ -2647,7 +2649,7 @@ From then on the file is the canary's own:
   plugin role a password of its own, and says each by name.
 - **Stable's changes.** A setting stable gains or changes later does not reach
   the canary, and `up` names each one that differs (the name, never the
-  value; the port, address, tier and profiles canary.sh sets are not named).
+  value; the port, address, tier, profiles and public origin canary.sh sets are not named).
   Edit `.env.canary.local` to carry one across, or delete it and the next
   `up` makes it again. `down --volumes` leaves it, and a canary stood up again
   makes its database on it.

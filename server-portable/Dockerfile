@@ -29,14 +29,19 @@ RUN bun install --frozen-lockfile --production
 # stage runs JavaScript (svelte-kit sync, vite build), which crashed Bun under
 # QEMU when the release cross-builds the other architecture, and then hung
 # (review pass 2, an amd64 build on arm64: cancelled at 843 s); its output is
-# plain JS and CSS, the same on either, which the final stage copies in.
+# plain JS and CSS, the same on either, which the final stage copies in, and
+# one build serves both, so a release's two images carry the same GUI. It needs
+# a builder that defines BUILDPLATFORM — BuildKit, which compose v2 and buildx
+# use, or buildah (podman); the classic builder (DOCKER_BUILDKIT=0) does not.
 FROM --platform=$BUILDPLATFORM oven/bun:1.4.3-alpine AS dashboard-build
 WORKDIR /app/rest-client
 COPY rest-client/package.json rest-client/bun.lock ./
 RUN bun install --frozen-lockfile --production
 WORKDIR /app/dashboard
 COPY dashboard/package.json dashboard/bun.lock ./
-RUN bun install --frozen-lockfile
+# No lifecycle scripts: `prepare` (svelte-kit sync) would run before the config
+# is copied, and swallow its own failure; `bun run build` syncs.
+RUN bun install --frozen-lockfile --ignore-scripts
 COPY rest-client/*.ts /app/rest-client/
 COPY server-portable/oauth-edge.ts server-portable/auth.ts /app/server-portable/
 COPY dashboard/svelte.config.js dashboard/vite.config.ts ./

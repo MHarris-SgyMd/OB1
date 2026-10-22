@@ -425,7 +425,8 @@ CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_PUBLIC_ORIGIN|
 #                               COMPOSE_PROJECT_NAME as the canary's project, so
 #                               the file names its own brain (SMD-2873), and
 #                               CANARY_SET's as the canary's (SERVER_PORT as
-#                               $CANARY_PORT; SMD-2874). A
+#                               $CANARY_PORT; SMD-2874), but OB1_GIT_SHA and
+#                               OB1_PUBLIC_ORIGIN, which get no line. A
 #                               value STABLE builds from the shell (`${X}`),
 #                               which reads otherwise with the shell's
 #                               variables than without, is refused, not
@@ -716,7 +717,7 @@ if mode == "write":
     if built:
         sys.exit("%s in %s take part of their value from the shell (${...}); write the canary'"'"'s file yourself, with the values it should have" % (", ".join(built), stable))
     with os.fdopen(os.open(out, os.O_WRONLY | os.O_TRUNC), "w") as f:
-        f.write("# The canary'"'"'s own env file (deploy/canary.sh, SMD-2583), written by `up`\n# on %s from %s as compose read it: every setting but\n# its database password, port, address, tier and profiles, which are its own,\n# and the other profiles'"'"' secrets.\n# Edit it to carry a change of stable'"'"'s across, or delete it to make it\n# again at the next `up`.\n" % (datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), os.environ["FROM"]))
+        f.write("# The canary'"'"'s own env file (deploy/canary.sh, SMD-2583), written by `up`\n# on %s from %s as compose read it: every setting but\n# its database password, port, address, tier and profiles, which are its own,\n# the public origin, which it has none of, and the other profiles'"'"' secrets.\n# Edit it to carry a change of stable'"'"'s across, or delete it to make it\n# again at the next `up`.\n" % (datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), os.environ["FROM"]))
         for n in cand:
             if not dropped.fullmatch(n) and not set_by_canary.fullmatch(n) and s[n] is not None:
                 f.write("%s=%s\n" % (n, quote(s[n])))
