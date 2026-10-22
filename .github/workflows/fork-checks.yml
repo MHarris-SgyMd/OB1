@@ -375,6 +375,15 @@ jobs:
         working-directory: evals
         run: bun eval-judge-propose.ts --self-check
 
+      # How the pass asks the mediated-pair test's question (SMD-3203 item 3):
+      # row 2's mapping (F-state distinct, the rest of the mediated capped), the
+      # tier's six options, the writer's prompt read word for word from the
+      # ADR's test, the gold where both raters agree, the scoring and the bar.
+      # No tier, no model.
+      - name: Mediated-pair rules
+        working-directory: evals
+        run: bun eval-mediated-pairs.ts --self-check
+
       # The projection-replay spike's rules (SMD-1998): the snapshot key per
       # projection, the replay rule branch by branch, the five scenarios on a
       # hand-known corpus, the sample, the cost arithmetic, the verdict against

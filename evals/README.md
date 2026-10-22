@@ -4261,6 +4261,56 @@ on the candidates the pass judges.
   pairs, mostly the session hook's later summary of the same session, which
   the pass never judges. The canary's proposals are its test set.
 
+## Can the pass ask the mediated-pair test? (SMD-3203)
+
+`eval-mediated-pairs.ts`. The subject-anchored ADR (`docs/subject-anchored-claims.md`) maps its rows 2 and 3 onto
+its mediated-pair test:
+* F-state is distinct;
+* the other mediated labels are related at most;
+* no mediated pair gets a supersession.
+
+Two blind raters applied the test to 100 canary pairs and agree on mediated or not with κ 0.97 (SMD-3203, comment
+3bec38de). Before decide mode applies the rows, this asks the pass's own models the test's question about the same
+pairs, rendered as prompt 4 renders them, and scores the answers against the pairs both raters agree on.
+
+```bash
+OB1_JEV_BASE_URL=http://127.0.0.1:8022 OB1_JEV_LOCAL=1 bun eval-mediated-pairs.ts --pairs /private/tmp/…/pairs.jsonl --ask tier2 --out …/tier2.jsonl
+OB1_LLM_BASE_URL=http://127.0.0.1:11434/v1 OB1_LLM_LOCAL=1 OB1_JUDGE_MODEL=qwen3.8:27b bun eval-mediated-pairs.ts --pairs … --ask writer2 --out …/writer2.jsonl
+bun eval-mediated-pairs.ts --pairs … --ask tierb --from …/writer2.jsonl --out …/tierb.jsonl     # the tier's env as above
+bun eval-mediated-pairs.ts --pairs … --key …/key.json --labels …/r1 --labels …/r2 --score tier2=… --score tierb=… --score writer2=…
+```
+
+**The bar**, fixed on SMD-3203 before each round (comments 56465f32 and 691632d2). A candidate qualifies if it meets
+all three, with an unanswered pair counted as wrong:
+* κ ≥ 0.6 with the gold on mediated or not, over the 79 of the 80 evolves and related pairs both raters agree on;
+* F-state precision ≥ 0.8, with at least 5 predicted, over the 95 pairs whose action both agree on;
+* F-state recall ≥ 0.5.
+
+**Results** (2026-10-22, the canary's 100 pairs; 11 gold F-state):
+
+| Round | Candidate | Mediated: agree, κ | Action: agree, κ | F-state predicted / both | Precision, recall | Median per pair | The bar |
+|---|---|---|---|---|---|---|---|
+| version 1 | tier: one choice of six | 49.4%, 0.04 | 48.4%, 0.06 | 1 / 0 | 0%, 0% | 2.0 s | misses |
+| version 1 | writer: the test's text | 75.9%, 0.51 | 64.2%, 0.36 | 0 / 0 | n/a, 0% | 14.1 s | misses |
+| version 2 | tier2: both steps | 59.5%, 0.21 | 49.5%, 0.10 | 1 / 0 | 0%, 0% | 2.6 s | misses |
+| version 2 | tierb: the writer's link, the tier's state | 82.3%, 0.64 | 68.4%, 0.47 | 10 / 4 | 40%, 36% | 15.2 s | misses |
+| version 2 | writer2: both steps | 82.3%, 0.64 | 66.3%, 0.42 | 5 / 0 | 0%, 0% | 19.2 s | misses |
+
+* **The writer's link step finds mediated pairs; no state step finds F-state.**
+  * Version 2's rules lift the writer's mediated κ from 0.51 to 0.64.
+  * Version 1's writer called 10 of the 11 gold F-state pairs F-name.
+  * Asked about the state alone, the tier says no for 38 of the 39 pairs it links F.
+* **The tier can't ask this test.** As one choice of six, it answers D on 62 of the 100. In two steps, its link agrees at
+  κ 0.21.
+* **The maintainer's choice (comment 0f41de5b): decide version 4 builds the cap on the writer's link step.**
+  * A pair the pass would store as evolves or propose as outdates is asked the link.
+  * An H or F link is related at most, with no supersession, an F-state pair included.
+  * Row 2's distinct waits for a state step that meets its bar.
+* **The gold is version 1's raters', not re-rated under version 2.** Their working definition of a state (comment
+  3bec38de) is version 2's rule 1. Both raters are instances of one model family, not the pass's.
+
+The pairs, the answers and the labels hold the brain's text, so they stay out of the repo.
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline
