@@ -10,8 +10,9 @@ Same MCP tools, same `thoughts` schema, same clients. Different plumbing.
 This file is the operator's reference: the two decisions, what leaves the box,
 where to run it for real. [`docs/01-getting-started.md`](docs/01-getting-started.md)
 walks the same stack at a beginner's pace, one verified step at a time, and
-connects each AI client; this fork carries no Edge Function build (`FORK.md`,
-"Deploying").
+connects each AI client. The compose stack is the brain's one deployment
+(SMD-2282's decision 6, SMD-2288): there is no single-process, Workers or
+Kubernetes build of it, and no Edge Function build (`FORK.md`, "Deploying").
 
 ## Two decisions to make first
 
@@ -592,12 +593,23 @@ key.
 
 ## Where to run it for real
 
-`deploy/compose.yaml` is a working reference, not a production topology — no TLS,
-no backups, no resource limits. For something durable:
+The same stack, on a host you keep: a VPS, a home server or a cloud VM runs
+`deploy/compose.yaml` with its own `deploy/.env`, as above. It has no other
+shape. The MCP server is a client of the REST core on the stack's internal
+network and the proxy is the one way in, so neither a server container run
+alone against a managed Postgres nor a single process can be the brain
+(SMD-2282's decision 6, SMD-2288). As shipped the stack has no TLS, no backups
+and no resource limits. For something durable:
 
-| | |
-| --- | --- |
-| **Container + managed Postgres** | RDS, Aurora, Neon, Cloud SQL, or Timescale with pgvector 0.8.0 or later; the server as a container. `DATABASE_URL` — the SQL store, the default (FORK.md change 97). The simplest data path. If the provider installs pgvector into a schema off the connection's `search_path` (Supabase uses `extensions`), the migrator heals its own session and preflight fails with the exact statement to run for the server — the login role's `ALTER ROLE … IN DATABASE … SET search_path`, its own path kept and the schema added, or the connection string's `options=` value where the connection sets the path — see `FORK.md` change 43 and SMD-2238. |
+- **TLS:** a tunnel or proxy in front of the stack's one published port, as
+  "Connect a client" above says. The `auth` profile's OAuth needs a name that
+  stays put (`deploy/README.md`, "Authorization server").
+- **A release, not a checkout build:** the published images, Ollama pinned by
+  digest (`deploy/README.md`, "Pinning a release").
+- **Several brains on one host:** one env file each (`deploy/README.md`, "One
+  env file is one brain").
+- **The rest:** backups, limits and log shipping are yours (`deploy/README.md`,
+  "What this does not cover").
 
 ## Two things this does not fix
 
@@ -614,7 +626,8 @@ or patient-adjacent data, wherever you host it.
 ## Related
 
 - `db/README.md` — the schema, migrations, and the runner
-- `server-portable/README.md` — the server, its four runtimes, and the data layers
+- `server-portable/README.md` — the server and the REST core, and their data layer
+- `mcp-server/README.md` — the MCP server at `/mcp`, a client of the REST core
 - `compat/supabase-sql/README.md` — running recipes and integrations without PostgREST
 - `evals/README.md` — how the local models were chosen, and how to re-run it
 - `deploy/README.md` — the compose stack in detail

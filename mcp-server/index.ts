@@ -16,7 +16,7 @@ import { createRestClient } from "../rest-client/index.ts";
 import { loadPlugins, type LoadedPlugin } from "../server-portable/core/plugins.ts";
 import { routable } from "../server-portable/auth.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "../server-portable/shutdown.ts";
-import { cutOpenRequests, flushTelemetry, knowTools, outgoingTraceparent, startTelemetry } from "../server-portable/telemetry.ts";
+import { cutOpenRequests, cutTelemetry, flushTelemetry, knowTools, outgoingTraceparent, startTelemetry } from "../server-portable/telemetry.ts";
 import { createMcpApp, edgeFrom, REST_TIMEOUT_MS } from "./app.ts";
 import { createExchanger, exchangeSettings } from "./exchange.ts";
 import { originProblem } from "../server-portable/oauth-edge.ts";
@@ -92,11 +92,14 @@ if (import.meta.main) {
   // (a client gone mid-call). No store to close here — the REST core holds it — so the stop says no pool was opened.
   drainOnSignal({
     drainBoundMs: grace.drainBoundMs,
+    graceMs: grace.graceS * 1000,
     server: () => bunServer,
     calls: toolCalls,
     close: async () => false,
-    // The telemetry still batched goes under the stop's bound, said on its own (index.ts's).
+    // The telemetry still batched goes under a bound of its own, said on its own; cut short, what each signal still
+    // held is said by count (index.ts's, SMD-2902).
     flush: flushTelemetry,
+    unsent: cutTelemetry,
     // A record still open — a mirror whose client left while it waits — ends before the exit, on every path (index.ts's).
     endOpen: cutOpenRequests,
     onCut: () => {

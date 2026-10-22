@@ -10,7 +10,7 @@ import { mayCall, unlocks, type ToolName } from "./tools.ts";
 import { HEALTH_DEADLINE_MS } from "./core/reads.ts";
 import * as say from "./render.ts";
 import { abandonedRequestLine, labelPart, requestLabel, SSE_KEEPALIVE_MAX_MS, SSE_KEEPALIVE_MS, withSseKeepalive } from "./sse.ts";
-import { beginRequest, cutOpenRequests, endsWithStream, flushTelemetry, outcomeOf, startTelemetry, traceOf, withToolSpan, type RequestOutcome, type ToolSpan } from "./telemetry.ts";
+import { beginRequest, cutOpenRequests, cutTelemetry, endsWithStream, flushTelemetry, outcomeOf, startTelemetry, traceOf, withToolSpan, type RequestOutcome, type ToolSpan } from "./telemetry.ts";
 import { authReachability, edgeSettings, edgeView, forPublicDocument, PRM_PATH, protectedResourceDocument, refusalAt, type EdgeSettings } from "./oauth-edge.ts";
 import { BUSY_MESSAGE, challengeResponse, corsHeaders, cutByStopLine, HEALTH_METHOD_NOT_ALLOWED_HEADERS, HEALTH_PATH, JSON_RPC_BUSY_CODE, MCP_METHODS, METHOD_NOT_ALLOWED_HEADERS, MIRROR_INPUT, MIRROR_WORDS, nameRoute, notCleared, notificationRefusedResponse, parsedBody, partsOf, rawPath, readBodyText, recordCall, REFUSAL_BODY_LIMIT, refusalTarget, RETRY_AFTER_SECONDS, REVOKED_MESSAGE, shownNothing, unauthorizedResponse, unavailableResponse, worseOutcome, type CallRecord, type RequestParts } from "./mcp-edge.ts";
 
@@ -886,11 +886,14 @@ if (SERVES_ON_BUN) {
   const mender = mend.intervalS > 0 ? core.startVectorMender({ intervalS: mend.intervalS }) : undefined;
   drainOnSignal({
     drainBoundMs: grace.drainBoundMs,
+    graceMs: grace.graceS * 1000,
     server: () => bunServer,
     calls: toolCalls,
     close: closeStore,
-    // The telemetry still batched goes beside the pool's close, under its bound, said on its own.
+    // The telemetry still batched goes beside the pool's close, under a bound of its own, said on its own; cut short,
+    // what each signal still held is said by count (SMD-2902).
     flush: flushTelemetry,
+    unsent: cutTelemetry,
     // A record the runtime no longer counts but that is still open — a mirror whose client left while it waits on the
     // registry — ends before that flush, on every path, though no cut came: a drained stop runs no onCut (PR 2c review pass 3).
     // The mender stops beside it, before the pool closes: no further row starts.

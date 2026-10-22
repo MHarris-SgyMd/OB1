@@ -18,8 +18,9 @@
 // OTEL_RESOURCE_ATTRIBUTES adds or overrides, and a pipeline tier's
 // deployment.environment.name from OB1_TIER (PR 3a), which nothing overrides.
 //
-// What is not sent — an export that failed, or what a batch's full queue
-// dropped — is said on stderr at most once a minute per signal, by count and
+// What is not sent — an export that failed, one its collector never finished
+// answering by its deadline, what a partial success rejected, or what a batch's
+// full queue dropped — is said on stderr at most once a minute per signal, by count and
 // kind (a count held inside a minute is said when the minute ends), and what is
 // still unsaid at the stop, its own flush's failures included, is said then;
 // never an error's message, which can carry the URL. Context follows a request
@@ -39,7 +40,7 @@ import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { defaultResource, detectResources, envDetector, resourceFromAttributes } from "@opentelemetry/resources";
-import { BatchLogRecordProcessor, LoggerProvider, SimpleLogRecordProcessor, type LogRecordExporter } from "@opentelemetry/sdk-logs";
+import { BatchLogRecordProcessor, LoggerProvider, SimpleLogRecordProcessor, type LogRecordExporter, type LogRecordProcessor } from "@opentelemetry/sdk-logs";
 import { MeterProvider as SdkMeterProvider, PeriodicExportingMetricReader, type PushMetricExporter } from "@opentelemetry/sdk-metrics";
 import { BasicTracerProvider, BatchSpanProcessor, SimpleSpanProcessor, type ReadableSpan, type Span, type SpanExporter, type SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import type { FlushResult } from "./shutdown.ts";
@@ -63,6 +64,8 @@ export interface Telemetry {
   readonly serviceName: string;
   /** Sends what is batched and waits for what is on its way, every signal at once: how that ended (shutdown.ts FlushResult; the stop bounds it). */
   flush(): Promise<FlushResult>;
+  /** The stop's flush cut short (SMD-2902): says, by signal, what was on its way or still batched as not sent, for `kind`. */
+  cut(kind: string): void;
   /** Unregisters the providers, so later spans and points are no-ops again (a suite's). */
   shutdown(): Promise<void>;
   /** Emits a request's log record; nothing where log records are not sent. */
@@ -77,6 +80,86 @@ interface Reporting {
   everyMs?: number;
   /** What the exporter sends, one and many (`span`, `spans`). */
   noun?: readonly [string, string];
+  /**
+   * How long an export may go unanswered before it is counted as not sent, `no answer in time` (SMD-2902 PR 2): the
+   * exporter's own timeout is an idle timeout, which a collector that trickles its answer never lets fire.
+   */
+  deadlineMs?: number;
+  /** What a partial success said the collector rejected of the export just answered, taken once (SMD-2902 PR 2). */
+  takeRejected?: () => number;
+  /** How a partial success is said: `rejected by the collector`, or for a metric export, counted whole, `partly rejected by the collector`. */
+  rejectedKind?: string;
+}
+
+/** What a watched export's deadline adds to twice the exporter's own timeout (exportDeadlineFrom). */
+export const EXPORT_DEADLINE_MARGIN_MS = 2_000;
+
+/**
+ * The OTLP exporter's timeout for a signal as the SDK reads it (otlp-exporter-base's shared env configuration):
+ * OTEL_EXPORTER_OTLP_<SIGNAL>_TIMEOUT, else OTEL_EXPORTER_OTLP_TIMEOUT, each a finite number above 0, else 10 s.
+ */
+export function exportTimeoutFrom(env: Record<string, string | undefined>, signal: "TRACES" | "METRICS" | "LOGS"): number {
+  const read = (name: string) => {
+    const raw = env[name];
+    if (raw == null || raw.trim() === "") return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  };
+  return read(`OTEL_EXPORTER_OTLP_${signal}_TIMEOUT`) ?? read("OTEL_EXPORTER_OTLP_TIMEOUT") ?? 10_000;
+}
+
+/**
+ * A watched export's deadline (SMD-2902 PR 2): twice the exporter's timeout, plus EXPORT_DEADLINE_MARGIN_MS, at most a
+ * timer's longest. The SDK's retrying transport schedules a retry only when its wait (a backoff, or a Retry-After
+ * header) fits in what is left of the timeout, and gives that attempt what is left as its own idle timer — so an
+ * export that is answered at all ends by twice the timeout, and one past this deadline is a collector that never
+ * finishes answering (review pass 1: a deadline of the timeout plus 2 s counted a Retry-After export that was then
+ * answered as not sent).
+ */
+export function exportDeadlineFrom(env: Record<string, string | undefined>, signal: "TRACES" | "METRICS" | "LOGS"): number {
+  return Math.min(MAX_TIMER, 2 * exportTimeoutFrom(env, signal) + EXPORT_DEADLINE_MARGIN_MS);
+}
+
+/** The OTLP exporter's one word on a partial success, which a diag logger at WARN is handed with the response's `partialSuccess` as JSON. */
+const PARTIAL_SUCCESS = "Received Partial Success response:";
+const REJECTED_FIELDS: Record<string, Signal> = { rejectedSpans: "traces", rejectedDataPoints: "metrics", rejectedLogRecords: "logs" };
+
+/**
+ * How many items a partial success rejected, by signal, from the diag line's arguments (SMD-2902 PR 2): its counts
+ * alone — never its errorMessage, which is the collector's text. A count of 0 (a warning, by the spec) is none.
+ */
+export function partialRejections(message: string, args: unknown[]): Partial<Record<Signal, number>> {
+  if (message !== PARTIAL_SUCCESS || typeof args[0] !== "string") return {};
+  let body: unknown;
+  try {
+    body = JSON.parse(args[0]);
+  } catch {
+    return {};
+  }
+  const found: Partial<Record<Signal, number>> = {};
+  for (const [field, signal] of Object.entries(REJECTED_FIELDS)) {
+    const n = Number((body as Record<string, unknown> | null)?.[field]);
+    if (Number.isSafeInteger(n) && n > 0) found[signal] = n;
+  }
+  return found;
+}
+
+/**
+ * What each signal's partial successes rejected, between the diag line that says it and the export answered with it
+ * (SMD-2902 PR 2): `add` reads a diag line, `take` gives a signal's count once and leaves it 0.
+ */
+export function partialBuckets(): { add(message: string, args: unknown[]): void; take(signal: Signal): number } {
+  const by: Record<Signal, number> = { traces: 0, metrics: 0, logs: 0 };
+  return {
+    add: (message, args) => {
+      for (const [signal, n] of Object.entries(partialRejections(message, args)) as [Signal, number][]) by[signal] += n;
+    },
+    take: (signal) => {
+      const n = by[signal];
+      by[signal] = 0;
+      return n;
+    },
+  };
 }
 
 /**
@@ -119,6 +202,13 @@ export interface WatchedExporter<T = ReadableSpan[]> extends Exporter<T> {
   dropped(count: number): void;
   /** Says what is still unsaid, whatever the window — the stop's last word on what was not sent. */
   sayRest(): void;
+  /**
+   * The stop's flush cut short (SMD-2902): counts the items of every export
+   * still on its way, and `held` more its batch never handed over, as not sent
+   * for `kind`, and says them at once. An export counted here is not counted
+   * again when it ends.
+   */
+  cut(kind: string, held?: number): void;
   /** From now on says each count at once, and says what is held: the provider is shutting down, whether or not its batch reaches this exporter's shutdown. */
   close(): void;
   /** How many items were handed to an export, so far. */
@@ -140,7 +230,7 @@ export interface WatchedExporter<T = ReadableSpan[]> extends Exporter<T> {
  * `count` is how many items one export holds: an array's length (spans, log
  * records), or 1 for a metric export, whose cumulative reading the next export sends again.
  */
-export function watchExporter<T = ReadableSpan[]>(inner: Exporter<T>, { origin, warn, everyMs = 60_000, noun = ["span", "spans"] }: Reporting, count: (items: T) => number = (items) => (items as unknown[]).length): WatchedExporter<T> {
+export function watchExporter<T = ReadableSpan[]>(inner: Exporter<T>, { origin, warn, everyMs = 60_000, noun = ["span", "spans"], deadlineMs, takeRejected, rejectedKind = "rejected by the collector" }: Reporting, count: (items: T) => number = (items) => (items as unknown[]).length): WatchedExporter<T> {
   const lost = new Map<string, number>();
   let saidAt = -Infinity;
   let started = 0;
@@ -152,7 +242,8 @@ export function watchExporter<T = ReadableSpan[]>(inner: Exporter<T>, { origin, 
   let held: ReturnType<typeof setTimeout> | undefined;
   // Once shutting down, a count is said at once, never held for a timer that would outlive the exporter (review pass 6).
   let closing = false;
-  const pending = new Set<Promise<void>>();
+  // Each export on its way, with its item count, and whether a cut, or its deadline, has already counted it.
+  const pending = new Map<Promise<void>, { n: number; cut: boolean }>();
   const sayNow = () => {
     clearTimeout(held);
     held = undefined;
@@ -182,11 +273,34 @@ export function watchExporter<T = ReadableSpan[]>(inner: Exporter<T>, { origin, 
       handed += n;
       let settle = () => {};
       const going = new Promise<void>((resolve) => { settle = resolve; });
-      pending.add(going);
+      const entry = { n, cut: false };
+      pending.set(going, entry);
+      // Past its deadline the export is counted as not sent — unless the stop's cut counted it already — and the SDK is
+      // handed a failure, so its batch moves on; a flush, the stop's cut and idle() no longer wait on it, and its answer,
+      // if one ever comes, counts nothing (SMD-2902 PR 2; review pass 1: a batch held the log records behind it).
+      let over = false;
+      const deadline = deadlineMs === undefined ? undefined : setTimeout(() => {
+        over = true;
+        failed += 1;
+        if (!entry.cut) say(n, "no answer in time");
+        entry.cut = true;
+        pending.delete(going);
+        settle();
+        done({ code: ExportResultCode.FAILED, error: new Error("no answer in time") });
+      }, deadlineMs);
+      (deadline as { unref?: () => void } | undefined)?.unref?.();
       inner.export(items, (result) => {
+        clearTimeout(deadline);
+        // Taken whatever the answer, so a count belongs to the export answered with it alone.
+        const rejected = takeRejected?.() ?? 0;
+        if (over) return;
         if (result.code !== ExportResultCode.SUCCESS) {
           failed += 1;
-          say(n, failureKind(result.error));
+          if (!entry.cut) say(n, failureKind(result.error));
+        } else if (rejected > 0) {
+          // A partial success: what the collector took is sent, what it rejected is not (the spec's count, at most the export's own).
+          failed += 1;
+          if (!entry.cut) say(Math.min(rejected, n), rejectedKind);
         }
         pending.delete(going);
         settle();
@@ -195,6 +309,16 @@ export function watchExporter<T = ReadableSpan[]>(inner: Exporter<T>, { origin, 
     },
     dropped: (n) => say(n, "queue full"),
     sayRest: sayNow,
+    cut: (kind, held = 0) => {
+      let n = Math.max(0, held);
+      for (const entry of pending.values()) {
+        if (entry.cut) continue;
+        entry.cut = true;
+        n += entry.n;
+      }
+      if (n > 0) lost.set(kind, (lost.get(kind) ?? 0) + n);
+      sayNow();
+    },
     close: () => {
       closing = true;
       sayNow();
@@ -204,7 +328,7 @@ export function watchExporter<T = ReadableSpan[]>(inner: Exporter<T>, { origin, 
     },
     mark: () => ({ started, failed, pending: pending.size }),
     idle: async () => {
-      await Promise.all([...pending]);
+      await Promise.all([...pending.keys()]);
     },
     // What is held is said as the exporter goes, and what its last exports lose as they end, so no timer says it to a sink that has gone (review passes 5–6).
     shutdown: async () => {
@@ -216,7 +340,11 @@ export function watchExporter<T = ReadableSpan[]>(inner: Exporter<T>, { origin, 
         sayNow();
       }
     },
-    forceFlush: () => inner.forceFlush?.() ?? Promise.resolve(),
+    // The exports this watcher still waits on, not the SDK's own queue, which holds one past its deadline until its
+    // collector ends the trickle: the log batch and the metric reader call this from their flush (review pass 1).
+    forceFlush: async () => {
+      await Promise.all([...pending.keys()]);
+    },
   };
 }
 
@@ -255,13 +383,34 @@ export function countingProcessor(inner: SpanProcessor): SpanProcessor & { reado
 }
 
 /**
+ * The log batch's counterpart of countingProcessor (SMD-2902): counts the
+ * records it is handed, so a stop whose flush is cut knows how many it still
+ * held — the log batch hands its queue over one batch at a time, after any
+ * export already on its way, so a collector that hangs holds the rest back.
+ */
+export function countingLogProcessor(inner: LogRecordProcessor): LogRecordProcessor & { readonly queued: number } {
+  let queued = 0;
+  return {
+    get queued() {
+      return queued;
+    },
+    onEmit: (record, within) => {
+      queued += 1;
+      inner.onEmit(record, within);
+    },
+    forceFlush: () => inner.forceFlush(),
+    shutdown: () => inner.shutdown(),
+  };
+}
+
+/**
  * The full queue's drops, from its two witnesses, each said once: the SDK's
  * diag line (a count since its last, said when a later span is queued) and a
  * flush's exact count (queued less handed). Neither counts a drop twice, so
  * the larger is what is known, and only what is past the last said is said
  * (review pass 4: a second flush, or a diag line after one, said them again).
  */
-export function dropCount(say: (count: number) => void): { fromDiag(count: number): void; exactly(total: number): void } {
+export function dropCount(say: (count: number) => void): { fromDiag(count: number): void; exactly(total: number): void; readonly known: number } {
   let diag = 0;
   let exact = 0;
   let said = 0;
@@ -278,6 +427,10 @@ export function dropCount(say: (count: number) => void): { fromDiag(count: numbe
     exactly: (total) => {
       exact = Math.max(exact, total);
       known();
+    },
+    // How many drops are known so far, said or not: what a cut takes off what the batch was handed (SMD-2902).
+    get known() {
+      return Math.max(diag, exact);
     },
   };
 }
@@ -429,8 +582,9 @@ function tierAttribute(): Attributes {
  * manager and the W3C propagator. A server's (Collector): each signal with a
  * URL is sent there — spans and log records batched, metrics at the reader's
  * interval — what is not sent said through `report`, by signal; the SDK's
- * diag output is read for the span batch's drops alone (its other text can
- * carry the URL), and a flush waits for exports already on their way (review
+ * diag output is read for the span batch's drops and a partial success's
+ * counts alone (its other text can carry the URL, and a partial success's
+ * message is the collector's), and a flush waits for exports already on their way (review
  * pass 2: the span batch's flush does not, and an empty one resolves at once).
  * A suite's (InMemory): its exporters, unbatched. Every provider is built
  * before any is registered, and a throw while building shuts down what was
@@ -450,9 +604,21 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
   const collector = "report" in mode ? mode : undefined;
   // The suite's exporters, read only where the mode is a suite's: a Collector's own options never pass as an exporter (review pass 3).
   const memory = "report" in mode ? undefined : mode;
-  const reportFor = (url: string, noun: readonly [string, string]): Reporting => ({ ...collector!.report, origin: new URL(url).origin, noun });
+  // What each signal's partial successes rejected, set by the diag line and taken by the export the line answered (SMD-2902 PR 2).
+  const rejected = partialBuckets();
+  const SDK_SIGNAL = { traces: "TRACES", metrics: "METRICS", logs: "LOGS" } as const;
+  const reportFor = (url: string, noun: readonly [string, string], signal: Signal): Reporting => ({
+    ...collector!.report, origin: new URL(url).origin, noun,
+    deadlineMs: exportDeadlineFrom(process.env, SDK_SIGNAL[signal]),
+    ...(signal === "metrics" ? { rejectedKind: "partly rejected by the collector" } : {}),
+    takeRejected: () => rejected.take(signal),
+  });
+  // The span batch's drops, read from the diag line where spans are sent.
+  let spanDropsFromDiag: ((count: number) => void) | undefined;
   const notes: string[] = [];
   const flushes: (() => Promise<FlushResult>)[] = [];
+  /** Each watched signal's word when the stop cuts its flush short (SMD-2902). */
+  const cuts: ((kind: string) => void)[] = [];
   const closes: (() => void)[] = [];
   const shutdowns: (() => Promise<void>)[] = [];
   /** What setting up does to the API's globals, done only once every provider is built. */
@@ -470,7 +636,7 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
         return "sent";
       });
     } else if (collector?.urls.traces) {
-      const watched = watchExporter(new OTLPTraceExporter({ url: collector.urls.traces }), reportFor(collector.urls.traces, ["span", "spans"]));
+      const watched = watchExporter(new OTLPTraceExporter({ url: collector.urls.traces }), reportFor(collector.urls.traces, ["span", "spans"], "traces"));
       const options = batchOptions(process.env, "OTEL_BSP");
       notes.push(...options.notes);
       const counted = countingProcessor(new BatchSpanProcessor(watched, {
@@ -482,15 +648,10 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
       tracerProvider = new BasicTracerProvider({ resource, spanProcessors: [counted] });
       const provider = tracerProvider;
       const drops = dropCount((count) => watched.dropped(count));
-      const quiet = () => {};
-      registers.push(() => diag.setLogger({
-        warn: (message: string) => {
-          const drop = DROPPED.exec(message);
-          if (drop) drops.fromDiag(Number(drop[1]));
-        },
-        error: quiet, info: quiet, debug: quiet, verbose: quiet,
-      }, DiagLogLevel.WARN));
+      spanDropsFromDiag = (count) => drops.fromDiag(count);
       flushes.push(() => flushBatch(provider, counted, watched, drops));
+      // What the batch was handed and never handed on, less its drops (already said), with what is on its way.
+      cuts.push((kind) => watched.cut(kind, counted.queued - watched.handed - drops.known));
       // The watcher closed first: the batch's shutdown flush may fail, and never reach the exporter's own shutdown (review pass 7).
       closes.push(() => watched.close());
     }
@@ -504,7 +665,7 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
     const metricExporter = collector?.urls.metrics ? new OTLPMetricExporter({ url: collector.urls.metrics }) : memory?.metrics;
     if (metricExporter) {
       // Counted by export, not by point: a cumulative reading is sent whole each time, so the next export carries what a failed one held (review pass 1).
-      const watched = collector?.urls.metrics ? watchExporter(metricExporter, reportFor(collector.urls.metrics, ["metric export", "metric exports"]), () => 1) : undefined;
+      const watched = collector?.urls.metrics ? watchExporter(metricExporter, reportFor(collector.urls.metrics, ["metric export", "metric exports"], "metrics"), () => 1) : undefined;
       const times = collector ? metricTimes(process.env.OTEL_METRIC_EXPORT_INTERVAL, process.env.OTEL_METRIC_EXPORT_TIMEOUT) : { interval: 3_600_000, timeout: 30_000, notes: [] };
       notes.push(...times.notes);
       // The reader asks its exporter which temporality and aggregation it wants: the OTLP exporter's, read from OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE.
@@ -525,28 +686,36 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
         await provider.forceFlush().catch(() => {});
         return "sent";
       });
-      if (watched) closes.push(() => watched.close());
+      if (watched) {
+        closes.push(() => watched.close());
+        // A metric reader holds no queue: what was on its way.
+        cuts.push((kind) => watched.cut(kind));
+      }
     }
 
     // Log records: one per request, emitted by telemetry.ts through `emit`, under its span's context.
     let loggerProvider: LoggerProvider | undefined;
     if (collector?.urls.logs) {
-      const watched = watchExporter(new OTLPLogExporter({ url: collector.urls.logs }), reportFor(collector.urls.logs, ["log record", "log records"]));
+      const watched = watchExporter(new OTLPLogExporter({ url: collector.urls.logs }), reportFor(collector.urls.logs, ["log record", "log records"], "logs"));
       const options = batchOptions(process.env, "OTEL_BLRP");
       notes.push(...options.notes);
-      loggerProvider = new LoggerProvider({
-        resource,
-        processors: [new BatchLogRecordProcessor({
-          exporter: watched,
-          maxQueueSize: options.queue,
-          maxExportBatchSize: options.batch,
-          scheduledDelayMillis: options.delay,
-          exportTimeoutMillis: options.timeout,
-          selfObsMeterProvider: logDrops((count) => watched.dropped(count)),
-        })],
-      });
+      let logsDropped = 0;
+      const counted = countingLogProcessor(new BatchLogRecordProcessor({
+        exporter: watched,
+        maxQueueSize: options.queue,
+        maxExportBatchSize: options.batch,
+        scheduledDelayMillis: options.delay,
+        exportTimeoutMillis: options.timeout,
+        selfObsMeterProvider: logDrops((count) => {
+          logsDropped += count;
+          watched.dropped(count);
+        }),
+      }));
+      loggerProvider = new LoggerProvider({ resource, processors: [counted] });
       const provider = loggerProvider;
       flushes.push(() => flushSignal(provider, watched));
+      // The records the batch still held behind an export on its way, less its drops (already said), with what is on its way.
+      cuts.push((kind) => watched.cut(kind, counted.queued - watched.handed - logsDropped));
       closes.push(() => watched.close());
     } else if (memory?.logs) {
       loggerProvider = new LoggerProvider({ resource, processors: [new SimpleLogRecordProcessor({ exporter: memory.logs })] });
@@ -561,6 +730,19 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
       shutdowns.push(() => provider.shutdown().catch(() => {}));
     }
     logger = loggerProvider?.getLogger("ob1");
+    // The SDK's diag output, read for two words alone — the span batch's drops and an exporter's partial success —
+    // and never said: its other text can carry the URL, and a partial success's message is the collector's.
+    if (collector) {
+      const quiet = () => {};
+      registers.push(() => diag.setLogger({
+        warn: (message: string, ...args: unknown[]) => {
+          const drop = DROPPED.exec(message);
+          if (drop) spanDropsFromDiag?.(Number(drop[1]));
+          rejected.add(message, args);
+        },
+        error: quiet, info: quiet, debug: quiet, verbose: quiet,
+      }, DiagLogLevel.WARN));
+    }
   } catch (err) {
     for (const close of closes) close();
     for (const shutdown of shutdowns) void shutdown();
@@ -575,6 +757,9 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
   return {
     serviceName: String(resource.attributes["service.name"] ?? serviceName),
     flush: async () => flushesResult(await Promise.all(flushes.map((flush) => flush()))),
+    cut: (kind) => {
+      for (const cut of cuts) cut(kind);
+    },
     shutdown: async () => {
       for (const close of closes) close();
       await Promise.all(shutdowns.map((shutdown) => shutdown()));

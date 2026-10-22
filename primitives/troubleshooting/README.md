@@ -1,6 +1,6 @@
 # Common Troubleshooting
 
-Solutions for issues that come up across any Open Brain extension. If your problem is specific to one extension (e.g., a particular table or tool), check that extension's README instead. Every server here — the core server in its container, each extension server under `bun` — logs the cause of a refused request to its own output, so the first move is almost always to read it: `podman compose -f deploy/compose.yaml logs server` for the core server, the terminal the `bun` command runs in for an extension.
+Solutions for issues that come up across any Open Brain extension. If your problem is specific to one extension (e.g., a particular table or tool), check that extension's README instead. Every server here — the brain's servers in the compose stack, each extension server under `bun` — logs the cause of a refused request to its own output, so the first move is almost always to read it: `podman compose -f deploy/compose.yaml logs mcp api` for the brain's `/mcp` and its REST core, the terminal the `bun` command runs in for an extension.
 
 ## Connection Issues
 
@@ -34,10 +34,10 @@ Solutions for issues that come up across any Open Brain extension. If your probl
 ## Server Issues
 
 **The server won't start**
-- `EADDRINUSE`: the port is taken. `PORT` unset is 8000 — the core server's, and on macOS podman's `gvproxy` holds it too. Pick another port.
+- `EADDRINUSE`: the port is taken. `PORT` unset is 8000 — the compose stack's, and on macOS podman's `gvproxy` holds it too. Pick another port.
 - `Cannot find package 'hono'`: run `(cd extensions && bun install)` once; an integration or recipe server reaches that same install through the `node_modules` link in `integrations/` or `recipes/`
 - A missing environment variable: the server names it and exits. The extension's README lists what it reads.
-- The core server exits with `preflight FAILED`: read the failing row — it names the setting and the fix (`deploy/README.md`, "Why the server runs preflight before serving")
+- The stack's `server` or `api` service exits with `preflight FAILED` (the image runs it before either): read the failing row — it names the setting and the fix (`deploy/README.md`, "Why the server runs preflight before serving")
 
 **The server starts but tool calls error**
 - Read the server's output: a failed tool call logs its cause there

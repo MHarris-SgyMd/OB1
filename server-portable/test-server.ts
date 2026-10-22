@@ -1289,8 +1289,54 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   assert(JSON.stringify(waits) === JSON.stringify([["extract"], ["extract", "consolidate"], null, null, null, null, null]) && markOf("heartbeat:board-sync", { waiting: ["extract"] })?.waiting === undefined,
     `the scheduler's waiting passes are carried by name, each once, and never off another worker's row (${JSON.stringify(waits)})`);
   const refusals = ["key", "identity", "lookup", "made-up", 2, null].map((r) => markOf("heartbeat:sleep", { refused: r })?.refused ?? null);
-  assert(JSON.stringify(refusals) === JSON.stringify(["key", "identity", "lookup", null, null, null]) && markOf("heartbeat:board-sync", { refused: "key" })?.refused === undefined && markOf("heartbeat:sleep", { refused: "made-up" }) !== undefined,
-    `the scheduler's refusal is carried when one of the list, and its row counts either way (${JSON.stringify(refusals)})`);
+  // Since SMD-3214 db/supervise.ts's guard writes one on any compose follower's row, so every worker's is read.
+  assert(JSON.stringify(refusals) === JSON.stringify(["key", "identity", "lookup", null, null, null]) && markOf("heartbeat:board-sync", { refused: "key" })?.refused === "key" && markOf("heartbeat:extract:x", { refused: "identity" })?.refused === "identity" && markOf("heartbeat:extract:x", { refused: "made-up" })?.refused === undefined && markOf("heartbeat:sleep", { refused: "made-up" }) !== undefined,
+    `a refusal is carried when one of the list, on any worker's row, and its row counts either way (${JSON.stringify(refusals)})`);
+  // The supervisor's next try (SMD-3214): on an ended row, of the shape, else left off — the row counted either way.
+  const ended = { ended: true, outcome: "failed" };
+  const restarts = [
+    { in_s: 60, code: 2, tries: 1 }, { in_s: null, code: 2, tries: 0 }, { in_s: 900, code: 1, tries: 7 },
+    { in_s: -1, code: 2, tries: 1 }, { in_s: 86_401, code: 2, tries: 1 }, { in_s: 60, code: 256, tries: 1 }, { in_s: 60, code: 2 }, { in_s: "60", code: 2, tries: 1 }, null, "soon",
+  ].map((r) => markOf("heartbeat:board-sync", { ...ended, restart: r }));
+  assert(restarts.every((h) => h !== undefined)
+      && JSON.stringify(restarts.map((h) => h?.restart ?? null)) === JSON.stringify([{ inS: 60, code: 2, tries: 1 }, { inS: null, code: 2, tries: 0 }, { inS: 900, code: 1, tries: 7 }, null, null, null, null, null, null, null])
+      && markOf("heartbeat:extract:x", { restart: { in_s: 60, code: 2, tries: 1 } })?.restart === undefined,
+    `a restart is carried on an ended row when of the shape, never on a live one, and its row counts either way (${JSON.stringify(restarts.map((h) => h?.restart ?? null))})`);
+  // Its words: held, with the cause and the next try by the row's own clock — the try past due said so — and none for a row no supervisor ended.
+  const heldRow = (age_s: number, restart: unknown, extra: Record<string, unknown> = {}) =>
+    parseHeartbeats([{ key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, ...ended, restart, ...extra }), at, age_s }]).heartbeats[0];
+  const heldState = (h: ReturnType<typeof heldRow>) => heartbeatState(h!);
+  const soon = heldState(heldRow(20, { in_s: 80, code: 2, tries: 2 }));
+  const heldGuard = heldState(heldRow(5, { in_s: null, code: 2, tries: 0 }, { refused: "identity" }));
+  const due = heldState(heldRow(120, { in_s: 60, code: 1, tries: 1 }));
+  assert(/^held: exited 2, 2 end\(s\) in a row — its supervisor runs it again in 60 s \(last stamped 20 s ago/.test(soon)
+      && /^held: refused \(identity\) — its supervisor runs it again only once the service is recreated/.test(heldGuard)
+      && /^held: exited 1, 1 end\(s\) in a row — its supervisor ran it again 60 s ago, and it has not stamped since/.test(due)
+      && heldState(heldRow(5, undefined)) === "ended on a failure (last stamped 5 s ago, every 60 s)",
+    `a held row reads held, its cause and its next try — the try past due said so — and an ended row with none reads as before (${soon} | ${heldGuard} | ${due})`);
+  // A follower ended on its start's refusal says the kind; the scheduler's row leaves it to preflight's own words (SMD-3214).
+  const endedWith = (key: string) => heartbeatState(parseHeartbeats([{ key, value: JSON.stringify({ ...good, every_s: 60, ...ended, refused: "linear-key" }), at, age_s: 5 }]).heartbeats[0]!);
+  assert(endedWith("heartbeat:board-sync") === "ended on a failure, refused at its start (linear-key) (last stamped 5 s ago, every 60 s)"
+      && endedWith("heartbeat:sleep") === "ended on a failure (last stamped 5 s ago, every 60 s)",
+    `an ended follower says its start's refusal by kind, the scheduler's row as before (${endedWith("heartbeat:board-sync")})`);
+  // Its budget (SMD-2679): the stop's word on a sleep that is over, of the two, and the budget of the shape; else left off, the row counted.
+  const stops = [{ from: at, to: at, budget: "clock" }, { from: at, to: at, budget: "statement" }, { from: at, to: null, budget: "clock" }, { from: at, to: at, budget: "rest" }]
+    .map((m) => markOf("heartbeat:sleep", { slept: m })?.slept?.budget ?? null);
+  // The bound rides with the word only, within its kind's range; `resting` only true, only the scheduler's.
+  const limits = [{ budget: "clock", limit: 60 }, { budget: "statement", limit: 0 }, { budget: "clock", limit: 10_081 }, { budget: "statement", limit: -1 }, { limit: 60 }]
+    .map((m) => markOf("heartbeat:sleep", { slept: { from: at, to: at, ...m } })?.slept?.limit ?? null);
+  assert(JSON.stringify(limits) === JSON.stringify([60, 0, null, null, null]) && markOf("heartbeat:sleep", { resting: true })?.resting === true
+      && markOf("heartbeat:sleep", { resting: "yes" })?.resting === undefined && markOf("heartbeat:board-sync", { resting: true })?.resting === undefined
+      // Not on a row that speaks for nothing running: ended, or stale (review pass 2).
+      && markOf("heartbeat:sleep", { resting: true, ended: true, outcome: "stopped" })?.resting === undefined
+      && parseHeartbeats([{ key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, resting: true }), at, age_s: 181 }]).heartbeats[0]?.resting === undefined,
+    `a stop's bound is carried with its word and within its kind's range, and resting only when true on the scheduler's row (${JSON.stringify(limits)})`);
+  const BUDGET = { minutes: 60, statementTimeoutS: 300, workMemMb: 4, maintenanceWorkMemMb: 64, stops: 3 };
+  const budgets = [BUDGET, { ...BUDGET, stops: -1 }, { ...BUDGET, workMemMb: 0 }, { ...BUDGET, minutes: 10_081 }, { ...BUDGET, statementTimeoutS: "300" }, null]
+    .map((b) => markOf("heartbeat:sleep", { budget: b })?.budget?.stops ?? null);
+  assert(JSON.stringify(stops) === JSON.stringify(["clock", "statement", null, null]) && JSON.stringify(budgets) === JSON.stringify([3, null, null, null, null, null])
+      && markOf("heartbeat:board-sync", { budget: BUDGET })?.budget === undefined && markOf("heartbeat:sleep", { budget: { ...BUDGET, stops: -1 } }) !== undefined,
+    `the scheduler's budget stop is carried on a sleep that is over and of the two, its budget when of the shape, never off another worker's row (${JSON.stringify(stops)}; ${JSON.stringify(budgets)})`);
   assert(heartbeatState(bs) === "alive (last stamped 15 min ago, every 300 s)" && heartbeatState(ex) === "stale (last stamped 3 min ago, every 60 s; 12 of its last 50 answers malformed)"
       && heartbeatState({ ...bs, outcome: "failed" }) === "alive, its last pass failed (last stamped 15 min ago, every 300 s)"
       && heartbeatState({ ...bs, running: true, waiting: ["extract"] }) === "waiting for the provider at a pass's start (last stamped 15 min ago, every 300 s)" && heartbeatState({ ...bs, running: true }) === "running a pass (last stamped 15 min ago, every 300 s)"
@@ -1742,7 +1788,8 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     const handlers = new Map<string, () => void>();
     const lines: string[] = [];
     const exits: number[] = [];
-    const { stopped } = drainOnSignal({ close: async () => true, drainBoundMs: 200, closeBoundMs: 100, log: (l) => lines.push(l), exit: (c) => exits.push(c), on: (s, h) => handlers.set(s, h), ...opts });
+    // The flush's budget at the close's bound, so a stalled collector's row takes 100 ms, not FLUSH_BUDGET_MS (SMD-2902).
+    const { stopped } = drainOnSignal({ close: async () => true, drainBoundMs: 200, closeBoundMs: 100, flushBudgetMs: 100, log: (l) => lines.push(l), exit: (c) => exits.push(c), on: (s, h) => handlers.set(s, h), ...opts });
     return { handlers, lines, exits, stopped };
   };
   /** The stop's exit code, or -1 when it has not run to its exit within 3 s: a hang fails its row rather than the suite. */
@@ -1811,7 +1858,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   const timedOut = await flushLine(async () => "timeout");
   assert(stalled.code === 0 && /; no database pool was opened; telemetry not all sent within 100 ms; exit 0$/.test(stalled.line) && /; database pool closed; telemetry sent; exit 0$/.test(went.line)
     && /; database pool closed; exit 0$/.test(unset.line) && /; telemetry not all sent; exit 0$/.test(failed.line) && /; no telemetry left to send; exit 0$/.test(none.line) && /; telemetry not all sent within 100 ms; exit 0$/.test(timedOut.line),
-    `the telemetry's flush is its own clause, under the pool's bound: sent, not sent, none left, not within it — a stalled collector is not the pool's (${[stalled.line, went.line, unset.line, failed.line, none.line, timedOut.line].join(" | ")})`);
+    `the telemetry's flush is its own clause: sent, not sent, none left, not within its bound — a stalled collector is not the pool's (${[stalled.line, went.line, unset.line, failed.line, none.line, timedOut.line].join(" | ")})`);
   // What the runtime no longer counts but a record holds open ends before the flush, on a drained stop and a cut
   // alike; and a cut that throws (a sink that fell over) leaves the flush and the exit to run (PR 2c review pass 3).
   const drainedOrder: string[] = [];
@@ -1825,9 +1872,9 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   const throwingCode = await settled(throwingCut.stopped);
   assert(drainedCode === 0 && drainedOrder.join() === "endOpen,flush" && throwingCode === 1 && cutOrder.join() === "onCut,endOpen,flush" && /; telemetry sent; exit 1$/.test(throwingCut.lines.at(-1) ?? ""),
     `open records ended before the flush on either path; a cut that throws still flushes and exits (${drainedOrder.join()} / ${cutOrder.join()}; ${throwingCut.lines.at(-1)})`);
-  // Beside the pool's close, not after it: both stalled take one bound, not two;
-  // and a second signal ends the flush's wait as it ends the pool's (review pass 2).
-  const both = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 300, flush: () => new Promise(() => {}) });
+  // Beside the pool's close, not after it: both stalled take the longer bound, not the two added (SMD-2902: each its
+  // own, 300 ms and 400); and a second signal ends the flush's wait as it ends the pool's (review pass 2).
+  const both = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 300, flushBudgetMs: 400, flush: () => new Promise(() => {}) });
   const b3 = performance.now();
   both.handlers.get("SIGTERM")!();
   await settled(both.stopped);
@@ -1838,8 +1885,81 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   await Bun.sleep(20);
   twice.handlers.get("SIGTERM")!();
   await settled(twice.stopped);
-  assert(bothMs < 550 && performance.now() - b4 < 1_000 && /database pool not closed: a second signal; telemetry not all sent: a second signal; exit 0$/.test(twice.lines.at(-1) ?? ""),
-    `a stalled pool and a stalled collector take one bound (${Math.round(bothMs)} ms of 300), and a second signal ends both waits (${twice.lines.at(-1)})`);
+  assert(bothMs >= 390 && bothMs < 650 && /database pool not closed within 300 ms; telemetry not all sent within 400 ms; exit 0$/.test(both.lines.at(-1) ?? "")
+    && performance.now() - b4 < 1_000 && /database pool not closed: a second signal; telemetry not all sent: a second signal; exit 0$/.test(twice.lines.at(-1) ?? ""),
+    `a stalled pool and a stalled collector take the longer of their bounds, not both (${Math.round(bothMs)} ms of 300 and 400: ${both.lines.at(-1)}), and a second signal ends both waits (${twice.lines.at(-1)})`);
+
+  // SMD-2902: the flush's own bound — its budget, inside what the grace period leaves less a second before the kill,
+  // never less than the close's — and, cut short, what each signal still held said (`unsent`) before the stop's line.
+  const bounded = async (opts: Partial<Parameters<typeof drainOnSignal>[0]> & { server: () => any }) => {
+    const told: string[] = [];
+    const bh = harness({ unsent: (kind) => { told.push(kind); bh.lines.push(`unsent: ${kind}`); }, ...opts });
+    const t = performance.now();
+    bh.handlers.get("SIGTERM")!();
+    const code = await settled(bh.stopped);
+    return { code, ms: performance.now() - t, told, lines: bh.lines, line: bh.lines.at(-1) ?? "", within: Number(/telemetry not all sent within (\d+) ms/.exec(bh.lines.at(-1) ?? "")?.[1] ?? NaN) };
+  };
+  const stall = () => new Promise<never>(() => {});
+  // A collector slower than the pool's close, inside the flush's budget: sent, not cut at the close's 100 ms.
+  const slower = await bounded({ server: () => undefined, flushBudgetMs: 600, flush: () => Bun.sleep(300).then(() => "sent" as const) });
+  // The grace period caps the budget: 1.4 s less the margin leaves about 400 ms of a 5 s budget.
+  const capped = await bounded({ server: () => undefined, graceMs: 1_400, flushBudgetMs: 5_000, flush: stall });
+  // A grace period with nothing left past the margin: the close's bound, as before.
+  const floored = await bounded({ server: () => undefined, graceMs: 1_000, flushBudgetMs: 5_000, flush: stall });
+  // After a cut at the 200 ms drain bound: what the grace leaves (1.5 s less 1 s less the 0.2 s drained), not the budget.
+  const cutStall = stuck();
+  const afterCut = await bounded({ server: () => cutStall.server, graceMs: 1_500, flushBudgetMs: 5_000, closeAfterCutMs: 50, flush: stall });
+  assert(slower.code === 0 && /; database pool closed; telemetry sent; exit 0$/.test(slower.line) && slower.told.length === 0
+    && capped.within >= 370 && capped.within <= 400 && capped.ms < 700 && floored.within === 100 && afterCut.code === 1 && afterCut.within >= 250 && afterCut.within <= 300,
+    `the flush's own bound: a 300 ms collector sent under a 600 ms budget (${slower.line}); a 1.4 s grace caps a 5 s budget at ${capped.within} ms; a 1 s grace leaves the close's 100 ms (${floored.within}); after a cut at 200 ms, a 1.5 s grace leaves ${afterCut.within} ms`);
+  const cutWord = (r: { told: string[]; lines: string[] }) => r.told.join("|") + " @" + r.lines.findIndex((l) => l.startsWith("unsent: ")) + "/" + (r.lines.length - 1);
+  assert(capped.told.length === 1 && capped.told[0] === `on its way or batched when the flush's ${capped.within} ms ran out` && capped.lines.at(-2)?.startsWith("unsent: ")
+    && afterCut.told.length === 1 && afterCut.lines.at(-2)?.startsWith("unsent: "),
+    `a flush cut at its bound says what was still on its way, once, just before the stop's line (${cutWord(capped)}; ${cutWord(afterCut)})`);
+  // A second signal while the flush waits, the pool already closed: the flush ends, and says what it held.
+  const told2: string[] = [];
+  const again = harness({ server: () => undefined, close: async () => true, flushBudgetMs: 60_000, flush: stall, unsent: (kind) => told2.push(kind) });
+  const b5 = performance.now();
+  again.handlers.get("SIGTERM")!();
+  await Bun.sleep(30);
+  again.handlers.get("SIGTERM")!();
+  // A third at once: what the batches held is said once — a second cut would count them again (review pass 2).
+  again.handlers.get("SIGTERM")!();
+  const againCode = await settled(again.stopped);
+  // A sink that throws is the telemetry's: the stop still says its line and exits.
+  const throwing = await bounded({ server: () => undefined, graceMs: 1_200, flushBudgetMs: 5_000, flush: stall, unsent: () => { throw new Error("the sink fell over"); } });
+  assert(againCode === 0 && performance.now() - b5 < 1_000 && /; database pool closed; telemetry not all sent: a second signal; exit 0$/.test(again.lines.at(-1) ?? "") && told2.length === 1 && told2.join() === "on its way or batched at a second signal"
+    && throwing.code === 0 && /telemetry not all sent within \d+ ms; exit 0$/.test(throwing.line),
+    `a second signal ends the flush's own wait and says what it held (${told2.join()}; ${again.lines.at(-1)}); an unsent sink that throws leaves the line and the exit (${throwing.line})`);
+  // A second signal during the drain (review pass 1): the operator waits for none of the rest, so the flush gets the
+  // close's after-cut bound, not its budget, and says what it held as the second signal's.
+  const drainStuck = stuck();
+  const told3: string[] = [];
+  const duringDrain = harness({ server: () => drainStuck.server, drainBoundMs: 60_000, closeAfterCutMs: 50, flushBudgetMs: 60_000, graceMs: 120_000, flush: stall, unsent: (kind) => told3.push(kind) });
+  const b6 = performance.now();
+  duringDrain.handlers.get("SIGTERM")!();
+  await Bun.sleep(30);
+  duringDrain.handlers.get("SIGTERM")!();
+  const duringCode = await settled(duringDrain.stopped);
+  const duringMs = performance.now() - b6;
+  // A flush that ended before a second signal cuts the close: nothing more is said of it (review pass 1).
+  const told4: string[] = [];
+  const ended = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000, flush: async () => "sent" as const, unsent: (kind) => told4.push(kind) });
+  ended.handlers.get("SIGTERM")!();
+  await Bun.sleep(30);
+  ended.handlers.get("SIGTERM")!();
+  const endedCode = await settled(ended.stopped);
+  const told5: string[] = [];
+  const rejected = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000, flush: () => Promise.reject(new Error("the SDK fell over")), unsent: (kind) => told5.push(kind) });
+  rejected.handlers.get("SIGTERM")!();
+  await Bun.sleep(30);
+  rejected.handlers.get("SIGTERM")!();
+  const rejectedCode = await settled(rejected.stopped);
+  assert(rejectedCode === 0 && told5.length === 0 && /database pool not closed: a second signal; telemetry not all sent; exit 0$/.test(rejected.lines.at(-1) ?? ""),
+    `a flush that rejected has ended too: a second signal says nothing more of it (${told5.length}: ${rejected.lines.at(-1)})`);
+  assert(duringCode === 1 && duringMs < 400 && /; telemetry not all sent: a second signal; exit 1$/.test(duringDrain.lines.at(-1) ?? "") && told3.join() === "on its way or batched at a second signal"
+    && endedCode === 0 && told4.length === 0 && /database pool not closed: a second signal; telemetry sent; exit 0$/.test(ended.lines.at(-1) ?? ""),
+    `a second signal during the drain cuts the flush to the close's bound (${Math.round(duringMs)} ms, ${told3.join()}: ${duringDrain.lines.at(-1)}); a flush that had ended says nothing more (${told4.length}: ${ended.lines.at(-1)})`);
 
   const cut = cutByStopLine("tools/call capture_thought", 8_400);
   assert(cut.startsWith("request cut off by the server's stop after 8.4 s: tools/call capture_thought — still running when the stop closed it") && !/runs to its end/.test(cut) && cut !== abandonedRequestLine("tools/call capture_thought", 8_400),
@@ -3543,7 +3663,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   try {
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
     startedAnyway = await startTelemetry("probe", (l) => { startSaid.push(l); if (l.includes(" go to ")) throw new Error("the sink fell over"); },
-      async () => ({ setUpTelemetry: () => ({ serviceName: "probe-svc\nforged", flush: async () => "none" as const, shutdown: async () => {}, emit: () => {} }) }));
+      async () => ({ setUpTelemetry: () => ({ serviceName: "probe-svc\nforged", flush: async () => "none" as const, cut: () => {}, shutdown: async () => {}, emit: () => {} }) }));
   } finally {
     if (savedEndpoint === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedEndpoint;
@@ -3557,7 +3677,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
     const loading = startTelemetry("probe", () => {}, async () => {
       await Bun.sleep(30);
-      return { setUpTelemetry: () => ({ serviceName: "probe-svc", flush: async () => "sent" as const, shutdown: async () => { shut += 1; }, emit: () => {} }) };
+      return { setUpTelemetry: () => ({ serviceName: "probe-svc", flush: async () => "sent" as const, cut: () => {}, shutdown: async () => { shut += 1; }, emit: () => {} }) };
     });
     await stopTelemetry();
     raceStarted = await loading;
@@ -3576,10 +3696,10 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
     const stale = startTelemetry("probe", () => {}, async () => {
       await Bun.sleep(30);
-      return { setUpTelemetry: () => ({ serviceName: "stale", flush: async () => "failed" as const, shutdown: async () => { await Bun.sleep(30); order.push("stale shut"); }, emit: () => {} }) };
+      return { setUpTelemetry: () => ({ serviceName: "stale", flush: async () => "failed" as const, cut: () => {}, shutdown: async () => { await Bun.sleep(30); order.push("stale shut"); }, emit: () => {} }) };
     });
     const stopped = stopTelemetry().then(() => { order.push("stop returned"); });
-    const fresh = startTelemetry("probe", () => {}, async () => ({ setUpTelemetry: () => ({ serviceName: "fresh", flush: async () => "sent" as const, shutdown: async () => { fastShut += 1; }, emit: () => {} }) }));
+    const fresh = startTelemetry("probe", () => {}, async () => ({ setUpTelemetry: () => ({ serviceName: "fresh", flush: async () => "sent" as const, cut: () => {}, shutdown: async () => { fastShut += 1; }, emit: () => {} }) }));
     await Promise.all([stale, stopped]);
     restarted = await fresh;
   } finally {
@@ -4094,6 +4214,31 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   assert(measured.includes('"http.server.request.duration"') && measured.includes('"tools/list"') && measured.includes('"refused"') && !measured.includes('"MCP_ACCESS_KEY"'),
     `the request-duration histogram, labelled with the request's MCP method and outcome, never the key's name (${measured.slice(0, 200)})`);
   assert(!everything.includes(PLANTED) && !everything.includes(KEY) && !everything.includes("note="), `no signal holds the key, the query string or the planted text (${everything.length} chars)`);
+
+  // SMD-2902, this entry's stop wired as the REST core's (review pass 1's mutants): a collector that never answers is
+  // cut at what its 3 s grace leaves less a second — not the 5 s budget, which a grace not passed would give — and
+  // what each signal held is said.
+  const hung = Bun.serve({ port: 0, idleTimeout: 0, fetch: () => new Promise<Response>(() => {}) });
+  const hungPort = hung.port;
+  const silent2 = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
+  const mcp2 = await serveChild(throughClient ? `${import.meta.dir}/../mcp-server` : import.meta.dir, "index.ts", {
+    OB1_STOP_GRACE: "3", MCP_ACCESS_KEY: KEY, DATABASE_URL: `postgres://u:p@127.0.0.1:${silent2.port}/db`, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${hungPort}`,
+    ...(throughClient ? { OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent2.port}`, OB1_PLUGINS: "" } : {}),
+  }, { waitForSdk: true });
+  let out2 = "";
+  try {
+    await fetch(`http://127.0.0.1:${mcp2.port}/mcp`, { method: "POST", headers: H, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }).then((r) => r.text());
+    out2 = await mcp2.stop();
+  } finally {
+    mcp2.kill();
+    hung.stop(true);
+    silent2.stop(true);
+  }
+  const hungLine = out2.split("\n").find((l) => l.startsWith("SIGTERM: stopped")) ?? "";
+  const hungWithin = Number(/telemetry not all sent within (\d+) ms; exit 0$/.exec(hungLine)?.[1] ?? NaN);
+  const hungSaid = out2.split("\n").filter((l) => l.includes(`not sent to http://127.0.0.1:${hungPort} (on its way or batched when the flush's ${hungWithin} ms ran out)`));
+  assert(mcp2.up && mcp2.sdk && hungWithin >= 1_500 && hungWithin <= 2_000 && hungSaid.some((l) => /^telemetry: \d+ spans? not sent/.test(l)) && hungSaid.some((l) => /^telemetry: \d+ log records? not sent/.test(l)),
+    `bun index.ts with a collector that never answers: its flush cut at what a 3 s grace leaves (${hungWithin} ms), each signal's held said (${hungLine} / ${hungSaid.join(" / ")})`);
 }
 
 server.stop();
@@ -4217,7 +4362,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
 {
   const { beginRequest, cutOpenRequests, flushTelemetry, openRequestCount, planTelemetry, requestLine, startTelemetry, stopTelemetry, withToolSpan } = await import("./telemetry.ts");
   const { faultOf } = await import("./spans.ts");
-  const { batchOptions, batchSizes, flushesResult, flushSignal, logDrops, metricTimes, setUpTelemetry, watchExporter } = await import("./otel-setup.ts");
+  const { batchOptions, batchSizes, exportDeadlineFrom, exportTimeoutFrom, flushesResult, flushSignal, logDrops, metricTimes, partialBuckets, partialRejections, setUpTelemetry, watchExporter } = await import("./otel-setup.ts");
   const { ROOT_CONTEXT, metrics: metricsApi, trace: traceApi } = await import("@opentelemetry/api");
   const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
   const { AggregationTemporality, InMemoryMetricExporter } = await import("@opentelemetry/sdk-metrics");
@@ -4347,7 +4492,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
 
   // An SDK whose log record throws: the request still ends, its line written (a record lost, never the request).
   const ended: string[] = [];
-  await startWith(() => ({ serviceName: "probe", flush: async () => "none" as const, shutdown: async () => {}, emit: () => { throw new Error("the logger fell over"); } }));
+  await startWith(() => ({ serviceName: "probe", flush: async () => "none" as const, cut: () => {}, shutdown: async () => {}, emit: () => { throw new Error("the logger fell over"); } }));
   let threw = false;
   try {
     beginRequest("api", new Request("http://api/v1/whoami"), (r) => ended.push(requestLine(r))).end({ status: 200 });
@@ -4525,7 +4670,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://tempo:4318/v1/traces";
   process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector:4318";
   try {
-    await startTelemetry("probe", (l) => startLines.push(l), async () => ({ setUpTelemetry: () => ({ serviceName: "probe", flush: async () => "none" as const, shutdown: async () => {}, emit: () => {} }) }));
+    await startTelemetry("probe", (l) => startLines.push(l), async () => ({ setUpTelemetry: () => ({ serviceName: "probe", flush: async () => "none" as const, cut: () => {}, shutdown: async () => {}, emit: () => {} }) }));
   } finally {
     for (const [name, value] of [["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", startEnv.traces], ["OTEL_EXPORTER_OTLP_ENDPOINT", startEnv.generic]] as const) {
       if (value === undefined) delete process.env[name];
@@ -4547,6 +4692,119 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   void flushSignal({ forceFlush: () => new Promise<void>(() => {}) }, stalled);
   await Bun.sleep(20);
   assert(early.length === 2 && early[1] === "telemetry: 2 log records not sent to http://collector:4318 (queue full) (SMD-1849)", `a flush that never ends has said what it held, before the wait (${early.join(" / ")})`);
+
+  // SMD-2902: the stop's cut counts each export on its way, and what its batch still held, once — a second cut adds
+  // only what it newly finds, and an export a cut counted says nothing more when it fails after (review pass 1's mutants).
+  const cutSaid: string[] = [];
+  let endLater: (result: { code: number; error?: Error }) => void = () => {};
+  const cutWatched = watchExporter({ export: (_items: unknown, done: (result: { code: number; error?: Error }) => void) => { endLater = done; }, shutdown: async () => {} } as never, { origin: "http://collector:4318", warn: (l) => cutSaid.push(l) });
+  cutWatched.export([1, 2] as never, () => {});
+  cutWatched.cut("on its way", 3);
+  cutWatched.cut("again");
+  endLater({ code: 1, error: Object.assign(new Error("refused"), { code: "ECONNREFUSED" }) });
+  cutWatched.sayRest();
+  assert(cutSaid.join(" / ") === "telemetry: 5 spans not sent to http://collector:4318 (on its way) (SMD-1849)" && cutWatched.mark().pending === 0,
+    `a cut says the export on its way and what was held once, a second cut nothing, the export's later failure nothing (${cutSaid.join(" / ")})`);
+
+  // SMD-2902 PR 2: an export unanswered past its deadline — a collector that trickles its answer, which the exporter's
+  // idle timeout never cuts — is counted as not sent, `no answer in time`, and no longer waited on: idle() resolves, the
+  // stop's cut finds nothing, and its late answer counts nothing.
+  const lateSaid: string[] = [];
+  const lateDone: number[] = [];
+  let answerLate: (result: { code: number; error?: Error }) => void = () => {};
+  // Its inner flush never ends, as the SDK's queue does not while a trickle holds one export (review pass 1).
+  const overdue = watchExporter({ export: (_items: unknown, done: (result: { code: number; error?: Error }) => void) => { answerLate = done; }, shutdown: async () => {}, forceFlush: () => new Promise<void>(() => {}) } as never, { origin: "http://collector:4318", warn: (l) => lateSaid.push(l), deadlineMs: 40 });
+  overdue.export([1, 2, 3] as never, (r: { code: number }) => lateDone.push(r.code));
+  const beforeDeadline = overdue.mark().pending;
+  await Bun.sleep(90);
+  const lateIdle = await Promise.race([overdue.idle().then(() => "idle"), Bun.sleep(30).then(() => "waiting")]);
+  const lateFlush = await Promise.race([overdue.forceFlush().then(() => "flushed"), Bun.sleep(30).then(() => "waiting")]);
+  // Its late answer a failure: still nothing more said or counted (review pass 1's mutants).
+  answerLate({ code: 1, error: Object.assign(new Error("refused"), { code: "ECONNREFUSED" }) });
+  overdue.cut("on its way");
+  assert(beforeDeadline === 1 && lateSaid.join(" / ") === "telemetry: 3 spans not sent to http://collector:4318 (no answer in time) (SMD-1849)" && lateIdle === "idle" && lateFlush === "flushed"
+    && overdue.mark().pending === 0 && overdue.mark().failed === 1 && lateDone.join() === "1",
+    `an export past its deadline: counted once as no answer in time, the SDK handed one failure then, no longer waited on by idle() or a flush, its late answer and the stop's cut nothing more (${lateSaid.join(" / ")}; ${lateIdle}, ${lateFlush}; done ${lateDone.join()})`);
+  // The stop's cut first, then the deadline: counted once, by the cut; the deadline only lets it go (review pass 1).
+  const cutFirst: string[] = [];
+  const cutDone: number[] = [];
+  const cutThenLate = watchExporter({ export: () => {}, shutdown: async () => {} } as never, { origin: "http://collector:4318", warn: (l) => cutFirst.push(l), deadlineMs: 40 });
+  cutThenLate.export([1, 2] as never, (r: { code: number }) => cutDone.push(r.code));
+  cutThenLate.cut("on its way");
+  await Bun.sleep(90);
+  cutThenLate.sayRest();
+  assert(cutFirst.join(" / ") === "telemetry: 2 spans not sent to http://collector:4318 (on its way) (SMD-1849)" && cutThenLate.mark().pending === 0 && cutThenLate.mark().failed === 1 && cutDone.join() === "1",
+    `a cut, then the deadline: counted once by the cut, then let go — no longer pending, the SDK handed its failure (${cutFirst.join(" / ")}; ${JSON.stringify(cutThenLate.mark())})`);
+  // An export answered at once says nothing when its deadline would have passed: the answer clears it.
+  const promptSaid: string[] = [];
+  const answered = watchExporter({ export: (_items: unknown, done: (result: { code: number }) => void) => done({ code: 0 }), shutdown: async () => {} } as never, { origin: "http://collector:4318", warn: (l) => promptSaid.push(l), deadlineMs: 40 });
+  answered.export([1] as never, () => {});
+  await Bun.sleep(90);
+  answered.sayRest();
+  // The cut, then a partial success: counted once, by the cut, though the answer still counts the export failed.
+  const cutPartSaid: string[] = [];
+  let answerCutPart: (result: { code: number }) => void = () => {};
+  const cutPart = watchExporter({ export: (_items: unknown, done: (result: { code: number }) => void) => { answerCutPart = done; }, shutdown: async () => {} } as never, { origin: "http://collector:4318", warn: (l) => cutPartSaid.push(l), takeRejected: () => 2 });
+  cutPart.export([1, 2, 3] as never, () => {});
+  cutPart.cut("on its way");
+  answerCutPart({ code: 0 });
+  cutPart.sayRest();
+  // A partial success answering an export past its deadline is still that export's: the next export is not blamed.
+  const latePartSaid: string[] = [];
+  const latePartDone: ((result: { code: number }) => void)[] = [];
+  let latePartCount = 0;
+  const latePart = watchExporter({ export: (_items: unknown, done: (result: { code: number }) => void) => { latePartDone.push(done); }, shutdown: async () => {} } as never, {
+    origin: "http://collector:4318", warn: (l) => latePartSaid.push(l), deadlineMs: 40, takeRejected: () => { const n = latePartCount; latePartCount = 0; return n; },
+  });
+  latePart.export([1, 2] as never, () => {});
+  await Bun.sleep(90);
+  latePartCount = 3;
+  latePartDone[0]({ code: 0 });
+  latePart.export([1] as never, () => {});
+  latePartDone[1]({ code: 0 });
+  latePart.sayRest();
+  assert(promptSaid.length === 0 && answered.mark().failed === 0
+    && cutPartSaid.join(" / ") === "telemetry: 3 spans not sent to http://collector:4318 (on its way) (SMD-1849)" && cutPart.mark().failed === 1
+    && latePartSaid.join(" / ") === "telemetry: 2 spans not sent to http://collector:4318 (no answer in time) (SMD-1849)" && latePartCount === 0 && latePart.mark().failed === 1,
+    `answered at once, nothing at the deadline; a cut then a partial success, said once by the cut; a late partial success taken by its own export, the next not blamed (${[...promptSaid, ...cutPartSaid, ...latePartSaid].join(" / ")})`);
+  // The buckets between the diag line and the export: by signal, summed, taken once.
+  const buckets = partialBuckets();
+  buckets.add("Received Partial Success response:", ['{"rejectedSpans":"2"}']);
+  buckets.add("Received Partial Success response:", ['{"rejectedSpans":"1","rejectedLogRecords":"4"}']);
+  buckets.add("another line", ['{"rejectedSpans":"9"}']);
+  const takes = [buckets.take("traces"), buckets.take("traces"), buckets.take("logs"), buckets.take("metrics")];
+  assert(takes.join() === "3,0,4,0", `a signal's partial successes summed and taken once, another line nothing (${takes.join()})`);
+  // A partial success: what the collector rejected of an export is not sent, at most the export's own count; an
+  // answer that rejected nothing is sent.
+  let rejectNext = 0;
+  const partSaid: string[] = [];
+  const part = watchExporter({ export: (_items: unknown, done: (result: { code: number }) => void) => done({ code: 0 }), shutdown: async () => {} } as never, {
+    origin: "http://collector:4318", warn: (l) => partSaid.push(l), takeRejected: () => { const n = rejectNext; rejectNext = 0; return n; },
+  });
+  // A metric export, counted whole, is said as partly rejected.
+  const metricSaid: string[] = [];
+  const metricPart = watchExporter({ export: (_items: unknown, done: (result: { code: number }) => void) => done({ code: 0 }), shutdown: async () => {} } as never, {
+    origin: "http://collector:4318", warn: (l) => metricSaid.push(l), noun: ["metric export", "metric exports"], takeRejected: () => 4, rejectedKind: "partly rejected by the collector",
+  }, () => 1);
+  metricPart.export({} as never, () => {});
+  rejectNext = 2;
+  part.export([1, 2, 3, 4, 5] as never, () => {});
+  part.export([1] as never, () => {});
+  rejectNext = 9;
+  part.export([1, 2] as never, () => {});
+  part.sayRest();
+  assert(partSaid.join(" / ") === "telemetry: 2 spans not sent to http://collector:4318 (rejected by the collector) (SMD-1849) / telemetry: 2 spans not sent to http://collector:4318 (rejected by the collector) (SMD-1849)" && part.mark().failed === 2,
+    `a partial success's rejected items are not sent, at most the export's own; one that rejected nothing is sent (${partSaid.join(" / ")}; failed ${part.mark().failed})`);
+  assert(metricSaid.join() === "telemetry: 1 metric export not sent to http://collector:4318 (partly rejected by the collector) (SMD-1849)", `a metric export partly rejected is one, said as partly rejected (${metricSaid.join()})`);
+  // The diag line's counts by signal, never its message; and the exporter's timeout read as the SDK reads it.
+  const PS = "Received Partial Success response:";
+  const pr = (message: string, arg: unknown) => JSON.stringify(partialRejections(message, [arg]));
+  const prCases = [pr(PS, '{"rejectedSpans":"3","errorMessage":"over quota"}'), pr(PS, '{"rejectedDataPoints":2}'), pr(PS, '{"rejectedLogRecords":"0","errorMessage":"a warning"}'), pr("another line", '{"rejectedSpans":"3"}'), pr(PS, "not json"), pr(PS, '{"rejectedSpans":"-4"}')];
+  const et = (env: Record<string, string>, signal: "TRACES" | "METRICS" | "LOGS") => exportTimeoutFrom(env, signal);
+  const edCases = [exportDeadlineFrom({}, "TRACES"), exportDeadlineFrom({ OTEL_EXPORTER_OTLP_TIMEOUT: "1000" }, "LOGS"), exportDeadlineFrom({ OTEL_EXPORTER_OTLP_TIMEOUT: "3000000000" }, "METRICS")];
+  const etCases = [et({}, "TRACES"), et({ OTEL_EXPORTER_OTLP_TIMEOUT: "3000" }, "LOGS"), et({ OTEL_EXPORTER_OTLP_TRACES_TIMEOUT: "500", OTEL_EXPORTER_OTLP_TIMEOUT: "3000" }, "TRACES"), et({ OTEL_EXPORTER_OTLP_TIMEOUT: "-1" }, "METRICS"), et({ OTEL_EXPORTER_OTLP_TIMEOUT: "soon" }, "METRICS"), et({ OTEL_EXPORTER_OTLP_METRICS_TIMEOUT: " " }, "METRICS")];
+  assert(prCases.join(" ") === '{"traces":3} {"metrics":2} {} {} {} {}' && etCases.join(" ") === "10000 3000 500 10000 10000 10000" && edCases.join(" ") === "22000 4000 2147483647",
+    `a partial success's counts by signal, a 0 none, another line or a body that is not JSON nothing; the exporter's timeout its signal's, else the shared, else 10 s; the deadline twice that plus 2 s, at most a timer's longest (${prCases.join(" ")}; ${etCases.join(" ")}; ${edCases.join(" ")})`);
 
   // The sizes and times read here, as the SDK reads none of them for log records and metrics.
   const times = [metricTimes(undefined, undefined), metricTimes("5000", undefined), metricTimes("500", "100"), metricTimes("10000", "20000"), metricTimes("3000000000", undefined)];

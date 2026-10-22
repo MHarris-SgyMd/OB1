@@ -145,6 +145,10 @@ const ids: string[] = [];
               VALUES ('search', 'search_thoughts', ${q}, 10, 0, 0, '{}'::jsonb, ARRAY[${ids[0]}::uuid], ARRAY[0.9::real], 'hybrid')`;
   }
   await sql`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[1]}::uuid, 'conflict_undirected', 0.7, 'a seeded reason', 0.9, 'consolidate:stub@p2', NULL)`;
+  // Judged ahead of every read, so brain_info's oldest pending age is 0 s at
+  // both doors: each door rounds its own read's age, and two reads either side
+  // of a half second answered 0 and 1 (SMD-3195 review pass 2, under load).
+  await sql`UPDATE supersession_proposals SET judged_at = now() + interval '1 hour' WHERE status = 'pending'`;
   await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error) VALUES
     (${ids[0]}::uuid, 'extract:rest@p1', 'failed', 'w', now(), 'boom'),
     (${ids[1]}::uuid, 'extract:mcp@p1', 'failed', 'w', now(), 'boom')`;

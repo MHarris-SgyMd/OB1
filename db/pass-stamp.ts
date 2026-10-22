@@ -21,9 +21,12 @@
  * stderr), and for the sleep scheduler `slept`, its current or last sleep's
  * `from` and `to` (SleepMark), and `reads`, whether its role reads the query
  * log (LogReads, SMD-2678), and `held`, the thoughts its wakes hold back
- * (SleepHeld, SMD-2694); and `waitingMidPass`, the passes waiting mid-pass for a
+ * (SleepHeld, SMD-2694), and `budget`, its budget in force and the sleeps
+ * stopped on it (SleepBudget, SMD-2679; `slept.budget` says which stopped); and `waitingMidPass`, the passes waiting mid-pass for a
  * provider that stopped answering — the sleep scheduler's by name, a
- * follower's its own (SMD-2905). Each stamp writes the whole value: a restarted follower's first
+ * follower's its own (SMD-2905); and `restart`, on a row ended by db/supervise.ts, the compose
+ * services' command, which runs the follower again on its own (SMD-3214) — written there, not
+ * here. Each stamp writes the whole value: a restarted follower's first
  * stamp carries no block until it judges one. The time is the row's
  * updated_at — now() on the database, so a worker's clock is not read.
  * ob1_config is key/value, so no migration: the `worker` grant group already
@@ -47,7 +50,7 @@
 
 import type { SQL } from "bun";
 import { MAX_TIMER_MS } from "./lease.ts";
-import type { SleepHeld } from "../server-portable/brain-info.ts";
+import type { BudgetStop, SleepBudget, SleepHeld } from "../server-portable/brain-info.ts";
 
 /** The workers that stamp, as the key and preflight's row name them. */
 export const STAMPING_WORKERS = ["board-sync", "extract", "consolidate", "sleep"] as const;
@@ -74,8 +77,14 @@ export type PassOutcome = "ok" | "failed" | "stopped";
 /** The last judged block's answers and malformed ones, and whether they passed SMD-2266's alarm. */
 export type MalformedBlock = { answers: number; bad: number; alarm: boolean };
 
-/** The sleep scheduler's current or last sleep: when it began and, once it is over, when it ended — the database's instants, ISO strings (SMD-2678). */
-export type SleepMark = { from: string; to: string | null };
+/**
+ * The sleep scheduler's current or last sleep: when it began and, once it is
+ * over, when it ended — the database's instants, ISO strings (SMD-2678) — and
+ * `budget` when it stopped on its budget, with `limit`, the bound it stopped
+ * at: the clock's minutes, or statement_timeout's seconds (0: the role's or
+ * the database's own) (SMD-2679).
+ */
+export type SleepMark = { from: string; to: string | null; budget?: BudgetStop; limit?: number };
 
 /** Whether the sleep scheduler's role reads query_log, as its start found: a search then wakes it; otherwise only writes do (SMD-2678). */
 export type LogReads = "yes" | "denied" | "missing";
@@ -131,7 +140,8 @@ export interface PassStamper {
    * Which start refusal ended the row (`refused` in the value): one of
    * worker-bootstrap.ts's StartRefusal, set before the end that writes it, so
    * preflight names the cause and its remedy rather than "start it again",
-   * which would only refuse again (SMD-2752). Only the scheduler sets it.
+   * which would only refuse again (SMD-2752). The scheduler sets it, and since
+   * SMD-3214 a follower refused at its start, through endOnRefusal.
    */
   refused?(kind: string): void;
   /**
@@ -160,6 +170,45 @@ export interface PassStamper {
    * preflight's `sleep` row names them (SMD-2694). Only the scheduler sets it.
    */
   held?(held: SleepHeld | null): void;
+  /**
+   * The sleep scheduler's budget in force and the sleeps it has stopped on it
+   * since its process began (`budget` in the value), carried by the row's next
+   * write and kept on its end: preflight's `sleep` row says them (SMD-2679).
+   * Only the scheduler sets it.
+   */
+  budget?(budget: SleepBudget): void;
+  /**
+   * The sleep scheduler waiting for a live call before its next sleep, its
+   * last stopped on its budget (`resting` in the value, left out while not):
+   * preflight's `sleep` row says the next begins after one only then — a
+   * restarted scheduler sleeps after the quiet alone (SMD-2679, review pass 1).
+   * Cleared by the row's end.
+   */
+  resting?(on: boolean): void;
+}
+
+/** The longest endOnRefusal waits for its write: the refusal's exit must not wait on a database that does not answer. */
+export const REFUSAL_STAMP_TIMEOUT_MS = 10_000;
+
+/**
+ * A follower's row ended on its start's refusal, the kind on it (SMD-3214):
+ * the claim workers' under `--follow`, board-sync's under `--loop`, so
+ * preflight gives the kind's remedy — and, under db/supervise.ts, which keeps
+ * the follower's own word, says it is held for that cause — where the row
+ * said only "ended on a failure". Bounded by REFUSAL_STAMP_TIMEOUT_MS; a
+ * write that fails or does not land in time leaves the row as it was, and
+ * `onError` hears it.
+ */
+export async function endOnRefusal(opts: { sql: SQL; worker: StampingWorker; job?: string; intervalS: number; kind: string; onError?: (e: Error) => void; timeoutMs?: number }): Promise<void> {
+  const st = passStamper({ sql: opts.sql, worker: opts.worker, job: opts.job, intervalS: opts.intervalS, onError: opts.onError });
+  st.refused?.(opts.kind);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<void>((resolve) => { timer = setTimeout(() => { try { opts.onError?.(new Error(`no answer in ${(opts.timeoutMs ?? REFUSAL_STAMP_TIMEOUT_MS) / 1000} s`)); } catch { /* reporting only */ } resolve(); }, opts.timeoutMs ?? REFUSAL_STAMP_TIMEOUT_MS); });
+  try {
+    await Promise.race([st.end("failed"), late]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -201,12 +250,14 @@ export function passStamper(opts: {
   let waitingMidPass: readonly string[] = [];
   let refused: string | null = null;
   let held: SleepHeld | null = null;
+  let budget: SleepBudget | null = null;
+  let resting = false;
   let failing = false;
   // Writes go one after another, so a timer's "running" stamp in flight when
   // the pass ends cannot land after the pass's own and undo it.
   let queue: Promise<void> = Promise.resolve();
   const send = async (running: boolean) => {
-    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(reads ? { reads } : {}), ...(waiting.length ? { waiting } : {}), ...(waitingMidPass.length ? { waitingMidPass } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}) });
+    const value = JSON.stringify({ v: 1, ...(opts.job === undefined ? {} : { job: opts.job }), every_s: everyS, running, outcome, ...(ended ? { ended } : {}), ...(malformed ? { malformed } : {}), ...(slept ? { slept } : {}), ...(reads ? { reads } : {}), ...(waiting.length ? { waiting } : {}), ...(waitingMidPass.length ? { waitingMidPass } : {}), ...(refused ? { refused } : {}), ...(held ? { held } : {}), ...(budget ? { budget } : {}), ...(resting ? { resting } : {}) });
     try {
       await opts.sql`INSERT INTO ob1_config (key, value) VALUES (${key}, ${value})
                      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
@@ -242,6 +293,7 @@ export function passStamper(opts: {
       // An ended row waits on nothing (SMD-2752 PR 3, review pass 1), mid-pass included (SMD-2905).
       waiting = [];
       waitingMidPass = [];
+      resting = false;
       if (m !== undefined) malformed = m;
       await write(false);
     },
@@ -290,6 +342,12 @@ export function passStamper(opts: {
     },
     held(h) {
       held = h && h.total > 0 ? h : null;
+    },
+    budget(b) {
+      budget = { ...b };
+    },
+    resting(on) {
+      resting = on;
     },
   };
 }

@@ -35,7 +35,7 @@
  */
 
 import { SQL } from "bun";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,7 +44,7 @@ import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FL
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
-import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
+import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
@@ -62,8 +62,9 @@ import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.t
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
-import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
-import { passStamper, stampKey } from "./pass-stamp.ts";
+import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, rowColumns, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
+import { endOnRefusal, passStamper, stampKey } from "./pass-stamp.ts";
+import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
 import { run as runSleep } from "./sleep.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
 import { findingGate, findingsSchemaProblem, findingsStep, groupFindings, outcomes, postFindings, selectFindings, summaryLine, type FindingsReport } from "./board-findings.ts";
@@ -102,7 +103,7 @@ if (!URL_) {
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["38"],
   long: ["9", "10g", "38b"],
-  extract: ["10", "10e", "10f", "17", "37", "39", "41", "43"],
+  extract: ["10", "10e", "10f", "17", "37", "37b", "39", "41", "43"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -4510,6 +4511,14 @@ if (want("10")) {
       const registered = (await sql`SELECT count(*)::int AS n FROM ob1_agent_keys WHERE key_hash = ${hashKey(freshKey)}`)[0].n;
       assert(refusedCode === 2 && refusedOut.some((l) => /does not serve absent-model, OB1_METADATA_MODEL, at start \(404 [^)]*not found/.test(l)) && refusedOut.some((l) => /pull the model, or set OB1_METADATA_MODEL to one the provider serves/.test(l)) && registered === 0,
              `a follower whose model the provider does not serve at start is refused, exit 2, its key not yet registered (exit ${refusedCode}, ${registered} key row(s): ${refusedOut.find((l) => /at start/.test(l))?.trim().slice(0, 140)})`);
+      // …and its row ends on the refusal, the kind on it, so preflight gives the remedy (SMD-3214).
+      const refusedBeat = async (job: string) => {
+        const [r] = await sql`SELECT value, extract(epoch FROM now() - updated_at)::float8 AS age FROM ob1_config WHERE key = ${stampKey("extract", job)}`;
+        return r ? { ...JSON.parse(r.value as string), age: Number(r.age) } : null;
+      };
+      const modelBeat = await refusedBeat(KEY);
+      assert(modelBeat?.ended === true && modelBeat.outcome === "failed" && modelBeat.refused === "model" && modelBeat.age < 10,
+             `a follower refused at its start ends its row with the kind, model (${JSON.stringify(modelBeat)})`);
       // …and so is one whose escalation model the provider does not serve (review pass 1).
       const escOut: string[] = [];
       const stopEsc = new AbortController();
@@ -4535,6 +4544,8 @@ if (want("10")) {
         downUntil = 0;
         assert(mismatchCode === 2 && Date.now() - t0 < 10_000 && mismatchOut.some((l) => /Refusing to extract under a key other than the one ob1_config records without --switch-key/.test(l)) && !mismatchOut.some((l) => /not answering at start/.test(l)),
                `a follower started with the provider down and another model's key is refused at once, not after the wait (exit ${mismatchCode} after ${Date.now() - t0} ms)`);
+        const keyBeat = await refusedBeat(extractionKey("other-model"));
+        assert(keyBeat?.ended === true && keyBeat.refused === "key", `…its row, under the job its model names, ended with the kind, key (${JSON.stringify(keyBeat)})`);
       }
       // …and a model the provider turns out not to serve, once it answers, is
       // refused there rather than waited on for ever (review pass 2).
@@ -4783,6 +4794,7 @@ if (want("10")) {
   refuseCalls = 0;
   const refusedBeat = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
   assert(refusedFollow.code === 2 && refusedBeat.outcome === "failed" && refusedBeat.ended === true, `a follower ended by the provider's refusal stamps its end, failed (exit ${refusedFollow.code}, ${JSON.stringify(refusedBeat)})`);
+  assert(refusedBeat.refused === "provider", `…the refusal named on its row, provider, so preflight and the held row say why (SMD-3214; ${JSON.stringify(refusedBeat)})`);
   await sql`SELECT delete_thought(${refusedNote}::uuid, NULL::jsonb)`;
   // A following pass that throws (here its Writer, on the pass's own counts
   // line) ends the run, and its heartbeat says so as the worker's end (review pass 3).
@@ -8072,6 +8084,10 @@ if (want("16")) {
       clearTimeout(stopFollower);
       assert(fcode === 2 && /the tier at http:\/\/127\.0\.0\.1:\d+ serves h2o-other, not h2o-stub at start/.test(fe) && /serve h2o-stub at OB1_JEV_BASE_URL/.test(fe) && tierCalls === 5,
         `a follower whose tier serves another model is refused at start, naming the remedy, and decides nothing (exit ${fcode}: ${last(fo + fe)})`);
+      // …its row, under the decide key, ended with the kind (SMD-3214).
+      const [fbeat] = await sql`SELECT value FROM ob1_config WHERE key = ${stampKey("consolidate", DKEY)}`;
+      const fv = fbeat ? JSON.parse(fbeat.value as string) : null;
+      assert(fv?.ended === true && fv.outcome === "failed" && fv.refused === "model", `…and its row ends on the refusal, the kind on it, model (${JSON.stringify(fv)})`);
     } finally {
       tier.stop(true);
       writer.stop(true);
@@ -8412,8 +8428,8 @@ function syncHarness(unitIndex: number) {
     embed: async () => { calls.push("embed"); return { embedding: JSON.parse(unit(unitIndex)) as number[], model: EMBEDDING_MODEL, chunks: [] }; },
     tags: async () => { calls.push("tags"); return { type: "task", topics: ["zqtopic"] }; },
     fingerprintOf: async (t) => (await sql`SELECT content_fingerprint_of(${t}) AS f`)[0].f as string,
-    holderOf: (fp) => brainRow(sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`),
-    holderOfIdentity: (system, key) => brainRow(sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE id = source_thought(${system}, ${key})`),
+    holderOf: (fp) => brainRow(sql`SELECT ${rowColumns(sql)} FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`),
+    holderOfIdentity: (system, key) => brainRow(sql`SELECT ${rowColumns(sql)} FROM thoughts WHERE id = source_thought(${system}, ${key})`),
     actor: { name: SYNC_ACTOR, via: "test-live" },
     dryRun: false,
     log: () => {},
@@ -9258,6 +9274,97 @@ if (want("23")) {
   assert(heldB.join(",") === "held,held" && (await sql`SELECT count(*)::int AS c FROM thoughts WHERE id IN (${famB[0].id}::uuid, ${famB[1].id}::uuid)`)[0].c === 0, `the dump for that ticket is held for the ticket AND its part, no row on either dump id (${heldB.join(",")})`);
   const sB2 = await sync(issueB);
   assert(sB2.outcome === "unchanged" && sB2.derived?.unchanged === 1 && calls.length === 0, `and the sync again reads both unchanged (${sB2.outcome}; ${JSON.stringify(sB2.derived)})`);
+
+  await store.close();
+  for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+}
+
+if (want("23b")) {
+  console.log("\n[23b] board-sync never moves a capture-only key's pointer onto another row: the key's paste of a ticket's header, pointing at the key's own thought T, joins the ticket's group, and once a write key takes T nothing supersedes it — the paste in the chain's middle and at its head (the ticket's text moved), where the pointer is dropped and said so, and at its tail, where it stays and 082's lapse clears it (SMD-2670)");
+  const { store, writer, sync } = syncHarness(11);
+  const lines: string[] = [];
+  writer.log = (l) => lines.push(l);
+  const agentOf = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
+  const HOOK = { name: "hook-23b", agent_id: await agentOf("3", "hook-23b", "capture"), via: "test-door", scope: "capture" };
+  const OPER = { name: "oper-23b", agent_id: await agentOf("4", "oper-23b", "write"), via: "test-door" };
+  const cap = async (content: string, actor: Record<string, unknown>, supersedes?: string) =>
+    ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "test" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }}::jsonb, ${unit(43)}::vector) AS r`)[0].r as { id: string }).id;
+  const pointerOf = async (id: string) => (await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${id}::uuid`)[0].s as string | null;
+  const superseders = async (id: string) => (await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes = ${id}::uuid`)[0].c as number;
+  const flagOf = async (id: string) => (await readTicketRows(sql, { scanHeaders: true })).find((r) => r.id === id)?.capture_pointer;
+  const syncedRow = async (identifier: string) => (await sql`SELECT id::text AS id FROM thoughts WHERE metadata->>'issue' = ${identifier}`)[0].id as string;
+  // A write key moving T's text takes T (082's rule), which fires the lapse.
+  const take = async (id: string, text: string) => {
+    const r = (await sql`SELECT update_thought(p_id := ${id}::uuid, p_content := ${text}::text, p_actor := ${OPER}::jsonb) AS r`)[0].r as { ok: boolean };
+    assert(r.ok, `the write key takes ${id} by moving its text`);
+  };
+  const issueOf = (n: number, title: string): LinearIssue => ({ ...SAMPLE_ISSUE, identifier: `SMD-${n}`, title, description: "The synced text.", project: null, labels: { nodes: [] }, updatedAt: "2026-09-22T01:00:00.000Z" });
+  // The ticket's header with another body: a ticket row by the grammar, its own text.
+  const paste = (issue: LinearIssue, body: string) => renderIssue({ ...issue, description: body });
+  const ids: string[] = [];
+
+  // The middle: board-sync's H holds Linear's text over a write key's paste O;
+  // the key's paste S, newer, points at T. The chain is H → S → O, and O is
+  // not pointed at T.
+  {
+    const issue = issueOf(90050, "The key's paste in the middle");
+    await sync(issue);
+    const H = await syncedRow("SMD-90050");
+    const O = await cap(paste(issue, "[23b.1] the operator's paste"), OPER);
+    await sync(issue);
+    const T = await cap("[23b.1] the hook's own note", HOOK);
+    const S = await cap(paste(issue, "[23b.1] the hook's paste"), HOOK, T);
+    ids.push(H, O, T, S);
+    assert((await pointerOf(H)) === O && (await pointerOf(S)) === T && (await flagOf(S)) === true && (await flagOf(H)) === false,
+      `[23b.1] setup: H→O chained by board-sync, the hook's S→T its capture's pointer, read as one (capture_pointer true on S, false on H)`);
+    lines.length = 0;
+    const r = await sync(issue);
+    assert(r.chainRefusal === undefined && (await pointerOf(H)) === S && (await pointerOf(S)) === O && (await pointerOf(O)) === null && (await superseders(T)) === 0,
+      `[23b.1] the chain is H → S → O and nothing points at T (H→${await pointerOf(H)}, S→${await pointerOf(S)}, O→${await pointerOf(O)})`);
+    assert(lines.some((l) => l.includes(`${S} → ${O} (was ${T}) — its pointer onto ${T} is a capture-only key's, which lapses only where its capture wrote it, and is DROPPED, not carried to the tail`)),
+      `[23b.1] …and the pass says the key's pointer was dropped, not carried (${lines.join(" ⏎ ")})`);
+    await take(T, "[23b.1] the operator's word on the hook's note");
+    assert((await superseders(T)) === 0, "[23b.1] once a write key takes T, nothing supersedes it");
+  }
+
+  // The head: the ticket's text moved in Linear and no row holds it, so the
+  // key's S, the current row, becomes the head and takes the text. The chain
+  // is S → H, and H is not pointed at T.
+  {
+    const issue = issueOf(90051, "The key's paste at the head");
+    await sync(issue);
+    const H = await syncedRow("SMD-90051");
+    const T = await cap("[23b.2] the hook's own note", HOOK);
+    const S = await cap(paste(issue, "[23b.2] the hook's paste"), HOOK, T);
+    ids.push(H, T, S);
+    lines.length = 0;
+    const moved: LinearIssue = { ...issue, state: { name: "Done", type: "completed" }, updatedAt: "2026-09-22T02:00:00.000Z" };
+    const r = await sync(moved);
+    const sRow = (await sql`SELECT content FROM thoughts WHERE id = ${S}::uuid`)[0] as { content: string };
+    assert(r.outcome === "updated" && r.chainRefusal === undefined && sRow.content === renderIssue(moved) && (await pointerOf(S)) === H && (await pointerOf(H)) === null && (await superseders(T)) === 0,
+      `[23b.2] S takes the moved text, the chain is S → H and nothing points at T (${r.outcome}; S→${await pointerOf(S)}, H→${await pointerOf(H)})`);
+    assert(lines.some((l) => l.includes(`its pointer onto ${T} is a capture-only key's`)), `[23b.2] …and the pass says the key's pointer was dropped (${lines.join(" ⏎ ")})`);
+    await take(T, "[23b.2] the operator's word on the hook's note");
+    assert((await superseders(T)) === 0, "[23b.2] once a write key takes T, nothing supersedes it");
+  }
+
+  // The tail: the key's S is the group's oldest row, behind a write key's
+  // newer paste W, which takes Linear's text. S stays the tail with its own
+  // pointer, untouched; the take then lapses it.
+  {
+    const issue = issueOf(90052, "The key's paste at the tail");
+    const T = await cap("[23b.3] the hook's own note", HOOK);
+    const S = await cap(paste(issue, "[23b.3] the hook's paste"), HOOK, T);
+    const W = await cap(paste(issue, "[23b.3] the operator's paste"), OPER);
+    ids.push(T, S, W);
+    lines.length = 0;
+    const r = await sync(issue);
+    assert(r.chainRefusal === undefined && (await pointerOf(W)) === S && (await pointerOf(S)) === T && (await flagOf(S)) === true && !lines.some((l) => l.includes("capture-only")),
+      `[23b.3] W takes the text, the chain is W → S, and S's pointer onto T is still its capture's (W→${await pointerOf(W)}, S→${await pointerOf(S)}; ${lines.join(" ⏎ ")})`);
+    await take(T, "[23b.3] the operator's word on the hook's note");
+    assert((await superseders(T)) === 0 && (await pointerOf(S)) === null && (await pointerOf(W)) === S,
+      `[23b.3] once a write key takes T, 082's lapse clears S's pointer and the chain above stands (S→${await pointerOf(S)})`);
+  }
 
   await store.close();
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
@@ -12051,9 +12158,186 @@ if (want("37")) {
     await hsql`DELETE FROM ob1_config WHERE key IN ('tier', 'last_refresh')`;
     for (const k of keep as { key: string; value: string }[]) await hsql`INSERT INTO ob1_config (key, value) VALUES (${k.key}, ${k.value})`;
     assert(after2.beats === 0 && after2.tier === "canary" && /^\d{4}-/.test(after2.refreshed ?? ""), `a refresh's settle stamps the tier and its time and leaves no heartbeat (${JSON.stringify(after2)})`);
+
+    // A follower's start refusal ends its row with the kind (SMD-3214):
+    // board-sync's, under --loop alone — its own two kinds, and usage — the
+    // exit still 2; a one-shot run, a dry run and an audit write no row.
+    await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    const boardEnv: Record<string, string> = { ...(process.env as Record<string, string>), OB1_ENV_FILES: "off", DATABASE_URL: URL_! };
+    delete boardEnv.LINEAR_API_KEY;
+    const boardRun = (extra: Record<string, string>, ...argv: string[]) => {
+      const c = Bun.spawnSync(["bun", "--no-env-file", join(HERE, "sync-linear.ts"), ...argv], { cwd: HERE, env: { ...boardEnv, ...extra } });
+      return { code: c.exitCode, err: c.stderr.toString() };
+    };
+    const noKey = boardRun({}, "--loop");
+    const noKeyRow = await row("heartbeat:board-sync");
+    assert(noKey.code === 2 && /LINEAR_API_KEY is not set/.test(noKey.err) && noKeyRow?.ended === true && noKeyRow.outcome === "failed" && noKeyRow.refused === "linear-key" && noKeyRow.age < 10,
+      `board-sync --loop with no LINEAR_API_KEY exits 2 and ends its row with the kind, linear-key (exit ${noKey.code}; ${JSON.stringify(noKeyRow)})`);
+    const badInterval = boardRun({ LINEAR_API_KEY: "lin_api_not_real", OB1_BOARD_SYNC_INTERVAL: "5" }, "--loop");
+    const intervalRow = await row("heartbeat:board-sync");
+    assert(badInterval.code === 2 && /must be a decimal integer >= 10 \(whole seconds\)/.test(badInterval.err) && intervalRow?.refused === "usage",
+      `…and on an interval it does not take, usage (exit ${badInterval.code}; ${JSON.stringify(intervalRow)})`);
+    await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    const unlooped = [boardRun({}), boardRun({}, "--loop", "--dry-run"), boardRun({ LINEAR_API_KEY: "lin_api_not_real", OB1_BOARD_SYNC_INTERVAL: "5" })];
+    assert(unlooped.every((r) => r.code === 2) && (await row("heartbeat:board-sync")) === null,
+      `a one-shot run and a dry run refused the same exit 2 and write no row (${unlooped.map((r) => r.code).join(", ")})`);
+    // A database not answering: the end is left within its bound, said, and the refusal goes on.
+    const deadSql = new SQL({ url: "postgres://u@127.0.0.1:1/none", max: 1 });
+    let heardDead = "";
+    const t0dead = Date.now();
+    try {
+      await endOnRefusal({ sql: deadSql, worker: "board-sync", intervalS: 300, kind: "usage", onError: (e) => { heardDead = e.message; }, timeoutMs: 3000 });
+    } finally {
+      await deadSql.close().catch(() => {});
+    }
+    assert(Date.now() - t0dead < 5000 && heardDead !== "", `endOnRefusal on a database not answering returns within its bound and says so (${Date.now() - t0dead} ms: ${heardDead.slice(0, 80)})`);
   } finally {
     await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await hsql.close();
+  }
+}
+
+if (want("37b")) {
+  console.log("\n[37b] db/supervise.ts: a compose follower run again after it ends on its own, on a clock of minutes, its heartbeat ended with the next try — its guards held, a stop passed on, nothing exiting for the runtime to restart in a loop (SMD-3214)");
+  const ssql = new SQL({ url: URL_!, max: 2 });
+  const row = async (key: string) => {
+    const [r] = await ssql`SELECT value, extract(epoch FROM now() - updated_at)::float8 AS age FROM ob1_config WHERE key = ${key}`;
+    return r ? { ...JSON.parse(r.value), age: Number(r.age) } : null;
+  };
+  const said: string[] = [];
+  const writer = { out: (l: string) => void said.push(l), err: (l: string) => void said.push(l) };
+  const fast = { first: 40, max: 160, reset: 60_000 };
+  /** Resolves with the supervisor's code, or "pending" when it has not settled within `ms`. */
+  const within = <T>(p: Promise<T>, ms: number) => Promise.race([p, Bun.sleep(ms).then(() => "pending" as const)]);
+  const EXTRACT_KEY = followerKey("extract", {})!;
+  try {
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    // The clock: 1, 2, 4, 8, then every 15 minutes.
+    assert(JSON.stringify([1, 2, 3, 4, 5, 6, 40].map((t) => restartWait(t))) === JSON.stringify([60_000, 120_000, 240_000, 480_000, 900_000, 900_000, 900_000]),
+      "the waits double from a minute to a cap of 15 minutes, however many ends in a row");
+    // The guards, by the compose file's words: the key first, each bad setting named, empty the follower's default.
+    const noKey = guardRefusal("sleep", { OB1_SLEEP_POLL: "x" }, { requireKey: true, digits: ["OB1_SLEEP_POLL"] });
+    const two = guardRefusal("extract", { OB1_WORKER_KEY: "k", OB1_EXTRACT_FOLLOW: "--status", OB1_EXTRACT_WORKERS: "1 --limit 1", OB1_X: "" }, { requireKey: true, digits: ["OB1_EXTRACT_FOLLOW", "OB1_EXTRACT_WORKERS", "OB1_X"] });
+    assert(noKey?.kind === "identity" && noKey.line.startsWith("sleep: OB1_WORKER_KEY is not set in deploy/.env — mint a key")
+        && two?.kind === "usage" && two.line === "extract: OB1_EXTRACT_FOLLOW ('--status') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only"
+        && guardRefusal("consolidate", { OB1_WORKER_KEY: "k", A: "15", B: "" }, { requireKey: true, digits: ["A", "B"] }) === null
+        && guardRefusal("board-sync", {}, {}) === null,
+      `the guards: no key first (identity), then each setting not digits named (usage), empty passing, none asked none refused (${noKey?.line.slice(0, 50)} | ${two?.line})`);
+    // The keys: the claim workers' under the job their configuration names, as a compose follower (no --job) stamps.
+    assert(followerKey("sleep", {}) === "heartbeat:sleep" && followerKey("board-sync", {}) === "heartbeat:board-sync" && EXTRACT_KEY === `heartbeat:${extractionKey(resolveEmbedConfig({}).metadataModel)}`
+        && followerKey("extract", { OB1_METADATA_MODEL: "m:1b" }) === `heartbeat:${extractionKey("m:1b")}` && /^heartbeat:consolidate:/.test(followerKey("consolidate", {}) ?? ""),
+      `the row a supervisor ends is the one its follower stamps (${EXTRACT_KEY})`);
+
+    // endRow: the follower's last word since its start kept — the scheduler's
+    // sleep and its refusal — its waits dropped, the row ended failed, the
+    // next try added; read back as held.
+    const began = new Date(Date.now() - 2000);
+    const st = passStamper({ sql: ssql as never, worker: "sleep", intervalS: 5 });
+    st.slept?.({ from: new Date().toISOString(), to: new Date().toISOString() });
+    st.waiting?.(["extract"]);
+    st.refused?.("model");
+    await st.alive("failed");
+    await endRow(ssql as never, { worker: "sleep", key: "heartbeat:sleep", since: began, restart: { in_s: 240, code: 2, tries: 3 } });
+    const kept = await row("heartbeat:sleep");
+    const facts = await readDatabaseFacts(ssql as never, { stats: false });
+    const keptBeat = facts.workers?.heartbeats.find((h) => h.worker === "sleep");
+    assert(kept?.ended === true && kept.outcome === "failed" && kept.running === false && kept.refused === "model" && kept.slept?.to && !("waiting" in kept)
+        && kept.restart?.in_s === 240 && kept.restart.code === 2 && kept.restart.tries === 3 && kept.every_s === 60 && kept.age < 5
+        && JSON.stringify(keptBeat?.restart) === JSON.stringify({ inS: 240, code: 2, tries: 3 }) && keptBeat?.refused === "model"
+        && /^held: refused \(model\), 3 end\(s\) in a row — its supervisor runs it again in 4 min/.test(keptBeat ? heartbeatState(keptBeat) : ""),
+      `endRow keeps the follower's last word, drops its waits, ends it failed with the next try, and the reader says held (${JSON.stringify(kept)})`);
+    // A row from before the follower's start is not its word: a row of the supervisor's own, under the claim worker's job.
+    await passStamper({ sql: ssql as never, worker: "extract", job: EXTRACT_KEY.slice("heartbeat:".length), intervalS: 15 }).alive("ok", { answers: 50, bad: 1, alarm: false });
+    await endRow(ssql as never, { worker: "extract", key: EXTRACT_KEY, since: new Date(Date.now() + 60_000), restart: { in_s: 60, code: 1, tries: 1 } });
+    const own = await row(EXTRACT_KEY);
+    assert(own?.job === EXTRACT_KEY.slice("heartbeat:".length) && own.ended === true && own.outcome === "failed" && !("malformed" in own) && own.restart?.code === 1
+        && facts !== null && (await readDatabaseFacts(ssql as never, { stats: false })).workers?.heartbeats.some((h) => h.key === EXTRACT_KEY && h.restart?.inS === 60),
+      `a row older than the follower's start is replaced by the supervisor's own, its job the configuration's, read as held (${JSON.stringify(own)})`);
+    // A follower that exited 0 on its own keeps its outcome; a value not JSON is replaced, never a reason to fail.
+    await ssql`UPDATE ob1_config SET value = 'not json', updated_at = now() WHERE key = 'heartbeat:sleep'`;
+    await endRow(ssql as never, { worker: "sleep", key: "heartbeat:sleep", since: began, restart: { in_s: 60, code: 0, tries: 1 } });
+    const notJson = await row("heartbeat:sleep");
+    assert(notJson?.v === 1 && notJson.ended === true && notJson.restart?.code === 0, `a value not JSON is replaced by the supervisor's own row (${JSON.stringify(notJson)})`);
+
+    // supervise(): a follower that exits on its own is run again on the
+    // clock, each end said once on the log and on its row; a stop in the wait
+    // ends it at once with 0.
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    said.length = 0;
+    const looping = supervise({ worker: "board-sync", run: "echo ran >&2; exit 3", sql: ssql as never, waits: fast, writer });
+    await pollUntil(async () => ((await row("heartbeat:board-sync"))?.restart?.tries ?? 0) >= 3, 10_000);
+    const mid = await row("heartbeat:board-sync");
+    const stopAt = Date.now();
+    looping.stop("SIGTERM");
+    const loopCode = await within(looping.done, 2000);
+    const ends = said.filter((l) => /^supervise: board-sync exited 3 after \d+ s; it runs again at \d{4}-\d\d-\d\dT[\d:.]+Z \(in 0 s, end \d in a row\), heartbeat:board-sync says so\./.test(l));
+    assert(loopCode === 0 && Date.now() - stopAt < 1000 && mid?.ended === true && mid.outcome === "failed" && mid.restart.code === 3 && mid.restart.tries >= 3 && ends.length >= 3 && !said.some((l) => /a refusal/.test(l)),
+      `a follower ending on its own runs again on the clock, each end on the log and the row, and a stop in the wait ends it at once with 0 (code ${loopCode}, ${ends.length} ends said, row ${JSON.stringify(mid?.restart)})`);
+    // The count starts again after a run of `reset` or longer: here every run counts as long.
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    const resetting = supervise({ worker: "board-sync", run: "sleep 0.15; exit 2", sql: ssql as never, waits: { first: 40, max: 160, reset: 100 }, writer });
+    await pollUntil(async () => (await row("heartbeat:board-sync")) !== null, 5000);
+    await Bun.sleep(600);
+    const reset = await row("heartbeat:board-sync");
+    resetting.stop("SIGTERM");
+    assert((await within(resetting.done, 2000)) === 0 && reset?.restart?.tries === 1 && said.some((l) => /exited 2 after \d+ s — a refusal, its lines above say why/.test(l)),
+      `a follower that ran past the reset starts the count again — each end the first in a row — and a refusal is said as one (${JSON.stringify(reset?.restart)})`);
+
+    // A stop passes on to the follower, whose own handler ends it; the supervisor then exits 0, the row left as the follower had it.
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    const marker = join(tmpdir(), `ob1-supervise-${process.pid}`);
+    rmSync(marker, { force: true });
+    const passing = supervise({ worker: "sleep", run: `exec sh -c 'trap "echo stopped-by-term > ${marker}; exit 0" TERM; echo up > ${marker}; while :; do sleep 0.05; done'`, sql: ssql as never, waits: fast, writer });
+    await pollUntil(async () => existsSync(marker), 5000);
+    passing.stop("SIGTERM");
+    const passCode = await within(passing.done, 3000);
+    const heard = existsSync(marker) ? readFileSync(marker, "utf8").trim() : "";
+    rmSync(marker, { force: true });
+    assert(passCode === 0 && heard === "stopped-by-term" && (await row("heartbeat:sleep")) === null,
+      `a stop goes on to the follower, which ends on it, and the supervisor exits 0 with no row of its own (code ${passCode}, the follower heard "${heard}")`);
+
+    // The guard: held, never started, its row the refusal with no next try — the supervisor settles only on a stop.
+    said.length = 0;
+    const guarded = supervise({ worker: "extract", run: "echo started >&2", requireKey: true, env: {}, sql: ssql as never, writer });
+    await pollUntil(async () => (await row(EXTRACT_KEY))?.refused === "identity", 5000);
+    const guardRow = await row(EXTRACT_KEY);
+    const stillHeld = await within(guarded.done, 300);
+    guarded.stop("SIGINT");
+    assert(stillHeld === "pending" && (await within(guarded.done, 1000)) === 0 && guardRow?.ended === true && guardRow.restart?.in_s === null && guardRow.restart.code === 2
+        && said[0]?.startsWith("extract: OB1_WORKER_KEY is not set in deploy/.env") && /^supervise: extract is held, not started/.test(said[1] ?? "") && !said.includes("started"),
+      `no key holds the follower unstarted, its row refused (identity) with no next try, until a stop ends it with 0 (${JSON.stringify(guardRow?.restart)})`);
+    // No database to write to: the supervisor runs and holds the same, the row left alone.
+    const unstamped = supervise({ worker: "sleep", run: "exit 2", sql: null, waits: fast, writer });
+    await Bun.sleep(200);
+    unstamped.stop("SIGTERM");
+    assert((await within(unstamped.done, 1000)) === 0 && (await row("heartbeat:sleep")) === null, "with no database the supervisor still runs the follower again and stops on a signal, the row left alone");
+
+    // The CLI, for real: as the compose service runs it — its handlers its
+    // own, the door closing its client — a SIGTERM in a wait or a hold ends it
+    // at once with 0, and its row says so.
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    const cliEnv = { ...process.env, DATABASE_URL: URL_!, OB1_ENV_FILES: "off" } as Record<string, string>;
+    delete cliEnv.OB1_WORKER_KEY;
+    const cli = Bun.spawn(["bun", "--no-env-file", join(HERE, "supervise.ts"), "--worker", "board-sync", "--run", "echo refused >&2; exit 2"], { cwd: HERE, env: cliEnv, stdout: "pipe", stderr: "pipe" });
+    await pollUntil(async () => (await row("heartbeat:board-sync"))?.restart?.in_s === 60, 15_000);
+    const t0 = Date.now();
+    cli.kill("SIGTERM");
+    const cliCode = await cli.exited;
+    const cliErr = await new Response(cli.stderr).text();
+    assert(cliCode === 0 && Date.now() - t0 < 2000 && /^refused$/m.test(cliErr) && /supervise: board-sync exited 2 after \d+ s — a refusal, its lines above say why; it runs again at .* \(in 60 s, end 1 in a row\), heartbeat:board-sync says so/.test(cliErr),
+      `the CLI waits a minute after its follower's refusal, and a SIGTERM then ends it with 0 at once (exit ${cliCode} after ${Date.now() - t0} ms)`);
+    const cliGuard = Bun.spawn(["bun", "--no-env-file", join(HERE, "supervise.ts"), "--worker", "extract", "--require-key", "--digits", "OB1_EXTRACT_FOLLOW", "--run", "echo started >&2"], { cwd: HERE, env: cliEnv, stdout: "pipe", stderr: "pipe" });
+    await pollUntil(async () => (await row(EXTRACT_KEY))?.refused === "identity", 15_000);
+    await Bun.sleep(200);
+    const guardRunning = cliGuard.exitCode === null;
+    cliGuard.kill("SIGTERM");
+    const guardCode = await cliGuard.exited;
+    const guardErr = await new Response(cliGuard.stderr).text();
+    assert(guardRunning && guardCode === 0 && !/^started$/m.test(guardErr) && /^extract: OB1_WORKER_KEY is not set in deploy\/\.env/m.test(guardErr),
+      `the CLI's guard holds with the follower unstarted, and a SIGTERM ends it with 0 (exit ${guardCode})`);
+  } finally {
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    await ssql.close();
   }
 }
 
@@ -12425,6 +12709,148 @@ if (want("38")) {
     await late;
     assert(lateWoke, `a capture committed after the sleep began, in a transaction begun before it, wakes it (${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
 
+    // ── The budget (SMD-2679) ────────────────────────────────────────────────
+    // Each pass's connections open with the budget's session settings: a
+    // statement trigger on the claim table records what the passes' own
+    // enqueue_thoughts sees — their connections, not the scheduler's.
+    type BudgetBeat = { running: boolean; outcome: string | null; ended?: boolean; resting?: boolean; slept?: { from: string; to: string | null; budget?: string; limit?: number }; budget?: { minutes: number; statementTimeoutS: number; workMemMb: number; maintenanceWorkMemMb: number; stops: number } };
+    const budgetBeat = async () => (await beat()) as unknown as BudgetBeat | null;
+    const asleepCount = () => lines.filter((l) => /asleep:/.test(l)).length;
+    // Captured first: a capture's own trigger writes claims on the suite's connection.
+    lines.length = 0;
+    for (let i = 0; i < 2; i++) await capture(`A budget note, number ${i}.`, "op-sleep", 0, 5);
+    await sql.unsafe(`CREATE TABLE zz_budget_seen (st text, wm text, mwm text);
+      CREATE FUNCTION zz_budget_seen() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        INSERT INTO zz_budget_seen VALUES (current_setting('statement_timeout'), current_setting('work_mem'), current_setting('maintenance_work_mem')); RETURN NULL; END $$;
+      CREATE TRIGGER zz_budget_seen AFTER INSERT OR UPDATE ON thought_work_claims FOR EACH STATEMENT EXECUTE FUNCTION zz_budget_seen()`);
+    try {
+      const acSet = new AbortController();
+      const setCode = await bounded(sleepRun({ statementTimeout: 7, workMem: 3, maintenanceWorkMem: 70, signal: acSet.signal }), acSet);
+      // The passes' claim writes, and the scheduler's own (its move of stopped
+      // thoughts to the back) on its own connection: the memory settings
+      // without the timeout (review pass 1).
+      const seen = (await sql`SELECT st, wm, mwm, count(*)::int AS n FROM zz_budget_seen GROUP BY 1, 2, 3 ORDER BY 1`) as { st: string; wm: string; mwm: string; n: number }[];
+      assert(setCode === 0 && seen.length === 2 && seen[0].st === "0" && seen[0].wm === "3MB" && seen[0].mwm === "70MB" && seen[1].st === "7s" && seen[1].wm === "3MB" && seen[1].mwm === "70MB" && seen[1].n >= 2 && lines.some((l) => /budget: a 60 min clock, statement_timeout 7 s, work_mem 3 MB, maintenance_work_mem 70 MB/.test(l)),
+        `each pass's connections open with the budget's settings — statement_timeout, work_mem and maintenance_work_mem, as both passes' claim writes saw them — the scheduler's own with the memory settings alone, and the start says the budget (exit ${setCode}; ${JSON.stringify(seen)})`);
+    } finally {
+      await sql.unsafe(`DROP TRIGGER zz_budget_seen ON thought_work_claims; DROP FUNCTION zz_budget_seen(); DROP TABLE zz_budget_seen`);
+    }
+
+    // The clock: spent, the passes stop after the thought in hand, every lease
+    // returned, the stop counted on the row; no sleep begins until a live
+    // call, and the next resumes the work left.
+    lines.length = 0;
+    for (let i = 0; i < 3; i++) await capture(`A clocked note, number ${i}.`, "op-sleep", 0, 6);
+    // A 3 s clock and 5 s calls: spent mid-thought, seconds either side, with
+    // time for extraction's start to claim first under a loaded runner
+    // (review passes 1 and 3: a clock under a poll left none).
+    slowExtract = 5000;
+    const acClock = new AbortController();
+    const clockRun = sleepRun({ follow: true, budgetMs: 3000, minStampEveryS: 1, signal: acClock.signal });
+    let clockBeat = null as BudgetBeat | null;
+    const spent = await pollUntil(async () => (clockBeat = await budgetBeat())?.slept?.budget === "clock" && clockBeat?.running === false, 20_000);
+    const afterClock = await claims(EX);
+    assert(spent && lines.some((l) => /the sleep's budget is spent \(3000 ms\) — the passes stop after the thought in hand/.test(l)) && !afterClock.claimed && (afterClock.pending ?? 0) >= 2 && clockBeat?.budget?.stops === 1 && clockBeat.budget.minutes === 60 && typeof clockBeat.slept?.to === "string" && clockBeat.slept.limit === 1 && clockBeat.resting === true,
+      `a sleep whose clock is spent stops its passes after the thought in hand, every lease returned and work left, the stop counted on the row with the bound it stopped at, and the row resting until a live call (${JSON.stringify(afterClock)}; ${JSON.stringify(clockBeat)})`);
+    slowExtract = 0;
+    await Bun.sleep(2500);
+    const noSleep = asleepCount();
+    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after the budget')`;
+    // The next sleep runs on the same 3 s clock, so the work moving
+    // is what proves the resume, not the pool drained (review pass 2).
+    const doneBefore = afterClock.succeeded ?? 0;
+    const resumed = await pollUntil(async () => asleepCount() >= 2 && ((await claims(EX)).succeeded ?? 0) > doneBefore, 20_000);
+    assert(noSleep === 1 && resumed,
+      `…no sleep begins in the quiet after it (${noSleep} sleep(s)); a live call and the quiet begin the next, which resumes the work left (${doneBefore} → ${JSON.stringify(await claims(EX))})`);
+    acClock.abort();
+    const clockCode = await clockRun;
+    // (The resumed sleep may spend its own clock too: the count is at least the one.)
+    assert(clockCode === 0 && ((await budgetBeat())?.budget?.stops ?? 0) >= 1, `…and the scheduler stopped by a signal exits 0, its row counting the stop (exit ${clockCode})`);
+
+    // The grace: a thought still in hand past it is stopped hard, a cut.
+    lines.length = 0;
+    await capture("A note the model takes its time over.", "op-sleep", 0, 7);
+    slowExtract = 12000;
+    const acGrace = new AbortController();
+    const graceRun = sleepRun({ follow: true, budgetMs: 3000, budgetGraceMs: 1000, minStampEveryS: 1, signal: acGrace.signal });
+    let graceHeld = "";
+    await pollUntil(async () => {
+      const [r] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
+      if (r) graceHeld = r.id;
+      return lines.some((l) => /still in hand 1 s past the budget — stopped now, the thought in hand cut/.test(l)) && (await budgetBeat())?.slept?.budget === "clock";
+    }, 20_000);
+    const [graceCut] = graceHeld ? await sql`SELECT cuts, stops FROM extraction_progress WHERE thought_id = ${graceHeld}::uuid AND work_type = ${EX}` : [];
+    assert(lines.some((l) => /extract still in hand 1 s past the budget — stopped now, the thought in hand cut/.test(l)) && !(await claims(EX)).claimed && graceCut?.cuts === 1 && graceCut.stops === 0,
+      `a pass still in hand past the budget's grace is stopped hard, its lease returned and the stop counted on the thought as the scheduler's cut, not a stop (${JSON.stringify(graceCut)}; ${JSON.stringify(await claims(EX))})`);
+    slowExtract = 0;
+    acGrace.abort();
+    await graceRun;
+
+    // A statement past statement_timeout ends the pass and the sleep, not the
+    // scheduler: a trigger holds the passes' enqueue past a 1 s timeout.
+    lines.length = 0;
+    await capture("A note behind a slow statement.", "op-sleep", 0, 8);
+    // After the capture, whose own trigger would wait out the slow statement too.
+    await sql.unsafe(`CREATE FUNCTION zz_budget_slow() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(3); RETURN NULL; END $$;
+      CREATE TRIGGER zz_budget_slow AFTER INSERT ON thought_work_claims FOR EACH STATEMENT EXECUTE FUNCTION zz_budget_slow()`);
+    let slowDropped = false;
+    const dropSlow = async () => {
+      if (slowDropped) return;
+      slowDropped = true;
+      await sql.unsafe(`DROP TRIGGER zz_budget_slow ON thought_work_claims; DROP FUNCTION zz_budget_slow()`);
+    };
+    const acSlow = new AbortController();
+    let slowSettled = false;
+    const slowRun = sleepRun({ follow: true, statementTimeout: 1, minStampEveryS: 1, signal: acSlow.signal }).finally(() => { slowSettled = true; });
+    try {
+      let slowBeat = null as BudgetBeat | null;
+      const stoppedOnIt = await pollUntil(async () => (slowBeat = await budgetBeat())?.slept?.budget === "statement" && slowBeat?.running === false, 20_000);
+      assert(stoppedOnIt && !slowSettled && lines.some((l) => /extract: a statement passed the pass's statement_timeout \(1 s\) — canceling statement due to statement timeout; the pass ends/.test(l)) && lines.some((l) => /the sleep stops on its budget: a pass's statement timed out/.test(l)) && slowBeat?.outcome === "failed" && slowBeat.budget?.stops === 1 && slowBeat.budget.statementTimeoutS === 1 && slowBeat.slept?.limit === 1 && !(await claims(EX)).claimed,
+        `a statement past statement_timeout ends the pass and stops the sleep on its budget — the row failed, the stop counted, no lease held — and the scheduler runs on (${JSON.stringify(slowBeat)}; settled ${slowSettled})`);
+      await dropSlow();
+      await Bun.sleep(1500);
+      const quietSleeps = asleepCount();
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after the slow statement')`;
+      const after = await pollUntil(async () => asleepCount() === quietSleeps + 1 && !(await claims(EX)).pending && !(await claims(EX)).claimed, 20_000);
+      assert(quietSleeps === 1 && after, `…and after a live call the next sleep, the statement no longer slow, does the work (${quietSleeps} sleep(s) before the call; ${JSON.stringify(await claims(EX))})`);
+    } finally {
+      await dropSlow();
+      acSlow.abort();
+    }
+    const slowCode = await slowRun;
+    assert(slowCode === 0, `…and a stop ends it with 0 (exit ${slowCode})`);
+
+    // An idle clock-out (review pass 2): the pools drained, the clock ends the
+    // sleep with no stop counted or marked, the row resting all the same; a
+    // live call and the quiet begin the next, and the row rests no longer.
+    lines.length = 0;
+    const acIdle = new AbortController();
+    const idleRun = sleepRun({ follow: true, budgetMs: 6000, minStampEveryS: 1, signal: acIdle.signal });
+    let idleBeat = null as BudgetBeat | null;
+    const idled = await pollUntil(async () => (idleBeat = await budgetBeat())?.resting === true, 30_000);
+    assert(idled && lines.some((l) => /the sleep's clock is spent \(6000 ms\) with nothing left to do — it ends; the next begins after a live call/.test(l)) && idleBeat?.slept?.budget === undefined && typeof idleBeat?.slept?.to === "string" && idleBeat.budget?.stops === 0,
+      `a clock spent on drained pools ends the sleep with no stop counted or marked, the row resting until a live call (${JSON.stringify(idleBeat)})`);
+    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after the idle clock')`;
+    let nextBeat = null as BudgetBeat | null;
+    const rested = await pollUntil(async () => asleepCount() === 2 && (nextBeat = await budgetBeat())?.running === true && nextBeat?.resting === undefined, 15_000);
+    assert(rested, `…and once a live call and the quiet begin the next sleep, the row rests no longer (${JSON.stringify(nextBeat)})`);
+    acIdle.abort();
+    await idleRun;
+
+    // A pass waiting for its provider is work left, the pools drained or not:
+    // the clock's stop is counted, a judge outage no idle night (review pass 3).
+    lines.length = 0;
+    unavailable = true;
+    const acOutage = new AbortController();
+    const outageRun = sleepRun({ follow: true, budgetMs: 3000, minStampEveryS: 1, signal: acOutage.signal });
+    let downBeat = null as BudgetBeat | null;
+    const downStopped = await pollUntil(async () => (downBeat = await budgetBeat())?.slept?.budget === "clock" && downBeat?.running === false, 30_000);
+    unavailable = false;
+    assert(downStopped && downBeat?.budget?.stops === 1 && lines.some((l) => /the sleep's budget is spent \(3000 ms\) — the passes stop after the thought in hand/.test(l)) && !lines.some((l) => /nothing left to do/.test(l)),
+      `a clock spent while the passes wait for the provider is a counted stop, not an idle clock-out (${JSON.stringify(downBeat)})`);
+    acOutage.abort();
+    await outageRun;
+
     // A model not served is the configuration's: the scheduler's check of
     // each pass's start meets it before the first quiet, and it ends with 2
     // at once, the row ended failed, no sleep begun (SMD-2752; before, the
@@ -12433,6 +12859,7 @@ if (want("38")) {
     missing = true;
     // Bounded: a scheduler that misses the refusal would wait for ever.
     const acFirst = new AbortController();
+    const checkFrom = new Date();
     const firstRun = sleepRun({ follow: true, quiet: 300, signal: acFirst.signal, minStampEveryS: 1 });
     const refusedFirst = await Promise.race([firstRun, Bun.sleep(30_000).then(() => "hung" as const)]);
     if (refusedFirst === "hung") { acFirst.abort(); await firstRun; }
@@ -12440,6 +12867,9 @@ if (want("38")) {
     const firstBeat = await beat();
     assert(refusedFirst === 2 && firstBeat?.ended === true && firstBeat.outcome === "failed" && lines.some((l) => /extract's start is refused \(model\) — the scheduler does not start/.test(l)) && !lines.some((l) => /asleep:/.test(l)),
       `a model not served ends --follow with 2 at its start, before any sleep (a quiet of 300 s), the row ended failed (exit ${refusedFirst}; ${JSON.stringify(firstBeat)})`);
+    // The check's refusal is the scheduler's to name: no follower's row of its own is ended beside it (SMD-3214).
+    const followerRows = (await sql`SELECT count(*)::int AS n FROM ob1_config WHERE (key LIKE 'heartbeat:extract:%' OR key LIKE 'heartbeat:consolidate:%') AND updated_at >= ${checkFrom}`)[0].n;
+    assert(followerRows === 0, `the scheduler's check refused writes no follower's row of its own (${followerRows})`);
     // The provider refusing the request itself on the first pass — past the
     // start's probe, before any pass finished — is the configuration's too:
     // it ends the run, not a retry for ever (review pass 2).
@@ -12917,7 +13347,8 @@ if (want("38")) {
         `a judge model not served ends the service with 2 at its start, before any sleep, the row ended failed and naming the refusal, model (exit ${judgeCode}; ${JSON.stringify(judgeBeat)})`);
       // A restarted scheduler's first row carries the last process's sleep,
       // which preflight reads, until it sleeps itself (SMD-2752 PR 3, review pass 1).
-      const lastMark = { from: "2026-10-01T00:00:00.000Z", to: "2026-10-01T00:20:00.000Z" };
+      // With its budget word (SMD-2679): the last sleep stopped on its clock.
+      const lastMark = { from: "2026-10-01T00:00:00.000Z", to: "2026-10-01T00:20:00.000Z", budget: "clock", limit: 60 };
       await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:sleep', ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "stopped", ended: true, slept: lastMark })})
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
       const carryRun = followRun({ quiet: 300 });
@@ -14171,6 +14602,12 @@ if (want("41")) {
     // so it refuses naming 105; 105 re-applied, it runs. Put back in any case.
     const SET058 = `CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{completed,canceled}'::text[] $$`;
     const apply105 = () => applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_duplicate_settles.sql") });
+    // The sets put back as this tree ships them — each set's last definer, so
+    // a later migration that changes a set is not undone by 105 (SMD-3160
+    // review pass 4). Their comments stay 105's: nothing here reads them.
+    const setDefiners = ["node_lifecycle_types", "node_settled_types"].map((fn) => readdirSync(join(HERE, "migrations")).filter((f) => f.endsWith(".sql")
+      && new RegExp(`^CREATE OR REPLACE FUNCTION ${fn}\\(\\)`, "m").test(readFileSync(join(HERE, "migrations", f), "utf8"))).sort().at(-1));
+    const applyShippedSets = () => applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => setDefiners.some((d) => d !== undefined && f.endsWith(d)) });
     let no058: string | null = "unread", before105: string | null = "unread", after105: string | null = "unread";
     // And closed() reads that set, not a list of its own: a Done ticket and a
     // Duplicate, unlinked, are a closed pair under 105's set and offered under
@@ -14190,7 +14627,7 @@ if (want("41")) {
       after105 = await findingsSchemaProblem(bsql);
       pairBack = await offered();
     } finally {
-      if (after105 !== null) { await bsql.unsafe(SET058); await apply105(); }
+      await applyShippedSets();
     }
     assert(no058 === "migration 058 is not applied, so whether a ticket is closed cannot be asked (cd db && bun migrate.ts --url …)"
         && before105 === "migration 105 is not applied, or an older tree's --reapply undid it, so a Duplicate ticket would read as open (cd db && bun migrate.ts --url …; after an older tree's --reapply, this tree's --reapply)"

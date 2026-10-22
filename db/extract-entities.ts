@@ -180,9 +180,9 @@ import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
-import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
+import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
-import { passStamper, stampKey, type MalformedBlock, type PassStamper } from "./pass-stamp.ts";
+import { endOnRefusal, passStamper, stampKey, type MalformedBlock, type PassStamper } from "./pass-stamp.ts";
 
 /**
  * Every argument accounted for (db/cli.ts): a flag this worker does not have,
@@ -303,6 +303,13 @@ export interface ExtractOptions {
    * unless a test drives it faster (review pass 2 of SMD-2694).
    */
   stallFloorMs?: number;
+  /**
+   * Postgres settings the run's own client opens every connection with
+   * (connect.ts's `session`): the sleep scheduler's per-pass budget —
+   * statement_timeout, work_mem, maintenance_work_mem (SMD-2679). Refused
+   * beside `sql`, a caller's client, which it would not reach.
+   */
+  session?: SessionSettings;
 }
 
 /**
@@ -423,6 +430,7 @@ export async function run(opts: ExtractOptions): Promise<number> {
   // Beside --status or --dry-run the probe and the key are skipped, and a
   // start reported through would be none (review pass 1).
   if (opts.check && (!settled.follow || opts.status === true || opts.dryRun === true)) return usage("extract-entities.ts: check is a follower's start — pass follow beside it, and no --status or --dry-run.");
+  if (opts.sql != null && opts.session != null) return usage("extract-entities.ts applies session settings to a client of its own: pass url without sql, or no session.");
   if (opts.sql != null) {
     // A reserved connection or a transaction's handle reports its pool's max
     // but is one connection, and a transaction keeps the run's claims from the
@@ -450,11 +458,23 @@ export async function run(opts: ExtractOptions): Promise<number> {
     err(STOPPED_EARLY);
     return 130;
   }
-  const sql = opts.sql ?? openSql(opts.url as string, { max: settled.workers + 1 });
+  const sql = opts.sql ?? openSql(opts.url as string, { max: settled.workers + 1, session: opts.session ?? undefined });
   // Aborted when the run returns, taking its listener off the caller's signal.
   const detach = new AbortController();
+  // The start's refusal, as onStart hears it: a follower of its own ends its
+  // row on it, the kind named, so preflight gives the remedy — and the compose
+  // service's supervisor, which keeps the follower's word, says it is held for
+  // that cause (SMD-3214). Not the scheduler's check, nor a pass it drives,
+  // whose row is the scheduler's.
+  let refusedAt: StartRefusal | null = null;
+  const heard: ExtractOptions = { ...opts, onStart: (r) => { if (!r.ok) refusedAt = r.refused; opts.onStart?.(r); } };
   try {
-    return await extractWith(sql, opts, settled, out, err, detach.signal);
+    const code = await extractWith(sql, heard, settled, out, err, detach.signal);
+    if (code === 2 && refusedAt !== null && settled.follow && opts.stamper === undefined && !opts.check && !opts.status && !opts.dryRun) {
+      const job = opts.job ?? extractionKey(resolveEmbedConfig((opts.env ?? process.env) as EmbedEnv).metadataModel);
+      await endOnRefusal({ sql, worker: "extract", job, intervalS: settled.follow, kind: refusedAt, onError: (e) => err(`  heartbeat ${stampKey("extract", job)} not ended on the refusal: ${e.message.split("\n")[0]}`) });
+    }
+    return code;
   } finally {
     detach.abort();
     // A failing close must not mask the run's own error.
@@ -1897,7 +1917,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   // The follower ends — a signal, its --limit, or the provider refusing the
   // request itself — and the row says so, with the final judgement's block: a
   // follower stopped at its --limit on a tripped block exits 3, and its row
-  // carries the alarm too. Its age then warns, as it should.
+  // carries the alarm too. Its age then warns, as it should. The provider's
+  // refusal is named on its own row, `provider`, as a start's is (SMD-3214):
+  // a revoked key or spent credit mid-pass, which the supervisor holds; the
+  // scheduler's row, which a driven pass stamps through, names its own.
+  if (configError && opts.stamper === undefined) stamper?.refused?.("provider");
   await stamper?.end(configError ? "failed" : "stopped", lastBlock);
   if (after === null) {
     // A follower stopped while it waited for the database: the counts
