@@ -1900,8 +1900,10 @@ Each pass stamps a heartbeat, `heartbeat:board-sync` in `ob1_config`
 (SMD-2261). Preflight's `workers` row, the keyed `/health` body and `brain_info`
 read it. The row warns at once when the loop says it stopped (`compose stop`)
 or its supervisor holds it — a refusal, which it tries again on its own, the
-row saying when (SMD-3214) — and once the heartbeat is older than three
-intervals: its container removed. It names `up -d --no-deps board-sync`, with the
+row saying when and which: no `LINEAR_API_KEY`, an initiative that is not one
+board, an interval or findings cap it does not take, an endpoint the egress
+policy refuses wholesale, each with its remedy (SMD-3214) — and once the
+heartbeat is older than three intervals: its container removed. It names `up -d --no-deps board-sync`, with the
 `-f` files and `-p` the stack was started with. Just after `up`, the server's
 preflight can read the row a `down` left before board-sync's first pass stamps
 it; such a warning in the start-up log clears on the next `bun preflight.ts`.
@@ -2046,7 +2048,8 @@ has removed.
   follower's first call at start — a model it does not serve, a refused key,
   a wrong base URL (SMD-2599). The service does not exit: its supervisor runs
   the follower again after 1, 2, 4, 8, then every 15 minutes, and preflight's
-  `workers` row says it is held, the exit code and the next try (SMD-3214).
+  `workers` row says it is held, the refusal by its kind with the kind's
+  remedy, and the next try (SMD-3214).
   No key, or a setting that is not digits, the supervisor refuses itself,
   before the follower starts, and holds until the service is recreated.
 - **Outages.** A follower waits out the database going away (it checks

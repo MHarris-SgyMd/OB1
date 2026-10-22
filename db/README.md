@@ -4782,6 +4782,13 @@ row's `updated_at`, the database's `now()`.
 - **`ended`:** the worker's process is gone — `stopped` on a signal or a
   follower's `--limit`, `failed` when the provider refused the request itself or
   a pass threw. Its row says so at once rather than "alive" until it goes stale.
+- **`refused`:** on an ended row, the start refusal that ended it, by kind
+  (db/worker-bootstrap.ts's `START_REFUSALS`): the sleep scheduler's at a
+  pass's start (SMD-2752); since SMD-3214 a claim follower's at its own start
+  under `--follow`, board-sync's under `--loop` — `linear-key`, `board`,
+  `usage`, `egress` — and `db/supervise.ts`'s guard's. Preflight gives the
+  kind's remedy. The scheduler's check, and a pass it drives, end no
+  follower's row: the refusal is the scheduler's.
 - **`restart`:** on an ended row, `db/supervise.ts`'s word — the compose
   services' command since SMD-3214, which runs the follower again when it ends
   on its own: `in_s`, the seconds from the row's stamp to the next try (`null`
@@ -5207,11 +5214,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2993 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1502 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 908 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 68 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+./with-postgres.sh bun test-live.ts         # 1511 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 909 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 69 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 252 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 259 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
