@@ -277,9 +277,14 @@ jobs:
           KEY=$(openssl rand -hex 32)
           HASH=$(printf '%s' "$KEY" | shasum -a 256 | cut -d' ' -f1)
           echo "OB1_SMOKE_KEY=$KEY" >> "$GITHUB_ENV"
+          # The MCP server built on the REST core's forward key, which compose
+          # requires (SMD-2287): its hash beside the smoke key's.
+          FORWARD_KEY=$(openssl rand -hex 32)
+          FORWARD_HASH=$(printf '%s' "$FORWARD_KEY" | shasum -a 256 | cut -d' ' -f1)
           cat > .env <<EOF
           POSTGRES_PASSWORD=$(openssl rand -hex 24)
-          MCP_ACCESS_KEYS=ci:write:$HASH
+          MCP_ACCESS_KEYS=ci:write:$HASH,ci-forwarder:forward:$FORWARD_HASH
+          OB1_FORWARDER_KEY=$FORWARD_KEY
           OB1_LLM_BASE_URL=http://host.docker.internal:11434/v1
           OB1_LLM_LOCAL=1
           OB1_QUERY_LOG=on
@@ -289,7 +294,7 @@ jobs:
           # runs the release's image, Ollama's by digest, and the proxy and the
           # forwarder keep compose.yaml's digests (the overlay names neither).
           docker compose -f compose.yaml -f compose.release.yaml --profile local-models config --format json \
-            | jq -e --arg s "$SERVER_IMAGE" --arg m "$MIGRATE_IMAGE" '(.services.server.image | startswith($s)) and .services.server.pull_policy == "missing" and (.services.api.image == .services.server.image) and (.services.migrate.image | startswith($m)) and (.services.ollama.image | test("^ollama/ollama@sha256:")) and (.services.ollama.image == .services["ollama-pull"].image) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.forwarder.image | test("@sha256:[0-9a-f]{64}$"))' >/dev/null
+            | jq -e --arg s "$SERVER_IMAGE" --arg m "$MIGRATE_IMAGE" '(.services.server.image | startswith($s)) and .services.server.pull_policy == "missing" and (.services.api.image == .services.server.image) and (.services.mcp.image == .services.server.image) and .services.mcp.pull_policy == "missing" and (.services.migrate.image | startswith($m)) and (.services.ollama.image | test("^ollama/ollama@sha256:")) and (.services.ollama.image == .services["ollama-pull"].image) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.forwarder.image | test("@sha256:[0-9a-f]{64}$"))' >/dev/null
           # SMD-2658, SMD-2685: the overlay this run ships changes nothing but
           # the images it pins and their pull policy, on any service but the
           # proxy, as fork-checks' "The proxy loads only the held route tables"
@@ -327,7 +332,7 @@ jobs:
             done
           done
           pull=(postgres proxy forwarder)
-          if [ "$PUBLISH" = true ]; then pull+=(server api migrate); fi
+          if [ "$PUBLISH" = true ]; then pull+=(server api mcp migrate); fi
           docker compose -f compose.yaml -f compose.release.yaml pull "${pull[@]}"
           docker compose -f compose.yaml -f compose.release.yaml up -d --pull never --wait --wait-timeout 240
         env:
