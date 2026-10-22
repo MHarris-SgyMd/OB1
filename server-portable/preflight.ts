@@ -32,7 +32,7 @@ import { EGRESS_UNITS, hostOf, localKnob, type EgressTerm } from "./egress.ts";
 import { statusType, withProviderSpan } from "./spans.ts";
 import { jevDecide, jevInfo, resolveJevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
-import { ago, budgetWords, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readDatabaseFacts, SLEEP_STALLED_JOIN } from "./brain-info.ts";
+import { ago, budgetWords, deniedObject, heartbeatState, heldWords, ledgerStatus, pad3, readDatabaseFacts, RESTART_OVERDUE_S, SLEEP_STALLED_JOIN, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -259,6 +259,24 @@ const runningWords = (l: Leases, c: PassCounts) =>
 const diedWords = (l: Leases) => `a worker died holding ${l.expired} of the claim(s) in flight, their leases expired`;
 const reclaim = (key: string) => `The next pass reclaims the expired claims (a row on its third expiry is marked failed); the release_stale_leases tool (work_type ${key}) returns them now. `;
 /** The sleep scheduler's passes waiting at their start for the provider (SMD-2752), or mid-pass for one that stopped answering (SMD-2905), as its `sleep` and `consolidate pass` rows both say them. */
+/**
+ * What mends a follower db/supervise.ts holds (SMD-3214), null for a row it
+ * did not end: the cause first — "start it again" is wrong for a service
+ * that runs it again on its own — then when it tries again, and the
+ * recreate a fix in deploy/.env needs. Long past its try with nothing
+ * stamped, the supervisor is taken for gone.
+ */
+function heldFix(h: WorkerHeartbeat, name: string): string | null {
+  const r = h.restart;
+  if (!r) return null;
+  const remedy = h.refused ? startRefusalRemedy(h.refused) : r.code === 2 ? "a refusal — its log says which" : `it exited ${r.code} — its log says why`;
+  const recreate = restartCommand(h.worker, h.job);
+  if (r.inS === null) return `${name} is held by its supervisor, never started: ${remedy}. That is deploy/.env's to mend, so recreate it then — ${recreate}.`;
+  const left = r.inS - h.ageS;
+  if (left > -RESTART_OVERDUE_S) return `${name} is held: ${remedy}. Its supervisor runs it again on its own ${left > 0 ? `in ${ago(left)}` : "now"}, then every 15 min at most while it keeps ending, so a fix outside deploy/.env (a model pulled, the migrations applied) is met at a try; one in deploy/.env needs the service recreated — ${recreate}.`;
+  return `${name}'s supervisor was due to run it again ${ago(-left)} ago, and nothing has stamped since: if its container is gone, start it — ${recreate}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`;
+}
+
 const providerWaitWords = (passes: readonly string[], midPass = false) => `${passes.join(" and ")} waiting for the provider ${midPass ? "mid-pass" : `at ${passes.length > 1 ? "their" : "its"} start`}`;
 /** Both waits a row can carry, the start's first: what a reader acts on (SMD-2905). */
 const allWaitWords = (start: readonly string[] | null, midPass: readonly string[] | null) =>
@@ -4598,6 +4616,9 @@ if (configFailed) {
                 const key = h.key;
                 const checkModel = h.malformed?.alarm ? ", once OB1_METADATA_MODEL, the endpoint and the prompt are checked (its last block passed the malformed alarm)" : "";
                 if ((h.stale || h.ended) && sleepRuns && (h.worker === "extract" || h.worker === "consolidate")) return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs here instead, which will not run beside a follower: take workers out of COMPOSE_PROFILES in deploy/.env and retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
+                // Held by its supervisor, which runs it again on its own (SMD-3214).
+                const held = heldFix(h, name);
+                if (held !== null) return held;
                 if (h.stale || h.ended) return `${name} ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again${checkModel} — ${restartCommand(h.worker, h.job)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
                 if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266). The row carries the block until the follower judges its next block (48 answers or more). A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers.`;
                 // Waiting mid-pass, by its own word: the provider stopped answering (SMD-2905).
@@ -4710,7 +4731,8 @@ if (configFailed) {
                     : "awake, its passes waiting for the brain to go quiet — no sleep yet";
               const down = h.stale || h.ended;
               // Ended by a pass's start refusal, by its own word (SMD-2752): the kind is the cause.
-              const refusedBy = h.ended && h.outcome === "failed" && h.refused ? h.refused : null;
+              // A held row's own words say it, the supervisor's (SMD-3214).
+              const refusedBy = h.ended && h.outcome === "failed" && h.refused && !h.restart ? h.refused : null;
               // A scheduler not running wakes for nothing: what would wake it is said as such.
               // The thoughts its wakes hold back, by its own word (SMD-2694): one
               // gaining windows across them is on its way; one stalled gains
@@ -4729,6 +4751,8 @@ if (configFailed) {
               const followers = w.heartbeats.filter((b) => (b.worker === "extract" || b.worker === "consolidate") && !b.stale && !b.ended);
               if (down && followers.length) {
                 fixes.push(`The workers profile's followers run here (${followers.map((b) => b.job ?? b.worker).join(", ")}), and the scheduler will not run beside them: choose one profile. For sleep, stop them (podman compose -f deploy/compose.yaml --profile workers stop extract consolidate, with the -f files and -p the stack was started with), take workers out of COMPOSE_PROFILES, delete their rows (DELETE FROM ob1_config WHERE key IN (${followers.map((b) => `'${b.key}'`).join(", ")})), then start it — ${restartCommand("sleep", null)}. For workers, take sleep out of COMPOSE_PROFILES in deploy/.env and retire this row: DELETE FROM ob1_config WHERE key = '${h.key}'.`);
+              } else if (h.restart) {
+                fixes.push(heldFix(h, "sleep") as string);
               } else if (refusedBy) {
                 // "Start it again" would only refuse again: the cause comes first (SMD-2752).
                 fixes.push(`sleep ended ${ago(h.ageS)} ago on a pass's start refusal (${refusedBy}): ${startRefusalRemedy(refusedBy)} — its log names the pass and the cause. Then start it — ${restartCommand("sleep", null)}${refusedBy === "lookup" ? "" : "; started before that, it refuses again"}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${h.key}'.`);

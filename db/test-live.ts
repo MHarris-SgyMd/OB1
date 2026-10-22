@@ -44,7 +44,7 @@ import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FL
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
-import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
+import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, SLEEP_REFUSALS } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
@@ -64,6 +64,7 @@ import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, rec
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import { passStamper, stampKey } from "./pass-stamp.ts";
+import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
 import { run as runSleep } from "./sleep.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
 import { findingGate, findingsSchemaProblem, findingsStep, groupFindings, outcomes, postFindings, selectFindings, summaryLine, type FindingsReport } from "./board-findings.ts";
@@ -102,7 +103,7 @@ if (!URL_) {
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["38"],
   long: ["9", "10g", "38b"],
-  extract: ["10", "10e", "10f", "17", "37", "39", "41", "43"],
+  extract: ["10", "10e", "10f", "17", "37", "37b", "39", "41", "43"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -12054,6 +12055,150 @@ if (want("37")) {
   } finally {
     await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await hsql.close();
+  }
+}
+
+if (want("37b")) {
+  console.log("\n[37b] db/supervise.ts: a compose follower run again after it ends on its own, on a clock of minutes, its heartbeat ended with the next try — its guards held, a stop passed on, nothing exiting for the runtime to restart in a loop (SMD-3214)");
+  const ssql = new SQL({ url: URL_!, max: 2 });
+  const row = async (key: string) => {
+    const [r] = await ssql`SELECT value, extract(epoch FROM now() - updated_at)::float8 AS age FROM ob1_config WHERE key = ${key}`;
+    return r ? { ...JSON.parse(r.value), age: Number(r.age) } : null;
+  };
+  const said: string[] = [];
+  const writer = { out: (l: string) => void said.push(l), err: (l: string) => void said.push(l) };
+  const fast = { first: 40, max: 160, reset: 60_000 };
+  /** Resolves with the supervisor's code, or "pending" when it has not settled within `ms`. */
+  const within = <T>(p: Promise<T>, ms: number) => Promise.race([p, Bun.sleep(ms).then(() => "pending" as const)]);
+  const EXTRACT_KEY = followerKey("extract", {})!;
+  try {
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    // The clock: 1, 2, 4, 8, then every 15 minutes.
+    assert(JSON.stringify([1, 2, 3, 4, 5, 6, 40].map((t) => restartWait(t))) === JSON.stringify([60_000, 120_000, 240_000, 480_000, 900_000, 900_000, 900_000]),
+      "the waits double from a minute to a cap of 15 minutes, however many ends in a row");
+    // The guards, by the compose file's words: the key first, each bad setting named, empty the follower's default.
+    const noKey = guardRefusal("sleep", { OB1_SLEEP_POLL: "x" }, { requireKey: true, digits: ["OB1_SLEEP_POLL"] });
+    const two = guardRefusal("extract", { OB1_WORKER_KEY: "k", OB1_EXTRACT_FOLLOW: "--status", OB1_EXTRACT_WORKERS: "1 --limit 1", OB1_X: "" }, { requireKey: true, digits: ["OB1_EXTRACT_FOLLOW", "OB1_EXTRACT_WORKERS", "OB1_X"] });
+    assert(noKey?.kind === "identity" && noKey.line.startsWith("sleep: OB1_WORKER_KEY is not set in deploy/.env — mint a key")
+        && two?.kind === "usage" && two.line === "extract: OB1_EXTRACT_FOLLOW ('--status') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only"
+        && guardRefusal("consolidate", { OB1_WORKER_KEY: "k", A: "15", B: "" }, { requireKey: true, digits: ["A", "B"] }) === null
+        && guardRefusal("board-sync", {}, {}) === null,
+      `the guards: no key first (identity), then each setting not digits named (usage), empty passing, none asked none refused (${noKey?.line.slice(0, 50)} | ${two?.line})`);
+    // The keys: the claim workers' under the job their configuration names, as a compose follower (no --job) stamps.
+    assert(followerKey("sleep", {}) === "heartbeat:sleep" && followerKey("board-sync", {}) === "heartbeat:board-sync" && EXTRACT_KEY === `heartbeat:${extractionKey(resolveEmbedConfig({}).metadataModel)}`
+        && followerKey("extract", { OB1_METADATA_MODEL: "m:1b" }) === `heartbeat:${extractionKey("m:1b")}` && /^heartbeat:consolidate:/.test(followerKey("consolidate", {}) ?? ""),
+      `the row a supervisor ends is the one its follower stamps (${EXTRACT_KEY})`);
+
+    // endRow: the follower's last word since its start kept — the scheduler's
+    // sleep and its refusal — its waits dropped, the row ended failed, the
+    // next try added; read back as held.
+    const began = new Date(Date.now() - 2000);
+    const st = passStamper({ sql: ssql as never, worker: "sleep", intervalS: 5 });
+    st.slept?.({ from: new Date().toISOString(), to: new Date().toISOString() });
+    st.waiting?.(["extract"]);
+    st.refused?.("model");
+    await st.alive("failed");
+    await endRow(ssql as never, { worker: "sleep", key: "heartbeat:sleep", since: began, restart: { in_s: 240, code: 2, tries: 3 } });
+    const kept = await row("heartbeat:sleep");
+    const facts = await readDatabaseFacts(ssql as never, { stats: false });
+    const keptBeat = facts.workers?.heartbeats.find((h) => h.worker === "sleep");
+    assert(kept?.ended === true && kept.outcome === "failed" && kept.running === false && kept.refused === "model" && kept.slept?.to && !("waiting" in kept)
+        && kept.restart?.in_s === 240 && kept.restart.code === 2 && kept.restart.tries === 3 && kept.every_s === 60 && kept.age < 5
+        && JSON.stringify(keptBeat?.restart) === JSON.stringify({ inS: 240, code: 2, tries: 3 }) && keptBeat?.refused === "model"
+        && /^held: refused \(model\), 3 end\(s\) in a row — its supervisor runs it again in 4 min/.test(keptBeat ? heartbeatState(keptBeat) : ""),
+      `endRow keeps the follower's last word, drops its waits, ends it failed with the next try, and the reader says held (${JSON.stringify(kept)})`);
+    // A row from before the follower's start is not its word: a row of the supervisor's own, under the claim worker's job.
+    await passStamper({ sql: ssql as never, worker: "extract", job: EXTRACT_KEY.slice("heartbeat:".length), intervalS: 15 }).alive("ok", { answers: 50, bad: 1, alarm: false });
+    await endRow(ssql as never, { worker: "extract", key: EXTRACT_KEY, since: new Date(Date.now() + 60_000), restart: { in_s: 60, code: 1, tries: 1 } });
+    const own = await row(EXTRACT_KEY);
+    assert(own?.job === EXTRACT_KEY.slice("heartbeat:".length) && own.ended === true && own.outcome === "failed" && !("malformed" in own) && own.restart?.code === 1
+        && facts !== null && (await readDatabaseFacts(ssql as never, { stats: false })).workers?.heartbeats.some((h) => h.key === EXTRACT_KEY && h.restart?.inS === 60),
+      `a row older than the follower's start is replaced by the supervisor's own, its job the configuration's, read as held (${JSON.stringify(own)})`);
+    // A follower that exited 0 on its own keeps its outcome; a value not JSON is replaced, never a reason to fail.
+    await ssql`UPDATE ob1_config SET value = 'not json', updated_at = now() WHERE key = 'heartbeat:sleep'`;
+    await endRow(ssql as never, { worker: "sleep", key: "heartbeat:sleep", since: began, restart: { in_s: 60, code: 0, tries: 1 } });
+    const notJson = await row("heartbeat:sleep");
+    assert(notJson?.v === 1 && notJson.ended === true && notJson.restart?.code === 0, `a value not JSON is replaced by the supervisor's own row (${JSON.stringify(notJson)})`);
+
+    // supervise(): a follower that exits on its own is run again on the
+    // clock, each end said once on the log and on its row; a stop in the wait
+    // ends it at once with 0.
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    said.length = 0;
+    const looping = supervise({ worker: "board-sync", run: "echo ran >&2; exit 3", sql: ssql as never, waits: fast, writer });
+    await pollUntil(async () => ((await row("heartbeat:board-sync"))?.restart?.tries ?? 0) >= 3, 10_000);
+    const mid = await row("heartbeat:board-sync");
+    const stopAt = Date.now();
+    looping.stop("SIGTERM");
+    const loopCode = await within(looping.done, 2000);
+    const ends = said.filter((l) => /^supervise: board-sync exited 3 after \d+ s; it runs again at \d{4}-\d\d-\d\dT[\d:.]+Z \(in 0 s, end \d in a row\), heartbeat:board-sync says so\./.test(l));
+    assert(loopCode === 0 && Date.now() - stopAt < 1000 && mid?.ended === true && mid.outcome === "failed" && mid.restart.code === 3 && mid.restart.tries >= 3 && ends.length >= 3 && !said.some((l) => /a refusal/.test(l)),
+      `a follower ending on its own runs again on the clock, each end on the log and the row, and a stop in the wait ends it at once with 0 (code ${loopCode}, ${ends.length} ends said, row ${JSON.stringify(mid?.restart)})`);
+    // The count starts again after a run of `reset` or longer: here every run counts as long.
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    const resetting = supervise({ worker: "board-sync", run: "sleep 0.15; exit 2", sql: ssql as never, waits: { first: 40, max: 160, reset: 100 }, writer });
+    await pollUntil(async () => (await row("heartbeat:board-sync")) !== null, 5000);
+    await Bun.sleep(600);
+    const reset = await row("heartbeat:board-sync");
+    resetting.stop("SIGTERM");
+    assert((await within(resetting.done, 2000)) === 0 && reset?.restart?.tries === 1 && said.some((l) => /exited 2 after \d+ s — a refusal, its lines above say why/.test(l)),
+      `a follower that ran past the reset starts the count again — each end the first in a row — and a refusal is said as one (${JSON.stringify(reset?.restart)})`);
+
+    // A stop passes on to the follower, whose own handler ends it; the supervisor then exits 0, the row left as the follower had it.
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    const marker = join(tmpdir(), `ob1-supervise-${process.pid}`);
+    rmSync(marker, { force: true });
+    const passing = supervise({ worker: "sleep", run: `exec sh -c 'trap "echo stopped-by-term > ${marker}; exit 0" TERM; echo up > ${marker}; while :; do sleep 0.05; done'`, sql: ssql as never, waits: fast, writer });
+    await pollUntil(async () => existsSync(marker), 5000);
+    passing.stop("SIGTERM");
+    const passCode = await within(passing.done, 3000);
+    const heard = existsSync(marker) ? readFileSync(marker, "utf8").trim() : "";
+    rmSync(marker, { force: true });
+    assert(passCode === 0 && heard === "stopped-by-term" && (await row("heartbeat:sleep")) === null,
+      `a stop goes on to the follower, which ends on it, and the supervisor exits 0 with no row of its own (code ${passCode}, the follower heard "${heard}")`);
+
+    // The guard: held, never started, its row the refusal with no next try — the supervisor settles only on a stop.
+    said.length = 0;
+    const guarded = supervise({ worker: "extract", run: "echo started >&2", requireKey: true, env: {}, sql: ssql as never, writer });
+    await pollUntil(async () => (await row(EXTRACT_KEY))?.refused === "identity", 5000);
+    const guardRow = await row(EXTRACT_KEY);
+    const stillHeld = await within(guarded.done, 300);
+    guarded.stop("SIGINT");
+    assert(stillHeld === "pending" && (await within(guarded.done, 1000)) === 0 && guardRow?.ended === true && guardRow.restart?.in_s === null && guardRow.restart.code === 2
+        && said[0]?.startsWith("extract: OB1_WORKER_KEY is not set in deploy/.env") && /^supervise: extract is held, not started/.test(said[1] ?? "") && !said.includes("started"),
+      `no key holds the follower unstarted, its row refused (identity) with no next try, until a stop ends it with 0 (${JSON.stringify(guardRow?.restart)})`);
+    // No database to write to: the supervisor runs and holds the same, the row left alone.
+    const unstamped = supervise({ worker: "sleep", run: "exit 2", sql: null, waits: fast, writer });
+    await Bun.sleep(200);
+    unstamped.stop("SIGTERM");
+    assert((await within(unstamped.done, 1000)) === 0 && (await row("heartbeat:sleep")) === null, "with no database the supervisor still runs the follower again and stops on a signal, the row left alone");
+
+    // The CLI, for real: as the compose service runs it — its handlers its
+    // own, the door closing its client — a SIGTERM in a wait or a hold ends it
+    // at once with 0, and its row says so.
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    const cliEnv = { ...process.env, DATABASE_URL: URL_!, OB1_ENV_FILES: "off" } as Record<string, string>;
+    delete cliEnv.OB1_WORKER_KEY;
+    const cli = Bun.spawn(["bun", "--no-env-file", join(HERE, "supervise.ts"), "--worker", "board-sync", "--run", "echo refused >&2; exit 2"], { cwd: HERE, env: cliEnv, stdout: "pipe", stderr: "pipe" });
+    await pollUntil(async () => (await row("heartbeat:board-sync"))?.restart?.in_s === 60, 15_000);
+    const t0 = Date.now();
+    cli.kill("SIGTERM");
+    const cliCode = await cli.exited;
+    const cliErr = await new Response(cli.stderr).text();
+    assert(cliCode === 0 && Date.now() - t0 < 2000 && /^refused$/m.test(cliErr) && /supervise: board-sync exited 2 after \d+ s — a refusal, its lines above say why; it runs again at .* \(in 60 s, end 1 in a row\), heartbeat:board-sync says so/.test(cliErr),
+      `the CLI waits a minute after its follower's refusal, and a SIGTERM then ends it with 0 at once (exit ${cliCode} after ${Date.now() - t0} ms)`);
+    const cliGuard = Bun.spawn(["bun", "--no-env-file", join(HERE, "supervise.ts"), "--worker", "extract", "--require-key", "--digits", "OB1_EXTRACT_FOLLOW", "--run", "echo started >&2"], { cwd: HERE, env: cliEnv, stdout: "pipe", stderr: "pipe" });
+    await pollUntil(async () => (await row(EXTRACT_KEY))?.refused === "identity", 15_000);
+    await Bun.sleep(200);
+    const guardRunning = cliGuard.exitCode === null;
+    cliGuard.kill("SIGTERM");
+    const guardCode = await cliGuard.exited;
+    const guardErr = await new Response(cliGuard.stderr).text();
+    assert(guardRunning && guardCode === 0 && !/^started$/m.test(guardErr) && /^extract: OB1_WORKER_KEY is not set in deploy\/\.env/m.test(guardErr),
+      `the CLI's guard holds with the follower unstarted, and a SIGTERM ends it with 0 (exit ${guardCode})`);
+  } finally {
+    await ssql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    await ssql.close();
   }
 }
 

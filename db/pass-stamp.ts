@@ -24,7 +24,9 @@
  * (SleepHeld, SMD-2694), and `budget`, its budget in force and the sleeps
  * stopped on it (SleepBudget, SMD-2679; `slept.budget` says which stopped); and `waitingMidPass`, the passes waiting mid-pass for a
  * provider that stopped answering — the sleep scheduler's by name, a
- * follower's its own (SMD-2905). Each stamp writes the whole value: a restarted follower's first
+ * follower's its own (SMD-2905); and `restart`, on a row ended by db/supervise.ts, the compose
+ * services' command, which runs the follower again on its own (SMD-3214) — written there, not
+ * here. Each stamp writes the whole value: a restarted follower's first
  * stamp carries no block until it judges one. The time is the row's
  * updated_at — now() on the database, so a worker's clock is not read.
  * ob1_config is key/value, so no migration: the `worker` grant group already
