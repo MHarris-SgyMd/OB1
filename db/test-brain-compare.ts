@@ -59,10 +59,12 @@ interface FakeConfig {
   hits: Record<string, string[]>;
   /** queries this brain refuses (an egress-gated embedding) — the search tool returns isError. */
   refuse?: string[];
+  /** queries this brain answers by exact matches alone, its embedding provider down (SMD-2891) — the reply carries `vectorFailed`. */
+  literal?: string[];
   /** the brain's thought-id set for list_thought_ids; omit to make the tool absent (a brain older than SMD-2244). */
   corpus?: { ids: string[]; digest?: string | null; pageCap?: number; fail?: string; failAfter?: boolean; badShape?: boolean; stuckCursor?: boolean; fakeTotal?: number };
   /** the brain's logged searches for list_logged_searches; omit to make the tool absent. */
-  log?: { searches: { query: string; arm: "keyword" | "hybrid" | "current" | null }[]; truncated?: boolean };
+  log?: { searches: { query: string; arm: "keyword" | "hybrid" | "current" | "literal" | null }[]; truncated?: boolean };
   /** a gateway/proxy that answers every tools/call POST with a plain 404 body (GET /health still routes). */
   proxy404?: boolean;
   /** frame the tools/call reply as an SSE stream rather than raw JSON. */
@@ -181,7 +183,8 @@ function startFake(cfg: FakeConfig): { server: ReturnType<typeof Bun.serve>; ep:
         } else {
           return replyError(body.id, `unknown tool ${name}`, cfg.sse);
         }
-        return replyOk(body.id, text, cfg.sse);
+        const literalAnswer = name === "search_thoughts" && cfg.literal?.includes(body.params.arguments.query ?? "");
+        return replyOk(body.id, text, cfg.sse, literalAnswer ? { vectorFailed: "provider_unreachable" } : undefined);
       }
       return new Response("not found", { status: 404 });
     },
@@ -190,8 +193,8 @@ function startFake(cfg: FakeConfig): { server: ReturnType<typeof Bun.serve>; ep:
   return { server, ep };
 }
 
-function replyOk(id: number, text: string, sse?: boolean): Response {
-  const msg = { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }] } };
+function replyOk(id: number, text: string, sse?: boolean, structured?: Record<string, unknown>): Response {
+  const msg = { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], ...(structured ? { structuredContent: structured } : {}) } };
   return frame(msg, sse);
 }
 function replyError(id: number, message: string, sse?: boolean): Response {
@@ -736,6 +739,9 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   // 059's arm (SMD-2255): a prefer_current search is replayed as one, not dropped.
   const withCurrent = replayPlanFromLog([{ query: "d", arm: "current" }, { query: "d", arm: "hybrid" }]);
   ok(withCurrent.length === 2 && withCurrent[0].arm === "current" && withCurrent[1].arm === "hybrid", `a logged current search is its own replay entry beside the hybrid one (${JSON.stringify(withCurrent)})`);
+  // 106's arm (SMD-2891): a search answered with no vector is no replay — a brain whose provider answers runs it with one.
+  const withLiteral = replayPlanFromLog([{ query: "e", arm: "literal" }, { query: "e", arm: "hybrid" }]);
+  ok(withLiteral.length === 1 && withLiteral[0].arm === "hybrid", `a logged literal search is left out, the same query's hybrid row replayed (${JSON.stringify(withLiteral)})`);
 }
 
 // A current-arm row replays as search_thoughts with prefer_current: the fake
@@ -888,7 +894,7 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
     } finally { console.log = logFn; a.server.stop(true); b.server.stop(true); }
     return { code, out: lines.join("\n") };
   };
-  const logged = (...qs: [string, "keyword" | "hybrid" | "current" | null][]) => ({ searches: qs.map(([query, arm]) => ({ query, arm })) });
+  const logged = (...qs: [string, "keyword" | "hybrid" | "current" | "literal" | null][]) => ({ searches: qs.map(([query, arm]) => ({ query, arm })) });
 
   const same = await gate({ log: logged(["q", "keyword"]), hits: { q: [uid(1), uid(2)] } }, { hits: { q: [uid(1), uid(2)] } });
   ok(same.code === 0 && /^replayed 1 of 1 distinct logged searches in the most recent page of localhost:\d+'s log \(0 skipped\)$/m.test(same.out) && /what moved: nothing — localhost:\d+ returns localhost:\d+'s ids on the one replayed\./.test(same.out),
@@ -944,6 +950,30 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
     `--diff over a log of pre-045 rows says so, not that nothing was logged (${noArmOnly.out.split("\n").slice(-1)})`);
   const noArmSome = await gate({ log: logged(["q", null], ["r", "keyword"]), hits: { r: [uid(2)] } }, { hits: { r: [uid(2)] } });
   ok(noArmSome.code === 0 && noArmSome.out.includes("replayed 1 of 1 distinct logged searches") && noArmSome.out.includes("1 more logged with no arm"), `…and beside a replayed one, counts it (${noArmSome.code})`);
+  // Searches answered by exact literals while the provider was down (arm literal, 106) are counted apart too (SMD-2891).
+  const literalOnly = await gate({ log: logged(["q", "literal"], ["q", "literal"], ["r", null]) }, {});
+  ok(literalOnly.code === 3 && literalOnly.out.includes("(0 skipped; 1 more logged with no arm, before migration 045, and 1 more answered by exact matches alone while the embedding provider was down (arm literal), not replayed)")
+      && literalOnly.out.includes("nothing to compare: every search in the window was logged before migration 045, with no arm to replay it on, or answered by exact matches alone while the embedding provider was down."),
+    `--diff over a log of literal and pre-045 rows counts each, distinct, and says why nothing was compared (${literalOnly.out.split("\n").slice(-2).join(" / ")})`);
+  const literalSome = await gate({ log: logged(["q", "literal"], ["r", "keyword"]), hits: { r: [uid(2)] } }, { hits: { r: [uid(2)] } });
+  ok(literalSome.code === 0 && literalSome.out.includes("replayed 1 of 1 distinct logged searches") && literalSome.out.includes("; 1 more answered by exact matches alone while the embedding provider was down (arm literal), not replayed)"), `…and beside a replayed one, counts it (${literalSome.code})`);
+  // A log of literal rows alone: nothing to compare, and the reason is the outage, not an empty log (review pass 1: a mutant dropping it survived beside a no-arm row).
+  const literalAlone = await gate({ log: logged(["q", "literal"]) }, {});
+  ok(literalAlone.code === 3 && literalAlone.out.includes("nothing to compare: every search in the window was answered by exact matches alone while the embedding provider was down.") && !/nothing to compare: \S+ logged no searches/.test(literalAlone.out),
+    `--diff over a log of literal rows alone says why nothing was compared (${literalAlone.code}: ${literalAlone.out.replace(/\n/g, " / ").slice(-400)})`);
+  // A query logged literal once and hybrid once is replayed, not counted apart too (review pass 1).
+  const both = await gate({ log: logged(["q", "literal"], ["q", "hybrid"]), hits: { q: [uid(2)] } }, { hits: { q: [uid(2)] } });
+  ok(both.code === 0 && both.out.includes("replayed 1 of 1 distinct logged searches") && !both.out.includes("answered by exact literals"), `a query replayed on its hybrid row is not also counted as a literal one (${both.out.split("\n").slice(-2).join(" / ")})`);
+  // A replay a brain answers by exact matches alone — its provider down now — is that brain failing the search, not a ranking (review pass 1: both down read as unmoved, exit 0).
+  const bothDown = await gate({ log: logged(["q", "hybrid"]), hits: { q: [uid(2)] }, literal: ["q"] }, { hits: { q: [uid(2)] }, literal: ["q"] });
+  ok(bothDown.code === 3 && bothDown.out.includes("nothing to compare: both brains failed every search in the window."), `both brains answering by literals alone: nothing compared, exit 3, not a pass (${bothDown.code}: ${bothDown.out.split("\n").slice(-1)})`);
+  const canaryDown = await gate({ log: logged(["q", "hybrid"]), hits: { q: [uid(2)] } }, { hits: { q: [uid(2)] }, literal: ["q"] });
+  ok(canaryDown.code === 1 && /failed 1 that .* answered/.test(canaryDown.out) && canaryDown.out.includes("answered by exact matches alone"), `the canary alone answering by literals: a failure on its side, exit 1, saying why (${canaryDown.code}: ${canaryDown.out.split("\n").filter((l) => /literals|failed/.test(l)).join(" / ").slice(0, 300)})`);
+  // The servers frame tools/call as SSE, and a current-arm row replays through search_thoughts too (review pass 2: both survived as mutants).
+  const sseCurrent = await gate({ log: logged(["q", "current"]), hits: { "q#current": [uid(2)] }, literal: ["q"], sse: true }, { hits: { "q#current": [uid(2)] }, literal: ["q"], sse: true });
+  ok(sseCurrent.code === 3 && sseCurrent.out.includes("nothing to compare: both brains failed every search in the window."), `an SSE-framed literal answer on a current-arm replay is a failed search too (${sseCurrent.code})`);
+  const replayDown = await gate({ log: logged(["q", "hybrid"]), hits: { q: [uid(2)] } }, { hits: { q: [uid(3)] }, literal: ["q"] }, { gate: false });
+  ok(replayDown.code === 1 && !replayDown.out.includes("what moved: 1 of 1"), `--replay too: a failed step, not a moved ranking (${replayDown.code})`);
 
   // A page whose searches are not a list is a log not read, not an empty one.
   const badPage = startFake({ info: baseInfo({}), newest: "9/24/2026", hits: {}, log: { searches: "nope" as unknown as [] } });
