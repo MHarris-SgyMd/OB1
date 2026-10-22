@@ -895,7 +895,7 @@ console.log("\n[12] Genre classify (SMD-2323): a metadata pre-signal decides wit
   assert(outage.genre === "other" && outage.source === "fallback", "a tier outage falls back to other and never throws");
 }
 
-console.log("\n[13] A provider that does not answer (SMD-2888): providerDown names an outage and nothing else, an outage's tags are the marker alone, a reset after a 200 is an outage, and the core's capture lands the row naming the embeddings endpoint");
+console.log("\n[13] A provider that does not answer (SMD-2888): providerDown names an outage and nothing else, an outage's tags are the marker alone, a reset after a 200 is an outage, and the core's capture lands the row naming the embeddings endpoint; a search answers by its literal arm, naming the endpoint masked (SMD-2891)");
 {
   // Bun 1.4.3's own errors, by their fields (measured: a closed port, an unresolved name).
   const refused = Object.assign(new TypeError("ECONNREFUSED: Unable to connect. Is the computer able to access the url?"), { code: "ECONNREFUSED" });
@@ -1082,6 +1082,81 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   } finally {
     plain.stop(true);
   }
+
+  // A search the provider does not answer for (SMD-2891): the store is asked
+  // for the literal arm alone (no vector), then — nothing matched — for the
+  // literals' own facts; the endpoint is named as a row prints it, its
+  // userinfo masked (review pass 1: SMD-2885's rule).
+  const asked: Record<string, unknown>[] = [];
+  const searchStore = {
+    hybridThoughts: async (o: Record<string, unknown>) => { asked.push(o); return []; },
+    literalFacts: async (q: string) => { asked.push({ literalFacts: q }); return { literals: [{ needle: "X-2891", common: false }, { needle: "Y-2891", common: true }], textable: false }; },
+  };
+  const sctx = createContext({
+    env: () => ({ OB1_LLM_BASE_URL: `http://user:hunter2@127.0.0.1:${closedNow()}/v1`, OB1_LLM_LOCAL: "1" }),
+    store: async () => searchStore as never,
+    door: "test",
+  });
+  const { searchThoughts } = await import("./core/reads.ts");
+  const errLines: string[] = [];
+  const realError = console.error;
+  console.error = (...m: unknown[]) => { errLines.push(m.join(" ")); };
+  let sr: Awaited<ReturnType<typeof searchThoughts>>;
+  try {
+    sr = await searchThoughts(sctx, { name: "reader", scope: "read", keyHash: "h" } as never, { query: "about X-2891", limit: 10, threshold: 0, recency_weight: 0, prefer_current: false } as never);
+  } finally {
+    console.error = realError;
+  }
+  // The server's line: which tool, the endpoint masked, what happened — never the query (review pass 2).
+  assert(errLines.length === 1 && /^search_thoughts: the embedding provider at http:\/\/\*\*\*@127\.0\.0\.1:\d+\/v1 was unavailable: the connection was refused; answered by exact matches alone$/.test(errLines[0]) && !errLines[0].includes("X-2891"),
+    `the server says so once on stderr, the endpoint masked and the query left out (${JSON.stringify(errLines)})`);
+  const sv = sr.ok ? sr.value : undefined;
+  assert(sv?.vectorFailed?.reason === "provider_unreachable" && sv.vectorFailed.base.includes("***@") && !sv.vectorFailed.base.includes("hunter2"),
+    `a search with the provider down: answered, the endpoint named with its userinfo masked (${JSON.stringify(sv?.vectorFailed)})`);
+  assert(asked.length === 2 && asked[0].embedding === null && JSON.stringify(asked[1]) === JSON.stringify({ literalFacts: "about X-2891" })
+      && JSON.stringify(sv?.facts) === JSON.stringify({ needles: ["X-2891"], needleCounts: [0], commonNeedles: ["Y-2891"], literalOnly: null }),
+    `…the literal arm asked with no vector, then the literals' facts (no probe for an unfiltered search, review pass 10): the facts in the hybrid's terms, a literal none holds a needle counted 0, a held one common alone (${JSON.stringify(sv?.facts)})`);
+  // A query holding no literal: the keyword arm, the whole query as one text (review pass 4); the endpoint named is the embeddings', with a chat endpoint of its own beside it.
+  const asked2: Record<string, unknown>[] = [];
+  const textStore = {
+    hybridThoughts: async (o: Record<string, unknown>) => { asked2.push({ hybrid: o.embedding }); return []; },
+    literalFacts: async () => { asked2.push({ literalFacts: true }); return { literals: [], textable: true }; },
+    textThoughts: async (o: Record<string, unknown>) => { asked2.push({ text: o.query, limit: o.limit, filter: o.filter }); return [{ id: "00000000-0000-4000-8000-0000000000c1", content: "alpha words", metadata: {}, created_at: "2026-10-21T00:00:00.000Z", occurrences: 1, totalCount: 1 }]; },
+
+    supersededAmong: async () => ({}),
+    ticketStatusInputs: async () => null,
+  };
+  const embedPort2 = closedNow();
+  const tctx = createContext({
+    env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${embedPort2}/v1`, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: "http://127.0.0.1:9/v1", OB1_CHAT_LOCAL: "1" }),
+    store: async () => textStore as never,
+    door: "test",
+  });
+  const realError2 = console.error;
+  console.error = () => {};
+  let tr: Awaited<ReturnType<typeof searchThoughts>>;
+  try {
+    tr = await searchThoughts(tctx, { name: "reader", scope: "read", keyHash: "h" } as never, { query: "alpha words", limit: 5, threshold: 0, recency_weight: 0, prefer_current: false } as never);
+  } finally {
+    console.error = realError2;
+  }
+  const tv = tr.ok ? tr.value : undefined;
+  assert(tv?.vectorFailed?.matched === "text" && tv.vectorFailed.base === `http://127.0.0.1:${embedPort2}/v1` && tv.hits.length === 1 && tv.hits[0].similarity === null && JSON.stringify(tv.hits[0].matchedNeedles) === JSON.stringify(["alpha words"])
+      && JSON.stringify(asked2) === JSON.stringify([{ hybrid: null }, { literalFacts: true }, { text: "alpha words", limit: 5, filter: {} }]),
+    `a query with no literal: the bounded text match asked for the whole query, its row the hit, matched as text, the embeddings endpoint named (${JSON.stringify({ vf: tv?.vectorFailed, asked2 })})`);
+  // A scoped text match that finds nothing asks the bounded text match again, unfiltered, for the held-outside count (review pass 9: an unbounded count passed).
+  asked2.length = 0;
+  textStore.textThoughts = async (o: Record<string, unknown>) => { asked2.push({ text: o.query, limit: o.limit, filter: o.filter, minTrust: o.minTrust }); return o.filter && Object.keys(o.filter as object).length ? [] : [{ id: "00000000-0000-4000-8000-0000000000c2", content: "alpha words", metadata: {}, created_at: "2026-10-21T00:00:00.000Z", occurrences: 1, totalCount: 7 }]; };
+  console.error = () => {};
+  let fr: Awaited<ReturnType<typeof searchThoughts>>;
+  try {
+    fr = await searchThoughts(tctx, { name: "reader", scope: "read", keyHash: "h" } as never, { query: "alpha words", limit: 5, threshold: 0, recency_weight: 0, prefer_current: false, filter: { type: "nope" } } as never);
+  } finally {
+    console.error = realError2;
+  }
+  const fv = fr.ok ? fr.value : undefined;
+  assert(JSON.stringify(asked2.filter((a) => "text" in a)) === JSON.stringify([{ text: "alpha words", limit: 5, filter: { type: "nope" } }, { text: "alpha words", limit: 1, filter: {} }]) && JSON.stringify(fv?.facts?.needleCounts) === "[7]",
+    `a scoped empty text match: the bounded text match asked again unfiltered, its page count the held-outside count (${JSON.stringify(asked2)})`);
 }
 
 console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vector through update_thought with the stamp it read; two outages in a row stop the tick, and two such ticks running are the provider away; the gate is asked the question the row's writer asked; a failing row is held for doubling sweeps and holds back nothing; a tick acts only under the leader lock");
