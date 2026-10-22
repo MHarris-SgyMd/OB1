@@ -680,13 +680,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // ob1_config.schema_version for the 1.9.0 cut, needing only 006's table;
   // 104 adds the lapse's tree and redefines 097's walk over it and its
   // trigger to lock it, refusing by name without 097 ([20av]); 105 redefines 058's two status sets and rebuilds 071's mirror,
-  // refusing by name without 058 or 071 ([20aw]) — all
+  // refusing by name without 058 or 071 ([20aw]); 106 widens 059's query_log arm check, refusing by name
+  // without 034 or 045 ([20ax]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 76, `030 is among the last seventy-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 77, `030 is among the last seventy-seven migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4595,6 +4596,33 @@ console.log("\n[20aw] Migration 105: refused by name without 058, then without 0
   await sql.unsafe(`DROP ROLE ob1_upgrade_mig105`);
   assert(asOwner === "applied" && owned.length >= 5 && owned.every((f) => ownedAfter.get(f) !== ownedBefore.get(f)),
     `run by a brain owner that is no superuser, the block alters every reader of its own (${asOwner.slice(0, 80)}; ${owned.length})`);
+  await sql.close();
+}
+
+console.log("\n[20ax] Migration 106: refused by name without 045; onto a brain at the file before it holding a row of every arm — `literal` refused there and taken after, every row as it was, any other word still refused; a re-apply a no-op (SMD-2891)");
+{
+  const the106 = MIGRATIONS.find((f) => f.endsWith("_query_log_literal_arm.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "045" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the106 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 106 needs query_log (034) and its arm column (045); this schema lacks them",
+    `106 on a schema stopped before 045 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the106 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const log = (arm: string | null) => sql`INSERT INTO query_log (kind, tool, query, arm) VALUES ('search', 'search_thoughts', 'upgrade 106', ${arm})`.then(() => "taken", (e: Error) => e.message);
+  for (const arm of ["hybrid", "keyword", "current", null]) assert((await log(arm)) === "taken", `[20ax] setup: at the file before it the log takes arm ${arm}`);
+  assert(/query_log_arm_check/.test(await log("literal")), "at the file before it the log refuses arm literal");
+  const rows = async () => JSON.stringify(await sql`SELECT id, logged_at::text AS t, kind, tool, query, arm FROM query_log ORDER BY id`);
+  const check = async () => String((await sql`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'query_log_arm_check'`)[0]?.d);
+  const before = await rows();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the106 });
+  assert((await rows()) === before, "106 applied: every row as it was");
+  assert((await log("literal")) === "taken" && /query_log_arm_check/.test(await log("vector")), "after it the log takes arm literal, and still refuses a word it does not know");
+  const rowsBeforeReapply = await rows(), checkBeforeReapply = await check();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the106 });
+  assert((await rows()) === rowsBeforeReapply && (await check()) === checkBeforeReapply && /'literal'/.test(checkBeforeReapply), `a re-apply of 106 is a no-op: no row moved, the same check (${checkBeforeReapply})`);
   await sql.close();
 }
 

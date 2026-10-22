@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2967 assertions: 2967 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and five (105) migrations applied, and
+`bun test-schema.ts` prints `2970 assertions: 2970 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and six (106) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1877,6 +1877,22 @@ Duplicate settled and its blocker cleared, both under 058's sets as before, the
 mirror rebuilt), test-upgrade [20aw] (a session's cached plan reaching the new
 sets among it), test-live [41] (the poster's refusals without 058's set and
 before 105, and a Done and a Duplicate ticket a closed pair by 105's set alone).
+
+Migration 106 widens the query log's arm check with `literal` (SMD-2891).
+With the embedding provider down, `search_thoughts` and the compat `search`
+failed with the runtime's raw "Unable to connect", though the exact-literal
+arm they fuse needs no model. They now call the same hybrid function with no
+vector — `match_thoughts` finds nothing on NULL, so the rows are the
+identifiers and quoted spans the query names, matched exactly; those matching
+nothing, the whole query is matched as one text, case aside, as
+`search_thoughts_keyword` matches it — and the reply says so. The function reports its needle facts only on a row, so when nothing
+matched the server reads them on their own (`extract_search_needles`, and each
+literal probed for its 101st row as 075's hybrid probes it): read only once no
+unfiltered search matched a literal, so each is absent or too common. Such a search is logged as arm
+`literal`, which no replay takes: `hybrid` and `current` would replay with a
+vector, and `keyword` is another tool's search. 106
+changes no function and rewrites no row; it refuses to apply without 045's
+arm column. test-upgrade [20ax].
 
 ## What changed relative to the guide
 
@@ -4517,8 +4533,12 @@ query and arm once, and the ids the two return are diffed: the measured per-PR
 **"what moved"**, in place of the hand-written control run. Each brain embeds its
 own query, so the hybrid and current arms need no model here. A search both
 brains refuse is skipped; one only one brain fails, the other answering, fails
-the run (exit 1 on both verbs). Rows logged before migration 045 have no arm,
-and are counted apart, not replayed. Both verbs print `--compare`'s report, then
+the run (exit 1 on both verbs); a search a brain answers by exact literals
+alone, its embedding provider down (`vectorFailed`, SMD-2891), is that brain
+failing it, so two brains on one downed provider compare nothing (exit 3 under
+`--diff`) rather than pass. Rows logged before migration 045 have no arm, and
+rows logged as arm `literal` (106) ran without a vector; both are counted
+apart, not replayed, unless the same query replays on another arm. Both verbs print `--compare`'s report, then
 the window and how many searches were replayed and skipped. A window that
 replayed none compared nothing, and `--diff` exits 3 on it: 0 is a pass, 1 a
 ranking that moved or a step that failed (stable's log unread, or a search one
@@ -4566,7 +4586,7 @@ replay over HTTP) do not need them and are here now.
 The `query_log.tier` column the tiers read is from migration 045 (SMD-1490): the
 server stamps every query_log row with its `OB1_TIER` (stable | canary | working,
 NULL for a plain brain). 045 also added `query_log.arm` (the retrieval arm a search
-ran — `hybrid` or `keyword`) and populated the long-dead `filter` column: the search
+ran — `hybrid` or `keyword`; 059 adds `current`, 106 `literal`) and populated the long-dead `filter` column: the search
 tools now take a metadata filter (`metadata @> filter`, a shallow object) and log
 it, so both replay halves can measure the filtered path against real use.
 
@@ -5029,7 +5049,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2967 assertions, PGlite, no container
+bun test-schema.ts                          # 2970 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1465 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 895 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 57 assertions: the shards SHARDS lists in test-live.ts, each its own cell

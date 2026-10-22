@@ -447,7 +447,8 @@ export function normaliseVectorlessRow(r: Record<string, unknown>): VectorlessRo
  */
 export type LoggedSearchRow = {
   query: string;
-  arm: "hybrid" | "keyword" | null;
+  /** 045's arms, 059's current, 106's literal (SMD-2891); null before 045. */
+  arm: "hybrid" | "keyword" | "current" | "literal" | null;
   tier: string | null;
   loggedAt: string | null;
   matchCount: number | null;
@@ -455,6 +456,9 @@ export type LoggedSearchRow = {
   recencyWeight: number | null;
   filter: Record<string, unknown>;
 };
+
+/** The page a text match is bounded by (SMD-2891, review pass 8): its count past this is "more than". */
+export const TEXT_PAGE = 1000;
 
 /**
  * A window of a brain's logged searches, most recent first, bounded by `limit`.
@@ -1356,7 +1360,7 @@ export type QuerySearchLog = {
   filter: Record<string, unknown>;
   resultIds: string[];
   resultScores: (number | null)[];
-  /** Which retrieval arm served the row: 'hybrid', 'keyword' (SMD-1490) or 'current' — search_thoughts with prefer_current (059, SMD-2255). */
+  /** Which retrieval arm served the row: 'hybrid', 'keyword' (SMD-1490), 'current' — search_thoughts with prefer_current (059, SMD-2255) — or 'literal': search or search_thoughts answered by its exact matches alone — its literals, then the query as one text — while the provider could not embed the query (106, SMD-2891). */
   arm?: string;
   /** The tier the writing server runs as: stable|canary|working, else absent (SMD-1806). */
   tier?: string;
@@ -1408,14 +1412,47 @@ export interface ThoughtStore {
   }): Promise<ThoughtKeywordMatch[]>;
 
   /**
+   * The literals 017's extract_search_needles takes from `query`, in its
+   * order, each with whether more thoughts hold it than one keyword page —
+   * 075's own rarity probe, unfiltered (SMD-2891). Its answer is read as
+   * absent or too common only once no unfiltered search matched a literal
+   * (answerWithoutVector's literal arm, or its probe for a filtered search).
+   * Never a count (a count read the whole match set, seconds per needle), and
+   * never a bare first-row probe (it plans a
+   * sequential scan, the whole table for an absent needle). `textable`: whether
+   * the whole query may be matched as one text — at least three characters and
+   * a word the English parser keeps, 017's rule for a quoted span, so `the`,
+   * `of the` and `AI` are not substrings of nearly every thought (review pass 5),
+   * and no longer than 017's 64 for a span (review pass 8: a megabyte query
+   * held a pool connection for minutes).
+   */
+  literalFacts(query: string): Promise<{ literals: { needle: string; common: boolean }[]; textable: boolean }>;
+
+  /**
+   * The text match a search falls back to without a vector (SMD-2891): the
+   * thoughts holding `query` as one text, case aside, within the filter and
+   * min_trust — bounded, as search_thoughts_keyword's function is not: the
+   * first TEXT_PAGE + 1 matching rows the scan meets (all of them when fewer,
+   * so then the newest; past the page, not of every holder), newest first
+   * within them, each row
+   * carrying how many that page held (`totalCount`, TEXT_PAGE + 1 meaning
+   * more than TEXT_PAGE). Review pass 8: the keyword function counts and
+   * scores its whole match set — 5.4 s for a word in nearly every thought at
+   * 200,000, which during an outage held every pool connection.
+   */
+  textThoughts(opts: { query: string; limit: number; filter: Record<string, unknown>; minTrust?: string }): Promise<ThoughtKeywordMatch[]>;
+
+  /**
    * The two above fused (migration 017): rank on the vector arm, presence per
    * needle on the keyword arm. `query` is the text the needles are extracted
    * from, in SQL, so every caller extracts identically; `embedding` is of that
-   * same text. Fixed top-`limit`, no paging.
+   * same text — or null when the provider could not embed it (SMD-2891):
+   * then the vector arm finds nothing and the rows are the exact-literal
+   * arm's alone. Fixed top-`limit`, no paging.
    */
   hybridThoughts(opts: {
     query: string;
-    embedding: number[];
+    embedding: number[] | null;
     threshold: number;
     limit: number;
     filter: Record<string, unknown>;
@@ -1904,7 +1941,7 @@ export function maskUrl(url: string): string {
  * not.
  */
 const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
-  matchThoughts: true, keywordThoughts: true, hybridThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
+  matchThoughts: true, keywordThoughts: true, hybridThoughts: true, literalFacts: true, textThoughts: true, getThought: true, listThoughts: true, countThoughts: true,
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true,
   resetCaptureStamp: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, traceProvenance: true,
