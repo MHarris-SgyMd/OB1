@@ -1011,6 +1011,10 @@ const EMITTER_PROBE = [
  *   to the named host, what it refuses and reports, the bounds on a
  *   connection and a tunnel, half-open tunnels, and what a host that never
  *   closes or ends first does to them.
+ * The timed cases run on shortened stop and drain bounds (Config.timings),
+ * and the bounded runs and the proxy's four groups each side by side, where
+ * they share no state: about 12 s, where in series on the service's bounds
+ * it was 41 (SMD-3198).
  * Running as another user, and the egress rules themselves, are the image's,
  * and the eval kit holds them live (evals/orchestration/n8n.ts, I).
  */
@@ -1430,8 +1434,9 @@ async function selfCheck(): Promise<number> {
   try {
     // Four groups side by side, each on proxies of its own, so each reads its
     // own refusals in order: the main proxy's cases; a refused client that
-    // stays; tunnels to hosts that never close or end first; and the strict and
-    // loose proxies (SMD-3198: in series they were 9.6 s, nearly all quiet bounds).
+    // stays; tunnels to hosts that never close or end first; and the strict
+    // and loose proxies (SMD-3198: in series they were 9.6 s, nearly all
+    // quiet bounds).
     await Promise.all([
       (async () => {
         expect(`the proxy listens on 127.0.0.1 alone (${own.url})`, own.url === `http://127.0.0.1:${own.port}`);
