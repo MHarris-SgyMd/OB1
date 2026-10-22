@@ -78,9 +78,17 @@ for a long context and is answered, `truncated: true`.
 ```bash
 cd jev && bun install --frozen-lockfile
 bun serve.ts                  # fetch-or-verify the pinned files, then serve on 127.0.0.1:8020
-bun serve.ts --fetch-only     # pre-pull into ~/.cache/ob1-jev/<revision> and exit
-bun serve.ts --no-fetch       # refuse to start unless the files are already there
+bun serve.ts --fetch-only     # pre-pull into ~/.cache/ob1-jev/<revision> and exit (1 on a failed fetch, 2 on a bad knob)
+bun serve.ts --no-fetch       # fetch nothing: serve once the pinned files are there
 ```
+
+Serving never exits on its own (SMD-3214): the compose service is `restart:
+unless-stopped`, which would restart an exit at once, in a loop. A fetch that
+fails or hashes wrong, files `--no-fetch` does not find, an engine that does
+not load and a port taken are each said and tried again after 1, 2, 4, 8,
+then every 15 minutes; a bad `JEV_PORT` or `JEV_THREADS` holds, idle, until
+the process is stopped. A stop ends it at once (143 for SIGTERM, 130 for
+SIGINT, before it serves; 0 once serving).
 
 On the host, `serve.ts` binds 127.0.0.1: a container reaches it as
 `host.containers.internal` under podman machine on macOS (gvproxy forwards to

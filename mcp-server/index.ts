@@ -12,7 +12,7 @@
 // a sound OB1_PUBLIC_ORIGIN) it trades each OAuth token at the hop as the
 // `mcp` client, its secret OB1_AUTH_SECRET_MCP (exchange.ts, SMD-2286).
 
-import { createRestClient } from "../rest-client/index.ts";
+import { createRestClient, DEFAULT_REST_URL } from "../rest-client/index.ts";
 import { loadPlugins, type LoadedPlugin } from "../server-portable/core/plugins.ts";
 import { routable } from "../server-portable/auth.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "../server-portable/shutdown.ts";
@@ -20,9 +20,6 @@ import { cutOpenRequests, cutTelemetry, flushTelemetry, knowTools, outgoingTrace
 import { createMcpApp, edgeFrom, REST_TIMEOUT_MS } from "./app.ts";
 import { createExchanger, exchangeSettings } from "./exchange.ts";
 import { originProblem } from "../server-portable/oauth-edge.ts";
-
-/** Where the REST core answers on the mesh unless OB1_REST_URL says otherwise. */
-export const DEFAULT_REST_URL = "http://api.ob1.internal.:8000";
 
 /**
  * The service its signals are named for, unless OTEL_SERVICE_NAME says: apart

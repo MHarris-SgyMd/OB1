@@ -480,10 +480,11 @@ bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile loca
   podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
-Seven services in order (nine with `local-models`): Postgres with pgvector, a migration job that applies the
+Eight services in order (ten with `local-models`): Postgres with pgvector, a migration job that applies the
 schema and exits, then `server` (nothing in the stack calls it; it retires in SMD-2287 PR 6), the REST core (internal unless
 `deploy/compose.api-public.yaml` is named), the MCP server at `/mcp`, which hands every tool call to the REST
-core, and the proxy in front of them with the forwarder that publishes its port. The server runs `preflight.ts` before it
+core, the operator GUI at `/dashboard`, which reads the brain through the REST core too, and the proxy in front of
+them with the forwarder that publishes its port. The server runs `preflight.ts` before it
 serves, so a misconfiguration crashloops rather than starting and failing on your
 first capture. To run a *release* rather than a checkout build — the published
 `ob1-server` and `ob1-migrate` images, Ollama pinned by digest — see
@@ -536,7 +537,22 @@ Opening the connector URL in a browser shows `Method Not Allowed`: the endpoint
 serves POST only, and that answer is expected. `capture_thought` returns the
 new thought's id, which is what the other two take.
 
-### 5. Optional: workflows beside the brain (n8n)
+### 5. Open the dashboard
+
+```
+http://127.0.0.1:8000/dashboard
+```
+
+Sign in with a read or write key: the brain's counts and newest thoughts, its
+status (version, migrations, sizes, the workers' heartbeats) and any thought.
+A capture-only key is refused there, since it reads nothing. Behind a TLS proxy
+or tunnel, set `OB1_PUBLIC_ORIGIN` in `deploy/.env` to the https origin first,
+or the sign-in form is refused as cross-site; once it is set, sign in there and
+not at `127.0.0.1`, where the form is refused the same way. A stack configured
+with the authorization server (`COMPOSE_PROFILES` naming `auth`) offers no key
+sign-in yet: its sign-in is still to come (`dashboard/README.md`).
+
+### 6. Optional: workflows beside the brain (n8n)
 
 For ingestion that runs on its own — a mailbox polled on a schedule, a
 tracker synced — the `orchestration` profile runs n8n beside the stack
@@ -628,6 +644,7 @@ or patient-adjacent data, wherever you host it.
 - `db/README.md` — the schema, migrations, and the runner
 - `server-portable/README.md` — the server and the REST core, and their data layer
 - `mcp-server/README.md` — the MCP server at `/mcp`, a client of the REST core
+- `dashboard/README.md` — the operator GUI at `/dashboard`, a client of the REST core
 - `compat/supabase-sql/README.md` — running recipes and integrations without PostgREST
 - `evals/README.md` — how the local models were chosen, and how to re-run it
 - `deploy/README.md` — the compose stack in detail
