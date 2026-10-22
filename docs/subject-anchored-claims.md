@@ -12,7 +12,7 @@ Amended 2026-10-22 (SMD-3203 item 3 PR 2a): the test is now version 2, with five
 So the maintainer chose to build the cap. Decide version 4 will ask the writer's link step of a pair it would store as evolves or propose as outdates. An H or F link is then related at most and gets no supersession, an F-state pair included. Row 2's distinct waits for a state step that meets its bar.
 
 Amended 2026-10-22 (SMD-3203 item 3 PR 2b): decide version 4 is built (pass key `@p4d4`), its link step the one measured, with the test's text embedded in the pass and held equal to this record's.
-- **A capped pair** is stored as related at H2O's P(related): its evolves, or the best verdict a capped outdates takes. It is floored on the relation words' mass, as any relation is.
+- **A capped pair's evolves or duplicate** becomes related at H2O's P(related): H2O's own verdict, or the best a capped outdates takes. It is floored on the relation words' mass, as any relation is. A related or unrelated verdict stands, and a capped outdates is written no proposal.
 - **Nothing else of H2O's distribution moves onto related.** On a mediated pair, much of it is about the subject that mediates the pair, such as a third subject's later status read as outdates.
 
 The decision table marks which rows the maintainer decided, which follow from them, which this record proposes, and which are built.

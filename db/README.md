@@ -3331,10 +3331,12 @@ tier gives each pair's verdict, not the judge:
   - **The cap:** an H link (one thought's own subject named in passing by the
     other), an F link (both mention a third subject that is neither's own),
     or an answer naming none of the four caps the pair: related at most, and
-    no supersession (the ADR's rows 2 and 3). An evolves, or a capped
-    outdates's best verdict that proposes nothing, is stored as related at
-    the tier's P(related), floored on the relation words' mass as any
-    relation is. A D or N link leaves the pair to version 3's rules.
+    no supersession (the ADR's rows 2 and 3). An evolves or a duplicate,
+    whether the tier's verdict or the best a capped outdates takes, becomes
+    related at the tier's P(related), floored on the relation words' mass as
+    any relation is. A related or unrelated verdict stands (an unrelated
+    after the tier's outdates records no distinct, as before). A D or N link
+    leaves the pair to version 3's rules.
   - **Measured:** SMD-3203 measured the step at κ 0.64 on mediated or not
     against two raters' agreed labels, at a median 14.3 s of the 27B a pair.
   - **Reported:** the run's summary counts its calls and the pairs it capped,

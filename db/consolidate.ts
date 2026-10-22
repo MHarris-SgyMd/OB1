@@ -1631,7 +1631,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       const proposing = verdict !== null || gated;
       // Decide version 4 (SMD-3203): the writer's link step, when it was asked, and whether it capped the pair.
       const link = j.decide?.link as { link?: string; capped?: boolean } | undefined;
-      const cappedBy = link?.capped ? `; capped at related by the writer's link step (${link.link === "unparsed" ? "no link read" : `an ${link.link} link`}, SMD-3203)` : "";
+      const cappedBy = link?.capped ? `, capped by the writer's link step (${link.link === "unparsed" ? "no link read" : `an ${link.link} link`}, SMD-3203)` : "";
       if (j.decide) {
         const writer = j.decide.writer as { current?: string } | undefined;
         if (gated) totals.gated++;

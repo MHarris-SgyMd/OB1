@@ -8039,11 +8039,18 @@ if (want("16")) {
           && banner.some((l) => /^\s*tier:\s+/.test(l)) && /add 12 thoughts to the pool/.test(ddry.out) && tierCalls === 0 && writerCalls === 0 && linkCalls === 0,
         `a dry run names decide mode's key, its decider and the tier's egress, and asks neither model (exit ${ddry.code}: ${banner.join(" | ").trim().slice(0, 300)})`);
 
+      // The gateway pair carries a proposal under the key whose newer text has since moved, as an earlier version's
+      // proposal on a mediated pair would: the run judges it again, and the link step's cap settles it (SMD-3203).
+      const [{ id: gateProp }] = (await sql`SELECT record_supersession_proposal(${gateOld}::uuid, ${gateNew}::uuid, 'newer_supersedes_older', 0.7, 'the gateway waits on release 4', 0.9, ${DKEY}, NULL) AS id`) as { id: string }[];
+      const movedGate = "[16d] The billing team says the gateway still waits on release 4.";
+      await sql`UPDATE thoughts SET content = ${movedGate}, content_fingerprint = content_fingerprint_of(${movedGate}) WHERE id = ${gateNew}::uuid`;
+      const [{ r: gateRebuilt }] = (await sql`SELECT rebuild_derived(${gateNew}::uuid, 'live: edit') AS r`) as { r: { stale_proposals: number } }[];
+
       // At --min-confidence 0.55, the pass's own floor, which decide version 3's writer gate reads (SMD-3151).
       const drun = await decide(denv, "--min-confidence", "0.55", "--dump", ddump);
       const dprops = (await sql`SELECT sp.older_id::text AS o, sp.newer_id::text AS n, sp.verdict, sp.confidence::float AS confidence, d.recipe
                                   FROM supersession_proposals sp LEFT JOIN derivations d ON d.artifact_kind = 'proposal' AND d.artifact_id = sp.id AND d.produced_by = ${DKEY}
-                                 WHERE sp.judge_key = ${DKEY}`) as { o: string; n: string; verdict: string; confidence: number; recipe: Record<string, unknown> | null }[];
+                                 WHERE sp.judge_key = ${DKEY} AND sp.status = 'pending'`) as { o: string; n: string; verdict: string; confidence: number; recipe: Record<string, unknown> | null }[];
       assert(drun.code === 0 && dprops.length === 1 && dprops[0].o === tenOld && dprops[0].n === tenNew && dprops[0].verdict === "newer_supersedes_older" && dprops[0].confidence === 0.8,
         `the tier's outdates with the writer's standing proposal is the run's one proposal, under decide mode's key at the tier's P(outdates) (exit ${drun.code}: ${JSON.stringify(dprops.map(({ recipe: _, ...r }) => r))}; ${last(drun.out)})`);
       type DecideRecipe = { model?: string; decider?: string; decide_version?: number; prompt_hash?: string; judged?: { verdict?: string; confidence_source?: string; evidence_found?: boolean; decide?: { top?: string; decider?: { name?: string }; writer?: { model?: string; current?: string; stale_found?: boolean }; link?: { model?: string; asked?: string; link?: string; capped?: boolean } } } };
@@ -8072,8 +8079,11 @@ if (want("16")) {
           && migDump?.recorded === "under-confidence" && migDump.top === "outdates" && migDump.floor === 0.55,
         `the tier's outdates under the pass's floor asks no writer: the relation's note names the floor, 0.55, and carries no writer, a related pair's names none, and the dump line records it under the floor (${JSON.stringify(mig?.recipe.judged ?? null).slice(0, 200)}; dump ${JSON.stringify(migDump ?? null)})`);
       // Decide version 4 (SMD-3203): the gateway pair, an outdates at the floor whose link step finds F, is written no
-      // proposal and takes the tier's related, capped, under the floor; the pager pair, an evolves the pass would store,
-      // is asked the link step after, and its H link stores it related at the tier's P(related), at the same floor.
+      // proposal and takes the tier's related, capped, under the floor, and its stale proposal is settled, the note
+      // saying the link step capped it; the pager pair, an evolves the pass would store, is asked the link step after,
+      // and its H link stores it related at the tier's P(related), at the same floor.
+      const [gateAfter] = (await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${gateProp}::uuid`) as { status: string; review_note: string | null }[];
+      const cappedNote = passSettledNote("judged again after a text moved — related, capped by the writer's link step (an F link, SMD-3203)", DKEY);
       type LinkNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; link?: { asked?: string; link?: string; capped?: boolean; via?: string }; writer?: unknown } } } };
       const pager = (await noteOf(pagerNew)) as unknown as LinkNote | undefined;
       const [pagerConf] = (await sql`SELECT (payload->>'confidence')::float AS c FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND thought_id = ${pagerNew}::uuid`) as { c: number }[];
@@ -8081,10 +8091,11 @@ if (want("16")) {
         .find((l) => l.newer === n && l.older === o);
       const [gateDump, pagerDump, tenDump] = [dumpOf(gateNew, gateOld), dumpOf(pagerNew, pagerOld), dumpOf(tenNew, tenOld)];
       const gateProps = dprops.filter((r) => r.o === gateOld || r.n === gateNew);
-      assert(gateProps.length === 0 && gateDump?.verdict === "related" && gateDump.recorded === null && gateDump.link === "F" && gateDump.capped === true
+      assert(gateRebuilt.stale_proposals === 1 && gateProps.length === 0 && gateAfter?.status === "rejected" && gateAfter.review_note === cappedNote
+          && gateDump?.verdict === "related" && gateDump.recorded === "settled" && gateDump.link === "F" && gateDump.capped === true
           && pager?.recipe.judged?.verdict === "related" && pager.recipe.judged.decide?.top === "evolves" && pager.recipe.judged.decide.link?.asked === "after" && pager.recipe.judged.decide.link.link === "H" && pager.recipe.judged.decide.link.capped === true
           && pager.recipe.judged.decide.writer === undefined && pagerConf?.c === 0.2 && pagerDump?.link === "H" && pagerDump.capped === true && tenDump?.link === "D" && tenDump.capped === false,
-        `the link step caps the gateway pair's outdates (an F link: no proposal, its related under the floor) and stores the pager pair's evolves as related at the tier's P(related) (an H link, asked after), and the dump says which (gateway ${JSON.stringify(gateDump ?? null)}; pager ${JSON.stringify(pager?.recipe.judged ?? null).slice(0, 300)}, ${pagerConf?.c})`);
+        `the link step caps the gateway pair's outdates (an F link: no proposal, its related under the floor, its stale proposal settled saying so) and stores the pager pair's evolves as related at the tier's P(related) (an H link, asked after), and the dump says which (gateway ${JSON.stringify(gateDump ?? null)}, ${JSON.stringify(gateAfter ?? null)}; pager ${JSON.stringify(pager?.recipe.judged ?? null).slice(0, 300)}, ${pagerConf?.c})`);
       assert(tierCalls === 6 && writerCalls === 2 && linkCalls === 4 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2
           && /1 under confidence 0\.55 not recorded/.test(drun.out)
           && /decide: the writer asked on 2 pair\(s\) — 1 stood, 1 declined, 0 with quotes that did not check out, 0 unparsed; 1 outdates under the floor 0\.55, the writer not asked/.test(drun.out)

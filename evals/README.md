@@ -4311,8 +4311,8 @@ all three, with an unanswered pair counted as wrong:
   * An H or F link is related at most, with no supersession, an F-state pair included.
   * Row 2's distinct waits for a state step that meets its bar.
   * **Built** (`server-portable/consolidate-decide.ts`, `@p4d4`). The eval's step A is now the pass's own question: its
-    head, its answer's keys and the reading of a link come from the pass, and `--self-check` holds the test's text the
-    pass embeds equal to the ADR's.
+    head, its answer's keys and its JSON reader come from the pass. `--self-check` holds the test's text the pass embeds
+    equal to the ADR's, step A to the pass's question byte for byte, and the eval's link reading to the pass's.
 * **The gold is version 1's raters', not re-rated under version 2.**
   * Only rule 1 is known to match both raters' working definitions (comment 3bec38de).
   * One gold F-state pair rests on rater 1 counting a fixed spec as a value, which rule 1 calls a name.

@@ -142,8 +142,9 @@ export type Judgement = {
    */
   probabilities?: JudgeProbabilities;
   /**
-   * Decide mode's note (consolidate-decide.ts, SMD-3115): the decider, its top verdict and what the writer wrote,
-   * recorded in the recipe as it came. Absent from the judge's answers.
+   * Decide mode's note (consolidate-decide.ts, SMD-3115): the decider, its top verdict, what the writer wrote and,
+   * since decide version 4, what its link step answered (SMD-3203), recorded in the recipe as it came. Absent from the
+   * judge's answers.
    */
   decide?: Record<string, unknown>;
 };

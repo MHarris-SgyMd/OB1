@@ -131,11 +131,16 @@ nothing. A proposal records H2O's P(outdates) as its confidence, under the
 pass's usual floor of 0.5. Since version 3 (SMD-3151) the writer is asked only
 when that P(outdates) clears the floor: under it a proposal could not be
 recorded, and the pair takes the relation H2O's distribution gives at the
-floor, as a quote that fails does, else its edge is closed.
+floor, as a quote that fails does, else its edge is closed. Since version 4
+(SMD-3203) the writer is first asked the mediated-pair test's link step
+(`docs/subject-anchored-claims.md`) about such a pair, and about an evolves the
+pass would store. A pair linked only through a third subject, or by one thought
+naming the other's subject in passing, is related at most, and no proposal is
+written for it.
 
 **The record rule** (decide version 2, shelved 2026-10-18; the pass runs version
-3, version 1's writer with its quotes read without markdown and asked only at
-the floor, SMD-3151) came from
+4, version 1's writer with its quotes read without markdown and asked only at
+the floor, SMD-3151, behind the link step, SMD-3203) came from
 the canary's first proposals.
 There, 38 of 48 outdated a Linear ticket, 35 of those tickets already said Done,
 and 23 gave the ticket's work being completed as the whole reason. The
