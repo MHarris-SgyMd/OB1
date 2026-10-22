@@ -420,7 +420,7 @@ Every MCP client handles remote servers slightly differently. The server accepts
 ```
 
 > [!NOTE]
-> The bridge is a process on your machine, but it is only a bridge: the server it reaches is still the one HTTP process from Step 4.
+> The bridge is a process on your machine, but it is only a bridge: the server it reaches is still the stack's `/mcp` from Step 4, by its URL.
 
 </details>
 
@@ -523,9 +523,9 @@ The metadata extraction is best-effort — the LLM is making its best guess with
 <details>
 <summary>🔍 <strong>How It Works Under the Hood</strong></summary>
 
-**When you capture from any AI via MCP:** your AI client sends the text to the `capture_thought` tool → the MCP server asks the embedding model for a vector of its meaning (1024 numbers, with the local default) AND asks the chat model for metadata, in parallel → both get stored as a single row in Postgres, in one statement → confirmation returned to your AI.
+**When you capture from any AI via MCP:** your AI client sends the text to the `capture_thought` tool → the MCP server at `/mcp` hands the call to the REST core → the REST core asks the embedding model for a vector of its meaning (1024 numbers, with the local default) AND asks the chat model for metadata, in parallel → both get stored as a single row in Postgres, in one statement → confirmation returned to your AI.
 
-**When you search your brain:** your AI client sends the query to the MCP server → the server embeds your question → Postgres (pgvector) matches it against every stored thought by vector similarity → results come back ranked by meaning, not keywords.
+**When you search your brain:** your AI client sends the query to the MCP server → the REST core behind it embeds your question → Postgres (pgvector) matches it against every stored thought by vector similarity → results come back ranked by meaning, not keywords.
 
 The embedding is what makes retrieval powerful. "Sarah's thinking about leaving" and "What did I note about career changes?" match semantically even though they share zero keywords. The metadata is a bonus layer for structured filtering on top.
 

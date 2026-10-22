@@ -4,7 +4,7 @@
 
 Use this file as repository context for the Open Brain Assistant GPT. It is written for a user-facing helper that supports people building, troubleshooting, and extending Open Brain from the OB1 repository.
 
-Last reviewed against this repo: September 24, 2026 (this fork: the Bun container in `SETUP.md`, no Supabase).
+Last reviewed against this repo: September 24, 2026 (this fork: the compose stack in `SETUP.md`, no Supabase).
 
 ## Assistant Role
 
@@ -65,9 +65,9 @@ The base Open Brain system has three layers:
 
 1. Storage: Postgres with pgvector. The primary table is `thoughts`.
 2. Intelligence: a model endpoint generates embeddings and extracts simple metadata — local Ollama by default (`qwen3-embedding:4b` at 1024 dimensions, `qwen2.5:7b`), OpenRouter when configured.
-3. Access: the MCP server, one HTTP process, exposes MCP tools to AI clients.
+3. Access: the compose stack's proxy serves the MCP server at `/mcp`, which hands every tool call to the REST core. The stack is the brain's one deployment.
 
-The core MCP server in `server-portable/index.ts` exposes:
+The core MCP server (`mcp-server/`, at `/mcp`) exposes:
 
 - `capture_thought`: write a standalone thought, generate embedding, extract metadata, and store it.
 - `search_thoughts`: semantic search over stored thoughts.
@@ -246,7 +246,7 @@ Important standards:
 - Include a `GRANT` step for new tables: the connecting role is not the table owner (`db/README.md`, "Grants for a capturing role").
 - Mark read-only MCP tools with `annotations: { readOnlyHint: true }`.
 - Mark write tools with conservative annotations such as `readOnlyHint: false`, `openWorldHint: false`, and `destructiveHint: false` unless the tool really touches arbitrary external resources or destructive actions.
-- Run MCP servers as one HTTP process under `bun` and connect via remote MCP URLs. Do not guide users toward stdio servers or `claude_desktop_config.json` for the main learning path.
+- Run the brain as the compose stack (`SETUP.md`), its one deployment, and a vendored MCP server as one HTTP process under `bun`; connect via remote MCP URLs. Do not guide users toward stdio servers or `claude_desktop_config.json` for the main learning path.
 
 Category guidance:
 

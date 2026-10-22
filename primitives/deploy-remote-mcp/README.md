@@ -1,12 +1,12 @@
 # Run a Remote MCP Server
 
-A guide to running any Open Brain extension server — and the recipe and integration servers that share its shape — as a remote MCP server: one process under [Bun](https://bun.sh) against your Postgres, reachable over HTTPS by any AI client. This is the same pattern the core Open Brain server uses ([`SETUP.md`](../../SETUP.md)): the extension servers run beside it, each on its own port, each with its own access keys.
+A guide to running any Open Brain extension server — and the recipe and integration servers that share its shape — as a remote MCP server: one process under [Bun](https://bun.sh) against your brain's Postgres, reachable over HTTPS by any AI client. These servers run beside the brain, each on its own port, each with its own access keys. The brain itself is the compose stack in [`SETUP.md`](../../SETUP.md), its one deployment (SMD-2288); this guide does not run it.
 
 "Remote" is about the client, not the machine. A connector in Claude Desktop, claude.ai or ChatGPT dials your server from the vendor's side, so it needs an HTTPS URL it can reach; a client on the same machine (Claude Code, Cursor) reaches `http://127.0.0.1:<port>` directly. Either way the server is one HTTP process — never a stdio process a client spawns, and never a `claude_desktop_config.json` entry.
 
 ## Prerequisites
 
-- A running Open Brain: the compose stack in [`SETUP.md`](../../SETUP.md), or any Postgres with pgvector carrying the schema `db/migrations/` applies
+- A running Open Brain: the compose stack in [`SETUP.md`](../../SETUP.md), with its database published to this host (Step 1)
 - [Bun](https://bun.sh) 1.4+ on the machine that will run the server
 - A checkout of this repository — the servers import the SQL shim and the access-key module by relative path, so they run from the tree, not from a copied file
 - The extension's README: its Step 1 applies the extension's own tables
@@ -18,7 +18,7 @@ Every extension README names the file to run and the environment it reads. The t
 | Setting | Value |
 |---------|-------|
 | Server file | `extensions/extension-name/index.ts` |
-| Port | `8787` (any free port; `PORT` unset means 8000, which the core server or podman's `gvproxy` may hold) |
+| Port | `8787` (any free port; `PORT` unset means 8000, which the stack's proxy or podman's `gvproxy` may hold) |
 | Environment | `SUPABASE_URL` (the Postgres connection string — the shim keeps the variable's name), `MCP_ACCESS_KEYS`, and whatever else the README lists (`DEFAULT_USER_ID`, `OPENROUTER_API_KEY`, …) |
 
 Replace `extension-name` below with the extension's directory name.
@@ -101,8 +101,8 @@ Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its
 
 A client on this machine is done: give it the `http://127.0.0.1:8787/mcp` URL. A hosted connector — Claude Desktop's custom connector, claude.ai, ChatGPT — connects from the vendor's side and needs an HTTPS URL that reaches your port. The same answers serve the core server ([`SETUP.md`](../../SETUP.md), "Connect a client"):
 
-- **A TLS proxy or tunnel on this host** — caddy, cloudflared, `tailscale funnel` — dials `127.0.0.1:8787` itself; the server keeps listening on the loopback. One proxy fronts every port you run: the core server on 8000, each extension on its own.
-- **Any host that runs Bun and reaches Postgres** — a VPS, a container built from a Bun image with this checkout in it — runs the same command; put its TLS terminator in front. `server-portable/Dockerfile` is the core server's image and the shape to copy.
+- **A TLS proxy or tunnel on this host** — caddy, cloudflared, `tailscale funnel` — dials `127.0.0.1:8787` itself; the server keeps listening on the loopback. One proxy fronts every port you run: the stack's on 8000, each extension on its own.
+- **Any host that runs Bun and reaches the brain's Postgres** — a VPS, a container built from a Bun image with this checkout in it — runs the same command; put its TLS terminator in front. `server-portable/Dockerfile`, the brain's server image, is the shape to copy.
 
 Save the HTTPS form of the Connection URL, then follow the [Remote MCP Connection](../remote-mcp/) guide to connect it to your AI client. Keep the process up the way you keep any service up — a systemd unit, a compose service, a process manager; `bun` restarts in a second and the URL and key stay.
 
@@ -124,7 +124,7 @@ The URL and access key stay the same — no need to reconfigure your AI clients.
 ## Troubleshooting
 
 **`EADDRINUSE` on start**
-- Something holds the port. `PORT` unset is 8000, the core server's; on macOS podman's `gvproxy` holds 8000 too. Pick another port and give the clients the new URL.
+- Something holds the port. `PORT` unset is 8000, the stack's; on macOS podman's `gvproxy` holds 8000 too. Pick another port and give the clients the new URL.
 
 **`Cannot find package 'hono'` (or `zod`, `@hono/mcp`)**
 - Step 2 was skipped: `(cd extensions && bun install)`. An integration or recipe server needs the same install; it finds it through the `node_modules` link in `integrations/` or `recipes/`.

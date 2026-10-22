@@ -668,9 +668,9 @@ is the defence: mint it with `keygen.ts`, and never hash a chosen word into
 `MCP_ACCESS_KEYS`, since the server holds only the digest and cannot tell how
 strong the key was. A raw `MCP_ACCESS_KEY`, the one key it sees in plain, is
 refused under 32 characters by preflight, the image's entrypoint. Compose
-passes the server no raw key, so this is for the image run on its own
-(`docker run`, Kubernetes); the vendored servers run no preflight, so give
-them a 32-byte key yourself. The REST core
+passes the server no raw key, so this holds only for a compose file edited to
+pass one; the vendored servers run no preflight, so give them a 32-byte key
+yourself. The REST core
 (`server-portable/rest/`, SMD-2284) checks the same keys, from headers alone,
 and refuses a wrong one before reading the body; it takes the same position,
 and the proxy does not route `/api` yet. The proxy
@@ -925,8 +925,8 @@ every server build (the three tier servers too). Set it from the shell, on the
 command that builds — not in `deploy/.env`, where a value written once is baked
 into every later build — with `--dirty`, so an image built from uncommitted
 changes says so. Compose never forwards it at runtime; a runtime variable of that
-name set some other way (`docker run -e`, a Kubernetes `env:` entry) overrides the
-baked one, so set none. Unset at build, the image reports `unknown`. Rebuild with it:
+name added to a service's `environment:` overrides the baked one, so add none.
+Unset at build, the image reports `unknown`. Rebuild with it:
 
 ```bash
 OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --build server proxy forwarder
@@ -3646,7 +3646,7 @@ so the profile builds from a checkout.
   `ok` (FORK.md change 75).
 - **Scheduled jobs.** One recipe (`recipes/editorial-policy`) uses `pg_cron` and
   `pg_net` to call an endpoint on a schedule. Off Supabase that becomes an ordinary
-  cron job, a Kubernetes CronJob, or a scheduled workflow. Not ported here.
+  cron job or a scheduled workflow (the `orchestration` profile's n8n). Not ported here.
 - **Data migration.** `pg_dump --data-only` from the old database, plus a full
   re-embed if the embedding model family changes — `db/reembed.ts`, run from a
   checkout with the provider reachable, not from this stack. A checkout reaches

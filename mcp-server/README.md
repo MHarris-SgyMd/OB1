@@ -199,6 +199,9 @@ was opened. A base it cannot serve exits 2 in words.
 
 ## Run
 
+Compose runs it as the `mcp` service on the server's image, behind the proxy's `/mcp`
+(`SETUP.md`); the brain has no other deployment (SMD-2288). By hand, as its tests run it:
+
 ```bash
 cd mcp-server && bun install
 OB1_REST_URL=http://api.ob1.internal.:8000 OB1_FORWARDER_KEY=<a forward-scope key> OB1_PLUGINS=<the REST core's> bun index.ts
