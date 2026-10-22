@@ -63,6 +63,12 @@ services:
         target: /etc/traefik/dynamic/grafana.yaml
     labels:
       ob1.proxy-grafana-route: *grafana-route
+  # The operator GUI's link to Grafana (SMD-2280): where this route serves it.
+  # With compose.grafana-port.yaml named too, the GUI links to that file's
+  # origin instead, Grafana's root URL then (dashboard/src/lib/server/grafana.ts).
+  app:
+    environment:
+      GRAFANA_ROUTE: /grafana/
 
 configs:
   proxy-grafana-route:
