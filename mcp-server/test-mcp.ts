@@ -284,6 +284,23 @@ console.log("\n[8b] Review pass 1: a capture key's capture, a reply that cannot 
     assert(!got.isError && expectReply(got, want) && words.test(got.text) && got.sc.vectorFailed === "provider_unreachable",
       `${key}: a capture saved without its vector said as in-process (${got.text.split("\n\n").find((p) => /vector/.test(p))?.slice(0, 90)})`);
   }
+  // A search answered without a vector because the provider did not answer (SMD-2891): the forwarded value says it as in-process — the header and word, and the compat search's note and field.
+  const hitless = { query: "plain words", preferCurrent: false, hits: [], facts: { needles: [], needleCounts: [], commonNeedles: [], literalOnly: null }, window: null, vectorFailed: vf };
+  answer = (n) => (n === "searchThoughts" ? ok(hitless) : ok({}));
+  const st = await tool("search_thoughts", { query: "plain words" }, "write-raw");
+  assert(!st.isError && expectReply(st, say.renderSearchThoughts(ok(hitless) as never, false)) && /^No thoughts found matching "plain words"\. Semantic search is unavailable — the embedding provider at http:\/\/ollama:11434\/v1 failed/.test(st.text) && st.sc.vectorFailed === "provider_unreachable",
+    `search_thoughts answered without a vector said as in-process (${st.text.slice(0, 120)})`);
+  const literal = { results: [{ id: "00000000-0000-4000-8000-0000000000ab", title: "SMD-1 names it", url: "u", trust: undefined }], vectorFailed: vf };
+  answer = (n) => (n === "search" ? ok(literal) : ok({}));
+  const compat = await tool("search", { query: "SMD-1" }, "write-raw");
+  assert(!compat.isError && expectReply(compat, say.renderSearch(ok(literal) as never)) && /"note":"Semantic search is unavailable/.test(compat.text) && compat.text.includes("[exact match — semantic search unavailable] SMD-1 names it") && compat.sc.vectorFailed === "provider_unreachable",
+    `search answered without a vector said as in-process, its note and field (${compat.text.slice(0, 160)})`);
+  // An empty compat answer without a vector is refused (review pass 4); the forwarder carries the refusal whole and says it as in-process.
+  const unavailable = { code: "EMBEDDING_PROVIDER_UNAVAILABLE", retryable: true, ...vf, matched: "literals", needles: [], commonNeedles: ["COMMON-1"] } as const;
+  answer = (n) => (n === "search" ? { ok: false, refusal: unavailable } as never : ok({}));
+  const emptyCompat = await tool("search", { query: "COMMON-1" }, "write-raw");
+  assert(emptyCompat.isError && expectReply(emptyCompat, say.renderSearch({ ok: false, refusal: unavailable } as never)) && emptyCompat.sc.code === "EMBEDDING_PROVIDER_UNAVAILABLE" && /Too common to match exactly .*: COMMON-1/.test(emptyCompat.text),
+    `an empty search answered without a vector: refused, said as in-process (${emptyCompat.text.slice(-120)})`);
   // A value render.ts cannot say is the tool's fault, coded, as index.ts's run catches it — never the SDK's uncoded error.
   answer = (n) => (n === "thoughtStats" ? ok({}) : ok({}));
   const unsayable = await tool("thought_stats", {});

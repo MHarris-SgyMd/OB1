@@ -808,6 +808,12 @@ console.log("\n[7c] A 503 says when to retry; capture's fault is the transient t
   answer = async () => refuse({ code: "SUPERSEDES_UNJUDGED", retryable: true, cause: "registry_away" });
   let r = await hit("/v1/thoughts", { key: "write-raw", method: "POST", body: JSON.stringify({ content: "y" }) });
   assert(r.status === 503 && r.headers.get("retry-after") === "2", `a retryable refusal at 503 carries Retry-After (${r.status} ${r.headers.get("retry-after")})`);
+  // The compat search finding nothing while its provider is down (SMD-2891): 503 with Retry-After, its facts the code, the word and what was matched — never the endpoint or the query's literals.
+  answer = async () => refuse({ code: "EMBEDDING_PROVIDER_UNAVAILABLE", retryable: true, reason: "provider_unreachable", detail: "the connection was refused", base: "http://ollama:11434/v1", matched: "text", needles: ["plain words"], commonNeedles: [] });
+  const eu = await hit("/v1/search/compat", { key: "read-raw", method: "POST", body: JSON.stringify({ query: "plain words" }) });
+  const eub = await eu.json() as Record<string, unknown>;
+  assert(eu.status === 503 && eu.headers.get("retry-after") === "2" && same(eub, { code: "EMBEDDING_PROVIDER_UNAVAILABLE", retryable: true, reason: "provider_unreachable", matched: "text" }),
+    `the compat search's outage with nothing found: 503, Retry-After, the code, the word and what was matched alone (${eu.status} ${JSON.stringify(eub)})`);
   answer = async () => { throw new Error("connection refused"); };
   r = await hit("/v1/thoughts", { key: "cap-raw", method: "POST", body: JSON.stringify({ content: "y" }) });
   const cb = await r.json() as Record<string, unknown>;

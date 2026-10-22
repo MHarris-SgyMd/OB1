@@ -1939,9 +1939,10 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
       graceFallbacks.push(`${file}:${name}=${/^\$\{OB1_STOP_GRACE:-(\d+)\}s$/.exec(svc.stop_grace_period ?? "")?.[1] ?? svc.stop_grace_period}`);
     }
   }
-  // Eight: the server and the REST core (SMD-2284) in compose.yaml, and each
-  // tier's server and REST core in compose.tiers.yaml (SMD-2294).
-  assert(graceFallbacks.length === 8 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
+  // Nine: the server, the REST core (SMD-2284) and the MCP server (SMD-2287)
+  // in compose.yaml, and each tier's server and REST core in
+  // compose.tiers.yaml (SMD-2294).
+  assert(graceFallbacks.length === 9 &&graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
     `every compose server's stop_grace_period is \${OB1_STOP_GRACE:-${DEFAULT_STOP_GRACE_S}}s, the code's default (${graceFallbacks.join(", ")})`);
 
   // Preflight refuses a value compose would render wrong, and reports one it reads.
@@ -2697,6 +2698,21 @@ console.log("\n[16l] A supersession proposal names who wrote each side, and is f
     `a row the writers' read did not return is a proposal gone in between, dropped; a read that did not run drops nothing (${gone}, ${unread})`);
   const old = render([proposal(1, null, null)]).content[0].text;
   assert(old.split("\n")[0].endsWith(WRITERS_UNREAD) && !/By: |WRITER/.test(old), "a row from before 094 says once the writers are not shown, and flags nothing");
+  // 107 (SMD-3036): a side the listing left unread past its cap.
+  const { walkCappedLine, WALK_CAP } = await import("./render.ts");
+  const { normaliseProposal } = await import("./store.ts");
+  const capped = render([proposal(1, op, hook, { newer: { ...proposal(1, op, hook).newer, walkCapped: true } })]);
+  const cv = (capped as unknown as { structuredContent: { proposals: { older: Record<string, unknown>; newer: Record<string, unknown> }[] } }).structuredContent.proposals[0];
+  assert(WALK_CAP === 25 && walkCappedLine() === "what an accept that makes this side stand would take and lapse was not read: a chain here passes 25 rows (the listing's cap, migration 107); consolidate.ts --accept reads it in full"
+      && capped.content[0].text.includes(`By: session-hook (agent) · trust agent · a capture-only key's text\n      ${walkCappedLine()}`) && capped.content[0].text.split(walkCappedLine()).length === 2
+      && cv.newer.walkCapped === true && !("walkCapped" in cv.older) && !r1.content[0].text.includes(walkCappedLine()),
+    `a side the listing left unread says so under it, once, and the value marks it; a side read carries neither (${cv.newer.walkCapped}, ${"walkCapped" in cv.older})`);
+  const listed = { id: "p", status: "pending", verdict: "newer_supersedes_older", confidence: 0.9, judge_key: "k", judged_at: "2026-09-25T00:00:00.000Z", reviewed_at: null, review_note: null, reason: null, similarity: null, superseding_id: null, older_id: O, older_content: "a", older_created_at: null, newer_id: N, newer_content: "b", newer_created_at: null };
+  const withCols = (takes: boolean | null) => normaliseProposal({ ...listed, older_capture_only: false, newer_capture_only: true, older_takes: false, newer_takes: takes, older_lapses: [], newer_lapses: takes === null ? null : [] });
+  const acceptedCapped = normaliseProposal({ ...listed, status: "accepted", older_capture_only: false, newer_capture_only: true, older_takes: false, newer_takes: null, older_lapses: [], newer_lapses: [] });
+  assert(withCols(null).newer.walkCapped === true && withCols(null).older.walkCapped === false && withCols(true).newer.walkCapped === false && normaliseProposal(listed).newer.walkCapped === false
+      && acceptedCapped.newer.walkCapped === false && acceptedCapped.newer.takes === false,
+    "the store reads a NULL takes on a row carrying 094's columns as the cap's — not on an accepted row, which takes no accept — and a row from before 094 as never capped");
 }
 
 console.log("\n[16m] The stated-status label in words and fields: every moved ticket named in its type's word, never the board's, the measured population only, and a REST core's answer without it read as none (SMD-2540)");
@@ -5316,6 +5332,74 @@ console.log("\n[30] A request the server did not accept sends its span and log r
     if (savedGeneric === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedGeneric;
   }
+}
+
+console.log("\n[31] A search answered without a vector says so — search_thoughts' header and typed word, its nothing-found reply with and without the query's facts, and the compat search's note and field; an answer with a vector says nothing of it (SMD-2891)");
+{
+  const { renderSearchThoughts, renderSearch } = await import("./render.ts");
+  const vf = { reason: "provider_unreachable", detail: "the connection was refused", base: "http://ollama:11434/v1" };
+  const lead = "Semantic search is unavailable — the embedding provider at http://ollama:11434/v1 failed: the connection was refused. So the query was matched only by its identifiers and quoted spans, exactly — not by meaning. ";
+  const hit = { id: "dddddddd-0000-4000-8000-000000000001", content: "SMD-1 names it", metadata: {}, created_at: "2026-10-21T00:00:00.000Z", similarity: null, matchedNeedles: ["SMD-1"], score: 0.016, fused: 0.016, demoted: [], supersededBy: null, moved: [], movedNotRead: 0 };
+  const facts = { needles: ["SMD-1"], needleCounts: [1], commonNeedles: [], literalOnly: true };
+  const st = renderSearchThoughts({ ok: true, value: { query: "SMD-1", preferCurrent: false, hits: [hit], facts, window: null, vectorFailed: vf } } as never, false);
+  const text = st.content[0].text;
+  assert(text.startsWith(`Found 1 thought(s): ${lead}search_thoughts_keyword finds any word or phrase a thought contains; semantic search returns once the provider answers. Searched exactly for: SMD-1.`) && !/similarity/.test(text),
+    `search_thoughts: the header leads with what the rows are, before the literals searched for, and no note ranks the rest by similarity (${text.slice(0, 200)})`);
+  assert(/--- Result 1 \(exact match\) ---/.test(text) && !/no vector/.test(text), "…and a hit is an exact match, not said to have no vector of its own: no query vector was made");
+  assert((st.structuredContent as { vectorFailed?: unknown }).vectorFailed === "provider_unreachable", "…and the typed result carries the marker word alone");
+  const none = renderSearchThoughts({ ok: true, value: { query: "plain words", preferCurrent: false, hits: [], facts: { needles: ["plain words"], needleCounts: [0], commonNeedles: [], literalOnly: null }, window: null, vectorFailed: { ...vf, matched: "text" } } } as never, false).content[0].text;
+  assert(none === 'No thoughts found matching "plain words". Semantic search is unavailable — the embedding provider at http://ollama:11434/v1 failed: the connection was refused. So the query was matched by its identifiers and quoted spans, if any, and then as one text, exactly (case aside) — not by meaning. search_thoughts_keyword finds any word or phrase a thought contains; semantic search returns once the provider answers. No thought contains: plain words.',
+    `nothing found, the query holding no literal: matched as one text, held by none (review pass 4) (${none})`);
+  // Nothing could be matched: no literal, and too short or only common words for a text match (review pass 5).
+  const thin = renderSearchThoughts({ ok: true, value: { query: "the", preferCurrent: false, hits: [], facts: { needles: [], needleCounts: [], commonNeedles: [], literalOnly: null }, window: null, vectorFailed: { ...vf, matched: "none" } } } as never, false).content[0].text;
+  assert(thin === 'No thoughts found matching "the". Semantic search is unavailable — the embedding provider at http://ollama:11434/v1 failed: the connection was refused. So nothing could be matched: the query holds no identifier or quoted span, and is too short, longer than 64 characters, or only common words to match as one text. search_thoughts_keyword finds any word or phrase a thought contains; semantic search returns once the provider answers.',
+    `nothing could be matched: said why (${thin})`);
+  // A text match past the limit, and under prefer_current, says both (review pass 5).
+  const textHit = { ...hit, content: "sleep scheduler notes", matchedNeedles: ["sleep scheduler"] };
+  const cut = renderSearchThoughts({ ok: true, value: { query: "sleep scheduler", preferCurrent: true, hits: [textHit], facts: { needles: ["sleep scheduler"], needleCounts: [30], commonNeedles: [], literalOnly: false }, window: null, vectorFailed: { ...vf, matched: "text" } } } as never, true).content[0].text;
+  assert(/Searched exactly for: sleep scheduler\. It is in 30 thoughts; these are the newest 1 — raise limit or page with search_thoughts_keyword\. prefer_current does not rank a text match: these are in its order, a superseded one labelled\./.test(cut) && !/No thought contains|Outside the top/.test(cut),
+    `a text match: its count past the limit, and prefer_current not applied, both said (${cut.slice(0, 500)})`);
+  // Exactly the page is a count; one past it is "more than", the shown the newest of the rows the scan found (review pass 9).
+  const atPage = renderSearchThoughts({ ok: true, value: { query: "sleep scheduler", preferCurrent: false, hits: [textHit], facts: { needles: ["sleep scheduler"], needleCounts: [1000], commonNeedles: [], literalOnly: null }, window: null, vectorFailed: { ...vf, matched: "text" } } } as never, false).content[0].text;
+  const pastPage = renderSearchThoughts({ ok: true, value: { query: "sleep scheduler", preferCurrent: false, hits: [textHit], facts: { needles: ["sleep scheduler"], needleCounts: [1001], commonNeedles: [], literalOnly: null }, window: null, vectorFailed: { ...vf, matched: "text" } } } as never, false).content[0].text;
+  const outsideAtPage = renderSearchThoughts({ ok: true, value: { query: "x y", preferCurrent: false, hits: [], facts: { needles: ["x y"], needleCounts: [1000], commonNeedles: [], literalOnly: null }, window: null, vectorFailed: { ...vf, matched: "text" } } } as never, false).content[0].text;
+  assert(/It is in 1000 thoughts; these are the newest 1 —/.test(atPage) && /It is in more than 1000 thoughts; these 1 are the newest of the first 1001 the scan found, not of all —/.test(pastPage) && /: x y \(in 1000 thoughts\)\./.test(outsideAtPage),
+    `1,000 is a count, 1,001 "more than", in both lines (${atPage.slice(0, 200)} | ${pastPage.slice(0, 260)})`);
+  // A vector search with no literal and nothing above a threshold says nothing of matching without a vector (review pass 4: a mutant printed it).
+  const vectored = renderSearchThoughts({ ok: true, value: { query: "plain words", preferCurrent: false, hits: [], facts: { needles: [], needleCounts: [], commonNeedles: [], literalOnly: false }, window: null } } as never, false).content[0].text;
+  assert(vectored === 'No thoughts found matching "plain words".', `…with a vector, nothing but the plain answer (${vectored})`);
+  const common = renderSearchThoughts({ ok: true, value: { query: "COMMON-1", preferCurrent: false, hits: [], facts: { needles: [], needleCounts: [], commonNeedles: ["COMMON-1"], literalOnly: null }, window: null, vectorFailed: vf } } as never, false);
+  assert(/Too common to match exactly \(more thoughts contain it than one keyword page returns\): COMMON-1 — use search_thoughts_keyword/.test(common.content[0].text) && !/No thought contains|has no identifier|Held only/.test(common.content[0].text) && (common.structuredContent as { literalOnly?: unknown }).literalOnly === null,
+    `nothing found, the literal too common: said so, not absent, and literalOnly unknown in the typed result (${common.content[0].text.slice(-160)})`);
+  const absent = renderSearchThoughts({ ok: true, value: { query: "SMD-2", preferCurrent: false, hits: [], facts: { needles: ["SMD-2"], needleCounts: [0], commonNeedles: [], literalOnly: true }, window: null, vectorFailed: vf } } as never, false).content[0].text;
+  assert(absent.endsWith("No thought contains: SMD-2.") && !absent.includes("has no identifier"), `nothing found with the facts: the literal no thought contains, by name (${absent})`);
+  // A literal held by thoughts the search's scope left out: said without a vector; with one, the provider up changes nothing (review pass 10).
+  const outsideFacts = { needles: ["RARE-7", "GONE-8"], needleCounts: [3, 0], commonNeedles: [], literalOnly: true };
+  const outside = renderSearchThoughts({ ok: true, value: { query: "RARE-7", preferCurrent: false, hits: [], facts: outsideFacts, window: null, vectorFailed: vf } } as never, false).content[0].text;
+  const outsideUp = renderSearchThoughts({ ok: true, value: { query: "RARE-7", preferCurrent: false, hits: [], facts: outsideFacts, window: null } } as never, false).content[0].text;
+  assert(outside.endsWith("No thought contains: GONE-8. Held only by thoughts outside this search's filter, said_by, actor or min_trust: RARE-7 (in 3 thoughts).") && outsideUp === 'No thoughts found matching "RARE-7". No thought contains: GONE-8.',
+    `nothing found, a literal held outside the scope: said so without a vector, and with one the reply as before (${outside.slice(-160)} | ${outsideUp})`);
+  const withVector = renderSearchThoughts({ ok: true, value: { query: "SMD-1", preferCurrent: false, hits: [{ ...hit, similarity: 0.9 }], facts, window: null } } as never, false);
+  assert(!withVector.content[0].text.includes("Semantic search is unavailable") && !("vectorFailed" in withVector.structuredContent) && /ranked first and the rest by similarity/.test(withVector.content[0].text),
+    "an answer with a vector: no mark, no field, the similarity note as before");
+
+  const compat = renderSearch({ ok: true, value: { results: [{ id: hit.id, title: "SMD-1 names it", url: "u1", trust: undefined }], vectorFailed: vf } } as never);
+  const v = JSON.parse(compat.content[0].text) as { results: Record<string, unknown>[]; vectorFailed: string; note: string };
+  assert(JSON.stringify(v.results) === JSON.stringify([{ id: hit.id, title: "[exact match — semantic search unavailable] SMD-1 names it", url: "u1" }]) && v.vectorFailed === "provider_unreachable"
+      && v.note === `${lead}The brain's search_thoughts_keyword tool finds any word or phrase a thought contains; semantic search returns once the provider answers.` && compat.content[0].text === JSON.stringify(compat.structuredContent),
+    `search: ChatGPT's results, each title marked (the field every surface hands the model), beside them the marker word and a note naming the brain's keyword tool (${compat.content[0].text.slice(0, 200)})`);
+  // The mark after the ingested and moved prefixes, never before the trust mark (review pass 2).
+  const marks = renderSearch({ ok: true, value: { results: [{ id: hit.id, title: "a page", url: "u1", trust: "ingested", moved: [{ ticket: "SMD-1", was: "started", now: "completed" }] }, { id: "dddddddd-0000-4000-8000-000000000002", title: "a note", url: "u2", trust: "operator", moved: [{ ticket: "SMD-2", was: "started", now: "completed" }] }], vectorFailed: vf } } as never);
+  const titles = (JSON.parse(marks.content[0].text) as { results: { title: string }[] }).results.map((r) => r.title);
+  assert(JSON.stringify(titles) === JSON.stringify(["[ingested] [moved since written: SMD-1 In Progress → Done] [exact match — semantic search unavailable] a page", "[moved since written: SMD-2 In Progress → Done] [exact match — semantic search unavailable] a note"]),
+    `search: the mark on an ingested and a moved result too, after their prefixes (${JSON.stringify(titles)})`);
+  // Nothing found without a vector is refused, as the outage was before (review pass 4): what was matched, each literal absent or too common.
+  const unavailable = renderSearch({ ok: false, refusal: { code: "EMBEDDING_PROVIDER_UNAVAILABLE", retryable: true, ...vf, matched: "literals", needles: ["GONE-1"], commonNeedles: ["COMMON-1"] } } as never);
+  assert(unavailable.isError === true && unavailable.content[0].text === `Found nothing. ${lead}The brain's search_thoughts_keyword tool finds any word or phrase a thought contains; semantic search returns once the provider answers. No thought contains: GONE-1. Too common to match exactly (more thoughts contain it than one keyword page returns): COMMON-1 — the brain's search_thoughts_keyword tool pages through them.`
+      && JSON.stringify(Object.keys(unavailable.structuredContent)) === JSON.stringify(["code", "retryable", "reason", "matched", "text"]) && unavailable.structuredContent.reason === "provider_unreachable",
+    `search: nothing found without a vector is an error naming the endpoint, what was matched and why nothing came of it; its value the code, the word and what was matched (${unavailable.content[0].text.slice(-200)})`);
+  const plainCompat = renderSearch({ ok: true, value: { results: [] } } as never);
+  assert(plainCompat.content[0].text === '{"results":[]}', "…and with a vector, the shape exactly");
 }
 
 report();

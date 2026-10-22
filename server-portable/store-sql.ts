@@ -25,7 +25,7 @@ import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgr
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList } from "./store.ts";
+import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -203,7 +203,7 @@ export class SqlStore implements ThoughtStore {
 
   async hybridThoughts(opts: {
     query: string;
-    embedding: number[];
+    embedding: number[] | null;
     threshold: number;
     limit: number;
     filter: Record<string, unknown>;
@@ -215,6 +215,9 @@ export class SqlStore implements ThoughtStore {
     // methods above call their functions rather than inlining them. Under
     // prefer_current the demotion is 059's function's too (SMD-2255); a tagged
     // template cannot bind a function name, so the two calls are two literals.
+    // A null embedding is a query the provider could not embed (SMD-2891):
+    // NULL::vector, on which match_thoughts returns nothing, so each function
+    // answers its exact-literal arm alone, with the same needle facts.
     const weight = opts.recencyWeight ?? RECENCY_DEFAULTS.weight;
     const halfLife = opts.halfLifeDays ?? RECENCY_DEFAULTS.halfLifeDays;
     // min_trust (SMD-1724) is the eighth argument of 075's forms, which take
@@ -227,7 +230,7 @@ export class SqlStore implements ThoughtStore {
                  matched_needles, needles, needle_counts, common_needles, literal_only, score,
                  fused, demoted, window_rows, window_known, window_demoted, window_synced_at, window_exact
           FROM search_thoughts_current(
-            ${toVector(opts.embedding)}::vector,
+            ${opts.embedding ? toVector(opts.embedding) : null}::vector,
             ${opts.query}::text,
             ${opts.threshold}::float,
             ${opts.limit}::int,
@@ -239,7 +242,7 @@ export class SqlStore implements ThoughtStore {
           SELECT id, content, metadata, created_at, similarity,
                  matched_needles, needles, needle_counts, common_needles, literal_only, score
           FROM search_thoughts_hybrid(
-            ${toVector(opts.embedding)}::vector,
+            ${opts.embedding ? toVector(opts.embedding) : null}::vector,
             ${opts.query}::text,
             ${opts.threshold}::float,
             ${opts.limit}::int,
@@ -250,15 +253,58 @@ export class SqlStore implements ThoughtStore {
     return rows.map((r: Record<string, unknown>) => normaliseHybridRow(r));
   }
 
+  async literalFacts(query: string): Promise<{ literals: { needle: string; common: boolean }[]; textable: boolean }> {
+    // 017's needles, each probed for its 101st matching row exactly as 075's
+    // hybrid probes it — the pattern escaped as 012 escapes it (test-e2e-sql
+    // [23] plants decoys only an unescaped `_`, `%` or `\` gets wrong), and the
+    // OFFSET that plans it through the trigram index: a bare EXISTS plans a
+    // sequential scan, the whole table for an absent needle (SMD-2891, review
+    // pass 3: 150 ms a needle at 200,000 thoughts, 1 ms this way).
+    // `textable` is 017's rule for a quoted span, on the whole query (review pass 5).
+    const [row] = await this.sql`
+      SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('needle', n.needle, 'common',
+                         EXISTS (SELECT 1 FROM thoughts t
+                                 WHERE t.content ILIKE '%' || replace(replace(replace(n.needle, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%'
+                                 OFFSET 100 LIMIT 1)) ORDER BY n.ord)
+                       FROM unnest(extract_search_needles(${query}::text)) WITH ORDINALITY AS n(needle, ord)), '[]'::jsonb) AS literals,
+             length(btrim(${query}::text)) BETWEEN 3 AND 64 AND length(to_tsvector('english', ${query}::text)) > 0 AS textable`;
+    const literals = (typeof row.literals === "string" ? JSON.parse(row.literals) : row.literals) as { needle: string; common: boolean }[];
+    return { literals: literals.map((l) => ({ needle: String(l.needle), common: l.common === true })), textable: row.textable === true };
+  }
+
+  async textThoughts(opts: { query: string; limit: number; filter: Record<string, unknown>; minTrust?: string }): Promise<ThoughtKeywordMatch[]> {
+    // 075's probe shape, bounded: the escaped pattern, the filter and the
+    // trust floor in one scan that stops at the page's last row, then the
+    // page ordered newest first. Never search_thoughts_keyword's function,
+    // whose count(*) OVER () and per-row occurrences read the whole match set
+    // (review pass 8). A row says how many the page held; a page past
+    // TEXT_PAGE says "more than".
+    const minTrust = opts.minTrust ?? null;
+    const rows = await this.sql`
+      WITH page AS (
+        SELECT t.id, t.content, t.metadata, t.created_at
+        FROM thoughts t
+        WHERE t.content ILIKE '%' || replace(replace(replace(${opts.query}::text, '\\', '\\\\'), '%', '\\%'), '_', '\\_') || '%'
+          AND (${opts.filter}::jsonb = '{}'::jsonb OR t.metadata @> ${opts.filter}::jsonb)
+          AND (ob1_min_trust_rank(${minTrust}::text) = 0 OR ob1_trust_rank(t.metadata->>'trust') >= ob1_min_trust_rank(${minTrust}::text))
+        LIMIT ${TEXT_PAGE + 1}
+      )
+      SELECT id, content, metadata, created_at, 1 AS occurrences, (SELECT count(*) FROM page)::int AS total_count
+      FROM page
+      ORDER BY created_at DESC NULLS LAST, id
+      LIMIT ${opts.limit}::int`;
+    return rows.map(normaliseKeywordRow);
+  }
+
   /** hybridThoughts with min_trust: 075's 8-argument forms, the same columns as the 7's. */
-  private async hybridAtTrust(opts: { query: string; embedding: number[]; threshold: number; limit: number; filter: Record<string, unknown>; preferCurrent?: boolean }, weight: number, halfLife: number, minTrust: string): Promise<ThoughtHybridMatch[]> {
+  private async hybridAtTrust(opts: { query: string; embedding: number[] | null; threshold: number; limit: number; filter: Record<string, unknown>; preferCurrent?: boolean }, weight: number, halfLife: number, minTrust: string): Promise<ThoughtHybridMatch[]> {
     const rows = opts.preferCurrent === true
       ? await this.sql`
           SELECT id, content, metadata, created_at, similarity,
                  matched_needles, needles, needle_counts, common_needles, literal_only, score,
                  fused, demoted, window_rows, window_known, window_demoted, window_synced_at, window_exact
           FROM search_thoughts_current(
-            ${toVector(opts.embedding)}::vector,
+            ${opts.embedding ? toVector(opts.embedding) : null}::vector,
             ${opts.query}::text,
             ${opts.threshold}::float,
             ${opts.limit}::int,
@@ -271,7 +317,7 @@ export class SqlStore implements ThoughtStore {
           SELECT id, content, metadata, created_at, similarity,
                  matched_needles, needles, needle_counts, common_needles, literal_only, score
           FROM search_thoughts_hybrid(
-            ${toVector(opts.embedding)}::vector,
+            ${opts.embedding ? toVector(opts.embedding) : null}::vector,
             ${opts.query}::text,
             ${opts.threshold}::float,
             ${opts.limit}::int,

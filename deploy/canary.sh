@@ -358,10 +358,22 @@ say() { printf '▸ %s\n' "$*"; }
 # The env file is the canary's own once `up` has made it (SMD-2583); before
 # that — `up`'s refusals, a `down` of a canary from before it — stable's, the
 # file the canary's is made from.
+# compose.yaml requires OB1_FORWARDER_KEY (SMD-2287), which `up` mints into
+# the canary's file only once the file is made or mended (make_canary_env,
+# set_canary_own): until then — the model probe below, a `down` of a canary
+# from before it, stable's file read before the canary has one — a
+# placeholder fills it for that call alone, so compose can read the file at
+# all. Never once those have run (OWN_KEYS, below): their read-back has proved
+# compose reads the canary's own key, and the shell's value would win over the
+# file's in the MCP server, whatever spelling of the line a grep misses
+# (review pass 2). Nor before, where the file plainly holds one.
+OWN_KEYS=""
 canary_compose() {
-  local env="$ENV_FILE"
+  local env="$ENV_FILE" fwd=()
   [ ! -f "$CANARY_ENV" ] || env="$CANARY_ENV"
-  SERVER_PORT="${PORT:-8000}" SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES="" OB1_GIT_SHA="$GIT_SHA" \
+  [ -n "$OWN_KEYS" ] || grep -qE "^[[:space:]]*(export[[:space:]]+)?OB1_FORWARDER_KEY=([^[:space:]#\"']|\"[^\"]|'[^'])" "$env" 2>/dev/null \
+    || fwd=(OB1_FORWARDER_KEY=placeholder-until-canary-sh-mints-one)
+  env ${fwd[@]+"${fwd[@]}"} SERVER_PORT="${PORT:-8000}" SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES="" OB1_GIT_SHA="$GIT_SHA" \
     "$RUNTIME" compose -p "$CANARY" --env-file "$env" -f "$HERE/compose.yaml" "$@"
 }
 
@@ -1142,15 +1154,17 @@ fi
 # The canary's env file is written with deploy/env-file.ts (SMD-2874 PR 2).
 command -v bun > /dev/null 2>&1 || { echo "up needs bun on PATH: deploy/env-file.ts writes the canary's own keys and settings to its env file." >&2; exit 2; }
 
-# Where the canary's server would send its model calls, as compose resolves
-# them for it (the fallbacks included). A bare name is a service on the
+# Where the canary's REST core would send its model calls, as compose
+# resolves them for it (the fallbacks included), and its telemetry: the REST
+# core holds both, the server's model knobs and the OTEL block, where `server`
+# holds no OTEL since it left the mesh (SMD-2287 PR 5b review pass 5). A bare name is a service on the
 # network the server is on, and the canary's has none of stable's; an address
 # (a dotted name, IPv4 or IPv6) is reached as stable reaches it.
 CONFIG_ERR="$(mktemp "${TMPDIR:-/tmp}/ob1-canary-config.XXXXXX")"
 said="$(canary_compose config --format json 2>"$CONFIG_ERR" | python3 -c '
 import json, sys
 from urllib.parse import urlparse
-env = json.load(sys.stdin)["services"]["server"].get("environment") or {}
+env = json.load(sys.stdin)["services"]["api"].get("environment") or {}
 for k in ("OB1_LLM_BASE_URL", "OB1_CHAT_BASE_URL", "OB1_JEV_BASE_URL"):
     host = urlparse(env.get(k) or "").hostname or ""
     if host and "." not in host and ":" not in host and host != "localhost":
@@ -1245,6 +1259,7 @@ esac
 # only), since a change to stable's no longer reaches the canary.
 if [ ! -f "$CANARY_ENV" ]; then
   make_canary_env
+  OWN_KEYS=1
   say "made the canary's env file, $CANARY_ENV, from $ENV_FILE: its database password, its port, $PORT, and its access keys are its own — $OWN_SAID"
 else
   drift="$(env_file drift "$ENV_FILE" "$CANARY_ENV" 2>/dev/null)" || drift=""
@@ -1253,6 +1268,7 @@ else
   # file made before SMD-2874 takes the canary's own address, tier, profiles
   # and keys where it held stable's.
   set_canary_own
+  OWN_KEYS=1
 fi
 # The canary's own write key (SMD-2874 PR 2), for the smoke and the
 # connector: stable's keys open it no more.
@@ -1371,6 +1387,10 @@ canary_compose up -d --no-deps --force-recreate server
 # The REST core runs the server's image by name: recreated after it, it runs
 # the build just made, not the one it was stopped on.
 canary_compose up -d --no-deps --force-recreate api
+# And the MCP server built on it (SMD-2287), which /mcp reaches, on the same
+# image: recreated last, on the build just made and the env file's own
+# OB1_FORWARDER_KEY. It writes nothing, so it was not stopped for the refresh.
+canary_compose up -d --no-deps --force-recreate mcp
 # Its own proxy (SMD-1846) and the forwarder that publishes its port
 # (SMD-2583), left running across a refresh: while the server is stopped the
 # proxy answers 502, and the server's new container is the same name on the
@@ -1380,20 +1400,23 @@ canary_compose up -d --no-deps proxy
 canary_compose up -d --no-deps forwarder
 BASE="http://127.0.0.1:$PORT/mcp"
 say "canary at $BASE"
+# Up when its keyed /health is the REST core's record: the MCP server built on
+# it answers keyless liveness on its own, and a key's /health is `ok` until the
+# REST core behind it answers (SMD-2287), so the key's JSON is both up.
+ready() { [ "$(curl -s --max-time 5 -H "x-brain-key: $KEY" "$BASE/health" 2>/dev/null | head -c 1 || true)" = "{" ]; }
 for _ in $(seq 1 60); do
-  [ "$(curl -s --max-time 2 "$BASE/health" || true)" = ok ] && break
+  ready && break
   sleep 2
 done
-if [ "$(curl -s --max-time 2 "$BASE/health" || true)" != ok ]; then
-  echo "the canary server did not answer $BASE/health in 60 tries (2 to 4 minutes). Its log, then the log of its proxy:" >&2
-  canary_compose logs --no-color --tail 40 server >&2 || true
+if ! ready; then
+  echo "the canary did not answer its keyed $BASE/health with the REST core's record in 60 tries (2 to 7 minutes). The logs of its REST core and MCP server, then of its proxy:" >&2
+  canary_compose logs --no-color --tail 40 api mcp >&2 || true
   canary_compose logs --no-color --tail 10 proxy forwarder >&2 || true
-  # restart: unless-stopped would otherwise restart it without end (hundreds
-  # of times a minute under podman), and a registered connector points at it.
-  # The REST core, recreated above on the same image and environment, would too.
-  canary_compose stop server api >/dev/null 2>&1 || true
+  # restart: unless-stopped would otherwise restart them without end (hundreds
+  # of times a minute under podman), and a registered connector points at them.
+  canary_compose stop server api mcp >/dev/null 2>&1 || true
   ADVISED=1
-  echo "the canary's server and REST core are stopped; fix the cause above and re-run $RERUN.$SLEEP_SAID" >&2
+  echo "the canary's server, REST core and MCP server are stopped; fix the cause above and re-run $RERUN.$SLEEP_SAID" >&2
   exit 1
 fi
 

@@ -271,6 +271,10 @@ export function renderComposeOverlay(o: OverlayInput): string {
     "  api:",
     `    image: ${pinned(o.images.server.ref, o.images.server.digest)}`,
     "    pull_policy: missing",
+    "  # So does the MCP server built on it (SMD-2287).",
+    "  mcp:",
+    `    image: ${pinned(o.images.server.ref, o.images.server.digest)}`,
+    "    pull_policy: missing",
     "  migrate:",
     `    image: ${pinned(o.images.migrate.ref, o.images.migrate.digest)}`,
     "    pull_policy: missing",
@@ -332,7 +336,13 @@ export function renderNotes(n: NotesInput): string {
   lines.push("```bash");
   if (rehearsal) lines.push("# (a rehearsal publishes no assets — from a checkout at this commit, in deploy/)");
   else {
-    for (const name of Object.keys(ASSETS)) lines.push(name === "env.example" ? `curl -fsSL -o .env ${download(name)}    # then set POSTGRES_PASSWORD, MCP_ACCESS_KEYS and a model provider` : name === "compose.api-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the REST core public at /api, a third -f on both commands` : name === "compose.hooks-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the plugins' webhooks public at /hooks, another -f on both commands` : name === "compose.grafana-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the observability profile's Grafana at /grafana on the stack's origin, beside /auth's sign-in (deploy/README.md says what that shares), another -f on every command` : name === "compose.grafana-port.yaml" ? `curl -fsSLO ${download(name)}    # optional: the observability profile's Grafana on 127.0.0.1:3000, an origin of its own (observability in COMPOSE_PROFILES, with GRAFANA_ADMIN_PASSWORD and OB1_MONITOR_DB_PASSWORD), another -f on every command` : `curl -fsSLO ${download(name)}`);
+    for (const name of Object.keys(ASSETS)) lines.push(name === "env.example" ? `curl -fsSL -o .env ${download(name)}    # then set POSTGRES_PASSWORD, MCP_ACCESS_KEYS, OB1_FORWARDER_KEY and a model provider` : name === "compose.api-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the REST core public at /api, a third -f on both commands` : name === "compose.hooks-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the plugins' webhooks public at /hooks, another -f on both commands` : name === "compose.grafana-public.yaml" ? `curl -fsSLO ${download(name)}    # optional: the observability profile's Grafana at /grafana on the stack's origin, beside /auth's sign-in (deploy/README.md says what that shares), another -f on every command` : name === "compose.grafana-port.yaml" ? `curl -fsSLO ${download(name)}    # optional: the observability profile's Grafana on 127.0.0.1:3000, an origin of its own (observability in COMPOSE_PROFILES, with GRAFANA_ADMIN_PASSWORD and OB1_MONITOR_DB_PASSWORD), another -f on every command` : `curl -fsSLO ${download(name)}`);
+  }
+  // The keys .env needs, minted by this release's own image: a release install has no checkout and no Bun (SMD-2287).
+  if (!rehearsal) {
+    lines.push(`docker run --rm --entrypoint bun ${names.server} keygen.ts --name laptop --scope write          # its line in MCP_ACCESS_KEYS; keep the key`);
+    lines.push(`docker run --rm --entrypoint bun ${names.server} keygen.ts --name mcp-forwarder --scope forward   # its line in MCP_ACCESS_KEYS too, the key OB1_FORWARDER_KEY`);
+    lines.push("# then put both lines, comma-separated, in .env's MCP_ACCESS_KEYS and the second key in OB1_FORWARDER_KEY, and:");
   }
   lines.push("docker compose -f compose.yaml -f compose.release.yaml pull");
   lines.push("docker compose -f compose.yaml -f compose.release.yaml up -d --wait");
@@ -460,6 +470,7 @@ function selfCheck(): number {
   const unpinned = built.filter(([name, kind]) => parsed.services[name]?.image !== parsed.services[kind].image || parsed.services[name]?.pull_policy !== "missing").map(([name]) => name);
   ok(built.length >= 5 && unpinned.length === 0, `every service compose.yaml runs the server's or the migrator's checkout build in (${built.map(([n]) => n).join(", ")}) runs the release's image, pullable: ${unpinned.join(", ") || "none unpinned"}`);
   ok(parsed.services.api?.image === parsed.services.server.image && parsed.services.api?.pull_policy === "missing", "the REST core runs the release's server image, pullable — a release install has no checkout to build it from (SMD-2284 review pass 1)");
+  ok(parsed.services.mcp?.image === parsed.services.server.image && parsed.services.mcp?.pull_policy === "missing", "the MCP server built on the REST core runs the release's server image, pullable (SMD-2287)");
   ok(parsed.services.ollama.image === "ollama/ollama@sha256:cc" && parsed.services["ollama-pull"].image === "ollama/ollama@sha256:cc" && overlay.includes("ollama/ollama:0.34.3 at release time"), "Ollama is pinned by digest for both services, the tag it came from beside it");
   ok(overlay.startsWith("# Open Brain — release 1.0.0+upstream.9543c29 (tag v1.0.0)"), "the overlay's header names the release");
   // What the overlay sets beside the images and their pull policy, on any service but the proxy and its forwarder (SMD-2583), which carry every client's bytes: nothing. The workflows hold the same of a render, each on its own terms (SMD-2685), so a list here cannot widen them.
@@ -476,7 +487,9 @@ function selfCheck(): number {
   const notes = renderNotes({ facts: good.facts, changelogSection: "### Added\n- a thing (SMD-1)", digests: { server: "sha256:aa", migrate: "sha256:bb", ollama: "sha256:cc" }, yieldText: "== table ==\n", yieldWindow: "over the whole log" });
   ok(notes.includes("# Open Brain 1.0.0+upstream.9543c29\n") && notes.includes("- a thing (SMD-1)") && notes.includes("releases/download/v1.0.0/compose.release.yaml") && notes.includes("`ghcr.io/mharris-sgymd/ob1-server:1.0.0` | `sha256:aa`") && notes.includes("`ollama/ollama:0.34.3` | `sha256:cc`") && notes.includes("/blob/v1.0.0/changes/") && notes.includes("104-x.md") && notes.includes("== table ==") && notes.includes("highest migration 048"), "the notes carry the changelog, the download lines, the digests, the change files, the yield and the preflight row");
   ok(["compose.api-public.yaml    # optional: the REST core", "compose.hooks-public.yaml    # optional: the plugins' webhooks", "compose.grafana-public.yaml    # optional: the observability profile's Grafana at /grafana on the stack's origin, beside /auth's sign-in", "compose.grafana-port.yaml    # optional: the observability profile's Grafana on 127.0.0.1:3000, an origin of its own (observability in COMPOSE_PROFILES, with GRAFANA_ADMIN_PASSWORD and OB1_MONITOR_DB_PASSWORD)"].every((line) => notes.includes(line)), "each optional overlay's download line says it is optional, Grafana's two what they need");
+  ok(notes.includes("docker run --rm --entrypoint bun ghcr.io/mharris-sgymd/ob1-server:1.0.0 keygen.ts --name laptop --scope write") && notes.includes("docker run --rm --entrypoint bun ghcr.io/mharris-sgymd/ob1-server:1.0.0 keygen.ts --name mcp-forwarder --scope forward") && notes.includes("the key OB1_FORWARDER_KEY"), "the notes mint the keys with the release's own image, the MCP server's forward key among them: a release install has no checkout (SMD-2287)");
   const rn = renderNotes({ facts: rehearsal.facts, changelogSection: null, digests: {}, yieldText: "t", yieldWindow: "" });
+  ok(!rn.includes("keygen.ts"), "a rehearsal's notes mint no key: they publish no image to mint it with");
   ok(rn.includes("— rehearsal") && rn.includes("_built, not published_") && !rn.includes("releases/download"), "rehearsal notes say what they are and offer no downloads");
 
   ok(githubOutput({ a: "1", b: "x\ny" }) === "a=1\nb<<__OB1_EOF__\nx\ny\n__OB1_EOF__\n", "GITHUB_OUTPUT lines, the delimiter form for a multi-line value");

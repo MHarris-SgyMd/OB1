@@ -221,9 +221,12 @@ docker run --entrypoint bun -p 127.0.0.1:<port>:8000 --network <a network the RE
   <server image> ../mcp-server/index.ts
 ```
 
-`deploy/canary.sh` mints a canary's own forwarder key. The compose service, which
-routes `/mcp` here and hands it `OB1_FORWARDER_KEY` and `OB1_AUTH_SECRET_MCP` from
-`deploy/.env`, is PR 5b.
+`deploy/canary.sh` mints a canary's own forwarder key. On the compose stack it is the
+`mcp` service (PR 5b): the proxy routes `/mcp`, `/health` and the protected-resource
+document to it as `mcp.ob1.internal`, and compose hands it `OB1_FORWARDER_KEY`
+(required: compose refuses the stack without it), `OB1_AUTH_SECRET_MCP`, the origin and
+profiles and `OB1_PLUGINS` from `deploy/.env`, on the mesh alone, with
+`bun --no-install` as its entrypoint.
 
 ## Test
 

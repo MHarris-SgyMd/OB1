@@ -72,9 +72,11 @@
  * (db/brain-compare.ts runTierReplay). So a thought stable gained since the
  * refresh can read as a move, and each brain embeds its own query: no model
  * or egress gate is this tool's. A search both brains refuse is skipped; one
- * only one brain fails, the other answering, fails the run (exit 1). Rows
- * logged before migration 045 have no arm and are counted apart, not
- * replayed. The replays are real searches, which a brain running with
+ * only one brain fails, the other answering, fails the run (exit 1); a
+ * search a brain answers by exact literals alone because its embedding
+ * provider did not answer counts as that brain's failure (SMD-2891). Rows
+ * logged before migration 045 have no arm, and rows logged as arm literal
+ * (106) ran without a vector; both are counted apart, not replayed. The replays are real searches, which a brain running with
  * OB1_QUERY_LOG=on logs. Both verbs print --compare's report, then the window
  * and how many searches were replayed and skipped. A window that replayed none
  * compared nothing, so --diff exits 3 on it rather than passing (SMD-2182).
