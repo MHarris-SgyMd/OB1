@@ -893,8 +893,9 @@ services:
     # model providers (the stack's Ollama and Jev by name, a host or hosted
     # one outward). Not the mesh: nothing routes to it since SMD-2532 closed
     # the root route, and /mcp is the `mcp` service's below (SMD-2287 PR 5b),
-    # on the mesh alone, as the ADR has it. Nothing in the stack calls it:
-    # n8n calls the REST core (SMD-2295), and it retires in SMD-2287 PR 6. No
+    # on the mesh alone, as the ADR has it. No shipped template calls it: n8n
+    # calls the REST core (SMD-2295), and the orchestration eval's workflows
+    # still call it until SMD-2295's second PR. It retires in SMD-2287 PR 6. No
     # dns_search here, unlike the proxy: an operator's model endpoint may be a
     # short name their resolver completes.
     networks:
@@ -1628,9 +1629,9 @@ services:
       # kit's egress probe records what the container still tries to reach
       # (evals/README.md). With these alone, the MCP registry module fetched
       # https://api.n8n.io/api/mcp-servers at boot and every 8 hours
-      # (measured). It lists MCP servers for the editor's catalogue, and the
-      # stock MCP Client node the templates use does not need it, so it is
-      # off.
+      # (measured). It lists MCP servers for the editor's catalogue, which no
+      # template needs (the stock MCP nodes, the eval kit's included, do
+      # not), so it is off.
       N8N_DISABLED_MODULES: mcp-registry
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_VERSION_NOTIFICATIONS_ENABLED: "false"

@@ -1169,7 +1169,7 @@ if (import.meta.main) {
     const written = await initSecrets(envFile);
     console.log(written.length ? `wrote ${written.join(", ")} to ${envFile}` : `${envFile} already holds the profile's secrets`);
     const env = parseEnv(readFileSync(envFile, "utf8"));
-    if (!env.N8N_BRAIN_CAPTURE_KEY) console.log("optional: N8N_BRAIN_CAPTURE_KEY, for a template that captures into the brain through the REST core at http://api:8000 (none ships yet) — cd server-portable && bun keygen.ts --name n8n --scope capture; the key into N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS, then recreate the REST core (compose up -d api; a restart keeps the old keys)");
+    if (!env.N8N_BRAIN_CAPTURE_KEY) console.log("optional: N8N_BRAIN_CAPTURE_KEY, for a template that captures into the brain through the REST core at http://api:8000 (none ships yet) — cd server-portable && bun keygen.ts --name n8n --scope capture; the key into N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS, then recreate the servers that read the list (compose up -d server api; a restart keeps the old keys; `server` until SMD-2287 PR 6 retires it) and provision again");
     console.log("back up N8N_ENCRYPTION_KEY and N8N_OWNER_PASSWORD with POSTGRES_PASSWORD; if n8n was running, recreate it (compose --profile orchestration up -d n8n; not `compose restart`, which keeps the old values)");
     process.exit(0);
   }

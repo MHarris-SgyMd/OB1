@@ -79,8 +79,9 @@ decision 1, `operator-surface-tiers.md`):
    file; Postgres adds a second server to pin and upgrade, for a workload of
    one operator's schedules (`../evals/README.md`, "The orchestration profile
    (SMD-2210)", has the numbers).
-4. **It reaches the brain through MCP only** (amended below, for the import
-   runner; amended by SMD-2295 to the REST core, above). Captures go through
+4. **It reaches the brain through one surface only: MCP, and the REST core
+   since SMD-2295** (amended below, for the import runner; amended by
+   SMD-2295, above). Captures go through
    n8n's MCP Client node (an HTTP Request node against the REST core since
    SMD-2295) with a **capture-scope** key (can add a thought, cannot read
    one); no workflow holds a write key. The brain grows no n8n-specific route,
@@ -271,8 +272,8 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
    the Linear key pinned elsewhere was refused, "Domain not allowed: This
    credential is restricted from accessing api.linear.app…" (measured). The POC
    pinned the Linear credential only; whether the MCP Client node honours a pin
-   on the brain's header credentials is not measured and is the first thing
-   SMD-2211 measures. **Measured for SMD-2295** (n8n 2.40.6, the pinned
+   on the brain's header credentials was not measured by the POC, and was
+   left to SMD-2211. **Measured for SMD-2295** (n8n 2.40.6, the pinned
    image, 2026-10-22): an `httpHeaderAuth` credential pinned to the bare
    name `api` is sent to `http://api:8000` (`API` and `api.` too) by the
    HTTP Request node, and refused ("Domain not allowed") for every other
@@ -367,7 +368,8 @@ not dropped when the recipe retires.
 - **What the brain sees.** A capture from n8n is a capture from a key: its actor
   is the key's name, its trust the key's kind. When SMD-1931's single capture
   route and SMD-1933's family envelope exist, the templates hand over the
-  envelope; until then, `capture_thought` with the rendered text.
+  envelope; until then, a capture with the rendered text, `POST /v1/thoughts`
+  on the REST core since SMD-2295 (`capture_thought` over MCP before it).
 
 ## Operations
 
@@ -578,9 +580,14 @@ the first of them converts (SMD-2149, SMD-2021).
   one provisioning step, expiring and separate keys, custody of the owner
   password, the encryption key and n8n's store, the kit run against the
   profile, the egress probe.
-- **SMD-2211** — the egress checkpoint: every template credential pinned, the MCP
-  Client node's honouring of a pin measured, no sink before the retrieve route
-  and the egress decision carry it.
+- **SMD-2211** — the egress checkpoint: every template credential pinned, no
+  sink before the retrieve route and the egress decision carry it. (The MCP
+  Client node's honouring of a pin was measured for SMD-2295: it does.)
+- **SMD-2295** (its second PR) — the brain credential pinned to `api`, a
+  provisioning rule refusing a brain credential pinned elsewhere, and the
+  orchestration eval re-aimed to the REST core: n8n's, Windmill's and
+  Activepieces' brain calls, and the import runner's `vendor` fixture, which
+  names `server:8000`.
 - **SMD-2212** — the first templates, built: the import runner and the
   generic import template that wraps the CLI emitters, and an act-tool
   workflow.

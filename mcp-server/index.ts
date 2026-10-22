@@ -1,6 +1,6 @@
 // The MCP server's entry (SMD-2287): `bun index.ts` serves app.ts on PORT —
 // as mcp.ob1.internal on the stack's mesh and at /mcp through the proxy, as
-// compose.yaml's `mcp` service (PR 5b; server-portable's is routed nowhere and called by nothing).
+// compose.yaml's `mcp` service (PR 5b; server-portable's is routed nowhere, and no shipped template calls it).
 // It calls the REST core at OB1_REST_URL with OB1_FORWARDER_KEY — a
 // forward-scope key MCP_ACCESS_KEYS holds (`bun keygen.ts --name <name> --scope forward`) —
 // beside each caller's key, and reads OB1_PLUGINS as the REST core does, for

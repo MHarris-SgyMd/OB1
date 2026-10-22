@@ -99,7 +99,7 @@ The services, in order, the last two with the profile:
 | --- | --- |
 | `postgres` | The Supabase-hosted database (`pgvector/pgvector:0.8.6-pg16`) |
 | `migrate` | Pasting SQL into the Supabase dashboard — the `ob1-migrate` image (`db/Dockerfile`) runs `db/migrate.ts`, then exits |
-| `server` | Upstream's Edge Function and its deploy command — on `egress`, called by nothing since SMD-2295, until it retires (SMD-2287 PR 6) |
+| `server` | Upstream's Edge Function and its deploy command — on `egress`, called by no shipped template since SMD-2295 (the orchestration eval still calls it until SMD-2295's second PR), until it retires (SMD-2287 PR 6) |
 | `api` | — the REST core: every operation, as JSON, over Postgres and the model provider; internal unless opted in (SMD-2284) |
 | `mcp` | — the MCP server at `/mcp`, a client of the REST core, on the mesh alone (SMD-2287) |
 | `proxy` | Supabase's gateway in front of the function — the stack's one origin, with the MCP server at `/mcp` on it ("One origin" below) |
@@ -407,7 +407,7 @@ network of its own, `postgres-port`, for its loopback port, and
 | --- | --- | --- | --- |
 | `forwarder` | Listens on 8000, on `edge`, and dials the proxy alone, as `proxy.ob1.internal` on `front`, at an address on `front` and no other; it opens each connection with the PROXY protocol's line naming the client (SMD-2583) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the MCP server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
 | `proxy` | `proxy.ob1.internal:8000` on `front`, which the forwarder dials, and `proxy:8000` on `mesh`; it dials every backend on the `mesh` network, by a name resolved with no search domains: the MCP server (`mcp`) as `mcp.ob1.internal:8000`, `auth.ob1.internal:3000`, and — with `compose.api-public.yaml` named — `api.ob1.internal:8000`, and with `compose.grafana-public.yaml` `lgtm.ob1.internal:3000` | Nothing of its own: the forwarder's port | Through the forwarder |
-| `server` | `server:8000` on `egress`, which nothing in the stack dials (n8n calls the REST core, SMD-2295); not on `mesh`: the proxy routes nothing to it since SMD-2532 closed the root, and `/mcp` is `mcp`'s. It dials `postgres:5432` on `data` and the model provider on `egress`. The MCP server the stack had before SMD-2287; it retires in SMD-2287 PR 6 | Nothing | Never |
+| `server` | `server:8000` on `egress`, which no shipped template dials (n8n calls the REST core, SMD-2295; the orchestration eval still calls it until SMD-2295's second PR); not on `mesh`: the proxy routes nothing to it since SMD-2532 closed the root, and `/mcp` is `mcp`'s. It dials `postgres:5432` on `data` and the model provider on `egress`. The MCP server the stack had before SMD-2287; it retires in SMD-2287 PR 6 | Nothing | Never |
 | `mcp` | `mcp.ob1.internal:8000` on the `mesh` network alone — the proxy. It dials the REST core as `api.ob1.internal:8000` and, on a stack configured with the authorization server, `auth.ob1.internal:3000` to trade a token, both on the mesh: no Postgres, no model provider, nothing outward (SMD-2287) | Nothing of its own: `/mcp`, `/health` and the protected-resource document on the proxy's port | Through the proxy |
 | `api` | `api.ob1.internal:8000` on the `mesh` network, and `api:8000` on `data` and `egress`, which every container there can reach — a key is still required for anything but `/health` and `/openapi.json`. It dials `postgres:5432` and the model provider as the server does | Nothing of its own: `/api` on the proxy's port, only with `compose.api-public.yaml` named ("The REST core" below) | Through the proxy, as the server, when `/api` is on |
 | `postgres` | `postgres:5432` on `data` alone — the migrator, the two servers, board-sync, the workers, the sleep scheduler and the import runner; from `egress` the name does not resolve and its address does not answer (CI's "Postgres answers on the data network alone") | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` and `api` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
@@ -858,7 +858,7 @@ root reports that 404 itself.
 | The session-capture hook | `"url": "http://127.0.0.1:<port>/"` in `~/.config/open-brain/session-capture.json` (or the file `OB1_SESSION_CAPTURE_CONFIG` names) | `"url": "http://127.0.0.1:<port>/mcp"`, then `bun recipes/session-capture-hook/session-capture.mjs --check`, which warns while the url answers through a pre-v2.0.0 stack's legacy route, and from v2.0.0 names the root as not the endpoint. `OB1_BRAIN_URL` in the hook's environment overrides the file: move it too |
 | `db/tier.ts --compare` (`db/brain-compare.ts`) | `http://127.0.0.1:<port>/`, or a connector name it reads with `claude mcp get` | `http://127.0.0.1:<port>/mcp`; a connector name follows the Claude Code row |
 | curl, a script, a monitor | `/worker-status`, `/jobs/<id>`, `POST /worker-retry-failed`, `/worker-release-leases`, `/worker-run`, `/health` at the root | the same under `/mcp` (`/mcp/worker-status`, …). `GET /health` at the root stays: it has a route of its own. A `scan_thoughts` handle's links are now under the endpoint the call came to |
-| n8n | `http://server:8000/` in an MCP Client node you built | no change at v2.0.0: `server` still answers on the `egress` network. Before SMD-2287 PR 6 retires it, make the call an HTTP Request node against the REST core, `http://api:8000/v1/…` with the key in `x-brain-key`, also on `egress` and not through the proxy (SMD-2295) |
+| n8n | `http://server:8000/` in an MCP Client node you built | an HTTP Request node against the REST core, `http://api:8000/v1/…` with the key in `x-brain-key`, on the `egress` network and not through the proxy (SMD-2295). `server` answers there only until SMD-2287 PR 6 retires it |
 | any other client: Codex or Cursor, an `mcp-remote` or `supergateway` bridge, a dashboard's `MCP_URL` | the root, with or without `?key=` | put `/mcp` before `?key=` (`https://host/mcp?key=…`), or at the end of a URL without one |
 
 A stack run with `compose.tiers.yaml` never had the legacy route: since SMD-2294 its
@@ -1183,7 +1183,7 @@ after a person, so the log stays free of names and addresses.
 # every request that did not end `ok`, on each server (the default project's
 # containers; another brain's are <project>-mcp-1, -api-1 and -server-1): /mcp's
 # in the MCP server's, the REST core's own and n8n's in the REST core's, and
-# server's, which nothing calls since SMD-2295
+# server's, which no shipped template calls since SMD-2295
 docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
 docker logs open-brain-api-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
 docker logs open-brain-server-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
@@ -2907,7 +2907,9 @@ The image is n8n's, pinned by digest and never vendored.
 
 n8n itself reaches the brain only through the REST core, `http://api:8000`
 on `egress` with the key in `x-brain-key` (SMD-2295, under SMD-2282's
-decision 1), with a capture-scope key, and holds no write key. The one exception is the profile's
+decision 1), with a capture-scope key, and holds no write key. A capture
+is `POST http://api:8000/v1/thoughts`; the REST core's contract is
+`GET http://api:8000/openapi.json`, which needs no key. The one exception is the profile's
 import runner (SMD-2212, below). It writes brain tables directly, the way the
 pipeline does from a checkout, and a workflow holding its key can cause those
 writes. That is the ADR's decision 4, amended, and the runner's key is
@@ -2925,7 +2927,8 @@ bun deploy/orchestration/provision.ts        # --env-file for another file; --ro
 # Optional, for a template that captures into the brain (none ships yet): a CAPTURE key
 cd server-portable && bun keygen.ts --name n8n --scope capture && cd ..
 #   the key into deploy/.env as N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS,
-#   then recreate the REST core it calls (compose up -d api; a restart keeps the old keys) and provision again
+#   then recreate the servers that read the list (compose up -d server api; a restart keeps the old keys;
+#   `server` until SMD-2287 PR 6 retires it, or a key taken out stays accepted there) and provision again
 ```
 
 `--url` names n8n's origin where it is not `http://127.0.0.1:$N8N_PORT`. A

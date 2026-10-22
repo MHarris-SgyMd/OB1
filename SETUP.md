@@ -480,7 +480,7 @@ bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile loca
 ```
 
 Seven services in order (nine with `local-models`): Postgres with pgvector, a migration job that applies the
-schema and exits, then `server` (called by nothing; it retires in SMD-2287 PR 6), the REST core (internal unless
+schema and exits, then `server` (called by no shipped template; the orchestration eval still calls it until SMD-2295's second PR, and it retires in SMD-2287 PR 6), the REST core (internal unless
 `deploy/compose.api-public.yaml` is named), the MCP server at `/mcp`, which hands every tool call to the REST
 core, and the proxy in front of them with the forwarder that publishes its port. The server runs `preflight.ts` before it
 serves, so a misconfiguration crashloops rather than starting and failing on your
