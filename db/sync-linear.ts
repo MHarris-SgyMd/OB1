@@ -42,7 +42,10 @@
  * the newest is the HEAD, and the rest are chained under it by `supersedes`
  * (032), so search labels them rather than returning a Backlog and a Done
  * answer; nothing is deleted. A pointer the hand set to a thought outside the
- * group is kept at the chain's tail, not erased.
+ * group is kept at the chain's tail, not erased — but a capture-only key's,
+ * which 082's lapse clears only on the row its capture wrote it on, is never
+ * moved to another row: kept where it is when that row is the tail, dropped and
+ * said so otherwise (SMD-2670).
  *
  * WRITES go through the server's own store — server-portable/store-sql.ts's
  * captureThought and updateThought over upsert_thought / update_thought — with
@@ -161,9 +164,12 @@ const HEADER_RE = new RegExp(`^(${IDENTIFIER_PATTERN}) — [^\\n]*\\nProject: [^
  * the identity update_thought judges DUPLICATE_CONTENT by — so "already holds
  * this text" is asked in the database's terms, not by an exact string compare
  * a trailing newline defeats (second review pass). NULL on a row 018 left
- * unfingerprinted.
+ * unfingerprinted. `capture_pointer` is true when the row's `supersedes` is
+ * still the pointer a capture-only key's capture wrote — the one 082's lapse
+ * clears once another party takes its target — and absent or false otherwise
+ * (SMD-2670).
  */
-export type BrainRow = { id: string; content: string; metadata: Record<string, unknown>; created_at: string | null; supersedes: string | null; fingerprint: string | null };
+export type BrainRow = { id: string; content: string; metadata: Record<string, unknown>; created_at: string | null; supersedes: string | null; fingerprint: string | null; capture_pointer?: boolean };
 
 /**
  * The identifier a row is a ticket row FOR, or null. Adopted rows say so in
@@ -225,7 +231,8 @@ export function groupTicketRows(rows: BrainRow[]): Map<string, BrainRow[]> {
  * The `supersedes` pointer each row of one identifier should carry, given the
  * order the head decides: head → next → … → last, and the last carries the
  * first pointer any of them held to a thought OUTSIDE the group (a design note
- * the hand named on capture), so a person's provenance survives at the chain's
+ * the hand named on capture) — a capture-only key's aside, below — so a
+ * person's provenance survives at the chain's
  * tail rather than being erased or left to strand a twin. Returned as
  * `[row, wanted]` for the rows whose pointer differs; applied by chainRows in
  * two phases — every differing non-null pointer cleared, then every wanted one
@@ -234,18 +241,39 @@ export function groupTicketRows(rows: BrainRow[]): Map<string, BrainRow[]> {
  * two-step swap this replaces re-linked only two rows and, with three where the
  * text-holder was the oldest, left the middle twin as head and every later pass
  * on WOULD_CYCLE (second review pass).
+ *
+ * A capture-only key's outside pointer (`capture_pointer`) is never carried:
+ * it stays on its own row when that row is the tail — first for the tail, so
+ * another row's outside pointer is the one named as dropped — and is otherwise
+ * left out, named as `notCarried` on that row's change. Written onto another
+ * row by this tool's update_thought it becomes board-sync's pointer, which 082's lapse never
+ * clears: a key's header paste pointing at its own thought T left the chain's
+ * tail superseding T after a write key took it (SMD-2670).
  */
-export function desiredPointers(order: BrainRow[]): { row: BrainRow; wanted: string | null; dropped?: string[] }[] {
+export function desiredPointers(order: BrainRow[]): { row: BrainRow; wanted: string | null; dropped?: string[]; notCarried?: string }[] {
   const ids = new Set(order.map((r) => r.id));
-  const foreign = order.map((r) => r.supersedes).filter((s): s is string => s !== null && !ids.has(s));
+  const tail = order.length - 1;
+  const outside = (r: BrainRow): r is BrainRow & { supersedes: string } => r.supersedes !== null && !ids.has(r.supersedes);
+  const last = order[tail];
+  const foreign = [
+    ...(last && outside(last) && last.capture_pointer ? [last.supersedes] : []),
+    ...order.filter((r) => outside(r) && !r.capture_pointer).map((r) => r.supersedes as string),
+  ];
   // One tail, one pointer: a second outside pointer cannot be kept, and is
-  // named on the last row's change so the pass says so (eighth review pass).
-  const dropped = foreign.slice(1);
-  const out: { row: BrainRow; wanted: string | null; dropped?: string[] }[] = [];
+  // named on the last row's change so the pass says so (eighth review pass) —
+  // or, when the last row does not change, on the change of a row that held
+  // it, which every dropped pointer's holder has. A pointer onto the thought
+  // the tail keeps is not dropped (SMD-2670's review pass 2).
+  const dropped = [...new Set(foreign.slice(1))].filter((p) => p !== foreign[0]);
+  const out: { row: BrainRow; wanted: string | null; dropped?: string[]; notCarried?: string }[] = [];
   for (let i = 0; i < order.length; i++) {
-    const wanted = i + 1 < order.length ? order[i + 1].id : foreign[0] ?? null;
-    if (order[i].supersedes !== wanted) out.push({ row: order[i], wanted, ...(i + 1 === order.length && dropped.length ? { dropped } : {}) });
+    const r = order[i];
+    const wanted = i < tail ? order[i + 1].id : foreign[0] ?? null;
+    const notCarried = i < tail && outside(r) && r.capture_pointer ? r.supersedes : undefined;
+    if (r.supersedes !== wanted) out.push({ row: r, wanted, ...(notCarried ? { notCarried } : {}) });
   }
+  const at = dropped.length ? out.find((c) => c.row === last) ?? out.find((c) => !c.row.capture_pointer && c.row.supersedes !== null && dropped.includes(c.row.supersedes)) : undefined;
+  if (at) at.dropped = dropped;
   return out;
 }
 
@@ -541,9 +569,25 @@ export async function readTicketRows(sql: SQL, opts: { scanHeaders: boolean; cla
  * UTC: the `::text` of a timestamptz carries the session's offset, and across a
  * DST change that text does not sort as the instants do, which would have made
  * the older of two pastes the head.
+ *
+ * `capture_pointer` is 082's lapse predicate for the row's own pointer, as
+ * 097's ob1_lapse_walk spells it: the capture event wrote this pointer under
+ * the capture scope, and no update has written the pointer since (SMD-2670).
+ * The walk also asks that the capture's agent captured the target; 082's check
+ * at the write holds that of every capture-scoped pointer, so it is not asked
+ * again here. A brain from before 082 marks no capture scope, and the column
+ * reads false there.
  */
 function rowColumns(sql: SQL) {
-  return sql`id::text AS id, content, metadata, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint`;
+  return sql`id::text AS id, content, metadata, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint,
+    (supersedes IS NOT NULL
+     AND EXISTS (SELECT 1 FROM thought_audit c
+                  WHERE c.thought_id = thoughts.id AND c.action = 'capture'
+                    AND c.actor_context->>'scope' = 'capture'
+                    AND c.diff->>'supersedes' = thoughts.supersedes::text)
+     AND NOT EXISTS (SELECT 1 FROM thought_audit u
+                      WHERE u.thought_id = thoughts.id AND u.action = 'update'
+                        AND u.diff ? 'supersedes')) AS capture_pointer`;
 }
 
 /**
@@ -557,7 +601,7 @@ function rowColumns(sql: SQL) {
 async function chainRows(w: Writer, identifier: string, order: BrainRow[]): Promise<{ changed: number; refusal?: string }> {
   const changes = desiredPointers(order);
   if (changes.length === 0) return { changed: 0 };
-  const say = (c: { row: BrainRow; wanted: string | null; dropped?: string[] }) => `${c.row.id} ${c.wanted ? `→ ${c.wanted}` : "cleared"}${c.row.supersedes && c.row.supersedes !== c.wanted ? ` (was ${c.row.supersedes})` : ""}${c.dropped ? ` — a second outside pointer (${c.dropped.join(", ")}) has no place in one chain and is DROPPED` : ""}`;
+  const say = (c: { row: BrainRow; wanted: string | null; dropped?: string[]; notCarried?: string }) => `${c.row.id} ${c.wanted ? `→ ${c.wanted}` : "cleared"}${c.row.supersedes && c.row.supersedes !== c.wanted ? ` (was ${c.row.supersedes})` : ""}${c.dropped ? ` — a second outside pointer (${c.dropped.join(", ")}) has no place in one chain and is DROPPED` : ""}${c.notCarried ? ` — its pointer onto ${c.notCarried} is a capture-only key's, which lapses only where its capture wrote it, and is DROPPED, not carried to the tail` : ""}`;
   if (w.dryRun) { w.log(`  ~ ${identifier}: would re-chain ${changes.map(say).join(", ")}`); return { changed: changes.length }; }
   // A write the database refuses undoes EVERY write before it — the clears and
   // the sets that landed — in reverse: the pointers a person set were promised
@@ -571,16 +615,30 @@ async function chainRows(w: Writer, identifier: string, order: BrainRow[]): Prom
   // (ninth review pass). A kill between them is the remaining gap; the loop
   // stops between issues, not inside one, and the compose grace period is
   // sized for that.
+  // A capture-only key's pointer is not written back: board-sync's write
+  // would make it board-sync's, which 082's lapse never clears (SMD-2670).
+  // Its row is written back cleared — its set may have landed, or thrown
+  // after landing, before the refusal — and the refusal names it. A clear
+  // that throws after landing never reaches `written` (a gap older than
+  // SMD-2670): a key's pointer is then left cleared, as the rule wants, but
+  // unnamed.
   const written: BrainRow[] = [];
   const undo = async (why: string): Promise<{ changed: number; refusal: string }> => {
-    const failed: string[] = [];
+    const failed: string[] = [], left: string[] = [];
     for (const row of [...new Set(written)].reverse()) {
+      const keyed = row.capture_pointer === true && row.supersedes !== null;
+      const to = keyed ? null : row.supersedes;
       try {
-        const back = await w.store.updateThought({ id: row.id, actor: w.actor, provenance: { supersedes: row.supersedes } });
-        if (!back.ok) failed.push(`${row.id} → ${row.supersedes}: ${back.error}`);
-      } catch (e) { failed.push(`${row.id} → ${row.supersedes}: ${(e as Error).message}`); }
+        const back = await w.store.updateThought({ id: row.id, actor: w.actor, provenance: { supersedes: to } });
+        if (!back.ok) failed.push(`${row.id} → ${to}: ${back.error}`);
+        else if (keyed) left.push(`${row.id} → ${row.supersedes}`);
+      } catch (e) { failed.push(`${row.id} → ${to}: ${(e as Error).message}`); }
     }
-    return { changed: 0, refusal: `${why}; the chain is as it was${failed.length ? ` except ${failed.join(", ")}, which could not be restored` : ""}` };
+    const except = [
+      ...(failed.length ? [`${failed.join(", ")}, which could not be restored`] : []),
+      ...(left.length ? [`${left.join(", ")}, a capture-only key's pointer, left cleared: written back by board-sync it would never lapse`] : []),
+    ];
+    return { changed: 0, refusal: `${why}; the chain is as it was${except.length ? ` except ${except.join("; and ")}` : ""}` };
   };
   try {
     for (const c of changes.filter((c) => c.row.supersedes !== null)) {
@@ -1224,6 +1282,29 @@ function selfCheck(): Promise<number> {
   ok(dp([row("c", text, {}, null, null), row("b", text, {}, null, "a"), row("a", text, {}, null, null)]) === "c→b", "only the missing pointer (c→b; b→a stands; a→null stands)");
   ok(dp([row("c", text, {}, null, "x"), row("b", text, {}, null, null)]) === "c→b b→x", "a pointer to a thought outside the group moves to the chain's tail, not erased");
   ok(dp([row("T1", text, {}, null, null), row("C", text, {}, null, "T0"), row("T0", text, {}, null, "T1")]) === "T1→C T0→null", "the holder at the head: C→T0 stands, T0's pointer at the new head clears, the head points at C");
+  // A capture-only key's outside pointer is never moved to another row: 082's
+  // lapse clears it only where its capture wrote it (SMD-2670).
+  const keyed = (id: string, supersedes: string): BrainRow => ({ ...row(id, text, {}, null, supersedes), capture_pointer: true });
+  {
+    const mid = desiredPointers([row("H", text, {}, null, "O"), keyed("S", "T"), row("O", text, {}, null, null)]);
+    ok(dp([row("H", text, {}, null, "O"), keyed("S", "T"), row("O", text, {}, null, null)]) === "H→S S→O" && mid.find((c) => c.row.id === "S")?.notCarried === "T" && mid.every((c) => c.dropped === undefined),
+      `a key's paste in the middle: its pointer onto T is not carried to the tail O, and is named as not carried on its own change (${JSON.stringify(mid.map((c) => [c.row.id, c.wanted, c.notCarried ?? null]))})`);
+    const head = desiredPointers([keyed("S", "T"), row("H", text, {}, null, null)]);
+    ok(dp([keyed("S", "T"), row("H", text, {}, null, null)]) === "S→H" && head[0].notCarried === "T", "…at the head (the ticket's text moved): S→H, and H is not pointed at T");
+    ok(dp([row("H", text, {}, null, null), keyed("S", "T")]) === "H→S", "…at the tail: it stays where its capture wrote it, untouched, and lapses there");
+    const both = desiredPointers([row("H", text, {}, null, "X"), keyed("S", "T")]);
+    ok(dp([row("H", text, {}, null, "X"), keyed("S", "T")]) === "H→S" && both.length === 1 && both[0].dropped?.join() === "X",
+      `…at the tail behind another row's outside pointer: the key's stays, untouched, and the other is named as DROPPED on its own row's change (${JSON.stringify(both.map((c) => [c.row.id, c.wanted, c.dropped ?? null]))})`);
+    const mixed = desiredPointers([keyed("K", "T"), row("H", text, {}, null, "X"), row("O", text, {}, null, null)]);
+    ok(dp([keyed("K", "T"), row("H", text, {}, null, "X"), row("O", text, {}, null, null)]) === "K→H H→O O→X" && mixed[0].notCarried === "T" && mixed.every((c) => c.dropped === undefined),
+      "…ahead of another row's outside pointer: that one goes to the tail, the key's is not carried, nothing else dropped");
+    // A pointer onto the thought the tail keeps is not named as dropped (review pass 2).
+    const same = (o: BrainRow[]) => desiredPointers(o).map((c) => `${c.row.id}:${c.dropped?.join() ?? "-"}:${c.notCarried ?? "-"}`).join(" ");
+    ok(same([row("A", text, {}, null, "X"), row("B", text, {}, null, "X")]) === "A:-:-" && same([row("H", text, {}, null, "T"), keyed("S", "T")]) === "H:-:-"
+        && same([keyed("K", "X"), row("J", text, {}, null, "X"), keyed("S", "T")]) === "K:-:X J:X:-",
+      `…two rows onto one outside thought: the one kept at the tail is not called dropped; a key's and another's onto X behind a key's tail: X named dropped on the other's change, not carried on the key's (${same([keyed("K", "X"), row("J", text, {}, null, "X"), keyed("S", "T")])})`);
+    ok(dp([row("H", text, {}, null, null), row("S", text, {}, null, "T"), row("O", text, {}, null, null)]) === "H→S S→O O→T", "…and a pointer no capture-only key's capture wrote still moves to the tail");
+  }
 
   // The write decisions, against a recording store.
   const calls: string[] = [];
@@ -1474,6 +1555,27 @@ function selfCheck(): Promise<number> {
     r = await run({ ...recorder, store: thirdFails }, [row("H", text, withFacets, "2026-09-23T00:00:00Z", null), row("A", text, {}, "2026-09-22T00:00:00Z", "F"), row("B", text, {}, "2026-09-21T00:00:00Z", null)]);
     ok(r.r.chainRefusal !== undefined && r.calls.join("; ") === "update A supersedes=null; update H supersedes=A; update A supersedes=B; update B supersedes=F → WOULD_CYCLE; update H supersedes=null; update A supersedes=F",
       `every write before the refusal is undone, each row once, to what it held — H back to null, A back to F (${r.calls.join("; ")})`);
+    // …but a capture-only key's pointer is not written back: board-sync's
+    // write would make it a pointer 082's lapse never clears (SMD-2670).
+    sets = 0;
+    const secondFails: Writer["store"] = { captureThought: recorder.store.captureThought, updateThought: async (o) => { if (o.provenance && o.provenance.supersedes != null && ++sets === 2) { calls.push(`update ${o.id} supersedes=${o.provenance.supersedes} → WOULD_CYCLE`); return { ok: false, error: "WOULD_CYCLE" }; } return recorder.store.updateThought(o); } };
+    const lines: string[] = [];
+    r = await run({ ...recorder, store: secondFails, log: (l) => lines.push(l) }, [row("H", text, withFacets, "2026-09-23T00:00:00Z", null), { ...row("A", text, {}, "2026-09-22T00:00:00Z", "F"), capture_pointer: true }, row("B", text, {}, "2026-09-21T00:00:00Z", null)]);
+    ok(r.calls.join("; ") === "update A supersedes=null; update H supersedes=A; update A supersedes=B → WOULD_CYCLE; update H supersedes=null; update A supersedes=null"
+        && r.r.chainRefusal?.endsWith("the chain is as it was except A → F, a capture-only key's pointer, left cleared: written back by board-sync it would never lapse") === true,
+      `a refused chain writes H back but leaves the key's A→F cleared, and says so (${r.calls.join("; ")}; ${r.r.chainRefusal})`);
+    // …and when the key's row was already set before the refusal, it is put
+    // back to cleared, not left on its new pointer (review pass 1).
+    sets = 0;
+    const thirdRefused: Writer["store"] = { captureThought: recorder.store.captureThought, updateThought: async (o) => { if (o.provenance && o.provenance.supersedes != null && ++sets === 3) { calls.push(`update ${o.id} supersedes=${o.provenance.supersedes} → WOULD_CYCLE`); return { ok: false, error: "WOULD_CYCLE" }; } return recorder.store.updateThought(o); } };
+    r = await run({ ...recorder, store: thirdRefused }, [row("H", text, withFacets, "2026-09-23T00:00:00Z", "X"), { ...row("S", text, {}, "2026-09-22T00:00:00Z", "T"), capture_pointer: true }, row("O", text, {}, "2026-09-21T00:00:00Z", null)]);
+    ok(r.calls.join("; ") === "update H supersedes=null; update S supersedes=null; update H supersedes=S; update S supersedes=O; update O supersedes=X → WOULD_CYCLE; update S supersedes=null; update H supersedes=X"
+        && r.r.chainRefusal?.endsWith("the chain is as it was except S → T, a capture-only key's pointer, left cleared: written back by board-sync it would never lapse") === true,
+      `a refusal after the key's row was set writes it back cleared, H back to X (${r.calls.join("; ")}; ${r.r.chainRefusal})`);
+    lines.length = 0;
+    r = await run({ ...recorder, log: (l) => lines.push(l) }, [row("H", text, withFacets, "2026-09-23T00:00:00Z", null), { ...row("A", text, {}, "2026-09-22T00:00:00Z", "F"), capture_pointer: true }, row("B", text, {}, "2026-09-21T00:00:00Z", null)]);
+    ok(r.calls.join("; ") === "update A supersedes=null; update H supersedes=A; update A supersedes=B" && lines.some((l) => l.includes("A → B (was F) — its pointer onto F is a capture-only key's, which lapses only where its capture wrote it, and is DROPPED, not carried to the tail")),
+      `the chain lands without carrying the key's pointer to B, and the pass says so (${r.calls.join("; ")}; ${lines.join(" ⏎ ")})`);
     // The structure hook (SMD-1867): called once, with the row that holds the
     // ticket and the adapter's mapping, after a capture, an adoption, a patch
     // and an edit; not on a dry run; not for a text another ticket claims.

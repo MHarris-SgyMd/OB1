@@ -9263,6 +9263,97 @@ if (want("23")) {
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
 }
 
+if (want("23b")) {
+  console.log("\n[23b] board-sync never moves a capture-only key's pointer onto another row: the key's paste of a ticket's header, pointing at the key's own thought T, joins the ticket's group, and once a write key takes T nothing supersedes it — the paste in the chain's middle and at its head (the ticket's text moved), where the pointer is dropped and said so, and at its tail, where it stays and 082's lapse clears it (SMD-2670)");
+  const { store, writer, sync } = syncHarness(11);
+  const lines: string[] = [];
+  writer.log = (l) => lines.push(l);
+  const agentOf = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
+  const HOOK = { name: "hook-23b", agent_id: await agentOf("3", "hook-23b", "capture"), via: "test-door", scope: "capture" };
+  const OPER = { name: "oper-23b", agent_id: await agentOf("4", "oper-23b", "write"), via: "test-door" };
+  const cap = async (content: string, actor: Record<string, unknown>, supersedes?: string) =>
+    ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "test" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }}::jsonb, ${unit(43)}::vector) AS r`)[0].r as { id: string }).id;
+  const pointerOf = async (id: string) => (await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${id}::uuid`)[0].s as string | null;
+  const superseders = async (id: string) => (await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes = ${id}::uuid`)[0].c as number;
+  const flagOf = async (id: string) => (await readTicketRows(sql, { scanHeaders: true })).find((r) => r.id === id)?.capture_pointer;
+  const syncedRow = async (identifier: string) => (await sql`SELECT id::text AS id FROM thoughts WHERE metadata->>'issue' = ${identifier}`)[0].id as string;
+  // A write key moving T's text takes T (082's rule), which fires the lapse.
+  const take = async (id: string, text: string) => {
+    const r = (await sql`SELECT update_thought(p_id := ${id}::uuid, p_content := ${text}::text, p_actor := ${OPER}::jsonb) AS r`)[0].r as { ok: boolean };
+    assert(r.ok, `the write key takes ${id} by moving its text`);
+  };
+  const issueOf = (n: number, title: string): LinearIssue => ({ ...SAMPLE_ISSUE, identifier: `SMD-${n}`, title, description: "The synced text.", project: null, labels: { nodes: [] }, updatedAt: "2026-09-22T01:00:00.000Z" });
+  // The ticket's header with another body: a ticket row by the grammar, its own text.
+  const paste = (issue: LinearIssue, body: string) => renderIssue({ ...issue, description: body });
+  const ids: string[] = [];
+
+  // The middle: board-sync's H holds Linear's text over a write key's paste O;
+  // the key's paste S, newer, points at T. The chain is H → S → O, and O is
+  // not pointed at T.
+  {
+    const issue = issueOf(90050, "The key's paste in the middle");
+    await sync(issue);
+    const H = await syncedRow("SMD-90050");
+    const O = await cap(paste(issue, "[23b.1] the operator's paste"), OPER);
+    await sync(issue);
+    const T = await cap("[23b.1] the hook's own note", HOOK);
+    const S = await cap(paste(issue, "[23b.1] the hook's paste"), HOOK, T);
+    ids.push(H, O, T, S);
+    assert((await pointerOf(H)) === O && (await pointerOf(S)) === T && (await flagOf(S)) === true && (await flagOf(H)) === false,
+      `[23b.1] setup: H→O chained by board-sync, the hook's S→T its capture's pointer, read as one (capture_pointer true on S, false on H)`);
+    lines.length = 0;
+    const r = await sync(issue);
+    assert(r.chainRefusal === undefined && (await pointerOf(H)) === S && (await pointerOf(S)) === O && (await pointerOf(O)) === null && (await superseders(T)) === 0,
+      `[23b.1] the chain is H → S → O and nothing points at T (H→${await pointerOf(H)}, S→${await pointerOf(S)}, O→${await pointerOf(O)})`);
+    assert(lines.some((l) => l.includes(`${S} → ${O} (was ${T}) — its pointer onto ${T} is a capture-only key's, which lapses only where its capture wrote it, and is DROPPED, not carried to the tail`)),
+      `[23b.1] …and the pass says the key's pointer was dropped, not carried (${lines.join(" ⏎ ")})`);
+    await take(T, "[23b.1] the operator's word on the hook's note");
+    assert((await superseders(T)) === 0, "[23b.1] once a write key takes T, nothing supersedes it");
+  }
+
+  // The head: the ticket's text moved in Linear and no row holds it, so the
+  // key's S, the current row, becomes the head and takes the text. The chain
+  // is S → H, and H is not pointed at T.
+  {
+    const issue = issueOf(90051, "The key's paste at the head");
+    await sync(issue);
+    const H = await syncedRow("SMD-90051");
+    const T = await cap("[23b.2] the hook's own note", HOOK);
+    const S = await cap(paste(issue, "[23b.2] the hook's paste"), HOOK, T);
+    ids.push(H, T, S);
+    lines.length = 0;
+    const moved: LinearIssue = { ...issue, state: { name: "Done", type: "completed" }, updatedAt: "2026-09-22T02:00:00.000Z" };
+    const r = await sync(moved);
+    const sRow = (await sql`SELECT content FROM thoughts WHERE id = ${S}::uuid`)[0] as { content: string };
+    assert(r.outcome === "updated" && r.chainRefusal === undefined && sRow.content === renderIssue(moved) && (await pointerOf(S)) === H && (await pointerOf(H)) === null && (await superseders(T)) === 0,
+      `[23b.2] S takes the moved text, the chain is S → H and nothing points at T (${r.outcome}; S→${await pointerOf(S)}, H→${await pointerOf(H)})`);
+    assert(lines.some((l) => l.includes(`its pointer onto ${T} is a capture-only key's`)), `[23b.2] …and the pass says the key's pointer was dropped (${lines.join(" ⏎ ")})`);
+    await take(T, "[23b.2] the operator's word on the hook's note");
+    assert((await superseders(T)) === 0, "[23b.2] once a write key takes T, nothing supersedes it");
+  }
+
+  // The tail: the key's S is the group's oldest row, behind a write key's
+  // newer paste W, which takes Linear's text. S stays the tail with its own
+  // pointer, untouched; the take then lapses it.
+  {
+    const issue = issueOf(90052, "The key's paste at the tail");
+    const T = await cap("[23b.3] the hook's own note", HOOK);
+    const S = await cap(paste(issue, "[23b.3] the hook's paste"), HOOK, T);
+    const W = await cap(paste(issue, "[23b.3] the operator's paste"), OPER);
+    ids.push(T, S, W);
+    lines.length = 0;
+    const r = await sync(issue);
+    assert(r.chainRefusal === undefined && (await pointerOf(W)) === S && (await pointerOf(S)) === T && (await flagOf(S)) === true && !lines.some((l) => l.includes("capture-only")),
+      `[23b.3] W takes the text, the chain is W → S, and S's pointer onto T is still its capture's (W→${await pointerOf(W)}, S→${await pointerOf(S)}; ${lines.join(" ⏎ ")})`);
+    await take(T, "[23b.3] the operator's word on the hook's note");
+    assert((await superseders(T)) === 0 && (await pointerOf(S)) === null && (await pointerOf(W)) === S,
+      `[23b.3] once a write key takes T, 082's lapse clears S's pointer and the chain above stands (S→${await pointerOf(S)})`);
+  }
+
+  await store.close();
+  for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+}
+
 // ── 24. Migration 054 — resolve_agent under a held key row ──────────────────
 //
 // db/test-schema.ts [49] holds the sequential half: which lookups write the

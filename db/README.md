@@ -4770,14 +4770,18 @@ row no other row of the group supersedes (the chain is the truth; age is the
 tiebreak), and the group is chained under it by `supersedes` (032): head → next →
 … → last, every differing pointer cleared first and then set, so no step closes a
 loop. A pointer the hand set to a thought outside the group is kept at the chain's
-tail, not erased. So a ticket moved back to a state an older paste recorded costs
-no model call: that paste becomes the head and its facets are patched. Nothing is
-deleted; the head's own write lands first, and a pointer the database refuses
-(a hand-set chain through an outside thought that loops back) is reported under
-*chain refusals*, never a reason the text did not land. When none of the ticket's
-rows holds Linear's text but another thought does, that thought is read: one
-that reads as this ticket, or as no ticket at all (a paste made after the row was
-adopted, with or without the header the grammar reads), is folded in as the head
+tail, not erased — except a capture-only key's: 082's lapse clears it only on the
+row its capture wrote it on, so it is never moved to another row. It stays put
+when its row is the tail (ahead of another row's outside pointer, then dropped)
+and is otherwise dropped, the pass saying so; a refused chain does not write it
+back either (SMD-2670). So a ticket moved back to a state an older paste
+recorded costs no model call: that paste becomes the head and its facets are
+patched. Nothing is deleted; the head's own write lands first, and a pointer the
+database refuses (a hand-set chain through an outside thought that loops back)
+is reported under *chain refusals*, never a reason the text did not land. When
+none of the ticket's rows holds Linear's text but another thought does, that
+thought is read: one that reads as this ticket, or as no ticket at all (a paste
+made after the row was adopted, with or without the header the grammar reads), is folded in as the head
 and chained; a text under ANOTHER ticket's claim is an outside holder, refused
 before any model call and never re-keyed — the facets are patched without
 `linear_updated_at` and `text_refused_by` names it, once, so the ticket stays
@@ -5082,8 +5086,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2982 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1466 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 896 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1478 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 908 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 57 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 239 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
