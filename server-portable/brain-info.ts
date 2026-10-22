@@ -1402,22 +1402,25 @@ export function findingsLine(db: Pick<DatabaseSummary, "findings" | "unread">): 
   return `${f.posted} posted in ${f.comments} comment(s): ${f.accepted} accepted, ${f.rejected} rejected, ${f.unanswered} unanswered after ${f.windowDays} d, ${f.open} open, ${f.withdrawn} withdrawn — ${rate}${found}`;
 }
 
-/** The record as the tool's short table: one fact per line, a label and a value. */
 /** The embedding provider's state, as provider-health.ts keeps it, with the re-probe interval (SMD-2890); restated here, as this file imports nothing. */
 export type ProviderFact = (
   | { status: "unknown" }
   | { status: "answering"; at: string }
-  | { status: "unreachable"; since: string; at: string; reason: string; detail: string }
+  | { status: "unreachable"; since: string; at: string; reason: string; detail: string; by: "call" | "probe" }
 ) & { reprobeS: number | null };
 
 /** The provider row's words (SMD-2890): a brain serving degraded says so, since when, why, and what still works. */
 export function providerWords(p: NonNullable<ServerFacts["provider"]>): string {
   if (p.status === "unknown") return "not called yet";
   if (p.status === "answering") return `answering (last answered ${p.at})`;
-  const reprobe = p.reprobeS === null ? "it is not re-probed, so a call that is answered clears this" : `re-probed every ${p.reprobeS} s`;
+  // The probe ends only what it can see (provider-health.ts probeClears, restated): its own outage, or a call's failed connection.
+  const reprobe = p.reprobeS === null ? "it is not re-probed, so a call that is answered clears this"
+    : p.by === "probe" || p.reason === "provider_unreachable" ? `re-probed every ${p.reprobeS} s`
+    : `a call failed in a way the probe (every ${p.reprobeS} s) cannot see, so only a call that is answered clears this`;
   return `unreachable since ${p.since} (${p.detail}) — serving degraded: a capture lands without its vector, a search answers by exact matches; ${reprobe}`;
 }
 
+/** The record as the tool's short table: one fact per line, a label and a value. */
 export function renderBrainInfo(info: BrainInfo): string {
   const row = (label: string, value: string) => `${`${label}:`.padEnd(16)} ${value}`;
   const tail = info.unreleased ? `; this tree adds ${info.unreleased[0] === info.unreleased[1] ? pad3(info.unreleased[0]) : `${pad3(info.unreleased[0])}–${pad3(info.unreleased[1])}`}, unreleased` : "";

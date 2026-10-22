@@ -37,7 +37,7 @@ import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
 import { mendIntervalFrom } from "./core/mend.ts";
-import { reprobeIntervalFrom } from "./provider-health.ts";
+import { inContainer, PROVIDER_PROBE_TIMEOUT_MS, reprobeIntervalFrom, startsDegraded, type ProbeKind } from "./provider-health.ts";
 import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
 import { enabledHooks, hookSecrets, loadPlugins, pluginNames, pluginProblem } from "./core/plugins.ts";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -653,11 +653,17 @@ if (chatIsOwn) {
  * `ollama` service name with no profile, `host.docker.internal` where the
  * runtime does not provide it, a typo in the port — was `preflight OK`, and the
  * first capture failed in 7 ms with the server log ending at `Started server`
- * (measured 2026-09-21 on SMD-1843's baseline). A hosted endpoint is not
+ * (measured 2026-09-21 on SMD-1843's baseline). Those still fail — the
+ * name that does not resolve, and in a container the loopback — but since
+ * SMD-2890 a resolved name with nothing answering yet only warns, and the
+ * server starts degraded (startsDegraded, provider-health.ts): a port typo
+ * outside a container is now that warning. A hosted endpoint is not
  * dialled here: it costs a credential to prove anything about, which is --deep.
  */
-const LOCAL_PROBE_TIMEOUT_MS = 2500;
+const LOCAL_PROBE_TIMEOUT_MS = PROVIDER_PROBE_TIMEOUT_MS;
 const LOCAL_PROBE_SECONDS = `${LOCAL_PROBE_TIMEOUT_MS / 1000} s`;
+/** Read once: whether this preflight runs in a container, where the loopback is the container's (startsDegraded). */
+const IN_CONTAINER = inContainer();
 /** The three spellings an operator reaches for, in the remedy's own words: the two host aliases, and the stack's own service. */
 const HOST_ALIASES = "http://host.containers.internal:11434/v1 under podman or http://host.docker.internal:11434/v1 under Docker";
 const STACK_OWN = "http://ollama:11434/v1 with --profile local-models";
@@ -677,13 +683,17 @@ const HOST_SPELLINGS = `an Ollama on the host is ${HOST_ALIASES}, and the stack'
  * OB1_CHUNK_CONTEXT=on a windowed capture spends a blurb budget first, then
  * the embedding's (third review pass).
  */
-function probeFailure(e: unknown): { kind: "silent" | "unresolved" | "refused" | "reset" | "tls" | "other"; why: string; then: string } {
+function probeFailure(e: unknown): { kind: ProbeKind; why: string; then: string } {
   const err = e as Error & { code?: string | number; syscall?: string };
   const code = String(err.code ?? "");
   const fast = "the first capture would fail on it in milliseconds";
   if (err.name === "TimeoutError") return { kind: "silent", why: `no HTTP answer in ${LOCAL_PROBE_SECONDS}`, then: "the first capture would wait on it, up to the whole request timeout (OB1_LLM_TIMEOUT), and then fail" };
   if (err.syscall === "getaddrinfo" || code === "ENOTFOUND") return { kind: "unresolved", why: `the name does not resolve${code && code !== "ENOTFOUND" ? ` (${code})` : ""}`, then: fast };
   if (code === "ConnectionRefused" || code === "ECONNREFUSED") return { kind: "refused", why: "the connection was refused", then: fast };
+  // No route to it: a LAN box asleep or booting behind a router that says so
+  // at once (an on-link one is silent instead). The runtime's providerDown
+  // counts both an outage, so the start does too (review pass 1).
+  if (code === "EHOSTUNREACH" || code === "ENETUNREACH") return { kind: "unroutable", why: `there is no route to it (${code})`, then: fast };
   // Accepted and closed with no HTTP: an https endpoint dialled as http, or a
   // listener that is not HTTP at all. Bun's message ends in advice about its
   // own `verbose` option, which is nothing to an operator (fifth review pass).
@@ -773,16 +783,19 @@ const REPROBE = reprobeIntervalFrom(env.OB1_PROVIDER_REPROBE_INTERVAL);
  * What the server does while this endpoint does not answer, for a row that
  * warns rather than fails: a name that resolves with nothing answering is a
  * provider not up yet — Ollama on the host started after the stack, the
- * profile's model still loading — and the brain serves degraded meanwhile
+ * profile's container still starting — and the brain serves degraded meanwhile
  * (SMD-2888, SMD-2891) rather than restart-looping on a failed preflight
- * (SMD-2890). The embeddings row names the re-probe that ends it; the chat
- * row's state is per capture, so it ends when a capture's call is answered.
+ * (SMD-2890). The embeddings row names the re-probe that ends it, and the
+ * tags too when the chat calls share its base (no chat row of their own); the
+ * chat row's state is per capture, so it ends when a capture's call is
+ * answered. A silent endpoint costs each call its wait first (review pass 1).
  */
+const SILENT_WAIT = "each first waiting on it up to the request timeout (OB1_LLM_TIMEOUT)";
 const DEGRADED = {
   embeddings: (silent: boolean) =>
-    `the server starts degraded — until it answers, a capture lands without its vector${silent ? ` after waiting on it up to the request timeout (OB1_LLM_TIMEOUT)` : ""}, a search answers by exact matches, and its keyed /health and brain_info say the provider is unreachable; ${REPROBE.intervalS > 0 ? `it re-probes every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) and leaves degraded when it answers` : "OB1_PROVIDER_REPROBE_INTERVAL is off, so it leaves degraded on the first call that is answered"}`,
+    `the server starts degraded — until it answers, a capture lands without its vector${chatIsOwn && chatEndpoint.base !== embEndpoint.base ? "" : " and untagged (no topics, no type)"} and a search answers by exact matches${silent ? `, ${SILENT_WAIT}` : ""}, and its keyed /health and brain_info say the provider is unreachable; ${REPROBE.intervalS > 0 ? `it re-probes every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) and leaves degraded when it answers` : "OB1_PROVIDER_REPROBE_INTERVAL is off, so it leaves degraded on the first call that is answered"}`,
   chat: (silent: boolean) =>
-    `the server starts — until it answers, a capture lands untagged (no topics, no type)${silent ? ` after waiting on it up to the request timeout (OB1_LLM_TIMEOUT)` : ""}; the first capture it answers is tagged again`,
+    `the server starts — until it answers, a capture lands untagged (no topics, no type)${silent ? `, ${SILENT_WAIT}` : ""}; the first capture it answers is tagged again`,
 };
 async function probeLocal(row: string, at: ProviderEndpoint, knob: string, degraded: (silent: boolean) => string): Promise<void> {
   const started = performance.now();
@@ -809,19 +822,18 @@ async function probeLocal(row: string, at: ProviderEndpoint, knob: string, degra
     const host = hostnameOf(at.base);
     const lead = kind === "tls" ? `${shown} answers, but ${why}` : `nothing answers at ${shown} — ${why}`;
     const route = proxy ? `; ${proxy} is set, so this call and every one the server makes go through that proxy unless NO_PROXY names ${host}` : "";
-    // Resolved, dialled, and nothing there — refused, or silent — with no proxy
-    // to blame: a provider not up yet, which the server outlasts (SMD-2890).
-    // A name that does not resolve fails above: the runtime lacks it (a
-    // missing profile service, a host alias it does not write; SMD-1875). So
-    // do a reset, a TLS refusal and anything unclassified — something there
-    // answers wrongly, and will not start answering by itself — and a failure
-    // through a proxy, which is the route's before it is the provider's.
-    if ((kind === "refused" || kind === "silent") && !proxy) {
+    // Resolved, dialled, and nothing there yet: a provider not up yet, which
+    // the server outlasts degraded (SMD-2890); what is and is not, and why,
+    // is startsDegraded's. A name that does not resolve fails above.
+    if (startsDegraded(kind, { host, proxy: proxy !== null, container: IN_CONTAINER })) {
       add(row, "warn", `nothing answers at ${shown} yet — ${why} (GET /models, ${LOCAL_PROBE_SECONDS} timeout); ${degraded(kind === "silent")}`,
           `Start the provider; the server needs no restart. If nothing is meant to answer there: ${probeRemedy(at.base, knob)}`);
       return;
     }
-    add(row, "fail", `${lead} (GET /models, ${LOCAL_PROBE_SECONDS} timeout)${route}; ${then}`,
+    // Failed only for being in a container: the loopback there is the container's own, where nothing will start.
+    const ownLoopback = !proxy && startsDegraded(kind, { host, proxy: false, container: false });
+    const own = ownLoopback ? `; this is a container, and ${host} in it is the container itself, where nothing will start answering` : "";
+    add(row, "fail", `${lead} (GET /models, ${LOCAL_PROBE_SECONDS} timeout)${route}${own}; ${then}`,
         (proxy ? `Add ${host} to NO_PROXY (and no_proxy) for the server, or unset ${proxy} for it. Otherwise: ` : "") + (kind === "tls" ? TLS_REMEDY : probeRemedy(at.base, knob)));
   }
 }
@@ -968,7 +980,7 @@ if (env.OB1_VECTOR_MEND_INTERVAL !== undefined && env.OB1_VECTOR_MEND_INTERVAL !
 // The same for the re-probe (SMD-2890): only when set.
 if (env.OB1_PROVIDER_REPROBE_INTERVAL !== undefined && env.OB1_PROVIDER_REPROBE_INTERVAL !== "") {
   if (REPROBE.problem) add("provider re-probe", "warn", REPROBE.problem, "Set OB1_PROVIDER_REPROBE_INTERVAL to whole seconds from 1 to 3600, or off, or unset it for 15.");
-  else if (REPROBE.intervalS === 0) add("provider re-probe", "ok", "off (OB1_PROVIDER_REPROBE_INTERVAL) — a server serving degraded leaves it only when a capture or search call is answered");
+  else if (REPROBE.intervalS === 0) add("provider re-probe", "ok", "off (OB1_PROVIDER_REPROBE_INTERVAL) — a server serving degraded leaves it only when a call is answered (a capture's, a search's, the vector mender's)");
   else add("provider re-probe", "ok", `every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) while a local embedding provider does not answer — the servers leave degraded when it does`);
 }
 

@@ -259,6 +259,7 @@ const faultWords = (e: unknown): string => {
  * endpoint reads nothing.
  */
 export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolean = () => false): Promise<MendTick> {
+  const tickStarted = Date.now();
   const tick: MendTick = { skipped: false, refusedAll: null, mended: 0, degraded: 0, refused: 0, failed: 0, held: 0, raced: 0, down: null, recovered: false, over: false, lockKept: false, firstError: null, sweepEnded: false };
   const cfg0 = ctx.embedConfig();
   const everything = refusesEverything(cfg0.embeddings, cfg0.egress);
@@ -403,7 +404,7 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
     // OUTAGE_TICKS, the provider away.
     if (outages > 0 && !answered) {
       tick.down = lastOutage;
-      if (lastOutage) ctx.providerHealth.noteDown(lastOutage);
+      if (lastOutage) ctx.providerHealth.noteDown(lastOutage, { by: "call", startedAt: tickStarted });
       if (freshOutages > 0 && ++state.unanswered >= OUTAGE_TICKS) state.down = true;
     }
     return tick;

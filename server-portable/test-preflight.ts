@@ -4168,7 +4168,7 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
   // and the remedy says to start it, then what 127.0.0.1 is inside a
   // container, and names the three spellings. Exit 1 here is DB_DOWN's.
   const refused = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1" });
-  assert(/^\s*!\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:1\/v1 yet — the connection was refused \(GET \/models, 2\.5 s timeout\); the server starts degraded — until it answers, a capture lands without its vector, a search answers by exact matches, and its keyed \/health and brain_info say the provider is unreachable; it re-probes every 15 s \(OB1_PROVIDER_REPROBE_INTERVAL\) and leaves degraded when it answers$/.test(row(refused.out, "provider endpoint")),
+  assert(/^\s*!\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:1\/v1 yet — the connection was refused \(GET \/models, 2\.5 s timeout\); the server starts degraded — until it answers, a capture lands without its vector and untagged \(no topics, no type\) and a search answers by exact matches, and its keyed \/health and brain_info say the provider is unreachable; it re-probes every 15 s \(OB1_PROVIDER_REPROBE_INTERVAL\) and leaves degraded when it answers$/.test(row(refused.out, "provider endpoint")),
          `a loopback endpoint nothing listens on warns on the provider endpoint row, naming the degraded start and the re-probe (${row(refused.out, "provider endpoint").slice(0, 200)})`);
   assert(/→ Start the provider; the server needs no restart\. If nothing is meant to answer there: Inside a container 127\.0\.0\.1 is the container itself, not the host: an Ollama on the host is/.test(fix(refused.out, "provider endpoint")) && THREE(fix(refused.out, "provider endpoint")),
          "…with the remedy to start it first, then the three spellings — the two host aliases and the stack's own service under its profile");
@@ -4270,7 +4270,7 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
   const timedOut = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${hung.port}/v1` });
   const waited = performance.now() - t0;
   hung.stop(true);
-  assert(/!\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 yet — no HTTP answer in 2\.5 s \(GET \/models, 2\.5 s timeout\); the server starts degraded — until it answers, a capture lands without its vector after waiting on it up to the request timeout \(OB1_LLM_TIMEOUT\), a search/.test(row(timedOut.out, "provider endpoint")),
+  assert(/!\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 yet — no HTTP answer in 2\.5 s \(GET \/models, 2\.5 s timeout\); the server starts degraded — until it answers, a capture lands without its vector and untagged \(no topics, no type\) and a search answers by exact matches, each first waiting on it up to the request timeout \(OB1_LLM_TIMEOUT\), and its keyed/.test(row(timedOut.out, "provider endpoint")),
          `an endpoint that accepts and never answers warns on the timeout, said in seconds, with the capture's wait as its cost (${row(timedOut.out, "provider endpoint").slice(0, 200)})`);
   assert(waited >= 2400 && waited < 10000, `…after about the timeout and not the run's whole patience (${Math.round(waited)} ms)`);
 
@@ -4316,6 +4316,15 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
          `a down chat server beside a live embedder warns on the chat endpoint row, in the chat's own terms, and not the provider's (${row(chatDown.out, "chat endpoint").slice(0, 200)})`);
   assert(/fix the port in OB1_CHAT_BASE_URL\./.test(fix(chatDown.out, "chat endpoint")) && /fix the port in OB1_LLM_BASE_URL\./.test(fix(refused.out, "provider endpoint")),
          "…and each row's remedy names its own knob (fifth review pass)");
+  // A silent chat server: the wait is the chat row's cost too; and an embeddings
+  // row beside a chat base of its own leaves the tags to that row (review pass 1).
+  const hungChat = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+  const chatSilent = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1", OB1_CHAT_BASE_URL: `http://127.0.0.1:${hungChat.port}/v1` });
+  hungChat.stop(true);
+  assert(/^\s*!\s+chat endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 yet — no HTTP answer in 2\.5 s \(GET \/models, 2\.5 s timeout\); the server starts — until it answers, a capture lands untagged \(no topics, no type\), each first waiting on it up to the request timeout \(OB1_LLM_TIMEOUT\); the first capture it answers is tagged again$/.test(row(chatSilent.out, "chat endpoint")),
+         `a silent chat server warns with the wait as its cost (${row(chatSilent.out, "chat endpoint").slice(0, 220)})`);
+  assert(/!\s+provider endpoint\s+.*a capture lands without its vector and a search answers by exact matches, and its keyed/.test(row(chatSilent.out, "provider endpoint")) && !/untagged/.test(row(chatSilent.out, "provider endpoint")),
+         `…and the embeddings row, beside a chat base of its own, says nothing of tags (${row(chatSilent.out, "provider endpoint").slice(0, 220)})`);
   const hostedChat = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL_STUB, OB1_CHAT_BASE_URL: "https://provider.invalid/v1", OB1_CHAT_API_KEY: "k-chat" });
   assert(row(hostedChat.out, "chat endpoint") === "" && /✓\s+provider endpoint/.test(hostedChat.out), "…and a hosted chat endpoint beside a local embedder is not dialled");
 
@@ -4329,6 +4338,12 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
   assert(deadProxy.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — the connection was refused \(GET \/models, 2\.5 s timeout\); HTTP_PROXY is set, so this call and every one the server makes go through that proxy unless NO_PROXY names 127\.0\.0\.1; the first capture/.test(row(deadProxy.out, "provider endpoint")),
          `a live endpoint behind a dead HTTP_PROXY fails naming the proxy variable (exit ${deadProxy.code})`);
   assert(/→ Add 127\.0\.0\.1 to NO_PROXY \(and no_proxy\) for the server, or unset HTTP_PROXY for it\. Otherwise: Inside a container/.test(fix(deadProxy.out, "provider endpoint")), "…with NO_PROXY first in the remedy, the hostname's remedy after");
+  // A proxy that never answers is the route's too: silent through a proxy fails, as refused through one does (review pass 1).
+  const hungProxy = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+  const silentProxy = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: PROXIED, HTTP_PROXY: `http://127.0.0.1:${hungProxy.port}` });
+  hungProxy.stop(true);
+  assert(/✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — no HTTP answer in 2\.5 s .*HTTP_PROXY is set/.test(row(silentProxy.out, "provider endpoint")),
+         `…and a silent proxy fails the row too, naming it (${row(silentProxy.out, "provider endpoint").slice(0, 200)})`);
   const exempt = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: PROXIED, http_proxy: "http://127.0.0.1:1", NO_PROXY: "127.0.0.1" });
   assert(/✓\s+provider endpoint\s+http:\/\/127\.0\.0\.1:\d+\/v1 answers — HTTP 200/.test(exempt.out) && !/proxy/.test(row(exempt.out, "provider endpoint")), "…and NO_PROXY naming the host passes with no proxy text on the row");
   const httpsProxyOnly = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: PROXIED, HTTPS_PROXY: "http://127.0.0.1:1" });

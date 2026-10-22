@@ -166,8 +166,9 @@ change or a whole brain at once.
 
 Together these are a brain **serving degraded** (`provider-health.ts`,
 SMD-2890): its embedding provider away, it still captures, searches by exact
-matches and mends after, and it says so. Every embedding call — a capture's, a
-search's, a mender tick's — tells the server whether the provider answered;
+matches and mends after, and it says so. Every embedding call — a capture's, an
+edit's, a search's, a mender tick's — tells the server whether the provider
+answered (a 4xx is an answer: the provider is there);
 the first outage after an answer is `unreachable since <t>`, said once in the
 log (`provider: … does not answer … serving degraded`), and the first answer
 after it is the return, said once (`… answers again`). A local endpoint (the
@@ -175,8 +176,14 @@ local rule preflight dials by, below) is probed at start — so a server started
 with its provider down says so before any call — and, while it does not answer,
 every `OB1_PROVIDER_REPROBE_INTERVAL` seconds (15 unless set, 1 to 3600; `0` or
 `off` for none, when only a call that is answered ends it): `GET /models`, no
-credential, no redirect followed, 2.5 s, any HTTP answer the provider back; an
-answering provider is not probed. A hosted endpoint is not probed — asking it
+credential, no redirect followed, 2.5 s, any HTTP answer the provider back but
+a 5xx, 408 or 429; an answering provider is not probed, and probes never
+overlap. The probe sees the socket and `/models`, not the call, so it ends
+only an outage it saw itself or a call's failed connection: a call's 5xx,
+timeout or broken body — a proxy that answers `/models` while its backend is
+down — ends only with a call that is answered (the mender's, at the latest).
+A call that began before the provider was last seen answering is not counted
+against it. A hosted endpoint is not probed — asking it
 costs a credential — and its state moves with real calls alone. A keyed
 `/health` (`provider`: `status` `unknown`, `answering` with `at`, or
 `unreachable` with `since`, `at`, the `reason` word and its `detail`; and
@@ -213,17 +220,22 @@ host aliases — is dialled once on every start, with or without `--deep`: the
 name resolved first, then one `GET /models`, no body, no credential, 2.5 s
 each, and any HTTP answer passes the
 `provider endpoint` row (a `chat endpoint` row for a chat base of its own). A
-name that resolves with nothing answering yet — refused, or silent — warns, and
-the server starts degraded (above, SMD-2890): an Ollama on the host started
-after the stack, or the profile's still loading, is a provider not up yet, not
-a broken brain, and failing preflight on it restart-looped the container until
-it came up. The row says what serving degraded costs (a silent endpoint holds
-each capture up to `OB1_LLM_TIMEOUT` first) and the re-probe interval; the
-chat row's cost is captures landing untagged. A name that does not resolve
-still fails — a runtime without it (the `ollama` service without its profile,
-a host alias the runtime does not write) will not grow it — and so do an
-endpoint that answers wrongly (a reset, an untrusted certificate) and any
-failure through a proxy, the route's before the provider's. Either way the
+name that resolves with nothing answering yet — refused, silent, or no route
+to it (`EHOSTUNREACH`, `ENETUNREACH`) — warns, and the server starts degraded
+(above, SMD-2890): an Ollama on the host started after the stack, or the
+profile's container still starting, is a provider not up yet, not a broken
+brain, and failing preflight on it restart-looped the container until it came
+up. The row says what serving degraded costs (a silent endpoint holds each
+capture and search up to `OB1_LLM_TIMEOUT` first, SMD-3205) and the re-probe
+interval; the chat row's cost is captures landing untagged. Still failures: a
+name that does not resolve — a runtime without it (the `ollama` service
+without its profile, a host alias the runtime does not write) will not grow
+it; in a container (`/.dockerenv` or `/run/.containerenv`), a loopback host,
+which is the container itself, where nothing will start (the maintainer's
+call); an endpoint that answers wrongly (a reset, an untrusted certificate);
+and any failure through a proxy, the route's before the provider's
+(`startsDegraded`, `provider-health.ts`). A port typo outside a container is
+now the warning. Either way the
 remedy names the name's kind: the service name needs `--profile local-models`; inside a
 container `127.0.0.1` is the container; `host.containers.internal` is podman's
 alias and `host.docker.internal` Docker's, which Linux Docker gets through the
@@ -471,7 +483,7 @@ the latter is unset (`store.ts:databaseUrl`), and preflight says which variable
 supplied the string. An `https://` `SUPABASE_URL` is not a connection string,
 and preflight and the store's first use say so.
 
-Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, and on Bun `OB1_STOP_GRACE` (the platform's grace period for a stop, in whole seconds with no unit; default 10 — see Caveats) `OB1_VECTOR_MEND_INTERVAL` (seconds between the vector mender's ticks, 1 to 86400; default 60, `0` or `off` for none — see "The vector mender" above) and `OB1_PROVIDER_REPROBE_INTERVAL` (seconds between re-probes of a local embedding provider that does not answer, 1 to 3600; default 15, `0` or `off` for none — see "serving degraded" above).
+Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, and on Bun `OB1_STOP_GRACE` (the platform's grace period for a stop, in whole seconds with no unit; default 10 — see Caveats), `OB1_VECTOR_MEND_INTERVAL` (seconds between the vector mender's ticks, 1 to 86400; default 60, `0` or `off` for none — see "The vector mender" above) and `OB1_PROVIDER_REPROBE_INTERVAL` (seconds between re-probes of a local embedding provider that does not answer, 1 to 3600; default 15, `0` or `off` for none — see "serving degraded" above).
 
 On a container these are ordinary environment variables.
 

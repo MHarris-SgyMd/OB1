@@ -56,6 +56,8 @@ const seen: Seen[] = [];
 const stubOpts = {
   async fetch(req: Request) {
     const url = new URL(req.url);
+    // A server's re-probe (SMD-2890) asks GET /models: an answer, not counted among the calls.
+    if (req.method === "GET") return Response.json({ object: "list", data: [] });
     const body = (await req.json()) as { model: string; input?: string };
     seen.push({ path: url.pathname, model: body.model, input: body.input });
     if (url.pathname.endsWith("/embeddings")) {
@@ -569,9 +571,10 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
 
 console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2890): started with its provider down, it serves degraded — a capture lands, a search answers by exact matches, keyed /health says unreachable since when while keyless /health stays `ok` — and leaves degraded by its re-probe alone within the interval once the provider answers, the same process throughout");
 {
-  const freePort = () => { const f = Bun.serve({ port: 0, fetch: () => new Response(null) }); const p = f.port; f.stop(true); return p; };
-  const providerPort = freePort();
-  const serverPort = freePort();
+  // Both ports held at once, then let go, so the two cannot be the same one (review pass 1).
+  const holds = [Bun.serve({ port: 0, fetch: () => new Response(null) }), Bun.serve({ port: 0, fetch: () => new Response(null) })];
+  const [providerPort, serverPort] = holds.map((h) => h.port);
+  for (const h of holds) h.stop(true);
   // The mender off, so the only thing that can see the provider back is the re-probe.
   const child = Bun.spawn(["bun", "--no-env-file", "index.ts"], {
     cwd: import.meta.dir,
@@ -591,7 +594,11 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
     return { text: (b.result?.content ?? []).map((c: { text?: string }) => c.text ?? "").join("\n") as string, isError: b.result?.isError === true };
   };
   type Provider = { status: string; since?: string; reason?: string; reprobeS?: number | null };
-  const keyed = async () => (await (await fetch(`${at}/health`, { headers: { "x-brain-key": OPEN_KEY } })).json() as { provider?: Provider }).provider;
+  // A keyed /health that misses its deadline answers plain `ok`: no record, said as such rather than thrown (review pass 1).
+  const keyed = async (): Promise<Provider | undefined> => {
+    const t = await (await fetch(`${at}/health`, { headers: { "x-brain-key": OPEN_KEY } })).text();
+    try { return (JSON.parse(t) as { provider?: Provider }).provider; } catch { return { status: `not a record: ${t.slice(0, 40)}` }; }
+  };
   let provider: ReturnType<typeof Bun.serve> | undefined;
   let models = 0;
   let cleared = false;
@@ -627,7 +634,7 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
       if (!cleared) await Bun.sleep(100);
     }
     const took = Date.now() - t0;
-    assert(cleared && models >= 1 && took < 3_000, `the provider up: within the 1 s interval and a probe's time, keyed /health says answering, by a re-probe (${took} ms, ${models} probe(s))`);
+    assert(cleared && models >= 1 && models <= 3 && took < 3_000, `the provider up: within the 1 s interval and a probe's time, keyed /health says answering, by a re-probe (${took} ms, ${models} probe(s))`);
     const after = models;
     await Bun.sleep(2_500);
     assert(models === after, `answering, it is not probed again (${models - after} more in 2.5 s)`);

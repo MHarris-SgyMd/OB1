@@ -93,7 +93,7 @@ ways out (SMD-1875). Before that row the name counted as local and was not
 dialled, so the stack came up `preflight OK` and the first capture failed on it
 (`getaddrinfo ENOTFOUND ollama`) with the server log ending at `Started server`.
 A name that resolves with nothing answering yet is the other case: an Ollama
-on the host not started yet, or the profile's still loading. The row warns, and
+on the host not started yet, or the profile's container still starting. The row warns, and
 the server starts degraded: captures land without their vectors, searches
 answer by exact matches, and keyed `/health` says `unreachable since`. It
 re-probes every `OB1_PROVIDER_REPROBE_INTERVAL` seconds (15) and leaves

@@ -11,8 +11,9 @@
 // brain_info (ServerFacts.provider). The keyless /health stays liveness: a
 // degraded brain is a brain to keep running, not to restart.
 
+import { existsSync } from "node:fs";
 import { isLocalHostname, LOCAL_PROVIDER_SERVICES } from "../db/config.mjs";
-import { providerDown, shownBase, type ProviderEndpoint } from "./embed.ts";
+import { ProviderError, providerDown, type ProviderEndpoint } from "./embed.ts";
 
 /** Seconds between re-probes while the provider is away, when OB1_PROVIDER_REPROBE_INTERVAL is unset. */
 export const DEFAULT_REPROBE_INTERVAL_S = 15;
@@ -41,17 +42,26 @@ export function reprobeIntervalFrom(raw: string | undefined): { intervalS: numbe
  * The provider as last seen: not yet called or probed; answering (`at`, the
  * last call or probe it answered); or unreachable since `since` (the first
  * outage of this run of them), `at` the latest, with providerDown's word and
- * words — never the text, nor the base.
+ * words — never the text, nor the base — and `by`, whether a real call or the
+ * probe saw the latest.
  */
 export type ProviderState =
   | { status: "unknown" }
   | { status: "answering"; at: string }
-  | { status: "unreachable"; since: string; at: string; reason: string; detail: string };
+  | { status: "unreachable"; since: string; at: string; reason: string; detail: string; by: "call" | "probe" };
+
+/** Who saw an outage, and when the call that saw it began (ms since the epoch). */
+export type DownSeen = { by?: "call" | "probe"; startedAt?: number };
 
 export interface ProviderHealth {
   state(): ProviderState;
-  /** A call or probe the provider did not answer (providerDown's outcome). */
-  noteDown(down: { reason: string; detail: string }): void;
+  /**
+   * A call or probe the provider did not answer (providerDown's outcome). One
+   * that began before the provider was last seen answering is passed over: a
+   * request that timed out after the provider came back says nothing about
+   * now (review pass 1).
+   */
+  noteDown(down: { reason: string; detail: string }, seen?: DownSeen): void;
   /** A call or probe it answered. */
   noteUp(): void;
 }
@@ -66,10 +76,12 @@ export function createProviderHealth(opts: { base: () => string; log?: (line: st
   let s: ProviderState = { status: "unknown" };
   return {
     state: () => s,
-    noteDown(down) {
+    noteDown(down, seen = {}) {
+      if (s.status === "answering" && seen.startedAt !== undefined && seen.startedAt < Date.parse(s.at)) return;
       const at = now().toISOString();
-      if (s.status === "unreachable") { s = { ...s, at, reason: down.reason, detail: down.detail }; return; }
-      s = { status: "unreachable", since: at, at, reason: down.reason, detail: down.detail };
+      const by = seen.by ?? "call";
+      if (s.status === "unreachable") { s = { ...s, at, reason: down.reason, detail: down.detail, by }; return; }
+      s = { status: "unreachable", since: at, at, reason: down.reason, detail: down.detail, by };
       log(`provider: the embedding provider at ${opts.base()} does not answer (${down.detail}) — serving degraded: a capture lands without its vector, a search answers by exact matches, until it answers`);
     },
     noteUp() {
@@ -78,6 +90,48 @@ export function createProviderHealth(opts: { base: () => string; log?: (line: st
       if (was === "unreachable") log(`provider: the embedding provider at ${opts.base()} answers again — no longer degraded`);
     },
   };
+}
+
+/**
+ * What one real embedding call, begun at `startedAt`, says of the provider:
+ * answered — a vector, or an HTTP refusal of the input that is no outage (a
+ * 4xx: the provider is there, as the mender counts it) — or down, in
+ * providerDown's terms. An egress refusal (no call made) and a failure that
+ * is neither (a width mismatch, a body that is not JSON) say nothing.
+ */
+export function heardFrom(health: ProviderHealth, startedAt: number, e?: unknown): void {
+  if (e === undefined) { health.noteUp(); return; }
+  const down = providerDown(e);
+  if (down) health.noteDown(down, { by: "call", startedAt });
+  else if (e instanceof ProviderError && e.kind === "http") health.noteUp();
+}
+
+/** What preflight's probe of a local endpoint found, by kind (preflight.ts probeFailure). */
+export type ProbeKind = "silent" | "unresolved" | "refused" | "unroutable" | "reset" | "tls" | "other";
+
+/** Whether this process runs in a container: the marker file Docker writes, or podman's. */
+export function inContainer(exists: (path: string) => boolean = existsSync): boolean {
+  return exists("/.dockerenv") || exists("/run/.containerenv");
+}
+
+/**
+ * Whether preflight lets the server start degraded on a probe that found
+ * nothing answering (SMD-2890): a name that resolved and a connection
+ * refused, silent, or with no route to it (EHOSTUNREACH, ENETUNREACH — a LAN
+ * box asleep or booting, which the runtime's providerDown counts an outage
+ * too; review pass 1) is a provider not up yet. Not: a failure through a
+ * proxy (the route's before the provider's); a reset, an untrusted
+ * certificate, anything unclassified (something answers wrongly, and will not
+ * start answering by itself); and, in a container, a loopback host — the
+ * container's own, where nothing will ever start (SMD-1875's headline case;
+ * the maintainer's call, review pass 1). A name that does not resolve never
+ * reaches this: the runtime lacks it.
+ */
+export function startsDegraded(kind: ProbeKind, where: { host: string; proxy: boolean; container: boolean }): boolean {
+  if (where.proxy) return false;
+  if (kind !== "refused" && kind !== "silent" && kind !== "unroutable") return false;
+  const loopback = where.host === "localhost" || where.host === "::1" || where.host === "[::1]" || where.host === "0.0.0.0" || /^127\.\d+\.\d+\.\d+$/.test(where.host);
+  return !(where.container && loopback);
 }
 
 /** An endpoint the server may dial with no credential and no content: preflight's local rule (loopback, a private network, the host aliases, the stack's own service names). */
@@ -91,21 +145,37 @@ export function probeable(at: Pick<ProviderEndpoint, "base">): boolean {
 
 /**
  * One probe, as preflight's: GET /models, no credential, no redirect followed,
- * PROVIDER_PROBE_TIMEOUT_MS. Any HTTP answer is the provider answering (null);
- * otherwise the outage in providerDown's terms, a timeout and a failure it does
- * not classify included — the error's code or name, never its message, which
- * may carry the URL.
+ * PROVIDER_PROBE_TIMEOUT_MS. An HTTP answer is the provider answering (null),
+ * but for the statuses providerDown reads as an outage — 5xx, 408, 429, a
+ * proxy in front of a backend that is down (review pass 1); otherwise the
+ * outage in providerDown's terms, a timeout and a failure it does not
+ * classify included — the error's code or name, never its message, which may
+ * carry the URL.
  */
 export async function probeProvider(at: Pick<ProviderEndpoint, "base">): Promise<{ reason: string; detail: string } | null> {
   try {
     const r = await fetch(`${at.base}/models`, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(PROVIDER_PROBE_TIMEOUT_MS) });
     await r.body?.cancel();
+    if (r.status >= 500 || r.status === 408 || r.status === 429) return { reason: `provider_${r.status}`, detail: `GET /models answered ${r.status}` };
     return null;
   } catch (e) {
     const err = e as Error & { code?: unknown };
     if (err?.name === "TimeoutError") return { reason: "provider_timeout", detail: `no HTTP answer in ${PROVIDER_PROBE_TIMEOUT_MS / 1000} s` };
     return providerDown(e) ?? { reason: "provider_unreachable", detail: `the call failed (${typeof err?.code === "string" && err.code ? err.code : err?.name ?? "error"})` };
   }
+}
+
+/**
+ * Whether the probe may end this outage by an answer. The probe sees the
+ * socket and GET /models, not the call: an outage it saw itself, or a call's
+ * connection that failed (refused, reset, unroutable, unresolved), it may end;
+ * a call's 5xx, timeout or broken body it may not — a proxy whose backend is
+ * down answers /models and fails /embeddings, and a probe that cleared that
+ * flapped the state on every capture (review pass 1). Those end with a call
+ * that is answered: a capture's, a search's, or the vector mender's.
+ */
+export function probeClears(s: ProviderState): boolean {
+  return s.status !== "unreachable" || s.by === "probe" || s.reason === "provider_unreachable";
 }
 
 /**
@@ -125,10 +195,11 @@ export function startProviderReprobe(health: ProviderHealth, opts: { endpoint: (
   const tick = async (first: boolean) => {
     if (stopped) return;
     if (first || health.state().status !== "answering") {
+      const startedAt = Date.now();
       const down = await probeProvider(opts.endpoint());
       if (stopped) return;
-      if (down) health.noteDown(down);
-      else health.noteUp();
+      if (down) health.noteDown(down, { by: "probe", startedAt });
+      else if (probeClears(health.state())) health.noteUp();
     }
     if (stopped) return;
     timer = setTimeout(() => void tick(false), Math.min(opts.intervalS * 1000, MAX_TIMER_MS));
@@ -137,6 +208,3 @@ export function startProviderReprobe(health: ProviderHealth, opts: { endpoint: (
   void tick(true);
   return { stop: () => { stopped = true; if (timer) clearTimeout(timer); }, reprobeS: opts.intervalS };
 }
-
-/** The base a log line names: userinfo masked, as a row prints it (SMD-2885). */
-export const providerBaseShown = (at: Pick<ProviderEndpoint, "base" | "userinfo">) => shownBase(at);

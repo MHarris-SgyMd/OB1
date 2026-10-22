@@ -18,8 +18,8 @@ import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, D
 import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
 import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, ProviderError, resolveEmbedConfig } from "./embed.ts";
 import { createContext } from "./core/context.ts";
-import { capture } from "./core/writes.ts";
-import { createProviderHealth, DEFAULT_REPROBE_INTERVAL_S, probeable, probeProvider, reprobeIntervalFrom, startProviderReprobe } from "./provider-health.ts";
+import { capture, updateThought } from "./core/writes.ts";
+import { createProviderHealth, DEFAULT_REPROBE_INTERVAL_S, heardFrom, inContainer, probeable, probeClears, probeProvider, reprobeIntervalFrom, startProviderReprobe, startsDegraded } from "./provider-health.ts";
 import { MEND_BATCH, MEND_SCAN, MENDER_ACTOR, mendIntervalFrom, mendOnce, newMendState, OUTAGE_TICKS, SERVER_DOORS, SPENT_FAILURES, startVectorMender, type MendState } from "./core/mend.ts";
 import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
@@ -2027,7 +2027,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
 
 // ── 16. The provider's state: degraded and back (SMD-2890) ──────────────────
 
-console.log("\n[16] The provider's state (SMD-2890): a change is one line, an outage keeps its start; a local endpoint is re-probed while it does not answer and not after; a hosted one, or the knob off, is not probed");
+console.log("\n[16] The provider's state (SMD-2890): a change is one line, an outage keeps its start; a local endpoint is re-probed while it does not answer and not after; a hosted one, or the knob off, is not probed; a probe ends only what it can see, never overlaps and stops when told; a late outage is passed over; preflight's start-degraded rule");
 {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const closedNow = () => { const srv = Bun.serve({ port: 0, fetch: () => new Response("") }); const port = srv.port; srv.stop(true); return port; };
@@ -2107,8 +2107,8 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
       const seen = hits;
       await sleep(2300);
       assert(hits === seen, `answering, it is not probed again (${hits - seen} probe(s) in 2.3 s)`);
-      h.noteDown({ reason: "provider_timeout", detail: "the request timed out (OB1_LLM_TIMEOUT)" });
-      assert(await until(() => h.state().status === "answering", 2500) && hits > seen, "a real call's outage turns it back on, and the next probe clears it");
+      h.noteDown({ reason: "provider_unreachable", detail: "the connection was refused" });
+      assert(await until(() => h.state().status === "answering", 2500) && hits > seen, "a real call's refused connection turns it back on, and the next probe clears it");
       loop.stop();
       const stopped = hits;
       h.noteDown({ reason: "provider_unreachable", detail: "the connection was refused" });
@@ -2127,6 +2127,163 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
     await sleep(300);
     assert(off.reprobeS === null && hosted.reprobeS === null && h.state().status === "unknown", "off, or hosted: no loop, no probe, the state unknown");
     off.stop(); hosted.stop();
+  }
+
+  // Review pass 1. A late outage: a call begun before the provider was last
+  // seen answering says nothing about now, and is passed over; one begun
+  // after counts. `by` is who saw it, a call unless the probe says so.
+  {
+    let t = Date.parse("2026-10-22T00:00:10.000Z");
+    const h = createProviderHealth({ base: () => "x", log: () => {}, now: () => new Date(t) });
+    h.noteUp();
+    h.noteDown({ reason: "provider_timeout", detail: "the request timed out (OB1_LLM_TIMEOUT)" }, { startedAt: t - 120_000 });
+    assert(h.state().status === "answering", "a timeout begun 120 s before the provider answered is passed over");
+    t += 1000;
+    h.noteDown({ reason: "provider_503", detail: "it answered 503" }, { startedAt: t - 10 });
+    const s1 = h.state();
+    assert(s1.status === "unreachable" && s1.by === "call" && s1.reason === "provider_503", `one begun after counts, seen by a call (${JSON.stringify(s1)})`);
+    h.noteDown({ reason: "provider_unreachable", detail: "the connection was refused" }, { by: "probe" });
+    const s2 = h.state();
+    assert(s2.status === "unreachable" && s1.status === "unreachable" && s2.by === "probe" && s2.since === s1.since, "the probe's outage is the probe's, the outage's start kept");
+  }
+  // What the probe may end: its own outage, or a call's failed connection — never a call's 5xx, timeout or body.
+  {
+    const u = (reason: string, by: "call" | "probe") => ({ status: "unreachable" as const, since: "t", at: "t", reason, detail: "d", by });
+    assert(probeClears({ status: "unknown" }) && probeClears({ status: "answering", at: "t" }) && probeClears(u("provider_unreachable", "call")) && probeClears(u("provider_503", "probe")) && probeClears(u("provider_timeout", "probe")),
+      "the probe ends its own outage, and a call's failed connection");
+    assert(!probeClears(u("provider_503", "call")) && !probeClears(u("provider_timeout", "call")) && !probeClears(u("provider_body", "call")) && !probeClears(u("provider_429", "call")),
+      "…but not a call's 5xx, 429, timeout or broken body");
+  }
+  // What a real call says: answered, a 4xx (the provider there), an outage; an egress refusal or a width mismatch nothing.
+  {
+    const h = createProviderHealth({ base: () => "x", log: () => {} });
+    const started = Date.now();
+    heardFrom(h, started, new ProviderError("refused by policy", "egress"));
+    heardFrom(h, started, new Error("embedding width 3, expected 4"));
+    assert(h.state().status === "unknown", "an egress refusal or a width mismatch says nothing");
+    heardFrom(h, started, new ProviderError("x failed: 503", "http", 503));
+    assert(h.state().status === "unreachable", "a 503 is an outage");
+    heardFrom(h, Date.now(), new ProviderError("x failed: 400", "http", 400));
+    assert(h.state().status === "answering", "a 400 is the provider answering");
+    heardFrom(h, Date.now(), Object.assign(new TypeError("fetch failed"), { code: "ECONNREFUSED" }));
+    heardFrom(h, Date.now());
+    assert(h.state().status === "answering", "a vector: answering");
+  }
+
+  // The probe reads an outage's statuses as an outage; a redirect is an answer from this address, not followed.
+  {
+    const counted = { hits: 0 };
+    const target = Bun.serve({ port: 0, fetch: () => { counted.hits++; return new Response("ok"); } });
+    const front = Bun.serve({ port: 0, fetch: (req) => (new URL(req.url).pathname.endsWith("/models") && req.headers.get("x-down") === null ? Response.redirect(`http://127.0.0.1:${target.port}/v1/models`, 302) : new Response("", { status: 503 })) });
+    const busy = Bun.serve({ port: 0, fetch: () => new Response("", { status: 503 }) });
+    try {
+      const redirected = await probeProvider({ base: `http://127.0.0.1:${front.port}/v1` });
+      assert(redirected === null && counted.hits === 0, `a 302 is an answer, its target never dialled (${JSON.stringify(redirected)}, ${counted.hits} hit(s))`);
+      const down503 = await probeProvider({ base: `http://127.0.0.1:${busy.port}/v1` });
+      assert(down503?.reason === "provider_503" && /GET \/models answered 503/.test(down503.detail), `a 503 to GET /models is an outage (${JSON.stringify(down503)})`);
+    } finally { target.stop(true); front.stop(true); busy.stop(true); }
+  }
+
+  // A proxy whose backend is down answers /models and fails /embeddings: a
+  // call's 503 stands through the probes — one line, no flapping — until a
+  // call is answered (review pass 1: a probe that cleared it flapped the state
+  // and logged two lines per capture).
+  {
+    const proxy = Bun.serve({ port: 0, fetch: () => Response.json({ object: "list", data: [] }) });
+    const lines: string[] = [];
+    const h = createProviderHealth({ base: () => "x", log: (l) => lines.push(l) });
+    const loop = startProviderReprobe(h, { endpoint: () => ({ base: `http://127.0.0.1:${proxy.port}/v1` }) as never, intervalS: 1 });
+    try {
+      await until(() => h.state().status === "answering", 1500);
+      heardFrom(h, Date.now(), new ProviderError("x failed: 503", "http", 503));
+      await sleep(2300);
+      const st = h.state();
+      assert(st.status === "unreachable" && st.reason === "provider_503" && lines.length === 1, `a call's 503 stands through two probes that answer, one line (${JSON.stringify(st)}; ${lines.length} line(s))`);
+      heardFrom(h, Date.now());
+      assert(h.state().status === "answering" && lines.length === 2, "…and a call that is answered ends it");
+    } finally { loop.stop(); proxy.stop(true); }
+  }
+
+  // The loop's pace, counted at the socket: a listener that closes each
+  // connection at once (an outage every probe) sees one probe a second — not
+  // a hot loop, not timers multiplying; one that never answers holds one
+  // probe open at a time; a stop with a probe in flight writes nothing after.
+  {
+    let resets = 0;
+    const closer = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open(sk) { resets++; sk.end(); }, data() {} } });
+    const h = createProviderHealth({ base: () => "x", log: () => {} });
+    const loop = startProviderReprobe(h, { endpoint: () => ({ base: `http://127.0.0.1:${closer.port}/v1` }) as never, intervalS: 1 });
+    await sleep(2500);
+    loop.stop();
+    closer.stop(true);
+    assert(resets >= 2 && resets <= 4 && h.state().status === "unreachable", `an outage every probe at 1 s: 2–4 probes in 2.5 s (${resets})`);
+
+    let open = 0, most = 0, opened = 0;
+    const hung = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { open() { open++; opened++; most = Math.max(most, open); }, close() { open--; }, data() {} } });
+    const h2 = createProviderHealth({ base: () => "x", log: () => {} });
+    const loop2 = startProviderReprobe(h2, { endpoint: () => ({ base: `http://127.0.0.1:${hung.port}/v1` }) as never, intervalS: 1 });
+    await sleep(2200);
+    assert(most === 1 && opened === 1, `a silent provider: one probe open at a time, none started beside it (${most} at most, ${opened} opened in 2.2 s)`);
+    loop2.stop();
+
+    const h3 = createProviderHealth({ base: () => "x", log: () => {} });
+    const before = opened;
+    const loop3 = startProviderReprobe(h3, { endpoint: () => ({ base: `http://127.0.0.1:${hung.port}/v1` }) as never, intervalS: 1 });
+    await sleep(300);
+    loop3.stop();
+    await sleep(3000);
+    hung.stop(true);
+    assert(h3.state().status === "unknown" && opened - before === 1, `stop() with a probe in flight: its outcome not written, no probe after (${JSON.stringify(h3.state())}, ${opened - before} opened)`);
+  }
+
+  // update_thought's re-embed feeds the state too (review pass 1): an outage
+  // refuses the edit whole, as before, and says so; an answer clears it.
+  {
+    const uid = "00000000-0000-4000-8000-0000000000d1";
+    const editStore = { getThought: async () => ({ id: uid, content: "old", metadata: {} }), updateThought: async () => ({ ok: true, id: uid, updatedAt: "2026-10-22T00:00:00.000Z" }) };
+    const embedsOk = Bun.serve({ port: 0, fetch: () => Response.json({ data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }] }) });
+    let port = closedNow();
+    const ectx = createContext({ env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }), store: async () => editStore as never, door: "test" });
+    try {
+      let threw: unknown;
+      try { await updateThought(ectx, { name: "writer", scope: "write", keyHash: "h" } as never, { id: uid, content: "new text" } as never); } catch (e) { threw = e; }
+      assert(threw !== undefined && providerDown(threw) !== null && ectx.providerHealth.state().status === "unreachable", `an edit whose provider is down: refused whole, the state unreachable (${JSON.stringify(ectx.providerHealth.state())})`);
+      port = embedsOk.port!;
+      await updateThought(ectx, { name: "writer", scope: "write", keyHash: "h" } as never, { id: uid, content: "newer text" } as never);
+      assert(ectx.providerHealth.state().status === "answering", "…and an edit it answers: answering");
+    } finally { embedsOk.stop(true); }
+  }
+
+  // A capture or a search the provider refuses with a 4xx: the call fails, as
+  // before, and the provider is there — answering (review pass 1, the mender's rule).
+  {
+    const refuses = Bun.serve({ port: 0, fetch: () => new Response(JSON.stringify({ error: "input refused" }), { status: 400 }) });
+    try {
+      const fctx = createContext({ env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${refuses.port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }), store: async () => ({ captureThought: async () => ({ id: "x", existed: false }), hybridThoughts: async () => [] }) as never, door: "test" });
+      fctx.providerHealth.noteDown({ reason: "provider_unreachable", detail: "the connection was refused" });
+      let capThrew = false;
+      try { await capture(fctx, { name: "writer", scope: "write", keyHash: "h" } as never, { content: "a thought the provider refuses" } as never); } catch { capThrew = true; }
+      assert(capThrew && fctx.providerHealth.state().status === "answering", `a capture refused 400: failed, and the provider answering (${JSON.stringify(fctx.providerHealth.state())})`);
+      fctx.providerHealth.noteDown({ reason: "provider_unreachable", detail: "the connection was refused" });
+      const { searchThoughts: st } = await import("./core/reads.ts");
+      let searchThrew = false;
+      try { await st(fctx, { name: "reader", scope: "read", keyHash: "h" } as never, { query: "anything", limit: 5, threshold: 0, recency_weight: 0, prefer_current: false } as never); } catch { searchThrew = true; }
+      assert(searchThrew && fctx.providerHealth.state().status === "answering", `a search refused 400: failed, and the provider answering (${JSON.stringify(fctx.providerHealth.state())})`);
+    } finally { refuses.stop(true); }
+  }
+
+  // Preflight's rule (startsDegraded): what warns and starts degraded, and what fails.
+  {
+    const at = (host: string, proxy = false, container = false) => ({ host, proxy, container });
+    assert(startsDegraded("refused", at("127.0.0.1")) && startsDegraded("silent", at("192.168.1.5")) && startsDegraded("unroutable", at("10.0.0.9")) && startsDegraded("refused", at("host.docker.internal", false, true)) && startsDegraded("refused", at("ollama", false, true)),
+      "refused, silent or unroutable, with no proxy: a provider not up yet — on the host, and for a host alias or a service name in a container");
+    assert(!startsDegraded("refused", at("127.0.0.1", true)) && !startsDegraded("silent", at("192.168.1.5", true)), "…but not through a proxy");
+    assert(!startsDegraded("reset", at("127.0.0.1")) && !startsDegraded("tls", at("127.0.0.1")) && !startsDegraded("other", at("127.0.0.1")) && !startsDegraded("unresolved", at("ollama")),
+      "a reset, an untrusted certificate, anything unclassified, an unresolved name: a failure");
+    for (const host of ["localhost", "127.0.0.1", "127.1.2.3", "::1", "[::1]", "0.0.0.0"]) {
+      assert(!startsDegraded("refused", at(host, false, true)) && startsDegraded("refused", at(host, false, false)), `${host}: in a container its own loopback, a failure; on the host, a provider not up yet`);
+    }
+    assert(inContainer((p) => p === "/.dockerenv") && inContainer((p) => p === "/run/.containerenv") && !inContainer(() => false), "a container: Docker's marker or podman's");
   }
 }
 

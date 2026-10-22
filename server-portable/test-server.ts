@@ -66,6 +66,8 @@ const provider = Bun.serve({
   port: 0,
   async fetch(req) {
     const url = new URL(req.url);
+    // A server's re-probe (SMD-2890) asks GET /models: an answer, with no body to parse.
+    if (req.method === "GET") return Response.json({ object: "list", data: [] });
     const body = (await req.json()) as { input?: string };
     if (embedDelayMs > 0) await Bun.sleep(embedDelayMs);
     if (url.pathname.endsWith("/embeddings")) {
@@ -1466,10 +1468,14 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const { providerWords, renderBrainInfo } = await import("./brain-info.ts");
   assert(providerWords({ status: "unknown", reprobeS: 15 }) === "not called yet", "unknown: not called yet");
   assert(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", reprobeS: 15 }) === "answering (last answered 2026-10-22T00:00:00.000Z)", "answering: when it last answered");
-  const down = { status: "unreachable" as const, since: "2026-10-22T00:00:00.000Z", at: "2026-10-22T00:01:00.000Z", reason: "provider_unreachable", detail: "the connection was refused" };
+  const down = { status: "unreachable" as const, since: "2026-10-22T00:00:00.000Z", at: "2026-10-22T00:01:00.000Z", reason: "provider_unreachable", detail: "the connection was refused", by: "call" as const };
   assert(providerWords({ ...down, reprobeS: 15 }) === "unreachable since 2026-10-22T00:00:00.000Z (the connection was refused) — serving degraded: a capture lands without its vector, a search answers by exact matches; re-probed every 15 s",
     `unreachable: since its first outage, why, what still works, the re-probe (${providerWords({ ...down, reprobeS: 15 })})`);
   assert(/; it is not re-probed, so a call that is answered clears this$/.test(providerWords({ ...down, reprobeS: null })), "…and with no re-probe, what clears it");
+  // A call's 5xx the probe cannot see (a proxy answering /models, its backend down; review pass 1): only a call clears it. The probe's own 5xx it can.
+  const proxied = { ...down, reason: "provider_503", detail: "it answered 503", reprobeS: 15 };
+  assert(/; a call failed in a way the probe \(every 15 s\) cannot see, so only a call that is answered clears this$/.test(providerWords(proxied)) && /; re-probed every 15 s$/.test(providerWords({ ...proxied, by: "probe" })),
+    `a call's 503: only a call clears it; the probe's own 503: the re-probe (${providerWords(proxied)})`);
   const base = { version: "1.0.0", releaseRange: null, latestMigration: 1, commit: "c", store: "sql", tier: null, embedding: { model: "m", dim: 4 }, database: { error: "x" }, ledgerStatus: null } as never;
   const shown = renderBrainInfo({ ...(base as object), provider: { ...down, reprobeS: 15 } } as never);
   const lines = shown.split("\n");
