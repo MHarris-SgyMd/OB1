@@ -581,8 +581,9 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     // rows are — exact-literal matches only, no similarity behind them.
     const literal = vectorFailed ? literalOnlyNote(vectorFailed, "search_thoughts") : null;
     if (data.length === 0) {
-      // Nothing cleared the threshold and no literal matched; the probe's
-      // facts (core/reads.ts) say why, when the brain had a row to say it on.
+      // Nothing cleared the threshold and no literal matched; the facts
+      // (core/reads.ts: the probe's, or without a vector answerWithoutVector's)
+      // say why, when there are any.
       const why: string[] = literal ? [literal] : [];
       if (facts) {
         const absent = facts.needles.filter((_, i) => facts.needleCounts[i] === 0);

@@ -133,12 +133,16 @@ async function answerWithoutVector(
   opts: { query: string; limit: number; threshold?: number; recencyWeight?: number; filter: Record<string, unknown>; preferCurrent?: boolean; minTrust?: Trust },
   failed: { reason: string; detail: string; base: string },
 ): Promise<{ rows: ThoughtHybridMatch[]; vectorFailed: QueryVectorFailed; facts?: QueryFacts }> {
+  // One text for every statement: the query without the whitespace at its
+  // ends, which no reader sees — JS trims a no-break space or a BOM that
+  // 017's tokeniser keeps, and a literal arm on the untrimmed query read
+  // " XY_2" while literalFacts read "XY_2" (review pass 11).
+  const text = opts.query.trim();
   const rows = await store.hybridThoughts({
-    query: opts.query, embedding: null, threshold: opts.threshold ?? 0, limit: opts.limit,
+    query: text, embedding: null, threshold: opts.threshold ?? 0, limit: opts.limit,
     filter: opts.filter, recencyWeight: opts.recencyWeight ?? 0, preferCurrent: opts.preferCurrent === true, minTrust: opts.minTrust,
   });
   if (rows.length > 0) return { rows, vectorFailed: { ...failed, matched: "literals" } };
-  const text = opts.query.trim();
   const { literals, textable } = await store.literalFacts(text);
   const vectorFailed: QueryVectorFailed = { ...failed, matched: textable ? "text" : literals.length > 0 ? "literals" : "none" };
   if (textable) {
@@ -148,7 +152,8 @@ async function answerWithoutVector(
     if (kw.length > 0) return { rows: kw.map((k) => textRow(k, text, common)), vectorFailed };
   }
   const scoped = Object.keys(opts.filter).length > 0 || opts.minTrust !== undefined;
-  const probe = scoped ? (await store.hybridThoughts({ query: opts.query, embedding: null, threshold: -1, limit: 1, filter: {} }))[0] : undefined;
+  // The probe finds a row only for a literal neither absent nor too common, so it runs only when literalFacts leaves one possible.
+  const probe = scoped && literals.some((l) => !l.common) ? (await store.hybridThoughts({ query: text, embedding: null, threshold: -1, limit: 1, filter: {} }))[0] : undefined;
   if (probe) return { rows: [], vectorFailed, facts: { ...factsOf(probe)!, literalOnly: null } };
   const outside = textable && scoped ? ((await store.textThoughts({ query: text, limit: 1, filter: {} }))[0]?.totalCount ?? 0) : 0;
   const facts: QueryFacts = outside > 0 ? { needles: [text], needleCounts: [outside], commonNeedles: [], literalOnly: null }
@@ -273,8 +278,8 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
 
 /**
  * What the query was taken to mean — every hybrid row carries the same four.
- * literalOnly is null when the facts come from literalFacts, not a row: a
- * search answered without a vector that matched nothing (SMD-2891).
+ * literalOnly is null for a search answered without a vector (SMD-2891): a
+ * text match, or facts read by answerWithoutVector.
  */
 export type QueryFacts = Pick<ThoughtHybridMatch, "needles" | "needleCounts" | "commonNeedles"> & { literalOnly: boolean | null };
 /**
@@ -292,8 +297,8 @@ export type SearchThoughtsResult = {
   /**
    * The query's facts: from the first hit, or — when nothing was returned —
    * from a one-row probe with no threshold, unfiltered, so the facts are the
-   * query's and not the filtered scope's. Null when the brain had no row to
-   * report them on.
+   * query's and not the filtered scope's; null when the brain had no row to
+   * report them on. Without a vector, answerWithoutVector's, never null.
    */
   facts: QueryFacts | null;
   /** prefer_current's window (059): what it held, for the header note. Null without the flag. */

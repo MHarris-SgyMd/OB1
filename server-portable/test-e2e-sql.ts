@@ -3805,10 +3805,23 @@ console.log("\n[23] A search the provider does not answer for is answered by the
     const commonRow = await result("search_thoughts", { query: "COMMON-2891 row" });
     assert(!commonRow.isError && ((commonRow.sc?.hits ?? []) as unknown[]).length === 10 && /Searched exactly for: COMMON-2891 row\. It is in 120 thoughts/.test(commonRow.text) && /Too common to match exactly .*: COMMON-2891\./.test(commonRow.text) && commonRow.sc?.literalOnly === null,
       `a text match beside a too-common literal: the text's count and the literal too common, literalOnly unknown (${commonRow.text.slice(0, 400)})`);
+    // The text match takes the limit the input schema clamped, 1 to 100 (core/schemas.ts): 0 and -1 are one, 150 a hundred.
+    const lim0 = await result("search_thoughts", { query: "alpha words", limit: 0 });
+    const limNeg = await result("search_thoughts", { query: "alpha words", limit: -1 });
+    const lim150 = await result("search_thoughts", { query: "COMMON-2891 row", limit: 150 });
+    assert(!lim0.isError && ((lim0.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === plain) && !/No thought contains/.test(lim0.text)
+        && !limNeg.isError && ((limNeg.sc?.hits ?? []) as unknown[]).length === 1 && !lim150.isError && ((lim150.sc?.hits ?? []) as unknown[]).length === 100,
+      `limits 0, -1 and 150 on a text match: one hit, one hit, a hundred (${[lim0, limNeg, lim150].map((r) => ((r.sc?.hits ?? []) as unknown[]).length).join(",")})`);
     // A too-common literal held only outside the filter: said held outside, not too common (review pass 6: it said "page with search_thoughts_keyword" beside that tool's own empty match).
     const commonFiltered = await result("search_thoughts", { query: "COMMON-2891", filter: { type: "no-such-type" } });
     assert(!commonFiltered.isError && /Held only by thoughts outside this search's filter, said_by, actor or min_trust: COMMON-2891 \(in 120 thoughts\)\./.test(commonFiltered.text) && !/Too common/.test(commonFiltered.text),
       `a too-common literal outside the filter: held outside, in 120 (${commonFiltered.text.replace(/\n+/g, " / ").slice(-220)})`);
+    // A no-break space at an end is whitespace to the reader, and to every statement the answer runs (review pass 11: the literal arm kept it, literalFacts did not, and a held literal read absent).
+    const nbsp = await result("search_thoughts", { query: "\u00a0DOWN-2891 zzz" });
+    const nbspScoped = await result("search_thoughts", { query: "\u00a0DOWN-2891 zzz", filter: { type: "no-such-type" } });
+    assert(((nbsp.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === named) && !/No thought contains/.test(nbsp.text)
+        && /Held only by thoughts outside this search's filter, said_by, actor or min_trust: DOWN-2891 \(in 1 thought\)\./.test(nbspScoped.text),
+      `a query led by a no-break space: its literal found, and outside a filter said held there (${nbsp.text.slice(0, 120)} | ${nbspScoped.text.slice(-160)})`);
     // Whitespace at the query's ends is no part of the text (review pass 6: "deploy\n" was held by none).
     const padded = await result("search_thoughts", { query: "  alpha words\n" });
     assert(!padded.isError && ((padded.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === plain) && /Contains: alpha words\n/.test(padded.text),
