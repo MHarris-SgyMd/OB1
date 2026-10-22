@@ -168,7 +168,7 @@ OB1_JEV_LOCAL=1
 - **An outage mid-pass** is handled like the judge's: a follower checks the
   writer's chat endpoint and then the tier's `/info` before it claims anything,
   and waits out an outage of either.
-- **The pass key** is `consolidate:h2o-lightning-4b+<writer>@p4d3`, so turning
+- **The pass key** is `consolidate:h2o-lightning-4b+<writer>@p4d4`, so turning
   decide mode on, or moving to a new decide version, starts a fresh pass over
   the pool. Proposals are reviewed as
   the judge's are (`bun db/consolidate.ts --list`, then `--accept` or

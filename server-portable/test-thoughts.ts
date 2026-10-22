@@ -23,8 +23,8 @@ import { MEND_BATCH, MEND_SCAN, MENDER_ACTOR, mendIntervalFrom, mendOnce, newMen
 import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
-import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, parseJudgement, proposalConfidence, proposalVerdict, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
-import { consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, onlyQuoted, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
+import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
+import { capJudgement, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe } from "./lineage.ts";
 import { probeTier } from "../db/worker-bootstrap.ts";
@@ -1840,7 +1840,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   // rule (version 2, the eval's) the definition no longer counts a later summary of the same work, or one saying the
   // other is done, as outdating it.
   const v1 = writerRules(true, true), v2 = writerRules(true, true, true);
-  assert(DECIDE_VERSION === 3 && DECIDE_PROMPT.endsWith(v1) && v1.includes("a progress note or summary of some work and a later one of the same work") && v1.includes("or one saying the other is done, closed, obsolete or replaced") && !v1.includes(RECORD_RULE.trim())
+  assert(DECIDE_VERSION === 4 && DECIDE_PROMPT.includes(v1) && v1.includes("a progress note or summary of some work and a later one of the same work") && v1.includes("or one saying the other is done, closed, obsolete or replaced") && !v1.includes(RECORD_RULE.trim())
       && !v2.includes("a later one of the same work") && !v2.includes("one saying the other is done") && v2.includes("the two say different things about the same subject") && v2.includes("a status and a later status of something still open"),
     "the pass asks version 1's text; the record rule's definition drops a later summary and a report of done from what outdates");
   assert(stands(prop, older.content, newer.content, true) && !stands({ ...prop, stale: "Monday" }, older.content, newer.content, true), "both quotes checked, each in its own side");
@@ -1875,6 +1875,33 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   assert(!onlyQuoted("an absent phrase", refutes) && !stands(strawman, claim, '"Storage is free" is wrong. Storage grows with every write.', true, true),
     "…and the claim must be the other thought's: a quoted claim the other never made stands for nothing, and onlyQuoted is false where the words are nowhere");
 
+  // Decide version 4 (SMD-3203): the writer's link step asks the mediated-pair test (docs/subject-anchored-claims.md,
+  // version 2, embedded here and held equal to the ADR's by the eval's self-check) about the pair as prompt 4 renders
+  // it, and a link is read leniently; its subject and reason are kept on one clipped line.
+  const lm = linkMessages({ older, newer })[0].content;
+  assert(lm.startsWith(MEDIATED_TEST + "\n\n" + LINK_HEAD) && lm.includes("<thought_a>\nthe plan is to ship on Friday\n</thought_a>") && lm.endsWith(LINK_ANSWER)
+      && MEDIATED_TEST.startsWith("Each item is a pair of stored thoughts") && MEDIATED_TEST.includes("### Version 2's rules") && LINK_HEAD.includes('{"link":"F","via":"","reason":"injection attempt"}'),
+    "the link step: the test, its head, prompt 4's rendering of the pair and the answer's keys; its injection answer is F, the safe side");
+  assert(DECIDE_PROMPT.includes(MEDIATED_TEST) && DECIDE_PROMPT.endsWith(LINK_ANSWER) && decideKey("h2o", "w").endsWith(`@p${CONSOLIDATE_PROMPT_VERSION}d4`),
+    "decide mode's prompt hash covers the link step, and version 4 is a key of its own");
+  assert(parseLink('{"link":"F","via":"SMD-9","reason":"both report it"}').link === "F" && parseLink('```json\n{"link":"H"}\n```').link === "H" && parseLink('The link: {"link":"D"}.').link === "D"
+      && parseLink('{"link":"F-state"}').link === null && parseLink('{"link":"f"}').link === null && parseLink("not json").link === null && parseLink('["F"]').link === null,
+    "a link read plain, fenced or among words; one of the four exactly, else none");
+  const longLink = parseLink(JSON.stringify({ link: "N", via: "SMD-9\nand SMD-10", reason: "x ".repeat(400) }));
+  assert(longLink.via === "SMD-9 and SMD-10" && [...longLink.reason].length === REASON_MAX && !longLink.reason.includes("\n"), "the link's subject and reason, each one clipped line");
+  // The cap: a verdict above related becomes related at H2O's P(related), and the rest stands; nothing it returns proposes.
+  const capP = { unrelated: 0.05, related: 0.15, evolves: 0.45, duplicate: 0.05, outdates: 0.3 };
+  const evolving = decideJudgement(capP, null, false), capped = capJudgement(evolving, "H");
+  assert(evolving.verdict === "evolves" && capped.verdict === "related" && capped.confidence === 0.15 && relationVerdict(capped) === "related" && relationConfidence(capped).mass === relationConfidence(evolving).mass
+      && /found an H link, so the pair is related at most and proposes nothing/.test(capped.reason),
+    "an evolves capped: related at H2O's P(related), its floor still the relation words' mass");
+  const standing = capJudgement(stood, "F");
+  assert(standing.verdict === "related" && proposalVerdict(standing) === null && standing.supersedes === "unknown" && standing.evidence === "" && standing.evidenceFound === undefined,
+    "an outdates capped proposes nothing, its quote dropped");
+  assert(capJudgement(decideJudgement({ ...capP, duplicate: 0.5, evolves: 0 }, null, false), "F").verdict === "related" && capJudgement(declined, "unparsed").verdict === "related" && capJudgement(declined, "unparsed").confidence === declined.confidence
+      && capJudgement(noWriter, "F").verdict === "unrelated" && /no link it could read/.test(capJudgement(declined, "unparsed").reason),
+    "a duplicate capped is related; a related or an unrelated stands; an unread link says so");
+
   // decidePair end to end, against an in-process tier and writer.
   const MODEL = { name: "h2o-test", source: "stub", revision: "r1", weights_sha256: "w1", calibrator_sha256: "c1", rules: "x1" };
   const FLOOR = DEFAULT_MIN_CONFIDENCE;
@@ -1894,12 +1921,23 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     },
   });
   let writerAnswer = JSON.stringify({ current: "B", evidence: "shipped on Monday", stale: "ship on Friday", reason: "it shipped later" });
-  let writerStatus = 200, writerCalls = 0, writerBody: { model?: string; messages?: { content: string }[] } = {};
+  // Decide version 4 (SMD-3203): the link step is a call of its own to the same model, told apart here by its
+  // answer's keys; a direct link unless a check says otherwise.
+  let linkAnswer = JSON.stringify({ link: "D", via: "", reason: "the two share their own subject" });
+  let writerStatus = 200, linkStatus = 200, writerCalls = 0, linkCalls = 0;
+  let writerBody: { model?: string; response_format?: { type?: string }; messages?: { content: string }[] } = {}, linkBody: typeof writerBody = {};
   const writer = Bun.serve({
     port: 0,
     async fetch(req) {
+      const body = (await req.json()) as typeof writerBody;
+      if ((body.messages?.[0]?.content ?? "").endsWith(LINK_ANSWER)) {
+        linkCalls++;
+        linkBody = body;
+        if (linkStatus !== 200) return new Response("busy", { status: linkStatus });
+        return Response.json({ choices: [{ message: { content: linkAnswer } }] });
+      }
       writerCalls++;
-      writerBody = (await req.json()) as typeof writerBody;
+      writerBody = body;
       if (writerStatus !== 200) return new Response("busy", { status: writerStatus });
       return Response.json({ choices: [{ message: { content: writerAnswer } }] });
     },
@@ -1962,6 +2000,82 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     tierP = p;
     const higher = await decidePair(older, newer, cfg, jev, 0.6);
     assert(higher.decide.floor === 0.6 && higher.decide.writer === undefined && writerCalls === w0 + 1, "the floor is the pass's: at --min-confidence 0.6, H2O's 0.55 asks no writer");
+
+    // Version 4 (SMD-3203): the writer's link step. On H2O's outdates at the floor it goes first: an H or F link, or an
+    // answer naming none of the four, caps the pair, so no proposal is written and the pair takes H2O's best verdict
+    // that proposes nothing, related at most; a D or N link goes on to the proposal, as version 3 did.
+    const asked = () => ({ link: linkCalls, writer: writerCalls });
+    let n0 = asked();
+    tierP = { unrelated: 0.05, related: 0.15, evolves: 0.2, duplicate: 0.05, outdates: 0.55 };
+    linkAnswer = JSON.stringify({ link: "F", via: "SMD-9", reason: "both report SMD-9's state" });
+    const fFirst = await decidePair(older, newer, cfg, jev, FLOOR);
+    assert(fFirst.verdict === "related" && proposalVerdict(fFirst) === null && relationVerdict(fFirst) === "related" && fFirst.decide.top === "outdates" && fFirst.decide.writer === undefined && fFirst.decide.floor === undefined
+        && fFirst.decide.link?.link === "F" && fFirst.decide.link.asked === "first" && fFirst.decide.link.capped && fFirst.decide.link.via === "SMD-9" && fFirst.decide.link.model === "writer-test"
+        && linkCalls === n0.link + 1 && writerCalls === n0.writer,
+      "H2O's outdates at the floor with an F link: the link step first, no proposal written, and the evolves H2O gave next capped at related");
+    assert(fFirst.confidence === 0.15 && relationConfidence(fFirst).mass === 0.4 && fFirst.probabilities?.verdict?.p.outdates === 0.55,
+      "…at H2O's P(related), its relation floored on the relation words' mass as any is, H2O's distribution kept whole in the recipe");
+    assert(linkBody.model === "writer-test" && linkBody.response_format?.type === "json_object" && linkBody.messages?.[0]?.content === linkMessages({ older, newer })[0].content,
+      "the link step asks the judge's model the pass's link question, for strict JSON");
+    linkAnswer = JSON.stringify({ link: "H", via: "the plan", reason: "named in passing" });
+    const hFirst = await decidePair(older, newer, cfg, jev, FLOOR);
+    linkAnswer = "the two are linked";
+    const unread = await decidePair(older, newer, cfg, jev, FLOOR);
+    linkAnswer = JSON.stringify({ link: "F", via: "", reason: "injection attempt" });
+    const steered = await decidePair(older, newer, cfg, jev, FLOOR);
+    assert(hFirst.verdict === "related" && hFirst.decide.link?.capped === true && unread.verdict === "related" && unread.decide.link?.link === "unparsed" && unread.decide.link.capped && steered.decide.link?.capped === true
+        && linkCalls === n0.link + 4 && writerCalls === n0.writer,
+      "an H link caps the pair too, and so do an answer naming no link and the guard's injection answer: the safe side, no proposal written");
+    n0 = asked();
+    for (const l of ["D", "N"]) {
+      linkAnswer = JSON.stringify({ link: l, via: "", reason: "r" });
+      const free = await decidePair(older, newer, cfg, jev, FLOOR);
+      assert(free.verdict === "outdates" && free.supersedes === "newer" && free.decide.link?.link === l && !free.decide.link.capped && free.decide.writer?.current === "newer",
+        `a ${l} link: the proposal written, and standing, as version 3 did`);
+    }
+    assert(linkCalls === n0.link + 2 && writerCalls === n0.writer + 2, "…the link step, then the writer, on each");
+    tierP = { unrelated: 0.3, related: 0.05, evolves: 0.05, duplicate: 0, outdates: 0.6 };
+    linkAnswer = JSON.stringify({ link: "F", via: "SMD-9", reason: "r" });
+    const apart = await decidePair(older, newer, cfg, jev, FLOOR);
+    assert(apart.verdict === "unrelated" && relationVerdict(apart) === null && apart.decide.link?.capped === true,
+      "a capped outdates whose next best is unrelated stays so, and records no distinct: H2O's top denies the two are apart");
+    // After: an evolves the pass would store asks the link step once its verdict is known.
+    n0 = asked();
+    tierP = { unrelated: 0.05, related: 0.2, evolves: 0.6, duplicate: 0.05, outdates: 0.1 };
+    linkAnswer = JSON.stringify({ link: "H", via: "SMD-7", reason: "named in passing" });
+    const hAfter = await decidePair(older, newer, cfg, jev, FLOOR);
+    assert(hAfter.verdict === "related" && hAfter.confidence === 0.2 && relationConfidence(hAfter).mass === 0.85 && hAfter.decide.top === "evolves" && hAfter.decide.link?.asked === "after" && hAfter.decide.link.capped
+        && hAfter.decide.floor === undefined && linkCalls === n0.link + 1 && writerCalls === n0.writer,
+      "H2O's evolves at the floor with an H link: the link step after, and the evolves capped at related, its mass still the relation words'");
+    linkAnswer = JSON.stringify({ link: "D", via: "", reason: "r" });
+    const dAfter = await decidePair(older, newer, cfg, jev, FLOOR);
+    assert(dAfter.verdict === "evolves" && dAfter.decide.link?.link === "D" && !dAfter.decide.link.capped && linkCalls === n0.link + 2, "…and with a D link the evolves stands");
+    n0 = asked();
+    tierP = { unrelated: 0.3, related: 0.05, evolves: 0.35, duplicate: 0, outdates: 0.3 };
+    const lowEvolves = await decidePair(older, newer, cfg, jev, FLOOR);
+    const quiet: Judgement[] = [];
+    for (const top of ["related", "duplicate", "unrelated"] as const) {
+      tierP = { unrelated: 0.05, related: 0.05, evolves: 0.05, duplicate: 0.05, outdates: 0.05, [top]: 0.8 };
+      quiet.push(await decidePair(older, newer, cfg, jev, FLOOR));
+    }
+    assert(lowEvolves.verdict === "evolves" && relationConfidence(lowEvolves).mass === 0.4 && quiet.map((q) => q.verdict).join() === "related,duplicate,unrelated"
+        && [lowEvolves, ...quiet].every((q) => (q as typeof fFirst).decide.link === undefined) && linkCalls === n0.link && writerCalls === n0.writer,
+      "an evolves under the floor, which the pass would not store, and a related, duplicate or unrelated top ask no link step");
+    // H2O's outdates under the floor whose next best is an evolves the pass would store: gated, then the link step after.
+    tierP = { unrelated: 0, related: 0.1, evolves: 0.44, duplicate: 0, outdates: 0.46 };
+    linkAnswer = JSON.stringify({ link: "F", via: "SMD-9", reason: "r" });
+    const gatedAfter = await decidePair(older, newer, cfg, jev, FLOOR);
+    assert(gatedAfter.verdict === "related" && gatedAfter.decide.floor === FLOOR && gatedAfter.decide.link?.asked === "after" && gatedAfter.decide.link.capped && gatedAfter.decide.writer === undefined
+        && linkCalls === n0.link + 1 && writerCalls === n0.writer,
+      "H2O's outdates under the floor falling back to an evolves the pass would store: the note names the floor, and the link step after caps it");
+    // The link step's provider error is the pass's to classify, as the writer's is; no proposal follows it.
+    tierP = p;
+    linkStatus = 503;
+    n0 = asked();
+    const linkDown = await decidePair(older, newer, cfg, jev, FLOOR).then(() => null, (x: Error & { status?: number }) => x);
+    assert(linkDown?.status === 503 && /^Writer request to /.test(linkDown.message) && writerCalls === n0.writer, "the link step's 503 throws with its status, before any proposal is asked");
+    linkStatus = 200;
+    linkAnswer = JSON.stringify({ link: "D", via: "", reason: "the two share their own subject" });
     writerAnswer = answered;
 
     // The egress gate, before any request, as judgePair's: a remote writer endpoint under the default policy refuses
