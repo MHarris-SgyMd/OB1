@@ -816,7 +816,7 @@ export function watchStream(stream: ReadableStream<Uint8Array>): { until: (patte
  * loaded, not a fixed wait), `stop` its SIGTERM (SIGKILL past 8 s) and then
  * its stdout and stderr together, `kill` for a `finally`.
  */
-export async function serveChild(cwd: string, entry: string, env: Record<string, string>, { waitForSdk = false } = {}): Promise<{ port: number; up: boolean; sdk: boolean; stop: () => Promise<string>; kill: () => void }> {
+export async function serveChild(cwd: string, entry: string, env: Record<string, string>, { waitForSdk = false } = {}): Promise<{ port: number; up: boolean; sdk: boolean; until: (pattern: RegExp, ms: number) => Promise<boolean>; stop: () => Promise<string>; kill: () => void }> {
   const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
   const port = free.port!;
   free.stop(true);
@@ -836,6 +836,8 @@ export async function serveChild(cwd: string, entry: string, env: Record<string,
     port,
     up,
     sdk,
+    // Waits until the child's stderr has said `pattern`, at most `ms`: true once it has (SMD-2902 PR 2).
+    until: (pattern, ms) => err.until(pattern, ms),
     stop: () => (stopped ??= (async () => {
       child.kill("SIGTERM");
       const killer = setTimeout(() => child.kill("SIGKILL"), 8_000);
