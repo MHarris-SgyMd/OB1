@@ -6,12 +6,14 @@
 export type Check = { id: string; pass: boolean; detail: string };
 
 /**
- * A tool's answer with every 64-hex value replaced (SMD-2295): the brain keys
- * are 64 hex, Activepieces' flows carry them in their steps, and an answer
- * may echo a request. Every candidate reply, adapter error and C3 detail the
- * eval prints passes it.
+ * Text with every run of 20 or more hex characters replaced (SMD-2295): the
+ * brain keys are 64 hex, Activepieces' flows carry them in their steps, an
+ * answer may echo a request, and a message cut to length may hold most of a
+ * key. UUIDs and timestamps carry hyphens, so they pass. The eval applies it
+ * at its two choke points, every check's detail and sample in the report and
+ * any error it ends on, and on the adapters' own errors besides.
  */
-export const redactKeys = (text: string): string => text.replace(/[0-9a-f]{64}/gi, "<key>");
+export const redactKeys = (text: string): string => text.replace(/[0-9a-f]{20,}/gi, "<key>");
 
 /** What `--up` chose for this project, read back by `--verify`: the `--with` overlays in force. */
 export type Ctx = { with: string[] };

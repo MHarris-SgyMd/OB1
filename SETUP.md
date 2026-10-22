@@ -480,7 +480,7 @@ bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile loca
 ```
 
 Seven services in order (nine with `local-models`): Postgres with pgvector, a migration job that applies the
-schema and exits, then `server` (no shipped template calls it; it retires in SMD-2287 PR 6), the REST core (internal unless
+schema and exits, then `server` (nothing in the stack calls it; it retires in SMD-2287 PR 6), the REST core (internal unless
 `deploy/compose.api-public.yaml` is named), the MCP server at `/mcp`, which hands every tool call to the REST
 core, and the proxy in front of them with the forwarder that publishes its port. The server runs `preflight.ts` before it
 serves, so a misconfiguration crashloops rather than starting and failing on your
@@ -540,7 +540,8 @@ new thought's id, which is what the other two take.
 For ingestion that runs on its own — a mailbox polled on a schedule, a
 tracker synced — the `orchestration` profile runs n8n beside the stack
 (`docs/orchestration-tool.md`). n8n reaches the brain through its REST
-core, `http://api:8000` (SMD-2295), with no write key. The profile's
+core, `http://api:8000` (SMD-2295), with no write key; its brain credential
+is pinned to `api`, and provisioning refuses one pinned anywhere else. The profile's
 import runner is the one part that writes brain tables, as the pipeline
 does from a checkout, behind a key its allowlist bounds. Two kinds of template ship (SMD-2212):
 - **An act tool:** `linear_file_issue` on `/mcp/ob1-act`. It loads when

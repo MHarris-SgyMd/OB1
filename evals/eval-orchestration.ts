@@ -209,7 +209,9 @@ function selfCheck(): number {
     rmSync(dir, { recursive: true, force: true });
   }
   // SMD-2295 PR 2: the one redaction every printed reply and adapter error passes.
-  expect("redactKeys: a 64-hex value, in either case, is replaced, and nothing shorter", redactKeys(`a ${"a".repeat(64)} b ${"F".repeat(64)} c ${"0".repeat(63)}`) === `a <key> b <key> c ${"0".repeat(63)}`);
+  expect("redactKeys: a key, in either case, and a key cut short are replaced; a UUID and a short hex run pass",
+    redactKeys(`a ${"a".repeat(64)} b ${"F".repeat(64)} c ${"0".repeat(20)} d ${"1".repeat(19)} e 3f2b8c1e-7a4d-4e2f-9b1c-0d5e6f7a8b9c`)
+      === `a <key> b <key> c <key> d ${"1".repeat(19)} e 3f2b8c1e-7a4d-4e2f-9b1c-0d5e6f7a8b9c`);
   // SMD-2295 PR 2: the Activepieces flows' brain keys, filled at import (the HTTP piece takes no connection).
   const flow = (f: string) => readFileSync(new URL(`./orchestration/activepieces/${f}`, import.meta.url), "utf8");
   const [ingestFlow, searchFlow] = [flow("linear-ingest.json"), flow("brain-search.json")];
@@ -437,6 +439,8 @@ async function verify(): Promise<void> {
   const size = run(["docker", "image", "inspect", adapter.image, "--format", "{{.Size}}"]).out.trim();
   const digest = run(["docker", "image", "inspect", adapter.image, "--format", "{{index .RepoDigests 0}}"]).out.trim();
   const store = adapter.storeFootprint?.(ctx);
+  // The report's one choke point: every detail is redacted here, whatever path built it (SMD-2295).
+  for (const c of checks) c.detail = redactKeys(c.detail);
   const report = {
     tool, with: ctx.with, version: adapter.version(), image: adapter.image, digest, imageMiB: Math.round(Number(size) / 1048576), store,
     memoryMiB: { atStart: idle, afterRuns: busy }, checks, switches: adapter.switches, searchSample: search.text.slice(0, 400), actSample: act.text.slice(0, 400),
@@ -460,6 +464,12 @@ function down(): void {
   console.log(`${tool}: project ob1-orch-${tool} removed with its volumes`);
 }
 
-if (mode === "--up") await up();
-else if (mode === "--verify") await verify();
-else down();
+// The other choke point: an error the eval ends on is printed redacted, never Bun's raw report of it (SMD-2295).
+try {
+  if (mode === "--up") await up();
+  else if (mode === "--verify") await verify();
+  else down();
+} catch (e) {
+  console.error(`error: ${redactKeys(e instanceof Error ? e.message : String(e))}`);
+  process.exit(1);
+}

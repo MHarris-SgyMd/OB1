@@ -6716,8 +6716,8 @@ removes the project and its volumes but keeps `orchestration/.env` and the
 built images.
 
 **On a podman machine, the network fault (SMD-2929).** If `--up` times out on
-the brain's `/health`, or reports the brain's commit as "unreadable" (not a
-stale image then), the project's `egress` network has likely come up with IP
+the brain's `/health`, or says the brain's keyed `/health` gave no readable
+answer, the project's `egress` network has likely come up with IP
 forwarding off: netavark leaves an internal network's `forwarding = 0`
 sysctl drop-in behind when the network is removed
 ([netavark#1497](https://github.com/containers/netavark/issues/1497)), and a

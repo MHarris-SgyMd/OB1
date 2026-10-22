@@ -1676,8 +1676,10 @@ services:
       timeout: 5s
       retries: 3
       start_period: 120s
+    # The REST core, n8n's one way into the brain (SMD-2295): `up -d n8n`
+    # brings it along. (Until SMD-2295 this named `server`.)
     depends_on:
-      server:
+      api:
         condition: service_started
     restart: unless-stopped
     logging: *logging
