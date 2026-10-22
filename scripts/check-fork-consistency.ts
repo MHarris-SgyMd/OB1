@@ -394,20 +394,27 @@
  *      tracks or would track is one a fork-checks.yml step runs — `bun` or
  *      `node` naming it from the step's working-directory, the job's or a `cd`
  *      in the step, where its failure fails the job (no `continue-on-error`,
- *      `if: false` or `|| true`), a comment line or a quoted string read as
- *      nothing — or one SUITES_NOT_RUN names with why; an entry there that a
- *      workflow runs, that names no suite or that gives no reason is reported
- *      too. db/test-weekly-digest.ts and server-portable/test-jobs.ts had
- *      passed unrun for weeks; `eval-*` files are measurements, not suites,
- *      and are not read
+ *      `if: false`, `${{ false }}` or `|| true`), a comment line or a quoted
+ *      string read as nothing, a matrix job read once a cell, a step under
+ *      `matrix.<key> == '<value>'` (or `!=`) joined by `&&` read in the cells
+ *      it runs in and one under any other `if:` that reads the matrix
+ *      reported (SMD-3169) — or one SUITES_NOT_RUN names with why; an entry
+ *      there that a workflow runs, that names no suite or that gives no
+ *      reason is reported too. db/test-weekly-digest.ts and
+ *      server-portable/test-jobs.ts had passed unrun for weeks; `eval-*`
+ *      files are measurements, not suites, and are not read
  *  35. db/ci-parity.sh runs what CI runs (SMD-2903): every script a
  *      fork-checks.yml step runs (check 34's reader) is a `run` line of
  *      ci-parity.sh where the step sets DATABASE_URL, or a `nodb` line where it
  *      does not, from a directory the step may run it from, with the same
- *      flags and environment (the database URLs aside); every typecheck step
- *      is a `typecheck` line; a line no step runs as written is stale; and
- *      PARITY_NOT_RUN excuses what it cannot run, by job or script, with why
- *      — an excuse for what CI no longer has is reported too
+ *      flags and environment (the database URLs aside), a matrix job read
+ *      once a cell, with `${{ matrix.* }}` filled in and a step under
+ *      `if: matrix.<key> == '<value>'` (or `!=`) read in the cells it runs
+ *      in, any other `if:` reading the matrix reported by check 34
+ *      (SMD-3169); every typecheck step is a `typecheck` line; a line no
+ *      step runs as written is stale; and PARITY_NOT_RUN excuses what it
+ *      cannot run, by job or script, with why — an excuse for what CI no
+ *      longer has is reported too
  *  36. the edge proxy (SMD-2876): deploy/edge/compose.yaml is EDGE_COMPOSE,
  *      value for value — compose.yaml's proxy's Traefik and access log, no
  *      trusted PROXY line, read-only and confined, the bridge shape on a
@@ -6346,23 +6353,21 @@ const tierMeshName = (kind: "mcp" | "api", tier: string) => tier === "stable" ? 
 // A route table's parts, as Bun.YAML reads the block; check 28 builds
 // compose.yaml's, compose.api-public.yaml's and compose.hooks-public.yaml's
 // tables from them too.
+/** A router, its `middlewares:` line left out when `mw` is "" (a router with none, as /mcp and /health have had since SMD-2532 took not-legacy away). */
 const routeRouter = (name: string, rule: string, priority: number, mw: string, service: string) =>
-  `    ${name}:\n      rule: "${rule}"\n      priority: ${priority}\n      entryPoints: [web]\n      middlewares: [${mw}]\n      service: ${service}\n`;
+  `    ${name}:\n      rule: "${rule}"\n      priority: ${priority}\n      entryPoints: [web]\n${mw ? `      middlewares: [${mw}]\n` : ""}      service: ${service}\n`;
 const routeErrors = (name: string, status: string) =>
   `    ${name}:\n      errors:\n        status: ["${status}"]\n        service: noop@internal\n        statusRewrites:\n          "${status}": 404\n`;
 const routeService = (name: string, url: string) => `    ${name}:\n      loadBalancer:\n        servers:\n          - url: "${url}"\n`;
-/** The 404 for every path under /canary or /working, in compose.tiers.yaml's table after its tier routers; compose.yaml's carried it from SMD-2874 until SMD-2532 removed the legacy route it kept those paths off. */
-const ROUTE_TIER_OFF = routeRouter("tier-off", "PathRegexp(`(?i)^/(canary|working)`)", 25, "not-served", "noop@internal");
-/** compose.tiers.yaml's canary and working routers, and the 404 for the rest of their prefixes: the three-brain stack's alone since SMD-2874 took them out of compose.yaml's (SMD-2878 decides that stack's future). */
-const ROUTE_TIER_PATHS = TIERS.filter((t) => t !== "stable").map((t) => routeRouter(t, `Path(\`/${t}/mcp\`) || PathPrefix(\`/${t}/mcp/\`)`, 30, "not-legacy, tier-absent", t)).join("")
-  + ROUTE_TIER_OFF;
-const routeHealth = (service: string) => routeRouter("health", "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))", 20, "not-legacy", service);
-const ROUTE_NOT_LEGACY = "    not-legacy:\n      headers:\n        customRequestHeaders:\n          X-OB1-Legacy-Route: \"\"\n";
+/** compose.tiers.yaml's canary and working routers, and its 404 (`tier-off`) for the rest of their prefixes: the three-brain stack's alone since SMD-2874 took the routers out of compose.yaml's, and SMD-2532 its tier-off (SMD-2878 decides that stack's future). */
+const ROUTE_TIER_PATHS = TIERS.filter((t) => t !== "stable").map((t) => routeRouter(t, `Path(\`/${t}/mcp\`) || PathPrefix(\`/${t}/mcp/\`)`, 30, "tier-absent", t)).join("")
+  + routeRouter("tier-off", "PathRegexp(`(?i)^/(canary|working)`)", 25, "not-served", "noop@internal");
+const routeHealth = (service: string) => routeRouter("health", "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))", 20, "", service);
 /** compose.tiers.yaml's route table, byte for byte, as Bun.YAML reads the block. */
 const TIER_ROUTE_TABLE = "http:\n  routers:\n"
-  + routeRouter("stable", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "not-legacy", "stable")
+  + routeRouter("stable", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "", "stable")
   + ROUTE_TIER_PATHS + routeHealth("stable")
-  + "  middlewares:\n" + ROUTE_NOT_LEGACY + routeErrors("tier-absent", "502") + routeErrors("not-served", "418")
+  + "  middlewares:\n" + routeErrors("tier-absent", "502") + routeErrors("not-served", "418")
   + "  services:\n" + TIERS.map((t) => routeService(t, `http://${tierMeshName("mcp", t)}.:8000`)).join("");
 /** The control, format and separator characters in a text other than the space and the line feed, each as `line (U+XXXX)` — compose and Bun.YAML part lines, comments and indentation differently around them. */
 const oddCharacters = (text: string) => [...new Set([...text.matchAll(/(?![ \n])[\p{Cc}\p{Cf}\p{Z}]/gu)].map((m) => `${text.slice(0, m.index).split("\n").length} (U+${m[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")})`))];
@@ -6529,8 +6534,8 @@ const TIER_STACK_PROBES: [string, ...[string, string, number?][]][] = [
   ["a Go template on a route table comment, which Traefik renders", ["    middlewares:\n", "    middlewares:\n      # {{ \"note\" }}\n"]],
   ["a variable on a route table comment, which compose interpolates", ["    middlewares:\n", "    middlewares:\n      # ${OB1_ROUTE_NOTE:-}\n"]],
   // The parsed file against the generated stack.
-  ["a duplicate canary router, after health", ["        service: stable\n    middlewares:", "        service: stable\n      canary:\n        rule: \"Path(`/canary/mcp`)\"\n        priority: 30\n        entryPoints: [web]\n        middlewares: [not-legacy]\n        service: stable\n    middlewares:"]],
-  ["an extra catch-all router", ["    routers:\n", "    routers:\n      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [not-legacy]\n        service: working\n"]],
+  ["a duplicate canary router, after health", ["        service: stable\n    middlewares:", "        service: stable\n      canary:\n        rule: \"Path(`/canary/mcp`)\"\n        priority: 30\n        entryPoints: [web]\n        middlewares: [tier-absent]\n        service: stable\n    middlewares:"]],
+  ["an extra catch-all router", ["    routers:\n", "    routers:\n      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [tier-absent]\n        service: working\n"]],
   ["tier-absent rewriting to 200", ["          statusRewrites:\n            \"502\": 404", "          statusRewrites:\n            \"502\": 200"]],
   ["an include beside the services", ["\nvolumes:\n", "\ninclude: [other.yaml]\n\nvolumes:\n"]],
   ["another project's name", ["name: open-brain-tiers\n", "name: open-brain\n"]],
@@ -6660,15 +6665,15 @@ checkTierStack();
 /** compose.yaml's route table, byte for byte, as Bun.YAML reads the block. */
 const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("auth", "Path(`/auth`) || PathPrefix(`/auth/`) || Path(`/.well-known/oauth-authorization-server/auth`) || Path(`/.well-known/openid-configuration/auth`) || Path(`/.well-known/oauth-authorization-server`)", 40, "auth-absent", "auth")
-  + routeRouter("resource", "Path(`/.well-known/oauth-protected-resource/mcp`)", 40, "not-legacy, auth-absent", "mcp")
+  + routeRouter("resource", "Path(`/.well-known/oauth-protected-resource/mcp`)", 40, "auth-absent", "mcp")
   + routeRouter("oauth-fallback-off", "Path(`/register`) || Path(`/authorize`) || Path(`/token`)", 35, "not-served", "noop@internal")
   + routeRouter("api-off", "Path(`/api`) || PathPrefix(`/api/`)", 35, "api-off", "noop@internal")
   + routeRouter("hooks-off", "Path(`/hooks`) || PathPrefix(`/hooks/`)", 35, "not-served", "noop@internal")
   + routeRouter("grafana-off", "Path(`/grafana`) || PathPrefix(`/grafana/`)", 35, "not-served", "noop@internal")
-  + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "not-legacy", "mcp")
+  + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "", "mcp")
   + routeHealth("mcp")
   + "  middlewares:\n"
-  + ROUTE_NOT_LEGACY + routeErrors("auth-absent", "502") + routeErrors("api-off", "418") + routeErrors("not-served", "418")
+  + routeErrors("auth-absent", "502") + routeErrors("api-off", "418") + routeErrors("not-served", "418")
   + "  services:\n" + routeService("mcp", `http://${tierMeshName("mcp", "stable")}.:8000`)
   + routeService("auth", "http://auth.ob1.internal.:3000");
 /** compose.api-public.yaml's route table, byte for byte, as Bun.YAML reads the block. */
@@ -6825,7 +6830,7 @@ const LGTM_SERVICE = {
     TEMPO_EXTRA_ARGS: "-config.file=/tmp/tempo-config.yaml -reporting.enabled=false",
     PYROSCOPE_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -memberlist.bind-addr=127.0.0.1 -usage-stats.enabled=false",
     // The collector's scrape of pg-exporter on `telemetry` (SMD-1849 PR 3b), one argument with no space in it.
-    OTELCOL_EXTRA_ARGS: "--config=yaml:{\"receivers\":{\"prometheus/postgres\":{\"config\":{\"scrape_configs\":[{\"job_name\":\"postgres\",\"scrape_interval\":\"30s\",\"static_configs\":[{\"targets\":[\"pg-exporter.ob1.internal.:9187\"]}]}]}}},\"service\":{\"pipelines\":{\"metrics\":{\"receivers\":[\"otlp\",\"prometheus/collector\",\"prometheus/postgres\"]}}}}",
+    OTELCOL_EXTRA_ARGS: "--config=yaml:{\"receivers\":{\"prometheus/postgres\":{\"config\":{\"scrape_configs\":[{\"job_name\":\"postgres\",\"scrape_interval\":\"30s\",\"metrics_path\":\"/cgi-bin/metrics\",\"static_configs\":[{\"targets\":[\"pg-exporter.ob1.internal.:9187\"]}]}]}}},\"service\":{\"pipelines\":{\"metrics\":{\"receivers\":[\"otlp\",\"prometheus/collector\",\"prometheus/postgres\"]}}}}",
   },
   volumes: ["lgtm-data:/data"],
   // The provisioned dashboard and its provider (PR 3c), check 37's, and the alert rules (SMD-3050), check 38's.
@@ -6837,7 +6842,8 @@ const LGTM_SERVICE = {
 /**
  * compose.yaml's Postgres exporter and the step that makes its role (SMD-1849 PR 3b), whole as Bun.YAML reads them, their `logging`
  * (check 29's) aside: the image by its digest, the role it reads as (ob1_monitor, a member of pg_monitor alone, never a superuser),
- * which statements it names and how much of their text, and its own queries left out. Held whole because what CI's one run of the profile
+ * which statements it names and how much of their text, and its own queries left out. The exporter on loopback behind busybox httpd on its `telemetry`
+ * address alone, serving the one CGI that fetches its /metrics (SMD-3023): its /probe dials any target and credentials its caller names. Held whole because what CI's one run of the profile
  * reads is the series (PR 3c), not how they are made: a superuser's DSN, an image by tag or a dropped --member-of passed every other
  * check (review pass 1).
  */
@@ -6845,8 +6851,39 @@ const PG_EXPORTER_SERVICE = {
   image: "quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e",
   profiles: ["observability"],
   read_only: true,
+  tmpfs: ["/tmp", "/var/www:exec,mode=1777"],
   cap_drop: ["ALL"],
   security_opt: ["no-new-privileges:true"],
+  init: true,
+  entrypoint: ["/bin/sh", "-c", [
+    "addr=\n",
+    "for _ in 1 2 3 4 5 6 7 8 9 10; do\n",
+    "  addr=$$(nslookup pg-exporter.ob1.internal. 2> /dev/null | awk '/^Name:/ { n = 1 } n && /^Address:? *[0-9.]+$$/ { print $$NF; exit }')\n",
+    "  [ -n \"$$addr\" ] && break\n",
+    "  sleep 1\n",
+    "done\n",
+    "if [ -z \"$$addr\" ]; then\n",
+    "  echo \"pg-exporter: pg-exporter.ob1.internal resolves to no address, and the exporter's front listens on that one alone: compose.yaml gives this container that name on telemetry\" >&2; sleep 30; exit 1\n",
+    "fi\n",
+    "if ! { mkdir -p /var/www/cgi-bin && cat > /var/www/cgi-bin/metrics && chmod 555 /var/www/cgi-bin/metrics; } << 'CGI'\n",
+    "#!/bin/sh\n",
+    "if f=$$(mktemp) && wget -q -T 10 -O \"$$f\" http://127.0.0.1:9188/metrics; then\n",
+    "  printf 'Content-Type: text/plain; version=0.0.4; charset=utf-8\\r\\n\\r\\n'; cat \"$$f\"\n",
+    "else\n",
+    "  printf 'HTTP/1.1 502 Bad Gateway\\r\\nContent-Type: text/plain\\r\\n\\r\\nno answer from the exporter, or no room in /tmp for it\\n'\n",
+    "fi\n",
+    "rm -f \"$$f\"\n",
+    "CGI\n",
+    "then\n",
+    "  echo \"pg-exporter: could not write its CGI to /var/www, the tmpfs compose.yaml gives it: the collector would scrape nothing\" >&2; sleep 30; exit 1\n",
+    "fi\n",
+    "/bin/postgres_exporter --web.listen-address=127.0.0.1:9188 \"$$@\" &\n",
+    "e=$$!\n",
+    "env -i PATH=/bin httpd -f -p \"$$addr:9187\" -h /var/www &\n",
+    "h=$$!\n",
+    "while kill -0 \"$$e\" 2> /dev/null && kill -0 \"$$h\" 2> /dev/null; do sleep 5; done\n",
+    "echo \"pg-exporter: the exporter or its front (httpd) stopped, its own line above saying why if it left one; the container exits in 30 s and restarts\" >&2; sleep 30; exit 1\n",
+  ].join(""), "pg-exporter"],
   command: [
     "--collector.stat_statements",
     "--collector.stat_statements.include_query",
@@ -6857,7 +6894,7 @@ const PG_EXPORTER_SERVICE = {
   environment: { DATA_SOURCE_URI: "postgres:5432/openbrain?sslmode=disable", DATA_SOURCE_USER: "ob1_monitor", DATA_SOURCE_PASS: "${OB1_MONITOR_DB_PASSWORD:-}" },
   depends_on: { "pg-monitor-role": { condition: "service_completed_successfully" } },
   networks: { data: {}, telemetry: { aliases: ["pg-exporter.ob1.internal"] } },
-  healthcheck: { test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9187/"], interval: "30s", timeout: "5s", retries: 3, start_period: "30s" },
+  healthcheck: { test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9188/"], interval: "30s", timeout: "5s", retries: 3, start_period: "30s" },
   restart: "unless-stopped",
 };
 const PG_MONITOR_ROLE_SERVICE = {
@@ -7016,7 +7053,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
       const svc = isMapping(services[name]) ? services[name] : undefined;
       const pdiffs: string[] = [];
       pathDiffs(JSON.parse(JSON.stringify(omitKeys(svc, ["logging"]))), held, `services.${name}`, pdiffs);
-      if (pdiffs.length) flag("proxy", `${pdiffs.slice(0, 6).join("; ")}${pdiffs.length > 6 ? `; and ${pdiffs.length - 6} more` : ""} — compose.yaml's ${name} is check 28's ${lit}: the role the exporter reads Postgres as, its one membership and which statements it names are its keys, so a change to it is made there too, on purpose (SMD-1849 PR 3b)`);
+      if (pdiffs.length) flag("proxy", `${pdiffs.slice(0, 6).join("; ")}${pdiffs.length > 6 ? `; and ${pdiffs.length - 6} more` : ""} — compose.yaml's ${name} is check 28's ${lit}: the role the exporter reads Postgres as, its one membership, which statements it names and (SMD-3023) the exporter on loopback behind its one-CGI front on telemetry are its keys, so a change to it is made there too, on purpose (SMD-1849 PR 3b)`);
     }
     const fconfig = isMapping(doc.configs) && isMapping(doc.configs.forwarder) ? doc.configs.forwarder : undefined;
     const sdiffs: string[] = [];
@@ -7094,7 +7131,7 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["a Go template on a comment line in compose.yaml's table, which Traefik renders as a catch-all router", "compose.yaml", "    routers:\n      auth:\n", "    routers:\n      # {{ \"\\n    all:\\n      rule: \\\"PathPrefix(`/`)\\\"\\n      priority: 100\\n      service: canary\" }}\n      auth:\n"],
   ["a catch-all router on a line led by a no-break space in compose.yaml's table, a key to YAML and a comment to a reader", "compose.yaml", "    routers:\n      auth:\n", "    routers:\n      \u00a0#all: {rule: \"PathPrefix(`/`)\", priority: 100, entryPoints: [web], service: canary}\n      auth:\n"],
   ["a comment line in compose.yaml's table", "compose.yaml", "      auth-absent:\n        errors:\n", "      # a note\n      auth-absent:\n        errors:\n"],
-  ["a catch-all router back under every unrouted path, as the legacy route was (SMD-2532)", "compose.yaml", "      health:\n        rule:", "      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [not-legacy]\n        service: server\n      health:\n        rule:"],
+  ["a catch-all router back under every unrouted path, as the legacy route was (SMD-2532)", "compose.yaml", "      health:\n        rule:", "      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [auth-absent]\n        service: server\n      health:\n        rule:"],
   ["Grafana's anonymous access on in the observability collector", "compose.yaml", "      GF_AUTH_ANONYMOUS_ENABLED: \"false\"\n", "      GF_AUTH_ANONYMOUS_ENABLED: \"true\"\n"],
   ["the proxy's label its own table", "compose.yaml", "      ob1.proxy-routes: *proxy-routes\n", "      ob1.proxy-routes: \"http: {}\"\n"],
   ["the mounted config its own table", "compose.yaml", "    content: *proxy-routes\n", "    content: \"http: {}\"\n"],
@@ -7152,7 +7189,7 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["compose.host-ports.yaml putting a sidecar in the proxy's PID namespace", "compose.host-ports.yaml", "  jev:\n    ports:\n", "  jev:\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n    ports:\n"],
   ["a compose.yaml service named as the MCP server's mesh name", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  mcp.ob1.internal:\n    image: oven/bun:1.4.3-alpine\n\nnetworks:\n  # The ADR's networks"],
   ["the import runner given SYS_PTRACE too", "compose.yaml", "    cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP]\n", "    cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP, SYS_PTRACE]\n"],
-  ["the authorization server unconfined by seccomp", "compose.yaml", "    tmpfs: [/tmp]\n    cap_drop: [ALL]\n    security_opt: [\"no-new-privileges:true\"]\n", "    tmpfs: [/tmp]\n    cap_drop: [ALL]\n    security_opt: [\"no-new-privileges:true\", \"seccomp=unconfined\"]\n"],
+  ["the authorization server unconfined by seccomp", "compose.yaml", "    security_opt: [\"no-new-privileges:true\"]\n    # The server stops on SIGTERM", "    security_opt: [\"no-new-privileges:true\", \"seccomp=unconfined\"]\n    # The server stops on SIGTERM"],
   ["the import runner mounting the engine's socket", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - /var/run/docker.sock:/var/run/docker.sock\n"],
   ["the import runner mounting the engine's socket past a variable's default (SMD-2685 review pass 1, which compose resolved to /var/run/docker.sock)", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ${OB1_X:-./}/../../../../../var/run/docker.sock:/var/run/docker.sock\n"],
   ["the import runner mounting the engine's socket through a variable inside the path", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ./a${OB1_X:-/../../../../..}/var/run/docker.sock:/s\n"],
@@ -7828,13 +7865,23 @@ checkBunPins();
 // each is taken). release.yml is not read: it runs on a tag, and on a pull
 // request only when its own paths change. A run counts only if the suite's
 // failure fails the job, so nothing counts from a step or job with
-// `continue-on-error` or `if: false`, or from a command followed by `|| true`
-// or `|| :`, a continued line read as one. A comment line runs nothing, and a
-// quoted string is read as nothing either: an echo that names a suite does not
-// run it, and so a suite run only inside `sh -c "…"`, or only through `bun run`
-// and a package script, reads as unrun, which is the loud direction. What
-// no workflow should run is named in SUITES_NOT_RUN with why, and an entry
-// there that a workflow does run is stale.
+// `continue-on-error` or `if: false` (or `${{ false }}`), or from a command
+// followed by `|| true` or `|| :`, a continued line read as one. A matrix job
+// is read once a cell, GitHub's way (matrixCells), its `${{ matrix.* }}` in env
+// values, the run text and the working-directory filled in from the cell, so
+// check 35 holds each shard of db-live to its line (SMD-3169). A step whose
+// `if:` is `matrix.<key> == '<value>'` (or `!=`) on a string value, alone or
+// joined by `&&` to parts that read no matrix, is read in the cells that run it
+// alone, so a shard renamed under db-live's rest-only step leaves its suite
+// unrun, not run four times; any other `if:` that reads the matrix, on a step
+// that runs a suite, is reported as one check 34 cannot decide (review passes 2
+// and 3), and an `if:` that reads no matrix is not evaluated unless it is
+// `false`. A comment line runs nothing, and a quoted string is read as nothing
+// either: an echo that names a suite does not run it, and so a suite run only
+// inside `sh -c "…"`, or only through `bun run` and a package script, reads as
+// unrun, which is the loud direction. What no workflow should run is named in
+// SUITES_NOT_RUN with why, and an entry there that a workflow does run is
+// stale.
 const SUITE_WORKFLOW = ".github/workflows/fork-checks.yml";
 const SUITES_NOT_RUN: Record<string, string> = {
   "db/test-support.ts": "the db/ suites' shared helpers, imported by them; it runs nothing itself",
@@ -7859,10 +7906,108 @@ type ScriptRun = { dirs: string[]; script: string; args: string; env: Record<str
 const SHELL_QUOTED = /"(?:[^"\\\n]|\\.)*"|'[^'\n]*'/g;
 /** What follows a command that swallows its failure, up to the end of its line or a `;`. */
 const SHELL_SWALLOWED = /^[^\n;]*?\|\|\s*(?:true|:)(?![\w-])/;
-/** A step or job whose failure cannot fail the job: `continue-on-error` set to anything but false, or `if: false`. */
-const failureIgnored = (v: Mapping): boolean => (v["continue-on-error"] !== undefined && v["continue-on-error"] !== false) || v.if === false;
-/** Every script a parsed workflow's steps run by bun or node whose failure fails the job (checks 34 and 35). */
-function scriptRunsIn(rel: string, doc: unknown): ScriptRun[] {
+/** A step or job whose failure cannot fail the job: `continue-on-error` set to anything but false, or `if: false`, bare or as `${{ false }}`. */
+const failureIgnored = (v: Mapping): boolean =>
+  (v["continue-on-error"] !== undefined && v["continue-on-error"] !== false) || v.if === false || (typeof v.if === "string" && /^\s*(?:\$\{\{\s*false\s*\}\}|false)\s*$/.test(v.if));
+/** A matrix value as GitHub renders it into a string: null as nothing, another scalar as itself, anything else as JSON. */
+const matrixText = (v: unknown): string => (v === null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
+/**
+ * A job's matrix cells as GitHub expands them: the product of its axes, less
+ * every cell an `exclude` entry matches in each of its keys; then each
+ * `include` entry is merged into every cell of that product whose axis
+ * values it does not change (values an earlier include added it may), or,
+ * when it fits none, added as a cell of its own, which no later include
+ * extends — so a matrix of include alone is a cell an entry. A job with no
+ * matrix is one empty cell; so is one whose matrix, an axis, its include or
+ * exclude list or an entry of either an expression gives, which leaves its
+ * `${{ matrix.* }}` unfilled and so matching no ci-parity.sh line — the loud
+ * direction — and one whose product is empty (an empty axis, every cell
+ * excluded), which GitHub refuses or runs nothing for.
+ */
+function matrixCells(strategy: unknown): Record<string, unknown>[] {
+  const m = isMapping(strategy) ? strategy.matrix : undefined;
+  if (!isMapping(m)) return [{}];
+  const { include = [], exclude = [], ...axes } = m;
+  if (!Array.isArray(include) || !Array.isArray(exclude) || ![...include, ...exclude].every(isMapping) || !Object.values(axes).every(Array.isArray)) return [{}];
+  // A cell keeps each value as YAML gives it, so an if: can tell a string from a number; values compare as rendered.
+  const same = (a: unknown, b: unknown) => a !== undefined && b !== undefined && matrixText(a) === matrixText(b);
+  let cells: Record<string, unknown>[] = Object.keys(axes).length
+    ? Object.entries(axes as Record<string, unknown[]>).reduce<Record<string, unknown>[]>((acc, [k, vs]) => acc.flatMap((c) => vs.map((v) => ({ ...c, [k]: v }))), [{}])
+    : [];
+  cells = cells.filter((c) => !exclude.some((x) => Object.keys(x).length > 0 && Object.entries(x).every(([k, v]) => same(c[k], v))));
+  const added: Record<string, unknown>[] = [];
+  for (const inc of include as Mapping[]) {
+    const fits = cells.filter((c) => Object.entries(inc).every(([k, v]) => !Object.hasOwn(axes, k) || same(c[k], v)));
+    if (fits.length) for (const c of fits) Object.assign(c, inc);
+    else added.push({ ...inc });
+  }
+  cells.push(...added);
+  return cells.length ? cells : [{}];
+}
+/** `${{ matrix.<key> }}` in a value. */
+const MATRIX_REF = /\$\{\{\s*matrix\.([A-Za-z_][\w-]*)\s*\}\}/g;
+/** A cell's value for a key, matched ignoring case as GitHub's contexts match property names; undefined when the cell has none. */
+const cellValue = (cell: Record<string, unknown>, key: string): unknown => {
+  const own = Object.keys(cell).find((k) => k.toLowerCase() === key.toLowerCase());
+  return own === undefined ? undefined : cell[own];
+};
+/** A value with each `${{ matrix.<key> }}` filled in from a cell, a key the cell lacks rendering empty, as on GitHub. */
+const fillMatrix = (v: string, cell: Record<string, unknown>): string =>
+  v.replace(MATRIX_REF, (_, key: string) => {
+    const value = cellValue(cell, key);
+    return value === undefined ? "" : matrixText(value);
+  });
+/** One comparison of a matrix value with a string literal (`''` an escaped quote). */
+const MATRIX_IF = /^\s*matrix\.([A-Za-z_][\w-]*)\s*(==|!=)\s*'((?:[^']|'')*)'\s*$/;
+/** A string literal in an expression. */
+const EXPRESSION_LITERAL = /'(?:[^']|'')*'/g;
+/** Whether an expression reads the matrix context: `matrix` itself, not a property named so (`needs.matrix`) or text in a literal. */
+const readsMatrix = (expr: string): boolean => /(?<![\w.$-])matrix\b/i.test(expr.replace(EXPRESSION_LITERAL, "''"));
+/** An expression's parts split on `op` where it stands outside parentheses and string literals. */
+function topLevelParts(expr: string, op: "&&" | "||"): string[] {
+  const parts: string[] = [];
+  let depth = 0, start = 0, quoted = false;
+  for (let i = 0; i < expr.length; i++) {
+    const c = expr[i];
+    if (c === "'") quoted = !quoted;
+    else if (quoted) continue;
+    else if (c === "(") depth++;
+    else if (c === ")") depth--;
+    else if (depth === 0 && expr.startsWith(op, i)) { parts.push(expr.slice(start, i)); start = i + op.length; i += op.length - 1; }
+  }
+  parts.push(expr.slice(start));
+  return parts;
+}
+/**
+ * Whether a step's `if:` runs it in a cell of a readable matrix. An `if:`
+ * that reads no matrix, or a cell of no readable matrix, is undefined: not
+ * evaluated, so read as run. An `if:` that is a chain of `&&` (inside
+ * `${{ }}` or not) is decided on its parts that read the matrix, each of
+ * which must be `matrix.<key> == '<value>'` or `!=` on a string value:
+ * compared ignoring case, as GitHub compares strings, a key the cell lacks
+ * being '' as GitHub dereferences it. One such part false makes the `if:`
+ * false, whatever the other parts (`!cancelled() && matrix.shard == 'rest'`,
+ * review pass 3). Any other `if:` that reads the matrix — an `||` at its top,
+ * a matrix part negated, parenthesised, reversed or indexed, a number or
+ * boolean value, which GitHub would compare as numbers — is "unread": check
+ * 34 reports it, so a shard renamed under one cannot leave a suite run by no
+ * cell while the checks count it in each (review pass 2).
+ */
+function matrixIfHolds(cond: unknown, cell: Record<string, unknown>): boolean | "unread" | undefined {
+  if (typeof cond !== "string" || !Object.keys(cell).length) return undefined;
+  const expr = cond.replace(/^\s*\$\{\{([^]*)\}\}\s*$/, "$1");
+  if (!readsMatrix(expr)) return undefined;
+  if (topLevelParts(expr, "||").length > 1) return "unread";
+  const decided: (boolean | "unread")[] = topLevelParts(expr, "&&").filter(readsMatrix).map((part) => {
+    const m = MATRIX_IF.exec(part);
+    const value = m ? cellValue(cell, m[1]) ?? "" : undefined;
+    if (!m || typeof value !== "string") return "unread";
+    return (value.toLowerCase() === m[3].replace(/''/g, "'").toLowerCase()) === (m[2] === "==");
+  });
+  return decided.includes(false) ? false : decided.includes("unread") ? "unread" : true;
+}
+/** Every script a parsed workflow's steps run by bun or node whose failure fails the job (checks 34 and 35); each step running one whose matrix `if:` it cannot decide goes in `unread`, its where, and is read as run. */
+function scriptRunsIn(rel: string, doc: unknown, unread: Set<string> = new Set()): ScriptRun[] {
   const out: ScriptRun[] = [];
   const wdOf = (v: unknown): string | undefined => {
     const d = isMapping(v) && isMapping(v.run) ? v.run["working-directory"] : undefined;
@@ -7875,31 +8020,44 @@ function scriptRunsIn(rel: string, doc: unknown): ScriptRun[] {
   for (const [job, def] of Object.entries(jobs)) {
     if (!isMapping(def) || failureIgnored(def)) continue;
     const jobWd = wdOf(def.defaults) ?? top ?? ".";
-    const jobEnv = { ...topEnv, ...envOf(def) };
     const steps = Array.isArray(def.steps) ? def.steps : [];
-    steps.forEach((step, i) => {
-      if (!isMapping(step) || typeof step.run !== "string" || failureIgnored(step)) return;
-      const wd = posix.normalize(typeof step["working-directory"] === "string" ? step["working-directory"] : jobWd);
-      const text = step.run.replace(/\\\n/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)).join("\n").replace(SHELL_QUOTED, '""');
-      const dirs = [wd, ...[...text.matchAll(SHELL_CD)].map((m) => posix.normalize(posix.join(wd, m[1])))];
-      const where = `${rel}: job ${job}, step ${typeof step.name === "string" ? JSON.stringify(step.name) : i + 1}`;
-      const stepEnv = { ...jobEnv, ...envOf(step) };
-      for (const m of text.matchAll(SCRIPT_RUN)) {
-        if (SHELL_SWALLOWED.test(text.slice(m.index! + m[0].length))) continue;
-        // The command's own assignments open the segment it is in: after the
-        // last newline, `;`, `&`, `|` or `(` before it.
-        const before = text.slice(0, m.index!);
-        const segment = before.slice(Math.max(...["\n", ";", "&", "|", "("].map((c) => before.lastIndexOf(c))) + 1);
-        const inline = Object.fromEntries((SHELL_ASSIGNS.exec(segment)?.[1] ?? "").trim().split(/\s+/).filter(Boolean).map((a) => [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]));
-        out.push({ dirs, script: m[1], args: m[2].trim().split(/\s+/).filter(Boolean).join(" "), env: { ...stepEnv, ...inline }, job, where });
-      }
-    });
+    for (const cell of matrixCells(def.strategy)) {
+      // A job with no readable matrix is one empty cell, its values left as written.
+      const inCell = Object.keys(cell).length > 0;
+      const fillText = (v: string): string => (inCell ? fillMatrix(v, cell) : v);
+      const fill = (env: Record<string, string>): Record<string, string> => Object.fromEntries(Object.entries(env).map(([k, v]) => [k, fillText(v)]));
+      const cellName = inCell ? ` (${Object.values(cell).map(matrixText).join(", ")})` : "";
+      const jobEnv = fill({ ...topEnv, ...envOf(def) });
+      steps.forEach((step, i) => {
+        if (!isMapping(step) || typeof step.run !== "string" || failureIgnored(step)) return;
+        const stepName = typeof step.name === "string" ? JSON.stringify(step.name) : i + 1;
+        const runs = matrixIfHolds(step.if, cell);
+        if (runs === false) return;
+        const runsBefore = out.length;
+        // GitHub fills the run text and the directory before the shell sees them.
+        const wd = posix.normalize(typeof step["working-directory"] === "string" ? fillText(step["working-directory"]) : jobWd);
+        const text = fillText(step.run).replace(/\\\n/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)).join("\n").replace(SHELL_QUOTED, '""');
+        const dirs = [wd, ...[...text.matchAll(SHELL_CD)].map((m) => posix.normalize(posix.join(wd, m[1])))];
+        const where = `${rel}: job ${job}${cellName}, step ${stepName}`;
+        const stepEnv = { ...jobEnv, ...fill(envOf(step)) };
+        for (const m of text.matchAll(SCRIPT_RUN)) {
+          if (SHELL_SWALLOWED.test(text.slice(m.index! + m[0].length))) continue;
+          // The command's own assignments open the segment it is in: after the
+          // last newline, `;`, `&`, `|` or `(` before it.
+          const before = text.slice(0, m.index!);
+          const segment = before.slice(Math.max(...["\n", ";", "&", "|", "("].map((c) => before.lastIndexOf(c))) + 1);
+          const inline = Object.fromEntries((SHELL_ASSIGNS.exec(segment)?.[1] ?? "").trim().split(/\s+/).filter(Boolean).map((a) => [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]));
+          out.push({ dirs, script: m[1], args: m[2].trim().split(/\s+/).filter(Boolean).join(" "), env: { ...stepEnv, ...inline }, job, where });
+        }
+        if (runs === "unread" && out.length > runsBefore) unread.add(`${rel}: job ${job}, step ${stepName}`);
+      });
+    }
   }
   return out;
 }
 /** Every script a parsed workflow's steps run whose failure fails the job, at every path it can resolve to (check 34). */
-function suitesRunIn(rel: string, doc: unknown): SuiteRun[] {
-  return scriptRunsIn(rel, doc).flatMap((r) => r.dirs.map((d) => ({ path: posix.normalize(posix.join(d, r.script)), where: r.where })));
+function suitesRunIn(rel: string, doc: unknown, unread?: Set<string>): SuiteRun[] {
+  return scriptRunsIn(rel, doc, unread).flatMap((r) => r.dirs.map((d) => ({ path: posix.normalize(posix.join(d, r.script)), where: r.where })));
 }
 /** What check 34 reports: a suite nothing runs and nothing excuses, an excused suite a workflow runs, an excuse for no suite. */
 function suiteProblems(suites: string[], run: SuiteRun[], notRun: Record<string, string>): [where: string, detail: string][] {
@@ -7938,6 +8096,34 @@ const SUITE_PROBLEM_PROBES: [string, string[], string[], Record<string, string>,
   ["an excuse for a file that is gone", ["a/test-a.ts"], ["a/test-a.ts"], { "a/test-gone.ts": "why" }, [SELF]],
   ["an excuse with no reason", ["a/test-a.ts"], [], { "a/test-a.ts": " " }, [SELF]],
 ];
+/** [what, an if:, a cell, what matrixIfHolds decides]. */
+const MATRIX_IF_PROBES: [string, unknown, Record<string, unknown>, boolean | "unread" | undefined][] = [
+  ["equal, ignoring case", "matrix.s == 'REST'", { s: "rest" }, true],
+  ["unequal", "${{ matrix.s != 'rest' }}", { s: "rest" }, false],
+  ["a misspelt value", "matrix.s == 'rset'", { s: "rest" }, false],
+  ["an escaped quote", "matrix.s == 'it''s'", { s: "it's" }, true],
+  ["a key the cell lacks is ''", "matrix.t == 'yes'", { s: "rest" }, false],
+  ["a key the cell lacks, unequal", "matrix.t != 'yes'", { s: "rest" }, true],
+  ["a key matched ignoring case", "matrix.S == 'rest'", { s: "rest" }, true],
+  ["no matrix read", "github.event_name == 'push'", { s: "rest" }, undefined],
+  ["no readable matrix", "matrix.s == 'rest'", {}, undefined],
+  ["a property named matrix, and the word in a literal, read no matrix (review pass 3)", "needs.matrix.outputs.run == 'true' && contains(github.head_ref, 'matrix.s')", { s: "rest" }, undefined],
+  ["an && chain, true (review pass 3)", "${{ !cancelled() && matrix.s == 'rest' }}", { s: "rest" }, true],
+  ["an && chain, false (review pass 3)", "always() && matrix.s == 'rset'", { s: "rest" }, false],
+  ["an && chain, false though another part is unread (review pass 3)", "matrix['s'] == 'rest' && matrix.s == 'rset'", { s: "rest" }, false],
+  ["an && chain with a part unread (review pass 3)", "matrix.s == 'rest' && matrix['s'] == 'rest'", { s: "rest" }, "unread"],
+  ["an || at the top, below which && binds (review pass 3)", "matrix.s == 'rset' && success() || always()", { s: "rest" }, "unread"],
+  ["an && inside a literal is no chain (review pass 3)", "matrix.s == 'a && b'", { s: "a && b" }, true],
+  ["a negated part (review pass 3)", "!(matrix.s == 'rest')", { s: "rest" }, "unread"],
+  ["the whole matrix read (review pass 3)", "contains(toJSON(matrix), 'rest')", { s: "rest" }, "unread"],
+  ["reversed operands", "'rest' == matrix.s", { s: "rest" }, "unread"],
+  ["parentheses", "(matrix.s == 'rest')", { s: "rest" }, "unread"],
+  ["an index", "matrix['s'] == 'rest'", { s: "rest" }, "unread"],
+  ["a boolean value, which GitHub compares as a number", "matrix.b == 'true'", { b: true }, "unread"],
+  ["a number value", "matrix.n != '01'", { n: 1 }, "unread"],
+];
+/** Step b's if: reads the matrix in a shape check 34 cannot decide; a's and c's it can or need not; d's it cannot either, but d runs no suite (review pass 3). */
+const MATRIX_UNREAD_PROBE = `jobs:\n  a:\n    strategy:\n      matrix:\n        s: [x, y]\n    steps:\n      - name: a\n        if: always() && matrix.s == 'x'\n        run: bun test-a.ts\n      - name: b\n        if: matrix.s == 'x' || always()\n        run: bun test-b.ts\n      - name: c\n        if: success()\n        run: bun test-c.ts\n      - name: d\n        if: matrix.s == 'x' || always()\n        run: tar czf logs.tgz logs\n`;
 function checkSuitesRun() {
   if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
     fail(SELF, `check 34 parses the workflows with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-2895)`);
@@ -7953,8 +8139,17 @@ function checkSuitesRun() {
   }
   const files = citationFiles();
   const suites = files.filter((rel) => SUITE_FILE.test(rel));
+  for (const [what, cond, cell, expected] of MATRIX_IF_PROBES) {
+    const got = matrixIfHolds(cond, cell);
+    if (got !== expected) fail(SELF, `check 34 no longer decides ${JSON.stringify(expected)} for its matrix if: probe "${what}" (decided ${JSON.stringify(got)})`);
+  }
+  const probeUnread = new Set<string>();
+  scriptRunsIn("probe.yml", Bun.YAML.parse(MATRIX_UNREAD_PROBE), probeUnread);
+  if (JSON.stringify([...probeUnread]) !== JSON.stringify(['probe.yml: job a, step "b"'])) fail(SELF, `check 34 no longer reports exactly step "b" of its probe as a matrix if: it cannot decide (reported ${JSON.stringify([...probeUnread])})`);
   const run: SuiteRun[] = [];
-  try { run.push(...suitesRunIn(SUITE_WORKFLOW, Bun.YAML.parse(readFileSync(join(ROOT, SUITE_WORKFLOW), "utf8")))); } catch (e) { fail(SUITE_WORKFLOW, `does not parse, so check 34 cannot read what its steps run: ${(e as Error).message}`); }
+  const unread = new Set<string>();
+  try { run.push(...suitesRunIn(SUITE_WORKFLOW, Bun.YAML.parse(readFileSync(join(ROOT, SUITE_WORKFLOW), "utf8")), unread)); } catch (e) { fail(SUITE_WORKFLOW, `does not parse, so check 34 cannot read what its steps run: ${(e as Error).message}`); }
+  for (const where of unread) fail(where, "has an `if:` that reads the matrix in a shape check 34 cannot decide, so whether a cell runs the suite this step runs is unknown and it could run in none — write each part that reads the matrix as `matrix.<key> == '<value>'` (or `!=`) on a string value, joined to the rest by `&&` (check 34, SMD-3169)");
   // test-schema.ts from a step's working-directory, test-preflight.ts from a cd:
   // were either missed, the reading is broken, not the tree clean.
   for (const known of ["db/test-schema.ts", "server-portable/test-preflight.ts"]) {
@@ -8056,6 +8251,14 @@ const SCRIPT_RUN_PROBES: [string, string, string[]][] = [
   ["the step's env, a command's own assignments on a continued line, and not a flag's =", `jobs:\n  a:\n    env:\n      J: "1"\n    steps:\n      - working-directory: db\n        env:\n          DATABASE_URL: postgres://x\n          S: two\n        run: |\n          timeout --kill-after=10s "$limit" bun test-s.ts > "$RUNNER_TEMP/d.log" 2>&1 &\n          OB1_W=768 OB1_M=n \\\n            timeout --kill-after=10s "$limit" bun test-s.ts > "$RUNNER_TEMP/n.log" 2>&1 &\n`, ['db|test-s.ts||{"DATABASE_URL":"postgres://x","J":"1","OB1_M":"n","OB1_W":"768","S":"two"}', 'db|test-s.ts||{"DATABASE_URL":"postgres://x","J":"1","S":"two"}']],
   ["a lowercase assignment opening the command (review pass 1)", `jobs:\n  a:\n    steps:\n      - run: limit=5 bun x/test-l.ts\n`, ['.|x/test-l.ts||{"limit":"5"}']],
   ["a cd's directory last", `jobs:\n  a:\n    steps:\n      - working-directory: db\n        run: (cd ../server-portable && exec bun test-p.ts) &\n`, ['server-portable|test-p.ts||{}']],
+  ["a matrix read once a cell, its value filled into the job's env and the step's, a key it lacks empty (SMD-3169)", `jobs:\n  a:\n    strategy:\n      matrix:\n        shard: [rest, sleep]\n    env:\n      J: j-\${{ matrix.shard }}\n    steps:\n      - run: bun test-m.ts\n        env:\n          S: \${{ matrix.shard }}\n          N: \${{matrix.none}}\n`, ['.|test-m.ts||{"J":"j-rest","N":"","S":"rest"}', '.|test-m.ts||{"J":"j-sleep","N":"","S":"sleep"}']],
+  ["a matrix's exclude, an include that extends cells, one that would change an axis value and so is a cell of its own, and numbers (SMD-3169)", `jobs:\n  a:\n    strategy:\n      matrix:\n        os: [l, m]\n        n: [1, 2]\n        exclude:\n          - os: m\n            n: 2\n        include:\n          - os: l\n            extra: e\n          - os: w\n    steps:\n      - run: bun test-x.ts\n        env:\n          V: \${{ matrix.os }}/\${{ matrix.n }}/\${{ matrix.extra }}\n`, ['.|test-x.ts||{"V":"l/1/e"}', '.|test-x.ts||{"V":"l/2/e"}', '.|test-x.ts||{"V":"m/1/"}', '.|test-x.ts||{"V":"w//"}']],
+  ["a step's matrix if: read in the cells it runs in, ignoring case, inside ${{ }} or not; one no cell runs; one on a key no cell has (''), none; an && chain decided on its matrix part (SMD-3169, review passes 1-3)", `jobs:\n  a:\n    strategy:\n      matrix:\n        s: [a, b]\n    env:\n      S: \${{ matrix.s }}\n    steps:\n      - run: bun test-a.ts\n        if: matrix.s == 'A'\n      - run: bun test-b.ts\n        if: \${{ matrix.s != 'a' }}\n      - run: bun test-n.ts\n        if: matrix.s == 'rset'\n      - run: bun test-k.ts\n        if: matrix.other == 'x'\n      - run: bun test-c.ts\n        if: matrix.s == 'a' && github.event_name == 'push'\n`, ['.|test-a.ts||{"S":"a"}', '.|test-b.ts||{"S":"b"}', '.|test-c.ts||{"S":"a"}']],
+  ["a matrix value filled into the run text and the working-directory, its key matched ignoring case (SMD-3169, review pass 3)", `jobs:\n  a:\n    strategy:\n      matrix:\n        d: [db, evals]\n    steps:\n      - working-directory: \${{ matrix.d }}\n        run: OB1_D=\${{ matrix.D }} bun test-w.ts --\${{ matrix.d }}\n`, ['db|test-w.ts|--db|{"OB1_D":"db"}', 'evals|test-w.ts|--evals|{"OB1_D":"evals"}']],
+  ["GitHub's own include example, and an exclude matching on some of a cell's keys (SMD-3169, review pass 2)", `jobs:\n  a:\n    strategy:\n      matrix:\n        fruit: [apple, pear]\n        animal: [cat, dog]\n        include:\n          - color: green\n          - color: pink\n            animal: cat\n          - fruit: apple\n            shape: circle\n          - fruit: banana\n          - fruit: banana\n            animal: cat\n    steps:\n      - run: bun test-f.ts\n        env:\n          V: \${{ matrix.fruit }}/\${{ matrix.animal }}/\${{ matrix.color }}/\${{ matrix.shape }}\n  b:\n    strategy:\n      matrix:\n        os: [l, m]\n        v: [1, 2]\n        e: [x, y]\n        exclude:\n          - os: m\n            v: 2\n    steps:\n      - run: bun test-e.ts\n        env:\n          V: \${{ matrix.os }}\${{ matrix.v }}\${{ matrix.e }}\n`, ['.|test-e.ts||{"V":"l1x"}', '.|test-e.ts||{"V":"l1y"}', '.|test-e.ts||{"V":"l2x"}', '.|test-e.ts||{"V":"l2y"}', '.|test-e.ts||{"V":"m1x"}', '.|test-e.ts||{"V":"m1y"}', '.|test-f.ts||{"V":"apple/cat/pink/circle"}', '.|test-f.ts||{"V":"apple/dog/green/circle"}', '.|test-f.ts||{"V":"banana///"}', '.|test-f.ts||{"V":"banana/cat//"}', '.|test-f.ts||{"V":"pear/cat/pink/"}', '.|test-f.ts||{"V":"pear/dog/green/"}']],
+  ["an if: of \${{ false }} runs nothing, as a bare false does (SMD-3169, review pass 2)", `jobs:\n  a:\n    steps:\n      - run: bun test-q.ts\n        if: \${{ false }}\n      - run: bun test-r.ts\n        if: "false"\n`, []],
+  ["a matrix whose exclude entry an expression gives left unfilled, and null rendered as nothing (SMD-3169, review pass 1)", `jobs:\n  a:\n    strategy:\n      matrix:\n        s: [one, two]\n        exclude:\n          - \${{ fromJSON(inputs.x) }}\n    steps:\n      - run: bun test-e.ts\n        env:\n          S: \${{ matrix.s }}\n  b:\n    strategy:\n      matrix:\n        s: [null]\n    steps:\n      - run: bun test-z.ts\n        env:\n          S: <\${{ matrix.s }}>\n`, ['.|test-e.ts||{"S":"${{ matrix.s }}"}', '.|test-z.ts||{"S":"<>"}']],
+  ["a matrix of include alone, and one an expression gives left unfilled (SMD-3169)", `jobs:\n  a:\n    strategy:\n      matrix:\n        include:\n          - s: one\n          - s: two\n    steps:\n      - run: bun test-i.ts\n        env:\n          S: \${{ matrix.s }}\n  b:\n    strategy:\n      matrix: \${{ fromJSON(inputs.m) }}\n    steps:\n      - run: bun test-j.ts\n        env:\n          S: \${{ matrix.s }}\n`, ['.|test-i.ts||{"S":"one"}', '.|test-i.ts||{"S":"two"}', '.|test-j.ts||{"S":"${{ matrix.s }}"}']],
 ];
 const PARITY_PROBE_TEXT = [
   "run() { suite db \"$@\"; }",

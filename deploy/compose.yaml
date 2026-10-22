@@ -197,10 +197,6 @@ x-otel-env: &otel-env
 # as a 404 and goes on. The resource router's 404 is the server's, with them,
 # while the server is up; with it down, auth-absent's bare 404 has none.
 # The middlewares:
-#   not-legacy  deletes X-OB1-Legacy-Route, the marker the legacy route set
-#           until v2.0.0 (an empty value deletes the header), so a client
-#           cannot send it and be logged as a straggler by a server that
-#           still reads it;
 #   auth-absent  any 502 — Traefik's own: no such name, nothing
 #           listening, or a request the server dropped mid-flight, as its
 #           registration stall does at 30 s; the server never answers 502
@@ -230,7 +226,7 @@ x-proxy-routes: &proxy-routes |
         rule: "Path(`/.well-known/oauth-protected-resource/mcp`)"
         priority: 40
         entryPoints: [web]
-        middlewares: [not-legacy, auth-absent]
+        middlewares: [auth-absent]
         service: mcp
       oauth-fallback-off:
         rule: "Path(`/register`) || Path(`/authorize`) || Path(`/token`)"
@@ -260,19 +256,13 @@ x-proxy-routes: &proxy-routes |
         rule: "Path(`/mcp`) || PathPrefix(`/mcp/`)"
         priority: 30
         entryPoints: [web]
-        middlewares: [not-legacy]
         service: mcp
       health:
         rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))"
         priority: 20
         entryPoints: [web]
-        middlewares: [not-legacy]
         service: mcp
     middlewares:
-      not-legacy:
-        headers:
-          customRequestHeaders:
-            X-OB1-Legacy-Route: ""
       auth-absent:
         errors:
           status: ["502"]
@@ -2063,11 +2053,12 @@ services:
       TEMPO_EXTRA_ARGS: "-config.file=/tmp/tempo-config.yaml -reporting.enabled=false"
       PYROSCOPE_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -memberlist.bind-addr=127.0.0.1 -usage-stats.enabled=false"
       # The collector scrapes pg-exporter every 30 s on `telemetry` into its
-      # metrics pipeline, beside OTLP and its own (SMD-1849 PR 3b): a second
+      # metrics pipeline, beside OTLP and its own (SMD-1849 PR 3b), at its
+      # front's one path, /cgi-bin/metrics (SMD-3023, pg-exporter below): a second
       # config the image's run-otelcol.sh appends, as one argument — no space
       # in it, since the script splits OTELCOL_EXTRA_ARGS on whitespace; the
       # pipeline's receivers are the image's two and this one.
-      OTELCOL_EXTRA_ARGS: '--config=yaml:{"receivers":{"prometheus/postgres":{"config":{"scrape_configs":[{"job_name":"postgres","scrape_interval":"30s","static_configs":[{"targets":["pg-exporter.ob1.internal.:9187"]}]}]}}},"service":{"pipelines":{"metrics":{"receivers":["otlp","prometheus/collector","prometheus/postgres"]}}}}'
+      OTELCOL_EXTRA_ARGS: '--config=yaml:{"receivers":{"prometheus/postgres":{"config":{"scrape_configs":[{"job_name":"postgres","scrape_interval":"30s","metrics_path":"/cgi-bin/metrics","static_configs":[{"targets":["pg-exporter.ob1.internal.:9187"]}]}]}}},"service":{"pipelines":{"metrics":{"receivers":["otlp","prometheus/collector","prometheus/postgres"]}}}}'
     # Prometheus's, Tempo's, Loki's, Pyroscope's and Grafana's data, in one volume.
     volumes:
       - lgtm-data:/data
@@ -2156,12 +2147,67 @@ services:
   # Postgres row reads its names (check 37's DASHBOARD_IMAGE_SERIES, measured
   # on this pin): a bump re-measures them, and CI's "The observability
   # profile's dashboard reads every series it names" runs each query.
+  #
+  # The exporter listens on loopback alone (SMD-3023): its /probe, which no
+  # flag turns off, dials whatever Postgres target and credentials its caller
+  # names. What answers on 9187 is the image's busybox httpd, bound to the
+  # container's address on `telemetry` alone — the address its alias
+  # resolves to there — so nothing on `data` reaches it, and serving one CGI,
+  # /cgi-bin/metrics, the collector's scrape path, which makes a request of
+  # its own to the exporter's /metrics; every other path is httpd's 404. Not
+  # httpd's proxy (`P:`): it reads the first request's line and then pipes
+  # the connection, so a /probe sent after it on the same connection reached
+  # the exporter (measured). httpd's environment is PATH alone, so its CGI's
+  # holds no password. The CGI lives on a tmpfs of its own, /var/www, mounted
+  # exec: Docker mounts a tmpfs noexec unless told (podman does not), and
+  # httpd then answers its 404 for a CGI it cannot run (measured under those
+  # options); its mode is Docker's default, which podman, copying the image's
+  # root-owned 755 directory, does not give it (measured). /tmp, where each
+  # scrape's copy goes, keeps the engine's defaults. Either process ending
+  # ends the container within 35 s, for its restart — polled every 5 s, since
+  # busybox's `wait -n` misses a process a signal ends (measured), then 30 s
+  # on. init hands the stop's signal to the shell, and the two processes end
+  # with the container.
   pg-exporter:
     image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
     profiles: ["observability"]
     read_only: true
+    tmpfs: [/tmp, "/var/www:exec,mode=1777"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    init: true
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        addr=
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+          addr=$$(nslookup pg-exporter.ob1.internal. 2> /dev/null | awk '/^Name:/ { n = 1 } n && /^Address:? *[0-9.]+$$/ { print $$NF; exit }')
+          [ -n "$$addr" ] && break
+          sleep 1
+        done
+        if [ -z "$$addr" ]; then
+          echo "pg-exporter: pg-exporter.ob1.internal resolves to no address, and the exporter's front listens on that one alone: compose.yaml gives this container that name on telemetry" >&2; sleep 30; exit 1
+        fi
+        if ! { mkdir -p /var/www/cgi-bin && cat > /var/www/cgi-bin/metrics && chmod 555 /var/www/cgi-bin/metrics; } << 'CGI'
+        #!/bin/sh
+        if f=$$(mktemp) && wget -q -T 10 -O "$$f" http://127.0.0.1:9188/metrics; then
+          printf 'Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n\r\n'; cat "$$f"
+        else
+          printf 'HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\n\r\nno answer from the exporter, or no room in /tmp for it\n'
+        fi
+        rm -f "$$f"
+        CGI
+        then
+          echo "pg-exporter: could not write its CGI to /var/www, the tmpfs compose.yaml gives it: the collector would scrape nothing" >&2; sleep 30; exit 1
+        fi
+        /bin/postgres_exporter --web.listen-address=127.0.0.1:9188 "$$@" &
+        e=$$!
+        env -i PATH=/bin httpd -f -p "$$addr:9187" -h /var/www &
+        h=$$!
+        while kill -0 "$$e" 2> /dev/null && kill -0 "$$h" 2> /dev/null; do sleep 5; done
+        echo "pg-exporter: the exporter or its front (httpd) stopped, its own line above saying why if it left one; the container exits in 30 s and restarts" >&2; sleep 30; exit 1
+      - pg-exporter
     command: ["--collector.stat_statements", "--collector.stat_statements.include_query", "--collector.stat_statements.query_length=120", "--collector.stat_statements.limit=100", "--collector.stat_statements.exclude_users=ob1_monitor"]
     environment:
       DATA_SOURCE_URI: "postgres:5432/openbrain?sslmode=disable"
@@ -2174,9 +2220,10 @@ services:
       data: {}
       telemetry:
         aliases: [pg-exporter.ob1.internal]
-    # Its landing page, which reads nothing from Postgres; a scrape would.
+    # Its landing page on loopback, which reads nothing from Postgres; a
+    # scrape would. httpd is watched by the entrypoint's loop.
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9187/"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9188/"]
       interval: 30s
       timeout: 5s
       retries: 3

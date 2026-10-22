@@ -25,7 +25,7 @@ import { atOriginHost, authReachability, edgeSettings, edgeView, forPublicDocume
 import { codeWord, ExchangeMisconfigured, type Exchanger } from "./exchange.ts";
 import {
   BUSY_MESSAGE, challengeResponse, corsHeaders, cutByStopLine, edgeRefusal, HEALTH_METHOD_NOT_ALLOWED_HEADERS, HEALTH_PATH, JSON_RPC_BUSY_CODE, JSON_RPC_UNAUTHORIZED_CODE, MCP_METHODS,
-  METHOD_NOT_ALLOWED_HEADERS, MIRROR_INPUT, MIRROR_WORDS, nameRoute, notCleared, noteLegacyRoute, notificationRefusedResponse, parsedBody,
+  METHOD_NOT_ALLOWED_HEADERS, MIRROR_INPUT, MIRROR_WORDS, nameRoute, notCleared, notificationRefusedResponse, parsedBody,
   partsOf, rawPath, readBodyText, recordCall, REFUSAL_BODY_LIMIT, refusalTarget, RETRY_AFTER_SECONDS, REVOKED_MESSAGE, shownNothing,
   unauthorizedResponse, unavailableResponse, worseOutcome, type CallRecord, type MirrorTool, type RefusalTarget, type RequestParts,
 } from "../server-portable/mcp-edge.ts";
@@ -678,7 +678,6 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (!body || (Object.keys(body).length === 1 && body.status === "ok")) return notCleared(c, traceOf(c.req.raw), null);
     // An answer that is no object is no record (review pass 3: a string's characters were served as its fields).
     if (typeof body !== "object" || Array.isArray(body)) return recordFault(new Error("the REST core answered /health with no record"));
-    noteLegacyRoute(c.req.raw, caller.name);
     return c.json({ ...body, oauth: await oauth }, 200, corsHeaders);
   });
 
@@ -689,7 +688,6 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (c.req.method === "HEAD" && presentedKeys(c.req.raw).length > 0) return headAtOnce(c, "/worker-status", "worker_status");
     const caller = await keyedCaller(c, "/worker-status", "worker_status");
     if (caller instanceof Response) return caller;
-    noteLegacyRoute(c.req.raw, caller.name);
     try {
       const answered = await deps.rest.call("worker_status", {}, credOf(caller));
       const word = turned(answered);
@@ -715,7 +713,6 @@ export function createMcpApp(deps: McpDeps): Hono {
     const [, tool, route] = mirror;
     const caller = await keyedCaller(c, route, tool);
     if (caller instanceof Response) return caller;
-    noteLegacyRoute(c.req.raw, caller.name);
     const body = await c.req.json().catch(() => null);
     const args: Record<string, unknown> = body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
     try {
@@ -747,7 +744,6 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (c.req.method === "HEAD" && presentedKeys(c.req.raw).length > 0) return headAtOnce(c, route, "job_status");
     const caller = await keyedCaller(c, route, "job_status");
     if (caller instanceof Response) return caller;
-    noteLegacyRoute(c.req.raw, caller.name);
     if (streamMatch) {
       const upstream = await deps.rest.stream(id, { ...credOf(caller), signal: c.req.raw.signal });
       if (upstream.status !== 200 || !upstream.body) {
@@ -877,7 +873,6 @@ export function createMcpApp(deps: McpDeps): Hono {
       }
       // Named from here on, so a line written later — the client gone, a throw — says whose key it was.
       trace.agent = standing.name;
-      noteLegacyRoute(c.req.raw, standing.name);
       noteUntooled(standing.operations);
       // The body read once and handed to the transport rebuilt: v2's transport reads the raw stream (SMD-2278).
       const rawBody = await c.req.text().catch(() => null);
