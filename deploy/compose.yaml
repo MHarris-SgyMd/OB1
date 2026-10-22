@@ -895,10 +895,9 @@ services:
     # the root route, and /mcp is the `mcp` service's below (SMD-2287 PR 5b),
     # on the mesh alone, as the ADR has it. No shipped template calls it: n8n's
     # brain calls go to the REST core (SMD-2295), and the orchestration eval's
-    # workflows still call it until SMD-2295's second PR. It retires in SMD-2287
-    # PR 6. No
-    # dns_search here, unlike the proxy: an operator's model endpoint may be a
-    # short name their resolver completes.
+    # workflows still call it until SMD-2295's second PR. It retires in
+    # SMD-2287 PR 6. No dns_search here, unlike the proxy: an operator's model
+    # endpoint may be a short name their resolver completes.
     networks:
       data: {}
       egress: {}
@@ -1658,11 +1657,11 @@ services:
       # the webhooks and the MCP endpoint, behind the owner's password and the
       # keys provisioning stores. No TLS here (SMD-1846 is the one origin).
       - "${N8N_BIND:-127.0.0.1}:${N8N_PORT:-5678}:5678"
-    # `egress` alone: the vendors its workflows name, and the brain's REST
-    # core as `api:8000` (SMD-2295) and the import runner as
-    # `orchestration-runner:8090`. Not
-    # the mesh, where every backend the proxy reaches is (a canary of another
-    # project joined it from SMD-2294 to SMD-2874, its server `server` too).
+    # `egress` alone: the vendors its workflows name, the brain's REST core as
+    # `api:8000` (SMD-2295) and the import runner as
+    # `orchestration-runner:8090`. Not the mesh, where every backend the proxy
+    # reaches is (a canary of another project joined it from SMD-2294 to
+    # SMD-2874, its server `server` too).
     # `egress` is this project's own.
     networks: [egress]
     volumes:

@@ -1182,8 +1182,8 @@ after a person, so the log stays free of names and addresses.
 ```bash
 # every request that did not end `ok`, on each server (the default project's
 # containers; another brain's are <project>-mcp-1, -api-1 and -server-1): /mcp's
-# in the MCP server's, the REST core's own and n8n's in the REST core's, and
-# server's, which no shipped template calls
+# in the MCP server's; the REST core's own, n8n's among them, in the REST
+# core's; and server's, which no shipped template calls, in its own
 docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
 docker logs open-brain-api-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
 docker logs open-brain-server-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
@@ -2909,13 +2909,13 @@ n8n itself reaches the brain only through the REST core, `http://api:8000`
 on `egress` with the key in `x-brain-key` (SMD-2295, under SMD-2282's
 decision 1), with a capture-scope key, and holds no write key. A capture
 is `POST http://api:8000/v1/thoughts`; the REST core's contract is
-`GET http://api:8000/openapi.json`, which needs no key. The one exception is the profile's
-import runner (SMD-2212, below). It writes brain tables directly, the way the
-pipeline does from a checkout, and a workflow holding its key can cause those
-writes. That is the ADR's decision 4, amended, and the runner's key is
-bounded by its allowlist. OB1's part is the provisioning step in
-`orchestration/`, the templates it loads from `orchestration/templates/`, and
-the runner.
+`GET http://api:8000/openapi.json`, which needs no key. The one exception is
+the profile's import runner (SMD-2212, below). It writes brain tables
+directly, the way the pipeline does from a checkout, and a workflow holding
+its key can cause those writes. That is the ADR's decision 4, amended, and
+the runner's key is bounded by its allowlist. OB1's part is the provisioning
+step in `orchestration/`, the templates it loads from
+`orchestration/templates/`, and the runner.
 
 Below, `compose` stands for `podman compose -f deploy/compose.yaml --profile
 orchestration`, or docker compose.
@@ -2927,8 +2927,8 @@ bun deploy/orchestration/provision.ts        # --env-file for another file; --ro
 # Optional, for a template that captures into the brain (none ships yet): a CAPTURE key
 cd server-portable && bun keygen.ts --name n8n --scope capture && cd ..
 #   the key into deploy/.env as N8N_BRAIN_CAPTURE_KEY, the line it prints into MCP_ACCESS_KEYS,
-#   then recreate the servers that read the list (compose up -d server api; a restart keeps the old keys;
-#   `server` until SMD-2287 PR 6 retires it, or a key taken out stays accepted there) and provision again
+#   then recreate the servers that read the list and provision again (compose up -d server api;
+#   a restart keeps the old keys; `server` until SMD-2287 PR 6, or a key taken out stays live there)
 ```
 
 `--url` names n8n's origin where it is not `http://127.0.0.1:$N8N_PORT`. A
