@@ -4,7 +4,8 @@
 // from two readers it owns: the environment, read lazily because root.ts's
 // initEnv seeds it before the first read, and the store, built on first use.
 
-import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedEnv, type Embedder } from "../embed.ts";
+import { createEmbedder, resolveEmbedConfig, shownBase, type EmbedConfig, type EmbedEnv, type Embedder } from "../embed.ts";
+import { createProviderHealth, type ProviderHealth } from "../provider-health.ts";
 import type { JevEnv } from "../jev.ts";
 import type { StoreEnv, ThoughtStore } from "../store.ts";
 import { queryLogEnabled } from "../../db/config.mjs";
@@ -43,6 +44,10 @@ export interface Ctx {
   logSearch(principal: Principal, tool: string, args: SearchLogArgs, data: { id: string; score?: number | null }[]): Promise<void>;
   /** The action-log rows of one call, in one write; best-effort, a no-op unless OB1_QUERY_LOG=on. */
   logActions(principal: Pick<Principal, "agentId">, rows: ActionRow[]): Promise<void>;
+  /** The embedding provider as this server last saw it (SMD-2890): every embedding call says, and the keyed /health and brain_info read it. */
+  providerHealth: ProviderHealth;
+  /** Seconds between re-probes of a provider that does not answer, once the server started its loop; null for none (a hosted endpoint, or OB1_PROVIDER_REPROBE_INTERVAL=off). */
+  reprobeS: number | null;
 }
 
 export type SearchLogArgs = { query: string; limit: number; threshold: number; recencyWeight: number; filter: Record<string, unknown>; arm: string };
@@ -141,5 +146,7 @@ export function createContext(deps: CoreDeps): Ctx {
     citationBase: () => deps.env().OPEN_BRAIN_CITATION_BASE_URL || "https://openbrain.local/thoughts",
     logSearch,
     logActions,
+    providerHealth: createProviderHealth({ base: () => shownBase(embedConfig().embeddings) }),
+    reprobeS: null,
   };
 }

@@ -266,10 +266,15 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     let vectorFailed: { reason: string; detail: string } | undefined;
     const [embedded, metadata, genre] = await Promise.all([
       gate.embeddings.allowed
-        ? ctx.embedder.embedCapture(content, subject).catch((e: unknown) => {
+        ? ctx.embedder.embedCapture(content, subject).then((v) => {
+            // Answered: the provider's state says so (SMD-2890).
+            ctx.providerHealth.noteUp();
+            return v;
+          }, (e: unknown) => {
             const down = providerDown(e);
             if (!down) throw e;
             console.error(`capture: the embedding provider at ${cfg.embeddings.base} was unavailable: ${down.detail}; saved without a vector`);
+            ctx.providerHealth.noteDown(down);
             vectorFailed = down;
             return undefined;
           })

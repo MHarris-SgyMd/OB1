@@ -1461,6 +1461,23 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     `not read: why; no table: said (${vectorsLine({ vectorless: null, unread: { vectorless: { reason: "timeout", message: "x" } } })})`);
 }
 
+// The Provider row (SMD-2890): not called yet, answering, or degraded since when, why, and what still works.
+{
+  const { providerWords, renderBrainInfo } = await import("./brain-info.ts");
+  assert(providerWords({ status: "unknown", reprobeS: 15 }) === "not called yet", "unknown: not called yet");
+  assert(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", reprobeS: 15 }) === "answering (last answered 2026-10-22T00:00:00.000Z)", "answering: when it last answered");
+  const down = { status: "unreachable" as const, since: "2026-10-22T00:00:00.000Z", at: "2026-10-22T00:01:00.000Z", reason: "provider_unreachable", detail: "the connection was refused" };
+  assert(providerWords({ ...down, reprobeS: 15 }) === "unreachable since 2026-10-22T00:00:00.000Z (the connection was refused) — serving degraded: a capture lands without its vector, a search answers by exact matches; re-probed every 15 s",
+    `unreachable: since its first outage, why, what still works, the re-probe (${providerWords({ ...down, reprobeS: 15 })})`);
+  assert(/; it is not re-probed, so a call that is answered clears this$/.test(providerWords({ ...down, reprobeS: null })), "…and with no re-probe, what clears it");
+  const base = { version: "1.0.0", releaseRange: null, latestMigration: 1, commit: "c", store: "sql", tier: null, embedding: { model: "m", dim: 4 }, database: { error: "x" }, ledgerStatus: null } as never;
+  const shown = renderBrainInfo({ ...(base as object), provider: { ...down, reprobeS: 15 } } as never);
+  const lines = shown.split("\n");
+  const at = lines.findIndex((l) => l.startsWith("Embedding:"));
+  assert(/^Provider:\s+unreachable since 2026-10-22T00:00:00\.000Z/.test(lines[at + 1] ?? ""), `the row follows Embedding (${lines[at + 1]})`);
+  assert(!/^Provider:/m.test(renderBrainInfo(base)), "…and a record without the field (an older server's, forwarded) has no row");
+}
+
 console.log("\n[13b] GET /health with a key is what the brain is; without one it is `ok` (SMD-2041)");
 {
   const get = async (path: string, headers: Record<string, string> = {}) => {
@@ -1495,6 +1512,8 @@ console.log("\n[13b] GET /health with a key is what the brain is; without one it
     assert(info.version === FORK_VERSION, `…version is FORK_VERSION (${info.version})`);
     assert(info.latestMigration === treeLast, `…latestMigration is db/migrations/'s last, ${treeLast} (${info.latestMigration})`);
     assert(info.commit === "unknown" && info.store === "sql" && info.tier === null, `…commit unknown with no OB1_GIT_SHA, the sql store, no tier (${info.commit}, ${info.store}, ${info.tier})`);
+    const provider = info.provider as { status?: string; reprobeS?: unknown } | undefined;
+    assert(["unknown", "answering"].includes(provider?.status ?? "") && "reprobeS" in (provider ?? {}), `…and the provider's state, the stub answering or not yet called (SMD-2890; ${JSON.stringify(provider)})`);
     // No database in this suite: the record still answers, and says why the
     // database's half is missing — the store's own refusal, not a 500.
     const database = info.database as { error?: string } | undefined;

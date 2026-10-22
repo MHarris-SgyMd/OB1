@@ -187,7 +187,16 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
   const b = await rest("GET", "/v1/brain");
   const m = await mcp("brain_info", {});
   const info = rendered((v) => say.renderBrainInfoReply(v), b.body);
-  assert(b.status === 200 && info.content[0].text === m.text && same(info.structuredContent, m.sc), `brain_info: the same record and table (${b.status}; first difference: ${firstDiff(info.structuredContent, m.sc)})`);
+  // The provider's state is each process's own (SMD-2890): the two doors here
+  // are two cores, each answered at its own moment, so it is set aside — the
+  // record's and the table's Provider row — and asked of each door alone.
+  const noProviderRow = (t: string) => t.split("\n").filter((l) => !l.startsWith("Provider:")).join("\n");
+  // The record without `provider`, and any rendered text in it without the row, at whatever depth the reply nests them.
+  const noProvider = (v: unknown): Record<string, unknown> => JSON.parse(JSON.stringify(v), (k, x) => (k === "provider" ? undefined : typeof x === "string" && /^Provider:/m.test(x) ? noProviderRow(x) : x));
+  assert(b.status === 200 && noProviderRow(info.content[0].text) === noProviderRow(m.text) && same(noProvider(info.structuredContent), noProvider(m.sc)), `brain_info: the same record and table, the provider's state aside (${b.status}; first difference: ${firstDiff(noProvider(info.structuredContent), noProvider(m.sc))})`);
+  const providerOf = (v: unknown) => (((v as { value?: unknown })?.value ?? v) as { provider?: { status?: string } }).provider;
+  assert(providerOf(b.body)?.status === "answering" && providerOf(m.sc)?.status === "answering" && /^Provider:\s+answering \(last answered /m.test(m.text),
+    `…and each door's own provider state answering, after the searches above (${JSON.stringify(providerOf(b.body))} | ${JSON.stringify(providerOf(m.sc))})`);
   covered.add("brain_info");
   const reads = ["search", "fetch", "search_thoughts", "search_thoughts_keyword", "list_thoughts", "list_thought_ids", "list_logged_searches", "list_supersession_proposals", "thought_stats", "thought_changes", "worker_status", "brain_info"];
   assert(reads.every((t) => covered.has(t)), "every read operation but the job pair is compared here; the job pair is [4]");

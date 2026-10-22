@@ -9,6 +9,7 @@ import * as reads from "./reads.ts";
 import * as writes from "./writes.ts";
 import * as workers from "./workers.ts";
 import * as mend from "./mend.ts";
+import { startProviderReprobe } from "../provider-health.ts";
 import { resolveJevConfig } from "../jev.ts";
 import type { PluginSql } from "../store.ts";
 
@@ -21,6 +22,7 @@ export { enabledHooks, hookSecrets, loadPlugins, runHook, runOperation, type Loa
 /** How long a keyed /health takes at most, the registry's word on its key included: either server's (SMD-2287). */
 export { HEALTH_DEADLINE_MS } from "./reads.ts";
 export { mendIntervalFrom, newMendState, type MendState } from "./mend.ts";
+export { reprobeIntervalFrom } from "../provider-health.ts";
 
 /** The operations, each taking the caller's principal and the tool's typed input. */
 export function createCore(deps: CoreDeps) {
@@ -63,6 +65,18 @@ export function createCore(deps: CoreDeps) {
     startVectorMender: bind(ctx, mend.startVectorMender),
     /** One tick of it, for a suite. */
     mendOnce: bind(ctx, mend.mendOnce),
+    /**
+     * The provider's re-probe loop (SMD-2890): both servers start one at boot,
+     * under OB1_PROVIDER_REPROBE_INTERVAL — a probe at once, then one each
+     * interval while a local provider does not answer.
+     */
+    startProviderReprobe: (intervalS: number) => {
+      const loop = startProviderReprobe(ctx.providerHealth, { endpoint: () => ctx.embedConfig().embeddings, intervalS });
+      ctx.reprobeS = loop.reprobeS;
+      return loop;
+    },
+    /** The provider's state, for a suite. */
+    providerHealth: ctx.providerHealth,
   };
 }
 

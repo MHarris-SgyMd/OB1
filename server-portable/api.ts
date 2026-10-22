@@ -8,7 +8,7 @@
 
 import { agents, closeStore, db, env, hooks, initEnv, plugins, serveHere } from "./root.ts";
 import { routable } from "./auth.ts";
-import { createCore, mendIntervalFrom } from "./core/index.ts";
+import { createCore, mendIntervalFrom, reprobeIntervalFrom } from "./core/index.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { markRunningLost } from "./jobs.ts";
 import { createRestApp } from "./rest/app.ts";
@@ -85,6 +85,13 @@ if (SERVES_ON_BUN) {
   const mend = mendIntervalFrom(process.env.OB1_VECTOR_MEND_INTERVAL);
   if (mend.problem) console.warn(mend.problem);
   const mender = mend.intervalS > 0 ? core.startVectorMender({ intervalS: mend.intervalS }) : undefined;
+  // The provider's state (SMD-2890): a probe at once, so a server started with
+  // its provider down says so on its keyed /health and brain_info, then one
+  // each interval while a local provider does not answer — the server serving
+  // degraded meanwhile (preflight lets it start), leaving it when one answers.
+  const reprobe = reprobeIntervalFrom(process.env.OB1_PROVIDER_REPROBE_INTERVAL);
+  if (reprobe.problem) console.warn(reprobe.problem);
+  const reprober = core.startProviderReprobe(reprobe.intervalS);
   drainOnSignal({
     drainBoundMs: grace.drainBoundMs,
     server: () => bunServer,
@@ -96,6 +103,7 @@ if (SERVES_ON_BUN) {
     // The mender stops beside it, before the pool closes: no further row starts.
     endOpen: () => {
       mender?.stop();
+      reprober.stop();
       cutOpenRequests();
     },
     onCut: () => {

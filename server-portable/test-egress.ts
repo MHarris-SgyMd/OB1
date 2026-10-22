@@ -545,6 +545,9 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
       restMended = (await sql`SELECT embedding IS NOT NULL AS has FROM thoughts WHERE id = ${madeBody.id!}::uuid`)[0].has === true;
       if (!restMended) await Bun.sleep(200);
     }
+    // The REST core keeps its own state, re-probed as the MCP server's is (SMD-2890): its keyed /health says so.
+    const apiProvider = (await (await fetch(`${apiAt}/health`, { headers: { "x-brain-key": OPEN_KEY } })).json() as { provider?: { status?: string; reprobeS?: number | null } }).provider;
+    assert(apiProvider?.reprobeS === 15 && ["unreachable", "answering"].includes(apiProvider.status ?? ""), `the REST core re-probes its provider, at the default 15 s, and its keyed /health says so (${JSON.stringify(apiProvider)})`);
     const restFound = await (await fetch(`${apiAt}/v1/search`, { method: "POST", headers: { "Content-Type": "application/json", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ query: restContent, limit: 5 }) })).text();
     assert(restMended && restFound.includes(madeBody.id!), "the MCP server gone, the REST core's own mender gives it its vector, and REST search finds it");
   } finally {
@@ -561,6 +564,86 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
     assert(downLines >= 1 && downLines <= 2 && menderLines.some((l) => /\d+ thoughts? given a vector/.test(l)), `the servers said the outage once each at most, and the mend (${menderLines.join(" / ")})`);
     assert(codes.every((c) => c === 0) && !/the tick failed/.test(said), `both stop cleanly, no tick failing on the closing pool (exit ${codes.join(", ")})`);
     if (!mended) console.log(said.split("\n").slice(-15).map((l) => `      ${l}`).join("\n"));
+  }
+}
+
+console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2890): started with its provider down, it serves degraded — a capture lands, a search answers by exact matches, keyed /health says unreachable since when while keyless /health stays `ok` — and leaves degraded by its re-probe alone within the interval once the provider answers, the same process throughout");
+{
+  const freePort = () => { const f = Bun.serve({ port: 0, fetch: () => new Response(null) }); const p = f.port; f.stop(true); return p; };
+  const providerPort = freePort();
+  const serverPort = freePort();
+  // The mender off, so the only thing that can see the provider back is the re-probe.
+  const child = Bun.spawn(["bun", "--no-env-file", "index.ts"], {
+    cwd: import.meta.dir,
+    env: {
+      PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: String(serverPort), OB1_STORE: "sql", DATABASE_URL: URL_,
+      OB1_LLM_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM), OB1_METADATA_MODEL: META_MODEL,
+      MCP_ACCESS_KEYS: `open:write:${hashKey(OPEN_KEY)}`, OB1_VECTOR_MEND_INTERVAL: "off", OB1_PROVIDER_REPROBE_INTERVAL: "1",
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const at = `http://127.0.0.1:${serverPort}`;
+  const rpc = async (name: string, args: Record<string, unknown>) => {
+    const r = await fetch(at, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }) });
+    const t = await r.text();
+    const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
+    return { text: (b.result?.content ?? []).map((c: { text?: string }) => c.text ?? "").join("\n") as string, isError: b.result?.isError === true };
+  };
+  type Provider = { status: string; since?: string; reason?: string; reprobeS?: number | null };
+  const keyed = async () => (await (await fetch(`${at}/health`, { headers: { "x-brain-key": OPEN_KEY } })).json() as { provider?: Provider }).provider;
+  let provider: ReturnType<typeof Bun.serve> | undefined;
+  let models = 0;
+  let cleared = false;
+  try {
+    let up = false;
+    for (let deadline = Date.now() + 15_000; !up && Date.now() < deadline; ) {
+      up = await fetch(`${at}/health`, { signal: AbortSignal.timeout(2_000) }).then((r) => r.ok, () => false);
+      if (!up) await Bun.sleep(100);
+    }
+    assert(up, "the server's own process starts with its provider down");
+    let p = await keyed();
+    for (let deadline = Date.now() + 5_000; p?.status !== "unreachable" && Date.now() < deadline; ) { await Bun.sleep(100); p = await keyed(); }
+    assert(p?.status === "unreachable" && /^\d{4}-\d\d-\d\dT/.test(p.since ?? "") && p.reason === "provider_unreachable" && p.reprobeS === 1,
+      `keyed /health: the provider unreachable since its first probe, re-probed every second (${JSON.stringify(p)})`);
+    const keyless = await fetch(`${at}/health`);
+    assert(keyless.status === 200 && (await keyless.text()) === "ok", "keyless /health stays liveness: `ok`, so nothing restarts a degraded brain");
+    const content = "degraded-verify-marker DGV-2890: a note captured while the provider is not up yet";
+    const cap = await rpc("capture_thought", { content });
+    const id = /id ([0-9a-f-]{36})/.exec(cap.text)?.[1];
+    assert(!cap.isError && !!id && /saved WITHOUT a vector/.test(cap.text), `a capture lands, without its vector (${cap.text.replace(/\n+/g, " / ").slice(0, 160)})`);
+    const kw = await rpc("search_thoughts_keyword", { query: "DGV-2890" });
+    assert(!kw.isError && kw.text.includes(id!), `keyword search finds it (${kw.text.slice(0, 120)})`);
+    const sem = await rpc("search_thoughts", { query: "DGV-2890", limit: 5 });
+    assert(!sem.isError && sem.text.includes(id!), `search_thoughts answers by its exact match (${sem.text.replace(/\n+/g, " / ").slice(0, 160)})`);
+    const info = await rpc("brain_info", {});
+    assert(/^Provider:\s+unreachable since \S+ \(the connection was refused\) — serving degraded: .*; re-probed every 1 s$/m.test(info.text), `brain_info's Provider row says so (${info.text.split("\n").find((l) => l.startsWith("Provider:"))})`);
+    // The provider comes up on its port: no call is made (the mender off, no
+    // capture, no search), so only the re-probe can see it.
+    provider = Bun.serve({ port: providerPort, fetch: (req) => { if (req.method === "GET") { models++; return Response.json({ object: "list", data: [] }); } return stubOpts.fetch(req); } });
+    const t0 = Date.now();
+    for (let deadline = t0 + 5_000; !cleared && Date.now() < deadline; ) {
+      cleared = (await keyed())?.status === "answering";
+      if (!cleared) await Bun.sleep(100);
+    }
+    const took = Date.now() - t0;
+    assert(cleared && models >= 1 && took < 3_000, `the provider up: within the 1 s interval and a probe's time, keyed /health says answering, by a re-probe (${took} ms, ${models} probe(s))`);
+    const after = models;
+    await Bun.sleep(2_500);
+    assert(models === after, `answering, it is not probed again (${models - after} more in 2.5 s)`);
+    assert(child.exitCode === null && !child.killed, "the same process throughout: no exit, no restart");
+  } finally {
+    child.kill();
+    const hung = setTimeout(() => child.kill("SIGKILL"), 10_000);
+    const code = await child.exited;
+    clearTimeout(hung);
+    provider?.stop(true);
+    const said = (await new Response(child.stdout).text()) + (await new Response(child.stderr).text());
+    const lines = said.split("\n").filter((l) => /^provider: /.test(l));
+    assert(lines.length === 2 && /does not answer \(the connection was refused\) — serving degraded/.test(lines[0]) && /answers again — no longer degraded/.test(lines[1]),
+      `the server said the change to degraded once, though captured and searched meanwhile, and the change back once (${lines.join(" / ")})`);
+    assert(code === 0, `it stops cleanly (exit ${code})`);
+    if (!cleared) console.log(said.split("\n").slice(-15).map((l) => `      ${l}`).join("\n"));
   }
 }
 

@@ -236,8 +236,9 @@ which is sent as `Bearer` in their place (SMD-2885). `OB1_JEV_BASE_URL` and
 `OB1_TELEGRAM_API_BASE` follow the same rule. `preflight.ts` prints a
 row for each endpoint, fails a hosted one with no credential of its own, and probes
 each by name — a local one on every start, a hosted one with `--deep` — so a
-chat endpoint that is down fails its own row while the embeddings row still
-passes (SMD-1875). Note what leaves the host under this
+chat endpoint that is down is named on its own row while the embeddings row
+still passes (SMD-1875); a local one whose name resolves with nothing answering
+yet warns, and the server starts degraded until it answers (SMD-2890). Note what leaves the host under this
 shape: a capture's full text, for tagging — and only the captures the gate
 lets through. Under the default policy the hosted chat endpoint is refused for
 every thought until an `OB1_EGRESS_ALLOW` term names what may go (above); the

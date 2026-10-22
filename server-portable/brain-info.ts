@@ -1198,6 +1198,13 @@ export interface ServerFacts {
   tier: string | null;
   /** The embedding model and width the server is configured with. */
   embedding: { model: string; dim: number };
+  /**
+   * The embedding provider as this server last saw it (SMD-2890): unknown,
+   * answering, or unreachable since a time — a brain serving degraded — with
+   * the re-probe interval while a local one does not answer (null for none).
+   * Absent from a server older than this field.
+   */
+  provider?: ProviderFact;
 }
 
 /**
@@ -1396,6 +1403,21 @@ export function findingsLine(db: Pick<DatabaseSummary, "findings" | "unread">): 
 }
 
 /** The record as the tool's short table: one fact per line, a label and a value. */
+/** The embedding provider's state, as provider-health.ts keeps it, with the re-probe interval (SMD-2890); restated here, as this file imports nothing. */
+export type ProviderFact = (
+  | { status: "unknown" }
+  | { status: "answering"; at: string }
+  | { status: "unreachable"; since: string; at: string; reason: string; detail: string }
+) & { reprobeS: number | null };
+
+/** The provider row's words (SMD-2890): a brain serving degraded says so, since when, why, and what still works. */
+export function providerWords(p: NonNullable<ServerFacts["provider"]>): string {
+  if (p.status === "unknown") return "not called yet";
+  if (p.status === "answering") return `answering (last answered ${p.at})`;
+  const reprobe = p.reprobeS === null ? "it is not re-probed, so a call that is answered clears this" : `re-probed every ${p.reprobeS} s`;
+  return `unreachable since ${p.since} (${p.detail}) — serving degraded: a capture lands without its vector, a search answers by exact matches; ${reprobe}`;
+}
+
 export function renderBrainInfo(info: BrainInfo): string {
   const row = (label: string, value: string) => `${`${label}:`.padEnd(16)} ${value}`;
   const tail = info.unreleased ? `; this tree adds ${info.unreleased[0] === info.unreleased[1] ? pad3(info.unreleased[0]) : `${pad3(info.unreleased[0])}–${pad3(info.unreleased[1])}`}, unreleased` : "";
@@ -1405,6 +1427,7 @@ export function renderBrainInfo(info: BrainInfo): string {
     row("Commit", info.commit),
     row("Store", `${info.store}${info.tier ? ` · tier ${info.tier}` : ""}`),
     row("Embedding", `${info.embedding.model} @ ${info.embedding.dim}`),
+    ...(info.provider ? [row("Provider", providerWords(info.provider))] : []),
   ];
   const db = info.database;
   if ("error" in db) {

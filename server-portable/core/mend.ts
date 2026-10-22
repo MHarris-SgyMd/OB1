@@ -287,6 +287,7 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
     outagesInARow = 0;
     if (answered) return;
     answered = true;
+    ctx.providerHealth.noteUp(); // the provider's state, as every embedding call tells it (SMD-2890)
     state.unanswered = 0;
     if (state.down) {
       state.down = false;
@@ -402,6 +403,7 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
     // OUTAGE_TICKS, the provider away.
     if (outages > 0 && !answered) {
       tick.down = lastOutage;
+      if (lastOutage) ctx.providerHealth.noteDown(lastOutage);
       if (freshOutages > 0 && ++state.unanswered >= OUTAGE_TICKS) state.down = true;
     }
     return tick;

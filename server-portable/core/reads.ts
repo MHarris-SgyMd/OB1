@@ -97,12 +97,16 @@ const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
     // As a row prints an endpoint: userinfo masked (SMD-2885).
     const base = shownBase(ctx.embedConfig().embeddings);
     console.error(`${opts.tool}: the embedding provider at ${base} was unavailable: ${down.detail}; answered by exact matches alone`);
+    // The provider's state, as every embedding call tells it (SMD-2890).
+    ctx.providerHealth.noteDown(down);
     const a = await answerWithoutVector(await ctx.store(), opts, { ...down, base });
     // Logged as arm `literal` (106): no arm a replay could take, since a
     // replay's provider answers; db/brain-compare.ts leaves it out of a plan.
     if (logged) await ctx.logSearch(principal, opts.tool, { query: opts.query, limit: opts.limit, threshold: opts.threshold ?? 0, recencyWeight: opts.recencyWeight ?? 0, filter: opts.filter, arm: "literal" }, a.rows);
     return { rows: a.rows, embedding: null, vectorFailed: a.vectorFailed, ...(a.facts ? { facts: a.facts } : {}) };
   }
+  // Answered: the provider's state says so (SMD-2890).
+  ctx.providerHealth.noteUp();
   // prefer_current (059, SMD-2255) is the same arm through another function,
   // logged as arm `current` so a replay takes the same one.
   const preferCurrent = opts.preferCurrent === true;
@@ -604,6 +608,7 @@ function serverFacts(ctx: Ctx): ServerFacts {
     store: storeKind(ctx.env()),
     tier: ctx.env().OB1_TIER || null,
     embedding: { model: cfg.embeddingModel, dim: cfg.embeddingDim },
+    provider: { ...ctx.providerHealth.state(), reprobeS: ctx.reprobeS },
   };
 }
 

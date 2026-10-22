@@ -37,6 +37,7 @@ import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
 import { mendIntervalFrom } from "./core/mend.ts";
+import { reprobeIntervalFrom } from "./provider-health.ts";
 import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
 import { enabledHooks, hookSecrets, loadPlugins, pluginNames, pluginProblem } from "./core/plugins.ts";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -766,7 +767,24 @@ async function resolveFirst(host: string): Promise<{ why: string; then: string }
   const code = String(outcome.code ?? "").replace(/^DNS_/, "");
   return { why: `the name does not resolve${code && code !== "ENOTFOUND" ? ` (${code})` : ""}`, then: "the first capture would fail on it in milliseconds" };
 }
-async function probeLocal(row: string, at: ProviderEndpoint, knob: string): Promise<void> {
+// The servers re-probe an embedding provider that does not answer (SMD-2890).
+const REPROBE = reprobeIntervalFrom(env.OB1_PROVIDER_REPROBE_INTERVAL);
+/**
+ * What the server does while this endpoint does not answer, for a row that
+ * warns rather than fails: a name that resolves with nothing answering is a
+ * provider not up yet — Ollama on the host started after the stack, the
+ * profile's model still loading — and the brain serves degraded meanwhile
+ * (SMD-2888, SMD-2891) rather than restart-looping on a failed preflight
+ * (SMD-2890). The embeddings row names the re-probe that ends it; the chat
+ * row's state is per capture, so it ends when a capture's call is answered.
+ */
+const DEGRADED = {
+  embeddings: (silent: boolean) =>
+    `the server starts degraded — until it answers, a capture lands without its vector${silent ? ` after waiting on it up to the request timeout (OB1_LLM_TIMEOUT)` : ""}, a search answers by exact matches, and its keyed /health and brain_info say the provider is unreachable; ${REPROBE.intervalS > 0 ? `it re-probes every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) and leaves degraded when it answers` : "OB1_PROVIDER_REPROBE_INTERVAL is off, so it leaves degraded on the first call that is answered"}`,
+  chat: (silent: boolean) =>
+    `the server starts — until it answers, a capture lands untagged (no topics, no type)${silent ? ` after waiting on it up to the request timeout (OB1_LLM_TIMEOUT)` : ""}; the first capture it answers is tagged again`,
+};
+async function probeLocal(row: string, at: ProviderEndpoint, knob: string, degraded: (silent: boolean) => string): Promise<void> {
   const started = performance.now();
   // Userinfo is not in the base (embed.ts takes it out, for the endpoint's
   // Basic header when there is no key) and this probe sends no credential, so
@@ -791,14 +809,26 @@ async function probeLocal(row: string, at: ProviderEndpoint, knob: string): Prom
     const host = hostnameOf(at.base);
     const lead = kind === "tls" ? `${shown} answers, but ${why}` : `nothing answers at ${shown} — ${why}`;
     const route = proxy ? `; ${proxy} is set, so this call and every one the server makes go through that proxy unless NO_PROXY names ${host}` : "";
+    // Resolved, dialled, and nothing there — refused, or silent — with no proxy
+    // to blame: a provider not up yet, which the server outlasts (SMD-2890).
+    // A name that does not resolve fails above: the runtime lacks it (a
+    // missing profile service, a host alias it does not write; SMD-1875). So
+    // do a reset, a TLS refusal and anything unclassified — something there
+    // answers wrongly, and will not start answering by itself — and a failure
+    // through a proxy, which is the route's before it is the provider's.
+    if ((kind === "refused" || kind === "silent") && !proxy) {
+      add(row, "warn", `nothing answers at ${shown} yet — ${why} (GET /models, ${LOCAL_PROBE_SECONDS} timeout); ${degraded(kind === "silent")}`,
+          `Start the provider; the server needs no restart. If nothing is meant to answer there: ${probeRemedy(at.base, knob)}`);
+      return;
+    }
     add(row, "fail", `${lead} (GET /models, ${LOCAL_PROBE_SECONDS} timeout)${route}; ${then}`,
         (proxy ? `Add ${host} to NO_PROXY (and no_proxy) for the server, or unset ${proxy} for it. Otherwise: ` : "") + (kind === "tls" ? TLS_REMEDY : probeRemedy(at.base, knob)));
   }
 }
-if (localEmbeddings) await probeLocal("provider endpoint", embEndpoint, "OB1_LLM_BASE_URL");
+if (localEmbeddings) await probeLocal("provider endpoint", embEndpoint, "OB1_LLM_BASE_URL", DEGRADED.embeddings);
 // A chat endpoint at the same base is the same socket: one probe. Its own
 // local base is its own row, so a down chat server fails by its own name.
-if (chatIsOwn && chatEndpoint.base !== embEndpoint.base && localChat) await probeLocal("chat endpoint", chatEndpoint, "OB1_CHAT_BASE_URL");
+if (chatIsOwn && chatEndpoint.base !== embEndpoint.base && localChat) await probeLocal("chat endpoint", chatEndpoint, "OB1_CHAT_BASE_URL", DEGRADED.chat);
 
 // ── Egress: what may leave the box (SMD-1903) ───────────────────────────────
 
@@ -934,6 +964,12 @@ if (env.OB1_VECTOR_MEND_INTERVAL !== undefined && env.OB1_VECTOR_MEND_INTERVAL !
   if (MEND.problem) add("vector mender", "warn", MEND.problem, "Set OB1_VECTOR_MEND_INTERVAL to whole seconds from 1 to 86400, or off, or unset it for 60.");
   else if (MEND.intervalS === 0) add("vector mender", "ok", "off (OB1_VECTOR_MEND_INTERVAL) — a thought saved without a vector keeps none until a db/reembed.ts pass gives it one");
   else add("vector mender", "ok", `every ${MEND.intervalS} s (OB1_VECTOR_MEND_INTERVAL) — the servers embed the thoughts saved without a vector once the provider answers and the egress gate allows`);
+}
+// The same for the re-probe (SMD-2890): only when set.
+if (env.OB1_PROVIDER_REPROBE_INTERVAL !== undefined && env.OB1_PROVIDER_REPROBE_INTERVAL !== "") {
+  if (REPROBE.problem) add("provider re-probe", "warn", REPROBE.problem, "Set OB1_PROVIDER_REPROBE_INTERVAL to whole seconds from 1 to 3600, or off, or unset it for 15.");
+  else if (REPROBE.intervalS === 0) add("provider re-probe", "ok", "off (OB1_PROVIDER_REPROBE_INTERVAL) — a server serving degraded leaves it only when a capture or search call is answered");
+  else add("provider re-probe", "ok", `every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) while a local embedding provider does not answer — the servers leave degraded when it does`);
 }
 
 // ── Access keys ──────────────────────────────────────────────────────────────
