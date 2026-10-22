@@ -1250,12 +1250,14 @@ sends to stable's collector is told apart by name.
 At start the server says where each signal goes — the variable, the
 endpoint's origin and the service's name (held to printable ASCII), so a
 credential in the URL stays out of the log — and why any goes nowhere. What is
-not sent — an export that failed, or what a batch's full queue dropped — is
+not sent — an export that failed, one its collector never finished answering,
+what a partial success rejected, or what a batch's full queue dropped — is
 said on stderr at most once a minute for each signal: how many (`spans`,
 `log records`, or `metric exports` — under cumulative temporality, the default,
 the next export carries what a failed one held), the origin and the kind (`HTTP 400`,
 `ECONNREFUSED`, `DEPTH_ZERO_SELF_SIGNED_CERT`, `timed out`,
-`retryable status, retries spent`, `too many exports at once`, `queue full`) — each kind with its count when a
+`retryable status, retries spent`, `too many exports at once`, `queue full`,
+`no answer in time`, `rejected by the collector`, `partly rejected by the collector`) — each kind with its count when a
 minute held more than one, five at most and the rest as `others` — never the
 error's message or a header. A count held inside a minute is said when the
 minute ends; at the stop, what is still unsaid is said, the stop's own
@@ -1266,8 +1268,20 @@ batched (`telemetry: 12 spans not sent to http://… (on its way or batched
 when the flush's 5000 ms ran out) (SMD-1849)`): a collector that is down is
 retried until then, and one that hangs waited on, so that is all that is
 known. Metrics count by export: a reading waiting behind an export on its
-way at the stop is not counted. What a collector answers 200 but rejects (an OTLP partial success)
-is not counted. A throw while the SDK loads leaves the server serving, said
+way at the stop is not counted. An export still unanswered at twice the
+exporter's own timeout (`OTEL_EXPORTER_OTLP_TIMEOUT`, 10 s, or the signal's
+own) plus 2 s is `no answer in time`, and no longer waited on: its batch moves
+on and a flush leaves it. That timeout is an idle one, which a collector
+trickling its answer more often than it never lets fire; an export the SDK
+retries, after a backoff or a `Retry-After`, ends inside twice it (SMD-2902
+PR 2). The SDK still holds such an export's request, in one of the 30 its
+exporter allows each signal at once, so under a trickle that never ends every
+export after 30 of them is `too many exports at once` until they end. What a
+collector answers 200 but rejects (an OTLP partial success) is `rejected by
+the collector`, by the count it gives — a metric export partly rejected as
+one, `partly rejected by the collector` — and counts that export as failed,
+so a stop whose own flush meets one says `not all sent`; the collector's own
+message is never said. A throw while the SDK loads leaves the server serving, said
 by the error's name alone. The stop sends what is still batched and the
 metrics' last reading, and waits for what is on its way, beside closing its
 pool, and says which on its own: `; telemetry sent`,

@@ -4316,7 +4316,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
 {
   const { beginRequest, cutOpenRequests, flushTelemetry, openRequestCount, planTelemetry, requestLine, startTelemetry, stopTelemetry, withToolSpan } = await import("./telemetry.ts");
   const { faultOf } = await import("./spans.ts");
-  const { batchOptions, batchSizes, flushesResult, flushSignal, logDrops, metricTimes, setUpTelemetry, watchExporter } = await import("./otel-setup.ts");
+  const { batchOptions, batchSizes, exportDeadlineFrom, exportTimeoutFrom, flushesResult, flushSignal, logDrops, metricTimes, partialBuckets, partialRejections, setUpTelemetry, watchExporter } = await import("./otel-setup.ts");
   const { ROOT_CONTEXT, metrics: metricsApi, trace: traceApi } = await import("@opentelemetry/api");
   const { InMemorySpanExporter } = await import("@opentelemetry/sdk-trace-base");
   const { AggregationTemporality, InMemoryMetricExporter } = await import("@opentelemetry/sdk-metrics");
@@ -4659,6 +4659,106 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   cutWatched.sayRest();
   assert(cutSaid.join(" / ") === "telemetry: 5 spans not sent to http://collector:4318 (on its way) (SMD-1849)" && cutWatched.mark().pending === 0,
     `a cut says the export on its way and what was held once, a second cut nothing, the export's later failure nothing (${cutSaid.join(" / ")})`);
+
+  // SMD-2902 PR 2: an export unanswered past its deadline — a collector that trickles its answer, which the exporter's
+  // idle timeout never cuts — is counted as not sent, `no answer in time`, and no longer waited on: idle() resolves, the
+  // stop's cut finds nothing, and its late answer counts nothing.
+  const lateSaid: string[] = [];
+  const lateDone: number[] = [];
+  let answerLate: (result: { code: number; error?: Error }) => void = () => {};
+  // Its inner flush never ends, as the SDK's queue does not while a trickle holds one export (review pass 1).
+  const overdue = watchExporter({ export: (_items: unknown, done: (result: { code: number; error?: Error }) => void) => { answerLate = done; }, shutdown: async () => {}, forceFlush: () => new Promise<void>(() => {}) } as never, { origin: "http://collector:4318", warn: (l) => lateSaid.push(l), deadlineMs: 40 });
+  overdue.export([1, 2, 3] as never, (r: { code: number }) => lateDone.push(r.code));
+  const beforeDeadline = overdue.mark().pending;
+  await Bun.sleep(90);
+  const lateIdle = await Promise.race([overdue.idle().then(() => "idle"), Bun.sleep(30).then(() => "waiting")]);
+  const lateFlush = await Promise.race([overdue.forceFlush().then(() => "flushed"), Bun.sleep(30).then(() => "waiting")]);
+  // Its late answer a failure: still nothing more said or counted (review pass 1's mutants).
+  answerLate({ code: 1, error: Object.assign(new Error("refused"), { code: "ECONNREFUSED" }) });
+  overdue.cut("on its way");
+  assert(beforeDeadline === 1 && lateSaid.join(" / ") === "telemetry: 3 spans not sent to http://collector:4318 (no answer in time) (SMD-1849)" && lateIdle === "idle" && lateFlush === "flushed"
+    && overdue.mark().pending === 0 && overdue.mark().failed === 1 && lateDone.join() === "1",
+    `an export past its deadline: counted once as no answer in time, the SDK handed one failure then, no longer waited on by idle() or a flush, its late answer and the stop's cut nothing more (${lateSaid.join(" / ")}; ${lateIdle}, ${lateFlush}; done ${lateDone.join()})`);
+  // The stop's cut first, then the deadline: counted once, by the cut; the deadline only lets it go (review pass 1).
+  const cutFirst: string[] = [];
+  const cutDone: number[] = [];
+  const cutThenLate = watchExporter({ export: () => {}, shutdown: async () => {} } as never, { origin: "http://collector:4318", warn: (l) => cutFirst.push(l), deadlineMs: 40 });
+  cutThenLate.export([1, 2] as never, (r: { code: number }) => cutDone.push(r.code));
+  cutThenLate.cut("on its way");
+  await Bun.sleep(90);
+  cutThenLate.sayRest();
+  assert(cutFirst.join(" / ") === "telemetry: 2 spans not sent to http://collector:4318 (on its way) (SMD-1849)" && cutThenLate.mark().pending === 0 && cutThenLate.mark().failed === 1 && cutDone.join() === "1",
+    `a cut, then the deadline: counted once by the cut, then let go — no longer pending, the SDK handed its failure (${cutFirst.join(" / ")}; ${JSON.stringify(cutThenLate.mark())})`);
+  // An export answered at once says nothing when its deadline would have passed: the answer clears it.
+  const promptSaid: string[] = [];
+  const answered = watchExporter({ export: (_items: unknown, done: (result: { code: number }) => void) => done({ code: 0 }), shutdown: async () => {} } as never, { origin: "http://collector:4318", warn: (l) => promptSaid.push(l), deadlineMs: 40 });
+  answered.export([1] as never, () => {});
+  await Bun.sleep(90);
+  answered.sayRest();
+  // The cut, then a partial success: counted once, by the cut, though the answer still counts the export failed.
+  const cutPartSaid: string[] = [];
+  let answerCutPart: (result: { code: number }) => void = () => {};
+  const cutPart = watchExporter({ export: (_items: unknown, done: (result: { code: number }) => void) => { answerCutPart = done; }, shutdown: async () => {} } as never, { origin: "http://collector:4318", warn: (l) => cutPartSaid.push(l), takeRejected: () => 2 });
+  cutPart.export([1, 2, 3] as never, () => {});
+  cutPart.cut("on its way");
+  answerCutPart({ code: 0 });
+  cutPart.sayRest();
+  // A partial success answering an export past its deadline is still that export's: the next export is not blamed.
+  const latePartSaid: string[] = [];
+  const latePartDone: ((result: { code: number }) => void)[] = [];
+  let latePartCount = 0;
+  const latePart = watchExporter({ export: (_items: unknown, done: (result: { code: number }) => void) => { latePartDone.push(done); }, shutdown: async () => {} } as never, {
+    origin: "http://collector:4318", warn: (l) => latePartSaid.push(l), deadlineMs: 40, takeRejected: () => { const n = latePartCount; latePartCount = 0; return n; },
+  });
+  latePart.export([1, 2] as never, () => {});
+  await Bun.sleep(90);
+  latePartCount = 3;
+  latePartDone[0]({ code: 0 });
+  latePart.export([1] as never, () => {});
+  latePartDone[1]({ code: 0 });
+  latePart.sayRest();
+  assert(promptSaid.length === 0 && answered.mark().failed === 0
+    && cutPartSaid.join(" / ") === "telemetry: 3 spans not sent to http://collector:4318 (on its way) (SMD-1849)" && cutPart.mark().failed === 1
+    && latePartSaid.join(" / ") === "telemetry: 2 spans not sent to http://collector:4318 (no answer in time) (SMD-1849)" && latePartCount === 0 && latePart.mark().failed === 1,
+    `answered at once, nothing at the deadline; a cut then a partial success, said once by the cut; a late partial success taken by its own export, the next not blamed (${[...promptSaid, ...cutPartSaid, ...latePartSaid].join(" / ")})`);
+  // The buckets between the diag line and the export: by signal, summed, taken once.
+  const buckets = partialBuckets();
+  buckets.add("Received Partial Success response:", ['{"rejectedSpans":"2"}']);
+  buckets.add("Received Partial Success response:", ['{"rejectedSpans":"1","rejectedLogRecords":"4"}']);
+  buckets.add("another line", ['{"rejectedSpans":"9"}']);
+  const takes = [buckets.take("traces"), buckets.take("traces"), buckets.take("logs"), buckets.take("metrics")];
+  assert(takes.join() === "3,0,4,0", `a signal's partial successes summed and taken once, another line nothing (${takes.join()})`);
+  // A partial success: what the collector rejected of an export is not sent, at most the export's own count; an
+  // answer that rejected nothing is sent.
+  let rejectNext = 0;
+  const partSaid: string[] = [];
+  const part = watchExporter({ export: (_items: unknown, done: (result: { code: number }) => void) => done({ code: 0 }), shutdown: async () => {} } as never, {
+    origin: "http://collector:4318", warn: (l) => partSaid.push(l), takeRejected: () => { const n = rejectNext; rejectNext = 0; return n; },
+  });
+  // A metric export, counted whole, is said as partly rejected.
+  const metricSaid: string[] = [];
+  const metricPart = watchExporter({ export: (_items: unknown, done: (result: { code: number }) => void) => done({ code: 0 }), shutdown: async () => {} } as never, {
+    origin: "http://collector:4318", warn: (l) => metricSaid.push(l), noun: ["metric export", "metric exports"], takeRejected: () => 4, rejectedKind: "partly rejected by the collector",
+  }, () => 1);
+  metricPart.export({} as never, () => {});
+  rejectNext = 2;
+  part.export([1, 2, 3, 4, 5] as never, () => {});
+  part.export([1] as never, () => {});
+  rejectNext = 9;
+  part.export([1, 2] as never, () => {});
+  part.sayRest();
+  assert(partSaid.join(" / ") === "telemetry: 2 spans not sent to http://collector:4318 (rejected by the collector) (SMD-1849) / telemetry: 2 spans not sent to http://collector:4318 (rejected by the collector) (SMD-1849)" && part.mark().failed === 2,
+    `a partial success's rejected items are not sent, at most the export's own; one that rejected nothing is sent (${partSaid.join(" / ")}; failed ${part.mark().failed})`);
+  assert(metricSaid.join() === "telemetry: 1 metric export not sent to http://collector:4318 (partly rejected by the collector) (SMD-1849)", `a metric export partly rejected is one, said as partly rejected (${metricSaid.join()})`);
+  // The diag line's counts by signal, never its message; and the exporter's timeout read as the SDK reads it.
+  const PS = "Received Partial Success response:";
+  const pr = (message: string, arg: unknown) => JSON.stringify(partialRejections(message, [arg]));
+  const prCases = [pr(PS, '{"rejectedSpans":"3","errorMessage":"over quota"}'), pr(PS, '{"rejectedDataPoints":2}'), pr(PS, '{"rejectedLogRecords":"0","errorMessage":"a warning"}'), pr("another line", '{"rejectedSpans":"3"}'), pr(PS, "not json"), pr(PS, '{"rejectedSpans":"-4"}')];
+  const et = (env: Record<string, string>, signal: "TRACES" | "METRICS" | "LOGS") => exportTimeoutFrom(env, signal);
+  const edCases = [exportDeadlineFrom({}, "TRACES"), exportDeadlineFrom({ OTEL_EXPORTER_OTLP_TIMEOUT: "1000" }, "LOGS"), exportDeadlineFrom({ OTEL_EXPORTER_OTLP_TIMEOUT: "3000000000" }, "METRICS")];
+  const etCases = [et({}, "TRACES"), et({ OTEL_EXPORTER_OTLP_TIMEOUT: "3000" }, "LOGS"), et({ OTEL_EXPORTER_OTLP_TRACES_TIMEOUT: "500", OTEL_EXPORTER_OTLP_TIMEOUT: "3000" }, "TRACES"), et({ OTEL_EXPORTER_OTLP_TIMEOUT: "-1" }, "METRICS"), et({ OTEL_EXPORTER_OTLP_TIMEOUT: "soon" }, "METRICS"), et({ OTEL_EXPORTER_OTLP_METRICS_TIMEOUT: " " }, "METRICS")];
+  assert(prCases.join(" ") === '{"traces":3} {"metrics":2} {} {} {} {}' && etCases.join(" ") === "10000 3000 500 10000 10000 10000" && edCases.join(" ") === "22000 4000 2147483647",
+    `a partial success's counts by signal, a 0 none, another line or a body that is not JSON nothing; the exporter's timeout its signal's, else the shared, else 10 s; the deadline twice that plus 2 s, at most a timer's longest (${prCases.join(" ")}; ${etCases.join(" ")}; ${edCases.join(" ")})`);
 
   // The sizes and times read here, as the SDK reads none of them for log records and metrics.
   const times = [metricTimes(undefined, undefined), metricTimes("5000", undefined), metricTimes("500", "100"), metricTimes("10000", "20000"), metricTimes("3000000000", undefined)];
