@@ -80,8 +80,8 @@ x-hook-env: &hook-env
   OB1_HOOK_SECRETS: ${OB1_HOOK_SECRETS:-}
 
 # The servers' OpenTelemetry settings (SMD-1849), merged by the MCP server and
-# the REST core alone: the workers send no telemetry, nor `server`, n8n's, which
-# is off the mesh the collector is on (SMD-2287). Each is the SDK's own
+# the REST core alone: the workers send no telemetry, nor `server`, which is
+# off the mesh the collector is on (SMD-2287). Each is the SDK's own
 # variable, passed as deploy/.env gives it; unset, it is empty, which the
 # servers read as unset (measured: no line, no change), so nothing is sent until
 # OTEL_EXPORTER_OTLP_ENDPOINT names a collector — the observability profile's
@@ -859,8 +859,7 @@ services:
     environment:
       <<: [*server-env, *plugin-env]
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
-    # No `ports:`, and no route through the proxy since SMD-2532: n8n reaches
-    # it as `server:8000` on `egress`.
+    # No `ports:`, and no route through the proxy since SMD-2532.
     depends_on:
       postgres:
         condition: service_healthy
@@ -892,12 +891,13 @@ services:
       - "host.docker.internal:host-gateway"
     # `data`, where it reaches Postgres, and `egress`, where it reaches the
     # model providers (the stack's Ollama and Jev by name, a host or hosted
-    # one outward) and n8n reaches it. Not the mesh: nothing routes to it
-    # since SMD-2532 closed the root route, and /mcp is the `mcp` service's
-    # below (SMD-2287 PR 5b), on the mesh alone, as the ADR has it. It serves
-    # n8n until it retires (PR 6, which moves n8n to the MCP server). No
-    # dns_search here, unlike the proxy: an operator's model endpoint may be a
-    # short name their resolver completes.
+    # one outward). Not the mesh: nothing routes to it since SMD-2532 closed
+    # the root route, and /mcp is the `mcp` service's below (SMD-2287 PR 5b),
+    # on the mesh alone, as the ADR has it. No shipped template calls it: n8n's
+    # brain calls go to the REST core (SMD-2295), and the orchestration eval's
+    # workflows still call it until SMD-2295's second PR. It retires in
+    # SMD-2287 PR 6. No dns_search here, unlike the proxy: an operator's model
+    # endpoint may be a short name their resolver completes.
     networks:
       data: {}
       egress: {}
@@ -1129,7 +1129,7 @@ services:
     # documented `up -d --build server proxy forwarder` recreates both on the
     # server's new image rather than leaving them on the old one (SMD-2284
     # review pass 1; SMD-2287). Not after `server`, which nothing here
-    # routes to since SMD-2532: n8n's alone.
+    # routes to since SMD-2532.
     depends_on:
       api:
         condition: service_started
@@ -1576,7 +1576,8 @@ services:
   # The orchestration tool (SMD-2210; docs/orchestration-tool.md, SMD-1863's
   # decision). Optional — `--profile orchestration`; a brain plus an AI client
   # never runs it. n8n runs workflows (a schedule, a trigger, a cursor), which
-  # reach the brain only through its MCP endpoint with a capture-scope key.
+  # reach the brain only through the REST core, `api:8000`, with a
+  # capture-scope key (SMD-2295, under SMD-2282's decision 1).
   # OB1's part is the provisioning and the templates in deploy/orchestration/;
   # the image is n8n's, referenced and never vendored.
   #
@@ -1639,9 +1640,9 @@ services:
       # kit's egress probe records what the container still tries to reach
       # (evals/README.md). With these alone, the MCP registry module fetched
       # https://api.n8n.io/api/mcp-servers at boot and every 8 hours
-      # (measured). It lists MCP servers for the editor's catalogue, and the
-      # stock MCP Client node the templates use does not need it, so it is
-      # off.
+      # (measured). It lists MCP servers for the editor's catalogue, which no
+      # template needs (the stock MCP nodes, the eval kit's included, do
+      # not), so it is off.
       N8N_DISABLED_MODULES: mcp-registry
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
@@ -1667,10 +1668,11 @@ services:
       # the webhooks and the MCP endpoint, behind the owner's password and the
       # keys provisioning stores. No TLS here (SMD-1846 is the one origin).
       - "${N8N_BIND:-127.0.0.1}:${N8N_PORT:-5678}:5678"
-    # `egress` alone: the vendors its workflows name, and the brain as
-    # `server:8000` and the import runner as `orchestration-runner:8090`. Not
-    # the mesh, where every backend the proxy reaches is (a canary of another
-    # project joined it from SMD-2294 to SMD-2874, its server `server` too).
+    # `egress` alone: the vendors its workflows name, the brain's REST core as
+    # `api:8000` (SMD-2295) and the import runner as
+    # `orchestration-runner:8090`. Not the mesh, where every backend the proxy
+    # reaches is (a canary of another project joined it from SMD-2294 to
+    # SMD-2874, its server `server` too).
     # `egress` is this project's own.
     networks: [egress]
     volumes:
