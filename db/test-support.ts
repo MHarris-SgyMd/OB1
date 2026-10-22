@@ -211,6 +211,8 @@ const FUNCTIONS = [
   "ob1_source_gate_truncate()",
   "ob1_source_gate_reconcile(uuid[])",
   "ob1_rebuild_source_gate()",
+  "ob1_rebuild_source_gate_for_types(text[])",
+  "ob1_refresh_set_readers()",
   "consolidation_pool(text)",
   "stale_entities(interval, int)",
   // 032 (SMD-1323)
@@ -344,6 +346,8 @@ const FUNCTIONS = [
   "ob1_lapse_walk(uuid, uuid)",
   // 104 (SMD-3046): the walk with its links, which the lapse locks.
   "ob1_lapse_tree(uuid, uuid)",
+  // 107 (SMD-3036): whether a side's walks fit the listing's cap.
+  "ob1_listing_walk_fits(uuid, uuid)",
 ];
 
 /**

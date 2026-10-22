@@ -376,7 +376,7 @@ OPENROUTER_API_KEY='sk-or-v1-your-openrouter-key' \
 bun integrations/telegram-capture/index.ts
 ```
 
-Bun prints its start line. Telegram calls this server from its side, so it needs an HTTPS URL that reaches port 8789 — the same TLS proxy or tunnel that fronts the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)). Authentication is handled inside the server by the secret-token check from Step 4, so the URL carries no key.
+Bun prints its start line. Telegram calls this server from its side, so it needs an HTTPS URL that reaches port 8789 — the same TLS proxy or tunnel that fronts the compose stack ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)). Authentication is handled inside the server by the secret-token check from Step 4, so the URL carries no key.
 
 Your capture URL will look like:
 

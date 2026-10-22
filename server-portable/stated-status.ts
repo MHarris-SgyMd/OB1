@@ -151,7 +151,7 @@ export function movedAmong(hits: readonly { id: string; content: string; created
  * ticket row — even one stamped agent or ingested — so printed beside another
  * thought's `By:` line, past the caller's min_trust, it would be words no one
  * vouched for; an allowlist leaves nothing to clean (the maintainer's call,
- * review pass 2). The seven are node_lifecycle_types() (058; `duplicate` since
+ * review pass 2). They are node_lifecycle_types() (058; `duplicate` since
  * 105, SMD-2935), the only types 095 returns; a custom state reads as its
  * type's word ("In Review" as In Progress). The REST answer keeps each
  * status's name for a caller that wants it.

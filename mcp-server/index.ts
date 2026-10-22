@@ -1,6 +1,6 @@
 // The MCP server's entry (SMD-2287): `bun index.ts` serves app.ts on PORT —
 // as mcp.ob1.internal on the stack's mesh and at /mcp through the proxy, as
-// compose.yaml's `mcp` service (PR 5b; server-portable's, n8n's alone, routed nowhere).
+// compose.yaml's `mcp` service (PR 5b; server-portable's is routed nowhere, and no shipped template calls it).
 // It calls the REST core at OB1_REST_URL with OB1_FORWARDER_KEY — a
 // forward-scope key MCP_ACCESS_KEYS holds (`bun keygen.ts --name <name> --scope forward`) —
 // beside each caller's key, and reads OB1_PLUGINS as the REST core does, for
@@ -16,7 +16,7 @@ import { createRestClient } from "../rest-client/index.ts";
 import { loadPlugins, type LoadedPlugin } from "../server-portable/core/plugins.ts";
 import { routable } from "../server-portable/auth.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "../server-portable/shutdown.ts";
-import { cutOpenRequests, flushTelemetry, knowTools, outgoingTraceparent, startTelemetry } from "../server-portable/telemetry.ts";
+import { cutOpenRequests, cutTelemetry, flushTelemetry, knowTools, outgoingTraceparent, startTelemetry } from "../server-portable/telemetry.ts";
 import { createMcpApp, edgeFrom, REST_TIMEOUT_MS } from "./app.ts";
 import { createExchanger, exchangeSettings } from "./exchange.ts";
 import { originProblem } from "../server-portable/oauth-edge.ts";
@@ -26,7 +26,7 @@ export const DEFAULT_REST_URL = "http://api.ob1.internal.:8000";
 
 /**
  * The service its signals are named for, unless OTEL_SERVICE_NAME says: apart
- * from `index.ts`'s `open-brain` while both run (`server`, n8n's, until PR 6),
+ * from `index.ts`'s `open-brain` while both run (`server`, until SMD-2287 PR 6),
  * and from the REST core's `open-brain-api`.
  */
 export const SERVICE_NAME = "open-brain-mcp";
@@ -92,11 +92,14 @@ if (import.meta.main) {
   // (a client gone mid-call). No store to close here — the REST core holds it — so the stop says no pool was opened.
   drainOnSignal({
     drainBoundMs: grace.drainBoundMs,
+    graceMs: grace.graceS * 1000,
     server: () => bunServer,
     calls: toolCalls,
     close: async () => false,
-    // The telemetry still batched goes under the stop's bound, said on its own (index.ts's).
+    // The telemetry still batched goes under a bound of its own, said on its own; cut short, what each signal still
+    // held is said by count (index.ts's, SMD-2902).
     flush: flushTelemetry,
+    unsent: cutTelemetry,
     // A record still open — a mirror whose client left while it waits — ends before the exit, on every path (index.ts's).
     endOpen: cutOpenRequests,
     onCut: () => {

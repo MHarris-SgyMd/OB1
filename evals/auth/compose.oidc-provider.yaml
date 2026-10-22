@@ -18,6 +18,7 @@ services:
     image: ob1-auth:poc
     pull_policy: build
     restart: "no"
+    init: true
     command: ["bun", "server.ts"]
     environment:
       OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:?run bun evals/eval-auth.ts --up}
