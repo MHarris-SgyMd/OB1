@@ -808,31 +808,31 @@ jobs:
         run: bun install --frozen-lockfile
 
       # Two suites side by side, each against its own database (SMD-2219), on
-      # the second service, pair-postgres, which they have to themselves: started
-      # here and run in the background while the job's other suites run on
-      # ob1test (SMD-3195). They were the job's last long step, a median 179 s
-      # after 106 s of suites, on the run's critical path. test-upgrade.ts applies
-      # migrations INCREMENTALLY, onto a database that already holds data — the
-      # one situation every other suite avoids by resetting first, and the only
-      # one a real deployment is ever in; most of its time is three waits on the
-      # migrator's 10 s lock_timeout. test-preflight.ts is the deploy gate:
-      # without it a misconfigured server starts, answers the MCP handshake,
-      # passes every HTTP liveness probe, and fails only when a user captures
-      # their first thought; its time is its preflight runs, a subprocess each.
-      # A Postgres of their own, not databases beside ob1test: a cluster's
-      # databases share its transaction horizon, and an open transaction of
-      # theirs hid test-plugins-sql.ts's new index from the planner (review pass
-      # 1, 9 runs in 30). The two connect as one role to one cluster, so what
-      # the cluster shares — a role and its settings, pg_locks,
-      # pg_stat_activity — is scoped in each to its own database, or named for
-      # the suite; both headers say so, and a fixture added to either keeps to
-      # it. Each leg runs in a subshell that outlives this step (the runner ends
-      # a job's leftover processes only at its end) and writes its log, then its
-      # exit code by a rename, so the last step never reads half of one;
-      # `|| rc=$?` keeps -e from ending the subshell before it writes the code.
-      # Each has its own time limit (a hang ends as 124, or 137 when TERM is
-      # ignored). The last step, "Incremental upgrade and preflight (started at
-      # the job's start)", waits on both and prints them.
+      # the second service, pair-postgres, which they have to themselves:
+      # started here and run in the background while the job's other suites run
+      # on ob1test (SMD-3195). They were the job's last long step, a median 179
+      # s after 106 s of suites, on the run's critical path. test-upgrade.ts
+      # applies migrations INCREMENTALLY, onto a database that already holds
+      # data — the one situation every other suite avoids by resetting first,
+      # and the only one a real deployment is ever in; most of its time is three
+      # waits on the migrator's 10 s lock_timeout. test-preflight.ts is the
+      # deploy gate: without it a misconfigured server starts, answers the MCP
+      # handshake, passes every HTTP liveness probe, and fails only when a user
+      # captures their first thought; its time is its preflight runs, a
+      # subprocess each. A Postgres of their own, not databases beside ob1test:
+      # a cluster's databases share its transaction horizon, and an open
+      # transaction of theirs hid test-plugins-sql.ts's new index from the
+      # planner (review pass 1, 9 runs in 30). The two connect as one role to
+      # one cluster, so what the cluster shares — a role and its settings,
+      # pg_locks, pg_stat_activity — is scoped in each to its own database, or
+      # named for the suite; both headers say so, and a fixture added to either
+      # keeps to it. Each leg runs in a subshell that outlives this step (the
+      # runner ends a job's leftover processes only at its end) and writes its
+      # log, then its exit code by a rename, so the last step never reads half
+      # of one; `|| rc=$?` keeps -e from ending the subshell before it writes
+      # the code. Each has its own time limit (a hang ends as 124, or 137 when
+      # TERM is ignored). The last step, "Incremental upgrade and preflight
+      # (started at the job's start)", waits on both and prints them.
       - name: Start the incremental upgrade and preflight, in the background
         working-directory: db
         run: |
