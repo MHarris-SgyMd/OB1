@@ -25,8 +25,12 @@ RUN bun install --frozen-lockfile --production
 # install (all build tools) stays behind and the image carries the build
 # alone. It imports the REST client and the auth switch's rule from beside it,
 # as in a checkout, so both are copied in first; its type-only imports of
-# server-portable/ are erased by the build.
-FROM oven/bun:1.4.3-alpine AS dashboard-build
+# server-portable/ are erased by the build. On the builder's own platform: the
+# stage runs JavaScript (svelte-kit sync, vite build), which crashed Bun under
+# QEMU when the release cross-builds the other architecture, and then hung
+# (review pass 2, an amd64 build on arm64: cancelled at 843 s); its output is
+# plain JS and CSS, the same on either, which the final stage copies in.
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.3-alpine AS dashboard-build
 WORKDIR /app/rest-client
 COPY rest-client/package.json rest-client/bun.lock ./
 RUN bun install --frozen-lockfile --production

@@ -505,7 +505,7 @@ paths today:
 | `/api` and everything under it | the proxy's bodiless 404 by default. With `compose.api-public.yaml` named (below), `api` — the REST core, as `api.ob1.internal` on the `mesh` network — with `/api` stripped: `/api/v1/stats` reaches it as `/v1/stats`, and the links it answers carry `/api` back |
 | `/hooks` and everything under it | the proxy's bodiless 404 by default. With `compose.hooks-public.yaml` named ("Plugins' webhooks" below), `api` — the REST core — path kept: `/hooks/<plugin>/<name>` is a plugin's inbound webhook, served only for a plugin `OB1_HOOKS` names (SMD-2310) |
 | `/mcp` and everything under it | `mcp` — the MCP server built on the REST core (SMD-2287), as `mcp.ob1.internal` on the `mesh` network: the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is its 405. Every tool is a call on the REST core, the caller's key beside this server's own forward key |
-| `/dashboard` and everything under it | `app` — the operator GUI (SMD-2280), as `app.ob1.internal` on the `mesh` network, path kept: sign in with a read or write access key, then the brain's counts and newest thoughts, its status (`brain_info`) and any thought, each read from the REST core under that key. Key sign-in is off while `COMPOSE_PROFILES` names `auth` (`dashboard/README.md`) |
+| `/dashboard` and everything under it | `app` — the operator GUI (SMD-2280), as `app.ob1.internal` on the `mesh` network, path kept: sign in with a read or write access key, then the brain's counts and newest thoughts, its status (`brain_info`) and any thought, each read from the REST core under that key. Key sign-in is off while `COMPOSE_PROFILES` names `auth` (`dashboard/README.md`). While `app` is stopped or starting, the proxy's own 502 |
 | `/grafana` and everything under it | the proxy's bodiless 404 by default. With `compose.grafana-public.yaml` named ("The observability profile" below), `lgtm` (`--profile observability`), as `lgtm.ob1.internal` on the `mesh` network — its Grafana, serving from `/grafana`, path kept, behind its own sign-in. With the profile off, or the container stopped or still starting, the proxy's bodiless 404 too, and so is a 502 of Grafana's own (a data source it cannot reach) |
 | every path starting with `/canary` or `/working`, in any letter case | the proxy's own 404 (SMD-2874: a canary or a working tier is a brain of its own on its own port, and this stack routes none; from SMD-2294 to v2.0.0 a tier answered at `/canary/mcp` here, deprecated by SMD-3057 for a release before it went). No router matches them, so a client still given a tier's URL here reaches nothing; until v2.0.0 `tier-off` kept them off the legacy route, and went with it (SMD-2532) |
 | `GET`/`HEAD`/`OPTIONS /health` | `mcp` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key; OPTIONS for a browser's CORS preflight |
@@ -936,7 +936,10 @@ OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --b
 
 The REST core, the MCP server at `/mcp` and the operator GUI at `/dashboard`
 run the server's image by name, and the proxy depends on all three, so this
-rebuilds and recreates them too; add
+rebuilds and recreates them too. The first such `up` after the GUI arrived
+(SMD-2280) also creates `app` and recreates the proxy, its route table having
+changed, so the whole origin answers nothing until the servers are back; later
+upgrades leave the proxy running. Add
 `-f compose.api-public.yaml` where `/api` is on.
 
 `proxy` and `forwarder` named beside `server`: the proxy waits on the server
@@ -2602,7 +2605,10 @@ setting, each with the value compose read, quoted afresh, but for these:
 - **stable's port, address, tier and profiles**: the file holds the canary's
   own, `SERVER_PORT` its `--port`, `SERVER_BIND="127.0.0.1"`,
   `OB1_TIER="canary"` and `COMPOSE_PROFILES=""` (SMD-2874), which canary.sh
-  also hands compose in the shell on every call;
+  also hands compose in the shell on every call, with an empty
+  `OB1_PUBLIC_ORIGIN`, which the file never carries: the canary is loopback
+  alone, and stable's origin would have its operator GUI refuse sign-in as
+  cross-site (SMD-2280);
 - **nothing else**: the file is kept only if compose reads every value in it
   as stable's file reads it, less those, and no value carries stable's
   database password (a `DATABASE_URL` holding it, say, is refused, naming the

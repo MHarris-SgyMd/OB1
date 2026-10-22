@@ -20,7 +20,10 @@ function link(value: string | undefined): string | null {
 	if (given.startsWith('/')) return given.startsWith('//') ? null : given;
 	try {
 		const url = new URL(given);
-		return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+		if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+		// GRAFANA_ORIGIN given with a trailing slash renders `…//grafana/`; Grafana's root URL drops it (review pass 2).
+		url.pathname = url.pathname.replace(/^\/{2,}/, '/');
+		return url.href;
 	} catch {
 		return null;
 	}

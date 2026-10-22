@@ -21,8 +21,10 @@ export const MAX_SESSIONS = 1000;
 /**
  * The most one key holds: a sign-in past it ends that key's oldest session, not
  * another key's, so one key signed in over and over cannot push every other
- * visitor out of MAX_SESSIONS (review pass 1). Only a flood under fifty keys
- * reaches the global cap.
+ * visitor out of MAX_SESSIONS (review pass 1). Only sessions under fifty keys or
+ * more reach the global cap. Two sign-ins posted at once over one cookie each
+ * open a session, and the browser keeps one: the other is bounded by this cap
+ * and the day, not by sign-out (review pass 2, accepted).
  */
 export const MAX_PER_KEY = 20;
 

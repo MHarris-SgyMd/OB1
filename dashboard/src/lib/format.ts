@@ -10,7 +10,10 @@
 export function when(iso: string | null | undefined): string {
 	if (!iso) return '—';
 	const d = new Date(iso);
-	return Number.isNaN(d.getTime()) ? iso : `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+	if (Number.isNaN(d.getTime())) return iso;
+	const s = d.toISOString();
+	// A year outside 0000–9999 is written `+010000-…`, which the cut below would garble: shown as given (review pass 2).
+	return /^\d{4}-/.test(s) ? `${s.slice(0, 16).replace('T', ' ')} UTC` : iso;
 }
 
 /** A count map's largest entries, largest first, ties by name. */

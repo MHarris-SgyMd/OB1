@@ -90,6 +90,9 @@ jobs:
   release:
     name: Release (images, stack from them, notes)
     runs-on: ubuntu-24.04
+    # A hung build ends here, not at GitHub's six hours (SMD-2280 review pass 2:
+    # a cross-built stage that ran JavaScript under QEMU hung).
+    timeout-minutes: 60
     permissions:
       contents: write   # gh release create
       packages: write   # GHCR

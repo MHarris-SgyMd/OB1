@@ -31,8 +31,10 @@ const BASE = flag("url")?.replace(/\/$/, "");
 const WRITE_KEY = flag("key");
 const READ_KEY = flag("read-key");
 const CAPTURE_KEY = flag("capture-key");
+/** Fail, not skip, when the overview lists no thought: CI captures one first, so its thought page is always driven. */
+const REQUIRE_THOUGHT = args.includes("--require-thought");
 if (!BASE || !WRITE_KEY) {
-  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>]");
+  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought]");
   process.exit(2);
 }
 const ORIGIN = new URL(BASE).origin;
@@ -150,6 +152,8 @@ let thoughtId = "";
   assert(total !== undefined, `…with the brain's total from the REST core (${total ?? "none"})`);
   assert(home.headers.get("cache-control") === "no-store" && home.headers.get("referrer-policy") === "same-origin", "…no-store, so no copy is kept, and Referrer-Policy same-origin");
   thoughtId = /href="\/dashboard\/thoughts\/([0-9a-f-]{36})"/.exec(home.html)?.[1] ?? "";
+  // The thought links are not preloaded on hover: each open is a `fetch`, which the core logs as a click-through (review pass 1).
+  if (thoughtId) assert(/data-testid="recent"[^>]*data-sveltekit-preload-data="off"/.test(home.html), "…its thought links not preloaded on hover (each open is a logged fetch)");
 
   const status = await get("/status");
   const version = /data-testid="version">([^<]+)</.exec(status.html)?.[1];
@@ -159,9 +163,18 @@ let thoughtId = "";
   if (thoughtId) {
     const t = await get(`/thoughts/${thoughtId}`);
     assert(t.status === 200 && t.html.includes('data-testid="text"') && t.html.includes(thoughtId), `a thought's page renders its text and id (${t.status})`);
+  } else if (REQUIRE_THOUGHT) {
+    bad("the overview lists no thought, and --require-thought asks for one: the thought page went undriven");
   } else {
     console.log("  ·  the brain holds no thought: the thought page's arm skipped");
   }
+
+  // A wrong key posted from a tab still signed in is refused in words, and the session it came from stands (review pass 2).
+  const held = cookie;
+  const stray = await signIn("not-a-key");
+  cookie = held;
+  const still = await get("/status");
+  assert(stray.status === 401 && stray.html.includes("The brain refused that access key") && still.status === 200, `a wrong key posted while signed in says it was refused (${stray.status}) and the session stands (${still.status})`);
 
   // The key reaches no page, no header, no script the pages load — the
   // entries SvelteKit imports inline, and every module they import in turn —
@@ -200,6 +213,27 @@ let thoughtId = "";
   const fresh = await get("/");
   assert(first !== second && toSignin(stale) && fresh.status === 200, `a second sign-in ends the first session on the server (first ${stale.status}, second ${fresh.status})`);
   await signOut();
+  cookie = "";
+
+  // One key holds 20 sessions at most: 21 sign-ins with it end its first, keep its second, and leave another key's
+  // session alone (session.ts MAX_PER_KEY; review pass 2: nothing held it).
+  let other = "";
+  if (READ_KEY) {
+    await signIn(READ_KEY);
+    other = cookie;
+    cookie = "";
+  }
+  const ids: string[] = [];
+  for (let i = 0; i < 21; i++) {
+    await signIn(WRITE_KEY);
+    ids.push(cookie);
+    cookie = "";
+  }
+  const statusOf = async (c: string) => { cookie = c; const r = await get("/"); cookie = ""; return r.status; };
+  const [oldest, next, newest] = [await statusOf(ids[0]), await statusOf(ids[1]), await statusOf(ids[20])];
+  const others = other ? await statusOf(other) : 200;
+  assert(oldest === 303 && next === 200 && newest === 200 && others === 200, `21 sign-ins with one key end its oldest session alone, not another key's (oldest ${oldest}, second ${next}, newest ${newest}, other key's ${other ? others : "not tried"})`);
+  for (const c of [...ids.slice(1), other].filter(Boolean)) { cookie = c; await signOut(); }
   cookie = "";
 }
 

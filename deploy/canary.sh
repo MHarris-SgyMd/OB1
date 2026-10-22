@@ -373,7 +373,7 @@ canary_compose() {
   [ ! -f "$CANARY_ENV" ] || env="$CANARY_ENV"
   [ -n "$OWN_KEYS" ] || grep -qE "^[[:space:]]*(export[[:space:]]+)?OB1_FORWARDER_KEY=([^[:space:]#\"']|\"[^\"]|'[^'])" "$env" 2>/dev/null \
     || fwd=(OB1_FORWARDER_KEY=placeholder-until-canary-sh-mints-one)
-  env ${fwd[@]+"${fwd[@]}"} SERVER_PORT="${PORT:-8000}" SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES="" OB1_GIT_SHA="$GIT_SHA" \
+  env ${fwd[@]+"${fwd[@]}"} SERVER_PORT="${PORT:-8000}" SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES="" OB1_PUBLIC_ORIGIN="" OB1_GIT_SHA="$GIT_SHA" \
     "$RUNTIME" compose -p "$CANARY" --env-file "$env" -f "$HERE/compose.yaml" "$@"
 }
 
@@ -396,8 +396,11 @@ canary_compose() {
 CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_[A-Z0-9_]*|OB1_WORKER_KEY|LINEAR_[A-Z0-9_]*|GRAFANA_[A-Z0-9_]*|OB1_MONITOR_[A-Z0-9_]*|MCP_ACCESS_KEYS|MCP_ACCESS_KEY|OB1_FORWARDER_KEY|OB1_HOOK_SECRETS|OB1_PLUGIN_DB_PASSWORD|OB1_CANARY_KEY'
 # What canary_compose sets in the shell for the canary, whatever the file says,
 # so a difference there is no drift. The file is written with the canary's own
-# values of these (env_file write), OB1_GIT_SHA aside, a build's.
-CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_GIT_SHA'
+# values of these (env_file write), OB1_GIT_SHA aside, a build's, and
+# OB1_PUBLIC_ORIGIN, which the canary never has: it is loopback alone and never
+# configured, and stable's origin would have its operator GUI refuse every
+# sign-in on the canary's port as cross-site (SMD-2280 review pass 2).
+CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_PUBLIC_ORIGIN|OB1_GIT_SHA'
 
 # Env files as compose reads them, by value (review pass 2: copying stable's
 # file line by line, less the left-out lines, kept a left-out value's
@@ -1417,9 +1420,9 @@ if ! ready; then
   canary_compose logs --no-color --tail 10 proxy forwarder >&2 || true
   # restart: unless-stopped would otherwise restart them without end (hundreds
   # of times a minute under podman), and a registered connector points at them.
-  canary_compose stop server api mcp >/dev/null 2>&1 || true
+  canary_compose stop server api mcp app >/dev/null 2>&1 || true
   ADVISED=1
-  echo "the canary's server, REST core and MCP server are stopped; fix the cause above and re-run $RERUN.$SLEEP_SAID" >&2
+  echo "the canary's server, REST core, MCP server and operator GUI are stopped; fix the cause above and re-run $RERUN.$SLEEP_SAID" >&2
   exit 1
 fi
 

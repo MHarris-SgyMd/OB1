@@ -5,8 +5,10 @@ import { codeOf, rest } from '$lib/server/rest';
 import { closeSession, cookieOptions, openSession, SESSION_COOKIE, SESSION_MAX_AGE } from '$lib/server/session';
 import { FIRST_READ, keySignInOffered, whoAmI } from '$lib/server/signin';
 
-export const load: PageServerLoad = async ({ locals }) => {
-	if (locals.session) throw redirect(303, HOME);
+export const load: PageServerLoad = async ({ locals, request }) => {
+	// Signed in, a visit goes home; a post's own answer stands, so a refused key
+	// sent from a tab still signed in says why (review pass 2).
+	if (locals.session && request.method === 'GET') throw redirect(303, HOME);
 	return { offered: keySignInOffered() };
 };
 

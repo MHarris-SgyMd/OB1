@@ -130,8 +130,11 @@ bun smoke.ts --url http://127.0.0.1:8000/dashboard --key <write> --read-key <rea
 
 It drives the GUI through the stack's proxy as a browser would: the sign-in wall, a
 wrong and a capture-only key refused, a cookie the server never issued refused, a
-sign-in posted from another origin or with `Origin: null` refused, the cookie's and
-the pages' headers, each page rendered from the REST core, no page, header, script or
-cookie holding the key, and sign-out and a second sign-in each ending a session on
-the server. CI runs it in the full-stack job, before that job configures the
-authorization server; after it, the job holds key sign-in off.
+sign-in posted from another origin or with `Origin: null` refused, a wrong key from a
+signed-in tab refused in words, the cookie's and the pages' headers, each page rendered
+from the REST core, no page, header, script or cookie holding the key, sign-out and a
+second sign-in each ending a session on the server, and one key's 21st sign-in ending
+its own oldest session. `--require-thought` fails rather than skips the thought page
+when the overview lists none. CI captures a thought and runs it in the full-stack job,
+before that job configures the authorization server; after it, the job holds key
+sign-in off.
