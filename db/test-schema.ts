@@ -5924,7 +5924,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   assert(whole.resolution === null && whole.by_mentions?.length === 4 && whole.by_degree?.length === 0 && render(whole).includes("the whole graph"), "no subject: the whole graph, and no hub list with edges off");
 
   // ── The lifecycle (SMD-1994). One rule, a per-thought weight, carries the
-  // filter (0 or 1) and the decay (DONE_WEIGHT for a completed or canceled
+  // filter (0 or 1) and the decay (DONE_WEIGHT for a completed, canceled or duplicate
   // thought); a thought with no lifecycle, or one this tool does not know,
   // weighs 1 under every flag. Every count above was read at weight 1, so the
   // default run is the control; here the same graph under each filter.
@@ -5950,7 +5950,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
     `node_state (058): every thought, its lifecycle node_lifecycle()'s both ways; open false for the settled t1 and t5, true for t2–t4, NULL for t6 and t8; with no link and no pointer, nothing blocked or superseded (${[...ns0.values()].map((r) => r.open).join()}, drift ${lifecycleDrift})`);
   assert(r1.thoughts[0].id === t1 && r1.thoughts[0].status === "Done" && r1.thoughts[0].status_type === "completed" && r1.thoughts[0].weight === 1 && r1.thoughts.find((t) => t.id === t5)!.status === "Canceled",
     "the JSON carries each thought's status, status_type and weight — t1 Done at weight 1 by default");
-  assert(text.includes(`latest linear_updated_at ${LATEST}: 5 of 7 thoughts carry a lifecycle, 2 of them completed or canceled, and 1 carries a status_type this tool does not know (weighed 1). Every thought weighs 1: a Done ticket counts as a live one`)
+  assert(text.includes(`latest linear_updated_at ${LATEST}: 5 of 7 thoughts carry a lifecycle, 2 of them completed, canceled or duplicate, and 1 carries a status_type this tool does not know (weighed 1). Every thought weighs 1: a Done ticket counts as a live one`)
       && text.includes("5 of 5 listed thoughts carry a lifecycle.") && text.includes("lifecycle all;") && !text.includes("holds no ticket status") && /status {7}thought/.test(text) && !text.includes("  weight  "),
     "the default report: the lifecycle line has the source, the freshness and the counts, says every thought weighs 1, the thought table has a status column and no weight column, and the old claim that the graph holds no status is gone");
   assert(lifecycleCaveat({ ...cov, with_lifecycle: 0, done: 0, unknown_status: 0, last_sync: null }, on).includes("none is stamped here: 0 of 7 thoughts carry a lifecycle"), "a brain board-sync has not reached says so instead of a freshness");
@@ -6006,7 +6006,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   assert(st[0].id === t1 && stDecay[3].id === t1 && stDecay[3].weight === 0.25 && stDecay[3].entities === 2 && stDecay[3].edges === 2 && stDecay[4].id === t5,
     `…and t1, first by default with the most neighbours and edges, ranks fourth at a quarter of its score, t5 last (${stDecay.map((t) => t.weight).join(",")})`);
   const rDecay = render(await graphReport(run, "Open Brain", decay));
-  assert(rDecay.includes("lifecycle all (done ×0.25)") && /2\.25 {5}2\.25/.test(rDecay) && rDecay.includes("depends_on×2.25") && /weight  status/.test(rDecay) && rDecay.includes("3.50 mentions") && rDecay.includes("--decay-done: a completed or canceled thought weighs 0.25 in every count (pre-registered, one weight)"),
+  assert(rDecay.includes("lifecycle all (done ×0.25)") && /2\.25 {5}2\.25/.test(rDecay) && rDecay.includes("depends_on×2.25") && /weight  status/.test(rDecay) && rDecay.includes("3.50 mentions") && rDecay.includes("--decay-done: a completed, canceled or duplicate thought weighs 0.25 in every count (pre-registered, one weight)"),
     "the decayed report: the header says the weight, the quarter counts render to two places in the table, the relation list and the subject line alike (3.50, not 3.5), the weight column appears, and the caveat pre-registers the one weight");
   let threwW = "";
   try { weightsSql({ status: "open", decayDone: true }, []); } catch (e) { threwW = (e as Error).message; }
@@ -6199,7 +6199,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
     "the whole graph under --startable is the one the startable thoughts build: every Kafka thought is blocked, so Kafka is not in the run; NATS has tR, tS and tW");
   const rStart = render(await graphReport(run, null, openStart));
   assert(rStart.includes("lifecycle open, startable;") && rStart.includes("as current as board-sync's last passes over both tickets of each (a relation is read from either side, so one removed on the board blocks until both are re-read): 6 active dependency facets; the latest was written or closed ")
-      && rStart.includes(". 7 of 16 thoughts belong to a ticket a dependency names; every other thought has none recorded and counts as unblocked. --startable: 5 thoughts with an open blocker weigh 0 in this run; a completed or canceled ticket is settled, not blocked, a blocker completed or canceled does not block, and a parent is not blocked by its children. 1 blocker of the held thoughts is unsettled only for want of a known status: not in the brain, or with no status_type this tool knows."),
+      && rStart.includes(". 7 of 16 thoughts belong to a ticket a dependency names; every other thought has none recorded and counts as unblocked. --startable: 5 thoughts with an open blocker weigh 0 in this run; a completed, canceled or duplicate ticket is settled, not blocked, a blocker completed, canceled or duplicate does not block, and a parent is not blocked by its children. 1 blocker of the held thoughts is unsettled only for want of a known status: not in the brain, or with no status_type this tool knows."),
     "the report: the header names the flag, and the dependency line has the source, when the dependencies last moved, the counts, the rules for settled tickets, settled blockers and parents, and the unsettled count");
   assert(!render(await graphReport(run, null, { ...wide, status: "open" })).includes("Dependencies are read"), "…a line printed under --startable alone");
   assert(render(await graphReport(run, "Anita", { ...on, types: ["place"], status: "open", startable: true })).includes("shares a --status open startable thought"), "a subject with no neighbour under the flag is told the flag emptied it");
@@ -6254,7 +6254,7 @@ console.log("\n[44] db/graph-centrality.ts: mentions, degree and support as defi
   const rBlocked = render(await graphReport(run, null, openDecay));
   const tPline = rBlocked.split("\n").find((l) => l.includes(tP)) ?? "";
   assert(rBlocked.includes("lifecycle open, blocked ×0.25;") && /weight +status +thought .* excerpt +blocked by$/m.test(rBlocked) && /0\.25 +Backlog .* SMD-7002$/.test(tPline) && rBlocked.includes("in-scope edges evidenced, times the weight:")
-      && rBlocked.includes(". --decay-blocked: 5 thoughts with an open blocker weigh 0.25 of their lifecycle weight in every count (pre-registered, one weight), and a listed one names its blockers; degree counts neighbours, not evidence, and is unchanged; a completed or canceled ticket is settled, not blocked,")
+      && rBlocked.includes(". --decay-blocked: 5 thoughts with an open blocker weigh 0.25 of their lifecycle weight in every count (pre-registered, one weight), and a listed one names its blockers; degree counts neighbours, not evidence, and is unchanged; a completed, canceled or duplicate ticket is settled, not blocked,")
       && rBlocked.includes("1 blocker of the down-weighted thoughts is unsettled") && rBlocked.includes("plus every thought without a lifecycle — it passes every filter; those with an open blocker at 0.25)")
       && render(await graphReport(run, null, { ...wide, decayBlocked: true })).includes("By its lifecycle every thought weighs 1: a Done ticket counts as a live one (--status open|active|done filters; --decay-done down-weights).\n"),
     `the report under the decay: the header names it, the thought table has the weight and a blocked by column (tP's row: ${JSON.stringify(tPline)}), and the dependency and lifecycle lines say what the decay did`);
@@ -8299,7 +8299,7 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
 
   const [sets] = await q<{ known: string[]; settled: string[] }>(`SELECT node_lifecycle_types() AS known, node_settled_types() AS settled`);
   assert(sets.known.join() === LIFECYCLE_TYPES.join() && sets.settled.join() === LIFECYCLE_FILTERS.done.join() && sets.known.filter((t) => !sets.settled.includes(t)).join() === LIFECYCLE_FILTERS.open.join(),
-    `058's status sets are graph-centrality's: the six known types in order, the two settled, and known less settled is --status open (${sets.known.join()} / ${sets.settled.join()})`);
+    `058's status sets, as 105 left them, are graph-centrality's: the seven known types in order, the three settled, and known less settled is --status open (${sets.known.join()} / ${sets.settled.join()})`);
 
   // The read on a thought of each shape, named or not.
   // Stamped as board-sync stamps (an UPDATE of the metadata), as [44] does.
@@ -8371,17 +8371,21 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   // The script's own check, on this brain as it stands, then without 058's
   // read, then with another status set.
   const startOpts = { startable: true, decayBlocked: false };
-  const fine = await schemaProblem(run, DEFAULT_OPTIONS);
+  const fine = await schemaProblem(run, DEFAULT_OPTIONS), fineStart = await schemaProblem(run, startOpts);
   await db.exec(`DROP FUNCTION node_state(uuid[])`);
   const missing = await schemaProblem(run, DEFAULT_OPTIONS);
   const missingStart = await schemaProblem(run, startOpts);
+  // 058's sets alone are a brain before 105 (SMD-2935): six known, two settled.
   await reapply("058");
-  await db.exec(`CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{triage,backlog,unstarted,started,completed,canceled,duplicate}'::text[] $$`);
+  const before105 = await schemaProblem(run, DEFAULT_OPTIONS);
+  // Then each set apart from 105's: the known one alone, the settled one alone.
+  await restoreShipped("node_lifecycle_types", "node_settled_types");
+  await db.exec(`CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{triage,backlog,unstarted,started,completed,canceled,duplicate,weird}'::text[] $$`);
   const skewKnown = await schemaProblem(run, DEFAULT_OPTIONS);
-  await reapply("058");
-  await db.exec(`CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{completed}'::text[] $$`);
+  await restoreShipped("node_lifecycle_types", "node_settled_types");
+  await db.exec(`CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{completed,canceled}'::text[] $$`);
   const skewSettled = await schemaProblem(run, DEFAULT_OPTIONS);
-  await db.exec(`CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{canceled,completed}'::text[] $$`);
+  await db.exec(`CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{duplicate,canceled,completed}'::text[] $$`);
   const reordered = await schemaProblem(run, DEFAULT_OPTIONS);
   await reapply("058");
   // A later migration reshapes node_state by DROP and CREATE; --reapply
@@ -8392,18 +8396,19 @@ console.log("\n[54] Migration 058: node_state — the five functions' columns in
   const [shape] = await q<{ result: string }>(`SELECT pg_get_function_result('node_state(uuid[])'::regprocedure) AS result`);
   assert(replayError === "" && shape.result === expected["node_state(uuid[])"][1],
     `058 replays over a reshaped node_state — it drops the three table functions before creating them — and leaves its own eleven columns (${replayError || "replayed"})`);
-  assert(fine === null && (await schemaProblem(run, startOpts)) === null
+  assert(fine === null && fineStart === null
       && missing === "graph-centrality reads a thought's lifecycle through node_state: migration 058 is not applied. Run db/migrate.ts."
       && missingStart === "graph-centrality reads a thought's lifecycle and its blockers through node_state: migration 058 is not applied. Run db/migrate.ts."
-      && (skewKnown ?? "").includes("this brain's migration 058 knows triage,backlog,unstarted,started,completed,canceled,duplicate (settled: completed,canceled). Update whichever is behind.")
-      && (skewSettled ?? "").includes("knows triage,backlog,unstarted,started,completed,canceled (settled: completed)") && reordered === null,
-    `schemaProblem: nothing on a migrated brain; without node_state every mode is refused naming 058 (the dependency flags naming the blockers too); a known or settled set that is not the script's is refused naming both, and the same members in another order are not (${skewKnown})`);
+      && (before105 ?? "").includes("this brain's node_lifecycle_types() and node_settled_types() (058, 105) hold triage,backlog,unstarted,started,completed,canceled (settled: completed,canceled). Update whichever is behind: the brain with db/migrate.ts (105 adds duplicate; after an older tree's --reapply, this tree's --reapply), the script with a newer checkout.")
+      && (skewKnown ?? "").includes("hold triage,backlog,unstarted,started,completed,canceled,duplicate,weird (settled: completed,canceled,duplicate)")
+      && (skewSettled ?? "").includes("hold triage,backlog,unstarted,started,completed,canceled,duplicate (settled: completed,canceled)") && reordered === null,
+    `schemaProblem: nothing on a migrated brain; without node_state every mode is refused naming 058 (the dependency flags naming the blockers too); 058's sets alone (a brain before 105) are refused naming both sets and each remedy, as is a known set or a settled set that alone is not the script's, and the same members in another order are not (${JSON.stringify([fine, before105, skewKnown, skewSettled, reordered])})`);
   // The replays above left 058's bodies; 068 redefines two of them over its
   // projection and 071 two over its gate (node_state again, and
   // node_dependencies, which only 071 redefines), and the sections after read
   // the shipped ones — named both, as node_lifecycle's last definer is 068 and
-  // node_state's 071.
-  await restoreShipped("node_state", "node_lifecycle", "node_dependencies");
+  // node_state's 071 — and 105's status sets.
+  await restoreShipped("node_state", "node_lifecycle", "node_dependencies", "node_lifecycle_types", "node_settled_types");
 
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`SELECT prune_orphan_entities()`);
@@ -10673,6 +10678,7 @@ console.log("\n[62] Migration 068: node_state reads a stored projection kept cur
   await db.query(`UPDATE thoughts SET metadata = metadata || '{"status_type": "canceled", "linear_updated_at": "2026-09-09"}' WHERE id = $1`, [x.id]);
   const keptUnderOld = await diverged();
   await reapply("068");
+  await restoreShipped("node_lifecycle_types", "node_settled_types");  // 058 put its six back (SMD-2935)
   const restored = (await q<{ b: string }>(`SELECT prosrc AS b FROM pg_proc WHERE oid = 'node_lifecycle()'::regprocedure`))[0].b;
   const triggers = (await q<{ n: number }>(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname LIKE 'thoughts_node_projection_%'`))[0].n;
   assert(before === twice && rebuiltClean.w === 0 && /row_number/.test(oldBody) && !underOld.drift && !keptUnderOld.drift && !keptUnderOld.life
@@ -11371,6 +11377,7 @@ console.log("\n[65] Migration 071: node_state's dependency columns read the ids 
   const underOld = await diverged(held.map((h) => h.id));
   await reapply("068");
   await reapply("071");
+  await restoreShipped("node_lifecycle_types", "node_settled_types");  // 058 put its six back (SMD-2935)
   const [restored] = await q<{ deps: string; state: string; trig: number }>(`
     SELECT (SELECT prosrc FROM pg_proc WHERE oid = 'node_dependencies()'::regprocedure) AS deps, (SELECT prosrc FROM pg_proc WHERE oid = 'node_state(uuid[])'::regprocedure) AS state,
            (SELECT count(*)::int FROM pg_trigger WHERE tgname LIKE 'thought_sources_node_gate_%' OR tgname = 'thoughts_node_source_gate_update') AS trig`);
@@ -15263,6 +15270,62 @@ console.log("\n[93] Migration 104: the lapse locks its own tree — ob1_lapse_tr
   assert(lockless && /ob1:lapse-locks-its-tree/.test(await src(LAPSE)) && /ob1_lapse_tree\(p_row, p_onto\)/.test(await src(WALK)),
     "097 re-applied puts its own walk and lockless trigger back; 104 restored after it, the tree and the locks");
   await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[94] Migration 105: Linear's duplicate status type known and settled (SMD-2935) — the sets, a Duplicate ticket settled and a Duplicate blocker no longer blocking (under 058's sets: unknown, and blocking), the gate mirror rebuilt to the new set, a re-apply a no-op");
+{
+  // By name, not number: main may take the number.
+  const the105 = files.find((f) => f.endsWith("_duplicate_settles.sql")) ?? "no _duplicate_settles.sql";
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const [sets] = await q<{ known: string[]; settled: string[]; kc: string; sc: string }>(
+    `SELECT node_lifecycle_types() AS known, node_settled_types() AS settled, obj_description('node_lifecycle_types()'::regprocedure, 'pg_proc') AS kc, obj_description('node_settled_types()'::regprocedure, 'pg_proc') AS sc`);
+  assert(sets.known.join() === "triage,backlog,unstarted,started,completed,canceled,duplicate" && sets.settled.join() === "completed,canceled,duplicate"
+      && /SMD-2935/.test(sets.kc) && /SMD-2935/.test(sets.sc) && /board-findings\.ts reads it/.test(sets.sc),
+    `105's sets: seven known, duplicate after canceled; three settled; each comment naming SMD-2935 (${sets.known.join()} / ${sets.settled.join()})`);
+
+  // A Duplicate blocker of an open ticket, a note filed under it; each ticket a sourced Linear row, as board-sync writes it.
+  const row = async (content: string, metadata: Record<string, unknown>) =>
+    (await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text AS id`, [content, JSON.stringify(metadata)]))[0].id;
+  const dup = await row("[94] DUP-2 — a duplicate", { source: "linear", issue: "DUP-2", status: "Duplicate", status_type: "duplicate", linear_updated_at: "2026-10-19T00:00:00.000Z" });
+  const open = await row("[94] DUP-1 — blocked by the duplicate", { source: "linear", issue: "DUP-1", status: "Todo", status_type: "unstarted", linear_updated_at: "2026-10-19T00:00:00.000Z" });
+  const note = await row("[94] a note filed under DUP-2", { ticket: "DUP-2" });
+  for (const [id, key] of [[dup, "DUP-2"], [open, "DUP-1"]]) await q(`SELECT record_thought_source($1::uuid, 'linear', $2, $2, 'text/markdown')`, [id, key]);
+  await q(`SELECT record_source_links($1::uuid, 'linear', '[{"relation": "blocked_by", "target": "DUP-2"}]'::jsonb)`, [open]);
+  type S = { id: string; open: boolean | null; blocked: boolean | null; blockers: string[] | null; unknown: string[] | null };
+  const state = async () => new Map((await q<S>(`SELECT thought_id::text AS id, open, blocked, blockers, unknown_blockers AS unknown FROM node_state(ARRAY[$1, $2, $3]::uuid[])`, [dup, open, note])).map((r) => [r.id, r]));
+  const gateOf = async () => (await q<{ g: boolean | null }>(`SELECT gates AS g FROM ob1_source_gate WHERE thought_id = $1`, [dup]))[0]?.g ?? null;
+  const drift = async () => (await q<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_node_projection_drift()`))[0].n;
+  const now = await state();
+  assert(now.get(dup)?.open === false && now.get(note)?.open === false && now.get(open)?.open === true && now.get(open)?.blocked === false
+      && now.get(open)?.blockers === null && (now.get(open)?.unknown ?? []).length === 0 && (await gateOf()) === true && (await drift()) === 0,
+    `a Duplicate ticket is settled, and so is a note filed under it; the open ticket it blocks is not blocked, its blocker neither open nor unknown; the mirror says the Duplicate's row gates, and nothing drifts (${JSON.stringify([...now.values()])})`);
+
+  // 058's sets, the mirror rebuilt to them: the brain before 105.
+  await db.exec(`CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{triage,backlog,unstarted,started,completed,canceled}'::text[] $$;
+                 CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{completed,canceled}'::text[] $$`);
+  const [rebuilt058] = await q<{ w: number }>(`SELECT written + deleted AS w FROM ob1_rebuild_source_gate()`);
+  const old = await state();
+  assert(old.get(dup)?.open === null && old.get(note)?.open === null && old.get(open)?.blocked === true && old.get(open)?.blockers?.join() === "DUP-2"
+      && old.get(open)?.unknown?.join() === "DUP-2" && rebuilt058.w === 1 && (await gateOf()) === false,
+    `under 058's sets the Duplicate is an unknown status (open NULL), and it blocks — an unknown blocker — as on stable before 105; the mirror rebuilt to them flips its row (${rebuilt058.w}; ${JSON.stringify(old.get(open))})`);
+
+  // 105 over it: the sets, then its own rebuild — without it the Duplicate's
+  // row would still say it does not gate, which drift() names.
+  await reapply(the105);
+  const back = await state();
+  assert(JSON.stringify([...back.values()]) === JSON.stringify([...now.values()]) && (await gateOf()) === true && (await drift()) === 0,
+    `105 applied over that brain: settled again, the blocker cleared, and its own rebuild leaves the mirror exact (${JSON.stringify(back.get(open))})`);
+  const [clean] = await q<{ w: number }>(`SELECT written + deleted AS w FROM ob1_rebuild_source_gate()`);
+  await reapply(the105);
+  const [again] = await q<{ known: string[]; settled: string[] }>(`SELECT node_lifecycle_types() AS known, node_settled_types() AS settled`);
+  assert(clean.w === 0 && again.known.join() === sets.known.join() && again.settled.join() === sets.settled.join() && (await drift()) === 0,
+    `…a rebuild after it finds nothing to fix, and a re-apply changes nothing (${clean.w})`);
+
+  // 077's finished tickets: a thought about the Duplicate alone is about finished work.
+  const [refs] = await q<{ r: string[] | null }>(`SELECT ticket_references_settled('a session about it', '{"topics": ["DUP-2"]}'::jsonb) AS r`);
+  assert(refs.r?.join() === "DUP-2", `077 counts a Duplicate among a thought's finished tickets (${JSON.stringify(refs.r)})`);
+
+  await db.query(`DELETE FROM thoughts WHERE content LIKE '[94]%'`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

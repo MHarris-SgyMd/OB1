@@ -828,7 +828,6 @@ git rebase -X ignore-space-change upstream/main   # every vendored server's head
 cd server-portable
 bun install --frozen-lockfile && bun test-server.ts && bunx tsc --noEmit
 bun run test:sql && bun run test:e2e            # needs podman or docker
-bunx wrangler deploy --dry-run --outdir=.cf-out   # Workers target still builds
 cd ../db && bun install --frozen-lockfile && bun test-schema.ts
 ./with-postgres.sh bun test-live.ts               # needs podman or docker
 cd .. && bun scripts/check-fork-consistency.ts   # CI runs it too (change 58)
@@ -858,15 +857,20 @@ its measurements are in the change file named.
 
 ### Landing a rebase on `main`, which is protected
 
-`main` is the working default and carries a ruleset: every one of
-`fork-checks.yml`'s sixteen jobs required, on a head up to date with `main` and
-satisfied only by a run of the Actions app; changes only through a pull request;
-no deletion, **no force-push**, and no bypass actors — it applies to admins too.
-The ruleset is a file, `.github/rulesets/main.json`, applied with
-`gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input .github/rulesets/main.json`,
-and `check-fork-consistency` check 20 holds the file to the workflow's job list,
-so a job added without being required fails CI by name (SMD-1856). That is
-deliberate, and it interacts with a rebase in one specific way.
+`main` is the working default and carries a ruleset: one required check,
+"Fork Checks passed", on a head up to date with `main` and satisfied only by a
+run of the Actions app; changes only through a pull request; no deletion, **no
+force-push**, and no bypass actors — it applies to admins too. "Fork Checks
+passed" is `fork-checks.yml`'s job `fork-checks-passed`, which needs every other
+job, runs even when one of them failed, and fails unless each succeeded (or, for
+a job with an `if:` of its own, was skipped). So every job is required through
+it, and a job added, renamed, split or run as a matrix changes nothing in the
+ruleset (SMD-3168). The ruleset is a file, `.github/rulesets/main.json`, applied
+with `gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input .github/rulesets/main.json`,
+and `check-fork-consistency` check 20 holds the file to that one context and the
+job to every other job in the workflow, so a job left out of its `needs:` fails
+CI by name (SMD-1856, SMD-3168). That is deliberate, and it interacts with a
+rebase in one specific way.
 
 A rebase produces `siggymd/rebase-YYYYMMDD` with **rewritten history**, so it
 cannot fast-forward onto `main`. Two ways forward:
@@ -881,7 +885,7 @@ reaching `main` goes through a PR, which is two commands:
 
 ```bash
 gh pr create --fill --base main --head siggymd/rebase-$(date +%Y%m%d)
-gh pr merge --merge --auto        # lands itself once the sixteen checks pass
+gh pr merge --merge --auto        # lands itself once "Fork Checks passed" passes
 ```
 
 History keeps both lines, which is what happened when the fork's work first landed

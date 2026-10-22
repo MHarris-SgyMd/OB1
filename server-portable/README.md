@@ -311,7 +311,8 @@ cannot take a parameter and sends a fixed weight; `db/migrations/020_*.sql` and
 `search_thoughts_hybrid` exactly as before, so the default ranking is unchanged
 and a superseded hit is only labelled (`⚠ Superseded by …`). On, it calls 059's
 `search_thoughts_current`: over the hybrid's top min(100, 4 × limit), a thought
-whose ticket is settled — completed or canceled, by 058's `node_state`, so a
+whose ticket is settled — completed, canceled or a duplicate, by 058's and
+105's `node_state`, so a
 note filed under a Done ticket counts — or that a newer thought supersedes has
 its score multiplied by 0.25. Under the hybrid's fusion that puts every current
 match in the window first, then the demoted ones in their own order (a demoted
@@ -319,10 +320,10 @@ exact hit keeps a quarter of its literal bonus, so on a query of literals only,
 or holding several of the query's literals, it can still outrank current rows —
 the header says when one does). Since migration 077 (SMD-2271) a thought with no
 ticket of its own is demoted too when every ticket it is about is finished:
-the keys in its topics, action items or session-summary header all Done or
-Canceled — or, naming none of those, three or more keys in its text, all
+the keys in its topics, action items or session-summary header all Done,
+Canceled or Duplicate — or, naming none of those, three or more keys in its text, all
 finished — and no open ticket named anywhere in it. Each
-demoted hit says `↓ Ranked ×0.25 — completed` (or `canceled`, `superseded`,
+demoted hit says `↓ Ranked ×0.25 — completed` (or `canceled`, `duplicate`, `superseded`,
 `references settled work (SMD-…)` with the deciding keys; the structured reply's
 `demoted` carries the token `references_settled`),
 and the header says how many of the window were demoted, how many carry a
@@ -357,7 +358,7 @@ and demoted lines, every moved ticket by key, and lists them in each hit's
 status's name and type); `search` gives that result `moved`, in status types
 over REST as well, and over MCP starts its title `[moved since written: …]` —
 before the thought's own words, which could forge it at the end. A status prints as its type's word (Triage,
-Backlog, Todo, In Progress, Done, Canceled), never the board's name: any write
+Backlog, Todo, In Progress, Done, Canceled, Duplicate), never the board's name: any write
 key can write a ticket row's name, and it would print on other people's hits.
 A hit's first 50 keys, in the order it mentions them, are read; the rest are
 counted (`movedNotRead`; beside a move, `(+N more named past the first 50, not
@@ -390,18 +391,18 @@ exists and moved.
 bun install
 ```
 
-Runtime dependencies are pinned to the exact versions `../extensions/package.json`
-installs for the vendored servers, so every target runs identical library code;
-`extensions/test-auth.ts` fails if the two drift. **If you bump one file, bump
-both in the same commit.**
+`hono` and `zod` are pinned to the exact versions `../extensions/package.json`
+installs for the vendored servers, and `extensions/test-auth.ts` fails if they
+drift; the MCP packages differ (the v2 scoped packages here, the v1 SDK and
+`@hono/mcp` there, until SMD-2279 and SMD-2281). **If you bump a shared package
+in one file, bump it in both in the same commit.**
 
-### 2. Pick a target
+### 2. Run it
 
-| Target | Command | Notes |
-| --- | --- | --- |
-| Bun, locally | `bun index.ts` | Serves on `PORT`, default 8000 |
-| Container | `docker build -t ob1-mcp .` | Alpine + Bun; see `Dockerfile` |
-| Node | `bun run --bun index.ts`, or wrap with `@hono/node-server` | Same shim |
+The brain deploys as the compose stack (SMD-2282's decision 6): this server is
+its `server` service, built from `Dockerfile`, and [`SETUP.md`](../SETUP.md)
+and [`deploy/README.md`](../deploy/README.md) bring it up. `bun index.ts`
+serves the same app on `PORT` (default 8000), as this directory's tests do.
 
 ### 3. Provide configuration
 
@@ -747,7 +748,7 @@ MCP tools do rather than a copy of it:
   - the public origin's challenge and its 503 (SMD-2382);
   - the bounded read of a refused body;
   - a request's parts and its calls' record for its line;
-  - the stop's cut line, and the old root URL's line;
+  - the stop's cut line;
   - the keyed mirrors' answer to a caller they show nothing.
 
   It is HTTP alone, with no store, no provider and no environment. It was moved out of
@@ -970,7 +971,7 @@ word any refusal as this one does.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1136 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the old root URL's once-per-key line, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050); the same 1136 with OB1_MCP_UNDER_TEST=client, through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
+bun test-server.ts        # 1131 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050); the same 1131 with OB1_MCP_UNDER_TEST=client, through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
 bun test-auth.ts          # 191 — scoped, hashed, named keys; the same 191 with OB1_MCP_UNDER_TEST=client, against the MCP server as a REST client (mcp-server/, SMD-2287)
 bun test-rest.ts          # 470 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, and `bun api.ts` stopped mid-request
 bun test-plugins.ts       # 283 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's; the same 283 with OB1_MCP_UNDER_TEST=client (mcp-server/, SMD-2287)
@@ -1101,4 +1102,3 @@ stored in the same write").
 
 - `../deploy/` — the compose stack this server is the published port of
 - `../FORK.md` — what this fork changes and why
-- `../integrations/kubernetes-deployment/` — a raw-SQL port that drops PostgREST too

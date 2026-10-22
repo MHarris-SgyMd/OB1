@@ -182,9 +182,14 @@
  *      named excuses
  *  20. main's ruleset is a record in the tree — .github/rulesets/main.json, the
  *      body `gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input`
- *      applies — and the record names every job: each job's display name in
- *      .github/workflows/fork-checks.yml is a required check, nothing is
- *      required that is not a job, every check is pinned to the Actions app
+ *      applies — and it requires one check, "Fork Checks passed": the job
+ *      fork-checks-passed in .github/workflows/fork-checks.yml, which needs
+ *      every other job, runs if: always(), lets only the jobs with an if: of
+ *      their own skip (AGGREGATE_MAY_SKIP, commit-lint), on which no job it
+ *      needs sets continue-on-error or calls a reusable workflow, which runs
+ *      on ubuntu-24.04 with no key beyond the few allowed on it or its step,
+ *      and whose one step is held verbatim and run on its own cases
+ *      (SMD-3168); every check is pinned to the Actions app
  *      (integration_id 15368), strict up-to-date is on and enforced on
  *      create, the four rules — deletion, non-fast-forward, pull-request with
  *      no required review and none of the four review flags, required-status-
@@ -195,12 +200,17 @@
  *      judged on its own merge commit and no PR waiting for another
  *      (SMD-1857), no other type is, the target is the default branch and
  *      nothing else, the bypass list is empty and enforcement is active; and
- *      the workflow names its jobs so the record can — no matrix, no
- *      expression in a name, no two jobs sharing one. The rules are
- *      rulesetProblems and workflowJobs, pure functions their probes run on
- *      in-memory records (twenty-five mutants, one accepted addition, nine
- *      non-probes, three workflow mutants); the workflow is parsed with
- *      Bun.YAML (SMD-1856); no exceptions
+ *      no other job reports a check under the aggregate's name. A matrix and a
+ *      name with an expression are allowed now, since the record names no job
+ *      but the one. The rules are rulesetProblems and aggregateProblems, pure
+ *      functions their probes run on in-memory records (twenty-seven ruleset
+ *      mutants, one accepted addition, nine non-probes; thirty-four aggregate
+ *      mutants, four accepted shapes and an empty skip list two ways, four
+ *      non-probes; one other-workflow name
+ *      clash; sixteen names mayReportAs must allow or refuse; a
+ *      5,000-expression name answered at once) and AGGREGATE_RUN under bash on ten cases; every workflow in
+ *      .github/workflows is read for a job carrying the aggregate's name; the workflow is parsed with Bun.YAML (SMD-1856,
+ *      SMD-3168); no exceptions
  *  21. a .sql file never destroys rows a brain already holds — CLAUDE.md's
  *      SQL-safety guard rail read as statements, not words: no DROP TABLE, no
  *      DROP DATABASE or DROP SCHEMA, no TRUNCATE with a table after it (a
@@ -384,20 +394,27 @@
  *      tracks or would track is one a fork-checks.yml step runs — `bun` or
  *      `node` naming it from the step's working-directory, the job's or a `cd`
  *      in the step, where its failure fails the job (no `continue-on-error`,
- *      `if: false` or `|| true`), a comment line or a quoted string read as
- *      nothing — or one SUITES_NOT_RUN names with why; an entry there that a
- *      workflow runs, that names no suite or that gives no reason is reported
- *      too. db/test-weekly-digest.ts and server-portable/test-jobs.ts had
- *      passed unrun for weeks; `eval-*` files are measurements, not suites,
- *      and are not read
+ *      `if: false`, `${{ false }}` or `|| true`), a comment line or a quoted
+ *      string read as nothing, a matrix job read once a cell, a step under
+ *      `matrix.<key> == '<value>'` (or `!=`) joined by `&&` read in the cells
+ *      it runs in and one under any other `if:` that reads the matrix
+ *      reported (SMD-3169) — or one SUITES_NOT_RUN names with why; an entry
+ *      there that a workflow runs, that names no suite or that gives no
+ *      reason is reported too. db/test-weekly-digest.ts and
+ *      server-portable/test-jobs.ts had passed unrun for weeks; `eval-*`
+ *      files are measurements, not suites, and are not read
  *  35. db/ci-parity.sh runs what CI runs (SMD-2903): every script a
  *      fork-checks.yml step runs (check 34's reader) is a `run` line of
  *      ci-parity.sh where the step sets DATABASE_URL, or a `nodb` line where it
  *      does not, from a directory the step may run it from, with the same
- *      flags and environment (the database URLs aside); every typecheck step
- *      is a `typecheck` line; a line no step runs as written is stale; and
- *      PARITY_NOT_RUN excuses what it cannot run, by job or script, with why
- *      — an excuse for what CI no longer has is reported too
+ *      flags and environment (the database URLs aside), a matrix job read
+ *      once a cell, with `${{ matrix.* }}` filled in and a step under
+ *      `if: matrix.<key> == '<value>'` (or `!=`) read in the cells it runs
+ *      in, any other `if:` reading the matrix reported by check 34
+ *      (SMD-3169); every typecheck step is a `typecheck` line; a line no
+ *      step runs as written is stale; and PARITY_NOT_RUN excuses what it
+ *      cannot run, by job or script, with why — an excuse for what CI no
+ *      longer has is reported too
  *  36. the edge proxy (SMD-2876): deploy/edge/compose.yaml is EDGE_COMPOSE,
  *      value for value — compose.yaml's proxy's Traefik and access log, no
  *      trusted PROXY line, read-only and confined, the bridge shape on a
@@ -1004,8 +1021,7 @@ function textFilesUnder(dirs: { dir: string; rel: string }[]) {
 //
 // Exceptions are per (file, function) and COUNTED, as check 6's are: the
 // files that CREATE a brain from the getting-started shape — the guide the
-// migrations were extracted from, a recipe's own Neon database, a Kubernetes
-// init script — define these functions because they are building the
+// migrations were extracted from, a recipe's own Neon database — define these functions because they are building the
 // database the migrations would otherwise build, and are excepted for exactly
 // the lines they have today with the reason beside them; one more line fails,
 // one fewer fails as stale. A sidecar that adds to an existing brain gets no
@@ -1072,12 +1088,6 @@ const CORE_FUNCTION_EXCEPTIONS = new Map<string, Record<string, CountedException
   }],
   ["recipes/vercel-neon-telegram/sql/001-create-thoughts.sql", { update_updated_at: one(NEON) }],
   ["recipes/vercel-neon-telegram/sql/002-match-thoughts.sql", { match_thoughts: one(NEON) }],
-  ["integrations/kubernetes-deployment/k8s/init.sql", {
-    match_thoughts: one("the init script of the deployment's own Postgres, run once on an empty database"),
-  }],
-  ["integrations/kubernetes-deployment/k8s/openbrain.yml", {
-    match_thoughts: one("the ConfigMap carrying k8s/init.sql, the deployment's own Postgres init, run once on an empty database"),
-  }],
 ]);
 
 /** Which of `owned`'s names a text names in a statement, by the rule the scan applies to the whole text. */
@@ -1728,7 +1738,7 @@ const THOUGHT_WRITE_PROBES = [
   // moved here); readwise-capture's, with the enhanced columns beside the vector; consolidation-bio's,
   // with the file's own fingerprint and no vector; the classification recipe's, content alone; the
   // Python client's dict; a list filled by append, sent by name; a list pushed, sent by name; an
-  // array literal; a bound array; the Kubernetes server's SQL with casts; the Neon recipe's template
+  // array literal; a bound array; a server's SQL with casts; the Neon recipe's template
   // over lines; quoted identifiers with a schema; an alias; INSERT … SELECT with a column list.
   'await supabase.from("thoughts").insert({ content, embedding, metadata });',
   'const { error } = await supabase.from("thoughts").insert({\n  content,\n  embedding,\n  source_type: "readwise",\n  type: "reference",\n  metadata: {\n    source: "readwise",\n    readwise_highlight_id: event.id,\n  },\n});',
@@ -1820,8 +1830,7 @@ const OWN_DATABASE = (what: string): CountedException => ({ why: `${what} — th
 const THOUGHT_WRITE_EXCEPTIONS = new Map([
   // The guide that shows upstream's upsert_thought body: the INSERT is the function's own (check 7 excepts the same lines).
   ["recipes/content-fingerprint-dedup/README.md", { why: "the INSERT inside the upsert_thought definition migration 003 was extracted from, kept as its record", lines: 1 }],
-  // Two deployments whose database is their own, built from the guide's shape.
-  ["integrations/kubernetes-deployment/index.ts", OWN_DATABASE("its own Postgres in the cluster, built by k8s/init.sql")],
+  // Two that own their database, built from the guide's shape.
   ["recipes/vercel-neon-telegram/src/lib/db.ts", OWN_DATABASE("its own Neon database, built by sql/001-create-thoughts.sql")],
   ["recipes/schema-aware-routing/index.ts", OWN_DATABASE("its own five-table project, built by its README's SQL (a `thoughts` with domain/status/source columns)")],
   // The fixture: a row as an older write left it — fingerprint and label by hand — for the writer under test to move.
@@ -2001,8 +2010,6 @@ function scan(text: string, from: number, stringsToo: boolean, inExpression: boo
   }
   return { out, end: text.length };
 }
-/** The index of the `}` that closes a template expression opened at `start`; `text.length` when none does. */
-function expressionEnd(text: string, start: number): number { return scan(text, start, true, true).end; }
 
 /**
  * Every import (and export-from) statement's specifier, with the line it starts
@@ -4354,7 +4361,7 @@ function checkConnectorRegistry() {
   if (problems.length === 0 && span.block !== renderClassification(registry)) fail(SPEC_PATH, `the generated tables differ from what ${REGISTRY_PATH} renders — run \`bun scripts/connector-registry.ts\` (SMD-1933)`);
 }
 checkConnectorRegistry();
-// ── 20: main's ruleset is a record in the tree, and the record names every job (SMD-1856) ──
+// ── 20: main's ruleset is a record in the tree, and it requires the one job that needs every other (SMD-1856, SMD-3168) ──
 /**
  * The ruleset GitHub enforces on `main` (id 22189960) lived outside the tree,
  * where a job added to the workflow was not added to it — which is how the
@@ -4364,17 +4371,31 @@ checkConnectorRegistry();
  * `.github/rulesets/main.json` is the body that
  * `gh api -X PUT repos/MHarris-SgyMd/OB1/rulesets/22189960 --input` applies, so
  * the setting is reviewed here first; this check holds the record to the
- * workflow — every job's display name required, nothing required that is not a
- * job — and to the ticket's decisions: the default branch as the target, strict
- * up-to-date on, every check pinned to the Actions app so only a workflow run
- * satisfies it, a pull-request rule with no required review (one maintainer)
- * and none of the review flags that would ask one another way, deletion and
- * force-push refused, no bypass actor, enforcement active. The workflow is held
- * to names this check can predict: no matrix, no expression in a name, no two
- * jobs sharing one — any of those and the required context never matches, the
- * check waits forever and every PR blocks. The record can still drift from the
- * live ruleset — CI's token cannot read it, and a GET adds defaults the record
- * omits — so FORK.md names the one command that re-applies it.
+ * ticket's decisions: the default branch as the target, strict up-to-date on,
+ * every check pinned to the Actions app so only a workflow run satisfies it, a
+ * pull-request rule with no required review (one maintainer) and none of the
+ * review flags that would ask one another way, deletion and force-push
+ * refused, no bypass actor, enforcement active. The record can still drift
+ * from the live ruleset — CI's token cannot read it, and a GET adds defaults
+ * the record omits — so FORK.md names the one command that re-applies it.
+ *
+ * Until SMD-3168 the record named every job, so each job added, renamed or
+ * split was a ruleset PUT made by hand just before its merge (SMD-3048,
+ * SMD-3051, SMD-3152), and a matrix was refused because its checks are named
+ * after their cells. Now the record requires one context, AGGREGATE_NAME: the
+ * job AGGREGATE_JOB, which `needs:` every other job, runs `if: always()` and
+ * fails unless each one succeeded or was skipped where MAY_SKIP names it. So
+ * this check holds that job instead: it exists under that name, it needs every
+ * job in the workflow and nothing else, it runs always (a skipped required
+ * check is a passing one), MAY_SKIP spells AGGREGATE_MAY_SKIP and those are
+ * exactly the jobs with an `if:` of their own (none of which another job
+ * needs), no job it needs sets `continue-on-error` or calls a reusable
+ * workflow, it runs on AGGREGATE_RUNNER, it and its step carry no key beyond
+ * the few allowed (no continue-on-error, no step if:, no shell, no env but
+ * NEEDS and MAY_SKIP), no
+ * job in any workflow takes its name, and its one step is AGGREGATE_RUN
+ * verbatim — which the check runs through bash on AGGREGATE_CASES, so the
+ * step's verdict is tested, not only its text.
  *
  * SMD-1857 wanted the merge queue as a fifth rule: a PR is queued, GitHub
  * builds the merge result and runs the required checks on it (the workflow's
@@ -4419,28 +4440,207 @@ type RulesetDoc = {
   conditions?: { ref_name?: { include?: unknown; exclude?: unknown } } | null;
   rules?: ({ type?: unknown; parameters?: ({ strict_required_status_checks_policy?: unknown; do_not_enforce_on_create?: unknown; required_status_checks?: unknown; required_approving_review_count?: unknown } & Record<string, unknown>) | null } | null)[];
 } | null | undefined;
-/** The workflow as workflowJobs reads it: a job's display name is its `name`, else its key — what GitHub reports the check as — and a matrix multiplies it. */
-type JobsDoc = { jobs?: Record<string, { name?: unknown; strategy?: { matrix?: unknown } | null } | null | undefined> | null } | null | undefined;
+/** The workflow as aggregateProblems reads it: a job's display name is its `name`, else its key — what GitHub reports the check as. */
+type JobsDoc = { jobs?: Record<string, { name?: unknown; if?: unknown; needs?: unknown; steps?: unknown } | null | undefined> | null } | null | undefined;
+/** The one job the record requires (SMD-3168), by key and by the display name GitHub reports its check under. */
+const AGGREGATE_JOB = "fork-checks-passed";
+const AGGREGATE_NAME = "Fork Checks passed";
+/** The `if:` the aggregate runs under, as written either way: always, so a failed need does not skip it into a pass. */
+const AGGREGATE_IF = ["always()", "${{ always() }}"];
+/** The step's NEEDS, every need's result as JSON. */
+const AGGREGATE_NEEDS_ENV = "${{ toJSON(needs) }}";
 /**
- * The display names the workflow's jobs report as checks, and the jobs whose
- * name this check cannot predict: a `strategy.matrix` job reports one check per
- * cell, named `<name> (<values>)`; a name holding `${{ … }}` is rendered at run
- * time; two jobs with one display name are one context GitHub cannot tell
- * apart. Each is refused here, before the record is compared to the list.
+ * The verdict step's run: body, verbatim. A need that did not succeed fails
+ * it — failure, cancelled, or skipped unless MAY_SKIP names the job exactly —
+ * and the names and results are printed. A NEEDS that does not parse fails it
+ * too: jq exits non-zero and the shell's -e stops there.
  */
-function workflowJobs(doc: JobsDoc) {
-  const names: string[] = [];
-  const problems: [string, string][] = [];
-  for (const [key, job] of Object.entries(doc?.jobs ?? {})) {
-    const name = typeof job?.name === "string" ? job.name : key;
-    if (job?.strategy && typeof job.strategy === "object" && "matrix" in job.strategy) problems.push([WORKFLOW, `job ${key} runs a matrix — GitHub reports one check per cell, named after its values, which ${RULESET} cannot name; give each cell its own job (SMD-1856)`]);
-    else if (name.includes("${{")) problems.push([WORKFLOW, `job ${key} is named by an expression (${name}) — the check's context is rendered at run time and ${RULESET} cannot name it (SMD-1856)`]);
-    else if (names.includes(name)) problems.push([WORKFLOW, `job ${key} shares the display name "${name}" with another job — one context for two jobs (SMD-1856)`]);
-    else names.push(name);
+const AGGREGATE_RUN = `# shellcheck disable=SC2016 # jq's variables, not the shell's
+not_passed=$(jq -r --arg may_skip "$MAY_SKIP" '
+  ($may_skip | split(" ") | map(select(. != ""))) as $skip
+  | to_entries[]
+  | select(.value.result != "success" and (.value.result != "skipped" or (.key as $k | any($skip[]; . == $k) | not)))
+  | "\\(.key): \\(.value.result)"' <<<"$NEEDS")
+if [ -n "$not_passed" ]; then
+  printf 'Not every job passed:\\n%s\\n' "$not_passed" >&2
+  exit 1
+fi
+echo "Every job passed: $(jq '[.[] | select(.result == "success")] | length' <<<"$NEEDS") succeeded, $(jq '[.[] | select(.result == "skipped")] | length' <<<"$NEEDS") skipped where MAY_SKIP allows."`;
+/** [why, NEEDS, MAY_SKIP, whether the step passes]: AGGREGATE_RUN under bash, case by case. */
+const AGGREGATE_CASES: [why: string, needs: string, maySkip: string, passes: boolean][] = (() => {
+  const r = (result: string) => ({ result, outputs: {} });
+  const n = (o: Record<string, { result: string }>) => JSON.stringify(o);
+  return [
+    ["every job succeeded", n({ a: r("success"), b: r("success") }), "commit-lint", true],
+    ["a job failed", n({ a: r("success"), b: r("failure") }), "commit-lint", false],
+    ["a job was cancelled", n({ a: r("success"), b: r("cancelled") }), "commit-lint", false],
+    ["a job MAY_SKIP does not name was skipped", n({ a: r("success"), b: r("skipped") }), "commit-lint", false],
+    ["commit-lint was skipped (a push)", n({ a: r("success"), "commit-lint": r("skipped") }), "commit-lint", true],
+    ["commit-lint failed", n({ a: r("success"), "commit-lint": r("failure") }), "commit-lint", false],
+    ["a job whose name MAY_SKIP's contains was skipped", n({ a: r("success"), commit: r("skipped") }), "commit-lint", false],
+    ["a job whose name contains MAY_SKIP's was skipped", n({ a: r("success"), "commit-lint-x": r("skipped") }), "commit-lint", false],
+    ["a result that is empty", n({ a: r("") }), "", false],
+    ["a NEEDS that does not parse", "not json", "", false],
+  ];
+})();
+/**
+ * The keys the aggregate job, its step and the step's env may carry, and no
+ * others (review pass 1): `continue-on-error` on either, a step `if:`, a
+ * `shell:` or a job's `defaults:`, or an env that moves PATH, would each turn a
+ * failed verdict into a passing job — "Fork Checks passed" green with a job red.
+ */
+const AGGREGATE_JOB_KEYS = ["name", "runs-on", "if", "needs", "steps", "timeout-minutes"];
+const AGGREGATE_STEP_KEYS = ["name", "id", "env", "run", "timeout-minutes"];
+/** The aggregate's runner (review pass 2): another label runs its step under another shell (a Windows runner's pwsh) or on a machine with its own jq. */
+const AGGREGATE_RUNNER = "ubuntu-24.04";
+/**
+ * The jobs the aggregate lets skip, as MAY_SKIP must spell them — one space
+ * between names, as the step's jq splits them (review pass 2). Held here so
+ * that a job made skippable is a reviewed change to this check, not an `if:`
+ * and a MAY_SKIP entry added together: commit-lint, because a plain push has
+ * no range of its own to lint. A job here must be one no other job needs (a
+ * skipped need skips its dependents, review pass 5). The comments above
+ * commit-lint and the aggregate in the workflow, and FORK.md's ruleset text,
+ * name this list in prose; change them with it. The probes keep their own list
+ * (PROBE_MAY_SKIP), so a change here moves only the real rules.
+ */
+const AGGREGATE_MAY_SKIP = ["commit-lint"];
+const AGGREGATE_ENV_KEYS = ["NEEDS", "MAY_SKIP"];
+/** A name as a message shows it: quoted, with anything outside printable ASCII escaped, so a look-alike does not read as the name it imitates (review pass 3). */
+const shownName = (s: string): string => JSON.stringify(s).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+/** One `${{ … }}` in a name: a quoted string read whole, so a `}}` inside it does not end the expression (review pass 4); unclosed, it runs to the end. */
+const EXPRESSION_IN_NAME = /\$\{\{(?:'(?:[^']|'')*'|[^'}]|\}(?!\}))*(?:\}\}|$)/;
+/**
+ * How a job's display name could report the check AGGREGATE_NAME, or null:
+ * its literal text carries it ("carries"), or — each `${{ … }}` read as any
+ * text, since a matrix value, `format()` or the event renders it at run time —
+ * it can render as it ("could render as"; review pass 3: a name wholly an
+ * expression passed). Both ignore case, which costs nothing. The match is a
+ * glob read with indexOf — the first part a prefix, the last a suffix, the
+ * rest in order between — never a RegExp built from the name, which a run of
+ * empty parts backtracked for minutes (review pass 4). `Tests (${{
+ * matrix.shard }})` can do neither, and is allowed.
+ */
+function mayReportAs(name: string, target: string): "carries" | "could render as" | null {
+  const text = name.toLowerCase();
+  const want = target.toLowerCase();
+  if (text.includes(want)) return "carries";
+  const parts = text.split(EXPRESSION_IN_NAME);
+  if (parts.length === 1) return null;
+  const first = parts[0];
+  const last = parts[parts.length - 1];
+  if (first.length + last.length > want.length || !want.startsWith(first) || !want.endsWith(last)) return null;
+  const end = want.length - last.length;
+  let at = first.length;
+  for (const part of parts.slice(1, -1)) {
+    const i = want.indexOf(part, at);
+    if (i < 0 || i + part.length > end) return null;
+    at = i + part.length;
   }
-  return { names, problems };
+  return "could render as";
 }
-function rulesetProblems(ruleset: RulesetDoc, jobNames: string[]) {
+/**
+ * [name, what mayReportAs answers for it against AGGREGATE_NAME] (review pass
+ * 5): names it must allow — the shapes a matrix or an input gives a job, and
+ * ones that come close — beside the ways it must refuse, so a matcher grown
+ * too broad fails here as surely as one grown too narrow.
+ */
+const MAY_REPORT_CASES: [name: string, answer: "carries" | "could render as" | null][] = [
+  ["Schema against real Postgres (${{ matrix.shard }})", null],
+  ["${{ inputs.label }} tests", null],
+  ["Fork Checks (${{ matrix.os }})", null],
+  ["Release (images, stack from them, notes)", null],
+  ["Fork Checks passe${{ x }}d!", null],
+  ["Fork ${{ x }} Checks ${{ y }} passed ${{ z }}", null],
+  ["Fork Checks pa${{ x }}ks passed", null],
+  ["", null],
+  ["Fork Checks passed", "carries"],
+  ["fork checks PASSED (old)", "carries"],
+  ["${{ x }}Fork Checks passed extra", "carries"],
+  ["${{ matrix.label }}", "could render as"],
+  ["Fork Checks ${{ matrix.word }}", "could render as"],
+  ["${{ 'Fork' }} Checks ${{ 'pass' }}ed", "could render as"],
+  ["${{ fromJSON('{\"a\":{\"b\":\"Fork Checks\"}}').a.b }} passed", "could render as"],
+  ["Fork Checks pass${{ x", "could render as"],
+];
+/**
+ * Jobs, other than the aggregate, whose display name could report a check
+ * under AGGREGATE_NAME (mayReportAs): a second check under the one context
+ * the record requires, pinned to the same app, which can pass while the
+ * aggregate fails. Read in every workflow, not this one alone (review pass 1).
+ */
+function nameClashes(file: string, doc: JobsDoc, aggregateKey: string | null): [string, string][] {
+  const jobs = doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {};
+  return Object.entries(jobs)
+    .filter(([key]) => key !== aggregateKey)
+    .flatMap(([key, job]): [string, string][] => {
+      const name = typeof job?.name === "string" ? job.name : key;
+      const how = mayReportAs(name, AGGREGATE_NAME);
+      const hint = how === "could render as" ? "; give it literal text no expression can complete it to, as `Live (\${{ matrix.shard }})` does" : "";
+      return how ? [[file, `job ${key} is named ${shownName(name)}, which ${how} "${AGGREGATE_NAME}"${hint} — a second check under the one context ${RULESET} requires, which can pass while the aggregate fails (SMD-3168)`]] : [];
+    });
+}
+/** A job's `needs:` as GitHub reads it: one key, or a list of them; anything else is null. */
+const needsOf = (needs: unknown): string[] | null =>
+  typeof needs === "string" ? [needs] : Array.isArray(needs) && needs.every((x) => typeof x === "string") ? needs : null;
+/**
+ * The aggregate job held to what makes the one context mean "every job
+ * passed": present under AGGREGATE_NAME, run always, no matrix, needing every
+ * other job and only those, one step that is AGGREGATE_RUN with NEEDS from
+ * `needs`, MAY_SKIP spelling AGGREGATE_MAY_SKIP and those being exactly the
+ * jobs with an `if:` of their own (any other skipped is a failure; one of
+ * those not named fails every run its `if:` skips), no job it needs set
+ * `continue-on-error` (a failure that reports as a success, review pass 2)
+ * or calls a reusable workflow (whose jobs this check does not read, review
+ * pass 3), the job on AGGREGATE_RUNNER with no key beyond AGGREGATE_JOB_KEYS,
+ * its step none beyond AGGREGATE_STEP_KEYS and its env none beyond
+ * AGGREGATE_ENV_KEYS, and no other job reporting a check under its name.
+ */
+function aggregateProblems(doc: JobsDoc, maySkipList: readonly string[] = AGGREGATE_MAY_SKIP): [string, string][] {
+  const problems: [string, string][] = [];
+  const jobs = doc?.jobs && typeof doc.jobs === "object" ? doc.jobs : {};
+  const others = Object.keys(jobs).filter((k) => k !== AGGREGATE_JOB);
+  problems.push(...nameClashes(WORKFLOW, doc, AGGREGATE_JOB));
+  for (const key of others) {
+    const ignored = (jobs[key] as Record<string, unknown> | null | undefined)?.["continue-on-error"];
+    if (ignored !== undefined && ignored !== false) problems.push([WORKFLOW, `job ${key} sets continue-on-error: ${JSON.stringify(ignored)} — its failure then reaches ${AGGREGATE_JOB}'s needs as a success, and "${AGGREGATE_NAME}" passes with it red; take it off (SMD-3168)`]);
+    const called = (jobs[key] as Record<string, unknown> | null | undefined)?.uses;
+    if (called !== undefined) problems.push([WORKFLOW, `job ${key} calls the reusable workflow ${JSON.stringify(called)} — its result is the called run's, whose own jobs check 20 does not read, so a continue-on-error there passes "${AGGREGATE_NAME}" with a job red (review pass 3); run its steps here${typeof called === "string" && called.startsWith("./") ? ", or teach check 20 to read the called file" : " — a remote one cannot be read from this tree"} (SMD-3168)`]);
+  }
+  const agg = jobs[AGGREGATE_JOB];
+  if (!agg || typeof agg !== "object") return [...problems, [WORKFLOW, `has no job ${AGGREGATE_JOB} ("${AGGREGATE_NAME}") — the one check ${RULESET} requires; without it every PR waits on a check that never reports (SMD-3168)`]];
+  for (const key of Object.keys(agg)) if (!AGGREGATE_JOB_KEYS.includes(key)) problems.push([WORKFLOW, `job ${AGGREGATE_JOB} sets ${key}, which check 20 does not allow on it — the job carries ${AGGREGATE_JOB_KEYS.join(", ")} alone, since a key like continue-on-error or defaults can turn a failed verdict into a pass (SMD-3168)`]);
+  if ((agg as Record<string, unknown>)["runs-on"] !== AGGREGATE_RUNNER) problems.push([WORKFLOW, `job ${AGGREGATE_JOB} runs on ${JSON.stringify((agg as Record<string, unknown>)["runs-on"] ?? null)}, not ${AGGREGATE_RUNNER} — another runner runs its step under another shell or another jq (SMD-3168)`]);
+  if (agg.name !== AGGREGATE_NAME) problems.push([WORKFLOW, `job ${AGGREGATE_JOB} is ${agg.name === undefined ? "unnamed" : `named ${JSON.stringify(agg.name)}`}, not "${AGGREGATE_NAME}" — the context ${RULESET} requires (SMD-3168)`]);
+  if (!AGGREGATE_IF.includes(String(agg.if ?? "").trim())) problems.push([WORKFLOW, `job ${AGGREGATE_JOB} runs if: ${JSON.stringify(agg.if ?? null)}, not if: always() — a job whose needs failed is skipped, and GitHub reads a skipped required check as passing (SMD-3168)`]);
+  const needs = needsOf(agg.needs);
+  if (!needs) problems.push([WORKFLOW, `job ${AGGREGATE_JOB}'s needs is ${JSON.stringify(agg.needs ?? null)}, not a list of the workflow's jobs (SMD-3168)`]);
+  else {
+    for (const key of others) if (!needs.includes(key)) problems.push([WORKFLOW, `job ${AGGREGATE_JOB} does not need ${key} — a job outside its needs can fail and the PR merges all the same; add it (SMD-3168)`]);
+    for (const n of new Set(needs)) if (!others.includes(n)) problems.push([WORKFLOW, `job ${AGGREGATE_JOB} needs ${n}, which is no other job in ${WORKFLOW} (SMD-3168)`]);
+  }
+  const steps = Array.isArray(agg.steps) ? (agg.steps as unknown[]) : null;
+  if (!steps || steps.length !== 1) return [...problems, [WORKFLOW, `job ${AGGREGATE_JOB} has ${steps ? steps.length : "no list of"} step(s), not the one verdict step check 20 holds (SMD-3168)`]];
+  const step = (steps[0] && typeof steps[0] === "object" ? steps[0] : {}) as { env?: unknown; run?: unknown } & Record<string, unknown>;
+  const env = (step.env && typeof step.env === "object" ? step.env : {}) as Record<string, unknown>;
+  for (const key of Object.keys(step)) if (!AGGREGATE_STEP_KEYS.includes(key)) problems.push([WORKFLOW, `job ${AGGREGATE_JOB}'s step sets ${key}, which check 20 does not allow on it — the step carries ${AGGREGATE_STEP_KEYS.join(", ")} alone, since continue-on-error, an if: or a shell can turn a failed verdict into a pass (SMD-3168)`]);
+  for (const key of Object.keys(env)) if (!AGGREGATE_ENV_KEYS.includes(key)) problems.push([WORKFLOW, `job ${AGGREGATE_JOB}'s step sets ${key} in its env, which check 20 does not allow — NEEDS and MAY_SKIP alone, since a PATH or a BASH_ENV changes what the verdict runs (SMD-3168)`]);
+  if (typeof step.run !== "string" || step.run.trimEnd() !== AGGREGATE_RUN) problems.push([WORKFLOW, `job ${AGGREGATE_JOB}'s step is not AGGREGATE_RUN in ${SELF} verbatim — the verdict check 20 runs on its cases; change both together (SMD-3168)`]);
+  if (env.NEEDS !== AGGREGATE_NEEDS_ENV) problems.push([WORKFLOW, `job ${AGGREGATE_JOB}'s step reads NEEDS from ${JSON.stringify(env.NEEDS ?? null)}, not ${AGGREGATE_NEEDS_ENV} — the results it judges (SMD-3168)`]);
+  const maySkip = maySkipList.join(" ");
+  // With nothing skippable the key may go too: the step reads an unset MAY_SKIP as empty.
+  const given = env.MAY_SKIP === undefined && maySkip === "" ? "" : env.MAY_SKIP;
+  if (given !== maySkip) problems.push([WORKFLOW, `job ${AGGREGATE_JOB}'s step sets MAY_SKIP to ${JSON.stringify(env.MAY_SKIP ?? null)}, not ${JSON.stringify(maySkip)} — AGGREGATE_MAY_SKIP in ${SELF}, one space between names as the step's jq splits them; a job made skippable is a change there, with its reason (SMD-3168)`]);
+  for (const key of maySkipList) {
+    const dependents = others.filter((k) => needsOf(jobs[k]?.needs)?.includes(key));
+    if (!others.includes(key)) problems.push([SELF, `AGGREGATE_MAY_SKIP names ${key}, which is no job in ${WORKFLOW} — take it off (SMD-3168)`]);
+    else if (jobs[key]?.if === undefined) problems.push([SELF, `AGGREGATE_MAY_SKIP names ${key}, which has no if: of its own — a job that always runs is never skipped, so a skip of it is a failure; take it off (SMD-3168)`]);
+    else if (dependents.length) problems.push([SELF, `AGGREGATE_MAY_SKIP names ${key}, which ${dependents.join(", ")} need${dependents.length === 1 ? "s" : ""} — a skipped need skips the jobs that need it, and with those skippable too a run passes having run nothing (review pass 5); a skippable job must be one nothing needs (SMD-3168)`]);
+  }
+  for (const key of others) if (jobs[key]?.if !== undefined && !maySkipList.includes(key)) problems.push([WORKFLOW, `job ${key} has an if: of its own and AGGREGATE_MAY_SKIP in ${SELF} does not name it — a skip of it would pass, or fail every run its if: skips; drop the if:, or add the job there with the reason it may skip (SMD-3168)`]);
+  return problems;
+}
+function rulesetProblems(ruleset: RulesetDoc) {
   const problems: [string, string][] = [];
   if (!ruleset || typeof ruleset !== "object") return [[RULESET, "is missing or does not parse — the body main's ruleset is applied from (SMD-1856)"]] as [string, string][];
   if (ruleset.target !== "branch") problems.push([RULESET, `target is ${JSON.stringify(ruleset.target)}, not "branch" (SMD-1856)`]);
@@ -4477,14 +4677,14 @@ function rulesetProblems(ruleset: RulesetDoc, jobNames: string[]) {
     else if (c.integration_id !== GITHUB_ACTIONS_APP_ID) problems.push([RULESET, `"${c.context}" is not pinned to the Actions app (integration_id ${GITHUB_ACTIONS_APP_ID}) — unpinned, a status any app posts under the name satisfies it (SMD-1856)`]);
   }
   for (const c of new Set(contexts)) if (c && contexts.filter((x) => x === c).length > 1) problems.push([RULESET, `requires "${c}" twice (SMD-1856)`]);
-  for (const name of jobNames) if (!contexts.includes(name)) problems.push([RULESET, `does not require "${name}", a job ${WORKFLOW} runs — every job is required, or a PR merges with it red; add it and re-apply the ruleset (SMD-1856)`]);
-  for (const c of new Set(contexts)) if (c && !jobNames.includes(c)) problems.push([RULESET, `requires "${c}", which no job in ${WORKFLOW} is named — a renamed or removed job leaves the check waiting forever and every PR blocked (SMD-1856)`]);
+  if (!contexts.includes(AGGREGATE_NAME)) problems.push([RULESET, `does not require "${AGGREGATE_NAME}", the job that needs every other (${AGGREGATE_JOB}) — without it a PR merges with any job red; add it and re-apply the ruleset (SMD-3168)`]);
+  for (const c of new Set(contexts)) if (c && c !== AGGREGATE_NAME) problems.push([RULESET, `requires ${shownName(c)}, which is not "${AGGREGATE_NAME}" — every job is required through ${AGGREGATE_JOB}'s needs, and a job's own name here is a context its next rename leaves waiting, blocking every PR (SMD-3168)`]);
   return problems;
 }
-/** A record every rule accepts, with every field a mutant can reach, and the job list it is judged against. */
+/** A record every rule accepts, with every field a mutant can reach; RULESET_PROBE_CONTEXTS is the one context it requires. */
 type RulesetProbeRule = { type: string; parameters?: { strict_required_status_checks_policy?: boolean; do_not_enforce_on_create?: boolean; required_status_checks?: ({ context?: string; integration_id?: number } | null)[] | string; required_approving_review_count?: number; [flag: string]: unknown } | null };
 type RulesetProbe = { target: string; enforcement: string; bypass_actors: unknown[]; conditions: { ref_name: { include: string[]; exclude: string[] } } | null; rules: RulesetProbeRule[] };
-const RULESET_PROBE_JOBS = ["Server tests", "Repo consistency"];
+const RULESET_PROBE_CONTEXTS = [AGGREGATE_NAME];
 const RULESET_PROBE = (): RulesetProbe => ({
   target: "branch",
   enforcement: "active",
@@ -4494,7 +4694,7 @@ const RULESET_PROBE = (): RulesetProbe => ({
     { type: "deletion" },
     { type: "non_fast_forward" },
     { type: "pull_request", parameters: { required_approving_review_count: 0, ...Object.fromEntries(PR_RULE_FLAGS.map((f) => [f, false])) } },
-    { type: "required_status_checks", parameters: { strict_required_status_checks_policy: true, do_not_enforce_on_create: false, required_status_checks: RULESET_PROBE_JOBS.map((context) => ({ context, integration_id: GITHUB_ACTIONS_APP_ID })) } },
+    { type: "required_status_checks", parameters: { strict_required_status_checks_policy: true, do_not_enforce_on_create: false, required_status_checks: RULESET_PROBE_CONTEXTS.map((context) => ({ context, integration_id: GITHUB_ACTIONS_APP_ID })) } },
   ],
 });
 /** The optional merge-queue rule as the record would carry it, with a parameter overridden for a mutant. */
@@ -4503,33 +4703,35 @@ const QUEUE_RULE = (over: Record<string, unknown> = {}): RulesetProbeRule => ({ 
 const RULESET_ACCEPTED: [why: string, mutate: (g: RulesetProbe) => RulesetProbe][] = [
   ["a merge-queue rule as MERGE_QUEUE records it", (g) => { g.rules.push(QUEUE_RULE()); return g; }],
 ];
-/** [why, mutate (returns the record to judge — the mutated probe, or null for no record), the job list, a phrase the ONE problem must carry]. */
-const RULESET_MUTANTS: [why: string, mutate: (g: RulesetProbe) => RulesetProbe | null, jobs: string[], says: string][] = [
-  ["a job the record does not require", (g) => g, [...RULESET_PROBE_JOBS, "Retrieval replay gate"], 'does not require "Retrieval replay gate"'],
-  ["a required check no job is named", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ context: "Old job", integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, RULESET_PROBE_JOBS, 'requires "Old job", which no job'],
-  ["a required check with no context", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, RULESET_PROBE_JOBS, "has no context"],
-  ["strict off", (g) => { g.rules[3].parameters!.strict_required_status_checks_policy = false; return g; }, RULESET_PROBE_JOBS, "strict_required_status_checks_policy is not true"],
-  ["enforce-on-create off", (g) => { g.rules[3].parameters!.do_not_enforce_on_create = true; return g; }, RULESET_PROBE_JOBS, "do_not_enforce_on_create is true"],
-  ["a check not pinned to the Actions app", (g) => { delete (g.rules[3].parameters!.required_status_checks as { integration_id?: number }[])[0].integration_id; return g; }, RULESET_PROBE_JOBS, "is not pinned to the Actions app"],
-  ["a check required twice", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ context: RULESET_PROBE_JOBS[0], integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, RULESET_PROBE_JOBS, `requires "${RULESET_PROBE_JOBS[0]}" twice`],
-  ["a required_status_checks rule with no parameters", (g) => { g.rules[3].parameters = null; return g; }, RULESET_PROBE_JOBS, "has no parameters"],
-  ["a required_status_checks list that is a string", (g) => { g.rules[3].parameters!.required_status_checks = "Server tests"; return g; }, RULESET_PROBE_JOBS, "not a list"],
-  ["no pull-request rule", (g) => { g.rules.splice(2, 1); return g; }, RULESET_PROBE_JOBS, "pull_request rule 0 time(s)"],
-  ["a doubled deletion rule", (g) => { g.rules.push({ type: "deletion" }); return g; }, RULESET_PROBE_JOBS, "deletion rule 2 time(s)"],
-  ["a pull-request rule requiring a review", (g) => { g.rules[2].parameters!.required_approving_review_count = 1; return g; }, RULESET_PROBE_JOBS, "required_approving_review_count is 1"],
-  ["a pull-request rule requiring thread resolution", (g) => { g.rules[2].parameters!.required_review_thread_resolution = true; return g; }, RULESET_PROBE_JOBS, "required_review_thread_resolution is true"],
-  ["a linear-history rule", (g) => { g.rules.push({ type: "required_linear_history" }); return g; }, RULESET_PROBE_JOBS, "carries a required_linear_history rule"],
-  ["a bypass actor", (g) => { g.bypass_actors.push({ actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always" }); return g; }, RULESET_PROBE_JOBS, "bypass_actors is not the empty list"],
-  ["enforcement set to evaluate", (g) => { g.enforcement = "evaluate"; return g; }, RULESET_PROBE_JOBS, 'enforcement is "evaluate"'],
-  ["a push target", (g) => { g.target = "push"; return g; }, RULESET_PROBE_JOBS, 'target is "push"'],
-  ["a ruleset aimed at another branch", (g) => { g.conditions!.ref_name.include = ["refs/heads/dev"]; return g; }, RULESET_PROBE_JOBS, "conditions.ref_name is not"],
-  ["a ruleset with no conditions", (g) => { g.conditions = null; return g; }, RULESET_PROBE_JOBS, "conditions.ref_name is not"],
-  ["no record at all", () => null, RULESET_PROBE_JOBS, "is missing or does not parse"],
-  ["a doubled merge-queue rule", (g) => { g.rules.push(QUEUE_RULE(), QUEUE_RULE()); return g; }, RULESET_PROBE_JOBS, "merge_queue rule 2 time(s) — at most once"],
-  ["a merge-queue rule with no parameters", (g) => { g.rules.push({ type: "merge_queue", parameters: null }); return g; }, RULESET_PROBE_JOBS, "merge_queue rule has no parameters"],
-  ["a queue that squashes", (g) => { g.rules.push(QUEUE_RULE({ merge_method: "SQUASH" })); return g; }, RULESET_PROBE_JOBS, 'merge_method is "SQUASH", not "MERGE"'],
-  ["a queue judged on the group's head only", (g) => { g.rules.push(QUEUE_RULE({ grouping_strategy: "HEADGREEN" })); return g; }, RULESET_PROBE_JOBS, 'grouping_strategy is "HEADGREEN"'],
-  ["a queue that waits for a second PR", (g) => { g.rules.push(QUEUE_RULE({ min_entries_to_merge: 2 })); return g; }, RULESET_PROBE_JOBS, "min_entries_to_merge is 2, not 1"],
+/** [why, mutate (returns the record to judge — the mutated probe, or null for no record), a phrase the ONE problem must carry]. */
+const RULESET_MUTANTS: [why: string, mutate: (g: RulesetProbe) => RulesetProbe | null, says: string][] = [
+  ["a record that does not require the aggregate", (g) => { g.rules[3].parameters!.required_status_checks = []; return g; }, `does not require "${AGGREGATE_NAME}"`],
+  ["a job's own name required beside the aggregate", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ context: "Repo consistency", integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, 'requires "Repo consistency", which is not'],
+  ["a look-alike of the aggregate's name required beside it", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ context: "Fork Checks\u00a0passed", integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, 'requires "Fork Checks\\u00a0passed", which is not'],
+  ["a required check no job is named", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ context: "Old job", integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, 'requires "Old job", which is not'],
+  ["a required check with no context", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, "has no context"],
+  ["strict off", (g) => { g.rules[3].parameters!.strict_required_status_checks_policy = false; return g; }, "strict_required_status_checks_policy is not true"],
+  ["enforce-on-create off", (g) => { g.rules[3].parameters!.do_not_enforce_on_create = true; return g; }, "do_not_enforce_on_create is true"],
+  ["a check not pinned to the Actions app", (g) => { delete (g.rules[3].parameters!.required_status_checks as { integration_id?: number }[])[0].integration_id; return g; }, "is not pinned to the Actions app"],
+  ["a check required twice", (g) => { (g.rules[3].parameters!.required_status_checks as object[]).push({ context: RULESET_PROBE_CONTEXTS[0], integration_id: GITHUB_ACTIONS_APP_ID }); return g; }, `requires "${RULESET_PROBE_CONTEXTS[0]}" twice`],
+  ["a required_status_checks rule with no parameters", (g) => { g.rules[3].parameters = null; return g; }, "required_status_checks rule has no parameters"],
+  ["a required_status_checks list that is a string", (g) => { g.rules[3].parameters!.required_status_checks = "Server tests"; return g; }, "not a list"],
+  ["no pull-request rule", (g) => { g.rules.splice(2, 1); return g; }, "pull_request rule 0 time(s)"],
+  ["a doubled deletion rule", (g) => { g.rules.push({ type: "deletion" }); return g; }, "deletion rule 2 time(s)"],
+  ["a pull-request rule requiring a review", (g) => { g.rules[2].parameters!.required_approving_review_count = 1; return g; }, "required_approving_review_count is 1"],
+  ["a pull-request rule requiring thread resolution", (g) => { g.rules[2].parameters!.required_review_thread_resolution = true; return g; }, "required_review_thread_resolution is true"],
+  ["a linear-history rule", (g) => { g.rules.push({ type: "required_linear_history" }); return g; }, "carries a required_linear_history rule"],
+  ["a bypass actor", (g) => { g.bypass_actors.push({ actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always" }); return g; }, "bypass_actors is not the empty list"],
+  ["enforcement set to evaluate", (g) => { g.enforcement = "evaluate"; return g; }, 'enforcement is "evaluate"'],
+  ["a push target", (g) => { g.target = "push"; return g; }, 'target is "push"'],
+  ["a ruleset aimed at another branch", (g) => { g.conditions!.ref_name.include = ["refs/heads/dev"]; return g; }, "conditions.ref_name is not"],
+  ["a ruleset with no conditions", (g) => { g.conditions = null; return g; }, "conditions.ref_name is not"],
+  ["no record at all", () => null, "is missing or does not parse"],
+  ["a doubled merge-queue rule", (g) => { g.rules.push(QUEUE_RULE(), QUEUE_RULE()); return g; }, "merge_queue rule 2 time(s) — at most once"],
+  ["a merge-queue rule with no parameters", (g) => { g.rules.push({ type: "merge_queue", parameters: null }); return g; }, "merge_queue rule has no parameters"],
+  ["a queue that squashes", (g) => { g.rules.push(QUEUE_RULE({ merge_method: "SQUASH" })); return g; }, 'merge_method is "SQUASH", not "MERGE"'],
+  ["a queue judged on the group's head only", (g) => { g.rules.push(QUEUE_RULE({ grouping_strategy: "HEADGREEN" })); return g; }, 'grouping_strategy is "HEADGREEN"'],
+  ["a queue that waits for a second PR", (g) => { g.rules.push(QUEUE_RULE({ min_entries_to_merge: 2 })); return g; }, "min_entries_to_merge is 2, not 1"],
 ];
 /** Non-probes: shapes the rules must not throw on and must report at least one problem for — a record that parsed but is not a ruleset. */
 const RULESET_NON_PROBES: [why: string, record: unknown][] = [
@@ -4543,37 +4745,141 @@ const RULESET_NON_PROBES: [why: string, record: unknown][] = [
   ["conditions that are a string", { ...RULESET_PROBE(), conditions: "main" }],
   ["a merge-queue rule whose parameters are a string", (() => { const g = RULESET_PROBE(); g.rules.push({ type: "merge_queue", parameters: "MERGE" } as unknown as RulesetProbeRule); return g; })()],
 ];
-/** The workflow reader's probes: [why, jobs, a phrase the one problem must carry]; the plain job by name and by key are read before them. */
-const WORKFLOW_MUTANTS: [why: string, jobs: Record<string, { name?: string; strategy?: { matrix?: unknown } | null }>, says: string][] = [
-  ["a matrix job", { a: { name: "Server tests", strategy: { matrix: { x: [1, 2] } } } }, "runs a matrix"],
-  ["a job named by an expression", { a: { name: "Tests (${{ matrix.x }})" } }, "named by an expression"],
-  ["two jobs with one display name", { a: { name: "Server tests" }, b: { name: "Server tests" } }, "shares the display name"],
+/** The skip list the probes judge against, apart from AGGREGATE_MAY_SKIP so that a change there does not move them (review pass 5). */
+const PROBE_MAY_SKIP = ["commit-lint"];
+/** A workflow aggregateProblems accepts: a plain job, the job AGGREGATE_MAY_SKIP names with its if:, a matrix job named by an expression (allowed since SMD-3168), and the aggregate needing all three. */
+type ProbeJobs = Record<string, Record<string, unknown> | null>;
+const AGGREGATE_PROBE = (): ProbeJobs => ({
+  a: { name: "Server tests" },
+  "commit-lint": { name: "Commit messages", if: "github.event_name == 'pull_request'" },
+  shard: { name: "Live (${{ matrix.shard }})", strategy: { matrix: { shard: ["rest", "sleep"] } } },
+  [AGGREGATE_JOB]: { name: AGGREGATE_NAME, "runs-on": "ubuntu-24.04", if: "always()", needs: ["a", "commit-lint", "shard"], steps: [{ name: "Every job succeeded", env: { NEEDS: AGGREGATE_NEEDS_ENV, MAY_SKIP: PROBE_MAY_SKIP.join(" ") }, run: `${AGGREGATE_RUN}\n` }] },
+});
+/** The aggregate of AGGREGATE_PROBE, to mutate in place. */
+const aggOf = (j: ProbeJobs) => j[AGGREGATE_JOB] as Record<string, unknown> & { steps: { env: Record<string, unknown>; run: string }[] };
+/** [why, mutate]: workflows aggregateProblems must ACCEPT beyond the probe. */
+const AGGREGATE_ACCEPTED: [why: string, mutate: (j: ProbeJobs) => ProbeJobs][] = [
+  ["if: written as an expression", (j) => { aggOf(j).if = "${{ always() }}"; return j; }],
+  ["needs as one key, when one job is all there is", () => ({ "commit-lint": { if: "github.event_name == 'pull_request'" }, [AGGREGATE_JOB]: { ...aggOf(AGGREGATE_PROBE()), needs: "commit-lint", steps: [{ env: { NEEDS: AGGREGATE_NEEDS_ENV, MAY_SKIP: PROBE_MAY_SKIP.join(" ") }, run: AGGREGATE_RUN }] } })],
+  ["timeouts on the job and the step, and a step id (a timeout is a failure)", (j) => { aggOf(j)["timeout-minutes"] = 5; Object.assign(aggOf(j).steps[0], { id: "verdict", "timeout-minutes": 2 }); return j; }],
+  ["continue-on-error: false on a needed job", (j) => { (j.a as Record<string, unknown>)["continue-on-error"] = false; return j; }],
 ];
+/** [why, mutate, a phrase the ONE problem must carry]. */
+const AGGREGATE_MUTANTS: [why: string, mutate: (j: ProbeJobs) => ProbeJobs, says: string][] = [
+  ["no aggregate job", (j) => { delete j[AGGREGATE_JOB]; return j; }, `has no job ${AGGREGATE_JOB}`],
+  ["the aggregate renamed", (j) => { aggOf(j).name = "All green"; return j; }, `is named "All green", not "${AGGREGATE_NAME}"`],
+  ["the aggregate run on success() alone", (j) => { aggOf(j).if = "success()"; return j; }, "not if: always()"],
+  ["the aggregate with no if:", (j) => { delete aggOf(j).if; return j; }, "not if: always()"],
+  ["the aggregate as a matrix", (j) => { aggOf(j).strategy = { matrix: { x: [1] } }; return j; }, "sets strategy, which check 20 does not allow on it"],
+  ["a job left out of its needs", (j) => { aggOf(j).needs = ["commit-lint", "shard"]; return j; }, `does not need a`],
+  ["a need that is no job", (j) => { aggOf(j).needs = ["a", "commit-lint", "shard", "ghost"]; return j; }, "needs ghost, which is no other job"],
+  ["needs that are a number", (j) => { aggOf(j).needs = 3; return j; }, "not a list of the workflow's jobs"],
+  ["a step that passes whatever it reads", (j) => { aggOf(j).steps[0].run = "echo ok"; return j; }, "is not AGGREGATE_RUN"],
+  ["the verdict's exit 1 dropped", (j) => { aggOf(j).steps[0].run = AGGREGATE_RUN.replace("  exit 1\n", ""); return j; }, "is not AGGREGATE_RUN"],
+  ["NEEDS read from somewhere else", (j) => { aggOf(j).steps[0].env.NEEDS = "{}"; return j; }, "reads NEEDS from"],
+  ["a second step", (j) => { aggOf(j).steps.push({ env: {}, run: "true" }); return j; }, "2 step(s), not the one verdict step"],
+  ["MAY_SKIP naming a job AGGREGATE_MAY_SKIP does not", (j) => { aggOf(j).steps[0].env.MAY_SKIP = "commit-lint a"; return j; }, 'sets MAY_SKIP to "commit-lint a", not "commit-lint"'],
+  ["MAY_SKIP emptied", (j) => { aggOf(j).steps[0].env.MAY_SKIP = ""; return j; }, 'sets MAY_SKIP to "", not "commit-lint"'],
+  ["MAY_SKIP split by a newline, which the step's jq does not split on", (j) => { aggOf(j).steps[0].env.MAY_SKIP = "commit-lint\n"; return j; }, "sets MAY_SKIP to"],
+  ["a job given an if: AGGREGATE_MAY_SKIP does not name", (j) => { (j.a as Record<string, unknown>).if = "github.event_name == 'push'"; return j; }, "job a has an if: of its own and AGGREGATE_MAY_SKIP"],
+  ["the job AGGREGATE_MAY_SKIP names with its if: taken off", (j) => { delete (j["commit-lint"] as Record<string, unknown>).if; return j; }, "AGGREGATE_MAY_SKIP names commit-lint, which has no if:"],
+  ["the job AGGREGATE_MAY_SKIP names gone", (j) => { delete j["commit-lint"]; aggOf(j).needs = ["a", "shard"]; return j; }, "AGGREGATE_MAY_SKIP names commit-lint, which is no job"],
+  ["a skippable job another job needs", (j) => { (j.a as Record<string, unknown>).needs = ["commit-lint"]; return j; }, "AGGREGATE_MAY_SKIP names commit-lint, which a needs"],
+  ["a needed job that ignores its own failure", (j) => { (j.a as Record<string, unknown>)["continue-on-error"] = true; return j; }, "job a sets continue-on-error: true"],
+  ["the aggregate on another runner", (j) => { aggOf(j)["runs-on"] = "windows-2025"; return j; }, 'runs on "windows-2025", not ubuntu-24.04'],
+  ["another job named as the aggregate", (j) => { (j.a as Record<string, unknown>).name = AGGREGATE_NAME; return j; }, `job a is named "${AGGREGATE_NAME}", which carries`],
+  ["another job named by an expression whose text carries the aggregate's name", (j) => { (j.a as Record<string, unknown>).name = `\${{ '${AGGREGATE_NAME}' }}`; return j; }, "which carries"],
+  ["another job named wholly by an expression (a matrix value)", (j) => { (j.a as Record<string, unknown>).name = "${{ matrix.label }}"; return j; }, "which could render as"],
+  ["another job named in part by an expression that could complete the name", (j) => { (j.a as Record<string, unknown>).name = "Fork Checks ${{ matrix.word }}"; return j; }, "which could render as"],
+  ["another job named by an expression with a `}}` inside a quoted string", (j) => { (j.a as Record<string, unknown>).name = `\${{ fromJSON('{"a":{"b":"Fork Checks"}}').a.b }} passed`; return j; }, "which could render as"],
+  ["another job named as the aggregate in another case", (j) => { (j.a as Record<string, unknown>).name = AGGREGATE_NAME.toLowerCase(); return j; }, "which carries"],
+  ["a needed job that calls a reusable workflow", (j) => { (j.a as Record<string, unknown>).uses = "./.github/workflows/called.yml"; return j; }, "job a calls the reusable workflow"],
+  ["the aggregate's job continue-on-error", (j) => { aggOf(j)["continue-on-error"] = true; return j; }, "sets continue-on-error, which check 20 does not allow on it"],
+  ["the aggregate's job defaults", (j) => { aggOf(j).defaults = { run: { shell: "sh" } }; return j; }, "sets defaults, which check 20 does not allow on it"],
+  ["the step continue-on-error", (j) => { (aggOf(j).steps[0] as Record<string, unknown>)["continue-on-error"] = true; return j; }, "step sets continue-on-error"],
+  ["the step skipped by its own if:", (j) => { (aggOf(j).steps[0] as Record<string, unknown>).if = "false"; return j; }, "step sets if"],
+  ["the step under another shell", (j) => { (aggOf(j).steps[0] as Record<string, unknown>).shell = "bash -c true {0}"; return j; }, "step sets shell"],
+  ["a PATH in the step's env", (j) => { aggOf(j).steps[0].env.PATH = "/nowhere"; return j; }, "sets PATH in its env"],
+];
+/** Non-probes: shapes aggregateProblems must not throw on and must report at least one problem for. */
+const AGGREGATE_NON_PROBES: [why: string, doc: unknown][] = [
+  ["no jobs", { jobs: null }],
+  ["an aggregate that is null", { jobs: { a: {}, [AGGREGATE_JOB]: null } }],
+  ["steps that are a string", { jobs: { [AGGREGATE_JOB]: { name: AGGREGATE_NAME, if: "always()", needs: [], steps: "run" } } }],
+  ["a step that is null", { jobs: { [AGGREGATE_JOB]: { name: AGGREGATE_NAME, if: "always()", needs: [], steps: [null] } } }],
+];
+/** AGGREGATE_RUN under bash with NEEDS and MAY_SKIP set: whether it exits 0, or why it could not be run. */
+function aggregateRunPasses(needs: string, maySkip: string): boolean | string {
+  try {
+    execFileSync("bash", ["-eo", "pipefail", "-s"], { input: AGGREGATE_RUN, env: { ...process.env, NEEDS: needs, MAY_SKIP: maySkip }, stdio: ["pipe", "ignore", "ignore"] });
+    return true;
+  } catch (e) {
+    const err = e as { status?: number | null; code?: string };
+    return typeof err.status === "number" ? false : `bash did not run (${err.code ?? "no exit status"})`;
+  }
+}
 function checkRulesetRecord() {
   // Self-test: a record every rule accepts passes; each mutant reports exactly
   // one problem, and that problem names what the mutant broke; a non-probe
   // reports something and throws nothing.
-  const base = rulesetProblems(RULESET_PROBE(), RULESET_PROBE_JOBS);
+  const base = rulesetProblems(RULESET_PROBE());
   if (base.length) fail(SELF, `check 20 false-positives on a consistent record (${base.map((p) => p[1]).join("; ")})`);
   for (const [why, mutate] of RULESET_ACCEPTED) {
-    const got = rulesetProblems(mutate(RULESET_PROBE()), RULESET_PROBE_JOBS);
+    const got = rulesetProblems(mutate(RULESET_PROBE()));
     if (got.length) fail(SELF, `check 20 refuses ${why} (its own probe): ${got.map((p) => p[1]).join("; ")}`);
   }
-  for (const [why, mutate, names, says] of RULESET_MUTANTS) {
-    const got = rulesetProblems(mutate(RULESET_PROBE()), [...names]);
+  for (const [why, mutate, says] of RULESET_MUTANTS) {
+    const got = rulesetProblems(mutate(RULESET_PROBE()));
     if (got.length !== 1) fail(SELF, `check 20 reports ${got.length} problem(s) for ${why}, not one (its own probe): ${JSON.stringify(got)}`);
     else if (!got[0][1].includes(says)) fail(SELF, `check 20's one problem for ${why} does not say "${says}" (its own probe): ${got[0][1]}`);
   }
   for (const [why, record] of RULESET_NON_PROBES) {
     let got: [string, string][];
-    try { got = rulesetProblems(record as RulesetDoc, RULESET_PROBE_JOBS); } catch (e) { fail(SELF, `check 20 throws for ${why}: ${(e as Error).message} (its own probe)`); continue; }
+    try { got = rulesetProblems(record as RulesetDoc); } catch (e) { fail(SELF, `check 20 throws for ${why}: ${(e as Error).message} (its own probe)`); continue; }
     if (!got.length) fail(SELF, `check 20 accepts ${why} (its own probe)`);
   }
-  const plain = workflowJobs({ jobs: { a: { name: "Server tests" }, b: {}, c: null, d: { strategy: null } } });
-  if (plain.problems.length || JSON.stringify(plain.names) !== JSON.stringify(["Server tests", "b", "c", "d"])) fail(SELF, `check 20 reads a plain workflow as ${JSON.stringify(plain)} (its own probe)`);
-  for (const [why, jobs, says] of WORKFLOW_MUTANTS) {
-    const got = workflowJobs({ jobs }).problems;
+  // The aggregate's rules, the same way: the probe passes, each accepted
+  // shape passes, each mutant reports one problem naming what it broke.
+  const aggBase = aggregateProblems({ jobs: AGGREGATE_PROBE() } as JobsDoc, PROBE_MAY_SKIP);
+  if (aggBase.length) fail(SELF, `check 20 false-positives on a consistent workflow (${aggBase.map((p) => p[1]).join("; ")})`);
+  for (const [why, mutate] of AGGREGATE_ACCEPTED) {
+    const got = aggregateProblems({ jobs: mutate(AGGREGATE_PROBE()) } as JobsDoc, PROBE_MAY_SKIP);
+    if (got.length) fail(SELF, `check 20 refuses ${why} (its own probe): ${got.map((p) => p[1]).join("; ")}`);
+  }
+  for (const [why, mutate, says] of AGGREGATE_MUTANTS) {
+    const got = aggregateProblems({ jobs: mutate(AGGREGATE_PROBE()) } as JobsDoc, PROBE_MAY_SKIP);
     if (got.length !== 1 || !got[0][1].includes(says)) fail(SELF, `check 20 reports ${JSON.stringify(got)} for ${why}, not one problem saying "${says}" (its own probe)`);
+  }
+  for (const [why, doc] of AGGREGATE_NON_PROBES) {
+    let got: [string, string][];
+    try { got = aggregateProblems(doc as JobsDoc, PROBE_MAY_SKIP); } catch (e) { fail(SELF, `check 20 throws for ${why}: ${(e as Error).message} (its own probe)`); continue; }
+    if (!got.length) fail(SELF, `check 20 accepts ${why} (its own probe)`);
+  }
+  // Nothing skippable: MAY_SKIP may be "" or absent, and a job's if: is then refused.
+  const noSkip = (env: Record<string, string>) => ({ jobs: { x: {}, [AGGREGATE_JOB]: { name: AGGREGATE_NAME, "runs-on": AGGREGATE_RUNNER, if: "always()", needs: ["x"], steps: [{ env: { NEEDS: AGGREGATE_NEEDS_ENV, ...env }, run: AGGREGATE_RUN }] } } }) as JobsDoc;
+  for (const env of [{}, { MAY_SKIP: "" }] as Record<string, string>[]) {
+    const got = aggregateProblems(noSkip(env), []);
+    if (got.length) fail(SELF, `check 20 refuses an empty skip list with MAY_SKIP ${"MAY_SKIP" in env ? "empty" : "absent"} (its own probe): ${got.map((p) => p[1]).join("; ")}`);
+  }
+  for (const [name, answer] of MAY_REPORT_CASES) {
+    const got = mayReportAs(name, AGGREGATE_NAME);
+    if (got !== answer) fail(SELF, `check 20's mayReportAs answers ${JSON.stringify(got)} for the name ${shownName(name)}, not ${JSON.stringify(answer)} (its own case, review pass 5)`);
+  }
+  const longStart = performance.now();
+  const longName = mayReportAs("${{a}}".repeat(5000) + "z", AGGREGATE_NAME);
+  const longMs = performance.now() - longStart;
+  if (longName !== null || longMs > 1000) fail(SELF, `check 20's mayReportAs reads a name of 5,000 expressions as ${JSON.stringify(longName)} in ${Math.round(longMs)} ms — it must be null, and at once: a RegExp built from a name backtracks (review pass 4, its own probe)`);
+  const otherClash = nameClashes("probe.yml", { jobs: { build: { name: "Build" }, spoof: { name: AGGREGATE_NAME } } } as JobsDoc, null);
+  if (otherClash.length !== 1 || !otherClash[0][1].includes("job spoof")) fail(SELF, `check 20 reports ${JSON.stringify(otherClash)} for another workflow's job named "${AGGREGATE_NAME}", not one problem naming it (its own probe)`);
+  // The step itself, run: AGGREGATE_RUN is the text the job holds, so its
+  // verdict on each case is the job's. jq absent would read as every case
+  // failing, so it is looked for first (review pass 1).
+  let haveJq = true;
+  try { execFileSync("jq", ["--version"], { stdio: "ignore" }); } catch { haveJq = false; fail(SELF, "check 20 runs AGGREGATE_RUN with jq, as the job does, and jq is not on PATH here — install jq (SMD-3168)"); }
+  for (const [why, needs, maySkip, passes] of haveJq ? AGGREGATE_CASES : []) {
+    const got = aggregateRunPasses(needs, maySkip);
+    if (typeof got === "string") { fail(SELF, `check 20 runs AGGREGATE_RUN under bash with jq, as the job does, and here ${got} — install bash and jq (SMD-3168)`); break; }
+    if (got !== passes) fail(SELF, `check 20's AGGREGATE_RUN ${got ? "passes" : "fails"} when ${why}, where the job must ${passes ? "pass" : "fail"} (its own case, SMD-3168)`);
   }
   if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
     fail(SELF, `check 20 parses ${WORKFLOW} with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1856)`);
@@ -4585,9 +4891,18 @@ function checkRulesetRecord() {
   }
   let doc: JobsDoc = null;
   try { doc = Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")) as JobsDoc; } catch (e) { return fail(WORKFLOW, `does not parse: ${(e as Error).message} — check 20 has no job list to hold the record to (SMD-1856)`); }
-  const { names, problems } = workflowJobs(doc);
-  if (!names.length && !problems.length) return fail(WORKFLOW, "has no jobs check 20 can read — the record cannot be held to an empty list (SMD-1856)");
-  for (const [where, msg] of [...problems, ...rulesetProblems(ruleset, names)]) fail(where, msg);
+  if (!doc?.jobs || !Object.keys(doc.jobs).length) return fail(WORKFLOW, "has no jobs check 20 can read — nothing for the one required check to need (SMD-1856)");
+  for (const [where, msg] of [...aggregateProblems(doc), ...rulesetProblems(ruleset)]) fail(where, msg);
+  // Every other workflow, for a job that would report a check under the one
+  // context (review pass 1); one that does not parse is check 23's to report.
+  const workflowsDir = join(ROOT, ".github", "workflows");
+  for (const f of existsSync(workflowsDir) ? readdirSync(workflowsDir).sort() : []) {
+    const rel = `.github/workflows/${f}`;
+    if (!/\.ya?ml$/.test(f) || rel === WORKFLOW) continue;
+    let other: JobsDoc = null;
+    try { other = Bun.YAML.parse(readFileSync(join(workflowsDir, f), "utf8")) as JobsDoc; } catch { continue; }
+    for (const [where, msg] of nameClashes(rel, other, null)) fail(where, msg);
+  }
 }
 checkRulesetRecord();
 
@@ -5908,7 +6223,6 @@ const TRUST_EXCEPTIONS = new Map<string, CountedException>([
   ["recipes/email-history-import/pull-gmail.ts", { why: `${RAW_IMPORT("SMD-2021")}; the second line is the retry`, lines: 2 }],
   ["recipes/entity-wiki/generate-wiki.mjs", { why: "a rerun rewrites an existing dossier's text with a raw PATCH, and a failed upsert_thought call (any error, not only a missing function) falls back to a raw insert: both stamped from the key's kind, so a regenerated dossier reads as the key's and not `agent`; only the first capture's call declares (SMD-2143 moves the script onto the shim, through update_thought and upsert_thought)", lines: 2 }],
   ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", { why: RAW_FALLBACK, lines: 1 }],
-  ["integrations/kubernetes-deployment/index.ts", { why: RAW_OWN_DATABASE, lines: 1 }],
   ["recipes/vercel-neon-telegram/src/lib/db.ts", { why: RAW_OWN_DATABASE, lines: 1 }],
   ["recipes/schema-aware-routing/index.ts", { why: RAW_OWN_DATABASE, lines: 1 }],
   ["extensions/test-writes.ts", { why: "the fixture check 10 counts: rows planted as an older write left them — test rows, not captures", lines: 1 }],
@@ -5993,23 +6307,21 @@ const tierMeshName = (kind: "mcp" | "api", tier: string) => tier === "stable" ? 
 // A route table's parts, as Bun.YAML reads the block; check 28 builds
 // compose.yaml's, compose.api-public.yaml's and compose.hooks-public.yaml's
 // tables from them too.
+/** A router, its `middlewares:` line left out when `mw` is "" (a router with none, as /mcp and /health have had since SMD-2532 took not-legacy away). */
 const routeRouter = (name: string, rule: string, priority: number, mw: string, service: string) =>
-  `    ${name}:\n      rule: "${rule}"\n      priority: ${priority}\n      entryPoints: [web]\n      middlewares: [${mw}]\n      service: ${service}\n`;
+  `    ${name}:\n      rule: "${rule}"\n      priority: ${priority}\n      entryPoints: [web]\n${mw ? `      middlewares: [${mw}]\n` : ""}      service: ${service}\n`;
 const routeErrors = (name: string, status: string) =>
   `    ${name}:\n      errors:\n        status: ["${status}"]\n        service: noop@internal\n        statusRewrites:\n          "${status}": 404\n`;
 const routeService = (name: string, url: string) => `    ${name}:\n      loadBalancer:\n        servers:\n          - url: "${url}"\n`;
-/** The 404 for every path under /canary or /working, in compose.tiers.yaml's table after its tier routers; compose.yaml's carried it from SMD-2874 until SMD-2532 removed the legacy route it kept those paths off. */
-const ROUTE_TIER_OFF = routeRouter("tier-off", "PathRegexp(`(?i)^/(canary|working)`)", 25, "not-served", "noop@internal");
-/** compose.tiers.yaml's canary and working routers, and the 404 for the rest of their prefixes: the three-brain stack's alone since SMD-2874 took them out of compose.yaml's (SMD-2878 decides that stack's future). */
-const ROUTE_TIER_PATHS = TIERS.filter((t) => t !== "stable").map((t) => routeRouter(t, `Path(\`/${t}/mcp\`) || PathPrefix(\`/${t}/mcp/\`)`, 30, "not-legacy, tier-absent", t)).join("")
-  + ROUTE_TIER_OFF;
-const routeHealth = (service: string) => routeRouter("health", "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))", 20, "not-legacy", service);
-const ROUTE_NOT_LEGACY = "    not-legacy:\n      headers:\n        customRequestHeaders:\n          X-OB1-Legacy-Route: \"\"\n";
+/** compose.tiers.yaml's canary and working routers, and its 404 (`tier-off`) for the rest of their prefixes: the three-brain stack's alone since SMD-2874 took the routers out of compose.yaml's, and SMD-2532 its tier-off (SMD-2878 decides that stack's future). */
+const ROUTE_TIER_PATHS = TIERS.filter((t) => t !== "stable").map((t) => routeRouter(t, `Path(\`/${t}/mcp\`) || PathPrefix(\`/${t}/mcp/\`)`, 30, "tier-absent", t)).join("")
+  + routeRouter("tier-off", "PathRegexp(`(?i)^/(canary|working)`)", 25, "not-served", "noop@internal");
+const routeHealth = (service: string) => routeRouter("health", "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))", 20, "", service);
 /** compose.tiers.yaml's route table, byte for byte, as Bun.YAML reads the block. */
 const TIER_ROUTE_TABLE = "http:\n  routers:\n"
-  + routeRouter("stable", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "not-legacy", "stable")
+  + routeRouter("stable", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "", "stable")
   + ROUTE_TIER_PATHS + routeHealth("stable")
-  + "  middlewares:\n" + ROUTE_NOT_LEGACY + routeErrors("tier-absent", "502") + routeErrors("not-served", "418")
+  + "  middlewares:\n" + routeErrors("tier-absent", "502") + routeErrors("not-served", "418")
   + "  services:\n" + TIERS.map((t) => routeService(t, `http://${tierMeshName("mcp", t)}.:8000`)).join("");
 /** The control, format and separator characters in a text other than the space and the line feed, each as `line (U+XXXX)` — compose and Bun.YAML part lines, comments and indentation differently around them. */
 const oddCharacters = (text: string) => [...new Set([...text.matchAll(/(?![ \n])[\p{Cc}\p{Cf}\p{Z}]/gu)].map((m) => `${text.slice(0, m.index).split("\n").length} (U+${m[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")})`))];
@@ -6167,8 +6479,8 @@ const TIER_STACK_PROBES: [string, ...[string, string, number?][]][] = [
   ["a Go template on a route table comment, which Traefik renders", ["    middlewares:\n", "    middlewares:\n      # {{ \"note\" }}\n"]],
   ["a variable on a route table comment, which compose interpolates", ["    middlewares:\n", "    middlewares:\n      # ${OB1_ROUTE_NOTE:-}\n"]],
   // The parsed file against the generated stack.
-  ["a duplicate canary router, after health", ["        service: stable\n    middlewares:", "        service: stable\n      canary:\n        rule: \"Path(`/canary/mcp`)\"\n        priority: 30\n        entryPoints: [web]\n        middlewares: [not-legacy]\n        service: stable\n    middlewares:"]],
-  ["an extra catch-all router", ["    routers:\n", "    routers:\n      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [not-legacy]\n        service: working\n"]],
+  ["a duplicate canary router, after health", ["        service: stable\n    middlewares:", "        service: stable\n      canary:\n        rule: \"Path(`/canary/mcp`)\"\n        priority: 30\n        entryPoints: [web]\n        middlewares: [tier-absent]\n        service: stable\n    middlewares:"]],
+  ["an extra catch-all router", ["    routers:\n", "    routers:\n      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [tier-absent]\n        service: working\n"]],
   ["tier-absent rewriting to 200", ["          statusRewrites:\n            \"502\": 404", "          statusRewrites:\n            \"502\": 200"]],
   ["an include beside the services", ["\nvolumes:\n", "\ninclude: [other.yaml]\n\nvolumes:\n"]],
   ["another project's name", ["name: open-brain-tiers\n", "name: open-brain\n"]],
@@ -6298,15 +6610,15 @@ checkTierStack();
 /** compose.yaml's route table, byte for byte, as Bun.YAML reads the block. */
 const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("auth", "Path(`/auth`) || PathPrefix(`/auth/`) || Path(`/.well-known/oauth-authorization-server/auth`) || Path(`/.well-known/openid-configuration/auth`) || Path(`/.well-known/oauth-authorization-server`)", 40, "auth-absent", "auth")
-  + routeRouter("resource", "Path(`/.well-known/oauth-protected-resource/mcp`)", 40, "not-legacy, auth-absent", "server")
+  + routeRouter("resource", "Path(`/.well-known/oauth-protected-resource/mcp`)", 40, "auth-absent", "server")
   + routeRouter("oauth-fallback-off", "Path(`/register`) || Path(`/authorize`) || Path(`/token`)", 35, "not-served", "noop@internal")
   + routeRouter("api-off", "Path(`/api`) || PathPrefix(`/api/`)", 35, "api-off", "noop@internal")
   + routeRouter("hooks-off", "Path(`/hooks`) || PathPrefix(`/hooks/`)", 35, "not-served", "noop@internal")
   + routeRouter("grafana-off", "Path(`/grafana`) || PathPrefix(`/grafana/`)", 35, "not-served", "noop@internal")
-  + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "not-legacy", "server")
+  + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "", "server")
   + routeHealth("server")
   + "  middlewares:\n"
-  + ROUTE_NOT_LEGACY + routeErrors("auth-absent", "502") + routeErrors("api-off", "418") + routeErrors("not-served", "418")
+  + routeErrors("auth-absent", "502") + routeErrors("api-off", "418") + routeErrors("not-served", "418")
   + "  services:\n" + routeService("server", `http://${tierMeshName("mcp", "stable")}.:8000`)
   + routeService("auth", "http://auth.ob1.internal.:3000");
 /** compose.api-public.yaml's route table, byte for byte, as Bun.YAML reads the block. */
@@ -6436,7 +6748,7 @@ const LGTM_SERVICE = {
     TEMPO_EXTRA_ARGS: "-config.file=/tmp/tempo-config.yaml -reporting.enabled=false",
     PYROSCOPE_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -memberlist.bind-addr=127.0.0.1 -usage-stats.enabled=false",
     // The collector's scrape of pg-exporter on `telemetry` (SMD-1849 PR 3b), one argument with no space in it.
-    OTELCOL_EXTRA_ARGS: "--config=yaml:{\"receivers\":{\"prometheus/postgres\":{\"config\":{\"scrape_configs\":[{\"job_name\":\"postgres\",\"scrape_interval\":\"30s\",\"static_configs\":[{\"targets\":[\"pg-exporter.ob1.internal.:9187\"]}]}]}}},\"service\":{\"pipelines\":{\"metrics\":{\"receivers\":[\"otlp\",\"prometheus/collector\",\"prometheus/postgres\"]}}}}",
+    OTELCOL_EXTRA_ARGS: "--config=yaml:{\"receivers\":{\"prometheus/postgres\":{\"config\":{\"scrape_configs\":[{\"job_name\":\"postgres\",\"scrape_interval\":\"30s\",\"metrics_path\":\"/cgi-bin/metrics\",\"static_configs\":[{\"targets\":[\"pg-exporter.ob1.internal.:9187\"]}]}]}}},\"service\":{\"pipelines\":{\"metrics\":{\"receivers\":[\"otlp\",\"prometheus/collector\",\"prometheus/postgres\"]}}}}",
   },
   volumes: ["lgtm-data:/data"],
   // The provisioned dashboard and its provider (PR 3c), check 37's, and the alert rules (SMD-3050), check 38's.
@@ -6448,7 +6760,8 @@ const LGTM_SERVICE = {
 /**
  * compose.yaml's Postgres exporter and the step that makes its role (SMD-1849 PR 3b), whole as Bun.YAML reads them, their `logging`
  * (check 29's) aside: the image by its digest, the role it reads as (ob1_monitor, a member of pg_monitor alone, never a superuser),
- * which statements it names and how much of their text, and its own queries left out. Held whole because what CI's one run of the profile
+ * which statements it names and how much of their text, and its own queries left out. The exporter on loopback behind busybox httpd on its `telemetry`
+ * address alone, serving the one CGI that fetches its /metrics (SMD-3023): its /probe dials any target and credentials its caller names. Held whole because what CI's one run of the profile
  * reads is the series (PR 3c), not how they are made: a superuser's DSN, an image by tag or a dropped --member-of passed every other
  * check (review pass 1).
  */
@@ -6456,8 +6769,39 @@ const PG_EXPORTER_SERVICE = {
   image: "quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e",
   profiles: ["observability"],
   read_only: true,
+  tmpfs: ["/tmp", "/var/www:exec,mode=1777"],
   cap_drop: ["ALL"],
   security_opt: ["no-new-privileges:true"],
+  init: true,
+  entrypoint: ["/bin/sh", "-c", [
+    "addr=\n",
+    "for _ in 1 2 3 4 5 6 7 8 9 10; do\n",
+    "  addr=$$(nslookup pg-exporter.ob1.internal. 2> /dev/null | awk '/^Name:/ { n = 1 } n && /^Address:? *[0-9.]+$$/ { print $$NF; exit }')\n",
+    "  [ -n \"$$addr\" ] && break\n",
+    "  sleep 1\n",
+    "done\n",
+    "if [ -z \"$$addr\" ]; then\n",
+    "  echo \"pg-exporter: pg-exporter.ob1.internal resolves to no address, and the exporter's front listens on that one alone: compose.yaml gives this container that name on telemetry\" >&2; sleep 30; exit 1\n",
+    "fi\n",
+    "if ! { mkdir -p /var/www/cgi-bin && cat > /var/www/cgi-bin/metrics && chmod 555 /var/www/cgi-bin/metrics; } << 'CGI'\n",
+    "#!/bin/sh\n",
+    "if f=$$(mktemp) && wget -q -T 10 -O \"$$f\" http://127.0.0.1:9188/metrics; then\n",
+    "  printf 'Content-Type: text/plain; version=0.0.4; charset=utf-8\\r\\n\\r\\n'; cat \"$$f\"\n",
+    "else\n",
+    "  printf 'HTTP/1.1 502 Bad Gateway\\r\\nContent-Type: text/plain\\r\\n\\r\\nno answer from the exporter, or no room in /tmp for it\\n'\n",
+    "fi\n",
+    "rm -f \"$$f\"\n",
+    "CGI\n",
+    "then\n",
+    "  echo \"pg-exporter: could not write its CGI to /var/www, the tmpfs compose.yaml gives it: the collector would scrape nothing\" >&2; sleep 30; exit 1\n",
+    "fi\n",
+    "/bin/postgres_exporter --web.listen-address=127.0.0.1:9188 \"$$@\" &\n",
+    "e=$$!\n",
+    "env -i PATH=/bin httpd -f -p \"$$addr:9187\" -h /var/www &\n",
+    "h=$$!\n",
+    "while kill -0 \"$$e\" 2> /dev/null && kill -0 \"$$h\" 2> /dev/null; do sleep 5; done\n",
+    "echo \"pg-exporter: the exporter or its front (httpd) stopped, its own line above saying why if it left one; the container exits in 30 s and restarts\" >&2; sleep 30; exit 1\n",
+  ].join(""), "pg-exporter"],
   command: [
     "--collector.stat_statements",
     "--collector.stat_statements.include_query",
@@ -6468,7 +6812,7 @@ const PG_EXPORTER_SERVICE = {
   environment: { DATA_SOURCE_URI: "postgres:5432/openbrain?sslmode=disable", DATA_SOURCE_USER: "ob1_monitor", DATA_SOURCE_PASS: "${OB1_MONITOR_DB_PASSWORD:-}" },
   depends_on: { "pg-monitor-role": { condition: "service_completed_successfully" } },
   networks: { data: {}, telemetry: { aliases: ["pg-exporter.ob1.internal"] } },
-  healthcheck: { test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9187/"], interval: "30s", timeout: "5s", retries: 3, start_period: "30s" },
+  healthcheck: { test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9188/"], interval: "30s", timeout: "5s", retries: 3, start_period: "30s" },
   restart: "unless-stopped",
 };
 const PG_MONITOR_ROLE_SERVICE = {
@@ -6620,7 +6964,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
       const svc = isMapping(services[name]) ? services[name] : undefined;
       const pdiffs: string[] = [];
       pathDiffs(JSON.parse(JSON.stringify(omitKeys(svc, ["logging"]))), held, `services.${name}`, pdiffs);
-      if (pdiffs.length) flag("proxy", `${pdiffs.slice(0, 6).join("; ")}${pdiffs.length > 6 ? `; and ${pdiffs.length - 6} more` : ""} — compose.yaml's ${name} is check 28's ${lit}: the role the exporter reads Postgres as, its one membership and which statements it names are its keys, so a change to it is made there too, on purpose (SMD-1849 PR 3b)`);
+      if (pdiffs.length) flag("proxy", `${pdiffs.slice(0, 6).join("; ")}${pdiffs.length > 6 ? `; and ${pdiffs.length - 6} more` : ""} — compose.yaml's ${name} is check 28's ${lit}: the role the exporter reads Postgres as, its one membership, which statements it names and (SMD-3023) the exporter on loopback behind its one-CGI front on telemetry are its keys, so a change to it is made there too, on purpose (SMD-1849 PR 3b)`);
     }
     const fconfig = isMapping(doc.configs) && isMapping(doc.configs.forwarder) ? doc.configs.forwarder : undefined;
     const sdiffs: string[] = [];
@@ -6698,7 +7042,7 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["a Go template on a comment line in compose.yaml's table, which Traefik renders as a catch-all router", "compose.yaml", "    routers:\n      auth:\n", "    routers:\n      # {{ \"\\n    all:\\n      rule: \\\"PathPrefix(`/`)\\\"\\n      priority: 100\\n      service: canary\" }}\n      auth:\n"],
   ["a catch-all router on a line led by a no-break space in compose.yaml's table, a key to YAML and a comment to a reader", "compose.yaml", "    routers:\n      auth:\n", "    routers:\n      \u00a0#all: {rule: \"PathPrefix(`/`)\", priority: 100, entryPoints: [web], service: canary}\n      auth:\n"],
   ["a comment line in compose.yaml's table", "compose.yaml", "      auth-absent:\n        errors:\n", "      # a note\n      auth-absent:\n        errors:\n"],
-  ["a catch-all router back under every unrouted path, as the legacy route was (SMD-2532)", "compose.yaml", "      health:\n        rule:", "      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [not-legacy]\n        service: server\n      health:\n        rule:"],
+  ["a catch-all router back under every unrouted path, as the legacy route was (SMD-2532)", "compose.yaml", "      health:\n        rule:", "      all:\n        rule: \"PathPrefix(`/`)\"\n        priority: 1\n        entryPoints: [web]\n        middlewares: [auth-absent]\n        service: server\n      health:\n        rule:"],
   ["Grafana's anonymous access on in the observability collector", "compose.yaml", "      GF_AUTH_ANONYMOUS_ENABLED: \"false\"\n", "      GF_AUTH_ANONYMOUS_ENABLED: \"true\"\n"],
   ["the proxy's label its own table", "compose.yaml", "      ob1.proxy-routes: *proxy-routes\n", "      ob1.proxy-routes: \"http: {}\"\n"],
   ["the mounted config its own table", "compose.yaml", "    content: *proxy-routes\n", "    content: \"http: {}\"\n"],
@@ -6756,7 +7100,7 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["compose.host-ports.yaml putting a sidecar in the proxy's PID namespace", "compose.host-ports.yaml", "  jev:\n    ports:\n", "  jev:\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n    ports:\n"],
   ["a compose.yaml service named as the MCP server's mesh name", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  mcp.ob1.internal:\n    image: oven/bun:1.4.3-alpine\n\nnetworks:\n  # The ADR's networks"],
   ["the import runner given SYS_PTRACE too", "compose.yaml", "    cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP]\n", "    cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP, SYS_PTRACE]\n"],
-  ["the authorization server unconfined by seccomp", "compose.yaml", "    tmpfs: [/tmp]\n    cap_drop: [ALL]\n    security_opt: [\"no-new-privileges:true\"]\n", "    tmpfs: [/tmp]\n    cap_drop: [ALL]\n    security_opt: [\"no-new-privileges:true\", \"seccomp=unconfined\"]\n"],
+  ["the authorization server unconfined by seccomp", "compose.yaml", "    security_opt: [\"no-new-privileges:true\"]\n    # The server stops on SIGTERM", "    security_opt: [\"no-new-privileges:true\", \"seccomp=unconfined\"]\n    # The server stops on SIGTERM"],
   ["the import runner mounting the engine's socket", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - /var/run/docker.sock:/var/run/docker.sock\n"],
   ["the import runner mounting the engine's socket past a variable's default (SMD-2685 review pass 1, which compose resolved to /var/run/docker.sock)", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ${OB1_X:-./}/../../../../../var/run/docker.sock:/var/run/docker.sock\n"],
   ["the import runner mounting the engine's socket through a variable inside the path", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ./a${OB1_X:-/../../../../..}/var/run/docker.sock:/s\n"],
@@ -7430,13 +7774,23 @@ checkBunPins();
 // each is taken). release.yml is not read: it runs on a tag, and on a pull
 // request only when its own paths change. A run counts only if the suite's
 // failure fails the job, so nothing counts from a step or job with
-// `continue-on-error` or `if: false`, or from a command followed by `|| true`
-// or `|| :`, a continued line read as one. A comment line runs nothing, and a
-// quoted string is read as nothing either: an echo that names a suite does not
-// run it, and so a suite run only inside `sh -c "…"`, or only through `bun run`
-// and a package script, reads as unrun, which is the loud direction. What
-// no workflow should run is named in SUITES_NOT_RUN with why, and an entry
-// there that a workflow does run is stale.
+// `continue-on-error` or `if: false` (or `${{ false }}`), or from a command
+// followed by `|| true` or `|| :`, a continued line read as one. A matrix job
+// is read once a cell, GitHub's way (matrixCells), its `${{ matrix.* }}` in env
+// values, the run text and the working-directory filled in from the cell, so
+// check 35 holds each shard of db-live to its line (SMD-3169). A step whose
+// `if:` is `matrix.<key> == '<value>'` (or `!=`) on a string value, alone or
+// joined by `&&` to parts that read no matrix, is read in the cells that run it
+// alone, so a shard renamed under db-live's rest-only step leaves its suite
+// unrun, not run four times; any other `if:` that reads the matrix, on a step
+// that runs a suite, is reported as one check 34 cannot decide (review passes 2
+// and 3), and an `if:` that reads no matrix is not evaluated unless it is
+// `false`. A comment line runs nothing, and a quoted string is read as nothing
+// either: an echo that names a suite does not run it, and so a suite run only
+// inside `sh -c "…"`, or only through `bun run` and a package script, reads as
+// unrun, which is the loud direction. What no workflow should run is named in
+// SUITES_NOT_RUN with why, and an entry there that a workflow does run is
+// stale.
 const SUITE_WORKFLOW = ".github/workflows/fork-checks.yml";
 const SUITES_NOT_RUN: Record<string, string> = {
   "db/test-support.ts": "the db/ suites' shared helpers, imported by them; it runs nothing itself",
@@ -7461,10 +7815,108 @@ type ScriptRun = { dirs: string[]; script: string; args: string; env: Record<str
 const SHELL_QUOTED = /"(?:[^"\\\n]|\\.)*"|'[^'\n]*'/g;
 /** What follows a command that swallows its failure, up to the end of its line or a `;`. */
 const SHELL_SWALLOWED = /^[^\n;]*?\|\|\s*(?:true|:)(?![\w-])/;
-/** A step or job whose failure cannot fail the job: `continue-on-error` set to anything but false, or `if: false`. */
-const failureIgnored = (v: Mapping): boolean => (v["continue-on-error"] !== undefined && v["continue-on-error"] !== false) || v.if === false;
-/** Every script a parsed workflow's steps run by bun or node whose failure fails the job (checks 34 and 35). */
-function scriptRunsIn(rel: string, doc: unknown): ScriptRun[] {
+/** A step or job whose failure cannot fail the job: `continue-on-error` set to anything but false, or `if: false`, bare or as `${{ false }}`. */
+const failureIgnored = (v: Mapping): boolean =>
+  (v["continue-on-error"] !== undefined && v["continue-on-error"] !== false) || v.if === false || (typeof v.if === "string" && /^\s*(?:\$\{\{\s*false\s*\}\}|false)\s*$/.test(v.if));
+/** A matrix value as GitHub renders it into a string: null as nothing, another scalar as itself, anything else as JSON. */
+const matrixText = (v: unknown): string => (v === null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
+/**
+ * A job's matrix cells as GitHub expands them: the product of its axes, less
+ * every cell an `exclude` entry matches in each of its keys; then each
+ * `include` entry is merged into every cell of that product whose axis
+ * values it does not change (values an earlier include added it may), or,
+ * when it fits none, added as a cell of its own, which no later include
+ * extends — so a matrix of include alone is a cell an entry. A job with no
+ * matrix is one empty cell; so is one whose matrix, an axis, its include or
+ * exclude list or an entry of either an expression gives, which leaves its
+ * `${{ matrix.* }}` unfilled and so matching no ci-parity.sh line — the loud
+ * direction — and one whose product is empty (an empty axis, every cell
+ * excluded), which GitHub refuses or runs nothing for.
+ */
+function matrixCells(strategy: unknown): Record<string, unknown>[] {
+  const m = isMapping(strategy) ? strategy.matrix : undefined;
+  if (!isMapping(m)) return [{}];
+  const { include = [], exclude = [], ...axes } = m;
+  if (!Array.isArray(include) || !Array.isArray(exclude) || ![...include, ...exclude].every(isMapping) || !Object.values(axes).every(Array.isArray)) return [{}];
+  // A cell keeps each value as YAML gives it, so an if: can tell a string from a number; values compare as rendered.
+  const same = (a: unknown, b: unknown) => a !== undefined && b !== undefined && matrixText(a) === matrixText(b);
+  let cells: Record<string, unknown>[] = Object.keys(axes).length
+    ? Object.entries(axes as Record<string, unknown[]>).reduce<Record<string, unknown>[]>((acc, [k, vs]) => acc.flatMap((c) => vs.map((v) => ({ ...c, [k]: v }))), [{}])
+    : [];
+  cells = cells.filter((c) => !exclude.some((x) => Object.keys(x).length > 0 && Object.entries(x).every(([k, v]) => same(c[k], v))));
+  const added: Record<string, unknown>[] = [];
+  for (const inc of include as Mapping[]) {
+    const fits = cells.filter((c) => Object.entries(inc).every(([k, v]) => !Object.hasOwn(axes, k) || same(c[k], v)));
+    if (fits.length) for (const c of fits) Object.assign(c, inc);
+    else added.push({ ...inc });
+  }
+  cells.push(...added);
+  return cells.length ? cells : [{}];
+}
+/** `${{ matrix.<key> }}` in a value. */
+const MATRIX_REF = /\$\{\{\s*matrix\.([A-Za-z_][\w-]*)\s*\}\}/g;
+/** A cell's value for a key, matched ignoring case as GitHub's contexts match property names; undefined when the cell has none. */
+const cellValue = (cell: Record<string, unknown>, key: string): unknown => {
+  const own = Object.keys(cell).find((k) => k.toLowerCase() === key.toLowerCase());
+  return own === undefined ? undefined : cell[own];
+};
+/** A value with each `${{ matrix.<key> }}` filled in from a cell, a key the cell lacks rendering empty, as on GitHub. */
+const fillMatrix = (v: string, cell: Record<string, unknown>): string =>
+  v.replace(MATRIX_REF, (_, key: string) => {
+    const value = cellValue(cell, key);
+    return value === undefined ? "" : matrixText(value);
+  });
+/** One comparison of a matrix value with a string literal (`''` an escaped quote). */
+const MATRIX_IF = /^\s*matrix\.([A-Za-z_][\w-]*)\s*(==|!=)\s*'((?:[^']|'')*)'\s*$/;
+/** A string literal in an expression. */
+const EXPRESSION_LITERAL = /'(?:[^']|'')*'/g;
+/** Whether an expression reads the matrix context: `matrix` itself, not a property named so (`needs.matrix`) or text in a literal. */
+const readsMatrix = (expr: string): boolean => /(?<![\w.$-])matrix\b/i.test(expr.replace(EXPRESSION_LITERAL, "''"));
+/** An expression's parts split on `op` where it stands outside parentheses and string literals. */
+function topLevelParts(expr: string, op: "&&" | "||"): string[] {
+  const parts: string[] = [];
+  let depth = 0, start = 0, quoted = false;
+  for (let i = 0; i < expr.length; i++) {
+    const c = expr[i];
+    if (c === "'") quoted = !quoted;
+    else if (quoted) continue;
+    else if (c === "(") depth++;
+    else if (c === ")") depth--;
+    else if (depth === 0 && expr.startsWith(op, i)) { parts.push(expr.slice(start, i)); start = i + op.length; i += op.length - 1; }
+  }
+  parts.push(expr.slice(start));
+  return parts;
+}
+/**
+ * Whether a step's `if:` runs it in a cell of a readable matrix. An `if:`
+ * that reads no matrix, or a cell of no readable matrix, is undefined: not
+ * evaluated, so read as run. An `if:` that is a chain of `&&` (inside
+ * `${{ }}` or not) is decided on its parts that read the matrix, each of
+ * which must be `matrix.<key> == '<value>'` or `!=` on a string value:
+ * compared ignoring case, as GitHub compares strings, a key the cell lacks
+ * being '' as GitHub dereferences it. One such part false makes the `if:`
+ * false, whatever the other parts (`!cancelled() && matrix.shard == 'rest'`,
+ * review pass 3). Any other `if:` that reads the matrix — an `||` at its top,
+ * a matrix part negated, parenthesised, reversed or indexed, a number or
+ * boolean value, which GitHub would compare as numbers — is "unread": check
+ * 34 reports it, so a shard renamed under one cannot leave a suite run by no
+ * cell while the checks count it in each (review pass 2).
+ */
+function matrixIfHolds(cond: unknown, cell: Record<string, unknown>): boolean | "unread" | undefined {
+  if (typeof cond !== "string" || !Object.keys(cell).length) return undefined;
+  const expr = cond.replace(/^\s*\$\{\{([^]*)\}\}\s*$/, "$1");
+  if (!readsMatrix(expr)) return undefined;
+  if (topLevelParts(expr, "||").length > 1) return "unread";
+  const decided: (boolean | "unread")[] = topLevelParts(expr, "&&").filter(readsMatrix).map((part) => {
+    const m = MATRIX_IF.exec(part);
+    const value = m ? cellValue(cell, m[1]) ?? "" : undefined;
+    if (!m || typeof value !== "string") return "unread";
+    return (value.toLowerCase() === m[3].replace(/''/g, "'").toLowerCase()) === (m[2] === "==");
+  });
+  return decided.includes(false) ? false : decided.includes("unread") ? "unread" : true;
+}
+/** Every script a parsed workflow's steps run by bun or node whose failure fails the job (checks 34 and 35); each step running one whose matrix `if:` it cannot decide goes in `unread`, its where, and is read as run. */
+function scriptRunsIn(rel: string, doc: unknown, unread: Set<string> = new Set()): ScriptRun[] {
   const out: ScriptRun[] = [];
   const wdOf = (v: unknown): string | undefined => {
     const d = isMapping(v) && isMapping(v.run) ? v.run["working-directory"] : undefined;
@@ -7477,31 +7929,44 @@ function scriptRunsIn(rel: string, doc: unknown): ScriptRun[] {
   for (const [job, def] of Object.entries(jobs)) {
     if (!isMapping(def) || failureIgnored(def)) continue;
     const jobWd = wdOf(def.defaults) ?? top ?? ".";
-    const jobEnv = { ...topEnv, ...envOf(def) };
     const steps = Array.isArray(def.steps) ? def.steps : [];
-    steps.forEach((step, i) => {
-      if (!isMapping(step) || typeof step.run !== "string" || failureIgnored(step)) return;
-      const wd = posix.normalize(typeof step["working-directory"] === "string" ? step["working-directory"] : jobWd);
-      const text = step.run.replace(/\\\n/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)).join("\n").replace(SHELL_QUOTED, '""');
-      const dirs = [wd, ...[...text.matchAll(SHELL_CD)].map((m) => posix.normalize(posix.join(wd, m[1])))];
-      const where = `${rel}: job ${job}, step ${typeof step.name === "string" ? JSON.stringify(step.name) : i + 1}`;
-      const stepEnv = { ...jobEnv, ...envOf(step) };
-      for (const m of text.matchAll(SCRIPT_RUN)) {
-        if (SHELL_SWALLOWED.test(text.slice(m.index! + m[0].length))) continue;
-        // The command's own assignments open the segment it is in: after the
-        // last newline, `;`, `&`, `|` or `(` before it.
-        const before = text.slice(0, m.index!);
-        const segment = before.slice(Math.max(...["\n", ";", "&", "|", "("].map((c) => before.lastIndexOf(c))) + 1);
-        const inline = Object.fromEntries((SHELL_ASSIGNS.exec(segment)?.[1] ?? "").trim().split(/\s+/).filter(Boolean).map((a) => [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]));
-        out.push({ dirs, script: m[1], args: m[2].trim().split(/\s+/).filter(Boolean).join(" "), env: { ...stepEnv, ...inline }, job, where });
-      }
-    });
+    for (const cell of matrixCells(def.strategy)) {
+      // A job with no readable matrix is one empty cell, its values left as written.
+      const inCell = Object.keys(cell).length > 0;
+      const fillText = (v: string): string => (inCell ? fillMatrix(v, cell) : v);
+      const fill = (env: Record<string, string>): Record<string, string> => Object.fromEntries(Object.entries(env).map(([k, v]) => [k, fillText(v)]));
+      const cellName = inCell ? ` (${Object.values(cell).map(matrixText).join(", ")})` : "";
+      const jobEnv = fill({ ...topEnv, ...envOf(def) });
+      steps.forEach((step, i) => {
+        if (!isMapping(step) || typeof step.run !== "string" || failureIgnored(step)) return;
+        const stepName = typeof step.name === "string" ? JSON.stringify(step.name) : i + 1;
+        const runs = matrixIfHolds(step.if, cell);
+        if (runs === false) return;
+        const runsBefore = out.length;
+        // GitHub fills the run text and the directory before the shell sees them.
+        const wd = posix.normalize(typeof step["working-directory"] === "string" ? fillText(step["working-directory"]) : jobWd);
+        const text = fillText(step.run).replace(/\\\n/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)).join("\n").replace(SHELL_QUOTED, '""');
+        const dirs = [wd, ...[...text.matchAll(SHELL_CD)].map((m) => posix.normalize(posix.join(wd, m[1])))];
+        const where = `${rel}: job ${job}${cellName}, step ${stepName}`;
+        const stepEnv = { ...jobEnv, ...fill(envOf(step)) };
+        for (const m of text.matchAll(SCRIPT_RUN)) {
+          if (SHELL_SWALLOWED.test(text.slice(m.index! + m[0].length))) continue;
+          // The command's own assignments open the segment it is in: after the
+          // last newline, `;`, `&`, `|` or `(` before it.
+          const before = text.slice(0, m.index!);
+          const segment = before.slice(Math.max(...["\n", ";", "&", "|", "("].map((c) => before.lastIndexOf(c))) + 1);
+          const inline = Object.fromEntries((SHELL_ASSIGNS.exec(segment)?.[1] ?? "").trim().split(/\s+/).filter(Boolean).map((a) => [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]));
+          out.push({ dirs, script: m[1], args: m[2].trim().split(/\s+/).filter(Boolean).join(" "), env: { ...stepEnv, ...inline }, job, where });
+        }
+        if (runs === "unread" && out.length > runsBefore) unread.add(`${rel}: job ${job}, step ${stepName}`);
+      });
+    }
   }
   return out;
 }
 /** Every script a parsed workflow's steps run whose failure fails the job, at every path it can resolve to (check 34). */
-function suitesRunIn(rel: string, doc: unknown): SuiteRun[] {
-  return scriptRunsIn(rel, doc).flatMap((r) => r.dirs.map((d) => ({ path: posix.normalize(posix.join(d, r.script)), where: r.where })));
+function suitesRunIn(rel: string, doc: unknown, unread?: Set<string>): SuiteRun[] {
+  return scriptRunsIn(rel, doc, unread).flatMap((r) => r.dirs.map((d) => ({ path: posix.normalize(posix.join(d, r.script)), where: r.where })));
 }
 /** What check 34 reports: a suite nothing runs and nothing excuses, an excused suite a workflow runs, an excuse for no suite. */
 function suiteProblems(suites: string[], run: SuiteRun[], notRun: Record<string, string>): [where: string, detail: string][] {
@@ -7540,6 +8005,34 @@ const SUITE_PROBLEM_PROBES: [string, string[], string[], Record<string, string>,
   ["an excuse for a file that is gone", ["a/test-a.ts"], ["a/test-a.ts"], { "a/test-gone.ts": "why" }, [SELF]],
   ["an excuse with no reason", ["a/test-a.ts"], [], { "a/test-a.ts": " " }, [SELF]],
 ];
+/** [what, an if:, a cell, what matrixIfHolds decides]. */
+const MATRIX_IF_PROBES: [string, unknown, Record<string, unknown>, boolean | "unread" | undefined][] = [
+  ["equal, ignoring case", "matrix.s == 'REST'", { s: "rest" }, true],
+  ["unequal", "${{ matrix.s != 'rest' }}", { s: "rest" }, false],
+  ["a misspelt value", "matrix.s == 'rset'", { s: "rest" }, false],
+  ["an escaped quote", "matrix.s == 'it''s'", { s: "it's" }, true],
+  ["a key the cell lacks is ''", "matrix.t == 'yes'", { s: "rest" }, false],
+  ["a key the cell lacks, unequal", "matrix.t != 'yes'", { s: "rest" }, true],
+  ["a key matched ignoring case", "matrix.S == 'rest'", { s: "rest" }, true],
+  ["no matrix read", "github.event_name == 'push'", { s: "rest" }, undefined],
+  ["no readable matrix", "matrix.s == 'rest'", {}, undefined],
+  ["a property named matrix, and the word in a literal, read no matrix (review pass 3)", "needs.matrix.outputs.run == 'true' && contains(github.head_ref, 'matrix.s')", { s: "rest" }, undefined],
+  ["an && chain, true (review pass 3)", "${{ !cancelled() && matrix.s == 'rest' }}", { s: "rest" }, true],
+  ["an && chain, false (review pass 3)", "always() && matrix.s == 'rset'", { s: "rest" }, false],
+  ["an && chain, false though another part is unread (review pass 3)", "matrix['s'] == 'rest' && matrix.s == 'rset'", { s: "rest" }, false],
+  ["an && chain with a part unread (review pass 3)", "matrix.s == 'rest' && matrix['s'] == 'rest'", { s: "rest" }, "unread"],
+  ["an || at the top, below which && binds (review pass 3)", "matrix.s == 'rset' && success() || always()", { s: "rest" }, "unread"],
+  ["an && inside a literal is no chain (review pass 3)", "matrix.s == 'a && b'", { s: "a && b" }, true],
+  ["a negated part (review pass 3)", "!(matrix.s == 'rest')", { s: "rest" }, "unread"],
+  ["the whole matrix read (review pass 3)", "contains(toJSON(matrix), 'rest')", { s: "rest" }, "unread"],
+  ["reversed operands", "'rest' == matrix.s", { s: "rest" }, "unread"],
+  ["parentheses", "(matrix.s == 'rest')", { s: "rest" }, "unread"],
+  ["an index", "matrix['s'] == 'rest'", { s: "rest" }, "unread"],
+  ["a boolean value, which GitHub compares as a number", "matrix.b == 'true'", { b: true }, "unread"],
+  ["a number value", "matrix.n != '01'", { n: 1 }, "unread"],
+];
+/** Step b's if: reads the matrix in a shape check 34 cannot decide; a's and c's it can or need not; d's it cannot either, but d runs no suite (review pass 3). */
+const MATRIX_UNREAD_PROBE = `jobs:\n  a:\n    strategy:\n      matrix:\n        s: [x, y]\n    steps:\n      - name: a\n        if: always() && matrix.s == 'x'\n        run: bun test-a.ts\n      - name: b\n        if: matrix.s == 'x' || always()\n        run: bun test-b.ts\n      - name: c\n        if: success()\n        run: bun test-c.ts\n      - name: d\n        if: matrix.s == 'x' || always()\n        run: tar czf logs.tgz logs\n`;
 function checkSuitesRun() {
   if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
     fail(SELF, `check 34 parses the workflows with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-2895)`);
@@ -7555,8 +8048,17 @@ function checkSuitesRun() {
   }
   const files = citationFiles();
   const suites = files.filter((rel) => SUITE_FILE.test(rel));
+  for (const [what, cond, cell, expected] of MATRIX_IF_PROBES) {
+    const got = matrixIfHolds(cond, cell);
+    if (got !== expected) fail(SELF, `check 34 no longer decides ${JSON.stringify(expected)} for its matrix if: probe "${what}" (decided ${JSON.stringify(got)})`);
+  }
+  const probeUnread = new Set<string>();
+  scriptRunsIn("probe.yml", Bun.YAML.parse(MATRIX_UNREAD_PROBE), probeUnread);
+  if (JSON.stringify([...probeUnread]) !== JSON.stringify(['probe.yml: job a, step "b"'])) fail(SELF, `check 34 no longer reports exactly step "b" of its probe as a matrix if: it cannot decide (reported ${JSON.stringify([...probeUnread])})`);
   const run: SuiteRun[] = [];
-  try { run.push(...suitesRunIn(SUITE_WORKFLOW, Bun.YAML.parse(readFileSync(join(ROOT, SUITE_WORKFLOW), "utf8")))); } catch (e) { fail(SUITE_WORKFLOW, `does not parse, so check 34 cannot read what its steps run: ${(e as Error).message}`); }
+  const unread = new Set<string>();
+  try { run.push(...suitesRunIn(SUITE_WORKFLOW, Bun.YAML.parse(readFileSync(join(ROOT, SUITE_WORKFLOW), "utf8")), unread)); } catch (e) { fail(SUITE_WORKFLOW, `does not parse, so check 34 cannot read what its steps run: ${(e as Error).message}`); }
+  for (const where of unread) fail(where, "has an `if:` that reads the matrix in a shape check 34 cannot decide, so whether a cell runs the suite this step runs is unknown and it could run in none — write each part that reads the matrix as `matrix.<key> == '<value>'` (or `!=`) on a string value, joined to the rest by `&&` (check 34, SMD-3169)");
   // test-schema.ts from a step's working-directory, test-preflight.ts from a cd:
   // were either missed, the reading is broken, not the tree clean.
   for (const known of ["db/test-schema.ts", "server-portable/test-preflight.ts"]) {
@@ -7658,6 +8160,14 @@ const SCRIPT_RUN_PROBES: [string, string, string[]][] = [
   ["the step's env, a command's own assignments on a continued line, and not a flag's =", `jobs:\n  a:\n    env:\n      J: "1"\n    steps:\n      - working-directory: db\n        env:\n          DATABASE_URL: postgres://x\n          S: two\n        run: |\n          timeout --kill-after=10s "$limit" bun test-s.ts > "$RUNNER_TEMP/d.log" 2>&1 &\n          OB1_W=768 OB1_M=n \\\n            timeout --kill-after=10s "$limit" bun test-s.ts > "$RUNNER_TEMP/n.log" 2>&1 &\n`, ['db|test-s.ts||{"DATABASE_URL":"postgres://x","J":"1","OB1_M":"n","OB1_W":"768","S":"two"}', 'db|test-s.ts||{"DATABASE_URL":"postgres://x","J":"1","S":"two"}']],
   ["a lowercase assignment opening the command (review pass 1)", `jobs:\n  a:\n    steps:\n      - run: limit=5 bun x/test-l.ts\n`, ['.|x/test-l.ts||{"limit":"5"}']],
   ["a cd's directory last", `jobs:\n  a:\n    steps:\n      - working-directory: db\n        run: (cd ../server-portable && exec bun test-p.ts) &\n`, ['server-portable|test-p.ts||{}']],
+  ["a matrix read once a cell, its value filled into the job's env and the step's, a key it lacks empty (SMD-3169)", `jobs:\n  a:\n    strategy:\n      matrix:\n        shard: [rest, sleep]\n    env:\n      J: j-\${{ matrix.shard }}\n    steps:\n      - run: bun test-m.ts\n        env:\n          S: \${{ matrix.shard }}\n          N: \${{matrix.none}}\n`, ['.|test-m.ts||{"J":"j-rest","N":"","S":"rest"}', '.|test-m.ts||{"J":"j-sleep","N":"","S":"sleep"}']],
+  ["a matrix's exclude, an include that extends cells, one that would change an axis value and so is a cell of its own, and numbers (SMD-3169)", `jobs:\n  a:\n    strategy:\n      matrix:\n        os: [l, m]\n        n: [1, 2]\n        exclude:\n          - os: m\n            n: 2\n        include:\n          - os: l\n            extra: e\n          - os: w\n    steps:\n      - run: bun test-x.ts\n        env:\n          V: \${{ matrix.os }}/\${{ matrix.n }}/\${{ matrix.extra }}\n`, ['.|test-x.ts||{"V":"l/1/e"}', '.|test-x.ts||{"V":"l/2/e"}', '.|test-x.ts||{"V":"m/1/"}', '.|test-x.ts||{"V":"w//"}']],
+  ["a step's matrix if: read in the cells it runs in, ignoring case, inside ${{ }} or not; one no cell runs; one on a key no cell has (''), none; an && chain decided on its matrix part (SMD-3169, review passes 1-3)", `jobs:\n  a:\n    strategy:\n      matrix:\n        s: [a, b]\n    env:\n      S: \${{ matrix.s }}\n    steps:\n      - run: bun test-a.ts\n        if: matrix.s == 'A'\n      - run: bun test-b.ts\n        if: \${{ matrix.s != 'a' }}\n      - run: bun test-n.ts\n        if: matrix.s == 'rset'\n      - run: bun test-k.ts\n        if: matrix.other == 'x'\n      - run: bun test-c.ts\n        if: matrix.s == 'a' && github.event_name == 'push'\n`, ['.|test-a.ts||{"S":"a"}', '.|test-b.ts||{"S":"b"}', '.|test-c.ts||{"S":"a"}']],
+  ["a matrix value filled into the run text and the working-directory, its key matched ignoring case (SMD-3169, review pass 3)", `jobs:\n  a:\n    strategy:\n      matrix:\n        d: [db, evals]\n    steps:\n      - working-directory: \${{ matrix.d }}\n        run: OB1_D=\${{ matrix.D }} bun test-w.ts --\${{ matrix.d }}\n`, ['db|test-w.ts|--db|{"OB1_D":"db"}', 'evals|test-w.ts|--evals|{"OB1_D":"evals"}']],
+  ["GitHub's own include example, and an exclude matching on some of a cell's keys (SMD-3169, review pass 2)", `jobs:\n  a:\n    strategy:\n      matrix:\n        fruit: [apple, pear]\n        animal: [cat, dog]\n        include:\n          - color: green\n          - color: pink\n            animal: cat\n          - fruit: apple\n            shape: circle\n          - fruit: banana\n          - fruit: banana\n            animal: cat\n    steps:\n      - run: bun test-f.ts\n        env:\n          V: \${{ matrix.fruit }}/\${{ matrix.animal }}/\${{ matrix.color }}/\${{ matrix.shape }}\n  b:\n    strategy:\n      matrix:\n        os: [l, m]\n        v: [1, 2]\n        e: [x, y]\n        exclude:\n          - os: m\n            v: 2\n    steps:\n      - run: bun test-e.ts\n        env:\n          V: \${{ matrix.os }}\${{ matrix.v }}\${{ matrix.e }}\n`, ['.|test-e.ts||{"V":"l1x"}', '.|test-e.ts||{"V":"l1y"}', '.|test-e.ts||{"V":"l2x"}', '.|test-e.ts||{"V":"l2y"}', '.|test-e.ts||{"V":"m1x"}', '.|test-e.ts||{"V":"m1y"}', '.|test-f.ts||{"V":"apple/cat/pink/circle"}', '.|test-f.ts||{"V":"apple/dog/green/circle"}', '.|test-f.ts||{"V":"banana///"}', '.|test-f.ts||{"V":"banana/cat//"}', '.|test-f.ts||{"V":"pear/cat/pink/"}', '.|test-f.ts||{"V":"pear/dog/green/"}']],
+  ["an if: of \${{ false }} runs nothing, as a bare false does (SMD-3169, review pass 2)", `jobs:\n  a:\n    steps:\n      - run: bun test-q.ts\n        if: \${{ false }}\n      - run: bun test-r.ts\n        if: "false"\n`, []],
+  ["a matrix whose exclude entry an expression gives left unfilled, and null rendered as nothing (SMD-3169, review pass 1)", `jobs:\n  a:\n    strategy:\n      matrix:\n        s: [one, two]\n        exclude:\n          - \${{ fromJSON(inputs.x) }}\n    steps:\n      - run: bun test-e.ts\n        env:\n          S: \${{ matrix.s }}\n  b:\n    strategy:\n      matrix:\n        s: [null]\n    steps:\n      - run: bun test-z.ts\n        env:\n          S: <\${{ matrix.s }}>\n`, ['.|test-e.ts||{"S":"${{ matrix.s }}"}', '.|test-z.ts||{"S":"<>"}']],
+  ["a matrix of include alone, and one an expression gives left unfilled (SMD-3169)", `jobs:\n  a:\n    strategy:\n      matrix:\n        include:\n          - s: one\n          - s: two\n    steps:\n      - run: bun test-i.ts\n        env:\n          S: \${{ matrix.s }}\n  b:\n    strategy:\n      matrix: \${{ fromJSON(inputs.m) }}\n    steps:\n      - run: bun test-j.ts\n        env:\n          S: \${{ matrix.s }}\n`, ['.|test-i.ts||{"S":"one"}', '.|test-i.ts||{"S":"two"}', '.|test-j.ts||{"S":"${{ matrix.s }}"}']],
 ];
 const PARITY_PROBE_TEXT = [
   "run() { suite db \"$@\"; }",
