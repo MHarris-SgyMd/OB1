@@ -48,14 +48,14 @@ features, not upstream parity).
 **87 artifacts** (17 integrations + 51 recipes + 16 schemas + 3 docs/drafts), each with
 exactly one disposition.
 
-- **keep + audited: 71** (78 until `brain-smoke-test` retired, SMD-2103; 77 until SMD-1931 retired `open-brain-rest` and `rest-api`, 75 until it retired `enhanced-mcp`, `delete-thought-mcp`, `update-thought-mcp` and `discord-capture`). Two of them — `edge-function-cost-optimization` and
+- **keep + audited: 70** (71 until SMD-2288 retired `kubernetes-deployment`; 78 until `brain-smoke-test` retired, SMD-2103; 77 until SMD-1931 retired `open-brain-rest` and `rest-api`, 75 until it retired `enhanced-mcp`, `delete-thought-mcp`, `update-thought-mcp` and `discord-capture`). Two of them — `edge-function-cost-optimization` and
   `local-brain-no-mcp` — are struck through as retired by SMD-1800 and stay in this count as
   they did before SMD-2126. The vendored tree is overwhelmingly legitimate community
   content with live in-tree references (CI parity tests, recipes, the fork's ROLE_GRANTS,
   cross-schema deps). The seed "remove" list did not survive the gate — every seed-remove
   integration/schema is load-bearing today (the SMD-1228/1524/1544/1798 audit wired them
   into CI + the shim after the seed was written).
-- **remove: 16.**
+- **remove: 17.**
   - `schemas/text-search-trgm` — index verbatim in migration 011; no fork-side dep.
   - `schemas/recency-boosted-match-thoughts` — `match_thoughts_recency` has zero callers; 020 folded recency into core `match_thoughts`.
   - `schemas/thought-work-claims` — comment-only stub; 015 owns the table.
@@ -72,6 +72,7 @@ exactly one disposition.
   - `integrations/delete-thought-mcp` — the core's `delete_thought` (SMD-1931).
   - `integrations/update-thought-mcp` — the core's `update_thought` (SMD-1931).
   - `integrations/discord-capture` — a README with no code (SMD-1931).
+  - `integrations/kubernetes-deployment` — no deployment target under compose-only (SMD-1931; removed by SMD-2288).
 - **sub-file removal: 2.** `recipes/email-history-import/rollback-chunking-columns.sql`
   — undoes abandoned upstream PR #27 column-chunking; no-op on the fork; and
   `recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs` — migration 023 backfills the
@@ -265,7 +266,7 @@ retired: their directories and their rows in those suites went with SMD-1931's P
 | `delete-thought-mcp` | **retired** (SMD-1931) | The core's `delete_thought` tool and `DELETE /v1/thoughts/{id}` call the `delete_thought` RPC (009, as 036, 042 and 060 replaced it), which answers a cited source with `REFUSED_CITED` and a detach option and records the key as the audit actor. This server's raw delete meets the same citation trigger as a plain error message, with no structured refusal and no detach, and audits with no actor. |
 | `update-thought-mcp` | **retired** (SMD-1931) | The core's `update_thought` tool and `PATCH /v1/thoughts/{id}`. |
 | `discord-capture` | **retired** (SMD-1931) | A README with no code. |
-| `kubernetes-deployment` | **retire** (SMD-1931; removal SMD-2288) | No deployment target under compose-only (the ADR, "What this reverses or amends"). |
+| `kubernetes-deployment` | **retired** (SMD-1931; removed by SMD-2288) | No deployment target under compose-only (the ADR, "What this reverses or amends"). |
 | `agent-memory-api` | **plugin** (SMD-2310, port SMD-2690) | Its own tables (`schemas/agent-memory`) and live clients (`hermes-agent-memory`, `openclaw-agent-memory`). |
 | `smart-ingest` | **plugin** (SMD-2310, port SMD-2690) | Its own tables (`schemas/smart-ingest`); document atomization the core does not do. |
 | `readwise-capture` | **plugin at `/hooks/readwise`** (SMD-2310, port SMD-2690) | An inbound webhook with its own cache (`schemas/readwise-books`). |
@@ -352,7 +353,7 @@ excluding `_shared/` / `_template/` scaffolding and `README.md` indexes. 87 arti
 | `enhanced-mcp` | ~~keep + audited + rebuild-tickets~~ → **retired (SMD-1931)** | Was a thirteen-tool MCP server on its own single key. Its search, list, get, update, capture and stats tools are core tools; its graph tools are the entity-graph read the GUI files (SMD-2280); `ops_capture_status` goes with smart-ingest's plugin (SMD-2690); `count_thoughts` and `ops_source_monitor` are dropped ("The brain's outward surface" above). Its `extensions/test-auth.ts` and `extensions/test-writes.ts` rows went with it. |
 | `entity-extraction-worker` | keep + audited *(revises seed "remove")* | `db/extract-entities.ts` (migration 016 / SMD-947) is the fork's *own-runtime* rebuild; the vendored Edge Function is the community queue-processor still wired to `smart-ingest` (triggers it by URL), `schemas/entity-extraction`, recipes `entity-wiki` / `wiki-compiler` / `brain-health-monitoring` / `typed-edge-classifier`, and CI `test-auth.ts:199`. Fails "verified no references." |
 | `hermes-agent-memory` | keep + audited | Standalone Python `MemoryProvider` plugin depending on the kept `agent-memory-api`. Not superseded / hazard / dead. |
-| `kubernetes-deployment` | keep + audited | Self-hosted K8s + own Postgres deployment path. Raw INSERTs audited under SMD-1524; guard owns `k8s/init.sql` / `openbrain.yml` / `index.ts` (OWN_DATABASE); CI `test-auth.ts:188` + the deploy-stack-auth job's image build (on Bun since SMD-1800; the deno-check job went with it). **SMD-1931 (2026-10-08): retire; removal SMD-2288.** |
+| `kubernetes-deployment` | ~~keep + audited~~ → **retired (SMD-1931; removed by SMD-2288)** | Was a self-hosted K8s deployment with its own Postgres and a raw-SQL port of the server. Compose-only leaves it no target; its checker exceptions, its `extensions/test-auth.ts` row and the deploy-stack-auth job's image steps went with it. |
 | `open-brain-rest` | ~~keep + audited~~ → **retired (SMD-1931)** | Was the REST gateway for the Next dashboards' surfaces, which `chrome-capture-extension` POSTed to. Every route's fate is in "The brain's outward surface" above; the extension now calls the REST core. Its `extensions/test-auth.ts` and `extensions/test-writes.ts` rows went with it. |
 | `openclaw-agent-memory` | keep + audited | OpenClaw plugin/publishing package depending on the kept `agent-memory-api` + `schemas/agent-memory`. Live: README index, docs, `.gitignore` (`dist/`), CLAW_HUB publishing. Distinct from the `recipes/openclaw-agent-memory` setup recipe. |
 | `readwise-capture` | keep + audited → fold-in **SMD-1867** | Readwise-highlight webhook capture source. `schemas/readwise-books` is its companion cache; CI `test-auth.ts:205` (webhook) + `test-writes.ts:512` (SMD-1524). Capture adapter under SMD-1867. **SMD-1931 (2026-10-08): a REST-core plugin at `/hooks/readwise`, port SMD-2690.** |
