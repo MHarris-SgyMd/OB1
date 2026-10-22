@@ -63,7 +63,7 @@ import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, rowColumns, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
-import { passStamper, stampKey } from "./pass-stamp.ts";
+import { endOnRefusal, passStamper, stampKey } from "./pass-stamp.ts";
 import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
 import { run as runSleep } from "./sleep.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
@@ -4511,6 +4511,14 @@ if (want("10")) {
       const registered = (await sql`SELECT count(*)::int AS n FROM ob1_agent_keys WHERE key_hash = ${hashKey(freshKey)}`)[0].n;
       assert(refusedCode === 2 && refusedOut.some((l) => /does not serve absent-model, OB1_METADATA_MODEL, at start \(404 [^)]*not found/.test(l)) && refusedOut.some((l) => /pull the model, or set OB1_METADATA_MODEL to one the provider serves/.test(l)) && registered === 0,
              `a follower whose model the provider does not serve at start is refused, exit 2, its key not yet registered (exit ${refusedCode}, ${registered} key row(s): ${refusedOut.find((l) => /at start/.test(l))?.trim().slice(0, 140)})`);
+      // …and its row ends on the refusal, the kind on it, so preflight gives the remedy (SMD-3214).
+      const refusedBeat = async (job: string) => {
+        const [r] = await sql`SELECT value, extract(epoch FROM now() - updated_at)::float8 AS age FROM ob1_config WHERE key = ${stampKey("extract", job)}`;
+        return r ? { ...JSON.parse(r.value as string), age: Number(r.age) } : null;
+      };
+      const modelBeat = await refusedBeat(KEY);
+      assert(modelBeat?.ended === true && modelBeat.outcome === "failed" && modelBeat.refused === "model" && modelBeat.age < 10,
+             `a follower refused at its start ends its row with the kind, model (${JSON.stringify(modelBeat)})`);
       // …and so is one whose escalation model the provider does not serve (review pass 1).
       const escOut: string[] = [];
       const stopEsc = new AbortController();
@@ -4536,6 +4544,8 @@ if (want("10")) {
         downUntil = 0;
         assert(mismatchCode === 2 && Date.now() - t0 < 10_000 && mismatchOut.some((l) => /Refusing to extract under a key other than the one ob1_config records without --switch-key/.test(l)) && !mismatchOut.some((l) => /not answering at start/.test(l)),
                `a follower started with the provider down and another model's key is refused at once, not after the wait (exit ${mismatchCode} after ${Date.now() - t0} ms)`);
+        const keyBeat = await refusedBeat(extractionKey("other-model"));
+        assert(keyBeat?.ended === true && keyBeat.refused === "key", `…its row, under the job its model names, ended with the kind, key (${JSON.stringify(keyBeat)})`);
       }
       // …and a model the provider turns out not to serve, once it answers, is
       // refused there rather than waited on for ever (review pass 2).
@@ -8073,6 +8083,10 @@ if (want("16")) {
       clearTimeout(stopFollower);
       assert(fcode === 2 && /the tier at http:\/\/127\.0\.0\.1:\d+ serves h2o-other, not h2o-stub at start/.test(fe) && /serve h2o-stub at OB1_JEV_BASE_URL/.test(fe) && tierCalls === 5,
         `a follower whose tier serves another model is refused at start, naming the remedy, and decides nothing (exit ${fcode}: ${last(fo + fe)})`);
+      // …its row, under the decide key, ended with the kind (SMD-3214).
+      const [fbeat] = await sql`SELECT value FROM ob1_config WHERE key = ${stampKey("consolidate", DKEY)}`;
+      const fv = fbeat ? JSON.parse(fbeat.value as string) : null;
+      assert(fv?.ended === true && fv.outcome === "failed" && fv.refused === "model", `…and its row ends on the refusal, the kind on it, model (${JSON.stringify(fv)})`);
     } finally {
       tier.stop(true);
       writer.stop(true);
@@ -12143,6 +12157,39 @@ if (want("37")) {
     await hsql`DELETE FROM ob1_config WHERE key IN ('tier', 'last_refresh')`;
     for (const k of keep as { key: string; value: string }[]) await hsql`INSERT INTO ob1_config (key, value) VALUES (${k.key}, ${k.value})`;
     assert(after2.beats === 0 && after2.tier === "canary" && /^\d{4}-/.test(after2.refreshed ?? ""), `a refresh's settle stamps the tier and its time and leaves no heartbeat (${JSON.stringify(after2)})`);
+
+    // A follower's start refusal ends its row with the kind (SMD-3214):
+    // board-sync's, under --loop alone — its own two kinds, and usage — the
+    // exit still 2; a one-shot run, a dry run and an audit write no row.
+    await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    const boardEnv: Record<string, string> = { ...(process.env as Record<string, string>), OB1_ENV_FILES: "off", DATABASE_URL: URL_! };
+    delete boardEnv.LINEAR_API_KEY;
+    const boardRun = (extra: Record<string, string>, ...argv: string[]) => {
+      const c = Bun.spawnSync(["bun", "--no-env-file", join(HERE, "sync-linear.ts"), ...argv], { cwd: HERE, env: { ...boardEnv, ...extra } });
+      return { code: c.exitCode, err: c.stderr.toString() };
+    };
+    const noKey = boardRun({}, "--loop");
+    const noKeyRow = await row("heartbeat:board-sync");
+    assert(noKey.code === 2 && /LINEAR_API_KEY is not set/.test(noKey.err) && noKeyRow?.ended === true && noKeyRow.outcome === "failed" && noKeyRow.refused === "linear-key" && noKeyRow.age < 10,
+      `board-sync --loop with no LINEAR_API_KEY exits 2 and ends its row with the kind, linear-key (exit ${noKey.code}; ${JSON.stringify(noKeyRow)})`);
+    const badInterval = boardRun({ LINEAR_API_KEY: "lin_api_not_real", OB1_BOARD_SYNC_INTERVAL: "5" }, "--loop");
+    const intervalRow = await row("heartbeat:board-sync");
+    assert(badInterval.code === 2 && /must be a decimal integer >= 10 \(whole seconds\)/.test(badInterval.err) && intervalRow?.refused === "usage",
+      `…and on an interval it does not take, usage (exit ${badInterval.code}; ${JSON.stringify(intervalRow)})`);
+    await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    const unlooped = [boardRun({}), boardRun({}, "--loop", "--dry-run"), boardRun({ LINEAR_API_KEY: "lin_api_not_real", OB1_BOARD_SYNC_INTERVAL: "5" })];
+    assert(unlooped.every((r) => r.code === 2) && (await row("heartbeat:board-sync")) === null,
+      `a one-shot run and a dry run refused the same exit 2 and write no row (${unlooped.map((r) => r.code).join(", ")})`);
+    // A database not answering: the end is left within its bound, said, and the refusal goes on.
+    const deadSql = new SQL({ url: "postgres://u@127.0.0.1:1/none", max: 1 });
+    let heardDead = "";
+    const t0dead = Date.now();
+    try {
+      await endOnRefusal({ sql: deadSql, worker: "board-sync", intervalS: 300, kind: "usage", onError: (e) => { heardDead = e.message; }, timeoutMs: 3000 });
+    } finally {
+      await deadSql.close().catch(() => {});
+    }
+    assert(Date.now() - t0dead < 5000 && heardDead !== "", `endOnRefusal on a database not answering returns within its bound and says so (${Date.now() - t0dead} ms: ${heardDead.slice(0, 80)})`);
   } finally {
     await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await hsql.close();
@@ -12811,6 +12858,7 @@ if (want("38")) {
     missing = true;
     // Bounded: a scheduler that misses the refusal would wait for ever.
     const acFirst = new AbortController();
+    const checkFrom = new Date();
     const firstRun = sleepRun({ follow: true, quiet: 300, signal: acFirst.signal, minStampEveryS: 1 });
     const refusedFirst = await Promise.race([firstRun, Bun.sleep(30_000).then(() => "hung" as const)]);
     if (refusedFirst === "hung") { acFirst.abort(); await firstRun; }
@@ -12818,6 +12866,9 @@ if (want("38")) {
     const firstBeat = await beat();
     assert(refusedFirst === 2 && firstBeat?.ended === true && firstBeat.outcome === "failed" && lines.some((l) => /extract's start is refused \(model\) — the scheduler does not start/.test(l)) && !lines.some((l) => /asleep:/.test(l)),
       `a model not served ends --follow with 2 at its start, before any sleep (a quiet of 300 s), the row ended failed (exit ${refusedFirst}; ${JSON.stringify(firstBeat)})`);
+    // The check's refusal is the scheduler's to name: no follower's row of its own is ended beside it (SMD-3214).
+    const followerRows = (await sql`SELECT count(*)::int AS n FROM ob1_config WHERE (key LIKE 'heartbeat:extract:%' OR key LIKE 'heartbeat:consolidate:%') AND updated_at >= ${checkFrom}`)[0].n;
+    assert(followerRows === 0, `the scheduler's check refused writes no follower's row of its own (${followerRows})`);
     // The provider refusing the request itself on the first pass — past the
     // start's probe, before any pass finished — is the configuration's too:
     // it ends the run, not a retry for ever (review pass 2).

@@ -115,7 +115,7 @@ import { SQL } from "bun";
 import { SqlStore } from "../server-portable/store-sql.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedConfig, type EmbedEnv, type EmbeddedCapture } from "../server-portable/embed.ts";
 import { decideCalls, type EgressSubject } from "../server-portable/egress.ts";
-import { egressRefusal } from "./worker-bootstrap.ts";
+import { egressRefusal, type StartRefusal } from "./worker-bootstrap.ts";
 import { extractMetadata, metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { captureLineage } from "../server-portable/lineage.ts";
 import type { Actor } from "../server-portable/store.ts";
@@ -129,8 +129,8 @@ import type { Derived } from "./ingest-contract.ts";
 // server-portable/).
 import { recordStructure, runName, type Structure } from "./ingest-structure.ts";
 import { commandLine, readNumber } from "./cli.ts";
-import { databaseUrl, openSql } from "./connect.ts";
-import { passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
+import { databaseUrl, databaseUrlIfAny, openSql } from "./connect.ts";
+import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { boardOf, findingsStep, findingsWanted, passCode, withoutFindingTerms, type FindingsStep } from "./board-findings.ts";
 
 // The Linear adapter's pure rules, re-exported: the renderer, the facets and
@@ -1700,17 +1700,34 @@ async function main(): Promise<void> {
   // the defaults: deny, every ticket bare). A set variable is never overwritten.
   // In the container none of the files is on the mount, so this reads nothing.
   const envSources = loadEnv();
-  const key = process.env.LINEAR_API_KEY?.trim();
-  if (!key) {
-    console.error(`LINEAR_API_KEY is not set, and no .env file supplied it. Create a personal API key at https://linear.app/settings/api and put it in a .env (gitignored; see evals/.env.example).\n  Read: ${describeEnv(envSources)}`);
+  /**
+   * A refusal of the configuration: said, then exit 2 — and under --loop, the
+   * service's mode, `heartbeat:board-sync` ended first with its kind, so
+   * preflight gives the remedy and the compose service's supervisor says it
+   * is held for that cause (SMD-3214). A dry run or an audit writes no row,
+   * as its loop would not; a database out of reach leaves the row alone.
+   */
+  const refuse = async (kind: StartRefusal, line: string): Promise<never> => {
+    console.error(line);
+    const at = databaseUrlIfAny(cli.value("url"));
+    if (cli.has("loop") && !cli.has("dry-run") && !cli.has("audit") && at !== null) {
+      const own = openSql(at);
+      try {
+        await endOnRefusal({ sql: own, worker: "board-sync", intervalS: DEFAULT_INTERVAL_S, kind, onError: (e) => console.error(`  heartbeat ${stampKey("board-sync")} not ended on the refusal: ${e.message.split("\n")[0]}`) });
+      } finally {
+        await own.close().catch(() => {});
+      }
+    }
     process.exit(2);
-  }
+  };
+  const key = process.env.LINEAR_API_KEY?.trim();
+  if (!key) return await refuse("linear-key", `LINEAR_API_KEY is not set, and no .env file supplied it. Create a personal API key at https://linear.app/settings/api and put it in a .env (gitignored; see evals/.env.example).\n  Read: ${describeEnv(envSources)}`);
   const url = databaseUrl(cli.value("url"));
   const initiative = cli.value("initiative")?.trim() || process.env.OB1_LINEAR_INITIATIVE?.trim() || DEFAULT_INITIATIVE;
   const intervalRaw = cli.value("interval")?.trim() || process.env.OB1_BOARD_SYNC_INTERVAL?.trim();
   // Seconds as decimal digits, by the scanner's rule: Number() read "0x10" as 16 and "1e3" as 1000.
   const intervalRead = intervalRaw ? readNumber("--interval / OB1_BOARD_SYNC_INTERVAL", intervalRaw, { min: 10 }) : DEFAULT_INTERVAL_S;
-  if (typeof intervalRead !== "number") { console.error(`${intervalRead.error} (whole seconds).`); process.exit(2); }
+  if (typeof intervalRead !== "number") return await refuse("usage", `${intervalRead.error} (whole seconds).`);
   const interval = intervalRead;
   const dryRun = cli.has("dry-run");
   const quiet = cli.has("quiet");
@@ -1737,8 +1754,9 @@ async function main(): Promise<void> {
   const wholesale = egressRefusal(cfg.embeddings, ticketPolicy)
     ?? (cfg.chat.base !== cfg.embeddings.base || cfg.chat.local !== cfg.embeddings.local ? egressRefusal(cfg.chat, ticketPolicy) : null);
   if (wholesale && !cli.has("allow-refused") && !cli.has("audit")) {
-    console.error(`  Refusing to run: ${wholesale}. Declare the endpoint local (OB1_LLM_LOCAL=1 / OB1_CHAT_LOCAL=1) when it is, allow this writer (OB1_EGRESS_ALLOW=actor:${ACTOR_NAME}), or pass --allow-refused to land every ticket without the refused call's result on purpose.\n  Read: ${describeEnv(envSources)}`);
-    process.exit(2);
+    await store.close();
+    await sql.close();
+    return await refuse("egress", `  Refusing to run: ${wholesale}. Declare the endpoint local (OB1_LLM_LOCAL=1 / OB1_CHAT_LOCAL=1) when it is, allow this writer (OB1_EGRESS_ALLOW=actor:${ACTOR_NAME}), or pass --allow-refused to land every ticket without the refused call's result on purpose.\n  Read: ${describeEnv(envSources)}`);
   }
   const embedder = createEmbedder(() => cfg, { rememberRefusal: false });
   const session = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
@@ -1762,7 +1780,7 @@ async function main(): Promise<void> {
   if (wanted.run) {
     if (wanted.sameKey) console.error(`  LINEAR_COMMENT_API_KEY is the same key as LINEAR_API_KEY: posting with it can do whatever its owner can on the board — a key of its own that can only comment is the one to use`);
     const set = await findingsStep(sql, process.env, { dryRun });
-    if ("error" in set) { console.error(set.error); await store.close(); await sql.close(); process.exit(2); }
+    if ("error" in set) { await store.close(); await sql.close(); return await refuse("usage", set.error); }
     if ("off" in set) console.error(`  findings are not posted to the board: ${set.off}`);
     else { findings = set.step; console.log(`  ${set.banner}`); }
   }
@@ -1865,8 +1883,9 @@ async function main(): Promise<void> {
   catch (e) {
     // Configuration exits 2; a transport error is a pass that failed — under
     // --loop the next pass retries, a one-shot run exits 1 (twelfth pass).
+    if (e instanceof BoardConfigError) { await store.close(); await sql.close(); return await refuse("board", `  ${(e as Error).message}`); }
     console.error(`  ${(e as Error).message}`);
-    if (e instanceof BoardConfigError || !cli.has("loop")) { await store.close(); await sql.close(); process.exit(e instanceof BoardConfigError ? 2 : 1); }
+    if (!cli.has("loop")) { await store.close(); await sql.close(); process.exit(1); }
   }
 
   // The signal handlers serve the one-shot pass too: a Ctrl-C mid-chain would

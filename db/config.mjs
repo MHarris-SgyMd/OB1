@@ -521,7 +521,9 @@ export function startRefusalRemedy(kind) {
     case "tables": return "apply the migrations as the tables' owner (cd db && bun migrate.ts --url <the owner's url>)";
     case "egress": return "the egress policy refuses every call the pass would make (OB1_EGRESS_* in deploy/.env; this preflight's egress rows say why)";
     case "lookup": return "the worker key's lookup did not name the key, and the egress policy admits that actor alone: its log says why the lookup failed (too many connections, a lock)";
-    case "usage": return "a setting its log names is not decimal digits — set it in deploy/.env, then recreate the service (db/supervise.ts's guard, SMD-3214) — or a pass refused the options the scheduler gave it, which no setting mends: report that, with the log";
+    case "usage": return "a setting its log names is not one the service takes — decimal digits, in its range (db/supervise.ts's guard, board-sync's interval or findings cap) — so set it in deploy/.env, then recreate the service; or a pass refused the options the scheduler gave it, which no setting mends: report that, with the log";
+    case "linear-key": return "LINEAR_API_KEY is not set: create a personal API key at https://linear.app/settings/api (read-only use), set it in deploy/.env, then recreate the service";
+    case "board": return "OB1_LINEAR_INITIATIVE (unset: \"Open Brain\") must name exactly one Linear initiative, with between 1 and 50 projects — its log says which it found; set it in deploy/.env, then recreate the service";
     default: return "";
   }
 }

@@ -182,7 +182,7 @@ import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, lease
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
-import { passStamper, stampKey, type MalformedBlock, type PassStamper } from "./pass-stamp.ts";
+import { endOnRefusal, passStamper, stampKey, type MalformedBlock, type PassStamper } from "./pass-stamp.ts";
 
 /**
  * Every argument accounted for (db/cli.ts): a flag this worker does not have,
@@ -461,8 +461,20 @@ export async function run(opts: ExtractOptions): Promise<number> {
   const sql = opts.sql ?? openSql(opts.url as string, { max: settled.workers + 1, session: opts.session ?? undefined });
   // Aborted when the run returns, taking its listener off the caller's signal.
   const detach = new AbortController();
+  // The start's refusal, as onStart hears it: a follower of its own ends its
+  // row on it, the kind named, so preflight gives the remedy — and the compose
+  // service's supervisor, which keeps the follower's word, says it is held for
+  // that cause (SMD-3214). Not the scheduler's check, nor a pass it drives,
+  // whose row is the scheduler's.
+  let refusedAt: StartRefusal | null = null;
+  const heard: ExtractOptions = { ...opts, onStart: (r) => { if (!r.ok) refusedAt = r.refused; opts.onStart?.(r); } };
   try {
-    return await extractWith(sql, opts, settled, out, err, detach.signal);
+    const code = await extractWith(sql, heard, settled, out, err, detach.signal);
+    if (code === 2 && refusedAt !== null && settled.follow && opts.stamper === undefined && !opts.check && !opts.status && !opts.dryRun) {
+      const job = opts.job ?? extractionKey(resolveEmbedConfig((opts.env ?? process.env) as EmbedEnv).metadataModel);
+      await endOnRefusal({ sql, worker: "extract", job, intervalS: settled.follow, kind: refusedAt, onError: (e) => err(`  heartbeat ${stampKey("extract", job)} not ended on the refusal: ${e.message.split("\n")[0]}`) });
+    }
+    return code;
   } finally {
     detach.abort();
     // A failing close must not mask the run's own error.
