@@ -180,6 +180,7 @@ const safeSide = (s: ProposalSide) => ({
   id: s.id, created_at: s.created_at, edited: s.edited,
   ...(s.writer ? { trust: oneOf(TRUST, s.writer.trust), captureOnly: s.writer.captureOnly } : {}),
   supersededBy: s.supersededBy ?? null, lapses: s.lapses ?? [],
+  ...(s.walkCapped ? { walkCapped: true } : {}),
 });
 /** thought_stats: the totals and the date range — the breakdowns' keys are extracted words, in the text's top ten. */
 const safeStats: Safe<ThoughtStats> = (v) => ({ total: v.total, aggregated: v.aggregated, oldest: v.oldest, newest: v.newest });
@@ -419,6 +420,18 @@ export function lapsesLine(lapses: { id: string; onto: string }[], side: string)
   return lapses.length === 1
     ? `an accept that makes this side stand clears a capture-only pointer, ${pairs}: it then no longer supersedes what it pointed at`
     : `an accept that makes this side stand clears ${lapses.length} capture-only pointers, ${pairs}: each then no longer supersedes what it pointed at`;
+}
+
+/** The rows each way past which the listing leaves a side's takes and lapses unread (107, SMD-3036: ob1_listing_walk_fits). */
+export const WALK_CAP = 25;
+
+/**
+ * A side the listing left unread (107, SMD-3036): its walks — the chain below
+ * the other side, the rows above this one — pass the cap, so what an accept
+ * would take and lapse is not shown; the accept guard reads it in full.
+ */
+export function walkCappedLine(): string {
+  return `what an accept that makes this side stand would take and lapse was not read: a chain here passes ${WALK_CAP} rows (the listing's cap, migration 107); consolidate.ts --accept reads it in full`;
 }
 
 /** The side an accepted proposal's superseding_id names, in capitals, or null (SMD-2707: an accept may go against the verdict with --direction). */
@@ -812,7 +825,8 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
       return `\n${notice ? `${head} ${notice}\n      text: ${snip(s.content)}` : `${head}: ${snip(s.content)}`}\n      ID: ${s.id}` +
         (s.writer ? `\n      ${proposalWriterLine(s.writer)}` : "") +
         (s.supersededBy ? `\n      ${supersededLine(s.supersededBy)}` : "") +
-        (s.lapses?.length ? `\n      ${lapsesLine(s.lapses, s.id)}` : "");
+        (s.lapses?.length ? `\n      ${lapsesLine(s.lapses, s.id)}` : "") +
+        (s.walkCapped ? `\n      ${walkCappedLine()}` : "");
     };
     const results = data.map((p, i) => {
       const edited = p.older.edited || p.newer.edited;

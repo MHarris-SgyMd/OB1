@@ -747,6 +747,7 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     command: ["bun", "/forwarder.ts"]
+    init: true
     configs:
       - source: forwarder
         target: /forwarder.ts

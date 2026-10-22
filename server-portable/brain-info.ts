@@ -189,8 +189,14 @@ export interface WorkerHeartbeat {
   ended: boolean;
   /** The last judged block's answers and malformed ones, and whether they passed SMD-2266's alarm (extraction only). */
   malformed: { answers: number; bad: number; alarm: boolean } | null;
-  /** The sleep scheduler's current or last sleep: its start and, once over, its end, UTC instants (SMD-2678); absent for the other workers, and for a sleep row with none or not of the shape. */
-  slept?: { from: string; to: string | null };
+  /**
+   * The sleep scheduler's current or last sleep: its start and, once over,
+   * its end, UTC instants (SMD-2678), and `budget` when it stopped on its
+   * budget — its clock spent, or a pass's statement past statement_timeout
+   * (SMD-2679); absent for the other workers, and for a sleep row with none
+   * or not of the shape.
+   */
+  slept?: { from: string; to: string | null; budget?: BudgetStop; limit?: number };
   /** Whether the sleep scheduler's role reads query_log, as its start found (SMD-2678); absent for the other workers and an older scheduler. */
   reads?: "yes" | "denied" | "missing";
   /** The sleep scheduler's passes waiting at their start for a provider that does not answer (SMD-2752); absent while none is, and for the other workers. */
@@ -201,8 +207,21 @@ export interface WorkerHeartbeat {
    * while none is, and for board-sync.
    */
   waitingMidPass?: ("extract" | "consolidate")[];
-  /** The start refusal that ended the sleep scheduler, one of db/worker-bootstrap.ts's START_REFUSALS (SMD-2752); absent otherwise, and for the other workers. */
+  /**
+   * The start refusal that ended the row, one of db/worker-bootstrap.ts's
+   * START_REFUSALS: the sleep scheduler's at a pass's start (SMD-2752), or
+   * db/supervise.ts's guard holding any compose follower (SMD-3214). Absent
+   * otherwise.
+   */
   refused?: SleepRefusal;
+  /**
+   * db/supervise.ts's word on an ended row (SMD-3214): it runs the follower
+   * again on its own `inS` seconds after the row's stamp — null: not until
+   * the service is recreated, its guard refusing the environment — the
+   * follower having exited `code`, the `tries`th end in a row. Absent from a
+   * row no supervisor ended.
+   */
+  restart?: { inS: number | null; code: number; tries: number };
   /**
    * The thoughts extraction holds back across the sleep scheduler's wakes —
    * pending or in flight with a hard stop counted on them (migration 093,
@@ -213,6 +232,35 @@ export interface WorkerHeartbeat {
    * row). Absent while none is, and for the other workers.
    */
   held?: SleepHeld;
+  /**
+   * The sleep scheduler's budget in force — the clock a sleep runs for at
+   * most (0: none) and each pass's session settings — and the sleeps it has
+   * stopped on it since its process began (SMD-2679). Absent for the other
+   * workers, and for an earlier scheduler's row.
+   */
+  budget?: SleepBudget;
+  /** The sleep scheduler waiting for a live call before its next sleep, its last stopped on its budget (SMD-2679); absent otherwise. */
+  resting?: true;
+}
+
+/** Why a sleep stopped on its budget: its clock spent, or a pass's statement cancelled past statement_timeout (SMD-2679). */
+export const BUDGET_STOPS = ["clock", "statement"] as const;
+export type BudgetStop = (typeof BUDGET_STOPS)[number];
+/** The sleep scheduler's budget (WorkerHeartbeat.budget): minutes and seconds 0 for none, the memory in MB. */
+export type SleepBudget = { minutes: number; statementTimeoutS: number; workMemMb: number; maintenanceWorkMemMb: number; stops: number };
+
+/** A budget in words, the scheduler's and preflight's: "a 60 min clock, statement_timeout 300 s, work_mem 4 MB, maintenance_work_mem 64 MB". */
+export function budgetWords(b: SleepBudget): string {
+  return `${b.minutes ? `a ${b.minutes} min clock` : "no clock"}, statement_timeout ${b.statementTimeoutS ? `${b.statementTimeoutS} s` : "the role's or the database's own"}, work_mem ${b.workMemMb} MB, maintenance_work_mem ${b.maintenanceWorkMemMb} MB`;
+}
+
+/** A `budget` value as db/sleep.ts writes it, or undefined: counts, each within its flag's bound. */
+function parseBudget(b: unknown): SleepBudget | undefined {
+  if (b === null || typeof b !== "object") return undefined;
+  const { minutes, statementTimeoutS, workMemMb, maintenanceWorkMemMb, stops } = b as Record<string, unknown>;
+  if (!count(minutes, 10_080) || !count(statementTimeoutS, 86_400) || !count(workMemMb, 2_097_151) || (workMemMb as number) < 1
+      || !count(maintenanceWorkMemMb, 2_097_151) || (maintenanceWorkMemMb as number) < 1 || !count(stops)) return undefined;
+  return { minutes, statementTimeoutS, workMemMb, maintenanceWorkMemMb, stops } as SleepBudget;
 }
 
 /** A thought the sleep scheduler's wakes hold back (WorkerHeartbeat.held). */
@@ -260,9 +308,10 @@ function parseHeld(h: unknown): SleepHeld | undefined {
 }
 
 /**
- * db/worker-bootstrap.ts's START_REFUSALS, which a sleep row's `refused`
- * must be one of: kept here, as server-portable reads no db/ module, and
- * held equal to it by test-live [38].
+ * db/worker-bootstrap.ts's START_REFUSALS, which a row's `refused` must be
+ * one of — the sleep scheduler's (SMD-2752), and since SMD-3214 any
+ * follower's db/supervise.ts held: kept here, as server-portable reads no
+ * db/ module, and held equal to it by test-live [38].
  */
 export const SLEEP_REFUSALS = ["usage", "egress", "tables", "model", "provider", "identity", "key", "lookup"] as const;
 export type SleepRefusal = (typeof SLEEP_REFUSALS)[number];
@@ -330,8 +379,12 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     // The scheduler's mark of its sleep (SMD-2678): left off when not of the
     // shape, as a malformed block is — the row still says whether it is alive.
     const s = worker === "sleep" ? (v!.slept as Record<string, unknown> | undefined) : undefined;
+    // Its budget word (SMD-2679) only on a sleep that is over, of the list, and left off otherwise.
+    const stoppedOn = s !== null && typeof s === "object" && typeof s.to === "string" && (BUDGET_STOPS as readonly unknown[]).includes(s.budget) ? (s.budget as BudgetStop) : undefined;
+    // The bound it stopped at, with the word only: the clock's minutes, statement_timeout's seconds.
+    const limit = stoppedOn && count(s!.limit, stoppedOn === "clock" ? 10_080 : 86_400) ? (s!.limit as number) : undefined;
     const slept = s !== null && typeof s === "object" && typeof s.from === "string" && UTC_INSTANT.test(s.from) && (s.to === null || (typeof s.to === "string" && UTC_INSTANT.test(s.to)))
-      ? { from: s.from, to: s.to as string | null }
+      ? { from: s.from, to: s.to as string | null, ...(stoppedOn ? { budget: stoppedOn } : {}), ...(limit !== undefined ? { limit } : {}) }
       : undefined;
     const reads = worker === "sleep" && (v!.reads === "yes" || v!.reads === "denied" || v!.reads === "missing") ? v!.reads : undefined;
     // Its waiting passes and its refusal (SMD-2752), each left off when not
@@ -347,9 +400,16 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
         && mid.every((p) => p === "extract" || p === "consolidate") && (worker === "sleep" || (mid.length === 1 && mid[0] === worker))
       ? (mid as ("extract" | "consolidate")[])
       : undefined;
-    const refused = worker === "sleep" && typeof v!.refused === "string" && (SLEEP_REFUSALS as readonly string[]).includes(v!.refused) ? (v!.refused as SleepRefusal) : undefined;
+    const refused = typeof v!.refused === "string" && (SLEEP_REFUSALS as readonly string[]).includes(v!.refused) ? (v!.refused as SleepRefusal) : undefined;
+    // The supervisor's next try (SMD-3214), on an ended row alone and left off when not of the shape.
+    const re = v!.ended === true ? (v!.restart as Record<string, unknown> | undefined) : undefined;
+    const restart = re !== null && typeof re === "object" && (re.in_s === null || count(re.in_s, 86_400)) && count(re.code, 255) && count(re.tries)
+      ? { inS: re.in_s as number | null, code: re.code as number, tries: re.tries as number }
+      : undefined;
     // The thoughts its wakes hold back (SMD-2694), left off when not of the shape.
     const held = worker === "sleep" ? parseHeld(v!.held) : undefined;
+    // Its budget and the sleeps stopped on it (SMD-2679), left off when not of the shape.
+    const budget = worker === "sleep" ? parseBudget(v!.budget) : undefined;
     heartbeats.push({
       key: r.key as string,
       worker: worker!,
@@ -367,7 +427,11 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ...(waiting ? { waiting } : {}),
       ...(waitingMidPass ? { waitingMidPass } : {}),
       ...(refused ? { refused } : {}),
+      ...(restart ? { restart } : {}),
       ...(held ? { held } : {}),
+      ...(budget ? { budget } : {}),
+      // Only on a live row: a scheduler killed while it waited leaves it, and speaks for nothing (review pass 2).
+      ...(worker === "sleep" && v!.resting === true && v!.ended !== true && v!.outcome !== "stopped" && !(ageS > STALE_AFTER_INTERVALS * everyS) ? { resting: true as const } : {}),
     });
   }
   return { heartbeats, ignored };
@@ -1313,10 +1377,37 @@ export function ago(s: number): string {
   return s < 90 ? `${Math.round(s)} s` : s < 90 * 60 ? `${Math.round(s / 60)} min` : s < 48 * 3600 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} d`;
 }
 
+/**
+ * How long past its supervisor's next try a row may stay unstamped before
+ * the supervisor is taken for gone: db/supervise.ts's longest wait, 15 min —
+ * a follower's start stamps nothing until its first pass, and may wait out
+ * the provider first (SMD-3214).
+ */
+export const RESTART_OVERDUE_S = 900;
+
+/**
+ * db/supervise.ts's word on an ended row, as a reader acts on it (SMD-3214):
+ * held until a recreate, the next try's time, or that try begun and not yet
+ * stamped. Null for a row no supervisor ended.
+ */
+export function restartWords(h: WorkerHeartbeat): string | null {
+  const r = h.restart;
+  if (!r) return null;
+  const why = h.refused ? `refused (${h.refused})` : `exited ${r.code}`;
+  if (r.inS === null) return `held: ${why} — its supervisor runs it again only once the service is recreated`;
+  const left = r.inS - h.ageS;
+  return left > 0
+    ? `held: ${why}, ${r.tries} end(s) in a row — its supervisor runs it again in ${ago(left)}`
+    : `held: ${why}, ${r.tries} end(s) in a row — its supervisor ran it again ${ago(-left)} ago, and it has not stamped since`;
+}
+
 /** One heartbeat's state in a few words: what a reader acts on first. */
 export function heartbeatState(h: WorkerHeartbeat): string {
   const alarm = h.malformed?.alarm ? `; ${h.malformed.bad} of its last ${h.malformed.answers} answers malformed` : "";
   const when = `last stamped ${ago(h.ageS)} ago, every ${h.everyS} s${alarm}`;
+  // Ended, and run again on its own by db/supervise.ts (SMD-3214): not stopped.
+  const held = restartWords(h);
+  if (held !== null) return `${held} (${when})`;
   // A worker that said it ended is stopped, fresh or not (review pass 1: it
   // read "alive"); one that ended on a failure says so (review pass 2).
   if (h.ended) return `${h.outcome === "failed" ? "ended on a failure" : "stopped"} (${when})`;

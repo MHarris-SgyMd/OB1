@@ -169,11 +169,11 @@ import {
 } from "../server-portable/consolidate.ts";
 import { actorPayload, isoDay, normaliseProposal, withWriters, WRITERS_MISSING, type ProposalSide, type ProposalWriter } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
-import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, writerFlagAdvice, writerFlagsText, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
+import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
-import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
+import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 
 /**
  * Every argument accounted for (db/cli.ts): a flag this worker does not have
@@ -288,6 +288,13 @@ export interface ConsolidateOptions {
   summary?: boolean;
   /** How the start went (worker-bootstrap.ts's StartResult), called once (SMD-2752). */
   onStart?: (r: StartResult) => void;
+  /**
+   * Postgres settings the run's own client opens every connection with
+   * (connect.ts's `session`): the sleep scheduler's per-pass budget —
+   * statement_timeout, work_mem, maintenance_work_mem (SMD-2679). Refused
+   * beside `sql`, a caller's client, which it would not reach.
+   */
+  session?: SessionSettings;
 }
 
 /** What run() says when a caller's signal stopped a decision before it was written — a decision has no pass (review pass 2). */
@@ -423,6 +430,7 @@ export async function run(opts: ConsolidateOptions): Promise<number> {
   // signal; --status, --dry-run, --list and --stale only read (review pass 2:
   // the two rules had drifted apart for a decision beside --dry-run).
   const writes = deciding || !(opts.status === true || opts.dryRun === true || reviewing);
+  if (opts.sql != null && opts.session != null) return usage("consolidate.ts applies session settings to a client of its own: pass url without sql, or no session.");
   if (opts.sql != null) {
     // A reserved connection or a transaction's handle reports its pool's max
     // but is one connection, and a transaction keeps the run's claims from the
@@ -451,7 +459,7 @@ export async function run(opts: ConsolidateOptions): Promise<number> {
     err(deciding ? DECISION_STOPPED : STOPPED_EARLY);
     return 130;
   }
-  const sql = opts.sql ?? openSql(opts.url as string, { max: settled.workers + 1 });
+  const sql = opts.sql ?? openSql(opts.url as string, { max: settled.workers + 1, session: opts.session ?? undefined });
   // Aborted when the run returns, taking its listener off the caller's signal.
   const detach = new AbortController();
   try {
@@ -722,7 +730,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     return `${notice ? `${head} ${notice}\n        text: ${snippet(s.content)}` : `${head} ${snippet(s.content)}`}\n        ID: ${s.id}` +
       (s.writer ? `\n        ${proposalWriterLine(s.writer)}` : "") +
       (s.supersededBy ? `\n        ${supersededLine(s.supersededBy)}` : "") +
-      (s.lapses.length ? `\n        ${lapsesLine(s.lapses, s.id)}` : "");
+      (s.lapses.length ? `\n        ${lapsesLine(s.lapses, s.id)}` : "") +
+      (s.walkCapped ? `\n        ${walkCappedLine()}` : "");
   };
   /** SMD-2707: the row's WRITER line — the flags, and while the row is the reviewer's, the accept it takes (the reply's words). */
   const writerFlagLine = (status: string, flags: StandingFlag[], p: { older: ProposalSide; newer: ProposalSide }) =>
@@ -747,7 +756,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   /**
    * SMD-2707: a row's writers and its WRITER flags for this accept, read as
-   * the listing reads them (list_proposal_writers, 094) — pending, stale or
+   * the listing reads them (list_proposal_writers, 094), its takes and
+   * lapses in full past the listing's cap (107, SMD-3036) — pending, stale or
    * rejected, each of which 029 accepts (review pass 1: a rejected flagged
    * row was accepted without --force); null on an accepted row (029 answers
    * it); "no-094" on a brain short of the file. On an undirected verdict
@@ -764,7 +774,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         SELECT p.verdict, p.status AS proposal_status,
                p.older_fingerprint IS NOT NULL AND p.older_fingerprint IS DISTINCT FROM content_fingerprint_of(o.content) AS older_moved,
                p.newer_fingerprint IS NOT NULL AND p.newer_fingerprint IS DISTINCT FROM content_fingerprint_of(n.content) AS newer_moved,
-               w.*
+               w.older_actor_name, w.older_actor_kind, w.older_trust, w.older_capture_only,
+               w.newer_actor_name, w.newer_actor_kind, w.newer_trust, w.newer_capture_only, w.same_capturer,
+               -- 107 (SMD-3036): the listing caps its walks; the guard reads its
+               -- one row's in full, so its refusal and the pointers it names are
+               -- never the cap's.
+               ob1_accept_takes(p.older_id, p.newer_id) AS older_takes, ob1_accept_lapses(p.older_id, p.newer_id) AS older_lapses,
+               ob1_accept_takes(p.newer_id, p.older_id) AS newer_takes, ob1_accept_lapses(p.newer_id, p.older_id) AS newer_lapses
           FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id
           CROSS JOIN LATERAL list_proposal_writers(ARRAY[p.id]) w
          WHERE p.id = ${id}::uuid AND p.status IN ('pending', 'stale', 'rejected')`) as Record<string, unknown>[];

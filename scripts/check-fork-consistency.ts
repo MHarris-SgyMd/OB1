@@ -242,6 +242,18 @@
  *      dashboard has a Cloudflare build of its own) that names `wrangler`, or
  *      — outside code, where the refusal is spelled — sets OB1_STORE to
  *      postgrest; probes for both patterns
+ * 22c. the brain deploys as the compose stack alone (SMD-2288): no doc outside
+ *      the history starts one of its servers by path, quoted, relative or
+ *      absolute (`bun server-portable/index.ts`, `cd mcp-server && bun
+ *      index.ts`, `bun run dev` there, a systemd `ExecStart`, `pm2 start`),
+ *      shell continuations joined; runs the server image alone (a `docker
+ *      run` of ob1-server or open-brain-server with no `--entrypoint`, or with
+ *      a runtime for it and the server's entry); or drives a cluster or a
+ *      platform's deploy (`kubectl`, `helm install|upgrade`, `fly`/`flyctl
+ *      deploy|launch`, `deployctl`, `gcloud run deploy`, `railway up`, `docker
+ *      stack deploy`, `docker service create`, `podman kube play`, `oc
+ *      apply|new-app`); a package manager's `dev` or `start` there (`cd`,
+ *      `--cwd`, `--prefix`, `-C`); probes
  *  23. every workflow under .github/workflows/ names its runner image — no
  *      `-latest` label in any case or size, no expression — and pins every
  *      `uses:` (a step's, or a job's reusable workflow) to a full commit SHA
@@ -381,7 +393,10 @@
  *      `unless-stopped`, so it comes back after a reboot with what it reads;
  *      what runs once "no" — and no service but those held (SMD-2760: Postgres
  *      had none, so on Docker a reboot would bring the servers back without
- *      their database; the tiers file is check 27's)
+ *      their database; the tiers file is check 27's); and a service that runs
+ *      a db/ follower runs it through db/supervise.ts, its --worker the
+ *      follower's and its --run an exec of it (SMD-3214: as `on-failure:3`
+ *      the followers stayed down after every reboot)
  *  33. one Bun, pinned everywhere (SMD-2894): every workflow step that uses
  *      oven-sh/setup-bun names `bun-version`, and every `oven/bun:<tag>` in a
  *      file git tracks or would track names a tag of the version
@@ -454,6 +469,19 @@
  *      no rule paused or recording. What Grafana itself refuses is left to it:
  *      it refuses the file and lgtm does not start, which CI's observability
  *      step sees. Each rule is the only catch of one of its probes
+ *  39. a status-set change runs the refresh and rebuilds the gate it moves
+ *      (SMD-3160): a migration that redefines node_lifecycle_types() or
+ *      node_settled_types() to another set than the last earlier file that
+ *      defined it has, as lines after its definition, SELECT
+ *      ob1_refresh_set_readers(); (from the file that defines it on) and,
+ *      for a lifecycle change, SELECT * FROM ob1_rebuild_source_gate(); or
+ *      SELECT * FROM ob1_rebuild_source_gate_for_types('{…}'); lines naming
+ *      exactly the types it adds and drops. Canonical forms only, on the
+ *      comment-stripped text with every literal's inside blanked: each
+ *      definition of a set anywhere in the file must be a line starting
+ *      CREATE OR REPLACE FUNCTION <set>() whose body is the bare literal,
+ *      else the file is reported. Each rule is the only catch of one of its
+ *      probes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34, 35, 36, 37 and 38 parse YAML with Bun.YAML)
@@ -464,7 +492,7 @@ import { readFileSync, existsSync, readdirSync, statSync, lstatSync } from "node
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
-import { coreColumnCommentStatement, coreFunctionStatement, DESTRUCTIVE_SQL_RULES, destructiveSqlIn, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
+import { coreColumnCommentStatement, coreFunctionStatement, DESTRUCTIVE_SQL_RULES, destructiveSqlIn, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, stripSqlComments, supabaseIsmsIn } from "../db/config.mjs";
 import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.ts";
 import { FORK_VERSION, REPO_URL, migrationSha, readReleases, schemaVersionValue, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.ts";
@@ -5279,6 +5307,201 @@ function checkRetiredTarget() {
 }
 checkRetiredTarget();
 
+// ── 22c: the brain deploys as the compose stack alone (SMD-2288) ─────────────
+//
+// SMD-2282's decision 6: the brain is the compose stack (the proxy, the REST
+// core, the MCP server at /mcp, Postgres and the profiles beside them), with no
+// single-process mode. The MCP server is a client of the REST core on the
+// stack's internal network, so no other shape can run it. SMD-3152 retired the
+// Workers target (22b) and SMD-2288 the Kubernetes one; this keeps a doc from
+// teaching another. A doc fails on a line that starts one of the brain's
+// servers by path from outside its directory or runs a `dev` or `start` script
+// there (after a `cd`, or by `--cwd`, `--prefix`, `--dir` or `-C`), runs the
+// server image alone as a server, or drives a cluster or a platform's deploy. A
+// command continued with `\` is read as one line, and the steps after a `cd`
+// cross `;` but never another `cd`. Between the runtime and the path only flags,
+// `run`, `watch` and a bare `--` are read, so prose ("a graph node is written by
+// server-portable/api.ts") passes. The image run with `--entrypoint` and a tool
+// (keygen.ts, in deploy/README.md) passes; with a runtime for it and the
+// server's entry later on the line, a path or the bare file the image's
+// directory holds, it fails (a tool given a file of that name as an argument
+// would too). `bun index.ts` on a line of its own, inside server-portable/ or
+// mcp-server/, is how their tests run the entry and is not read; a `cd` on the
+// line before it is not joined to it either. Compose's own command spelled with
+// the runtime (`bun ../mcp-server/index.ts`) fails like any other: name the file
+// and the entrypoint apart. A path segment holds no `/`, and a flag splits one
+// way (FLAGS), so a long path or a long run of flags is read once: either read
+// two ways, a line of thirty ran past Bun's backtracking limit and the match
+// returned false, a violation missed. The probes hold both with a line of
+// thirty. The history (changes/, CHANGELOG.md, FORK.md) records what was.
+/** Path characters: no space, quote, backtick or shell separator. */
+const PATH_CHAR = String.raw`[^\s"'\x60|;&,]`;
+/** One path segment and its slash: no `/` inside, so a path splits one way. */
+const SEGMENT = String.raw`[^\s"'\x60|;&,/]+\/`;
+/** One of the brain's server directories, from the root, `./`, `../` or absolute. */
+const BRAIN_DIR = String.raw`\/?(?:${SEGMENT})*?(?:server-portable|mcp-server)`;
+/** One of their entry files by that path, quoted or not. */
+const BRAIN_ENTRY = String.raw`["'\x60]?${BRAIN_DIR}\/(?:index|api)\.[jt]s\b`;
+/** The entry file alone, `./` or not, as a word of its own: not the tail of another directory's path. */
+const BARE_ENTRY = String.raw`(?<![\w/.-])(?:\.\/)?(?:index|api)\.[jt]s\b`;
+/** A runtime that would start it, as a word: not `bun build`, `bun test` or `bun install`, which start nothing. */
+const RUNTIME = String.raw`\b(?:bun|node|deno|tsx|pm2\s+start)\b(?!\s+(?:build|test|install)\b)`;
+/** A quoted value, either quote. */
+const QUOTED = String.raw`(?:"[^"\n]*"|'[^'\n]*')`;
+/**
+ * Flags, `run` and `watch` (`tsx watch`). Each splits one way: a flag's name
+ * starts with a word character after its dashes (`--?[\w-]+` read `--a` as
+ * `--` `a` or `-` `-a`); a value after `=` is quoted or runs to the next space
+ * (commas in it: `--allow-env=PORT,DATABASE_URL`); a value after a space is
+ * quoted, or starts with neither `-` nor the words `run` and `watch`; and a
+ * bare `--` ends the flags (`pm2 start bun -- …`). Two ways a word, thirty
+ * words ran past Bun's backtracking limit and the match returned false.
+ */
+const FLAGS = String.raw`(?:\s+(?:--?\w[\w-]*(?:=(?:${QUOTED}|[^\s"'\x60|;&]*)|\s(?:${QUOTED}|(?!(?:run|watch)\b)[^\s"'\x60|;&,-]${PATH_CHAR}*))?|--|run|watch))*?`;
+/** A package script that runs the entry (server-portable's `dev` is `bun --watch index.ts`): `dev` or `start`, not `dev:docs` or `start-db`. */
+const SCRIPT = String.raw`(?:dev|start)(?![\w:-])`;
+const DEV_RUN = String.raw`(?:bun|npm|pnpm|yarn)\s+(?:run\s+)?${SCRIPT}`;
+/** The flags, up to the path. */
+const ARGS = String.raw`${FLAGS}\s+`;
+/** One character of the commands after a `cd`, or an `&&`: `;` too, but never into another `cd` or `pushd`. One unit a character, so the steps split one way. */
+const STEP = String.raw`(?:(?!\b(?:cd|pushd)\b)[^\n|&]|&&)`;
+const OUTSIDE_COMPOSE = [
+  // bun server-portable/index.ts, PORT=8000 bun run ./mcp-server/index.ts, ExecStart=/usr/bin/bun /opt/ob1/server-portable/index.ts
+  new RegExp(RUNTIME + ARGS + BRAIN_ENTRY),
+  // cd server-portable && bun install; bun index.ts, cd mcp-server; PORT=8001 bun --watch index.ts, cd "server-portable" && npm run dev
+  new RegExp(String.raw`\b(?:cd|pushd)\s+["']?${BRAIN_DIR}\/?["']?\s*(?:&&|;)${STEP}*?(?:` + RUNTIME + String.raw`${STEP}*?${BARE_ENTRY}|\b${DEV_RUN})`),
+  // bun --cwd mcp-server index.ts, bun --cwd server-portable run dev, bun run --cwd server-portable dev
+  new RegExp(RUNTIME + FLAGS + String.raw`\s+--cwd[= ]${BRAIN_DIR}\/?` + ARGS + String.raw`(?:${BARE_ENTRY}|(?:run\s+)?${SCRIPT})`),
+  // a package manager's script there: npm --prefix server-portable run dev, npm run dev --prefix …, yarn --cwd … dev, pnpm -C … start
+  new RegExp(String.raw`\b(?:npm|pnpm|yarn)\b(?=[^\n|;&]*\s(?:--prefix|--cwd|--dir|-C)[= ]["']?${BRAIN_DIR}(?![\w-]))(?=[^\n|;&]*\s(?:run\s+)?${SCRIPT})`),
+  // the server image alone: docker run … ob1-server, docker container run, docker create, with no --entrypoint on the line
+  /\b(?:docker|podman)\s+(?:container\s+)?(?:run|create)\b(?![^\n]*--entrypoint)[^\n]*\b(?:ob1|open-brain)-server(?![\w-])/,
+  // the image with a runtime for its entrypoint and the server's entry: docker run --entrypoint bun <image> index.ts
+  new RegExp(String.raw`\b(?:docker|podman)\s+(?:container\s+)?(?:run|create)\b[^\n]*?--entrypoint[= ]["']?(?:\S*\/)?(?:bun|node)\b[^\n]*?(?:${BRAIN_ENTRY}|\s["']?${BARE_ENTRY})`),
+  // a cluster or a platform's deploy
+  /\bkubectl\b|\bhelm\s+(?:install|upgrade)\b|\b(?:fly|flyctl)\s+(?:deploy|launch)\b|\bdeployctl\b|\bgcloud\s+run\s+deploy\b|\brailway\s+up\b|\bdocker\s+(?:stack\s+deploy|service\s+create)\b|\bpodman\s+(?:kube\s+play|play\s+kube)\b|\boc\s+(?:apply|new-app)\b/,
+];
+/** A doc's lines with shell continuations (a trailing `\`) joined, each at its first line's number. */
+function joinedLines(text: string): [number, string][] {
+  const out: [number, string][] = [];
+  let at = 0;
+  let held: string | null = null;
+  text.split("\n").forEach((line, i) => {
+    if (held === null) { at = i + 1; held = ""; }
+    if (/\\\s*$/.test(line)) held += line.replace(/\\\s*$/, " ");
+    else { out.push([at, held + line]); held = null; }
+  });
+  if (held !== null) out.push([at, held]);
+  return out;
+}
+const outsideCompose = (line: string) => OUTSIDE_COMPOSE.some((re) => re.test(line));
+/** [text, caught?] — what 22c must catch (the ticket's Verify plant first), and the neighbours it must not reach. */
+const OUTSIDE_COMPOSE_PROBES: [string, boolean][] = [
+  ["run `bun server-portable/index.ts`", true],
+  ["PORT=8000 bun run ./server-portable/index.ts", true],
+  ["bun --no-env-file server-portable/api.ts", true],
+  ["bun --env-file .env.local --watch server-portable/index.ts", true],
+  ["node server-portable/index.js", true],
+  ["OB1_REST_URL=http://api:8000 bun mcp-server/index.ts", true],
+  ['bun "server-portable/index.ts"', true],
+  ["bun `mcp-server/index.ts`", true],
+  ["ExecStart=/usr/local/bin/bun /opt/ob1/server-portable/index.ts", true],
+  [`bun --env-file=/home/me/${"d/".repeat(30)}.env server-portable/index.ts`, true],
+  [`bun${" --a b".repeat(30)} ; bun server-portable/index.ts`, true],
+  [`bun${" --a run".repeat(30)} ; bun server-portable/index.ts`, true],
+  ["pm2 start bun -- server-portable/index.ts", true],
+  ["tsx watch server-portable/index.ts", true],
+  ['bun --env-file ".env.local" server-portable/index.ts', true],
+  ["node --require './otel.js' server-portable/index.js", true],
+  ["deno run --allow-env=PORT,DATABASE_URL server-portable/index.ts", true],
+  ["pm2 start server-portable/index.ts --interpreter bun", true],
+  ["cd server-portable && bun index.ts", true],
+  ["cd server-portable && bun ./index.ts", true],
+  ["cd mcp-server; bun install; bun index.ts", true],
+  ["cd server-portable && bun install; bun index.ts", true],
+  ['cd "server-portable" && bun index.ts', true],
+  ["pushd mcp-server && bun index.ts", true],
+  ["cd mcp-server; bun --watch index.ts", true],
+  ["cd mcp-server && OB1_REST_URL=http://api:8000 bun index.ts", true],
+  ["cd server-portable && bun install && bun index.ts", true],
+  ["cd ../server-portable && bun index.ts", true],
+  ["cd server-portable && bun run dev", true],
+  ["cd server-portable && npm run dev", true],
+  ["cd server-portable && yarn start", true],
+  ["bun --cwd mcp-server index.ts", true],
+  ["bun --cwd server-portable run dev", true],
+  ["bun run --cwd server-portable dev", true],
+  ["npm --prefix server-portable run dev", true],
+  ["npm run dev --prefix server-portable", true],
+  ["yarn --cwd server-portable dev", true],
+  ["pnpm -C mcp-server start", true],
+  ["docker run -p 8000:8000 ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
+  ["podman run --rm -e MCP_ACCESS_KEYS ob1-server", true],
+  ["docker run -p 8000:8000 open-brain-server", true],
+  ["docker container run -p 8000:8000 ob1-server", true],
+  ["docker create --name brain ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
+  ["docker run --entrypoint bun -p 127.0.0.1:8001:8000 \\\n  -e OB1_REST_URL=http://api:8000 \\\n  <server image> ../mcp-server/index.ts", true],
+  ["docker run --entrypoint bun ghcr.io/mharris-sgymd/ob1-server:2.0.0 index.ts", true],
+  ["podman run --entrypoint=bun open-brain-server api.ts", true],
+  ["docker run --entrypoint=/usr/local/bin/bun ghcr.io/mharris-sgymd/ob1-server:2.0.0 index.ts", true],
+  ["docker run --entrypoint bun ob1-server 'index.ts'", true],
+  ["kubectl apply -f k8s/", true],
+  ["helm install brain ./chart", true],
+  ["helm upgrade brain ./chart", true],
+  ["fly deploy", true],
+  ["flyctl launch", true],
+  ["deployctl deploy --project=brain main.ts", true],
+  ["gcloud run deploy brain --image ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
+  ["railway up", true],
+  ["docker stack deploy -c deploy/compose.yaml brain", true],
+  ["docker service create --name brain ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
+  ["podman kube play brain.yaml", true],
+  ["oc apply -f brain.yaml", true],
+  ["oc new-app ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
+  ["podman play kube brain.yaml", true],
+  ["docker run --rm --entrypoint bun ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z> keygen.ts --name laptop --scope write", false],
+  ["cd server-portable && bun keygen.ts --name n8n --scope capture", false],
+  ["cd mcp-server && bun install", false],
+  ["cd mcp-server && npm install", false],
+  ["cd server-portable && npm run dev:docs", false],
+  ["cd server-portable && bun test && npm run lint", false],
+  ["cd server-portable && bun test && cd ../dashboards/open-brain-dashboard-next && npm run dev", false],
+  ["cd server-portable && bun keygen.ts && cd ../integrations/slack-capture && bun index.ts", false],
+  ["npm --prefix server-portable install", false],
+  ["docker run --name ob1-server-test postgres:17", false],
+  ["cd server-portable && bun install && cat index.ts", false],
+  ["cd server-portable && bun build ./index.ts --outdir dist", false],
+  ["cd mcp-server && bun test index.ts", false],
+  ["cd server-portable && bun keygen.ts; cd .. && bun extensions/household-knowledge/index.ts", false],
+  ["cd server-portable && bun keygen.ts && bun ../extensions/household-knowledge/index.ts", false],
+  ["bun test server-portable/test-server.ts", false],
+  ["bun build server-portable/index.ts --outdir dist", false],
+  ["after bun install, open server-portable/index.ts", false],
+  ["Each graph node is written by server-portable/api.ts", false],
+  ["deno lint mcp-server/index.ts", false],
+  ["`server-portable/index.ts` is the server n8n reaches", false],
+  ["podman compose -f deploy/compose.yaml run --rm migrate", false],
+  ["bun extensions/household-knowledge/index.ts", false],
+  ["the image's entrypoint runs `exec bun index.ts`", false],
+  ["Kubernetes' and ECS's 30, Fly's `kill_timeout`", false],
+];
+const DOC_FILE = /\.mdx?$/;
+function checkComposeOnly() {
+  for (const [probe, caught] of OUTSIDE_COMPOSE_PROBES) {
+    if (joinedLines(probe).some(([, line]) => outsideCompose(line)) !== caught) fail(SELF, `check 22c ${caught ? "misses" : "catches"} its probe ${JSON.stringify(probe)} (its own probe)`);
+  }
+  const files = citationFiles().filter((rel) => DOC_FILE.test(rel) && !isHistory(rel));
+  for (const want of ["SETUP.md", "docs/01-getting-started.md", "primitives/deploy-remote-mcp/README.md"]) {
+    if (!files.includes(want)) fail(SELF, `check 22c's listing does not reach ${want} — the listing is broken, not the tree clean`);
+  }
+  for (const rel of files) {
+    for (const [n, line] of joinedLines(readFileSync(join(ROOT, rel), "utf8"))) {
+      if (outsideCompose(line)) fail(`${rel}:${n}`, "runs the brain outside the compose stack — it deploys as the compose stack alone (SMD-2282's decision 6, SMD-2288), which SETUP.md brings up; a vendored server's own `bun <file>` is primitives/deploy-remote-mcp/'s");
+    }
+  }
+}
+checkComposeOnly();
+
 // ── 23: a workflow names its runner image and pins every action to a commit (SMD-2093) ──
 /**
  * Both workflows ran on `ubuntu-latest`, which GitHub moves to a new Ubuntu on
@@ -5886,8 +6109,9 @@ const API_ROLE: TransportRole = {
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
     // The authorization server's token check, built from the environment (SMD-2286): authorization, as auth.ts is, no store.
     ["./oauth-token.ts", new Set(["remoteChecker", "tokenSettings", "TokenCheck"])],
-    // The stop's lines for what it cuts, and the spans' start and flush (SMD-1849): request records and telemetry, no store.
-    ["./telemetry.ts", new Set(["cutOpenRequests", "flushTelemetry", "startTelemetry"])],
+    // The stop's lines for what it cuts, and the spans' start and flush (SMD-1849), and what a cut flush held (SMD-2902):
+    // request records and telemetry, no store.
+    ["./telemetry.ts", new Set(["cutOpenRequests", "cutTelemetry", "flushTelemetry", "startTelemetry"])],
   ]),
   wiring: false,
   mustImport: "./core/index.ts",
@@ -6720,13 +6944,14 @@ const PROXY_SERVICE = {
 };
 /** The forwarder's script (SMD-2583), deploy/forwarder.ts: compose.yaml carries it inline as x-forwarder, in its `forwarder` config and its label, each held to this byte for byte — the file CI runs --self-check on. It holds no `$`, which compose would read as a variable from deploy/.env or the shell, so the copy compose runs is this file (review pass 1: `${X:-…}` steered the script and passed), and no `!`, which check 27 refuses in compose.tiers.yaml. */
 const FORWARDER_SCRIPT = readFileSync(join(ROOT, "deploy", "forwarder.ts"), "utf8");
-/** compose.yaml's forwarder (SMD-2583), whole but for its label (the script's, held below) and its logging (check 29's): the stack's published port, on `edge` and `front` alone, in front of the proxy. */
+/** compose.yaml's forwarder (SMD-2583), whole but for its label (the script's, held below) and its logging (check 29's): the stack's published port, on `edge` and `front` alone, in front of the proxy, under an init so a stop ends it at once (SMD-3193). */
 const FORWARDER_SERVICE = {
   image: "docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373",
   user: "65534:65534",
   cap_drop: ["ALL"],
   security_opt: ["no-new-privileges:true"],
   command: ["bun", "/forwarder.ts"],
+  init: true,
   configs: [{ source: "forwarder", target: "/forwarder.ts" }],
   ports: ["${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"],
   networks: ["edge", "front"],
@@ -6962,7 +7187,7 @@ const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
   "compose.yaml": {
     postgres: ["data"],
     migrate: ["data"],
-    // Not on the mesh: nothing routes to it since SMD-2532, and /mcp is the MCP server built on the REST core's, on the mesh alone (SMD-2287); n8n reaches it on egress.
+    // Not on the mesh: nothing routes to it since SMD-2532, and /mcp is the MCP server built on the REST core's, on the mesh alone (SMD-2287); no shipped template calls it (n8n's brain calls go to the REST core, SMD-2295), the orchestration eval until SMD-2295's second PR.
     server: { data: {}, egress: {} },
     api: { data: {}, egress: {}, mesh: { aliases: [tierMeshName("api", "stable")] } },
     mcp: { mesh: { aliases: [tierMeshName("mcp", "stable")] } },
@@ -7665,16 +7890,22 @@ await checkPlugins();
 // back without their database; on podman, its unit disabled too, nothing came
 // back, and the dogfood stack stayed down ~47 minutes on 2026-10-09.
 // RESTART_POLICIES holds each service's policy by value: what serves is
-// `unless-stopped`, what runs once is "no", and a service that exits on
-// configuration a restart does not fix is `on-failure:3` (board-sync's
-// comment). A service added, or a policy changed, is a change there on
-// purpose. compose.tiers.yaml takes compose.yaml's postgres and Ollama
+// `unless-stopped`, what runs once is "no". The followers — board-sync, the
+// two claim workers, the sleep scheduler — were `on-failure:3`, so that a
+// refusal stopped rather than looped, and neither runtime starts that policy
+// at boot: on 2026-10-22 both brains' sleep and stable's board-sync stayed
+// down after a podman machine restart (SMD-3214). They are `unless-stopped`
+// now, through db/supervise.ts, which holds a refusal itself: a follower run
+// any other way under that policy is the crash loop again, so
+// supervisorGapsIn holds each one's command. jev stays `on-failure:3` until
+// it retries its own fetch. A service added, or a policy changed, is a change
+// there on purpose. compose.tiers.yaml takes compose.yaml's postgres and Ollama
 // through check 27, and the overlays name no restart (check 28's OVERLAYS),
 // so this file is the one to read.
 /** Each compose.yaml service's `restart`, exactly. */
 const RESTART_POLICIES: Record<string, string> = {
   postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", mcp: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
-  "board-sync": "on-failure:3", extract: "on-failure:3", consolidate: "on-failure:3", sleep: "on-failure:3",
+  "board-sync": "unless-stopped", extract: "unless-stopped", consolidate: "unless-stopped", sleep: "unless-stopped",
   ollama: "unless-stopped", "ollama-pull": "no", jev: "on-failure:3",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",
   lgtm: "unless-stopped", "pg-monitor-role": "no", "pg-exporter": "unless-stopped",
@@ -7694,6 +7925,43 @@ function restartGapsIn(text: string, held: Record<string, string>): [service: st
   for (const service of Object.keys(held)) if (!(service in doc.services)) gaps.push([service, "held in check 32's RESTART_POLICIES and not in the file"]);
   return gaps;
 }
+/** The db/ followers by script — each runs until stopped — and the --worker db/supervise.ts names it by. */
+const FOLLOWER_WORKERS: Record<string, string> = { "sleep.ts": "sleep", "extract-entities.ts": "extract", "consolidate.ts": "consolidate", "sync-linear.ts": "board-sync" };
+const FOLLOWER_SCRIPT = /\bdb\/(sleep|extract-entities|consolidate|sync-linear)\.ts\b/;
+/**
+ * Where a compose file runs a db/ follower other than through db/supervise.ts
+ * (SMD-3214): the command's first words `bun db/supervise.ts`, its --worker
+ * the follower's, its --run starting `exec bun db/<the follower>`, so the stop
+ * the supervisor passes on reaches the follower and not a shell.
+ */
+function supervisorGapsIn(text: string): [service: string | null, detail: string][] {
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(text); } catch (e) { return [[null, `does not parse: ${(e as Error).message}`]]; }
+  if (!isMapping(doc) || !isMapping(doc.services)) return [[null, "has no top-level `services:` mapping"]];
+  const gaps: [string | null, string][] = [];
+  for (const [service, def] of Object.entries(doc.services)) {
+    const cmd = isMapping(def) ? def.command : undefined;
+    const words = Array.isArray(cmd) ? cmd.map(String) : typeof cmd === "string" ? [cmd] : [];
+    const script = words.map((w) => FOLLOWER_SCRIPT.exec(w)?.[1]).find((m) => m !== undefined);
+    if (script === undefined) continue;
+    const at = (flag: string) => { const i = words.indexOf(flag); return i === -1 ? undefined : words[i + 1]; };
+    if (words[0] !== "bun" || words[1] !== "db/supervise.ts") gaps.push([service, `runs db/${script}.ts other than through db/supervise.ts, which under \`unless-stopped\` restarts its refusal in a loop`]);
+    else if (at("--worker") !== FOLLOWER_WORKERS[`${script}.ts`]) gaps.push([service, `runs db/${script}.ts under --worker ${JSON.stringify(at("--worker") ?? null)}, where its heartbeat is ${FOLLOWER_WORKERS[`${script}.ts`]}'s`]);
+    else if (!at("--run")?.startsWith(`exec bun db/${script}.ts`)) gaps.push([service, `its --run does not begin \`exec bun db/${script}.ts\`, so the stop the supervisor passes on reaches a shell, not the follower`]);
+  }
+  return gaps;
+}
+const SUPERVISED = `services:\n  sleep:\n    command: ["bun", "db/supervise.ts", "--worker", "sleep", "--require-key", "--run", "exec bun db/sleep.ts --follow"]\n  other:\n    command: ["bun", "serve.ts"]\n`;
+/** [what, text, the services (null = the file) the rule reports]. */
+const SUPERVISOR_PROBES: [string, string, (string | null)[]][] = [
+  ["a follower supervised, beside a service that runs none", SUPERVISED, []],
+  ["the sh -c of before SMD-3214", SUPERVISED.replace(/command: \["bun", "db\/supervise\.ts".*\]/, `command: ["sh", "-c", "exec bun db/sleep.ts --follow"]`), ["sleep"]],
+  ["a follower as the whole command", SUPERVISED.replace(/command: \["bun", "db\/supervise\.ts".*\]/, `command: ["bun", "db/sync-linear.ts", "--loop"]`), ["sleep"]],
+  ["a follower in a string command", SUPERVISED.replace(/command: \["bun", "db\/supervise\.ts".*\]/, `command: bun db/consolidate.ts --follow`), ["sleep"]],
+  ["the supervisor naming another worker", SUPERVISED.replace(`"--worker", "sleep"`, `"--worker", "extract"`), ["sleep"]],
+  ["a --run that does not exec", SUPERVISED.replace(`"exec bun db/sleep.ts`, `"bun db/sleep.ts`), ["sleep"]],
+  ["no --run at all", SUPERVISED.replace(`, "--run", "exec bun db/sleep.ts --follow"`, `, "db/sleep.ts"`), ["sleep"]],
+];
 const RESTART_GOOD = `services:\n  postgres:\n    image: x\n    restart: unless-stopped\n  migrate:\n    image: y\n    restart: "no"\n`;
 const RESTART_HELD = { postgres: "unless-stopped", migrate: "no" };
 /** [what, text, the services (null = the file) the rule reports]. */
@@ -7716,6 +7984,13 @@ function checkRestartPolicies() {
   for (const [what, text, expected] of RESTART_PROBES) {
     const got = restartGapsIn(text, RESTART_HELD).map(([service]) => service);
     if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 32 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  for (const [what, text, expected] of SUPERVISOR_PROBES) {
+    const got = supervisorGapsIn(text).map(([service]) => service);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 32 no longer reports exactly ${JSON.stringify(expected)} for its supervisor probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  for (const [service, detail] of supervisorGapsIn(readFileSync(join(ROOT, "deploy/compose.yaml"), "utf8"))) {
+    fail("deploy/compose.yaml", `${service === null ? "the file" : `service \`${service}\``}: ${detail} (SMD-3214)`);
   }
   for (const [service, detail] of restartGapsIn(readFileSync(join(ROOT, "deploy/compose.yaml"), "utf8"), RESTART_POLICIES)) {
     fail("deploy/compose.yaml", `${service === null ? "the file" : `service \`${service}\``}: ${detail} — what serves is \`unless-stopped\`, so it comes back after a reboot with what it reads; what runs once is "no"; a policy is changed there on purpose (SMD-2760, deploy/README.md "After a reboot")`);
@@ -9109,6 +9384,220 @@ function checkAlertRules() {
   }
 }
 checkAlertRules();
+
+// ── Check 39: a status-set change runs the refresh and rebuilds the gate it moves (SMD-3160) ──
+// 071's ob1_source_gate stores, per source row, whether its thought's
+// status_type is in node_lifecycle_types(). A migration that changes the set
+// leaves those rows wrong until a rebuild after it — the full one, or 108's
+// keyed one, which reconciles only the types it is given (a type left out
+// stays wrong on every brain, and only drift() would say so) — and a change to
+// either set leaves every pooled session on the old set until
+// ob1_refresh_set_readers() (108) drops their plans. The rule reads canonical
+// forms only and refuses any other: two passes of a statement parser found a
+// seam each, and a loud refusal costs an author a rewrite where a quiet miss
+// costs every brain (review pass 3).
+//   * The text read is comment-stripped, and its literals — '…', E'…', "…"
+//     and $tag$…$tag$ — are blanked for every search below but the set's own
+//     literal and a keyed call's list, read back from the same place.
+//   * Every CREATE [OR REPLACE] FUNCTION [schema.]node_lifecycle_types (or
+//     node_settled_types), and every RENAME TO one, anywhere — in a string, a
+//     body or an EXECUTE included — is a definition. Each must be a line
+//     starting `CREATE OR REPLACE FUNCTION node_lifecycle_types()` outside
+//     any literal, else the file is "unreadable", with the form to write.
+//   * A definition's body — inside its first dollar quote, or to its first
+//     `;` if it has none — must be exactly `SELECT '{a,b}'::text[]`, a plpgsql
+//     `[DECLARE …] BEGIN RETURN '{a,b}'::text[]; END`, or (with no dollar
+//     quote) BEGIN ATOMIC SELECT / RETURN of it: a set built from the literal
+//     (`|| ARRAY['c']`) is not read as the literal. The file's last
+//     definition is the set it leaves, compared to the last earlier file that
+//     defined that set.
+//   * After that definition, the calls are lines outside any literal:
+//     `SELECT * FROM ob1_rebuild_source_gate();` or
+//     `SELECT * FROM ob1_rebuild_source_gate_for_types('{…}');` lines naming
+//     together exactly the types added and dropped (a lifecycle change only),
+//     and, for either set in any file from the one that defines it on,
+//     `SELECT ob1_refresh_set_readers();`.
+type SetChangeRule = "rebuild" | "types" | "refresh" | "unreadable";
+const SET_FUNCTIONS = ["node_lifecycle_types", "node_settled_types"] as const;
+const SET_FORM = (fn: string) => `every definition a line starting CREATE OR REPLACE FUNCTION ${fn}() outside any string or body, whose body is SELECT '{a,b}'::text[] (or a plpgsql BEGIN RETURN '{a,b}'::text[]; END) — e.g. AS $$ SELECT '{a,b}'::text[] $$;`;
+const FULL_LINE = /^SELECT \* FROM ob1_rebuild_source_gate\(\);/m;
+const KEYED_LINE = /^SELECT \* FROM ob1_rebuild_source_gate_for_types\('[^'\n]*'\);/gm;
+const KEYED_LIST = /^SELECT \* FROM ob1_rebuild_source_gate_for_types\('\{([^}']*)\}'\);$/;
+const REFRESH_LINE = /^SELECT ob1_refresh_set_readers\(\);/m;
+const REFRESH_DEF = /^CREATE OR REPLACE FUNCTION ob1_refresh_set_readers\(\)/m;
+const SET_LITERAL = /'\{([^}']*)\}'\s*::\s*text\s*\[\s*\]/g;
+const DOLLAR_AT = /^\$([A-Za-z_][A-Za-z_0-9]*)?\$/;
+const BODY_SHAPES = [/^\s*SELECT\s+SET\s*;?\s*$/i, /^\s*(?:DECLARE\s+(?:[^;]*;\s*)*)?BEGIN\s+RETURN\s+SET\s*;\s*END\s*;?\s*$/i];
+const BARE_SHAPE = /\b(?:BEGIN\s+ATOMIC\s+SELECT|RETURN)\s+SET\s*;$/i;
+const setOf = (literal: string) => new Set(literal.split(",").map((t) => t.trim().replace(/^"(.*)"$/, "$1")).filter((t) => t !== ""));
+/** Where the dollar quote starting at `i` opens (its delimiter), or null: a `$` glued to an identifier (`a$b`) or a `$1` is no quote. */
+function dollarAt(text: string, i: number): string | null {
+  if (text[i] !== "$" || /[A-Za-z0-9_$]/.test(text[i - 1] ?? "")) return null;
+  return DOLLAR_AT.exec(text.slice(i, i + 64))?.[0] ?? null;
+}
+/** The text with the inside of every literal blanked, its length and line breaks kept; an unterminated one runs to the end. */
+function blankLiterals(text: string): string {
+  const out = text.split("");
+  const blank = (from: number, to: number) => { for (let k = from; k < to; k++) if (out[k] !== "\n") out[k] = " "; };
+  for (let i = 0; i < text.length;) {
+    const c = text[i];
+    if (c === "'" || c === '"') {
+      const escapes = c === "'" && /[eE]/.test(text[i - 1] ?? "") && !/[A-Za-z0-9_$]/.test(text[i - 2] ?? "");
+      let j = i + 1;
+      while (j < text.length) {
+        if (escapes && text[j] === "\\") j += 2;
+        else if (text[j] === c) break;  // a doubled quote ends one string and opens the next: blanked alike
+        else j++;
+      }
+      blank(i + 1, Math.min(j, text.length));
+      i = j + 1;
+      continue;
+    }
+    const tag = dollarAt(text, i);
+    if (tag) {
+      const close = text.indexOf(tag, i + tag.length);
+      blank(i + tag.length, close < 0 ? text.length : close);
+      i = close < 0 ? text.length : close + tag.length;
+      continue;
+    }
+    i++;
+  }
+  return out.join("");
+}
+/**
+ * A set's state after a file: null when the file does not define it; else
+ * the set its last definition leaves (null when check 39 cannot read every
+ * definition, or that one's body) and the text after that definition, raw
+ * and blanked alike.
+ */
+function lastSetIn(code: string, blanked: string, fn: string): { set: Set<string> | null; after: string; afterBlanked: string } | null {
+  const anyDef = new RegExp(`\\bCREATE\\s+(?:OR\\s+REPLACE\\s+)?FUNCTION\\s+(?:"?\\w+"?\\s*\\.\\s*)?"?${fn}\\b|\\bRENAME\\s+TO\\s+"?${fn}\\b`, "gi");
+  const defs = [...code.matchAll(anyDef)].length;
+  if (defs === 0) return null;
+  const lines = [...blanked.matchAll(new RegExp(`^CREATE OR REPLACE FUNCTION ${fn}\\(\\)`, "gm"))];
+  const unread = { set: null, after: "", afterBlanked: "" };
+  if (lines.length !== defs) return unread;
+  const last = lines.at(-1)!, at = last.index! + last[0].length;
+  const restB = blanked.slice(at);
+  let open = -1, tag: string | null = null;
+  for (let k = 0; k < restB.length && restB[k] !== ";"; k++) if ((tag = dollarAt(restB, k))) { open = k; break; }
+  let body: string, shapes: RegExp[], endAt: number;
+  if (tag) {
+    const close = restB.indexOf(tag, open + tag.length);
+    if (close < 0) return unread;
+    body = code.slice(at + open + tag.length, at + close);
+    shapes = BODY_SHAPES;
+    endAt = close + tag.length;
+  } else {
+    const semi = restB.indexOf(";");
+    if (semi < 0) return unread;
+    body = code.slice(at, at + semi + 1);
+    shapes = [BARE_SHAPE];
+    endAt = semi + 1;
+  }
+  const literals = [...body.matchAll(SET_LITERAL)];
+  if (literals.length !== 1 || !shapes.some((s) => s.test(body.replace(SET_LITERAL, "SET")))) return unread;
+  return { set: setOf(literals[0][1]), after: code.slice(at + endAt), afterBlanked: restB.slice(endAt) };
+}
+const symmetric = (a: Set<string>, b: Set<string>) => [...[...b].filter((t) => !a.has(t)), ...[...a].filter((t) => !b.has(t))].sort();
+/** Each migration (in order) that changes a set without its follow-up lines after the definition: the refresh (from the file that defines it on), and for node_lifecycle_types() a rebuild of exactly what it moves. */
+function setChangeProblems(files: readonly { name: string; text: string }[]): [SetChangeRule, string, string][] {
+  const out: [SetChangeRule, string, string][] = [];
+  const prev: Record<string, Set<string> | null> = { node_lifecycle_types: null, node_settled_types: null };
+  let refreshKnown = false;
+  for (const { name, text } of files) {
+    const code = stripSqlComments(text) as string;
+    const blanked = blankLiterals(code);
+    if (REFRESH_DEF.test(blanked)) refreshKnown = true;
+    for (const fn of SET_FUNCTIONS) {
+      const found = lastSetIn(code, blanked, fn);
+      if (found === null) continue;
+      if (found.set === null) {
+        out.push(["unreadable", name, `it defines ${fn}() in a place or form check 39 does not read — write ${SET_FORM(fn)} — so the types a change moves are known`]);
+        prev[fn] = null;
+        continue;
+      }
+      const was = prev[fn];
+      prev[fn] = found.set;
+      if (was === null) continue;
+      const moved = symmetric(was, found.set);
+      if (moved.length === 0) continue;
+      const after = found.afterBlanked;
+      if (fn === "node_lifecycle_types") {
+        const keyed = [...after.matchAll(KEYED_LINE)].map((m) => [...setOf(KEYED_LIST.exec(found.after.slice(m.index!, m.index! + m[0].length))?.[1] ?? "")]);
+        const full = FULL_LINE.test(after);
+        const call = `SELECT * FROM ob1_rebuild_source_gate_for_types('{${moved.join(",")}}');`;
+        if (!full && keyed.length === 0) {
+          out.push(["rebuild", name, `it changes node_lifecycle_types() (moving ${moved.join(", ")}) and has no rebuild of 071's gate mirror as a line after it — add the line ${call}`]);
+        } else if (!full) {
+          const named = [...new Set(keyed.flat())].sort();
+          if (named.join() !== moved.join()) out.push(["types", name, `its keyed rebuild lines name {${named.join(",")}}, but the change moves {${moved.join(",")}} — every type it adds and drops: ${call}`]);
+        }
+      }
+      if (refreshKnown && !REFRESH_LINE.test(after)) {
+        out.push(["refresh", name, `it changes ${fn}() and has no SELECT ob1_refresh_set_readers(); line after it — without it pooled sessions, 071's gate triggers among them, keep the old set`]);
+      }
+    }
+  }
+  return out;
+}
+const SET_BASE = { name: "001_base.sql", text: "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\nCREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{b}'::text[] $$;\nCREATE OR REPLACE FUNCTION ob1_refresh_set_readers() RETURNS int LANGUAGE sql AS $$ SELECT 0 $$;\n" };
+const setChange = (body: string) => ({ name: "002_change.sql", text: body });
+const ABC = "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$;\n";
+const RF = "SELECT ob1_refresh_set_readers();\n";
+const SET_PROBES: [string, string, SetChangeRule[]][] = [
+  ["a change with the refresh and the full rebuild", `${ABC}${RF}SELECT * FROM ob1_rebuild_source_gate();\n`, []],
+  ["a change with the refresh and the keyed form", `${ABC}${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["a change that adds and drops, keyed in two lines", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,c}'::text[] $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\nSELECT * FROM ob1_rebuild_source_gate_for_types('{b}');\n`, []],
+  ["the set over two lines, a settled set as a literal after it", `CREATE OR REPLACE FUNCTION node_lifecycle_types()\nRETURNS text[] LANGUAGE sql IMMUTABLE\nAS $$ SELECT '{a,b,c}'::text[] $$;\nCREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{b}'::text[] $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["the set's body over lines, its dollar quote alone on the last", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$\nSELECT '{a,b,c}'::text[]\n$$;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["the set in a BEGIN ATOMIC body", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE\nBEGIN ATOMIC\nSELECT '{a,b,c}'::text[];\nEND;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["the set in a plpgsql body, a declaration and BEGIN at the start of lines", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE plpgsql IMMUTABLE AS $f$\nDECLARE\n  v int;\nBEGIN\nRETURN '{a,b,c}'::text[];\nEND $f$;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["a change to the settled set alone, with the refresh", `CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\n${RF}`, []],
+  ["the same set again", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{b,a}'::text[] $$;\n", []],
+  ["$$ in strings around the real calls, and a $-glued identifier", `${ABC}SELECT 'cost: $$';\nSELECT 1 AS a$b$c;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\nSELECT 'x$$';\n`, []],
+  ["an E-string with an escaped quote and $$ before the calls", `${ABC}SELECT E'it\\'s $$';\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["a change with the refresh and no rebuild", `${ABC}${RF}`, ["rebuild"]],
+  ["two definitions, the second a change, a refresh and no rebuild", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\nSELECT * FROM ob1_rebuild_source_gate();\n${ABC}${RF}`, ["rebuild"]],
+  ["a change whose rebuild is only in a comment or a DO block", `${ABC}${RF}-- SELECT * FROM ob1_rebuild_source_gate();\nDO $d$\nBEGIN\nSELECT * FROM ob1_rebuild_source_gate();\nEND $d$;\n`, ["rebuild"]],
+  ["a change whose rebuild comes before the set", `SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n${ABC}${RF}`, ["rebuild"]],
+  ["a change whose rebuild is in a wrapper's body", `${ABC}${RF}CREATE OR REPLACE FUNCTION wrap() RETURNS void LANGUAGE plpgsql AS $b$\nBEGIN\n  PERFORM ob1_rebuild_source_gate();\nEND $b$;\n`, ["rebuild"]],
+  ["a change whose rebuild is a line in a wrapper's sql body", `${ABC}${RF}CREATE OR REPLACE FUNCTION wrap() RETURNS SETOF record LANGUAGE sql AS $b$\nSELECT * FROM ob1_rebuild_source_gate();\n$b$;\n`, ["rebuild"]],
+  ["$$ in a string, then the calls in a wrapper's body", `${ABC}SELECT '$$';\nCREATE OR REPLACE FUNCTION wrap() RETURNS SETOF record LANGUAGE sql AS $$\nSELECT ob1_refresh_set_readers();\nSELECT * FROM ob1_rebuild_source_gate();\n$$;\n`, ["rebuild", "refresh"]],
+  ["the calls only inside a comment's string", `${ABC}COMMENT ON FUNCTION node_lifecycle_types() IS 'run after it:\nSELECT ob1_refresh_set_readers();\nSELECT * FROM ob1_rebuild_source_gate();\n';\n`, ["rebuild", "refresh"]],
+  ["a change that adds and drops, keyed with what it adds alone", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,c}'::text[] $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, ["types"]],
+  ["a change keyed with more than it moves", `${ABC}${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c,x}');\n`, ["types"]],
+  ["a change with the rebuild and no refresh", `${ABC}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, ["refresh"]],
+  ["a change whose refresh is a line in a wrapper's sql body", `${ABC}CREATE OR REPLACE FUNCTION wrap() RETURNS int LANGUAGE sql AS $b$\nSELECT ob1_refresh_set_readers();\n$b$;\nSELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, ["refresh"]],
+  ["a change to the settled set alone, with no refresh", "CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\n", ["refresh"]],
+  ["a settled set in a form the check does not read", `CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT ARRAY['a'] $$;\n${RF}`, ["unreadable"]],
+  ["a set in a form the check does not read", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT ARRAY['a','b','c'] $$;\n" + RF + "SELECT * FROM ob1_rebuild_source_gate();\n", ["unreadable"]],
+  ["a set defined in an EXECUTE string", `DO $d$ BEGIN EXECUTE 'CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $f$ SELECT 1 $f$'; END $d$;\n${RF}SELECT * FROM ob1_rebuild_source_gate();\n`, ["unreadable"]],
+  ["a body holding two different sets", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT CASE WHEN random() < 2 THEN '{a,b,c}'::text[] ELSE '{a}'::text[] END $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate();\n`, ["unreadable"]],
+  ["a canonical definition, then a qualified one adding a type", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\nCREATE OR REPLACE FUNCTION public.node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,d}'::text[] $$;\n`, ["unreadable"]],
+  ["a canonical definition, then a lowercase one", `${ABC}${RF}SELECT * FROM ob1_rebuild_source_gate();\ncreate or replace function node_lifecycle_types() returns text[] language sql immutable as $$ select '{a,b,c,d}'::text[] $$;\n`, ["unreadable"]],
+  ["a function renamed to the set", `CREATE OR REPLACE FUNCTION new_set() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$;\nALTER FUNCTION new_set() RENAME TO node_lifecycle_types;\n`, ["unreadable"]],
+  ["a canonical definition inside a helper's body, after the change", `${ABC}${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\nCREATE OR REPLACE FUNCTION restore_sets() RETURNS void LANGUAGE plpgsql AS $b$\nBEGIN\nEXECUTE $q$\nCREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $f$ SELECT '{a,b}'::text[] $f$\n$q$;\nEND $b$;\n`, ["unreadable"]],
+  ["a set built from the literal", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] || ARRAY['c'] $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate();\n`, ["unreadable"]],
+  ["a BEGIN ATOMIC body built from the literal", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE\nBEGIN ATOMIC\nSELECT '{a,b}'::text[] || ARRAY['c'];\nEND;\n${RF}SELECT * FROM ob1_rebuild_source_gate();\n`, ["unreadable"]],
+  ["a settled set built from the literal", `CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT array_append('{b}'::text[], 'a') $$;\n${RF}`, ["unreadable"]],
+  ["a set under a quoted, qualified name", `CREATE OR REPLACE FUNCTION "public"."node_lifecycle_types"() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate();\n`, ["unreadable"]],
+];
+function checkSetChanges() {
+  for (const [what, body, expected] of SET_PROBES) {
+    const got = setChangeProblems([SET_BASE, setChange(body)]).map(([rule]) => rule);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 39 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  // The file that defines the refresh is held to it; one before it is not (105's own block).
+  const definer = setChangeProblems([{ name: "001_base.sql", text: SET_BASE.text.split("\n").slice(0, 2).join("\n") }, setChange(`${SET_BASE.text.split("\n")[2]}\nCREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\n`)]).map(([rule]) => rule);
+  if (JSON.stringify(definer) !== JSON.stringify(["refresh"])) fail(SELF, `check 39 no longer reports exactly ["refresh"] for its probe "the file that defines the refresh changes a set without calling it" (reported ${JSON.stringify(definer)})`);
+  const early = setChangeProblems([{ name: "001_base.sql", text: SET_BASE.text.split("\n")[0] }, setChange(`${ABC}SELECT * FROM ob1_rebuild_source_gate();\n`)]).map(([rule]) => rule);
+  if (JSON.stringify(early) !== JSON.stringify([])) fail(SELF, `check 39 no longer reports exactly [] for its probe "a change before the refresh exists, with the full rebuild" (reported ${JSON.stringify(early)})`);
+  const dir = join(ROOT, "db/migrations");
+  const files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort().map((f) => ({ name: f, text: readFileSync(join(dir, f), "utf8") }));
+  for (const [, name, detail] of setChangeProblems(files)) fail(`db/migrations/${name}`, `${detail} (check 39, SMD-3160)`);
+}
+checkSetChanges();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so
