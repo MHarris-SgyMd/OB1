@@ -269,7 +269,7 @@ Which vendored integrations become plugins and which retire was decided on 2026-
 - **Change 042 ("OAuth discovery is a 404", SMD-1246):** three `/.well-known/` paths are now routed, and only while the `auth` profile is configured. Everything else stays a 404.
 - **SMD-1846's "OAuth not in scope":** OAuth is in scope. Auth stays in the services, not the proxy.
 - **`docs/orchestration-tool.md`:** n8n "reaches the brain only through its MCP surface". Under decision 1 it reaches the REST core instead. The key discipline (a capture-scope key in a domain-pinned credential) carries over unchanged.
-- **CLAUDE.md's MCP guard rail:** "one HTTP process reached by URL", never stdio, still holds for the MCP server. The reference deployment becomes the compose stack, not the Bun container: rewritten by SMD-2288 PR 2, with check 22c holding it.
+- **CLAUDE.md's MCP guard rail:** one HTTP server reached by URL, never stdio, still holds for the MCP server. The reference deployment becomes the compose stack, not the Bun container: rewritten by SMD-2288 PR 2, with check 22c holding it.
 - **SMD-2133's "Target end-state":** REST is canonical, and the deployed surface is three servers, not two interfaces on one process.
 - **`docs/mcp-sdk-v2-migration.md` (SMD-2275):** it calls server-portable "the canonical one-HTTP-process server". Its staging still holds, but the long-term MCP surface is SMD-2287's server, a client of the REST core.
 - **`integrations/kubernetes-deployment`:** under compose-only it has no deployment target. It retired, with SMD-1931 recording the disposition and SMD-2288 the removal (PR 1). SMD-2259, the Kubernetes step of SMD-2080 and the Kubernetes outlier in SMD-2281, held for that, fall away with it.

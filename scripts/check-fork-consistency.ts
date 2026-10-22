@@ -5299,23 +5299,25 @@ checkRetiredTarget();
 // stack's internal network, so no other shape can run it. SMD-3152 retired the
 // Workers target (22b) and SMD-2288 the Kubernetes one; this keeps a doc from
 // teaching another. A doc fails on a line that starts one of the brain's
-// servers by path from outside its directory, runs the server image alone as a
-// server, or drives a cluster or a platform's deploy; a command continued with
-// `\` is read as one line. Between the runtime and the path only flags and
-// `run` are read, so prose ("a graph node is written by server-portable/api.ts")
-// passes. The image run with `--entrypoint` and a tool (keygen.ts, in
-// deploy/README.md) passes; with a runtime for it and the server's entry later
-// on the line, a path or the bare file the image's directory holds, it fails
-// (a tool given a file of that name as an argument would too). `bun index.ts` on a line of its own, inside
-// server-portable/ or mcp-server/, is how their tests run the entry and is not
-// read; a `cd` on the line before it is not joined to it either. Compose's own
-// command spelled with the runtime (`bun ../mcp-server/index.ts`) fails like any
-// other: name the file and the entrypoint apart. A path segment holds no `/`,
-// and a flag splits one way (FLAGS), so a long path or a long run of flags is
-// read once: either read two ways, a line of thirty ran past Bun's
-// backtracking limit and the match returned false, a violation missed. The
-// probes hold both with a line of thirty. The history (changes/, CHANGELOG.md, FORK.md)
-// records what was.
+// servers by path from outside its directory or runs a `dev` or `start` script
+// there (after a `cd`, or by `--cwd`, `--prefix`, `--dir` or `-C`), runs the
+// server image alone as a server, or drives a cluster or a platform's deploy. A
+// command continued with `\` is read as one line, and the steps after a `cd`
+// cross `;` but never another `cd`. Between the runtime and the path only flags,
+// `run`, `watch` and a bare `--` are read, so prose ("a graph node is written by
+// server-portable/api.ts") passes. The image run with `--entrypoint` and a tool
+// (keygen.ts, in deploy/README.md) passes; with a runtime for it and the
+// server's entry later on the line, a path or the bare file the image's
+// directory holds, it fails (a tool given a file of that name as an argument
+// would too). `bun index.ts` on a line of its own, inside server-portable/ or
+// mcp-server/, is how their tests run the entry and is not read; a `cd` on the
+// line before it is not joined to it either. Compose's own command spelled with
+// the runtime (`bun ../mcp-server/index.ts`) fails like any other: name the file
+// and the entrypoint apart. A path segment holds no `/`, and a flag splits one
+// way (FLAGS), so a long path or a long run of flags is read once: either read
+// two ways, a line of thirty ran past Bun's backtracking limit and the match
+// returned false, a violation missed. The probes hold both with a line of
+// thirty. The history (changes/, CHANGELOG.md, FORK.md) records what was.
 /** Path characters: no space, quote, backtick or shell separator. */
 const PATH_CHAR = String.raw`[^\s"'\x60|;&,]`;
 /** One path segment and its slash: no `/` inside, so a path splits one way. */
@@ -5359,7 +5361,7 @@ const OUTSIDE_COMPOSE = [
   // the server image alone: docker run … ob1-server, docker container run, docker create, with no --entrypoint on the line
   /\b(?:docker|podman)\s+(?:container\s+)?(?:run|create)\b(?![^\n]*--entrypoint)[^\n]*\b(?:ob1|open-brain)-server(?![\w-])/,
   // the image with a runtime for its entrypoint and the server's entry: docker run --entrypoint bun <image> index.ts
-  new RegExp(String.raw`\b(?:docker|podman)\s+(?:container\s+)?(?:run|create)\b[^\n]*?--entrypoint[= ]["']?(?:\S*\/)?(?:bun|node)\b[^\n]*?(?:${BRAIN_ENTRY}|\s["']?(?:\.\/)?(?:index|api)\.[jt]s\b)`),
+  new RegExp(String.raw`\b(?:docker|podman)\s+(?:container\s+)?(?:run|create)\b[^\n]*?--entrypoint[= ]["']?(?:\S*\/)?(?:bun|node)\b[^\n]*?(?:${BRAIN_ENTRY}|\s["']?${BARE_ENTRY})`),
   // a cluster or a platform's deploy
   /\bkubectl\b|\bhelm\s+(?:install|upgrade)\b|\b(?:fly|flyctl)\s+(?:deploy|launch)\b|\bdeployctl\b|\bgcloud\s+run\s+deploy\b|\brailway\s+up\b|\bdocker\s+(?:stack\s+deploy|service\s+create)\b|\bpodman\s+(?:kube\s+play|play\s+kube)\b|\boc\s+(?:apply|new-app)\b/,
 ];
