@@ -555,7 +555,7 @@ Each one is another small server run the same way as this one — [`primitives/d
 
 You just used three free tools, one command and one settings file to build a personal knowledge system with semantic search, an open write protocol, and an open read protocol — on your own machine, with the models on your own machine. No CS degree. No account with anyone. No monthly SaaS fee.
 
-Here's the thing worth noticing: every piece of it is ordinary infrastructure you can read. The schema is `db/migrations/`. The server is one file, `server-portable/index.ts`. The models are two names in a settings file. Want to add a new capture source? [`primitives/deploy-remote-mcp/`](../primitives/deploy-remote-mcp/) is the shape, and the [integrations](../integrations/) are worked examples. Want to add a field to your thoughts? [`db/README.md`](../db/README.md) explains the migrations. Want to share part of your brain with a teammate? [`primitives/shared-mcp/`](../primitives/shared-mcp/) is a second server with its own keys.
+Here's the thing worth noticing: every piece of it is ordinary infrastructure you can read. The schema is `db/migrations/`. The MCP server is `mcp-server/`, and the REST core it calls is `server-portable/`. The models are two names in a settings file. Want to add a new capture source? [`primitives/deploy-remote-mcp/`](../primitives/deploy-remote-mcp/) is the shape, and the [integrations](../integrations/) are worked examples. Want to add a field to your thoughts? [`db/README.md`](../db/README.md) explains the migrations. Want to share part of your brain with a teammate? [`primitives/shared-mcp/`](../primitives/shared-mcp/) is a second server with its own keys.
 
 You just built AI infrastructure using AI. That pattern doesn't stop here.
 

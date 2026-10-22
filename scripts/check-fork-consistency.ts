@@ -243,11 +243,14 @@
  *      — outside code, where the refusal is spelled — sets OB1_STORE to
  *      postgrest; probes for both patterns
  * 22c. the brain deploys as the compose stack alone (SMD-2288): no doc outside
- *      the history starts one of its servers by path (`bun
- *      server-portable/index.ts`, `cd mcp-server && bun index.ts`), runs the
- *      server image alone as a server (a `docker run` of ob1-server with no
- *      `--entrypoint`), or drives a cluster or a platform's deploy (`kubectl`,
- *      `helm install`, `fly deploy`); probes
+ *      the history starts one of its servers by path, quoted, relative or
+ *      absolute (`bun server-portable/index.ts`, `cd mcp-server && bun
+ *      index.ts`, a systemd `ExecStart`, `pm2 start`), shell continuations
+ *      joined; runs the server image alone (a `docker run` of ob1-server or
+ *      open-brain-server with no `--entrypoint`); or drives a cluster or a
+ *      platform's deploy (`kubectl`, `helm install|upgrade`, `fly`/`flyctl
+ *      deploy|launch`, `deployctl`, `gcloud run deploy`, `railway up`, `docker
+ *      stack deploy`); probes
  *  23. every workflow under .github/workflows/ names its runner image — no
  *      `-latest` label in any case or size, no expression — and pins every
  *      `uses:` (a step's, or a job's reusable workflow) to a full commit SHA
@@ -5294,47 +5297,90 @@ checkRetiredTarget();
 // Workers target (22b) and SMD-2288 the Kubernetes one; this keeps a doc from
 // teaching another. A doc fails on a line that starts one of the brain's
 // servers by path from outside its directory, runs the server image alone as a
-// server, or drives a cluster or a platform's deploy. The image run with
-// `--entrypoint` runs a tool in it (keygen.ts, in deploy/README.md), not the
-// server, and passes. `bun index.ts` inside server-portable/ or mcp-server/ is
-// how their tests run the entry, so it is not read: those READMEs say what
-// compose runs. The history (changes/, CHANGELOG.md, FORK.md) records what was.
-/** One of the brain's entry files, by its path from the tree's root. */
-const BRAIN_ENTRY = String.raw`(?:\.\/)?(?:server-portable|mcp-server)\/(?:index|api)\.[jt]s\b`;
-/** A runtime that would start it, as a word. */
-const RUNTIME = String.raw`\b(?:bun|node|deno|tsx)\b`;
+// server, or drives a cluster or a platform's deploy; a command continued with
+// `\` is read as one line. The image run with `--entrypoint` and a tool
+// (keygen.ts, in deploy/README.md) passes; with the server's entry it is the
+// first pattern's. `bun index.ts` inside server-portable/ or mcp-server/ is how
+// their tests run the entry, so it is not read: those READMEs say what compose
+// runs. So is compose's own command, `bun ../mcp-server/index.ts`, if a doc
+// spells it with the runtime: name the file alone. The history (changes/,
+// CHANGELOG.md, FORK.md) records what was.
+/** Path characters: no space, quote, backtick or shell separator. */
+const PATH_CHAR = String.raw`[^\s"'\x60|;&,]`;
+/** One of the brain's server directories, from the root, `./`, `../` or absolute. */
+const BRAIN_DIR = String.raw`(?:\.{1,2}\/|\/)?(?:${PATH_CHAR}+\/)*?(?:server-portable|mcp-server)`;
+/** One of their entry files by that path, quoted or not. */
+const BRAIN_ENTRY = String.raw`["'\x60]?${BRAIN_DIR}\/(?:index|api)\.[jt]s\b`;
+/** The entry file alone, as a word of its own: not the tail of another directory's path. */
+const BARE_ENTRY = String.raw`(?<![\w/.-])(?:index|api)\.[jt]s\b`;
+/** A runtime that would start it, as a word: not `bun build`, `bun test` or `bun install`, which start nothing. */
+const RUNTIME = String.raw`\b(?:bun|node|deno|tsx|pm2\s+start)\b(?!\s+(?:build|test|install|add)\b)`;
+/** Words up to the next shell separator. */
+const ARGS = String.raw`(?:\s+${PATH_CHAR}+)*?\s+`;
 const OUTSIDE_COMPOSE = [
-  // bun server-portable/index.ts, PORT=8000 bun run ./mcp-server/index.ts
-  new RegExp(`${RUNTIME}(?:\\s+[^\\s|;&]+)*?\\s+${BRAIN_ENTRY}`),
-  // cd server-portable && bun index.ts, cd mcp-server; PORT=8001 bun --watch index.ts
-  new RegExp(String.raw`\bcd\s+(?:\.\/)?(?:server-portable|mcp-server)\/?\s*(?:&&|;)[^\n|;&]*?` + RUNTIME + String.raw`[^\n|;&]*?\b(?:index|api)\.[jt]s\b`),
+  // bun server-portable/index.ts, PORT=8000 bun run ./mcp-server/index.ts, ExecStart=/usr/bin/bun /opt/ob1/server-portable/index.ts
+  new RegExp(RUNTIME + ARGS + BRAIN_ENTRY),
+  // cd server-portable && bun install && bun index.ts, cd mcp-server; PORT=8001 bun --watch index.ts
+  new RegExp(String.raw`\bcd\s+${BRAIN_DIR}\/?\s*(?:&&|;)(?:[^\n|;&]|&&)*?` + RUNTIME + String.raw`(?:[^\n|;&]|&&)*?` + BARE_ENTRY),
   // bun --cwd mcp-server index.ts
-  new RegExp(RUNTIME + String.raw`[^\n|;&]*?--cwd[= ](?:\.\/)?(?:server-portable|mcp-server)\/?\s+(?:[^\s|;&]+\s+)*?(?:index|api)\.[jt]s\b`),
+  new RegExp(RUNTIME + String.raw`(?:\s+${PATH_CHAR}+)*?\s+--cwd[= ]${BRAIN_DIR}\/?` + ARGS + BARE_ENTRY),
   // the server image alone: docker run … ob1-server, with no --entrypoint on the line
-  /\b(?:docker|podman)\s+run\b(?![^\n]*--entrypoint)[^\n]*\bob1-server\b/,
+  /\b(?:docker|podman)\s+run\b(?![^\n]*--entrypoint)[^\n]*\b(?:ob1|open-brain)-server\b/,
   // a cluster or a platform's deploy
-  /\bkubectl\b|\bhelm\s+(?:install|upgrade)\b|\b(?:fly|flyctl)\s+(?:deploy|launch)\b|\bdeployctl\b/,
+  /\bkubectl\b|\bhelm\s+(?:install|upgrade)\b|\b(?:fly|flyctl)\s+(?:deploy|launch)\b|\bdeployctl\b|\bgcloud\s+run\s+deploy\b|\brailway\s+up\b|\bdocker\s+stack\s+deploy\b/,
 ];
-/** [line, caught?] — what 22c must catch (the ticket's Verify plant first), and the neighbours it must not reach. */
+/** A doc's lines with shell continuations (a trailing `\`) joined, each at its first line's number. */
+function joinedLines(text: string): [number, string][] {
+  const out: [number, string][] = [];
+  let at = 0;
+  let held: string | null = null;
+  text.split("\n").forEach((line, i) => {
+    if (held === null) { at = i + 1; held = ""; }
+    if (/\\\s*$/.test(line)) held += line.replace(/\\\s*$/, " ");
+    else { out.push([at, held + line]); held = null; }
+  });
+  if (held !== null) out.push([at, held]);
+  return out;
+}
+const outsideCompose = (line: string) => OUTSIDE_COMPOSE.some((re) => re.test(line));
+/** [text, caught?] — what 22c must catch (the ticket's Verify plant first), and the neighbours it must not reach. */
 const OUTSIDE_COMPOSE_PROBES: [string, boolean][] = [
   ["run `bun server-portable/index.ts`", true],
   ["PORT=8000 bun run ./server-portable/index.ts", true],
   ["bun --no-env-file server-portable/api.ts", true],
   ["node server-portable/index.js", true],
   ["OB1_REST_URL=http://api:8000 bun mcp-server/index.ts", true],
+  ['bun "server-portable/index.ts"', true],
+  ["bun `mcp-server/index.ts`", true],
+  ["ExecStart=/usr/local/bin/bun /opt/ob1/server-portable/index.ts", true],
+  ["pm2 start server-portable/index.ts --interpreter bun", true],
   ["cd server-portable && bun index.ts", true],
   ["cd mcp-server; bun --watch index.ts", true],
   ["cd mcp-server && OB1_REST_URL=http://api:8000 bun index.ts", true],
+  ["cd server-portable && bun install && bun index.ts", true],
+  ["cd ../server-portable && bun index.ts", true],
   ["bun --cwd mcp-server index.ts", true],
   ["docker run -p 8000:8000 ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
   ["podman run --rm -e MCP_ACCESS_KEYS ob1-server", true],
+  ["docker run -p 8000:8000 open-brain-server", true],
+  ["docker run --entrypoint bun -p 127.0.0.1:8001:8000 \\\n  -e OB1_REST_URL=http://api:8000 \\\n  <server image> ../mcp-server/index.ts", true],
   ["kubectl apply -f k8s/", true],
   ["helm install brain ./chart", true],
+  ["helm upgrade brain ./chart", true],
   ["fly deploy", true],
+  ["flyctl launch", true],
+  ["deployctl deploy --project=brain main.ts", true],
+  ["gcloud run deploy brain --image ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
+  ["railway up", true],
+  ["docker stack deploy -c deploy/compose.yaml brain", true],
   ["docker run --rm --entrypoint bun ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z> keygen.ts --name laptop --scope write", false],
   ["cd server-portable && bun keygen.ts --name n8n --scope capture", false],
   ["cd mcp-server && bun install", false],
+  ["cd server-portable && bun keygen.ts; cd .. && bun extensions/household-knowledge/index.ts", false],
+  ["cd server-portable && bun keygen.ts && bun ../extensions/household-knowledge/index.ts", false],
   ["bun test server-portable/test-server.ts", false],
+  ["bun build server-portable/index.ts --outdir dist", false],
+  ["after bun install, open server-portable/index.ts", false],
   ["`server-portable/index.ts` is the server n8n reaches", false],
   ["podman compose -f deploy/compose.yaml run --rm migrate", false],
   ["bun extensions/household-knowledge/index.ts", false],
@@ -5344,16 +5390,16 @@ const OUTSIDE_COMPOSE_PROBES: [string, boolean][] = [
 const DOC_FILE = /\.mdx?$/;
 function checkComposeOnly() {
   for (const [probe, caught] of OUTSIDE_COMPOSE_PROBES) {
-    if (OUTSIDE_COMPOSE.some((re) => re.test(probe)) !== caught) fail(SELF, `check 22c ${caught ? "misses" : "catches"} its probe ${JSON.stringify(probe)} (its own probe)`);
+    if (joinedLines(probe).some(([, line]) => outsideCompose(line)) !== caught) fail(SELF, `check 22c ${caught ? "misses" : "catches"} its probe ${JSON.stringify(probe)} (its own probe)`);
   }
   const files = citationFiles().filter((rel) => DOC_FILE.test(rel) && !isHistory(rel));
   for (const want of ["SETUP.md", "docs/01-getting-started.md", "primitives/deploy-remote-mcp/README.md"]) {
     if (!files.includes(want)) fail(SELF, `check 22c's listing does not reach ${want} — the listing is broken, not the tree clean`);
   }
   for (const rel of files) {
-    readFileSync(join(ROOT, rel), "utf8").split("\n").forEach((line, i) => {
-      if (OUTSIDE_COMPOSE.some((re) => re.test(line))) fail(`${rel}:${i + 1}`, "runs the brain outside the compose stack — it deploys as the compose stack alone (SMD-2282's decision 6, SMD-2288), which SETUP.md brings up; a vendored server's own `bun <file>` is primitives/deploy-remote-mcp/'s");
-    });
+    for (const [n, line] of joinedLines(readFileSync(join(ROOT, rel), "utf8"))) {
+      if (outsideCompose(line)) fail(`${rel}:${n}`, "runs the brain outside the compose stack — it deploys as the compose stack alone (SMD-2282's decision 6, SMD-2288), which SETUP.md brings up; a vendored server's own `bun <file>` is primitives/deploy-remote-mcp/'s");
+    }
   }
 }
 checkComposeOnly();

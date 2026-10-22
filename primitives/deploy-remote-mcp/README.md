@@ -99,7 +99,7 @@ Each server holds one pool of `OB1_PG_POOL` connections (ten unless set) for its
 
 ## Step 5: Put It Behind HTTPS
 
-A client on this machine is done: give it the `http://127.0.0.1:8787/mcp` URL. A hosted connector — Claude Desktop's custom connector, claude.ai, ChatGPT — connects from the vendor's side and needs an HTTPS URL that reaches your port. The same answers serve the core server ([`SETUP.md`](../../SETUP.md), "Connect a client"):
+A client on this machine is done: give it the `http://127.0.0.1:8787/mcp` URL. A hosted connector — Claude Desktop's custom connector, claude.ai, ChatGPT — connects from the vendor's side and needs an HTTPS URL that reaches your port. The same answers serve the stack ([`SETUP.md`](../../SETUP.md), "Connect a client"):
 
 - **A TLS proxy or tunnel on this host** — caddy, cloudflared, `tailscale funnel` — dials `127.0.0.1:8787` itself; the server keeps listening on the loopback. One proxy fronts every port you run: the stack's on 8000, each extension on its own.
 - **Any host that runs Bun and reaches the brain's Postgres** — a VPS, a container built from a Bun image with this checkout in it — runs the same command; put its TLS terminator in front. `server-portable/Dockerfile`, the brain's server image, is the shape to copy.

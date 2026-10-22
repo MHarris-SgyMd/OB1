@@ -215,14 +215,10 @@ same values, and also needs `OB1_AUTH_SECRET_MCP`, the authorization server's `m
 `deploy/.env`.
 
 The server image (`server-portable/Dockerfile`) carries this directory and
-`rest-client/`, each with its own lockfile's packages (PR 5a). It runs there without
-the image's preflight, which needs a database this server never opens:
-
-```bash
-docker run --entrypoint bun -p 127.0.0.1:<port>:8000 --network <a network the REST core is on> \
-  -e OB1_FORWARDER_KEY=<key> -e OB1_REST_URL=<the REST core> -e OB1_PLUGINS=<the REST core's> \
-  <server image> ../mcp-server/index.ts
-```
+`rest-client/`, each with its own lockfile's packages (PR 5a). There `bun` is the
+entrypoint and `../mcp-server/index.ts` the file, without the image's preflight, which
+needs a database this server never opens. CI's step "The server image runs the MCP server as a REST client"
+starts it from the image alone to hold that; the brain runs it only as compose's service.
 
 `deploy/canary.sh` mints a canary's own forwarder key. On the compose stack it is the
 `mcp` service (PR 5b): the proxy routes `/mcp`, `/health` and the protected-resource

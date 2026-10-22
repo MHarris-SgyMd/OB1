@@ -49,7 +49,7 @@ The core user journey is:
 - `docs/03-faq.md`: Common user questions and troubleshooting, especially ChatGPT, search, import, storage, and key rotation.
 - `docs/04-ai-assisted-setup.md`: Guide for using AI coding tools to build the same system.
 - `docs/05-tool-audit.md`: Guidance for keeping MCP tool surfaces useful and not bloated.
-- `server-portable/index.ts`: Canonical core MCP server — Bun, in the compose stack's container (`SETUP.md`).
+- `mcp-server/`: the core MCP server at `/mcp`, a client of the REST core in `server-portable/`; both run in the compose stack (`SETUP.md`).
 - `extensions/`: Curated six-part learning path for practical Open Brain builds.
 - `recipes/`: Standalone imports, workflows, automation patterns, and alternative architectures.
 - `skills/`: Reusable AI client skills or prompt packs.
