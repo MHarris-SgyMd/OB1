@@ -593,7 +593,7 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
     const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
     return { text: (b.result?.content ?? []).map((c: { text?: string }) => c.text ?? "").join("\n") as string, isError: b.result?.isError === true };
   };
-  type Provider = { status: string; since?: string; reason?: string; reprobeS?: number | null };
+  type Provider = { status: string; since?: string; reason?: string; by?: string; reprobeS?: number | null };
   // A keyed /health that misses its deadline answers plain `ok`: no record, said as such rather than thrown (review pass 1).
   const keyed = async (): Promise<Provider | undefined> => {
     const t = await (await fetch(`${at}/health`, { headers: { "x-brain-key": OPEN_KEY } })).text();
@@ -602,6 +602,9 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
   let provider: ReturnType<typeof Bun.serve> | undefined;
   let models = 0;
   let cleared = false;
+  // Review pass 3: /embeddings answering 503 behind a /models that answers, and the call-shaped probes counted.
+  let embeds503 = false;
+  let probeCalls = 0;
   try {
     let up = false;
     for (let deadline = Date.now() + 15_000; !up && Date.now() < deadline; ) {
@@ -627,7 +630,15 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
     assert(/^Provider:\s+unreachable since \S+ \(the connection was refused\) — serving degraded: .*; re-probed every 1 s$/m.test(info.text), `brain_info's Provider row says so (${info.text.split("\n").find((l) => l.startsWith("Provider:"))})`);
     // The provider comes up on its port: no call is made (the mender off, no
     // capture, no search), so only the re-probe can see it.
-    provider = Bun.serve({ port: providerPort, fetch: (req) => { if (req.method === "GET") { models++; return Response.json({ object: "list", data: [] }); } return stubOpts.fetch(req); } });
+    provider = Bun.serve({ port: providerPort, fetch: async (req) => {
+      if (req.method === "GET") { models++; return Response.json({ object: "list", data: [] }); }
+      if (new URL(req.url).pathname.endsWith("/embeddings")) {
+        const b = (await req.clone().json()) as { input?: unknown };
+        if (JSON.stringify(b.input ?? "").includes("probe")) probeCalls++;
+        if (embeds503) return new Response("{}", { status: 503 });
+      }
+      return stubOpts.fetch(req);
+    } });
     const t0 = Date.now();
     for (let deadline = t0 + 5_000; !cleared && Date.now() < deadline; ) {
       cleared = (await keyed())?.status === "answering";
@@ -638,6 +649,26 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
     const after = models;
     await Bun.sleep(2_500);
     assert(models === after, `answering, it is not probed again (${models - after} more in 2.5 s)`);
+    // An outage only a call can see — /models answers, /embeddings 503s, as a
+    // proxy whose backend is down — on a quiet brain with the mender off: the
+    // GET /models probe cannot end it, and nothing else calls; the loop's
+    // call-shaped probe does, in this process (review pass 3).
+    embeds503 = true;
+    const cap2 = await rpc("capture_thought", { content: "degraded-verify-marker DGV-2890b: captured while the embeddings call answers 503" });
+    const p2 = await keyed();
+    assert(!cap2.isError && /saved WITHOUT a vector/.test(cap2.text) && p2?.status === "unreachable" && p2.by === "call" && p2.reason === "provider_503",
+      `a capture's 503: saved without its vector, the state a call's outage (${JSON.stringify(p2)})`);
+    const modelsAt = models;
+    const probesAt = probeCalls;
+    await Bun.sleep(1_500);
+    assert(probeCalls > probesAt && (await keyed())?.status === "unreachable", `still failing: probed by a call each interval, still unreachable (${probeCalls - probesAt} call-shaped probe(s))`);
+    embeds503 = false;
+    let back = false;
+    for (let deadline = Date.now() + 5_000; !back && Date.now() < deadline; ) {
+      back = (await keyed())?.status === "answering";
+      if (!back) await Bun.sleep(100);
+    }
+    assert(back && models === modelsAt, `the embeddings call back: answering within the interval, by the call-shaped probe, no GET /models spent on it (${models - modelsAt})`);
     assert(child.exitCode === null && !child.killed, "the same process throughout: no exit, no restart");
   } finally {
     child.kill();
@@ -647,8 +678,8 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
     provider?.stop(true);
     const said = (await new Response(child.stdout).text()) + (await new Response(child.stderr).text());
     const lines = said.split("\n").filter((l) => /^provider: /.test(l));
-    assert(lines.length === 2 && /does not answer \(the connection was refused\) — serving degraded/.test(lines[0]) && /answers again — no longer degraded/.test(lines[1]),
-      `the server said the change to degraded once, though captured and searched meanwhile, and the change back once (${lines.join(" / ")})`);
+    assert(lines.length === 4 && /does not answer \(the connection was refused\) — serving degraded/.test(lines[0]) && /answers again — no longer degraded/.test(lines[1]) && /does not answer \(it answered 503\)/.test(lines[2]) && /answers again/.test(lines[3]),
+      `the server said each change once — degraded, back, degraded on the 503, back — though captured, searched and probed meanwhile (${lines.join(" / ")})`);
     assert(code === 0, `it stops cleanly (exit ${code})`);
     if (!cleared) console.log(said.split("\n").slice(-15).map((l) => `      ${l}`).join("\n"));
   }

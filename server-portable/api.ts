@@ -85,10 +85,12 @@ if (SERVES_ON_BUN) {
   const mend = mendIntervalFrom(process.env.OB1_VECTOR_MEND_INTERVAL);
   if (mend.problem) console.warn(mend.problem);
   const mender = mend.intervalS > 0 ? core.startVectorMender({ intervalS: mend.intervalS }) : undefined;
-  // The provider's state (SMD-2890): a probe at once, so a server started with
-  // its provider down says so on its keyed /health and brain_info, then one
-  // each interval while a local provider does not answer — the server serving
-  // degraded meanwhile (preflight lets it start), leaving it when one answers.
+  // The provider's state (SMD-2890): for a local provider, a probe at once, so
+  // a server started with its provider down says so on its keyed /health and
+  // brain_info, then one each interval while it does not answer (none after
+  // the first with the knob off; a hosted one is not probed) — the server
+  // serving degraded meanwhile (preflight lets it start), leaving it when one
+  // answers. startProviderReprobe says how each outage is probed.
   const reprobe = reprobeIntervalFrom(process.env.OB1_PROVIDER_REPROBE_INTERVAL);
   if (reprobe.problem) console.warn(reprobe.problem);
   const reprober = core.startProviderReprobe(reprobe.intervalS);

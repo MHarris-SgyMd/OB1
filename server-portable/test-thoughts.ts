@@ -2040,7 +2040,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
 
 // ── 16. The provider's state: degraded and back (SMD-2890) ──────────────────
 
-console.log("\n[16] The provider's state (SMD-2890): a change is one line, an outage keeps its start; a local endpoint is re-probed while it does not answer and not after; a hosted one, or the knob off, is not probed; a probe ends only what it can see, never overlaps and stops when told; a late outage is passed over; preflight's start-degraded rule");
+console.log("\n[16] The provider's state (SMD-2890): a change is one line, an outage keeps its start; a local endpoint is re-probed while it does not answer and not after; with the knob off, once at start; a hosted one is not probed; an outage only a call can see is probed by a call; a probe ends only what it can see, never overlaps and stops when told; a late outage is passed over; preflight's start-degraded rule");
 {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const closedNow = () => { const srv = Bun.serve({ port: 0, fetch: () => new Response("") }); const port = srv.port; srv.stop(true); return port; };
@@ -2085,7 +2085,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
     "loopback, the profile's service, a host alias and a private address are probed");
   assert(!probeable({ base: "https://openrouter.ai/api/v1" }) && !probeable({ base: "not a url" }), "a hosted endpoint, or a base that is not a URL, is not");
 
-  // One probe: any HTTP answer is answering; a refusal and a silence are outages, in providerDown's words.
+  // One probe: an HTTP answer is answering (a 5xx, 408 or 429 aside, below); a refusal and a silence are outages, in providerDown's words.
   {
     const refused = await probeProvider({ base: `http://127.0.0.1:${closedNow()}/v1` });
     assert(refused?.reason === "provider_unreachable" && refused.detail === "the connection was refused", `a closed port: unreachable, refused (${JSON.stringify(refused)})`);
@@ -2238,6 +2238,49 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
       heardFrom(h, performance.now());
       assert(h.state().status === "answering" && lines.length === 2, "…and a call that is answered ends it");
     } finally { loop.stop(); proxy.stop(true); }
+  }
+
+  // An outage only a call can see, with a call to probe it by (review pass 3):
+  // each interval one call, its outcome the state's — a call's timeout on a
+  // silent provider, then the provider back, ends with no capture, search or
+  // mender call at all; a GET /models probe is not spent on it.
+  {
+    let modelsHits = 0;
+    const answersModels = Bun.serve({ port: 0, fetch: () => { modelsHits++; return Response.json({ object: "list", data: [] }); } });
+    let calls = 0;
+    let failing = true;
+    const h = createProviderHealth({ base: () => "x", log: () => {} });
+    const loop = startProviderReprobe(h, {
+      endpoint: () => ({ base: `http://127.0.0.1:${answersModels.port}/v1` }) as never,
+      intervalS: 1,
+      call: async () => { calls++; if (failing) throw new ProviderError("x timed out after 120 s (OB1_LLM_TIMEOUT)", "timeout"); return [0.1]; },
+    });
+    try {
+      await until(() => h.state().status === "answering", 1500);
+      const seenModels = modelsHits;
+      heardFrom(h, performance.now(), new ProviderError("x timed out after 120 s (OB1_LLM_TIMEOUT)", "timeout"));
+      await sleep(2300);
+      const st = h.state();
+      assert(st.status === "unreachable" && st.by === "call" && calls >= 2 && calls <= 3 && modelsHits === seenModels, `a call's timeout stands while the call-shaped probe fails, one a second, no GET /models spent (${JSON.stringify(st)}; ${calls} call(s), ${modelsHits - seenModels} GET)`);
+      failing = false;
+      assert(await until(() => h.state().status === "answering", 1500), "…and the provider back, the next call-shaped probe ends it");
+      const after = calls;
+      await sleep(1300);
+      assert(calls === after, `answering, no call is spent (${calls - after})`);
+    } finally { loop.stop(); answersModels.stop(true); }
+  }
+
+  // stop() with a call-shaped probe in flight: its answer, come after, is not written.
+  {
+    let release: () => void = () => {};
+    const h = createProviderHealth({ base: () => "x", log: () => {} });
+    h.noteDown({ reason: "provider_503", detail: "it answered 503" });
+    const loop = startProviderReprobe(h, { endpoint: () => ({ base: "http://127.0.0.1:9/v1" }) as never, intervalS: 1, call: () => new Promise((r) => { release = () => r([0.1]); }) });
+    await sleep(100);
+    loop.stop();
+    release();
+    await sleep(50);
+    assert(h.state().status === "unreachable", `stop() with a call-shaped probe in flight: its answer not written (${h.state().status})`);
   }
 
   // The loop's pace, counted at the socket: a listener that closes each

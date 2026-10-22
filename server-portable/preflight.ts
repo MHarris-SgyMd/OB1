@@ -645,7 +645,8 @@ if (chatIsOwn) {
 /**
  * A local endpoint is dialled once, by default: one GET of `/models` with no
  * body and no credential, under a short timeout, and only the connection is
- * judged — any HTTP status is an endpoint that answers; what it serves is
+ * judged — any HTTP status is an endpoint that answers, a 5xx, 408 or 429 one
+ * not ready yet (a warning, since SMD-2890's review pass 2); what it serves is
  * --deep's question. Until this row preflight's credential rule
  * (isLocalEndpoint, above) called an endpoint local by its hostname and
  * connected to nothing without --deep, so an address that reached nothing
@@ -654,7 +655,8 @@ if (chatIsOwn) {
  * runtime does not provide it, a typo in the port — was `preflight OK`, and the
  * first capture failed in 7 ms with the server log ending at `Started server`
  * (measured 2026-09-21 on SMD-1843's baseline). Those still fail — the
- * name that does not resolve, and in a container the loopback — but since
+ * name that does not resolve, in a container the loopback, a reset, an
+ * untrusted certificate, anything unclassified, a failure through a proxy — but since
  * SMD-2890 a resolved name with nothing answering yet only warns, and the
  * server starts degraded (startsDegraded, provider-health.ts): a port typo
  * outside a container is now that warning. A hosted endpoint is not

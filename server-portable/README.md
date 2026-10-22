@@ -178,25 +178,28 @@ every `OB1_PROVIDER_REPROBE_INTERVAL` seconds (15 unless set, 1 to 3600; `0` or
 `off` for the start's probe alone, when only a call that is answered ends it): `GET /models`, no
 credential, no redirect followed, 2.5 s, any HTTP answer the provider back but
 a 5xx, 408 or 429; an answering provider is not probed, and probes never
-overlap. The probe sees the socket and `/models`, not the call, so it ends
-only an outage it saw itself or a call's failed connection: a call's 5xx,
+overlap. That probe sees the socket and `/models`, not the call, so it ends
+only an outage it saw itself or a call's failed connection. A call's 5xx,
 timeout or broken body — a proxy that answers `/models` while its backend is
-down — ends only with a call that is answered: the next capture's, edit's,
-search's or mender tick's, so on a brain with no traffic it stands, and the
-`Provider` row says what ends it; the probe, which could not end it, skips
-it meanwhile. A probe's own outage on top of such an outage moves its time
-alone. A call that began before the provider was last seen answering is not
+down, a silent provider a capture timed out on — ends only with a call that
+is answered, so while one stands the loop probes with a call instead: one
+embedding of the word `probe` per interval, through the server's own
+embedder and the egress gate, as a query (as preflight's `--deep` sends
+`preflight`). Each process so ends its own outage, whether or not its mender
+holds the lock, on a brain with no traffic too; it costs a model call an
+interval, only while calls fail, and that call is a `gen_ai` span like any
+other, so a provider failing it counts toward the provider-failures alert,
+as its failing captures do (the `GET /models` probe makes no span). A probe's
+own outage on top of such an outage moves its time alone. A call that began before the provider was last seen answering is not
 counted against it (judged on the monotonic clock, so a wall-clock step
 changes nothing). A hosted endpoint is not probed — asking it
 costs a credential — and its state moves with real calls alone. A keyed
 `/health` (`provider`: `status` `unknown`, `answering` with `at`, or
-`unreachable` with `since`, `at`, the `reason` word and its `detail`; and
-`reprobeS`) and `brain_info` (its `Provider` row) report it; the keyless
+`unreachable` with `since`, `at`, the `reason` word, its `detail` and `by`,
+whether a call or the probe opened it; and `reprobeS`) and `brain_info` (its `Provider` row) report it; the keyless
 `/health` stays `ok`, liveness alone, so a container's health check never
 restarts a brain that is serving degraded. The state is the process's: each
-server keeps its own, and a restart starts it at `unknown`. The re-probe
-makes no `gen_ai` span, so it does not count toward the provider-failures
-alert.
+server keeps its own, and a restart starts it at `unknown`.
 
 A call the **egress gate** refuses is neither (`egress.ts`, SMD-1903). The
 server asks the gate before either call and makes only the ones it allows: a
@@ -222,7 +225,7 @@ A local endpoint — local by its hostname, the credential rule's sense and not
 `OB1_LLM_LOCAL`'s: loopback, a private address, the `ollama` service name, the two
 host aliases — is dialled once on every start, with or without `--deep`: the
 name resolved first, then one `GET /models`, no body, no credential, 2.5 s
-each, and any HTTP answer passes the
+each, and any HTTP answer but a 5xx, 408 or 429 passes the
 `provider endpoint` row (a `chat endpoint` row for a chat base of its own). A
 name that resolves with nothing answering yet — refused, silent, or no route
 to it (`EHOSTUNREACH`, `ENETUNREACH`) — warns, and the server starts degraded
@@ -236,7 +239,8 @@ name that does not resolve — a runtime without it (the `ollama` service
 without its profile, a host alias the runtime does not write) will not grow
 it; in a container (`/.dockerenv` or `/run/.containerenv`), a loopback host,
 which is the container itself, where nothing will start (the maintainer's
-call); an endpoint that answers wrongly (a reset, an untrusted certificate);
+call); an endpoint that answers wrongly (a reset, an untrusted certificate) and
+anything unclassified;
 and any failure through a proxy, the route's before the provider's
 (`startsDegraded`, `provider-health.ts`). A port typo outside a container is
 now the warning. Either way the

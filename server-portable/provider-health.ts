@@ -19,6 +19,8 @@ import { ProviderError, providerDown, type ProviderEndpoint } from "./embed.ts";
 export const DEFAULT_REPROBE_INTERVAL_S = 15;
 /** The longest interval the knob takes: an hour. */
 const MAX_REPROBE_INTERVAL_S = 3_600;
+/** What a call-shaped probe embeds: a fixed word, no one's text — as preflight's --deep sends "preflight". */
+export const PROBE_WORD = "probe";
 /** A probe's bound: preflight's, so the two agree on what "answers" means. */
 export const PROVIDER_PROBE_TIMEOUT_MS = 2_500;
 /** setTimeout's ceiling (Bun, as Node). */
@@ -198,8 +200,9 @@ export async function probeProvider(at: Pick<ProviderEndpoint, "base">): Promise
  * a call's 5xx, timeout or broken body it may not — a proxy whose backend is
  * down answers /models and fails /embeddings, and a probe that cleared that
  * flapped the state on every capture (review pass 1). Those end with a call
- * that is answered: a capture's, an edit's, a search's, or the vector
- * mender's — none, on a brain with no traffic, which the state then says.
+ * that is answered: a capture's, an edit's, a search's, the vector mender's,
+ * or the loop's own call-shaped probe (review pass 3: with two servers the
+ * mender's call is often the other process's, and a quiet brain makes none).
  */
 export function probeClears(s: ProviderState): boolean {
   return s.status !== "unreachable" || s.by === "probe" || s.reason === "provider_unreachable";
@@ -209,14 +212,20 @@ export function probeClears(s: ProviderState): boolean {
  * The re-probe loop: once at start, so a server started with its provider
  * down says so at once (preflight's warning is another process's) — with the
  * knob off too, then never again (review pass 2: preflight's row promised the
- * state); then every `intervalS` while the state is not answering and is an
- * outage the probe can end (probeClears: probing one it cannot is a call that
- * changes nothing) — a real call that meets an outage turns it back on, one
- * that is answered leaves it idle. Only a local endpoint is probed: a hosted
- * one costs a credential to ask, and its state moves with real calls alone.
- * Timers are unref'd, never overlap, and stop() starts no further probe.
+ * state); then every `intervalS` while the state is not answering — a real
+ * call that meets an outage turns it back on, one that is answered leaves it
+ * idle. An outage the GET /models probe can end (probeClears) is probed so;
+ * one only a call can see — a call's 5xx, timeout or broken body — by `call`,
+ * when given: one real embedding of PROBE_WORD, fed to the state as any call
+ * is (heardFrom), so each process ends its own outage whether or not its
+ * mender holds the lock, and a silent provider a call timed out on is still
+ * re-probed (review pass 3). It costs a model call an interval, only while
+ * calls fail, only to a local endpoint. Only a local endpoint is probed at
+ * all: a hosted one costs a credential to ask, and its state moves with real
+ * calls alone. Timers are unref'd, never overlap, and stop() starts no
+ * further probe and writes nothing a probe in flight finds.
  */
-export function startProviderReprobe(health: ProviderHealth, opts: { endpoint: () => ProviderEndpoint; intervalS: number }): { stop: () => void; reprobeS: number | null } {
+export function startProviderReprobe(health: ProviderHealth, opts: { endpoint: () => ProviderEndpoint; intervalS: number; call?: () => Promise<unknown> }): { stop: () => void; reprobeS: number | null } {
   const at = opts.endpoint();
   if (!probeable(at)) return { stop: () => {}, reprobeS: null };
   let stopped = false;
@@ -224,7 +233,13 @@ export function startProviderReprobe(health: ProviderHealth, opts: { endpoint: (
   const tick = async (first: boolean) => {
     if (stopped) return;
     const s = health.state();
-    if (first || (s.status !== "answering" && probeClears(s))) {
+    if (s.status === "unreachable" && !probeClears(s) && opts.call) {
+      const startedAt = performance.now();
+      let failed: { e: unknown } | null = null;
+      try { await opts.call(); } catch (e) { failed = { e }; }
+      if (stopped) return;
+      heardFrom(health, startedAt, failed ? failed.e : undefined);
+    } else if (first || (s.status !== "answering" && probeClears(s))) {
       const startedAt = performance.now();
       const down = await probeProvider(opts.endpoint());
       if (stopped) return;

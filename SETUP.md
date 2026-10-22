@@ -238,7 +238,9 @@ row for each endpoint, fails a hosted one with no credential of its own, and pro
 each by name — a local one on every start, a hosted one with `--deep` — so a
 chat endpoint that is down is named on its own row while the embeddings row
 still passes (SMD-1875); a local one whose name resolves with nothing answering
-yet warns, and the server starts degraded until it answers (SMD-2890). Note what leaves the host under this
+yet warns and the server starts all the same — degraded until it answers, for
+the embeddings endpoint; captures untagged until it answers, for the chat one
+(SMD-2890). Note what leaves the host under this
 shape: a capture's full text, for tagging — and only the captures the gate
 lets through. Under the default policy the hosted chat endpoint is refused for
 every thought until an `OB1_EGRESS_ALLOW` term names what may go (above); the

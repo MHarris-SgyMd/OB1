@@ -9,7 +9,7 @@ import * as reads from "./reads.ts";
 import * as writes from "./writes.ts";
 import * as workers from "./workers.ts";
 import * as mend from "./mend.ts";
-import { startProviderReprobe } from "../provider-health.ts";
+import { PROBE_WORD, startProviderReprobe } from "../provider-health.ts";
 import { resolveJevConfig } from "../jev.ts";
 import type { PluginSql } from "../store.ts";
 
@@ -67,11 +67,18 @@ export function createCore(deps: CoreDeps) {
     mendOnce: bind(ctx, mend.mendOnce),
     /**
      * The provider's re-probe loop (SMD-2890): both servers start one at boot,
-     * under OB1_PROVIDER_REPROBE_INTERVAL — a probe at once, then one each
-     * interval while a local provider does not answer.
+     * under OB1_PROVIDER_REPROBE_INTERVAL — for a local provider, a probe at
+     * once, then one each interval while it does not answer (none after the
+     * first with the knob off; none at all for a hosted one). An outage only a
+     * call can see is probed by one: the server's own embedding of PROBE_WORD,
+     * through the egress gate as a query (review pass 3).
      */
     startProviderReprobe: (intervalS: number) => {
-      const loop = startProviderReprobe(ctx.providerHealth, { endpoint: () => ctx.embedConfig().embeddings, intervalS });
+      const loop = startProviderReprobe(ctx.providerHealth, {
+        endpoint: () => ctx.embedConfig().embeddings,
+        intervalS,
+        call: () => ctx.embedder.getEmbedding(PROBE_WORD, { kind: "query", content: PROBE_WORD }, "query"),
+      });
       ctx.reprobeS = loop.reprobeS;
       return loop;
     },
