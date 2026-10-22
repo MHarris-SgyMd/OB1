@@ -21,7 +21,11 @@ export const handle: Handle = async ({ event, resolve }) => {
 	const response = await resolve(event);
 	// Nothing a page shows is the browser's to keep: a thought, the brain's facts.
 	response.headers.set('cache-control', 'no-store');
-	response.headers.set('referrer-policy', 'no-referrer');
+	// No page's URL leaves the origin. Not `no-referrer`: under it a browser
+	// sends `Origin: null` with a plain form POST, which SvelteKit refuses as
+	// cross-site, so sign-out (a form with no script) failed in every browser
+	// (review pass 1, Chromium, Firefox and WebKit).
+	response.headers.set('referrer-policy', 'same-origin');
 	response.headers.set('x-content-type-options', 'nosniff');
 	response.headers.set('x-frame-options', 'DENY');
 	return response;

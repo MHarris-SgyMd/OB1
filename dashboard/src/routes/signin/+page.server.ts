@@ -2,7 +2,7 @@ import { fail, redirect } from '@sveltejs/kit';
 import { HOME } from '$lib/paths';
 import type { Actions, PageServerLoad } from './$types';
 import { codeOf, rest } from '$lib/server/rest';
-import { cookieOptions, openSession, SESSION_COOKIE, SESSION_MAX_AGE } from '$lib/server/session';
+import { closeSession, cookieOptions, openSession, SESSION_COOKIE, SESSION_MAX_AGE } from '$lib/server/session';
 import { FIRST_READ, keySignInOffered, whoAmI } from '$lib/server/signin';
 
 export const load: PageServerLoad = async ({ locals }) => {
@@ -37,6 +37,8 @@ export const actions: Actions = {
 		if (!who.operations.includes(FIRST_READ)) {
 			return fail(403, { error: 'This key cannot read: the dashboard needs a read- or write-scoped key. A capture-only key may add thoughts and nothing else.' });
 		}
+		// A sign-in over a live session replaces it: the old id would otherwise hold its key until it expired, out of sign-out's reach.
+		closeSession(cookies.get(SESSION_COOKIE));
 		const id = openSession({ key, name: who.name, scope: who.scope, canCapture: who.operations.includes('capture_thought') });
 		cookies.set(SESSION_COOKIE, id, { ...cookieOptions(url), maxAge: SESSION_MAX_AGE });
 		throw redirect(303, HOME);

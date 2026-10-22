@@ -13,8 +13,9 @@ const config = {
 		// Absolute, not relative: every link and asset names /dashboard/…, as the
 		// proxy routes it, whatever page it is on.
 		paths: { base: '/dashboard', relative: false },
-		// Everything the page loads is this server's: SvelteKit hashes its own
-		// inline script, so no other script runs, and no page may frame it.
+		// Everything the page loads is this server's: SvelteKit marks its own
+		// inline script with a per-response nonce, so no other script runs, and
+		// no page may frame it.
 		csp: {
 			mode: 'auto',
 			directives: {

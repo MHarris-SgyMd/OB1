@@ -934,8 +934,9 @@ Unset at build, the image reports `unknown`. Rebuild with it:
 OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --build server proxy forwarder
 ```
 
-The REST core and the MCP server at `/mcp` run the server's image by name,
-and the proxy depends on both, so this rebuilds and recreates them too; add
+The REST core, the MCP server at `/mcp` and the operator GUI at `/dashboard`
+run the server's image by name, and the proxy depends on all three, so this
+rebuilds and recreates them too; add
 `-f compose.api-public.yaml` where `/api` is on.
 
 `proxy` and `forwarder` named beside `server`: the proxy waits on the server
@@ -976,7 +977,7 @@ and SMD-2238.
 
 What comes back after the host, the Docker daemon or a podman machine
 restarts is each container's restart policy; compose is not involved. In
-`compose.yaml` what serves is `unless-stopped`: Postgres, the three servers,
+`compose.yaml` what serves is `unless-stopped`: Postgres, the three servers and the operator GUI,
 the proxy, the forwarder that publishes its port, Ollama, n8n, the
 orchestration runner, the authorization server and the observability
 profile's `lgtm` and `pg-exporter`. What runs once is `"no"`: the migrator,

@@ -1,11 +1,16 @@
 // How the pages write the REST core's values: shared by the server and the
 // browser, so nothing here may read the session or the environment.
 
-/** An ISO instant as the visitor's locale writes a date and time, or a dash for none. */
+/**
+ * An ISO instant as `2026-10-22 14:03 UTC`, or a dash for none. In UTC and
+ * labelled, so the server's render and the browser's agree: a locale format
+ * rendered in the container's zone and re-rendered in the visitor's showed
+ * two times for one instant (review pass 1).
+ */
 export function when(iso: string | null | undefined): string {
 	if (!iso) return '—';
 	const d = new Date(iso);
-	return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+	return Number.isNaN(d.getTime()) ? iso : `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
 }
 
 /** A count map's largest entries, largest first, ties by name. */

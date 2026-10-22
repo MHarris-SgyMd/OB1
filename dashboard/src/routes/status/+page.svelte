@@ -43,7 +43,7 @@
 				<dt class="text-text-muted">Size</dt><dd>{bytes(db.databaseBytes)}</dd>
 				{#if db.counts}
 					{#each Object.entries(db.counts) as [table, n] (table)}
-						<dt class="text-text-muted">{table}</dt><dd>{n === null ? '—' : n.toLocaleString()} rows</dd>
+						<dt class="text-text-muted">{table}</dt><dd>{n === null ? '—' : `${n.toLocaleString()} ${n === 1 ? 'row' : 'rows'}`}</dd>
 					{/each}
 				{/if}
 				<dt class="text-text-muted">Without a vector</dt><dd>{db.vectorless ?? '—'}</dd>

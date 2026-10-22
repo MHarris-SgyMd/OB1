@@ -6979,6 +6979,33 @@ const MCP_SERVICE = {
   healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"], interval: "30s", timeout: "3s", start_period: "10s", retries: 3 },
 };
 /**
+ * compose.yaml's `app`, the operator GUI (SMD-2280), whole, its logging aside: the server's image run as
+ * `bun ../dashboard/serve.ts` with auto-install off, holding no key and no secret — only the origin and the
+ * configured switch its sign-in reads (COMPOSE_PROFILES naming auth turns key sign-in off, ADR decision 16, so
+ * dropping or pinning it would reopen that door) — on the mesh alone, its files read-only and no capability, its
+ * health on its own path, and its wait on the REST core. A change to it is made here too, on purpose (review pass 1:
+ * a key list, a forwarder key, `user: root`, another image and COMPOSE_PROFILES dropped each passed the per-key rules).
+ */
+const APP_SERVICE = {
+  image: "${COMPOSE_PROJECT_NAME:-open-brain}-server",
+  pull_policy: "never",
+  entrypoint: ["bun", "--no-install"],
+  command: ["../dashboard/serve.ts"],
+  environment: {
+    OB1_PUBLIC_ORIGIN: "${OB1_PUBLIC_ORIGIN:-}",
+    COMPOSE_PROFILES: "${COMPOSE_PROFILES:-}",
+  },
+  stop_grace_period: "${OB1_STOP_GRACE:-10}s",
+  depends_on: { api: { condition: "service_started" } },
+  restart: "unless-stopped",
+  networks: { mesh: { aliases: ["app.ob1.internal"] } },
+  read_only: true,
+  tmpfs: ["/tmp"],
+  cap_drop: ["ALL"],
+  security_opt: ["no-new-privileges:true"],
+  healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/dashboard/health >/dev/null || exit 1"], interval: "30s", timeout: "3s", start_period: "10s", retries: 3 },
+};
+/**
  * compose.yaml's observability collector (SMD-1849 PR 3a) as Bun.YAML reads it, its `logging` (check 29's) and its labels (check 37's,
  * PR 3c) aside: the image by its digest,
  * Grafana's anonymous access off, the refusal of an empty or default admin password (30 s before it exits), the backends on the
@@ -7113,7 +7140,7 @@ const PG_MONITOR_ROLE_SERVICE = {
 const GRAFANA_PORT_LGTM_ENV = { LGTM_ORIGIN: "${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}" };
 /** The operator GUI's link to Grafana (SMD-2280), by the overlay that reaches it, by value: the one key each sets on `app`. */
 const GRAFANA_APP_ENV: Record<string, Mapping> = {
-  "compose.grafana-public.yaml": { GRAFANA_LINK: "/grafana/" },
+  "compose.grafana-public.yaml": { GRAFANA_ROUTE: "/grafana/" },
   "compose.grafana-port.yaml": { GRAFANA_LINK: "${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}/grafana/" },
 };
 /** Each overlay, by file: the keys it sets on each service it names (an overlay that carries a table sets only its mount, label and wait on the proxy), and its top-level keys beside `services` (x-* anchors aside). CI's "The proxy loads only the held route tables" holds the same of each combination, in its `declared` paths. */
@@ -7254,6 +7281,11 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
     const mdiffs: string[] = [];
     pathDiffs(JSON.parse(JSON.stringify(omitKeys(mcp, ["logging"]))), MCP_SERVICE, "services.mcp", mdiffs);
     if (mdiffs.length) flag("proxy", `${mdiffs.slice(0, 6).join("; ")}${mdiffs.length > 6 ? `; and ${mdiffs.length - 6} more` : ""} — compose.yaml's mcp is check 28's MCP_SERVICE: it is on the mesh beside the proxy with none of the server's secrets, so a knob handed to it, its entrypoint, its health or its wait on the REST core is changed there too, on purpose (SMD-2287)`);
+    // The operator GUI, whole (SMD-2280): what it holds, how it starts, its confinement, its health.
+    const app = isMapping(services.app) ? services.app : undefined;
+    const adiffs: string[] = [];
+    pathDiffs(JSON.parse(JSON.stringify(omitKeys(app, ["logging"]))), APP_SERVICE, "services.app", adiffs);
+    if (adiffs.length) flag("proxy", `${adiffs.slice(0, 6).join("; ")}${adiffs.length > 6 ? `; and ${adiffs.length - 6} more` : ""} — compose.yaml's app is check 28's APP_SERVICE: the browser's way into the brain, holding no key, so a knob handed to it, its image, user, confinement, health or wait is changed there too, on purpose — and COMPOSE_PROFILES is what turns its key sign-in off while the stack is configured (SMD-2280)`);
     // The observability collector, whole (SMD-1849 PR 3a): Grafana's sign-in, its exposure and what it calls out to are its environment.
     const lgtm = isMapping(services.lgtm) ? services.lgtm : undefined;
     const ldiffs: string[] = [];

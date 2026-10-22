@@ -1388,7 +1388,7 @@ jobs:
           # scheduler's exec'd --follow with them.
           docker compose -f compose.yaml --profile sleep config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.sleep | (has("ports") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_POLL") and has("OB1_SLEEP_WORKERS") and has("OB1_SLEEP_BUDGET") and has("OB1_SLEEP_STATEMENT_TIMEOUT") and has("OB1_SLEEP_WORK_MEM") and has("OB1_SLEEP_MAINTENANCE_WORK_MEM")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and (.command[2] | test("^\\[ -n \"\\$+OB1_WORKER_KEY\" \\] \\|\\| ") and test("\nexec bun db/sleep\\.ts --follow --quiet \"\\$+\\{OB1_SLEEP_QUIET:-300\\}\" --poll \"\\$+\\{OB1_SLEEP_POLL:-5\\}\" --workers \"\\$+\\{OB1_SLEEP_WORKERS:-1\\}\" --budget \"\\$+\\{OB1_SLEEP_BUDGET:-60\\}\" --statement-timeout \"\\$+\\{OB1_SLEEP_STATEMENT_TIMEOUT:-300\\}\" --work-mem \"\\$+\\{OB1_SLEEP_WORK_MEM:-4\\}\" --maintenance-work-mem \"\\$+\\{OB1_SLEEP_MAINTENANCE_WORK_MEM:-64\\}\"\n?$")))'
-          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api forwarder mcp migrate postgres proxy server " ]
+          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api app forwarder mcp migrate postgres proxy server " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'
           # SMD-2287: the MCP server built on the REST core runs the server's
@@ -1535,7 +1535,7 @@ jobs:
           declared() {
             case "$1" in
               compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml) ;;
-              compose.grafana-public.yaml) printf '%s\n' '["services","app","environment","GRAFANA_LINK"]' ;;
+              compose.grafana-public.yaml) printf '%s\n' '["services","app","environment","GRAFANA_ROUTE"]' ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' '["services","postgres","networks","postgres-port"]' '["networks","postgres-port"]' ;;
               compose.grafana-port.yaml) printf '%s\n' '["services","lgtm","ports"]' '["services","lgtm","networks","grafana-port"]' '["services","lgtm","environment","LGTM_ORIGIN"]' '["services","app","environment","GRAFANA_LINK"]' '["networks","grafana-port"]' ;;
               # The release's: an image and its pull policy, on any service but the proxy and its forwarder (SMD-2583).
@@ -1652,6 +1652,12 @@ jobs:
             proxy_loads "[$routes, $hooks]" -f compose.yaml -f compose.release.yaml -f compose.hooks-public.yaml "${profiles[@]}"
             proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.release.yaml -f compose.grafana-public.yaml "${profiles[@]}"
             proxy_loads "[$routes]" -f compose.yaml -f compose.release.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+            # Every service compose.yaml runs on a local build's image (the
+            # server's, the migrator's, by the project's name) runs the
+            # release's instead, so a service added there is pinned here too
+            # (SMD-2280 review pass 1: the overlay could drop the GUI and pass).
+            left="$(docker compose -f compose.yaml -f compose.release.yaml "${profiles[@]}" config --format json | jq -r '[.services | to_entries[] | select((.value.image // "") | test("^[^/:@]*-(server|migrate)$")) | .key] | join(" ")')"
+            [ -z "$left" ] || { echo "the release overlay ($mode) leaves on a local build's image: $left" >&2; exit 1; }
           done
           files="$(printf '%s\n' * | grep -iE '^((docker|podman|container)-)?compose.*\.ya?ml$' | LC_ALL=C sort -u | tr '\n' ' ')"
           named="$(printf '%s\n' "${rendered[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
@@ -1732,6 +1738,22 @@ jobs:
         env:
           OB1_SMOKE_COMMIT: ${{ github.sha }}
 
+      # SMD-2280: the operator GUI as a browser uses it, through the stack's
+      # proxy at /dashboard, on the stack configured for no authorization
+      # server, after smoke.sh's captures: the sign-in wall, a wrong and a
+      # capture-only key refused, a cookie the server never issued and a
+      # cross-site sign-in refused, the session cookie's attributes and the
+      # pages' headers, the overview, the status and a thought rendered from
+      # the REST core under the write key and the read key, the key in no
+      # page, header, script or cookie, and sign-out and a second sign-in
+      # each ending a session on the server (dashboard/smoke.ts). Here, not
+      # after the next step: that one configures the authorization server,
+      # and the GUI then offers no key sign-in (review pass 1). The smoke
+      # imports nothing, so nothing is installed.
+      - name: The operator GUI, driven through the proxy
+        working-directory: dashboard
+        run: bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
+
       # Where the authorization server's step ran when the full-stack checks
       # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):
       # deploy/.env configured for the authorization server
@@ -1741,12 +1763,26 @@ jobs:
       # daemon restart and the SIGTERM stop after it meet the server they met
       # then; the smoke just before holds a stack configured for none, which
       # no job held before (deploy-stack-brains' smoke holds this one). Every
-      # compose call after it names its services.
+      # compose call after it names its services. The operator GUI is
+      # recreated on it too (SMD-2280), and holds ADR decision 16: configured,
+      # its public origin offers no key sign-in, whether or not the
+      # authorization server answers — no key field, and a post of the write
+      # key from the origin it is configured for refused with no cookie, by
+      # the GUI's own words (not SvelteKit's cross-site refusal).
       - name: The server is configured for an authorization server that is not running
         working-directory: deploy
         run: |
           ../.github/ci/auth-settings.sh
-          docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps server mcp
+          docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps server mcp app
+          page=$(curl -fsS --max-time 15 http://127.0.0.1:8010/dashboard/signin)
+          grep -q 'Key sign-in is off' <<<"$page" || { echo "the configured GUI's sign-in page does not say key sign-in is off" >&2; exit 1; }
+          if grep -q 'name="key"' <<<"$page"; then echo "the configured GUI offers a key field" >&2; exit 1; fi
+          code=$(curl -s -o /tmp/gui-signin -D /tmp/gui-signin-headers -w '%{http_code}' --max-time 15 -X POST \
+            -H 'content-type: application/x-www-form-urlencoded' -H 'accept: text/html' -H 'origin: https://brain.example.test' \
+            --data-urlencode "key=$OB1_SMOKE_KEY" http://127.0.0.1:8010/dashboard/signin)
+          echo "a key posted to the configured GUI: $code"
+          if [ "$code" != 403 ] || ! grep -q 'Key sign-in is off' /tmp/gui-signin; then echo "the configured GUI did not refuse key sign-in itself" >&2; exit 1; fi
+          if grep -qi '^set-cookie: ob1_dashboard_session=[^;]' /tmp/gui-signin-headers; then echo "the configured GUI set a session cookie" >&2; exit 1; fi
 
       # SMD-2284: the REST core is internal by default — it answers on the mesh
       # as api.ob1.internal, and the proxy's /api is a 404 — until the operator
@@ -2064,18 +2100,6 @@ jobs:
         env:
           MCP_URL: http://127.0.0.1:8010/mcp
         run: bun smoke.ts --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
-
-      # SMD-2280: the operator GUI as a browser uses it, through the stack's
-      # proxy at /dashboard: the sign-in wall, a wrong and a capture-only key
-      # refused, a cookie the server never issued and a cross-site sign-in
-      # refused, the session cookie's attributes, the overview, the status and
-      # a thought rendered from the REST core under the write key and the read
-      # key, the key in no page, header, script or cookie, and sign-out ending
-      # the session on the server (dashboard/smoke.ts). The smoke imports
-      # nothing, so nothing is installed.
-      - name: The operator GUI, driven through the proxy
-        working-directory: dashboard
-        run: bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
 
       # SMD-2760. What comes back after a reboot is each container's restart
       # policy. Postgres had none, so on Docker a reboot would bring the

@@ -46,13 +46,14 @@ on:
     # What the job builds from, or reads: the two Dockerfiles and what they
     # COPY, the compose files, the manifest, the scripts the job runs or
     # imports, and this file. The server image carries mcp-server/ and
-    # rest-client/ since SMD-2287 PR 5a.
+    # rest-client/ since SMD-2287 PR 5a, and dashboard/ since SMD-2280.
     paths:
       - ".github/workflows/release.yml"
       - "scripts/release-artifacts.ts"
       - "server-portable/**"
       - "mcp-server/**"
       - "rest-client/**"
+      - "dashboard/**"
       - "plugins/**"
       - "scripts/fork-index.ts"
       - "scripts/mechanism-yield.ts"

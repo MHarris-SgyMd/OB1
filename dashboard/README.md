@@ -52,6 +52,14 @@ with an access key.
   not the authorization server answers: knocking it over must not open a weaker door.
   Sign-in by code and PKCE, and break-glass key sign-in on a loopback-only port, are
   SMD-2280's fourth PR; until then a configured stack's GUI signs no one in.
+- **One key holds at most 20 sessions**, and a sign-in past that ends that key's oldest;
+  the server holds 1,000 in all. A sign-in over a live session ends the old one.
+- **The origin is shared.** The cookie rides `/dashboard` alone, but any page served
+  elsewhere on the same origin (Grafana at `/grafana/` with
+  `compose.grafana-public.yaml`, say) can send requests to `/dashboard` that carry it,
+  and SvelteKit's origin check passes them. A script running in such a page reaches
+  what the signed-in visitor's key reaches (ADR, "Path-based public routes carry
+  obligations").
 
 ## The origin
 
@@ -64,7 +72,9 @@ https. So the server must know the origin a browser sees:
   unsound one is warned of and passed over.
 - Otherwise each request's `Host`, with the scheme the stack's proxy saw (its
   `X-Forwarded-Proto`, which Traefik sets itself): plain HTTP on the loopback or a
-  LAN address signs in as it is reached.
+  LAN address signs in as it is reached through the stack's port. Reached without
+  the proxy (a `bun serve.ts` of your own), no such header arrives and the scheme
+  is taken as https, so set `OB1_PUBLIC_ORIGIN` there (Develop, below).
 
 ## Settings
 
@@ -73,14 +83,15 @@ https. So the server must know the origin a browser sees:
 | `OB1_REST_URL` | The REST core; `http://api.ob1.internal.:8000` on the mesh unless set |
 | `OB1_PUBLIC_ORIGIN` | The origin behind TLS (above) |
 | `COMPOSE_PROFILES` | Key sign-in is off while it names `auth` |
-| `GRAFANA_LINK` | The nav's link to Grafana, set by `deploy/compose.grafana-public.yaml` (`/grafana/`) or `deploy/compose.grafana-port.yaml` (`/grafana/` on its loopback origin); none without either |
+| `GRAFANA_LINK` | The nav's link to Grafana: `deploy/compose.grafana-port.yaml` sets it to `/grafana/` on its loopback origin, Grafana's root URL whenever that file is named |
+| `GRAFANA_ROUTE` | The link when `GRAFANA_LINK` is unset: `deploy/compose.grafana-public.yaml` sets it to `/grafana/` on this origin. With neither, no link |
 | `PORT` | 8000 unless set |
 
 ## The pages
 
 | Path | What it reads |
 |---|---|
-| `/dashboard` | `thought_stats` (the counts, the date range, the largest types, topics and people) and `list_thoughts` (the ten newest) |
+| `/dashboard/` | `thought_stats` (the counts, the date range, the largest types, topics and people) and `list_thoughts` (the ten newest; their links are not preloaded on hover, since each open is a click-through) |
 | `/dashboard/status` | `brain_info`: the server's version, commit and migrations, and the database's ledger, sizes, counts, workers' heartbeats and proposal queue |
 | `/dashboard/thoughts/<id>` | `fetch`: a thought's text and metadata (the core logs the open as a click-through, as it does any `fetch`) |
 | `/dashboard/signin`, `/dashboard/signout` | Sign-in and sign-out |
@@ -91,20 +102,25 @@ SMD-2280's second PR; plugin pages its third.
 
 Every page is rendered on the server: the browser calls no API, so there is no proxy
 in the GUI to the REST core, and a page reads only the operations its own load names.
-Pages are `no-store`, refuse framing, and carry a Content-Security-Policy that admits
-no script but SvelteKit's own.
+Pages are `no-store`, refuse framing, send `Referrer-Policy: same-origin` (not
+`no-referrer`, under which a browser posts a form with `Origin: null` and SvelteKit
+refuses it), and carry a Content-Security-Policy that admits no script but
+SvelteKit's own, by a nonce per response. Times are written in UTC.
 
 ## Develop
 
 ```bash
+(cd rest-client && bun install) && (cd server-portable && bun install)   # what the GUI imports and its types read
 cd dashboard && bun install
 bun run check                        # svelte-check
-bun run build && OB1_REST_URL=http://127.0.0.1:<port> OB1_PUBLIC_ORIGIN=http://127.0.0.1:8000 bun serve.ts
+bun run build && PORT=5174 OB1_REST_URL=http://127.0.0.1:8000/api OB1_PUBLIC_ORIGIN=http://127.0.0.1:5174 bun serve.ts
 ```
 
-`OB1_REST_URL` there is a REST core you can reach: the stack's `/api` with
-`deploy/compose.api-public.yaml` (`http://127.0.0.1:8000/api`), or one run from a
-checkout.
+Then open `http://127.0.0.1:5174/dashboard`. `OB1_REST_URL` there is a REST core you
+can reach: the stack's `/api` with `deploy/compose.api-public.yaml`, as above, or one
+run from a checkout. Not port 8000, the stack's own: on macOS a listener on every
+address beside the stack's loopback one starts without an error, and the browser keeps
+reaching the stack.
 
 ## Smoke
 
@@ -114,6 +130,8 @@ bun smoke.ts --url http://127.0.0.1:8000/dashboard --key <write> --read-key <rea
 
 It drives the GUI through the stack's proxy as a browser would: the sign-in wall, a
 wrong and a capture-only key refused, a cookie the server never issued refused, a
-sign-in posted from another origin refused, the cookie's attributes, each page
-rendered from the REST core, no page, header, script or cookie holding the key, and
-sign-out ending the session on the server. CI runs it in the full-stack job.
+sign-in posted from another origin or with `Origin: null` refused, the cookie's and
+the pages' headers, each page rendered from the REST core, no page, header, script or
+cookie holding the key, and sign-out and a second sign-in each ending a session on
+the server. CI runs it in the full-stack job, before that job configures the
+authorization server; after it, the job holds key sign-in off.

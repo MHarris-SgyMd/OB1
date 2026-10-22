@@ -18,6 +18,13 @@ export const SESSION_COOKIE = 'ob1_dashboard_session';
 export const SESSION_MAX_AGE = 60 * 60 * 24;
 /** The most sessions held at once: the oldest goes when a sign-in would pass it, so a flood of sign-ins holds at most this many keys in memory. */
 export const MAX_SESSIONS = 1000;
+/**
+ * The most one key holds: a sign-in past it ends that key's oldest session, not
+ * another key's, so one key signed in over and over cannot push every other
+ * visitor out of MAX_SESSIONS (review pass 1). Only a flood under fifty keys
+ * reaches the global cap.
+ */
+export const MAX_PER_KEY = 20;
 
 export type Session = {
 	/** The access key, sent as x-brain-key on every call to the REST core. */
@@ -55,7 +62,12 @@ function newId(): string {
 
 /** A new session, its id the cookie's value; `now` (ms) for a test to place it. */
 export function openSession(session: Session, now = Date.now()): string {
-	for (const [id, held] of sessions) if (held.exp <= now) sessions.delete(id);
+	const own: string[] = [];
+	for (const [id, held] of sessions) {
+		if (held.exp <= now) sessions.delete(id);
+		else if (held.key === session.key) own.push(id);
+	}
+	while (own.length >= MAX_PER_KEY) sessions.delete(own.shift()!);
 	while (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value!);
 	const id = newId();
 	sessions.set(id, { ...session, exp: now + SESSION_MAX_AGE * 1000 });

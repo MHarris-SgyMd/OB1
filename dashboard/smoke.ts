@@ -103,6 +103,12 @@ console.log(`▸ dashboard ${BASE}`);
   const signin = await get("/signin");
   assert(signin.status === 200 && signin.html.includes('name="key"'), `/signin offers key sign-in (${signin.status})`);
   assert(/content-security-policy/i.test([...signin.headers.keys()].join(" ")) && signin.headers.get("x-frame-options") === "DENY", "…with a Content-Security-Policy, and no framing");
+  // same-origin, never no-referrer: under no-referrer a browser posts a plain form with `Origin: null`, which
+  // SvelteKit refuses as cross-site, and sign-out — a form with no script — failed in every browser (review pass 1).
+  // This smoke sets Origin itself, so it holds the header that decides what a browser sends.
+  assert(signin.headers.get("referrer-policy") === "same-origin", `…and Referrer-Policy same-origin, so a browser's form post carries its origin (${signin.headers.get("referrer-policy")})`);
+  const nullOrigin = await fetch(`${BASE}/signin`, { method: "POST", redirect: "manual", headers: { ...FORM, origin: "null" }, body: new URLSearchParams({ key: WRITE_KEY }).toString() });
+  assert(nullOrigin.status === 403, `…since a form posted with Origin null is refused (${nullOrigin.status})`);
 }
 
 // Keys the brain must not take.
@@ -142,7 +148,7 @@ let thoughtId = "";
   assert(home.status === 200 && home.html.includes('data-testid="who"') && home.html.includes("write key"), `the overview renders for the write key and names its scope (${home.status})`);
   const total = /data-testid="total">([\d,.\s]+)</.exec(home.html)?.[1];
   assert(total !== undefined, `…with the brain's total from the REST core (${total ?? "none"})`);
-  assert(home.headers.get("cache-control") === "no-store", "…and no-store, so no copy is kept");
+  assert(home.headers.get("cache-control") === "no-store" && home.headers.get("referrer-policy") === "same-origin", "…no-store, so no copy is kept, and Referrer-Policy same-origin");
   thoughtId = /href="\/dashboard\/thoughts\/([0-9a-f-]{36})"/.exec(home.html)?.[1] ?? "";
 
   const status = await get("/status");
@@ -181,6 +187,19 @@ let thoughtId = "";
   cookie = sessionCookie;
   const again = await get("/");
   assert(toSignin(again), `…and ends the session on the server: the old cookie presented again is no session (${again.status} → ${again.location})`);
+  cookie = "";
+
+  // A sign-in over a live session replaces it: the first id is no session once the second is issued (review pass 1).
+  await signIn(WRITE_KEY);
+  const first = cookie;
+  await signIn(WRITE_KEY);
+  const second = cookie;
+  cookie = first;
+  const stale = await get("/");
+  cookie = second;
+  const fresh = await get("/");
+  assert(first !== second && toSignin(stale) && fresh.status === 200, `a second sign-in ends the first session on the server (first ${stale.status}, second ${fresh.status})`);
+  await signOut();
   cookie = "";
 }
 

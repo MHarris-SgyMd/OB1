@@ -1391,6 +1391,9 @@ canary_compose up -d --no-deps --force-recreate api
 # image: recreated last, on the build just made and the env file's own
 # OB1_FORWARDER_KEY. It writes nothing, so it was not stopped for the refresh.
 canary_compose up -d --no-deps --force-recreate mcp
+# And the operator GUI at /dashboard (SMD-2280), on the same image for the same
+# reason; it holds only sessions, which a recreate ends.
+canary_compose up -d --no-deps --force-recreate app
 # Its own proxy (SMD-1846) and the forwarder that publishes its port
 # (SMD-2583), left running across a refresh: while the server is stopped the
 # proxy answers 502, and the server's new container is the same name on the
