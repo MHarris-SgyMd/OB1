@@ -5,6 +5,13 @@
  */
 export type Check = { id: string; pass: boolean; detail: string };
 
+/**
+ * A tool's answer with every 64-hex value replaced (SMD-2295): the brain keys
+ * are 64 hex, Activepieces' flows carry them in their steps, and an answer
+ * may echo a request. Used on every reply the eval prints.
+ */
+export const redactKeys = (text: string): string => text.replace(/[0-9a-f]{64}/gi, "<key>");
+
 /** What `--up` chose for this project, read back by `--verify`: the `--with` overlays in force. */
 export type Ctx = { with: string[] };
 

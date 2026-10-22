@@ -6696,7 +6696,12 @@ bun eval-orchestration.ts --verify n8n [--json] [--wait-schedule]
 bun eval-orchestration.ts --down n8n      # removes the project and its volumes
 ```
 
-It needs `LINEAR_API_KEY` on the usual search path and the host's Ollama; it
+It needs `LINEAR_API_KEY` on the usual search path (in a git worktree, which
+holds no gitignored `.env`, point `OB1_ENV_FILE` at a file that has it) and
+the host's Ollama with `qwen3-embedding:4b` and `qwen2.5:7b`; the brain
+takes 127.0.0.1:8012 and the candidates 5680 (n8n), 8080 (Activepieces) and
+8090 (Windmill), and every call goes through the `docker` CLI (podman's on a
+podman machine). It
 writes `orchestration/.env` (gitignored) once and reuses it. compose runs with
 that file and an allowlisted environment — never the driver's, which
 `loadEnv()` fills from `deploy/.env`, so a dogfood stack's port and keys cannot
@@ -6706,7 +6711,19 @@ exists: after editing a workflow file, `--down` first (n8n's provisioning
 replaces instead, since SMD-2210). Since SMD-2210, too, `--up n8n` runs the
 shipped `orchestration` profile rather than the overlay described here, which
 put n8n in a database on the brain's server ("The orchestration profile
-(SMD-2210)", below). The n8n rows in this section are that POC's.
+(SMD-2210)", below). The n8n rows in this section are that POC's. `--down`
+removes the project and its volumes but keeps `orchestration/.env` and the
+built images.
+
+**On a podman machine, the network fault (SMD-2929).** If `--up` times out on
+the brain's `/health`, or reports the brain's commit as "unreadable" (not a
+stale image then), the project's `egress` network has likely come up with IP
+forwarding off: netavark leaves an internal network's `forwarding = 0`
+sysctl drop-in behind when the network is removed
+([netavark#1497](https://github.com/containers/netavark/issues/1497)), and a
+later network reusing the bridge name inherits it. The kit's own `--down`
+leaves three or four behind. `--down`, run SMD-2929's cleanup inside the
+podman VM, then `--up` again.
 
 **The result — n8n and Activepieces pass the POC; Windmill passes C1, C1s, C3
 and C4 but not C2**, because the criteria posted before the run ask for the capture to
@@ -6768,24 +6785,35 @@ client" (the maintainer's wording). `vendor`'s pipeline and E's judge name
 `api:8000`, and `--up` now starts the forwarder (and names `api`). The kit had
 stopped coming up twice since its last run: no forward key after SMD-2287 PR
 5b, and the forwarder never started after SMD-2583. One clean cycle each on
-the dogfood Mac (podman 6.1.4; the netavark cleanup of SMD-2929 run before
-each `--up`):
+the dogfood Mac (podman 6.1.4), from a tree of this change before its first
+commit (main ef5e43dc plus the change). The plain n8n run came before the
+podman fault's cause was found and passed on networks that happened to be
+sound; SMD-2929's cleanup ran before the Activepieces, Windmill and sealed
+runs.
+Activepieces' first fresh `--up` failed provisioning once (`TRIGGER_UPDATE_STATUS`,
+"The worker skipped the trigger enable hook", with the uninstallable `~0.12.0`
+pin); the run below is on `~0.13.0`. Windmill's `--verify` exits 1 by design,
+for its C2:
 
 | candidate | C1 | C1s | C2 | C3 | the tool's own |
 | --- | --- | --- | --- | --- | --- |
 | n8n 2.40.6 | PASS: 10, +10 / 10, +0 | PASS: seen after 541 s | PASS: n8n's HTTP Request node | PASS | K, P, A, I PASS |
-| n8n 2.40.6, sealed | PASS: 10, +10 / 10, +0 | not run (sealed) | PASS | PASS (the act fails, as sealed it must) | K, P, A, I PASS; E PASS: `api.dns.podman` ×42 and the runner's name inside, only `api.linear.app` outside, 21 connections to `api:8000` |
+| n8n 2.40.6, sealed | PASS: 10, +10 / 10, +0 | not run (sealed) | PASS | PASS (the act fails, as sealed it must) | K, P, A, I PASS; E PASS: `api.dns.podman` ×42 and the runner's name ×10 inside, only `api.linear.app` outside, 21 connections to `api:8000` and 5 to the runner's `:8090` |
 | activepieces 0.91.3 | PASS: 10, +10 / 10, +0 | PASS: seen after 812 s | PASS: the HTTP piece's send-request action | PASS | — |
 | windmill CE v1.817.0 | PASS: 10, +10 / 10, +0 | not measured (the stack was taken down mid-wait) | FAIL, as posted: a script of ours calling `fetch` (Windmill has no HTTP step outside a script) | PASS | — |
 
-Every capture's audit row reads `origin` `open-brain-api` and the tool's own
-`source` (`n8n` and `activepieces` read back from the audit; Windmill's
-script sends `windmill`): the REST door, not the MCP server's.
+The captures' audit rows, read by hand after the runs (`SELECT action, origin,
+source, count(*) FROM thought_audit WHERE actor_name = 'orch-capture' GROUP
+BY 1,2,3` in the eval brain's Postgres; the eval does not read the audit):
+n8n's 10 captures and Activepieces' 20 read `origin` `open-brain-api` and the
+tool's own `source`, the REST door, not the MCP server's. Windmill's script
+sends `source: windmill`; its rows were not read.
 
-Memory is `docker stats`' usage per container — the cgroup's, page cache
+In the POC's runs (2026-09-25, before SMD-2295's re-aim), memory is `docker
+stats`' usage per container — the cgroup's, page cache
 included, not a resident set — read when `--verify` starts (after `--up`, and
 after any scheduled run that fired in between) and again at its end — after the
-two ingestion runs, the MCP calls and, in these runs, the schedule wait (692
+two ingestion runs, the MCP calls and, in those runs, the schedule wait (692
 to 875 s), so the second reading includes a scheduled run and minutes of
 idling (Windmill's shared Postgres grew over it: its queue lives there). The shared Postgres column is the whole
 container: the candidate's database and the brain's own work together, with no

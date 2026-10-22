@@ -30,7 +30,7 @@
  * A knob for a run (ORCH_AP_PIECES_SYNC_MODE) goes in orchestration/.env.
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "../../server-portable/auth.ts";
@@ -64,6 +64,8 @@ const PASS_THROUGH = [
 export function ensureEnv(file = ENV_FILE): Record<string, string> {
   const hex = (n: number) => randomBytes(n).toString("hex");
   if (existsSync(file)) {
+    // It holds the kit's keys and passwords: owner-only, whatever an older run or a hand left it at.
+    chmodSync(file, 0o600);
     const env = parseEnv(readFileSync(file, "utf8"));
     // A value a later candidate needs is appended, never a rewrite: the
     // database passwords are the ones the volume was initialised with.

@@ -61,12 +61,12 @@
  * project skips what already exists; after editing a workflow file, --down first.
  * Needs LINEAR_API_KEY (the usual .env search path) and the host's Ollama.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hashKey } from "../server-portable/auth.ts";
 import { loadEnv } from "./env.ts";
-import type { Adapter, Check, Ctx } from "./orchestration/adapter.ts";
+import { redactKeys, type Adapter, type Check, type Ctx } from "./orchestration/adapter.ts";
 import { callTool, listTools, refuses } from "./orchestration/mcp-client.ts";
 import { activepieces, withBrainKeys } from "./orchestration/activepieces.ts";
 import { engineTime, factsFrom, judgeEgress, n8n } from "./orchestration/n8n.ts";
@@ -187,9 +187,9 @@ function selfCheck(): number {
     const [cap, rd] = ["c".repeat(64), "d".repeat(64)];
     const listed = `orch-capture:capture:${hashKey(cap)},orch-read:read:${hashKey(rd)}`;
     const pre5b = join(dir, "pre5b.env");
-    writeFileSync(pre5b, `POSTGRES_PASSWORD=p\nMCP_ACCESS_KEYS=${listed}\nORCH_BRAIN_CAPTURE_KEY=${cap}\nORCH_BRAIN_READ_KEY=${rd}\n`, { mode: 0o600 });
+    writeFileSync(pre5b, `POSTGRES_PASSWORD=p\nMCP_ACCESS_KEYS=${listed}\nORCH_BRAIN_CAPTURE_KEY=${cap}\nORCH_BRAIN_READ_KEY=${rd}\n`, { mode: 0o644 });
     const migrated = ensureEnv(pre5b);
-    expect("ensureEnv: a pre-5b file gains a forward key and one record, its records and lines kept", own(migrated) && migrated.MCP_ACCESS_KEYS === `${listed},${forwards(migrated)[0]}` && migrated.POSTGRES_PASSWORD === "p" && Boolean(migrated.ORCH_MCP_KEY));
+    expect("ensureEnv: a pre-5b file gains a forward key and one record, its records and lines kept", own(migrated) && migrated.MCP_ACCESS_KEYS === `${listed},${forwards(migrated)[0]}` && migrated.POSTGRES_PASSWORD === "p" && Boolean(migrated.ORCH_MCP_KEY) && migrated.N8N_BRAIN_CAPTURE_KEY === cap && (statSync(pre5b).mode & 0o777) === 0o600);
     const settled = readFileSync(pre5b, "utf8");
     const rerun = ensureEnv(pre5b);
     expect("ensureEnv: a second run leaves the file as it was, and returns what it holds", readFileSync(pre5b, "utf8") === settled && JSON.stringify(rerun) === JSON.stringify(migrated));
@@ -205,6 +205,7 @@ function selfCheck(): number {
     rmSync(dir, { recursive: true, force: true });
   }
   // SMD-2295 PR 2: the Activepieces flows' brain keys, filled at import (the HTTP piece takes no connection).
+  expect("redactKeys: a 64-hex value, in either case, is replaced, and nothing shorter", redactKeys(`a ${"a".repeat(64)} b ${"F".repeat(64)} c ${"0".repeat(63)}`) === `a <key> b <key> c ${"0".repeat(63)}`);
   const flow = (f: string) => readFileSync(new URL(`./orchestration/activepieces/${f}`, import.meta.url), "utf8");
   const [ingestFlow, searchFlow] = [flow("linear-ingest.json"), flow("brain-search.json")];
   expect("the Activepieces flows as committed hold placeholders and no key", ![ingestFlow, searchFlow, flow("linear-issue.json")].some((t) => /[0-9a-f]{64}/i.test(t))
@@ -253,7 +254,7 @@ setLayout(tool, adapter.profile, overlays(mode === "--down" ? Object.keys(adapte
 const brainHealthy = async () => (await fetch("http://127.0.0.1:8012/health").catch(() => null))?.ok === true;
 
 async function up(): Promise<void> {
-  if (!env.LINEAR_API_KEY) usage("LINEAR_API_KEY is not set (evals/.env, <repo>/.env or deploy/.env)");
+  if (!env.LINEAR_API_KEY) usage("LINEAR_API_KEY is not set (OB1_ENV_FILE, evals/.env, <repo>/.env or deploy/.env; a git worktree has none of the last three)");
   // Kept before compose runs: a failed --up is followed by --down, which removes every variant anyway.
   setEnvValue(WITH_KEY, ctx.with.join(","));
   const variantServices = ctx.with.flatMap((v) => adapter.variants![v].services);
@@ -361,7 +362,8 @@ async function verify(): Promise<void> {
   const call = async (declared: string, args: Record<string, unknown>) => {
     const name = find(declared);
     if (!name) return { isError: true, text: "not listed" };
-    return callTool(url, headers, name, args, 120_000).catch((e: Error) => ({ isError: true, text: e.message }));
+    // Redacted here, so no sample, detail or error the report prints can carry a brain key a tool echoed.
+    return callTool(url, headers, name, args, 120_000).catch((e: Error) => ({ isError: true, text: e.message })).then((r) => ({ ...r, text: redactKeys(r.text) }));
   };
   const search = await call(adapter.tools.search, { query: "which orchestration tool for ingestion and sync", limit: 3 });
   const act = await call(adapter.tools.act, { identifier: "SMD-1863" });
