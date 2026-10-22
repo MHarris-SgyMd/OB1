@@ -65,7 +65,8 @@ export function ensureEnv(file = ENV_FILE): Record<string, string> {
   const hex = (n: number) => randomBytes(n).toString("hex");
   if (existsSync(file)) {
     // It holds the kit's keys and passwords: owner-only, whatever an older run or a hand left it at.
-    chmodSync(file, 0o600);
+    // A file this user cannot chmod (another owner, a read-only mount) is warned about, not fatal.
+    try { chmodSync(file, 0o600); } catch (e) { console.error(`warning: could not make ${file} owner-only: ${e instanceof Error ? e.message : String(e)}`); }
     const env = parseEnv(readFileSync(file, "utf8"));
     // A value a later candidate needs is appended, never a rewrite: the
     // database passwords are the ones the volume was initialised with.

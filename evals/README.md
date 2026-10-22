@@ -6700,8 +6700,8 @@ It needs `LINEAR_API_KEY` on the usual search path (in a git worktree, which
 holds no gitignored `.env`, point `OB1_ENV_FILE` at a file that has it) and
 the host's Ollama with `qwen3-embedding:4b` and `qwen2.5:7b`; the brain
 takes 127.0.0.1:8012 and the candidates 5680 (n8n), 8080 (Activepieces) and
-8090 (Windmill), and every call goes through the `docker` CLI (podman's on a
-podman machine). It
+8090 (Windmill), and every engine call goes through the `docker` CLI
+(podman's on a podman machine). It
 writes `orchestration/.env` (gitignored) once and reuses it. compose runs with
 that file and an allowlisted environment — never the driver's, which
 `loadEnv()` fills from `deploy/.env`, so a dogfood stack's port and keys cannot
@@ -6723,7 +6723,9 @@ sysctl drop-in behind when the network is removed
 ([netavark#1497](https://github.com/containers/netavark/issues/1497)), and a
 later network reusing the bridge name inherits it. The kit's own `--down`
 leaves three or four behind. `--down`, run SMD-2929's cleanup inside the
-podman VM, then `--up` again.
+podman VM (it removes the drop-ins no network owns, and any `forwarding = 0`
+one on an outward network's bridge, turning forwarding back on), then `--up`
+again.
 
 **The result — n8n and Activepieces pass the POC; Windmill passes C1, C1s, C3
 and C4 but not C2**, because the criteria posted before the run ask for the capture to

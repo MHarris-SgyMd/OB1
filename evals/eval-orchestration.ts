@@ -61,7 +61,7 @@
  * project skips what already exists; after editing a workflow file, --down first.
  * Needs LINEAR_API_KEY (the usual .env search path) and the host's Ollama.
  */
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hashKey } from "../server-portable/auth.ts";
@@ -180,6 +180,8 @@ function selfCheck(): number {
   // SMD-2287 PR 5b), on temp files: a new one, a pre-5b one, a rerun, and two
   // hand-edited ones.
   const dir = mkdtempSync(join(tmpdir(), "ob1-orch-selfcheck-"));
+  // A strict umask would mask the rewrite to 0600 by itself, and the chmod case would hold nothing.
+  const umask = process.umask(0o022);
   try {
     const forwards = (e: Record<string, string>) => (e.MCP_ACCESS_KEYS ?? "").split(",").filter((r) => r.startsWith(`${FORWARDER_NAME}:`));
     const own = (e: Record<string, string>) => /^[0-9a-f]{64}$/.test(e.OB1_FORWARDER_KEY ?? "") && JSON.stringify(forwards(e)) === JSON.stringify([`${FORWARDER_NAME}:forward:${hashKey(e.OB1_FORWARDER_KEY)}`]);
@@ -187,7 +189,8 @@ function selfCheck(): number {
     const [cap, rd] = ["c".repeat(64), "d".repeat(64)];
     const listed = `orch-capture:capture:${hashKey(cap)},orch-read:read:${hashKey(rd)}`;
     const pre5b = join(dir, "pre5b.env");
-    writeFileSync(pre5b, `POSTGRES_PASSWORD=p\nMCP_ACCESS_KEYS=${listed}\nORCH_BRAIN_CAPTURE_KEY=${cap}\nORCH_BRAIN_READ_KEY=${rd}\n`, { mode: 0o644 });
+    writeFileSync(pre5b, `POSTGRES_PASSWORD=p\nMCP_ACCESS_KEYS=${listed}\nORCH_BRAIN_CAPTURE_KEY=${cap}\nORCH_BRAIN_READ_KEY=${rd}\n`);
+    chmodSync(pre5b, 0o644);
     const migrated = ensureEnv(pre5b);
     expect("ensureEnv: a pre-5b file gains a forward key and one record, its records and lines kept", own(migrated) && migrated.MCP_ACCESS_KEYS === `${listed},${forwards(migrated)[0]}` && migrated.POSTGRES_PASSWORD === "p" && Boolean(migrated.ORCH_MCP_KEY) && migrated.N8N_BRAIN_CAPTURE_KEY === cap && (statSync(pre5b).mode & 0o777) === 0o600);
     const settled = readFileSync(pre5b, "utf8");
@@ -202,10 +205,12 @@ function selfCheck(): number {
     const restaled = ensureEnv(stale);
     expect("ensureEnv: an empty forward key is minted, its record in place of the stale one", own(restaled) && restaled.MCP_ACCESS_KEYS === `orch-read:read:${hashKey(rd)},${forwards(restaled)[0]}`);
   } finally {
+    process.umask(umask);
     rmSync(dir, { recursive: true, force: true });
   }
-  // SMD-2295 PR 2: the Activepieces flows' brain keys, filled at import (the HTTP piece takes no connection).
+  // SMD-2295 PR 2: the one redaction every printed reply and adapter error passes.
   expect("redactKeys: a 64-hex value, in either case, is replaced, and nothing shorter", redactKeys(`a ${"a".repeat(64)} b ${"F".repeat(64)} c ${"0".repeat(63)}`) === `a <key> b <key> c ${"0".repeat(63)}`);
+  // SMD-2295 PR 2: the Activepieces flows' brain keys, filled at import (the HTTP piece takes no connection).
   const flow = (f: string) => readFileSync(new URL(`./orchestration/activepieces/${f}`, import.meta.url), "utf8");
   const [ingestFlow, searchFlow] = [flow("linear-ingest.json"), flow("brain-search.json")];
   expect("the Activepieces flows as committed hold placeholders and no key", ![ingestFlow, searchFlow, flow("linear-issue.json")].some((t) => /[0-9a-f]{64}/i.test(t))
@@ -277,6 +282,9 @@ async function up(): Promise<void> {
   if (r.code !== 0) throw new Error(`compose up failed:\n${r.err.slice(-2000)}`);
   await waitFor("the brain's /health", brainHealthy);
   const reported = await fetch("http://127.0.0.1:8012/health", { headers: { "x-brain-key": env.ORCH_BRAIN_READ_KEY } }).then((h) => h.json()).then((j: any) => String(j.commit), () => "unreadable");
+  if (reported === "unreadable") {
+    throw new Error("the brain's keyed /health gave no readable answer: on a podman machine the project's egress network has likely lost the host (SMD-2929, netavark#1497; evals/README.md, \"On a podman machine\") — --down, run that ticket's cleanup, --up again");
+  }
   if (reported !== stamp) {
     // What the engine holds under the project's names, so the likely stale copy can be seen rather than guessed at.
     const held = run(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedAt}}"]).out.split("\n").filter((l) => l.includes(`ob1-orch-${tool}-`)).join("; ");
@@ -391,7 +399,7 @@ async function verify(): Promise<void> {
   checks.push({
     id: "C3",
     pass: searchOk && (sealed ? Boolean(find(adapter.tools.act)) && !actOk : actOk) && anon.refused && wrong.refused,
-    detail: `tools [${names.join(", ")}]${listed instanceof Error ? ` (${(listed as Error).message.slice(0, 120)})` : ""}; search ${searchOk ? "ok" : `FAIL ${search.text.slice(0, 160)}`}; act ${actVerdict}; no key → ${anon.refused ? "refused" : "NOT REFUSED"} (${anon.detail}); wrong key → ${wrong.refused ? "refused" : "NOT REFUSED"} (${wrong.detail})`,
+    detail: `tools [${names.join(", ")}]${listed instanceof Error ? ` (${redactKeys((listed as Error).message).slice(0, 120)})` : ""}; search ${searchOk ? "ok" : `FAIL ${search.text.slice(0, 160)}`}; act ${actVerdict}; no key → ${anon.refused ? "refused" : "NOT REFUSED"} (${redactKeys(anon.detail)}); wrong key → ${wrong.refused ? "refused" : "NOT REFUSED"} (${redactKeys(wrong.detail)})`,
   });
 
   // C1's schedule half: the on-demand runs above say nothing about whether the

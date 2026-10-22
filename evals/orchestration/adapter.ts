@@ -8,7 +8,8 @@ export type Check = { id: string; pass: boolean; detail: string };
 /**
  * A tool's answer with every 64-hex value replaced (SMD-2295): the brain keys
  * are 64 hex, Activepieces' flows carry them in their steps, and an answer
- * may echo a request. Used on every reply the eval prints.
+ * may echo a request. Every candidate reply, adapter error and C3 detail the
+ * eval prints passes it.
  */
 export const redactKeys = (text: string): string => text.replace(/[0-9a-f]{64}/gi, "<key>");
 
