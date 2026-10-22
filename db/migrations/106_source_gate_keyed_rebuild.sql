@@ -11,7 +11,7 @@
 --   mirror under SHARE locks on thoughts and thought_sources, held to the
 --   migration's commit. 105 (SMD-2935, `duplicate`) did, as 071's own install
 --   did. The reconcile joins every source row to its thought, so writes wait
---   for the whole table, not for the rows the change moves — measured on
+--   for as long as that takes, not for the rows the change moves — measured on
 --   PG 16 at compose defaults (SMD-2935 review pass 5): 26 ms at 10,000
 --   source rows, 221 ms at 100,000, 3.3–4.4 s at a million (2M thoughts),
 --   heading for minutes at the 1B horizon (SMD-2754, SMD-2758). A set change
@@ -43,8 +43,8 @@
 --   A change to node_settled_types() alone needs the plan refresh and no
 --   mirror work: the mirror reads node_lifecycle_types() only.
 --   scripts/check-fork-consistency.ts check 39 holds the rebuild: a migration
---   that changes the set calls one of the two, and the keyed one with exactly
---   the types the change adds and drops. node_lifecycle_types()'s comment
+--   that changes the set calls the full rebuild or the keyed one after it,
+--   the keyed one with exactly the types the change adds and drops. node_lifecycle_types()'s comment
 --   says the same, where the next change is made.
 --   No table, column or grant. MINOR under the version rules.
 --
@@ -97,9 +97,14 @@ AS $$
 DECLARE
   v_type text;
   v_ids uuid[] := '{}';
+  -- Each type once, NULLs out: a list naming one a thousand times would
+  -- otherwise probe, and copy the ids gathered so far, a thousand times under
+  -- the locks (review pass 1: 8 s at 1,000 repeats of a type of 668 rows);
+  -- and a list of NULLs is as empty as '{}', taking no lock (review pass 2).
+  v_types text[] := ARRAY(SELECT DISTINCT x FROM unnest(p_types) x WHERE x IS NOT NULL);
 BEGIN
   written := 0; deleted := 0;
-  IF p_types IS NULL OR cardinality(p_types) = 0 THEN
+  IF cardinality(v_types) = 0 THEN
     RETURN NEXT;
     RETURN;
   END IF;
@@ -113,10 +118,7 @@ BEGIN
   -- thoughts before thought_sources, the order a writer of both takes them.
   LOCK TABLE thoughts IN SHARE MODE;
   LOCK TABLE thought_sources IN SHARE MODE;
-  -- Each type once: a list naming one a thousand times would otherwise probe,
-  -- and copy the ids gathered so far, a thousand times under the locks
-  -- (review pass 1: 8 s at 1,000 repeats of a type of 668 rows).
-  FOREACH v_type IN ARRAY ARRAY(SELECT DISTINCT x FROM unnest(p_types) x WHERE x IS NOT NULL) LOOP
+  FOREACH v_type IN ARRAY v_types LOOP
     v_ids := v_ids || ARRAY(
       SELECT o.thought_id
         FROM thoughts t JOIN thought_sources o ON o.thought_id = t.id
@@ -130,7 +132,7 @@ COMMENT ON FUNCTION ob1_rebuild_source_gate_for_types(text[]) IS
   'Reconciles ob1_source_gate for the sourced thoughts whose status_type is one of the types given — what a change to node_lifecycle_types() that adds or drops them moves — under the full rebuild''s SHARE locks on thoughts and thought_sources, and returns what it wrote and deleted. Each type is one probe of 001''s GIN index on thoughts.metadata, so the cost follows those rows, not the table. Refuses to run outside READ COMMITTED; an empty or NULL array touches nothing. Migration 106 / SMD-3160.';
 
 COMMENT ON FUNCTION ob1_rebuild_source_gate() IS
-  'Reconciles the whole of ob1_source_gate under SHARE locks on thoughts and thought_sources and returns what it wrote and deleted — zeros when it was exact. Refuses to run outside READ COMMITTED. 071''s seed and the repair after a write made with either table''s user triggers disabled (beside ob1_rebuild_node_projection(), 068''s). A migration that changes node_lifecycle_types() runs ob1_rebuild_source_gate_for_types(<the types it moves>) instead, whose cost follows those rows (106). Migrations 071, 106 / SMD-2267, SMD-3160.';
+  'Reconciles the whole of ob1_source_gate under SHARE locks on thoughts and thought_sources and returns what it wrote and deleted — zeros when it was exact. Refuses to run outside READ COMMITTED. 071''s seed and the repair after a write made with either table''s user triggers disabled (beside ob1_rebuild_node_projection(), 068''s). A migration that changes node_lifecycle_types() runs ob1_rebuild_source_gate_for_types(<the types it adds and drops>) instead, whose cost follows those rows (106). Migrations 071, 106 / SMD-2267, SMD-3160.';
 
 -- Where the next set change is made: the set's own comment says what follows
 -- it (105's words kept, then this).

@@ -449,11 +449,14 @@
  *      step sees. Each rule is the only catch of one of its probes
  *  39. a status-set change rebuilds the gate it moves (SMD-3160): a
  *      migration that redefines node_lifecycle_types() to another set than
- *      the file before it calls a rebuild of 071's mirror — the full
- *      ob1_rebuild_source_gate(), or 106's
- *      ob1_rebuild_source_gate_for_types('{…}') with exactly the types the
- *      change adds and drops — read on the comment-stripped text, the sets
- *      from their literals. Each rule is the only catch of one of its probes
+ *      the file before it calls, after its last definition and outside any
+ *      quoted string, a rebuild of 071's mirror — the full
+ *      ob1_rebuild_source_gate(), or 106's ob1_rebuild_source_gate_for_types
+ *      whose calls together name exactly the types the change adds and drops.
+ *      Statements split with strings and dollar quotes respected, comments
+ *      stripped; a set read as '{…}'::text[] or ARRAY['…'], any other form
+ *      reported rather than skipped. Each rule is the only catch of one of
+ *      its probes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34, 35, 36, 37 and 38 parse YAML with Bun.YAML)
@@ -8844,34 +8847,93 @@ checkAlertRules();
 // ── Check 39: a status-set change rebuilds the gate it moves (SMD-3160) ──────
 // 071's ob1_source_gate stores, per source row, whether its thought's
 // status_type is in node_lifecycle_types(). A migration that changes the set
-// leaves those rows wrong until a rebuild: the full one, or 106's keyed one,
-// which reconciles only the types it is given — a type left out stays wrong
-// on every brain, and only drift() would say so. The sets are read from the
-// files' literals, in order, so the types a change moves are known exactly.
-type SetChangeRule = "rebuild" | "types";
-const SET_DEF = /\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:public\.)?node_lifecycle_types\s*\(\s*\)[\s\S]*?'\{([^}']*)\}'\s*::\s*text\s*\[\s*\]/i;
-// A call: after SELECT … FROM, FROM or PERFORM — not a definition, nor a name
-// quoted in a guard (to_regprocedure('ob1_rebuild_source_gate()'), as 105 has).
-const FULL_CALL = /\b(?:FROM|PERFORM)\s+(?:public\.)?ob1_rebuild_source_gate\s*\(\s*\)/i;
-const KEYED_CALL = /\b(?:FROM|PERFORM)\s+(?:public\.)?ob1_rebuild_source_gate_for_types\s*\(\s*'\{([^}']*)\}'/gi;
+// leaves those rows wrong until a rebuild after it: the full one, or 106's
+// keyed one, which reconciles only the types it is given — a type left out
+// stays wrong on every brain, and only drift() would say so. The sets are read
+// from the files' literals, in order, so the types a change moves are known
+// exactly. Each file is split into statements (strings and dollar quotes
+// respected, comments stripped); its LAST definition of the set counts, read
+// as '{…}'::text[] or ARRAY['…', …] — any other form is reported, not skipped,
+// since a set it cannot read would leave the next file blamed for this one's
+// change. A call counts only after that definition and outside a quoted
+// string: SELECT [* FROM] or PERFORM ob1_rebuild_source_gate(), or the keyed
+// form with '{…}' or ARRAY['…'] — every keyed call's types together must be
+// exactly the types the change adds and drops. Not read: whether a DO block's
+// call runs (an IF false around it passes).
+type SetChangeRule = "rebuild" | "types" | "unreadable";
+/** A file's statements, split on `;` outside quotes and dollar quotes, each with its text as written. */
+function sqlStatements(code: string): string[] {
+  const out: string[] = [];
+  let i = 0, startAt = 0;
+  while (i < code.length) {
+    const c = code[i];
+    if (c === "'") {
+      i++;
+      while (i < code.length && !(code[i] === "'" && code[i + 1] !== "'")) i += code[i] === "'" ? 2 : 1;
+      i++;
+    } else if (c === "$") {
+      const tag = /^\$[A-Za-z_]*\$/.exec(code.slice(i))?.[0];
+      if (tag) { const close = code.indexOf(tag, i + tag.length); i = close < 0 ? code.length : close + tag.length; } else i++;
+    } else if (c === ";") {
+      out.push(code.slice(startAt, i)); i++; startAt = i;
+    } else i++;
+  }
+  if (code.slice(startAt).trim()) out.push(code.slice(startAt));
+  return out;
+}
+/** The text with every single-quoted string's inside blanked (its length kept): a name in prose or a guard is no call. */
+const blankStrings = (text: string) => text.replace(/'(?:[^']|'')*'/g, (m) => "'" + " ".repeat(m.length - 2) + "'");
+// A definition, not a COMMENT ON FUNCTION or a GRANT naming it.
+const SET_HEAD = /\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:public\.)?"?node_lifecycle_types"?\s*\(\s*\)/i;
+const SET_LITERAL = /'\{([^}']*)\}'\s*::\s*text\s*\[\s*\]/gi;
+const SET_ARRAY = /\bARRAY\s*\[([^\]]*)\]/gi;
+const FULL_CALL = /\b(?:FROM|SELECT|PERFORM)\s+(?:public\.)?ob1_rebuild_source_gate\s*\(\s*\)/i;
+const KEYED_CALL = /\b(?:FROM|SELECT|PERFORM)\s+(?:public\.)?ob1_rebuild_source_gate_for_types\s*\(/gi;
 const setOf = (literal: string) => new Set(literal.split(",").map((t) => t.trim().replace(/^"(.*)"$/, "$1")).filter((t) => t !== ""));
-/** Each migration (in order) that redefines the set to another than the one before, without a rebuild of exactly what it moves. */
+const arrayOf = (body: string) => new Set([...body.matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replace(/''/g, "'")));
+/** A definition statement's set, or null when it is in no form this check reads (or in two). */
+function setIn(statement: string): Set<string> | null {
+  const sets = [...[...statement.matchAll(SET_LITERAL)].map((m) => setOf(m[1])), ...[...statement.matchAll(SET_ARRAY)].map((m) => arrayOf(m[1]))];
+  const distinct = new Set(sets.map((x) => [...x].sort().join()));
+  return distinct.size === 1 ? sets[0] : null;
+}
+/** The keyed call's types at `at` in the statement as written: its first argument, '{…}' or ARRAY['…'], or null. */
+function keyedTypesAt(statement: string, at: number): Set<string> | null {
+  const rest = statement.slice(at).replace(/^\s*(?:p_types\s*=>\s*)?/i, "");
+  const lit = /^'\{([^}']*)\}'/.exec(rest);
+  if (lit) return setOf(lit[1]);
+  const arr = /^ARRAY\s*\[([^\]]*)\]/i.exec(rest);
+  return arr ? arrayOf(arr[1]) : null;
+}
+/** Each migration (in order) that redefines the set to another than the one before, without a rebuild after it of exactly what it moves. */
 function setChangeProblems(files: readonly { name: string; text: string }[]): [SetChangeRule, string, string][] {
   const out: [SetChangeRule, string, string][] = [];
   let prev: Set<string> | null = null;
   for (const { name, text } of files) {
-    const code = stripSqlComments(text) as string;
-    const def = SET_DEF.exec(code);
-    if (!def) continue;
-    const next = setOf(def[1]);
+    const statements = sqlStatements(stripSqlComments(text) as string);
+    const defs = statements.map((st, i) => [st, i] as const).filter(([st]) => SET_HEAD.test(blankStrings(st)));
+    if (defs.length === 0) continue;
+    const [lastDef, lastAt] = defs[defs.length - 1];
+    const next = setIn(lastDef);
+    if (next === null) {
+      out.push(["unreadable", name, "it redefines node_lifecycle_types() in a form check 39 cannot read — write the set as '{a,b}'::text[] or ARRAY['a','b'], once, so the types a change moves are known"]);
+      prev = null;
+      continue;
+    }
     if (prev !== null) {
       const moved = [...new Set([...[...next].filter((t) => !prev!.has(t)), ...[...prev].filter((t) => !next.has(t))])].sort();
       if (moved.length > 0) {
-        const keyed = [...code.matchAll(KEYED_CALL)].map((m) => [...setOf(m[1])].sort());
-        if (!FULL_CALL.test(code) && keyed.length === 0) {
-          out.push(["rebuild", name, `it changes node_lifecycle_types() (moving ${moved.join(", ")}) and calls no rebuild of 071's gate mirror — add SELECT * FROM ob1_rebuild_source_gate_for_types('{${moved.join(",")}}') after the set`]);
-        } else if (!FULL_CALL.test(code) && !keyed.some((k) => k.join() === moved.join())) {
-          out.push(["types", name, `its ob1_rebuild_source_gate_for_types call names {${keyed.map((k) => k.join(",")).join("} and {")}}, but the change moves {${moved.join(",")}} — every type it adds and every type it drops`]);
+        const after = statements.slice(lastAt + 1);
+        const full = after.some((st) => FULL_CALL.test(blankStrings(st)));
+        const keyed: (Set<string> | null)[] = [];
+        for (const st of after) for (const m of blankStrings(st).matchAll(KEYED_CALL)) keyed.push(keyedTypesAt(st, m.index! + m[0].length));
+        if (!full && keyed.length === 0) {
+          out.push(["rebuild", name, `it changes node_lifecycle_types() (moving ${moved.join(", ")}) and calls no rebuild of 071's gate mirror after it — add SELECT * FROM ob1_rebuild_source_gate_for_types('{${moved.join(",")}}') after the set`]);
+        } else if (!full) {
+          const named = keyed.some((k) => k === null) ? null : [...new Set(keyed.flatMap((k) => [...k!]))].sort();
+          if (named === null || named.join() !== moved.join()) {
+            out.push(["types", name, `its ob1_rebuild_source_gate_for_types calls name ${named === null ? "a list check 39 cannot read" : `{${named.join(",")}}`}, but the change moves {${moved.join(",")}} — every type it adds and every type it drops, as '{…}' or ARRAY['…']`]);
+          }
         }
       }
     }
@@ -8881,15 +8943,24 @@ function setChangeProblems(files: readonly { name: string; text: string }[]): [S
 }
 const SET_BASE = { name: "001_base.sql", text: "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;" };
 const setChange = (body: string) => ({ name: "002_change.sql", text: body });
+const ABC = "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$;";
 const SET_PROBES: [string, string, SetChangeRule[]][] = [
-  ["a change that runs the full rebuild", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$; SELECT * FROM ob1_rebuild_source_gate();", []],
-  ["a change that runs the keyed form with what it adds", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$; SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');", []],
+  ["a change that runs the full rebuild", `${ABC} SELECT * FROM ob1_rebuild_source_gate();`, []],
+  ["a change that runs the full rebuild without FROM", `${ABC} SELECT ob1_rebuild_source_gate();`, []],
+  ["a change that runs the keyed form with what it adds", `${ABC} SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');`, []],
+  ["a change that runs the keyed form with ARRAY['c']", `${ABC} SELECT ob1_rebuild_source_gate_for_types(ARRAY['c']);`, []],
   ["a change that adds and drops, keyed with both", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,c}'::text[] $$; SELECT * FROM ob1_rebuild_source_gate_for_types('{c, b}');", []],
+  ["a change that adds and drops, keyed in two calls", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,c}'::text[] $$; SELECT * FROM ob1_rebuild_source_gate_for_types('{c}'); SELECT * FROM ob1_rebuild_source_gate_for_types('{b}');", []],
+  ["a set as ARRAY beside a settled set as a literal", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT ARRAY['a','b','c'] $$; CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{b}'::text[] $$; SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');", []],
   ["the same set again", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{b,a}'::text[] $$;", []],
-  ["a change with no rebuild", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$;", ["rebuild"]],
-  ["a change whose only mention of the rebuild is a guard's quoted name", "DO $g$ BEGIN IF to_regprocedure('ob1_rebuild_source_gate()') IS NULL THEN RAISE EXCEPTION 'x'; END IF; END $g$; CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$;", ["rebuild"]],
-  ["a change whose rebuild is only in a comment", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$;\n-- SELECT * FROM ob1_rebuild_source_gate();", ["rebuild"]],
+  ["a change with no rebuild", ABC, ["rebuild"]],
+  ["a change whose rebuild is only in a comment", `${ABC}\n-- SELECT * FROM ob1_rebuild_source_gate();`, ["rebuild"]],
+  ["a change whose only mention of the rebuild is a guard's quoted name", `DO $g$ BEGIN IF to_regprocedure('ob1_rebuild_source_gate()') IS NULL THEN RAISE EXCEPTION 'x'; END IF; END $g$; ${ABC}`, ["rebuild"]],
+  ["a change whose only mention of the rebuild is prose in a string", `${ABC} COMMENT ON FUNCTION node_lifecycle_types() IS 'gates reconciled from ob1_rebuild_source_gate() after a change';`, ["rebuild"]],
+  ["a change whose rebuild comes before the set", `SELECT * FROM ob1_rebuild_source_gate_for_types('{c}'); ${ABC}`, ["rebuild"]],
+  ["two definitions, the second a change, no rebuild", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$; " + ABC, ["rebuild"]],
   ["a change that adds and drops, keyed with what it adds alone", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,c}'::text[] $$; SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');", ["types"]],
+  ["a set in a form the check cannot read", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT CAST('{a,b,c}' AS text[]) $$; SELECT * FROM ob1_rebuild_source_gate();", ["unreadable"]],
 ];
 function checkSetChanges() {
   for (const [what, body, expected] of SET_PROBES) {
@@ -8897,7 +8968,7 @@ function checkSetChanges() {
     if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 39 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
   }
   // A definition of the full rebuild is no call of it.
-  const defOnly = setChangeProblems([SET_BASE, setChange("CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$; CREATE OR REPLACE FUNCTION ob1_rebuild_source_gate() RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;")]).map(([rule]) => rule);
+  const defOnly = setChangeProblems([SET_BASE, setChange(`${ABC} CREATE OR REPLACE FUNCTION ob1_rebuild_source_gate() RETURNS void LANGUAGE sql AS $$ SELECT 1 $$;`)]).map(([rule]) => rule);
   if (JSON.stringify(defOnly) !== JSON.stringify(["rebuild"])) fail(SELF, `check 39 no longer reports exactly ["rebuild"] for its probe "a change beside a definition of the full rebuild, no call" (reported ${JSON.stringify(defOnly)})`);
   const dir = join(ROOT, "db/migrations");
   const files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort().map((f) => ({ name: f, text: readFileSync(join(dir, f), "utf8") }));

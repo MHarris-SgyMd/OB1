@@ -15364,10 +15364,16 @@ console.log("\n[95] Migration 106: a keyed rebuild of 071's gate mirror for a st
   assert(full.written === 1 && (await gates()).get(d1) === true && (await drift()) === 0,
     `…which the full rebuild, the repair, then fixes (${JSON.stringify(full)})`);
 
-  // Empty and NULL touch nothing; the same call again finds nothing to fix.
-  const [empty, nul, again] = [await keyed([]), await keyed(null), await keyed(["kgweird", "nosuchtype"])];
-  assert(JSON.stringify([empty, nul, again]) === JSON.stringify([{ written: 0, deleted: 0 }, { written: 0, deleted: 0 }, { written: 0, deleted: 0 }]),
-    `an empty or NULL array touches nothing, and on an exact mirror the call writes nothing, a type no row holds included (${JSON.stringify([empty, nul, again])})`);
+  // Empty, NULL and all-NULL touch nothing; the same call again finds nothing to fix.
+  const [empty, nul, nuls, again] = [await keyed([]), await keyed(null), await keyed([null as unknown as string, null as unknown as string]), await keyed(["kgweird", "nosuchtype"])];
+  assert(JSON.stringify([empty, nul, nuls, again]) === JSON.stringify([{ written: 0, deleted: 0 }, { written: 0, deleted: 0 }, { written: 0, deleted: 0 }, { written: 0, deleted: 0 }]),
+    `an empty, NULL or all-NULL array touches nothing, and on an exact mirror the call writes nothing, a type no row holds included (${JSON.stringify([empty, nul, nuls, again])})`);
+  // …and takes no lock: under REPEATABLE READ, where a call that went on would be refused, it answers.
+  let quiet = "refused";
+  await db.exec(`BEGIN ISOLATION LEVEL REPEATABLE READ`);
+  try { quiet = JSON.stringify(await keyed([null as unknown as string])); } catch (e) { quiet = (e as Error).message; }
+  await db.exec(`ROLLBACK`);
+  assert(quiet === JSON.stringify({ written: 0, deleted: 0 }), `an all-NULL array returns before the isolation check and the locks (${quiet})`);
 
   // Refused outside READ COMMITTED: its snapshot must postdate its locks.
   let refused = "ran";
