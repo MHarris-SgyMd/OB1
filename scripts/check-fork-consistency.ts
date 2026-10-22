@@ -6962,7 +6962,7 @@ const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
   "compose.yaml": {
     postgres: ["data"],
     migrate: ["data"],
-    // Not on the mesh: nothing routes to it since SMD-2532, and /mcp is the MCP server built on the REST core's, on the mesh alone (SMD-2287); no shipped template calls it, n8n the REST core (SMD-2295), the orchestration eval until SMD-2295's second PR.
+    // Not on the mesh: nothing routes to it since SMD-2532, and /mcp is the MCP server built on the REST core's, on the mesh alone (SMD-2287); no shipped template calls it (n8n's brain calls go to the REST core, SMD-2295), the orchestration eval until SMD-2295's second PR.
     server: { data: {}, egress: {} },
     api: { data: {}, egress: {}, mesh: { aliases: [tierMeshName("api", "stable")] } },
     mcp: { mesh: { aliases: [tierMeshName("mcp", "stable")] } },

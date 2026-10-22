@@ -79,9 +79,9 @@ decision 1, `operator-surface-tiers.md`):
    file; Postgres adds a second server to pin and upgrade, for a workload of
    one operator's schedules (`../evals/README.md`, "The orchestration profile
    (SMD-2210)", has the numbers).
-4. **It reaches the brain through one surface only: MCP, and the REST core
-   since SMD-2295** (amended below, for the import runner; amended by
-   SMD-2295, above). Captures go through
+4. **It reaches the brain through one surface only: the REST core since
+   SMD-2295, MCP before it** (amended below, for the import runner; amended
+   by SMD-2295, above). Captures go through
    n8n's MCP Client node (an HTTP Request node against the REST core since
    SMD-2295) with a **capture-scope** key (can add a thought, cannot read
    one); no workflow holds a write key. The brain grows no n8n-specific route,
@@ -570,8 +570,8 @@ the first of them converts (SMD-2149, SMD-2021).
   and SMD-949's, consuming this transport; where the Obsidian and Markdown syncs
   run is SMD-1814's and SMD-1815's.
 - **Whether the MCP Client node honours a credential domain pin** — measured
-  for SMD-2295: it does (posture step 2). Since SMD-2295 no template's brain
-  call uses that node.
+  for SMD-2295: it does (posture step 2). No shipped template's brain call
+  uses that node; the eval's do until SMD-2295's second PR.
 
 ## Follow-ups
 
@@ -587,7 +587,7 @@ the first of them converts (SMD-2149, SMD-2021).
   provisioning rule refusing a brain credential pinned elsewhere, and the
   orchestration eval re-aimed to the REST core: n8n's, Windmill's and
   Activepieces' brain calls, and the import runner's `vendor` fixture, which
-  names `server:8000`.
+  names `server:8000`; C2 reworded to "the tool's own HTTP client".
 - **SMD-2212** — the first templates, built: the import runner and the
   generic import template that wraps the CLI emitters, and an act-tool
   workflow.
