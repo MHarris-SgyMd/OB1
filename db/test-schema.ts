@@ -15316,10 +15316,15 @@ console.log("\n[94] Migration 105: Linear's duplicate status type known and sett
   assert(JSON.stringify([...back.values()]) === JSON.stringify([...now.values()]) && (await gateOf()) === true && (await drift()) === 0,
     `105 applied over that brain: settled again, the blocker cleared, and its own rebuild leaves the mirror exact (${JSON.stringify(back.get(open))})`);
   const [clean] = await q<{ w: number }>(`SELECT written + deleted AS w FROM ob1_rebuild_source_gate()`);
+  const [once] = await q<{ known: string[]; settled: string[] }>(`SELECT node_lifecycle_types() AS known, node_settled_types() AS settled`);
   await reapply(the105);
   const [again] = await q<{ known: string[]; settled: string[] }>(`SELECT node_lifecycle_types() AS known, node_settled_types() AS settled`);
-  assert(clean.w === 0 && again.known.join() === sets.known.join() && again.settled.join() === sets.settled.join() && (await drift()) === 0,
+  assert(clean.w === 0 && once.known.join() === "triage,backlog,unstarted,started,completed,canceled,duplicate" && again.known.join() === once.known.join() && again.settled.join() === once.settled.join() && (await drift()) === 0,
     `…a rebuild after it finds nothing to fix, and a re-apply changes nothing (${clean.w})`);
+  // 105's sets are this tree's only until a later migration changes one:
+  // the shipped sets back, and 106's comments over 105's (review pass 4).
+  await restoreShipped("node_lifecycle_types", "node_settled_types");
+  await reapply("106");
 
   // 077's finished tickets: a thought about the Duplicate alone is about finished work.
   const [refs] = await q<{ r: string[] | null }>(`SELECT ticket_references_settled('a session about it', '{"topics": ["DUP-2"]}'::jsonb) AS r`);
@@ -15396,10 +15401,11 @@ console.log("\n[95] Migration 106: a keyed rebuild of 071's gate mirror for a st
   // 106 again changes nothing; its comments name it and the full rebuild names it back.
   let reapplied: string;
   try { reapplied = await reapply(the106); } catch (e) { reapplied = `threw: ${(e as Error).message}`; }
-  const [c] = await q<{ k: string; f: string; s: string }>(`SELECT obj_description('ob1_rebuild_source_gate_for_types(text[])'::regprocedure, 'pg_proc') AS k, obj_description('ob1_rebuild_source_gate()'::regprocedure, 'pg_proc') AS f, obj_description('node_lifecycle_types()'::regprocedure, 'pg_proc') AS s`);
+  const [c] = await q<{ k: string; f: string; s: string; st: string }>(`SELECT obj_description('ob1_rebuild_source_gate_for_types(text[])'::regprocedure, 'pg_proc') AS k, obj_description('ob1_rebuild_source_gate()'::regprocedure, 'pg_proc') AS f, obj_description('node_lifecycle_types()'::regprocedure, 'pg_proc') AS s, obj_description('node_settled_types()'::regprocedure, 'pg_proc') AS st`);
   assert(reapplied.endsWith("_source_gate_keyed_rebuild.sql") && (await drift()) === 0 && /Migration 106 \/ SMD-3160/.test(c.k) && /ob1_rebuild_source_gate_for_types/.test(c.f) && /Migrations 071, 106/.test(c.f)
-      && /ob1_rebuild_source_gate_for_types/.test(c.s) && /ob1_refresh_set_readers/.test(c.s) && /Migration 058 \/ SMD-2074/.test(c.s) && /SMD-2935/.test(c.s),
-    `a re-apply of 106 is a no-op; its function's comment names it, the full rebuild's names the keyed form for a set change, and the set's own says what a change to it runs, 058's and 105's words kept (${reapplied.slice(0, 60)})`);
+      && /ob1_rebuild_source_gate_for_types/.test(c.s) && /ob1_refresh_set_readers/.test(c.s) && /Migration 058 \/ SMD-2074/.test(c.s) && /SMD-2935/.test(c.s)
+      && /ob1_refresh_set_readers/.test(c.st) && !/ob1_rebuild_source_gate/.test(c.st) && /board-findings\.ts reads it/.test(c.st) && /Migration 058 \/ SMD-2074/.test(c.st) && /SMD-2935/.test(c.st),
+    `a re-apply of 106 is a no-op; its function's comment names it, the full rebuild's names the keyed form for a set change, and each set's own says what a change to it runs — the settled set's the refresh alone — 058's and 105's words kept (${reapplied.slice(0, 60)})`);
 
   // The plan refresh as a call: each of the brain's readers of the sets is
   // altered (its catalog row rewritten), the refresh itself and the sets not,

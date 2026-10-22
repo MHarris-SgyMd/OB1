@@ -8849,88 +8849,119 @@ checkAlertRules();
 // status_type is in node_lifecycle_types(). A migration that changes the set
 // leaves those rows wrong until a rebuild after it — the full one, or 106's
 // keyed one, which reconciles only the types it is given (a type left out
-// stays wrong on every brain, and only drift() would say so) — and leaves
-// every pooled session on the old set until ob1_refresh_set_readers() (106)
-// drops their plans. The rule reads canonical forms only, at the start of a
-// line on the comment-stripped text, and refuses any other: two passes of a
-// statement parser found a seam each, and a loud refusal costs an author a
-// rewrite where a quiet miss costs every brain (review pass 3).
-//   * Any CREATE … FUNCTION … node_lifecycle_types anywhere in a file — in a
-//     string or an EXECUTE included — makes it a set change to read.
+// stays wrong on every brain, and only drift() would say so) — and a change to
+// either set leaves every pooled session on the old set until
+// ob1_refresh_set_readers() (106) drops their plans. The rule reads canonical
+// forms only, at the start of a line on the comment-stripped text, and refuses
+// any other: two passes of a statement parser found a seam each, and a loud
+// refusal costs an author a rewrite where a quiet miss costs every brain
+// (review pass 3).
+//   * Any CREATE … FUNCTION … node_lifecycle_types (or node_settled_types)
+//     anywhere in a file — in a string or an EXECUTE included — makes it a
+//     set change to read.
 //   * Its definition is a line starting `CREATE OR REPLACE FUNCTION
-//     node_lifecycle_types()` whose statement (to the next line starting a
-//     statement) holds exactly one '{…}'::text[]; the file's last such line
-//     counts. Anything else is "unreadable", with the form to write.
-//   * After that line, the calls are lines starting
+//     node_lifecycle_types()` (or node_settled_types()) whose body — to the
+//     close of its first dollar quote, or its first `;` if it has none —
+//     holds one set as '{…}'::text[] (the same set twice is one); the file's
+//     last such line counts. Anything else is "unreadable", with the form to
+//     write.
+//   * After it, the calls are lines starting
 //     `SELECT * FROM ob1_rebuild_source_gate();`,
-//     `SELECT * FROM ob1_rebuild_source_gate_for_types('{…}');` (the keyed
-//     calls together exactly the types added and dropped) and, from the file
-//     that defines it on, `SELECT ob1_refresh_set_readers();`.
+//     `SELECT * FROM ob1_rebuild_source_gate_for_types('{…}');` (for a
+//     lifecycle change: the keyed calls together exactly the types added and
+//     dropped) and, for either set from the file that defines it on,
+//     `SELECT ob1_refresh_set_readers();`. A line inside a dollar-quoted body
+//     (a function's, a DO block's) is no call; one inside a single-quoted
+//     string would still read as one — no migration writes SQL so.
 type SetChangeRule = "rebuild" | "types" | "refresh" | "unreadable";
-const SET_ANY = /\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+[^(;]*node_lifecycle_types\b/i;
-const SET_LINE = /^CREATE OR REPLACE FUNCTION node_lifecycle_types\(\)/gm;
-const STATEMENT_START = /^(?:CREATE|COMMENT|SELECT|DO|GRANT|REVOKE|ALTER|DROP|INSERT|UPDATE|DELETE|WITH|SET|BEGIN|COMMIT)\b/m;
-const SET_LITERAL = /'\{([^}']*)\}'\s*::\s*text\s*\[\s*\]/g;
+const SET_FORM = (fn: string) => `a line starting CREATE OR REPLACE FUNCTION ${fn}() whose body, to its closing dollar quote, holds the set once as '{a,b}'::text[] — e.g. AS $$ SELECT '{a,b}'::text[] $$;`;
 const FULL_LINE = /^SELECT \* FROM ob1_rebuild_source_gate\(\);/m;
 const KEYED_LINE = /^SELECT \* FROM ob1_rebuild_source_gate_for_types\('\{([^}']*)\}'\);/gm;
 const REFRESH_LINE = /^SELECT ob1_refresh_set_readers\(\);/m;
 const REFRESH_DEF = /^CREATE OR REPLACE FUNCTION ob1_refresh_set_readers\(\)/m;
+const SET_LITERAL = /'\{([^}']*)\}'\s*::\s*text\s*\[\s*\]/g;
+const DOLLAR = /\$([A-Za-z_][A-Za-z_0-9]*)?\$/g;
 const setOf = (literal: string) => new Set(literal.split(",").map((t) => t.trim().replace(/^"(.*)"$/, "$1")).filter((t) => t !== ""));
-const SET_FORM = "a line starting CREATE OR REPLACE FUNCTION node_lifecycle_types() whose body holds the set once as '{a,b}'::text[]";
-/** Each migration (in order) that changes the set without the refresh and a rebuild of exactly what it moves, as top-level lines after it. */
+/** The text with every dollar-quoted body blanked (its length kept): a line inside a function's body, or a dollar-quoted string, is no call. */
+function blankDollarBodies(text: string): string {
+  let out = "", at = 0;
+  for (DOLLAR.lastIndex = 0; ; ) {
+    const open = DOLLAR.exec(text);
+    if (!open) break;
+    const close = text.indexOf(open[0], open.index + open[0].length);
+    if (close < 0) break;
+    out += text.slice(at, open.index + open[0].length) + text.slice(open.index + open[0].length, close).replace(/[^\n]/g, " ");
+    at = close;
+    DOLLAR.lastIndex = close + open[0].length;
+  }
+  return out + text.slice(at);
+}
+/**
+ * A set's last canonical definition in a file: the set read from its body (the
+ * CREATE line to the close of its first dollar quote, or to the first `;` if it
+ * has none), and the text after it. `null` set when the file defines the
+ * function some other way, or the body holds no set or two.
+ */
+function lastSetIn(code: string, fn: string): { set: Set<string> | null; after: string } | null {
+  if (!new RegExp(`\\bCREATE\\s+(?:OR\\s+REPLACE\\s+)?FUNCTION\\s+[^(;]*\\b${fn}\\b`, "i").test(code)) return null;
+  const lines = [...code.matchAll(new RegExp(`^CREATE OR REPLACE FUNCTION ${fn}\\(\\)`, "gm"))];
+  const last = lines[lines.length - 1];
+  if (!last) return { set: null, after: "" };
+  const rest = code.slice(last.index! + last[0].length);
+  DOLLAR.lastIndex = 0;
+  const open = DOLLAR.exec(rest);
+  const semi = rest.indexOf(";");
+  let endAt: number;
+  if (open && (semi < 0 || open.index < semi)) {
+    const close = rest.indexOf(open[0], open.index + open[0].length);
+    endAt = close < 0 ? rest.length : close + open[0].length;
+  } else endAt = semi < 0 ? rest.length : semi + 1;
+  const body = rest.slice(0, endAt);
+  const sets = new Set([...body.matchAll(SET_LITERAL)].map((m) => [...setOf(m[1])].sort().join()));
+  return { set: sets.size === 1 ? setOf([...sets][0]) : null, after: rest.slice(endAt) };
+}
+const symmetric = (a: Set<string>, b: Set<string>) => [...new Set([...[...b].filter((t) => !a.has(t)), ...[...a].filter((t) => !b.has(t))])].sort();
+/** Each migration (in order) that changes a set without its follow-up lines after the definition: the refresh (from the file that defines it on), and for node_lifecycle_types() a rebuild of exactly what it moves. */
 function setChangeProblems(files: readonly { name: string; text: string }[]): [SetChangeRule, string, string][] {
   const out: [SetChangeRule, string, string][] = [];
-  let prev: Set<string> | null = null;
+  const prev: Record<string, Set<string> | null> = { node_lifecycle_types: null, node_settled_types: null };
   let refreshKnown = false;
   for (const { name, text } of files) {
     const code = stripSqlComments(text) as string;
-    const definesRefresh = REFRESH_DEF.test(code);
-    if (SET_ANY.test(code)) {
-      const lines = [...code.matchAll(SET_LINE)];
-      const last = lines[lines.length - 1];
-      let next: Set<string> | null = null;
-      let after = "";
-      if (last) {
-        // The statement runs to the next line that starts one (its own first
-        // line set aside: it starts with the CREATE just read).
-        const rest = code.slice(last.index! + last[0].length);
-        const firstBreak = rest.indexOf("\n");
-        const stop = firstBreak < 0 ? null : STATEMENT_START.exec(rest.slice(firstBreak));
-        const statement = stop ? rest.slice(0, firstBreak + stop.index) : rest;
-        const sets = [...statement.matchAll(SET_LITERAL)].map((m) => [...setOf(m[1])].sort().join());
-        if (new Set(sets).size === 1) next = setOf(sets[0].replace(/,/g, ","));
-        after = rest.slice(statement.length);
+    for (const fn of ["node_lifecycle_types", "node_settled_types"]) {
+      const found = lastSetIn(code, fn);
+      if (found === null) continue;
+      if (found.set === null) {
+        out.push(["unreadable", name, `it redefines ${fn}() in a form check 39 does not read — write ${SET_FORM(fn)} — so the types a change moves are known`]);
+        prev[fn] = null;
+        continue;
       }
-      if (next === null) {
-        out.push(["unreadable", name, `it redefines node_lifecycle_types() in a form check 39 does not read — write ${SET_FORM}, so the types a change moves are known`]);
-        prev = null;
-      } else {
-        if (prev !== null) {
-          const was = prev;
-          const moved = [...new Set([...[...next].filter((t) => !was.has(t)), ...[...was].filter((t) => !next!.has(t))])].sort();
-          if (moved.length > 0) {
-            const keyed = [...after.matchAll(KEYED_LINE)].map((m) => [...setOf(m[1])]);
-            const full = FULL_LINE.test(after);
-            const call = `SELECT * FROM ob1_rebuild_source_gate_for_types('{${moved.join(",")}}');`;
-            if (!full && keyed.length === 0) {
-              out.push(["rebuild", name, `it changes node_lifecycle_types() (moving ${moved.join(", ")}) and has no rebuild of 071's gate mirror as a line after it — add the line ${call}`]);
-            } else if (!full) {
-              const named = [...new Set(keyed.flat())].sort();
-              if (named.join() !== moved.join()) out.push(["types", name, `its keyed rebuild lines name {${named.join(",")}}, but the change moves {${moved.join(",")}} — every type it adds and drops: ${call}`]);
-            }
-            if (refreshKnown && !REFRESH_LINE.test(after)) {
-              out.push(["refresh", name, "it changes node_lifecycle_types() and has no SELECT ob1_refresh_set_readers(); line after it — without it pooled sessions, 071's gate triggers among them, keep the old set"]);
-            }
-          }
+      const was = prev[fn];
+      prev[fn] = found.set;
+      if (was === null) continue;
+      const moved = symmetric(was, found.set);
+      if (moved.length === 0) continue;
+      const after = blankDollarBodies(found.after);
+      if (fn === "node_lifecycle_types") {
+        const keyed = [...after.matchAll(KEYED_LINE)].map((m) => [...setOf(m[1])]);
+        const full = FULL_LINE.test(after);
+        const call = `SELECT * FROM ob1_rebuild_source_gate_for_types('{${moved.join(",")}}');`;
+        if (!full && keyed.length === 0) {
+          out.push(["rebuild", name, `it changes node_lifecycle_types() (moving ${moved.join(", ")}) and has no rebuild of 071's gate mirror as a line after it — add the line ${call}`]);
+        } else if (!full) {
+          const named = [...new Set(keyed.flat())].sort();
+          if (named.join() !== moved.join()) out.push(["types", name, `its keyed rebuild lines name {${named.join(",")}}, but the change moves {${moved.join(",")}} — every type it adds and drops: ${call}`]);
         }
-        prev = next;
+      }
+      if (refreshKnown && !REFRESH_LINE.test(after)) {
+        out.push(["refresh", name, `it changes ${fn}() and has no SELECT ob1_refresh_set_readers(); line after it — without it pooled sessions, 071's gate triggers among them, keep the old set`]);
       }
     }
-    if (definesRefresh) refreshKnown = true;
+    if (REFRESH_DEF.test(code)) refreshKnown = true;
   }
   return out;
 }
-const SET_BASE = { name: "001_base.sql", text: "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\nCREATE OR REPLACE FUNCTION ob1_refresh_set_readers() RETURNS int LANGUAGE sql AS $$ SELECT 0 $$;\n" };
+const SET_BASE = { name: "001_base.sql", text: "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\nCREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{b}'::text[] $$;\nCREATE OR REPLACE FUNCTION ob1_refresh_set_readers() RETURNS int LANGUAGE sql AS $$ SELECT 0 $$;\n" };
 const setChange = (body: string) => ({ name: "002_change.sql", text: body });
 const ABC = "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$;\n";
 const RF = "SELECT ob1_refresh_set_readers();\n";
@@ -8939,17 +8970,26 @@ const SET_PROBES: [string, string, SetChangeRule[]][] = [
   ["a change with the refresh and the keyed form", `${ABC}${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
   ["a change that adds and drops, keyed in two lines", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,c}'::text[] $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\nSELECT * FROM ob1_rebuild_source_gate_for_types('{b}');\n`, []],
   ["the set over two lines, a settled set as a literal after it", `CREATE OR REPLACE FUNCTION node_lifecycle_types()\nRETURNS text[] LANGUAGE sql IMMUTABLE\nAS $$ SELECT '{a,b,c}'::text[] $$;\nCREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{b}'::text[] $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["the set's body over lines, its dollar quote alone on the last", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$\nSELECT '{a,b,c}'::text[]\n$$;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["the set in a BEGIN ATOMIC body", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE\nBEGIN ATOMIC\nSELECT '{a,b,c}'::text[];\nEND;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["the set in a plpgsql body, a declaration and BEGIN at the start of lines", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE plpgsql IMMUTABLE AS $f$\nDECLARE\n  v int;\nBEGIN\nRETURN '{a,b,c}'::text[];\nEND $f$;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["a change to the settled set alone, with the refresh", `CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\n${RF}`, []],
   ["the same set again", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{b,a}'::text[] $$;\n", []],
   ["a change with the refresh and no rebuild", `${ABC}${RF}`, ["rebuild"]],
   ["two definitions, the second a change, a refresh and no rebuild", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\nSELECT * FROM ob1_rebuild_source_gate();\n${ABC}${RF}`, ["rebuild"]],
   ["a change whose rebuild is only in a comment or a DO block", `${ABC}${RF}-- SELECT * FROM ob1_rebuild_source_gate();\nDO $d$ BEGIN PERFORM ob1_rebuild_source_gate(); END $d$;\n`, ["rebuild"]],
   ["a change whose rebuild comes before the set", `SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n${ABC}${RF}`, ["rebuild"]],
   ["a change whose rebuild is in a wrapper's body", `${ABC}${RF}CREATE OR REPLACE FUNCTION wrap() RETURNS void LANGUAGE plpgsql AS $b$\nBEGIN\n  PERFORM ob1_rebuild_source_gate();\nEND $b$;\n`, ["rebuild"]],
+  ["a change whose rebuild is a line in a wrapper's sql body", `${ABC}${RF}CREATE OR REPLACE FUNCTION wrap() RETURNS SETOF record LANGUAGE sql AS $b$\nSELECT * FROM ob1_rebuild_source_gate();\n$b$;\n`, ["rebuild"]],
   ["a change that adds and drops, keyed with what it adds alone", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,c}'::text[] $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, ["types"]],
   ["a change keyed with more than it moves", `${ABC}${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c,x}');\n`, ["types"]],
   ["a change with the rebuild and no refresh", `${ABC}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, ["refresh"]],
+  ["a change whose refresh is a line in a wrapper's sql body", `${ABC}CREATE OR REPLACE FUNCTION wrap() RETURNS int LANGUAGE sql AS $b$\nSELECT ob1_refresh_set_readers();\n$b$;\nSELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, ["refresh"]],
+  ["a change to the settled set alone, with no refresh", "CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\n", ["refresh"]],
+  ["a settled set in a form the check does not read", `CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT ARRAY['a'] $$;\n${RF}`, ["unreadable"]],
   ["a set in a form the check does not read", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT ARRAY['a','b','c'] $$;\n" + RF + "SELECT * FROM ob1_rebuild_source_gate();\n", ["unreadable"]],
   ["a set defined in an EXECUTE string", `DO $d$ BEGIN EXECUTE 'CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $f$ SELECT 1 $f$'; END $d$;\n${RF}SELECT * FROM ob1_rebuild_source_gate();\n`, ["unreadable"]],
+  ["a body holding two different sets", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT CASE WHEN random() < 2 THEN '{a,b,c}'::text[] ELSE '{a}'::text[] END $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate();\n`, ["unreadable"]],
   ["a set under a quoted, qualified name", `CREATE OR REPLACE FUNCTION "public"."node_lifecycle_types"() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate();\n`, ["unreadable"]],
 ];
 function checkSetChanges() {

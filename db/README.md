@@ -1908,15 +1908,19 @@ warmed session, review pass 3). A migration that changes
 ob1_refresh_set_readers();` and `SELECT * FROM
 ob1_rebuild_source_gate_for_types('{<each type it adds or drops>}');`; a change
 to `node_settled_types()` alone runs only the first. Check 39 of
-`scripts/check-fork-consistency.ts` holds both for a lifecycle change, reading
-canonical forms only — the set as `'{…}'::text[]` in a line starting `CREATE OR
-REPLACE FUNCTION node_lifecycle_types()`, the two calls as lines after it — and
-reporting any other. What follows the set by hand (graph-centrality's
-`LIFECYCLE_TYPES` and `LIFECYCLE_FILTERS`, stated-status's `TYPE_WORDS`, and for
-a settled change render's `DEMOTIONS`) and the tests that pin it (test-schema
-[54] and [94], test-e2e-sql [22]) are named in `node_lifecycle_types()`'s
-comment, where the next change is made. Refuses by name without 071; a re-apply
-is a no-op. test-schema [95] (a set change simulated each way: the moved type's
+`scripts/check-fork-consistency.ts` holds both for a lifecycle change and the
+first for a settled one, reading canonical forms only — the set as
+`'{…}'::text[]` in the body (to its closing dollar quote) of a line starting
+`CREATE OR REPLACE FUNCTION node_lifecycle_types()` or `node_settled_types()`,
+the calls as lines after it outside any dollar-quoted body — and reporting any
+other. What follows each set by hand (graph-centrality's `LIFECYCLE_TYPES`,
+`LIFECYCLE_FILTERS` and its refusal's words, stated-status's `TYPE_WORDS`,
+render's `DEMOTIONS`, board-findings' comments, this README's count of the sets)
+and the tests that pin it (test-schema [44], [54], [55], [69] and [94],
+test-e2e-sql [22], test-server [16m], test-live [41]) are named in that set's
+comment, where the next change is made; [94] and test-live [41], which re-apply
+105, put the shipped sets back after. Refuses by name without 071; a re-apply is
+a no-op. test-schema [95] (a set change simulated each way: the moved type's
 rows fixed, an unrelated drift left for the full rebuild; empty, NULL, all-NULL
 and repeated types; the READ COMMITTED refusal; the refresh altering every
 reader), test-upgrade [20ax] (onto a populated brain; a status write and a

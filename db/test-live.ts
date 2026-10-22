@@ -35,7 +35,7 @@
  */
 
 import { SQL } from "bun";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14150,6 +14150,11 @@ if (want("41")) {
     // so it refuses naming 105; 105 re-applied, it runs. Put back in any case.
     const SET058 = `CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{completed,canceled}'::text[] $$`;
     const apply105 = () => applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_duplicate_settles.sql") });
+    // Put back as this tree ships them: each set's last definer, so a later
+    // migration that changes a set is not undone by 105 (SMD-3160 review pass 4).
+    const setDefiners = ["node_lifecycle_types", "node_settled_types"].map((fn) => readdirSync(join(HERE, "migrations")).filter((f) => f.endsWith(".sql")
+      && new RegExp(`^CREATE OR REPLACE FUNCTION ${fn}\\(\\)`, "m").test(readFileSync(join(HERE, "migrations", f), "utf8"))).sort().at(-1));
+    const applyShippedSets = () => applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => setDefiners.some((d) => d !== undefined && f.endsWith(d)) });
     let no058: string | null = "unread", before105: string | null = "unread", after105: string | null = "unread";
     // And closed() reads that set, not a list of its own: a Done ticket and a
     // Duplicate, unlinked, are a closed pair under 105's set and offered under
@@ -14169,7 +14174,7 @@ if (want("41")) {
       after105 = await findingsSchemaProblem(bsql);
       pairBack = await offered();
     } finally {
-      if (after105 !== null) { await bsql.unsafe(SET058); await apply105(); }
+      await applyShippedSets();
     }
     assert(no058 === "migration 058 is not applied, so whether a ticket is closed cannot be asked (cd db && bun migrate.ts --url …)"
         && before105 === "migration 105 is not applied, or an older tree's --reapply undid it, so a Duplicate ticket would read as open (cd db && bun migrate.ts --url …; after an older tree's --reapply, this tree's --reapply)"
