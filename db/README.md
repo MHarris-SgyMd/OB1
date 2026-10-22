@@ -3526,15 +3526,18 @@ of `db/sleep.ts` holds the mechanics; this is what an operator needs.
 
 ```bash
 bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ever
-bun sleep.ts --url …               # wait for quiet, sleep once until both pools drain or a call wakes it
+bun sleep.ts --url …               # wait for quiet, sleep once until both pools drain, a call wakes it or its budget stops it
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
 #   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N extraction and, once it joins, N consolidation calls at once)
-#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 130 a signal before one sleep ended, or a second signal
+#   --budget MINUTES (60; 0 none)   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
+#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 130 a signal before one sleep ended, or a second signal
 ```
 
 **Running it.** On the compose stack, as its own service: `--profile sleep`
 runs `sleep.ts --follow` as `sleep`, with `OB1_SLEEP_QUIET`, `OB1_SLEEP_POLL`
-and `OB1_SLEEP_WORKERS` for its three numbers, digits only (SMD-2678;
+and `OB1_SLEEP_WORKERS` for its three numbers, and `OB1_SLEEP_BUDGET`,
+`OB1_SLEEP_STATEMENT_TIMEOUT`, `OB1_SLEEP_WORK_MEM` and
+`OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only (SMD-2678;
 `deploy/README.md`, "The `sleep` profile instead", has the first start and
 the move from the `workers` profile):
 
@@ -3597,7 +3600,8 @@ consolidation joins past, extraction is set aside — stopped, if in hand with
 a stalled thought — until consolidation's pool drains, then resumes, so on a
 one-slot model the judge does not wait behind the window, and a night still
 reaches the thought. It is tried in every sleep once consolidation's pool
-drains, and finished by the first sleep long enough for both. Limits stand:
+drains, and finished by the first sleep long enough for both — one its clock
+(`--budget`) allows. Limits stand:
 sleeps of about a minute, each under the stall floor, neither stall a slow
 window nor let it finish, and consolidation waits on it until a longer
 sleep; and once consolidation has joined, a stalled thought in hand keeps
@@ -3626,6 +3630,54 @@ A brain before 093, or a role that cannot read its table (the
 extraction group's), joins once extraction drains alone, and the start says
 so; granted later, the scheduler takes it up once restarted. `--dry-run`
 names the held thoughts. A failed row stays failed: `--retry-failed` is the operator's.
+
+**Its budget** (SMD-2679, SMD-1794's step 2; stated until SMD-1499 derives it
+from the brain's size):
+
+| Bound | Flag | Default | At it |
+|---|---|---|---|
+| the sleep's clock | `--budget MINUTES` | 60 (0: none) | the passes stop after the thought in hand, every lease returned, none starts; one still in hand 300 s later is stopped hard, a cut |
+| each pass's `statement_timeout` | `--statement-timeout SECONDS` | 300 (0: the role's or the database's own) | the statement is cancelled (57014): the pass ends, the others stop hard, and the sleep stops — not the scheduler, which ended with 1 before |
+| each pass's `work_mem` | `--work-mem MB` | 4 | Postgres's own default: a server sized up for its awake index does not hand it to the background passes |
+| each pass's `maintenance_work_mem` | `--maintenance-work-mem MB` | 64 | Postgres's own default; no pass builds an index or vacuums yet, so it bounds SMD-2918's heal ahead of it |
+
+The settings ride each pass's own client (`connect.ts`'s `session`, Bun's
+startup parameters, so every connection the pool opens carries them, and they
+beat the role's and the database's own: a timeout of 0 is left out, so theirs
+stands); the start's check runs under them. The scheduler's own two
+connections take the memory settings and statement_timeout 0, beating a
+role's or database's own — its poll reads the pools, a scan of every thought,
+and a timeout there would end the scheduler — and the clock is read between
+those reads, so a sleep can run one past it. A clock stop is counted and
+marked only when it cut work (a claim pending or in hand as the clock was
+spent, as the drain reads the pools — consolidation's not yet enqueued
+included, another process's claims under the keys too — or a pass waiting for
+its provider): an idle clock-out ends the sleep as quietly as a drained one,
+the next still after a live call, and one sleep's exits 0. The settings go
+out as startup parameters, which a transaction pooler (PgBouncer, a managed
+host's pooled endpoint) refuses: connect the scheduler to Postgres directly,
+as the compose stack does.
+A sleep stopped on its budget ends, and the next begins only after a live call
+and the quiet — not after a rest: the budget bounds a night's work, and the
+passes resume from the claim tables. A restarted scheduler sleeps after the
+quiet alone. The clock counts idle minutes too, so a sleep whose pools
+drained still ends at it, and a sync write's capture after that waits for the
+next sleep. A statement past its timeout inside a thought's own write fails
+that thought, as any database error there does; on a claim it costs that
+worker its poll. An operator's `pg_cancel_backend` is 57014 too ("user
+request"): no budget's, it ends the scheduler as a pass that throws does.
+Under `--follow` the row says which stopped the last sleep (`slept.budget`:
+`clock` or `statement`) and the bound it stopped at (`slept.limit`), that it
+waits for a live call (`resting`), and carries the budget with the sleeps
+stopped on it since the process began (`budget`); preflight's `sleep` row
+says each, and warns on a statement stop with its setting until that is
+raised past the bound; one sleep stopped on its budget exits 1.
+
+**Upgrading to the budget.** The clock is on by default: from this release a
+long quiet night holds the model for 60 minutes, and the rest of a backlog
+waits for the next live call and the quiet. `OB1_SLEEP_BUDGET=0` (`--budget
+0`) and a recreate restore the old behaviour; a larger value drains a
+backlog — a model change's re-pooled consolidation, say — in fewer nights.
 
 **Its start, and refusals.** Before its first quiet it runs each pass's start
 once — the engines' `check` (SMD-2752): the banner, the egress gate, the tables,
@@ -3680,6 +3732,15 @@ own name while it waits, and the `workers` and `consolidate pass` rows say
 it. A follower's start wait stays unsaid: its row does not exist until its
 first pass begins.
 
+Since SMD-2679 it carries `budget`, the budget in force and the sleeps
+stopped on it since the process began, and the last sleep's `slept.budget`
+(`clock` or `statement`) says which stopped it: "awake — the last sleep
+ended … stopped on its budget — its clock spent (60 min); the next begins
+after a live call and the quiet" while it waits for one (`resting`), no
+warning; a statement stop warns, its fix `OB1_SLEEP_STATEMENT_TIMEOUT`, until
+that is raised past the bound it stopped at (`slept.limit`; **Its budget**,
+above).
+
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
 the wakes (a hard stop counted on them, 093): how many, and the three most
 stalled, then most stopped, with their stops and windows kept — stalled as
@@ -3693,7 +3754,7 @@ a long sleep leaves the row then, not at the next live call. The `sleep` row
 names them — "1 thought(s) held back across its wakes — <id>, 7 of 24
 window(s) kept over 3 stop(s)" passes, a document on its way — and warns on a
 stalled one, naming it: consolidation joins past it once extraction holds
-nothing else, and the first sleep long enough finishes it, or extraction run
+nothing else, and the first sleep long enough — its clock allowing — finishes it, or extraction run
 by hand with the scheduler stopped. One whose windows are all kept is told
 apart: its stops land past the last window. A scheduler stopped or stale
 names what it held at its last word, and warns of none.
@@ -3728,8 +3789,7 @@ key, 079's check, the relations grants; not an operator's `--retry-*` — where 
 used to end the scheduler (SMD-2752). A wake or a stop during that wait stops
 the pass before it began, and a stop is a stop however a pass then ends, unless one throws.
 
-Not yet here: a budget per pass and per sleep and the re-derive pass
-(SMD-2679).
+Not yet here: the re-derive pass and a re-embed pass, SMD-2679's later PRs.
 test-live [38] drives it against a stub model.
 
 ## Extensions
@@ -5082,9 +5142,9 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2982 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1466 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1477 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 896 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 57 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 68 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 239 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)

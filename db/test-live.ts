@@ -12425,6 +12425,148 @@ if (want("38")) {
     await late;
     assert(lateWoke, `a capture committed after the sleep began, in a transaction begun before it, wakes it (${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
 
+    // ── The budget (SMD-2679) ────────────────────────────────────────────────
+    // Each pass's connections open with the budget's session settings: a
+    // statement trigger on the claim table records what the passes' own
+    // enqueue_thoughts sees — their connections, not the scheduler's.
+    type BudgetBeat = { running: boolean; outcome: string | null; ended?: boolean; resting?: boolean; slept?: { from: string; to: string | null; budget?: string; limit?: number }; budget?: { minutes: number; statementTimeoutS: number; workMemMb: number; maintenanceWorkMemMb: number; stops: number } };
+    const budgetBeat = async () => (await beat()) as unknown as BudgetBeat | null;
+    const asleepCount = () => lines.filter((l) => /asleep:/.test(l)).length;
+    // Captured first: a capture's own trigger writes claims on the suite's connection.
+    lines.length = 0;
+    for (let i = 0; i < 2; i++) await capture(`A budget note, number ${i}.`, "op-sleep", 0, 5);
+    await sql.unsafe(`CREATE TABLE zz_budget_seen (st text, wm text, mwm text);
+      CREATE FUNCTION zz_budget_seen() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        INSERT INTO zz_budget_seen VALUES (current_setting('statement_timeout'), current_setting('work_mem'), current_setting('maintenance_work_mem')); RETURN NULL; END $$;
+      CREATE TRIGGER zz_budget_seen AFTER INSERT OR UPDATE ON thought_work_claims FOR EACH STATEMENT EXECUTE FUNCTION zz_budget_seen()`);
+    try {
+      const acSet = new AbortController();
+      const setCode = await bounded(sleepRun({ statementTimeout: 7, workMem: 3, maintenanceWorkMem: 70, signal: acSet.signal }), acSet);
+      // The passes' claim writes, and the scheduler's own (its move of stopped
+      // thoughts to the back) on its own connection: the memory settings
+      // without the timeout (review pass 1).
+      const seen = (await sql`SELECT st, wm, mwm, count(*)::int AS n FROM zz_budget_seen GROUP BY 1, 2, 3 ORDER BY 1`) as { st: string; wm: string; mwm: string; n: number }[];
+      assert(setCode === 0 && seen.length === 2 && seen[0].st === "0" && seen[0].wm === "3MB" && seen[0].mwm === "70MB" && seen[1].st === "7s" && seen[1].wm === "3MB" && seen[1].mwm === "70MB" && seen[1].n >= 2 && lines.some((l) => /budget: a 60 min clock, statement_timeout 7 s, work_mem 3 MB, maintenance_work_mem 70 MB/.test(l)),
+        `each pass's connections open with the budget's settings — statement_timeout, work_mem and maintenance_work_mem, as both passes' claim writes saw them — the scheduler's own with the memory settings alone, and the start says the budget (exit ${setCode}; ${JSON.stringify(seen)})`);
+    } finally {
+      await sql.unsafe(`DROP TRIGGER zz_budget_seen ON thought_work_claims; DROP FUNCTION zz_budget_seen(); DROP TABLE zz_budget_seen`);
+    }
+
+    // The clock: spent, the passes stop after the thought in hand, every lease
+    // returned, the stop counted on the row; no sleep begins until a live
+    // call, and the next resumes the work left.
+    lines.length = 0;
+    for (let i = 0; i < 3; i++) await capture(`A clocked note, number ${i}.`, "op-sleep", 0, 6);
+    // A 3 s clock and 5 s calls: spent mid-thought, seconds either side, with
+    // time for extraction's start to claim first under a loaded runner
+    // (review passes 1 and 3: a clock under a poll left none).
+    slowExtract = 5000;
+    const acClock = new AbortController();
+    const clockRun = sleepRun({ follow: true, budgetMs: 3000, minStampEveryS: 1, signal: acClock.signal });
+    let clockBeat = null as BudgetBeat | null;
+    const spent = await pollUntil(async () => (clockBeat = await budgetBeat())?.slept?.budget === "clock" && clockBeat?.running === false, 20_000);
+    const afterClock = await claims(EX);
+    assert(spent && lines.some((l) => /the sleep's budget is spent \(3000 ms\) — the passes stop after the thought in hand/.test(l)) && !afterClock.claimed && (afterClock.pending ?? 0) >= 2 && clockBeat?.budget?.stops === 1 && clockBeat.budget.minutes === 60 && typeof clockBeat.slept?.to === "string" && clockBeat.slept.limit === 1 && clockBeat.resting === true,
+      `a sleep whose clock is spent stops its passes after the thought in hand, every lease returned and work left, the stop counted on the row with the bound it stopped at, and the row resting until a live call (${JSON.stringify(afterClock)}; ${JSON.stringify(clockBeat)})`);
+    slowExtract = 0;
+    await Bun.sleep(2500);
+    const noSleep = asleepCount();
+    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after the budget')`;
+    // The next sleep runs on the same 3 s clock, so the work moving
+    // is what proves the resume, not the pool drained (review pass 2).
+    const doneBefore = afterClock.succeeded ?? 0;
+    const resumed = await pollUntil(async () => asleepCount() >= 2 && ((await claims(EX)).succeeded ?? 0) > doneBefore, 20_000);
+    assert(noSleep === 1 && resumed,
+      `…no sleep begins in the quiet after it (${noSleep} sleep(s)); a live call and the quiet begin the next, which resumes the work left (${doneBefore} → ${JSON.stringify(await claims(EX))})`);
+    acClock.abort();
+    const clockCode = await clockRun;
+    // (The resumed sleep may spend its own clock too: the count is at least the one.)
+    assert(clockCode === 0 && ((await budgetBeat())?.budget?.stops ?? 0) >= 1, `…and the scheduler stopped by a signal exits 0, its row counting the stop (exit ${clockCode})`);
+
+    // The grace: a thought still in hand past it is stopped hard, a cut.
+    lines.length = 0;
+    await capture("A note the model takes its time over.", "op-sleep", 0, 7);
+    slowExtract = 12000;
+    const acGrace = new AbortController();
+    const graceRun = sleepRun({ follow: true, budgetMs: 3000, budgetGraceMs: 1000, minStampEveryS: 1, signal: acGrace.signal });
+    let graceHeld = "";
+    await pollUntil(async () => {
+      const [r] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
+      if (r) graceHeld = r.id;
+      return lines.some((l) => /still in hand 1 s past the budget — stopped now, the thought in hand cut/.test(l)) && (await budgetBeat())?.slept?.budget === "clock";
+    }, 20_000);
+    const [graceCut] = graceHeld ? await sql`SELECT cuts, stops FROM extraction_progress WHERE thought_id = ${graceHeld}::uuid AND work_type = ${EX}` : [];
+    assert(lines.some((l) => /extract still in hand 1 s past the budget — stopped now, the thought in hand cut/.test(l)) && !(await claims(EX)).claimed && graceCut?.cuts === 1 && graceCut.stops === 0,
+      `a pass still in hand past the budget's grace is stopped hard, its lease returned and the stop counted on the thought as the scheduler's cut, not a stop (${JSON.stringify(graceCut)}; ${JSON.stringify(await claims(EX))})`);
+    slowExtract = 0;
+    acGrace.abort();
+    await graceRun;
+
+    // A statement past statement_timeout ends the pass and the sleep, not the
+    // scheduler: a trigger holds the passes' enqueue past a 1 s timeout.
+    lines.length = 0;
+    await capture("A note behind a slow statement.", "op-sleep", 0, 8);
+    // After the capture, whose own trigger would wait out the slow statement too.
+    await sql.unsafe(`CREATE FUNCTION zz_budget_slow() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(3); RETURN NULL; END $$;
+      CREATE TRIGGER zz_budget_slow AFTER INSERT ON thought_work_claims FOR EACH STATEMENT EXECUTE FUNCTION zz_budget_slow()`);
+    let slowDropped = false;
+    const dropSlow = async () => {
+      if (slowDropped) return;
+      slowDropped = true;
+      await sql.unsafe(`DROP TRIGGER zz_budget_slow ON thought_work_claims; DROP FUNCTION zz_budget_slow()`);
+    };
+    const acSlow = new AbortController();
+    let slowSettled = false;
+    const slowRun = sleepRun({ follow: true, statementTimeout: 1, minStampEveryS: 1, signal: acSlow.signal }).finally(() => { slowSettled = true; });
+    try {
+      let slowBeat = null as BudgetBeat | null;
+      const stoppedOnIt = await pollUntil(async () => (slowBeat = await budgetBeat())?.slept?.budget === "statement" && slowBeat?.running === false, 20_000);
+      assert(stoppedOnIt && !slowSettled && lines.some((l) => /extract: a statement passed the pass's statement_timeout \(1 s\) — canceling statement due to statement timeout; the pass ends/.test(l)) && lines.some((l) => /the sleep stops on its budget: a pass's statement timed out/.test(l)) && slowBeat?.outcome === "failed" && slowBeat.budget?.stops === 1 && slowBeat.budget.statementTimeoutS === 1 && slowBeat.slept?.limit === 1 && !(await claims(EX)).claimed,
+        `a statement past statement_timeout ends the pass and stops the sleep on its budget — the row failed, the stop counted, no lease held — and the scheduler runs on (${JSON.stringify(slowBeat)}; settled ${slowSettled})`);
+      await dropSlow();
+      await Bun.sleep(1500);
+      const quietSleeps = asleepCount();
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after the slow statement')`;
+      const after = await pollUntil(async () => asleepCount() === quietSleeps + 1 && !(await claims(EX)).pending && !(await claims(EX)).claimed, 20_000);
+      assert(quietSleeps === 1 && after, `…and after a live call the next sleep, the statement no longer slow, does the work (${quietSleeps} sleep(s) before the call; ${JSON.stringify(await claims(EX))})`);
+    } finally {
+      await dropSlow();
+      acSlow.abort();
+    }
+    const slowCode = await slowRun;
+    assert(slowCode === 0, `…and a stop ends it with 0 (exit ${slowCode})`);
+
+    // An idle clock-out (review pass 2): the pools drained, the clock ends the
+    // sleep with no stop counted or marked, the row resting all the same; a
+    // live call and the quiet begin the next, and the row rests no longer.
+    lines.length = 0;
+    const acIdle = new AbortController();
+    const idleRun = sleepRun({ follow: true, budgetMs: 6000, minStampEveryS: 1, signal: acIdle.signal });
+    let idleBeat = null as BudgetBeat | null;
+    const idled = await pollUntil(async () => (idleBeat = await budgetBeat())?.resting === true, 30_000);
+    assert(idled && lines.some((l) => /the sleep's clock is spent \(6000 ms\) with nothing left to do — it ends; the next begins after a live call/.test(l)) && idleBeat?.slept?.budget === undefined && typeof idleBeat?.slept?.to === "string" && idleBeat.budget?.stops === 0,
+      `a clock spent on drained pools ends the sleep with no stop counted or marked, the row resting until a live call (${JSON.stringify(idleBeat)})`);
+    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after the idle clock')`;
+    let nextBeat = null as BudgetBeat | null;
+    const rested = await pollUntil(async () => asleepCount() === 2 && (nextBeat = await budgetBeat())?.running === true && nextBeat?.resting === undefined, 15_000);
+    assert(rested, `…and once a live call and the quiet begin the next sleep, the row rests no longer (${JSON.stringify(nextBeat)})`);
+    acIdle.abort();
+    await idleRun;
+
+    // A pass waiting for its provider is work left, the pools drained or not:
+    // the clock's stop is counted, a judge outage no idle night (review pass 3).
+    lines.length = 0;
+    unavailable = true;
+    const acOutage = new AbortController();
+    const outageRun = sleepRun({ follow: true, budgetMs: 3000, minStampEveryS: 1, signal: acOutage.signal });
+    let downBeat = null as BudgetBeat | null;
+    const downStopped = await pollUntil(async () => (downBeat = await budgetBeat())?.slept?.budget === "clock" && downBeat?.running === false, 30_000);
+    unavailable = false;
+    assert(downStopped && downBeat?.budget?.stops === 1 && lines.some((l) => /the sleep's budget is spent \(3000 ms\) — the passes stop after the thought in hand/.test(l)) && !lines.some((l) => /nothing left to do/.test(l)),
+      `a clock spent while the passes wait for the provider is a counted stop, not an idle clock-out (${JSON.stringify(downBeat)})`);
+    acOutage.abort();
+    await outageRun;
+
     // A model not served is the configuration's: the scheduler's check of
     // each pass's start meets it before the first quiet, and it ends with 2
     // at once, the row ended failed, no sleep begun (SMD-2752; before, the
@@ -12917,7 +13059,8 @@ if (want("38")) {
         `a judge model not served ends the service with 2 at its start, before any sleep, the row ended failed and naming the refusal, model (exit ${judgeCode}; ${JSON.stringify(judgeBeat)})`);
       // A restarted scheduler's first row carries the last process's sleep,
       // which preflight reads, until it sleeps itself (SMD-2752 PR 3, review pass 1).
-      const lastMark = { from: "2026-10-01T00:00:00.000Z", to: "2026-10-01T00:20:00.000Z" };
+      // With its budget word (SMD-2679): the last sleep stopped on its clock.
+      const lastMark = { from: "2026-10-01T00:00:00.000Z", to: "2026-10-01T00:20:00.000Z", budget: "clock", limit: 60 };
       await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:sleep', ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "stopped", ended: true, slept: lastMark })})
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
       const carryRun = followRun({ quiet: 300 });
