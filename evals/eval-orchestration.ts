@@ -25,7 +25,8 @@
  * What --verify checks (the ticket's comment of 2026-09-25 has the wording):
  *   C1  it first deletes the thoughts `orch-capture` wrote (delete_thought),
  *       then runs the ingestion workflow twice. Each run must report, from the
- *       TOOL's own run record, ten capture_thought calls answered; the brain
+ *       TOOL's own run record, ten captures answered (POST /v1/thoughts on
+ *       the REST core since SMD-2295; capture_thought before it); the brain
  *       must hold ten rows with ten distinct identifiers, all written by
  *       `orch-capture`, after the first and none more after the second. The
  *       reset makes every verify's first run prove itself (review pass 1: a dead
@@ -60,14 +61,17 @@
  * project skips what already exists; after editing a workflow file, --down first.
  * Needs LINEAR_API_KEY (the usual .env search path) and the host's Ollama.
  */
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { hashKey } from "../server-portable/auth.ts";
 import { loadEnv } from "./env.ts";
 import type { Adapter, Check, Ctx } from "./orchestration/adapter.ts";
 import { callTool, listTools, refuses } from "./orchestration/mcp-client.ts";
-import { activepieces } from "./orchestration/activepieces.ts";
+import { activepieces, withBrainKeys } from "./orchestration/activepieces.ts";
 import { engineTime, factsFrom, judgeEgress, n8n } from "./orchestration/n8n.ts";
 import { windmill } from "./orchestration/windmill.ts";
-import { brainSql, compose, ENV_FILE, ensureEnv, memoryByContainer, run, setEnvValue, setLayout, waitFor } from "./orchestration/stack.ts";
+import { brainSql, compose, ENV_FILE, ensureEnv, FORWARDER_NAME, memoryByContainer, run, setEnvValue, setLayout, waitFor } from "./orchestration/stack.ts";
 import { initSecrets } from "../deploy/orchestration/provision.ts";
 
 const ADAPTERS: Record<string, Adapter> = { n8n, activepieces, windmill };
@@ -172,6 +176,45 @@ function selfCheck(): number {
   const sealed = Bun.YAML.parse(readFileSync(new URL("./orchestration/compose.n8n-sealed.yaml", import.meta.url), "utf8")) as any;
   const filter = String(sealed?.services?.["egress-watch"]?.command?.at(-1) ?? "");
   expect("the watcher's filter records UDP, TCP on 53, IPv4 SYNs and IPv6 TCP", ["udp", "tcp port 53", "tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0", "(ip6 and tcp)"].every((c) => filter.includes(c)));
+  // SMD-2295 PR 2: ensureEnv's forward key (compose requires OB1_FORWARDER_KEY since
+  // SMD-2287 PR 5b), on temp files: a new one, a pre-5b one, a rerun, and two
+  // hand-edited ones.
+  const dir = mkdtempSync(join(tmpdir(), "ob1-orch-selfcheck-"));
+  try {
+    const forwards = (e: Record<string, string>) => (e.MCP_ACCESS_KEYS ?? "").split(",").filter((r) => r.startsWith(`${FORWARDER_NAME}:`));
+    const own = (e: Record<string, string>) => /^[0-9a-f]{64}$/.test(e.OB1_FORWARDER_KEY ?? "") && JSON.stringify(forwards(e)) === JSON.stringify([`${FORWARDER_NAME}:forward:${hashKey(e.OB1_FORWARDER_KEY)}`]);
+    expect("ensureEnv: a new file holds a forward key and its one record", own(ensureEnv(join(dir, "fresh.env"))));
+    const [cap, rd] = ["c".repeat(64), "d".repeat(64)];
+    const listed = `orch-capture:capture:${hashKey(cap)},orch-read:read:${hashKey(rd)}`;
+    const pre5b = join(dir, "pre5b.env");
+    writeFileSync(pre5b, `POSTGRES_PASSWORD=p\nMCP_ACCESS_KEYS=${listed}\nORCH_BRAIN_CAPTURE_KEY=${cap}\nORCH_BRAIN_READ_KEY=${rd}\n`, { mode: 0o600 });
+    const migrated = ensureEnv(pre5b);
+    expect("ensureEnv: a pre-5b file gains a forward key and one record, its records and lines kept", own(migrated) && migrated.MCP_ACCESS_KEYS.startsWith(`${listed},`) && migrated.POSTGRES_PASSWORD === "p" && Boolean(migrated.ORCH_MCP_KEY));
+    expect("ensureEnv: a second run changes nothing", JSON.stringify(ensureEnv(pre5b)) === JSON.stringify(migrated));
+    const nolist = join(dir, "nolist.env");
+    writeFileSync(nolist, "POSTGRES_PASSWORD=p\n", { mode: 0o600 });
+    const bare = ensureEnv(nolist);
+    expect("ensureEnv: a file with no key list gets the forward record alone", own(bare) && bare.MCP_ACCESS_KEYS === forwards(bare)[0]);
+    const stale = join(dir, "stale.env");
+    writeFileSync(stale, `MCP_ACCESS_KEYS=orch-read:read:${hashKey(rd)},${FORWARDER_NAME}:forward:${"e".repeat(64)}\nOB1_FORWARDER_KEY=\n`, { mode: 0o600 });
+    const restaled = ensureEnv(stale);
+    expect("ensureEnv: an empty forward key is minted, its record in place of the stale one", own(restaled) && restaled.MCP_ACCESS_KEYS.startsWith(`orch-read:read:${hashKey(rd)},`));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // SMD-2295 PR 2: the Activepieces flows' brain keys, filled at import (the HTTP piece takes no connection).
+  const flow = (f: string) => readFileSync(new URL(`./orchestration/activepieces/${f}`, import.meta.url), "utf8");
+  const [ingestFlow, searchFlow] = [flow("linear-ingest.json"), flow("brain-search.json")];
+  expect("the Activepieces flows as committed hold placeholders and no key", ![ingestFlow, searchFlow, flow("linear-issue.json")].some((t) => /[0-9a-f]{64}/i.test(t))
+    && ingestFlow.includes("__OB1_BRAIN_CAPTURE_KEY__") && searchFlow.includes("__OB1_BRAIN_READ_KEY__"));
+  const brainKeys = { ORCH_BRAIN_CAPTURE_KEY: "a".repeat(64), ORCH_BRAIN_READ_KEY: "b".repeat(64) };
+  const filled = (t: string) => JSON.stringify(JSON.parse(withBrainKeys(t, brainKeys)));
+  expect("withBrainKeys: the ingestion carries the capture key alone, the search the read key alone",
+    filled(ingestFlow).includes(brainKeys.ORCH_BRAIN_CAPTURE_KEY) && !filled(ingestFlow).includes(brainKeys.ORCH_BRAIN_READ_KEY)
+    && filled(searchFlow).includes(brainKeys.ORCH_BRAIN_READ_KEY) && !filled(searchFlow).includes(brainKeys.ORCH_BRAIN_CAPTURE_KEY));
+  const throwsMatching = (f: () => unknown, re: RegExp) => { try { f(); return false; } catch (e) { return re.test(String(e)); } };
+  expect("withBrainKeys: an unset key is refused", throwsMatching(() => withBrainKeys(ingestFlow, { ORCH_BRAIN_READ_KEY: brainKeys.ORCH_BRAIN_READ_KEY }), /ORCH_BRAIN_CAPTURE_KEY is unset/));
+  expect("withBrainKeys: a placeholder left over, in any case, is refused", throwsMatching(() => withBrainKeys(`${ingestFlow} __OB1_brain_other__`, brainKeys), /still holds a placeholder/));
   console.log(failed ? `eval-orchestration self-check: ${failed} failed` : `eval-orchestration self-check: OK (${cases.length} cases)`);
   return failed ? 1 : 0;
 }
@@ -222,10 +265,11 @@ async function up(): Promise<void> {
   // The proxy and its forwarder too: the brain's only published port is the
   // forwarder's in front of the proxy (SMD-1846, SMD-2583), and nothing the
   // named services wait on starts either; the forwarder waits on the proxy,
-  // so naming the proxy alone left 8012 closed. `api` is the REST core the
-  // candidates call (SMD-2295). `server` is named because its service alone
-  // builds the image `api` and `mcp` run, until SMD-2287 PR 6 retires it;
-  // nothing calls it.
+  // so naming the proxy alone left 8012 closed. `api`, the REST core the
+  // candidates call (SMD-2295), is named for what it is; the proxy's
+  // depends_on starts it anyway. `server` is named because its service alone
+  // builds the image `api` and `mcp` run, until SMD-2287 PR 6 retires it, so
+  // its container starts too, though nothing calls it.
   const r = compose(tool, ["up", "-d", "--build", "postgres", "migrate", "server", "api", "proxy", "forwarder", ...adapter.services, ...variantServices], { OB1_GIT_SHA: stamp });
   if (r.code !== 0) throw new Error(`compose up failed:\n${r.err.slice(-2000)}`);
   await waitFor("the brain's /health", brainHealthy);

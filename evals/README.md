@@ -6757,12 +6757,15 @@ own HTTP step, `POST http://api:8000/v1/thoughts` with the capture key in
   provisioning refuses a brain credential pinned anywhere else.
 - **Activepieces:** the HTTP piece (`~0.13.0`, the version 0.91.3's catalogue
   offers). The piece takes no connection, so the brain keys are filled into
-  the flows' steps at import and sit in the flow, not the connection store.
+  the flows' steps at import and sit in the flow, not the connection store;
+  a holder of Activepieces' own MCP token can then read them through its
+  flow tools (inferred, not measured), where the MCP piece's connection kept
+  them out of reach.
 - **Windmill:** its scripts call `fetch`.
 
 C2 reads "the tool's own HTTP client" where it read "the tool's own MCP
 client" (the maintainer's wording). `vendor`'s pipeline and E's judge name
-`api:8000`, and `--up` now also starts `api` and the forwarder. The kit had
+`api:8000`, and `--up` now starts the forwarder (and names `api`). The kit had
 stopped coming up twice since its last run: no forward key after SMD-2287 PR
 5b, and the forwarder never started after SMD-2583. One clean cycle each on
 the dogfood Mac (podman 6.1.4; the netavark cleanup of SMD-2929 run before
@@ -6776,7 +6779,8 @@ each `--up`):
 | windmill CE v1.817.0 | PASS: 10, +10 / 10, +0 | not measured (the stack was taken down mid-wait) | FAIL, as posted: a script of ours calling `fetch` (Windmill has no HTTP step outside a script) | PASS | — |
 
 Every capture's audit row reads `origin` `open-brain-api` and the tool's own
-`source` (`n8n`, `activepieces`): the REST door, not the MCP server's.
+`source` (`n8n` and `activepieces` read back from the audit; Windmill's
+script sends `windmill`): the REST door, not the MCP server's.
 
 Memory is `docker stats`' usage per container — the cgroup's, page cache
 included, not a resident set — read when `--verify` starts (after `--up`, and

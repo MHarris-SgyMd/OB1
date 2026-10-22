@@ -941,9 +941,10 @@ async function selfCheck(): Promise<number> {
   const KIT = join(HERE, "..", "..", "evals", "orchestration", "n8n");
   const kitIds = existsSync(join(KIT, "credentials.template.json")) ? idsOf(join(KIT, "credentials.template.json")) : [];
   const declaredIds = new Set([...profileIds, ...kitIds]);
-  const brainCredentials = [PROFILE_CREDENTIALS, join(KIT, "credentials.template.json")].filter(existsSync)
-    .flatMap((f) => (JSON.parse(readFileSync(f, "utf8")) as any[]).filter((c) => c.brainScope !== undefined));
-  expect("every shipped brain credential (the profile's capture key, the kit's read key) is pinned to the REST core's host", brainCredentials.length === 2 && brainCredentials.every((c) => brainPinProblem(c) === undefined));
+  // The profile's capture key, and the kit's read key where the kit is in the tree.
+  const credentialFiles = [PROFILE_CREDENTIALS, join(KIT, "credentials.template.json")].filter(existsSync);
+  const brainCredentials = credentialFiles.flatMap((f) => (JSON.parse(readFileSync(f, "utf8")) as any[]).filter((c) => c.brainScope !== undefined));
+  expect("every shipped brain credential (the profile's capture key, the kit's read key) is pinned to the REST core's host", brainCredentials.length === credentialFiles.length && brainCredentials.every((c) => brainPinProblem(c) === undefined));
   const shipped = [...templatesIn(PROFILE_TEMPLATES), ...templatesIn(KIT).filter((f) => !f.endsWith("credentials.template.json"))];
   expect("the profile ships its templates: the act tool's two and the import template", ["act-mcp.json", "act-linear-file-issue.json", `import${PER_PIPELINE}`, `import-on-demand${PER_PIPELINE}`].every((t) => shipped.some((f) => f.endsWith(`/${t}`))));
   for (const t of shipped) for (const p of undeclaredCredentials(JSON.parse(readFileSync(t, "utf8")), declaredIds, t)) fails.push(p);

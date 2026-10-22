@@ -583,7 +583,7 @@ the first of them converts (SMD-2149, SMD-2021).
 - **SMD-2211** — the egress checkpoint: every template credential pinned, no
   sink before the retrieve route and the egress decision carry it. (The MCP
   Client node's honouring of a pin was measured for SMD-2295: it does.)
-- **SMD-2295** (done) — n8n's brain calls go to the REST core: the ADR
+- **SMD-2295** (its two PRs) — n8n's brain calls go to the REST core: the ADR
   amended, the brain credential pinned to `api` and provisioning refusing a
   brain credential pinned elsewhere, and the orchestration eval re-aimed to
   the REST core (n8n's, Windmill's and Activepieces' brain calls, the

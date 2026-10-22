@@ -43,7 +43,8 @@ export const ENV_FILE = join(HERE, ".env");
 type Keys = { capture: string; read: string; forward: string };
 
 /** The MCP server's forward-scope record, as keygen.ts --scope forward prints it. */
-const forwardRecord = (key: string) => `orch-mcp-forwarder:forward:${hashKey(key)}`;
+export const FORWARDER_NAME = "orch-mcp-forwarder";
+const forwardRecord = (key: string) => `${FORWARDER_NAME}:forward:${hashKey(key)}`;
 
 /** What docker and compose need from the caller's environment to reach the engine — and nothing else. */
 const PASS_THROUGH = [
@@ -59,22 +60,25 @@ const PASS_THROUGH = [
  * The POC's .env: created on first use, reused after, so a second `--up`
  * meets the database its first one initialised. Returns the parsed values.
  */
-export function ensureEnv(): Record<string, string> {
+export function ensureEnv(file = ENV_FILE): Record<string, string> {
   const hex = (n: number) => randomBytes(n).toString("hex");
-  if (existsSync(ENV_FILE)) {
-    const env = parseEnv(readFileSync(ENV_FILE, "utf8"));
+  if (existsSync(file)) {
+    const env = parseEnv(readFileSync(file, "utf8"));
     // A value a later candidate needs is appended, never a rewrite: the
     // database passwords are the ones the volume was initialised with.
     const later: Record<string, () => string> = { ORCH_MCP_KEY: () => hex(32), ORCH_KEY16: () => hex(16), ORCH_JWT_SECRET: () => hex(32), ...profileKeys(env) };
     const missing = Object.keys(later).filter((k) => !env[k]);
-    if (missing.length) writeFileSync(ENV_FILE, readFileSync(ENV_FILE, "utf8") + missing.map((k) => `${k}=${later[k]()}\n`).join(""), { mode: 0o600 });
-    // A file from before SMD-2287 PR 5b has no forward key: minted once, its
-    // record added to the key list in the same write.
+    if (missing.length) writeFileSync(file, readFileSync(file, "utf8") + missing.map((k) => `${k}=${later[k]()}\n`).join(""), { mode: 0o600 });
+    // A file from before SMD-2287 PR 5b has no forward key (or an empty one):
+    // minted once, its record put in the key list in the same write, in place
+    // of any forwarder record already there, and on its own if the file holds
+    // no key list.
     if (!env.OB1_FORWARDER_KEY) {
       const forward = hex(32);
-      setEnvValues(ENV_FILE, { OB1_FORWARDER_KEY: forward, MCP_ACCESS_KEYS: `${env.MCP_ACCESS_KEYS},${forwardRecord(forward)}` });
+      const kept = (env.MCP_ACCESS_KEYS ?? "").split(",").map((r) => r.trim()).filter((r) => r && !r.startsWith(`${FORWARDER_NAME}:`));
+      setEnvValues(file, { OB1_FORWARDER_KEY: forward, MCP_ACCESS_KEYS: [...kept, forwardRecord(forward)].join(",") });
     }
-    return missing.length || !env.OB1_FORWARDER_KEY ? parseEnv(readFileSync(ENV_FILE, "utf8")) : env;
+    return missing.length || !env.OB1_FORWARDER_KEY ? parseEnv(readFileSync(file, "utf8")) : env;
   }
   const keys: Keys = { capture: hex(32), read: hex(32), forward: hex(32) };
   const lines = [
@@ -102,8 +106,8 @@ export function ensureEnv(): Record<string, string> {
     ...Object.entries(profileKeys({ ORCH_BRAIN_CAPTURE_KEY: keys.capture })).map(([k, f]) => `${k}=${f()}`),
     "",
   ];
-  writeFileSync(ENV_FILE, lines.join("\n"), { mode: 0o600 });
-  return parseEnv(readFileSync(ENV_FILE, "utf8"));
+  writeFileSync(file, lines.join("\n"), { mode: 0o600 });
+  return parseEnv(readFileSync(file, "utf8"));
 }
 
 /**

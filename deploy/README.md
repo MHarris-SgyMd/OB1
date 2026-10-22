@@ -99,7 +99,7 @@ The services, in order, the last two with the profile:
 | --- | --- |
 | `postgres` | The Supabase-hosted database (`pgvector/pgvector:0.8.6-pg16`) |
 | `migrate` | Pasting SQL into the Supabase dashboard — the `ob1-migrate` image (`db/Dockerfile`) runs `db/migrate.ts`, then exits |
-| `server` | Upstream's Edge Function and its deploy command — on `egress`, called by nothing since SMD-2295, until it retires (SMD-2287 PR 6) |
+| `server` | Upstream's Edge Function and its deploy command — on `egress`, called by nothing in the stack since SMD-2295, until it retires (SMD-2287 PR 6) |
 | `api` | — the REST core: every operation, as JSON, over Postgres and the model provider; internal unless opted in (SMD-2284) |
 | `mcp` | — the MCP server at `/mcp`, a client of the REST core, on the mesh alone (SMD-2287) |
 | `proxy` | Supabase's gateway in front of the function — the stack's one origin, with the MCP server at `/mcp` on it ("One origin" below) |
@@ -1183,7 +1183,7 @@ after a person, so the log stays free of names and addresses.
 # every request that did not end `ok`, on each server (the default project's
 # containers; another brain's are <project>-mcp-1, -api-1 and -server-1): /mcp's
 # in the MCP server's; the REST core's own, n8n's among them, in the REST
-# core's; and server's, which nothing calls since SMD-2295, in its own
+# core's; and server's, which nothing in the stack calls since SMD-2295, in its own
 docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
 docker logs open-brain-api-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
 docker logs open-brain-server-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'

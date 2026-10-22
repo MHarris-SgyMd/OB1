@@ -8,7 +8,9 @@
  * steps' own headers, filled into each flow at import from orchestration/.env
  * and never committed, so they sit in the flow, not the connection store. Its
  * project MCP server is on by default; the flows with an MCP Tool trigger
- * appear on it beside Activepieces' own flow-building tools.
+ * appear on it beside Activepieces' own flow-building tools. Those tools read
+ * a flow's steps, so a holder of that server's token can read the brain keys
+ * too (inferred, not measured): the cost of a piece with no connection.
  *
  * Running the ingestion once on demand goes through that same MCP server:
  * `ap_test_flow` runs the flow end to end in the test environment — the real
@@ -32,14 +34,15 @@ const PIECES = ["@activepieces/piece-schedule", "@activepieces/piece-linear", "@
 const BRAIN_KEYS: Record<string, string> = { __OB1_BRAIN_CAPTURE_KEY__: "ORCH_BRAIN_CAPTURE_KEY", __OB1_BRAIN_READ_KEY__: "ORCH_BRAIN_READ_KEY" };
 
 /** A flow file with its brain-key placeholders filled; refused if a key is unset or a placeholder is left. */
-function withBrainKeys(text: string, env: Record<string, string>): string {
+export function withBrainKeys(text: string, env: Record<string, string>): string {
   let out = text;
   for (const [placeholder, name] of Object.entries(BRAIN_KEYS)) {
     if (!out.includes(placeholder)) continue;
     if (!env[name]) throw new Error(`${name} is unset in orchestration/.env: a flow needs it for its brain call`);
     out = out.split(placeholder).join(env[name]);
   }
-  if (/__OB1_[A-Z_]+__/.test(out)) throw new Error(`a flow still holds a placeholder: ${/__OB1_[A-Z_]+__/.exec(out)?.[0]}`);
+  const left = /__OB1_[A-Z0-9_]+__/i.exec(out);
+  if (left) throw new Error(`a flow still holds a placeholder: ${left[0]}`);
   return out;
 }
 
@@ -140,7 +143,8 @@ export const activepieces: Adapter = {
     // anchored, since the steps it echoes below carry the issues' own text
     // (review passes 1 and 2).
     const run = /^✅ Run (\S+) — SUCCEEDED \(/m.exec(r.text);
-    if (r.isError || !run) throw new Error(`ap_test_flow: ${r.text.slice(0, 600)}`);
+    // The flows hold the brain keys (withBrainKeys), and the run's echo may repeat a step's input: no 64-hex value is printed.
+    if (r.isError || !run) throw new Error(`ap_test_flow: ${r.text.replace(/[0-9a-f]{64}/gi, "<key>").slice(0, 600)}`);
     // The run record: one loop iteration per issue, each with the capture step's status.
     const record = await api("GET", `/v1/flow-runs/${run[1]}`, undefined, s.token);
     const iterations: any[] = record.steps?.step_3?.output?.iterations ?? [];
