@@ -2296,10 +2296,11 @@ jobs:
       # deploy/.env; a new edge port a host process holds on 127.0.0.1 or
       # [::1] while the edge runs, which keeps serving; a file beside the
       # table. A changed registry (ob1b's port renamed ob1c) is served after
-      # an up under umask 077 with the table's directory made afresh. With
-      # ob1b's forwarder stopped, its host is a
-      # bare 404 and the stack's still answers. Then the edge goes, and ob1b
-      # with its volume (logs first, when the step failed).
+      # an up under umask 077 with the table's directory made afresh. ob1b's
+      # forwarder stops on SIGTERM, in under 5 s with exit 143 (SMD-3193), and
+      # with it stopped its host is a bare 404 and the stack's still answers.
+      # Then the edge goes, and ob1b with its volume (logs first, when the
+      # step failed).
       - name: The edge proxy reaches both brains through their published ports
         working-directory: deploy
         run: |
@@ -2368,7 +2369,12 @@ jobs:
           (umask 077 && rm -rf edge/dynamic && bun --no-env-file edge/edge.ts up)
           [ "$(curl -s --max-time 10 http://ob1c.localhost:8090/health || true)" = ok ] || { echo "the changed registry's ob1c is not served after up" >&2; exit 1; }
           [ "$(curl -s --max-time 10 http://ob1b.localhost:8090/health || true)" = "404 page not found" ] || { echo "ob1b, gone from the registry, is still routed after up" >&2; exit 1; }
+          # The forwarder stops on SIGTERM, under its init (SMD-3193): bun as PID 1 ignored it, so a stop waited out the 10 s grace and exited 137, the kill.
+          SECONDS=0
           docker compose --env-file .env.ob1b.local -f compose.yaml stop forwarder
+          took=$SECONDS
+          fcode=$(docker inspect -f '{{.State.ExitCode}}' "$(docker compose --env-file .env.ob1b.local -f compose.yaml ps -aq forwarder)")
+          if [ "$fcode" != 143 ] || [ "$took" -ge 5 ]; then echo "ob1b's forwarder stopped in ${took} s with exit $fcode, not under 5 s with 143: it did not stop on SIGTERM" >&2; exit 1; fi
           rm -f /tmp/edge-down.body
           down="$(curl -s --max-time 10 -o /tmp/edge-down.body -w '%{http_code}' http://ob1c.localhost:8090/health || true)"
           if ! { [ "$down" = 404 ] && [ ! -s /tmp/edge-down.body ]; }; then echo "ob1b (as ob1c) down gave $down with $(wc -c < /tmp/edge-down.body 2>/dev/null || echo 0) bytes through the edge, not a bare 404" >&2; exit 1; fi

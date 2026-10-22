@@ -668,9 +668,9 @@ is the defence: mint it with `keygen.ts`, and never hash a chosen word into
 `MCP_ACCESS_KEYS`, since the server holds only the digest and cannot tell how
 strong the key was. A raw `MCP_ACCESS_KEY`, the one key it sees in plain, is
 refused under 32 characters by preflight, the image's entrypoint. Compose
-passes the server no raw key, so this is for the image run on its own
-(`docker run`, Kubernetes); the vendored servers run no preflight, so give
-them a 32-byte key yourself. The REST core
+passes the server no raw key, so this holds only for a compose file edited to
+pass one; the vendored servers run no preflight, so give them a 32-byte key
+yourself. The REST core
 (`server-portable/rest/`, SMD-2284) checks the same keys, from headers alone,
 and refuses a wrong one before reading the body; it takes the same position,
 and the proxy does not route `/api` yet. The proxy
@@ -925,8 +925,8 @@ every server build (the three tier servers too). Set it from the shell, on the
 command that builds — not in `deploy/.env`, where a value written once is baked
 into every later build — with `--dirty`, so an image built from uncommitted
 changes says so. Compose never forwards it at runtime; a runtime variable of that
-name set some other way (`docker run -e`, a Kubernetes `env:` entry) overrides the
-baked one, so set none. Unset at build, the image reports `unknown`. Rebuild with it:
+name added to a service's `environment:` overrides the baked one, so add none.
+Unset at build, the image reports `unknown`. Rebuild with it:
 
 ```bash
 OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --build server proxy forwarder
@@ -960,9 +960,9 @@ misconfigured deployment crashloops, which is visible, instead of looking health
 which is not. `preflight.ts --json` suits a pipeline gate; `--deep` also calls
 OpenRouter and checks the embedding width still matches the schema.
 
-One check that matters most on a managed database: `vector extension`. If the
-provider installed pgvector into a schema off the connection's `search_path`
-(Supabase uses `extensions`), the bare `vector` type does not resolve and every
+One check that matters most on a database brought from a provider (a dump
+restored from Supabase, say): `vector extension`. If pgvector sits in a schema
+off the connection's `search_path` (Supabase uses `extensions`), the bare `vector` type does not resolve and every
 capture and search would fail with `type "vector" does not exist` on a database
 that has pgvector. Preflight fails with the schema it found and the exact
 statement to run: the login role's `ALTER ROLE … IN DATABASE … SET search_path`,
@@ -1259,22 +1259,35 @@ the next export carries what a failed one held), the origin and the kind (`HTTP 
 minute held more than one, five at most and the rest as `others` — never the
 error's message or a header. A count held inside a minute is said when the
 minute ends; at the stop, what is still unsaid is said, the stop's own
-flush's failures included when the flush ends inside the stop's bound (a
-collector that is down retries until its export's timeout, so the stop says
-only `; telemetry not all sent within N ms`) and the full queues' drops counted
-exactly. What a collector answers 200 but rejects (an OTLP partial success)
+flush's failures included when the flush ends inside its bound, and the full
+queues' drops counted exactly. A flush cut at its bound says, by signal, how
+many spans, log records and metric exports were on their way or still
+batched (`telemetry: 12 spans not sent to http://… (on its way or batched
+when the flush's 5000 ms ran out) (SMD-1849)`): a collector that is down is
+retried until then, and one that hangs waited on, so that is all that is
+known. Metrics count by export: a reading waiting behind an export on its
+way at the stop is not counted. What a collector answers 200 but rejects (an OTLP partial success)
 is not counted. A throw while the SDK loads leaves the server serving, said
 by the error's name alone. The stop sends what is still batched and the
 metrics' last reading, and waits for what is on its way, beside closing its
-pool and under the same bound, and says which on its own: `; telemetry sent`,
+pool, and says which on its own: `; telemetry sent`,
 `; telemetry not all sent` (an export of some signal failed), `; no telemetry
 left to send`, or `; telemetry not all sent within N ms` (or `: a second
 signal`) — never as the pool's. Under cumulative temporality, the default,
 the metrics' reading is sent whole at every flush, so with a metrics endpoint a
 stop after any request is `sent`, or `not all sent` where an export failed,
 never `no telemetry left to send`; under delta it can be.
-The stop gives its flush the pool's bound, a second at most (a quarter of one after a cut), so a collector down
-at the stop, which the exporters retry, is said only as `not all sent within` (SMD-2902).
+The flush has a bound of its own (SMD-2902): 5 s at most, inside what
+`OB1_STOP_GRACE` leaves less a second before the kill, and never less than the
+pool's (a second, a quarter of one after a cut); a second signal during the
+drain gives it the pool's alone, and one after the drain ends it. A collector
+that answers in a second or two gets the stop's telemetry when the drain has
+left the time (a drain cut at its bound leaves about a second; an export
+already on its way can need its answer time twice: the log batch and the
+metric reader wait for it first); one that is down adds at most 5 s to the
+stop, which then says what it did not send. Nothing orders
+the observability profile's collector after the servers, so a `compose down`
+or an upgrade can stop it first.
 
 A span holds the line's values and nothing else: its name (`tools/call
 capture_thought`, `GET /v1/thoughts/:id`), `http.request.method` (`_OTHER` for
@@ -3674,7 +3687,7 @@ so the profile builds from a checkout.
   `ok` (FORK.md change 75).
 - **Scheduled jobs.** One recipe (`recipes/editorial-policy`) uses `pg_cron` and
   `pg_net` to call an endpoint on a schedule. Off Supabase that becomes an ordinary
-  cron job, a Kubernetes CronJob, or a scheduled workflow. Not ported here.
+  cron job or a scheduled workflow (the `orchestration` profile's n8n). Not ported here.
 - **Data migration.** `pg_dump --data-only` from the old database, plus a full
   re-embed if the embedding model family changes — `db/reembed.ts`, run from a
   checkout with the provider reachable, not from this stack. A checkout reaches

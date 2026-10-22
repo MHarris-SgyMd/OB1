@@ -21,7 +21,8 @@
  * that exit is 1. A second signal cuts the wait short the same way. The
  * bounds count from the handler, not from the signal's sending, so the stop
  * inside the grace period is a measurement (8.4–8.5 s for a cut at the
- * bound), not a guarantee.
+ * bound; about 9.0 s where a collector that hangs or refuses takes the
+ * flush's last second, SMD-2902), not a guarantee.
  *
  * Bun only, and only when index.ts is the entry: Workers has no signals, and a
  * suite that imports the module must keep its own. jev/serve.ts handles the
@@ -43,7 +44,7 @@ export function isStoppable(x: unknown): x is Stoppable {
 /** The grace period a stop is given when OB1_STOP_GRACE is unset: Docker's default, which compose and `docker stop` use. */
 export const DEFAULT_STOP_GRACE_S = 10;
 
-/** What the drain leaves of the grace period, for the pool's close and the exit. */
+/** What the drain leaves of the grace period, for the pool's close, the telemetry's flush (at most a second of it, FLUSH_MARGIN_MS before the kill, SMD-2902) and the exit. */
 export const STOP_MARGIN_MS = 2_000;
 
 /** The shortest drain a grace period buys, however short it is: at 1 or 2 s the margin shrinks, and 0.5 s plus the 250 ms close still fits. */
@@ -91,6 +92,19 @@ export const CLOSE_BOUND_MS = 1_000;
  * cut at the bound measured 9.2–9.3 s with the 1 s close, review pass 2).
  */
 export const CLOSE_AFTER_CUT_MS = 250;
+
+/**
+ * The most the stop gives its telemetry flush (SMD-2902): a collector that
+ * answers in a second or two gets what was batched, and one that is down —
+ * whose exports retry for up to their own timeout, 10 s, and fail all the
+ * same — adds at most this to the stop. Nothing orders the observability
+ * profile's collector after the servers, so a `compose down` or an upgrade
+ * can stop it first.
+ */
+export const FLUSH_BUDGET_MS = 5_000;
+
+/** What the flush leaves of the grace period, before the platform's kill. */
+export const FLUSH_MARGIN_MS = 1_000;
 
 /** The tool calls running, whatever became of their requests. */
 export interface CallCount {
@@ -141,11 +155,22 @@ export interface DrainOptions {
   close: () => Promise<boolean>;
   /**
    * Send the telemetry still batched or on its way (SMD-1849 PR 2b–2c); undefined
-   * with no collector set. Run beside the close, under its bound, and said on
-   * its own, so a collector that stalls is never read as a pool that did not
-   * close (review pass 1).
+   * with no collector set. Run beside the close and said on its own, so a
+   * collector that stalls is never read as a pool that did not close (review
+   * pass 1), under a bound of its own (SMD-2902): FLUSH_BUDGET_MS, at most what
+   * the grace period leaves less FLUSH_MARGIN_MS, never less than the close's.
    */
   flush?: () => Promise<FlushResult | undefined>;
+  /**
+   * Told when the flush is cut — at its bound, or by a second signal — before
+   * the stop's line: says what each signal still held as not sent, for `kind`
+   * (SMD-2902).
+   */
+  unsent?: (kind: string) => void;
+  /** The platform's grace period, which the flush's bound stays inside: DEFAULT_STOP_GRACE_S unless the server read OB1_STOP_GRACE. */
+  graceMs?: number;
+  /** The most the flush is given: FLUSH_BUDGET_MS outside a test. */
+  flushBudgetMs?: number;
   /** The tool calls still running, waited on with the requests. */
   calls?: CallCount;
   /** Told just before what is still in flight is closed — at the bound, or on a second signal — so the lines it leaves say the stop cut it. */
@@ -175,6 +200,8 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
   const drainBoundMs = opts.drainBoundMs ?? DRAIN_BOUND_MS;
   const closeBoundMs = opts.closeBoundMs ?? CLOSE_BOUND_MS;
   const closeAfterCutMs = opts.closeAfterCutMs ?? CLOSE_AFTER_CUT_MS;
+  const graceMs = opts.graceMs ?? DEFAULT_STOP_GRACE_S * 1000;
+  const flushBudgetMs = opts.flushBudgetMs ?? FLUSH_BUDGET_MS;
   const log = opts.log ?? ((line: string) => console.log(line));
   const exit = opts.exit ?? ((code: number) => process.exit(code));
   const on = opts.on ?? ((signal, handler) => { process.on(signal, handler); });
@@ -190,13 +217,15 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
     const running = () => (calls ? `, ${toolCalls(calls.running)} running` : "");
     log(`${signal}: no longer accepting; ${requests(server?.pendingRequests ?? 0)} in flight${running()}, waited on for up to ${drainBoundMs / 1000} s (SMD-2250)`);
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // A second signal while the drain runs: the operator is not waiting for the rest, the flush included (review pass 1).
+    let again = false;
     let drained = await Promise.race([
       Promise.all([
         // A stop() that rejects has stopped accepting all the same; read as drained, not as an unhandled rejection that skips the close and the line.
         server ? server.stop().then(() => true, () => true) : true,
         calls?.idle(),
       ]).then(() => true),
-      new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), drainBoundMs); cutShort = () => resolve(false); }),
+      new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), drainBoundMs); cutShort = () => { again = true; resolve(false); }; }),
     ]);
     clearTimeout(timer);
     // Cut with nothing left — the last request ended as the bound or a second
@@ -217,18 +246,47 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
     // A drain that ended late gets what is left of the drain's bound plus the
     // after-cut close, so the exit-0 path cannot outlast the cut path (review pass 3).
     const closeMs = drained ? Math.round(Math.min(closeBoundMs, Math.max(closeAfterCutMs, drainBoundMs + closeAfterCutMs - (performance.now() - t0)))) : closeAfterCutMs;
+    // The flush's own bound (SMD-2902): its budget, inside what the grace period
+    // leaves before the kill, and never less than the close's — the bound it had;
+    // after a second signal, the close's alone.
+    const flushMs = again ? closeMs : Math.round(Math.max(closeMs, Math.min(flushBudgetMs, graceMs - FLUSH_MARGIN_MS - (performance.now() - t0))));
     try {
       opts.endOpen?.();
     } catch {}
-    // The telemetry's flush beside the pool's close, under the same bound, each said on its own.
-    const said: Record<FlushResult, string> = { sent: "; telemetry sent", failed: "; telemetry not all sent", none: "; no telemetry left to send", timeout: `; telemetry not all sent within ${closeMs} ms` };
+    // The telemetry's flush beside the pool's close, each said on its own.
+    const said: Record<FlushResult, string> = { sent: "; telemetry sent", failed: "; telemetry not all sent", none: "; no telemetry left to send", timeout: `; telemetry not all sent within ${flushMs} ms` };
     let flushTimer: ReturnType<typeof setTimeout> | undefined;
     let flushCut = () => {};
+    // Once the flush has ended, a cut has nothing to say: its line already says how (review pass 1).
+    let flushEnded = false;
+    // What each signal still held, said once as the flush is cut — a collector that refuses is retried until then, and
+    // one that hangs is waited on, so the kind is what is known: on its way, or still batched. Guarded, as the cut's sink is.
+    const sayUnsent = (kind: string) => {
+      if (flushEnded) return;
+      flushEnded = true;
+      try {
+        opts.unsent?.(kind);
+      } catch {}
+    };
+    const bySecondSignal = () => {
+      sayUnsent("on its way or batched at a second signal");
+      return "; telemetry not all sent: a second signal";
+    };
     const flushed = opts.flush ? Promise.race([
-      opts.flush().then((result) => (result === undefined ? "" : said[result]), () => said.failed),
+      opts.flush().then((result) => {
+        flushEnded = true;
+        return result === undefined ? "" : said[result];
+      }, () => {
+        flushEnded = true;
+        return said.failed;
+      }),
       new Promise<string>((resolve) => {
-        flushTimer = setTimeout(() => resolve(said.timeout), closeMs);
-        flushCut = () => resolve("; telemetry not all sent: a second signal");
+        flushTimer = setTimeout(() => {
+          if (again) return resolve(bySecondSignal());
+          sayUnsent(`on its way or batched when the flush's ${flushMs} ms ran out`);
+          resolve(said.timeout);
+        }, flushMs);
+        flushCut = () => resolve(bySecondSignal());
       }),
     ]) : Promise.resolve("");
     const closed = await Promise.race([
