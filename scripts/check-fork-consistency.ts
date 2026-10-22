@@ -7007,6 +7007,7 @@ const APP_SERVICE = {
   environment: {
     OB1_PUBLIC_ORIGIN: "${OB1_PUBLIC_ORIGIN:-}",
     COMPOSE_PROFILES: "${COMPOSE_PROFILES:-}",
+    OB1_STOP_GRACE: "${OB1_STOP_GRACE:-}",
   },
   stop_grace_period: "${OB1_STOP_GRACE:-10}s",
   depends_on: { api: { condition: "service_started" } },

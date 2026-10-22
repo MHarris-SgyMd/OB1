@@ -1,13 +1,13 @@
 <script lang="ts">
 	import { base } from '$app/paths';
-	import { firstLine, top, when } from '$lib/format';
+	import { top, when } from '$lib/format';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
 	const breakdowns = $derived([
 		{ label: 'Types', counts: top(data.stats.types) },
 		{ label: 'Topics', counts: top(data.stats.topics) },
-		{ label: 'People', counts: top(data.stats.people) },
+		{ label: 'People mentioned', counts: top(data.stats.people) },
 	]);
 </script>
 
@@ -55,8 +55,8 @@
 			<ul class="divide-y divide-white/5" data-testid="recent" data-sveltekit-preload-data="off">
 				{#each data.recent as t (t.id)}
 					<li class="py-2">
-						<a class="hover:text-primary-light" href="{base}/thoughts/{t.id}">{firstLine(t.content)}</a>
-						<div class="text-xs text-text-muted">{when(t.created_at)}{t.supersededBy ? ' · superseded' : ''}</div>
+						<a class="hover:text-primary-light" href="{base}/thoughts/{t.id}">{t.line}</a>
+						<div class="text-xs text-text-muted">{t.created_at ? when(t.created_at) : 'undated'}{t.superseded ? ' · superseded' : ''}</div>
 					</li>
 				{/each}
 			</ul>

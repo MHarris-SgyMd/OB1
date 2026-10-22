@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { when } from '$lib/format';
+	import { ingestedNotice } from '../../../../../server-portable/core/filter.ts';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -11,6 +12,8 @@
 	);
 	const shown = (v: unknown) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
 	const time = (v: unknown) => (typeof v === 'string' ? when(v) : '—');
+	// An ingested row says so beside its text, as the tools say it (SMD-1724).
+	const notice = $derived(ingestedNotice(data.thought.metadata));
 </script>
 
 <svelte:head><title>{data.thought.title} · Open Brain</title></svelte:head>
@@ -24,6 +27,9 @@
 		</div>
 	</header>
 
+	{#if notice}
+		<p class="text-sm text-amber-300" role="note" data-testid="notice">{notice}</p>
+	{/if}
 	<div class="bg-bg-card border border-white/10 rounded-xl p-5 whitespace-pre-wrap break-words" data-testid="text">{data.thought.text}</div>
 
 	<div class="bg-bg-card border border-white/10 rounded-xl p-5">

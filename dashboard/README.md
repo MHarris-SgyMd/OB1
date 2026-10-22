@@ -91,14 +91,15 @@ https. So the server must know the origin a browser sees:
 | `GRAFANA_LINK` | The nav's link to Grafana: `deploy/compose.grafana-port.yaml` sets it to `/grafana/` on its loopback origin, Grafana's root URL whenever that file is named |
 | `GRAFANA_ROUTE` | The link when `GRAFANA_LINK` is unset: `deploy/compose.grafana-public.yaml` sets it to `/grafana/` on this origin. With neither, no link |
 | `PORT` | 8000 unless set |
+| `OB1_STOP_GRACE` | The stop's grace, as the servers read it: the GUI drains within it, less 2 s |
 
 ## The pages
 
 | Path | What it reads |
 |---|---|
 | `/dashboard/` | `thought_stats` (the counts, the date range, the largest types, topics and people) and `list_thoughts` (the ten newest; their links are not preloaded on hover, since each open is a click-through) |
-| `/dashboard/status` | `brain_info`: the server's version, commit and migrations, and the database's ledger, sizes, counts, workers' heartbeats and proposal queue |
-| `/dashboard/thoughts/<id>` | `fetch`: a thought's text and metadata (the core logs the open as a click-through, as it does any `fetch`) |
+| `/dashboard/status` | `brain_info`, laid out as the core's own rows (`brainInfoRows` in `server-portable/brain-info.ts`, the brain_info tool's words): the server's version, commit and migrations, and the database's ledger, sizes, counts, vectors, proposals, findings and workers' heartbeats |
+| `/dashboard/thoughts/<id>` | `fetch`: a thought's text and metadata, with the ingested notice before an ingested thought's text, rendered on the server with no script (the core logs the open as a click-through, as it does any `fetch`: SMD-3212) |
 | `/dashboard/signin`, `/dashboard/signout` | Sign-in and sign-out |
 | `/dashboard/health` | Liveness: `ok`, asking the REST core nothing |
 

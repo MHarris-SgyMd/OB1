@@ -162,11 +162,17 @@ let thoughtId = "";
   const status = await get("/status");
   const version = /data-testid="version">([^<]+)</.exec(status.html)?.[1];
   assert(status.status === 200 && /^\d+\.\d+\.\d+/.test(version ?? ""), `the status page renders the server's version (${status.status}: ${version ?? "none"})`);
-  assert(/data-testid="ledger">\s*\d+/.test(status.html), "…and the ledger's highest migration");
+  assert(/data-testid="migrations">\s*\d+ applied/.test(status.html), "…and the ledger's highest migration, in brain_info's words");
 
   if (thoughtId) {
     const t = await get(`/thoughts/${thoughtId}`);
     assert(t.status === 200 && t.html.includes('data-testid="text"') && t.html.includes(thoughtId), `a thought's page renders its text and id (${t.status})`);
+    // Rendered on the server alone, so its text rides once (review pass 4: twice, with the hydration data).
+    assert(!t.html.includes("<script"), "…with no script, so its text is in the page once");
+    // The ingested notice exactly where the thought's trust is ingested, before its text (SMD-1724; CI's capture is one).
+    const ingested = /<dt[^>]*>trust<\/dt>\s*<dd[^>]*>ingested</.test(t.html);
+    const notice = t.html.indexOf('data-testid="notice"');
+    assert(ingested === (notice >= 0) && (notice < 0 || notice < t.html.indexOf('data-testid="text"')), `…and the ingested notice ${ingested ? "before its text" : "absent"}, its trust ${ingested ? "ingested" : "otherwise"}`);
   } else if (REQUIRE_THOUGHT) {
     bad("the overview lists no thought, and --require-thought asks for one: the thought page went undriven");
   } else {

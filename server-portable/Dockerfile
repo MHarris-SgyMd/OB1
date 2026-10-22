@@ -43,7 +43,8 @@ COPY dashboard/package.json dashboard/bun.lock ./
 # is copied, and swallow its own failure; `bun run build` syncs.
 RUN bun install --frozen-lockfile --ignore-scripts
 COPY rest-client/*.ts /app/rest-client/
-COPY server-portable/oauth-edge.ts server-portable/auth.ts /app/server-portable/
+COPY server-portable/oauth-edge.ts server-portable/auth.ts server-portable/brain-info.ts /app/server-portable/
+COPY server-portable/core/filter.ts /app/server-portable/core/
 COPY dashboard/svelte.config.js dashboard/vite.config.ts ./
 COPY dashboard/src ./src
 COPY dashboard/static ./static

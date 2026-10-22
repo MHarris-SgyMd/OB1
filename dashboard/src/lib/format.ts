@@ -23,19 +23,6 @@ export function top(counts: Record<string, number> | null | undefined, n = 8): [
 		.slice(0, n);
 }
 
-/** Bytes as KB, MB or GB, one decimal. */
-export function bytes(n: number | null | undefined): string {
-	if (n === null || n === undefined) return '—';
-	const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-	let v = n;
-	let i = 0;
-	while (v >= 1024 && i < units.length - 1) {
-		v /= 1024;
-		i++;
-	}
-	return i === 0 ? `${v} B` : `${v.toFixed(1)} ${units[i]}`;
-}
-
 /** A thought's first line, cut at `max` characters, for a list. */
 export function firstLine(text: string, max = 160): string {
 	const line = text.trimStart().split('\n', 1)[0] ?? '';

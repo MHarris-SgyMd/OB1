@@ -4,5 +4,5 @@
 // at build: the image carries none of server-portable for them.
 
 export type { ThoughtStats } from '../../../server-portable/store.ts';
-export type { BrainInfo, DatabaseSummary, WorkerHeartbeat } from '../../../server-portable/brain-info.ts';
+export type { BrainInfo } from '../../../server-portable/brain-info.ts';
 export type { FetchedThought, ListThoughtsResult, ListedThought } from '../../../server-portable/core/reads.ts';

@@ -44,7 +44,8 @@ export async function read<K extends CallableOperation>(event: RequestEvent, ses
 	try {
 		answer = await rest().call(name, input, { key: session.key, signal: event.request.signal });
 	} catch (err) {
-		console.error(`[dashboard] ${name}: the REST core did not answer: ${err instanceof Error ? err.message : String(err)}`);
+		// A visitor who left aborted the call: nothing went wrong, and nobody reads the answer (review pass 4).
+		if (!event.request.signal.aborted) console.error(`[dashboard] ${name}: the REST core did not answer: ${err instanceof Error ? err.message : String(err)}`);
 		throw error(502, 'The brain did not answer. The dashboard log has the reason.');
 	}
 	if (answer.ok) return answer.body;

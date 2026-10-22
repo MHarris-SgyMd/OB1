@@ -1037,6 +1037,7 @@ services:
     environment:
       OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:-}
       COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+      OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     # After the REST core, so `up app` brings it; not held for its health:
     # while it is down a page is the GUI's own 502.

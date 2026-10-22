@@ -24,6 +24,7 @@
 
 import { createRestClient, DEFAULT_REST_URL } from "../rest-client/index.ts";
 import { originProblem } from "../server-portable/oauth-edge.ts";
+import { drainBoundFrom } from "../server-portable/shutdown.ts";
 
 const env = process.env;
 
@@ -41,7 +42,14 @@ try {
 }
 
 // adapter-node's own settings, from this file alone: a stray one in the environment would steer the origin.
-for (const name of ["ORIGIN", "PROTOCOL_HEADER", "HOST_HEADER", "PORT_HEADER", "ADDRESS_HEADER", "XFF_DEPTH", "SOCKET_PATH"]) delete env[name];
+for (const name of ["ORIGIN", "PROTOCOL_HEADER", "HOST_HEADER", "PORT_HEADER", "ADDRESS_HEADER", "XFF_DEPTH", "SOCKET_PATH", "SHUTDOWN_TIMEOUT", "BODY_SIZE_LIMIT"]) delete env[name];
+// A stop drains within the platform's grace (OB1_STOP_GRACE, as the servers
+// read it, less 2 s): adapter-node waits 30 s by default, past compose's 10 s,
+// so a stop with a request stuck on the REST core ended in the kill with every
+// open request cut off unanswered (review pass 4).
+env.SHUTDOWN_TIMEOUT = String(Math.ceil(drainBoundFrom(env.OB1_STOP_GRACE).drainBoundMs / 1000));
+// The only body the GUI takes is the sign-in form's key: 64 kB, not adapter-node's 512 kB.
+env.BODY_SIZE_LIMIT = "64K";
 const publicOrigin = env.OB1_PUBLIC_ORIGIN?.trim();
 const problem = publicOrigin ? originProblem(publicOrigin) : null;
 if (publicOrigin && !problem) {
