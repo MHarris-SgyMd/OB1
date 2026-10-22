@@ -2,7 +2,8 @@
 
 An architecture decision record. **Decided 2026-09-25: n8n is the fork's
 orchestration tool for ingestion and sync — an optional, self-hosted sidecar
-that reaches the brain only through its MCP surface, shipped as a compose
+that reaches the brain only through its REST core (through its MCP surface
+until SMD-2295), shipped as a compose
 profile that references n8n's image, with OB1's part being workflow templates
 and the key discipline around them, never the runtime.** The evidence is the
 POC in `evals/README.md` § "Which orchestration tool?" (`evals/eval-orchestration.ts`,
@@ -35,6 +36,21 @@ leaves open.
   pipeline from a workflow").
 - The runner writes as a database role of its own, not the superuser.
 
+**Amended by SMD-2295** (n8n through the REST core, under SMD-2282's
+decision 1, `operator-surface-tiers.md`):
+- Decision 4's boundary is the REST core. A template's brain call is an HTTP
+  Request node against the REST core's routes at `http://api:8000`, the name
+  n8n reaches it by on `egress`, with the key in `x-brain-key`. It is not the
+  MCP Client node: the brain's MCP server is for AI clients.
+- The key discipline is unchanged: a capture-scope key, attributed and
+  revocable, in a credential pinned to one host. The brain credential is now
+  pinned to `api` (posture step 2).
+- n8n stays on `egress` alone, as built (SMD-2583).
+- n8n's own MCP endpoint (the act tool, SMD-2212) is n8n's, not the brain's,
+  and is unaffected.
+- Decision 1's C2 and C3 record what the POC measured on 2026-09-25, each
+  tool's own MCP client among it.
+
 ## The decision
 
 1. **n8n, over Activepieces and Windmill.** n8n and Activepieces passed every
@@ -62,8 +78,9 @@ leaves open.
    one operator's schedules (`../evals/README.md`, "The orchestration profile
    (SMD-2210)", has the numbers).
 4. **It reaches the brain through MCP only** (amended below, for the import
-   runner). Captures go through n8n's MCP
-   Client node with a **capture-scope** key (can add a thought, cannot read
+   runner; amended by SMD-2295 to the REST core, above). Captures go through
+   n8n's MCP Client node (an HTTP Request node against the REST core since
+   SMD-2295) with a **capture-scope** key (can add a thought, cannot read
    one); no workflow holds a write key. The brain grows no n8n-specific route,
    and n8n reaches no brain table. Amended in SMD-2210: an import template
    will hold the key of OB1's own pipeline runner, a bounded write path
@@ -253,7 +270,9 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
    credential is restricted from accessing api.linear.app…" (measured). The POC
    pinned the Linear credential only; whether the MCP Client node honours a pin
    on the brain's header credentials is not measured and is the first thing
-   SMD-2211 measures.
+   SMD-2211 measures. Since SMD-2295 the brain credential is pinned to `api`,
+   and a brain call is the HTTP Request node, the node the Linear pin was
+   measured on.
 3. **Keys are least-privilege and separate** (SMD-2210). Ingestion holds a
    capture-scope brain key; nothing holds a write key. The key an AI client
    presents to n8n's MCP endpoint is not the key that starts an ingestion (the
@@ -542,7 +561,7 @@ the first of them converts (SMD-2149, SMD-2021).
   and SMD-949's, consuming this transport; where the Obsidian and Markdown syncs
   run is SMD-1814's and SMD-1815's.
 - **Whether the MCP Client node honours a credential domain pin** — SMD-2211
-  measures it first.
+  measures it first. Since SMD-2295 no template's brain call uses that node.
 
 ## Follow-ups
 

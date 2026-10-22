@@ -1715,7 +1715,7 @@ jobs:
       # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):
       # deploy/.env configured for the authorization server
       # (.github/ci/auth-settings.sh) and the MCP server /mcp reaches recreated
-      # on it (SMD-2287), with `server`, n8n's, beside it — with no
+      # on it (SMD-2287), with `server` beside it — with no
       # authorization server running. The REST core, the plugin webhook, the
       # daemon restart and the SIGTERM stop after it meet the server they met
       # then; the smoke just before holds a stack configured for none, which
@@ -2371,7 +2371,7 @@ jobs:
       # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):
       # deploy/.env configured for the authorization server
       # (.github/ci/auth-settings.sh) and the MCP server /mcp reaches recreated
-      # on it (SMD-2287), with `server`, n8n's, beside it — with no
+      # on it (SMD-2287), with `server` beside it — with no
       # authorization server running. The steps after it meet the stack
       # they met then: smoke.sh takes its branch for a server configured but
       # not advertising, and canary.sh has OB1_AUTH_ lines to leave out of the
@@ -3528,7 +3528,7 @@ jobs:
       # The stack the observability step met in deploy-stack, where it ran
       # until SMD-3170: deploy/.env configured for an authorization server
       # (.github/ci/auth-settings.sh) and the MCP server /mcp reaches recreated
-      # on it (SMD-2287), with `server`, n8n's, beside it — with none running. So lgtm starts on an https public origin, Grafana's
+      # on it (SMD-2287), with `server` beside it — with none running. So lgtm starts on an https public origin, Grafana's
       # root URL under it and its cookie secure (compose.yaml's lgtm command),
       # which no other job starts it on.
       - name: The server is configured for an authorization server that is not running
