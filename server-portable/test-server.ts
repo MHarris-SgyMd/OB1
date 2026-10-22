@@ -2642,6 +2642,21 @@ console.log("\n[16l] A supersession proposal names who wrote each side, and is f
     `a row the writers' read did not return is a proposal gone in between, dropped; a read that did not run drops nothing (${gone}, ${unread})`);
   const old = render([proposal(1, null, null)]).content[0].text;
   assert(old.split("\n")[0].endsWith(WRITERS_UNREAD) && !/By: |WRITER/.test(old), "a row from before 094 says once the writers are not shown, and flags nothing");
+  // 107 (SMD-3036): a side the listing left unread past its cap.
+  const { walkCappedLine, WALK_CAP } = await import("./render.ts");
+  const { normaliseProposal } = await import("./store.ts");
+  const capped = render([proposal(1, op, hook, { newer: { ...proposal(1, op, hook).newer, walkCapped: true } })]);
+  const cv = (capped as unknown as { structuredContent: { proposals: { older: Record<string, unknown>; newer: Record<string, unknown> }[] } }).structuredContent.proposals[0];
+  assert(WALK_CAP === 25 && walkCappedLine() === "what an accept that makes this side stand would take and lapse was not read: a chain here passes 25 rows (the listing's cap, migration 107); consolidate.ts --accept reads it in full"
+      && capped.content[0].text.includes(`By: session-hook (agent) · trust agent · a capture-only key's text\n      ${walkCappedLine()}`) && capped.content[0].text.split(walkCappedLine()).length === 2
+      && cv.newer.walkCapped === true && !("walkCapped" in cv.older) && !r1.content[0].text.includes(walkCappedLine()),
+    `a side the listing left unread says so under it, once, and the value marks it; a side read carries neither (${cv.newer.walkCapped}, ${"walkCapped" in cv.older})`);
+  const listed = { id: "p", status: "pending", verdict: "newer_supersedes_older", confidence: 0.9, judge_key: "k", judged_at: "2026-09-25T00:00:00.000Z", reviewed_at: null, review_note: null, reason: null, similarity: null, superseding_id: null, older_id: O, older_content: "a", older_created_at: null, newer_id: N, newer_content: "b", newer_created_at: null };
+  const withCols = (takes: boolean | null) => normaliseProposal({ ...listed, older_capture_only: false, newer_capture_only: true, older_takes: false, newer_takes: takes, older_lapses: [], newer_lapses: takes === null ? null : [] });
+  const acceptedCapped = normaliseProposal({ ...listed, status: "accepted", older_capture_only: false, newer_capture_only: true, older_takes: false, newer_takes: null, older_lapses: [], newer_lapses: [] });
+  assert(withCols(null).newer.walkCapped === true && withCols(null).older.walkCapped === false && withCols(true).newer.walkCapped === false && normaliseProposal(listed).newer.walkCapped === false
+      && acceptedCapped.newer.walkCapped === false && acceptedCapped.newer.takes === false,
+    "the store reads a NULL takes on a row carrying 094's columns as the cap's — not on an accepted row, which takes no accept — and a row from before 094 as never capped");
 }
 
 console.log("\n[16m] The stated-status label in words and fields: every moved ticket named in its type's word, never the board's, the measured population only, and a REST core's answer without it read as none (SMD-2540)");
