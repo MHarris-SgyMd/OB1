@@ -3456,7 +3456,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # Bun on the runner, for auth/provision.ts, which .github/ci/auth-settings.sh runs.
+      # Bun on the runner, for auth/provision.ts, which
+      # .github/ci/auth-settings.sh runs.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.3"
@@ -3502,14 +3503,12 @@ jobs:
       # scraped every 30 s) — or 0 itself for the ten that answer 0 where
       # their family has series and their filter matches nothing (`or 0 * …`:
       # the failure share, the store's three, the collector's three and its
-      # three totals), empty
-      # where it has none — but the NO_TRAFFIC panel, whose events this
-      # traffic does not make; each Loki query must return a record (one that
-      # parsed and has an outcome); each Tempo query must find a trace (the
-      # stub's 404 ends a provider span in error). So this holds every name,
-      # and every label a
-      # matcher requires, on the pinned images; check 37 holds the names and
-      # labels without a running profile. Loki refuses every record with its
+      # three totals), empty where it has none — but the NO_TRAFFIC panel,
+      # whose events this traffic does not make; each Loki query must return
+      # a record (one that parsed and has an outcome); each Tempo query must
+      # find a trace (the stub's 404 ends a provider span in error). So this
+      # holds every name, and every label a matcher requires, on the pinned
+      # images; check 37 holds the names and labels without a running profile. Loki refuses every record with its
       # disk past 90% (PR 3c, measured), so the runner's is read once lgtm's
       # image is pulled, before Loki starts, and room made where it is tight. The
       # step puts the stack's containers and deploy/.env back as it found
@@ -3517,10 +3516,9 @@ jobs:
       # ob1_monitor role, lgtm-data and the telemetry network stay), so a step
       # added after it meets the stack it found: a collector would lengthen
       # the servers' stop line, which deploy-stack's last steps read where
-      # this ran until SMD-3170.
-      # A capture citing a thought that is not there makes the store's
-      # refusals line read above 0, and
-      # one tool called once proves Prometheus's zero at a series' start.
+      # this ran until SMD-3170. A capture citing a thought that is not there
+      # makes the store's refusals line read above 0, and one tool called
+      # once proves Prometheus's zero at a series' start.
       # SMD-3050: compose's render of the alert rules is
       # deploy/observability/alert-rules.yaml, Grafana holds exactly its
       # rules, provisioned from it, and after the traffic the provider rule is
