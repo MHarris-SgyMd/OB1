@@ -34,18 +34,22 @@
 --     triggers disabled; its comment now names the keyed form for a set
 --     change. 071's header still says to run the full rebuild — the file is
 --     not edited (append-only); this one supersedes that note.
---   A migration that changes node_lifecycle_types() does two things after it,
---   as 105 did: the plan refresh — 105's no-op ALTER of the brain's own
---   functions that name a set, so no session keeps a plan built on the old
---   set (071's gate triggers among them, which would go on writing gates
---   from it) — and
+--   * ob1_refresh_set_readers() — 105's DO $touch$ block as a call: it alters
+--     each of the brain's own functions that name a set to the volatility it
+--     has (dropping every session's plans built on it) and returns how many.
+--     Without it a pooled session keeps the old set — its searches, its
+--     node_state, 071's gate triggers, and drift() itself, which in a warmed
+--     session reported 12 phantom rows (review pass 3, run as the next author
+--     would).
+--   A migration that changes node_lifecycle_types() runs, after the change:
+--     SELECT ob1_refresh_set_readers();
 --     SELECT * FROM ob1_rebuild_source_gate_for_types('{<each type it adds or drops>}');
---   A change to node_settled_types() alone needs the plan refresh and no
---   mirror work: the mirror reads node_lifecycle_types() only.
---   scripts/check-fork-consistency.ts check 39 holds the rebuild: a migration
---   that changes the set calls the full rebuild or the keyed one after it,
---   the keyed one with exactly the types the change adds and drops. node_lifecycle_types()'s comment
---   says the same, where the next change is made.
+--   A change to node_settled_types() alone runs the first and needs no mirror
+--   work: the mirror reads node_lifecycle_types() only. check 39 of
+--   scripts/check-fork-consistency.ts holds both for a lifecycle change, as
+--   top-level statements after the set. What follows the set by hand, and the
+--   tests that pin it, are named in node_lifecycle_types()'s comment, where
+--   the next change is made.
 --   No table, column or grant. MINOR under the version rules.
 --
 -- NOT HERE
@@ -128,6 +132,45 @@ BEGIN
 END
 $$;
 
+-- The plan refresh, as a call: 105's DO $touch$ block, word for word in its
+-- rule, so the next set change runs it by name and check 39 can require it.
+-- Without it a pooled session keeps a plan built on the old set — its
+-- searches, its node_state, and 071's own gate triggers, which would go on
+-- writing gates from it — and drift() itself reads the old set there (review
+-- pass 3: 12 phantom drift rows in a warmed session). Returns how many of the
+-- brain's functions it altered.
+CREATE OR REPLACE FUNCTION ob1_refresh_set_readers()
+RETURNS int
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  r record;
+  v_n int := 0;
+BEGIN
+  FOR r IN
+    SELECT p.oid::regprocedure AS fn,
+           CASE p.provolatile WHEN 'i' THEN 'IMMUTABLE' WHEN 's' THEN 'STABLE' ELSE 'VOLATILE' END AS vol
+      FROM pg_proc p
+      JOIN pg_proc s ON s.oid = 'node_settled_types()'::regprocedure
+     WHERE p.pronamespace = s.pronamespace AND p.proowner = s.proowner
+       AND p.prokind IN ('f', 'w')
+       AND (p.prosrc ~* 'node_(lifecycle|settled)_types"?[[:space:]]*[(]'
+            OR EXISTS (SELECT 1 FROM pg_depend d
+                        WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.refclassid = 'pg_proc'::regclass
+                          AND d.refobjid IN ('node_lifecycle_types()'::regprocedure, 'node_settled_types()'::regprocedure)))
+       AND p.oid NOT IN ('node_lifecycle_types()'::regprocedure, 'node_settled_types()'::regprocedure,
+                         'ob1_refresh_set_readers()'::regprocedure)
+  LOOP
+    EXECUTE format('ALTER FUNCTION %s %s', r.fn, r.vol);
+    v_n := v_n + 1;
+  END LOOP;
+  RETURN v_n;
+END
+$$;
+
+COMMENT ON FUNCTION ob1_refresh_set_readers() IS
+  'Alters each of the brain''s own functions that name node_lifecycle_types() or node_settled_types() (their schema and owner; by text, in any case, or by dependency) to the volatility it has — a no-op that drops every session''s plans built on it — and returns how many. 105''s DO $touch$ block as a call: a migration that changes either set runs it after the change, then, for a change to node_lifecycle_types(), ob1_rebuild_source_gate_for_types(<the types it adds and drops>). Migration 106 / SMD-3160.';
+
 COMMENT ON FUNCTION ob1_rebuild_source_gate_for_types(text[]) IS
   'Reconciles ob1_source_gate for the sourced thoughts whose status_type is one of the types given — what a change to node_lifecycle_types() that adds or drops them moves — under the full rebuild''s SHARE locks on thoughts and thought_sources, and returns what it wrote and deleted. Each type is one probe of 001''s GIN index on thoughts.metadata, so the cost follows those rows, not the table. Refuses to run outside READ COMMITTED; an empty or NULL array touches nothing. Migration 106 / SMD-3160.';
 
@@ -137,4 +180,4 @@ COMMENT ON FUNCTION ob1_rebuild_source_gate() IS
 -- Where the next set change is made: the set's own comment says what follows
 -- it (105's words kept, then this).
 COMMENT ON FUNCTION node_lifecycle_types() IS
-  'The status types node_state knows — Linear''s seven state types, in board order. A status_type outside them is unknown: no lifecycle, no claim that a blocker is settled. graph-centrality.ts''s LIFECYCLE_TYPES must equal it. A migration that changes it runs, after it, the plan refresh (105''s no-op ALTER of the brain''s functions that name a set) and SELECT * FROM ob1_rebuild_source_gate_for_types(''{<each type it adds or drops>}'') — check 39 holds the second. Migration 058 / SMD-2074; duplicate since migration 105 / SMD-2935; the rebuild, 106 / SMD-3160.';
+  'The status types node_state knows — Linear''s state types, in board order. A status_type outside them is unknown: no lifecycle, no claim that a blocker is settled. A migration that changes it, after the change: SELECT ob1_refresh_set_readers(); then SELECT * FROM ob1_rebuild_source_gate_for_types(''{<each type it adds or drops>}''); — check 39 holds both. What follows the set by hand: graph-centrality.ts''s LIFECYCLE_TYPES and LIFECYCLE_FILTERS (open, active, done), stated-status.ts''s TYPE_WORDS (a word for the type), and for a settled change render.ts''s DEMOTIONS and node_settled_types(); the tests that pin it: test-schema [54], [94] and test-e2e-sql [22]. Migration 058 / SMD-2074; duplicate since migration 105 / SMD-2935; the recipe, 106 / SMD-3160.';

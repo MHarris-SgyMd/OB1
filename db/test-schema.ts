@@ -15398,8 +15398,20 @@ console.log("\n[95] Migration 106: a keyed rebuild of 071's gate mirror for a st
   try { reapplied = await reapply(the106); } catch (e) { reapplied = `threw: ${(e as Error).message}`; }
   const [c] = await q<{ k: string; f: string; s: string }>(`SELECT obj_description('ob1_rebuild_source_gate_for_types(text[])'::regprocedure, 'pg_proc') AS k, obj_description('ob1_rebuild_source_gate()'::regprocedure, 'pg_proc') AS f, obj_description('node_lifecycle_types()'::regprocedure, 'pg_proc') AS s`);
   assert(reapplied.endsWith("_source_gate_keyed_rebuild.sql") && (await drift()) === 0 && /Migration 106 \/ SMD-3160/.test(c.k) && /ob1_rebuild_source_gate_for_types/.test(c.f) && /Migrations 071, 106/.test(c.f)
-      && /ob1_rebuild_source_gate_for_types/.test(c.s) && /plan refresh/.test(c.s) && /Migration 058 \/ SMD-2074/.test(c.s) && /SMD-2935/.test(c.s),
+      && /ob1_rebuild_source_gate_for_types/.test(c.s) && /ob1_refresh_set_readers/.test(c.s) && /Migration 058 \/ SMD-2074/.test(c.s) && /SMD-2935/.test(c.s),
     `a re-apply of 106 is a no-op; its function's comment names it, the full rebuild's names the keyed form for a set change, and the set's own says what a change to it runs, 058's and 105's words kept (${reapplied.slice(0, 60)})`);
+
+  // The plan refresh as a call: each of the brain's readers of the sets is
+  // altered (its catalog row rewritten), the refresh itself and the sets not,
+  // and the count says how many.
+  const readerRows = async () => new Map((await q<{ f: string; x: string }>(`SELECT p.oid::regprocedure::text AS f, p.xmin::text AS x FROM pg_proc p
+      WHERE p.pronamespace = 'public'::regnamespace AND p.prosrc ~ 'node_(lifecycle|settled)_types[[:space:]]*[(]'
+        AND p.proname NOT IN ('node_lifecycle_types', 'node_settled_types', 'ob1_refresh_set_readers')`)).map((r) => [r.f, r.x]));
+  const before95 = await readerRows();
+  const [{ n }] = await q<{ n: number }>(`SELECT ob1_refresh_set_readers() AS n`);
+  const after95 = await readerRows();
+  assert(before95.size >= 5 && n === before95.size && [...before95].every(([f, x]) => after95.get(f) !== x),
+    `ob1_refresh_set_readers() alters each of the brain's ${before95.size} readers of the sets and says so (${n})`);
 
   await db.query(`DELETE FROM thoughts WHERE content LIKE '[95]%'`);
 }

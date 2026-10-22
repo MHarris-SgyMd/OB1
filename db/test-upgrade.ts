@@ -4653,6 +4653,39 @@ console.log("\n[20ax] Migration 106: refused by name without 071; onto a populat
   assert(waited === "55P03" && sourceWaited === "55P03" && after === "true" && sourceAfter === "true",
     `a status write and a source row's write each wait for the keyed form's locks to its transaction's end (${waited}, ${sourceWaited} at a 1 s lock_timeout), and go through after, the mirror following both (${after}, ${sourceAfter})`);
 
+  // A set change as the recipe runs it, against a server's pooled
+  // connection: a session that searched eight times with prefer_current
+  // before it (a cached generic plan) demotes a ticket of the newly settled
+  // type after it — the refresh is what reaches it (review pass 3; [20aw]
+  // holds the same for 105's own block).
+  const VEC = `[${Array.from({ length: OPTS.dim }, (_, i) => (i === 0 ? 1 : 0)).join(",")}]`;
+  const [{ id: kdone }] = await sql`INSERT INTO thoughts (content, metadata, embedding) VALUES ('upgrade 106: UPK-9', ${{ source: "linear", issue: "UPK-9", status: "Kgdone", status_type: "kgdone" }}::jsonb, ${VEC}::vector) RETURNING id::text AS id`;
+  await sql`SELECT record_thought_source(${kdone}::uuid, 'linear', 'UPK-9', 'UPK-9', 'text/markdown')`;
+  const [sets0] = await sql`SELECT node_lifecycle_types() AS k, node_settled_types() AS st`;
+  const warm = new SQL({ url: URL_, max: 1 });
+  const demoted = async () => (((await warm`SELECT demoted FROM search_thoughts_current(${VEC}::vector, 'upgrade 106', 0, 10, '{}'::jsonb, 0, 30, NULL) WHERE id = ${kdone}::uuid`)[0] as { demoted: string[] | null } | undefined)?.demoted ?? null);
+  const warmBefore: (string[] | null)[] = [];
+  for (let i = 0; i < 8; i++) warmBefore.push(await demoted());
+  const setSql = (k: string[], st: string[]) => `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{${k.join(",")}}'::text[] $$;
+    CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{${st.join(",")}}'::text[] $$;`;
+  await sql.begin(async (tx: SQL) => {
+    await tx.unsafe(setSql([...(sets0.k as string[]), "kgdone"], [...(sets0.st as string[]), "kgdone"]));
+    await tx`SELECT ob1_refresh_set_readers()`;
+    await tx`SELECT * FROM ob1_rebuild_source_gate_for_types('{kgdone}')`;
+  });
+  const warmAfter = await demoted();
+  await warm.close();
+  const [g9] = await sql`SELECT gates FROM ob1_source_gate WHERE thought_id = ${kdone}::uuid`;
+  const [d9] = await sql`SELECT count(*)::int AS n FROM ob1_node_projection_drift()`;
+  assert(warmBefore.every((d) => d === null) && warmAfter?.join() === "kgdone" && g9.gates === true && d9.n === 0,
+    `a set change run as the recipe says — the set, ob1_refresh_set_readers(), the keyed rebuild — reaches a session that searched eight times before it (${JSON.stringify([warmBefore[0], warmAfter])}), and the gate follows with nothing drifting`);
+  // The sets as they were, by the same recipe.
+  await sql.begin(async (tx: SQL) => {
+    await tx.unsafe(setSql(sets0.k as string[], sets0.st as string[]));
+    await tx`SELECT ob1_refresh_set_readers()`;
+    await tx`SELECT * FROM ob1_rebuild_source_gate_for_types('{kgdone}')`;
+  });
+
   // A re-apply moves nothing.
   const rowsAgain = await rows(), mirrorAgain = await mirror(), auditsAgain = await audits();
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the106 });

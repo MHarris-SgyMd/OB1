@@ -258,7 +258,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2977 assertions: 2977 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2978 assertions: 2978 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports one hundred and six (106) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
@@ -1898,19 +1898,30 @@ rebuild relies on. At a million source rows a capture waited 1.39 s behind it
 against 8.9 s behind the full rebuild with 21,212 rows of the type, 29 ms
 against 6.2 s with 16. The full rebuild stays for repair after a write with
 triggers disabled, and its comment now names the keyed form; 071's own header is
-not edited. A migration that changes the set does two things after it, as 105
-did: the plan refresh (105's no-op ALTER of the brain's functions that name a
-set, 071's gate triggers among them) and `SELECT * FROM
-ob1_rebuild_source_gate_for_types('{<each type it adds or drops>}')`; a change
-to `node_settled_types()` alone needs only the first. `node_lifecycle_types()`'s
-comment says so, and check 39 of `scripts/check-fork-consistency.ts` holds the
-rebuild — the full one or the keyed one, after the set, the keyed calls naming
-exactly the types the change adds and drops. Refuses by name without 071; a
-re-apply is a no-op. test-schema [95] (a set change simulated each way: the
-moved type's rows fixed, an unrelated drift left for the full rebuild; empty,
-NULL, all-NULL and repeated types; the READ COMMITTED refusal), test-upgrade
-[20ax] (onto a populated brain; a status write and a source-row write wait for
-it).
+not edited. 106 also adds `ob1_refresh_set_readers()`, 105's `DO $touch$` block
+as a call: it alters each of the brain's own functions that name a set to the
+volatility it has, dropping every session's plans built on it, and returns how
+many — without it a pooled session, 071's gate triggers among them, keeps the
+old set, and `drift()` itself reads the old set there (12 phantom rows in a
+warmed session, review pass 3). A migration that changes
+`node_lifecycle_types()` runs, after the change, the lines `SELECT
+ob1_refresh_set_readers();` and `SELECT * FROM
+ob1_rebuild_source_gate_for_types('{<each type it adds or drops>}');`; a change
+to `node_settled_types()` alone runs only the first. Check 39 of
+`scripts/check-fork-consistency.ts` holds both for a lifecycle change, reading
+canonical forms only — the set as `'{…}'::text[]` in a line starting `CREATE OR
+REPLACE FUNCTION node_lifecycle_types()`, the two calls as lines after it — and
+reporting any other. What follows the set by hand (graph-centrality's
+`LIFECYCLE_TYPES` and `LIFECYCLE_FILTERS`, stated-status's `TYPE_WORDS`, and for
+a settled change render's `DEMOTIONS`) and the tests that pin it (test-schema
+[54] and [94], test-e2e-sql [22]) are named in `node_lifecycle_types()`'s
+comment, where the next change is made. Refuses by name without 071; a re-apply
+is a no-op. test-schema [95] (a set change simulated each way: the moved type's
+rows fixed, an unrelated drift left for the full rebuild; empty, NULL, all-NULL
+and repeated types; the READ COMMITTED refusal; the refresh altering every
+reader), test-upgrade [20ax] (onto a populated brain; a status write and a
+source-row write wait for it; a set change run by the recipe reaches a warmed
+session).
 
 ## What changed relative to the guide
 
@@ -5063,7 +5074,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2977 assertions, PGlite, no container
+bun test-schema.ts                          # 2978 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1465 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 895 assertions: one shard, as its Fork Checks job runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 57 assertions: the shards SHARDS lists in test-live.ts, each its own job
