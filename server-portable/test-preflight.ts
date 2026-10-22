@@ -4163,9 +4163,11 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
   const THREE = (s: string) => /host\.containers\.internal:11434\/v1/.test(s) && /host\.docker\.internal:11434\/v1/.test(s) && /--profile local-models/.test(s);
 
   // The measured baseline: the code's default inside a container is the
-  // container's own loopback, which reaches nothing. Refused → a warning
-  // (SMD-2890: a provider not up yet, which the server outlasts degraded),
-  // and the remedy says to start it, then what 127.0.0.1 is inside a
+  // container's own loopback, which reaches nothing — and there it still
+  // fails (startsDegraded; CI's image step holds that). This suite runs on
+  // the host, where a refused loopback is a warning (SMD-2890: a provider not
+  // up yet, which the server outlasts degraded), and the remedy says to start
+  // it, then what 127.0.0.1 is inside a
   // container, and names the three spellings. Exit 1 here is DB_DOWN's.
   const refused = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1" });
   assert(/^\s*!\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:1\/v1 yet — the connection was refused \(GET \/models, 2\.5 s timeout\); the server starts degraded — until it answers, a capture lands without its vector and untagged \(no topics, no type\) and a search answers by exact matches, and its keyed \/health and brain_info say the provider is unreachable; it re-probes every 15 s \(OB1_PROVIDER_REPROBE_INTERVAL\) and leaves degraded when it answers$/.test(row(refused.out, "provider endpoint")),
@@ -4174,7 +4176,7 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
          "…with the remedy to start it first, then the three spellings — the two host aliases and the stack's own service under its profile");
   // The knob's words on the row: off, and another interval.
   const reprobeOff = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1", OB1_PROVIDER_REPROBE_INTERVAL: "off" });
-  assert(/OB1_PROVIDER_REPROBE_INTERVAL is off, so it leaves degraded on the first call that is answered$/.test(row(reprobeOff.out, "provider endpoint")) && /✓\s+provider re-probe\s+off \(OB1_PROVIDER_REPROBE_INTERVAL\)/.test(reprobeOff.out),
+  assert(/OB1_PROVIDER_REPROBE_INTERVAL is off, so after its probe at start it leaves degraded on the first call that is answered$/.test(row(reprobeOff.out, "provider endpoint")) && /✓\s+provider re-probe\s+off \(OB1_PROVIDER_REPROBE_INTERVAL\)/.test(reprobeOff.out),
          "OB1_PROVIDER_REPROBE_INTERVAL=off: the row says only an answered call ends it, and the knob's own row says off");
   const reprobe5 = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1", OB1_PROVIDER_REPROBE_INTERVAL: "5" });
   assert(/it re-probes every 5 s \(OB1_PROVIDER_REPROBE_INTERVAL\)/.test(row(reprobe5.out, "provider endpoint")) && /✓\s+provider re-probe\s+every 5 s/.test(reprobe5.out),
@@ -4219,7 +4221,7 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
          "…and the remedy names the profile first, then the host aliases and a hosted provider");
   const withKey = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://ollama:1/v1", OPENROUTER_API_KEY: "sk-or-1234" });
   assert(withKey.code === 1 && new RegExp(String.raw`${ollamaResolves ? "!" : "✗"}\s+provider endpoint`).test(withKey.out) && /!\s+provider credential\s+a key is set but the endpoint is local/.test(withKey.out),
-         "a key set beside the fallback address (the URL line left commented) fails on the endpoint, where it used to warn about the key and say OK");
+         "a key set beside the fallback address (the URL line left commented) fails on the endpoint (warns, where the name resolves), where it used to warn about the key and say OK");
 
   // The host alias on a runtime that does not provide it, or with nothing on
   // the host: the remedy says which runtime provides which name, and that
@@ -4257,7 +4259,12 @@ console.log("\n[9] A local endpoint is dialled by default: a name that does not 
   assert(new RegExp(String.raw`✓\s+provider endpoint\s+${rx(ANSWERS)} answers — HTTP 404 to GET /models`).test(notFound.out), "a 4xx answer is an endpoint that answers — the API's behaviour is --deep's question");
   status = 500;
   const erroring = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: ANSWERS });
-  assert(/✓\s+provider endpoint\s+\S+ answers — HTTP 500/.test(erroring.out), "…and so is a 5xx");
+  // A 5xx, 408 or 429 is the provider there and not ready: a warning and a degraded start, as the runtime's probe reads it (review pass 2).
+  assert(/^\s*!\s+provider endpoint\s+\S+ answers, but not yet — HTTP 500 to GET \/models in \d+ ms; the server starts degraded/.test(row(erroring.out, "provider endpoint")) && /→ Wait for it, or read its log/.test(fix(erroring.out, "provider endpoint")),
+         `…while a 5xx is an endpoint not ready yet: a warning, the server started degraded (${row(erroring.out, "provider endpoint").slice(0, 160)})`);
+  status = 429;
+  const limited = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: ANSWERS });
+  assert(/!\s+provider endpoint\s+\S+ answers, but not yet — HTTP 429/.test(limited.out), "…and so is a 429");
   answering.stop(true);
 
   // One that accepts the connection and never answers: the timeout, in words,

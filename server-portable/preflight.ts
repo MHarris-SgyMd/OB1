@@ -37,7 +37,7 @@ import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
 import { mendIntervalFrom } from "./core/mend.ts";
-import { inContainer, PROVIDER_PROBE_TIMEOUT_MS, reprobeIntervalFrom, startsDegraded, type ProbeKind } from "./provider-health.ts";
+import { inContainer, isLoopback, PROVIDER_PROBE_TIMEOUT_MS, reprobeIntervalFrom, startsDegraded, type ProbeKind } from "./provider-health.ts";
 import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
 import { enabledHooks, hookSecrets, loadPlugins, pluginNames, pluginProblem } from "./core/plugins.ts";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -713,11 +713,11 @@ function probeRemedy(base: string, knob: string): string {
   if (LOCAL_PROVIDER_SERVICES.includes(host)) {
     return `\`${host}\` is the local-models profile's service and exists only under it: start the stack with --profile local-models, or set ${knob} to an Ollama on the host (${HOST_ALIASES}) or to a hosted provider with a key.`;
   }
-  if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]" || host === "0.0.0.0") {
+  if (isLoopback(host)) {
     return `Inside a container ${host} is the container itself, not the host: ${HOST_SPELLINGS}. From a shell on the host, start the provider or fix the port in ${knob}.`;
   }
   if (host === "host.docker.internal" || host === "host.containers.internal") {
-    return `Nothing on the host answers at that port, or this runtime does not provide the name: podman writes both names; Docker Desktop only host.docker.internal; Docker on Linux neither unless extra_hosts host-gateway is set, and deploy/compose.yaml sets it for host.docker.internal. Start the provider on the host and name it in ${knob} (${HOST_ALIASES}), or use the stack's own (${STACK_OWN}).`;
+    return `Nothing on the host answers at that port, or this runtime does not provide the name: podman writes both names; Docker Desktop only host.docker.internal; Docker on Linux neither unless extra_hosts host-gateway is set, and deploy/compose.yaml sets it for host.docker.internal. Start the provider on the host and name it in ${knob} (${HOST_ALIASES}), or use the stack's own (${STACK_OWN}). On Linux Docker the alias is the host's bridge address, so an Ollama there must listen on it, not only on 127.0.0.1 (OLLAMA_HOST; SETUP.md).`;
   }
   return `Start the provider at that address or fix the host and port in ${knob}; ${HOST_SPELLINGS}.`;
 }
@@ -793,7 +793,7 @@ const REPROBE = reprobeIntervalFrom(env.OB1_PROVIDER_REPROBE_INTERVAL);
 const SILENT_WAIT = "each first waiting on it up to the request timeout (OB1_LLM_TIMEOUT)";
 const DEGRADED = {
   embeddings: (silent: boolean) =>
-    `the server starts degraded — until it answers, a capture lands without its vector${chatIsOwn && chatEndpoint.base !== embEndpoint.base ? "" : " and untagged (no topics, no type)"} and a search answers by exact matches${silent ? `, ${SILENT_WAIT}` : ""}, and its keyed /health and brain_info say the provider is unreachable; ${REPROBE.intervalS > 0 ? `it re-probes every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) and leaves degraded when it answers` : "OB1_PROVIDER_REPROBE_INTERVAL is off, so it leaves degraded on the first call that is answered"}`,
+    `the server starts degraded — until it answers, a capture lands without its vector${chatIsOwn && chatEndpoint.base !== embEndpoint.base ? "" : " and untagged (no topics, no type)"} and a search answers by exact matches${silent ? `, ${SILENT_WAIT}` : ""}, and its keyed /health and brain_info say the provider is unreachable; ${REPROBE.intervalS > 0 ? `it re-probes every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) and leaves degraded when it answers` : "OB1_PROVIDER_REPROBE_INTERVAL is off, so after its probe at start it leaves degraded on the first call that is answered"}`,
   chat: (silent: boolean) =>
     `the server starts — until it answers, a capture lands untagged (no topics, no type)${silent ? `, ${SILENT_WAIT}` : ""}; the first capture it answers is tagged again`,
 };
@@ -815,7 +815,16 @@ async function probeLocal(row: string, at: ProviderEndpoint, knob: string, degra
     // included, under a row that names the base (first review pass).
     const r = await fetch(`${at.base}/models`, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(LOCAL_PROBE_TIMEOUT_MS) });
     await r.body?.cancel();
-    add(row, "ok", `${shown} answers — HTTP ${r.status} to GET /models in ${Math.max(1, Math.round(performance.now() - started))} ms; what it serves is checked under --deep`);
+    const ms = Math.max(1, Math.round(performance.now() - started));
+    // An outage's status (5xx, 408, 429) is the provider there and not ready — a
+    // server still loading, a proxy whose backend is down: the runtime's probe
+    // reads it as an outage, so the start does too (review pass 2).
+    if (r.status >= 500 || r.status === 408 || r.status === 429) {
+      add(row, "warn", `${shown} answers, but not yet — HTTP ${r.status} to GET /models in ${ms} ms; ${degraded(false)}`,
+          "Wait for it, or read its log for why it answers that; the server needs no restart.");
+      return;
+    }
+    add(row, "ok", `${shown} answers — HTTP ${r.status} to GET /models in ${ms} ms; what it serves is checked under --deep`);
   } catch (e) {
     const { kind, why, then } = probeFailure(e);
     const proxy = proxyKnobFor(at.base);
@@ -825,14 +834,16 @@ async function probeLocal(row: string, at: ProviderEndpoint, knob: string, degra
     // Resolved, dialled, and nothing there yet: a provider not up yet, which
     // the server outlasts degraded (SMD-2890); what is and is not, and why,
     // is startsDegraded's. A name that does not resolve fails above.
-    if (startsDegraded(kind, { host, proxy: proxy !== null, container: IN_CONTAINER })) {
+    // In a container the loopback is judged by what the name resolved to as well: an /etc/hosts alias for 127.0.0.1 is the container too (review pass 2).
+    const addresses = IN_CONTAINER ? await Bun.dns.lookup(host).then((rs) => rs.map((r) => r.address), () => [] as string[]) : [];
+    if (startsDegraded(kind, { host, proxy: proxy !== null, container: IN_CONTAINER, addresses })) {
       add(row, "warn", `nothing answers at ${shown} yet — ${why} (GET /models, ${LOCAL_PROBE_SECONDS} timeout); ${degraded(kind === "silent")}`,
           `Start the provider; the server needs no restart. If nothing is meant to answer there: ${probeRemedy(at.base, knob)}`);
       return;
     }
     // Failed only for being in a container: the loopback there is the container's own, where nothing will start.
     const ownLoopback = !proxy && startsDegraded(kind, { host, proxy: false, container: false });
-    const own = ownLoopback ? `; this is a container, and ${host} in it is the container itself, where nothing will start answering` : "";
+    const own = ownLoopback ? `; this is a container, and ${host} in it is the container itself, where nothing will start answering unless it shares another's network (a pod, network_mode)` : "";
     add(row, "fail", `${lead} (GET /models, ${LOCAL_PROBE_SECONDS} timeout)${route}${own}; ${then}`,
         (proxy ? `Add ${host} to NO_PROXY (and no_proxy) for the server, or unset ${proxy} for it. Otherwise: ` : "") + (kind === "tls" ? TLS_REMEDY : probeRemedy(at.base, knob)));
   }
@@ -980,7 +991,7 @@ if (env.OB1_VECTOR_MEND_INTERVAL !== undefined && env.OB1_VECTOR_MEND_INTERVAL !
 // The same for the re-probe (SMD-2890): only when set.
 if (env.OB1_PROVIDER_REPROBE_INTERVAL !== undefined && env.OB1_PROVIDER_REPROBE_INTERVAL !== "") {
   if (REPROBE.problem) add("provider re-probe", "warn", REPROBE.problem, "Set OB1_PROVIDER_REPROBE_INTERVAL to whole seconds from 1 to 3600, or off, or unset it for 15.");
-  else if (REPROBE.intervalS === 0) add("provider re-probe", "ok", "off (OB1_PROVIDER_REPROBE_INTERVAL) — a server serving degraded leaves it only when a call is answered (a capture's, a search's, the vector mender's)");
+  else if (REPROBE.intervalS === 0) add("provider re-probe", "ok", "off (OB1_PROVIDER_REPROBE_INTERVAL) — the servers probe once at start, and a server serving degraded leaves it only when a call is answered (a capture's, an edit's, a search's, the vector mender's)");
   else add("provider re-probe", "ok", `every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) while a local embedding provider does not answer — the servers leave degraded when it does`);
 }
 

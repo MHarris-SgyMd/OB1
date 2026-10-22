@@ -255,7 +255,8 @@ jobs:
       # two OB1 images with them, which proves the registry serves what was
       # pushed, under the job's token.
       # Since SMD-1875 preflight dials the provider address once (GET /models)
-      # and the container refuses to start when nothing answers, so the same
+      # and the container refuses to start on a name that does not resolve, or
+      # starts degraded where nothing answers yet (SMD-2890), so the same
       # listener the `Full stack, no Supabase` job puts on the runner stands in
       # for the provider here: the runner is the container's host.docker.internal
       # through compose.yaml's extra_hosts host-gateway, bound on every

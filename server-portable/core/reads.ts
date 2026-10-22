@@ -90,7 +90,7 @@ const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
   // Any other failure — a 4xx, a width mismatch — still fails the search, so
   // a misconfigured brain says so, as a capture does (SMD-2888).
   let embedding: number[];
-  const embedStarted = Date.now();
+  const embedStarted = performance.now();
   try {
     embedding = await ctx.embedder.getEmbedding(opts.query, q.subject, "query");
   } catch (e) {

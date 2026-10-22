@@ -259,7 +259,6 @@ const faultWords = (e: unknown): string => {
  * endpoint reads nothing.
  */
 export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolean = () => false): Promise<MendTick> {
-  const tickStarted = Date.now();
   const tick: MendTick = { skipped: false, refusedAll: null, mended: 0, degraded: 0, refused: 0, failed: 0, held: 0, raced: 0, down: null, recovered: false, over: false, lockKept: false, firstError: null, sweepEnded: false };
   const cfg0 = ctx.embedConfig();
   const everything = refusesEverything(cfg0.embeddings, cfg0.egress);
@@ -283,6 +282,8 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
   let freshOutages = 0;
   let outagesInARow = 0;
   let lastOutage: { reason: string; detail: string } | null = null;
+  /** When the call that met the last outage began (performance.now()): an answer seen since passes it over (SMD-2890). */
+  let lastOutageStarted = 0;
   // The provider answered a call of this tick: an outage that stood is over, and its holds go.
   const answer = () => {
     outagesInARow = 0;
@@ -322,6 +323,7 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
         const embedder = gate.blurbs ? ctx.embedder : (state.bare ??= createEmbedder(() => ({ ...ctx.embedConfig(), chunkContext: false })));
         embeddedRows++;
         let embedded;
+        const callStarted = performance.now();
         try {
           embedded = await embedder.embedCapture(row.content, gate.subject);
         } catch (e) {
@@ -335,6 +337,7 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
             hold(row.id, down.detail, true);
             outages++;
             lastOutage = down;
+            lastOutageStarted = callStarted;
             // Two in a row: the provider away, as far as this tick can tell — it stops, two calls spent.
             if (++outagesInARow >= 2) break outer;
             continue;
@@ -404,7 +407,7 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
     // OUTAGE_TICKS, the provider away.
     if (outages > 0 && !answered) {
       tick.down = lastOutage;
-      if (lastOutage) ctx.providerHealth.noteDown(lastOutage, { by: "call", startedAt: tickStarted });
+      if (lastOutage) ctx.providerHealth.noteDown(lastOutage, { by: "call", startedAt: lastOutageStarted });
       if (freshOutages > 0 && ++state.unanswered >= OUTAGE_TICKS) state.down = true;
     }
     return tick;

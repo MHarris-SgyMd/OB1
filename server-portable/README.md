@@ -175,15 +175,19 @@ after it is the return, said once (`… answers again`). A local endpoint (the
 local rule preflight dials by, below) is probed at start — so a server started
 with its provider down says so before any call — and, while it does not answer,
 every `OB1_PROVIDER_REPROBE_INTERVAL` seconds (15 unless set, 1 to 3600; `0` or
-`off` for none, when only a call that is answered ends it): `GET /models`, no
+`off` for the start's probe alone, when only a call that is answered ends it): `GET /models`, no
 credential, no redirect followed, 2.5 s, any HTTP answer the provider back but
 a 5xx, 408 or 429; an answering provider is not probed, and probes never
 overlap. The probe sees the socket and `/models`, not the call, so it ends
 only an outage it saw itself or a call's failed connection: a call's 5xx,
 timeout or broken body — a proxy that answers `/models` while its backend is
-down — ends only with a call that is answered (the mender's, at the latest).
-A call that began before the provider was last seen answering is not counted
-against it. A hosted endpoint is not probed — asking it
+down — ends only with a call that is answered: the next capture's, edit's,
+search's or mender tick's, so on a brain with no traffic it stands, and the
+`Provider` row says what ends it; the probe, which could not end it, skips
+it meanwhile. A probe's own outage on top of such an outage moves its time
+alone. A call that began before the provider was last seen answering is not
+counted against it (judged on the monotonic clock, so a wall-clock step
+changes nothing). A hosted endpoint is not probed — asking it
 costs a credential — and its state moves with real calls alone. A keyed
 `/health` (`provider`: `status` `unknown`, `answering` with `at`, or
 `unreachable` with `since`, `at`, the `reason` word and its `detail`; and
@@ -483,7 +487,7 @@ the latter is unset (`store.ts:databaseUrl`), and preflight says which variable
 supplied the string. An `https://` `SUPABASE_URL` is not a connection string,
 and preflight and the store's first use say so.
 
-Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, and on Bun `OB1_STOP_GRACE` (the platform's grace period for a stop, in whole seconds with no unit; default 10 — see Caveats), `OB1_VECTOR_MEND_INTERVAL` (seconds between the vector mender's ticks, 1 to 86400; default 60, `0` or `off` for none — see "The vector mender" above) and `OB1_PROVIDER_REPROBE_INTERVAL` (seconds between re-probes of a local embedding provider that does not answer, 1 to 3600; default 15, `0` or `off` for none — see "serving degraded" above).
+Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, and on Bun `OB1_STOP_GRACE` (the platform's grace period for a stop, in whole seconds with no unit; default 10 — see Caveats), `OB1_VECTOR_MEND_INTERVAL` (seconds between the vector mender's ticks, 1 to 86400; default 60, `0` or `off` for none — see "The vector mender" above) and `OB1_PROVIDER_REPROBE_INTERVAL` (seconds between re-probes of a local embedding provider that does not answer, 1 to 3600; default 15, `0` or `off` for the start's probe alone — see "serving degraded" above).
 
 On a container these are ordinary environment variables.
 

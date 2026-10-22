@@ -266,7 +266,7 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // mismatch — still fails the capture, so a misconfigured brain says so.
     let vectorFailed: { reason: string; detail: string } | undefined;
     // The provider's state, as every embedding call tells it (SMD-2890).
-    const embedStarted = Date.now();
+    const embedStarted = performance.now();
     const [embedded, metadata, genre] = await Promise.all([
       gate.embeddings.allowed
         ? ctx.embedder.embedCapture(content, subject).then((v) => {
@@ -589,7 +589,7 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id, conten
   const subject: EgressSubject = { kind: "edit", actor: principal.name, metadata: existing?.metadata ?? { source: "mcp" }, content };
   const gate = content !== undefined ? decideCalls(subject, cfg, cfg.egress) : undefined;
   // An edit whose provider does not answer is still refused whole; the provider's state hears it either way (SMD-2890, review pass 1).
-  const embedStarted = Date.now();
+  const embedStarted = performance.now();
   const embedded = content !== undefined && gate?.embeddings.allowed
     ? await ctx.embedder.embedCapture(content, subject).then((v) => { heardFrom(ctx.providerHealth, embedStarted); return v; }, (e: unknown) => { heardFrom(ctx.providerHealth, embedStarted, e); throw e; })
     : undefined;

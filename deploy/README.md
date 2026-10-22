@@ -95,7 +95,8 @@ dialled, so the stack came up `preflight OK` and the first capture failed on it
 A name that resolves with nothing answering yet is the other case: an Ollama
 on the host not started yet, or the profile's container still starting. The row warns, and
 the server starts degraded: captures land without their vectors, searches
-answer by exact matches, and keyed `/health` says `unreachable since`. It
+answer by exact matches, and keyed `/health` (`provider.status`, `since`) and
+`brain_info` (`Provider: unreachable since …`) say so. It
 re-probes every `OB1_PROVIDER_REPROBE_INTERVAL` seconds (15) and leaves
 degraded when the provider answers, with no restart (SMD-2890).
 
