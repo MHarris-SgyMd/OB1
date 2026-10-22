@@ -1205,82 +1205,123 @@ jobs:
           [ "$CODE" -eq 1 ] || { echo "preflight exited $CODE, expected 1" >&2; cat /tmp/negative.out >&2; exit 1; }
           docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun server preflight.ts | grep -F 'preflight OK'
 
-      # SMD-2424: the workers profile's own command, run for real against
-      # this stack (its database is up; --no-deps starts nothing else). The
-      # `sh -c` refuses without a worker key and on a setting that is not
-      # digits — `--status` as a value once reached the CLI as a flag, ran
-      # and exited 0 — both exit 2 before bun starts; and a well-formed
-      # setting gets as far as the worker, whose own refusal proves the exec
-      # and the arguments were taken: SMD-2599's start probe, which a
-      # --follow worker makes before it registers a key or claims anything,
-      # and which this stack's provider stub (embeddings only, a bare 404
-      # for chat) refuses with exit 2.
-      - name: The workers profile refuses before it starts a follower
+      # SMD-2424, SMD-3214: the workers profile's own command, run for real
+      # against this stack (its database is up; --no-deps starts nothing
+      # else), detached, as the service runs. db/supervise.ts, the command,
+      # holds without a worker key and on a setting that is not digits —
+      # `--status` as a value once reached the CLI as a flag, ran and exited 0
+      # — and starts no follower; a well-formed setting gets as far as the
+      # worker, whose own refusal proves the exec and the arguments were
+      # taken: SMD-2599's start probe, which a --follow worker makes before it
+      # registers a key or claims anything, and which this stack's provider
+      # stub (embeddings only, a bare 404 for chat) refuses with exit 2 — and
+      # the supervisor holds that too, to run it again in a minute. Each case
+      # is still running once its line is logged — the container does not
+      # exit, so `unless-stopped` has nothing to restart in a loop — and a
+      # stop ends it promptly with 0.
+      - name: The workers profile holds a refusal rather than exiting
         working-directory: deploy
         run: |
           # Nothing else in this stack runs the workers' image: pull it first,
           # so the bound below times the command, not Docker Hub.
           docker compose -f compose.yaml --profile workers pull --quiet extract consolidate
-          # Bounded: a refusal that regressed starts a follower, which never exits.
-          worker() { local svc=$1; shift; set +e; timeout 120 docker compose -f compose.yaml --profile workers run --rm --no-deps -T "$@" "$svc" > /tmp/worker.out 2>&1; CODE=$?; set -e; }
-          hold() { if ! grep -qF -- "$1" /tmp/worker.out || [ "$CODE" -ne 2 ]; then echo "--- expected exit 2 and \"$1\"; got $CODE: ---" >&2; cat /tmp/worker.out >&2; exit 1; fi; }
-          worker extract -e OB1_WORKER_KEY=
-          hold 'extract: OB1_WORKER_KEY is not set in deploy/.env'
-          worker consolidate -e OB1_WORKER_KEY=
-          hold 'consolidate: OB1_WORKER_KEY is not set in deploy/.env'
-          worker extract -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=--status
-          hold "OB1_EXTRACT_FOLLOW ('--status') and OB1_EXTRACT_WORKERS ('') take digits only"
-          worker consolidate -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_WORKERS='1 --limit 1'
-          hold "take digits only"
-          # …and each variable is checked, not only the pair's first.
-          worker consolidate -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_FOLLOW=--status
-          hold "OB1_CONSOLIDATE_FOLLOW ('--status') and OB1_CONSOLIDATE_WORKERS ('') take digits only"
-          worker extract -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_WORKERS='1 --limit 1'
-          hold "OB1_EXTRACT_FOLLOW ('') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only"
-          worker extract -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=30
-          hold 'A --follow worker refuses this before it claims anything (SMD-2599)'
-          worker consolidate -e OB1_WORKER_KEY=not-a-key
-          hold 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
+          before="$(q "SELECT key FROM ob1_config WHERE key LIKE 'heartbeat:%'")"
+          # Bounded: each case waits up to 60 s for its line, then is stopped.
+          held() {
+            local svc=$1 want=$2; shift 2
+            local ct="ci-held-$svc-$RANDOM"
+            docker compose -f compose.yaml --profile workers run -d --no-deps --name "$ct" "$@" "$svc" > /dev/null
+            for _ in $(seq 1 30); do docker logs "$ct" 2>&1 | grep -qF -- "$want" && break; sleep 2; done
+            sleep 2
+            docker logs "$ct" > /tmp/held.out 2>&1
+            local running took code
+            running="$(docker inspect -f '{{.State.Running}}' "$ct")"
+            took=$(date +%s); docker stop -t 30 "$ct" > /dev/null; took=$(( $(date +%s) - took ))
+            code="$(docker inspect -f '{{.State.ExitCode}}' "$ct")"
+            docker rm "$ct" > /dev/null
+            if ! grep -qF -- "$want" /tmp/held.out || [ "$running" != true ] || [ "$code" != 0 ] || [ "$took" -gt 15 ]; then
+              echo "--- expected \"$want\", still running after it, then exit 0 within 15 s of a stop; got running=$running, exit $code after ${took} s: ---" >&2; cat /tmp/held.out >&2; exit 1
+            fi
+          }
+          also() { grep -qF -- "$1" /tmp/held.out || { echo "--- expected \"$1\" too: ---" >&2; cat /tmp/held.out >&2; exit 1; }; }
+          held extract 'extract: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          also 'supervise: extract is held, not started'
+          held consolidate 'consolidate: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          held extract "extract: OB1_EXTRACT_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=--status
+          held consolidate "consolidate: OB1_CONSOLIDATE_WORKERS ('1 --limit 1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_WORKERS='1 --limit 1'
+          # …and each setting is checked, not only the pair's first.
+          held consolidate "consolidate: OB1_CONSOLIDATE_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_FOLLOW=--status
+          held extract "extract: OB1_EXTRACT_FOLLOW ('x') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=x -e OB1_EXTRACT_WORKERS='1 --limit 1'
+          held extract 'supervise: extract exited 2' -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=30
+          also 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          also 'it runs again at'
+          held consolidate 'supervise: consolidate exited 2' -e OB1_WORKER_KEY=not-a-key
+          also 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          # The held rows the cases wrote go, leaving this stack's later steps the brain they had.
+          for k in $(q "SELECT key FROM ob1_config WHERE key LIKE 'heartbeat:%'"); do
+            printf '%s\n' "$before" | grep -qxF -- "$k" || q "DELETE FROM ob1_config WHERE key = '$k'"
+          done
 
-      # SMD-2678: the sleep profile's own command, the same way. Its `sh -c`
-      # refuses without a worker key and on each setting that is not digits;
-      # a well-formed one reaches the scheduler, whose own refusals prove the
-      # exec and the arguments were taken — --poll past a minute, and a claim
-      # follower's fresh heartbeat in this stack's database, beside which it
-      # will not sleep (the two profiles are alternatives), which also proves
-      # it reaches the database on the server's environment.
-      - name: The sleep profile refuses before it sleeps
+      # SMD-2678, SMD-3214: the sleep profile's own command, the same way. Its
+      # supervisor holds without a worker key and on each setting that is not
+      # digits, and ends heartbeat:sleep with the refusal and no next try, so
+      # preflight says the recreate it waits for; a well-formed setting
+      # reaches the scheduler, whose own refusals prove the exec and the
+      # arguments were taken — --poll past a minute, and a claim follower's
+      # fresh heartbeat in this stack's database, beside which it will not
+      # sleep (the two profiles are alternatives), which also proves it
+      # reaches the database on the server's environment — each held, to run
+      # again in a minute.
+      - name: The sleep profile holds a refusal rather than exiting
         working-directory: deploy
         run: |
-          sleeper() { set +e; timeout 120 docker compose -f compose.yaml --profile sleep run --rm --no-deps -T "$@" sleep > /tmp/sleep.out 2>&1; CODE=$?; set -e; }
-          hold() { if ! grep -qF -- "$1" /tmp/sleep.out || [ "$CODE" -ne 2 ]; then echo "--- expected exit 2 and \"$1\"; got $CODE: ---" >&2; cat /tmp/sleep.out >&2; exit 1; fi; }
           q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
-          sleeper -e OB1_WORKER_KEY=
-          hold 'sleep: OB1_WORKER_KEY is not set in deploy/.env'
-          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_QUIET=--status
-          hold "sleep: OB1_SLEEP_QUIET ('--status'), OB1_SLEEP_POLL ('') and OB1_SLEEP_WORKERS ('') take digits only"
-          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL='1 --dry-run'
-          hold "OB1_SLEEP_POLL ('1 --dry-run') and OB1_SLEEP_WORKERS ('') take digits only"
-          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
-          hold "OB1_SLEEP_WORKERS ('-1') take digits only"
-          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
-          hold '--poll must be'
-          # SMD-2679: the budget's four settings, a guard of their own, and the
-          # flag each reaches — a clock past a week refused by the scheduler.
-          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
-          hold "sleep: OB1_SLEEP_BUDGET ('60m'), OB1_SLEEP_STATEMENT_TIMEOUT (''), OB1_SLEEP_WORK_MEM ('') and OB1_SLEEP_MAINTENANCE_WORK_MEM ('') take digits only"
-          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=10081
-          hold '--budget must be a decimal integer >= 0 and <= 10080'
-          q "INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:ci-outside@p2', '{\"v\":1,\"job\":\"extract:ci-outside@p2\",\"every_s\":60,\"running\":false,\"outcome\":\"ok\"}')"
-          sleeper -e OB1_WORKER_KEY=not-a-key
-          q "DELETE FROM ob1_config WHERE key = 'heartbeat:extract:ci-outside@p2'"
-          hold 'refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:ci-outside@p2'
-          # The refusal ends heartbeat:sleep on a failure, so preflight's sleep
-          # row names the followers keeping it down; then the row goes, leaving
-          # this stack's later steps the brain they had.
-          stamped="$(q "SELECT (value::jsonb->>'outcome') || ':' || (value::jsonb->>'ended') FROM ob1_config WHERE key = 'heartbeat:sleep'")"
+          held() {
+            local want=$1; shift
+            local ct="ci-held-sleep-$RANDOM"
+            docker compose -f compose.yaml --profile sleep run -d --no-deps --name "$ct" "$@" sleep > /dev/null
+            for _ in $(seq 1 30); do docker logs "$ct" 2>&1 | grep -qF -- "$want" && break; sleep 2; done
+            sleep 2
+            docker logs "$ct" > /tmp/held.out 2>&1
+            local running took code
+            running="$(docker inspect -f '{{.State.Running}}' "$ct")"
+            took=$(date +%s); docker stop -t 30 "$ct" > /dev/null; took=$(( $(date +%s) - took ))
+            code="$(docker inspect -f '{{.State.ExitCode}}' "$ct")"
+            docker rm "$ct" > /dev/null
+            if ! grep -qF -- "$want" /tmp/held.out || [ "$running" != true ] || [ "$code" != 0 ] || [ "$took" -gt 15 ]; then
+              echo "--- expected \"$want\", still running after it, then exit 0 within 15 s of a stop; got running=$running, exit $code after ${took} s: ---" >&2; cat /tmp/held.out >&2; exit 1
+            fi
+          }
+          also() { grep -qF -- "$1" /tmp/held.out || { echo "--- expected \"$1\" too: ---" >&2; cat /tmp/held.out >&2; exit 1; }; }
+          row() { q "SELECT concat_ws(':', value::jsonb->>'outcome', value::jsonb->>'ended', value::jsonb->>'refused', value::jsonb#>>'{restart,in_s}', value::jsonb#>>'{restart,code}') FROM ob1_config WHERE key = 'heartbeat:sleep'"; }
+          held 'sleep: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          stamped="$(row)"
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
-          [ "$stamped" = "failed:true" ] || { echo "--- expected heartbeat:sleep ended on a failure; got '$stamped' ---" >&2; exit 1; }
+          # concat_ws skips the null in_s: held for a recreate, no next try.
+          [ "$stamped" = "failed:true:identity:2" ] || { echo "--- expected heartbeat:sleep ended, refused (identity), no next try; got '$stamped' ---" >&2; exit 1; }
+          held "sleep: OB1_SLEEP_QUIET ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_QUIET=--status
+          held "sleep: OB1_SLEEP_POLL ('1 --dry-run') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL='1 --dry-run'
+          held "sleep: OB1_SLEEP_WORKERS ('-1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
+          held '--poll must be' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
+          also 'supervise: sleep exited 2'
+          # SMD-2679: the budget's four settings, each guarded, and the flag
+          # each reaches — a clock past a week refused by the scheduler.
+          held "sleep: OB1_SLEEP_BUDGET ('60m') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
+          held "sleep: OB1_SLEEP_MAINTENANCE_WORK_MEM ('64MB') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_MAINTENANCE_WORK_MEM=64MB
+          held '--budget must be a decimal integer >= 0 and <= 10080' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=10081
+          q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
+          q "INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:ci-outside@p2', '{\"v\":1,\"job\":\"extract:ci-outside@p2\",\"every_s\":60,\"running\":false,\"outcome\":\"ok\"}')"
+          held 'supervise: sleep exited 2' -e OB1_WORKER_KEY=not-a-key
+          q "DELETE FROM ob1_config WHERE key = 'heartbeat:extract:ci-outside@p2'"
+          also 'refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:ci-outside@p2'
+          # The refusal ends heartbeat:sleep on a failure, and the supervisor
+          # adds its next try, so preflight's sleep row says it is held and
+          # names the followers keeping it down; then the row goes, leaving
+          # this stack's later steps the brain they had.
+          stamped="$(row)"
+          q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
+          [ "$stamped" = "failed:true:60:2" ] || { echo "--- expected heartbeat:sleep ended on a failure, its next try in 60 s after exit 2; got '$stamped' ---" >&2; exit 1; }
 
       # SMD-1844. An address-less mapping binds 0.0.0.0; this stack holds a brain
       # behind one password and one key over plain HTTP. Read compose's own
@@ -1399,23 +1440,26 @@ jobs:
           # keep the key list the worker names itself by (board-sync blanks
           # it), are handed the worker key, mount the checkout read-only,
           # reach a host model by the host alias, wait for the schema, keep
-          # their grace periods (120 s, 60 s), and stop after three refusals
-          # rather than loop; take no plugin knob — the plugin login role's
+          # their grace periods (120 s, 60 s), and come back after a reboot
+          # through db/supervise.ts, which holds a refusal rather than loop
+          # (SMD-3214); take no plugin knob — the plugin login role's
           # password is the two servers' and the migrator's (SMD-2310); and
-          # each command's last line is exactly its
+          # each command is the supervisor with the key guard, the worker's
+          # two settings guarded digits only, and a --run of exactly its
           # worker's exec'd --follow, so no flag (a --switch-key would lift
-          # the model-change refusal) rides along. The refusals themselves
-          # are run, by the step above.
+          # the model-change refusal) rides along. The holds themselves are
+          # run, by the step above.
           docker compose -f compose.yaml --profile workers config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully") and .services.extract.stop_grace_period == "2m0s" and .services.consolidate.stop_grace_period == "1m0s" and (.services.extract.command[2] | test("\nexec bun db/extract-entities\\.ts --follow \\$+\\{OB1_EXTRACT_FOLLOW:\\+\"\\$+OB1_EXTRACT_FOLLOW\"\\} --workers \"\\$+\\{OB1_EXTRACT_WORKERS:-1\\}\"\n?$")) and (.services.consolidate.command[2] | test("\nexec bun db/consolidate\\.ts --follow \\$+\\{OB1_CONSOLIDATE_FOLLOW:\\+\"\\$+OB1_CONSOLIDATE_FOLLOW\"\\} --workers \"\\$+\\{OB1_CONSOLIDATE_WORKERS:-1\\}\"\n?$"))'
+            | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully") and .services.extract.stop_grace_period == "2m0s" and .services.consolidate.stop_grace_period == "1m0s" and (.services.extract.command[:9] == ["bun", "db/supervise.ts", "--worker", "extract", "--require-key", "--digits", "OB1_EXTRACT_FOLLOW", "OB1_EXTRACT_WORKERS", "--run"] and (.services.extract.command | length == 10) and (.services.extract.command[9] | test("^exec bun db/extract-entities\\.ts --follow \\$+\\{OB1_EXTRACT_FOLLOW:\\+\"\\$+OB1_EXTRACT_FOLLOW\"\\} --workers \"\\$+\\{OB1_EXTRACT_WORKERS:-1\\}\"$"))) and (.services.consolidate.command[:9] == ["bun", "db/supervise.ts", "--worker", "consolidate", "--require-key", "--digits", "OB1_CONSOLIDATE_FOLLOW", "OB1_CONSOLIDATE_WORKERS", "--run"] and (.services.consolidate.command | length == 10) and (.services.consolidate.command[9] | test("^exec bun db/consolidate\\.ts --follow \\$+\\{OB1_CONSOLIDATE_FOLLOW:\\+\"\\$+OB1_CONSOLIDATE_FOLLOW\"\\} --workers \"\\$+\\{OB1_CONSOLIDATE_WORKERS:-1\\}\"$")))'
           # SMD-2678: the sleep profile's service holds the same, and more of
           # its own: init (bun as PID 1 ignores SIGTERM until its handlers are
           # in, SMD-2666), the extract service's grace (120 s), its seven
-          # settings handed in — the budget's four since SMD-2679 — the key
-          # guard as its command's first line, and its last exactly the
-          # scheduler's exec'd --follow with them.
+          # settings handed in — the budget's four since SMD-2679 — and its
+          # command the supervisor with the key guard and all seven guarded
+          # digits only, its --run exactly the scheduler's exec'd --follow
+          # with them (SMD-3214).
           docker compose -f compose.yaml --profile sleep config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and (.services.sleep | (has("ports") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_POLL") and has("OB1_SLEEP_WORKERS") and has("OB1_SLEEP_BUDGET") and has("OB1_SLEEP_STATEMENT_TIMEOUT") and has("OB1_SLEEP_WORK_MEM") and has("OB1_SLEEP_MAINTENANCE_WORK_MEM")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and (.command[2] | test("^\\[ -n \"\\$+OB1_WORKER_KEY\" \\] \\|\\| ") and test("\nexec bun db/sleep\\.ts --follow --quiet \"\\$+\\{OB1_SLEEP_QUIET:-300\\}\" --poll \"\\$+\\{OB1_SLEEP_POLL:-5\\}\" --workers \"\\$+\\{OB1_SLEEP_WORKERS:-1\\}\" --budget \"\\$+\\{OB1_SLEEP_BUDGET:-60\\}\" --statement-timeout \"\\$+\\{OB1_SLEEP_STATEMENT_TIMEOUT:-300\\}\" --work-mem \"\\$+\\{OB1_SLEEP_WORK_MEM:-4\\}\" --maintenance-work-mem \"\\$+\\{OB1_SLEEP_MAINTENANCE_WORK_MEM:-64\\}\"\n?$")))'
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.sleep | (has("ports") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_POLL") and has("OB1_SLEEP_WORKERS") and has("OB1_SLEEP_BUDGET") and has("OB1_SLEEP_STATEMENT_TIMEOUT") and has("OB1_SLEEP_WORK_MEM") and has("OB1_SLEEP_MAINTENANCE_WORK_MEM")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and .command[:14] == ["bun", "db/supervise.ts", "--worker", "sleep", "--require-key", "--digits", "OB1_SLEEP_QUIET", "OB1_SLEEP_POLL", "OB1_SLEEP_WORKERS", "OB1_SLEEP_BUDGET", "OB1_SLEEP_STATEMENT_TIMEOUT", "OB1_SLEEP_WORK_MEM", "OB1_SLEEP_MAINTENANCE_WORK_MEM", "--run"] and (.command | length == 15) and (.command[14] | test("^exec bun db/sleep\\.ts --follow --quiet \"\\$+\\{OB1_SLEEP_QUIET:-300\\}\" --poll \"\\$+\\{OB1_SLEEP_POLL:-5\\}\" --workers \"\\$+\\{OB1_SLEEP_WORKERS:-1\\}\" --budget \"\\$+\\{OB1_SLEEP_BUDGET:-60\\}\" --statement-timeout \"\\$+\\{OB1_SLEEP_STATEMENT_TIMEOUT:-300\\}\" --work-mem \"\\$+\\{OB1_SLEEP_WORK_MEM:-4\\}\" --maintenance-work-mem \"\\$+\\{OB1_SLEEP_MAINTENANCE_WORK_MEM:-64\\}\"$")))'
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api forwarder mcp migrate postgres proxy server " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'
