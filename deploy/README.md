@@ -960,9 +960,9 @@ misconfigured deployment crashloops, which is visible, instead of looking health
 which is not. `preflight.ts --json` suits a pipeline gate; `--deep` also calls
 OpenRouter and checks the embedding width still matches the schema.
 
-One check that matters most on a managed database: `vector extension`. If the
-provider installed pgvector into a schema off the connection's `search_path`
-(Supabase uses `extensions`), the bare `vector` type does not resolve and every
+One check that matters most on a database brought from a provider (a dump
+restored from Supabase, say): `vector extension`. If pgvector sits in a schema
+off the connection's `search_path` (Supabase uses `extensions`), the bare `vector` type does not resolve and every
 capture and search would fail with `type "vector" does not exist` on a database
 that has pgvector. Preflight fails with the schema it found and the exact
 statement to run: the login role's `ALTER ROLE … IN DATABASE … SET search_path`,

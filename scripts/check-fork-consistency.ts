@@ -252,7 +252,8 @@
  *      platform's deploy (`kubectl`, `helm install|upgrade`, `fly`/`flyctl
  *      deploy|launch`, `deployctl`, `gcloud run deploy`, `railway up`, `docker
  *      stack deploy`, `docker service create`, `podman kube play`, `oc
- *      apply`); probes
+ *      apply|new-app`); a package manager's `dev` or `start` there (`cd`,
+ *      `--cwd`, `--prefix`, `-C`); probes
  *  23. every workflow under .github/workflows/ names its runner image — no
  *      `-latest` label in any case or size, no expression — and pins every
  *      `uses:` (a step's, or a job's reusable workflow) to a full commit SHA
@@ -5327,31 +5328,40 @@ const BRAIN_ENTRY = String.raw`["'\x60]?${BRAIN_DIR}\/(?:index|api)\.[jt]s\b`;
 const BARE_ENTRY = String.raw`(?<![\w/.-])(?:\.\/)?(?:index|api)\.[jt]s\b`;
 /** A runtime that would start it, as a word: not `bun build`, `bun test` or `bun install`, which start nothing. */
 const RUNTIME = String.raw`\b(?:bun|node|deno|tsx|pm2\s+start)\b(?!\s+(?:build|test|install)\b)`;
+/** A quoted value, either quote. */
+const QUOTED = String.raw`(?:"[^"\n]*"|'[^'\n]*')`;
 /**
- * Flags and `run`. Each splits one way: a flag's name starts with a word
- * character after its dashes (`--?[\w-]+` read `--a` as `--` `a` or `-` `-a`),
- * a value after a space starts with neither `-` nor the word `run`, and a bare
- * `--` ends the flags (`pm2 start bun -- …`). Two ways a word, thirty words
- * ran past Bun's backtracking limit and the match returned false.
+ * Flags, `run` and `watch` (`tsx watch`). Each splits one way: a flag's name
+ * starts with a word character after its dashes (`--?[\w-]+` read `--a` as
+ * `--` `a` or `-` `-a`); a value after `=` is quoted or runs to the next space
+ * (commas in it: `--allow-env=PORT,DATABASE_URL`); a value after a space is
+ * quoted, or starts with neither `-` nor the words `run` and `watch`; and a
+ * bare `--` ends the flags (`pm2 start bun -- …`). Two ways a word, thirty
+ * words ran past Bun's backtracking limit and the match returned false.
  */
-const FLAGS = String.raw`(?:\s+(?:--?\w[\w-]*(?:=${PATH_CHAR}*|\s(?!run\b)[^\s"'\x60|;&,-]${PATH_CHAR}*)?|--|run))*?`;
-/** A package script that runs the entry (server-portable's `dev` is `bun --watch index.ts`), by any package manager. */
-const DEV_RUN = String.raw`(?:bun|npm|pnpm|yarn)\s+(?:run\s+)?(?:dev|start)\b`;
+const FLAGS = String.raw`(?:\s+(?:--?\w[\w-]*(?:=(?:${QUOTED}|[^\s"'\x60|;&]*)|\s(?:${QUOTED}|(?!(?:run|watch)\b)[^\s"'\x60|;&,-]${PATH_CHAR}*))?|--|run|watch))*?`;
+/** A package script that runs the entry (server-portable's `dev` is `bun --watch index.ts`): `dev` or `start`, not `dev:docs` or `start-db`. */
+const SCRIPT = String.raw`(?:dev|start)(?![\w:-])`;
+const DEV_RUN = String.raw`(?:bun|npm|pnpm|yarn)\s+(?:run\s+)?${SCRIPT}`;
 /** The flags, up to the path. */
 const ARGS = String.raw`${FLAGS}\s+`;
+/** One character of the commands after a `cd`, or an `&&`: `;` too, but never into another `cd` or `pushd`. One unit a character, so the steps split one way. */
+const STEP = String.raw`(?:(?!\b(?:cd|pushd)\b)[^\n|&]|&&)`;
 const OUTSIDE_COMPOSE = [
   // bun server-portable/index.ts, PORT=8000 bun run ./mcp-server/index.ts, ExecStart=/usr/bin/bun /opt/ob1/server-portable/index.ts
   new RegExp(RUNTIME + ARGS + BRAIN_ENTRY),
-  // cd server-portable && bun install && bun index.ts, cd mcp-server; PORT=8001 bun --watch index.ts, cd server-portable && npm run dev
-  new RegExp(String.raw`\bcd\s+${BRAIN_DIR}\/?\s*(?:&&|;)(?:[^\n|;&]|&&)*?(?:` + RUNTIME + String.raw`(?:[^\n|;&]|&&)*?${BARE_ENTRY}|\b${DEV_RUN})`),
+  // cd server-portable && bun install; bun index.ts, cd mcp-server; PORT=8001 bun --watch index.ts, cd "server-portable" && npm run dev
+  new RegExp(String.raw`\b(?:cd|pushd)\s+["']?${BRAIN_DIR}\/?["']?\s*(?:&&|;)${STEP}*?(?:` + RUNTIME + String.raw`${STEP}*?${BARE_ENTRY}|\b${DEV_RUN})`),
   // bun --cwd mcp-server index.ts, bun --cwd server-portable run dev, bun run --cwd server-portable dev
-  new RegExp(RUNTIME + FLAGS + String.raw`\s+--cwd[= ]${BRAIN_DIR}\/?` + ARGS + String.raw`(?:${BARE_ENTRY}|(?:run\s+)?(?:dev|start)\b)`),
-  // the server image alone: docker run … ob1-server, with no --entrypoint on the line
-  /\b(?:docker|podman)\s+run\b(?![^\n]*--entrypoint)[^\n]*\b(?:ob1|open-brain)-server\b/,
+  new RegExp(RUNTIME + FLAGS + String.raw`\s+--cwd[= ]${BRAIN_DIR}\/?` + ARGS + String.raw`(?:${BARE_ENTRY}|(?:run\s+)?${SCRIPT})`),
+  // a package manager's script there: npm --prefix server-portable run dev, npm run dev --prefix …, yarn --cwd … dev, pnpm -C … start
+  new RegExp(String.raw`\b(?:npm|pnpm|yarn)\b(?=[^\n|;&]*\s(?:--prefix|--cwd|--dir|-C)[= ]["']?${BRAIN_DIR}(?![\w-]))(?=[^\n|;&]*\s(?:run\s+)?${SCRIPT})`),
+  // the server image alone: docker run … ob1-server, docker container run, docker create, with no --entrypoint on the line
+  /\b(?:docker|podman)\s+(?:container\s+)?(?:run|create)\b(?![^\n]*--entrypoint)[^\n]*\b(?:ob1|open-brain)-server(?![\w-])/,
   // the image with a runtime for its entrypoint and the server's entry: docker run --entrypoint bun <image> index.ts
-  new RegExp(String.raw`\b(?:docker|podman)\s+run\b[^\n]*?--entrypoint[= ]["']?(?:\S*\/)?(?:bun|node)\b[^\n]*?(?:${BRAIN_ENTRY}|\s(?:\.\/)?(?:index|api)\.[jt]s\b)`),
+  new RegExp(String.raw`\b(?:docker|podman)\s+(?:container\s+)?(?:run|create)\b[^\n]*?--entrypoint[= ]["']?(?:\S*\/)?(?:bun|node)\b[^\n]*?(?:${BRAIN_ENTRY}|\s["']?(?:\.\/)?(?:index|api)\.[jt]s\b)`),
   // a cluster or a platform's deploy
-  /\bkubectl\b|\bhelm\s+(?:install|upgrade)\b|\b(?:fly|flyctl)\s+(?:deploy|launch)\b|\bdeployctl\b|\bgcloud\s+run\s+deploy\b|\brailway\s+up\b|\bdocker\s+(?:stack\s+deploy|service\s+create)\b|\bpodman\s+kube\s+play\b|\boc\s+(?:apply|new-app)\b/,
+  /\bkubectl\b|\bhelm\s+(?:install|upgrade)\b|\b(?:fly|flyctl)\s+(?:deploy|launch)\b|\bdeployctl\b|\bgcloud\s+run\s+deploy\b|\brailway\s+up\b|\bdocker\s+(?:stack\s+deploy|service\s+create)\b|\bpodman\s+(?:kube\s+play|play\s+kube)\b|\boc\s+(?:apply|new-app)\b/,
 ];
 /** A doc's lines with shell continuations (a trailing `\`) joined, each at its first line's number. */
 function joinedLines(text: string): [number, string][] {
@@ -5382,9 +5392,17 @@ const OUTSIDE_COMPOSE_PROBES: [string, boolean][] = [
   [`bun${" --a b".repeat(30)} ; bun server-portable/index.ts`, true],
   [`bun${" --a run".repeat(30)} ; bun server-portable/index.ts`, true],
   ["pm2 start bun -- server-portable/index.ts", true],
+  ["tsx watch server-portable/index.ts", true],
+  ['bun --env-file ".env.local" server-portable/index.ts', true],
+  ["node --require './otel.js' server-portable/index.js", true],
+  ["deno run --allow-env=PORT,DATABASE_URL server-portable/index.ts", true],
   ["pm2 start server-portable/index.ts --interpreter bun", true],
   ["cd server-portable && bun index.ts", true],
   ["cd server-portable && bun ./index.ts", true],
+  ["cd mcp-server; bun install; bun index.ts", true],
+  ["cd server-portable && bun install; bun index.ts", true],
+  ['cd "server-portable" && bun index.ts', true],
+  ["pushd mcp-server && bun index.ts", true],
   ["cd mcp-server; bun --watch index.ts", true],
   ["cd mcp-server && OB1_REST_URL=http://api:8000 bun index.ts", true],
   ["cd server-portable && bun install && bun index.ts", true],
@@ -5395,13 +5413,20 @@ const OUTSIDE_COMPOSE_PROBES: [string, boolean][] = [
   ["bun --cwd mcp-server index.ts", true],
   ["bun --cwd server-portable run dev", true],
   ["bun run --cwd server-portable dev", true],
+  ["npm --prefix server-portable run dev", true],
+  ["npm run dev --prefix server-portable", true],
+  ["yarn --cwd server-portable dev", true],
+  ["pnpm -C mcp-server start", true],
   ["docker run -p 8000:8000 ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
   ["podman run --rm -e MCP_ACCESS_KEYS ob1-server", true],
   ["docker run -p 8000:8000 open-brain-server", true],
+  ["docker container run -p 8000:8000 ob1-server", true],
+  ["docker create --name brain ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
   ["docker run --entrypoint bun -p 127.0.0.1:8001:8000 \\\n  -e OB1_REST_URL=http://api:8000 \\\n  <server image> ../mcp-server/index.ts", true],
   ["docker run --entrypoint bun ghcr.io/mharris-sgymd/ob1-server:2.0.0 index.ts", true],
   ["podman run --entrypoint=bun open-brain-server api.ts", true],
   ["docker run --entrypoint=/usr/local/bin/bun ghcr.io/mharris-sgymd/ob1-server:2.0.0 index.ts", true],
+  ["docker run --entrypoint bun ob1-server 'index.ts'", true],
   ["kubectl apply -f k8s/", true],
   ["helm install brain ./chart", true],
   ["helm upgrade brain ./chart", true],
@@ -5414,10 +5439,18 @@ const OUTSIDE_COMPOSE_PROBES: [string, boolean][] = [
   ["docker service create --name brain ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
   ["podman kube play brain.yaml", true],
   ["oc apply -f brain.yaml", true],
+  ["oc new-app ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
+  ["podman play kube brain.yaml", true],
   ["docker run --rm --entrypoint bun ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z> keygen.ts --name laptop --scope write", false],
   ["cd server-portable && bun keygen.ts --name n8n --scope capture", false],
   ["cd mcp-server && bun install", false],
   ["cd mcp-server && npm install", false],
+  ["cd server-portable && npm run dev:docs", false],
+  ["cd server-portable && bun test && npm run lint", false],
+  ["cd server-portable && bun test && cd ../dashboards/open-brain-dashboard-next && npm run dev", false],
+  ["cd server-portable && bun keygen.ts && cd ../integrations/slack-capture && bun index.ts", false],
+  ["npm --prefix server-portable install", false],
+  ["docker run --name ob1-server-test postgres:17", false],
   ["cd server-portable && bun install && cat index.ts", false],
   ["cd server-portable && bun build ./index.ts --outdir dist", false],
   ["cd mcp-server && bun test index.ts", false],
