@@ -753,13 +753,23 @@ export async function stopTelemetry(): Promise<void> {
  * Sends what each signal still holds — the spans and log records batched, the
  * metrics' last reading — and waits for what is on its way: how that ended,
  * or undefined with no collector set. A server's stop runs it beside closing
- * its pool, under the pool's bound, and says which (shutdown.ts); first it says
- * what the anonymous budget held back, since a server's stop never shuts the
- * SDK down (review pass 3).
+ * its pool, under a bound of its own (SMD-2902), and says which (shutdown.ts);
+ * first it says what the anonymous budget held back, since a server's stop
+ * never shuts the SDK down (review pass 3).
  */
 export async function flushTelemetry(): Promise<FlushResult | undefined> {
   sayUnsent();
   return sdk?.flush();
+}
+
+/**
+ * The stop's flush cut short, at its bound or by a second signal (SMD-2902):
+ * says, by signal, how many spans, log records and metric exports were on
+ * their way or still batched, as not sent for `kind` — the stop's own line
+ * then says only that not all was sent. Nothing with no collector set.
+ */
+export function cutTelemetry(kind: string): void {
+  sdk?.cut(kind);
 }
 
 /**

@@ -92,7 +92,7 @@ The Open Brain isn't that. It's a memory layer for your AI. You put thoughts in,
 
 If you need to fix a typo or delete something, ask your AI — a write key has `update_thought` and `delete_thought` — or use any SQL client (`psql`). But if you're finding yourself wanting to regularly browse and edit your content, that's Obsidian's workflow, not this one. They solve different problems.
 
-That said — the system is yours to extend. The MCP server is one file, `server-portable/index.ts`; a tool it lacks is one more `registerTool` block. You built the system, you can extend it.
+That said — the system is yours to extend. A tool the brain lacks is a plugin ([`plugins/README.md`](../plugins/README.md)), which the brain's own servers serve. You built the system, you can extend it.
 
 ### "I want the visual editing experience — headings, bullets, drag stuff around, everything visible at once"
 

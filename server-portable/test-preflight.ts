@@ -3724,6 +3724,59 @@ else {
       await beat("heartbeat:sleep", v({ every_s: 60 }), 20);
       assert(/awake, its passes waiting for the brain to go quiet — no sleep yet;/.test(row((await run(LOG_ON)).out, "sleep")), "awake with no sleep recorded says no sleep yet");
 
+      // Its budget (SMD-2679): a sleep its clock stopped is no warning — the
+      // row says so, and that the next begins after a live call; one a
+      // statement past statement_timeout stopped warns, its fix the setting;
+      // the budget and the sleeps stopped on it are in the detail.
+      const BUDGET = { minutes: 60, statementTimeoutS: 300, workMemMb: 4, maintenanceWorkMemMb: 64, stops: 2 };
+      await beat("heartbeat:sleep", v({ every_s: 60, resting: true, slept: { from: await at(3660), to: await at(60), budget: "clock", limit: 60 }, budget: BUDGET }), 20);
+      const clockOut = await run(LOG_ON);
+      assert(/✓\s+sleep\s+alive \(last stamped 20 s ago, every 60 s\); awake — the last sleep ended 60 s ago, after 60 min, stopped on its budget — its clock spent \(60 min\); the next begins after a live call and the quiet; a search or a write wakes it; budget: a 60 min clock, statement_timeout 300 s, work_mem 4 MB, maintenance_work_mem 64 MB — 2 sleep\(s\) stopped on it since it started$/.test(row(clockOut.out, "sleep")),
+        `a sleep its clock stopped: the row says so and that the next waits for a live call, the budget and its count in the detail, no warning (${row(clockOut.out, "sleep")})`);
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", resting: true, slept: { from: await at(400), to: await at(60), budget: "statement", limit: 300 }, budget: { ...BUDGET, stops: 1 } }), 20);
+      const stmtOut = await run(LOG_ON);
+      assert(/!\s+sleep\s+.*; awake — the last sleep ended 60 s ago, after 6 min, stopped on its budget — a pass's statement past statement_timeout \(300 s\); the next begins after a live call/.test(row(stmtOut.out, "sleep"))
+          && /→ Its last sleep stopped when a pass's statement passed its statement_timeout \(300 s\): its log names the pass and Postgres's words\. A scan the brain has outgrown needs longer — raise OB1_SLEEP_STATEMENT_TIMEOUT in deploy\/\.env/.test(fix(stmtOut.out, "sleep")) && !/Its last pass failed/.test(fix(stmtOut.out, "sleep")),
+        `a sleep a statement past statement_timeout stopped warns, its fix the setting, not the generic failed pass (${row(stmtOut.out, "sleep")} | ${fix(stmtOut.out, "sleep")})`);
+      // Restarted with the setting raised (review pass 1): the bound is the
+      // mark's own, the row is not resting — a restart sleeps after the quiet
+      // alone — and the fix is not asked for again.
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: null, slept: { from: await at(400), to: await at(60), budget: "statement", limit: 300 }, budget: { ...BUDGET, statementTimeoutS: 600, stops: 0 } }), 20);
+      const raisedOut = await run(LOG_ON);
+      assert(/✓\s+sleep\s+alive .*; awake, its passes waiting for the brain to go quiet — the last sleep ended 60 s ago, after 6 min, stopped on its budget — a pass's statement past statement_timeout \(300 s\); a search or a write wakes it; budget: a 60 min clock, statement_timeout 600 s/.test(row(raisedOut.out, "sleep")) && fix(raisedOut.out, "sleep") === "",
+        `a restarted scheduler, its timeout raised past the bound its last sleep stopped at: the mark's own bound, no "after a live call", no fix (${row(raisedOut.out, "sleep")} | ${fix(raisedOut.out, "sleep")})`);
+      // Ended, the row says its last sleep stopped on its budget, the count since it last started.
+      await beat("heartbeat:sleep", v({ every_s: 60, ended: true, outcome: "stopped", slept: { from: await at(3660), to: await at(60), budget: "clock", limit: 60 }, budget: BUDGET }), 20);
+      assert(/its last sleep ended 60 s ago, after 60 min, stopped on its budget — its clock spent \(60 min\);.*— 2 sleep\(s\) stopped on it since it last started/.test(row((await run(LOG_ON)).out, "sleep")),
+        "a stopped scheduler's row says its last sleep stopped on its budget, the count since it last started");
+      // …and one whose last sleep a statement stopped is told to raise the setting before it starts it again (review pass 1).
+      await beat("heartbeat:sleep", v({ every_s: 60, ended: true, outcome: "stopped", slept: { from: await at(400), to: await at(60), budget: "statement", limit: 300 }, budget: { ...BUDGET, stops: 1 } }), 20);
+      const downStmt = fix((await run(LOG_ON)).out, "sleep");
+      assert(/start it again — .*Its last sleep stopped when a pass's statement passed its statement_timeout \(300 s\): raise OB1_SLEEP_STATEMENT_TIMEOUT first, or it stops there again\./.test(downStmt),
+        `a stopped scheduler whose last sleep a statement stopped is told to raise the setting first (${downStmt})`);
+      // …but not once it is raised past that bound (review pass 2: the stopped row asked again for what was done).
+      await beat("heartbeat:sleep", v({ every_s: 60, ended: true, outcome: "stopped", slept: { from: await at(400), to: await at(60), budget: "statement", limit: 300 }, budget: { ...BUDGET, statementTimeoutS: 900, stops: 0 } }), 20);
+      const downRaised = fix((await run(LOG_ON)).out, "sleep");
+      assert(/start it again — /.test(downRaised) && !/raise OB1_SLEEP_STATEMENT_TIMEOUT first/.test(downRaised), `…and not asked to raise it again once raised past that bound (${downRaised})`);
+      // The role's or the database's own timeout (limit 0, ours 0): its own words and remedy, not the generic failed pass (review pass 2).
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", resting: true, slept: { from: await at(400), to: await at(60), budget: "statement", limit: 0 }, budget: { ...BUDGET, statementTimeoutS: 0, stops: 1 } }), 20);
+      const roleOut = await run(LOG_ON);
+      assert(/stopped on its budget — a pass's statement past statement_timeout \(the role's or the database's own\);/.test(row(roleOut.out, "sleep")) && /budget: a 60 min clock, statement_timeout the role's or the database's own,/.test(row(roleOut.out, "sleep"))
+          && /→ Its last sleep stopped when a pass's statement passed the role's or the database's own statement_timeout: .*needs longer — set OB1_SLEEP_STATEMENT_TIMEOUT above theirs \(a startup setting beats it\), or raise theirs in deploy\/\.env/.test(fix(roleOut.out, "sleep")) && !/Its last pass failed/.test(fix(roleOut.out, "sleep")),
+        `a stop on the role's or the database's own timeout says so, its remedy to set ours above theirs (${row(roleOut.out, "sleep")} | ${fix(roleOut.out, "sleep")})`);
+      // An idle clock-out (review pass 2): resting with no stop on the mark — the clock with nothing left to do, no warning.
+      await beat("heartbeat:sleep", v({ every_s: 60, resting: true, slept: { from: await at(3660), to: await at(60) }, budget: { ...BUDGET, stops: 0 } }), 20);
+      const idleOut = await run(LOG_ON);
+      assert(/✓\s+sleep\s+alive .*; awake — the last sleep ended 60 s ago, after 60 min, at its clock with nothing left to do; the next begins after a live call and the quiet;/.test(row(idleOut.out, "sleep")),
+        `a sleep its clock ended with nothing left to do: resting, said as such, no warning (${row(idleOut.out, "sleep")})`);
+      // Words not of the shape are left off: a stop of no kind, a sleep still running, a budget with a negative count.
+      await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(400), to: await at(60), budget: "rest" }, budget: { ...BUDGET, stops: -1 } }), 20);
+      const oddOut = row((await run(LOG_ON)).out, "sleep");
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(130), to: null, budget: "clock" } }), 10);
+      const runningOut = row((await run(LOG_ON)).out, "sleep");
+      assert(/✓\s+sleep\s+alive .*awake, its passes waiting for the brain to go quiet — the last sleep ended 60 s ago, after 6 min; a search or a write wakes it$/.test(oddOut) && /asleep, its passes running — for 2 min; a search or a write wakes it$/.test(runningOut),
+        `a budget word of no kind, on a sleep not over, or a budget not of the shape is left off (${oddOut} | ${runningOut})`);
+
       // The log off: writes alone wake it, a warning with the switch.
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(400), to: await at(100) } }), 20);
       const offOut = await run(SQL_ENV);
@@ -3770,7 +3823,7 @@ else {
       // Gone stale: its restart is the compose service, then the checkout's.
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(900), to: await at(700) } }), 600);
       const sleepOut = await run(LOG_ON);
-      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep ended 12 min ago, after 3 min; when it runs, a search or a write wakes it$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep, with the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL and OB1_SLEEP_WORKERS in deploy\/\.env\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
+      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep ended 12 min ago, after 3 min; when it runs, a search or a write wakes it$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep, with the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM in deploy\/\.env\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow, with each as its flag\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
         `a stale heartbeat:sleep names the sleep service's restart (${row(sleepOut.out, "sleep")} | ${fix(sleepOut.out, "sleep")})`);
       // Asleep with a pass waiting at its start for the provider (SMD-2752):
       // the row says so, not that its passes run, and warns with the provider.
@@ -3848,7 +3901,7 @@ else {
       await sleeping({ total: 2, thoughts: [{ id: ID2, stops: 4, stalled: 3, kept: 0, windows: null }, { id: ID1, stops: 3, stalled: 0, kept: 7, windows: 24 }] });
       const stalledOut = await run(LOG_ON);
       assert(/!\s+sleep\s+.*2 thought\(s\) held back across its wakes — 22222222-2222-4222-8222-222222222222, no window kept over 4 stop\(s\), the last 3 with none gained; 11111111/.test(row(stalledOut.out, "sleep"))
-        && /→ 22222222-2222-4222-8222-222222222222: 3 or more long hard stops in a row have taken it with no window gained — a window of it outlasting the sleeps\. Consolidation joins past it once extraction holds nothing else, a newer thought judged meanwhile missing its pair with it, and the first sleep long enough — overnight, most likely — finishes it\. Sooner, finish it by hand: stop the scheduler just after a live call, .*--profile sleep stop sleep.*deploy\/compose\.host-ports\.yaml publishes it — as \(cd db && bun extract-entities\.ts --url <the database's URL>\).*release_claims_for_worker\(job, worker_id\); then start it again: podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep/.test(fix(stalledOut.out, "sleep")) && !/11111111/.test(fix(stalledOut.out, "sleep")),
+        && /→ 22222222-2222-4222-8222-222222222222: 3 or more long hard stops in a row have taken it with no window gained — a window of it outlasting the sleeps\. Consolidation joins past it once extraction holds nothing else, a newer thought judged meanwhile missing its pair with it, and the first sleep long enough finishes it\. Sooner, finish it by hand: stop the scheduler just after a live call, .*--profile sleep stop sleep.*deploy\/compose\.host-ports\.yaml publishes it — as \(cd db && bun extract-entities\.ts --url <the database's URL>\).*release_claims_for_worker\(job, worker_id\); then start it again: podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep/.test(fix(stalledOut.out, "sleep")) && !/11111111/.test(fix(stalledOut.out, "sleep")),
         `a stalled thought warns, naming it alone and what finishes it (${fix(stalledOut.out, "sleep")})`);
       // Every window kept, the stops past the last: the decider's call or the write (review pass 1).
       await sleeping({ total: 1, thoughts: [{ id: ID1, stops: 4, stalled: 3, kept: 24, windows: 24 }] });

@@ -1265,6 +1265,12 @@ jobs:
           hold "OB1_SLEEP_WORKERS ('-1') take digits only"
           sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
           hold '--poll must be'
+          # SMD-2679: the budget's four settings, a guard of their own, and the
+          # flag each reaches — a clock past a week refused by the scheduler.
+          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
+          hold "sleep: OB1_SLEEP_BUDGET ('60m'), OB1_SLEEP_STATEMENT_TIMEOUT (''), OB1_SLEEP_WORK_MEM ('') and OB1_SLEEP_MAINTENANCE_WORK_MEM ('') take digits only"
+          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=10081
+          hold '--budget must be a decimal integer >= 0 and <= 10080'
           q "INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:ci-outside@p2', '{\"v\":1,\"job\":\"extract:ci-outside@p2\",\"every_s\":60,\"running\":false,\"outcome\":\"ok\"}')"
           sleeper -e OB1_WORKER_KEY=not-a-key
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:extract:ci-outside@p2'"
@@ -1404,11 +1410,12 @@ jobs:
             | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully") and .services.extract.stop_grace_period == "2m0s" and .services.consolidate.stop_grace_period == "1m0s" and (.services.extract.command[2] | test("\nexec bun db/extract-entities\\.ts --follow \\$+\\{OB1_EXTRACT_FOLLOW:\\+\"\\$+OB1_EXTRACT_FOLLOW\"\\} --workers \"\\$+\\{OB1_EXTRACT_WORKERS:-1\\}\"\n?$")) and (.services.consolidate.command[2] | test("\nexec bun db/consolidate\\.ts --follow \\$+\\{OB1_CONSOLIDATE_FOLLOW:\\+\"\\$+OB1_CONSOLIDATE_FOLLOW\"\\} --workers \"\\$+\\{OB1_CONSOLIDATE_WORKERS:-1\\}\"\n?$"))'
           # SMD-2678: the sleep profile's service holds the same, and more of
           # its own: init (bun as PID 1 ignores SIGTERM until its handlers are
-          # in, SMD-2666), the extract service's grace (120 s), its three
-          # settings handed in, the key guard as its command's first line, and
-          # its last exactly the scheduler's exec'd --follow with them.
+          # in, SMD-2666), the extract service's grace (120 s), its seven
+          # settings handed in — the budget's four since SMD-2679 — the key
+          # guard as its command's first line, and its last exactly the
+          # scheduler's exec'd --follow with them.
           docker compose -f compose.yaml --profile sleep config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and (.services.sleep | (has("ports") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_POLL") and has("OB1_SLEEP_WORKERS")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and (.command[2] | test("^\\[ -n \"\\$+OB1_WORKER_KEY\" \\] \\|\\| ") and test("\nexec bun db/sleep\\.ts --follow --quiet \"\\$+\\{OB1_SLEEP_QUIET:-300\\}\" --poll \"\\$+\\{OB1_SLEEP_POLL:-5\\}\" --workers \"\\$+\\{OB1_SLEEP_WORKERS:-1\\}\"\n?$")))'
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.sleep | (has("ports") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_POLL") and has("OB1_SLEEP_WORKERS") and has("OB1_SLEEP_BUDGET") and has("OB1_SLEEP_STATEMENT_TIMEOUT") and has("OB1_SLEEP_WORK_MEM") and has("OB1_SLEEP_MAINTENANCE_WORK_MEM")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and (.command[2] | test("^\\[ -n \"\\$+OB1_WORKER_KEY\" \\] \\|\\| ") and test("\nexec bun db/sleep\\.ts --follow --quiet \"\\$+\\{OB1_SLEEP_QUIET:-300\\}\" --poll \"\\$+\\{OB1_SLEEP_POLL:-5\\}\" --workers \"\\$+\\{OB1_SLEEP_WORKERS:-1\\}\" --budget \"\\$+\\{OB1_SLEEP_BUDGET:-60\\}\" --statement-timeout \"\\$+\\{OB1_SLEEP_STATEMENT_TIMEOUT:-300\\}\" --work-mem \"\\$+\\{OB1_SLEEP_WORK_MEM:-4\\}\" --maintenance-work-mem \"\\$+\\{OB1_SLEEP_MAINTENANCE_WORK_MEM:-64\\}\"\n?$")))'
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api forwarder mcp migrate postgres proxy server " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'

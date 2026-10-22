@@ -193,6 +193,13 @@ export function databaseOf(url: string): string {
   return decodeURIComponent(new URL(url).pathname.slice(1));
 }
 
+/** Postgres settings a client's connections open with, by name: `{ statement_timeout: "300s", work_mem: "4MB" }`. */
+export type SessionSettings = Readonly<Record<string, string>>;
+/** A setting's name, as Postgres spells one (a custom one dotted). */
+const SESSION_NAME = /^[a-z_][a-z0-9_.]*$/i;
+/** Startup parameters that are no setting: who connects, to what, and how. */
+const NOT_SETTINGS: ReadonlySet<string> = new Set(["user", "database", "replication", "options", "password"]);
+
 /**
  * A client on `url`. One connection unless the script asks for more (a claim
  * worker takes one per worker and a spare for its heartbeat). A URL
@@ -205,12 +212,26 @@ export function databaseOf(url: string): string {
  * trusting the URL. Pinning the URL's database here instead split a run
  * across two databases, since the suites and sync-linear's SqlStore build
  * clients of their own (SMD-2302 review pass 3).
+ *
+ * `session` is Postgres settings every connection of the client opens with —
+ * Bun's `connection` option, sent in the startup message, so a connection the
+ * pool opens later carries them too (measured on Bun 1.4.3): the sleep
+ * scheduler's per-pass budget, statement_timeout and the memory settings
+ * (SMD-2679).
  */
-export function openSql(url: string, opts: { max?: number } = {}): SQL {
+export function openSql(url: string, opts: { max?: number; session?: SessionSettings } = {}): SQL {
   const problem = databaseUrlProblem(url);
   if (problem !== null) throw new Error(problem);
+  // Settings only: a startup packet's name is taken as given, so one naming the
+  // user, the database or a replication connection would switch it, and a NUL
+  // splits the packet (review pass 3). Named, never a value.
+  for (const [k, v] of Object.entries(opts.session ?? {})) {
+    if (!SESSION_NAME.test(k) || NOT_SETTINGS.has(k.toLowerCase()) || typeof v !== "string" || v.includes("\0")) {
+      throw new Error(`openSql: session takes Postgres settings by name, and ${JSON.stringify(k.slice(0, 40))} is not one it takes`);
+    }
+  }
   try {
-    return new SQL({ url, max: opts.max ?? 1 });
+    return new SQL({ url, max: opts.max ?? 1, ...(opts.session ? { connection: { ...opts.session } } : {}) });
   } catch {
     throw new Error("The database client refused the URL. (Nothing of it is printed.)");
   }
