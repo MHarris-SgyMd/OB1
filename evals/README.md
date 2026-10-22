@@ -6681,12 +6681,12 @@ step, its credentials in its own encrypted store, and gets the same work:
 
 - **Ingestion** — every 15 minutes (and on demand): ten SMD issues from Linear's
   GraphQL API with the Linear key the tool holds, one thought each, captured
-  through the candidate's MCP client with the capture key (through its HTTP
-  step against the brain's REST core since SMD-2295, below).
+  with the capture key through the candidate's own HTTP step against the
+  brain's REST core (through its MCP client until SMD-2295, below).
 - **MCP server** — the candidate's own MCP endpoint offers two tools an AI
-  client can call: `brain_search` (the brain's `search_thoughts`, through the
-  tool's MCP client with the read key — remember; `POST /v1/search` on the
-  REST core since SMD-2295) and `linear_issue` (a live Linear lookup with the
+  client can call: `brain_search` (`POST /v1/search` on the REST core with the
+  read key — remember; the brain's `search_thoughts` through the tool's MCP
+  client until SMD-2295) and `linear_issue` (a live Linear lookup with the
   tool's Linear key — act).
 
 ```sh
@@ -6722,10 +6722,10 @@ forwarding off: netavark leaves an internal network's `forwarding = 0`
 sysctl drop-in behind when the network is removed
 ([netavark#1497](https://github.com/containers/netavark/issues/1497)), and a
 later network reusing the bridge name inherits it. The kit's own `--down`
-leaves three or four behind. `--down`, run SMD-2929's cleanup inside the
-podman VM (it removes the drop-ins no network owns, and any `forwarding = 0`
-one on an outward network's bridge, turning forwarding back on), then `--up`
-again.
+leaves three or four behind. `--down`, run the cleanup script posted on
+SMD-2929 (it is not in this repo) inside the podman VM (it removes the
+drop-ins no network owns, and any `forwarding = 0` one on an outward
+network's bridge, turning forwarding back on), then `--up` again.
 
 **The result — n8n and Activepieces pass the POC; Windmill passes C1, C1s, C3
 and C4 but not C2**, because the criteria posted before the run ask for the capture to

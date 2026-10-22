@@ -14,14 +14,7 @@
       "input": {
         "toolName": "brain_search",
         "toolDescription": "Search the Open Brain for thoughts about a topic; returns the best matches with their text.",
-        "inputSchema": [
-          {
-            "name": "query",
-            "type": "Text",
-            "required": true,
-            "description": "What to search for"
-          }
-        ],
+        "inputSchema": [{ "name": "query", "type": "Text", "required": true, "description": "What to search for" }],
         "returnsResponse": true
       },
       "propertySettings": {}
@@ -38,20 +31,12 @@
         "input": {
           "method": "POST",
           "url": "http://api:8000/v1/search",
-          "headers": {
-            "x-brain-key": "__OB1_BRAIN_READ_KEY__",
-            "content-type": "application/json"
-          },
+          "headers": { "x-brain-key": "__OB1_BRAIN_READ_KEY__", "content-type": "application/json" },
           "queryParams": {},
           "authType": "NONE",
           "authFields": {},
           "body_type": "json",
-          "body": {
-            "data": {
-              "query": "{{trigger.query}}",
-              "limit": 3
-            }
-          },
+          "body": { "data": { "query": "{{trigger.query}}", "limit": 3 } },
           "response_is_binary": false,
           "use_proxy": false,
           "timeout": 120,
@@ -59,14 +44,7 @@
           "failureMode": "continue_none"
         },
         "propertySettings": {},
-        "errorHandlingOptions": {
-          "continueOnFailure": {
-            "value": false
-          },
-          "retryOnFailure": {
-            "value": false
-          }
-        }
+        "errorHandlingOptions": { "continueOnFailure": { "value": false }, "retryOnFailure": { "value": false } }
       },
       "nextAction": {
         "name": "step_2",
@@ -77,24 +55,9 @@
           "pieceName": "@activepieces/piece-mcp",
           "pieceVersion": "~0.0.21",
           "actionName": "reply_to_mcp_client",
-          "input": {
-            "mode": "simple",
-            "response": {
-              "response": {
-                "result": "{{step_1.body}}"
-              }
-            },
-            "respond": "stop"
-          },
+          "input": { "mode": "simple", "response": { "response": { "result": "{{step_1.body}}" } }, "respond": "stop" },
           "propertySettings": {},
-          "errorHandlingOptions": {
-            "continueOnFailure": {
-              "value": false
-            },
-            "retryOnFailure": {
-              "value": false
-            }
-          }
+          "errorHandlingOptions": { "continueOnFailure": { "value": false }, "retryOnFailure": { "value": false } }
         }
       }
     }
