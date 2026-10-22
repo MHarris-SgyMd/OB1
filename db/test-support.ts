@@ -344,7 +344,7 @@ const FUNCTIONS = [
   "ob1_lapse_walk(uuid, uuid)",
   // 104 (SMD-3046): the walk with its links, which the lapse locks.
   "ob1_lapse_tree(uuid, uuid)",
-  // 106 (SMD-3036): whether a side's walks fit the listing's cap.
+  // 107 (SMD-3036): whether a side's walks fit the listing's cap.
   "ob1_listing_walk_fits(uuid, uuid)",
 ];
 

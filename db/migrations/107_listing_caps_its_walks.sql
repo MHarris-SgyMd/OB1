@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 106: the listing caps the walks it runs — list_proposal_writers
+-- Migration 107: the listing caps the walks it runs — list_proposal_writers
 --                reads a side's takes and lapses only when the chain below
 --                the other side and the tree above it each hold 25 rows or
 --                fewer, and leaves both NULL past that, which the replies
@@ -82,7 +82,7 @@
 --   comments. MINOR: nothing changes shape, no data step. EXECUTE is PUBLIC
 --   by default; no grant group names them. Re-applying 094 puts its
 --   uncapped listing back; this file, applied after it, the cap.
---   test-schema [95], test-upgrade [20ax].
+--   test-schema [95], test-upgrade [20ay].
 --
 -- Prerequisites
 --   094 (list_proposal_writers, ob1_accept_takes, ob1_accept_lapses).
@@ -97,7 +97,7 @@ BEGIN
      OR to_regprocedure('ob1_accept_takes(uuid, uuid)') IS NULL
      OR to_regprocedure('ob1_accept_lapses(uuid, uuid)') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 106 needs 094 (list_proposal_writers, ob1_accept_takes, ob1_accept_lapses); this schema lacks it',
+      MESSAGE = 'migration 107 needs 094 (list_proposal_writers, ob1_accept_takes, ob1_accept_lapses); this schema lacks it',
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -157,7 +157,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_listing_walk_fits(uuid, uuid) IS
-  'Whether the walks list_proposal_writers would run for an accept making p_side stand over p_other stay within 25 rows each way: p_other and the rows below it, down its supersedes chain (ob1_accept_takes'' walk and ob1_accept_lapses'' loop check), and the rows whose chain reaches p_side (the lapse walk''s clears and the links it goes on through). Index reads of supersedes alone; cycle-safe. The listing reads a side''s takes and lapses only when it answers true. Migration 106 / SMD-3036.';
+  'Whether the walks list_proposal_writers would run for an accept making p_side stand over p_other stay within 25 rows each way: p_other and the rows below it, down its supersedes chain (ob1_accept_takes'' walk and ob1_accept_lapses'' loop check), and the rows whose chain reaches p_side (the lapse walk''s clears and the links it goes on through). Index reads of supersedes alone; cycle-safe. The listing reads a side''s takes and lapses only when it answers true. Migration 107 / SMD-3036.';
 
 -- ---------------------------------------------------------------------------
 -- 2. The listing, its walks capped.
@@ -189,7 +189,7 @@ AS $$
   -- and what an accept making it stand over the other side would lapse and
   -- whether it would take the side.
   -- ob1:listing-walk-cap — those two read only where the side's walks fit
-  -- 25 rows (ob1_listing_walk_fits); NULL past it (106, SMD-3036).
+  -- 25 rows (ob1_listing_walk_fits); NULL past it (107, SMD-3036).
   WITH page AS (
     SELECT p.id, p.status, p.older_id, p.newer_id, o.metadata AS older_metadata, n.metadata AS newer_metadata
       FROM supersession_proposals p
@@ -225,4 +225,4 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION list_proposal_writers(uuid[]) IS
-  'Who wrote each side of the supersession proposals named (any status; the first 200 ids read): its actor_name, actor_kind and trust (050, 073), whether its text is still a capture-only key''s alone (ob1_capture_only_text), the first thought superseding it, the pointers an accept making it stand over the other side would lapse, as [{id, onto}] (ob1_accept_lapses; none on an accepted row), whether that accept would take it (ob1_accept_takes), and whether one agent captured both sides (same_capturer). Since 106 a side''s lapses and takes are read only when its walks fit 25 rows (ob1_listing_walk_fits), and are NULL past it — an accepted row''s lapses stay []; db/consolidate.ts''s accept guard reads them in full. The companion of list_supersession_proposals (070); an id naming no proposal returns nothing. Migration 094 / SMD-2707; the cap 106 / SMD-3036.';
+  'Who wrote each side of the supersession proposals named (any status; the first 200 ids read): its actor_name, actor_kind and trust (050, 073), whether its text is still a capture-only key''s alone (ob1_capture_only_text), the first thought superseding it, the pointers an accept making it stand over the other side would lapse, as [{id, onto}] (ob1_accept_lapses; none on an accepted row), whether that accept would take it (ob1_accept_takes), and whether one agent captured both sides (same_capturer). Since 107 a side''s lapses and takes are read only when its walks fit 25 rows (ob1_listing_walk_fits), and are NULL past it — an accepted row''s lapses stay []; db/consolidate.ts''s accept guard reads them in full. The companion of list_supersession_proposals (070); an id naming no proposal returns nothing. Migration 094 / SMD-2707; the cap 107 / SMD-3036.';

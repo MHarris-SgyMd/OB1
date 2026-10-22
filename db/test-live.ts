@@ -7887,7 +7887,7 @@ if (want("16")) {
         && newerDir.code === 1 && newerDir.out.includes("accept refused: an accept would make the NEWER side stand: its text is a capture-only key's")
         && olderDir.code === 0 && olderDir.out.includes(`accepted ${pu}: ${W6} now supersedes ${C6}`),
       `an undirected flagged row lists an accept per direction, --force on the flagged one; no --direction asks for one, the flagged one is refused, the other accepted (${[noDir.out, newerDir.out, olderDir.out].map((o) => o.trim().slice(0, 80)).join(" | ")})`);
-    // SMD-3036 (106): the listing caps its walks, the guard does not. One
+    // SMD-3036 (107): the listing caps its walks, the guard does not. One
     // key's two thoughts, the hook's S proposed to stand over the top of 25
     // of its own rows on the operator's B (planted with the check off, as a
     // brain from before 082 holds them): the accept would take S — its chain
@@ -7902,7 +7902,7 @@ if (want("16")) {
     const pc = await propose(top, S8);
     const bc = blk((await consolidate("--list")).out, pc);
     const refusedC = await consolidate("--accept", pc);
-    assert(bc.includes(`ID: ${S8}\n        By: hook-16 (agent) · trust agent · a capture-only key's text\n        what an accept that makes this side stand would take and lapse was not read: a chain here passes 25 rows (the listing's cap, migration 106); consolidate.ts --accept reads it in full`)
+    assert(bc.includes(`ID: ${S8}\n        By: hook-16 (agent) · trust agent · a capture-only key's text\n        what an accept that makes this side stand would take and lapse was not read: a chain here passes 25 rows (the listing's cap, migration 107); consolidate.ts --accept reads it in full`)
         && !/WRITER|writer:/.test(bc)
         && refusedC.code === 1 && refusedC.out.includes("accept refused: an accept would make the NEWER side stand: its text is a capture-only key's — the other side's key too, but the accept would take this side from it")
         && (await supersedesOf(S8)) === null,
@@ -7911,7 +7911,7 @@ if (want("16")) {
     // the rest answers as before.
     await sql`DROP FUNCTION list_proposal_writers(uuid[])`;
     const plainR = await consolidate("--accept", pr);
-    // 094 put back, and 106 after it: the listing as shipped.
+    // 094 put back, and 107 after it: the listing as shipped.
     await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("094_") || f.endsWith("_listing_caps_its_walks.sql") });
     assert(plainR.code === 0 && plainR.out.includes(`accepted ${pr}: ${W2} now supersedes ${C2}`) && !/lapsed:/.test(plainR.out) && plainR.stderr.includes("The writer check did not run"),
       `…and on a brain short of 094 an accept says the writer check did not run, and is answered as before (${plainR.stderr.trim().slice(0, 160)})`);

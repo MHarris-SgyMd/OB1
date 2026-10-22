@@ -4676,6 +4676,7 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   assert(armOf(whole) === "search_thoughts k=5 thr=0.3 rw=0", `a real's float32 noise does not reach the arm name (${armOf(whole)})`);
   assert(armOf({ ...whole, arm: "current" }) === "search_thoughts k=5 thr=0.3 rw=0 current" && armOf({ ...whole, arm: "hybrid" }) === armOf(whole),
     "a prefer_current row (arm current, 059) is its own arm; a hybrid row's name is unchanged");
+  assert(armOf({ ...whole, arm: "literal" }) === "search_thoughts k=5 thr=0.3 rw=0 literal", "a row answered by exact literals alone while the provider was down (arm literal, 106) is its own arm too (SMD-2891)");
   const actDb = toActionRow({ agent_id: null, logged_at: t(1), at_us: "1789816860000000", tool: "fetch", target_id: A });
   assert(actDb.agentId === null && actDb.atUs === 1789816860000000, "an action row's NULL agent and at_us survive the coercion");
   const goldFx = goldFromFixture({ queries: [{ query: "first", relevant: `{${C},"${D}"}` }, { query: "second", relevant: [C] }] });
@@ -14326,12 +14327,12 @@ console.log("\n[84] Migration 094: list_proposal_writers names who wrote each si
   const comment = async (sig: string) => (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? "";
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
   const cols = (await one<{ c: string }>(`SELECT array_to_string(array(SELECT n FROM unnest(proargnames, proargmodes) AS u(n, m) WHERE m = 't'), ',') AS c FROM pg_proc WHERE oid = $1::regprocedure`, [SIG])).c;
-  assert((await functionsNamed("list_proposal_writers")) === 1 && lastDefinerOf("list_proposal_writers").startsWith("106") && lastDefinerOf("ob1_capture_only_text").startsWith("094")
+  assert((await functionsNamed("list_proposal_writers")) === 1 && lastDefinerOf("list_proposal_writers").startsWith("107") && lastDefinerOf("ob1_capture_only_text").startsWith("094")
       && lastDefinerOf("list_supersession_proposals").startsWith("070") && /ob1:listing-names-the-writers/.test(await src(SIG))
       && lastDefinerOf("ob1_accept_lapses").startsWith("097") && /ob1:accept-lapses-read/.test(await src("ob1_accept_lapses(uuid, uuid)")) && /094 \/ SMD-2707/.test(await comment("ob1_accept_lapses(uuid, uuid)"))
       && lastDefinerOf("ob1_accept_takes").startsWith("094") && /094 \/ SMD-2707/.test(await comment("ob1_accept_takes(uuid, uuid)"))
       && /094 \/ SMD-2707/.test(await comment(SIG)) && /094 \/ SMD-2707/.test(await comment("ob1_capture_only_text(uuid)")),
-    "ob1_capture_only_text 094's, the writers' read 106's since SMD-3036 (its walks capped, [95]), ob1_accept_lapses 097's since SMD-3035, each its comment, the sentinels in the bodies; 070's listing untouched");
+    "ob1_capture_only_text 094's, the writers' read 107's since SMD-3036 (its walks capped, [95]), ob1_accept_lapses 097's since SMD-3035, each its comment, the sentinels in the bodies; 070's listing untouched");
   assert(cols === "id,older_actor_name,older_actor_kind,older_trust,older_capture_only,older_superseded_by,older_lapses,older_takes,newer_actor_name,newer_actor_kind,newer_trust,newer_capture_only,newer_superseded_by,newer_lapses,newer_takes,same_capturer",
     `the proposal's id, each side's writer and superseder, then same_capturer (${cols})`);
 
@@ -14560,7 +14561,7 @@ console.log("\n[84] Migration 094: list_proposal_writers names who wrote each si
   assert((await read()) === before && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n === events
       && (await functionsNamed("list_proposal_writers")) === 1,
     "094 re-applied: one form, the same rows, no event");
-  // 094 re-applied puts its own read and listing back; 097 and 106 are
+  // 094 re-applied puts its own read and listing back; 097 and 107 are
   // their last definers since SMD-3035 and SMD-3036, and the sections after
   // run on the shipped state.
   await restoreShipped("ob1_accept_lapses", "list_proposal_writers");
@@ -14826,7 +14827,7 @@ console.log("\n[87] Migration 097: one walk for 082's lapse — ob1_lapse_walk i
   await reapply("097");
   assert(own && (await shape()), "092 and 094 re-applied put their own lapse and read back; 097 re-applied after them, the walk");
   // 097 re-applied put its own walk and lockless trigger back over 104's,
-  // and 094 its uncapped listing over 106's.
+  // and 094 its uncapped listing over 107's.
   await restoreShipped("ob1_lapse_walk", "ob1_lapse_capture_pointers", "ob1_lapse_tree", "list_proposal_writers");
   await db.exec(`DELETE FROM thoughts`);
 }
@@ -15330,7 +15331,7 @@ console.log("\n[94] Migration 105: Linear's duplicate status type known and sett
   await db.query(`DELETE FROM thoughts WHERE content LIKE '[94]%'`);
 }
 
-console.log("\n[95] Migration 106: the listing caps the walks it runs — list_proposal_writers reads a side's takes and lapses only when the chain below the other side and the rows above it each hold 25 or fewer (ob1_listing_walk_fits), NULL past it and the rest of the row read; within it the direct reads; the rows above counted, not the depth; a raw cycle ends; an accepted row's lapses stay []; a re-apply a no-op, and 094 re-applied uncapped (SMD-3036)");
+console.log("\n[95] Migration 107: the listing caps the walks it runs — list_proposal_writers reads a side's takes and lapses only when the chain below the other side and the rows above it each hold 25 or fewer (ob1_listing_walk_fits), NULL past it and the rest of the row read; within it the direct reads; the rows above counted, not the depth; a raw cycle ends; an accepted row's lapses stay []; a re-apply a no-op, and 094 re-applied uncapped (SMD-3036)");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
@@ -15365,12 +15366,12 @@ console.log("\n[95] Migration 106: the listing caps the walks it runs — list_p
   const meta = await one<{ v: string; l: string }>(`SELECT p.provolatile::text AS v, l.lanname AS l FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang WHERE p.oid = $1::regprocedure`, [FITS]);
   const body = await src(SIG);
   assert((await functionsNamed("ob1_listing_walk_fits")) === 1 && (await functionsNamed("list_proposal_writers")) === 1
-      && lastDefinerOf("ob1_listing_walk_fits").startsWith("106") && lastDefinerOf("list_proposal_writers").startsWith("106")
+      && lastDefinerOf("ob1_listing_walk_fits").startsWith("107") && lastDefinerOf("list_proposal_writers").startsWith("107")
       && meta.v === "s" && meta.l === "plpgsql" && /ob1:listing-walk-cap/.test(await src(FITS))
       && /ob1:listing-names-the-writers/.test(body) && /ob1:listing-walk-cap/.test(body)
       && /WHEN f\.older_fits THEN ob1_accept_lapses\(g\.older_id, g\.newer_id\)/.test(body) && /WHEN f\.newer_fits THEN ob1_accept_takes\(g\.newer_id, g\.older_id\)/.test(body)
-      && /106 \/ SMD-3036/.test(await comment(FITS)) && /106 \/ SMD-3036/.test(await comment(SIG)),
-    "106 defines the cap's count (STABLE, its sentinel) and redefines the listing to read each side's takes and lapses behind it; each comment names 106");
+      && /107 \/ SMD-3036/.test(await comment(FITS)) && /107 \/ SMD-3036/.test(await comment(SIG)),
+    "107 defines the cap's count (STABLE, its sentinel) and redefines the listing to read each side's takes and lapses behind it; each comment names 107");
 
   // The chain below: the write key's B, then the hook's c1..c25, each onto
   // the one below (planted with the check off, as [87] plants the hook's
@@ -15435,20 +15436,20 @@ console.log("\n[95] Migration 106: the listing caps the walks it runs — list_p
   assert(accepted.ok && JSON.stringify(accepted.row.newer_lapses) === "[]" && accepted.row.newer_takes === null && JSON.stringify(accepted.row.older_lapses) === "[]" && accepted.row.older_takes === null,
     `an accepted row past the cap: both sides' lapses [] (029 answers its accept), their takes unread (${JSON.stringify(accepted.row)})`);
 
-  // Re-apply: 106 again moves nothing; 094 re-applied puts its uncapped
-  // listing back, and the restore (106 last) the cap.
+  // Re-apply: 107 again moves nothing; 094 re-applied puts its uncapped
+  // listing back, and the restore (107 last) the cap.
   const pids = [p25, p26, q25, q26];
   const read = async () => JSON.stringify(await q(`SELECT * FROM list_proposal_writers($1::uuid[])`, [pids]));
   const events = async () => (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n;
   const before = await read(), eventsBefore = await events();
-  await reapply("106");
+  await reapply("107");
   assert((await read()) === before && (await events()) === eventsBefore && (await functionsNamed("list_proposal_writers")) === 1 && (await functionsNamed("ob1_listing_walk_fits")) === 1,
-    "106 re-applied: one form each, the same rows, no event");
+    "107 re-applied: one form each, the same rows, no event");
   await reapply("094");
   const uncapped = (await row(p26)).newer_takes === true && !/ob1:listing-walk-cap/.test(await src(SIG));
   await restoreShipped("list_proposal_writers", "ob1_accept_lapses");
   assert(uncapped && (await row(p26)).newer_takes === null && /ob1:listing-walk-cap/.test(await src(SIG)) && (await functionsNamed("list_proposal_writers")) === 1,
-    "094 re-applied puts its uncapped listing back (the 26-row side read); 106 restored after it, the cap");
+    "094 re-applied puts its uncapped listing back (the 26-row side read); 107 restored after it, the cap");
   await db.exec(`DELETE FROM thoughts`);
 }
 

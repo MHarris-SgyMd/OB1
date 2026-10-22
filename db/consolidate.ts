@@ -749,7 +749,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   /**
    * SMD-2707: a row's writers and its WRITER flags for this accept, read as
    * the listing reads them (list_proposal_writers, 094), its takes and
-   * lapses in full past the listing's cap (106, SMD-3036) — pending, stale or
+   * lapses in full past the listing's cap (107, SMD-3036) — pending, stale or
    * rejected, each of which 029 accepts (review pass 1: a rejected flagged
    * row was accepted without --force); null on an accepted row (029 answers
    * it); "no-094" on a brain short of the file. On an undirected verdict
@@ -768,7 +768,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
                p.newer_fingerprint IS NOT NULL AND p.newer_fingerprint IS DISTINCT FROM content_fingerprint_of(n.content) AS newer_moved,
                w.older_actor_name, w.older_actor_kind, w.older_trust, w.older_capture_only,
                w.newer_actor_name, w.newer_actor_kind, w.newer_trust, w.newer_capture_only, w.same_capturer,
-               -- 106 (SMD-3036): the listing caps its walks; the guard reads its
+               -- 107 (SMD-3036): the listing caps its walks; the guard reads its
                -- one row's in full, so its refusal and the pointers it names are
                -- never the cap's.
                ob1_accept_takes(p.older_id, p.newer_id) AS older_takes, ob1_accept_lapses(p.older_id, p.newer_id) AS older_lapses,
