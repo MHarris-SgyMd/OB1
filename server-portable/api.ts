@@ -13,7 +13,7 @@ import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stopp
 import { markRunningLost } from "./jobs.ts";
 import { createRestApp } from "./rest/app.ts";
 import { remoteChecker, tokenSettings, type TokenCheck } from "./oauth-token.ts";
-import { cutOpenRequests, flushTelemetry, startTelemetry } from "./telemetry.ts";
+import { cutOpenRequests, cutTelemetry, flushTelemetry, startTelemetry } from "./telemetry.ts";
 
 /**
  * The door a write through this server names in its actor (`via`), which
@@ -87,11 +87,14 @@ if (SERVES_ON_BUN) {
   const mender = mend.intervalS > 0 ? core.startVectorMender({ intervalS: mend.intervalS }) : undefined;
   drainOnSignal({
     drainBoundMs: grace.drainBoundMs,
+    graceMs: grace.graceS * 1000,
     server: () => bunServer,
     calls,
     close: closeStore,
-    // The telemetry still batched goes beside the pool's close, under its bound, said on its own.
+    // The telemetry still batched goes beside the pool's close, under a bound of its own, said on its own; cut short,
+    // what each signal still held is said by count (SMD-2902).
     flush: flushTelemetry,
+    unsent: cutTelemetry,
     // A record the runtime no longer counts but that is still open ends before that flush, on every path (PR 2c review pass 3).
     // The mender stops beside it, before the pool closes: no further row starts.
     endOpen: () => {

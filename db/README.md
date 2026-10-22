@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2982 assertions: 2982 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and seven (107) migrations applied, and
+`bun test-schema.ts` prints `2993 assertions: 2993 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and eight (108) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -534,7 +534,7 @@ server — which cannot import a `db/` script, and whose PostgREST store (retire
 in SMD-3152) reached only RPCs — could not share them. Five functions, all `LANGUAGE sql`, SECURITY
 INVOKER, no SET, not STRICT, so a caller's planner inlines them:
 `node_lifecycle_types()` and `node_settled_types()` (the six status types this
-schema knows, and the two that settle a node — seven and three since 105);
+schema knows, and the two that settle a node — `duplicate` in both since 105);
 `node_lifecycle()` (per thought: status, status_type, the source watermark
 `synced_at` and `created_at` — a row carrying `ticket` or `issue` reads its
 ticket's head; it read `thoughts` alone until 068 stored the heads);
@@ -1004,7 +1004,8 @@ transaction, upgraded the lock and deadlocked bucket-mates ten times in ten. REP
 every status move between known and unknown (a source row's delete and a
 re-record that changes nothing run; the delete raises 40001 if its thought's
 status moved since the snapshot). `ob1_rebuild_source_gate()` repairs the mirror after a write made with
-triggers disabled, and `ob1_node_projection_drift()` gains a `source_gate` arm.
+triggers disabled, and `ob1_node_projection_drift()` gains a `source_gate` arm
+(a status-set change runs 108's keyed form, not the full rebuild).
 `node_dependencies()` keeps its rows and tests each link's system against the
 gating systems, read once per call, instead of grouping every source row with
 its thought. `source_thought()` keeps its
@@ -1925,6 +1926,56 @@ and 107 after it the cap. test-schema [95] (25 and 26 rows below and above,
 the rows above counted and not the depth, a raw cycle, an accepted row),
 test-live [16] (past the cap `--list` flags nothing and the guard refuses
 the taking), test-upgrade [20ay], test-server [16l].
+
+Migration 108 adds a keyed rebuild of 071's gate mirror for a status-set change
+(SMD-3160): `ob1_rebuild_source_gate_for_types(text[])`. 071 asked a migration
+that changes `node_lifecycle_types()` to run the full
+`ob1_rebuild_source_gate()`, which joins every source row to its thought under
+SHARE locks on `thoughts` and `thought_sources`, so writes wait for as long as
+that takes — 26 ms at 10,000 source rows, 3.3–4.4 s at a million (105, SMD-2935
+review pass 5), an hour or so at the 1B horizon if it stays linear — though a
+change moves only the rows of the types it adds or drops. The keyed form takes
+the same locks after the same READ COMMITTED refusal, finds the sourced thoughts
+whose `status_type` is one of the types given, each type once (a probe of 001's
+GIN index on `thoughts.metadata` per type; a type held by a large share of rows
+is scanned, at about the full rebuild's cost), and reconciles those alone with
+071's `ob1_source_gate_reconcile(ids)`, returning what it wrote and deleted; an
+empty, NULL or all-NULL array touches nothing and takes no lock. No advisory
+lock: SHARE holds off every writer whose triggers could touch the mirror, as the
+full rebuild relies on. At a million source rows a capture waited 1.39 s behind
+it against 8.9 s behind the full rebuild with 21,212 rows of the type, 29 ms
+against 6.2 s with 16, on a host busier than SMD-2935 pass 5's (the ratio is
+what holds). The full rebuild stays for repair after a write with triggers
+disabled, and its comment now names the keyed form; 071's own header is not
+edited. 108 also adds `ob1_refresh_set_readers()`, 105's `DO $touch$` block as a
+call: it alters each of the brain's own functions that name a set to the
+volatility it has, dropping every session's plans built on it, and returns how
+many — without it a pooled session, 071's gate triggers among them, keeps the
+old set, and `drift()` itself reads the old set there (12 phantom rows in a
+warmed session, review pass 3). A migration that changes
+`node_lifecycle_types()` runs, after the change, the lines `SELECT
+ob1_refresh_set_readers();` and `SELECT * FROM
+ob1_rebuild_source_gate_for_types('{<each type it adds or drops>}');`; a change
+to `node_settled_types()` alone runs only the first. Check 39 of
+`scripts/check-fork-consistency.ts` holds both for a lifecycle change and the
+first for a settled one. It reads canonical forms only, with every literal's
+inside blanked: each definition of a set anywhere in the file — a string, a
+body, a qualified name or a `RENAME TO` included — must be a line starting
+`CREATE OR REPLACE FUNCTION node_lifecycle_types()` (or `node_settled_types()`)
+whose body is exactly `SELECT '{…}'::text[]` (or a plpgsql `BEGIN RETURN
+'{…}'::text[]; END`), and the calls lines after the last one outside any
+literal; anything else is reported. Each set's comment says how to list every
+copy that follows it by hand — they all name canceled or unstarted, so `git grep
+-nwE 'canceled|unstarted' -- ':!db/migrations' ':!changes' ':!CHANGELOG.md'
+':!integrations'` finds them, the tests that pin them among them — and which the
+code reads; no sentence counts the types any more. [94] and test-live [41],
+which re-apply 105, put the shipped sets back after. Refuses by name without
+071; a re-apply is a no-op. test-schema [96] (a set change simulated each way:
+the moved type's rows fixed, an unrelated drift left for the full rebuild;
+empty, NULL, all-NULL and repeated types; the READ COMMITTED refusal; the
+refresh altering every reader), test-upgrade [20az] (onto a populated brain; a
+status write and a source-row write wait for it; a set change run by the recipe
+reaches a warmed session).
 
 ## What changed relative to the guide
 
@@ -3054,7 +3105,7 @@ and is unchanged by it. The JSON's `options` gains `decayBlocked: false`.
 `ingest-records.ts --items` writes `blocks` / `blocked_by` for any system, and
 both flags read them. A blocker is settled by its row's lifecycle, which a row
 of another system has only if its source stated one (an items file, in
-`facets.status_type`, one of the seven types). So a system gates only when some
+`facets.status_type`, one of the known types). So a system gates only when some
 source row of it states a known status_type in its own metadata — a status a row
 borrows through a Linear ticket claim does not count — and is then read exactly
 as the board is, an unknown blocker blocking. A system that states none cannot
@@ -3526,15 +3577,18 @@ of `db/sleep.ts` holds the mechanics; this is what an operator needs.
 
 ```bash
 bun sleep.ts --url … --follow      # sleep whenever the brain is quiet, for ever
-bun sleep.ts --url …               # wait for quiet, sleep once until both pools drain or a call wakes it
+bun sleep.ts --url …               # wait for quiet, sleep once until both pools drain, a call wakes it or its budget stops it
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
 #   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N extraction and, once it joins, N consolidation calls at once)
-#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 130 a signal before one sleep ended, or a second signal
+#   --budget MINUTES (60; 0 none)   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
+#   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 130 a signal before one sleep ended, or a second signal
 ```
 
 **Running it.** On the compose stack, as its own service: `--profile sleep`
 runs `sleep.ts --follow` as `sleep`, with `OB1_SLEEP_QUIET`, `OB1_SLEEP_POLL`
-and `OB1_SLEEP_WORKERS` for its three numbers, digits only (SMD-2678;
+and `OB1_SLEEP_WORKERS` for its three numbers, and `OB1_SLEEP_BUDGET`,
+`OB1_SLEEP_STATEMENT_TIMEOUT`, `OB1_SLEEP_WORK_MEM` and
+`OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only (SMD-2678;
 `deploy/README.md`, "The `sleep` profile instead", has the first start and
 the move from the `workers` profile):
 
@@ -3597,7 +3651,8 @@ consolidation joins past, extraction is set aside — stopped, if in hand with
 a stalled thought — until consolidation's pool drains, then resumes, so on a
 one-slot model the judge does not wait behind the window, and a night still
 reaches the thought. It is tried in every sleep once consolidation's pool
-drains, and finished by the first sleep long enough for both. Limits stand:
+drains, and finished by the first sleep long enough for both — one its clock
+(`--budget`) allows. Limits stand:
 sleeps of about a minute, each under the stall floor, neither stall a slow
 window nor let it finish, and consolidation waits on it until a longer
 sleep; and once consolidation has joined, a stalled thought in hand keeps
@@ -3626,6 +3681,54 @@ A brain before 093, or a role that cannot read its table (the
 extraction group's), joins once extraction drains alone, and the start says
 so; granted later, the scheduler takes it up once restarted. `--dry-run`
 names the held thoughts. A failed row stays failed: `--retry-failed` is the operator's.
+
+**Its budget** (SMD-2679, SMD-1794's step 2; stated until SMD-1499 derives it
+from the brain's size):
+
+| Bound | Flag | Default | At it |
+|---|---|---|---|
+| the sleep's clock | `--budget MINUTES` | 60 (0: none) | the passes stop after the thought in hand, every lease returned, none starts; one still in hand 300 s later is stopped hard, a cut |
+| each pass's `statement_timeout` | `--statement-timeout SECONDS` | 300 (0: the role's or the database's own) | the statement is cancelled (57014): the pass ends, the others stop hard, and the sleep stops — not the scheduler, which ended with 1 before |
+| each pass's `work_mem` | `--work-mem MB` | 4 | Postgres's own default: a server sized up for its awake index does not hand it to the background passes |
+| each pass's `maintenance_work_mem` | `--maintenance-work-mem MB` | 64 | Postgres's own default; no pass builds an index or vacuums yet, so it bounds SMD-2918's heal ahead of it |
+
+The settings ride each pass's own client (`connect.ts`'s `session`, Bun's
+startup parameters, so every connection the pool opens carries them, and they
+beat the role's and the database's own: a timeout of 0 is left out, so theirs
+stands); the start's check runs under them. The scheduler's own two
+connections take the memory settings and statement_timeout 0, beating a
+role's or database's own — its poll reads the pools, a scan of every thought,
+and a timeout there would end the scheduler — and the clock is read between
+those reads, so a sleep can run one past it. A clock stop is counted and
+marked only when it cut work (a claim pending or in hand as the clock was
+spent, as the drain reads the pools — consolidation's not yet enqueued
+included, another process's claims under the keys too — or a pass waiting for
+its provider): an idle clock-out ends the sleep as quietly as a drained one,
+the next still after a live call, and one sleep's exits 0. The settings go
+out as startup parameters, which a transaction pooler (PgBouncer, a managed
+host's pooled endpoint) refuses: connect the scheduler to Postgres directly,
+as the compose stack does.
+A sleep stopped on its budget ends, and the next begins only after a live call
+and the quiet — not after a rest: the budget bounds a night's work, and the
+passes resume from the claim tables. A restarted scheduler sleeps after the
+quiet alone. The clock counts idle minutes too, so a sleep whose pools
+drained still ends at it, and a sync write's capture after that waits for the
+next sleep. A statement past its timeout inside a thought's own write fails
+that thought, as any database error there does; on a claim it costs that
+worker its poll. An operator's `pg_cancel_backend` is 57014 too ("user
+request"): no budget's, it ends the scheduler as a pass that throws does.
+Under `--follow` the row says which stopped the last sleep (`slept.budget`:
+`clock` or `statement`) and the bound it stopped at (`slept.limit`), that it
+waits for a live call (`resting`), and carries the budget with the sleeps
+stopped on it since the process began (`budget`); preflight's `sleep` row
+says each, and warns on a statement stop with its setting until that is
+raised past the bound; one sleep stopped on its budget exits 1.
+
+**Upgrading to the budget.** The clock is on by default: from this release a
+long quiet night holds the model for 60 minutes, and the rest of a backlog
+waits for the next live call and the quiet. `OB1_SLEEP_BUDGET=0` (`--budget
+0`) and a recreate restore the old behaviour; a larger value drains a
+backlog — a model change's re-pooled consolidation, say — in fewer nights.
 
 **Its start, and refusals.** Before its first quiet it runs each pass's start
 once — the engines' `check` (SMD-2752): the banner, the egress gate, the tables,
@@ -3680,6 +3783,15 @@ own name while it waits, and the `workers` and `consolidate pass` rows say
 it. A follower's start wait stays unsaid: its row does not exist until its
 first pass begins.
 
+Since SMD-2679 it carries `budget`, the budget in force and the sleeps
+stopped on it since the process began, and the last sleep's `slept.budget`
+(`clock` or `statement`) says which stopped it: "awake — the last sleep
+ended … stopped on its budget — its clock spent (60 min); the next begins
+after a live call and the quiet" while it waits for one (`resting`), no
+warning; a statement stop warns, its fix `OB1_SLEEP_STATEMENT_TIMEOUT`, until
+that is raised past the bound it stopped at (`slept.limit`; **Its budget**,
+above).
+
 Since SMD-2694 it carries `held`, the thoughts extraction holds back across
 the wakes (a hard stop counted on them, 093): how many, and the three most
 stalled, then most stopped, with their stops and windows kept — stalled as
@@ -3693,7 +3805,7 @@ a long sleep leaves the row then, not at the next live call. The `sleep` row
 names them — "1 thought(s) held back across its wakes — <id>, 7 of 24
 window(s) kept over 3 stop(s)" passes, a document on its way — and warns on a
 stalled one, naming it: consolidation joins past it once extraction holds
-nothing else, and the first sleep long enough finishes it, or extraction run
+nothing else, and the first sleep long enough — its clock allowing — finishes it, or extraction run
 by hand with the scheduler stopped. One whose windows are all kept is told
 apart: its stops land past the last window. A scheduler stopped or stale
 names what it held at its last word, and warns of none.
@@ -3728,8 +3840,7 @@ key, 079's check, the relations grants; not an operator's `--retry-*` — where 
 used to end the scheduler (SMD-2752). A wake or a stop during that wait stops
 the pass before it began, and a stop is a stop however a pass then ends, unless one throws.
 
-Not yet here: a budget per pass and per sleep and the re-derive pass
-(SMD-2679).
+Not yet here: the re-derive pass and a re-embed pass, SMD-2679's later PRs.
 test-live [38] drives it against a stub model.
 
 ## Extensions
@@ -5085,10 +5196,10 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2982 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1478 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+bun test-schema.ts                          # 2993 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1489 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 908 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 57 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 68 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 239 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
