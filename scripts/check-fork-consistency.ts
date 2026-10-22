@@ -6757,7 +6757,7 @@ const LGTM_SERVICE = {
     TEMPO_EXTRA_ARGS: "-config.file=/tmp/tempo-config.yaml -reporting.enabled=false",
     PYROSCOPE_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -memberlist.bind-addr=127.0.0.1 -usage-stats.enabled=false",
     // The collector's scrape of pg-exporter on `telemetry` (SMD-1849 PR 3b), one argument with no space in it.
-    OTELCOL_EXTRA_ARGS: "--config=yaml:{\"receivers\":{\"prometheus/postgres\":{\"config\":{\"scrape_configs\":[{\"job_name\":\"postgres\",\"scrape_interval\":\"30s\",\"static_configs\":[{\"targets\":[\"pg-exporter.ob1.internal.:9187\"]}]}]}}},\"service\":{\"pipelines\":{\"metrics\":{\"receivers\":[\"otlp\",\"prometheus/collector\",\"prometheus/postgres\"]}}}}",
+    OTELCOL_EXTRA_ARGS: "--config=yaml:{\"receivers\":{\"prometheus/postgres\":{\"config\":{\"scrape_configs\":[{\"job_name\":\"postgres\",\"scrape_interval\":\"30s\",\"metrics_path\":\"/cgi-bin/metrics\",\"static_configs\":[{\"targets\":[\"pg-exporter.ob1.internal.:9187\"]}]}]}}},\"service\":{\"pipelines\":{\"metrics\":{\"receivers\":[\"otlp\",\"prometheus/collector\",\"prometheus/postgres\"]}}}}",
   },
   volumes: ["lgtm-data:/data"],
   // The provisioned dashboard and its provider (PR 3c), check 37's, and the alert rules (SMD-3050), check 38's.
@@ -6769,7 +6769,8 @@ const LGTM_SERVICE = {
 /**
  * compose.yaml's Postgres exporter and the step that makes its role (SMD-1849 PR 3b), whole as Bun.YAML reads them, their `logging`
  * (check 29's) aside: the image by its digest, the role it reads as (ob1_monitor, a member of pg_monitor alone, never a superuser),
- * which statements it names and how much of their text, and its own queries left out. Held whole because what CI's one run of the profile
+ * which statements it names and how much of their text, and its own queries left out. The exporter on loopback behind busybox httpd on its `telemetry`
+ * address alone, serving the one CGI that fetches its /metrics (SMD-3023): its /probe dials any target and credentials its caller names. Held whole because what CI's one run of the profile
  * reads is the series (PR 3c), not how they are made: a superuser's DSN, an image by tag or a dropped --member-of passed every other
  * check (review pass 1).
  */
@@ -6777,8 +6778,39 @@ const PG_EXPORTER_SERVICE = {
   image: "quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e",
   profiles: ["observability"],
   read_only: true,
+  tmpfs: ["/tmp", "/var/www:exec,mode=1777"],
   cap_drop: ["ALL"],
   security_opt: ["no-new-privileges:true"],
+  init: true,
+  entrypoint: ["/bin/sh", "-c", [
+    "addr=\n",
+    "for _ in 1 2 3 4 5 6 7 8 9 10; do\n",
+    "  addr=$$(nslookup pg-exporter.ob1.internal. 2> /dev/null | awk '/^Name:/ { n = 1 } n && /^Address:? *[0-9.]+$$/ { print $$NF; exit }')\n",
+    "  [ -n \"$$addr\" ] && break\n",
+    "  sleep 1\n",
+    "done\n",
+    "if [ -z \"$$addr\" ]; then\n",
+    "  echo \"pg-exporter: pg-exporter.ob1.internal resolves to no address, and the exporter's front listens on that one alone: compose.yaml gives this container that name on telemetry\" >&2; sleep 30; exit 1\n",
+    "fi\n",
+    "if ! { mkdir -p /var/www/cgi-bin && cat > /var/www/cgi-bin/metrics && chmod 555 /var/www/cgi-bin/metrics; } << 'CGI'\n",
+    "#!/bin/sh\n",
+    "if f=$$(mktemp) && wget -q -T 10 -O \"$$f\" http://127.0.0.1:9188/metrics; then\n",
+    "  printf 'Content-Type: text/plain; version=0.0.4; charset=utf-8\\r\\n\\r\\n'; cat \"$$f\"\n",
+    "else\n",
+    "  printf 'HTTP/1.1 502 Bad Gateway\\r\\nContent-Type: text/plain\\r\\n\\r\\nno answer from the exporter, or no room in /tmp for it\\n'\n",
+    "fi\n",
+    "rm -f \"$$f\"\n",
+    "CGI\n",
+    "then\n",
+    "  echo \"pg-exporter: could not write its CGI to /var/www, the tmpfs compose.yaml gives it: the collector would scrape nothing\" >&2; sleep 30; exit 1\n",
+    "fi\n",
+    "/bin/postgres_exporter --web.listen-address=127.0.0.1:9188 \"$$@\" &\n",
+    "e=$$!\n",
+    "env -i PATH=/bin httpd -f -p \"$$addr:9187\" -h /var/www &\n",
+    "h=$$!\n",
+    "while kill -0 \"$$e\" 2> /dev/null && kill -0 \"$$h\" 2> /dev/null; do sleep 5; done\n",
+    "echo \"pg-exporter: the exporter or its front (httpd) stopped, its own line above saying why if it left one; the container exits in 30 s and restarts\" >&2; sleep 30; exit 1\n",
+  ].join(""), "pg-exporter"],
   command: [
     "--collector.stat_statements",
     "--collector.stat_statements.include_query",
@@ -6789,7 +6821,7 @@ const PG_EXPORTER_SERVICE = {
   environment: { DATA_SOURCE_URI: "postgres:5432/openbrain?sslmode=disable", DATA_SOURCE_USER: "ob1_monitor", DATA_SOURCE_PASS: "${OB1_MONITOR_DB_PASSWORD:-}" },
   depends_on: { "pg-monitor-role": { condition: "service_completed_successfully" } },
   networks: { data: {}, telemetry: { aliases: ["pg-exporter.ob1.internal"] } },
-  healthcheck: { test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9187/"], interval: "30s", timeout: "5s", retries: 3, start_period: "30s" },
+  healthcheck: { test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9188/"], interval: "30s", timeout: "5s", retries: 3, start_period: "30s" },
   restart: "unless-stopped",
 };
 const PG_MONITOR_ROLE_SERVICE = {
@@ -6941,7 +6973,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
       const svc = isMapping(services[name]) ? services[name] : undefined;
       const pdiffs: string[] = [];
       pathDiffs(JSON.parse(JSON.stringify(omitKeys(svc, ["logging"]))), held, `services.${name}`, pdiffs);
-      if (pdiffs.length) flag("proxy", `${pdiffs.slice(0, 6).join("; ")}${pdiffs.length > 6 ? `; and ${pdiffs.length - 6} more` : ""} — compose.yaml's ${name} is check 28's ${lit}: the role the exporter reads Postgres as, its one membership and which statements it names are its keys, so a change to it is made there too, on purpose (SMD-1849 PR 3b)`);
+      if (pdiffs.length) flag("proxy", `${pdiffs.slice(0, 6).join("; ")}${pdiffs.length > 6 ? `; and ${pdiffs.length - 6} more` : ""} — compose.yaml's ${name} is check 28's ${lit}: the role the exporter reads Postgres as, its one membership, which statements it names and (SMD-3023) the exporter on loopback behind its one-CGI front on telemetry are its keys, so a change to it is made there too, on purpose (SMD-1849 PR 3b)`);
     }
     const fconfig = isMapping(doc.configs) && isMapping(doc.configs.forwarder) ? doc.configs.forwarder : undefined;
     const sdiffs: string[] = [];
@@ -7077,7 +7109,7 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["compose.host-ports.yaml putting a sidecar in the proxy's PID namespace", "compose.host-ports.yaml", "  jev:\n    ports:\n", "  jev:\n    pid: \"service:proxy\"\n    cap_add: [SYS_PTRACE]\n    ports:\n"],
   ["a compose.yaml service named as the MCP server's mesh name", "compose.yaml", "\nnetworks:\n  # The ADR's networks", "  mcp.ob1.internal:\n    image: oven/bun:1.4.3-alpine\n\nnetworks:\n  # The ADR's networks"],
   ["the import runner given SYS_PTRACE too", "compose.yaml", "    cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP]\n", "    cap_add: [SETUID, SETGID, KILL, NET_ADMIN, SETPCAP, SYS_PTRACE]\n"],
-  ["the authorization server unconfined by seccomp", "compose.yaml", "    tmpfs: [/tmp]\n    cap_drop: [ALL]\n    security_opt: [\"no-new-privileges:true\"]\n", "    tmpfs: [/tmp]\n    cap_drop: [ALL]\n    security_opt: [\"no-new-privileges:true\", \"seccomp=unconfined\"]\n"],
+  ["the authorization server unconfined by seccomp", "compose.yaml", "    security_opt: [\"no-new-privileges:true\"]\n    # The server stops on SIGTERM", "    security_opt: [\"no-new-privileges:true\", \"seccomp=unconfined\"]\n    # The server stops on SIGTERM"],
   ["the import runner mounting the engine's socket", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - /var/run/docker.sock:/var/run/docker.sock\n"],
   ["the import runner mounting the engine's socket past a variable's default (SMD-2685 review pass 1, which compose resolved to /var/run/docker.sock)", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ${OB1_X:-./}/../../../../../var/run/docker.sock:/var/run/docker.sock\n"],
   ["the import runner mounting the engine's socket through a variable inside the path", "compose.yaml", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n", "      - ./orchestration/pipelines.json:/app/deploy/orchestration/pipelines.json:ro,z\n      - ./a${OB1_X:-/../../../../..}/var/run/docker.sock:/s\n"],
