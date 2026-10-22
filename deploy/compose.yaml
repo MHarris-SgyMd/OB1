@@ -1948,7 +1948,7 @@ services:
   # otel-lgtm: an OpenTelemetry collector taking OTLP on 4317 and 4318, and
   # Prometheus, Tempo, Loki, Pyroscope and Grafana behind it, all on the
   # stack's machine — the brain is personal data, and its telemetry goes
-  # nowhere else unless an operator sends it there. The two servers send to it
+  # nowhere else unless an operator sends it there. The MCP server and the REST core send to it
   # when deploy/.env names it, OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm.ob1.internal.:4318
   # (x-otel-env). Its Grafana is reached through compose.grafana-port.yaml, on
   # loopback and an origin of its own, or at /grafana on the stack's origin
@@ -2087,10 +2087,10 @@ services:
     # (docker/compose#11900, as with the proxy's table), so an upgrade that
     # changes the dashboard or a rule reaches Grafana on its `up -d`.
     labels:
-      ob1.grafana-dashboard: "sha256:2ecb3dae2a5eea17dbf05039d71f35b9f6dd360e36ff2adf1b62eac2f4cb6bc8"
+      ob1.grafana-dashboard: "sha256:1cdea2f74a57034dad33f48a94f4b2c2541535dbc28e6c1b555e7f94f3c0d3ee"
       ob1.grafana-alert-rules: "sha256:b49651cf40cccc8943b6525e8351df4254ff558a37609bb61453f5181b47ac95"
       ob1.grafana-dashboard-provider: "sha256:2a13b2862670670482aadbadfcf7a864e28fe4d3c9704faa9ac75ff66b9d021d"
-    # `mesh` as lgtm.ob1.internal: the two servers send to it there, and
+    # `mesh` as lgtm.ob1.internal: the MCP server and the REST core send to it there, and
     # compose.grafana-public.yaml's proxy reaches its Grafana there; and
     # `telemetry`, where it scrapes pg-exporter alone (SMD-1849 PR 3b). No
     # `ports:`.
@@ -2195,7 +2195,7 @@ networks:
   #          project joins it: a canary is a brain of its own, on its own
   #          networks and port (SMD-2874; docs/one-brain-per-stack.md).
   #   data   internal: Postgres, and only what connects to it — the migrator,
-  #          the two servers, board-sync, the workers, the sleep scheduler, the import runner and
+  #          `server` and the REST core, board-sync, the workers, the sleep scheduler, the import runner and
   #          its role's one-shot. No other project joins it.
   #   egress outward: whatever calls a model provider or a vendor (the two
   #          servers, board-sync, the workers, the sleep scheduler, the import runner, n8n), and
@@ -2470,7 +2470,7 @@ configs:
             "type": "timeseries",
             "id": 9,
             "title": "Provider calls per second",
-            "description": "Embedding and chat calls the two servers made, by model; the workers' are not sent (SMD-2910).",
+            "description": "Embedding and chat calls the REST core made, by model; the workers' are not sent (SMD-2910), nor `server`'s.",
             "datasource": {"type": "prometheus", "uid": "prometheus"},
             "gridPos": {"x": 0, "y": 25, "w": 8, "h": 8},
             "targets": [

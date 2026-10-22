@@ -6367,8 +6367,10 @@ const TIER_ROUTE_TABLE = "http:\n  routers:\n"
 /** The control, format and separator characters in a text other than the space and the line feed, each as `line (U+XXXX)` — compose and Bun.YAML part lines, comments and indentation differently around them. */
 const oddCharacters = (text: string) => [...new Set([...text.matchAll(/(?![ \n])[\p{Cc}\p{Cf}\p{Z}]/gu)].map((m) => `${text.slice(0, m.index).split("\n").length} (U+${m[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")})`))];
 /** compose.yaml's server, REST core and migrator knobs a tier's services do not read: this stack runs no extraction, typed-decision tier (so no consolidation decide mode, SMD-3115), authorization server, plugin (SMD-2310) or collector (SMD-1849's observability profile), and no auth or orchestration profile. */
+/** The OpenTelemetry knobs compose.yaml's x-otel-env forwards, each the SDK's own name (SMD-1849). */
+const OTEL_KEYS = ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_LOGS_EXPORTER", "OTEL_SDK_DISABLED", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG", "OTEL_METRIC_EXPORT_INTERVAL"];
 const TIER_OMITTED_ENV = ["OB1_EXTRACT_CHUNK_TOKENS", "OB1_EXTRACT_MAX_WINDOWS", "OB1_EXTRACT_ESCALATE_MODEL", "OB1_JEV_BASE_URL", "OB1_JEV_MODEL", "OB1_JEV_LOCAL", "OB1_CONSOLIDATE_DECIDER", "OB1_PUBLIC_ORIGIN", "COMPOSE_PROFILES", "OB1_PLUGINS", "OB1_PLUGIN_DB_PASSWORD", "OB1_HOOKS", "OB1_HOOK_SECRETS",
-  "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_LOGS_EXPORTER", "OTEL_SDK_DISABLED", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG", "OTEL_METRIC_EXPORT_INTERVAL"];
+  ...OTEL_KEYS];
 /** The services compose.yaml's servers and migrator wait on that this stack does not run, so nothing here waits on them. */
 const TIER_ABSENT_SERVICES = ["jev"];
 type Mapping = Record<string, unknown>;
@@ -6742,8 +6744,6 @@ const DASHBOARD_PATH = "/otel-lgtm/open-brain-dashboard.json";
 const DASHBOARD_PROVIDER_PATH = "/otel-lgtm/grafana/conf/provisioning/dashboards/open-brain.yaml";
 /** Where lgtm's Grafana finds the provisioned alert rules (SMD-3050), mounted from the grafana-alert-rules config: its provisioning directory's alerting/, every file of which it reads for rules (and contact points, policies and templates, which check 38 refuses there). */
 const ALERT_RULES_PATH = "/otel-lgtm/grafana/conf/provisioning/alerting/open-brain.yaml";
-/** The OpenTelemetry knobs compose.yaml's x-otel-env forwards, each the SDK's own name (SMD-1849). */
-const OTEL_KEYS = ["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_RESOURCE_ATTRIBUTES", "OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_LOGS_EXPORTER", "OTEL_SDK_DISABLED", "OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG", "OTEL_METRIC_EXPORT_INTERVAL"];
 /**
  * compose.yaml's `mcp`, the MCP server built on the REST core (SMD-2287), whole, its logging aside: the knobs it holds
  * are its environment, listed — none of the server's secrets (no database URL, key list, provider key, plugin or

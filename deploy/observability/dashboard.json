@@ -218,7 +218,7 @@
       "type": "timeseries",
       "id": 9,
       "title": "Provider calls per second",
-      "description": "Embedding and chat calls the two servers made, by model; the workers' are not sent (SMD-2910).",
+      "description": "Embedding and chat calls the REST core made, by model; the workers' are not sent (SMD-2910), nor `server`'s.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"x": 0, "y": 25, "w": 8, "h": 8},
       "targets": [
