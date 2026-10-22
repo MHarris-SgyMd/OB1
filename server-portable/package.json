@@ -15,7 +15,7 @@
     "keygen": "bun keygen.ts",
     "test:local": "../db/with-postgres.sh bun test-local-provider.ts"
   },
-  "comment": "hono and zod match the versions extensions/package.json installs for the vendored servers; the MCP packages are the v2 scoped @modelcontextprotocol/core + @modelcontextprotocol/server (SMD-2278), while extensions and integrations/kubernetes-deployment stay on the v1 @modelcontextprotocol/sdk + @hono/mcp until SMD-2279 / SMD-2281. extensions/test-auth.ts holds each install to its stack and fails on drift; bump the shared packages across all three in the same commit. jose matches deploy/auth's pin: the REST core checks that server's tokens with it (oauth-token.ts, SMD-2286).",
+  "comment": "hono and zod match the versions extensions/package.json installs for the vendored servers; the MCP packages are the v2 scoped @modelcontextprotocol/core + @modelcontextprotocol/server (SMD-2278), while extensions stays on the v1 @modelcontextprotocol/sdk + @hono/mcp until SMD-2279 / SMD-2281. extensions/test-auth.ts holds each install to its stack and fails on drift; bump the shared packages across extensions, server-portable and mcp-server in the same commit. jose matches deploy/auth's pin: the REST core checks that server's tokens with it (oauth-token.ts, SMD-2286).",
   "dependencies": {
     "@modelcontextprotocol/core": "2.1.0",
     "@modelcontextprotocol/server": "2.1.0",

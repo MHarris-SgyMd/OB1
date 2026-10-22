@@ -243,7 +243,7 @@ Read against the tree on 2026-09-27.
 | board-sync and the `db/` scripts | 35 files import `server-portable` modules (`entities`, `embed`, `chunk`, `egress`, `store`, …) and none import `index.ts`. SMD-2283 keeps those paths. The worker containers join the mesh and the egress network (they call providers); as built, `data` and `egress` (SMD-2583) | SMD-2283, SMD-2134, SMD-1869 |
 | n8n | Brain calls move from MCP to the REST core. SMD-2212 (merged, #222) needs no re-aim for its import: n8n calls the `orchestration-runner`, not the brain. Its act tool is n8n's own endpoint | SMD-2295 |
 | `orchestration-runner` (#222) | A worker-class DB writer on the mesh and the egress network (as built, `data` and `egress`, where n8n reaches it; SMD-2583). Its per-uid egress rules (SMD-2289) are the container's own network namespace's, so they hold whichever networks it joins | SMD-2289 |
-| `integrations/kubernetes-deployment` | Retires under compose-only | SMD-1931, SMD-2288 |
+| `integrations/kubernetes-deployment` | **Retired** under compose-only (SMD-2288 PR 1) | SMD-1931, SMD-2288 |
 | Jev, the LLM env forwarding, the preflight entrypoint | Move from the `server` service to the REST core | SMD-2284 |
 | Release images and CI | `ob1-server` stays one image for the three servers: it carries the MCP server built on the REST core since SMD-2287 PR 5a, by the maintainer's choice (2026-10-20) over an image per server; the full-stack job goes through the proxy; the Workers build retires | SMD-2296, SMD-2287, SMD-2288 |
 | Docs and skills with the one-process `?key=` URL shape | One bring-up path and the new URLs | SMD-2288 |
@@ -272,7 +272,7 @@ Which vendored integrations become plugins and which retire was decided on 2026-
 - **CLAUDE.md's MCP guard rail:** "one HTTP process reached by URL", never stdio, still holds for the MCP server. The reference deployment becomes the compose stack, not the Bun container (SMD-2288, maintainer review of the wording).
 - **SMD-2133's "Target end-state":** REST is canonical, and the deployed surface is three servers, not two interfaces on one process.
 - **`docs/mcp-sdk-v2-migration.md` (SMD-2275):** it calls server-portable "the canonical one-HTTP-process server". Its staging still holds, but the long-term MCP surface is SMD-2287's server, a client of the REST core.
-- **`integrations/kubernetes-deployment`:** under compose-only it has no deployment target. It retires, with SMD-1931 recording the disposition and SMD-2288 the removal. SMD-2259, the Kubernetes step of SMD-2080 and the Kubernetes outlier in SMD-2281 are held for that.
+- **`integrations/kubernetes-deployment`:** under compose-only it has no deployment target. It retired, with SMD-1931 recording the disposition and SMD-2288 the removal (PR 1). SMD-2259, the Kubernetes step of SMD-2080 and the Kubernetes outlier in SMD-2281, held for that, fall away with it.
 
 - **CONTRIBUTING.md's "Remote MCP pattern" (`:132`, `:382`), the PR template's server checkbox and the `dashboards/` and `integrations/` category rows** (CLAUDE.md, CONTRIBUTING.md) describe standalone `bun <file>` servers with their own keys. Decisions 9–12 replace them with the curated plugin pattern (SMD-2310 rewrites them). SMD-1846's `/ext/<name>` row becomes `/hooks/<name>`.
 
