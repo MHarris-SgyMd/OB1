@@ -150,8 +150,7 @@ export function stalledRequestLine(label: string, elapsedMs: number): string {
  * carry over: no vendored MCP server calls a provider since kubernetes-deployment,
  * the one that did under its own OB1_LLM_TIMEOUT (SMD-2692), retired with
  * compose-only (SMD-2288); the rest make queries alone. So the line names no
- * provider bound: the stuck part is a query, and the server's own log above it
- * says which.
+ * provider bound: the stuck part is a query.
  */
 export function vendoredStalledLine(label: string, elapsedMs: number): string {
   return `request still running after ${Math.round(elapsedMs / 1000)} s: ${label} — the keepalive stops here and the runtime's idle timeout takes over; the call is stuck on a query (SMD-2001)`;

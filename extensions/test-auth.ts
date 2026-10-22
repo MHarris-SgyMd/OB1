@@ -585,7 +585,6 @@ const MID_UPLOAD = SERVERS.find((s) => s.file === "recipes/ob-graph/index.ts")!;
       "mcpReply hands its stream to withSseKeepalive with the vendored line for the ceiling");
     // The stand-in the slow probe above serves is the real transport's shape (review pass 2): a
     // vendored server's POST is answered on an event stream, which is what mcpReply keeps alive.
-    env(MID_UPLOAD, KEYS);
     const real = await handlers[SERVERS.indexOf(MID_UPLOAD)](new Request("http://extension.test/mcp",
       { method: "POST", headers: { ...RPC, "x-access-key": READ_KEY }, body: JSON.stringify(LIST) }));
     assert(real.status === 200 && /^text\/event-stream\b/.test(real.headers.get("content-type") ?? ""),

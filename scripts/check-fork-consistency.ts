@@ -1738,7 +1738,7 @@ const THOUGHT_WRITE_PROBES = [
   // moved here); readwise-capture's, with the enhanced columns beside the vector; consolidation-bio's,
   // with the file's own fingerprint and no vector; the classification recipe's, content alone; the
   // Python client's dict; a list filled by append, sent by name; a list pushed, sent by name; an
-  // array literal; a bound array; a server's SQL with casts (the Kubernetes server's, retired with SMD-2288); the Neon recipe's template
+  // array literal; a bound array; a server's SQL with casts; the Neon recipe's template
   // over lines; quoted identifiers with a schema; an alias; INSERT … SELECT with a column list.
   'await supabase.from("thoughts").insert({ content, embedding, metadata });',
   'const { error } = await supabase.from("thoughts").insert({\n  content,\n  embedding,\n  source_type: "readwise",\n  type: "reference",\n  metadata: {\n    source: "readwise",\n    readwise_highlight_id: event.id,\n  },\n});',
