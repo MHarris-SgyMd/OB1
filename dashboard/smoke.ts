@@ -37,8 +37,10 @@ const READ_KEY = flag("read-key");
 const CAPTURE_KEY = flag("capture-key");
 /** Fail, not skip, when the overview lists no thought: CI captures one first, so its thought page is always driven. */
 const REQUIRE_THOUGHT = args.includes("--require-thought");
+/** Fail unless the thought driven is an ingested one: CI's capture is, so the notice arm cannot pass on a thought without one. */
+const REQUIRE_INGESTED = args.includes("--require-ingested");
 if (!BASE || !WRITE_KEY) {
-  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought]");
+  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought] [--require-ingested]");
   process.exit(2);
 }
 const ORIGIN = new URL(BASE).origin;
@@ -173,6 +175,7 @@ let thoughtId = "";
     const ingested = /<dt[^>]*>trust<\/dt>\s*<dd[^>]*>ingested</.test(t.html);
     const notice = t.html.indexOf('data-testid="notice"');
     assert(ingested === (notice >= 0) && (notice < 0 || notice < t.html.indexOf('data-testid="text"')), `…and the ingested notice ${ingested ? "before its text" : "absent"}, its trust ${ingested ? "ingested" : "otherwise"}`);
+    if (REQUIRE_INGESTED) assert(ingested, "…an ingested thought, as --require-ingested asks, so the notice arm is driven");
   } else if (REQUIRE_THOUGHT) {
     bad("the overview lists no thought, and --require-thought asks for one: the thought page went undriven");
   } else {
@@ -203,6 +206,8 @@ let thoughtId = "";
     for (const m of text.matchAll(/["'](\.{1,2}\/[^"']+\.js)["']/g)) queue.push(new URL(m[1], `${ORIGIN}${s}`).pathname);
   }
   assert(pages[2].status === 200 && pages[3].status === 200, `the pages' navigation data answers for the session (${pages[2].status}, ${pages[3].status})`);
+  // The overview sends each thought's first line, not its content: ten large thoughts made it 18.8 MB (review pass 4).
+  assert(!home.html.includes('"content"') && !home.html.includes("content:") && !pages[2].html.includes('"content"'), "the overview's page and data carry no thought's content, its first lines alone");
   assert(!leaked && scripts.size > 2, `no page, header, navigation data or script (${scripts.size} modules) holds the key`);
 
   const out = await signOut();

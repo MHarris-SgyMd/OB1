@@ -13,7 +13,7 @@
 	<dl class="grid grid-cols-[minmax(9rem,auto)_1fr] gap-x-6 gap-y-2 text-sm">
 		{#each data.rows as [label, value] (label)}
 			<dt class="text-text-muted">{label}</dt>
-			<dd class="break-words" data-testid={testId(label)}>{value}</dd>
+			<dd class="min-w-0 [overflow-wrap:anywhere]" data-testid={testId(label)}>{value}</dd>
 		{/each}
 	</dl>
 </section>

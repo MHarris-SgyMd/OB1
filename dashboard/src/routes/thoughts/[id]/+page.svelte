@@ -40,7 +40,7 @@
 			<dl class="grid grid-cols-[minmax(8rem,auto)_1fr] gap-x-6 gap-y-2 text-sm">
 				{#each fields as [k, v] (k)}
 					<dt class="text-text-muted">{k}</dt>
-					<dd class="font-mono whitespace-pre-wrap break-words">{shown(v)}</dd>
+					<dd class="min-w-0 font-mono whitespace-pre-wrap [overflow-wrap:anywhere]">{shown(v)}</dd>
 				{/each}
 			</dl>
 		{/if}

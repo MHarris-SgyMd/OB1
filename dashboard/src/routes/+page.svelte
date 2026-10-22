@@ -51,8 +51,9 @@
 		{#if data.recent.length === 0}
 			<p class="text-sm text-text-muted">The brain holds no thoughts yet.</p>
 		{:else}
-			<!-- No preload on hover: a thought's page reads `fetch`, which the core logs as a click-through (034), so a hover would label one (review pass 1). -->
-			<ul class="divide-y divide-white/5" data-testid="recent" data-sveltekit-preload-data="off">
+			<!-- No preload on hover: a thought's page reads `fetch`, which the core logs as a click-through (034), so a hover would label one (review pass 1).
+			     A full load on a click: the thought page is the server's alone (csr false), which a client-side navigation bypassed (review pass 5). -->
+			<ul class="divide-y divide-white/5" data-testid="recent" data-sveltekit-preload-data="off" data-sveltekit-reload>
 				{#each data.recent as t (t.id)}
 					<li class="py-2">
 						<a class="hover:text-primary-light" href="{base}/thoughts/{t.id}">{t.line}</a>

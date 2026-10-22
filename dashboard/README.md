@@ -141,6 +141,7 @@ signed-in tab refused in words, the cookie's and the pages' headers, each page r
 from the REST core, no page, header, script or cookie holding the key, sign-out and a
 second sign-in each ending a session on the server, and one key's 21st sign-in ending
 its own oldest session. `--require-thought` fails rather than skips the thought page
-when the overview lists none. CI captures a thought and runs it in the full-stack job,
+when the overview lists none, and `--require-ingested` unless that thought is an
+ingested one, so its notice is driven. CI captures a thought and runs it in the full-stack job,
 before that job configures the authorization server; after it, the job holds key
 sign-in off.
