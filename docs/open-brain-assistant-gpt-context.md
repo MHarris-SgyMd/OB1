@@ -4,7 +4,7 @@
 
 Use this file as repository context for the Open Brain Assistant GPT. It is written for a user-facing helper that supports people building, troubleshooting, and extending Open Brain from the OB1 repository.
 
-Last reviewed against this repo: September 24, 2026 (this fork: the Bun container in `SETUP.md`, no Supabase).
+Last reviewed against this repo: September 24, 2026 (this fork: the compose stack in `SETUP.md`, no Supabase).
 
 ## Assistant Role
 
@@ -25,11 +25,11 @@ Open Brain is not a notes app. It is an infrastructure layer for AI memory: one 
 
 The core setup creates:
 
-- A Postgres with pgvector — the compose stack in `SETUP.md`, or any Postgres.
+- A Postgres with pgvector, in the compose stack (`SETUP.md`).
 - A `thoughts` table with text content, vector embeddings, metadata, fingerprints, and timestamps.
 - A `match_thoughts` RPC for semantic search.
 - An `upsert_thought` RPC for deduplicated capture.
-- The MCP server (`server-portable/`) as a container behind the stack's proxy, whose port is the one the stack publishes by default, with the server at `/mcp` on it.
+- The MCP server (`mcp-server/`) as a container behind the stack's proxy, a client of the REST core (`server-portable/`), whose port is the one the stack publishes by default, with the server at `/mcp` on it.
 - A remote MCP connection URL like `http://127.0.0.1:8000/mcp?key=YOUR_MCP_ACCESS_KEY` on the machine, or `https://your-host/mcp?key=…` through the TLS proxy in front of it.
 
 The core user journey is:
@@ -49,7 +49,7 @@ The core user journey is:
 - `docs/03-faq.md`: Common user questions and troubleshooting, especially ChatGPT, search, import, storage, and key rotation.
 - `docs/04-ai-assisted-setup.md`: Guide for using AI coding tools to build the same system.
 - `docs/05-tool-audit.md`: Guidance for keeping MCP tool surfaces useful and not bloated.
-- `server-portable/index.ts`: Canonical core MCP server — Bun, in the compose stack's container (`SETUP.md`).
+- `mcp-server/`: the core MCP server at `/mcp`, a client of the REST core in `server-portable/`; both run in the compose stack (`SETUP.md`).
 - `extensions/`: Curated six-part learning path for practical Open Brain builds.
 - `recipes/`: Standalone imports, workflows, automation patterns, and alternative architectures.
 - `skills/`: Reusable AI client skills or prompt packs.
@@ -65,9 +65,9 @@ The base Open Brain system has three layers:
 
 1. Storage: Postgres with pgvector. The primary table is `thoughts`.
 2. Intelligence: a model endpoint generates embeddings and extracts simple metadata — local Ollama by default (`qwen3-embedding:4b` at 1024 dimensions, `qwen2.5:7b`), OpenRouter when configured.
-3. Access: the MCP server, one HTTP process, exposes MCP tools to AI clients.
+3. Access: the compose stack's proxy serves the MCP server at `/mcp`, which hands every tool call to the REST core. The stack is the brain's one deployment.
 
-The core MCP server in `server-portable/index.ts` exposes:
+The core MCP server (`mcp-server/`, at `/mcp`) exposes:
 
 - `capture_thought`: write a standalone thought, generate embedding, extract metadata, and store it.
 - `search_thoughts`: semantic search over stored thoughts.
@@ -246,7 +246,7 @@ Important standards:
 - Include a `GRANT` step for new tables: the connecting role is not the table owner (`db/README.md`, "Grants for a capturing role").
 - Mark read-only MCP tools with `annotations: { readOnlyHint: true }`.
 - Mark write tools with conservative annotations such as `readOnlyHint: false`, `openWorldHint: false`, and `destructiveHint: false` unless the tool really touches arbitrary external resources or destructive actions.
-- Run MCP servers as one HTTP process under `bun` and connect via remote MCP URLs. Do not guide users toward stdio servers or `claude_desktop_config.json` for the main learning path.
+- Run the brain as the compose stack (`SETUP.md`), its one deployment, and a vendored MCP server as one HTTP process under `bun`; connect via remote MCP URLs. Do not guide users toward stdio servers or `claude_desktop_config.json` for the main learning path.
 
 Category guidance:
 

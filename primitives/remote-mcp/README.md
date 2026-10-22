@@ -7,7 +7,7 @@ A guide to connecting your Open Brain extensions to any AI client. Run the serve
 
 ## Prerequisites
 
-- Your **MCP Connection URL** — the server's URL with the access key on it. Behind the TLS proxy it looks like `https://your-host/mcp?key=your-access-key`; for a client on the same machine as the server, `http://127.0.0.1:8787/mcp?key=your-access-key` (the port is the one the server's `PORT` names; the core server's is `http://127.0.0.1:8000/mcp?key=…`)
+- Your **MCP Connection URL** — the server's URL with the access key on it. Behind the TLS proxy it looks like `https://your-host/mcp?key=your-access-key`; for a client on the same machine as the server, `http://127.0.0.1:8787/mcp?key=your-access-key` (the port is the one the server's `PORT` names; the brain's is `http://127.0.0.1:8000/mcp?key=…`, through the compose stack's proxy)
 - The AI client you want to connect
 
 > A hosted client — Claude Desktop's connector, claude.ai, ChatGPT — dials your server from the vendor's side, so it needs the HTTPS form. Claude Code, Cursor and the other clients that run on your machine take the `127.0.0.1` form directly.
@@ -104,7 +104,7 @@ Every MCP client handles remote servers slightly differently. Your extension acc
 }
 ```
 
-> Older examples pass the access key via `--header`, which some `mcp-remote` versions did not send before attempting OAuth client registration. Pass the key via the `?key=` query parameter instead: it rides every request on every version. The same holds for the core brain's own MCP server. At the public origin of a stack with the `auth` profile on it advertises OAuth (a preview; [`deploy/README.md`](../../deploy/README.md), "Authorization server"), and a keyless request to its `/mcp` there gets the challenge that starts a sign-in. A request that carries a key never does. The bridge is a stdio process on your machine, but it is a bridge: the server it reaches is still the one HTTP process — the rule is that the *server* is never a stdio process.
+> Older examples pass the access key via `--header`, which some `mcp-remote` versions did not send before attempting OAuth client registration. Pass the key via the `?key=` query parameter instead: it rides every request on every version. The same holds for the core brain's own MCP server. At the public origin of a stack with the `auth` profile on it advertises OAuth (a preview; [`deploy/README.md`](../../deploy/README.md), "Authorization server"), and a keyless request to its `/mcp` there gets the challenge that starts a sign-in. A request that carries a key never does. The bridge is a stdio process on your machine, but it is a bridge: the server it reaches is still one reached by URL — the rule is that the *server* is never a stdio process.
 
 ## Troubleshooting
 

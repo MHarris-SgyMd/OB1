@@ -82,4 +82,4 @@ Held by the maintainer's review:
 - **The brain's thoughts are reached through `ctx.call(name, input)` alone.** That is a core operation called as the caller, behind the caller's own scope: a read operation called with a read key cannot capture or update. A write through it names the caller on its audit row.
 - **An output says only what the caller may see.** `ctx.call` hands back the core operation's whole value: for `capture_thought`, more than the REST core tells a key that cannot read (`rest/app.ts`'s `capturedFor`). What reaches the caller is what the output schema declares, so it should not declare more.
 
-Plugins are **curated**: they run in the brain's process with its privileges, so a new one needs maintainer review. That review is the control; the roles and check 31 catch what review misses by accident.
+Plugins are **curated**: they run inside the brain's servers with their privileges, so a new one needs maintainer review. That review is the control; the roles and check 31 catch what review misses by accident.

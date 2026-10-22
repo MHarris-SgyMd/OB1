@@ -242,6 +242,18 @@
  *      dashboard has a Cloudflare build of its own) that names `wrangler`, or
  *      — outside code, where the refusal is spelled — sets OB1_STORE to
  *      postgrest; probes for both patterns
+ * 22c. the brain deploys as the compose stack alone (SMD-2288): no doc outside
+ *      the history starts one of its servers by path, quoted, relative or
+ *      absolute (`bun server-portable/index.ts`, `cd mcp-server && bun
+ *      index.ts`, `bun run dev` there, a systemd `ExecStart`, `pm2 start`),
+ *      shell continuations joined; runs the server image alone (a `docker
+ *      run` of ob1-server or open-brain-server with no `--entrypoint`, or with
+ *      a runtime for it and the server's entry); or drives a cluster or a
+ *      platform's deploy (`kubectl`, `helm install|upgrade`, `fly`/`flyctl
+ *      deploy|launch`, `deployctl`, `gcloud run deploy`, `railway up`, `docker
+ *      stack deploy`, `docker service create`, `podman kube play`, `oc
+ *      apply|new-app`); a package manager's `dev` or `start` there (`cd`,
+ *      `--cwd`, `--prefix`, `-C`); probes
  *  23. every workflow under .github/workflows/ names its runner image — no
  *      `-latest` label in any case or size, no expression — and pins every
  *      `uses:` (a step's, or a job's reusable workflow) to a full commit SHA
@@ -5278,6 +5290,201 @@ function checkRetiredTarget() {
   }
 }
 checkRetiredTarget();
+
+// ── 22c: the brain deploys as the compose stack alone (SMD-2288) ─────────────
+//
+// SMD-2282's decision 6: the brain is the compose stack (the proxy, the REST
+// core, the MCP server at /mcp, Postgres and the profiles beside them), with no
+// single-process mode. The MCP server is a client of the REST core on the
+// stack's internal network, so no other shape can run it. SMD-3152 retired the
+// Workers target (22b) and SMD-2288 the Kubernetes one; this keeps a doc from
+// teaching another. A doc fails on a line that starts one of the brain's
+// servers by path from outside its directory or runs a `dev` or `start` script
+// there (after a `cd`, or by `--cwd`, `--prefix`, `--dir` or `-C`), runs the
+// server image alone as a server, or drives a cluster or a platform's deploy. A
+// command continued with `\` is read as one line, and the steps after a `cd`
+// cross `;` but never another `cd`. Between the runtime and the path only flags,
+// `run`, `watch` and a bare `--` are read, so prose ("a graph node is written by
+// server-portable/api.ts") passes. The image run with `--entrypoint` and a tool
+// (keygen.ts, in deploy/README.md) passes; with a runtime for it and the
+// server's entry later on the line, a path or the bare file the image's
+// directory holds, it fails (a tool given a file of that name as an argument
+// would too). `bun index.ts` on a line of its own, inside server-portable/ or
+// mcp-server/, is how their tests run the entry and is not read; a `cd` on the
+// line before it is not joined to it either. Compose's own command spelled with
+// the runtime (`bun ../mcp-server/index.ts`) fails like any other: name the file
+// and the entrypoint apart. A path segment holds no `/`, and a flag splits one
+// way (FLAGS), so a long path or a long run of flags is read once: either read
+// two ways, a line of thirty ran past Bun's backtracking limit and the match
+// returned false, a violation missed. The probes hold both with a line of
+// thirty. The history (changes/, CHANGELOG.md, FORK.md) records what was.
+/** Path characters: no space, quote, backtick or shell separator. */
+const PATH_CHAR = String.raw`[^\s"'\x60|;&,]`;
+/** One path segment and its slash: no `/` inside, so a path splits one way. */
+const SEGMENT = String.raw`[^\s"'\x60|;&,/]+\/`;
+/** One of the brain's server directories, from the root, `./`, `../` or absolute. */
+const BRAIN_DIR = String.raw`\/?(?:${SEGMENT})*?(?:server-portable|mcp-server)`;
+/** One of their entry files by that path, quoted or not. */
+const BRAIN_ENTRY = String.raw`["'\x60]?${BRAIN_DIR}\/(?:index|api)\.[jt]s\b`;
+/** The entry file alone, `./` or not, as a word of its own: not the tail of another directory's path. */
+const BARE_ENTRY = String.raw`(?<![\w/.-])(?:\.\/)?(?:index|api)\.[jt]s\b`;
+/** A runtime that would start it, as a word: not `bun build`, `bun test` or `bun install`, which start nothing. */
+const RUNTIME = String.raw`\b(?:bun|node|deno|tsx|pm2\s+start)\b(?!\s+(?:build|test|install)\b)`;
+/** A quoted value, either quote. */
+const QUOTED = String.raw`(?:"[^"\n]*"|'[^'\n]*')`;
+/**
+ * Flags, `run` and `watch` (`tsx watch`). Each splits one way: a flag's name
+ * starts with a word character after its dashes (`--?[\w-]+` read `--a` as
+ * `--` `a` or `-` `-a`); a value after `=` is quoted or runs to the next space
+ * (commas in it: `--allow-env=PORT,DATABASE_URL`); a value after a space is
+ * quoted, or starts with neither `-` nor the words `run` and `watch`; and a
+ * bare `--` ends the flags (`pm2 start bun -- …`). Two ways a word, thirty
+ * words ran past Bun's backtracking limit and the match returned false.
+ */
+const FLAGS = String.raw`(?:\s+(?:--?\w[\w-]*(?:=(?:${QUOTED}|[^\s"'\x60|;&]*)|\s(?:${QUOTED}|(?!(?:run|watch)\b)[^\s"'\x60|;&,-]${PATH_CHAR}*))?|--|run|watch))*?`;
+/** A package script that runs the entry (server-portable's `dev` is `bun --watch index.ts`): `dev` or `start`, not `dev:docs` or `start-db`. */
+const SCRIPT = String.raw`(?:dev|start)(?![\w:-])`;
+const DEV_RUN = String.raw`(?:bun|npm|pnpm|yarn)\s+(?:run\s+)?${SCRIPT}`;
+/** The flags, up to the path. */
+const ARGS = String.raw`${FLAGS}\s+`;
+/** One character of the commands after a `cd`, or an `&&`: `;` too, but never into another `cd` or `pushd`. One unit a character, so the steps split one way. */
+const STEP = String.raw`(?:(?!\b(?:cd|pushd)\b)[^\n|&]|&&)`;
+const OUTSIDE_COMPOSE = [
+  // bun server-portable/index.ts, PORT=8000 bun run ./mcp-server/index.ts, ExecStart=/usr/bin/bun /opt/ob1/server-portable/index.ts
+  new RegExp(RUNTIME + ARGS + BRAIN_ENTRY),
+  // cd server-portable && bun install; bun index.ts, cd mcp-server; PORT=8001 bun --watch index.ts, cd "server-portable" && npm run dev
+  new RegExp(String.raw`\b(?:cd|pushd)\s+["']?${BRAIN_DIR}\/?["']?\s*(?:&&|;)${STEP}*?(?:` + RUNTIME + String.raw`${STEP}*?${BARE_ENTRY}|\b${DEV_RUN})`),
+  // bun --cwd mcp-server index.ts, bun --cwd server-portable run dev, bun run --cwd server-portable dev
+  new RegExp(RUNTIME + FLAGS + String.raw`\s+--cwd[= ]${BRAIN_DIR}\/?` + ARGS + String.raw`(?:${BARE_ENTRY}|(?:run\s+)?${SCRIPT})`),
+  // a package manager's script there: npm --prefix server-portable run dev, npm run dev --prefix …, yarn --cwd … dev, pnpm -C … start
+  new RegExp(String.raw`\b(?:npm|pnpm|yarn)\b(?=[^\n|;&]*\s(?:--prefix|--cwd|--dir|-C)[= ]["']?${BRAIN_DIR}(?![\w-]))(?=[^\n|;&]*\s(?:run\s+)?${SCRIPT})`),
+  // the server image alone: docker run … ob1-server, docker container run, docker create, with no --entrypoint on the line
+  /\b(?:docker|podman)\s+(?:container\s+)?(?:run|create)\b(?![^\n]*--entrypoint)[^\n]*\b(?:ob1|open-brain)-server(?![\w-])/,
+  // the image with a runtime for its entrypoint and the server's entry: docker run --entrypoint bun <image> index.ts
+  new RegExp(String.raw`\b(?:docker|podman)\s+(?:container\s+)?(?:run|create)\b[^\n]*?--entrypoint[= ]["']?(?:\S*\/)?(?:bun|node)\b[^\n]*?(?:${BRAIN_ENTRY}|\s["']?${BARE_ENTRY})`),
+  // a cluster or a platform's deploy
+  /\bkubectl\b|\bhelm\s+(?:install|upgrade)\b|\b(?:fly|flyctl)\s+(?:deploy|launch)\b|\bdeployctl\b|\bgcloud\s+run\s+deploy\b|\brailway\s+up\b|\bdocker\s+(?:stack\s+deploy|service\s+create)\b|\bpodman\s+(?:kube\s+play|play\s+kube)\b|\boc\s+(?:apply|new-app)\b/,
+];
+/** A doc's lines with shell continuations (a trailing `\`) joined, each at its first line's number. */
+function joinedLines(text: string): [number, string][] {
+  const out: [number, string][] = [];
+  let at = 0;
+  let held: string | null = null;
+  text.split("\n").forEach((line, i) => {
+    if (held === null) { at = i + 1; held = ""; }
+    if (/\\\s*$/.test(line)) held += line.replace(/\\\s*$/, " ");
+    else { out.push([at, held + line]); held = null; }
+  });
+  if (held !== null) out.push([at, held]);
+  return out;
+}
+const outsideCompose = (line: string) => OUTSIDE_COMPOSE.some((re) => re.test(line));
+/** [text, caught?] — what 22c must catch (the ticket's Verify plant first), and the neighbours it must not reach. */
+const OUTSIDE_COMPOSE_PROBES: [string, boolean][] = [
+  ["run `bun server-portable/index.ts`", true],
+  ["PORT=8000 bun run ./server-portable/index.ts", true],
+  ["bun --no-env-file server-portable/api.ts", true],
+  ["bun --env-file .env.local --watch server-portable/index.ts", true],
+  ["node server-portable/index.js", true],
+  ["OB1_REST_URL=http://api:8000 bun mcp-server/index.ts", true],
+  ['bun "server-portable/index.ts"', true],
+  ["bun `mcp-server/index.ts`", true],
+  ["ExecStart=/usr/local/bin/bun /opt/ob1/server-portable/index.ts", true],
+  [`bun --env-file=/home/me/${"d/".repeat(30)}.env server-portable/index.ts`, true],
+  [`bun${" --a b".repeat(30)} ; bun server-portable/index.ts`, true],
+  [`bun${" --a run".repeat(30)} ; bun server-portable/index.ts`, true],
+  ["pm2 start bun -- server-portable/index.ts", true],
+  ["tsx watch server-portable/index.ts", true],
+  ['bun --env-file ".env.local" server-portable/index.ts', true],
+  ["node --require './otel.js' server-portable/index.js", true],
+  ["deno run --allow-env=PORT,DATABASE_URL server-portable/index.ts", true],
+  ["pm2 start server-portable/index.ts --interpreter bun", true],
+  ["cd server-portable && bun index.ts", true],
+  ["cd server-portable && bun ./index.ts", true],
+  ["cd mcp-server; bun install; bun index.ts", true],
+  ["cd server-portable && bun install; bun index.ts", true],
+  ['cd "server-portable" && bun index.ts', true],
+  ["pushd mcp-server && bun index.ts", true],
+  ["cd mcp-server; bun --watch index.ts", true],
+  ["cd mcp-server && OB1_REST_URL=http://api:8000 bun index.ts", true],
+  ["cd server-portable && bun install && bun index.ts", true],
+  ["cd ../server-portable && bun index.ts", true],
+  ["cd server-portable && bun run dev", true],
+  ["cd server-portable && npm run dev", true],
+  ["cd server-portable && yarn start", true],
+  ["bun --cwd mcp-server index.ts", true],
+  ["bun --cwd server-portable run dev", true],
+  ["bun run --cwd server-portable dev", true],
+  ["npm --prefix server-portable run dev", true],
+  ["npm run dev --prefix server-portable", true],
+  ["yarn --cwd server-portable dev", true],
+  ["pnpm -C mcp-server start", true],
+  ["docker run -p 8000:8000 ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
+  ["podman run --rm -e MCP_ACCESS_KEYS ob1-server", true],
+  ["docker run -p 8000:8000 open-brain-server", true],
+  ["docker container run -p 8000:8000 ob1-server", true],
+  ["docker create --name brain ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
+  ["docker run --entrypoint bun -p 127.0.0.1:8001:8000 \\\n  -e OB1_REST_URL=http://api:8000 \\\n  <server image> ../mcp-server/index.ts", true],
+  ["docker run --entrypoint bun ghcr.io/mharris-sgymd/ob1-server:2.0.0 index.ts", true],
+  ["podman run --entrypoint=bun open-brain-server api.ts", true],
+  ["docker run --entrypoint=/usr/local/bin/bun ghcr.io/mharris-sgymd/ob1-server:2.0.0 index.ts", true],
+  ["docker run --entrypoint bun ob1-server 'index.ts'", true],
+  ["kubectl apply -f k8s/", true],
+  ["helm install brain ./chart", true],
+  ["helm upgrade brain ./chart", true],
+  ["fly deploy", true],
+  ["flyctl launch", true],
+  ["deployctl deploy --project=brain main.ts", true],
+  ["gcloud run deploy brain --image ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
+  ["railway up", true],
+  ["docker stack deploy -c deploy/compose.yaml brain", true],
+  ["docker service create --name brain ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
+  ["podman kube play brain.yaml", true],
+  ["oc apply -f brain.yaml", true],
+  ["oc new-app ghcr.io/mharris-sgymd/ob1-server:2.0.0", true],
+  ["podman play kube brain.yaml", true],
+  ["docker run --rm --entrypoint bun ghcr.io/mharris-sgymd/ob1-server:<X.Y.Z> keygen.ts --name laptop --scope write", false],
+  ["cd server-portable && bun keygen.ts --name n8n --scope capture", false],
+  ["cd mcp-server && bun install", false],
+  ["cd mcp-server && npm install", false],
+  ["cd server-portable && npm run dev:docs", false],
+  ["cd server-portable && bun test && npm run lint", false],
+  ["cd server-portable && bun test && cd ../dashboards/open-brain-dashboard-next && npm run dev", false],
+  ["cd server-portable && bun keygen.ts && cd ../integrations/slack-capture && bun index.ts", false],
+  ["npm --prefix server-portable install", false],
+  ["docker run --name ob1-server-test postgres:17", false],
+  ["cd server-portable && bun install && cat index.ts", false],
+  ["cd server-portable && bun build ./index.ts --outdir dist", false],
+  ["cd mcp-server && bun test index.ts", false],
+  ["cd server-portable && bun keygen.ts; cd .. && bun extensions/household-knowledge/index.ts", false],
+  ["cd server-portable && bun keygen.ts && bun ../extensions/household-knowledge/index.ts", false],
+  ["bun test server-portable/test-server.ts", false],
+  ["bun build server-portable/index.ts --outdir dist", false],
+  ["after bun install, open server-portable/index.ts", false],
+  ["Each graph node is written by server-portable/api.ts", false],
+  ["deno lint mcp-server/index.ts", false],
+  ["`server-portable/index.ts` is the server n8n reaches", false],
+  ["podman compose -f deploy/compose.yaml run --rm migrate", false],
+  ["bun extensions/household-knowledge/index.ts", false],
+  ["the image's entrypoint runs `exec bun index.ts`", false],
+  ["Kubernetes' and ECS's 30, Fly's `kill_timeout`", false],
+];
+const DOC_FILE = /\.mdx?$/;
+function checkComposeOnly() {
+  for (const [probe, caught] of OUTSIDE_COMPOSE_PROBES) {
+    if (joinedLines(probe).some(([, line]) => outsideCompose(line)) !== caught) fail(SELF, `check 22c ${caught ? "misses" : "catches"} its probe ${JSON.stringify(probe)} (its own probe)`);
+  }
+  const files = citationFiles().filter((rel) => DOC_FILE.test(rel) && !isHistory(rel));
+  for (const want of ["SETUP.md", "docs/01-getting-started.md", "primitives/deploy-remote-mcp/README.md"]) {
+    if (!files.includes(want)) fail(SELF, `check 22c's listing does not reach ${want} — the listing is broken, not the tree clean`);
+  }
+  for (const rel of files) {
+    for (const [n, line] of joinedLines(readFileSync(join(ROOT, rel), "utf8"))) {
+      if (outsideCompose(line)) fail(`${rel}:${n}`, "runs the brain outside the compose stack — it deploys as the compose stack alone (SMD-2282's decision 6, SMD-2288), which SETUP.md brings up; a vendored server's own `bun <file>` is primitives/deploy-remote-mcp/'s");
+    }
+  }
+}
+checkComposeOnly();
 
 // ── 23: a workflow names its runner image and pins every action to a commit (SMD-2093) ──
 /**
