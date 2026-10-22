@@ -3822,6 +3822,9 @@ console.log("\n[23] A search the provider does not answer for is answered by the
     assert(((nbsp.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === named) && !/No thought contains/.test(nbsp.text)
         && /Held only by thoughts outside this search's filter, said_by, actor or min_trust: DOWN-2891 \(in 1 thought\)\./.test(nbspScoped.text),
       `a query led by a no-break space: its literal found, and outside a filter said held there (${nbsp.text.slice(0, 120)} | ${nbspScoped.text.slice(-160)})`);
+    // NEL at an end is whitespace too, though neither JS's \s nor 017's strips it (review pass 12).
+    const nel = await result("search_thoughts", { query: "alpha words\u0085" });
+    assert(((nel.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === plain) && !/No thought contains/.test(nel.text), `a query ended by NEL: the text without it (${nel.text.slice(0, 160)})`);
     // Whitespace at the query's ends is no part of the text (review pass 6: "deploy\n" was held by none).
     const padded = await result("search_thoughts", { query: "  alpha words\n" });
     assert(!padded.isError && ((padded.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === plain) && /Contains: alpha words\n/.test(padded.text),

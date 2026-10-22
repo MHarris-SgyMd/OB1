@@ -136,8 +136,13 @@ async function answerWithoutVector(
   // One text for every statement: the query without the whitespace at its
   // ends, which no reader sees — JS trims a no-break space or a BOM that
   // 017's tokeniser keeps, and a literal arm on the untrimmed query read
-  // " XY_2" while literalFacts read "XY_2" (review pass 11).
-  const text = opts.query.trim();
+  // " XY_2" while literalFacts read "XY_2" (review pass 11). NEL (U+0085)
+  // too, which Unicode calls whitespace and neither JS's \s nor 017's strips;
+  // and a lone surrogate made the U+FFFD Postgres receives, so a reply shows
+  // the text it searched (review pass 12).
+  const text = opts.query
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD")
+    .replace(/^[\s\u0085]+|[\s\u0085]+$/g, "");
   const rows = await store.hybridThoughts({
     query: text, embedding: null, threshold: opts.threshold ?? 0, limit: opts.limit,
     filter: opts.filter, recencyWeight: opts.recencyWeight ?? 0, preferCurrent: opts.preferCurrent === true, minTrust: opts.minTrust,

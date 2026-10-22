@@ -93,7 +93,7 @@ export const SPECS = {
       "`prefer_current` ranks finished and replaced work, and thoughts about finished tickets, below live work: off by default. " +
       "A hit naming a ticket whose status has moved since it was written lists it in `moved` (over MCP `{ticket, was, now}` in status types, and the text says `⚠ Moved since written: <ticket> <then> → <now>`, each status as its type's word — Triage, Backlog, Todo, In Progress, Done, Canceled; a custom \"In Review\" shows as In Progress — never the board's name; over REST each status's name and type); it is not ranked lower for it — trust the ticket's status now over what the thought says. " +
       "For a hit naming a ticket, `moved` is empty when its tickets were checked and none moved, and null when they were not checked — a superseded hit, a ticket row, a note filed under a ticket, any hit on a brain before migration 095 or from a REST core older than this server; `movedNotRead` counts the keys past the first 50 a checked hit mentions, which were not checked. " +
-      "While the embedding provider does not answer, the hits are the query's exact matches alone (no similarity) — its identifiers and quoted spans, then, those matching nothing, the query as one text — and `vectorFailed` and the text say so.",
+      "While the embedding provider does not answer, the hits are the query's exact matches alone (no similarity) — its identifiers and quoted spans, then, those matching nothing, the query as one text — and `vectorFailed` says so (over MCP the text too; over REST the empty answer's `facts` say why nothing was found).",
     annotations: {
       readOnlyHint: true,
     },
