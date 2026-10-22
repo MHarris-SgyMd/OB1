@@ -3830,7 +3830,7 @@ asks for a stopped follower's row to be retired, not started again.
 
 **A database not answering at its start** is waited out, as one mid-sleep
 is (SMD-2599's schedule), so the service started beside a restarting Postgres
-spends none of its three restarts. A stop during the wait ends an in-process run (`run({ signal })`) with 130; the CLI installs its signal handlers only after the start's reads, so a signal then ends it at once, as a signal ends any process (143 for the compose service's SIGTERM).
+does not end and wait on its supervisor's clock (SMD-3214). A stop during the wait ends an in-process run (`run({ signal })`) with 130; the CLI installs its signal handlers only after the start's reads, so a signal then ends it at once, as a signal ends any process (143 for the SIGTERM the compose service's supervisor passes on).
 So does each pass's start at every sleep: a follower waits out every statement
 up to its first claim — the tables check, the worker key's lookup, extraction's
 key, 079's check, the relations grants; not an operator's `--retry-*` — where it
@@ -4779,6 +4779,14 @@ row's `updated_at`, the database's `now()`.
 - **`ended`:** the worker's process is gone — `stopped` on a signal or a
   follower's `--limit`, `failed` when the provider refused the request itself or
   a pass threw. Its row says so at once rather than "alive" until it goes stale.
+- **`restart`:** on an ended row, `db/supervise.ts`'s word — the compose
+  services' command since SMD-3214, which runs the follower again when it ends
+  on its own: `in_s`, the seconds from the row's stamp to the next try (`null`
+  when it holds until the service is recreated: no `OB1_WORKER_KEY`, or a
+  setting that is not digits), `code`, the follower's exit status, and
+  `tries`, the ends in a row — 1, 2, 4, 8, then every 15 minutes. It keeps
+  what the follower wrote last, its `refused` included, and writes a row of
+  its own for one that wrote none. The follower's next stamp replaces it.
 
 A pass is stamped `running` as it starts and every `every_s` while it runs, so
 a follower's first pass over a backlog reads alive, as lease renewal keeps its
@@ -4799,7 +4807,9 @@ the record; the heartbeat still counts.
 `workers` row warns, with a remedy for each — for every heartbeat but the
 sleep scheduler's, which has its own `sleep` row ("Sleep", above):
 - when a heartbeat is older than three of its intervals, or its worker ended
-  (the remedy names the command that starts it again);
+  (the remedy names the command that starts it again) — or, held by its
+  supervisor, the cause, when it tries again on its own, and the recreate a
+  fix in `deploy/.env` needs;
 - when a fresh one's last pass failed;
 - when its last block passed the malformed alarm, which a follower otherwise
   says only on stderr.
@@ -5194,11 +5204,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2992 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1489 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1502 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 908 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 68 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 239 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 252 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
