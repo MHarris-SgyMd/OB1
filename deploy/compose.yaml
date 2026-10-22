@@ -1026,9 +1026,9 @@ services:
   # restart signs everyone out. Key sign-in is off while COMPOSE_PROFILES
   # names auth (ADR decision 16). OB1_PUBLIC_ORIGIN is the origin its forms
   # and cookie are judged by behind TLS (dashboard/serve.ts); unset, each
-  # request's own, over plain HTTP. On the mesh alone: nothing outward, no
-  # Postgres. Its files are the image's, read-only, and it keeps no
-  # capability.
+  # request's own, over plain HTTP. A stop drains within OB1_STOP_GRACE, as
+  # the servers' does. On the mesh alone: nothing outward, no Postgres. Its
+  # files are the image's, read-only, and it keeps no capability.
   app:
     image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
     pull_policy: never

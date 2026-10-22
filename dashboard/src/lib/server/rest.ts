@@ -23,7 +23,7 @@ export function rest(): RestClient {
 	return client;
 }
 
-export function restUrl(e: Record<string, string | undefined>): string {
+function restUrl(e: Record<string, string | undefined>): string {
 	return e.OB1_REST_URL?.trim() || DEFAULT_REST_URL;
 }
 

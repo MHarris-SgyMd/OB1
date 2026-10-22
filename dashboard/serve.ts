@@ -16,10 +16,11 @@
 //     reached over plain HTTP on the loopback or a LAN address signs in as it
 //     is reached, and one behind TLS needs OB1_PUBLIC_ORIGIN, or a form's post
 //     is refused as cross-site.
-// It reads OB1_REST_URL (the REST core, api.ob1.internal on the mesh unless
-// set), COMPOSE_PROFILES (key sign-in is off while it names auth) and
-// GRAFANA_LINK or GRAFANA_ROUTE (the Grafana link, set by the overlays that
-// reach Grafana).
+// It also sets adapter-node's drain and body limit (below), and reads
+// OB1_REST_URL (the REST core, api.ob1.internal on the mesh unless set),
+// OB1_STOP_GRACE (the stop's grace, as the servers read it), COMPOSE_PROFILES
+// (key sign-in is off while it names auth) and GRAFANA_LINK or GRAFANA_ROUTE
+// (the Grafana link, set by the overlays that reach Grafana).
 // It holds no key and no secret of its own: each visitor's key is the call's.
 
 import { createRestClient, DEFAULT_REST_URL } from "../rest-client/index.ts";

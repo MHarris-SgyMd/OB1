@@ -1826,19 +1826,20 @@ jobs:
 
       # SMD-2280: the operator GUI as a browser uses it, through the stack's
       # proxy at /dashboard, on the stack configured for no authorization
-      # server, after one capture of its own over /mcp (smoke.sh captures
-      # nothing, and the thought page went undriven: review pass 2), so
-      # --require-thought fails the step rather than skip that arm: the sign-in wall, a wrong and a
-      # capture-only key refused, a cookie the server never issued and a
-      # cross-site sign-in refused, the session cookie's attributes and the
-      # pages' headers, the overview, the status and a thought rendered from
-      # the REST core under the write key (the overview and a 404 under the
-      # read key), the key in no
-      # page, header, script or cookie, and sign-out and a second sign-in
-      # each ending a session on the server (dashboard/smoke.ts). Here, not
-      # after the next step: that one configures the authorization server,
-      # and the GUI then offers no key sign-in (review pass 1). The smoke
-      # imports nothing, so nothing is installed.
+      # server (dashboard/smoke.ts). First one capture of its own over /mcp,
+      # ingested, since smoke.sh captures nothing: --require-thought fails
+      # the step rather than skip the thought page, and --require-ingested
+      # unless that page's ingested notice is driven. The smoke holds the
+      # sign-in wall; a wrong and a capture-only key, a cookie the server never
+      # issued and a cross-site or Origin-null sign-in refused; the cookie's
+      # and the pages' headers; the overview, the status and a thought rendered
+      # from the REST core under the write key, the overview and a 404 under
+      # the read key; the overview's data holding each thought's first line
+      # alone; the key in no page, header, script or cookie; and sign-out, a
+      # second sign-in and the per-key cap each ending a session on the
+      # server. Here, not after the next step: that one configures the
+      # authorization server, and the GUI then offers no key sign-in (review
+      # pass 1). The smoke imports nothing, so nothing is installed.
       - name: The operator GUI, driven through the proxy
         working-directory: dashboard
         run: |

@@ -21,8 +21,8 @@ export const MAX_SESSIONS = 1000;
 /**
  * The most one key holds: a sign-in past it ends that key's oldest session, not
  * another key's, so one key signed in over and over cannot push every other
- * visitor out of MAX_SESSIONS (review pass 1). Only sessions under fifty keys or
- * more reach the global cap. Two sign-ins posted at once over one cookie each
+ * visitor out of MAX_SESSIONS (review pass 1). Only sessions under fifty or more
+ * keys reach the global cap. Two sign-ins posted at once over one cookie each
  * open a session, and the browser keeps one: the other is bounded by this cap
  * and the day, not by sign-out (review pass 2, accepted).
  */
@@ -62,8 +62,9 @@ function newId(): string {
 	return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-/** A new session, its id the cookie's value; `now` (ms) for a test to place it. */
-export function openSession(session: Session, now = Date.now()): string {
+/** A new session, its id the cookie's value. */
+export function openSession(session: Session): string {
+	const now = Date.now();
 	const own: string[] = [];
 	for (const [id, held] of sessions) {
 		if (held.exp <= now) sessions.delete(id);
@@ -77,11 +78,11 @@ export function openSession(session: Session, now = Date.now()): string {
 }
 
 /** The session an id names, or null for one it does not: unknown, ended or expired. */
-export function readSession(id: string | undefined, now = Date.now()): Session | null {
+export function readSession(id: string | undefined): Session | null {
 	if (!id) return null;
 	const held = sessions.get(id);
 	if (!held) return null;
-	if (held.exp <= now) {
+	if (held.exp <= Date.now()) {
 		sessions.delete(id);
 		return null;
 	}
@@ -91,9 +92,4 @@ export function readSession(id: string | undefined, now = Date.now()): Session |
 /** Ends a session: sign-out, or a key the REST core no longer takes. */
 export function closeSession(id: string | undefined): void {
 	if (id) sessions.delete(id);
-}
-
-/** How many sessions are held, for the suite. */
-export function sessionCount(): number {
-	return sessions.size;
 }
