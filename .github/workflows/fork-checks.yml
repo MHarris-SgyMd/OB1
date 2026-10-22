@@ -779,6 +779,20 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # The upgrade and preflight pair's own Postgres, which the start step's
+      # two legs reach on 5433: its comment has why (SMD-3195).
+      pair-postgres:
+        image: pgvector/pgvector:0.8.6-pg16
+        env:
+          POSTGRES_PASSWORD: ob1test
+          POSTGRES_DB: ob1upgrade
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -792,6 +806,56 @@ jobs:
       - name: Install
         working-directory: server-portable
         run: bun install --frozen-lockfile
+
+      # Two suites side by side, each against its own database (SMD-2219), on
+      # the second service, pair-postgres, which they have to themselves: started
+      # here and run in the background while the job's other suites run on
+      # ob1test (SMD-3195). They were the job's last long step, a median 179 s
+      # after 106 s of suites, on the run's critical path. test-upgrade.ts applies
+      # migrations INCREMENTALLY, onto a database that already holds data — the
+      # one situation every other suite avoids by resetting first, and the only
+      # one a real deployment is ever in; most of its time is three waits on the
+      # migrator's 10 s lock_timeout. test-preflight.ts is the deploy gate:
+      # without it a misconfigured server starts, answers the MCP handshake,
+      # passes every HTTP liveness probe, and fails only when a user captures
+      # their first thought; its time is its preflight runs, a subprocess each.
+      # A Postgres of their own, not databases beside ob1test: a cluster's
+      # databases share its transaction horizon, and an open transaction of
+      # theirs hid test-plugins-sql.ts's new index from the planner (review pass
+      # 1, 9 runs in 30). The two connect as one role to one cluster, so what
+      # the cluster shares — a role and its settings, pg_locks,
+      # pg_stat_activity — is scoped in each to its own database, or named for
+      # the suite; both headers say so, and a fixture added to either keeps to
+      # it. Each leg runs in a subshell that outlives this step (the runner ends
+      # a job's leftover processes only at its end) and writes its log, then its
+      # exit code by a rename, so the last step never reads half of one;
+      # `|| rc=$?` keeps -e from ending the subshell before it writes the code.
+      # Each has its own time limit (a hang ends as 124, or 137 when TERM is
+      # ignored). The last step, "Incremental upgrade and preflight (started at
+      # the job's start)", waits on both and prints them.
+      - name: Start the incremental upgrade and preflight, in the background
+        working-directory: db
+        run: |
+          # test-preflight's database; the service creates only test-upgrade's.
+          bun --eval 'const s = new Bun.SQL(process.env.UPGRADE_DATABASE_URL); await s.unsafe("CREATE DATABASE ob1preflight"); await s.close()'
+          limit_s=600
+          echo "$(date +%s) $limit_s" > "$RUNNER_TEMP/pair.started"
+          (
+            rc=0
+            DATABASE_URL=$UPGRADE_DATABASE_URL \
+              timeout --kill-after=10s "${limit_s}s" bun test-upgrade.ts > "$RUNNER_TEMP/test-upgrade.log" 2>&1 || rc=$?
+            echo "$rc" > "$RUNNER_TEMP/test-upgrade.rc.part" && mv "$RUNNER_TEMP/test-upgrade.rc.part" "$RUNNER_TEMP/test-upgrade.rc"
+          ) < /dev/null > /dev/null 2>&1 &
+          (
+            cd ../server-portable
+            rc=0
+            DATABASE_URL=$PREFLIGHT_DATABASE_URL \
+              timeout --kill-after=10s "${limit_s}s" bun test-preflight.ts > "$RUNNER_TEMP/test-preflight.log" 2>&1 || rc=$?
+            echo "$rc" > "$RUNNER_TEMP/test-preflight.rc.part" && mv "$RUNNER_TEMP/test-preflight.rc.part" "$RUNNER_TEMP/test-preflight.rc"
+          ) < /dev/null > /dev/null 2>&1 &
+        env:
+          UPGRADE_DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5433/ob1upgrade
+          PREFLIGHT_DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5433/ob1preflight
 
       - name: Store conformance
         working-directory: server-portable
@@ -966,68 +1030,6 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
-      # Two suites side by side, each against its own database on the service
-      # container (SMD-2219). test-upgrade.ts applies migrations INCREMENTALLY,
-      # onto a database that already holds data — the one situation every other
-      # suite avoids by resetting first, and the only one a real deployment is
-      # ever in; most of its time is three waits on the migrator's 10 s
-      # lock_timeout. test-preflight.ts is the deploy gate: without it a
-      # misconfigured server starts, answers the MCP handshake, passes every
-      # HTTP liveness probe, and fails only when a user captures their first
-      # thought; its time is its preflight runs, a subprocess each. In series
-      # they were the job's two longest steps, and the job was the run's
-      # critical path. Both connect as one role to one cluster, so what the
-      # cluster shares — a role and its settings, pg_locks, pg_stat_activity —
-      # is scoped in each suite to its own database, or named for the suite;
-      # both headers say so, and a fixture added to either keeps to it. The
-      # rest is SMD-2092's step for the schema legs: each run writes its own
-      # log, both are waited on and printed (a passing one folded, a failing
-      # one open), each has its own time limit (a hang ends as 124, or 137 when
-      # TERM is ignored), and the two summary lines close the step. A leg that
-      # fails here and passes alone (db/with-postgres.sh) is load, or a leak
-      # between the two: replay this run: block against one with-postgres.sh
-      # database.
-      - name: Incremental upgrade and preflight, side by side
-        working-directory: db
-        run: |
-          # test-upgrade's database; the service creates only ob1test.
-          bun --eval 'const s = new Bun.SQL(process.env.DATABASE_URL); await s.unsafe("CREATE DATABASE ob1upgrade"); await s.close()'
-          limit=10m
-          DATABASE_URL=$UPGRADE_DATABASE_URL \
-            timeout --kill-after=10s "$limit" bun test-upgrade.ts > "$RUNNER_TEMP/test-upgrade.log" 2>&1 &
-          upgrade_pid=$!
-          (cd ../server-portable && exec timeout --kill-after=10s "$limit" bun test-preflight.ts) > "$RUNNER_TEMP/test-preflight.log" 2>&1 &
-          preflight_pid=$!
-          # `|| rc=$?`, not a bare wait: the step runs under -e, and a bare wait
-          # on a failed run would end the step before either log is printed.
-          upgrade_rc=0; wait "$upgrade_pid" || upgrade_rc=$?
-          preflight_rc=0; wait "$preflight_pid" || preflight_rc=$?
-          summaries=""
-          for leg in "test-upgrade:$upgrade_rc" "test-preflight:$preflight_rc"; do
-            suite=${leg%%:*}
-            rc=${leg#*:}
-            log="$RUNNER_TEMP/$suite.log"
-            case $rc in
-              124) rc="124, over the $limit limit" ;;
-              137) rc="137, killed: over the $limit limit with TERM ignored, or out of memory" ;;
-            esac
-            if [ "$rc" = 0 ]; then
-              echo "::group::$suite.ts — passed"
-              cat "$log"
-              echo "::endgroup::"
-            else
-              echo "::error title=SQL data layer::$suite.ts failed (exit $rc) — its log follows"
-              cat "$log"
-            fi
-            summary=$(grep -aE '^[0-9]+ assertions: ' "$log" | tail -n 1 || true)
-            summaries+="  $suite.ts: ${summary:-no summary line — the run stopped before its report} (exit $rc)"$'\n'
-          done
-          printf '\n%s' "$summaries"
-          [ "$upgrade_rc" -eq 0 ] && [ "$preflight_rc" -eq 0 ]
-        env:
-          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-          UPGRADE_DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1upgrade
-
       # Every vendored writer of a thought's content or vector goes through
       # update_thought or the 3-argument upsert_thought (change 69, SMD-1228):
       # each is driven as deployed against this database — the fork's schema
@@ -1059,6 +1061,45 @@ jobs:
         run: bun test-tools.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # The pair the job started after Install (SMD-3195), waited on up to its
+      # limit and the kill after it, and printed as SMD-2092's step prints the
+      # schema legs: a passing log folded, a failing one open, and the two
+      # summary lines last. It runs when a step before it failed too, so a
+      # failure beside one of the pair's is seen beside it. A leg that fails
+      # here and passes alone (db/with-postgres.sh) is load, or a leak between
+      # the two: replay the start step's two legs against one with-postgres.sh
+      # database.
+      - name: Incremental upgrade and preflight (started at the job's start)
+        if: ${{ !cancelled() }}
+        run: |
+          read -r started limit_s < "$RUNNER_TEMP/pair.started" || { echo "::error title=SQL data layer::the pair was never started: its start step did not run, or failed before it wrote $RUNNER_TEMP/pair.started"; exit 1; }
+          # The limit, the 10 s kill after it, and 20 s for each leg's subshell to write its code.
+          deadline=$((started + limit_s + 30))
+          while { [ ! -f "$RUNNER_TEMP/test-upgrade.rc" ] || [ ! -f "$RUNNER_TEMP/test-preflight.rc" ]; } && [ "$(date +%s)" -lt "$deadline" ]; do sleep 1; done
+          summaries=""
+          failed=0
+          for suite in test-upgrade test-preflight; do
+            log="$RUNNER_TEMP/$suite.log"
+            rc=$(cat "$RUNNER_TEMP/$suite.rc" 2> /dev/null) || rc="none, its subshell wrote no code by ${limit_s} s and 30 s"
+            [ "$rc" = 0 ] || failed=1
+            case $rc in
+              124) rc="124, over the ${limit_s} s limit" ;;
+              137) rc="137, killed: over the ${limit_s} s limit with TERM ignored, or out of memory" ;;
+            esac
+            if [ "$rc" = 0 ]; then
+              echo "::group::$suite.ts — passed"
+              cat "$log"
+              echo "::endgroup::"
+            else
+              echo "::error title=SQL data layer::$suite.ts failed (exit $rc) — its log follows"
+              cat "$log" || true
+            fi
+            summary=$(grep -aE '^[0-9]+ assertions: ' "$log" | tail -n 1 || true)
+            summaries+="  $suite.ts: ${summary:-no summary line — the run stopped before its report} (exit $rc)"$'\n'
+          done
+          printf '\n%s' "$summaries"
+          [ "$failed" = 0 ]
 
   deploy-stack:
     name: Full stack, no Supabase
