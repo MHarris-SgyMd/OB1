@@ -55,7 +55,8 @@ async function api(method: string, path: string, body?: unknown, token?: string)
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await r.text();
-  if (!r.ok) throw new Error(`${method} ${path} → ${r.status}: ${text.slice(0, 400)}`);
+  // The flows carry the brain keys (withBrainKeys), and an answer may echo a request: no 64-hex value is printed.
+  if (!r.ok) throw new Error(`${method} ${path} → ${r.status}: ${text.replace(/[0-9a-f]{64}/gi, "<key>").slice(0, 400)}`);
   return text ? JSON.parse(text) : null;
 }
 

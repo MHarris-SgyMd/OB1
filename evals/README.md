@@ -6988,7 +6988,8 @@ a brain that does not report the stamp (below, "Found on the way").
 - **E — egress, under `--with sealed`.** n8n sits on an `internal: true`
   network, in the network namespace of a tcpdump watcher that starts before
   it. A Bun HTTP relay on both networks publishes the loopback port, and the
-  brain's server joins the sealed network as well as its own. The ingestion
+  brain's REST core, `api` (the server until SMD-2295), joins the sealed
+  network as well as its own. The ingestion
   is a probe workflow of ten fixed captures, since Linear is unreachable by
   design. C3 requires the act tool to fail. E reads the watcher's capture:
   every UDP datagram (DNS decoded), every TCP segment on port 53, every
@@ -7006,7 +7007,7 @@ a brain that does not report the stamp (below, "Found on the way").
   CD flag, a notify opcode, a non-IN class, inside a TCP segment. A name
   fails unless it is a service's (bare, or with the network's own domain) or
   a host the kit's templates name (`api.linear.app`). Expansions with the
-  host's own search domains (`server.<isp domain>`) are reported apart and
+  host's own search domains (`api.<isp domain>`) are reported apart and
   pass: fixed names, carrying nothing. The brain must have been seen, or the
   capture proves nothing. E also fails with CANNOT JUDGE in four cases:
   - the capture itself did not run once for the whole window (not exactly
@@ -7026,10 +7027,11 @@ a brain that does not report the stamp (below, "Found on the way").
   E fails (both measured in review pass 3).
 
   The judge is pure, and `eval-orchestration.ts --self-check` (CI) holds it
-  on 35 crafted logs in the watcher's format, tcpdump's own lines from pass
+  on crafted logs in the watcher's format (40 since SMD-2295), tcpdump's own lines from pass
   3's runs among them. Each way out below fails:
   - a raw-IP dial, and the same on another interface;
-  - `n8n.io`, and `server.9.9.9.9.nip.io`;
+  - `n8n.io`, and `api.9.9.9.9.nip.io`;
+  - a question for `server`, no longer the brain since SMD-2295;
   - EDNS, NS, CD-flag, notify, unknown-type, CHAOS and TCP-carried
     queries;
   - data to the resolver without a readable question;
@@ -7187,7 +7189,8 @@ and E:
     saved its request headers, the run key among them (review pass 1).
 - **E** admits a connection to the runner's `:8090`, its addresses read from
   the engine, and nothing else of it. The runner joins the sealed network
-  as the server does. The judge holds 39 crafted logs in CI.
+  as the brain does (the server then, the REST core since SMD-2295). The
+  judge held 39 crafted logs in CI then, 40 since.
 
 **The results** (the dogfood Mac, SQLite, `--wait-schedule`, 2026-09-26/27).
 Every check passed on each review pass's code:

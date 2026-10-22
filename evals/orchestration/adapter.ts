@@ -30,7 +30,8 @@ export type Adapter = {
   provision(env: Record<string, string>, ctx: Ctx): Promise<string[]>;
   /**
    * Run the ingestion workflow once, return when it has finished, and return
-   * how many capture_thought calls the TOOL's own run record says were
+   * how many captures (POST /v1/thoughts on the REST core since SMD-2295;
+   * capture_thought before it) the TOOL's own run record says were
    * answered — the evidence a run executed that a row count cannot give when
    * the brain's dedup makes a repeat add nothing (review pass 2: a second run
    * skipped outright passed as "+0").

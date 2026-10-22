@@ -16,10 +16,11 @@
  * read) and `orch-read` (read scope: the retrieval tool's). Only their hashes
  * reach MCP_ACCESS_KEYS. Beside them, the MCP server's own forward-scope key,
  * `orch-mcp-forwarder`, its raw value in OB1_FORWARDER_KEY, which compose
- * requires since SMD-2287 PR 5b (the stack's `mcp` service holds it). The profile's keys sit there under deploy/.env's
- * names (profileKeys, and the profile's own --init). LINEAR_API_KEY is not copied into it: the driver reads
- * it from the usual search path (db/env.ts) and each adapter hands it to its
- * tool's credential store; compose never sees it.
+ * requires since SMD-2287 PR 5b (the stack's `mcp` service holds it). The
+ * profile's keys sit there under deploy/.env's names (profileKeys, and the
+ * profile's own --init). LINEAR_API_KEY is not copied into it: the driver
+ * reads it from the usual search path (db/env.ts) and each adapter hands it
+ * to its tool's credential store; compose never sees it.
  *
  * compose and docker run with an ALLOWLISTED environment, never the driver's
  * whole one. loadEnv() fills process.env from deploy/.env and <repo>/.env —
@@ -67,6 +68,8 @@ export function ensureEnv(file = ENV_FILE): Record<string, string> {
     // A value a later candidate needs is appended, never a rewrite: the
     // database passwords are the ones the volume was initialised with.
     const later: Record<string, () => string> = { ORCH_MCP_KEY: () => hex(32), ORCH_KEY16: () => hex(16), ORCH_JWT_SECRET: () => hex(32), ...profileKeys(env) };
+    // No capture key to copy (a hand-edited file): no N8N_BRAIN_CAPTURE_KEY line reading "undefined".
+    if (!env.ORCH_BRAIN_CAPTURE_KEY) delete later.N8N_BRAIN_CAPTURE_KEY;
     const missing = Object.keys(later).filter((k) => !env[k]);
     if (missing.length) writeFileSync(file, readFileSync(file, "utf8") + missing.map((k) => `${k}=${later[k]()}\n`).join(""), { mode: 0o600 });
     // A file from before SMD-2287 PR 5b has no forward key (or an empty one):

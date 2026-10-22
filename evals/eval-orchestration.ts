@@ -6,7 +6,7 @@
  *   bun eval-orchestration.ts --up <tool> [--with <variant>]…   # brain + candidate, provisioned headlessly
  *   bun eval-orchestration.ts --verify <tool> [--json] [--wait-schedule]
  *   bun eval-orchestration.ts --down <tool>      # removes the project's containers AND volumes
- *   bun eval-orchestration.ts --self-check       # n8n's egress judge, facts and filter; no stack (CI)
+ *   bun eval-orchestration.ts --self-check       # n8n's egress judge, facts and filter, the kit env's forward key, the Activepieces key fill; no stack (CI)
  *
  * <tool> is one of n8n | activepieces | windmill. Each runs as its own compose
  * project, `ob1-orch-<tool>`: deploy/compose.yaml as shipped plus
@@ -189,16 +189,18 @@ function selfCheck(): number {
     const pre5b = join(dir, "pre5b.env");
     writeFileSync(pre5b, `POSTGRES_PASSWORD=p\nMCP_ACCESS_KEYS=${listed}\nORCH_BRAIN_CAPTURE_KEY=${cap}\nORCH_BRAIN_READ_KEY=${rd}\n`, { mode: 0o600 });
     const migrated = ensureEnv(pre5b);
-    expect("ensureEnv: a pre-5b file gains a forward key and one record, its records and lines kept", own(migrated) && migrated.MCP_ACCESS_KEYS.startsWith(`${listed},`) && migrated.POSTGRES_PASSWORD === "p" && Boolean(migrated.ORCH_MCP_KEY));
-    expect("ensureEnv: a second run changes nothing", JSON.stringify(ensureEnv(pre5b)) === JSON.stringify(migrated));
+    expect("ensureEnv: a pre-5b file gains a forward key and one record, its records and lines kept", own(migrated) && migrated.MCP_ACCESS_KEYS === `${listed},${forwards(migrated)[0]}` && migrated.POSTGRES_PASSWORD === "p" && Boolean(migrated.ORCH_MCP_KEY));
+    const settled = readFileSync(pre5b, "utf8");
+    const rerun = ensureEnv(pre5b);
+    expect("ensureEnv: a second run leaves the file as it was, and returns what it holds", readFileSync(pre5b, "utf8") === settled && JSON.stringify(rerun) === JSON.stringify(migrated));
     const nolist = join(dir, "nolist.env");
     writeFileSync(nolist, "POSTGRES_PASSWORD=p\n", { mode: 0o600 });
     const bare = ensureEnv(nolist);
-    expect("ensureEnv: a file with no key list gets the forward record alone", own(bare) && bare.MCP_ACCESS_KEYS === forwards(bare)[0]);
+    expect("ensureEnv: a file with no key list gets the forward record alone, and no capture key copied from nothing", own(bare) && bare.MCP_ACCESS_KEYS === forwards(bare)[0] && !("N8N_BRAIN_CAPTURE_KEY" in bare));
     const stale = join(dir, "stale.env");
     writeFileSync(stale, `MCP_ACCESS_KEYS=orch-read:read:${hashKey(rd)},${FORWARDER_NAME}:forward:${"e".repeat(64)}\nOB1_FORWARDER_KEY=\n`, { mode: 0o600 });
     const restaled = ensureEnv(stale);
-    expect("ensureEnv: an empty forward key is minted, its record in place of the stale one", own(restaled) && restaled.MCP_ACCESS_KEYS.startsWith(`orch-read:read:${hashKey(rd)},`));
+    expect("ensureEnv: an empty forward key is minted, its record in place of the stale one", own(restaled) && restaled.MCP_ACCESS_KEYS === `orch-read:read:${hashKey(rd)},${forwards(restaled)[0]}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -214,7 +216,7 @@ function selfCheck(): number {
     && filled(searchFlow).includes(brainKeys.ORCH_BRAIN_READ_KEY) && !filled(searchFlow).includes(brainKeys.ORCH_BRAIN_CAPTURE_KEY));
   const throwsMatching = (f: () => unknown, re: RegExp) => { try { f(); return false; } catch (e) { return re.test(String(e)); } };
   expect("withBrainKeys: an unset key is refused", throwsMatching(() => withBrainKeys(ingestFlow, { ORCH_BRAIN_READ_KEY: brainKeys.ORCH_BRAIN_READ_KEY }), /ORCH_BRAIN_CAPTURE_KEY is unset/));
-  expect("withBrainKeys: a placeholder left over, in any case, is refused", throwsMatching(() => withBrainKeys(`${ingestFlow} __OB1_brain_other__`, brainKeys), /still holds a placeholder/));
+  expect("withBrainKeys: a placeholder left over, in any case, is refused", throwsMatching(() => withBrainKeys(`${ingestFlow} __OB1_brain_key2__`, brainKeys), /still holds a placeholder/));
   console.log(failed ? `eval-orchestration self-check: ${failed} failed` : `eval-orchestration self-check: OK (${cases.length} cases)`);
   return failed ? 1 : 0;
 }

@@ -290,7 +290,9 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
    - a brain key that `MCP_ACCESS_KEYS` does not list, or one at write scope,
      wherever in a credential it sits;
    - a key whose scope differs from the one its credential declares
-     (`brainScope`), so ingestion's credential cannot carry a read key.
+     (`brainScope`), so ingestion's credential cannot carry a read key;
+   - a declared brain credential not pinned to the REST core's host, `api`,
+     alone (SMD-2295).
 4. **Key custody** (SMD-2210). n8n 2.40.6 offers 106 scopes (measured). The
    POC's key held eight. The profile's held eight too, a different eight:
    it adds `credential:update` and `workflow:update`, so a re-provision
