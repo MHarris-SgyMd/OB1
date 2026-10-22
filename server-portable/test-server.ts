@@ -1293,6 +1293,24 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const refusals = ["key", "identity", "lookup", "made-up", 2, null].map((r) => markOf("heartbeat:sleep", { refused: r })?.refused ?? null);
   assert(JSON.stringify(refusals) === JSON.stringify(["key", "identity", "lookup", null, null, null]) && markOf("heartbeat:board-sync", { refused: "key" })?.refused === undefined && markOf("heartbeat:sleep", { refused: "made-up" }) !== undefined,
     `the scheduler's refusal is carried when one of the list, and its row counts either way (${JSON.stringify(refusals)})`);
+  // Its budget (SMD-2679): the stop's word on a sleep that is over, of the two, and the budget of the shape; else left off, the row counted.
+  const stops = [{ from: at, to: at, budget: "clock" }, { from: at, to: at, budget: "statement" }, { from: at, to: null, budget: "clock" }, { from: at, to: at, budget: "rest" }]
+    .map((m) => markOf("heartbeat:sleep", { slept: m })?.slept?.budget ?? null);
+  // The bound rides with the word only, within its kind's range; `resting` only true, only the scheduler's.
+  const limits = [{ budget: "clock", limit: 60 }, { budget: "statement", limit: 0 }, { budget: "clock", limit: 10_081 }, { budget: "statement", limit: -1 }, { limit: 60 }]
+    .map((m) => markOf("heartbeat:sleep", { slept: { from: at, to: at, ...m } })?.slept?.limit ?? null);
+  assert(JSON.stringify(limits) === JSON.stringify([60, 0, null, null, null]) && markOf("heartbeat:sleep", { resting: true })?.resting === true
+      && markOf("heartbeat:sleep", { resting: "yes" })?.resting === undefined && markOf("heartbeat:board-sync", { resting: true })?.resting === undefined
+      // Not on a row that speaks for nothing running: ended, or stale (review pass 2).
+      && markOf("heartbeat:sleep", { resting: true, ended: true, outcome: "stopped" })?.resting === undefined
+      && parseHeartbeats([{ key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, resting: true }), at, age_s: 181 }]).heartbeats[0]?.resting === undefined,
+    `a stop's bound is carried with its word and within its kind's range, and resting only when true on the scheduler's row (${JSON.stringify(limits)})`);
+  const BUDGET = { minutes: 60, statementTimeoutS: 300, workMemMb: 4, maintenanceWorkMemMb: 64, stops: 3 };
+  const budgets = [BUDGET, { ...BUDGET, stops: -1 }, { ...BUDGET, workMemMb: 0 }, { ...BUDGET, minutes: 10_081 }, { ...BUDGET, statementTimeoutS: "300" }, null]
+    .map((b) => markOf("heartbeat:sleep", { budget: b })?.budget?.stops ?? null);
+  assert(JSON.stringify(stops) === JSON.stringify(["clock", "statement", null, null]) && JSON.stringify(budgets) === JSON.stringify([3, null, null, null, null, null])
+      && markOf("heartbeat:board-sync", { budget: BUDGET })?.budget === undefined && markOf("heartbeat:sleep", { budget: { ...BUDGET, stops: -1 } }) !== undefined,
+    `the scheduler's budget stop is carried on a sleep that is over and of the two, its budget when of the shape, never off another worker's row (${JSON.stringify(stops)}; ${JSON.stringify(budgets)})`);
   assert(heartbeatState(bs) === "alive (last stamped 15 min ago, every 300 s)" && heartbeatState(ex) === "stale (last stamped 3 min ago, every 60 s; 12 of its last 50 answers malformed)"
       && heartbeatState({ ...bs, outcome: "failed" }) === "alive, its last pass failed (last stamped 15 min ago, every 300 s)"
       && heartbeatState({ ...bs, running: true, waiting: ["extract"] }) === "waiting for the provider at a pass's start (last stamped 15 min ago, every 300 s)" && heartbeatState({ ...bs, running: true }) === "running a pass (last stamped 15 min ago, every 300 s)"

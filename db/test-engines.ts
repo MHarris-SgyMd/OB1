@@ -648,6 +648,59 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
   ok(!closed, "…and never closes the caller's client");
 }
 
+// ---------------------------------------------------------------------------
+// sleep.ts's budget (SMD-2679): the four flags refused by run() in the CLI's
+// words before connecting, and the session settings they make.
+// ---------------------------------------------------------------------------
+{
+  const { run, budgetSession, budgetMemory, schedulerSession, statementTimedOut } = await import("./sleep.ts");
+  const inProcess = async (opts: Record<string, unknown>) => {
+    seen = 0;
+    const w = capture();
+    const code = await run({ env: BASE_ENV, ...opts, writer: w } as never);
+    await Bun.sleep(50);
+    const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
+    return { code, out: lines(w.outs), err: lines(w.errs), seen };
+  };
+  const cases: [string, Record<string, unknown>, string[], string][] = [
+    ["--budget past a week", { url: AT, budget: 10081 }, ["--url", AT, "--budget", "10081"], "--budget must be a decimal integer >= 0 and <= 10080"],
+    ["--statement-timeout past a day", { url: AT, statementTimeout: 86401 }, ["--url", AT, "--statement-timeout", "86401"], "--statement-timeout must be a decimal integer >= 0 and <= 86400"],
+    ["--work-mem 0", { url: AT, workMem: 0 }, ["--url", AT, "--work-mem", "0"], "--work-mem must be a decimal integer >= 1 and <= 2097151"],
+    ["--maintenance-work-mem past Postgres's bound", { url: AT, maintenanceWorkMem: 2097152 }, ["--url", AT, "--maintenance-work-mem", "2097152"], "--maintenance-work-mem must be a decimal integer >= 1 and <= 2097151"],
+    // In the CLI's order: --workers before the budget, the budget before the session settings.
+    ["--workers 0 and --budget past a week", { url: AT, workers: 0, budget: 10081 }, ["--url", AT, "--workers", "0", "--budget", "10081"], "--workers must be a decimal integer >= 1"],
+    ["--budget past a week and --work-mem 0", { url: AT, budget: 10081, workMem: 0 }, ["--url", AT, "--budget", "10081", "--work-mem", "0"], "--budget must be a decimal integer >= 0 and <= 10080"],
+  ];
+  for (const [what, opts, argv, first] of cases) {
+    const r = await inProcess(opts);
+    const cli = await counted(["sleep.ts", ...argv]);
+    ok(r.code === 2 && cli.code === 2, `sleep run() with ${what}: exit 2, as the CLI (${r.code}, ${cli.code})`);
+    ok(r.out === cli.out && r.err === cli.err && cli.err.startsWith(first), `…in the scanner's words, the whole of both streams alike (${JSON.stringify(cli.err.split("\n")[0].slice(0, 90))}${r.err === cli.err ? "" : ` — run() said ${JSON.stringify(r.err.slice(0, 90))}`})`);
+    ok(r.seen === 0 && cli.seen === 0 && !(r.out + r.err + cli.out + cli.err).includes(MARK), `…before connecting, and without the password (${r.seen}, ${cli.seen})`);
+  }
+  const session = budgetSession({ statementTimeout: 300, workMem: 4, maintenanceWorkMem: 64 });
+  const noTimeout = budgetSession({ statementTimeout: 0, workMem: 1, maintenanceWorkMem: 1 });
+  ok(JSON.stringify(session) === JSON.stringify({ statement_timeout: "300s", work_mem: "4MB", maintenance_work_mem: "64MB" }) && !("statement_timeout" in noTimeout)
+      && JSON.stringify(budgetMemory({ workMem: 4, maintenanceWorkMem: 64 })) === JSON.stringify({ work_mem: "4MB", maintenance_work_mem: "64MB" })
+      // The scheduler's own: the memory settings and statement_timeout 0, beating a role's or database's own (review pass 2).
+      && JSON.stringify(schedulerSession({ workMem: 4, maintenanceWorkMem: 64 })) === JSON.stringify({ statement_timeout: "0", work_mem: "4MB", maintenance_work_mem: "64MB" }),
+     `sleep's budgetSession makes the three settings a pass's connections open with — no timeout at 0, so the role's or the database's own stands — and budgetMemory the two the scheduler's own take (${JSON.stringify(session)}; ${JSON.stringify(noTimeout)})`);
+  // A statement timed out is 57014 in statement_timeout's words; an operator's cancel is 57014 too, and no budget's (review pass 1).
+  const timedOut = { name: "PostgresError", errno: "57014", message: "canceling statement due to statement timeout" };
+  const cancelled = { name: "PostgresError", errno: "57014", message: "canceling statement due to user request" };
+  ok(statementTimedOut(timedOut) && !statementTimedOut(cancelled) && !statementTimedOut({ errno: "57P01", message: "statement timeout" }) && !statementTimedOut(null),
+     "sleep's statementTimedOut reads statement_timeout's cancel, not an operator's, nor another code");
+  // connect.ts's session takes settings by name: no startup parameter that is
+  // no setting, no name of another shape, no NUL — thrown before connecting (review pass 3).
+  const opened = (session: Record<string, string>) => { try { const c = openSql(AT, { session }); void c.close(); return "opened"; } catch (e) { return (e as Error).message; } };
+  const refusals = ([{ user: "postgres" }, { Database: "other" }, { replication: "true" }, { "bad name": "1" }, { work_mem: "4MB\0x" }] as Record<string, string>[]).map(opened);
+  ok(refusals.every((m) => /^openSql: session takes Postgres settings by name/.test(m)) && opened({ work_mem: "4MB", "app.custom_x": "1" }) === "opened" && seen === 0,
+     `openSql refuses a session naming the user, the database or replication, a name of another shape and a NUL, and takes settings (${refusals.map((m) => m.slice(0, 20)).join(" | ")})`);
+  // The tests' hooks are held to a rule, as passFollowS is: thrown, a caller's not an operator's.
+  const hook = await run({ url: AT, budgetMs: -1, writer: capture() } as never).then((c) => String(c), (e: Error) => `${e.name}: ${e.message}`);
+  ok(/^RangeError: budgetMs must be/.test(hook), `…and a negative budgetMs is thrown, not run (${hook.slice(0, 60)})`);
+}
+
 // config.mjs's embeddingContract: the constants' rule over any record — over
 // the environment config.mjs is imported under, the constants themselves.
 for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768 " }, { OB1_EMBEDDING_MODEL: "", OB1_EMBEDDING_DIM: "" }, { OB1_EMBEDDING_DIM: "abc" }, { OB1_EMBEDDING_MODEL: "qwen3-embedding:4b", OB1_EMBEDDING_DIM: "1024", OB1_EMBEDDING_DIMENSIONS: " off " }] as Record<string, string>[]) {

@@ -173,7 +173,7 @@ import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snip
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
-import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
+import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 
 /**
  * Every argument accounted for (db/cli.ts): a flag this worker does not have
@@ -288,6 +288,13 @@ export interface ConsolidateOptions {
   summary?: boolean;
   /** How the start went (worker-bootstrap.ts's StartResult), called once (SMD-2752). */
   onStart?: (r: StartResult) => void;
+  /**
+   * Postgres settings the run's own client opens every connection with
+   * (connect.ts's `session`): the sleep scheduler's per-pass budget —
+   * statement_timeout, work_mem, maintenance_work_mem (SMD-2679). Refused
+   * beside `sql`, a caller's client, which it would not reach.
+   */
+  session?: SessionSettings;
 }
 
 /** What run() says when a caller's signal stopped a decision before it was written — a decision has no pass (review pass 2). */
@@ -423,6 +430,7 @@ export async function run(opts: ConsolidateOptions): Promise<number> {
   // signal; --status, --dry-run, --list and --stale only read (review pass 2:
   // the two rules had drifted apart for a decision beside --dry-run).
   const writes = deciding || !(opts.status === true || opts.dryRun === true || reviewing);
+  if (opts.sql != null && opts.session != null) return usage("consolidate.ts applies session settings to a client of its own: pass url without sql, or no session.");
   if (opts.sql != null) {
     // A reserved connection or a transaction's handle reports its pool's max
     // but is one connection, and a transaction keeps the run's claims from the
@@ -451,7 +459,7 @@ export async function run(opts: ConsolidateOptions): Promise<number> {
     err(deciding ? DECISION_STOPPED : STOPPED_EARLY);
     return 130;
   }
-  const sql = opts.sql ?? openSql(opts.url as string, { max: settled.workers + 1 });
+  const sql = opts.sql ?? openSql(opts.url as string, { max: settled.workers + 1, session: opts.session ?? undefined });
   // Aborted when the run returns, taking its listener off the caller's signal.
   const detach = new AbortController();
   try {
