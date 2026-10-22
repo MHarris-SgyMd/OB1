@@ -1742,7 +1742,8 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     const handlers = new Map<string, () => void>();
     const lines: string[] = [];
     const exits: number[] = [];
-    const { stopped } = drainOnSignal({ close: async () => true, drainBoundMs: 200, closeBoundMs: 100, log: (l) => lines.push(l), exit: (c) => exits.push(c), on: (s, h) => handlers.set(s, h), ...opts });
+    // The flush's budget at the close's bound, so a stalled collector's row takes 100 ms, not FLUSH_BUDGET_MS (SMD-2902).
+    const { stopped } = drainOnSignal({ close: async () => true, drainBoundMs: 200, closeBoundMs: 100, flushBudgetMs: 100, log: (l) => lines.push(l), exit: (c) => exits.push(c), on: (s, h) => handlers.set(s, h), ...opts });
     return { handlers, lines, exits, stopped };
   };
   /** The stop's exit code, or -1 when it has not run to its exit within 3 s: a hang fails its row rather than the suite. */
@@ -1811,7 +1812,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   const timedOut = await flushLine(async () => "timeout");
   assert(stalled.code === 0 && /; no database pool was opened; telemetry not all sent within 100 ms; exit 0$/.test(stalled.line) && /; database pool closed; telemetry sent; exit 0$/.test(went.line)
     && /; database pool closed; exit 0$/.test(unset.line) && /; telemetry not all sent; exit 0$/.test(failed.line) && /; no telemetry left to send; exit 0$/.test(none.line) && /; telemetry not all sent within 100 ms; exit 0$/.test(timedOut.line),
-    `the telemetry's flush is its own clause, under the pool's bound: sent, not sent, none left, not within it — a stalled collector is not the pool's (${[stalled.line, went.line, unset.line, failed.line, none.line, timedOut.line].join(" | ")})`);
+    `the telemetry's flush is its own clause: sent, not sent, none left, not within its bound — a stalled collector is not the pool's (${[stalled.line, went.line, unset.line, failed.line, none.line, timedOut.line].join(" | ")})`);
   // What the runtime no longer counts but a record holds open ends before the flush, on a drained stop and a cut
   // alike; and a cut that throws (a sink that fell over) leaves the flush and the exit to run (PR 2c review pass 3).
   const drainedOrder: string[] = [];
@@ -1825,9 +1826,9 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   const throwingCode = await settled(throwingCut.stopped);
   assert(drainedCode === 0 && drainedOrder.join() === "endOpen,flush" && throwingCode === 1 && cutOrder.join() === "onCut,endOpen,flush" && /; telemetry sent; exit 1$/.test(throwingCut.lines.at(-1) ?? ""),
     `open records ended before the flush on either path; a cut that throws still flushes and exits (${drainedOrder.join()} / ${cutOrder.join()}; ${throwingCut.lines.at(-1)})`);
-  // Beside the pool's close, not after it: both stalled take one bound, not two;
-  // and a second signal ends the flush's wait as it ends the pool's (review pass 2).
-  const both = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 300, flush: () => new Promise(() => {}) });
+  // Beside the pool's close, not after it: both stalled take the longer bound, not the two added (SMD-2902: each its
+  // own, 300 ms and 400); and a second signal ends the flush's wait as it ends the pool's (review pass 2).
+  const both = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 300, flushBudgetMs: 400, flush: () => new Promise(() => {}) });
   const b3 = performance.now();
   both.handlers.get("SIGTERM")!();
   await settled(both.stopped);
@@ -1838,8 +1839,81 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   await Bun.sleep(20);
   twice.handlers.get("SIGTERM")!();
   await settled(twice.stopped);
-  assert(bothMs < 550 && performance.now() - b4 < 1_000 && /database pool not closed: a second signal; telemetry not all sent: a second signal; exit 0$/.test(twice.lines.at(-1) ?? ""),
-    `a stalled pool and a stalled collector take one bound (${Math.round(bothMs)} ms of 300), and a second signal ends both waits (${twice.lines.at(-1)})`);
+  assert(bothMs >= 390 && bothMs < 650 && /database pool not closed within 300 ms; telemetry not all sent within 400 ms; exit 0$/.test(both.lines.at(-1) ?? "")
+    && performance.now() - b4 < 1_000 && /database pool not closed: a second signal; telemetry not all sent: a second signal; exit 0$/.test(twice.lines.at(-1) ?? ""),
+    `a stalled pool and a stalled collector take the longer of their bounds, not both (${Math.round(bothMs)} ms of 300 and 400: ${both.lines.at(-1)}), and a second signal ends both waits (${twice.lines.at(-1)})`);
+
+  // SMD-2902: the flush's own bound — its budget, inside what the grace period leaves less a second before the kill,
+  // never less than the close's — and, cut short, what each signal still held said (`unsent`) before the stop's line.
+  const bounded = async (opts: Partial<Parameters<typeof drainOnSignal>[0]> & { server: () => any }) => {
+    const told: string[] = [];
+    const bh = harness({ unsent: (kind) => { told.push(kind); bh.lines.push(`unsent: ${kind}`); }, ...opts });
+    const t = performance.now();
+    bh.handlers.get("SIGTERM")!();
+    const code = await settled(bh.stopped);
+    return { code, ms: performance.now() - t, told, lines: bh.lines, line: bh.lines.at(-1) ?? "", within: Number(/telemetry not all sent within (\d+) ms/.exec(bh.lines.at(-1) ?? "")?.[1] ?? NaN) };
+  };
+  const stall = () => new Promise<never>(() => {});
+  // A collector slower than the pool's close, inside the flush's budget: sent, not cut at the close's 100 ms.
+  const slower = await bounded({ server: () => undefined, flushBudgetMs: 600, flush: () => Bun.sleep(300).then(() => "sent" as const) });
+  // The grace period caps the budget: 1.4 s less the margin leaves about 400 ms of a 5 s budget.
+  const capped = await bounded({ server: () => undefined, graceMs: 1_400, flushBudgetMs: 5_000, flush: stall });
+  // A grace period with nothing left past the margin: the close's bound, as before.
+  const floored = await bounded({ server: () => undefined, graceMs: 1_000, flushBudgetMs: 5_000, flush: stall });
+  // After a cut at the 200 ms drain bound: what the grace leaves (1.5 s less 1 s less the 0.2 s drained), not the budget.
+  const cutStall = stuck();
+  const afterCut = await bounded({ server: () => cutStall.server, graceMs: 1_500, flushBudgetMs: 5_000, closeAfterCutMs: 50, flush: stall });
+  assert(slower.code === 0 && /; database pool closed; telemetry sent; exit 0$/.test(slower.line) && slower.told.length === 0
+    && capped.within >= 370 && capped.within <= 400 && capped.ms < 700 && floored.within === 100 && afterCut.code === 1 && afterCut.within >= 250 && afterCut.within <= 300,
+    `the flush's own bound: a 300 ms collector sent under a 600 ms budget (${slower.line}); a 1.4 s grace caps a 5 s budget at ${capped.within} ms; a 1 s grace leaves the close's 100 ms (${floored.within}); after a cut at 200 ms, a 1.5 s grace leaves ${afterCut.within} ms`);
+  const cutWord = (r: { told: string[]; lines: string[] }) => r.told.join("|") + " @" + r.lines.findIndex((l) => l.startsWith("unsent: ")) + "/" + (r.lines.length - 1);
+  assert(capped.told.length === 1 && capped.told[0] === `on its way or batched when the flush's ${capped.within} ms ran out` && capped.lines.at(-2)?.startsWith("unsent: ")
+    && afterCut.told.length === 1 && afterCut.lines.at(-2)?.startsWith("unsent: "),
+    `a flush cut at its bound says what was still on its way, once, just before the stop's line (${cutWord(capped)}; ${cutWord(afterCut)})`);
+  // A second signal while the flush waits, the pool already closed: the flush ends, and says what it held.
+  const told2: string[] = [];
+  const again = harness({ server: () => undefined, close: async () => true, flushBudgetMs: 60_000, flush: stall, unsent: (kind) => told2.push(kind) });
+  const b5 = performance.now();
+  again.handlers.get("SIGTERM")!();
+  await Bun.sleep(30);
+  again.handlers.get("SIGTERM")!();
+  // A third at once: what the batches held is said once — a second cut would count them again (review pass 2).
+  again.handlers.get("SIGTERM")!();
+  const againCode = await settled(again.stopped);
+  // A sink that throws is the telemetry's: the stop still says its line and exits.
+  const throwing = await bounded({ server: () => undefined, graceMs: 1_200, flushBudgetMs: 5_000, flush: stall, unsent: () => { throw new Error("the sink fell over"); } });
+  assert(againCode === 0 && performance.now() - b5 < 1_000 && /; database pool closed; telemetry not all sent: a second signal; exit 0$/.test(again.lines.at(-1) ?? "") && told2.length === 1 && told2.join() === "on its way or batched at a second signal"
+    && throwing.code === 0 && /telemetry not all sent within \d+ ms; exit 0$/.test(throwing.line),
+    `a second signal ends the flush's own wait and says what it held (${told2.join()}; ${again.lines.at(-1)}); an unsent sink that throws leaves the line and the exit (${throwing.line})`);
+  // A second signal during the drain (review pass 1): the operator waits for none of the rest, so the flush gets the
+  // close's after-cut bound, not its budget, and says what it held as the second signal's.
+  const drainStuck = stuck();
+  const told3: string[] = [];
+  const duringDrain = harness({ server: () => drainStuck.server, drainBoundMs: 60_000, closeAfterCutMs: 50, flushBudgetMs: 60_000, graceMs: 120_000, flush: stall, unsent: (kind) => told3.push(kind) });
+  const b6 = performance.now();
+  duringDrain.handlers.get("SIGTERM")!();
+  await Bun.sleep(30);
+  duringDrain.handlers.get("SIGTERM")!();
+  const duringCode = await settled(duringDrain.stopped);
+  const duringMs = performance.now() - b6;
+  // A flush that ended before a second signal cuts the close: nothing more is said of it (review pass 1).
+  const told4: string[] = [];
+  const ended = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000, flush: async () => "sent" as const, unsent: (kind) => told4.push(kind) });
+  ended.handlers.get("SIGTERM")!();
+  await Bun.sleep(30);
+  ended.handlers.get("SIGTERM")!();
+  const endedCode = await settled(ended.stopped);
+  const told5: string[] = [];
+  const rejected = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000, flush: () => Promise.reject(new Error("the SDK fell over")), unsent: (kind) => told5.push(kind) });
+  rejected.handlers.get("SIGTERM")!();
+  await Bun.sleep(30);
+  rejected.handlers.get("SIGTERM")!();
+  const rejectedCode = await settled(rejected.stopped);
+  assert(rejectedCode === 0 && told5.length === 0 && /database pool not closed: a second signal; telemetry not all sent; exit 0$/.test(rejected.lines.at(-1) ?? ""),
+    `a flush that rejected has ended too: a second signal says nothing more of it (${told5.length}: ${rejected.lines.at(-1)})`);
+  assert(duringCode === 1 && duringMs < 400 && /; telemetry not all sent: a second signal; exit 1$/.test(duringDrain.lines.at(-1) ?? "") && told3.join() === "on its way or batched at a second signal"
+    && endedCode === 0 && told4.length === 0 && /database pool not closed: a second signal; telemetry sent; exit 0$/.test(ended.lines.at(-1) ?? ""),
+    `a second signal during the drain cuts the flush to the close's bound (${Math.round(duringMs)} ms, ${told3.join()}: ${duringDrain.lines.at(-1)}); a flush that had ended says nothing more (${told4.length}: ${ended.lines.at(-1)})`);
 
   const cut = cutByStopLine("tools/call capture_thought", 8_400);
   assert(cut.startsWith("request cut off by the server's stop after 8.4 s: tools/call capture_thought — still running when the stop closed it") && !/runs to its end/.test(cut) && cut !== abandonedRequestLine("tools/call capture_thought", 8_400),
@@ -3527,7 +3601,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   try {
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
     startedAnyway = await startTelemetry("probe", (l) => { startSaid.push(l); if (l.includes(" go to ")) throw new Error("the sink fell over"); },
-      async () => ({ setUpTelemetry: () => ({ serviceName: "probe-svc\nforged", flush: async () => "none" as const, shutdown: async () => {}, emit: () => {} }) }));
+      async () => ({ setUpTelemetry: () => ({ serviceName: "probe-svc\nforged", flush: async () => "none" as const, cut: () => {}, shutdown: async () => {}, emit: () => {} }) }));
   } finally {
     if (savedEndpoint === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedEndpoint;
@@ -3541,7 +3615,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
     const loading = startTelemetry("probe", () => {}, async () => {
       await Bun.sleep(30);
-      return { setUpTelemetry: () => ({ serviceName: "probe-svc", flush: async () => "sent" as const, shutdown: async () => { shut += 1; }, emit: () => {} }) };
+      return { setUpTelemetry: () => ({ serviceName: "probe-svc", flush: async () => "sent" as const, cut: () => {}, shutdown: async () => { shut += 1; }, emit: () => {} }) };
     });
     await stopTelemetry();
     raceStarted = await loading;
@@ -3560,10 +3634,10 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
     const stale = startTelemetry("probe", () => {}, async () => {
       await Bun.sleep(30);
-      return { setUpTelemetry: () => ({ serviceName: "stale", flush: async () => "failed" as const, shutdown: async () => { await Bun.sleep(30); order.push("stale shut"); }, emit: () => {} }) };
+      return { setUpTelemetry: () => ({ serviceName: "stale", flush: async () => "failed" as const, cut: () => {}, shutdown: async () => { await Bun.sleep(30); order.push("stale shut"); }, emit: () => {} }) };
     });
     const stopped = stopTelemetry().then(() => { order.push("stop returned"); });
-    const fresh = startTelemetry("probe", () => {}, async () => ({ setUpTelemetry: () => ({ serviceName: "fresh", flush: async () => "sent" as const, shutdown: async () => { fastShut += 1; }, emit: () => {} }) }));
+    const fresh = startTelemetry("probe", () => {}, async () => ({ setUpTelemetry: () => ({ serviceName: "fresh", flush: async () => "sent" as const, cut: () => {}, shutdown: async () => { fastShut += 1; }, emit: () => {} }) }));
     await Promise.all([stale, stopped]);
     restarted = await fresh;
   } finally {
@@ -4078,6 +4152,31 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   assert(measured.includes('"http.server.request.duration"') && measured.includes('"tools/list"') && measured.includes('"refused"') && !measured.includes('"MCP_ACCESS_KEY"'),
     `the request-duration histogram, labelled with the request's MCP method and outcome, never the key's name (${measured.slice(0, 200)})`);
   assert(!everything.includes(PLANTED) && !everything.includes(KEY) && !everything.includes("note="), `no signal holds the key, the query string or the planted text (${everything.length} chars)`);
+
+  // SMD-2902, this entry's stop wired as the REST core's (review pass 1's mutants): a collector that never answers is
+  // cut at what its 3 s grace leaves less a second — not the 5 s budget, which a grace not passed would give — and
+  // what each signal held is said.
+  const hung = Bun.serve({ port: 0, idleTimeout: 0, fetch: () => new Promise<Response>(() => {}) });
+  const hungPort = hung.port;
+  const silent2 = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
+  const mcp2 = await serveChild(throughClient ? `${import.meta.dir}/../mcp-server` : import.meta.dir, "index.ts", {
+    OB1_STOP_GRACE: "3", MCP_ACCESS_KEY: KEY, DATABASE_URL: `postgres://u:p@127.0.0.1:${silent2.port}/db`, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${hungPort}`,
+    ...(throughClient ? { OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent2.port}`, OB1_PLUGINS: "" } : {}),
+  }, { waitForSdk: true });
+  let out2 = "";
+  try {
+    await fetch(`http://127.0.0.1:${mcp2.port}/mcp`, { method: "POST", headers: H, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }).then((r) => r.text());
+    out2 = await mcp2.stop();
+  } finally {
+    mcp2.kill();
+    hung.stop(true);
+    silent2.stop(true);
+  }
+  const hungLine = out2.split("\n").find((l) => l.startsWith("SIGTERM: stopped")) ?? "";
+  const hungWithin = Number(/telemetry not all sent within (\d+) ms; exit 0$/.exec(hungLine)?.[1] ?? NaN);
+  const hungSaid = out2.split("\n").filter((l) => l.includes(`not sent to http://127.0.0.1:${hungPort} (on its way or batched when the flush's ${hungWithin} ms ran out)`));
+  assert(mcp2.up && mcp2.sdk && hungWithin >= 1_500 && hungWithin <= 2_000 && hungSaid.some((l) => /^telemetry: \d+ spans? not sent/.test(l)) && hungSaid.some((l) => /^telemetry: \d+ log records? not sent/.test(l)),
+    `bun index.ts with a collector that never answers: its flush cut at what a 3 s grace leaves (${hungWithin} ms), each signal's held said (${hungLine} / ${hungSaid.join(" / ")})`);
 }
 
 server.stop();
@@ -4331,7 +4430,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
 
   // An SDK whose log record throws: the request still ends, its line written (a record lost, never the request).
   const ended: string[] = [];
-  await startWith(() => ({ serviceName: "probe", flush: async () => "none" as const, shutdown: async () => {}, emit: () => { throw new Error("the logger fell over"); } }));
+  await startWith(() => ({ serviceName: "probe", flush: async () => "none" as const, cut: () => {}, shutdown: async () => {}, emit: () => { throw new Error("the logger fell over"); } }));
   let threw = false;
   try {
     beginRequest("api", new Request("http://api/v1/whoami"), (r) => ended.push(requestLine(r))).end({ status: 200 });
@@ -4509,7 +4608,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://tempo:4318/v1/traces";
   process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector:4318";
   try {
-    await startTelemetry("probe", (l) => startLines.push(l), async () => ({ setUpTelemetry: () => ({ serviceName: "probe", flush: async () => "none" as const, shutdown: async () => {}, emit: () => {} }) }));
+    await startTelemetry("probe", (l) => startLines.push(l), async () => ({ setUpTelemetry: () => ({ serviceName: "probe", flush: async () => "none" as const, cut: () => {}, shutdown: async () => {}, emit: () => {} }) }));
   } finally {
     for (const [name, value] of [["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", startEnv.traces], ["OTEL_EXPORTER_OTLP_ENDPOINT", startEnv.generic]] as const) {
       if (value === undefined) delete process.env[name];
@@ -4531,6 +4630,19 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   void flushSignal({ forceFlush: () => new Promise<void>(() => {}) }, stalled);
   await Bun.sleep(20);
   assert(early.length === 2 && early[1] === "telemetry: 2 log records not sent to http://collector:4318 (queue full) (SMD-1849)", `a flush that never ends has said what it held, before the wait (${early.join(" / ")})`);
+
+  // SMD-2902: the stop's cut counts each export on its way, and what its batch still held, once — a second cut adds
+  // only what it newly finds, and an export a cut counted says nothing more when it fails after (review pass 1's mutants).
+  const cutSaid: string[] = [];
+  let endLater: (result: { code: number; error?: Error }) => void = () => {};
+  const cutWatched = watchExporter({ export: (_items: unknown, done: (result: { code: number; error?: Error }) => void) => { endLater = done; }, shutdown: async () => {} } as never, { origin: "http://collector:4318", warn: (l) => cutSaid.push(l) });
+  cutWatched.export([1, 2] as never, () => {});
+  cutWatched.cut("on its way", 3);
+  cutWatched.cut("again");
+  endLater({ code: 1, error: Object.assign(new Error("refused"), { code: "ECONNREFUSED" }) });
+  cutWatched.sayRest();
+  assert(cutSaid.join(" / ") === "telemetry: 5 spans not sent to http://collector:4318 (on its way) (SMD-1849)" && cutWatched.mark().pending === 0,
+    `a cut says the export on its way and what was held once, a second cut nothing, the export's later failure nothing (${cutSaid.join(" / ")})`);
 
   // The sizes and times read here, as the SDK reads none of them for log records and metrics.
   const times = [metricTimes(undefined, undefined), metricTimes("5000", undefined), metricTimes("500", "100"), metricTimes("10000", "20000"), metricTimes("3000000000", undefined)];

@@ -5849,8 +5849,9 @@ const API_ROLE: TransportRole = {
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
     // The authorization server's token check, built from the environment (SMD-2286): authorization, as auth.ts is, no store.
     ["./oauth-token.ts", new Set(["remoteChecker", "tokenSettings", "TokenCheck"])],
-    // The stop's lines for what it cuts, and the spans' start and flush (SMD-1849): request records and telemetry, no store.
-    ["./telemetry.ts", new Set(["cutOpenRequests", "flushTelemetry", "startTelemetry"])],
+    // The stop's lines for what it cuts, and the spans' start and flush (SMD-1849), and what a cut flush held (SMD-2902):
+    // request records and telemetry, no store.
+    ["./telemetry.ts", new Set(["cutOpenRequests", "cutTelemetry", "flushTelemetry", "startTelemetry"])],
   ]),
   wiring: false,
   mustImport: "./core/index.ts",
