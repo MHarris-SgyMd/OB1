@@ -61,7 +61,7 @@ COPY releases.json /app/releases.json
 # /health body (SMD-2041). A build arg baked into the environment: compose
 # passes it from OB1_GIT_SHA, the release job the tag's commit, and neither
 # forwards one at runtime. It is an ENV, so a runtime variable of the same name
-# (`docker run -e`, a Kubernetes `env:` entry) does override it — set none.
+# (a service's `environment:` entry) does override it — set none.
 # After every COPY, so a new commit rebuilds no earlier layer. Unset reads as
 # `unknown`.
 ARG OB1_GIT_SHA=unknown
