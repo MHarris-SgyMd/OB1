@@ -983,15 +983,32 @@ restarts is each container's restart policy; compose is not involved. In
 `compose.yaml` what serves is `unless-stopped`: Postgres, the three servers and the operator GUI,
 the proxy, the forwarder that publishes its port, Ollama, n8n, the
 orchestration runner, the authorization server and the observability
-profile's `lgtm` and `pg-exporter`. What runs once is `"no"`: the migrator,
-`ollama-pull`, the runner's role job and the exporter's. `board-sync`, the two workers, the sleep scheduler and `jev` are
-`on-failure:3`, so that a configuration a restart does not fix stops them
-rather than loops; count on neither runtime to start those at boot. The
-servers can need one of them: with `OB1_JEV_BASE_URL` naming the `jev`
+profile's `lgtm` and `pg-exporter` — and, since SMD-3214, `board-sync`, the
+two workers and the sleep scheduler. What runs once is `"no"`: the migrator,
+`ollama-pull`, the runner's role job and the exporter's.
+
+The four followers were `on-failure:3`, so that a configuration a restart does
+not fix stopped them rather than looped; but neither runtime starts that
+policy at boot, so every reboot left a brain serving and not sleeping (on
+2026-10-22 both dogfood brains' `sleep` and stable's `board-sync` stayed down
+until started by hand). Their command is now `db/supervise.ts`, which runs the
+follower and, when it ends on its own — a refusal (exit 2), a crash — runs it
+again after 1, 2, 4, 8, then every 15 minutes, its heartbeat ended with when.
+The container never exits, so the runtime has nothing to restart in a loop. A
+fix outside `deploy/.env` (a model pulled, the migrations applied) is met at
+the next try; one in `deploy/.env` needs the service recreated, which `up -d`
+does when its environment changes. No `OB1_WORKER_KEY`, or a setting that is
+not digits, holds it until that recreate, the follower never started.
+Preflight's `workers` and `sleep` rows say a held service is held, its cause
+and its next try, rather than "start it again".
+
+`jev` is still `on-failure:3`, so count on neither runtime to start it at
+boot. The servers can need it: with `OB1_JEV_BASE_URL` naming the `jev`
 service, their preflight fails ("The jev service is not running") until it
 runs, so after a reboot start it by hand, `compose --profile jev up -d jev`
 with the stack's `-f` files (SMD-2834). Check 32
-of `scripts/check-fork-consistency.ts` holds every service's policy. Postgres
+of `scripts/check-fork-consistency.ts` holds every service's policy, and that
+each follower runs through the supervisor. Postgres
 had none until SMD-2760, so on Docker a reboot would bring the servers back
 without their database. A canary (`canary.sh`) and the three-tier stack
 (`compose.tiers.yaml`) take the same policies.
@@ -1867,9 +1884,10 @@ podman compose -f deploy/compose.yaml --profile board-sync logs -f board-sync
 
 Each pass stamps a heartbeat, `heartbeat:board-sync` in `ob1_config`
 (SMD-2261). Preflight's `workers` row, the keyed `/health` body and `brain_info`
-read it. The row warns at once when the loop says it stopped (`compose stop`),
-and once the heartbeat is older than three intervals — its restarts used up,
-or its container removed. It names `up -d --no-deps board-sync`, with the
+read it. The row warns at once when the loop says it stopped (`compose stop`)
+or its supervisor holds it — a refusal, which it tries again on its own, the
+row saying when (SMD-3214) — and once the heartbeat is older than three
+intervals: its container removed. It names `up -d --no-deps board-sync`, with the
 `-f` files and `-p` the stack was started with. Just after `up`, the server's
 preflight can read the row a `down` left before board-sync's first pass stamps
 it; such a warning in the start-up log clears on the next `bun preflight.ts`.
@@ -1922,7 +1940,8 @@ sleep's clock, waits for the next live call and the quiet. They are alternatives
 not companions: the `sleep` service will not run beside the workers'
 followers — it refuses at its start, and when one starts later it ends
 (exit 2) before its next sleep begins, or within a poll if asleep, both
-profiles brought up at once included. The rest of this
+profiles brought up at once included; its supervisor then tries it again
+every few minutes, so it starts on its own once the followers stop. The rest of this
 section is the `workers` profile.
 
 **The cost comes first.** Extraction makes a model call per thought (per
@@ -1996,11 +2015,12 @@ has removed.
   against an older schema, and the workers do not check the schema's version.
   The mount is the checkout compose was run from, so run it from one that
   stays (not a worktree you will remove). A changed checkout reaches a
-  follower when it is restarted — any restart, on-failure included.
-- **Stopping.** `stop` lets each worker finish the thought it holds. The grace
-  period is 120 s for `extract` (a thought's extraction took 121 s at p90 on
-  the stable brain) and 60 s for `consolidate`. Inside it the follower exits
-  0; past it the container is killed (137). Either way it stays stopped, and
+  follower when it is restarted — any restart, its supervisor's included.
+- **Stopping.** `stop` lets each worker finish the thought it holds: the
+  supervisor passes the signal on. The grace period is 120 s for `extract` (a
+  thought's extraction took 121 s at p90 on the stable brain) and 60 s for
+  `consolidate`. Inside it the service exits 0; past it the container is
+  killed (137). Either way it stays stopped, and
   a thought still held is not lost: its lease lapses after 900 s and the next
   run takes it (a thought whose lease lapses three times is recorded failed).
 - **Refusals.** A configuration refusal exits 2: no key, a key
@@ -2010,8 +2030,11 @@ has removed.
   Ollama), or (`extract`) a model or prompt version other than the one the
   brain's extraction key records. So does a provider that refuses the
   follower's first call at start — a model it does not serve, a refused key,
-  a wrong base URL (SMD-2599). The service is restarted three times — four
-  runs — then stops, and `ps` shows it exited, as `board-sync` does.
+  a wrong base URL (SMD-2599). The service does not exit: its supervisor runs
+  the follower again after 1, 2, 4, 8, then every 15 minutes, and preflight's
+  `workers` row says it is held, the exit code and the next try (SMD-3214).
+  No key, or a setting that is not digits, the supervisor refuses itself,
+  before the follower starts, and holds until the service is recreated.
 - **Outages.** A follower waits out the database going away (it checks
   again after 5 s, doubling to 5 min) and a provider outage — a transient
   error past its pauses, a 404 naming the model while Ollama pulls it, a
@@ -2020,7 +2043,7 @@ has removed.
   one-token call until the provider answers; a thought that fails again
   within 15 minutes of that is recorded failed, as its own fault (SMD-2599).
   An unreachable provider at start is waited for too. None of these exits,
-  so none spends a restart.
+  so none waits on the supervisor's clock.
 
 **Changing the model.** A new `OB1_METADATA_MODEL`, or a checkout whose
 extraction prompt version moved (after a pull), is a new extraction key, and
@@ -2175,8 +2198,8 @@ The settings go out as startup parameters, which a transaction pooler
 Postgres directly, as the stack's own does. `extract-entities.ts
 --status` (the command above) reads its progress, and a status read is not a
 live call. `COMPOSE_PROFILES=sleep` in `deploy/.env` brings it back with the
-stack's `up -d`; like the workers it is `on-failure:3`, so after a reboot
-neither runtime starts it on its own ("After a reboot", above). Name the
+stack's `up -d`; like the workers it is `unless-stopped` through its
+supervisor, so a reboot brings it back ("After a reboot", above). Name the
 profile on `down` too (`--profile sleep down`, or `COMPOSE_PROFILES=sleep`): a
 plain `down` removes Postgres and leaves `sleep` running, waiting for ever for
 a database that is gone.
@@ -2189,11 +2212,13 @@ live call. A follower stopped cleanly marks its row ended, so the refusal
 lifts at once; one killed past its grace leaves its row fresh for up to three
 of its intervals (3 min), so delete the rows as the log says — needed anyway
 if you are retiring the profile, or preflight's `workers` row asks for them
-back. Four refusals in a row (its start and three restarts) use up the service's restarts, after which
-`up -d sleep` starts it again. Each refusal ends `heartbeat:sleep` on a
-failure, so preflight's `sleep` row names the followers keeping it down and
-the two ways out: one profile or the other, each taken out of
-`COMPOSE_PROFILES` with its rows deleted.
+back. The service does not exit on the refusal: its supervisor tries again
+after 1, 2, 4, 8, then every 15 minutes, so it starts on its own once the
+followers' rows are ended or gone (SMD-3214). Each refusal ends
+`heartbeat:sleep` on a failure with that next try, so preflight's `sleep` row
+says it is held, names the followers keeping it down and the two ways out:
+one profile or the other, each taken out of `COMPOSE_PROFILES` with its rows
+deleted.
 
 ```bash
 podman compose -f deploy/compose.yaml --profile workers stop extract consolidate
@@ -2230,14 +2255,15 @@ new key — waits for the brain to go quiet.
 Since SMD-2752 it checks each pass's start
 once, before its first quiet: a bad `OB1_WORKER_KEY`, a model not served (the
 judge's too) or an extraction key recorded under another model ends each
-start at once (exit 2, `heartbeat:sleep` ended failed); `on-failure:3`
-restarts it three times, each refused the same way, and then `ps` shows it
-exited, so `podman logs` on `sleep` names the cause within seconds of the
-first start, not at the first quiet. As with the `workers` profile, a model
-`ollama-pull` is still pulling at a first boot is refused the same way: start
-`sleep` once the pull is done. A worker key revoked later, or the key moved by
-a `--switch-key` run elsewhere, ends it at the next sleep rather than retrying
-until a restart. Each pass's banner is said once there, not at every sleep;
+start at once (exit 2, `heartbeat:sleep` ended failed), and its supervisor
+tries again after 1, 2, 4, 8, then every 15 minutes, each try refused the same
+way until the cause is mended (SMD-3214), so `podman logs` on `sleep` names
+the cause within seconds of the first start, not at the first quiet, and
+preflight's `sleep` row gives it and the next try. As with the `workers`
+profile, a model `ollama-pull` is still pulling at a first boot is refused the
+same way, and met at a later try once the pull is done. A worker key revoked
+later, or the key moved by a `--switch-key` run elsewhere, ends it at the next
+sleep, held the same way. Each pass's banner is said once there, not at every sleep;
 progress lines (`pool:`, `before:`) still come with each sleep's work.
 
 ## Refreshing a tier

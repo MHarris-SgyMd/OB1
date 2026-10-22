@@ -1316,7 +1316,10 @@ services:
       OB1_BOARD_SYNC_INTERVAL: ${OB1_BOARD_SYNC_INTERVAL:-}
       LINEAR_COMMENT_API_KEY: ${LINEAR_COMMENT_API_KEY:-}
       OB1_FINDINGS_POST_CAP: ${OB1_FINDINGS_POST_CAP:-}
-    command: ["bun", "db/sync-linear.ts", "--loop"]
+    # Through db/supervise.ts (SMD-3214), which runs the loop again after it
+    # ends on its own — a refusal, a database not answering yet — on a clock of
+    # minutes, so the container does not exit and the restart below cannot loop.
+    command: ["bun", "db/supervise.ts", "--worker", "board-sync", "--run", "exec bun db/sync-linear.ts --loop"]
     # The server's host alias (SMD-1875): this worker dials OB1_LLM_BASE_URL
     # too, and on Linux Docker Option B's name exists only through this entry.
     extra_hosts: *host-alias
@@ -1331,12 +1334,14 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    # Not `unless-stopped`: the tool exits 2 on a missing LINEAR_API_KEY or a
-    # bad interval — configuration, which a restart does not fix — and an
-    # unconditional restart made that refusal a crash loop with the same hint
-    # filling the log (fifth review pass). Three tries cover a database not yet
-    # answering; then the service stops and `ps` says so.
-    restart: on-failure:3
+    # `unless-stopped`, so it comes back after a reboot (SMD-3214): neither
+    # runtime starts an `on-failure` container at boot. The tool still exits 2
+    # on a missing LINEAR_API_KEY or a bad interval — configuration, which a
+    # restart does not fix — and an unconditional restart of the tool itself
+    # made that refusal a crash loop (fifth review pass); the supervisor above
+    # holds it instead, trying again after 1, 2, 4, 8, then every 15 minutes,
+    # and ends heartbeat:board-sync with when, so preflight says it is held.
+    restart: unless-stopped
     logging: *logging
 
   # Entity extraction and consolidation, unattended (SMD-2424). Optional —
@@ -1360,13 +1365,16 @@ services:
   # older schema (deploy/README.md; SMD-2601). Two differences from
   # board-sync. MCP_ACCESS_KEYS stays: the worker names itself by
   # OB1_WORKER_KEY's hash in that list (db/worker-bootstrap.ts). And
-  # OB1_WORKER_KEY is required: the `sh -c` refuses to start without it,
-  # exit 2, where a run from a checkout warns and writes mentions, edges and
-  # proposals with no agent id. The knobs are forwarded, so `compose exec
-  # extract env` shows what the follower was started with, and read by the
-  # command line, which takes digits only — a value starting with a dash
-  # would otherwise reach the CLI as a flag (`--status` ran once and exited
-  # 0). `exec` hands the process to bun, so the stop signal reaches it.
+  # OB1_WORKER_KEY is required: db/supervise.ts, the command, refuses to
+  # start the follower without it (`--require-key`), where a run from a
+  # checkout warns and writes mentions, edges and proposals with no agent id.
+  # The knobs are forwarded, so `compose exec extract env` shows what the
+  # follower was started with, and read by `--run`'s command line once the
+  # supervisor has found them digits only (`--digits`) — a value starting
+  # with a dash would otherwise reach the CLI as a flag (`--status` ran once
+  # and exited 0). Either refusal holds the service until it is recreated
+  # (SMD-3214). `exec` hands the shell's process to bun, so the stop signal
+  # the supervisor passes on reaches it.
   extract:
     image: oven/bun:1.4.3-alpine
     profiles: ["workers"]
@@ -1381,12 +1389,16 @@ services:
       OB1_EXTRACT_FOLLOW: ${OB1_EXTRACT_FOLLOW:-}
       OB1_EXTRACT_WORKERS: ${OB1_EXTRACT_WORKERS:-}
     command:
-      - sh
-      - -c
-      - |
-        [ -n "$$OB1_WORKER_KEY" ] || { echo "extract: OB1_WORKER_KEY is not set in deploy/.env — mint a key (cd server-portable && bun keygen.ts --name workers --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY" >&2; exit 2; }
-        case "$$OB1_EXTRACT_FOLLOW$$OB1_EXTRACT_WORKERS" in *[!0-9]*) echo "extract: OB1_EXTRACT_FOLLOW ('$$OB1_EXTRACT_FOLLOW') and OB1_EXTRACT_WORKERS ('$$OB1_EXTRACT_WORKERS') take digits only" >&2; exit 2;; esac
-        exec bun db/extract-entities.ts --follow $${OB1_EXTRACT_FOLLOW:+"$$OB1_EXTRACT_FOLLOW"} --workers "$${OB1_EXTRACT_WORKERS:-1}"
+      - bun
+      - db/supervise.ts
+      - --worker
+      - extract
+      - --require-key
+      - --digits
+      - OB1_EXTRACT_FOLLOW
+      - OB1_EXTRACT_WORKERS
+      - --run
+      - exec bun db/extract-entities.ts --follow $${OB1_EXTRACT_FOLLOW:+"$$OB1_EXTRACT_FOLLOW"} --workers "$${OB1_EXTRACT_WORKERS:-1}"
     extra_hosts: *host-alias
     # board-sync's: Postgres on `data`, the model provider on `egress`.
     networks: [data, egress]
@@ -1402,18 +1414,20 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    # board-sync's rule, for both services: a refusal exits 2 — no key, a
-    # key MCP_ACCESS_KEYS does not hold (or revoked, or of a scope that grants
-    # nothing), a bad knob, the egress gate, (this service) a model or prompt
+    # board-sync's rule, for both services: `unless-stopped`, so a reboot
+    # brings it back (SMD-3214), and the supervisor holds a refusal rather
+    # than letting the container exit. A refusal ends the follower with 2 —
+    # a key MCP_ACCESS_KEYS does not hold (or revoked, or of a scope that
+    # grants nothing), the egress gate, (this service) a model or prompt
     # version other than the recorded key's, a provider refusing the first
-    # call at start — and a restart does not fix configuration, so after
-    # three restarts the service stops and `ps` says so. podman restarts at
-    # once, with no backoff, and never resets the count, which is why an
-    # outage must not exit: a follower waits out the database going away
-    # and a provider outage, and spends no restart on either (SMD-2599). A
-    # follower stopped by a signal exits 0 (137 if killed past the grace
-    # period) and stays stopped.
-    restart: on-failure:3
+    # call at start — and the supervisor runs it again after 1, 2, 4, 8, then
+    # every 15 minutes, its heartbeat ended with when; podman would restart
+    # at once, with no backoff, and never reset the count. An outage is still
+    # no exit: a follower waits out the database going away and a provider
+    # outage itself (SMD-2599). A stop goes on to the follower, which ends
+    # after the thought in hand, and the service exits 0 (137 if killed past
+    # the grace period) and stays stopped.
+    restart: unless-stopped
     logging: *logging
 
   # Consolidation never applies a proposal; since 084 it stores related,
@@ -1446,19 +1460,23 @@ services:
       OB1_CONSOLIDATE_FOLLOW: ${OB1_CONSOLIDATE_FOLLOW:-}
       OB1_CONSOLIDATE_WORKERS: ${OB1_CONSOLIDATE_WORKERS:-}
     command:
-      - sh
-      - -c
-      - |
-        [ -n "$$OB1_WORKER_KEY" ] || { echo "consolidate: OB1_WORKER_KEY is not set in deploy/.env — mint a key (cd server-portable && bun keygen.ts --name workers --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY" >&2; exit 2; }
-        case "$$OB1_CONSOLIDATE_FOLLOW$$OB1_CONSOLIDATE_WORKERS" in *[!0-9]*) echo "consolidate: OB1_CONSOLIDATE_FOLLOW ('$$OB1_CONSOLIDATE_FOLLOW') and OB1_CONSOLIDATE_WORKERS ('$$OB1_CONSOLIDATE_WORKERS') take digits only" >&2; exit 2;; esac
-        exec bun db/consolidate.ts --follow $${OB1_CONSOLIDATE_FOLLOW:+"$$OB1_CONSOLIDATE_FOLLOW"} --workers "$${OB1_CONSOLIDATE_WORKERS:-1}"
+      - bun
+      - db/supervise.ts
+      - --worker
+      - consolidate
+      - --require-key
+      - --digits
+      - OB1_CONSOLIDATE_FOLLOW
+      - OB1_CONSOLIDATE_WORKERS
+      - --run
+      - exec bun db/consolidate.ts --follow $${OB1_CONSOLIDATE_FOLLOW:+"$$OB1_CONSOLIDATE_FOLLOW"} --workers "$${OB1_CONSOLIDATE_WORKERS:-1}"
     extra_hosts: *host-alias
     networks: [data, egress]
     # A thought is up to --k (3) judged pairs: 11 s at the median, 38 s at
     # the most on the stable brain (1,447 claims, 2026-10-05).
     stop_grace_period: 60s
     depends_on: *claim-worker-depends
-    restart: on-failure:3
+    restart: unless-stopped
     logging: *logging
 
   # The sleep scheduler, unattended (SMD-1794; this service SMD-2678). Optional
@@ -1480,12 +1498,14 @@ services:
   # each sleep, and within a poll while asleep — so both profiles brought up
   # at once end it too.
   #
-  # The workers' shape: the same image, mounts, environment, key guard and
-  # digits-only knobs, so it runs this checkout's code too (SMD-2601). One
-  # worker per pass unless OB1_SLEEP_WORKERS says more. `init: true` from the
-  # start (SMD-2666): bun as PID 1 ignores SIGTERM until it installs its
-  # handlers, which the scheduler does after its start reads — and those wait
-  # out a database not answering yet, so a stop then would wait out the grace.
+  # The workers' shape: the same image, mounts, environment, supervisor, key
+  # guard and digits-only knobs, so it runs this checkout's code too
+  # (SMD-2601). One worker per pass unless OB1_SLEEP_WORKERS says more.
+  # `init: true` from the start (SMD-2666): bun as PID 1 ignored SIGTERM until
+  # it installed its handlers, which the scheduler does after its start reads
+  # — and those wait out a database not answering yet, so a stop then waited
+  # out the grace. The supervisor installs its own first, and the scheduler
+  # is its child, not PID 1 (SMD-3214); the init still reaps.
   sleep:
     image: oven/bun:1.4.3-alpine
     profiles: ["sleep"]
@@ -1504,13 +1524,21 @@ services:
       OB1_SLEEP_WORK_MEM: ${OB1_SLEEP_WORK_MEM:-}
       OB1_SLEEP_MAINTENANCE_WORK_MEM: ${OB1_SLEEP_MAINTENANCE_WORK_MEM:-}
     command:
-      - sh
-      - -c
-      - |
-        [ -n "$$OB1_WORKER_KEY" ] || { echo "sleep: OB1_WORKER_KEY is not set in deploy/.env — mint a key (cd server-portable && bun keygen.ts --name workers --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY" >&2; exit 2; }
-        case "$$OB1_SLEEP_QUIET$$OB1_SLEEP_POLL$$OB1_SLEEP_WORKERS" in *[!0-9]*) echo "sleep: OB1_SLEEP_QUIET ('$$OB1_SLEEP_QUIET'), OB1_SLEEP_POLL ('$$OB1_SLEEP_POLL') and OB1_SLEEP_WORKERS ('$$OB1_SLEEP_WORKERS') take digits only" >&2; exit 2;; esac
-        case "$$OB1_SLEEP_BUDGET$$OB1_SLEEP_STATEMENT_TIMEOUT$$OB1_SLEEP_WORK_MEM$$OB1_SLEEP_MAINTENANCE_WORK_MEM" in *[!0-9]*) echo "sleep: OB1_SLEEP_BUDGET ('$$OB1_SLEEP_BUDGET'), OB1_SLEEP_STATEMENT_TIMEOUT ('$$OB1_SLEEP_STATEMENT_TIMEOUT'), OB1_SLEEP_WORK_MEM ('$$OB1_SLEEP_WORK_MEM') and OB1_SLEEP_MAINTENANCE_WORK_MEM ('$$OB1_SLEEP_MAINTENANCE_WORK_MEM') take digits only" >&2; exit 2;; esac
-        exec bun db/sleep.ts --follow --quiet "$${OB1_SLEEP_QUIET:-300}" --poll "$${OB1_SLEEP_POLL:-5}" --workers "$${OB1_SLEEP_WORKERS:-1}" --budget "$${OB1_SLEEP_BUDGET:-60}" --statement-timeout "$${OB1_SLEEP_STATEMENT_TIMEOUT:-300}" --work-mem "$${OB1_SLEEP_WORK_MEM:-4}" --maintenance-work-mem "$${OB1_SLEEP_MAINTENANCE_WORK_MEM:-64}"
+      - bun
+      - db/supervise.ts
+      - --worker
+      - sleep
+      - --require-key
+      - --digits
+      - OB1_SLEEP_QUIET
+      - OB1_SLEEP_POLL
+      - OB1_SLEEP_WORKERS
+      - OB1_SLEEP_BUDGET
+      - OB1_SLEEP_STATEMENT_TIMEOUT
+      - OB1_SLEEP_WORK_MEM
+      - OB1_SLEEP_MAINTENANCE_WORK_MEM
+      - --run
+      - exec bun db/sleep.ts --follow --quiet "$${OB1_SLEEP_QUIET:-300}" --poll "$${OB1_SLEEP_POLL:-5}" --workers "$${OB1_SLEEP_WORKERS:-1}" --budget "$${OB1_SLEEP_BUDGET:-60}" --statement-timeout "$${OB1_SLEEP_STATEMENT_TIMEOUT:-300}" --work-mem "$${OB1_SLEEP_WORK_MEM:-4}" --maintenance-work-mem "$${OB1_SLEEP_MAINTENANCE_WORK_MEM:-64}"
     extra_hosts: *host-alias
     # The workers': Postgres on `data`, the model provider on `egress`
     # (SMD-2583). On compose's default network it would wait for a database it
@@ -1521,10 +1549,14 @@ services:
     # and a wait for the quiet at once.
     stop_grace_period: 120s
     depends_on: *claim-worker-depends
-    # The workers' rule: a refusal exits 2 (no key, a bad knob, a pass refusing
-    # at its first start, followers running outside it) and three restarts end
-    # it; an outage, at its start or in a sleep, is waited out, not exited.
-    restart: on-failure:3
+    # The workers' rule: `unless-stopped`, so a reboot brings it back
+    # (SMD-3214). A refusal ends the scheduler with 2 (a pass refusing at its
+    # first start, followers running outside it) and the supervisor runs it
+    # again after 1, 2, 4, 8, then every 15 minutes — so it starts on its own
+    # once the workers profile's followers stop; no key or a bad knob holds it
+    # until a recreate. An outage, at its start or in a sleep, is waited out,
+    # not exited.
+    restart: unless-stopped
     logging: *logging
 
   # Replaces: OpenRouter. Optional — enable with `--profile local-models`.

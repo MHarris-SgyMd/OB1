@@ -1555,8 +1555,9 @@ if [ -n "$STOPPED_SLEEP" ]; then
     canary_compose --profile sleep up -d --no-deps --force-recreate sleep
     SLEEP_PENDING=""
   else
-    # Started with no key it exits 2 three times and stays down (on-failure:3),
-    # so it is left stopped and the run says so at its end (SMD-3154).
+    # Started with no key its supervisor holds it, running and sleeping
+    # nothing, until a recreate (SMD-3214), so it is left stopped and the run
+    # says so at its end (SMD-3154).
     SLEEP_LEFT=1
     ADVISED=1
     say "canary sleep worker LEFT STOPPED: $CANARY_ENV holds no OB1_WORKER_KEY (this up cleared stable's) — mint one (cd server-portable && bun keygen.ts --name canary-sleep --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY, then: $SLEEP_START"
