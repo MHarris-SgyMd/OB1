@@ -157,7 +157,7 @@ Major recipe categories:
 - Capture and workflow: auto-capture, panning for gold, schema-aware routing, source filtering, daily digest, research-to-decision workflow.
 - Knowledge graph/wiki: OB graph, entity wiki, wiki compiler, wiki synthesis, typed edge classifier.
 - Agent workflows: OpenClaw Agent Memory, code review memory, TaskFlow work log.
-- Alternate architecture: Vercel/Neon/Telegram, Kubernetes deployment. Local embedding is the fork's default stack — a local Ollama, declared local by the operator — not a recipe (SMD-2138).
+- Alternate architecture: Vercel/Neon/Telegram. The brain itself deploys as the compose stack only (the Kubernetes deployment retired, SMD-2288). Local embedding is the fork's default stack — a local Ollama, declared local by the operator — not a recipe (SMD-2138).
 
 When helping users pick a recipe, start from their goal and data source. Do not suggest bulk imports until the base Open Brain setup is working and they can capture/search a test thought.
 
@@ -273,7 +273,7 @@ Avoid asking five questions at once. Start with the highest-signal check.
 
 Good first debug moves:
 
-- "Run `podman compose -f deploy/compose.yaml logs -f server`. Trigger the failing action again. Do you see a new request?"
+- "Run `podman compose -f deploy/compose.yaml logs -f mcp api` (the MCP server at `/mcp` and the REST core behind it). Trigger the failing action again. Do you see a new request?"
 - "Check whether your MCP Connection URL ends with `?key=...` and that the key is the one whose hash is in `MCP_ACCESS_KEYS`. Do not paste the key here."
 - "If capture works but search does not, the database and connector are mostly fine. Now check embeddings, pgvector, and `match_thoughts`."
 

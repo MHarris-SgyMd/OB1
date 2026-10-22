@@ -64,7 +64,7 @@ export type SearchRow = {
   matchCount: number | null;
   threshold: number | null;
   recencyWeight: number | null;
-  /** The retrieval arm the log recorded (045): hybrid, keyword or current (059's prefer_current); absent in a fixture or an older export. */
+  /** The retrieval arm the log recorded (045): hybrid, keyword, current (059's prefer_current) or literal (106: answered by exact literals alone while the provider was down, SMD-2891); absent in a fixture or an older export. */
   arm?: string | null;
   resultIds: string[];
   /** Approximate tokens of the content returned (chars / 4 over the ids as stored now); null when unknown. */
@@ -271,9 +271,11 @@ const fmt = (x: number | null): string => (x === null ? "?" : String(Number(x.to
 /** The arm a search row ran under: the tool and the arguments the log recorded. */
 export function armOf(s: SearchRow): string {
   // prefer_current (059, SMD-2255) is another ranking of the same tool and
-  // arguments: named, so its rows are not pooled with the default's. Every
-  // other row's name is what it was.
-  return `${s.tool} k=${s.matchCount ?? "?"} thr=${fmt(s.threshold)} rw=${fmt(s.recencyWeight)}${s.arm === "current" ? " current" : ""}`;
+  // arguments, and literal (106, SMD-2891) an answer by exact literals alone
+  // while the provider was down: each named, so its rows are not pooled with
+  // the default's. A literal row does not say whether prefer_current was
+  // asked; it ranked no vector either way. Every other row's name is what it was.
+  return `${s.tool} k=${s.matchCount ?? "?"} thr=${fmt(s.threshold)} rw=${fmt(s.recencyWeight)}${s.arm === "current" || s.arm === "literal" ? ` ${s.arm}` : ""}`;
 }
 
 export type ArmStats = {

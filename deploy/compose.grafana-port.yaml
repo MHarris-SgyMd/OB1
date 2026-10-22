@@ -20,7 +20,7 @@
 # reaches the LAN and the host — on Docker Desktop and a podman machine by
 # host.docker.internal, its loopback ports included; on Linux the host's other
 # listeners, by the network's gateway — as well as every name on `mesh`, and
-# pg-exporter on `telemetry` (SMD-3023). Check 28 holds this file — its keys (OVERLAYS), its network (FILE_NETWORKS,
+# pg-exporter's metrics on `telemetry` (SMD-3023). Check 28 holds this file — its keys (OVERLAYS), its network (FILE_NETWORKS,
 # SERVICE_NETWORKS) and its one environment key by value (GRAFANA_PORT_LGTM_ENV)
 # — and check 13 its port.
 

@@ -19,15 +19,15 @@
 # What the host can reach: only the forwarder, in front of the proxy (and
 # n8n, under --profile orchestration), and only from the host itself; the
 # authorization server (--profile auth) publishes nothing. The proxy is the
-# stack's one origin: each service is a path on it (`/mcp` the server), not a
+# stack's one origin: each service is a path on it (`/mcp` the MCP server), not a
 # port of its own (SMD-1846), and it is on internal networks alone behind the
 # forwarder, which holds the port (SMD-2583). Every
 # published port here names its address, `127.0.0.1` unless the operator sets
 # the `*_BIND` knob, because an address-less `"8000:8000"` binds 0.0.0.0 — every
 # interface — and this stack holds a brain (personal data at rest) behind one
 # password and one key over plain HTTP. Postgres, Ollama and the server publish
-# nothing; the proxy reaches the server by its name on the mesh network, the
-# server reaches Postgres on the internal `data` network and Ollama on `egress`
+# nothing; the proxy reaches the MCP server by its name on the mesh network,
+# the servers reach Postgres on the internal `data` network and Ollama on `egress`
 # by service name (the networks at the end of this file), and a tool run from
 # a checkout gets them through compose.host-ports.yaml (a second -f),
 # loopback again unless told otherwise. scripts/check-fork-consistency.ts
@@ -58,9 +58,10 @@ x-logging: &logging
     max-size: "10m"
     max-file: "3"
 
-# The plugins' knobs (SMD-2310), merged by the MCP server and the REST core
-# alone: the workers merge the server's block, and none of them runs a plugin
-# or needs the plugin login role's password. The migrator forwards its own.
+# The plugins' knobs (SMD-2310), merged by `server` and the REST core alone:
+# the workers merge the server's block, and none of them runs a plugin or
+# needs the plugin login role's password. The migrator forwards its own, and
+# the MCP server at /mcp only OB1_PLUGINS, its tools' names (SMD-2287).
 x-plugin-env: &plugin-env
   # The plugins the brain runs: names from plugins/registry.ts,
   # comma-separated; unset, none. Both servers serve the same set; preflight
@@ -79,13 +80,14 @@ x-hook-env: &hook-env
   OB1_HOOK_SECRETS: ${OB1_HOOK_SECRETS:-}
 
 # The servers' OpenTelemetry settings (SMD-1849), merged by the MCP server and
-# the REST core alone: the workers send no telemetry. Each is the SDK's own
+# the REST core alone: the workers send no telemetry, nor `server`, n8n's, which
+# is off the mesh the collector is on (SMD-2287). Each is the SDK's own
 # variable, passed as deploy/.env gives it; unset, it is empty, which the
 # servers read as unset (measured: no line, no change), so nothing is sent until
 # OTEL_EXPORTER_OTLP_ENDPOINT names a collector — the observability profile's
 # below is http://lgtm.ob1.internal.:4318 — and each server keeps its own
-# service name (open-brain, open-brain-api): no OTEL_SERVICE_NAME here, which
-# would give both one. OB1_OTEL_TRUST_TRACEPARENT stays out on purpose (check
+# service name (open-brain-mcp, open-brain-api): no OTEL_SERVICE_NAME here,
+# which would give both one. OB1_OTEL_TRUST_TRACEPARENT stays out on purpose (check
 # 14's NOT_FORWARDED): no proxy in this stack sets a traceparent to trust. The
 # three-brain stack leaves them out (check 27's TIER_OMITTED_ENV);
 # deploy/README.md, "Traces, metrics and log records", says what each does.
@@ -117,10 +119,10 @@ x-otel-env: &otel-env
 # named volumes in SERVICE_KEYS, SERVICE_MOUNTS, SERVICE_BUILDS, CONFINEMENT
 # and COMPOSE_VOLUMES; the proxy itself is PROXY_SERVICE there (SMD-2685).
 #
-# A request's path reaches the server as it came (no prefix stripped): the
-# server answers POST at every path and /health under any prefix
-# (server-portable/index.ts's /health route, mcp-edge.ts's HEALTH_PATH), so
-# `/mcp` needs no setting there.
+# A request's path reaches the MCP server as it came (no prefix stripped):
+# the `mcp` service (mcp-server/, SMD-2287) answers POST at every path and
+# /health under any prefix (mcp-edge.ts's HEALTH_PATH), so `/mcp` needs no
+# setting there.
 # The routers, highest priority first, each on the one public entrypoint
 # (`web`): a router that names none is on every entrypoint, the ping one
 # included, and so would be any entrypoint added later:
@@ -144,7 +146,7 @@ x-otel-env: &otel-env
 #           (the proxy's dns_search);
 #   resource the MCP server's protected-resource document,
 #           /.well-known/oauth-protected-resource/mcp (RFC 9728), to the
-#           server, which serves it only while the stack is configured, the
+#           `mcp` service, which serves it only while the stack is configured, the
 #           request's Host is the origin's and the authorization server
 #           answers it on the mesh, and answers 404 otherwise (SMD-2382;
 #           server-portable/oauth-edge.ts). A server that is down is
@@ -169,9 +171,10 @@ x-otel-env: &otel-env
 #           Grafana (SMD-1849 PR 3a). Off by default: Grafana on this
 #           origin shares it with /auth, so a script running in a Grafana
 #           page could act on the authorization server's session;
-#   mcp     /mcp and everything under it — the endpoint clients are given;
+#   mcp     /mcp and everything under it — the endpoint clients are given —
+#           to the `mcp` service as mcp.ob1.internal (SMD-2287);
 #   health  GET, HEAD and OPTIONS /health at the origin root, for a GET-only
-#           probe and a browser's CORS preflight.
+#           probe and a browser's CORS preflight, to the `mcp` service too.
 # Nothing else is routed, so the proxy answers every other path itself, with
 # Traefik's own 404 (body `404 page not found`): the origin root — `/`,
 # `GET /`, `POST /?key=`, /worker-status, /jobs/<id> — and every path under
@@ -194,10 +197,6 @@ x-otel-env: &otel-env
 # as a 404 and goes on. The resource router's 404 is the server's, with them,
 # while the server is up; with it down, auth-absent's bare 404 has none.
 # The middlewares:
-#   not-legacy  deletes X-OB1-Legacy-Route, the marker the legacy route set
-#           until v2.0.0 (an empty value deletes the header), so a client
-#           cannot send it and be logged as a straggler by a server that
-#           still reads it;
 #   auth-absent  any 502 — Traefik's own: no such name, nothing
 #           listening, or a request the server dropped mid-flight, as its
 #           registration stall does at 30 s; the server never answers 502
@@ -227,8 +226,8 @@ x-proxy-routes: &proxy-routes |
         rule: "Path(`/.well-known/oauth-protected-resource/mcp`)"
         priority: 40
         entryPoints: [web]
-        middlewares: [not-legacy, auth-absent]
-        service: server
+        middlewares: [auth-absent]
+        service: mcp
       oauth-fallback-off:
         rule: "Path(`/register`) || Path(`/authorize`) || Path(`/token`)"
         priority: 35
@@ -257,19 +256,13 @@ x-proxy-routes: &proxy-routes |
         rule: "Path(`/mcp`) || PathPrefix(`/mcp/`)"
         priority: 30
         entryPoints: [web]
-        middlewares: [not-legacy]
-        service: server
+        service: mcp
       health:
         rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))"
         priority: 20
         entryPoints: [web]
-        middlewares: [not-legacy]
-        service: server
+        service: mcp
     middlewares:
-      not-legacy:
-        headers:
-          customRequestHeaders:
-            X-OB1-Legacy-Route: ""
       auth-absent:
         errors:
           status: ["502"]
@@ -289,7 +282,7 @@ x-proxy-routes: &proxy-routes |
           statusRewrites:
             "418": 404
     services:
-      server:
+      mcp:
         loadBalancer:
           servers:
             - url: "http://mcp.ob1.internal.:8000"
@@ -836,10 +829,11 @@ services:
       OB1_AGENT_CACHE_TTL_MS: ${OB1_AGENT_CACHE_TTL_MS:-}
       OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
       # The stack's configured state and its public origin, as the
-      # authorization server gets them (below): the server advertises OAuth at
-      # <origin>/mcp only while COMPOSE_PROFILES names auth, the request's
-      # Host is the origin's, and the authorization server answers its probe
-      # on the mesh (SMD-2382, oauth-edge.ts). The REST core below takes this
+      # authorization server gets them (below): the MCP server (the `mcp`
+      # service, which lists them itself) advertises OAuth at <origin>/mcp only
+      # while COMPOSE_PROFILES names auth, the request's Host is the origin's,
+      # and the authorization server answers its probe on the mesh (SMD-2382,
+      # oauth-edge.ts); `server`, off the mesh, advertises nothing. The REST core below takes this
       # block too, and accepts the authorization server's tokens only while
       # both are set (SMD-2286, oauth-token.ts): drop them from it and it takes
       # keys alone. Its preflight prints the same `public origin` row, naming
@@ -863,11 +857,10 @@ services:
       OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
       PORT: "8000"
     environment:
-      <<: [*server-env, *plugin-env, *otel-env]
+      <<: [*server-env, *plugin-env]
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
-    # No `ports:`. The proxy below is the stack's published port and reaches
-    # this server as mcp.ob1.internal:8000 on the mesh (SMD-1846, SMD-2294);
-    # n8n reaches it as `server:8000` on `egress`.
+    # No `ports:`, and no route through the proxy since SMD-2532: n8n reaches
+    # it as `server:8000` on `egress`.
     depends_on:
       postgres:
         condition: service_healthy
@@ -897,21 +890,17 @@ services:
     # (fourth review pass).
     extra_hosts: &host-alias
       - "host.docker.internal:host-gateway"
-    # `data`, where it reaches Postgres; `egress`, where it reaches the model
-    # providers (the stack's Ollama and Jev by name, a host or hosted one
-    # outward) and n8n reaches it; and `mesh`, where it reaches the
-    # authorization server's health check as auth.ob1.internal (SMD-2382) and
-    # answers the proxy as mcp.ob1.internal. The ADR has the MCP server on the
-    # mesh alone; it joins the other two while it embeds and writes itself,
-    # not through the REST core (SMD-2287). No dns_search here, unlike the
-    # proxy: the probe's name is written rooted, which no search domain is
-    # tried under, and an operator's model endpoint may be a short name their
-    # resolver completes.
+    # `data`, where it reaches Postgres, and `egress`, where it reaches the
+    # model providers (the stack's Ollama and Jev by name, a host or hosted
+    # one outward) and n8n reaches it. Not the mesh: nothing routes to it
+    # since SMD-2532 closed the root route, and /mcp is the `mcp` service's
+    # below (SMD-2287 PR 5b), on the mesh alone, as the ADR has it. It serves
+    # n8n until it retires (PR 6, which moves n8n to the MCP server). No
+    # dns_search here, unlike the proxy: an operator's model endpoint may be a
+    # short name their resolver completes.
     networks:
       data: {}
       egress: {}
-      mesh:
-        aliases: [mcp.ob1.internal]
     logging: *logging
 
   # The REST core (SMD-2284): every operation the MCP tools expose, as JSON,
@@ -953,6 +942,60 @@ services:
     # The image's own check, the same keyless GET of /health (SMD-1849), named
     # here too: a server image from before it POSTs to the MCP endpoint at /,
     # which the REST core answers 404 (NO_ROUTE).
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    logging: *logging
+
+  # The MCP server built on the REST core (SMD-2287): `/mcp`, `/health` and
+  # the protected-resource document through the proxy, which reaches it as
+  # mcp.ob1.internal on the mesh. The server's image run as
+  # `bun ../mcp-server/index.ts`, without the image's preflight: it reads no
+  # store and holds no key list. Each tool is a call on the REST core at
+  # api.ob1.internal, the caller's key beside this server's own
+  # forward-scope key, OB1_FORWARDER_KEY, whose hash MCP_ACCESS_KEYS holds and
+  # which the REST core refuses as a caller. On the mesh alone: no Postgres,
+  # no model provider, nothing outward. On a stack configured with the
+  # authorization server it trades each OAuth token there as the `mcp`
+  # client, OB1_AUTH_SECRET_MCP (SMD-2286). Its spans are open-brain-mcp's.
+  # Not the plugins' login password (plugin-env): it runs no plugin SQL, only
+  # their tools' schemas, which OB1_PLUGINS names.
+  mcp:
+    # The server's image, by the server's name, never pulled or built here,
+    # as the REST core's; the release overlay pins it to the release's.
+    image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
+    pull_policy: never
+    # Bun with auto-install off: the image's own packages are all it loads,
+    # as CI's image step holds by running it offline (SMD-2978).
+    entrypoint: ["bun", "--no-install"]
+    command: ["../mcp-server/index.ts"]
+    environment:
+      <<: *otel-env
+      # Required: without it the server stops at once (exit 2), and /mcp
+      # would answer the proxy's 502. deploy/canary.sh mints a canary's own.
+      OB1_FORWARDER_KEY: ${OB1_FORWARDER_KEY:?set OB1_FORWARDER_KEY in the stack's env file — the MCP server's forward-scope key, minted with bun server-portable/keygen.ts --name mcp-forwarder --scope forward (a release install runs keygen.ts in the release's server image), its line in MCP_ACCESS_KEYS}
+      OB1_PLUGINS: ${OB1_PLUGINS:-}
+      OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:-}
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+      OB1_AUTH_SECRET_MCP: ${OB1_AUTH_SECRET_MCP:-}
+      OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
+    stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    # After the REST core, so `up mcp` brings it; not held for its health:
+    # while it is down a tool call is the MCP server's own 500 or 503, and
+    # liveness answers regardless.
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      mesh:
+        aliases: [mcp.ob1.internal]
+    # The image's check, a keyless GET of /health, named here as the REST
+    # core's is: podman builds the image in OCI form, which keeps no
+    # HEALTHCHECK (SMD-2287 PR 5a review). It asks the REST core nothing.
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"]
       interval: 30s
@@ -1049,7 +1092,7 @@ services:
     # internal networks and no other (SMD-2583): `front`, where the forwarder
     # reaches it as proxy.ob1.internal and nothing else is, and `mesh`, where
     # it reaches every backend — the MCP server as mcp.ob1.internal
-    # (SMD-2382), the REST core as api.ob1.internal (SMD-2284), the
+    # (SMD-2287), the REST core as api.ob1.internal (SMD-2284), the
     # authorization server as auth.ob1.internal. Until v2.0.0 it also
     # reached a tier's MCP server there as mcp.<tier>.ob1.internal
     # (SMD-2294); a tier is a brain of its own since SMD-2874, and this
@@ -1078,18 +1121,19 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-    # Started after the server, so `up proxy` brings the brain, and
-    # `up forwarder`, which waits on the proxy, its port too; not held for
-    # the server's health: while the server is down or in preflight the proxy
-    # answers 502, and it answers again when the server does. It also means
-    # `up server` alone never starts the proxy: name both (deploy/README.md,
-    # "One origin"). The REST core too, so the documented `up -d --build
-    # server proxy forwarder` recreates it on the server's new image rather
-    # than leaving it on the old one (SMD-2284 review pass 1).
+    # Started after the MCP server and the REST core behind it, so `up proxy`
+    # brings the brain once its image is built (the `server` service builds
+    # it: name `server` with `--build`, as the commands below do), and
+    # `up forwarder`, which waits on the proxy, its port too; not held for their health: while the MCP server is down the
+    # proxy answers 502, and it answers again when the server does. So the
+    # documented `up -d --build server proxy forwarder` recreates both on the
+    # server's new image rather than leaving them on the old one (SMD-2284
+    # review pass 1; SMD-2287). Not after `server`, which nothing here
+    # routes to since SMD-2532: n8n's alone.
     depends_on:
-      server:
-        condition: service_started
       api:
+        condition: service_started
+      mcp:
         condition: service_started
     restart: unless-stopped
     logging: *logging
@@ -1894,7 +1938,7 @@ services:
   # otel-lgtm: an OpenTelemetry collector taking OTLP on 4317 and 4318, and
   # Prometheus, Tempo, Loki, Pyroscope and Grafana behind it, all on the
   # stack's machine — the brain is personal data, and its telemetry goes
-  # nowhere else unless an operator sends it there. The two servers send to it
+  # nowhere else unless an operator sends it there. The MCP server and the REST core send to it
   # when deploy/.env names it, OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm.ob1.internal.:4318
   # (x-otel-env). Its Grafana is reached through compose.grafana-port.yaml, on
   # loopback and an origin of its own, or at /grafana on the stack's origin
@@ -2009,11 +2053,12 @@ services:
       TEMPO_EXTRA_ARGS: "-config.file=/tmp/tempo-config.yaml -reporting.enabled=false"
       PYROSCOPE_EXTRA_ARGS: "-server.http-listen-address=127.0.0.1 -server.grpc-listen-address=127.0.0.1 -memberlist.bind-addr=127.0.0.1 -usage-stats.enabled=false"
       # The collector scrapes pg-exporter every 30 s on `telemetry` into its
-      # metrics pipeline, beside OTLP and its own (SMD-1849 PR 3b): a second
+      # metrics pipeline, beside OTLP and its own (SMD-1849 PR 3b), at its
+      # front's one path, /cgi-bin/metrics (SMD-3023, pg-exporter below): a second
       # config the image's run-otelcol.sh appends, as one argument — no space
       # in it, since the script splits OTELCOL_EXTRA_ARGS on whitespace; the
       # pipeline's receivers are the image's two and this one.
-      OTELCOL_EXTRA_ARGS: '--config=yaml:{"receivers":{"prometheus/postgres":{"config":{"scrape_configs":[{"job_name":"postgres","scrape_interval":"30s","static_configs":[{"targets":["pg-exporter.ob1.internal.:9187"]}]}]}}},"service":{"pipelines":{"metrics":{"receivers":["otlp","prometheus/collector","prometheus/postgres"]}}}}'
+      OTELCOL_EXTRA_ARGS: '--config=yaml:{"receivers":{"prometheus/postgres":{"config":{"scrape_configs":[{"job_name":"postgres","scrape_interval":"30s","metrics_path":"/cgi-bin/metrics","static_configs":[{"targets":["pg-exporter.ob1.internal.:9187"]}]}]}}},"service":{"pipelines":{"metrics":{"receivers":["otlp","prometheus/collector","prometheus/postgres"]}}}}'
     # Prometheus's, Tempo's, Loki's, Pyroscope's and Grafana's data, in one volume.
     volumes:
       - lgtm-data:/data
@@ -2033,10 +2078,10 @@ services:
     # (docker/compose#11900, as with the proxy's table), so an upgrade that
     # changes the dashboard or a rule reaches Grafana on its `up -d`.
     labels:
-      ob1.grafana-dashboard: "sha256:d5d2486a57a6101b14c533e238956aacfc2b633017402524593ed82fe30cbb83"
+      ob1.grafana-dashboard: "sha256:1cdea2f74a57034dad33f48a94f4b2c2541535dbc28e6c1b555e7f94f3c0d3ee"
       ob1.grafana-alert-rules: "sha256:b49651cf40cccc8943b6525e8351df4254ff558a37609bb61453f5181b47ac95"
       ob1.grafana-dashboard-provider: "sha256:2a13b2862670670482aadbadfcf7a864e28fe4d3c9704faa9ac75ff66b9d021d"
-    # `mesh` as lgtm.ob1.internal: the two servers send to it there, and
+    # `mesh` as lgtm.ob1.internal: the MCP server and the REST core send to it there, and
     # compose.grafana-public.yaml's proxy reaches its Grafana there; and
     # `telemetry`, where it scrapes pg-exporter alone (SMD-1849 PR 3b). No
     # `ports:`.
@@ -2102,12 +2147,67 @@ services:
   # Postgres row reads its names (check 37's DASHBOARD_IMAGE_SERIES, measured
   # on this pin): a bump re-measures them, and CI's "The observability
   # profile's dashboard reads every series it names" runs each query.
+  #
+  # The exporter listens on loopback alone (SMD-3023): its /probe, which no
+  # flag turns off, dials whatever Postgres target and credentials its caller
+  # names. What answers on 9187 is the image's busybox httpd, bound to the
+  # container's address on `telemetry` alone — the address its alias
+  # resolves to there — so nothing on `data` reaches it, and serving one CGI,
+  # /cgi-bin/metrics, the collector's scrape path, which makes a request of
+  # its own to the exporter's /metrics; every other path is httpd's 404. Not
+  # httpd's proxy (`P:`): it reads the first request's line and then pipes
+  # the connection, so a /probe sent after it on the same connection reached
+  # the exporter (measured). httpd's environment is PATH alone, so its CGI's
+  # holds no password. The CGI lives on a tmpfs of its own, /var/www, mounted
+  # exec: Docker mounts a tmpfs noexec unless told (podman does not), and
+  # httpd then answers its 404 for a CGI it cannot run (measured under those
+  # options); its mode is Docker's default, which podman, copying the image's
+  # root-owned 755 directory, does not give it (measured). /tmp, where each
+  # scrape's copy goes, keeps the engine's defaults. Either process ending
+  # ends the container within 35 s, for its restart — polled every 5 s, since
+  # busybox's `wait -n` misses a process a signal ends (measured), then 30 s
+  # on. init hands the stop's signal to the shell, and the two processes end
+  # with the container.
   pg-exporter:
     image: quay.io/prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
     profiles: ["observability"]
     read_only: true
+    tmpfs: [/tmp, "/var/www:exec,mode=1777"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    init: true
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        addr=
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+          addr=$$(nslookup pg-exporter.ob1.internal. 2> /dev/null | awk '/^Name:/ { n = 1 } n && /^Address:? *[0-9.]+$$/ { print $$NF; exit }')
+          [ -n "$$addr" ] && break
+          sleep 1
+        done
+        if [ -z "$$addr" ]; then
+          echo "pg-exporter: pg-exporter.ob1.internal resolves to no address, and the exporter's front listens on that one alone: compose.yaml gives this container that name on telemetry" >&2; sleep 30; exit 1
+        fi
+        if ! { mkdir -p /var/www/cgi-bin && cat > /var/www/cgi-bin/metrics && chmod 555 /var/www/cgi-bin/metrics; } << 'CGI'
+        #!/bin/sh
+        if f=$$(mktemp) && wget -q -T 10 -O "$$f" http://127.0.0.1:9188/metrics; then
+          printf 'Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n\r\n'; cat "$$f"
+        else
+          printf 'HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\n\r\nno answer from the exporter, or no room in /tmp for it\n'
+        fi
+        rm -f "$$f"
+        CGI
+        then
+          echo "pg-exporter: could not write its CGI to /var/www, the tmpfs compose.yaml gives it: the collector would scrape nothing" >&2; sleep 30; exit 1
+        fi
+        /bin/postgres_exporter --web.listen-address=127.0.0.1:9188 "$$@" &
+        e=$$!
+        env -i PATH=/bin httpd -f -p "$$addr:9187" -h /var/www &
+        h=$$!
+        while kill -0 "$$e" 2> /dev/null && kill -0 "$$h" 2> /dev/null; do sleep 5; done
+        echo "pg-exporter: the exporter or its front (httpd) stopped, its own line above saying why if it left one; the container exits in 30 s and restarts" >&2; sleep 30; exit 1
+      - pg-exporter
     command: ["--collector.stat_statements", "--collector.stat_statements.include_query", "--collector.stat_statements.query_length=120", "--collector.stat_statements.limit=100", "--collector.stat_statements.exclude_users=ob1_monitor"]
     environment:
       DATA_SOURCE_URI: "postgres:5432/openbrain?sslmode=disable"
@@ -2120,9 +2220,10 @@ services:
       data: {}
       telemetry:
         aliases: [pg-exporter.ob1.internal]
-    # Its landing page, which reads nothing from Postgres; a scrape would.
+    # Its landing page on loopback, which reads nothing from Postgres; a
+    # scrape would. httpd is watched by the entrypoint's loop.
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9187/"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9188/"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -2141,7 +2242,7 @@ networks:
   #          project joins it: a canary is a brain of its own, on its own
   #          networks and port (SMD-2874; docs/one-brain-per-stack.md).
   #   data   internal: Postgres, and only what connects to it — the migrator,
-  #          the two servers, board-sync, the workers, the sleep scheduler, the import runner and
+  #          `server` and the REST core, board-sync, the workers, the sleep scheduler, the import runner and
   #          its role's one-shot. No other project joins it.
   #   egress outward: whatever calls a model provider or a vendor (the two
   #          servers, board-sync, the workers, the sleep scheduler, the import runner, n8n), and
@@ -2212,7 +2313,7 @@ configs:
             {
               "name": "service",
               "label": "Server",
-              "description": "open-brain is the MCP server, open-brain-api the REST core: each server's own service.name.",
+              "description": "open-brain-mcp is the MCP server at /mcp, open-brain-api the REST core: each server's own service.name.",
               "type": "query",
               "datasource": {"type": "prometheus", "uid": "prometheus"},
               "query": {
@@ -2270,7 +2371,7 @@ configs:
           {
             "type": "row",
             "id": 1,
-            "title": "Requests — both servers, per request (http_server_request_duration_seconds)",
+            "title": "Requests — every server, per request (http_server_request_duration_seconds)",
             "collapsed": false,
             "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1},
             "panels": []
@@ -2416,7 +2517,7 @@ configs:
             "type": "timeseries",
             "id": 9,
             "title": "Provider calls per second",
-            "description": "Embedding and chat calls the two servers made, by model; the workers' are not sent (SMD-2910).",
+            "description": "Embedding and chat calls the REST core made, by model; the workers' are not sent (SMD-2910), nor `server`'s.",
             "datasource": {"type": "prometheus", "uid": "prometheus"},
             "gridPos": {"x": 0, "y": 25, "w": 8, "h": 8},
             "targets": [

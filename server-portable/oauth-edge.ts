@@ -19,7 +19,7 @@
  * the origin's, and its path is exactly `/mcp`, the `resource` the document
  * names (RFC 9728 §3.3 wants them identical), with any query. A client at
  * any `Host` but the origin's (loopback, a LAN address, another name), on
- * `/mcp/`, or on the root URL kept for SMD-2306's window dialled a URL that
+ * `/mcp/`, or on the root URL (a server with no proxy in front) dialled a URL that
  * is not that resource, so an OAuth flow could never finish for it; it gets
  * today's answers in every state. So does every request on a stack whose
  * origin is unsound: there is no resource to recognise. Keying on
@@ -31,11 +31,11 @@
  * configured stack a `?key=` connector is asked to sign in once; its key
  * still authenticates first, so it is served after: SMD-2286's to settle.)
  *
- * This server (server-portable's /mcp) accepts no OAuth token: one is
+ * This server (server-portable's index.ts) accepts no OAuth token: one is
  * answered 401 `invalid_token` here. The REST core checks the authorization
  * server's tokens (SMD-2286 PR 1, oauth-token.ts), and mcp-server/ trades
- * each at the hop (PR 2, mcp-server/exchange.ts), serving /mcp with SMD-2287
- * PR 5.
+ * each at the hop (PR 2, mcp-server/exchange.ts), serving the compose stack's
+ * /mcp since SMD-2287 PR 5b; the proxy routes nothing to index.ts since SMD-2532.
  */
 
 import { queryOf } from "./auth.ts";

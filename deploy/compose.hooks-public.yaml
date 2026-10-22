@@ -11,7 +11,7 @@
 # against the secret OB1_HOOK_SECRETS gives its plugin, and runs as a caller of
 # capture scope alone. The forwarder slot (x-brain-forwarder) is deleted on the
 # way in, as /api's is (`hooks-no-forwarder`: an empty value deletes the
-# header, as compose.yaml's not-legacy does). Nothing limits the rate of
+# header). Nothing limits the rate of
 # deliveries here; a sender
 # that floods one is the plugin's to refuse. Dropping the file and running
 # `up -d` again recreates the proxy without it (the label below changes,

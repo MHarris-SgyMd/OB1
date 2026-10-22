@@ -34,7 +34,7 @@ ChatGPT is less intuitive than Claude at picking the right MCP tool on its own. 
 
 ### "ChatGPT says the Open Brain tool is not available"
 
-First check the server's log: `podman compose -f deploy/compose.yaml logs server`. If you see **zero requests** while ChatGPT is failing, stop debugging keys, URLs, and server code. ChatGPT never called your server; the problem is the tools exposed to that chat session.
+First check the MCP server's log: `podman compose -f deploy/compose.yaml logs mcp api` (the MCP server at `/mcp` and the REST core behind it). If you see **zero requests** while ChatGPT is failing, stop debugging keys, URLs, and server code. ChatGPT never called your server; the problem is the tools exposed to that chat session.
 
 As of May 2026, OpenAI's ChatGPT developer-mode docs are in beta and the plan/model behavior is not perfectly stable. The important implementation detail: ChatGPT treats MCP tools without `readOnlyHint` as write actions. Open Brain now marks `search_thoughts`, `list_thoughts`, `thought_stats`, `search`, and `fetch` as read-only. It marks `capture_thought` as a bounded, non-destructive write action.
 
@@ -48,7 +48,7 @@ After updating your MCP server, rebuild and restart it, then refresh or recreate
 
 Pause. The problems are almost never in the code. They're in the configuration: a secret that doesn't match, a URL that's missing the key, a step that got skipped. Letting an AI rewrite working code when the issue is a mismatched environment variable will make things harder to debug, not easier.
 
-Read the server's log first (`podman compose -f deploy/compose.yaml logs server`) — and the row preflight failed on, if it did. That'll tell you what's actually happening.
+Read the servers' logs first (`podman compose -f deploy/compose.yaml logs mcp api`, and `logs server` for preflight) — and the row preflight failed on, if it did. That'll tell you what's actually happening.
 
 ### "Search isn't working but I can capture recent thoughts"
 
@@ -150,7 +150,7 @@ First, check your row count: ask your AI "How many thoughts do I have?" (the `th
 
 Second, test search directly. Ask your AI to search for something you KNOW is in there — use words that are close to what you actually typed when you captured it. If that works but vaguer queries don't, the system is fine, it just needs more content for the semantic matching to have enough to work with.
 
-Third, check the server's log (`podman compose -f deploy/compose.yaml logs server`). If search is erroring out silently, you'll see it there.
+Third, check the servers' logs (`podman compose -f deploy/compose.yaml logs mcp api`). If search is erroring out silently, you'll see it there.
 
 Fourth, if search finds a thought when listing recent entries but NOT through semantic search, that's a useful clue. It means the data is there and retrievable, but the embedding or similarity matching isn't connecting your query to that entry. This usually improves as you add more content — semantic search gets sharper with more data points to compare against.
 
@@ -222,7 +222,7 @@ That said: check your usage tier in your provider's console, make sure your agen
 ## Quick Reference: Before You Ask for Help
 
 1. **Did you follow the guide step by step?** Most issues trace back to a skipped or modified step.
-2. **Check the server's log.** `podman compose -f deploy/compose.yaml logs server` — and `deploy/smoke.sh`, which probes every surface. This tells you what's actually breaking.
+2. **Check the servers' logs.** `podman compose -f deploy/compose.yaml logs mcp api` — and `deploy/smoke.sh`, which probes every surface. This tells you what's actually breaking.
 3. **Is your URL format correct?** `http://127.0.0.1:8000/mcp?key=your-key` from this machine, `https://your-host/mcp?key=your-key` through your TLS proxy or tunnel — a hosted connector needs the second.
 4. **Read the preflight row.** A server that refuses to start names the setting and the fix.
 5. **Don't let AI rewrite your server code** unless you understand what it's changing. Configuration problems need configuration fixes.

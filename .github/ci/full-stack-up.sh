@@ -30,7 +30,9 @@ CAPTURE_KEY=$(openssl rand -hex 32)
 CAPTURE_HASH=$(printf '%s' "$CAPTURE_KEY" | shasum -a 256 | cut -d' ' -f1)
 echo "OB1_SMOKE_CAPTURE_KEY=$CAPTURE_KEY" >> "$GITHUB_ENV"
 # And a forwarder (SMD-2284): grants nothing; the REST core reads it
-# beside a caller's key on the mesh, and /api deletes it.
+# beside a caller's key on the mesh, and /api deletes it. The MCP server
+# built on the REST core holds it as OB1_FORWARDER_KEY (SMD-2287), which
+# compose requires.
 FORWARD_KEY=$(openssl rand -hex 32)
 FORWARD_HASH=$(printf '%s' "$FORWARD_KEY" | shasum -a 256 | cut -d' ' -f1)
 echo "OB1_SMOKE_FORWARD_KEY=$FORWARD_KEY" >> "$GITHUB_ENV"
@@ -38,7 +40,9 @@ echo "OB1_SMOKE_FORWARD_KEY=$FORWARD_KEY" >> "$GITHUB_ENV"
 # needs no credential (preflight decides). Preflight dials it
 # (GET /models, SMD-1875), and the steps that seed or search thoughts
 # embed through it (POST /v1/embeddings: deploy-stack-brains' tier and
-# canary steps, deploy-stack-auth's stream probe); smoke.sh captures nothing and preflight
+# canary steps, deploy-stack-auth's stream probe, the observability job's
+# traffic, whose capture's metadata call is the stub's 404 that its
+# provider panels and alert read); smoke.sh captures nothing and preflight
 # runs without --deep, so a listener on the runner answering those
 # two is the whole provider: the runner is the container's
 # host.docker.internal (compose.yaml's extra_hosts host-gateway), and
@@ -110,5 +114,6 @@ OB1_LLM_LOCAL=1
 OB1_QUERY_LOG=on
 SERVER_PORT=8010
 OB1_GIT_SHA=$GITHUB_SHA
+OB1_FORWARDER_KEY=$FORWARD_KEY
 EOF
 docker compose -f compose.yaml up -d --build --wait --wait-timeout 240

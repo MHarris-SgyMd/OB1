@@ -4676,6 +4676,7 @@ console.log("\n[39] Memory utilization over the query log: attribution, the cite
   assert(armOf(whole) === "search_thoughts k=5 thr=0.3 rw=0", `a real's float32 noise does not reach the arm name (${armOf(whole)})`);
   assert(armOf({ ...whole, arm: "current" }) === "search_thoughts k=5 thr=0.3 rw=0 current" && armOf({ ...whole, arm: "hybrid" }) === armOf(whole),
     "a prefer_current row (arm current, 059) is its own arm; a hybrid row's name is unchanged");
+  assert(armOf({ ...whole, arm: "literal" }) === "search_thoughts k=5 thr=0.3 rw=0 literal", "a row answered by exact literals alone while the provider was down (arm literal, 106) is its own arm too (SMD-2891)");
   const actDb = toActionRow({ agent_id: null, logged_at: t(1), at_us: "1789816860000000", tool: "fetch", target_id: A });
   assert(actDb.agentId === null && actDb.atUs === 1789816860000000, "an action row's NULL agent and at_us survive the coercion");
   const goldFx = goldFromFixture({ queries: [{ query: "first", relevant: `{${C},"${D}"}` }, { query: "second", relevant: [C] }] });
@@ -15322,9 +15323,10 @@ console.log("\n[94] Migration 105: Linear's duplicate status type known and sett
   assert(clean.w === 0 && once.known.join() === "triage,backlog,unstarted,started,completed,canceled,duplicate" && again.known.join() === once.known.join() && again.settled.join() === once.settled.join() && (await drift()) === 0,
     `…a rebuild after it finds nothing to fix, and a re-apply changes nothing (${clean.w})`);
   // 105's sets are this tree's only until a later migration changes one:
-  // the shipped sets back, and 106's comments over 105's (review pass 4).
+  // the shipped sets back, and 107's comments over 105's (review pass 4),
+  // by name, as [95] finds it.
   await restoreShipped("node_lifecycle_types", "node_settled_types");
-  await reapply("106");
+  await reapply(files.find((f) => f.endsWith("_source_gate_keyed_rebuild.sql")) ?? "no _source_gate_keyed_rebuild.sql");
 
   // 077's finished tickets: a thought about the Duplicate alone is about finished work.
   const [refs] = await q<{ r: string[] | null }>(`SELECT ticket_references_settled('a session about it', '{"topics": ["DUP-2"]}'::jsonb) AS r`);
@@ -15333,11 +15335,11 @@ console.log("\n[94] Migration 105: Linear's duplicate status type known and sett
   await db.query(`DELETE FROM thoughts WHERE content LIKE '[94]%'`);
 }
 
-console.log("\n[95] Migration 106: a keyed rebuild of 071's gate mirror for a status-set change (SMD-3160) — a set change simulated each way: the moved type's rows reconciled and no other, an unrelated drift left for the full rebuild; empty and NULL touch nothing; refused outside READ COMMITTED; a re-apply a no-op");
+console.log("\n[95] Migration 107: a keyed rebuild of 071's gate mirror for a status-set change (SMD-3160) — a set change simulated each way: the moved type's rows reconciled and no other, an unrelated drift left for the full rebuild; empty and NULL touch nothing; refused outside READ COMMITTED; a re-apply a no-op");
 {
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   // By name, not number: main may take the number.
-  const the106 = files.find((f) => f.endsWith("_source_gate_keyed_rebuild.sql")) ?? "no _source_gate_keyed_rebuild.sql";
+  const the107 = files.find((f) => f.endsWith("_source_gate_keyed_rebuild.sql")) ?? "no _source_gate_keyed_rebuild.sql";
   const row = async (content: string, metadata: Record<string, unknown>) =>
     (await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text AS id`, [content, JSON.stringify(metadata)]))[0].id;
   // Two sourced rows of a type no set knows yet, one of a known type, one whose
@@ -15398,14 +15400,14 @@ console.log("\n[95] Migration 106: a keyed rebuild of 071's gate mirror for a st
   assert(dropBefore === 2 && dropped.written === 2 && g2.get(w1) === false && g2.get(w2) === false && (await drift()) === 0,
     `a set change that drops the type: the same call takes the two rows back to not gating, and nothing drifts (${dropBefore}; ${JSON.stringify(dropped)})`);
 
-  // 106 again changes nothing; its comments name it and the full rebuild names it back.
+  // 107 again changes nothing; its comments name it and the full rebuild names it back.
   let reapplied: string;
-  try { reapplied = await reapply(the106); } catch (e) { reapplied = `threw: ${(e as Error).message}`; }
+  try { reapplied = await reapply(the107); } catch (e) { reapplied = `threw: ${(e as Error).message}`; }
   const [c] = await q<{ k: string; f: string; s: string; st: string }>(`SELECT obj_description('ob1_rebuild_source_gate_for_types(text[])'::regprocedure, 'pg_proc') AS k, obj_description('ob1_rebuild_source_gate()'::regprocedure, 'pg_proc') AS f, obj_description('node_lifecycle_types()'::regprocedure, 'pg_proc') AS s, obj_description('node_settled_types()'::regprocedure, 'pg_proc') AS st`);
-  assert(reapplied.endsWith("_source_gate_keyed_rebuild.sql") && (await drift()) === 0 && /Migration 106 \/ SMD-3160/.test(c.k) && /ob1_rebuild_source_gate_for_types/.test(c.f) && /Migrations 071, 106/.test(c.f)
+  assert(reapplied.endsWith("_source_gate_keyed_rebuild.sql") && (await drift()) === 0 && /Migration 107 \/ SMD-3160/.test(c.k) && /ob1_rebuild_source_gate_for_types/.test(c.f) && /Migrations 071, 107/.test(c.f)
       && /ob1_rebuild_source_gate_for_types/.test(c.s) && /ob1_refresh_set_readers/.test(c.s) && /Migration 058 \/ SMD-2074/.test(c.s) && /SMD-2935/.test(c.s)
       && /ob1_refresh_set_readers/.test(c.st) && !/ob1_rebuild_source_gate/.test(c.st) && /board-findings\.ts reads it/.test(c.st) && /Migration 058 \/ SMD-2074/.test(c.st) && /SMD-2935/.test(c.st),
-    `a re-apply of 106 is a no-op; its function's comment names it, the full rebuild's names the keyed form for a set change, and each set's own says what a change to it runs — the settled set's the refresh alone — 058's and 105's words kept (${reapplied.slice(0, 60)})`);
+    `a re-apply of 107 is a no-op; its function's comment names it, the full rebuild's names the keyed form for a set change, and each set's own says what a change to it runs — the settled set's the refresh alone — 058's and 105's words kept (${reapplied.slice(0, 60)})`);
 
   // The plan refresh as a call: each of the brain's readers of the sets is
   // altered (its catalog row rewritten), the refresh itself and the sets not,

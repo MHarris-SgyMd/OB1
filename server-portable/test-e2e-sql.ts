@@ -627,7 +627,7 @@ console.log("\n[6f] Async job handle: scan_thoughts returns a handle, the poll w
   assert(handle.poll === `/jobs/${handle.jobId}` && handle.stream === `/jobs/${handle.jobId}/stream`, `the handle carries the poll and stream routes (${handle.poll}, ${handle.stream})`);
   // Called at /mcp (the proxy's path), the links are under it, and answer
   // there: behind the proxy a root-relative one reached the server only
-  // through the legacy route v2.0.0 removes (SMD-2306).
+  // through the legacy route v2.0.0 removed (SMD-2532).
   const mounted = JSON.parse(await call("scan_thoughts", { limit: 1 }, "e2e-key", "/mcp/")) as { jobId: string; poll: string; stream: string };
   assert(mounted.poll === `/mcp/jobs/${mounted.jobId}` && mounted.stream === `/mcp/jobs/${mounted.jobId}/stream`, `called at /mcp/, the links are under /mcp (${mounted.poll}, ${mounted.stream})`);
   const viaMount = await fetch(`${BASE}${mounted.poll}`, { headers: { "x-brain-key": "e2e-key" } });
@@ -2850,21 +2850,6 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   await call("thought_stats", {}, "bot-raw"); // registers bot-key in the registry, as any first request does
   await sql`SELECT revoke_agent_key(${hashKey("bot-raw")}, 'SMD-2041 e2e')`;
   assert(await health("bot-raw") === "ok", "a revoked write key → `ok`, not the record");
-  {
-    // Nor is a revoked key named as still on the old root URL (SMD-2306): the
-    // line comes after the refusal, on the MCP endpoint and a REST route alike.
-    const warned: string[] = [];
-    const realWarn = console.warn;
-    console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
-    try {
-      const MARK = { "x-ob1-legacy-route": "1", "x-brain-key": "bot-raw" };
-      await fetch(BASE, { method: "POST", headers: { ...H, ...MARK }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) }).then((r) => r.text());
-      await fetch(`${BASE}/worker-status`, { headers: MARK }).then((r) => r.text());
-    } finally {
-      console.warn = realWarn;
-    }
-    assert(!warned.some((w) => w.includes(`key "bot-key" reached`)), `a revoked key, marked, on POST / and GET /worker-status → no old-root-URL line (${warned.filter((w) => w.includes("old root URL")).join(" | ") || "none"})`);
-  }
   // The registry's lookup under a lock (SMD-2072). Each lock wait is capped
   // (agents.ts's RESOLVE_LOCK_TIMEOUT_MS, 250 ms) and a timed-out lookup is
   // retried for up to 2 s (BUSY_RETRY), so every key answers inside /health's
@@ -3689,6 +3674,188 @@ console.log("\n[22] A hit naming a ticket that moved since it was written says s
       `…every other result keeps the shape exactly (${others.map((x) => Object.keys(x).join("|")).join(" ")})`);
   } finally {
     await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([moving, still, older, note, filed, quiet, dup, wide], "TEXT")}::uuid[])`;
+    await sql.close();
+  }
+}
+
+console.log("\n[23] A search the provider does not answer for is answered by the exact-literal arm alone, said so and logged as arm literal — search_thoughts with and without prefer_current and min_trust, and the compat search; a query whose literals match nothing is matched as one text, and an empty answer says why; the compat search with nothing found is refused; a misconfigured provider still fails it; the provider back, nothing changed (SMD-2891)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const idIn = (s: string) => /id ([0-9a-f-]{36})/.exec(s)?.[1];
+  const lastArm = async (tool: string, query: string) => (await sql`SELECT arm FROM query_log WHERE kind = 'search' AND tool = ${tool} AND query = ${query} ORDER BY logged_at DESC LIMIT 1`)[0]?.arm as string | undefined;
+  const marked = /Semantic search is unavailable — the embedding provider at https:\/\/stub\.invalid\/v1 failed: the connection was refused\. So the query was matched only by its identifiers and quoted spans, exactly — not by meaning\. search_thoughts_keyword finds any word or phrase a thought contains; semantic search returns once the provider answers\./;
+  // Its literals matched nothing, so the whole query was matched as one text too (review pass 5).
+  const asText = /Semantic search is unavailable — the embedding provider at https:\/\/stub\.invalid\/v1 failed: the connection was refused\. So the query was matched by its identifiers and quoted spans, if any, and then as one text, exactly \(case aside\) — not by meaning\./;
+  stubDown = null;
+  const named = idIn(await call("capture_thought", { content: "[23] DOWN-2891 names the outage arm" }))!;
+  const plain = idIn(await call("capture_thought", { content: "[23] alpha words with no identifier in them" }))!;
+  // More thoughts holding one literal than a keyword page returns, so it is too common to match exactly (raw rows: no model call needed).
+  await sql`INSERT INTO thoughts (content) SELECT '[23] COMMON-2891 row ' || g FROM generate_series(1, 120) g`;
+  // Decoys only an unescaped pattern gets wrong, a keyword page's worth and one more each, as literalFacts probes the 101st row:
+  // `_` and `%` match any character to ILIKE, so ZQXDECOY-9 and 50ABC_OFF-9 rows are no holders of ZQ_DECOY-9 or 50%_OFF-9;
+  // and X\Y_2 rows hold X\Y_2, which an unescaped `\` reads as X then Y (review passes 2 and 3).
+  await sql`INSERT INTO thoughts (content) SELECT '[23] decoy ' || g || ' ZQXDECOY-9 50ABC_OFF-9 ' || chr(88) || chr(92) || 'Y_2' FROM generate_series(1, 101) g`;
+  try {
+    const q = "what was said about DOWN-2891";
+    const up = await result("search_thoughts", { query: q });
+    assert(!up.isError && !("vectorFailed" in (up.sc ?? {})) && !/Semantic search is unavailable/.test(up.text) && (await lastArm("search_thoughts", q)) === "hybrid",
+      `the provider answering: no mark, no field, logged as arm hybrid (${up.text.slice(0, 80)})`);
+
+    stubDown = "refused";
+    const down = await result("search_thoughts", { query: q });
+    const ids = ((down.sc?.hits ?? []) as { id: string; similarity: number | null }[]);
+    assert(!down.isError && marked.test(down.text) && down.sc?.vectorFailed === "provider_unreachable",
+      `refused at the socket: answered, not an error — the mark names the endpoint, what happened, that only literals matched and the keyword tool; the typed result carries the word (${down.text.replace(/\n+/g, " / ").slice(0, 300)})`);
+    assert(ids.some((h) => h.id === named && h.similarity === null) && !ids.some((h) => h.id === plain) && /\(exact match\) ---/.test(down.text) && !/no vector/.test(down.text) && /Searched exactly for: DOWN-2891\./.test(down.text),
+      `…the thought holding the literal is the hit, an exact match with no similarity, and the one without it is not (${JSON.stringify(ids)})`);
+    // A query of literals only, matched: with a vector the note would rank the rest by similarity (review pass 1: the first check's query was not literal-only).
+    const lit = await result("search_thoughts", { query: "DOWN-2891" });
+    assert(!lit.isError && marked.test(lit.text) && ((lit.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === named) && lit.sc?.literalOnly === true && !/by similarity/.test(lit.text),
+      `…and on a query of literals only, no note ranks the rest by a similarity there is none of (${lit.text.slice(0, 160)})`);
+    assert((await lastArm("search_thoughts", q)) === "literal", "…logged as arm literal");
+    const current = await result("search_thoughts", { query: q + " now", prefer_current: true });
+    assert(!current.isError && marked.test(current.text) && ((current.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === named) && (await lastArm("search_thoughts", q + " now")) === "literal"
+        && (current.sc?.window as { exact?: boolean } | null)?.exact === true,
+      `prefer_current: the same through 059's function — its window read, the hit, the mark, arm literal (${current.text.slice(0, 120)} ${JSON.stringify(current.sc?.window)})`);
+    const currentFloor = await result("search_thoughts", { query: q + " now at a floor", prefer_current: true, min_trust: "ingested" });
+    assert(!currentFloor.isError && asText.test(currentFloor.text) && ((currentFloor.sc?.hits ?? []) as unknown[]).length === 0 && /Held only by thoughts outside/.test(currentFloor.text) && !/Too common/.test(currentFloor.text),
+      `prefer_current with min_trust: 075's eight-argument current form, no vector, the floor holding (${currentFloor.text.slice(0, 160)})`);
+    // min_trust through 075's form: the floor holds without a vector too — the row
+    // the e2e key wrote has no trust recorded, below every word, so it is kept out.
+    const floor = await result("search_thoughts", { query: q + " at a floor", min_trust: "ingested" });
+    assert(!floor.isError && asText.test(floor.text) && ((floor.sc?.hits ?? []) as unknown[]).length === 0 && (await lastArm("search_thoughts", q + " at a floor")) === undefined,
+      `min_trust: answered and marked through 075's form, the floor keeping out the row with no trust, and not logged, as a min_trust search never is (${floor.text.slice(0, 160)})`);
+    assert(/Held only by thoughts outside this search's filter, said_by, actor or min_trust: DOWN-2891 \(in 1 thought\)\./.test(floor.text) && !/Too common|No thought contains/.test(floor.text),
+      `…and says the literal is held, by thoughts outside the floor — not absent, not too common (review pass 2) (${floor.text.replace(/\n+/g, " / ").slice(-220)})`);
+
+    // A query with no literal is matched as one text, as the keyword arm matches it (review pass 4, the maintainer's call).
+    const words = await result("search_thoughts", { query: "Alpha Words" });
+    assert(!words.isError && asText.test(words.text) && ((words.sc?.hits ?? []) as { id: string; similarity: number | null }[]).some((h) => h.id === plain && h.similarity === null) && /Contains: Alpha Words/.test(words.text) && words.sc?.vectorFailed === "provider_unreachable"
+        && (await lastArm("search_thoughts", "Alpha Words")) === "literal",
+      `a query of plain words: the thought holding them as one text, case aside, said so, arm literal (${words.text.replace(/\n+/g, " / ").slice(0, 300)})`);
+    const sentence = await result("search_thoughts", { query: "what did we decide about the meaning of all this" });
+    assert(!sentence.isError && asText.test(sentence.text) && /No thought contains: what did we decide about the meaning of all this\./.test(sentence.text),
+      `a sentence: held verbatim by no thought, and said so (${sentence.text.replace(/\n+/g, " / ").slice(-200)})`);
+    const wordsFloor = await result("search_thoughts", { query: "alpha words", min_trust: "ingested" });
+    assert(!wordsFloor.isError && /Held only by thoughts outside this search's filter, said_by, actor or min_trust: alpha words \(in 1 thought\)\./.test(wordsFloor.text),
+      `…and one held only outside the floor, said so (${wordsFloor.text.replace(/\n+/g, " / ").slice(-200)})`);
+    // …and outside a filter, which the text match keeps as the literal arm does (review pass 5: dropping it passed every suite).
+    const wordsFilter = await result("search_thoughts", { query: "alpha words", filter: { type: "no-such-type" } });
+    assert(!wordsFilter.isError && ((wordsFilter.sc?.hits ?? []) as unknown[]).length === 0 && /Held only by thoughts outside this search's filter, said_by, actor or min_trust: alpha words \(in 1 thought\)\./.test(wordsFilter.text),
+      `a text match keeps the filter: nothing in its scope, the one holder outside it said (${wordsFilter.text.replace(/\n+/g, " / ").slice(-200)})`);
+    // prefer_current ranks no text match, and says so (review pass 5).
+    const wordsCurrent = await result("search_thoughts", { query: "alpha words", prefer_current: true });
+    assert(!wordsCurrent.isError && /prefer_current does not rank a text match: these are in its order, a superseded one labelled\./.test(wordsCurrent.text), `prefer_current over a text match: said not to rank it (${wordsCurrent.text.slice(0, 300)})`);
+    // A query too short, or only common words, matches nothing as text (review pass 5: `the` counted every thought).
+    const tooThin = await result("search_thoughts", { query: "the" });
+    assert(!tooThin.isError && /So nothing could be matched: the query holds no identifier or quoted span, and is too short, longer than 64 characters, or only common words to match as one text\./.test(tooThin.text) && ((tooThin.sc?.hits ?? []) as unknown[]).length === 0,
+      `"the": nothing matched, and why (${tooThin.text.slice(0, 260)})`);
+    const tooShort = await result("search_thoughts", { query: "zq" });
+    assert(!tooShort.isError && /So nothing could be matched: the query holds no identifier or quoted span, and is too short, longer than 64 characters, or only common words to match as one text\./.test(tooShort.text),
+      `"zq", a word under three characters: nothing matched, and why (${tooShort.text.slice(0, 260)})`);
+    // A too-common identifier alone is matched as one text, the count past the limit said (review pass 5: it was refused).
+    const commonAlone = await result("search_thoughts", { query: "COMMON-2891" });
+    assert(!commonAlone.isError && asText.test(commonAlone.text) && ((commonAlone.sc?.hits ?? []) as unknown[]).length === 10 && /It is in 120 thoughts; these are the newest 10 — raise limit or page with search_thoughts_keyword\./.test(commonAlone.text),
+      `a too-common identifier alone: its first ten holders as text, the 120 said (${commonAlone.text.slice(0, 400)})`);
+    // The text match is bounded to its first 1,001 matching rows, its count past them "more than" (review pass 8: the keyword
+    // function's whole-set count held every pool connection for seconds on a common word); and to 64 characters, 017's span bound.
+    await sql`INSERT INTO thoughts (content) SELECT '[23] MANY-2891 row ' || g FROM generate_series(1, 1005) g`;
+    const many = await result("search_thoughts", { query: "MANY-2891", limit: 3 });
+    assert(!many.isError && ((many.sc?.hits ?? []) as unknown[]).length === 3 && /It is in more than 1000 thoughts; these 3 are the newest of the first 1001 the scan found, not of all — page with search_thoughts_keyword\./.test(many.text),
+      `a text past the page: its count "more than 1000", the newest of the first found (${many.text.slice(0, 400)})`);
+    const manyOutside = await result("search_thoughts", { query: "MANY-2891", filter: { type: "no-such-type" } });
+    assert(/Held only by thoughts outside this search's filter, said_by, actor or min_trust: MANY-2891 \(in more than 1000 thoughts\)\./.test(manyOutside.text), `…and held outside the filter, "in more than 1000" (${manyOutside.text.slice(-200)})`);
+    // The text match escapes as 012 does: `%` is no wildcard, so "alpha%words" is not "alpha words" (review pass 8).
+    const wildcard = await result("search_thoughts", { query: "alpha%words" });
+    assert(!wildcard.isError && !((wildcard.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === plain) && /No thought contains: alpha%words\./.test(wildcard.text),
+      `a text holding %: matched literally, not as a wildcard (${wildcard.text.slice(-200)})`);
+    // The text rule's bound at its edge: 64 characters matched, 65 not (review pass 9).
+    const at64 = "alpha words" + " plain".repeat(Math.ceil((64 - 11) / 6));
+    const sixtyFour = await result("search_thoughts", { query: at64.slice(0, 64) });
+    const sixtyFive = await result("search_thoughts", { query: (at64 + " plain").slice(0, 65) });
+    assert(at64.slice(0, 64).length === 64 && asText.test(sixtyFour.text) && /So nothing could be matched/.test(sixtyFive.text),
+      `64 characters are matched as text, 65 are not (${sixtyFour.text.slice(0, 120)} | ${sixtyFive.text.slice(0, 120)})`);
+    const longWords = await result("search_thoughts", { query: "alpha words and many more plain words to make this query longer than sixty four" });
+    assert(!longWords.isError && /So nothing could be matched/.test(longWords.text), `a plain-words query over 64 characters: nothing matched as text, said so (${longWords.text.slice(0, 260)})`);
+    // Text hits beside a too-common literal say why the text was asked; a text match has no literal-only reading (review pass 6).
+    const commonRow = await result("search_thoughts", { query: "COMMON-2891 row" });
+    assert(!commonRow.isError && ((commonRow.sc?.hits ?? []) as unknown[]).length === 10 && /Searched exactly for: COMMON-2891 row\. It is in 120 thoughts/.test(commonRow.text) && /Too common to match exactly .*: COMMON-2891\./.test(commonRow.text) && commonRow.sc?.literalOnly === null,
+      `a text match beside a too-common literal: the text's count and the literal too common, literalOnly unknown (${commonRow.text.slice(0, 400)})`);
+    // The text match takes the limit the input schema clamped, 1 to 100 (core/schemas.ts): 0 and -1 are one, 150 a hundred.
+    const lim0 = await result("search_thoughts", { query: "alpha words", limit: 0 });
+    const limNeg = await result("search_thoughts", { query: "alpha words", limit: -1 });
+    const lim150 = await result("search_thoughts", { query: "COMMON-2891 row", limit: 150 });
+    assert(!lim0.isError && ((lim0.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === plain) && !/No thought contains/.test(lim0.text)
+        && !limNeg.isError && ((limNeg.sc?.hits ?? []) as unknown[]).length === 1 && !lim150.isError && ((lim150.sc?.hits ?? []) as unknown[]).length === 100,
+      `limits 0, -1 and 150 on a text match: one hit, one hit, a hundred (${[lim0, limNeg, lim150].map((r) => ((r.sc?.hits ?? []) as unknown[]).length).join(",")})`);
+    // A too-common literal held only outside the filter: said held outside, not too common (review pass 6: it said "page with search_thoughts_keyword" beside that tool's own empty match).
+    const commonFiltered = await result("search_thoughts", { query: "COMMON-2891", filter: { type: "no-such-type" } });
+    assert(!commonFiltered.isError && /Held only by thoughts outside this search's filter, said_by, actor or min_trust: COMMON-2891 \(in 120 thoughts\)\./.test(commonFiltered.text) && !/Too common/.test(commonFiltered.text),
+      `a too-common literal outside the filter: held outside, in 120 (${commonFiltered.text.replace(/\n+/g, " / ").slice(-220)})`);
+    // A no-break space at an end is whitespace to the reader, and to every statement the answer runs (review pass 11: the literal arm kept it, literalFacts did not, and a held literal read absent).
+    const nbsp = await result("search_thoughts", { query: "\u00a0DOWN-2891 zzz" });
+    const nbspScoped = await result("search_thoughts", { query: "\u00a0DOWN-2891 zzz", filter: { type: "no-such-type" } });
+    assert(((nbsp.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === named) && !/No thought contains/.test(nbsp.text)
+        && /Held only by thoughts outside this search's filter, said_by, actor or min_trust: DOWN-2891 \(in 1 thought\)\./.test(nbspScoped.text),
+      `a query led by a no-break space: its literal found, and outside a filter said held there (${nbsp.text.slice(0, 120)} | ${nbspScoped.text.slice(-160)})`);
+    // NEL at an end is whitespace too, though neither JS's \s nor 017's strips it (review pass 12).
+    const nel = await result("search_thoughts", { query: "alpha words\u0085" });
+    assert(((nel.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === plain) && !/No thought contains/.test(nel.text), `a query ended by NEL: the text without it (${nel.text.slice(0, 160)})`);
+    // Whitespace at the query's ends is no part of the text (review pass 6: "deploy\n" was held by none).
+    const padded = await result("search_thoughts", { query: "  alpha words\n" });
+    assert(!padded.isError && ((padded.sc?.hits ?? []) as { id: string }[]).some((h) => h.id === plain) && /Contains: alpha words\n/.test(padded.text),
+      `a query with whitespace at its ends: the text without it (${padded.text.slice(0, 300)})`);
+    // A literal too common to match exactly is said to be that, not absent (review pass 1: the probe has no row for it without a vector).
+    const common = await result("search_thoughts", { query: "what about COMMON-2891" });
+    assert(!common.isError && asText.test(common.text) && /Too common to match exactly \(more thoughts contain it than one keyword page returns\): COMMON-2891 — use search_thoughts_keyword to page through them\./.test(common.text) && !/No thought contains|Held only|has no identifier/.test(common.text) && JSON.stringify(common.sc?.literalOnly) === "null",
+      `a too-common literal: nothing found, said too common, not absent (${common.text.replace(/\n+/g, " / ").slice(0, 400)})`);
+    const absent = await result("search_thoughts", { query: "what about NOPE-28910" });
+    assert(!absent.isError && asText.test(absent.text) && /No thought contains: NOPE-28910\./.test(absent.text) && !/Too common/.test(absent.text),
+      `an absent literal: said absent, by name (${absent.text.replace(/\n+/g, " / ").slice(0, 300)})`);
+    const decoy = await result("search_thoughts", { query: "what about ZQ_DECOY-9 and 50%_OFF-9 and X\\Y_2" });
+    assert(!decoy.isError && /No thought contains: ZQ_DECOY-9, 50%_OFF-9\./.test(decoy.text) && /Too common to match exactly .*: X\\Y_2 — /.test(decoy.text),
+      `literals only an unescaped pattern gets wrong: the underscore's and the percent's absent, the backslash's too common, each in its own list (${decoy.text.replace(/\n+/g, " / ").slice(-260)})`);
+
+    const compat = await result("search", { query: "DOWN-2891" });
+    const mine = ((compat.sc?.results ?? []) as { id: string; title: string }[]).find((r) => r.id === named);
+    assert(!compat.isError && compat.text === JSON.stringify(compat.sc) && mine?.title.startsWith("[exact match — semantic search unavailable] ") === true
+        && compat.sc?.vectorFailed === "provider_unreachable" && /https:\/\/stub\.invalid\/v1 failed: the connection was refused/.test(String(compat.sc?.note)) && /The brain's search_thoughts_keyword tool finds any word or phrase/.test(String(compat.sc?.note))
+        && !/Too common|No thought contains|has no identifier/.test(String(compat.sc?.note)),
+      `search: ChatGPT's shape with the literal's thought, its title marked, the marker word and a note naming the endpoint and the brain's keyword tool (${compat.text.slice(0, 300)})`);
+    assert((await lastArm("search", "DOWN-2891")) === "literal", "…logged as arm literal");
+    // Its empty answers say why, as search_thoughts' do (review pass 2: ChatGPT read "none" for a literal 120 thoughts hold).
+    // Nothing found is refused, as the outage was before (review pass 4, the maintainer's call): an empty list reads as
+    // "nothing stored". Lower case: the probe folds case as the keyword arm does (review pass 3: LIKE passed every suite).
+    const refusedAs = async (query: string) => { const r = await result("search", { query }); return { r, text: r.text, sc: r.sc ?? {} }; };
+    const [cCommon, cAbsent, cSentence, cThin] = [await refusedAs("what about common-2891"), await refusedAs("NOPE-28910"), await refusedAs("the meaning of all this"), await refusedAs("of the")];
+    assert([cCommon, cAbsent, cSentence, cThin].every((c) => c.r.isError && c.sc.code === "EMBEDDING_PROVIDER_UNAVAILABLE" && c.sc.retryable === true && c.sc.reason === "provider_unreachable" && /^Found nothing\. Semantic search is unavailable — the embedding provider at https:\/\/stub\.invalid\/v1 failed: the connection was refused\./.test(c.text))
+        && cCommon.sc.matched === "text" && /Too common to match exactly .*: common-2891 — the brain's search_thoughts_keyword tool pages through them\.$/.test(cCommon.text)
+        && /No thought contains: NOPE-28910\.$/.test(cAbsent.text) && cSentence.sc.matched === "text" && /No thought contains: the meaning of all this\.$/.test(cSentence.text)
+        && cThin.sc.matched === "none" && /nothing could be matched/.test(cThin.text),
+      `search's empty answers: refused, retryable, naming the endpoint and what was matched — too common, absent, a sentence held by none, stopwords (${[cCommon, cAbsent, cSentence, cThin].map((c) => c.text.slice(-80)).join(" | ")})`);
+    const cAlone = await result("search", { query: "common-2891" });
+    assert(!cAlone.isError && ((cAlone.sc?.results ?? []) as unknown[]).length === 10, `search for a too-common identifier alone: its holders as text, not refused (${cAlone.text.slice(0, 120)})`);
+    const cWords = await result("search", { query: "alpha words" });
+    assert(!cWords.isError && ((cWords.sc?.results ?? []) as { id: string; title: string }[]).some((x) => x.id === plain && x.title.startsWith("[exact match — semantic search unavailable] ")) && /and then as one text/.test(String(cWords.sc?.note)),
+      `search with plain words: the thought holding them as one text, marked (${cWords.text.slice(0, 200)})`);
+
+    // A 503 is an outage too; a 400 says the request is wrong, so the search fails as before.
+    stubDown = 503;
+    const busy = await result("search_thoughts", { query: q + " busy" });
+    assert(!busy.isError && /failed: it answered 503\. So/.test(busy.text) && busy.sc?.vectorFailed === "provider_503", `a 503: answered by the literals, the word provider_503 (${busy.text.slice(0, 160)})`);
+    stubDown = 400;
+    const wrong = await result("search_thoughts", { query: q + " wrong" });
+    assert(wrong.isError && !/Semantic search is unavailable/.test(wrong.text) && (await lastArm("search_thoughts", q + " wrong")) === undefined,
+      `a 400: the search fails, unmarked and unlogged, as before (${wrong.text.slice(0, 160)})`);
+
+    // The provider back: the next search is a vector search again.
+    stubDown = null;
+    const back = await result("search_thoughts", { query: q });
+    assert(!back.isError && !("vectorFailed" in (back.sc ?? {})) && !/Semantic search is unavailable/.test(back.text) && ((back.sc?.hits ?? []) as { similarity: number | null }[]).some((h) => h.similarity !== null) && (await lastArm("search_thoughts", q)) === "hybrid",
+      `the provider back: no mark, rows with a similarity again, arm hybrid (${back.text.slice(0, 80)})`);
+  } finally {
+    stubDown = null;
+    await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array([named, plain], "TEXT")}::uuid[]) OR content LIKE '[23] COMMON-2891 row %' OR content LIKE '[23] decoy %' OR content LIKE '[23] MANY-2891 row %'`;
     await sql.close();
   }
 }

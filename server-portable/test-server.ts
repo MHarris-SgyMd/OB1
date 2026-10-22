@@ -46,14 +46,12 @@ process.env.MCP_ACCESS_KEY = "test-key-xyz";
 
 const KEY = "test-key-xyz";
 
-// [19]'s named keys, beside the single key, a name per route so each call
-// site's old-root-URL line is its own (SMD-2306). Set here because the env is
-// read once, at the first request (root.ts), and no section before [19] uses
-// them or sends the legacy route's marker.
-const LEGACY_NAMED = { agent: "write", script: "read", poller: "read", monitor: "read", operator: "write", reader: "read" } as const;
-const legacyKeyOf = (name: keyof typeof LEGACY_NAMED) => `legacy-${name}-key-0123456789`;
-process.env.MCP_ACCESS_KEYS = Object.entries(LEGACY_NAMED)
-  .map(([n, scope]) => `${n}:${scope}:${createHash("sha256").update(legacyKeyOf(n as keyof typeof LEGACY_NAMED)).digest("hex")}`).join(",");
+// Named keys beside the single key: [10]'s read key and [19]'s marked calls'.
+// Set here because the env is read once, at the first request (root.ts).
+const NAMED_KEYS = { agent: "write", script: "read" } as const;
+const namedKeyOf = (name: keyof typeof NAMED_KEYS) => `named-${name}-key-0123456789`;
+process.env.MCP_ACCESS_KEYS = Object.entries(NAMED_KEYS)
+  .map(([n, scope]) => `${n}:${scope}:${createHash("sha256").update(namedKeyOf(n as keyof typeof NAMED_KEYS)).digest("hex")}`).join(",");
 // [10a]'s capture-only key, so each of the three client scopes lists its tools.
 const CAPTURE_KEY = "contract-capture-key-0123456789";
 process.env.MCP_ACCESS_KEYS += `,contract-capture:capture:${createHash("sha256").update(CAPTURE_KEY).digest("hex")}`;
@@ -315,7 +313,7 @@ console.log("\n[5b] A refused NOTIFICATION (no id) gets no JSON-RPC body — 202
   // Retry-After is not CORS-safelisted, so it is exposed for browser clients to
   // read off the busy refusal (SMD-2106); corsHeaders carries it on every answer.
   assert((badMethod.headers.get("access-control-expose-headers") ?? "").includes("Retry-After"), "responses expose Retry-After so a browser client can read it");
-  assert(["Deprecation", "Link"].every((h) => (badMethod.headers.get("access-control-expose-headers") ?? "").split(/,\s*/).includes(h)), "…and Deprecation and Link, the root URL's window the proxy adds (SMD-2306)");
+  assert(!["Deprecation", "Link"].some((h) => (badMethod.headers.get("access-control-expose-headers") ?? "").split(/,\s*/).includes(h)), "…and neither Deprecation nor Link, which the legacy route added until v2.0.0 (SMD-2532)");
 }
 
 console.log("\n[6] Auth via ?key= — the documented connector path");
@@ -465,7 +463,7 @@ console.log("\n[10a] MCP tools/list and the REST core's OpenAPI document are two
   }
   // Each client scope's tools/list is exactly the operations whose scope the
   // key unlocks — the gate, read from the two surfaces, agrees.
-  for (const [scope, key] of [["write", KEY], ["read", legacyKeyOf("script")], ["capture", CAPTURE_KEY]] as const) {
+  for (const [scope, key] of [["write", KEY], ["read", namedKeyOf("script")], ["capture", CAPTURE_KEY]] as const) {
     const names = (await listed(key)).map((t) => t.name).sort();
     const reached = [...ops].filter(([, { op }]) => UNLOCKS[scope].includes(op["x-ob1-scope"])).map(([name]) => name).sort();
     assert(names.length > 0 && JSON.stringify(names) === JSON.stringify(reached), `a ${scope} key lists exactly the operations its scope reaches (${names.length})`);
@@ -618,7 +616,7 @@ console.log("\n[11a] The public origin's rules (oauth-edge.ts, SMD-2382)");
     ["not configured, keyless at the public /mcp", { configured: false, origin: null }, req(`${PUBLIC_ORIGIN}/mcp`), true, "today", false],
     ["configured, unsound origin", { configured: true, origin: null }, req(`${PUBLIC_ORIGIN}/mcp`), true, "today", false],
     ["keyless on loopback", ON, req("http://127.0.0.1:8000/mcp"), true, "today", false],
-    ["keyless at the public root (SMD-2306's window)", ON, req(`${PUBLIC_ORIGIN}/`), true, "today", false],
+    ["keyless at the public root (a server with no proxy in front)", ON, req(`${PUBLIC_ORIGIN}/`), true, "today", false],
     ["keyless at another public path", ON, req(`${PUBLIC_ORIGIN}/mcp/x`), true, "today", false],
     ["a wrong key at the public /mcp", ON, req(`${PUBLIC_ORIGIN}/mcp?key=wrong`), true, "today", false],
     ["keyless at the public /mcp, reachable", ON, req(`${PUBLIC_ORIGIN}/mcp`), true, "challenge", true],
@@ -737,7 +735,7 @@ console.log("\n[11b] At the public origin, configured (SMD-2382): the document a
   const emptyKey = await at("/mcp?key=", { method: "POST", headers: H, body: INIT });
   assert(emptyKey.status === 200 && emptyKey.headers.get("www-authenticate") === null, `an empty ?key= is a key client's: today's refusal (${emptyKey.status})`);
   const exposed = (await fetch(BASE, { method: "POST", headers: H, body: INIT })).headers.get("access-control-expose-headers");
-  assert(exposed === "Retry-After, Deprecation, Link, WWW-Authenticate", `every response exposes the challenge header beside Retry-After, Deprecation and Link, loopback's included (${exposed})`);
+  assert(exposed === "Retry-After, WWW-Authenticate", `every response exposes the challenge header beside Retry-After, loopback's included (${exposed})`);
   const before = authProbes;
   const loopback = await fetch(`${BASE}/mcp`, { method: "POST", headers: H, body: INIT });
   assert(loopback.status === 200 && loopback.headers.get("www-authenticate") === null && (await loopback.json())?.error?.code === -32001 && authProbes === before,
@@ -1867,9 +1865,10 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
       graceFallbacks.push(`${file}:${name}=${/^\$\{OB1_STOP_GRACE:-(\d+)\}s$/.exec(svc.stop_grace_period ?? "")?.[1] ?? svc.stop_grace_period}`);
     }
   }
-  // Eight: the server and the REST core (SMD-2284) in compose.yaml, and each
-  // tier's server and REST core in compose.tiers.yaml (SMD-2294).
-  assert(graceFallbacks.length === 8 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
+  // Nine: the server, the REST core (SMD-2284) and the MCP server (SMD-2287)
+  // in compose.yaml, and each tier's server and REST core in
+  // compose.tiers.yaml (SMD-2294).
+  assert(graceFallbacks.length === 9 &&graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
     `every compose server's stop_grace_period is \${OB1_STOP_GRACE:-${DEFAULT_STOP_GRACE_S}}s, the code's default (${graceFallbacks.join(", ")})`);
 
   // Preflight refuses a value compose would render wrong, and reports one it reads.
@@ -2903,65 +2902,36 @@ console.log("\n[18] Async job routes: keyed GETs, no key shown nothing, an id re
   }
 }
 
-console.log("\n[19] A key on the old root URL is logged once, by name, only when the proxy's legacy route marked the request (SMD-2306)");
+console.log("\n[19] The legacy route's marker is read no more: a marked request names no key (SMD-2532)");
 {
-  // The proxy's legacy route sets the marker and its /mcp route deletes it
-  // (deploy/compose.yaml); CI's deploy-stack-auth job holds that half. Here: the
-  // server logs a marked request's key name once, after the key check, and
-  // never an unmarked one, which a server with no proxy in front only gets —
-  // from the MCP endpoint and from a keyed REST route alike (review pass 1:
-  // a script polling /worker-status at the root was never named). Each route
-  // has a key name of its own (LEGACY_NAMED, at the top: review pass 2 — with
-  // one name shared by two routes, the second route's call was unheld), and
-  // no section before this one sends the marker, so every name is unsaid.
-  const fresh = await import("./index.ts");
-  const keyOf = legacyKeyOf;
-  const NAMED = LEGACY_NAMED;
-  const SCRIPT_KEY = keyOf("script"), AGENT_KEY = keyOf("agent");
+  // Until v2.0.0 the proxy's legacy route marked what it forwarded with
+  // X-OB1-Legacy-Route, and the server named each key on it once (SMD-2306).
+  // The route went with v2.0.0, and the server stopped reading the marker: a
+  // marked call on the MCP endpoint or a keyed REST route (a read, a worker
+  // action, a job) warns nothing the same call unmarked does not, however a
+  // line came to be worded: each batch is sent unmarked first, then marked.
   const MARK = { "x-ob1-legacy-route": "1" };
   const warned: string[] = [];
   const realWarn = console.warn;
   console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
-  const send = (path: string, headers: Record<string, string>, method = "POST") =>
-    fetch(`${BASE}${path}`, { method, headers, body: method === "POST" ? INIT : undefined, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS * 5) }).then((r) => r.text()).catch(() => "");
-  const said = () => warned.filter((w) => w.includes("old root URL"));
-  try {
-    await send("/", { ...H, "x-brain-key": AGENT_KEY });
-    await send("/", { ...H, ...MARK, "x-brain-key": AGENT_KEY, "x-ob1-legacy-route": "0" });
-    await send("/", { ...H, ...MARK, "x-brain-key": "not-a-configured-key" });
-    await send("/", { ...H, ...MARK });
-    await send("/worker-status", { ...MARK, "x-brain-key": "not-a-configured-key" }, "GET");
-    const before = said().length;
-    await send("/?x=1", { ...H, ...MARK, "x-brain-key": AGENT_KEY });
-    await send("/", { ...H, ...MARK, "x-brain-key": AGENT_KEY });
-    const mcp = said();
-    await send("/worker-status?x=1", { ...MARK, "x-brain-key": SCRIPT_KEY }, "GET");
-    await send("/jobs/00000000-0000-4000-8000-000000000000", { ...MARK, "x-brain-key": SCRIPT_KEY }, "GET");
-    const rest = said().slice(mcp.length);
-    // The other keyed routes, each with a name of its own; a read key on a
-    // write action is refused before the line, as a wrong key is.
-    const fromHere = said().length;
-    const action = (key: string) => fetch(`${BASE}/worker-run`, { method: "POST", headers: { ...MARK, "x-brain-key": key, "Content-Type": "application/json" }, body: JSON.stringify({ work_type: "x", dry_run: true }), signal: AbortSignal.timeout(PROBE_TIMEOUT_MS * 5) }).then((r) => r.text()).catch(() => "");
-    await action(keyOf("reader"));
-    await action(keyOf("operator"));
-    await send("/jobs/00000000-0000-4000-8000-000000000000/stream", { ...MARK, "x-brain-key": keyOf("poller") }, "HEAD");
-    await send("/jobs/00000000-0000-4000-8000-000000000000", { ...MARK, "x-brain-key": keyOf("poller") }, "GET");
-    await send("/x/health", { ...MARK, "x-brain-key": keyOf("monitor") }, "GET");
-    const others = said().slice(fromHere);
-    await send("/a%22)%20key%20%22admin%22%20(", { ...H, ...MARK, "x-brain-key": KEY });
-    const forged = said().slice(fromHere + others.length);
-    assert(before === 0, `no line for an unmarked request, a marker other than 1, a wrong key or no key, on either route (${before})`);
-    assert(mcp.length === 1 && mcp[0] === fresh.legacyRouteLine("agent", "POST", "/"), `two marked MCP calls → one line naming the key, the method and the path, never the query (${mcp.join(" | ")})`);
-    assert(rest.length === 1 && rest[0] === fresh.legacyRouteLine("script", "GET", "/worker-status"), `a marked GET /worker-status, then /jobs/<id>, with another key → one line naming it (${rest.join(" | ")})`);
-    const expected = [
-      fresh.legacyRouteLine("operator", "POST", "/worker-run"),
-      fresh.legacyRouteLine("poller", "GET", "/jobs/00000000-0000-4000-8000-000000000000"),
-      fresh.legacyRouteLine("monitor", "GET", "/x/health"),
+  const probe = { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS * 20) };
+  const status = (path: string, init: RequestInit) => fetch(`${BASE}${path}`, { ...probe, ...init }).then((r) => r.status).catch(() => 0);
+  const batch = async (mark: Record<string, string>) => {
+    const from = warned.length;
+    const codes = [
+      await status("/", { method: "POST", headers: { ...H, ...mark, "x-brain-key": namedKeyOf("agent") }, body: INIT }),
+      await status("/worker-status", { headers: { ...mark, "x-brain-key": namedKeyOf("script") } }),
+      await status("/worker-run", { method: "POST", headers: { ...mark, "x-brain-key": namedKeyOf("agent"), "content-type": "application/json" }, body: JSON.stringify({ work_type: "extraction" }) }),
+      await status(`/jobs/${crypto.randomUUID()}`, { headers: { ...mark, "x-brain-key": namedKeyOf("script") } }),
     ];
-    assert(JSON.stringify(others) === JSON.stringify(expected), `a worker action, /jobs/<id> (its HEAD shown nothing first) and /health under a prefix each name their key once; a read key on the write action is not named (${others.join(" | ")})`);
-    assert(forged.length === 1 && forged[0].includes(`(POST "/a%22)%20key%20%22admin%22%20(")`) && !forged[0].includes(`key "admin"`), `the path is the raw one, quoted, so a client cannot write a key's name into the line (${forged[0]})`);
-    assert(fresh.legacyRouteLine("n", "POST", `/${"x".repeat(5000)}`).length < 500, "a long path is cut");
-    assert(!said().some((l) => [KEY, ...Object.keys(NAMED).map((n) => keyOf(n as keyof typeof NAMED))].some((k) => l.includes(k))), "no line carries a key itself");
+    return { codes, lines: warned.slice(from).map((w) => w.replace(/[0-9a-f-]{36}|\d+/g, "#")) };
+  };
+  try {
+    const plain = await batch({});
+    const marked = await batch(MARK);
+    assert([plain, marked].every((b) => b.codes.join() === "200,200,400,404"), `the calls were answered, so the absence below is of a line, not of a call (${plain.codes}; marked ${marked.codes})`);
+    const extra = marked.lines.filter((l) => !plain.lines.includes(l));
+    assert(extra.length === 0, `a marked call warns nothing its unmarked twin does not (${extra.join(" | ")})`);
   } finally {
     console.warn = realWarn;
   }
@@ -5235,6 +5205,74 @@ console.log("\n[30] A request the server did not accept sends its span and log r
     if (savedGeneric === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedGeneric;
   }
+}
+
+console.log("\n[31] A search answered without a vector says so — search_thoughts' header and typed word, its nothing-found reply with and without the query's facts, and the compat search's note and field; an answer with a vector says nothing of it (SMD-2891)");
+{
+  const { renderSearchThoughts, renderSearch } = await import("./render.ts");
+  const vf = { reason: "provider_unreachable", detail: "the connection was refused", base: "http://ollama:11434/v1" };
+  const lead = "Semantic search is unavailable — the embedding provider at http://ollama:11434/v1 failed: the connection was refused. So the query was matched only by its identifiers and quoted spans, exactly — not by meaning. ";
+  const hit = { id: "dddddddd-0000-4000-8000-000000000001", content: "SMD-1 names it", metadata: {}, created_at: "2026-10-21T00:00:00.000Z", similarity: null, matchedNeedles: ["SMD-1"], score: 0.016, fused: 0.016, demoted: [], supersededBy: null, moved: [], movedNotRead: 0 };
+  const facts = { needles: ["SMD-1"], needleCounts: [1], commonNeedles: [], literalOnly: true };
+  const st = renderSearchThoughts({ ok: true, value: { query: "SMD-1", preferCurrent: false, hits: [hit], facts, window: null, vectorFailed: vf } } as never, false);
+  const text = st.content[0].text;
+  assert(text.startsWith(`Found 1 thought(s): ${lead}search_thoughts_keyword finds any word or phrase a thought contains; semantic search returns once the provider answers. Searched exactly for: SMD-1.`) && !/similarity/.test(text),
+    `search_thoughts: the header leads with what the rows are, before the literals searched for, and no note ranks the rest by similarity (${text.slice(0, 200)})`);
+  assert(/--- Result 1 \(exact match\) ---/.test(text) && !/no vector/.test(text), "…and a hit is an exact match, not said to have no vector of its own: no query vector was made");
+  assert((st.structuredContent as { vectorFailed?: unknown }).vectorFailed === "provider_unreachable", "…and the typed result carries the marker word alone");
+  const none = renderSearchThoughts({ ok: true, value: { query: "plain words", preferCurrent: false, hits: [], facts: { needles: ["plain words"], needleCounts: [0], commonNeedles: [], literalOnly: null }, window: null, vectorFailed: { ...vf, matched: "text" } } } as never, false).content[0].text;
+  assert(none === 'No thoughts found matching "plain words". Semantic search is unavailable — the embedding provider at http://ollama:11434/v1 failed: the connection was refused. So the query was matched by its identifiers and quoted spans, if any, and then as one text, exactly (case aside) — not by meaning. search_thoughts_keyword finds any word or phrase a thought contains; semantic search returns once the provider answers. No thought contains: plain words.',
+    `nothing found, the query holding no literal: matched as one text, held by none (review pass 4) (${none})`);
+  // Nothing could be matched: no literal, and too short or only common words for a text match (review pass 5).
+  const thin = renderSearchThoughts({ ok: true, value: { query: "the", preferCurrent: false, hits: [], facts: { needles: [], needleCounts: [], commonNeedles: [], literalOnly: null }, window: null, vectorFailed: { ...vf, matched: "none" } } } as never, false).content[0].text;
+  assert(thin === 'No thoughts found matching "the". Semantic search is unavailable — the embedding provider at http://ollama:11434/v1 failed: the connection was refused. So nothing could be matched: the query holds no identifier or quoted span, and is too short, longer than 64 characters, or only common words to match as one text. search_thoughts_keyword finds any word or phrase a thought contains; semantic search returns once the provider answers.',
+    `nothing could be matched: said why (${thin})`);
+  // A text match past the limit, and under prefer_current, says both (review pass 5).
+  const textHit = { ...hit, content: "sleep scheduler notes", matchedNeedles: ["sleep scheduler"] };
+  const cut = renderSearchThoughts({ ok: true, value: { query: "sleep scheduler", preferCurrent: true, hits: [textHit], facts: { needles: ["sleep scheduler"], needleCounts: [30], commonNeedles: [], literalOnly: false }, window: null, vectorFailed: { ...vf, matched: "text" } } } as never, true).content[0].text;
+  assert(/Searched exactly for: sleep scheduler\. It is in 30 thoughts; these are the newest 1 — raise limit or page with search_thoughts_keyword\. prefer_current does not rank a text match: these are in its order, a superseded one labelled\./.test(cut) && !/No thought contains|Outside the top/.test(cut),
+    `a text match: its count past the limit, and prefer_current not applied, both said (${cut.slice(0, 500)})`);
+  // Exactly the page is a count; one past it is "more than", the shown the newest of the rows the scan found (review pass 9).
+  const atPage = renderSearchThoughts({ ok: true, value: { query: "sleep scheduler", preferCurrent: false, hits: [textHit], facts: { needles: ["sleep scheduler"], needleCounts: [1000], commonNeedles: [], literalOnly: null }, window: null, vectorFailed: { ...vf, matched: "text" } } } as never, false).content[0].text;
+  const pastPage = renderSearchThoughts({ ok: true, value: { query: "sleep scheduler", preferCurrent: false, hits: [textHit], facts: { needles: ["sleep scheduler"], needleCounts: [1001], commonNeedles: [], literalOnly: null }, window: null, vectorFailed: { ...vf, matched: "text" } } } as never, false).content[0].text;
+  const outsideAtPage = renderSearchThoughts({ ok: true, value: { query: "x y", preferCurrent: false, hits: [], facts: { needles: ["x y"], needleCounts: [1000], commonNeedles: [], literalOnly: null }, window: null, vectorFailed: { ...vf, matched: "text" } } } as never, false).content[0].text;
+  assert(/It is in 1000 thoughts; these are the newest 1 —/.test(atPage) && /It is in more than 1000 thoughts; these 1 are the newest of the first 1001 the scan found, not of all —/.test(pastPage) && /: x y \(in 1000 thoughts\)\./.test(outsideAtPage),
+    `1,000 is a count, 1,001 "more than", in both lines (${atPage.slice(0, 200)} | ${pastPage.slice(0, 260)})`);
+  // A vector search with no literal and nothing above a threshold says nothing of matching without a vector (review pass 4: a mutant printed it).
+  const vectored = renderSearchThoughts({ ok: true, value: { query: "plain words", preferCurrent: false, hits: [], facts: { needles: [], needleCounts: [], commonNeedles: [], literalOnly: false }, window: null } } as never, false).content[0].text;
+  assert(vectored === 'No thoughts found matching "plain words".', `…with a vector, nothing but the plain answer (${vectored})`);
+  const common = renderSearchThoughts({ ok: true, value: { query: "COMMON-1", preferCurrent: false, hits: [], facts: { needles: [], needleCounts: [], commonNeedles: ["COMMON-1"], literalOnly: null }, window: null, vectorFailed: vf } } as never, false);
+  assert(/Too common to match exactly \(more thoughts contain it than one keyword page returns\): COMMON-1 — use search_thoughts_keyword/.test(common.content[0].text) && !/No thought contains|has no identifier|Held only/.test(common.content[0].text) && (common.structuredContent as { literalOnly?: unknown }).literalOnly === null,
+    `nothing found, the literal too common: said so, not absent, and literalOnly unknown in the typed result (${common.content[0].text.slice(-160)})`);
+  const absent = renderSearchThoughts({ ok: true, value: { query: "SMD-2", preferCurrent: false, hits: [], facts: { needles: ["SMD-2"], needleCounts: [0], commonNeedles: [], literalOnly: true }, window: null, vectorFailed: vf } } as never, false).content[0].text;
+  assert(absent.endsWith("No thought contains: SMD-2.") && !absent.includes("has no identifier"), `nothing found with the facts: the literal no thought contains, by name (${absent})`);
+  // A literal held by thoughts the search's scope left out: said without a vector; with one, the provider up changes nothing (review pass 10).
+  const outsideFacts = { needles: ["RARE-7", "GONE-8"], needleCounts: [3, 0], commonNeedles: [], literalOnly: true };
+  const outside = renderSearchThoughts({ ok: true, value: { query: "RARE-7", preferCurrent: false, hits: [], facts: outsideFacts, window: null, vectorFailed: vf } } as never, false).content[0].text;
+  const outsideUp = renderSearchThoughts({ ok: true, value: { query: "RARE-7", preferCurrent: false, hits: [], facts: outsideFacts, window: null } } as never, false).content[0].text;
+  assert(outside.endsWith("No thought contains: GONE-8. Held only by thoughts outside this search's filter, said_by, actor or min_trust: RARE-7 (in 3 thoughts).") && outsideUp === 'No thoughts found matching "RARE-7". No thought contains: GONE-8.',
+    `nothing found, a literal held outside the scope: said so without a vector, and with one the reply as before (${outside.slice(-160)} | ${outsideUp})`);
+  const withVector = renderSearchThoughts({ ok: true, value: { query: "SMD-1", preferCurrent: false, hits: [{ ...hit, similarity: 0.9 }], facts, window: null } } as never, false);
+  assert(!withVector.content[0].text.includes("Semantic search is unavailable") && !("vectorFailed" in withVector.structuredContent) && /ranked first and the rest by similarity/.test(withVector.content[0].text),
+    "an answer with a vector: no mark, no field, the similarity note as before");
+
+  const compat = renderSearch({ ok: true, value: { results: [{ id: hit.id, title: "SMD-1 names it", url: "u1", trust: undefined }], vectorFailed: vf } } as never);
+  const v = JSON.parse(compat.content[0].text) as { results: Record<string, unknown>[]; vectorFailed: string; note: string };
+  assert(JSON.stringify(v.results) === JSON.stringify([{ id: hit.id, title: "[exact match — semantic search unavailable] SMD-1 names it", url: "u1" }]) && v.vectorFailed === "provider_unreachable"
+      && v.note === `${lead}The brain's search_thoughts_keyword tool finds any word or phrase a thought contains; semantic search returns once the provider answers.` && compat.content[0].text === JSON.stringify(compat.structuredContent),
+    `search: ChatGPT's results, each title marked (the field every surface hands the model), beside them the marker word and a note naming the brain's keyword tool (${compat.content[0].text.slice(0, 200)})`);
+  // The mark after the ingested and moved prefixes, never before the trust mark (review pass 2).
+  const marks = renderSearch({ ok: true, value: { results: [{ id: hit.id, title: "a page", url: "u1", trust: "ingested", moved: [{ ticket: "SMD-1", was: "started", now: "completed" }] }, { id: "dddddddd-0000-4000-8000-000000000002", title: "a note", url: "u2", trust: "operator", moved: [{ ticket: "SMD-2", was: "started", now: "completed" }] }], vectorFailed: vf } } as never);
+  const titles = (JSON.parse(marks.content[0].text) as { results: { title: string }[] }).results.map((r) => r.title);
+  assert(JSON.stringify(titles) === JSON.stringify(["[ingested] [moved since written: SMD-1 In Progress → Done] [exact match — semantic search unavailable] a page", "[moved since written: SMD-2 In Progress → Done] [exact match — semantic search unavailable] a note"]),
+    `search: the mark on an ingested and a moved result too, after their prefixes (${JSON.stringify(titles)})`);
+  // Nothing found without a vector is refused, as the outage was before (review pass 4): what was matched, each literal absent or too common.
+  const unavailable = renderSearch({ ok: false, refusal: { code: "EMBEDDING_PROVIDER_UNAVAILABLE", retryable: true, ...vf, matched: "literals", needles: ["GONE-1"], commonNeedles: ["COMMON-1"] } } as never);
+  assert(unavailable.isError === true && unavailable.content[0].text === `Found nothing. ${lead}The brain's search_thoughts_keyword tool finds any word or phrase a thought contains; semantic search returns once the provider answers. No thought contains: GONE-1. Too common to match exactly (more thoughts contain it than one keyword page returns): COMMON-1 — the brain's search_thoughts_keyword tool pages through them.`
+      && JSON.stringify(Object.keys(unavailable.structuredContent)) === JSON.stringify(["code", "retryable", "reason", "matched", "text"]) && unavailable.structuredContent.reason === "provider_unreachable",
+    `search: nothing found without a vector is an error naming the endpoint, what was matched and why nothing came of it; its value the code, the word and what was matched (${unavailable.content[0].text.slice(-200)})`);
+  const plainCompat = renderSearch({ ok: true, value: { results: [] } } as never);
+  assert(plainCompat.content[0].text === '{"results":[]}', "…and with a vector, the shape exactly");
 }
 
 report();

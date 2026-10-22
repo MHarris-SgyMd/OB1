@@ -1,8 +1,0 @@
-# integrations/kubernetes-deployment builds with this directory as its context
-# (its index.ts imports ../_shared/auth.ts and ../_shared/sse.ts); only these five files reach the daemon.
-*
-!kubernetes-deployment/package.json
-!kubernetes-deployment/bun.lock
-!kubernetes-deployment/index.ts
-!_shared/auth.ts
-!_shared/sse.ts
