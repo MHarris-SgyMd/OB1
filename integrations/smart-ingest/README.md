@@ -138,7 +138,7 @@ OPENROUTER_API_KEY='your-openrouter-key' \
 bun integrations/smart-ingest/index.ts
 ```
 
-`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). Give it a port the stack does not hold. The `rest-api` gateway that proxied `/ingest` to it is retired (SMD-1931); this server is called directly until it becomes a REST-core plugin (SMD-2690). `extensions/test-auth.ts` starts it this way in CI. A caller on another machine reaches it through the same TLS proxy as the core server ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
+`SUPABASE_URL` carries the Postgres connection string (the shim's convention; `SUPABASE_SERVICE_ROLE_KEY` may be left unset); `PORT` unset is 8000, which the compose stack publishes — see [Run a migrated server under Bun](../../compat/supabase-sql/README.md#3-run-a-migrated-server-under-bun). Give it a port the stack does not hold. The `rest-api` gateway that proxied `/ingest` to it is retired (SMD-1931); this server is called directly until it becomes a REST-core plugin (SMD-2690). `extensions/test-auth.ts` starts it this way in CI. A caller on another machine reaches it through the same TLS proxy as the compose stack ([Run a Remote MCP Server, Step 5](../../primitives/deploy-remote-mcp/README.md#step-5-put-it-behind-https)).
 
 ### 2. Set the environment
 

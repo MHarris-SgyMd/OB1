@@ -18,7 +18,7 @@ Every extension README names the file to run and the environment it reads. The t
 | Setting | Value |
 |---------|-------|
 | Server file | `extensions/extension-name/index.ts` |
-| Port | `8787` (any free port; `PORT` unset means 8000, which the stack's proxy or podman's `gvproxy` may hold) |
+| Port | `8787` (any free port; `PORT` unset means 8000, the stack's published port, which podman's `gvproxy` may hold too) |
 | Environment | `SUPABASE_URL` (the Postgres connection string — the shim keeps the variable's name), `MCP_ACCESS_KEYS`, and whatever else the README lists (`DEFAULT_USER_ID`, `OPENROUTER_API_KEY`, …) |
 
 Replace `extension-name` below with the extension's directory name.

@@ -546,7 +546,7 @@ Your MCP server handles both reading and writing. But if you want a quick-captur
 - **[Telegram Capture](../integrations/telegram-capture/)** — Message a bot, get a thought
 - More integrations in [`/integrations`](../integrations/)
 
-Each one is another small server run the same way as this one — [`primitives/deploy-remote-mcp/`](../primitives/deploy-remote-mcp/) is the pattern.
+Each one is a small server of its own that runs beside the stack — [`primitives/deploy-remote-mcp/`](../primitives/deploy-remote-mcp/) is the pattern.
 
 </details>
 
