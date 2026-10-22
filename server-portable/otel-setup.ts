@@ -39,7 +39,7 @@ import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { defaultResource, detectResources, envDetector, resourceFromAttributes } from "@opentelemetry/resources";
-import { BatchLogRecordProcessor, LoggerProvider, SimpleLogRecordProcessor, type LogRecordExporter } from "@opentelemetry/sdk-logs";
+import { BatchLogRecordProcessor, LoggerProvider, SimpleLogRecordProcessor, type LogRecordExporter, type LogRecordProcessor } from "@opentelemetry/sdk-logs";
 import { MeterProvider as SdkMeterProvider, PeriodicExportingMetricReader, type PushMetricExporter } from "@opentelemetry/sdk-metrics";
 import { BasicTracerProvider, BatchSpanProcessor, SimpleSpanProcessor, type ReadableSpan, type Span, type SpanExporter, type SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import type { FlushResult } from "./shutdown.ts";
@@ -63,6 +63,8 @@ export interface Telemetry {
   readonly serviceName: string;
   /** Sends what is batched and waits for what is on its way, every signal at once: how that ended (shutdown.ts FlushResult; the stop bounds it). */
   flush(): Promise<FlushResult>;
+  /** The stop's flush cut short (SMD-2902): says, by signal, what was on its way or still batched as not sent, for `kind`. */
+  cut(kind: string): void;
   /** Unregisters the providers, so later spans and points are no-ops again (a suite's). */
   shutdown(): Promise<void>;
   /** Emits a request's log record; nothing where log records are not sent. */
@@ -119,6 +121,13 @@ export interface WatchedExporter<T = ReadableSpan[]> extends Exporter<T> {
   dropped(count: number): void;
   /** Says what is still unsaid, whatever the window — the stop's last word on what was not sent. */
   sayRest(): void;
+  /**
+   * The stop's flush cut short (SMD-2902): counts the items of every export
+   * still on its way, and `held` more its batch never handed over, as not sent
+   * for `kind`, and says them at once. An export counted here is not counted
+   * again when it ends.
+   */
+  cut(kind: string, held?: number): void;
   /** From now on says each count at once, and says what is held: the provider is shutting down, whether or not its batch reaches this exporter's shutdown. */
   close(): void;
   /** How many items were handed to an export, so far. */
@@ -152,7 +161,8 @@ export function watchExporter<T = ReadableSpan[]>(inner: Exporter<T>, { origin, 
   let held: ReturnType<typeof setTimeout> | undefined;
   // Once shutting down, a count is said at once, never held for a timer that would outlive the exporter (review pass 6).
   let closing = false;
-  const pending = new Set<Promise<void>>();
+  // Each export on its way, with its item count, and whether a cut has already counted it.
+  const pending = new Map<Promise<void>, { n: number; cut: boolean }>();
   const sayNow = () => {
     clearTimeout(held);
     held = undefined;
@@ -182,11 +192,12 @@ export function watchExporter<T = ReadableSpan[]>(inner: Exporter<T>, { origin, 
       handed += n;
       let settle = () => {};
       const going = new Promise<void>((resolve) => { settle = resolve; });
-      pending.add(going);
+      const entry = { n, cut: false };
+      pending.set(going, entry);
       inner.export(items, (result) => {
         if (result.code !== ExportResultCode.SUCCESS) {
           failed += 1;
-          say(n, failureKind(result.error));
+          if (!entry.cut) say(n, failureKind(result.error));
         }
         pending.delete(going);
         settle();
@@ -195,6 +206,16 @@ export function watchExporter<T = ReadableSpan[]>(inner: Exporter<T>, { origin, 
     },
     dropped: (n) => say(n, "queue full"),
     sayRest: sayNow,
+    cut: (kind, held = 0) => {
+      let n = Math.max(0, held);
+      for (const entry of pending.values()) {
+        if (entry.cut) continue;
+        entry.cut = true;
+        n += entry.n;
+      }
+      if (n > 0) lost.set(kind, (lost.get(kind) ?? 0) + n);
+      sayNow();
+    },
     close: () => {
       closing = true;
       sayNow();
@@ -204,7 +225,7 @@ export function watchExporter<T = ReadableSpan[]>(inner: Exporter<T>, { origin, 
     },
     mark: () => ({ started, failed, pending: pending.size }),
     idle: async () => {
-      await Promise.all([...pending]);
+      await Promise.all([...pending.keys()]);
     },
     // What is held is said as the exporter goes, and what its last exports lose as they end, so no timer says it to a sink that has gone (review passes 5–6).
     shutdown: async () => {
@@ -255,13 +276,34 @@ export function countingProcessor(inner: SpanProcessor): SpanProcessor & { reado
 }
 
 /**
+ * The log batch's counterpart of countingProcessor (SMD-2902): counts the
+ * records it is handed, so a stop whose flush is cut knows how many it still
+ * held — the log batch hands its queue over one batch at a time, after any
+ * export already on its way, so a collector that hangs holds the rest back.
+ */
+export function countingLogProcessor(inner: LogRecordProcessor): LogRecordProcessor & { readonly queued: number } {
+  let queued = 0;
+  return {
+    get queued() {
+      return queued;
+    },
+    onEmit: (record, within) => {
+      queued += 1;
+      inner.onEmit(record, within);
+    },
+    forceFlush: () => inner.forceFlush(),
+    shutdown: () => inner.shutdown(),
+  };
+}
+
+/**
  * The full queue's drops, from its two witnesses, each said once: the SDK's
  * diag line (a count since its last, said when a later span is queued) and a
  * flush's exact count (queued less handed). Neither counts a drop twice, so
  * the larger is what is known, and only what is past the last said is said
  * (review pass 4: a second flush, or a diag line after one, said them again).
  */
-export function dropCount(say: (count: number) => void): { fromDiag(count: number): void; exactly(total: number): void } {
+export function dropCount(say: (count: number) => void): { fromDiag(count: number): void; exactly(total: number): void; readonly known: number } {
   let diag = 0;
   let exact = 0;
   let said = 0;
@@ -278,6 +320,10 @@ export function dropCount(say: (count: number) => void): { fromDiag(count: numbe
     exactly: (total) => {
       exact = Math.max(exact, total);
       known();
+    },
+    // How many drops are known so far, said or not: what a cut takes off what the batch was handed (SMD-2902).
+    get known() {
+      return Math.max(diag, exact);
     },
   };
 }
@@ -453,6 +499,8 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
   const reportFor = (url: string, noun: readonly [string, string]): Reporting => ({ ...collector!.report, origin: new URL(url).origin, noun });
   const notes: string[] = [];
   const flushes: (() => Promise<FlushResult>)[] = [];
+  /** Each watched signal's word when the stop cuts its flush short (SMD-2902). */
+  const cuts: ((kind: string) => void)[] = [];
   const closes: (() => void)[] = [];
   const shutdowns: (() => Promise<void>)[] = [];
   /** What setting up does to the API's globals, done only once every provider is built. */
@@ -491,6 +539,8 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
         error: quiet, info: quiet, debug: quiet, verbose: quiet,
       }, DiagLogLevel.WARN));
       flushes.push(() => flushBatch(provider, counted, watched, drops));
+      // What the batch was handed and never handed on, less its drops (already said), with what is on its way.
+      cuts.push((kind) => watched.cut(kind, counted.queued - watched.handed - drops.known));
       // The watcher closed first: the batch's shutdown flush may fail, and never reach the exporter's own shutdown (review pass 7).
       closes.push(() => watched.close());
     }
@@ -525,7 +575,11 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
         await provider.forceFlush().catch(() => {});
         return "sent";
       });
-      if (watched) closes.push(() => watched.close());
+      if (watched) {
+        closes.push(() => watched.close());
+        // A metric reader holds no queue: what was on its way.
+        cuts.push((kind) => watched.cut(kind));
+      }
     }
 
     // Log records: one per request, emitted by telemetry.ts through `emit`, under its span's context.
@@ -534,19 +588,23 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
       const watched = watchExporter(new OTLPLogExporter({ url: collector.urls.logs }), reportFor(collector.urls.logs, ["log record", "log records"]));
       const options = batchOptions(process.env, "OTEL_BLRP");
       notes.push(...options.notes);
-      loggerProvider = new LoggerProvider({
-        resource,
-        processors: [new BatchLogRecordProcessor({
-          exporter: watched,
-          maxQueueSize: options.queue,
-          maxExportBatchSize: options.batch,
-          scheduledDelayMillis: options.delay,
-          exportTimeoutMillis: options.timeout,
-          selfObsMeterProvider: logDrops((count) => watched.dropped(count)),
-        })],
-      });
+      let logsDropped = 0;
+      const counted = countingLogProcessor(new BatchLogRecordProcessor({
+        exporter: watched,
+        maxQueueSize: options.queue,
+        maxExportBatchSize: options.batch,
+        scheduledDelayMillis: options.delay,
+        exportTimeoutMillis: options.timeout,
+        selfObsMeterProvider: logDrops((count) => {
+          logsDropped += count;
+          watched.dropped(count);
+        }),
+      }));
+      loggerProvider = new LoggerProvider({ resource, processors: [counted] });
       const provider = loggerProvider;
       flushes.push(() => flushSignal(provider, watched));
+      // The records the batch still held behind an export on its way, less its drops (already said), with what is on its way.
+      cuts.push((kind) => watched.cut(kind, counted.queued - watched.handed - logsDropped));
       closes.push(() => watched.close());
     } else if (memory?.logs) {
       loggerProvider = new LoggerProvider({ resource, processors: [new SimpleLogRecordProcessor({ exporter: memory.logs })] });
@@ -575,6 +633,9 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
   return {
     serviceName: String(resource.attributes["service.name"] ?? serviceName),
     flush: async () => flushesResult(await Promise.all(flushes.map((flush) => flush()))),
+    cut: (kind) => {
+      for (const cut of cuts) cut(kind);
+    },
     shutdown: async () => {
       for (const close of closes) close();
       await Promise.all(shutdowns.map((shutdown) => shutdown()));
