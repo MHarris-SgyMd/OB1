@@ -108,8 +108,9 @@ is green.
    from the SDK — re-point to v2's type exports. This stage is a candidate to
    fold into SMD-1931's consolidation (retire rather than migrate). **Done for
    three:** SMD-1931 retired `enhanced-mcp`, `delete-thought-mcp` and
-   `update-thought-mcp`; `ob-graph` and `work-operating-model-activation`
-   remain.
+   `update-thought-mcp`. **Done for all five (2026-10-22):** SMD-2920 retired
+   `ob-graph` and `work-operating-model-activation`, so no server in this
+   stage remains to migrate.
 3. **The self-pinned outliers.** `integrations/kubernetes-deployment`, which
    vendored its own pinned SDK + `@hono/mcp`, retired with compose-only
    (SMD-2288) rather than migrate. `recipes/vercel-neon-telegram` is already on the v1

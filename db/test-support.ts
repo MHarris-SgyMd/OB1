@@ -1090,9 +1090,6 @@ export const CONTRIB_SCHEMA_FILES: readonly string[] = [
   "recipes/chatgpt-conversation-import/schema.sql",
   "recipes/life-engine/schema.sql",
   "recipes/lint-sweep/views.sql",
-  "recipes/ob-graph/schema.sql",
-  "recipes/repo-learning-coach/schema.sql",
-  "recipes/work-operating-model-activation/schema.sql",
   "recipes/world-model-diagnostic-activation/schema-v2-draft.sql",
 ];
 

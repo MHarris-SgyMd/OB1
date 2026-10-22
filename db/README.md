@@ -258,7 +258,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2993 assertions: 2993 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `2992 assertions: 2992 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports one hundred and eight (108) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
@@ -2120,14 +2120,11 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `professional_contacts`, `contact_interactions`, `opportunities` (extensions/professional-crm) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `family_members`, `activities`, `important_dates` (extensions/family-calendar — upstream's file carried no RLS and no grant; listed so the whole path is one grant) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `companies`, `job_postings`, `applications`, `interviews`, `job_contacts` (extensions/job-hunt) | `SELECT, INSERT, UPDATE, DELETE` |
-| **recipes** — the nine recipe SQL files a brain applies as a schema (tables or views; `CONTRIB_SCHEMA_FILES` in `db/test-support.ts`), applied by hand as each README says (SMD-1810). Upstream granted most of these to `service_role` (adaptive-capture's four to `authenticated`; lint-sweep's views nothing), enabled RLS on most with policies on `auth.uid()`, and `REVOKE`d ob-graph's three functions from `anon` and `authenticated`; all cut, the REVOKEs too (none is SECURITY DEFINER, and there is no PostgREST here to expose them), so EXECUTE stays PUBLIC's and no function row is needed. Every id is a `uuid` or text: no sequences. The privileges are upstream's own for its roles | `correction_learnings`, `classification_outcomes`, `capture_thresholds`, `ab_comparisons` (recipes/adaptive-capture-classification — upstream's three privileges to its API role, kept; the recipe deletes nothing) | `SELECT, INSERT, UPDATE` |
+| **recipes** — the six recipe SQL files a brain applies as a schema (tables or views; `CONTRIB_SCHEMA_FILES` in `db/test-support.ts`), applied by hand as each README says (SMD-1810). Upstream granted most of these to `service_role` (adaptive-capture's four to `authenticated`; lint-sweep's views nothing), enabled RLS on most with policies on `auth.uid()`; all cut. No function is `REVOKE`d from PUBLIC (none is SECURITY DEFINER, and there is no PostgREST here to expose one), so EXECUTE stays PUBLIC's and no function row is needed; ob-graph, repo-learning-coach and work-operating-model-activation retired (SMD-2920, SMD-2923). Every id is a `uuid` or text: no sequences. The privileges are upstream's own for its roles | `correction_learnings`, `classification_outcomes`, `capture_thresholds`, `ab_comparisons` (recipes/adaptive-capture-classification — upstream's three privileges to its API role, kept; the recipe deletes nothing) | `SELECT, INSERT, UPDATE` |
 | | views `ops_source_volume_24h`, `ops_recent_thoughts`, `ops_enrichment_gaps`, `ops_type_distribution`, `ops_sensitivity_distribution`, `ops_ingestion_summary`, `ops_stalled_entity_queue`, `ops_graph_coverage` (recipes/brain-health-monitoring, its `ops-views.sql`; the last three exist only where smart-ingest and entity-extraction are applied, and are skipped until then) | `SELECT` |
 | | `chatgpt_conversations` (recipes/chatgpt-conversation-import; `user_id` is a plain nullable `uuid` now — upstream's referenced `auth.users`) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `life_engine_habits`, `life_engine_habit_log`, `life_engine_checkins`, `life_engine_briefings`, `life_engine_evolution`, `life_engine_state` (recipes/life-engine) | `SELECT, INSERT, UPDATE, DELETE` |
 | | views `lint_orphans_by_tag`, `lint_over_tagged`, `lint_empty_content`, `lint_very_long`, `lint_low_signal`, `lint_exact_duplicates`, `lint_high_importance_isolated` (recipes/lint-sweep, its `views.sql`; the last two are guarded on `content_fingerprint` and `thought_entities`, both the migrations', so all seven exist on a migrated brain) | `SELECT` |
-| | `graph_nodes`, `graph_edges` (recipes/ob-graph) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `repo_learning_projects`, `repo_learning_research_documents`, `repo_learning_tracks`, `repo_learning_lessons`, `repo_learning_quizzes`, `repo_learning_quiz_questions`, `repo_learning_lesson_progress`, `repo_learning_quiz_attempts`, `repo_learning_quiz_responses`, `repo_learning_lesson_comments` (recipes/repo-learning-coach) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `operating_model_profiles`, `operating_model_sessions`, `operating_model_layer_checkpoints`, `operating_model_entries`, `operating_model_exports` (recipes/work-operating-model-activation; its three functions keep PUBLIC's EXECUTE — upstream only granted them to its service role) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `world_model_assessments`, `world_model_boundary_flows` (recipes/world-model-diagnostic-activation, its `schema-v2-draft.sql` — a draft its README's V1 does not apply; listed so applying it is one `--grant` away) | `SELECT, INSERT, UPDATE, DELETE` |
 
 Plus `USAGE ON SCHEMA public`, and the right to create a temp table:
@@ -5196,7 +5193,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2993 assertions, PGlite, no container
+bun test-schema.ts                          # 2992 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1489 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 908 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 68 assertions: the shards SHARDS lists in test-live.ts, each its own cell

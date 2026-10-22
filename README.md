@@ -32,7 +32,7 @@ The 20 most recent merged PRs. This list is generated from GitHub and refreshes 
 | [Refresh README recent contributions](README.md) | Refresh README recent contributions. | [@github-actions[bot]](https://github.com/github-actions[bot]) |
 | [Add deploy-pages workflow for openbrain.fyi](.github/workflows/deploy-pages.yml) | Adds deploy-pages workflow for openbrain.fyi. | [@snapsynapse](https://github.com/snapsynapse) |
 | [Google Activity import: include Gemini answers from safeHtmlItem](recipes/google-activity-import/) | Google Activity import: include Gemini answers from safeHtmlItem. | [@araece](https://github.com/araece) |
-| [Repo-learning-coach: load .env via dotenv + fix research frontmatter](recipes/repo-learning-coach/) | Repo-learning-coach: load .env via dotenv + fix research frontmatter. | [@eazene](https://github.com/eazene) |
+| [Repo-learning-coach: load .env via dotenv + fix research frontmatter](docs/vendored-disposition.md) | Retired (SMD-2923) — the study app it fixed retired, unused on this fork; the brain learning a codebase is SMD-3006 | [@eazene](https://github.com/eazene) |
 | [Provenance-chains: fix eval.mjs default model (dated id 404s on OpenRouter)](recipes/provenance-chains/) | Provenance-chains: fix eval.mjs default model (dated id 404s on OpenRouter). | [@eazene](https://github.com/eazene) |
 | [Fix editorial-policy auditor JSON parse under claude-haiku-4-5](recipes/editorial-policy/) | Fixes editorial-policy auditor JSON parse under claude-haiku-4-5. | [@eazene](https://github.com/eazene) |
 | [Fix add_household_item storing details as an escaped JSON string](extensions/household-knowledge/) | Fixes add_household_item storing details as an escaped JSON string. | [@hannahgwilson](https://github.com/hannahgwilson) |
@@ -45,7 +45,7 @@ The 20 most recent merged PRs. This list is generated from GitHub and refreshes 
 | [Persistent wiki pages](db/README.md#the-migrations) | Retired (SMD-1812) — on this fork the page store is core, migration 064: `pages`, `page_sections`, `page_section_revisions` and `write_page_section`'s regen guard, a page being a thought whose text is its render (`db/README.md`, migration 064) | — |
 | [Fix update-thought-mcp deploy-blocking bugs](skills/updating-thoughts/) | Retired (SMD-1931) — on this fork `update_thought` is a core tool, listed for a write key; `skills/updating-thoughts` uses it | — |
 | [Reject non-POST MCP requests with 405 to prevent GET handshake hang](docs/vendored-disposition.md) | Retired (SMD-2288) — the Kubernetes deployment it fixed retired with compose-only: the brain deploys as the compose stack (`deploy/`), whose server answers a GET on the MCP endpoint with 405. | [@jcpoyser](https://github.com/jcpoyser) |
-| [Fix ob-graph MCP GET route causing SSE reconnect storm](recipes/ob-graph/) | Fixes ob-graph MCP GET route causing SSE reconnect storm. | [@eazene](https://github.com/eazene) |
+| [Fix ob-graph MCP GET route causing SSE reconnect storm](docs/vendored-disposition.md) | Retired (SMD-2920) — ob-graph's hand-curated graph retired; the brain's graph is the one extraction builds | [@eazene](https://github.com/eazene) |
 | [Fix UUID id pagination in thought-enrichment backfills](recipes/thought-enrichment/) | Fixes UUID id pagination in thought-enrichment backfills. | [@themacmarketer](https://github.com/themacmarketer) |
 | [Fix double-encoded metadata writes in thought-enrichment](recipes/thought-enrichment/) | Fixes double-encoded metadata writes in thought-enrichment. | [@jebontheside](https://github.com/jebontheside) |
 
@@ -113,8 +113,6 @@ Standalone capabilities that make your Open Brain smarter.
 | [Life Engine](recipes/life-engine/) | Self-improving personal assistant — calendar, habits, health, proactive briefings via Telegram or Discord | [@justfinethanku](https://github.com/justfinethanku) |
 | [Life Engine Video](recipes/life-engine-video/) | Add-on that renders Life Engine briefings as short animated videos with voiceover | [@justfinethanku](https://github.com/justfinethanku) |
 | [Daily Digest](recipes/daily-digest/) | Automated daily summary of recent thoughts delivered via email or Slack | OB1 Team |
-| [Bring Your Own Context](recipes/bring-your-own-context/) | Portable context workflow that packages extraction prompts, profile generation, and remote MCP deployment into one entrypoint | [@jonathanedwards](https://github.com/jonathanedwards) |
-| [Work Operating Model Activation](recipes/work-operating-model-activation/) | Conversation-first workflow that turns tacit work patterns into structured Open Brain records and agent-ready operating files | [@jonathanedwards](https://github.com/jonathanedwards) |
 | [World Model Diagnostic Activation](recipes/world-model-diagnostic-activation/) | Ship-now activation path for a 20-minute world-model readiness diagnostic that compounds through core Open Brain capture | [@jonathanedwards](https://github.com/jonathanedwards) |
 | [Research-to-Decision Workflow](recipes/research-to-decision-workflow/) | Composition recipe that chains canonical skills into operator and investor research, synthesis, meeting, and memo workflows | [@NateBJones](https://github.com/NateBJones) |
 | [OpenClaw Agent Memory for OB1](recipes/openclaw-agent-memory/) | Canonical recipe for using OB1 Agent Memory as the governed continuity layer for OpenClaw workflows | OB1 Team |
@@ -135,7 +133,6 @@ Plain-text skill packs you can drop into Claude Code, Codex, or other AI clients
 | [Meeting Synthesis Skill Pack](skills/meeting-synthesis/) | Converts meeting notes or transcripts into decisions, action items, risks, and follow-up artifacts | [@NateBJones](https://github.com/NateBJones) |
 | [Panning for Gold Skill Pack](skills/panning-for-gold/) | Turns brain dumps and transcripts into evaluated idea inventories | [@jaredirish](https://github.com/jaredirish) |
 | [Aiception Skill Pack (formerly Claudeception)](skills/claudeception/) | Extracts reusable lessons from work sessions into new skills | [@jaredirish](https://github.com/jaredirish) |
-| [Work Operating Model Skill Pack](skills/work-operating-model/) | Runs a five-layer elicitation interview and saves the approved operating model into Open Brain | [@jonathanedwards](https://github.com/jonathanedwards) |
 | [World Model Readiness Diagnostic](skills/world-model-diagnostic/) | Runs a 20-minute world-model diagnostic that maps paradigm fit, audits the boundary layer, and labels findings by confidence | [@jonathanedwards](https://github.com/jonathanedwards) |
 | [OpenClaw Agent Memory Skill Pack](skills/openclaw-agent-memory/) | Teaches OpenClaw agents to recall, write back, report usage, and respect OB1 provenance/use-policy rules | OB1 Team |
 

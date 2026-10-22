@@ -275,13 +275,14 @@
  *      the class decision is docs/vendored-disposition.md's "PostgREST-
  *      speaking scripts" (an import emits ingestion-contract items, a
  *      maintenance script moves onto compat/supabase-sql, three retire), and
- *      POSTGREST_EXCEPTIONS counts the nineteen files with a call site
+ *      POSTGREST_EXCEPTIONS counts the eighteen files with a call site
  *      (two more reach the gateway through a lib; twenty-eight until
  *      obsidian-vault-import and local-ollama-embeddings retired (SMD-2137,
  *      SMD-2138), brain-backup, lint-sweep and thought-enrichment's three
  *      moved onto the shim (SMD-2144, SMD-2139), weekly-digest retired
- *      for the db/ verb db/weekly-digest.ts (SMD-2239), and brain-smoke-test
- *      retired into deploy/smoke.sh (SMD-2103)) with the ticket that
+ *      for the db/ verb db/weekly-digest.ts (SMD-2239), brain-smoke-test
+ *      retired into deploy/smoke.sh (SMD-2103), and ob-graph's
+ *      smoke-graph-rpcs.mjs went with its recipe (SMD-2920)) with the ticket that
  *      ports or retires each — a landed
  *      port fails until its entry goes, so the
  *      table's size, plus the two lib-reached scripts, is the class's
@@ -1471,7 +1472,7 @@ function checkCredentialCompares() {
 // check found nine files with eleven such statements: the two MCP servers
 // (`update-thought-mcp`, `enhanced-mcp`), three HTTP APIs
 // (`agent-memory-api`, `open-brain-rest`, `rest-api`), a worker
-// (`consolidation-workers/bio`), a recipe's server (`repo-learning-coach`), a
+// (`consolidation-workers/bio`), a recipe's server (`repo-learning-coach`, retired since: SMD-2923), a
 // recipe's paste-in snippet (`provenance-chains`) and a README's sample
 // (`telegram-capture`). Every rule the fork put into the
 // writers is bypassed by such a statement: 003/018's fingerprint is left
@@ -1713,7 +1714,7 @@ const THOUGHT_WRITE_PROBES = [
   'const updates: Record<string, unknown> = {};\nif (content !== undefined) {\n  updates.content = content;\n  updates.embedding = `[${embedding.join(",")}]`;\n}\nconst { data, error } = await supabase\n  .from("thoughts")\n  .update(updates)\n  .eq("id", id)\n  .select("id")\n  .single();',
   // enhanced-mcp: a literal over several lines, with the file\'s own fingerprint beside the content.
   'const { error: updateError } = await supabase\n  .from("thoughts")\n  .update({\n    content,\n    content_fingerprint: fingerprint,\n    embedding,\n    type: extracted.type,\n    updated_at: new Date().toISOString(),\n  })\n  .eq("id", id);',
-  // agent-memory-api and repo-learning-coach: the vector alone, after a 2-argument upsert.
+  // agent-memory-api and repo-learning-coach (retired since, SMD-2923): the vector alone, after a 2-argument upsert.
   'if (thoughtId) await supabase.from("thoughts").update({ embedding }).eq("id", thoughtId);',
   "const { error: embeddingError } = await supabase\n  .from('thoughts')\n  .update({ embedding })\n  .eq('id', thoughtId)",
   // open-brain-rest: a literal bound to a name, then sent.
@@ -2039,8 +2040,10 @@ function scan(text: string, from: number, stringsToo: boolean, inExpression: boo
 /**
  * Every import (and export-from) statement's specifier, with the line it starts
  * on, in order. A statement ends at its `;`, or — for one written on a single
- * line with no `;` (recipes/repo-learning-coach is semicolon-less throughout;
- * SMD-1799's second review pass found its twelve files' imports unread) — at
+ * line with no `;` (SMD-1799's second review pass found a semicolon-less
+ * recipe's twelve files' imports unread; that recipe, repo-learning-coach,
+ * retired with SMD-2923, and no file on the shim is semicolon-less now, but
+ * the reading stays until this rule retires with the shim, SMD-3216) — at
  * its line's end. A semicolon-less import that spans lines is still missed (a
  * silent miss, never a false catch), so the rule says so here.
  */
@@ -2154,7 +2157,7 @@ const SPECIFIER_PROBES: [string, string[], string[]][] = [
   ['import { createClient } from "../../compat/supabase-sql/index.ts";\nimport { db } from "./_shared/db.ts";\n', ['import { Pool } from "npm:pg@8";\nexport const db = new Pool();\n'], ["dep0:specifier:npm:pg@8@1"]],
   // `node:` is fine, a relative dynamic import is fine, a specifier in a comment or a string is prose.
   ['import { createHash } from "node:crypto";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst m = await import("./tools.ts");\n// see "jsr:@supabase/functions-js"\nconst s = "npm:hono";\n', [], []],
-  // Semicolon-less, single-line (the second review pass: repo-learning-coach's shape, unread until then).
+  // Semicolon-less, single-line (the second review pass: a semicolon-less recipe's shape, unread until then).
   ["import { Hono } from 'npm:hono@4'\nimport { createClient } from '../../compat/supabase-sql/index.ts'\n", [], ["specifier:npm:hono@4@1"]],
   // The third pass: a `;`-led next line counts the import once; a mixed file credits each import to its own line.
   ["import { a } from 'npm:a'\n;[1].forEach(f)\n", [], ["specifier:npm:a@1"]],
@@ -5808,13 +5811,14 @@ checkWorkflowPins();
 // that says it posts to `/rest/v1/rpc/…` is making a claim about itself), a
 // `rest/v1` path in any string, a supabase-py import or `create_client(`
 // (Python and shell alone), or a `@supabase/postgrest-js` specifier is a hit.
-// POSTGREST_EXCEPTIONS counts the nineteen files with a call site (two
+// POSTGREST_EXCEPTIONS counts the eighteen files with a call site (two
 // more reach the gateway through a lib; twenty-eight until the two retirements,
 // obsidian-vault-import and local-ollama-embeddings — SMD-2137 and SMD-2138 —
 // the first five ports: brain-backup and lint-sweep — SMD-2144 — and
 // thought-enrichment's three — SMD-2139 — weekly-digest's retirement for
-// the db/ verb db/weekly-digest.ts — SMD-2239 — and brain-smoke-test's into
-// deploy/smoke.sh — SMD-2103)
+// the db/ verb db/weekly-digest.ts — SMD-2239 — brain-smoke-test's into
+// deploy/smoke.sh — SMD-2103 — and ob-graph's smoke-graph-rpcs.mjs with its
+// recipe — SMD-2920)
 // with the ticket that ports or retires each: a line past the count fails (a
 // new call beside the documented ones),
 // a count no line reaches fails as stale (the port landed on those lines —
@@ -5917,13 +5921,14 @@ const SHIM = "a maintenance script; it moves onto compat/supabase-sql under bun"
  * file → the ticket that ports or retires it, and the exact count of lines that speak PostgREST. Thirty files in
  * twenty-one recipes (SMD-2126's survey of f7693c4c, re-measured on d8e3de60); two more of the thirty —
  * atomizer's backfill-gmail-correspondents.mjs and authorship-edges' backfill-authorship.mjs — reach the
- * gateway through their `lib/` file alone and have no line of their own. Four of the thirty are gone:
+ * gateway through their `lib/` file alone and have no line of their own. Five of the thirty are gone:
  * obsidian-vault-import's import-obsidian.py (SMD-2137) and local-ollama-embeddings' embed-local.py (SMD-2138)
  * retired with their recipes, the first entries to leave; weekly-digest's weekly-digest.mjs (SMD-2239),
  * its live mode rebuilt as the db/ verb db/weekly-digest.ts (a sink, not a maintenance script — the
  * recipe's README stays a pointer); and brain-smoke-test's smoke-all.js (SMD-2103), retired with its
  * recipe once deploy/smoke.sh took the wrong-key refusal, the one check of its that applied here and
- * that smoke.sh lacked. Five more are on the shim: brain-backup's
+ * that smoke.sh lacked; and ob-graph's smoke-graph-rpcs.mjs, with its recipe (SMD-2920; SMD-2146
+ * canceled). Five more are on the shim: brain-backup's
  * backup-brain.mjs and lint-sweep's lint-sweep.js (SMD-2144), the first ports to land, and
  * thought-enrichment's enrich-thoughts.mjs, backfill-type.mjs and backfill-sensitivity.mjs (SMD-2139),
  * the first writers.
@@ -5954,8 +5959,6 @@ const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   // templates, is read to cover it. Its
   // two read-only siblings, brain-backup and lint-sweep, are on the shim (SMD-2144, rescoped 2026-09-26).
   ["recipes/source-filtering/backfill-metadata.ts", POSTGREST(SHIM, "SMD-2021", 2)],
-  // The one smoke harness left, with its own ticket (brain-smoke-test's retired: deploy/smoke.sh absorbed its applicable checks, SMD-2103).
-  ["recipes/ob-graph/smoke-graph-rpcs.mjs", POSTGREST("the smoke moves onto the shim or into extensions/test-tools.ts", "SMD-2146", 1)],
 ]);
 function checkPostgrestClients() {
   for (const name of ["x.ts", "x.tsx", "x.mts", "x.cts", "x.js", "x.jsx", "x.mjs", "x.cjs", "x.py", "x.sh"]) if (!POSTGREST_CODE_FILE.test(name)) fail(SELF, `check 24's POSTGREST_CODE_FILE no longer reads ${name} (its own probe)`);

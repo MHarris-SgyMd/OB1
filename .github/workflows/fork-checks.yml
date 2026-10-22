@@ -1046,7 +1046,7 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
-      # Every tool of the eight servers on the SQL shim, called through
+      # Every tool of the seven servers on the SQL shim, called through
       # tools/call against the extensions' own schema.sql files (applied as
       # they are — no auth.* stub and no Supabase role, since SMD-1810, which
       # also stopped test-writes.ts above creating the three roles on this

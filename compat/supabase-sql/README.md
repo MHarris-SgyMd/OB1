@@ -94,8 +94,7 @@ Without it, Bun downloads whatever version npm serves when it finds no
 counts as none. The other variables are the ones the file's README has
 its Supabase deploy set as secrets, passed as environment instead; each README's
 callout gives its own line. `SUPABASE_SERVICE_ROLE_KEY` is read and ignored by
-every server but `work-operating-model-activation`, which refuses to start
-without it — set it to any value there. An extension's `schema.sql` applies to
+every server. An extension's `schema.sql` applies to
 a plain Postgres as it is: the RLS policies on `auth.uid()` upstream's carried
 are gone (SMD-1810), so no stub function precedes it. Check 11 of `scripts/check-fork-consistency.ts` holds
 every code file under the category directories and docs/ to no `Deno` (the seven Edge Function files it excepted left with SMD-1800), and every shim-importing file to no
@@ -112,11 +111,11 @@ cd compat/supabase-sql && bun run test
 
 ## Expected outcome
 
-`257 assertions: 257 passed, 0 failed` and `PASS`. A migrated file behaves
+`259 assertions: 259 passed, 0 failed` and `PASS`. A migrated file behaves
 identically: same `{ data, error }` shape, same SQLSTATE codes, same row counts.
-`extensions/test-tools.ts` then drives every tool of the eight MCP servers with
-a schema of their own — seven extensions and the ob-graph recipe, fifty-five
-tools — against those schemas, and `extensions/test-writes.ts` the servers
+`extensions/test-tools.ts` then drives every tool of the seven MCP servers with
+a schema of their own — the extensions, forty-five tools — against those
+schemas, and `extensions/test-writes.ts` the servers
 that need the model provider stubbed (agent-memory-api's nine routes,
 the two consolidation workers, smart-ingest): the migrated
 files this shim is judged by.
@@ -164,7 +163,8 @@ from `EXCLUDED`, so the statement always returns the row — unless
 `ignoreDuplicates: true` asks for `DO NOTHING`, which leaves a conflicting row
 as it is and returns none, as `Prefer: resolution=ignore-duplicates` does
 (unread until SMD-1798's first review pass; repo-learning-coach's progress
-upsert had reset a learner's row on every sync); and `.rpc()`'s shape
+upsert, retired since with SMD-2923, had reset a learner's row on every sync);
+and `.rpc()`'s shape
 is what the function declares (`pg_proc.proretset`): a set-returning function
 is rows even when one row of one column came back, `RETURNS SETOF <scalar>` a
 bare list, a scalar function its value, a function returning one composite row
@@ -266,8 +266,8 @@ development — the test caught it.
   migrated file is verified to parse; `extensions/test-writes.ts` drives the
   writers among them against a real Postgres (the bio worker, the one that
   filters on a JSON path, found the two gaps change 73 closed); and
-  `extensions/test-tools.ts` drives every tool of the eight MCP servers with a
-  schema of their own — fifty-five tools since SMD-1798 — against those
+  `extensions/test-tools.ts` drives every tool of the seven MCP servers with a
+  schema of their own — forty-five tools since SMD-2920 retired ob-graph's ten — against those
   schemas (change 74's review had found seven of the first twenty-nine
   failing on the shim — no `.not()`, a JavaScript array bound as its `String()`,
   four embedded selects the codemod's blocker regex let through — and driving
