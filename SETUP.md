@@ -425,11 +425,15 @@ No Supabase account. No Supabase CLI. No Deno.
 ```bash
 cp deploy/.env.example deploy/.env
 openssl rand -hex 24                                    # POSTGRES_PASSWORD
-cd server-portable && bun keygen.ts --name laptop --scope write
+bun server-portable/keygen.ts --name laptop --scope write
+bun server-portable/keygen.ts --name mcp-forwarder --scope forward   # the MCP server's own key
 ```
 
-Put the `name:scope:sha256` line in `MCP_ACCESS_KEYS`, and keep the raw key
-somewhere safe — it is not recoverable.
+Put each `name:scope:sha256` line in `MCP_ACCESS_KEYS`, comma-separated, and
+keep the laptop key somewhere safe — it is not recoverable. The forward key's raw
+value goes in `OB1_FORWARDER_KEY`: the MCP server at `/mcp` calls the REST core
+with it beside each client's key, and compose refuses the stack without it
+(SMD-2287). It grants nothing as a caller.
 
 The name becomes an agent on first use, with a stable id recorded against every
 write (`thought_audit.canonical_agent_id`). The id survives rotating the key —
@@ -475,9 +479,10 @@ bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile loca
   podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
-Five services in order (seven with `local-models`): Postgres with pgvector, a migration job that applies the
-schema and exits, then the MCP server, the REST core (internal unless `deploy/compose.api-public.yaml` is named)
-and the proxy in front of them. The server runs `preflight.ts` before it
+Seven services in order (nine with `local-models`): Postgres with pgvector, a migration job that applies the
+schema and exits, then the server n8n reaches, the REST core (internal unless
+`deploy/compose.api-public.yaml` is named), the MCP server at `/mcp`, which hands every tool call to the REST
+core, and the proxy in front of them with the forwarder that publishes its port. The server runs `preflight.ts` before it
 serves, so a misconfiguration crashloops rather than starting and failing on your
 first capture. To run a *release* rather than a checkout build — the published
 `ob1-server` and `ob1-migrate` images, Ollama pinned by digest — see
