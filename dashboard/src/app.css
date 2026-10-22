@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+/* No web font: an operator page asks nothing of a third party (the SvelteKit
+   dashboard loaded Google Fonts on every visit). */
+@theme {
+	--color-bg: #0a0a0b;
+	--color-bg-elevated: #141416;
+	--color-bg-card: #1a1a1d;
+	--color-text: #fafafa;
+	--color-text-muted: #9a9aa0;
+	--color-primary: #6366f1;
+	--color-primary-light: #818cf8;
+	--font-sans: ui-sans-serif, system-ui, sans-serif;
+	--font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+body {
+	background-color: var(--color-bg);
+	color: var(--color-text);
+	line-height: 1.6;
+	-webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3 {
+	font-weight: 600;
+	line-height: 1.2;
+}

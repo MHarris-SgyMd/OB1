@@ -240,6 +240,19 @@ jobs:
         working-directory: mcp-server
         run: bunx tsc --noEmit
 
+      # SMD-2280: the operator GUI (dashboard/), checked as the image builds
+      # it: svelte-check over its pages and server code, which import the REST
+      # client above and type their answers by server-portable's own types,
+      # both installed by now. The image's dashboard-build stage runs its
+      # `vite build`, and the full-stack job drives it through the proxy.
+      - name: Install the operator GUI's pinned packages
+        working-directory: dashboard
+        run: bun install --frozen-lockfile
+
+      - name: Check the operator GUI
+        working-directory: dashboard
+        run: bun run check
+
       - name: The MCP server over the REST core
         working-directory: mcp-server
         run: bun test-mcp.ts
@@ -1344,7 +1357,7 @@ jobs:
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data"]) and .networks.data.internal == true
               and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "pg-exporter", "pg-monitor-role", "postgres", "server", "sleep"])
               and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "server", "sleep"])
-              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "auth", "lgtm", "mcp", "proxy"]) and (on("telemetry") == ["lgtm", "pg-exporter"]) and .networks.telemetry.internal == true
+              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "app", "auth", "lgtm", "mcp", "proxy"]) and (on("telemetry") == ["lgtm", "pg-exporter"]) and .networks.telemetry.internal == true
               and ([.services | to_entries[] | select((.value.environment // {}) | keys | any(startswith("OTEL_"))) | .key] == ["api", "mcp"])'
           docker compose -f compose.yaml -f compose.host-ports.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data", "postgres-port"]) and (on("postgres-port") == ["postgres"])'
@@ -1420,7 +1433,7 @@ jobs:
           img="$(docker compose -f compose.yaml config --format json | jq -r .services.forwarder.image)"
           want="${img#*oven/bun:}"; want="${want%%[-@]*}"
           [[ "$want" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "the forwarder's image $img names no Bun version" >&2; exit 1; }
-          for s in forwarder server mcp; do
+          for s in forwarder server mcp app; do
             got="$(docker compose -f compose.yaml exec -T "$s" bun --version)"
             echo "$s: Bun $got"
             [ "$got" = "$want" ] || { echo "$s runs Bun $got, not the pinned $want (the forwarder's $img)" >&2; exit 1; }
@@ -1521,9 +1534,10 @@ jobs:
           # are held by "Every published port binds loopback" and by check 13.
           declared() {
             case "$1" in
-              compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml|compose.grafana-public.yaml) ;;
+              compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml) ;;
+              compose.grafana-public.yaml) printf '%s\n' '["services","app","environment","GRAFANA_LINK"]' ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' '["services","postgres","networks","postgres-port"]' '["networks","postgres-port"]' ;;
-              compose.grafana-port.yaml) printf '%s\n' '["services","lgtm","ports"]' '["services","lgtm","networks","grafana-port"]' '["services","lgtm","environment","LGTM_ORIGIN"]' '["networks","grafana-port"]' ;;
+              compose.grafana-port.yaml) printf '%s\n' '["services","lgtm","ports"]' '["services","lgtm","networks","grafana-port"]' '["services","lgtm","environment","LGTM_ORIGIN"]' '["services","app","environment","GRAFANA_LINK"]' '["networks","grafana-port"]' ;;
               # The release's: an image and its pull policy, on any service but the proxy and its forwarder (SMD-2583).
               compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ] && [ "$s" != forwarder ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
               *) echo "$1 declares nothing here — give it an OVERLAYS entry in check 28 and its paths in declared()" >&2; return 1 ;;
@@ -2051,6 +2065,18 @@ jobs:
           MCP_URL: http://127.0.0.1:8010/mcp
         run: bun smoke.ts --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
 
+      # SMD-2280: the operator GUI as a browser uses it, through the stack's
+      # proxy at /dashboard: the sign-in wall, a wrong and a capture-only key
+      # refused, a cookie the server never issued and a cross-site sign-in
+      # refused, the session cookie's attributes, the overview, the status and
+      # a thought rendered from the REST core under the write key and the read
+      # key, the key in no page, header, script or cookie, and sign-out ending
+      # the session on the server (dashboard/smoke.ts). The smoke imports
+      # nothing, so nothing is installed.
+      - name: The operator GUI, driven through the proxy
+        working-directory: dashboard
+        run: bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY"
+
       # SMD-2760. What comes back after a reboot is each container's restart
       # policy. Postgres had none, so on Docker a reboot would bring the
       # servers back without their database (on podman, with its restart unit
@@ -2082,19 +2108,20 @@ jobs:
             if [ -z "$id" ]; then echo "absent none none 0001-01-01T00:00:00Z"; return; fi
             docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.HostConfig.RestartPolicy.Name}} {{.State.StartedAt}}' "$id" 2> /dev/null || echo "unreadable none none 0001-01-01T00:00:00Z"
           }
-          # Running and healthy: each of the six declares a healthcheck (the
+          # Running and healthy: each of the seven declares a healthcheck (the
           # server's is its image's, server-portable/Dockerfile; the MCP server
-          # built on the REST core names its own, SMD-2287).
+          # built on the REST core names its own, SMD-2287, and so does the
+          # operator GUI, SMD-2280).
           back() {
             local status health
             read -r status health _ <<<"$(state "$1")"
             [ "$status" = running ] && [ "$health" = healthy ]
           }
           while [ $(($(date -u +%s) - t0)) -lt 120 ]; do
-            if back postgres && back server && back api && back mcp && back proxy && back forwarder; then break; fi
+            if back postgres && back server && back api && back mcp && back app && back proxy && back forwarder; then break; fi
             sleep 2
           done
-          for s in postgres server api mcp proxy forwarder; do
+          for s in postgres server api mcp app proxy forwarder; do
             read -r status health policy started <<<"$(state "$s")"
             at=$(date -d "$started" +%s)
             echo "$s: $status, health $health, policy $policy, started $((at - t0)) s after the restart began"

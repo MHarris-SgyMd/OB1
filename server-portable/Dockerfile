@@ -20,8 +20,28 @@ WORKDIR /app/rest-client
 COPY rest-client/package.json rest-client/bun.lock ./
 RUN bun install --frozen-lockfile --production
 
+# The operator GUI (SMD-2280), built here: SvelteKit's adapter-node writes a
+# server with every package bundled into dashboard/build/, so this stage's
+# install (all build tools) stays behind and the image carries the build
+# alone. It imports the REST client and the auth switch's rule from beside it,
+# as in a checkout, so both are copied in first; its type-only imports of
+# server-portable/ are erased by the build.
+FROM oven/bun:1.4.3-alpine AS dashboard-build
+WORKDIR /app/rest-client
+COPY rest-client/package.json rest-client/bun.lock ./
+RUN bun install --frozen-lockfile --production
+WORKDIR /app/dashboard
+COPY dashboard/package.json dashboard/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY rest-client/*.ts /app/rest-client/
+COPY server-portable/oauth-edge.ts server-portable/auth.ts /app/server-portable/
+COPY dashboard/svelte.config.js dashboard/vite.config.ts ./
+COPY dashboard/src ./src
+COPY dashboard/static ./static
+RUN bun run build
+
 # The image keeps the checkout's layout under /app — server-portable/, db/,
-# plugins/, mcp-server/, rest-client/ and releases.json side by side — so every
+# plugins/, mcp-server/, rest-client/, dashboard/ and releases.json side by side — so every
 # relative import resolves as it does in a checkout: the server's
 # ../db/config.mjs, the MCP server's ../server-portable/ modules, and a plugin's
 # ../../server-portable/plugin-sdk.ts, through which it reaches zod in
@@ -45,6 +65,11 @@ COPY server-portable/rest ./rest
 # suites' in-process stack out).
 COPY mcp-server/*.ts mcp-server/package.json /app/mcp-server/
 COPY rest-client/*.ts rest-client/package.json /app/rest-client/
+# The operator GUI (SMD-2280): its built server and the entry that starts it,
+# `bun ../dashboard/serve.ts`, which imports the REST client above and
+# server-portable's oauth-edge.ts, as in a checkout.
+COPY --from=dashboard-build /app/dashboard/build /app/dashboard/build
+COPY dashboard/serve.ts dashboard/package.json /app/dashboard/
 # Every plugin in the tree (SMD-2310): the registry imports each by name, and
 # OB1_PLUGINS picks which run. Tests stay out (.dockerignore).
 COPY plugins /app/plugins
@@ -87,6 +112,8 @@ ENV OB1_GIT_SHA=$OB1_GIT_SHA
 #                  MCP_ACCESS_KEYS; and OB1_AUTH_SECRET_MCP on a stack that
 #                  trades OAuth tokens. Its other settings (the REST core's
 #                  address, the plugins, the origin): mcp-server/README.md
+# ../dashboard/serve.ts, the operator GUI (SMD-2280), reads no secret: each
+#                  visitor's key is the call's. Its settings: dashboard/README.md
 EXPOSE 8000
 USER bun
 
@@ -110,10 +137,10 @@ USER bun
 #
 # The entry is the command: index.ts, the MCP server, unless a service names
 # another — the REST core's `command: ["api.ts"]` in deploy/compose.yaml
-# (SMD-2284): one image, one preflight, two servers. A third runs without
-# it, with `bun` as the entrypoint: ../mcp-server/index.ts (SMD-2287),
-# which reads no store and holds no key list — the REST core does both — and
-# whose own handlers answer a stop (shutdown.ts).
+# (SMD-2284): one image, one preflight, two servers. Two more run without
+# it, with `bun` as the entrypoint: ../mcp-server/index.ts (SMD-2287) and
+# the operator GUI's ../dashboard/serve.ts (SMD-2280), which read no store and
+# hold no key list — the REST core does both.
 ENTRYPOINT ["/bin/sh", "-c", "trap 'exit 143' TERM; trap 'exit 130' INT; bun preflight.ts & wait $! || exit $?; exec bun \"$@\"", "entry"]
 CMD ["index.ts"]
 
