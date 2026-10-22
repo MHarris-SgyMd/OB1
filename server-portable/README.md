@@ -391,18 +391,18 @@ exists and moved.
 bun install
 ```
 
-Runtime dependencies are pinned to the exact versions `../extensions/package.json`
-installs for the vendored servers, so every target runs identical library code;
-`extensions/test-auth.ts` fails if the two drift. **If you bump one file, bump
-both in the same commit.**
+`hono` and `zod` are pinned to the exact versions `../extensions/package.json`
+installs for the vendored servers, and `extensions/test-auth.ts` fails if they
+drift; the MCP packages differ (the v2 scoped packages here, the v1 SDK and
+`@hono/mcp` there, until SMD-2279 and SMD-2281). **If you bump a shared package
+in one file, bump it in both in the same commit.**
 
-### 2. Pick a target
+### 2. Run it
 
-| Target | Command | Notes |
-| --- | --- | --- |
-| Bun, locally | `bun index.ts` | Serves on `PORT`, default 8000 |
-| Container | `docker build -t ob1-mcp .` | Alpine + Bun; see `Dockerfile` |
-| Node | `bun run --bun index.ts`, or wrap with `@hono/node-server` | Same shim |
+The brain deploys as the compose stack (SMD-2282's decision 6): this server is
+its `server` service, built from `Dockerfile`, and [`SETUP.md`](../SETUP.md)
+and [`deploy/README.md`](../deploy/README.md) bring it up. `bun index.ts`
+serves the same app on `PORT` (default 8000), as this directory's tests do.
 
 ### 3. Provide configuration
 
@@ -1102,4 +1102,3 @@ stored in the same write").
 
 - `../deploy/` — the compose stack this server is the published port of
 - `../FORK.md` — what this fork changes and why
-- `../integrations/kubernetes-deployment/` — a raw-SQL port that drops PostgREST too
