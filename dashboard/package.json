@@ -1,0 +1,25 @@
+{
+	"name": "ob1-dashboard",
+	"private": true,
+	"type": "module",
+	"comment": "The operator GUI (SMD-2280): a SvelteKit server, a client of the REST core through ../rest-client, served at /dashboard by the stack's proxy. Built into the server image (server-portable/Dockerfile) and run there as compose's `app` service, `bun ../dashboard/serve.ts`. Every package is a build-time one: adapter-node bundles what the server needs into build/, so the image installs nothing for it. Pinned exactly, as the other servers' packages are.",
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"preview": "vite preview",
+		"prepare": "svelte-kit sync || echo ''",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+	},
+	"devDependencies": {
+		"@sveltejs/adapter-node": "5.5.7",
+		"@sveltejs/kit": "2.70.3",
+		"@sveltejs/vite-plugin-svelte": "6.2.4",
+		"@tailwindcss/vite": "4.3.3",
+		"@types/bun": "1.4.0",
+		"svelte": "5.57.1",
+		"svelte-check": "4.7.6",
+		"tailwindcss": "4.3.3",
+		"typescript": "5.9.3",
+		"vite": "7.3.6"
+	}
+}

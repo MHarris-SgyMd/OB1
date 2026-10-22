@@ -13,7 +13,7 @@
 **/node_modules
 
 # Everything outside the directories the images actually need (db/, server-portable/, plugins/,
-# mcp-server/, rest-client/).
+# mcp-server/, rest-client/, dashboard/).
 recipes
 dashboards
 integrations
@@ -78,6 +78,11 @@ db/bun.lock
 rest-client/generate.ts
 rest-client/openapi.json
 mcp-server/stack.ts
+# The operator GUI's build output and its smoke (SMD-2280): the image builds
+# its own from src/.
+dashboard/.svelte-kit
+dashboard/build
+dashboard/smoke.ts
 
 # Local environment and editor state.
 .env
