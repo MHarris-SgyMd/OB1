@@ -1917,7 +1917,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   // The follower ends — a signal, its --limit, or the provider refusing the
   // request itself — and the row says so, with the final judgement's block: a
   // follower stopped at its --limit on a tripped block exits 3, and its row
-  // carries the alarm too. Its age then warns, as it should.
+  // carries the alarm too. Its age then warns, as it should. The provider's
+  // refusal is named on its own row, `provider`, as a start's is (SMD-3214):
+  // a revoked key or spent credit mid-pass, which the supervisor holds; the
+  // scheduler's row, which a driven pass stamps through, names its own.
+  if (configError && opts.stamper === undefined) stamper?.refused?.("provider");
   await stamper?.end(configError ? "failed" : "stopped", lastBlock);
   if (after === null) {
     // A follower stopped while it waited for the database: the counts

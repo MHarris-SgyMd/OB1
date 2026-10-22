@@ -2255,6 +2255,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     }
     // The follower ends — a signal, its --limit, or the provider refusing the
     // request itself — and the row says so: its age then warns, as it should.
+    // The provider's refusal is named on its own row, as extract's is (SMD-3214).
+    if (configError && opts.stamper === undefined) stamper?.refused?.("provider");
     await stamper?.end(configError ? "failed" : "stopped");
   }
 

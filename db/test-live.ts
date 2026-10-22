@@ -4794,6 +4794,7 @@ if (want("10")) {
   refuseCalls = 0;
   const refusedBeat = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
   assert(refusedFollow.code === 2 && refusedBeat.outcome === "failed" && refusedBeat.ended === true, `a follower ended by the provider's refusal stamps its end, failed (exit ${refusedFollow.code}, ${JSON.stringify(refusedBeat)})`);
+  assert(refusedBeat.refused === "provider", `…the refusal named on its row, provider, so preflight and the held row say why (SMD-3214; ${JSON.stringify(refusedBeat)})`);
   await sql`SELECT delete_thought(${refusedNote}::uuid, NULL::jsonb)`;
   // A following pass that throws (here its Writer, on the pass's own counts
   // line) ends the run, and its heartbeat says so as the worker's end (review pass 3).
