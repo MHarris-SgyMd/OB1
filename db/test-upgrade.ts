@@ -545,8 +545,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // consolidation judge's distinct stored, SMD-3117), 103 (the 1.9.0 cut's
   // schema_version, SMD-1804), 104 (the lapse locks its own tree,
   // SMD-3046), 105 (Linear's duplicate status type known and
-  // settled, SMD-2935), 106 (the query log's literal arm, SMD-2891) and
-  // 107 (the listing caps the walks it runs, SMD-3036)
+  // settled, SMD-2935), 106 (the query log's literal arm, SMD-2891),
+  // 107 (the listing caps the walks it runs, SMD-3036) and 108 (a keyed
+  // rebuild of 071's mirror for a status-set change, SMD-3160)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -684,13 +685,14 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // refusing by name without 058 or 071 ([20aw]); 106 widens 059's query_log arm check, refusing by name
   // without 034 or 045 ([20ax]); 107 adds
   // the listing's cap and redefines 094's listing behind it, refusing by
-  // name without 094 ([20ay]) — all
+  // name without 094 ([20ay]); 108 adds the mirror's keyed rebuild,
+  // refusing by name without 071 ([20az]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 78, `030 is among the last seventy-eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 79, `030 is among the last seventy-nine migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4681,6 +4683,98 @@ console.log("\n[20ay] Migration 107: refused by name without 094; onto a populat
   // A re-apply moves nothing.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === theFile });
   assert((await listed()) === listedAfter && (await rows()) === before && (await audits()) === auditBefore, `a re-apply of ${number} is a no-op`);
+  await sql.close();
+}
+
+console.log("\n[20az] Migration 108: refused by name without 071; onto a populated brain at the file before it — the keyed rebuild there, no thought, audit or gate row moved by the file; a status write and a source row's write wait for the keyed form's locks, as for the full rebuild's; a set change run by the recipe reaching a session that searched eight times before it; a re-apply a no-op (SMD-3160)");
+{
+  const the108 = MIGRATIONS.find((f) => f.endsWith("_source_gate_keyed_rebuild.sql"))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "071" });
+  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the108 }).then(() => "applied", (e: Error) => e.message);
+  assert(refused === "migration 108 needs 071 (ob1_source_gate_reconcile, ob1_rebuild_source_gate); this schema lacks it",
+    `108 on a schema stopped before 071 is refused up front, naming what it needs (${refused})`);
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the108 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const ticket = async (key: string, type: string) =>
+    ((await sql`INSERT INTO thoughts (content, metadata) VALUES (${`upgrade 108: ${key}`}, ${{ source: "linear", issue: key, status: type, status_type: type }}::jsonb) RETURNING id::text AS id`)[0] as { id: string }).id;
+  const a = await ticket("UPK-1", "duplicate"), b = await ticket("UPK-2", "started");
+  for (const [id, key] of [[a, "UPK-1"], [b, "UPK-2"]]) await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${key}, ${key}, 'text/markdown')`;
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const mirror = async () => JSON.stringify(await sql`SELECT thought_id, system, gates FROM ob1_source_gate ORDER BY thought_id`);
+  const before = await rows(), auditBefore = await audits(), mirrorBefore = await mirror();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the108 });
+  const [fn] = await sql`SELECT to_regprocedure('ob1_rebuild_source_gate_for_types(text[])') IS NOT NULL AS ok`;
+  const [r] = await sql`SELECT * FROM ob1_rebuild_source_gate_for_types('{duplicate}')`;
+  assert(fn.ok && (await rows()) === before && (await audits()) === auditBefore && (await mirror()) === mirrorBefore && r.written === 0 && r.deleted === 0,
+    `108 onto the populated brain: the keyed rebuild there, finding the exact mirror exact (${JSON.stringify(r)}), and no thought, audit or gate row moved`);
+
+  // The keyed form holds SHARE on thoughts and on thought_sources to its
+  // transaction's end, as the full rebuild does: a status write and a source
+  // row's write in the meantime each wait, here cut at 1 s. The second is the
+  // one only thought_sources' lock holds off — a source row recorded meanwhile
+  // would take its gate from the set as it was (review pass 1).
+  const c = await ticket("UPK-3", "duplicate");
+  const holder = new SQL({ url: URL_, max: 1 });
+  const errOf = (e: Error) => (e as Error & { errno?: string }).errno ?? (e as Error & { code?: string }).code ?? e.message;
+  const cut = (write: (tx: SQL) => Promise<unknown>) => sql.begin(async (tx: SQL) => { await tx.unsafe(`SET LOCAL lock_timeout = '1s'`); await write(tx); return "ran"; }).catch(errOf);
+  let waited = "ran", sourceWaited = "ran", after = "unread", sourceAfter = "unread";
+  try {
+    await holder.unsafe(`BEGIN; SELECT * FROM ob1_rebuild_source_gate_for_types('{duplicate}')`);
+    waited = await cut((tx) => tx`UPDATE thoughts SET metadata = metadata || '{"status_type": "completed"}'::jsonb WHERE id = ${b}::uuid`);
+    sourceWaited = await cut((tx) => tx`SELECT record_thought_source(${c}::uuid, 'linear', 'UPK-3', 'UPK-3', 'text/markdown')`);
+    await holder.unsafe(`COMMIT`);
+    await sql`UPDATE thoughts SET metadata = metadata || '{"status_type": "completed"}'::jsonb WHERE id = ${b}::uuid`;
+    await sql`SELECT record_thought_source(${c}::uuid, 'linear', 'UPK-3', 'UPK-3', 'text/markdown')`;
+    after = String(((await sql`SELECT gates FROM ob1_source_gate WHERE thought_id = ${b}::uuid`)[0] as { gates: boolean }).gates);
+    sourceAfter = String(((await sql`SELECT gates FROM ob1_source_gate WHERE thought_id = ${c}::uuid`)[0] as { gates: boolean } | undefined)?.gates ?? "no row");
+  } finally {
+    await holder.unsafe(`ROLLBACK`).catch(() => undefined);
+    await holder.close();
+  }
+  assert(waited === "55P03" && sourceWaited === "55P03" && after === "true" && sourceAfter === "true",
+    `a status write and a source row's write each wait for the keyed form's locks to its transaction's end (${waited}, ${sourceWaited} at a 1 s lock_timeout), and go through after, the mirror following both (${after}, ${sourceAfter})`);
+
+  // A set change as the recipe runs it, against a server's pooled
+  // connection: a session that searched eight times with prefer_current
+  // before it (a cached generic plan) demotes a ticket of the newly settled
+  // type after it — the refresh is what reaches it, as [20aw] shows a session
+  // without 105's block keeps the old set (review pass 3).
+  const VEC = `[${Array.from({ length: OPTS.dim }, (_, i) => (i === 0 ? 1 : 0)).join(",")}]`;
+  const [{ id: kdone }] = await sql`INSERT INTO thoughts (content, metadata, embedding) VALUES ('upgrade 108: UPK-9', ${{ source: "linear", issue: "UPK-9", status: "Kgdone", status_type: "kgdone" }}::jsonb, ${VEC}::vector) RETURNING id::text AS id`;
+  await sql`SELECT record_thought_source(${kdone}::uuid, 'linear', 'UPK-9', 'UPK-9', 'text/markdown')`;
+  const [sets0] = await sql`SELECT node_lifecycle_types() AS k, node_settled_types() AS st`;
+  const warm = new SQL({ url: URL_, max: 1 });
+  const demoted = async () => (((await warm`SELECT demoted FROM search_thoughts_current(${VEC}::vector, 'upgrade 108', 0, 10, '{}'::jsonb, 0, 30, NULL) WHERE id = ${kdone}::uuid`)[0] as { demoted: string[] | null } | undefined)?.demoted ?? null);
+  const warmBefore: (string[] | null)[] = [];
+  for (let i = 0; i < 8; i++) warmBefore.push(await demoted());
+  const setSql = (k: string[], st: string[]) => `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{${k.join(",")}}'::text[] $$;
+    CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{${st.join(",")}}'::text[] $$;`;
+  await sql.begin(async (tx: SQL) => {
+    await tx.unsafe(setSql([...(sets0.k as string[]), "kgdone"], [...(sets0.st as string[]), "kgdone"]));
+    await tx`SELECT ob1_refresh_set_readers()`;
+    await tx`SELECT * FROM ob1_rebuild_source_gate_for_types('{kgdone}')`;
+  });
+  const warmAfter = await demoted();
+  await warm.close();
+  const [g9] = await sql`SELECT gates FROM ob1_source_gate WHERE thought_id = ${kdone}::uuid`;
+  const [d9] = await sql`SELECT count(*)::int AS n FROM ob1_node_projection_drift()`;
+  assert(warmBefore.every((d) => d === null) && warmAfter?.join() === "kgdone" && g9.gates === true && d9.n === 0,
+    `a set change run as the recipe says — the set, ob1_refresh_set_readers(), the keyed rebuild — reaches a session that searched eight times before it (${JSON.stringify([warmBefore[0], warmAfter])}), and the gate follows with nothing drifting`);
+  // The sets as they were, by the same recipe.
+  await sql.begin(async (tx: SQL) => {
+    await tx.unsafe(setSql(sets0.k as string[], sets0.st as string[]));
+    await tx`SELECT ob1_refresh_set_readers()`;
+    await tx`SELECT * FROM ob1_rebuild_source_gate_for_types('{kgdone}')`;
+  });
+
+  // A re-apply moves nothing.
+  const rowsAgain = await rows(), mirrorAgain = await mirror(), auditsAgain = await audits();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the108 });
+  assert((await rows()) === rowsAgain && (await mirror()) === mirrorAgain && (await audits()) === auditsAgain, "a re-apply of 108 is a no-op: no thought, gate or audit row moved");
   await sql.close();
 }
 

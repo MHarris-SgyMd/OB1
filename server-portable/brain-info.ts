@@ -189,8 +189,14 @@ export interface WorkerHeartbeat {
   ended: boolean;
   /** The last judged block's answers and malformed ones, and whether they passed SMD-2266's alarm (extraction only). */
   malformed: { answers: number; bad: number; alarm: boolean } | null;
-  /** The sleep scheduler's current or last sleep: its start and, once over, its end, UTC instants (SMD-2678); absent for the other workers, and for a sleep row with none or not of the shape. */
-  slept?: { from: string; to: string | null };
+  /**
+   * The sleep scheduler's current or last sleep: its start and, once over,
+   * its end, UTC instants (SMD-2678), and `budget` when it stopped on its
+   * budget — its clock spent, or a pass's statement past statement_timeout
+   * (SMD-2679); absent for the other workers, and for a sleep row with none
+   * or not of the shape.
+   */
+  slept?: { from: string; to: string | null; budget?: BudgetStop; limit?: number };
   /** Whether the sleep scheduler's role reads query_log, as its start found (SMD-2678); absent for the other workers and an older scheduler. */
   reads?: "yes" | "denied" | "missing";
   /** The sleep scheduler's passes waiting at their start for a provider that does not answer (SMD-2752); absent while none is, and for the other workers. */
@@ -213,6 +219,35 @@ export interface WorkerHeartbeat {
    * row). Absent while none is, and for the other workers.
    */
   held?: SleepHeld;
+  /**
+   * The sleep scheduler's budget in force — the clock a sleep runs for at
+   * most (0: none) and each pass's session settings — and the sleeps it has
+   * stopped on it since its process began (SMD-2679). Absent for the other
+   * workers, and for an earlier scheduler's row.
+   */
+  budget?: SleepBudget;
+  /** The sleep scheduler waiting for a live call before its next sleep, its last stopped on its budget (SMD-2679); absent otherwise. */
+  resting?: true;
+}
+
+/** Why a sleep stopped on its budget: its clock spent, or a pass's statement cancelled past statement_timeout (SMD-2679). */
+export const BUDGET_STOPS = ["clock", "statement"] as const;
+export type BudgetStop = (typeof BUDGET_STOPS)[number];
+/** The sleep scheduler's budget (WorkerHeartbeat.budget): minutes and seconds 0 for none, the memory in MB. */
+export type SleepBudget = { minutes: number; statementTimeoutS: number; workMemMb: number; maintenanceWorkMemMb: number; stops: number };
+
+/** A budget in words, the scheduler's and preflight's: "a 60 min clock, statement_timeout 300 s, work_mem 4 MB, maintenance_work_mem 64 MB". */
+export function budgetWords(b: SleepBudget): string {
+  return `${b.minutes ? `a ${b.minutes} min clock` : "no clock"}, statement_timeout ${b.statementTimeoutS ? `${b.statementTimeoutS} s` : "the role's or the database's own"}, work_mem ${b.workMemMb} MB, maintenance_work_mem ${b.maintenanceWorkMemMb} MB`;
+}
+
+/** A `budget` value as db/sleep.ts writes it, or undefined: counts, each within its flag's bound. */
+function parseBudget(b: unknown): SleepBudget | undefined {
+  if (b === null || typeof b !== "object") return undefined;
+  const { minutes, statementTimeoutS, workMemMb, maintenanceWorkMemMb, stops } = b as Record<string, unknown>;
+  if (!count(minutes, 10_080) || !count(statementTimeoutS, 86_400) || !count(workMemMb, 2_097_151) || (workMemMb as number) < 1
+      || !count(maintenanceWorkMemMb, 2_097_151) || (maintenanceWorkMemMb as number) < 1 || !count(stops)) return undefined;
+  return { minutes, statementTimeoutS, workMemMb, maintenanceWorkMemMb, stops } as SleepBudget;
 }
 
 /** A thought the sleep scheduler's wakes hold back (WorkerHeartbeat.held). */
@@ -330,8 +365,12 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     // The scheduler's mark of its sleep (SMD-2678): left off when not of the
     // shape, as a malformed block is — the row still says whether it is alive.
     const s = worker === "sleep" ? (v!.slept as Record<string, unknown> | undefined) : undefined;
+    // Its budget word (SMD-2679) only on a sleep that is over, of the list, and left off otherwise.
+    const stoppedOn = s !== null && typeof s === "object" && typeof s.to === "string" && (BUDGET_STOPS as readonly unknown[]).includes(s.budget) ? (s.budget as BudgetStop) : undefined;
+    // The bound it stopped at, with the word only: the clock's minutes, statement_timeout's seconds.
+    const limit = stoppedOn && count(s!.limit, stoppedOn === "clock" ? 10_080 : 86_400) ? (s!.limit as number) : undefined;
     const slept = s !== null && typeof s === "object" && typeof s.from === "string" && UTC_INSTANT.test(s.from) && (s.to === null || (typeof s.to === "string" && UTC_INSTANT.test(s.to)))
-      ? { from: s.from, to: s.to as string | null }
+      ? { from: s.from, to: s.to as string | null, ...(stoppedOn ? { budget: stoppedOn } : {}), ...(limit !== undefined ? { limit } : {}) }
       : undefined;
     const reads = worker === "sleep" && (v!.reads === "yes" || v!.reads === "denied" || v!.reads === "missing") ? v!.reads : undefined;
     // Its waiting passes and its refusal (SMD-2752), each left off when not
@@ -350,6 +389,8 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     const refused = worker === "sleep" && typeof v!.refused === "string" && (SLEEP_REFUSALS as readonly string[]).includes(v!.refused) ? (v!.refused as SleepRefusal) : undefined;
     // The thoughts its wakes hold back (SMD-2694), left off when not of the shape.
     const held = worker === "sleep" ? parseHeld(v!.held) : undefined;
+    // Its budget and the sleeps stopped on it (SMD-2679), left off when not of the shape.
+    const budget = worker === "sleep" ? parseBudget(v!.budget) : undefined;
     heartbeats.push({
       key: r.key as string,
       worker: worker!,
@@ -368,6 +409,9 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ...(waitingMidPass ? { waitingMidPass } : {}),
       ...(refused ? { refused } : {}),
       ...(held ? { held } : {}),
+      ...(budget ? { budget } : {}),
+      // Only on a live row: a scheduler killed while it waited leaves it, and speaks for nothing (review pass 2).
+      ...(worker === "sleep" && v!.resting === true && v!.ended !== true && v!.outcome !== "stopped" && !(ageS > STALE_AFTER_INTERVALS * everyS) ? { resting: true as const } : {}),
     });
   }
   return { heartbeats, ignored };

@@ -35,7 +35,7 @@
  */
 
 import { SQL } from "bun";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,7 +62,7 @@ import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.t
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
-import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
+import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, rowColumns, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import { passStamper, stampKey } from "./pass-stamp.ts";
 import { run as runSleep } from "./sleep.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
@@ -8412,8 +8412,8 @@ function syncHarness(unitIndex: number) {
     embed: async () => { calls.push("embed"); return { embedding: JSON.parse(unit(unitIndex)) as number[], model: EMBEDDING_MODEL, chunks: [] }; },
     tags: async () => { calls.push("tags"); return { type: "task", topics: ["zqtopic"] }; },
     fingerprintOf: async (t) => (await sql`SELECT content_fingerprint_of(${t}) AS f`)[0].f as string,
-    holderOf: (fp) => brainRow(sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`),
-    holderOfIdentity: (system, key) => brainRow(sql`SELECT id::text AS id, content, metadata, created_at::text AS created_at, supersedes::text AS supersedes, content_fingerprint AS fingerprint FROM thoughts WHERE id = source_thought(${system}, ${key})`),
+    holderOf: (fp) => brainRow(sql`SELECT ${rowColumns(sql)} FROM thoughts WHERE content_fingerprint = ${fp} LIMIT 1`),
+    holderOfIdentity: (system, key) => brainRow(sql`SELECT ${rowColumns(sql)} FROM thoughts WHERE id = source_thought(${system}, ${key})`),
     actor: { name: SYNC_ACTOR, via: "test-live" },
     dryRun: false,
     log: () => {},
@@ -9258,6 +9258,97 @@ if (want("23")) {
   assert(heldB.join(",") === "held,held" && (await sql`SELECT count(*)::int AS c FROM thoughts WHERE id IN (${famB[0].id}::uuid, ${famB[1].id}::uuid)`)[0].c === 0, `the dump for that ticket is held for the ticket AND its part, no row on either dump id (${heldB.join(",")})`);
   const sB2 = await sync(issueB);
   assert(sB2.outcome === "unchanged" && sB2.derived?.unchanged === 1 && calls.length === 0, `and the sync again reads both unchanged (${sB2.outcome}; ${JSON.stringify(sB2.derived)})`);
+
+  await store.close();
+  for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
+}
+
+if (want("23b")) {
+  console.log("\n[23b] board-sync never moves a capture-only key's pointer onto another row: the key's paste of a ticket's header, pointing at the key's own thought T, joins the ticket's group, and once a write key takes T nothing supersedes it — the paste in the chain's middle and at its head (the ticket's text moved), where the pointer is dropped and said so, and at its tail, where it stays and 082's lapse clears it (SMD-2670)");
+  const { store, writer, sync } = syncHarness(11);
+  const lines: string[] = [];
+  writer.log = (l) => lines.push(l);
+  const agentOf = async (seed: string, label: string, scope: string) => ((await sql`SELECT resolve_agent(${seed.repeat(64)}, ${label}, ${scope}) AS r`)[0].r as { agent_id: string }).agent_id;
+  const HOOK = { name: "hook-23b", agent_id: await agentOf("3", "hook-23b", "capture"), via: "test-door", scope: "capture" };
+  const OPER = { name: "oper-23b", agent_id: await agentOf("4", "oper-23b", "write"), via: "test-door" };
+  const cap = async (content: string, actor: Record<string, unknown>, supersedes?: string) =>
+    ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "test" }, actor, ...(actor.scope === "capture" ? { recapture: "keep" } : {}), ...(supersedes ? { supersedes } : {}) }}::jsonb, ${unit(43)}::vector) AS r`)[0].r as { id: string }).id;
+  const pointerOf = async (id: string) => (await sql`SELECT supersedes::text AS s FROM thoughts WHERE id = ${id}::uuid`)[0].s as string | null;
+  const superseders = async (id: string) => (await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes = ${id}::uuid`)[0].c as number;
+  const flagOf = async (id: string) => (await readTicketRows(sql, { scanHeaders: true })).find((r) => r.id === id)?.capture_pointer;
+  const syncedRow = async (identifier: string) => (await sql`SELECT id::text AS id FROM thoughts WHERE metadata->>'issue' = ${identifier}`)[0].id as string;
+  // A write key moving T's text takes T (082's rule), which fires the lapse.
+  const take = async (id: string, text: string) => {
+    const r = (await sql`SELECT update_thought(p_id := ${id}::uuid, p_content := ${text}::text, p_actor := ${OPER}::jsonb) AS r`)[0].r as { ok: boolean };
+    assert(r.ok, `the write key takes ${id} by moving its text`);
+  };
+  const issueOf = (n: number, title: string): LinearIssue => ({ ...SAMPLE_ISSUE, identifier: `SMD-${n}`, title, description: "The synced text.", project: null, labels: { nodes: [] }, updatedAt: "2026-09-22T01:00:00.000Z" });
+  // The ticket's header with another body: a ticket row by the grammar, its own text.
+  const paste = (issue: LinearIssue, body: string) => renderIssue({ ...issue, description: body });
+  const ids: string[] = [];
+
+  // The middle: board-sync's H holds Linear's text over a write key's paste O;
+  // the key's paste S, newer, points at T. The chain is H → S → O, and O is
+  // not pointed at T.
+  {
+    const issue = issueOf(90050, "The key's paste in the middle");
+    await sync(issue);
+    const H = await syncedRow("SMD-90050");
+    const O = await cap(paste(issue, "[23b.1] the operator's paste"), OPER);
+    await sync(issue);
+    const T = await cap("[23b.1] the hook's own note", HOOK);
+    const S = await cap(paste(issue, "[23b.1] the hook's paste"), HOOK, T);
+    ids.push(H, O, T, S);
+    assert((await pointerOf(H)) === O && (await pointerOf(S)) === T && (await flagOf(S)) === true && (await flagOf(H)) === false,
+      `[23b.1] setup: H→O chained by board-sync, the hook's S→T its capture's pointer, read as one (capture_pointer true on S, false on H)`);
+    lines.length = 0;
+    const r = await sync(issue);
+    assert(r.chainRefusal === undefined && (await pointerOf(H)) === S && (await pointerOf(S)) === O && (await pointerOf(O)) === null && (await superseders(T)) === 0,
+      `[23b.1] the chain is H → S → O and nothing points at T (H→${await pointerOf(H)}, S→${await pointerOf(S)}, O→${await pointerOf(O)})`);
+    assert(lines.some((l) => l.includes(`${S} → ${O} (was ${T}) — its pointer onto ${T} is a capture-only key's, which lapses only where its capture wrote it, and is DROPPED, not carried to the tail`)),
+      `[23b.1] …and the pass says the key's pointer was dropped, not carried (${lines.join(" ⏎ ")})`);
+    await take(T, "[23b.1] the operator's word on the hook's note");
+    assert((await superseders(T)) === 0, "[23b.1] once a write key takes T, nothing supersedes it");
+  }
+
+  // The head: the ticket's text moved in Linear and no row holds it, so the
+  // key's S, the current row, becomes the head and takes the text. The chain
+  // is S → H, and H is not pointed at T.
+  {
+    const issue = issueOf(90051, "The key's paste at the head");
+    await sync(issue);
+    const H = await syncedRow("SMD-90051");
+    const T = await cap("[23b.2] the hook's own note", HOOK);
+    const S = await cap(paste(issue, "[23b.2] the hook's paste"), HOOK, T);
+    ids.push(H, T, S);
+    lines.length = 0;
+    const moved: LinearIssue = { ...issue, state: { name: "Done", type: "completed" }, updatedAt: "2026-09-22T02:00:00.000Z" };
+    const r = await sync(moved);
+    const sRow = (await sql`SELECT content FROM thoughts WHERE id = ${S}::uuid`)[0] as { content: string };
+    assert(r.outcome === "updated" && r.chainRefusal === undefined && sRow.content === renderIssue(moved) && (await pointerOf(S)) === H && (await pointerOf(H)) === null && (await superseders(T)) === 0,
+      `[23b.2] S takes the moved text, the chain is S → H and nothing points at T (${r.outcome}; S→${await pointerOf(S)}, H→${await pointerOf(H)})`);
+    assert(lines.some((l) => l.includes(`its pointer onto ${T} is a capture-only key's`)), `[23b.2] …and the pass says the key's pointer was dropped (${lines.join(" ⏎ ")})`);
+    await take(T, "[23b.2] the operator's word on the hook's note");
+    assert((await superseders(T)) === 0, "[23b.2] once a write key takes T, nothing supersedes it");
+  }
+
+  // The tail: the key's S is the group's oldest row, behind a write key's
+  // newer paste W, which takes Linear's text. S stays the tail with its own
+  // pointer, untouched; the take then lapses it.
+  {
+    const issue = issueOf(90052, "The key's paste at the tail");
+    const T = await cap("[23b.3] the hook's own note", HOOK);
+    const S = await cap(paste(issue, "[23b.3] the hook's paste"), HOOK, T);
+    const W = await cap(paste(issue, "[23b.3] the operator's paste"), OPER);
+    ids.push(T, S, W);
+    lines.length = 0;
+    const r = await sync(issue);
+    assert(r.chainRefusal === undefined && (await pointerOf(W)) === S && (await pointerOf(S)) === T && (await flagOf(S)) === true && !lines.some((l) => l.includes("capture-only")),
+      `[23b.3] W takes the text, the chain is W → S, and S's pointer onto T is still its capture's (W→${await pointerOf(W)}, S→${await pointerOf(S)}; ${lines.join(" ⏎ ")})`);
+    await take(T, "[23b.3] the operator's word on the hook's note");
+    assert((await superseders(T)) === 0 && (await pointerOf(S)) === null && (await pointerOf(W)) === S,
+      `[23b.3] once a write key takes T, 082's lapse clears S's pointer and the chain above stands (S→${await pointerOf(S)})`);
+  }
 
   await store.close();
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`;
@@ -12425,6 +12516,148 @@ if (want("38")) {
     await late;
     assert(lateWoke, `a capture committed after the sleep began, in a transaction begun before it, wakes it (${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
 
+    // ── The budget (SMD-2679) ────────────────────────────────────────────────
+    // Each pass's connections open with the budget's session settings: a
+    // statement trigger on the claim table records what the passes' own
+    // enqueue_thoughts sees — their connections, not the scheduler's.
+    type BudgetBeat = { running: boolean; outcome: string | null; ended?: boolean; resting?: boolean; slept?: { from: string; to: string | null; budget?: string; limit?: number }; budget?: { minutes: number; statementTimeoutS: number; workMemMb: number; maintenanceWorkMemMb: number; stops: number } };
+    const budgetBeat = async () => (await beat()) as unknown as BudgetBeat | null;
+    const asleepCount = () => lines.filter((l) => /asleep:/.test(l)).length;
+    // Captured first: a capture's own trigger writes claims on the suite's connection.
+    lines.length = 0;
+    for (let i = 0; i < 2; i++) await capture(`A budget note, number ${i}.`, "op-sleep", 0, 5);
+    await sql.unsafe(`CREATE TABLE zz_budget_seen (st text, wm text, mwm text);
+      CREATE FUNCTION zz_budget_seen() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        INSERT INTO zz_budget_seen VALUES (current_setting('statement_timeout'), current_setting('work_mem'), current_setting('maintenance_work_mem')); RETURN NULL; END $$;
+      CREATE TRIGGER zz_budget_seen AFTER INSERT OR UPDATE ON thought_work_claims FOR EACH STATEMENT EXECUTE FUNCTION zz_budget_seen()`);
+    try {
+      const acSet = new AbortController();
+      const setCode = await bounded(sleepRun({ statementTimeout: 7, workMem: 3, maintenanceWorkMem: 70, signal: acSet.signal }), acSet);
+      // The passes' claim writes, and the scheduler's own (its move of stopped
+      // thoughts to the back) on its own connection: the memory settings
+      // without the timeout (review pass 1).
+      const seen = (await sql`SELECT st, wm, mwm, count(*)::int AS n FROM zz_budget_seen GROUP BY 1, 2, 3 ORDER BY 1`) as { st: string; wm: string; mwm: string; n: number }[];
+      assert(setCode === 0 && seen.length === 2 && seen[0].st === "0" && seen[0].wm === "3MB" && seen[0].mwm === "70MB" && seen[1].st === "7s" && seen[1].wm === "3MB" && seen[1].mwm === "70MB" && seen[1].n >= 2 && lines.some((l) => /budget: a 60 min clock, statement_timeout 7 s, work_mem 3 MB, maintenance_work_mem 70 MB/.test(l)),
+        `each pass's connections open with the budget's settings — statement_timeout, work_mem and maintenance_work_mem, as both passes' claim writes saw them — the scheduler's own with the memory settings alone, and the start says the budget (exit ${setCode}; ${JSON.stringify(seen)})`);
+    } finally {
+      await sql.unsafe(`DROP TRIGGER zz_budget_seen ON thought_work_claims; DROP FUNCTION zz_budget_seen(); DROP TABLE zz_budget_seen`);
+    }
+
+    // The clock: spent, the passes stop after the thought in hand, every lease
+    // returned, the stop counted on the row; no sleep begins until a live
+    // call, and the next resumes the work left.
+    lines.length = 0;
+    for (let i = 0; i < 3; i++) await capture(`A clocked note, number ${i}.`, "op-sleep", 0, 6);
+    // A 3 s clock and 5 s calls: spent mid-thought, seconds either side, with
+    // time for extraction's start to claim first under a loaded runner
+    // (review passes 1 and 3: a clock under a poll left none).
+    slowExtract = 5000;
+    const acClock = new AbortController();
+    const clockRun = sleepRun({ follow: true, budgetMs: 3000, minStampEveryS: 1, signal: acClock.signal });
+    let clockBeat = null as BudgetBeat | null;
+    const spent = await pollUntil(async () => (clockBeat = await budgetBeat())?.slept?.budget === "clock" && clockBeat?.running === false, 20_000);
+    const afterClock = await claims(EX);
+    assert(spent && lines.some((l) => /the sleep's budget is spent \(3000 ms\) — the passes stop after the thought in hand/.test(l)) && !afterClock.claimed && (afterClock.pending ?? 0) >= 2 && clockBeat?.budget?.stops === 1 && clockBeat.budget.minutes === 60 && typeof clockBeat.slept?.to === "string" && clockBeat.slept.limit === 1 && clockBeat.resting === true,
+      `a sleep whose clock is spent stops its passes after the thought in hand, every lease returned and work left, the stop counted on the row with the bound it stopped at, and the row resting until a live call (${JSON.stringify(afterClock)}; ${JSON.stringify(clockBeat)})`);
+    slowExtract = 0;
+    await Bun.sleep(2500);
+    const noSleep = asleepCount();
+    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after the budget')`;
+    // The next sleep runs on the same 3 s clock, so the work moving
+    // is what proves the resume, not the pool drained (review pass 2).
+    const doneBefore = afterClock.succeeded ?? 0;
+    const resumed = await pollUntil(async () => asleepCount() >= 2 && ((await claims(EX)).succeeded ?? 0) > doneBefore, 20_000);
+    assert(noSleep === 1 && resumed,
+      `…no sleep begins in the quiet after it (${noSleep} sleep(s)); a live call and the quiet begin the next, which resumes the work left (${doneBefore} → ${JSON.stringify(await claims(EX))})`);
+    acClock.abort();
+    const clockCode = await clockRun;
+    // (The resumed sleep may spend its own clock too: the count is at least the one.)
+    assert(clockCode === 0 && ((await budgetBeat())?.budget?.stops ?? 0) >= 1, `…and the scheduler stopped by a signal exits 0, its row counting the stop (exit ${clockCode})`);
+
+    // The grace: a thought still in hand past it is stopped hard, a cut.
+    lines.length = 0;
+    await capture("A note the model takes its time over.", "op-sleep", 0, 7);
+    slowExtract = 12000;
+    const acGrace = new AbortController();
+    const graceRun = sleepRun({ follow: true, budgetMs: 3000, budgetGraceMs: 1000, minStampEveryS: 1, signal: acGrace.signal });
+    let graceHeld = "";
+    await pollUntil(async () => {
+      const [r] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
+      if (r) graceHeld = r.id;
+      return lines.some((l) => /still in hand 1 s past the budget — stopped now, the thought in hand cut/.test(l)) && (await budgetBeat())?.slept?.budget === "clock";
+    }, 20_000);
+    const [graceCut] = graceHeld ? await sql`SELECT cuts, stops FROM extraction_progress WHERE thought_id = ${graceHeld}::uuid AND work_type = ${EX}` : [];
+    assert(lines.some((l) => /extract still in hand 1 s past the budget — stopped now, the thought in hand cut/.test(l)) && !(await claims(EX)).claimed && graceCut?.cuts === 1 && graceCut.stops === 0,
+      `a pass still in hand past the budget's grace is stopped hard, its lease returned and the stop counted on the thought as the scheduler's cut, not a stop (${JSON.stringify(graceCut)}; ${JSON.stringify(await claims(EX))})`);
+    slowExtract = 0;
+    acGrace.abort();
+    await graceRun;
+
+    // A statement past statement_timeout ends the pass and the sleep, not the
+    // scheduler: a trigger holds the passes' enqueue past a 1 s timeout.
+    lines.length = 0;
+    await capture("A note behind a slow statement.", "op-sleep", 0, 8);
+    // After the capture, whose own trigger would wait out the slow statement too.
+    await sql.unsafe(`CREATE FUNCTION zz_budget_slow() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(3); RETURN NULL; END $$;
+      CREATE TRIGGER zz_budget_slow AFTER INSERT ON thought_work_claims FOR EACH STATEMENT EXECUTE FUNCTION zz_budget_slow()`);
+    let slowDropped = false;
+    const dropSlow = async () => {
+      if (slowDropped) return;
+      slowDropped = true;
+      await sql.unsafe(`DROP TRIGGER zz_budget_slow ON thought_work_claims; DROP FUNCTION zz_budget_slow()`);
+    };
+    const acSlow = new AbortController();
+    let slowSettled = false;
+    const slowRun = sleepRun({ follow: true, statementTimeout: 1, minStampEveryS: 1, signal: acSlow.signal }).finally(() => { slowSettled = true; });
+    try {
+      let slowBeat = null as BudgetBeat | null;
+      const stoppedOnIt = await pollUntil(async () => (slowBeat = await budgetBeat())?.slept?.budget === "statement" && slowBeat?.running === false, 20_000);
+      assert(stoppedOnIt && !slowSettled && lines.some((l) => /extract: a statement passed the pass's statement_timeout \(1 s\) — canceling statement due to statement timeout; the pass ends/.test(l)) && lines.some((l) => /the sleep stops on its budget: a pass's statement timed out/.test(l)) && slowBeat?.outcome === "failed" && slowBeat.budget?.stops === 1 && slowBeat.budget.statementTimeoutS === 1 && slowBeat.slept?.limit === 1 && !(await claims(EX)).claimed,
+        `a statement past statement_timeout ends the pass and stops the sleep on its budget — the row failed, the stop counted, no lease held — and the scheduler runs on (${JSON.stringify(slowBeat)}; settled ${slowSettled})`);
+      await dropSlow();
+      await Bun.sleep(1500);
+      const quietSleeps = asleepCount();
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after the slow statement')`;
+      const after = await pollUntil(async () => asleepCount() === quietSleeps + 1 && !(await claims(EX)).pending && !(await claims(EX)).claimed, 20_000);
+      assert(quietSleeps === 1 && after, `…and after a live call the next sleep, the statement no longer slow, does the work (${quietSleeps} sleep(s) before the call; ${JSON.stringify(await claims(EX))})`);
+    } finally {
+      await dropSlow();
+      acSlow.abort();
+    }
+    const slowCode = await slowRun;
+    assert(slowCode === 0, `…and a stop ends it with 0 (exit ${slowCode})`);
+
+    // An idle clock-out (review pass 2): the pools drained, the clock ends the
+    // sleep with no stop counted or marked, the row resting all the same; a
+    // live call and the quiet begin the next, and the row rests no longer.
+    lines.length = 0;
+    const acIdle = new AbortController();
+    const idleRun = sleepRun({ follow: true, budgetMs: 6000, minStampEveryS: 1, signal: acIdle.signal });
+    let idleBeat = null as BudgetBeat | null;
+    const idled = await pollUntil(async () => (idleBeat = await budgetBeat())?.resting === true, 30_000);
+    assert(idled && lines.some((l) => /the sleep's clock is spent \(6000 ms\) with nothing left to do — it ends; the next begins after a live call/.test(l)) && idleBeat?.slept?.budget === undefined && typeof idleBeat?.slept?.to === "string" && idleBeat.budget?.stops === 0,
+      `a clock spent on drained pools ends the sleep with no stop counted or marked, the row resting until a live call (${JSON.stringify(idleBeat)})`);
+    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after the idle clock')`;
+    let nextBeat = null as BudgetBeat | null;
+    const rested = await pollUntil(async () => asleepCount() === 2 && (nextBeat = await budgetBeat())?.running === true && nextBeat?.resting === undefined, 15_000);
+    assert(rested, `…and once a live call and the quiet begin the next sleep, the row rests no longer (${JSON.stringify(nextBeat)})`);
+    acIdle.abort();
+    await idleRun;
+
+    // A pass waiting for its provider is work left, the pools drained or not:
+    // the clock's stop is counted, a judge outage no idle night (review pass 3).
+    lines.length = 0;
+    unavailable = true;
+    const acOutage = new AbortController();
+    const outageRun = sleepRun({ follow: true, budgetMs: 3000, minStampEveryS: 1, signal: acOutage.signal });
+    let downBeat = null as BudgetBeat | null;
+    const downStopped = await pollUntil(async () => (downBeat = await budgetBeat())?.slept?.budget === "clock" && downBeat?.running === false, 30_000);
+    unavailable = false;
+    assert(downStopped && downBeat?.budget?.stops === 1 && lines.some((l) => /the sleep's budget is spent \(3000 ms\) — the passes stop after the thought in hand/.test(l)) && !lines.some((l) => /nothing left to do/.test(l)),
+      `a clock spent while the passes wait for the provider is a counted stop, not an idle clock-out (${JSON.stringify(downBeat)})`);
+    acOutage.abort();
+    await outageRun;
+
     // A model not served is the configuration's: the scheduler's check of
     // each pass's start meets it before the first quiet, and it ends with 2
     // at once, the row ended failed, no sleep begun (SMD-2752; before, the
@@ -12917,7 +13150,8 @@ if (want("38")) {
         `a judge model not served ends the service with 2 at its start, before any sleep, the row ended failed and naming the refusal, model (exit ${judgeCode}; ${JSON.stringify(judgeBeat)})`);
       // A restarted scheduler's first row carries the last process's sleep,
       // which preflight reads, until it sleeps itself (SMD-2752 PR 3, review pass 1).
-      const lastMark = { from: "2026-10-01T00:00:00.000Z", to: "2026-10-01T00:20:00.000Z" };
+      // With its budget word (SMD-2679): the last sleep stopped on its clock.
+      const lastMark = { from: "2026-10-01T00:00:00.000Z", to: "2026-10-01T00:20:00.000Z", budget: "clock", limit: 60 };
       await sql`INSERT INTO ob1_config (key, value) VALUES ('heartbeat:sleep', ${JSON.stringify({ v: 1, every_s: 60, running: false, outcome: "stopped", ended: true, slept: lastMark })})
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
       const carryRun = followRun({ quiet: 300 });
@@ -14171,6 +14405,12 @@ if (want("41")) {
     // so it refuses naming 105; 105 re-applied, it runs. Put back in any case.
     const SET058 = `CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{completed,canceled}'::text[] $$`;
     const apply105 = () => applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.endsWith("_duplicate_settles.sql") });
+    // The sets put back as this tree ships them — each set's last definer, so
+    // a later migration that changes a set is not undone by 105 (SMD-3160
+    // review pass 4). Their comments stay 105's: nothing here reads them.
+    const setDefiners = ["node_lifecycle_types", "node_settled_types"].map((fn) => readdirSync(join(HERE, "migrations")).filter((f) => f.endsWith(".sql")
+      && new RegExp(`^CREATE OR REPLACE FUNCTION ${fn}\\(\\)`, "m").test(readFileSync(join(HERE, "migrations", f), "utf8"))).sort().at(-1));
+    const applyShippedSets = () => applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => setDefiners.some((d) => d !== undefined && f.endsWith(d)) });
     let no058: string | null = "unread", before105: string | null = "unread", after105: string | null = "unread";
     // And closed() reads that set, not a list of its own: a Done ticket and a
     // Duplicate, unlinked, are a closed pair under 105's set and offered under
@@ -14190,7 +14430,7 @@ if (want("41")) {
       after105 = await findingsSchemaProblem(bsql);
       pairBack = await offered();
     } finally {
-      if (after105 !== null) { await bsql.unsafe(SET058); await apply105(); }
+      await applyShippedSets();
     }
     assert(no058 === "migration 058 is not applied, so whether a ticket is closed cannot be asked (cd db && bun migrate.ts --url …)"
         && before105 === "migration 105 is not applied, or an older tree's --reapply undid it, so a Duplicate ticket would read as open (cd db && bun migrate.ts --url …; after an older tree's --reapply, this tree's --reapply)"
