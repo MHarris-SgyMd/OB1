@@ -7,11 +7,13 @@
 # server step's own settings, which it tests.
 #
 # The full-stack auth job's authorization server step runs this before it
-# starts the server. The other two full-stack jobs run it where that step ran
-# when the three were one job, and recreate the MCP server on it, so the steps
-# after it meet what they met then: a server configured for an origin whose
-# authorization server is not running, and a deploy/.env holding OB1_AUTH_
-# lines, which canary.sh must leave out of the canary's file.
+# starts the server. deploy-stack and deploy-stack-brains run it where that
+# step ran when the three were one job, and deploy-stack-observability before
+# the observability step, which met it in deploy-stack until SMD-3170; each
+# recreates the MCP server on it, so the steps after it meet what they met
+# then: a server configured for an origin whose authorization server is not
+# running, and a deploy/.env holding OB1_AUTH_ lines, which canary.sh must
+# leave out of the canary's file.
 #
 # CI only: it appends a made-up origin, the auth profile and fresh secrets to
 # deploy/.env, which on an operator's checkout is the brain's own file, so it
