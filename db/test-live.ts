@@ -28,10 +28,10 @@
  *   OB1_ALLOW_REMOTE_DB=1 DATABASE_URL=... bun test-live.ts   # anything else
  *
  * OB1_LIVE_SHARD=sleep|long|extract|rest runs one shard of the sections
- * (SHARDS below). Fork Checks runs the four side by side, one job each, every
- * one on a database of its own (SMD-3048). From one checkout, run them one at
- * a time: [2] edits a migration file while it runs, which another shard's
- * migrations would read.
+ * (SHARDS below). Fork Checks runs the four side by side, one matrix cell each,
+ * every one on a database of its own (SMD-3048, SMD-3169). From one checkout,
+ * run them one at a time: [2] edits a migration file while it runs, which
+ * another shard's migrations would read.
  */
 
 import { SQL } from "bun";

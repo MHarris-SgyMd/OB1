@@ -394,20 +394,27 @@
  *      tracks or would track is one a fork-checks.yml step runs — `bun` or
  *      `node` naming it from the step's working-directory, the job's or a `cd`
  *      in the step, where its failure fails the job (no `continue-on-error`,
- *      `if: false` or `|| true`), a comment line or a quoted string read as
- *      nothing — or one SUITES_NOT_RUN names with why; an entry there that a
- *      workflow runs, that names no suite or that gives no reason is reported
- *      too. db/test-weekly-digest.ts and server-portable/test-jobs.ts had
- *      passed unrun for weeks; `eval-*` files are measurements, not suites,
- *      and are not read
+ *      `if: false`, `${{ false }}` or `|| true`), a comment line or a quoted
+ *      string read as nothing, a matrix job read once a cell, a step under
+ *      `matrix.<key> == '<value>'` (or `!=`) joined by `&&` read in the cells
+ *      it runs in and one under any other `if:` that reads the matrix
+ *      reported (SMD-3169) — or one SUITES_NOT_RUN names with why; an entry
+ *      there that a workflow runs, that names no suite or that gives no
+ *      reason is reported too. db/test-weekly-digest.ts and
+ *      server-portable/test-jobs.ts had passed unrun for weeks; `eval-*`
+ *      files are measurements, not suites, and are not read
  *  35. db/ci-parity.sh runs what CI runs (SMD-2903): every script a
  *      fork-checks.yml step runs (check 34's reader) is a `run` line of
  *      ci-parity.sh where the step sets DATABASE_URL, or a `nodb` line where it
  *      does not, from a directory the step may run it from, with the same
- *      flags and environment (the database URLs aside); every typecheck step
- *      is a `typecheck` line; a line no step runs as written is stale; and
- *      PARITY_NOT_RUN excuses what it cannot run, by job or script, with why
- *      — an excuse for what CI no longer has is reported too
+ *      flags and environment (the database URLs aside), a matrix job read
+ *      once a cell, with `${{ matrix.* }}` filled in and a step under
+ *      `if: matrix.<key> == '<value>'` (or `!=`) read in the cells it runs
+ *      in, any other `if:` reading the matrix reported by check 34
+ *      (SMD-3169); every typecheck step is a `typecheck` line; a line no
+ *      step runs as written is stale; and PARITY_NOT_RUN excuses what it
+ *      cannot run, by job or script, with why — an excuse for what CI no
+ *      longer has is reported too
  *  36. the edge proxy (SMD-2876): deploy/edge/compose.yaml is EDGE_COMPOSE,
  *      value for value — compose.yaml's proxy's Traefik and access log, no
  *      trusted PROXY line, read-only and confined, the bridge shape on a
@@ -7744,13 +7751,23 @@ checkBunPins();
 // each is taken). release.yml is not read: it runs on a tag, and on a pull
 // request only when its own paths change. A run counts only if the suite's
 // failure fails the job, so nothing counts from a step or job with
-// `continue-on-error` or `if: false`, or from a command followed by `|| true`
-// or `|| :`, a continued line read as one. A comment line runs nothing, and a
-// quoted string is read as nothing either: an echo that names a suite does not
-// run it, and so a suite run only inside `sh -c "…"`, or only through `bun run`
-// and a package script, reads as unrun, which is the loud direction. What
-// no workflow should run is named in SUITES_NOT_RUN with why, and an entry
-// there that a workflow does run is stale.
+// `continue-on-error` or `if: false` (or `${{ false }}`), or from a command
+// followed by `|| true` or `|| :`, a continued line read as one. A matrix job
+// is read once a cell, GitHub's way (matrixCells), its `${{ matrix.* }}` in env
+// values, the run text and the working-directory filled in from the cell, so
+// check 35 holds each shard of db-live to its line (SMD-3169). A step whose
+// `if:` is `matrix.<key> == '<value>'` (or `!=`) on a string value, alone or
+// joined by `&&` to parts that read no matrix, is read in the cells that run it
+// alone, so a shard renamed under db-live's rest-only step leaves its suite
+// unrun, not run four times; any other `if:` that reads the matrix, on a step
+// that runs a suite, is reported as one check 34 cannot decide (review passes 2
+// and 3), and an `if:` that reads no matrix is not evaluated unless it is
+// `false`. A comment line runs nothing, and a quoted string is read as nothing
+// either: an echo that names a suite does not run it, and so a suite run only
+// inside `sh -c "…"`, or only through `bun run` and a package script, reads as
+// unrun, which is the loud direction. What no workflow should run is named in
+// SUITES_NOT_RUN with why, and an entry there that a workflow does run is
+// stale.
 const SUITE_WORKFLOW = ".github/workflows/fork-checks.yml";
 const SUITES_NOT_RUN: Record<string, string> = {
   "db/test-support.ts": "the db/ suites' shared helpers, imported by them; it runs nothing itself",
@@ -7775,10 +7792,108 @@ type ScriptRun = { dirs: string[]; script: string; args: string; env: Record<str
 const SHELL_QUOTED = /"(?:[^"\\\n]|\\.)*"|'[^'\n]*'/g;
 /** What follows a command that swallows its failure, up to the end of its line or a `;`. */
 const SHELL_SWALLOWED = /^[^\n;]*?\|\|\s*(?:true|:)(?![\w-])/;
-/** A step or job whose failure cannot fail the job: `continue-on-error` set to anything but false, or `if: false`. */
-const failureIgnored = (v: Mapping): boolean => (v["continue-on-error"] !== undefined && v["continue-on-error"] !== false) || v.if === false;
-/** Every script a parsed workflow's steps run by bun or node whose failure fails the job (checks 34 and 35). */
-function scriptRunsIn(rel: string, doc: unknown): ScriptRun[] {
+/** A step or job whose failure cannot fail the job: `continue-on-error` set to anything but false, or `if: false`, bare or as `${{ false }}`. */
+const failureIgnored = (v: Mapping): boolean =>
+  (v["continue-on-error"] !== undefined && v["continue-on-error"] !== false) || v.if === false || (typeof v.if === "string" && /^\s*(?:\$\{\{\s*false\s*\}\}|false)\s*$/.test(v.if));
+/** A matrix value as GitHub renders it into a string: null as nothing, another scalar as itself, anything else as JSON. */
+const matrixText = (v: unknown): string => (v === null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
+/**
+ * A job's matrix cells as GitHub expands them: the product of its axes, less
+ * every cell an `exclude` entry matches in each of its keys; then each
+ * `include` entry is merged into every cell of that product whose axis
+ * values it does not change (values an earlier include added it may), or,
+ * when it fits none, added as a cell of its own, which no later include
+ * extends — so a matrix of include alone is a cell an entry. A job with no
+ * matrix is one empty cell; so is one whose matrix, an axis, its include or
+ * exclude list or an entry of either an expression gives, which leaves its
+ * `${{ matrix.* }}` unfilled and so matching no ci-parity.sh line — the loud
+ * direction — and one whose product is empty (an empty axis, every cell
+ * excluded), which GitHub refuses or runs nothing for.
+ */
+function matrixCells(strategy: unknown): Record<string, unknown>[] {
+  const m = isMapping(strategy) ? strategy.matrix : undefined;
+  if (!isMapping(m)) return [{}];
+  const { include = [], exclude = [], ...axes } = m;
+  if (!Array.isArray(include) || !Array.isArray(exclude) || ![...include, ...exclude].every(isMapping) || !Object.values(axes).every(Array.isArray)) return [{}];
+  // A cell keeps each value as YAML gives it, so an if: can tell a string from a number; values compare as rendered.
+  const same = (a: unknown, b: unknown) => a !== undefined && b !== undefined && matrixText(a) === matrixText(b);
+  let cells: Record<string, unknown>[] = Object.keys(axes).length
+    ? Object.entries(axes as Record<string, unknown[]>).reduce<Record<string, unknown>[]>((acc, [k, vs]) => acc.flatMap((c) => vs.map((v) => ({ ...c, [k]: v }))), [{}])
+    : [];
+  cells = cells.filter((c) => !exclude.some((x) => Object.keys(x).length > 0 && Object.entries(x).every(([k, v]) => same(c[k], v))));
+  const added: Record<string, unknown>[] = [];
+  for (const inc of include as Mapping[]) {
+    const fits = cells.filter((c) => Object.entries(inc).every(([k, v]) => !Object.hasOwn(axes, k) || same(c[k], v)));
+    if (fits.length) for (const c of fits) Object.assign(c, inc);
+    else added.push({ ...inc });
+  }
+  cells.push(...added);
+  return cells.length ? cells : [{}];
+}
+/** `${{ matrix.<key> }}` in a value. */
+const MATRIX_REF = /\$\{\{\s*matrix\.([A-Za-z_][\w-]*)\s*\}\}/g;
+/** A cell's value for a key, matched ignoring case as GitHub's contexts match property names; undefined when the cell has none. */
+const cellValue = (cell: Record<string, unknown>, key: string): unknown => {
+  const own = Object.keys(cell).find((k) => k.toLowerCase() === key.toLowerCase());
+  return own === undefined ? undefined : cell[own];
+};
+/** A value with each `${{ matrix.<key> }}` filled in from a cell, a key the cell lacks rendering empty, as on GitHub. */
+const fillMatrix = (v: string, cell: Record<string, unknown>): string =>
+  v.replace(MATRIX_REF, (_, key: string) => {
+    const value = cellValue(cell, key);
+    return value === undefined ? "" : matrixText(value);
+  });
+/** One comparison of a matrix value with a string literal (`''` an escaped quote). */
+const MATRIX_IF = /^\s*matrix\.([A-Za-z_][\w-]*)\s*(==|!=)\s*'((?:[^']|'')*)'\s*$/;
+/** A string literal in an expression. */
+const EXPRESSION_LITERAL = /'(?:[^']|'')*'/g;
+/** Whether an expression reads the matrix context: `matrix` itself, not a property named so (`needs.matrix`) or text in a literal. */
+const readsMatrix = (expr: string): boolean => /(?<![\w.$-])matrix\b/i.test(expr.replace(EXPRESSION_LITERAL, "''"));
+/** An expression's parts split on `op` where it stands outside parentheses and string literals. */
+function topLevelParts(expr: string, op: "&&" | "||"): string[] {
+  const parts: string[] = [];
+  let depth = 0, start = 0, quoted = false;
+  for (let i = 0; i < expr.length; i++) {
+    const c = expr[i];
+    if (c === "'") quoted = !quoted;
+    else if (quoted) continue;
+    else if (c === "(") depth++;
+    else if (c === ")") depth--;
+    else if (depth === 0 && expr.startsWith(op, i)) { parts.push(expr.slice(start, i)); start = i + op.length; i += op.length - 1; }
+  }
+  parts.push(expr.slice(start));
+  return parts;
+}
+/**
+ * Whether a step's `if:` runs it in a cell of a readable matrix. An `if:`
+ * that reads no matrix, or a cell of no readable matrix, is undefined: not
+ * evaluated, so read as run. An `if:` that is a chain of `&&` (inside
+ * `${{ }}` or not) is decided on its parts that read the matrix, each of
+ * which must be `matrix.<key> == '<value>'` or `!=` on a string value:
+ * compared ignoring case, as GitHub compares strings, a key the cell lacks
+ * being '' as GitHub dereferences it. One such part false makes the `if:`
+ * false, whatever the other parts (`!cancelled() && matrix.shard == 'rest'`,
+ * review pass 3). Any other `if:` that reads the matrix — an `||` at its top,
+ * a matrix part negated, parenthesised, reversed or indexed, a number or
+ * boolean value, which GitHub would compare as numbers — is "unread": check
+ * 34 reports it, so a shard renamed under one cannot leave a suite run by no
+ * cell while the checks count it in each (review pass 2).
+ */
+function matrixIfHolds(cond: unknown, cell: Record<string, unknown>): boolean | "unread" | undefined {
+  if (typeof cond !== "string" || !Object.keys(cell).length) return undefined;
+  const expr = cond.replace(/^\s*\$\{\{([^]*)\}\}\s*$/, "$1");
+  if (!readsMatrix(expr)) return undefined;
+  if (topLevelParts(expr, "||").length > 1) return "unread";
+  const decided: (boolean | "unread")[] = topLevelParts(expr, "&&").filter(readsMatrix).map((part) => {
+    const m = MATRIX_IF.exec(part);
+    const value = m ? cellValue(cell, m[1]) ?? "" : undefined;
+    if (!m || typeof value !== "string") return "unread";
+    return (value.toLowerCase() === m[3].replace(/''/g, "'").toLowerCase()) === (m[2] === "==");
+  });
+  return decided.includes(false) ? false : decided.includes("unread") ? "unread" : true;
+}
+/** Every script a parsed workflow's steps run by bun or node whose failure fails the job (checks 34 and 35); each step running one whose matrix `if:` it cannot decide goes in `unread`, its where, and is read as run. */
+function scriptRunsIn(rel: string, doc: unknown, unread: Set<string> = new Set()): ScriptRun[] {
   const out: ScriptRun[] = [];
   const wdOf = (v: unknown): string | undefined => {
     const d = isMapping(v) && isMapping(v.run) ? v.run["working-directory"] : undefined;
@@ -7791,31 +7906,44 @@ function scriptRunsIn(rel: string, doc: unknown): ScriptRun[] {
   for (const [job, def] of Object.entries(jobs)) {
     if (!isMapping(def) || failureIgnored(def)) continue;
     const jobWd = wdOf(def.defaults) ?? top ?? ".";
-    const jobEnv = { ...topEnv, ...envOf(def) };
     const steps = Array.isArray(def.steps) ? def.steps : [];
-    steps.forEach((step, i) => {
-      if (!isMapping(step) || typeof step.run !== "string" || failureIgnored(step)) return;
-      const wd = posix.normalize(typeof step["working-directory"] === "string" ? step["working-directory"] : jobWd);
-      const text = step.run.replace(/\\\n/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)).join("\n").replace(SHELL_QUOTED, '""');
-      const dirs = [wd, ...[...text.matchAll(SHELL_CD)].map((m) => posix.normalize(posix.join(wd, m[1])))];
-      const where = `${rel}: job ${job}, step ${typeof step.name === "string" ? JSON.stringify(step.name) : i + 1}`;
-      const stepEnv = { ...jobEnv, ...envOf(step) };
-      for (const m of text.matchAll(SCRIPT_RUN)) {
-        if (SHELL_SWALLOWED.test(text.slice(m.index! + m[0].length))) continue;
-        // The command's own assignments open the segment it is in: after the
-        // last newline, `;`, `&`, `|` or `(` before it.
-        const before = text.slice(0, m.index!);
-        const segment = before.slice(Math.max(...["\n", ";", "&", "|", "("].map((c) => before.lastIndexOf(c))) + 1);
-        const inline = Object.fromEntries((SHELL_ASSIGNS.exec(segment)?.[1] ?? "").trim().split(/\s+/).filter(Boolean).map((a) => [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]));
-        out.push({ dirs, script: m[1], args: m[2].trim().split(/\s+/).filter(Boolean).join(" "), env: { ...stepEnv, ...inline }, job, where });
-      }
-    });
+    for (const cell of matrixCells(def.strategy)) {
+      // A job with no readable matrix is one empty cell, its values left as written.
+      const inCell = Object.keys(cell).length > 0;
+      const fillText = (v: string): string => (inCell ? fillMatrix(v, cell) : v);
+      const fill = (env: Record<string, string>): Record<string, string> => Object.fromEntries(Object.entries(env).map(([k, v]) => [k, fillText(v)]));
+      const cellName = inCell ? ` (${Object.values(cell).map(matrixText).join(", ")})` : "";
+      const jobEnv = fill({ ...topEnv, ...envOf(def) });
+      steps.forEach((step, i) => {
+        if (!isMapping(step) || typeof step.run !== "string" || failureIgnored(step)) return;
+        const stepName = typeof step.name === "string" ? JSON.stringify(step.name) : i + 1;
+        const runs = matrixIfHolds(step.if, cell);
+        if (runs === false) return;
+        const runsBefore = out.length;
+        // GitHub fills the run text and the directory before the shell sees them.
+        const wd = posix.normalize(typeof step["working-directory"] === "string" ? fillText(step["working-directory"]) : jobWd);
+        const text = fillText(step.run).replace(/\\\n/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)).join("\n").replace(SHELL_QUOTED, '""');
+        const dirs = [wd, ...[...text.matchAll(SHELL_CD)].map((m) => posix.normalize(posix.join(wd, m[1])))];
+        const where = `${rel}: job ${job}${cellName}, step ${stepName}`;
+        const stepEnv = { ...jobEnv, ...fill(envOf(step)) };
+        for (const m of text.matchAll(SCRIPT_RUN)) {
+          if (SHELL_SWALLOWED.test(text.slice(m.index! + m[0].length))) continue;
+          // The command's own assignments open the segment it is in: after the
+          // last newline, `;`, `&`, `|` or `(` before it.
+          const before = text.slice(0, m.index!);
+          const segment = before.slice(Math.max(...["\n", ";", "&", "|", "("].map((c) => before.lastIndexOf(c))) + 1);
+          const inline = Object.fromEntries((SHELL_ASSIGNS.exec(segment)?.[1] ?? "").trim().split(/\s+/).filter(Boolean).map((a) => [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)]));
+          out.push({ dirs, script: m[1], args: m[2].trim().split(/\s+/).filter(Boolean).join(" "), env: { ...stepEnv, ...inline }, job, where });
+        }
+        if (runs === "unread" && out.length > runsBefore) unread.add(`${rel}: job ${job}, step ${stepName}`);
+      });
+    }
   }
   return out;
 }
 /** Every script a parsed workflow's steps run whose failure fails the job, at every path it can resolve to (check 34). */
-function suitesRunIn(rel: string, doc: unknown): SuiteRun[] {
-  return scriptRunsIn(rel, doc).flatMap((r) => r.dirs.map((d) => ({ path: posix.normalize(posix.join(d, r.script)), where: r.where })));
+function suitesRunIn(rel: string, doc: unknown, unread?: Set<string>): SuiteRun[] {
+  return scriptRunsIn(rel, doc, unread).flatMap((r) => r.dirs.map((d) => ({ path: posix.normalize(posix.join(d, r.script)), where: r.where })));
 }
 /** What check 34 reports: a suite nothing runs and nothing excuses, an excused suite a workflow runs, an excuse for no suite. */
 function suiteProblems(suites: string[], run: SuiteRun[], notRun: Record<string, string>): [where: string, detail: string][] {
@@ -7854,6 +7982,34 @@ const SUITE_PROBLEM_PROBES: [string, string[], string[], Record<string, string>,
   ["an excuse for a file that is gone", ["a/test-a.ts"], ["a/test-a.ts"], { "a/test-gone.ts": "why" }, [SELF]],
   ["an excuse with no reason", ["a/test-a.ts"], [], { "a/test-a.ts": " " }, [SELF]],
 ];
+/** [what, an if:, a cell, what matrixIfHolds decides]. */
+const MATRIX_IF_PROBES: [string, unknown, Record<string, unknown>, boolean | "unread" | undefined][] = [
+  ["equal, ignoring case", "matrix.s == 'REST'", { s: "rest" }, true],
+  ["unequal", "${{ matrix.s != 'rest' }}", { s: "rest" }, false],
+  ["a misspelt value", "matrix.s == 'rset'", { s: "rest" }, false],
+  ["an escaped quote", "matrix.s == 'it''s'", { s: "it's" }, true],
+  ["a key the cell lacks is ''", "matrix.t == 'yes'", { s: "rest" }, false],
+  ["a key the cell lacks, unequal", "matrix.t != 'yes'", { s: "rest" }, true],
+  ["a key matched ignoring case", "matrix.S == 'rest'", { s: "rest" }, true],
+  ["no matrix read", "github.event_name == 'push'", { s: "rest" }, undefined],
+  ["no readable matrix", "matrix.s == 'rest'", {}, undefined],
+  ["a property named matrix, and the word in a literal, read no matrix (review pass 3)", "needs.matrix.outputs.run == 'true' && contains(github.head_ref, 'matrix.s')", { s: "rest" }, undefined],
+  ["an && chain, true (review pass 3)", "${{ !cancelled() && matrix.s == 'rest' }}", { s: "rest" }, true],
+  ["an && chain, false (review pass 3)", "always() && matrix.s == 'rset'", { s: "rest" }, false],
+  ["an && chain, false though another part is unread (review pass 3)", "matrix['s'] == 'rest' && matrix.s == 'rset'", { s: "rest" }, false],
+  ["an && chain with a part unread (review pass 3)", "matrix.s == 'rest' && matrix['s'] == 'rest'", { s: "rest" }, "unread"],
+  ["an || at the top, below which && binds (review pass 3)", "matrix.s == 'rset' && success() || always()", { s: "rest" }, "unread"],
+  ["an && inside a literal is no chain (review pass 3)", "matrix.s == 'a && b'", { s: "a && b" }, true],
+  ["a negated part (review pass 3)", "!(matrix.s == 'rest')", { s: "rest" }, "unread"],
+  ["the whole matrix read (review pass 3)", "contains(toJSON(matrix), 'rest')", { s: "rest" }, "unread"],
+  ["reversed operands", "'rest' == matrix.s", { s: "rest" }, "unread"],
+  ["parentheses", "(matrix.s == 'rest')", { s: "rest" }, "unread"],
+  ["an index", "matrix['s'] == 'rest'", { s: "rest" }, "unread"],
+  ["a boolean value, which GitHub compares as a number", "matrix.b == 'true'", { b: true }, "unread"],
+  ["a number value", "matrix.n != '01'", { n: 1 }, "unread"],
+];
+/** Step b's if: reads the matrix in a shape check 34 cannot decide; a's and c's it can or need not; d's it cannot either, but d runs no suite (review pass 3). */
+const MATRIX_UNREAD_PROBE = `jobs:\n  a:\n    strategy:\n      matrix:\n        s: [x, y]\n    steps:\n      - name: a\n        if: always() && matrix.s == 'x'\n        run: bun test-a.ts\n      - name: b\n        if: matrix.s == 'x' || always()\n        run: bun test-b.ts\n      - name: c\n        if: success()\n        run: bun test-c.ts\n      - name: d\n        if: matrix.s == 'x' || always()\n        run: tar czf logs.tgz logs\n`;
 function checkSuitesRun() {
   if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
     fail(SELF, `check 34 parses the workflows with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-2895)`);
@@ -7869,8 +8025,17 @@ function checkSuitesRun() {
   }
   const files = citationFiles();
   const suites = files.filter((rel) => SUITE_FILE.test(rel));
+  for (const [what, cond, cell, expected] of MATRIX_IF_PROBES) {
+    const got = matrixIfHolds(cond, cell);
+    if (got !== expected) fail(SELF, `check 34 no longer decides ${JSON.stringify(expected)} for its matrix if: probe "${what}" (decided ${JSON.stringify(got)})`);
+  }
+  const probeUnread = new Set<string>();
+  scriptRunsIn("probe.yml", Bun.YAML.parse(MATRIX_UNREAD_PROBE), probeUnread);
+  if (JSON.stringify([...probeUnread]) !== JSON.stringify(['probe.yml: job a, step "b"'])) fail(SELF, `check 34 no longer reports exactly step "b" of its probe as a matrix if: it cannot decide (reported ${JSON.stringify([...probeUnread])})`);
   const run: SuiteRun[] = [];
-  try { run.push(...suitesRunIn(SUITE_WORKFLOW, Bun.YAML.parse(readFileSync(join(ROOT, SUITE_WORKFLOW), "utf8")))); } catch (e) { fail(SUITE_WORKFLOW, `does not parse, so check 34 cannot read what its steps run: ${(e as Error).message}`); }
+  const unread = new Set<string>();
+  try { run.push(...suitesRunIn(SUITE_WORKFLOW, Bun.YAML.parse(readFileSync(join(ROOT, SUITE_WORKFLOW), "utf8")), unread)); } catch (e) { fail(SUITE_WORKFLOW, `does not parse, so check 34 cannot read what its steps run: ${(e as Error).message}`); }
+  for (const where of unread) fail(where, "has an `if:` that reads the matrix in a shape check 34 cannot decide, so whether a cell runs the suite this step runs is unknown and it could run in none — write each part that reads the matrix as `matrix.<key> == '<value>'` (or `!=`) on a string value, joined to the rest by `&&` (check 34, SMD-3169)");
   // test-schema.ts from a step's working-directory, test-preflight.ts from a cd:
   // were either missed, the reading is broken, not the tree clean.
   for (const known of ["db/test-schema.ts", "server-portable/test-preflight.ts"]) {
@@ -7972,6 +8137,14 @@ const SCRIPT_RUN_PROBES: [string, string, string[]][] = [
   ["the step's env, a command's own assignments on a continued line, and not a flag's =", `jobs:\n  a:\n    env:\n      J: "1"\n    steps:\n      - working-directory: db\n        env:\n          DATABASE_URL: postgres://x\n          S: two\n        run: |\n          timeout --kill-after=10s "$limit" bun test-s.ts > "$RUNNER_TEMP/d.log" 2>&1 &\n          OB1_W=768 OB1_M=n \\\n            timeout --kill-after=10s "$limit" bun test-s.ts > "$RUNNER_TEMP/n.log" 2>&1 &\n`, ['db|test-s.ts||{"DATABASE_URL":"postgres://x","J":"1","OB1_M":"n","OB1_W":"768","S":"two"}', 'db|test-s.ts||{"DATABASE_URL":"postgres://x","J":"1","S":"two"}']],
   ["a lowercase assignment opening the command (review pass 1)", `jobs:\n  a:\n    steps:\n      - run: limit=5 bun x/test-l.ts\n`, ['.|x/test-l.ts||{"limit":"5"}']],
   ["a cd's directory last", `jobs:\n  a:\n    steps:\n      - working-directory: db\n        run: (cd ../server-portable && exec bun test-p.ts) &\n`, ['server-portable|test-p.ts||{}']],
+  ["a matrix read once a cell, its value filled into the job's env and the step's, a key it lacks empty (SMD-3169)", `jobs:\n  a:\n    strategy:\n      matrix:\n        shard: [rest, sleep]\n    env:\n      J: j-\${{ matrix.shard }}\n    steps:\n      - run: bun test-m.ts\n        env:\n          S: \${{ matrix.shard }}\n          N: \${{matrix.none}}\n`, ['.|test-m.ts||{"J":"j-rest","N":"","S":"rest"}', '.|test-m.ts||{"J":"j-sleep","N":"","S":"sleep"}']],
+  ["a matrix's exclude, an include that extends cells, one that would change an axis value and so is a cell of its own, and numbers (SMD-3169)", `jobs:\n  a:\n    strategy:\n      matrix:\n        os: [l, m]\n        n: [1, 2]\n        exclude:\n          - os: m\n            n: 2\n        include:\n          - os: l\n            extra: e\n          - os: w\n    steps:\n      - run: bun test-x.ts\n        env:\n          V: \${{ matrix.os }}/\${{ matrix.n }}/\${{ matrix.extra }}\n`, ['.|test-x.ts||{"V":"l/1/e"}', '.|test-x.ts||{"V":"l/2/e"}', '.|test-x.ts||{"V":"m/1/"}', '.|test-x.ts||{"V":"w//"}']],
+  ["a step's matrix if: read in the cells it runs in, ignoring case, inside ${{ }} or not; one no cell runs; one on a key no cell has (''), none; an && chain decided on its matrix part (SMD-3169, review passes 1-3)", `jobs:\n  a:\n    strategy:\n      matrix:\n        s: [a, b]\n    env:\n      S: \${{ matrix.s }}\n    steps:\n      - run: bun test-a.ts\n        if: matrix.s == 'A'\n      - run: bun test-b.ts\n        if: \${{ matrix.s != 'a' }}\n      - run: bun test-n.ts\n        if: matrix.s == 'rset'\n      - run: bun test-k.ts\n        if: matrix.other == 'x'\n      - run: bun test-c.ts\n        if: matrix.s == 'a' && github.event_name == 'push'\n`, ['.|test-a.ts||{"S":"a"}', '.|test-b.ts||{"S":"b"}', '.|test-c.ts||{"S":"a"}']],
+  ["a matrix value filled into the run text and the working-directory, its key matched ignoring case (SMD-3169, review pass 3)", `jobs:\n  a:\n    strategy:\n      matrix:\n        d: [db, evals]\n    steps:\n      - working-directory: \${{ matrix.d }}\n        run: OB1_D=\${{ matrix.D }} bun test-w.ts --\${{ matrix.d }}\n`, ['db|test-w.ts|--db|{"OB1_D":"db"}', 'evals|test-w.ts|--evals|{"OB1_D":"evals"}']],
+  ["GitHub's own include example, and an exclude matching on some of a cell's keys (SMD-3169, review pass 2)", `jobs:\n  a:\n    strategy:\n      matrix:\n        fruit: [apple, pear]\n        animal: [cat, dog]\n        include:\n          - color: green\n          - color: pink\n            animal: cat\n          - fruit: apple\n            shape: circle\n          - fruit: banana\n          - fruit: banana\n            animal: cat\n    steps:\n      - run: bun test-f.ts\n        env:\n          V: \${{ matrix.fruit }}/\${{ matrix.animal }}/\${{ matrix.color }}/\${{ matrix.shape }}\n  b:\n    strategy:\n      matrix:\n        os: [l, m]\n        v: [1, 2]\n        e: [x, y]\n        exclude:\n          - os: m\n            v: 2\n    steps:\n      - run: bun test-e.ts\n        env:\n          V: \${{ matrix.os }}\${{ matrix.v }}\${{ matrix.e }}\n`, ['.|test-e.ts||{"V":"l1x"}', '.|test-e.ts||{"V":"l1y"}', '.|test-e.ts||{"V":"l2x"}', '.|test-e.ts||{"V":"l2y"}', '.|test-e.ts||{"V":"m1x"}', '.|test-e.ts||{"V":"m1y"}', '.|test-f.ts||{"V":"apple/cat/pink/circle"}', '.|test-f.ts||{"V":"apple/dog/green/circle"}', '.|test-f.ts||{"V":"banana///"}', '.|test-f.ts||{"V":"banana/cat//"}', '.|test-f.ts||{"V":"pear/cat/pink/"}', '.|test-f.ts||{"V":"pear/dog/green/"}']],
+  ["an if: of \${{ false }} runs nothing, as a bare false does (SMD-3169, review pass 2)", `jobs:\n  a:\n    steps:\n      - run: bun test-q.ts\n        if: \${{ false }}\n      - run: bun test-r.ts\n        if: "false"\n`, []],
+  ["a matrix whose exclude entry an expression gives left unfilled, and null rendered as nothing (SMD-3169, review pass 1)", `jobs:\n  a:\n    strategy:\n      matrix:\n        s: [one, two]\n        exclude:\n          - \${{ fromJSON(inputs.x) }}\n    steps:\n      - run: bun test-e.ts\n        env:\n          S: \${{ matrix.s }}\n  b:\n    strategy:\n      matrix:\n        s: [null]\n    steps:\n      - run: bun test-z.ts\n        env:\n          S: <\${{ matrix.s }}>\n`, ['.|test-e.ts||{"S":"${{ matrix.s }}"}', '.|test-z.ts||{"S":"<>"}']],
+  ["a matrix of include alone, and one an expression gives left unfilled (SMD-3169)", `jobs:\n  a:\n    strategy:\n      matrix:\n        include:\n          - s: one\n          - s: two\n    steps:\n      - run: bun test-i.ts\n        env:\n          S: \${{ matrix.s }}\n  b:\n    strategy:\n      matrix: \${{ fromJSON(inputs.m) }}\n    steps:\n      - run: bun test-j.ts\n        env:\n          S: \${{ matrix.s }}\n`, ['.|test-i.ts||{"S":"one"}', '.|test-i.ts||{"S":"two"}', '.|test-j.ts||{"S":"${{ matrix.s }}"}']],
 ];
 const PARITY_PROBE_TEXT = [
   "run() { suite db \"$@\"; }",

@@ -696,8 +696,19 @@ jobs:
         run: bun test-weekly-digest.ts
 
   db-live:
-    name: Schema against real Postgres
+    name: "Schema against real Postgres (${{ matrix.shard }})"
     runs-on: ubuntu-24.04
+
+    # The live suite in four shards, one cell each, on a database of its own
+    # (SMD-3048): sleep, long and extract are the sections test-live.ts's
+    # SHARDS lists, split by their CI times so no cell outlasts the full-stack
+    # jobs; rest is [1] and every section SHARDS does not list. One job, not
+    # four copies of it, since the ruleset requires "Fork Checks passed" alone
+    # and not the cells' names (SMD-3168, SMD-3169).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [rest, sleep, long, extract]
 
     # A service container, not with-postgres.sh — the runner provides the database
     # and Actions handles readiness. The local script exists for developers, who
@@ -731,146 +742,25 @@ jobs:
 
       # Covers what PGlite structurally cannot: the migration runner over TCP,
       # driver-level jsonb binding (where the double-encoding bug lived), and
-      # whether the planner actually reaches for the HNSW index. The suite runs
-      # in four shards, one job each (SMD-3048). This job runs the shard named
-      # rest: [1] and every section test-live.ts's SHARDS does not list. The
-      # three jobs below run SHARDS' three, each on a database of its own.
-      - name: Run the live suite
+      # whether the planner actually reaches for the HNSW index.
+      - name: Run the live suite's shard
         working-directory: db
         run: bun test-live.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-          OB1_LIVE_SHARD: rest
+          OB1_LIVE_SHARD: ${{ matrix.shard }}
 
       # pgvector installed off the connection's search_path — how Supabase and
       # several managed providers ship it. The runner heals its own session and
       # preflight names the persistent fix. The test image installs pgvector into
       # public, so this suite relocates it into a schema to reproduce the shape.
+      # The rest's cell runs it, as the rest's job did.
       - name: pgvector off the search path
+        if: matrix.shard == 'rest'
         working-directory: db
         run: bun test-search-path.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-
-  # The live suite's three other shards (SMD-3048): its sections that wait
-  # out workers' timers, split by their CI times so no shard outlasts the
-  # full-stack jobs. Each is db-live's job with the shard named.
-  db-live-sleep:
-    name: "Schema against real Postgres: the sleep scheduler"
-    runs-on: ubuntu-24.04
-
-    services:
-      postgres:
-        image: pgvector/pgvector:0.8.6-pg16
-        env:
-          POSTGRES_PASSWORD: ob1test
-          POSTGRES_DB: ob1test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.4.3"
-
-      - name: Install
-        working-directory: db
-        run: bun install --frozen-lockfile
-
-      # The sections test-live.ts's SHARDS lists under sleep.
-      - name: Run the live suite's sleep shard
-        working-directory: db
-        run: bun test-live.ts
-        env:
-          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-          OB1_LIVE_SHARD: sleep
-
-  db-live-long:
-    name: "Schema against real Postgres: long thoughts and the re-embed"
-    runs-on: ubuntu-24.04
-
-    services:
-      postgres:
-        image: pgvector/pgvector:0.8.6-pg16
-        env:
-          POSTGRES_PASSWORD: ob1test
-          POSTGRES_DB: ob1test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.4.3"
-
-      - name: Install
-        working-directory: db
-        run: bun install --frozen-lockfile
-
-      # The sections test-live.ts's SHARDS lists under long.
-      - name: Run the live suite's long shard
-        working-directory: db
-        run: bun test-live.ts
-        env:
-          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-          OB1_LIVE_SHARD: long
-
-  db-live-extract:
-    name: "Schema against real Postgres: extraction"
-    runs-on: ubuntu-24.04
-
-    services:
-      postgres:
-        image: pgvector/pgvector:0.8.6-pg16
-        env:
-          POSTGRES_PASSWORD: ob1test
-          POSTGRES_DB: ob1test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: "1.4.3"
-
-      - name: Install
-        working-directory: db
-        run: bun install --frozen-lockfile
-
-      # The sections test-live.ts's SHARDS lists under extract.
-      - name: Run the live suite's extract shard
-        working-directory: db
-        run: bun test-live.ts
-        env:
-          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-          OB1_LIVE_SHARD: extract
 
   data-layer:
     name: SQL data layer against real Postgres
@@ -4057,9 +3947,6 @@ jobs:
       - db-schema
       - replay-gate
       - db-live
-      - db-live-sleep
-      - db-live-long
-      - db-live-extract
       - data-layer
       - deploy-stack
       - deploy-stack-brains
