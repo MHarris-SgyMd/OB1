@@ -1289,8 +1289,31 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   assert(JSON.stringify(waits) === JSON.stringify([["extract"], ["extract", "consolidate"], null, null, null, null, null]) && markOf("heartbeat:board-sync", { waiting: ["extract"] })?.waiting === undefined,
     `the scheduler's waiting passes are carried by name, each once, and never off another worker's row (${JSON.stringify(waits)})`);
   const refusals = ["key", "identity", "lookup", "made-up", 2, null].map((r) => markOf("heartbeat:sleep", { refused: r })?.refused ?? null);
-  assert(JSON.stringify(refusals) === JSON.stringify(["key", "identity", "lookup", null, null, null]) && markOf("heartbeat:board-sync", { refused: "key" })?.refused === undefined && markOf("heartbeat:sleep", { refused: "made-up" }) !== undefined,
-    `the scheduler's refusal is carried when one of the list, and its row counts either way (${JSON.stringify(refusals)})`);
+  // Since SMD-3214 db/supervise.ts's guard writes one on any compose follower's row, so every worker's is read.
+  assert(JSON.stringify(refusals) === JSON.stringify(["key", "identity", "lookup", null, null, null]) && markOf("heartbeat:board-sync", { refused: "key" })?.refused === "key" && markOf("heartbeat:extract:x", { refused: "identity" })?.refused === "identity" && markOf("heartbeat:extract:x", { refused: "made-up" })?.refused === undefined && markOf("heartbeat:sleep", { refused: "made-up" }) !== undefined,
+    `a refusal is carried when one of the list, on any worker's row, and its row counts either way (${JSON.stringify(refusals)})`);
+  // The supervisor's next try (SMD-3214): on an ended row, of the shape, else left off — the row counted either way.
+  const ended = { ended: true, outcome: "failed" };
+  const restarts = [
+    { in_s: 60, code: 2, tries: 1 }, { in_s: null, code: 2, tries: 0 }, { in_s: 900, code: 1, tries: 7 },
+    { in_s: -1, code: 2, tries: 1 }, { in_s: 86_401, code: 2, tries: 1 }, { in_s: 60, code: 256, tries: 1 }, { in_s: 60, code: 2 }, { in_s: "60", code: 2, tries: 1 }, null, "soon",
+  ].map((r) => markOf("heartbeat:board-sync", { ...ended, restart: r }));
+  assert(restarts.every((h) => h !== undefined)
+      && JSON.stringify(restarts.map((h) => h?.restart ?? null)) === JSON.stringify([{ inS: 60, code: 2, tries: 1 }, { inS: null, code: 2, tries: 0 }, { inS: 900, code: 1, tries: 7 }, null, null, null, null, null, null, null])
+      && markOf("heartbeat:extract:x", { restart: { in_s: 60, code: 2, tries: 1 } })?.restart === undefined,
+    `a restart is carried on an ended row when of the shape, never on a live one, and its row counts either way (${JSON.stringify(restarts.map((h) => h?.restart ?? null))})`);
+  // Its words: held, with the cause and the next try by the row's own clock — the try past due said so — and none for a row no supervisor ended.
+  const heldRow = (age_s: number, restart: unknown, extra: Record<string, unknown> = {}) =>
+    parseHeartbeats([{ key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, ...ended, restart, ...extra }), at, age_s }]).heartbeats[0];
+  const heldState = (h: ReturnType<typeof heldRow>) => heartbeatState(h!);
+  const soon = heldState(heldRow(20, { in_s: 80, code: 2, tries: 2 }));
+  const heldGuard = heldState(heldRow(5, { in_s: null, code: 2, tries: 0 }, { refused: "identity" }));
+  const due = heldState(heldRow(120, { in_s: 60, code: 1, tries: 1 }));
+  assert(/^held: exited 2, 2 end\(s\) in a row — its supervisor runs it again in 60 s \(last stamped 20 s ago/.test(soon)
+      && /^held: refused \(identity\) — its supervisor runs it again only once the service is recreated/.test(heldGuard)
+      && /^held: exited 1, 1 end\(s\) in a row — its supervisor ran it again 60 s ago, and it has not stamped since/.test(due)
+      && heldState(heldRow(5, undefined)) === "ended on a failure (last stamped 5 s ago, every 60 s)",
+    `a held row reads held, its cause and its next try — the try past due said so — and an ended row with none reads as before (${soon} | ${heldGuard} | ${due})`);
   // Its budget (SMD-2679): the stop's word on a sleep that is over, of the two, and the budget of the shape; else left off, the row counted.
   const stops = [{ from: at, to: at, budget: "clock" }, { from: at, to: at, budget: "statement" }, { from: at, to: null, budget: "clock" }, { from: at, to: at, budget: "rest" }]
     .map((m) => markOf("heartbeat:sleep", { slept: m })?.slept?.budget ?? null);

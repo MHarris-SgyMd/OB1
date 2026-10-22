@@ -393,7 +393,10 @@
  *      `unless-stopped`, so it comes back after a reboot with what it reads;
  *      what runs once "no" — and no service but those held (SMD-2760: Postgres
  *      had none, so on Docker a reboot would bring the servers back without
- *      their database; the tiers file is check 27's)
+ *      their database; the tiers file is check 27's); and a service that runs
+ *      a db/ follower runs it through db/supervise.ts, its --worker the
+ *      follower's and its --run an exec of it (SMD-3214: as `on-failure:3`
+ *      the followers stayed down after every reboot)
  *  33. one Bun, pinned everywhere (SMD-2894): every workflow step that uses
  *      oven-sh/setup-bun names `bun-version`, and every `oven/bun:<tag>` in a
  *      file git tracks or would track names a tag of the version
@@ -7887,16 +7890,22 @@ await checkPlugins();
 // back without their database; on podman, its unit disabled too, nothing came
 // back, and the dogfood stack stayed down ~47 minutes on 2026-10-09.
 // RESTART_POLICIES holds each service's policy by value: what serves is
-// `unless-stopped`, what runs once is "no", and a service that exits on
-// configuration a restart does not fix is `on-failure:3` (board-sync's
-// comment). A service added, or a policy changed, is a change there on
-// purpose. compose.tiers.yaml takes compose.yaml's postgres and Ollama
+// `unless-stopped`, what runs once is "no". The followers — board-sync, the
+// two claim workers, the sleep scheduler — were `on-failure:3`, so that a
+// refusal stopped rather than looped, and neither runtime starts that policy
+// at boot: on 2026-10-22 both brains' sleep and stable's board-sync stayed
+// down after a podman machine restart (SMD-3214). They are `unless-stopped`
+// now, through db/supervise.ts, which holds a refusal itself: a follower run
+// any other way under that policy is the crash loop again, so
+// supervisorGapsIn holds each one's command. jev stays `on-failure:3` until
+// it retries its own fetch. A service added, or a policy changed, is a change
+// there on purpose. compose.tiers.yaml takes compose.yaml's postgres and Ollama
 // through check 27, and the overlays name no restart (check 28's OVERLAYS),
 // so this file is the one to read.
 /** Each compose.yaml service's `restart`, exactly. */
 const RESTART_POLICIES: Record<string, string> = {
   postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", mcp: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
-  "board-sync": "on-failure:3", extract: "on-failure:3", consolidate: "on-failure:3", sleep: "on-failure:3",
+  "board-sync": "unless-stopped", extract: "unless-stopped", consolidate: "unless-stopped", sleep: "unless-stopped",
   ollama: "unless-stopped", "ollama-pull": "no", jev: "on-failure:3",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",
   lgtm: "unless-stopped", "pg-monitor-role": "no", "pg-exporter": "unless-stopped",
@@ -7916,6 +7925,43 @@ function restartGapsIn(text: string, held: Record<string, string>): [service: st
   for (const service of Object.keys(held)) if (!(service in doc.services)) gaps.push([service, "held in check 32's RESTART_POLICIES and not in the file"]);
   return gaps;
 }
+/** The db/ followers by script — each runs until stopped — and the --worker db/supervise.ts names it by. */
+const FOLLOWER_WORKERS: Record<string, string> = { "sleep.ts": "sleep", "extract-entities.ts": "extract", "consolidate.ts": "consolidate", "sync-linear.ts": "board-sync" };
+const FOLLOWER_SCRIPT = /\bdb\/(sleep|extract-entities|consolidate|sync-linear)\.ts\b/;
+/**
+ * Where a compose file runs a db/ follower other than through db/supervise.ts
+ * (SMD-3214): the command's first words `bun db/supervise.ts`, its --worker
+ * the follower's, its --run starting `exec bun db/<the follower>`, so the stop
+ * the supervisor passes on reaches the follower and not a shell.
+ */
+function supervisorGapsIn(text: string): [service: string | null, detail: string][] {
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(text); } catch (e) { return [[null, `does not parse: ${(e as Error).message}`]]; }
+  if (!isMapping(doc) || !isMapping(doc.services)) return [[null, "has no top-level `services:` mapping"]];
+  const gaps: [string | null, string][] = [];
+  for (const [service, def] of Object.entries(doc.services)) {
+    const cmd = isMapping(def) ? def.command : undefined;
+    const words = Array.isArray(cmd) ? cmd.map(String) : typeof cmd === "string" ? [cmd] : [];
+    const script = words.map((w) => FOLLOWER_SCRIPT.exec(w)?.[1]).find((m) => m !== undefined);
+    if (script === undefined) continue;
+    const at = (flag: string) => { const i = words.indexOf(flag); return i === -1 ? undefined : words[i + 1]; };
+    if (words[0] !== "bun" || words[1] !== "db/supervise.ts") gaps.push([service, `runs db/${script}.ts other than through db/supervise.ts, which under \`unless-stopped\` restarts its refusal in a loop`]);
+    else if (at("--worker") !== FOLLOWER_WORKERS[`${script}.ts`]) gaps.push([service, `runs db/${script}.ts under --worker ${JSON.stringify(at("--worker") ?? null)}, where its heartbeat is ${FOLLOWER_WORKERS[`${script}.ts`]}'s`]);
+    else if (!at("--run")?.startsWith(`exec bun db/${script}.ts`)) gaps.push([service, `its --run does not begin \`exec bun db/${script}.ts\`, so the stop the supervisor passes on reaches a shell, not the follower`]);
+  }
+  return gaps;
+}
+const SUPERVISED = `services:\n  sleep:\n    command: ["bun", "db/supervise.ts", "--worker", "sleep", "--require-key", "--run", "exec bun db/sleep.ts --follow"]\n  other:\n    command: ["bun", "serve.ts"]\n`;
+/** [what, text, the services (null = the file) the rule reports]. */
+const SUPERVISOR_PROBES: [string, string, (string | null)[]][] = [
+  ["a follower supervised, beside a service that runs none", SUPERVISED, []],
+  ["the sh -c of before SMD-3214", SUPERVISED.replace(/command: \["bun", "db\/supervise\.ts".*\]/, `command: ["sh", "-c", "exec bun db/sleep.ts --follow"]`), ["sleep"]],
+  ["a follower as the whole command", SUPERVISED.replace(/command: \["bun", "db\/supervise\.ts".*\]/, `command: ["bun", "db/sync-linear.ts", "--loop"]`), ["sleep"]],
+  ["a follower in a string command", SUPERVISED.replace(/command: \["bun", "db\/supervise\.ts".*\]/, `command: bun db/consolidate.ts --follow`), ["sleep"]],
+  ["the supervisor naming another worker", SUPERVISED.replace(`"--worker", "sleep"`, `"--worker", "extract"`), ["sleep"]],
+  ["a --run that does not exec", SUPERVISED.replace(`"exec bun db/sleep.ts`, `"bun db/sleep.ts`), ["sleep"]],
+  ["no --run at all", SUPERVISED.replace(`, "--run", "exec bun db/sleep.ts --follow"`, `, "db/sleep.ts"`), ["sleep"]],
+];
 const RESTART_GOOD = `services:\n  postgres:\n    image: x\n    restart: unless-stopped\n  migrate:\n    image: y\n    restart: "no"\n`;
 const RESTART_HELD = { postgres: "unless-stopped", migrate: "no" };
 /** [what, text, the services (null = the file) the rule reports]. */
@@ -7938,6 +7984,13 @@ function checkRestartPolicies() {
   for (const [what, text, expected] of RESTART_PROBES) {
     const got = restartGapsIn(text, RESTART_HELD).map(([service]) => service);
     if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 32 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  for (const [what, text, expected] of SUPERVISOR_PROBES) {
+    const got = supervisorGapsIn(text).map(([service]) => service);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 32 no longer reports exactly ${JSON.stringify(expected)} for its supervisor probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  for (const [service, detail] of supervisorGapsIn(readFileSync(join(ROOT, "deploy/compose.yaml"), "utf8"))) {
+    fail("deploy/compose.yaml", `${service === null ? "the file" : `service \`${service}\``}: ${detail} (SMD-3214)`);
   }
   for (const [service, detail] of restartGapsIn(readFileSync(join(ROOT, "deploy/compose.yaml"), "utf8"), RESTART_POLICIES)) {
     fail("deploy/compose.yaml", `${service === null ? "the file" : `service \`${service}\``}: ${detail} — what serves is \`unless-stopped\`, so it comes back after a reboot with what it reads; what runs once is "no"; a policy is changed there on purpose (SMD-2760, deploy/README.md "After a reboot")`);
