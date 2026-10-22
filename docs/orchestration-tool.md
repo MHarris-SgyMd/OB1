@@ -43,13 +43,15 @@ decision 1, `operator-surface-tiers.md`):
   n8n reaches it by on `egress`, with the key in `x-brain-key`. It is not the
   MCP Client node: the brain's MCP server is for AI clients.
 - The key discipline is unchanged: a capture-scope key, attributed and
-  revocable, in a credential pinned to one host. The brain credential is now
-  pinned to `api` (posture step 2).
+  revocable, in a credential pinned to one host. The brain credential is
+  pinned to `api` in SMD-2295's second PR, with the eval's re-aim. Until
+  then the eval's MCP Client nodes send it to `server:8000`, which the pin
+  would refuse (posture step 2).
 - n8n stays on `egress` alone, as built (SMD-2583).
 - n8n's own MCP endpoint (the act tool, SMD-2212) is n8n's, not the brain's,
   and is unaffected.
-- Decision 1's C2 and C3 record what the POC measured on 2026-09-25, each
-  tool's own MCP client among it.
+- Decision 1's C2 and C3 record what the POC measured on 2026-09-25,
+  including each tool's own MCP client.
 
 ## The decision
 
@@ -270,9 +272,14 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
    credential is restricted from accessing api.linear.app…" (measured). The POC
    pinned the Linear credential only; whether the MCP Client node honours a pin
    on the brain's header credentials is not measured and is the first thing
-   SMD-2211 measures. Since SMD-2295 the brain credential is pinned to `api`,
-   and a brain call is the HTTP Request node, the node the Linear pin was
-   measured on.
+   SMD-2211 measures. **Measured for SMD-2295** (n8n 2.40.6, the pinned
+   image, 2026-10-22): an `httpHeaderAuth` credential pinned to the bare
+   name `api` is sent to `http://api:8000` (`API` and `api.` too) by the
+   HTTP Request node, and refused ("Domain not allowed") for every other
+   host tried: a prefix or suffix of the name, `api`'s own IP address, a
+   userinfo trick, a URL built by an expression, and a redirect from `api` to
+   another host, which n8n checks again. The MCP Client node refuses it
+   off-host too. The pin compares the hostname alone, not the port.
 3. **Keys are least-privilege and separate** (SMD-2210). Ingestion holds a
    capture-scope brain key; nothing holds a write key. The key an AI client
    presents to n8n's MCP endpoint is not the key that starts an ingestion (the
@@ -560,8 +567,9 @@ the first of them converts (SMD-2149, SMD-2021).
 - **Two-way sync** — conflict resolution and round-trip fidelity are SMD-1813's
   and SMD-949's, consuming this transport; where the Obsidian and Markdown syncs
   run is SMD-1814's and SMD-1815's.
-- **Whether the MCP Client node honours a credential domain pin** — SMD-2211
-  measures it first. Since SMD-2295 no template's brain call uses that node.
+- **Whether the MCP Client node honours a credential domain pin** — measured
+  for SMD-2295: it does (posture step 2). Since SMD-2295 no template's brain
+  call uses that node.
 
 ## Follow-ups
 
