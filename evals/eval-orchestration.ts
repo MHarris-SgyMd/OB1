@@ -208,10 +208,10 @@ function selfCheck(): number {
     process.umask(umask);
     rmSync(dir, { recursive: true, force: true });
   }
-  // SMD-2295 PR 2: the one redaction every printed reply and adapter error passes.
-  expect("redactKeys: a key, in either case, and a key cut short are replaced; a UUID and a short hex run pass",
+  // SMD-2295 PR 2: the redaction the report and the eval's last error pass.
+  expect("redactKeys: a key, in either case, and a key cut to 20 are replaced; a UUID and 19 hex pass",
     redactKeys(`a ${"a".repeat(64)} b ${"F".repeat(64)} c ${"0".repeat(20)} d ${"1".repeat(19)} e 3f2b8c1e-7a4d-4e2f-9b1c-0d5e6f7a8b9c`)
-      === `a <key> b <key> c <key> d ${"1".repeat(19)} e 3f2b8c1e-7a4d-4e2f-9b1c-0d5e6f7a8b9c`);
+      === `a <hex> b <hex> c <hex> d ${"1".repeat(19)} e 3f2b8c1e-7a4d-4e2f-9b1c-0d5e6f7a8b9c`);
   // SMD-2295 PR 2: the Activepieces flows' brain keys, filled at import (the HTTP piece takes no connection).
   const flow = (f: string) => readFileSync(new URL(`./orchestration/activepieces/${f}`, import.meta.url), "utf8");
   const [ingestFlow, searchFlow] = [flow("linear-ingest.json"), flow("brain-search.json")];
@@ -372,8 +372,7 @@ async function verify(): Promise<void> {
   const call = async (declared: string, args: Record<string, unknown>) => {
     const name = find(declared);
     if (!name) return { isError: true, text: "not listed" };
-    // Redacted here, so no sample, detail or error the report prints can carry a brain key a tool echoed.
-    return callTool(url, headers, name, args, 120_000).catch((e: Error) => ({ isError: true, text: e.message })).then((r) => ({ ...r, text: redactKeys(r.text) }));
+    return callTool(url, headers, name, args, 120_000).catch((e: Error) => ({ isError: true, text: e.message }));
   };
   const search = await call(adapter.tools.search, { query: "which orchestration tool for ingestion and sync", limit: 3 });
   const act = await call(adapter.tools.act, { identifier: "SMD-1863" });
@@ -401,7 +400,7 @@ async function verify(): Promise<void> {
   checks.push({
     id: "C3",
     pass: searchOk && (sealed ? Boolean(find(adapter.tools.act)) && !actOk : actOk) && anon.refused && wrong.refused,
-    detail: `tools [${names.join(", ")}]${listed instanceof Error ? ` (${redactKeys((listed as Error).message).slice(0, 120)})` : ""}; search ${searchOk ? "ok" : `FAIL ${search.text.slice(0, 160)}`}; act ${actVerdict}; no key → ${anon.refused ? "refused" : "NOT REFUSED"} (${redactKeys(anon.detail)}); wrong key → ${wrong.refused ? "refused" : "NOT REFUSED"} (${redactKeys(wrong.detail)})`,
+    detail: `tools [${names.join(", ")}]${listed instanceof Error ? ` (${(listed as Error).message.slice(0, 120)})` : ""}; search ${searchOk ? "ok" : `FAIL ${search.text.slice(0, 160)}`}; act ${actVerdict}; no key → ${anon.refused ? "refused" : "NOT REFUSED"} (${anon.detail}); wrong key → ${wrong.refused ? "refused" : "NOT REFUSED"} (${wrong.detail})`,
   });
 
   // C1's schedule half: the on-demand runs above say nothing about whether the
@@ -439,11 +438,14 @@ async function verify(): Promise<void> {
   const size = run(["docker", "image", "inspect", adapter.image, "--format", "{{.Size}}"]).out.trim();
   const digest = run(["docker", "image", "inspect", adapter.image, "--format", "{{index .RepoDigests 0}}"]).out.trim();
   const store = adapter.storeFootprint?.(ctx);
-  // The report's one choke point: every detail is redacted here, whatever path built it (SMD-2295).
-  for (const c of checks) c.detail = redactKeys(c.detail);
+  // Redacted where the report is built, the verdicts already read from the raw
+  // text: every detail and both samples, whatever path made them (SMD-2295).
+  // E's is the packet capture's, no candidate's words, and its hostnames are
+  // the evidence of an escape.
+  for (const c of checks) if (c.id !== "E") c.detail = redactKeys(c.detail);
   const report = {
     tool, with: ctx.with, version: adapter.version(), image: adapter.image, digest, imageMiB: Math.round(Number(size) / 1048576), store,
-    memoryMiB: { atStart: idle, afterRuns: busy }, checks, switches: adapter.switches, searchSample: search.text.slice(0, 400), actSample: act.text.slice(0, 400),
+    memoryMiB: { atStart: idle, afterRuns: busy }, checks, switches: adapter.switches, searchSample: redactKeys(search.text).slice(0, 400), actSample: redactKeys(act.text).slice(0, 400),
   };
   if (json) {
     console.log(JSON.stringify(report, null, 2));
@@ -464,12 +466,12 @@ function down(): void {
   console.log(`${tool}: project ob1-orch-${tool} removed with its volumes`);
 }
 
-// The other choke point: an error the eval ends on is printed redacted, never Bun's raw report of it (SMD-2295).
+// The error the eval ends on, its stack included, is printed redacted (SMD-2295).
 try {
   if (mode === "--up") await up();
   else if (mode === "--verify") await verify();
   else down();
 } catch (e) {
-  console.error(`error: ${redactKeys(e instanceof Error ? e.message : String(e))}`);
+  console.error(`error: ${redactKeys(e instanceof Error ? (e.stack ?? e.message) : String(e))}`);
   process.exit(1);
 }

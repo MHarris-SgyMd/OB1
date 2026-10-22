@@ -12,7 +12,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { HERE, waitFor } from "./stack.ts";
-import { redactKeys, type Adapter } from "./adapter.ts";
+import type { Adapter } from "./adapter.ts";
 
 const DIR = join(HERE, "windmill");
 /** The pinned release: the image and the version the report prints, from one value. */
@@ -40,7 +40,7 @@ async function api(method: string, path: string, body?: unknown, token?: string)
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await r.text();
-  if (!r.ok) throw new Error(`${method} ${path} → ${r.status}: ${redactKeys(text).slice(0, 400)}`);
+  if (!r.ok) throw new Error(`${method} ${path} → ${r.status}: ${text.slice(0, 400)}`);
   try { return JSON.parse(text); } catch { return text; }
 }
 
@@ -87,7 +87,7 @@ export const windmill: Adapter = {
     for (const s of SCRIPTS) {
       await waitFor(`the lockfile of ${s.path}`, async () => {
         const got = await api("GET", `/w/${WS}/scripts/get/p/${s.path}`, undefined, t);
-        if (got.lock_error_logs) throw new Error(`${s.path}: ${redactKeys(String(got.lock_error_logs)).slice(0, 400)}`);
+        if (got.lock_error_logs) throw new Error(`${s.path}: ${String(got.lock_error_logs).slice(0, 400)}`);
         return typeof got.lock === "string" && got.lock.length > 0;
       }, 300_000, 3_000);
     }

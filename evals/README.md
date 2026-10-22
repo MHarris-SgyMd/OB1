@@ -6797,12 +6797,12 @@ Activepieces' first fresh `--up` failed provisioning once (`TRIGGER_UPDATE_STATU
 pin); the run below is on `~0.13.0`. Windmill's `--verify` exits 1 by design,
 for its C2:
 
-| candidate | C1 | C1s | C2 | C3 | the tool's own |
+| candidate | C1 | C1s | C2 | C3 | n8n's own checks (K, P, A, I, E; below) |
 | --- | --- | --- | --- | --- | --- |
 | n8n 2.40.6 | PASS: 10, +10 / 10, +0 | PASS: seen after 541 s | PASS: n8n's HTTP Request node | PASS | K, P, A, I PASS |
 | n8n 2.40.6, sealed | PASS: 10, +10 / 10, +0 | not run (sealed) | PASS | PASS (the act fails, as sealed it must) | K, P, A, I PASS; E PASS: `api.dns.podman` ×42 and the runner's name ×10 inside, only `api.linear.app` outside, 21 connections to `api:8000` and 5 to the runner's `:8090` |
 | activepieces 0.91.3 | PASS: 10, +10 / 10, +0 | PASS: seen after 812 s | PASS: the HTTP piece's send-request action | PASS | — |
-| windmill CE v1.817.0 | PASS: 10, +10 / 10, +0 | not measured (the stack was taken down mid-wait) | FAIL, as posted: a script of ours calling `fetch` (Windmill has no HTTP step outside a script) | PASS | — |
+| windmill CE v1.817.0 | PASS: 10, +10 / 10, +0 | not measured (the stack was taken down mid-wait) | FAIL by design: a script of ours calling `fetch` (Windmill has no HTTP step outside a script) | PASS | — |
 
 The captures' audit rows, read by hand after the runs (`SELECT action, origin,
 source, count(*) FROM thought_audit WHERE actor_name = 'orch-capture' GROUP

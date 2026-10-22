@@ -6,14 +6,14 @@
 export type Check = { id: string; pass: boolean; detail: string };
 
 /**
- * Text with every run of 20 or more hex characters replaced (SMD-2295): the
- * brain keys are 64 hex, Activepieces' flows carry them in their steps, an
- * answer may echo a request, and a message cut to length may hold most of a
- * key. UUIDs and timestamps carry hyphens, so they pass. The eval applies it
- * at its two choke points, every check's detail and sample in the report and
- * any error it ends on, and on the adapters' own errors besides.
+ * Text with every run of 20 or more hex characters replaced by `<hex>`
+ * (SMD-2295): the brain keys are 64 hex, Activepieces' flows carry them in
+ * their steps, an answer may echo a request, and a message cut to length may
+ * hold a key's first 20 or more. UUIDs and timestamps carry hyphens and pass;
+ * a git sha or a digest is masked too. The eval applies it where its report
+ * is built and to the error it ends on (eval-orchestration.ts).
  */
-export const redactKeys = (text: string): string => text.replace(/[0-9a-f]{20,}/gi, "<key>");
+export const redactKeys = (text: string): string => text.replace(/[0-9a-f]{20,}/gi, "<hex>");
 
 /** What `--up` chose for this project, read back by `--verify`: the `--with` overlays in force. */
 export type Ctx = { with: string[] };
@@ -55,11 +55,7 @@ export type Adapter = {
   scheduledRuns(env: Record<string, string>, since: string): Promise<number>;
   /** The candidate's own MCP endpoint and the header an AI client presents. */
   mcpServer(env: Record<string, string>): Promise<{ url: string; headers: Record<string, string> }>;
-  /**
-   * What carries the capture to the brain's REST core: the tool's own HTTP
-   * step, or a script of ours where it has none. Until SMD-2295 this was the
-   * tool's MCP-client step against the brain's MCP server.
-   */
+  /** What carries the capture to the brain's REST core: the tool's own HTTP step, or a script of ours where it has none. */
   httpClient: string;
   /** Is that the tool's own HTTP step? C2 asks for it (SMD-2295's wording of the posted "the tool's own MCP client"); a script of ours standing in does not pass. */
   nativeHttpClient: boolean;

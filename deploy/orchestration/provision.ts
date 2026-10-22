@@ -415,9 +415,8 @@ export const BRAIN_HOST = "api";
  */
 export function brainPinProblem(credential: any): string | undefined {
   const data = credential?.data ?? {};
-  if (data.allowedHttpRequestDomains !== "domains") return `a brain credential is pinned to the REST core's host alone — set "allowedHttpRequestDomains": "domains" and "allowedDomains": "${BRAIN_HOST}" (it has allowedHttpRequestDomains ${JSON.stringify(data.allowedHttpRequestDomains ?? null)})`;
-  if (data.allowedDomains !== BRAIN_HOST) return `a brain credential is pinned to the REST core's host alone, "allowedDomains": "${BRAIN_HOST}" (it has ${JSON.stringify(data.allowedDomains ?? null)})`;
-  return undefined;
+  if (data.allowedHttpRequestDomains === "domains" && data.allowedDomains === BRAIN_HOST) return undefined;
+  return `a brain credential is pinned to the REST core's host alone: set "allowedHttpRequestDomains": "domains" and "allowedDomains": "${BRAIN_HOST}" (it has allowedHttpRequestDomains ${JSON.stringify(data.allowedHttpRequestDomains ?? null)}, allowedDomains ${JSON.stringify(data.allowedDomains ?? null)})`;
 }
 
 /** Every credential id a workflow's nodes name must be one the credential templates declare. Returns the problems. */
@@ -850,9 +849,9 @@ async function selfCheck(): Promise<number> {
   expect("a brain credential pinned to api passes", !throws(() => checkBrainKey(pinned(pin), env), /./));
   expect("an unpinned brain credential is refused", throws(() => checkBrainKey(pinned({}), env), /pinned to the REST core's host alone/));
   expect("a brain credential allowed every domain is refused", throws(() => checkBrainKey(pinned({ allowedHttpRequestDomains: "all", allowedDomains: BRAIN_HOST }), env), /allowedHttpRequestDomains "all"/));
-  expect("a brain credential pinned to another host is refused", throws(() => checkBrainKey(pinned({ ...pin, allowedDomains: "server" }), env), /"allowedDomains": "api" \(it has "server"\)/));
-  expect("a brain credential pinned to api and another host is refused", throws(() => checkBrainKey(pinned({ ...pin, allowedDomains: "api,api.linear.app" }), env), /it has "api,api\.linear\.app"/));
-  expect("a credential that declares no brain scope needs no pin", !throws(() => checkBrainKey({ name: "v", type: "httpHeaderAuth", data: { name: "x-n8n-key", value: "anything" } }, env), /./));
+  expect("a brain credential pinned to another host is refused", throws(() => checkBrainKey(pinned({ ...pin, allowedDomains: "server" }), env), /allowedDomains "server"\)/));
+  expect("a brain credential pinned to api and another host is refused", throws(() => checkBrainKey(pinned({ ...pin, allowedDomains: "api,api.linear.app" }), env), /allowedDomains "api,api\.linear\.app"\)/));
+  expect("a credential that declares no brain scope may be pinned to another host (the runner's shape)", !throws(() => checkBrainKey({ name: "v", type: "httpHeaderAuth", data: { name: "x-runner-key", value: "anything", allowedHttpRequestDomains: "domains", allowedDomains: "orchestration-runner" } }, env), /./));
   expect("a credential holding no brain key and declaring none passes", !throws(() => checkBrainKey({ name: "x", type: "httpHeaderAuth", data: { name: "x-n8n-key", value: "anything" } }, env), /./));
   expect("a key as `Bearer <key>` is seen", throws(() => checkBrainKey({ name: "a", type: "httpHeaderAuth", data: { name: "Authorization", value: `Bearer ${wr}` } }, env), /WRITE-scope/));
   expect("a key in a URL's ?key= is seen", throws(() => checkBrainKey({ name: "u", type: "httpQueryAuth", data: { url: `http://host.example/path?key=${wr}&x=1` } }, env), /WRITE-scope/));
@@ -943,8 +942,8 @@ async function selfCheck(): Promise<number> {
   const declaredIds = new Set([...profileIds, ...kitIds]);
   // The profile's capture key, and the kit's read key where the kit is in the tree.
   const credentialFiles = [PROFILE_CREDENTIALS, join(KIT, "credentials.template.json")].filter(existsSync);
-  const brainCredentials = credentialFiles.flatMap((f) => (JSON.parse(readFileSync(f, "utf8")) as any[]).filter((c) => c.brainScope !== undefined));
-  expect("every shipped brain credential (the profile's capture key, the kit's read key) is pinned to the REST core's host", brainCredentials.length === credentialFiles.length && brainCredentials.every((c) => brainPinProblem(c) === undefined));
+  const brainCredentials = credentialFiles.map((f) => (JSON.parse(readFileSync(f, "utf8")) as any[]).filter((c) => c.brainScope !== undefined));
+  expect("every shipped brain credential (the profile's capture key, the kit's read key) is pinned to the REST core's host", brainCredentials.every((inFile) => inFile.length > 0 && inFile.every((c) => brainPinProblem(c) === undefined)));
   const shipped = [...templatesIn(PROFILE_TEMPLATES), ...templatesIn(KIT).filter((f) => !f.endsWith("credentials.template.json"))];
   expect("the profile ships its templates: the act tool's two and the import template", ["act-mcp.json", "act-linear-file-issue.json", `import${PER_PIPELINE}`, `import-on-demand${PER_PIPELINE}`].every((t) => shipped.some((f) => f.endsWith(`/${t}`))));
   for (const t of shipped) for (const p of undeclaredCredentials(JSON.parse(readFileSync(t, "utf8")), declaredIds, t)) fails.push(p);

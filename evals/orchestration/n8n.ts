@@ -38,7 +38,7 @@ import { api, ensureApiKey, keyExpiry, PROFILE_CREDENTIALS, PROFILE_TEMPLATES, p
 import { loadPipelines, RUNNER_ACTOR } from "../../deploy/orchestration/runner.ts";
 import { callTool, listTools, refuses } from "./mcp-client.ts";
 import { brainSql, compose, ENV_FILE, HERE, N8N_KIT_PORT, run } from "./stack.ts";
-import { redactKeys, type Adapter, type Check, type Ctx } from "./adapter.ts";
+import type { Adapter, Check, Ctx } from "./adapter.ts";
 
 const DIR = join(HERE, "n8n");
 /** The kit's runner allowlist, which compose.n8n.yaml mounts over the shipped (empty) one. */
@@ -186,7 +186,7 @@ async function actChecks(env: Record<string, string>, ctx: Ctx): Promise<Check> 
   return {
     id: "A",
     pass: none.refused && wrong.refused && exact && flowOk,
-    detail: `/mcp/${ACT.path}: no key → ${redactKeys(none.detail)}; wrong key → ${redactKeys(wrong.detail)}; tools ${JSON.stringify(tools)} (the template ships ${JSON.stringify(ACT.tools)}); `
+    detail: `/mcp/${ACT.path}: no key → ${none.detail}; wrong key → ${wrong.detail}; tools ${JSON.stringify(tools)} (the template ships ${JSON.stringify(ACT.tools)}); `
       + `linear_file_issue for an absent team → ${call.text.slice(0, 160)}${sealed(ctx) ? " (sealed: Linear must be unreachable)" : ""}`,
   };
 }
@@ -531,7 +531,7 @@ export const n8n: Adapter = {
     // the run (review pass 3).
     const newest = Number((await api(BASE, key, "GET", `/executions?workflowId=${id}&limit=1`)).data?.[0]?.id ?? 0);
     const r = await fetch(`${BASE}/webhook/${flow.path}`, { method: "POST", headers: { "x-n8n-run-key": env.N8N_WEBHOOK_KEY, "content-type": "application/json" }, body: "{}" });
-    if (!r.ok) throw new Error(`webhook /webhook/${flow.path} → ${r.status}: ${redactKeys(await r.text()).slice(0, 200)}`);
+    if (!r.ok) throw new Error(`webhook /webhook/${flow.path} → ${r.status}: ${(await r.text()).slice(0, 200)}`);
     const page = await api(BASE, key, "GET", `/executions?workflowId=${id}&includeData=true&limit=20`);
     const run = (page.data as any[]).find((e) => e.mode === "webhook" && Number(e.id) > newest);
     if (!run) throw new Error("the webhook answered but no new webhook execution is in the history");

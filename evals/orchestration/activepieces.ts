@@ -20,7 +20,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { compose, HERE, waitFor } from "./stack.ts";
-import { redactKeys, type Adapter } from "./adapter.ts";
+import type { Adapter } from "./adapter.ts";
 import { callTool } from "./mcp-client.ts";
 
 const DIR = join(HERE, "activepieces");
@@ -55,8 +55,7 @@ async function api(method: string, path: string, body?: unknown, token?: string)
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await r.text();
-  // The flows carry the brain keys (withBrainKeys), and an answer may echo a request: no 64-hex value is printed.
-  if (!r.ok) throw new Error(`${method} ${path} → ${r.status}: ${redactKeys(text).slice(0, 400)}`);
+  if (!r.ok) throw new Error(`${method} ${path} → ${r.status}: ${text.slice(0, 400)}`);
   return text ? JSON.parse(text) : null;
 }
 
@@ -144,8 +143,7 @@ export const activepieces: Adapter = {
     // anchored, since the steps it echoes below carry the issues' own text
     // (review passes 1 and 2).
     const run = /^✅ Run (\S+) — SUCCEEDED \(/m.exec(r.text);
-    // The flows hold the brain keys (withBrainKeys), and the run's echo may repeat a step's input: no 64-hex value is printed.
-    if (r.isError || !run) throw new Error(`ap_test_flow: ${redactKeys(r.text).slice(0, 600)}`);
+    if (r.isError || !run) throw new Error(`ap_test_flow: ${r.text.slice(0, 600)}`);
     // The run record: one loop iteration per issue, each with the capture step's status.
     const record = await api("GET", `/v1/flow-runs/${run[1]}`, undefined, s.token);
     const iterations: any[] = record.steps?.step_3?.output?.iterations ?? [];

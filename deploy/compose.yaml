@@ -1677,7 +1677,8 @@ services:
       retries: 3
       start_period: 120s
     # The REST core, n8n's one way into the brain (SMD-2295): `up -d n8n`
-    # brings it along. (Until SMD-2295 this named `server`.)
+    # brings it along. It runs the image `server`'s service builds, so on a
+    # project that has not built it, bring the stack up first.
     depends_on:
       api:
         condition: service_started
