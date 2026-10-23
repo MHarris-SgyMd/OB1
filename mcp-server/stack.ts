@@ -1,7 +1,7 @@
 // The MCP server with the REST core behind it, in one process, for a suite
-// (SMD-2287): server-portable's suites drive it in place of index.ts when
-// OB1_MCP_UNDER_TEST=client (server-portable/test-support.ts mcpUnderTest),
-// so the same assertions hold the MCP server as a REST client to what
+// (SMD-2287): server-portable's suites that drive an MCP server drive this
+// one (server-portable/test-support.ts mcpUnderTest; since PR 6a, never
+// index.ts), so their assertions hold the MCP server as a REST client to what
 // server-portable answers. Import it after the suite has set its
 // environment: it adds a forwarder key of its own to MCP_ACCESS_KEYS — a
 // forward-scope key, which grants nothing — before the REST core reads it.
