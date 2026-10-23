@@ -120,14 +120,14 @@ export const windmill: Adapter = {
   },
   // Windmill names a script's tool from its path: `s-`, then the path with `/`
   // as `_` and every `_` doubled (measured: f/ob1/brain_search → s-f_ob1_brain__search).
-  mcpClient: "a script of ours importing the MCP SDK (Windmill has no MCP-client step)",
-  nativeMcpClient: false,
+  httpClient: "a script of ours calling fetch against the REST core (Windmill has no HTTP step outside a script)",
+  nativeHttpClient: false,
   tools: { search: "s-f_ob1_brain__search", act: "s-f_ob1_linear__issue" },
   version() {
     return `CE v${TAG}`;
   },
   switches: {
     telemetry: ["instance setting disable_stats=true through the API (no environment variable exists)"],
-    runtimeFetch: "a script's npm imports resolved from the npm registry into a lockfile at deploy (the MCP SDK, windmill-client); the Hub is fetched only when asked",
+    runtimeFetch: "a script's npm imports resolved from the npm registry into a lockfile at deploy (windmill-client); the Hub is fetched only when asked",
   },
 };

@@ -44,9 +44,9 @@ decision 1, `operator-surface-tiers.md`):
   MCP Client node: the brain's MCP server is for AI clients.
 - The key discipline is unchanged: a capture-scope key, attributed and
   revocable, in a credential pinned to one host. The brain credential is
-  pinned to `api` in SMD-2295's second PR, with the eval's re-aim. Until
-  then the eval's MCP Client nodes send it to `server:8000`, which the pin
-  would refuse (posture step 2).
+  pinned to `api` (posture step 2), and provisioning refuses a brain
+  credential pinned to anything else (SMD-2295's second PR, with the eval's
+  re-aim to the REST core).
 - n8n stays on `egress` alone, as built (SMD-2583).
 - n8n's own MCP endpoint (the act tool, SMD-2212) is n8n's, not the brain's,
   and is unaffected.
@@ -290,7 +290,9 @@ concern SMD-1813's allowlist and SMD-1903's egress policy already name.
    - a brain key that `MCP_ACCESS_KEYS` does not list, or one at write scope,
      wherever in a credential it sits;
    - a key whose scope differs from the one its credential declares
-     (`brainScope`), so ingestion's credential cannot carry a read key.
+     (`brainScope`), so ingestion's credential cannot carry a read key;
+   - a declared brain credential not pinned to the REST core's host, `api`,
+     alone (SMD-2295).
 4. **Key custody** (SMD-2210). n8n 2.40.6 offers 106 scopes (measured). The
    POC's key held eight. The profile's held eight too, a different eight:
    it adds `credential:update` and `workflow:update`, so a re-provision
@@ -571,7 +573,7 @@ the first of them converts (SMD-2149, SMD-2021).
   run is SMD-1814's and SMD-1815's.
 - **Whether the MCP Client node honours a credential domain pin** — measured
   for SMD-2295: it does (posture step 2). No shipped template's brain call
-  uses that node; the eval's do until SMD-2295's second PR.
+  uses that node, nor, since SMD-2295's second PR, the eval's.
 
 ## Follow-ups
 
@@ -583,11 +585,12 @@ the first of them converts (SMD-2149, SMD-2021).
 - **SMD-2211** — the egress checkpoint: every template credential pinned, no
   sink before the retrieve route and the egress decision carry it. (The MCP
   Client node's honouring of a pin was measured for SMD-2295: it does.)
-- **SMD-2295** (its second PR) — the brain credential pinned to `api`, a
-  provisioning rule refusing a brain credential pinned elsewhere, and the
-  orchestration eval re-aimed to the REST core: n8n's, Windmill's and
-  Activepieces' brain calls, and the import runner's `vendor` fixture, which
-  names `server:8000`; C2 reworded to "the tool's own HTTP client".
+- **SMD-2295** (its two PRs) — n8n's brain calls go to the REST core: the ADR
+  amended, the brain credential pinned to `api` and provisioning refusing a
+  brain credential pinned elsewhere, and the orchestration eval re-aimed to
+  the REST core (n8n's, Windmill's and Activepieces' brain calls, the
+  import runner's `vendor` fixture), C2 reworded to "the tool's own HTTP
+  client".
 - **SMD-2212** — the first templates, built: the import runner and the
   generic import template that wraps the CLI emitters, and an act-tool
   workflow.

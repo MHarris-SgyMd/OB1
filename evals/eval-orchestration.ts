@@ -6,7 +6,7 @@
  *   bun eval-orchestration.ts --up <tool> [--with <variant>]…   # brain + candidate, provisioned headlessly
  *   bun eval-orchestration.ts --verify <tool> [--json] [--wait-schedule]
  *   bun eval-orchestration.ts --down <tool>      # removes the project's containers AND volumes
- *   bun eval-orchestration.ts --self-check       # n8n's egress judge, facts and filter; no stack (CI)
+ *   bun eval-orchestration.ts --self-check       # n8n's egress judge, facts and filter, the kit env's forward key, the Activepieces key fill, the redaction; no stack (CI)
  *
  * <tool> is one of n8n | activepieces | windmill. Each runs as its own compose
  * project, `ob1-orch-<tool>`: deploy/compose.yaml as shipped plus
@@ -25,7 +25,8 @@
  * What --verify checks (the ticket's comment of 2026-09-25 has the wording):
  *   C1  it first deletes the thoughts `orch-capture` wrote (delete_thought),
  *       then runs the ingestion workflow twice. Each run must report, from the
- *       TOOL's own run record, ten capture_thought calls answered; the brain
+ *       TOOL's own run record, ten captures answered (POST /v1/thoughts on
+ *       the REST core since SMD-2295; capture_thought before it); the brain
  *       must hold ten rows with ten distinct identifiers, all written by
  *       `orch-capture`, after the first and none more after the second. The
  *       reset makes every verify's first run prove itself (review pass 1: a dead
@@ -36,11 +37,13 @@
  *       waits (up to 20 min, the schedule is every 15) for a run the SCHEDULE
  *       started since the verify began to succeed, by the tool's run history.
  *   C2  capture: those rows' writer is `orch-capture`, a CAPTURE-scope record
- *       in MCP_ACCESS_KEYS, carried by the TOOL's own MCP client — as the
- *       criteria were posted; a script of ours standing in where the tool has
- *       no such step (Windmill) is reported and does not pass. Read: the brain
- *       search on the candidate's endpoint answers, and the only credential on
- *       that path is `orch-read`.
+ *       in MCP_ACCESS_KEYS, carried by the TOOL's own HTTP client to the
+ *       brain's REST core (`api:8000`). As posted it read "the TOOL's own MCP
+ *       client" against the brain's MCP server; SMD-2295 moved n8n, and so
+ *       the kit, to the REST core (the maintainer's wording). A script of ours
+ *       standing in where the tool has no such step (Windmill) is reported and
+ *       does not pass. Read: the brain search on the candidate's endpoint
+ *       answers, and the only credential on that path is `orch-read`.
  *   C3  the candidate's own MCP endpoint lists both tools, the brain search
  *       returns thoughts, the Linear lookup returns SMD-1863 with an
  *       `updatedAt` timestamp as values (the request carries both as text), and
@@ -58,14 +61,17 @@
  * project skips what already exists; after editing a workflow file, --down first.
  * Needs LINEAR_API_KEY (the usual .env search path) and the host's Ollama.
  */
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { hashKey } from "../server-portable/auth.ts";
 import { loadEnv } from "./env.ts";
-import type { Adapter, Check, Ctx } from "./orchestration/adapter.ts";
+import { redactKeys, type Adapter, type Check, type Ctx } from "./orchestration/adapter.ts";
 import { callTool, listTools, refuses } from "./orchestration/mcp-client.ts";
-import { activepieces } from "./orchestration/activepieces.ts";
+import { activepieces, withBrainKeys } from "./orchestration/activepieces.ts";
 import { engineTime, factsFrom, judgeEgress, n8n } from "./orchestration/n8n.ts";
 import { windmill } from "./orchestration/windmill.ts";
-import { brainSql, compose, ENV_FILE, ensureEnv, memoryByContainer, run, setEnvValue, setLayout, waitFor } from "./orchestration/stack.ts";
+import { brainSql, compose, ENV_FILE, ensureEnv, FORWARDER_NAME, memoryByContainer, run, setEnvValue, setLayout, waitFor } from "./orchestration/stack.ts";
 import { initSecrets } from "../deploy/orchestration/provision.ts";
 
 const ADAPTERS: Record<string, Adapter> = { n8n, activepieces, windmill };
@@ -82,8 +88,9 @@ function usage(msg: string): never {
  * `--self-check`: the egress judge (n8n's E) against logs in the watcher's
  * own format, tcpdump's own lines among them. The recorded run's shape
  * passes, and each way out fails. Also checked: the engine's facts parsed from
- * podman's own output, and the watcher's filter in its overlay. No stack and
- * no network (CI).
+ * podman's own output, the watcher's filter in its overlay, the kit env's
+ * forward key, the Activepieces key fill and `redactKeys`. No stack and no
+ * network (CI).
  */
 function selfCheck(): number {
   const T = "2026-09-25 22:17:00.100000 ";
@@ -91,7 +98,7 @@ function selfCheck(): number {
   const base = [
     "tcpdump: verbose output suppressed, use -v[v]... for full protocol decode",
     "listening on any, link-type LINUX_SLL2 (Linux cooked v2), snapshot length 262144 bytes",
-    `${T}eth0  Out IP 10.89.4.2.39771 > 10.89.4.1.53: 59194+ A? server.dns.podman. (35)`,
+    `${T}eth0  Out IP 10.89.4.2.39771 > 10.89.4.1.53: 59194+ A? api.dns.podman. (32)`,
     `${T}eth0  In  IP 10.89.4.1.53 > 10.89.4.2.39771: 59194 1/0/0 A 10.89.4.3 (51)`,
     `${T}eth0  Out IP 10.89.4.2.51086 > 10.89.4.3.8000: Flags [S], seq 1, win 64240, length 0`,
     `${T}eth0  In  IP 10.89.4.4.40026 > 10.89.4.2.5678: Flags [S], seq 2, win 64240, length 0`,
@@ -102,14 +109,16 @@ function selfCheck(): number {
   const out = (rest: string, iface = "eth0") => `${T}${iface}  Out IP 10.89.4.2.5555 > ${rest}`;
   // [what, lines, pass, detail must match, facts]
   const cases: [string, string[], boolean, RegExp, (typeof facts & { runner?: string[]; problem?: string })?][] = [
-    ["the recorded shape passes", base, true, /the network's own names: server\.dns\.podman ×1/],
-    ["a host search-domain expansion is reported apart, and passes", [...base, out("10.89.4.1.53: 7+ AAAA? server.cerberus-gondola.ts.net. (48)")], true, /search-domain expansions: server\.cerberus-gondola\.ts\.net ×1/],
+    ["the recorded shape passes", base, true, /the network's own names: api\.dns\.podman ×1/],
+    // The brain is the REST core since SMD-2295: a question for the old server's name is no service's.
+    ["a question for `server`, no longer the brain, fails", [...base, out("10.89.4.1.53: 8+ A? server.dns.podman. (35)")], false, /NOT A TEMPLATE'S HOST: server\.dns\.podman/],
+    ["a host search-domain expansion is reported apart, and passes", [...base, out("10.89.4.1.53: 7+ AAAA? api.cerberus-gondola.ts.net. (45)")], true, /search-domain expansions: api\.cerberus-gondola\.ts\.net ×1/],
     ["a TCP DNS connection to the resolver passes while its segments are empty", [...base, out("10.89.4.1.53: Flags [S], seq 9, length 0"), out("10.89.4.1.53: Flags [.], ack 1, win 63, length 0")], true, /DNS only to 10\.89\.4\.1/],
     ["an inbound SYN to n8n (the host's poll) is not n8n's dial", [...base, `${T}eth0  P   IP 192.168.127.1.62396 > 10.89.4.2.8000: Flags [S], seq 5, length 0`], true, /./],
     ["a raw-IP dial fails", [...base, out("9.9.9.9.443: Flags [S], seq 4, length 0")], false, /DIALLED OUTSIDE THE COMPOSE NETWORK: 9\.9\.9\.9:443 \(tcp\)/],
     ["a dial on another interface fails", [...base, out("9.9.9.9.443: Flags [S], seq 4, length 0", "eth1")], false, /9\.9\.9\.9:443/],
     ["n8n's own domain fails as a name", [...base, out("10.89.4.1.53: 1+ A? n8n.io. (24)")], false, /NOT A TEMPLATE'S HOST: n8n\.io/],
-    ["a name that starts like a service fails", [...base, out("10.89.4.1.53: 2+ A? server.9.9.9.9.nip.io. (39)")], false, /NOT A TEMPLATE'S HOST: server\.9\.9\.9\.9\.nip\.io/],
+    ["a name that starts like a service fails", [...base, out("10.89.4.1.53: 2+ A? api.9.9.9.9.nip.io. (36)")], false, /NOT A TEMPLATE'S HOST: api\.9\.9\.9\.9\.nip\.io/],
     ["an EDNS query is read", [...base, out("10.89.4.1.53: 3+ [1au] A? api.n8n.io. (39)")], false, /NOT A TEMPLATE'S HOST: api\.n8n\.io/],
     ["an NS query is read", [...base, out("10.89.4.1.53: 4+ NS? example.com. (29)")], false, /NOT A TEMPLATE'S HOST: example\.com/],
     // The next four are tcpdump's own lines, from pass 3's run on a sealed network made non-internal, where the resolver forwarded each.
@@ -138,7 +147,7 @@ function selfCheck(): number {
     ["a capture that restarted (two headers) fails", [...base, base[1]], false, /CANNOT JUDGE: the watcher's capture opened 2 times/],
     ["a capture that never opened fails", base.filter((l) => !l.startsWith("listening on")), false, /opened 0 times/],
     ["a capture that ended before it was read fails", [...base, "92 packets captured", "92 packets received by filter", "0 packets dropped by kernel"], false, /capture ended before it was read/],
-    ["a question line without its length is unreadable", [...base, out("10.89.4.1.53: 4242+ A? server.dns.podman.")], false, /UNREADABLE PACKET LINES/],
+    ["a question line without its length is unreadable", [...base, out("10.89.4.1.53: 4242+ A? api.dns.podman.")], false, /UNREADABLE PACKET LINES/],
     // The import runner (SMD-2212): an import template's one internal peer besides the brain.
     ["a connection to the import runner's :8090 passes", [...base, out("10.89.4.1.53: 11+ A? orchestration-runner.dns.podman. (49)"), out("10.89.4.5.8090: Flags [S], seq 12, length 0")], true, /to the import runner \(10\.89\.4\.5:8090\): 1/, { ...facts, runner: ["10.89.4.5"] }],
     ["port 8090 on another host is not the runner", [...base, out("9.9.9.9.8090: Flags [S], seq 13, length 0")], false, /9\.9\.9\.9:8090/, { ...facts, runner: ["10.89.4.5"] }],
@@ -168,6 +177,55 @@ function selfCheck(): number {
   const sealed = Bun.YAML.parse(readFileSync(new URL("./orchestration/compose.n8n-sealed.yaml", import.meta.url), "utf8")) as any;
   const filter = String(sealed?.services?.["egress-watch"]?.command?.at(-1) ?? "");
   expect("the watcher's filter records UDP, TCP on 53, IPv4 SYNs and IPv6 TCP", ["udp", "tcp port 53", "tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0", "(ip6 and tcp)"].every((c) => filter.includes(c)));
+  // SMD-2295 PR 2: ensureEnv's forward key (compose requires OB1_FORWARDER_KEY since
+  // SMD-2287 PR 5b), on temp files: a new one, a pre-5b one, a rerun, and two
+  // hand-edited ones.
+  const dir = mkdtempSync(join(tmpdir(), "ob1-orch-selfcheck-"));
+  // A strict umask would mask the rewrite to 0600 by itself, and the chmod case would hold nothing.
+  const umask = process.umask(0o022);
+  try {
+    const forwards = (e: Record<string, string>) => (e.MCP_ACCESS_KEYS ?? "").split(",").filter((r) => r.startsWith(`${FORWARDER_NAME}:`));
+    const own = (e: Record<string, string>) => /^[0-9a-f]{64}$/.test(e.OB1_FORWARDER_KEY ?? "") && JSON.stringify(forwards(e)) === JSON.stringify([`${FORWARDER_NAME}:forward:${hashKey(e.OB1_FORWARDER_KEY)}`]);
+    expect("ensureEnv: a new file holds a forward key and its one record", own(ensureEnv(join(dir, "fresh.env"))));
+    const [cap, rd] = ["c".repeat(64), "d".repeat(64)];
+    const listed = `orch-capture:capture:${hashKey(cap)},orch-read:read:${hashKey(rd)}`;
+    const pre5b = join(dir, "pre5b.env");
+    writeFileSync(pre5b, `POSTGRES_PASSWORD=p\nMCP_ACCESS_KEYS=${listed}\nORCH_BRAIN_CAPTURE_KEY=${cap}\nORCH_BRAIN_READ_KEY=${rd}\n`);
+    chmodSync(pre5b, 0o644);
+    const migrated = ensureEnv(pre5b);
+    expect("ensureEnv: a pre-5b file gains a forward key and one record, its records and lines kept", own(migrated) && migrated.MCP_ACCESS_KEYS === `${listed},${forwards(migrated)[0]}` && migrated.POSTGRES_PASSWORD === "p" && Boolean(migrated.ORCH_MCP_KEY) && migrated.N8N_BRAIN_CAPTURE_KEY === cap && (statSync(pre5b).mode & 0o777) === 0o600);
+    const settled = readFileSync(pre5b, "utf8");
+    const rerun = ensureEnv(pre5b);
+    expect("ensureEnv: a second run leaves the file as it was, and returns what it holds", readFileSync(pre5b, "utf8") === settled && JSON.stringify(rerun) === JSON.stringify(migrated));
+    const nolist = join(dir, "nolist.env");
+    writeFileSync(nolist, "POSTGRES_PASSWORD=p\n", { mode: 0o600 });
+    const bare = ensureEnv(nolist);
+    expect("ensureEnv: a file with no key list gets the forward record alone, and no capture key copied from nothing", own(bare) && bare.MCP_ACCESS_KEYS === forwards(bare)[0] && !("N8N_BRAIN_CAPTURE_KEY" in bare));
+    const stale = join(dir, "stale.env");
+    writeFileSync(stale, `MCP_ACCESS_KEYS=orch-read:read:${hashKey(rd)},${FORWARDER_NAME}:forward:${"e".repeat(64)}\nOB1_FORWARDER_KEY=\n`, { mode: 0o600 });
+    const restaled = ensureEnv(stale);
+    expect("ensureEnv: an empty forward key is minted, its record in place of the stale one", own(restaled) && restaled.MCP_ACCESS_KEYS === `orch-read:read:${hashKey(rd)},${forwards(restaled)[0]}`);
+  } finally {
+    process.umask(umask);
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // SMD-2295 PR 2: the redaction the report and the eval's last error pass.
+  expect("redactKeys: a key, in either case, and a key cut to 20 are replaced; a UUID and 19 hex pass",
+    redactKeys(`a ${"a".repeat(64)} b ${"F".repeat(64)} c ${"0".repeat(20)} d ${"1".repeat(19)} e 3f2b8c1e-7a4d-4e2f-9b1c-0d5e6f7a8b9c`)
+      === `a <hex> b <hex> c <hex> d ${"1".repeat(19)} e 3f2b8c1e-7a4d-4e2f-9b1c-0d5e6f7a8b9c`);
+  // SMD-2295 PR 2: the Activepieces flows' brain keys, filled at import (the HTTP piece takes no connection).
+  const flow = (f: string) => readFileSync(new URL(`./orchestration/activepieces/${f}`, import.meta.url), "utf8");
+  const [ingestFlow, searchFlow] = [flow("linear-ingest.json"), flow("brain-search.json")];
+  expect("the Activepieces flows as committed hold placeholders and no key", ![ingestFlow, searchFlow, flow("linear-issue.json")].some((t) => /[0-9a-f]{64}/i.test(t))
+    && ingestFlow.includes("__OB1_BRAIN_CAPTURE_KEY__") && searchFlow.includes("__OB1_BRAIN_READ_KEY__"));
+  const brainKeys = { ORCH_BRAIN_CAPTURE_KEY: "a".repeat(64), ORCH_BRAIN_READ_KEY: "b".repeat(64) };
+  const filled = (t: string) => JSON.stringify(JSON.parse(withBrainKeys(t, brainKeys)));
+  expect("withBrainKeys: the ingestion carries the capture key alone, the search the read key alone",
+    filled(ingestFlow).includes(brainKeys.ORCH_BRAIN_CAPTURE_KEY) && !filled(ingestFlow).includes(brainKeys.ORCH_BRAIN_READ_KEY)
+    && filled(searchFlow).includes(brainKeys.ORCH_BRAIN_READ_KEY) && !filled(searchFlow).includes(brainKeys.ORCH_BRAIN_CAPTURE_KEY));
+  const throwsMatching = (f: () => unknown, re: RegExp) => { try { f(); return false; } catch (e) { return re.test(String(e)); } };
+  expect("withBrainKeys: an unset key is refused", throwsMatching(() => withBrainKeys(ingestFlow, { ORCH_BRAIN_READ_KEY: brainKeys.ORCH_BRAIN_READ_KEY }), /ORCH_BRAIN_CAPTURE_KEY is unset/));
+  expect("withBrainKeys: a placeholder left over, in any case, is refused", throwsMatching(() => withBrainKeys(`${ingestFlow} __OB1_brain_key2__`, brainKeys), /still holds a placeholder/));
   console.log(failed ? `eval-orchestration self-check: ${failed} failed` : `eval-orchestration self-check: OK (${cases.length} cases)`);
   return failed ? 1 : 0;
 }
@@ -204,7 +262,7 @@ setLayout(tool, adapter.profile, overlays(mode === "--down" ? Object.keys(adapte
 const brainHealthy = async () => (await fetch("http://127.0.0.1:8012/health").catch(() => null))?.ok === true;
 
 async function up(): Promise<void> {
-  if (!env.LINEAR_API_KEY) usage("LINEAR_API_KEY is not set (evals/.env, <repo>/.env or deploy/.env)");
+  if (!env.LINEAR_API_KEY) usage("LINEAR_API_KEY is not set (OB1_ENV_FILE, evals/.env, <repo>/.env or deploy/.env; a git worktree has none of the last three)");
   // Kept before compose runs: a failed --up is followed by --down, which removes every variant anyway.
   setEnvValue(WITH_KEY, ctx.with.join(","));
   const variantServices = ctx.with.flatMap((v) => adapter.variants![v].services);
@@ -215,12 +273,21 @@ async function up(): Promise<void> {
   // and compose started the old one: a brain two migrations behind the tree,
   // with `--build` in the command (SMD-2210, measured).
   const stamp = `${run(["git", "rev-parse", "--short=12", "HEAD"]).out.trim() || "nogit"}+orch${Date.now()}`;
-  // The proxy too: the brain's only published port is its (SMD-1846), and
-  // nothing the named services wait on starts it.
-  const r = compose(tool, ["up", "-d", "--build", "postgres", "migrate", "server", "proxy", ...adapter.services, ...variantServices], { OB1_GIT_SHA: stamp });
+  // The proxy and its forwarder too: the brain's only published port is the
+  // forwarder's in front of the proxy (SMD-1846, SMD-2583), and nothing the
+  // named services wait on starts either; the forwarder waits on the proxy,
+  // so naming the proxy alone left 8012 closed. `api`, the REST core the
+  // candidates call (SMD-2295), is named for what it is; the proxy's
+  // depends_on starts it anyway. `server` is named because its service alone
+  // builds the image `api` and `mcp` run, until SMD-2287 PR 6 retires it, so
+  // its container starts too, though nothing calls it.
+  const r = compose(tool, ["up", "-d", "--build", "postgres", "migrate", "server", "api", "proxy", "forwarder", ...adapter.services, ...variantServices], { OB1_GIT_SHA: stamp });
   if (r.code !== 0) throw new Error(`compose up failed:\n${r.err.slice(-2000)}`);
   await waitFor("the brain's /health", brainHealthy);
   const reported = await fetch("http://127.0.0.1:8012/health", { headers: { "x-brain-key": env.ORCH_BRAIN_READ_KEY } }).then((h) => h.json()).then((j: any) => String(j.commit), () => "unreadable");
+  if (reported === "unreadable") {
+    throw new Error("the brain's keyed /health gave no readable answer: on a podman machine the project's egress network has likely lost the host (SMD-2929, netavark#1497; evals/README.md, \"On a podman machine\") — --down, run that ticket's cleanup, --up again");
+  }
   if (reported !== stamp) {
     // What the engine holds under the project's names, so the likely stale copy can be seen rather than guessed at.
     const held = run(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedAt}}"]).out.split("\n").filter((l) => l.includes(`ob1-orch-${tool}-`)).join("; ");
@@ -322,8 +389,8 @@ async function verify(): Promise<void> {
     && /"updatedAt\\?"\s*:\s*\\?"\d{4}-\d\d-\d\dT/.test(act.text);
   checks.push({
     id: "C2",
-    pass: adapter.nativeMcpClient && first.after.rows === EXPECTED_ISSUES && captureScoped && searchOk,
-    detail: `capture: ${first.after.rows} rows by ${WRITER} (${captureScoped ? "a capture-scope record" : "NOT a capture-scope record"}) through ${adapter.mcpClient}${adapter.nativeMcpClient ? "" : " — not the tool's MCP client, which C2 as posted requires"}; read: brain search through orch-read ${searchOk ? "answered" : "FAILED"}`,
+    pass: adapter.nativeHttpClient && first.after.rows === EXPECTED_ISSUES && captureScoped && searchOk,
+    detail: `capture: ${first.after.rows} rows by ${WRITER} (${captureScoped ? "a capture-scope record" : "NOT a capture-scope record"}) through ${adapter.httpClient}${adapter.nativeHttpClient ? "" : " — not the tool's own HTTP step, which C2 requires"}; read: brain search through orch-read ${searchOk ? "answered" : "FAILED"}`,
   });
   // Sealed, the brain-side half must pass and the act tool must not: Linear
   // answering means the seal leaked. The tool must still be listed, so a
@@ -372,9 +439,14 @@ async function verify(): Promise<void> {
   const size = run(["docker", "image", "inspect", adapter.image, "--format", "{{.Size}}"]).out.trim();
   const digest = run(["docker", "image", "inspect", adapter.image, "--format", "{{index .RepoDigests 0}}"]).out.trim();
   const store = adapter.storeFootprint?.(ctx);
+  // Redacted where the report is built, the verdicts already read from the raw
+  // text: every detail and both samples, whatever path made them (SMD-2295).
+  // E's is the packet capture's, no candidate's words, and its hostnames are
+  // the evidence of an escape.
+  for (const c of checks) if (c.id !== "E") c.detail = redactKeys(c.detail);
   const report = {
     tool, with: ctx.with, version: adapter.version(), image: adapter.image, digest, imageMiB: Math.round(Number(size) / 1048576), store,
-    memoryMiB: { atStart: idle, afterRuns: busy }, checks, switches: adapter.switches, searchSample: search.text.slice(0, 400), actSample: act.text.slice(0, 400),
+    memoryMiB: { atStart: idle, afterRuns: busy }, checks, switches: adapter.switches, searchSample: redactKeys(search.text).slice(0, 400), actSample: redactKeys(act.text).slice(0, 400),
   };
   if (json) {
     console.log(JSON.stringify(report, null, 2));
@@ -395,6 +467,12 @@ function down(): void {
   console.log(`${tool}: project ob1-orch-${tool} removed with its volumes`);
 }
 
-if (mode === "--up") await up();
-else if (mode === "--verify") await verify();
-else down();
+// The error the eval ends on, its stack included, is printed redacted (SMD-2295).
+try {
+  if (mode === "--up") await up();
+  else if (mode === "--verify") await verify();
+  else down();
+} catch (e) {
+  console.error(`error: ${redactKeys(e instanceof Error ? (e.stack ?? e.message) : String(e))}`);
+  process.exit(1);
+}
