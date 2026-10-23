@@ -2450,7 +2450,7 @@ if (configFailed) {
                    pg AS (SELECT NULL::uuid AS id WHERE false),`}
                    al AS (SELECT d.id, d.artifact_kind, d.artifact_id, d.produced_by, d.input_ids, d.input_fingerprints, d.recipe,
                                  (to_jsonb(d) ->> 'stale_since')::timestamptz AS stale_since
-                            FROM public.derivations d LIMIT ${BOUND}),
+                            FROM public.derivations d ORDER BY d.id LIMIT ${BOUND}),
                    st AS (SELECT d.id FROM al d JOIN public.thoughts t ON t.id = d.input_ids[1]
                            -- 084: a relation, like a proposal, is the consolidation pass's to judge again, not rebuild_derived's
                            -- (SMD-2726 adds its arm); a closed one's row stays as history (SMD-1873 PR 2 review pass 1).
@@ -2586,7 +2586,7 @@ if (configFailed) {
               // census above cannot see it (it starts from the artifacts).
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${n(c.orphans)} lineage row(s) name an artifact that is gone (${(c.orphan_ids ?? []).join(", ")}) — a raw delete of windows or mentions, or a vector cleared under a replay, left the row behind (SMD-1732). ${coverage}`,
-                  "Run bun db/rebuild.ts --url <url> --orphans: it deletes each such row through rebuild_derived, which touches no row whose artifact stands.");
+                  "Run bun db/rebuild.ts --url <url> --orphans: it deletes each such row through rebuild_derived, which touches no row whose artifact stands. A running sleep scheduler sweeps them too, up to 500 thoughts at each sleep's start (db/sleep.ts, SMD-2679).");
             } else {
               // A capped read says so in the headline, before the count that
               // a reader stops at (run-it, second review pass: a missing row
