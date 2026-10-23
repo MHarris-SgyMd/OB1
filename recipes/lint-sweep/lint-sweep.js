@@ -733,7 +733,7 @@ function renderReport({ args, tier1, tier2, tier3, startedAt, finishedAt }) {
     lines.push("*Scope: most recent 500 high-importance thoughts (`created_at desc`), first 2000 entities, first 5000 edges. Counts below are within that slice, not the whole brain.*");
     lines.push("");
     if (tier2.graphTablesMissing.length > 0) {
-      lines.push(`*Graph tables absent: ${tier2.graphTablesMissing.join(", ")}. Tier 2 requires the \`entity-extraction\` schema (which ships \`entities\`, \`edges\`, \`thought_entities\`) — see PRs #197 and #199. The \`ob-graph\` recipe uses different table names and does NOT satisfy this dependency.*`);
+      lines.push(`*Graph tables absent: ${tier2.graphTablesMissing.join(", ")}. Tier 2 requires the \`entity-extraction\` schema (which ships \`entities\`, \`edges\`, \`thought_entities\`) — see PRs #197 and #199.*`);
       lines.push("");
     }
     lines.push(`- High-importance (≥4) thoughts with no entity links (in first 500 high-importance sampled): **${tier2.highImportanceIsolated.length}**`);

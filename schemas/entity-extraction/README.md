@@ -1,14 +1,12 @@
 # Entity Extraction Schema
 
-> Tables, trigger, and queue for **automatic** entity and relationship extraction from thoughts. Complements the community [`recipes/ob-graph/`](../../recipes/ob-graph/) manual graph layer — this is the extraction side.
+> Tables, trigger, and queue for **automatic** entity and relationship extraction from thoughts.
 
 ## Positioning
 
-`ob-graph` gives you a clean 2-table manual graph (`graph_nodes`, `graph_edges`) that you build up via MCP calls. It's the right choice if you want to sketch relationships by hand.
+`entity-extraction` is automatic extraction from the `thoughts` content you already have. It adds a typed entity table, an edges table with evidence + confidence, a queue for async processing, and a trigger that enqueues new thoughts for you. Pair it with the companion `integrations/entity-extraction-worker/` edge function (opens in a separate PR) to actually run the extraction.
 
-`entity-extraction` is the other half of the story: automatic extraction from the `thoughts` content you already have. It adds a typed entity table, an edges table with evidence + confidence, a queue for async processing, and a trigger that enqueues new thoughts for you. Pair it with the companion `integrations/entity-extraction-worker/` edge function (opens in a separate PR) to actually run the extraction.
-
-The two schemas are independent — you can install either, both, or neither. They don't share tables or functions.
+The `recipes/ob-graph/` manual graph this README used to compare itself with retired (SMD-2920): a relationship you state yourself is a thought, and extraction makes the edge.
 
 ## What It Does
 
@@ -66,17 +64,6 @@ After running the migration:
 - One trigger (`trg_queue_entity_extraction`) attached to the `thoughts` table firing after insert or update of content/metadata.
 - No row-level security and no grants in the file (this fork, SMD-1796): upstream enabled RLS on all five tables with a full-access policy for Supabase's `service_role` and a `SELECT` scaffold for `authenticated`, roles that do not exist off Supabase, and RLS with no policy for the role you connect as denies it every row. `bun migrate.ts --grant <role>` gives the role your server and workers connect as the five tables and their three sequences (the `community` group in `db/README.md`). Upstream's posture, for the record: `service_role` bypasses RLS (used by the MCP server and workers via the service-role key server-side) and has a full-access policy. `authenticated` has a minimum `SELECT`-only policy as a scaffold for future multi-tenant dashboards -- when per-user ownership is wired, tighten to `auth.uid() = user_id`. `anon` has no access: stock Open Brain's MCP path is an Edge Function using the service-role key, not the anon key, so no anon grant is needed.
 - New thoughts are automatically queued for entity extraction. Pre-existing thoughts require the optional backfill step.
-
-## How This Differs From `ob-graph`
-
-| Aspect | `recipes/ob-graph/` | `schemas/entity-extraction/` (this PR) |
-|---|---|---|
-| Build mode | Manual via MCP calls | Automatic extraction from thought content |
-| Tables | 2 (`graph_nodes`, `graph_edges`) | 5 (`entities`, `edges`, `thought_entities`, `entity_extraction_queue`, `consolidation_log`) |
-| Primary use | Sketch entities by hand, query graph paths | Turn accumulated thoughts into a queryable entity index |
-| Paired with | 10 MCP tools for building/querying | `integrations/entity-extraction-worker/` (enhanced-mcp's `graph_search` retired with SMD-1931; the entity-graph read is SMD-2280) |
-
-Install whichever matches your workflow. They don't conflict.
 
 ## Pruning and Retention
 

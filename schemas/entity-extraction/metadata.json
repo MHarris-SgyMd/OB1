@@ -1,6 +1,6 @@
 {
   "name": "Entity Extraction Schema",
-  "description": "Tables, trigger, and queue for automatic entity and relationship extraction from thoughts. Complements the manual ob-graph recipe.",
+  "description": "Tables, trigger, and queue for automatic entity and relationship extraction from thoughts.",
   "category": "schemas",
   "author": {
     "name": "Alan Shurafa",

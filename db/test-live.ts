@@ -8332,7 +8332,7 @@ if (want("18")) {
         try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }
         catch (e) { contribFailed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
-      assert(contribFiles.length === 15 && contribFailed.length === 0, `…and so does every listed extension and recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
+      assert(contribFiles.length === 12 && contribFailed.length === 0, `…and so does every listed extension and recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
 
       // After: --grant issues the whole community group, over TCP, in one
       // transaction — views as tables, sequences and functions spelled as GRANT
