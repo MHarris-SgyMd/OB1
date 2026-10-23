@@ -27,7 +27,7 @@ const { assert, report } = createAssert();
 
 // The children's env: what of test-server's these rows read — no store of
 // this process's own, one access key — and a local provider stub, which holds
-// one call's embedding for SLOW_CALL_MS ([3]'s tool call at a stop). Each
+// one call's embedding until its stop has landed ([3]'s tool call at a stop). Each
 // child is handed its own DATABASE_URL. test-server's named keys and OAuth
 // settings are read by none of them.
 delete process.env.OB1_STORE;
@@ -41,13 +41,22 @@ const KEY = "test-key-xyz";
 /** [3]'s query, whose embedding the stub holds: a tool call still running when its client has left and the stop lands. */
 const SLOW_QUERY = "a call the stop waits on";
 const SLOW_CALL_MS = 1_500;
+// Its order is the events', not the clock's: the stub says when the embedding
+// has arrived, and answers no sooner than SLOW_CALL_MS after it nor 500 ms
+// after [3] has signalled the child, so a starved runner cannot land the
+// signal after the call has ended (review pass 2).
+const slowArrived = Promise.withResolvers<void>();
+const slowSignalled = Promise.withResolvers<void>();
 const provider = Bun.serve({
   port: 0,
   async fetch(req) {
     if (req.method === "GET") return Response.json({ object: "list", data: [] });
     const body = (await req.json()) as { input?: string };
     if (new URL(req.url).pathname.endsWith("/embeddings")) {
-      if (String(body.input ?? "").includes(SLOW_QUERY)) await Bun.sleep(SLOW_CALL_MS);
+      if (String(body.input ?? "").includes(SLOW_QUERY)) {
+        slowArrived.resolve();
+        await Promise.all([Bun.sleep(SLOW_CALL_MS), slowSignalled.promise.then(() => Bun.sleep(500))]);
+      }
       const v = new Array(DEFAULT_EMBEDDING_DIM).fill(0);
       v[String(body.input ?? "").length % DEFAULT_EMBEDDING_DIM] = 1;
       return Response.json({ data: [{ embedding: v }] });
@@ -933,9 +942,10 @@ console.log("\n[3] SIGTERM stops the server once what is in flight has ended, ex
     assert(leftCode === 0 && (leftCounted || /0 requests in flight/.test(leftLog)) && leftLines.length === 1 && leftLines[0]?.outcome === "abandoned"
       && leftLines[0].agent === "MCP_ACCESS_KEY" && leftLines[0].status === (leftCounted ? 200 : 0),
       `a mirror whose client left, at a drained stop: one \`abandoned\` line — the stop's, before the flush, where the runtime let it go; its handler's where the drain waited (${leftCode}, ${leftCounted ? "counted" : "let go"}; ${JSON.stringify(leftLines)})`);
-    // A tool call whose client has left, still running when SIGTERM lands. Bun 1.4.3 no longer counts its request, so
-    // only index.ts's count of tool calls holds the stop until the call ends; before review pass 3 a stop like this
-    // exited under the call, and its capture was lost. Bun 1.4.0 still counts the request, which holds the stop too.
+    // A tool call whose client has left, still running when SIGTERM lands. Bun (1.4.0 and 1.4.3 alike) counts a request
+    // done once its client has gone, so only index.ts's count of tool calls holds the stop until the call ends; before
+    // review pass 3 a stop like this exited under the call, and its capture was lost. The line may still count the
+    // request where the abort has yet to reach the server; the tool call is counted either way.
     const tw = performance.now();
     const leaver = new AbortController();
     const waitedOn = fetch(`http://127.0.0.1:${calling.port}/`, {
@@ -944,18 +954,20 @@ console.log("\n[3] SIGTERM stops the server once what is in flight has ended, ex
       signal: leaver.signal,
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "search_thoughts", arguments: { query: SLOW_QUERY } } }),
     }).then(async (r) => { await r.text(); return "read"; }, () => "left");
-    await Bun.sleep(300);
+    const reached = await Promise.race([slowArrived.promise.then(() => true), Bun.sleep(5_000).then(() => false)]);
     leaver.abort();
     const leftCall = await waitedOn;
-    await Bun.sleep(200);
+    await Bun.sleep(100); // the abort reaches the child, so its request is let go and the call alone holds the stop
     calling.proc.kill("SIGTERM");
+    slowSignalled.resolve();
     const callCode = await exited(calling.proc, SLOW_CALL_MS + 3_000);
     const callTook = performance.now() - tw;
     const callLog = await calling.out;
     const callStop = callLog.split("\n").find((l) => l.startsWith("SIGTERM: no longer accepting")) ?? "";
-    assert(leftCall === "left" && callCode === 0 && callTook >= SLOW_CALL_MS && /; (?:0 requests in flight, 1 tool call running|1 request in flight)\b/.test(callStop),
-      `a tool call running past its client when SIGTERM lands holds the stop until it ends, exit 0 (${leftCall}; ${callCode} at ${Math.round(callTook)} ms, the call ${SLOW_CALL_MS} ms; ${callStop})`);
+    assert(reached && leftCall === "left" && callCode === 0 && callTook >= SLOW_CALL_MS && /; (?:0 requests|1 request) in flight, 1 tool call running\b/.test(callStop),
+      `a tool call running past its client when SIGTERM lands holds the stop until it ends, exit 0 (${reached ? "reached its embedding" : "no embedding within 5 s"}, ${leftCall}; ${callCode} at ${Math.round(callTook)} ms, the call ${SLOW_CALL_MS} ms; ${callStop})`);
   } finally {
+    slowSignalled.resolve();
     for (const { proc } of [busy, idle, ctrlC, cutter, graced, leftBehind, calling]) proc.kill("SIGKILL");
     silent.stop(true);
   }
