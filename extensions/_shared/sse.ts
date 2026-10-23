@@ -4,7 +4,7 @@
 // its streams alive with the same frame and the same ceiling. The vendored MCP
 // servers answer on the same kind of stream (@hono/mcp's transport, which pings
 // only a GET's stream), so a byte-for-byte copy of this file sits in
-// extensions/_shared/ and recipes/_shared/ beside auth.ts's, and each of those servers sends its reply through mcpReply below
+// extensions/_shared/ beside auth.ts's (recipes/_shared/'s went with ob-graph and work-operating-model-activation, SMD-2920), and each of those servers sends its reply through mcpReply below
 // (SMD-2001). `bun run sync-sse` in extensions/ rewrites the copies from this
 // file; extensions/test-auth.ts fails if one differs or a server skips it. It
 // imports nothing, and everything here runs as it is on Bun, Node, Deno and Workers.
@@ -203,8 +203,8 @@ export function abandonedRequestLine(label: string, elapsedMs: number): string {
  * nothing long, and its listener comes before the body read, so a client that
  * leaves mid-upload is logged, as `?`. Then:
  * - a method other than POST carries no call: its reply is respond()'s as it
- *   is, body unread, close unwatched — ob-graph hands a GET to the transport,
- *   whose stream only the client ends;
+ *   is, body unread, close unwatched — a GET handed to the transport opens a
+ *   stream only the client ends;
  * - a client already gone gets the line and a 408, and the tool never runs
  *   (unlike at the core route, the server has been built);
  * - a reply that is not an event stream (JSON, a 202, a refusal) comes back as

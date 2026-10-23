@@ -55,7 +55,7 @@ The script groups typed edges by relation, truncates thought content to 300 char
 - Node.js 18+ (uses built-in `fetch`).
 
 > [!NOTE]
-> This recipe does **not** require the `recipes/ob-graph/` manual graph layer. It uses the automatic extraction tables from the (pending) `schemas/entity-extraction/` PR. The two are independent.
+> This recipe uses the automatic extraction tables from the `schemas/entity-extraction/` schema.
 
 ## Credential Tracker
 
