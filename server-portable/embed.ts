@@ -577,7 +577,8 @@ export type EmbedConfig = {
   judgeModel: string;
   /**
    * Decide mode (SMD-3115): OB1_CONSOLIDATE_DECIDER, the typed-decision tier's model that gives the pass's verdict,
-   * the judge's model then only writing the proposals it calls (consolidate-decide.ts); "" when the judge decides.
+   * the judge's model then only writing the proposals it calls and, since decide version 4, answering the mediated-pair
+   * test's link step (consolidate-decide.ts, SMD-3203); "" when the judge decides.
    * The pass key names it with the judge's model (consolidatePassKey), so turning it on starts a fresh pass.
    */
   decider: string;
