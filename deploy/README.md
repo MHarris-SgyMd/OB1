@@ -16,6 +16,10 @@ backups, no resource limits.
   what `podman compose` runs when it is installed): the proxy's route table is
   an inline `configs:` entry, which older compose does not read, and the Python
   podman-compose refuses the file (1.6.0: `missing networks: default`)
+- To build the images from a checkout (`up --build`): Docker Engine 25 or later,
+  or podman 5.1 or later — the server's Dockerfile sets its healthcheck's
+  `--start-interval`, which older builders refuse (SMD-3194). A release install
+  pulls the images and needs neither
 - A model provider: the stack's own Ollama (`--profile local-models`, one line to
   set: `OB1_LLM_LOCAL=1`), an Ollama on the host, or an OpenRouter key — the shipped defaults are
   local; `deploy/.env.example`, "Model provider", is the one line to choose

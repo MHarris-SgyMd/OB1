@@ -89,6 +89,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+      start_period: 10s
+      start_interval: 1s
     restart: unless-stopped
     logging: *logging
 
@@ -130,6 +132,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+      start_period: 10s
+      start_interval: 1s
     restart: unless-stopped
     logging: *logging
 
