@@ -206,8 +206,14 @@ export function providerDown(e: unknown): { reason: string; detail: string } | n
  * `invalid_body`, or the runtime's code (`ECONNREFUSED`) — never the text or
  * the base's userinfo. A call the gate
  * refuses was never made, and has none.
+ *
+ * `signal`, a caller's (db/reembed.ts's hard stop, SMD-2679): aborted, the
+ * call in hand ends at once, request or body, rejecting with its abort's
+ * reason — an AbortError for a plain abort(), never OB1_LLM_TIMEOUT's error —
+ * rather than running out OB1_LLM_TIMEOUT. The deadline still holds beside
+ * it, and a deadline that passes is still the timeout, named.
  */
-export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/completions", body: unknown, subject: EgressSubject): Promise<T> {
+export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/completions", body: unknown, subject: EgressSubject, signal?: AbortSignal): Promise<T> {
   const what = path === "/embeddings" ? "Embeddings" : "Chat completion";
   // The endpoint the PATH selects, and the one every message below names: a
   // chat call that fails names the chat base, which since SMD-1902 need not be
@@ -217,7 +223,7 @@ export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/
   if (!gate.allowed) throw refuseEgress(what, at.base, gate);
   const model = typeof body === "object" && body !== null ? (body as { model?: unknown }).model : undefined;
   return withProviderSpan(path === "/embeddings" ? "embeddings" : "chat", model, at.base, async (span) => {
-    const answer = await exchange<T>(cfg, path, body, at, what);
+    const answer = await exchange<T>(cfg, path, body, at, what, signal);
     span.set(usageOf(answer));
     return answer;
   }, providerErrorType);
@@ -236,7 +242,7 @@ function providerErrorType(err: unknown): string | undefined {
 }
 
 /** providerCall's exchange, once the gate has let it through: the request, the deadline over it, the status kept, the body capped, the JSON parsed. */
-async function exchange<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/completions", body: unknown, at: ProviderEndpoint, what: string): Promise<T> {
+async function exchange<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/completions", body: unknown, at: ProviderEndpoint, what: string, signal?: AbortSignal): Promise<T> {
   const timedOut = () =>
     new ProviderError(`${what} request to ${at.base} timed out after ${cfg.timeoutMs / 1000} s (OB1_LLM_TIMEOUT)`, "timeout");
   let r: Response;
@@ -245,13 +251,18 @@ async function exchange<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/comple
       method: "POST",
       headers: at.headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(cfg.timeoutMs),
+      // The caller's abort rejects with its reason (AbortError for a plain abort()), the deadline as TimeoutError,
+      // headers or body alike (measured on Bun 1.4.3, SMD-2679).
+      signal: signal ? AbortSignal.any([AbortSignal.timeout(cfg.timeoutMs), signal]) : AbortSignal.timeout(cfg.timeoutMs),
       // OB1_LLM_TIMEOUT is the one deadline: Bun's fetch would otherwise cut
       // an unstreamed call at its own 300 s idle timeout, so a longer value
       // here never took effect (measured for SMD-1879; entities.ts).
       timeout: false,
     });
   } catch (e) {
+    // The caller's stop first: a caller's own timeout signal is its stop, not
+    // OB1_LLM_TIMEOUT's (review pass 2 of SMD-2679 PR 4a-1).
+    if (signal?.aborted) throw e;
     // Named as what it is, with the knob, and WITHOUT a status: nothing about
     // the next attempt is known, so embedCapture treats it as transient.
     if ((e as Error).name === "TimeoutError") throw timedOut();
@@ -272,6 +283,9 @@ async function exchange<T>(cfg: EmbedConfig, path: "/embeddings" | "/chat/comple
   try {
     text = await r.text();
   } catch (e) {
+    // The caller's stop mid-body is the stop, not a body that was not JSON or
+    // the status's failure (review pass 1 of SMD-2679 PR 4a-1: it was read so).
+    if (signal?.aborted) throw e;
     if ((e as Error).name === "TimeoutError") throw timedOut();
     if (r.ok && providerDown(e)) throw e;
   }
@@ -786,10 +800,13 @@ export type Embedder = {
    * vectors when the content is too long to embed in a single provider call.
    * `subject` is whose text this is, for the egress gate (SMD-1903); a
    * refusal throws a ProviderError of kind `egress` before any request.
+   * `signal` is a caller's stop (providerCall's): aborted, every call of the
+   * capture ends and the capture rejects with its reason — no head window
+   * stands in for the whole content and no window goes in bare for it.
    */
-  embedCapture(content: string, subject: EgressSubject): Promise<EmbeddedCapture>;
-  /** One embedding. `kind` selects the query template over the document one; `subject` as above. */
-  getEmbedding(text: string, subject: EgressSubject, kind?: EmbedKind): Promise<number[]>;
+  embedCapture(content: string, subject: EgressSubject, signal?: AbortSignal): Promise<EmbeddedCapture>;
+  /** One embedding. `kind` selects the query template over the document one; `subject` and `signal` as above. */
+  getEmbedding(text: string, subject: EgressSubject, kind?: EmbedKind, signal?: AbortSignal): Promise<number[]>;
 };
 
 /**
@@ -876,13 +893,13 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
     return applyEmbeddingPrompt(cfg.embeddingModel, text, kind === "query");
   }
 
-  async function getEmbedding(text: string, subject: EgressSubject, kind: EmbedKind = "document"): Promise<number[]> {
+  async function getEmbedding(text: string, subject: EgressSubject, kind: EmbedKind = "document", signal?: AbortSignal): Promise<number[]> {
     const cfg = config();
     const d = await providerCall<{ data?: [{ embedding?: unknown }] }>(cfg, "/embeddings", {
       model: cfg.embeddingModel,
       input: applyPrompt(cfg, text, kind),
       ...(cfg.dimensionsRequested ? { dimensions: cfg.embeddingDim } : {}),
-    }, subject);
+    }, subject, signal);
     const embedding = d?.data?.[0]?.embedding;
     if (!Array.isArray(embedding)) {
       throw new Error(`${cfg.embeddings.base} returned no embedding for model ${cfg.embeddingModel}`);
@@ -927,7 +944,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
    * `thought_chunks.context` is NULL for a window embedded bare, preflight counts
    * both kinds, and the capture response says so at the time.
    */
-  async function contextualiseChunk(cfg: EmbedConfig, document: string, chunk: string, subject: EgressSubject, say: Say): Promise<{ text: string; error?: string }> {
+  async function contextualiseChunk(cfg: EmbedConfig, document: string, chunk: string, subject: EgressSubject, say: Say, signal?: AbortSignal): Promise<{ text: string; error?: string }> {
     // Filled by db/config.mjs's function, shared with evals/eval-contextual.ts,
     // so the harness measures the prompt the server sends; it is one pass with
     // a function, because two string replaces read `$&` and its relatives in
@@ -950,7 +967,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
         temperature: cfg.metadataTemperature,
         ...cfg.metadataReasoning,
         messages: [{ role: "user", content: prompt }],
-      }, subject);
+      }, subject, signal);
       const out = (d?.choices?.[0]?.message?.content ?? "").trim();
       // The rule lives in db/config.mjs so the benchmark applies the same one. A
       // blurb this file accepted and the harness rejected would mean every
@@ -968,7 +985,9 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
       // so does an egress refusal of the CHAT endpoint (SMD-1903): the blurb
       // is enrichment, the window is stored bare with the reason, and the
       // embedding call is judged on its own endpoint. After the log's own
-      // throw, `bare` throws its mark again (callLog).
+      // throw, `bare` throws its mark again (callLog). The caller's stop is
+      // not the blurb's failure: the capture ends (SMD-2679).
+      if (signal?.aborted) throw e;
       return bare((e as Error).message);
     }
   }
@@ -1025,16 +1044,16 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
    * generations on the interactive capture path, and neither is obviously right:
    * anyone turning this on has already been told to measure it first.
    */
-  async function embedCapture(content: string, subject: EgressSubject, say: Say): Promise<EmbeddedCapture> {
+  async function embedCapture(content: string, subject: EgressSubject, say: Say, signal?: AbortSignal): Promise<EmbeddedCapture> {
     const cfg = config();
     const windows = chunkContent(content, { maxTokens: cfg.chunkTokens, threshold: cfg.chunkThreshold, overlapTokens: cfg.chunkOverlap });
     if (!windows.length) {
-      return { embedding: await getEmbedding(content, subject), model: cfg.embeddingModel, chunks: [], contextFailures: 0, contextErrors: [], wholeContentFellBack: false, wholeContentRefused };
+      return { embedding: await getEmbedding(content, subject, "document", signal), model: cfg.embeddingModel, chunks: [], contextFailures: 0, contextErrors: [], wholeContentFellBack: false, wholeContentRefused };
     }
 
     const wantContext = cfg.chunkContext;
     const blurbs = wantContext
-      ? await Promise.all(windows.map((w) => contextualiseChunk(cfg, content, w.content, subject, say)))
+      ? await Promise.all(windows.map((w) => contextualiseChunk(cfg, content, w.content, subject, say, signal)))
       : windows.map((): { text: string; error?: string } => ({ text: "" }));
     const contexts = blurbs.map((b) => b.text);
 
@@ -1045,7 +1064,9 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
     const [whole, ...windowVectors] = await Promise.all([
       wholeContentRefused
         ? Promise.resolve(null)
-        : getEmbedding(content, subject).catch((e: Error & { status?: number; body?: string }) => {
+        : getEmbedding(content, subject, "document", signal).catch((e: Error & { status?: number; body?: string }) => {
+            // Nor is the caller's stop (SMD-2679): the capture ends with it.
+            if (signal?.aborted) throw e;
             // An egress refusal is not a fallback (SMD-1903): the windows'
             // calls are refused on the same rule, so the head window cannot
             // stand in, and the caller — the server's edit path, the re-embed
@@ -1078,7 +1099,7 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
             }
             return null;
           }),
-      ...windows.map((w, i) => getEmbedding(composeChunkForEmbedding(contexts[i], w.content), subject)),
+      ...windows.map((w, i) => getEmbedding(composeChunkForEmbedding(contexts[i], w.content), subject, "document", signal)),
     ]);
 
     return {
@@ -1098,9 +1119,9 @@ export function createEmbedder(config: () => EmbedConfig, opts: { rememberRefusa
   }
 
   return {
-    embedCapture: (content, subject) => {
+    embedCapture: (content, subject, signal) => {
       const call = callLog();
-      return embedCapture(content, subject, call.say).catch((e: unknown) => {
+      return embedCapture(content, subject, call.say, signal).catch((e: unknown) => {
         throw e instanceof LogThrow ? e.error : e;
       });
     },
