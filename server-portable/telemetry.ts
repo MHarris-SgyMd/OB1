@@ -613,8 +613,7 @@ export function planTelemetry(env: Record<string, string | undefined> = process.
     return plan;
   }
   // Each why with its kind (SMD-2909), and the signals it holds back.
-  const nowhere = new Map<string, string[]>();
-  const nowhereKind = new Map<string, SaidKind>();
+  const nowhere = new Map<string, { kind: SaidKind; words: string[] }>();
   const unread = new Map<string, string[]>();
   const somewhere = new Map<string, { variable: string; origin: string; words: string[] }>();
   const add = (map: Map<string, string[]>, key: string, word: string) => map.set(key, [...(map.get(key) ?? []), word]);
@@ -638,8 +637,7 @@ export function planTelemetry(env: Record<string, string | undefined> = process.
       : shared && /[?#]/.test(endpoint) ? [`${variable} has a query string or a fragment, which the signal's path would follow`, "query"] : [undefined, undefined];
     // No URL is always a why (no http(s) URL), so past this a URL is there.
     if (why !== undefined || url === undefined) {
-      add(nowhere, why!, word);
-      nowhereKind.set(why!, kind!);
+      nowhere.set(why!, { kind: kind!, words: [...(nowhere.get(why!)?.words ?? []), word] });
       continue;
     }
     if (exporters.some((e) => e !== "otlp")) add(unread, `OTEL_${part}_EXPORTER ${quoted(exporterValue!)} is not read (only otlp or none)`, word);
@@ -652,7 +650,7 @@ export function planTelemetry(env: Record<string, string | undefined> = process.
     goes.words.push(word);
     somewhere.set(key, goes);
   }
-  for (const [why, words] of nowhere) plan.reasons.push({ line: `telemetry: ${why}: no ${listed(words, "or")} are sent (SMD-1849)`, kind: nowhereKind.get(why)! });
+  for (const [why, { kind, words }] of nowhere) plan.reasons.push({ line: `telemetry: ${why}: no ${listed(words, "or")} are sent (SMD-1849)`, kind });
   for (const [what, words] of unread) plan.reasons.push({ line: `telemetry: ${what}: ${listed(words, "and")} go as OTLP/HTTP JSON (SMD-1849)`, kind: "unread" });
   plan.goes = [...somewhere.values()];
   return plan;
@@ -723,16 +721,16 @@ export function startTelemetry(
  * `preflight --deep`'s telemetry row (PR 2d review passes 1–2), from what the
  * start and the send said (`said`, startTelemetry's lines, each with its kind:
  * the status reads the kinds alone, the words only make the detail, SMD-2909),
- * the signals with a URL, the provider probes made and how the send went: `ok` where the probes'
- * spans or points went — by the signals that go, a flush that found nothing
- * left counted as gone, since a span batch may have sent them first; a warning
- * for what the server would share — an export not sent, an endpoint that is no
- * URL or has a query string, an SDK that would not start, a setting held to its
- * bound or read as its default — whatever was sent;
- * a skip where no collector is named, spans and points both go nowhere (a
- * signal off on purpose by `OTEL_SDK_DISABLED` or an exporter's `none` among
- * them), or no probe ran. A line that says where a signal goes, what is not
- * read, or what is off is no problem. Each line once, in a row's words.
+ * the signals with a URL, the provider probes made and how the send went: `ok`
+ * where the probes' spans or points went — by the signals that go, a flush
+ * that found nothing left counted as gone, since a span batch may have sent
+ * them first; a warning for what the server would share — an export not sent,
+ * an endpoint that is no URL or has a query string, an SDK that would not
+ * start, a setting held to its bound or read as its default — whatever was
+ * sent; a skip where no collector is named, spans and points both go nowhere
+ * (a signal off on purpose by `OTEL_SDK_DISABLED` or an exporter's `none`
+ * among them), or no probe ran. A line that says where a signal goes, what is
+ * not read, or what is off is no problem. Each line once, in a row's words.
  */
 export function telemetryRow(state: { started: boolean; said: readonly Said[]; urls: TelemetryPlan["urls"]; probes: number; sent?: FlushResult; boundMs: number }): { status: "ok" | "warn" | "skip"; detail: string; fix?: string } {
   // Judged by each line's kind, never its words (SMD-2909); the skips below come from what goes, not from a kind.

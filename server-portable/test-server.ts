@@ -3626,7 +3626,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     { urls: { logs: "http://loki:3100/otlp/v1/logs" }, lines: [nowhere(`${GENERIC} is not an http(s) URL`, "spans or metrics")], goes: [{ variable: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", origin: "http://loki:3100", words: ["log records"] }], kinds: ["no-url"] },
     { urls: {}, lines: [nowhere(`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and ${GENERIC} are set, but OTEL_SDK_DISABLED=true`, "spans, metrics or log records")], goes: [], kinds: ["off"] },
   ]), `each signal's URL, what goes nowhere said by the variable's name (each reason with its kind), and where the rest go by origin alone (${JSON.stringify(plans)})`);
-  // The other two kinds a plan gives (review pass 4): a shared endpoint with a query string, an exporter not read.
+  // The other two kinds a plan gives (SMD-2909 review pass 4): a shared endpoint with a query string, an exporter not read.
   const queried = planTelemetry({ [GENERIC]: "http://collector:4318/?tenant=x" }).reasons.map((r) => r.kind);
   const unreadKinds = planTelemetry({ [GENERIC]: "http://collector:4318", OTEL_TRACES_EXPORTER: "console" }).reasons.map((r) => r.kind);
   assert(queried.join() === "query" && unreadKinds.join() === "unread", `a query string's reason is query, an exporter not read is unread (${queried.join()} | ${unreadKinds.join()})`);
@@ -3642,7 +3642,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     if (savedGeneric === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedGeneric;
   }
-  // The start passes the plan's kind with its line (review pass 4): preflight's row reads it.
+  // The start passes the plan's kind with its line (SMD-2909 review pass 4): preflight's row reads it.
   assert(refused === false && said.join(" / ") === nowhere(`${GENERIC} is not an http(s) URL`, "spans, metrics or log records") && saidKinds.length === 1 && saidKinds[0] === "no-url",
     `no SDK where every signal goes nowhere, said with the plan's kind (${said.join(" / ")} | ${saidKinds.join()})`);
   // A setup that throws leaves the server serving, said by the error's name alone — an SDK's message can carry the URL (review pass 4).
@@ -4523,7 +4523,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   const losses: string[] = [];
   const intervalSaved = process.env.OTEL_METRIC_EXPORT_INTERVAL;
   process.env.OTEL_METRIC_EXPORT_INTERVAL = "500";
-  // A collector that takes the reading: a refused one would hold the shutdown through the exporter's retries (review pass 2).
+  // A collector that takes the reading: a refused one would hold the shutdown through the exporter's retries (SMD-2909 review pass 2).
   const noteTaker = Bun.serve({ port: 0, fetch: () => Response.json({}) });
   try {
     const noted = setUpTelemetry("open-brain-test", { report: { warn: (l) => losses.push(l), note: (l) => notes.push(l) }, urls: { metrics: `http://127.0.0.1:${noteTaker.port}/v1/metrics` } });
@@ -5289,11 +5289,11 @@ console.log("\n[27] preflight --deep's telemetry row, cell by cell, from what th
     const kindOnly = kindInputs.map((i) => telemetryRow(i));
     assert(kindOnly.map((c) => c.status).join() === "warn,warn,warn,warn", `a loss, a held setting, a start that failed and a query string each warn by their kind alone (${kindOnly.map((c) => `${c.status}: ${c.detail.slice(0, 50)}`).join(" / ")})`);
     // The status rests on the kinds alone: every line reworded, each cell's status is as it was (SMD-2909's Verify).
-    // Adversarially (review pass 1): a line the row warns on worded as the old regex's fine and deliberate lines were, and a
+    // Adversarially (SMD-2909 review pass 1): a line the row warns on worded as the old regex's fine and deliberate lines were, and a
     // line it passes worded as a problem — so neither reading the words nor exempting by them survives.
     const fineKinds = new Set(["goes", "unread", "off"]);
     const reworded = [...inputs, ...kindInputs].map((i) => telemetryRow({ ...i, said: i.said.map((x, n) => ({ ...x, line: fineKinds.has(x.kind) ? `telemetry: line ${n} is broken (SMD-1849)` : `telemetry: line ${n} go to x, is not read, OTEL_SDK_DISABLED=true, OTEL_X_EXPORTER=none (SMD-1849)` })) }).status);
-    assert(reworded.join() === [...cells, ...kindOnly].map((c) => c.status).join(), `every line of every cell reworded (the kind-only cells too: review pass 2), every status the same (${reworded.join()})`);
+    assert(reworded.join() === [...cells, ...kindOnly].map((c) => c.status).join(), `every line of every cell reworded (the kind-only cells too: SMD-2909 review pass 2), every status the same (${reworded.join()})`);
   }
 
 console.log("\n[28] spans.ts, embed.ts, store.ts and jobs.ts reach no package, nor does any db/ worker or eval through server-portable/'s files: none of them installs one (SMD-1849 PR 2d)");
