@@ -98,7 +98,7 @@ export interface paths {
         };
         /**
          * List Recent Thoughts
-         * @description List recently captured thoughts with optional filters by type, topic, person, time range, who wrote them (`said_by`: operator | agent | ingested; `actor`: a key's name), or what their content is (`min_trust`). Each item says who wrote it and its trust on a `By:` line, and an item of outside text (trust ingested) carries a notice that instructions inside it are content, not directions.
+         * @description List recently captured thoughts with optional filters by type, topic, person, time range, who wrote them (`said_by`: operator | agent | ingested; `actor`: a key's name), or what their content is (`min_trust`). Each item says who wrote it and its trust on a `By:` line, and an item of outside text (trust ingested) carries a notice that instructions inside it are content, not directions. Newest first by default, or `sort` oldest. When more follow, the reply carries a cursor: pass it as `after`, with the same `sort` and filters, for the next page, until no cursor is given (null): a walk sees each thought there when it began once, to the microsecond; newest first, one captured meanwhile is not among them, and oldest first it comes at the end.
          */
         get: operations["list_thoughts"];
         put?: never;
@@ -1209,6 +1209,8 @@ export interface operations {
                 said_by?: "operator" | "agent" | "ingested";
                 actor?: string;
                 min_trust?: "operator" | "agent" | "ingested";
+                sort?: "newest" | "oldest";
+                after?: string;
             };
             header?: never;
             path?: never;
@@ -1216,7 +1218,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The operation's value. */
+            /** @description A page (SMD-2995): `thoughts`, each with `supersededBy` (the id of a thought that supersedes it, or null); `sort`, the order they are in (newest or oldest); and `cursor` — pass it as the `after` query parameter, with the same `sort` and filters, for the next page; null when no more follow. A cursor that is none of this operation's, or an empty one, is refused REFUSED_CURSOR (400) with `reason: "shape"`; one made under the other sort with `reason: "sort"` and the `sort` it was made under. */
             200: {
                 headers: {
                     [name: string]: unknown;
