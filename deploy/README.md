@@ -2242,6 +2242,18 @@ environment once, so recreate the service after changing any of them, the
 key or the model: `podman compose -f deploy/compose.yaml --profile sleep up -d
 sleep`. A `restart` keeps the values it was created with.
 
+**Reading a pass pair by pair** (SMD-3203). With
+`OB1_SLEEP_DUMP_DIR=/var/lib/ob1/sleep-dumps`, where the service mounts its
+`sleep-dumps` volume, each consolidation pass appends every verdict to one
+JSONL file per pass key there, as `db/consolidate.ts --dump` writes them. That
+includes decide mode's link step, when it was asked and whether it capped the
+pair, which a capped pair that stores no relation leaves nowhere else. Copy
+them out while `sleep` runs, to a directory outside any checkout:
+`podman compose -f deploy/compose.yaml cp sleep:/var/lib/ob1/sleep-dumps <dir>`.
+From a stopped container podman's copy says it copied and puts the files
+elsewhere or nowhere. They hold the brain's text, each file created 0600, and
+a copy keeps that mode; unset, nothing is written and the volume stays empty.
+
 **Changing the model** is the `workers` profile's procedure above with `sleep`
 in place of the two followers: stop `sleep` before the change reaches it, run
 the switch, then bring back `server api sleep`. The switch extracts the backlog
@@ -2882,6 +2894,9 @@ leaves. A refusal puts the canary's Postgres back as it found it. The volume
 is looked for by name (`<stable>-canary_pgdata`, `open-brain-canary_pgdata`
 beside the default stable), which is how `compose down --volumes` removes it.
 With none there is nothing to delete, and nothing is started to find out.
+The canary's sleep dumps (its `sleep-dumps` volume, SMD-3203) go with the
+database: the down names the sleep profile, so compose counts that service and
+its volume.
 Neither touches stable: `down` acts on the canary's project alone.
 
 On every PR, the deploy-stack-brains CI job runs `canary.sh` beside its stack, in

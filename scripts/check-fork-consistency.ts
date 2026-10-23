@@ -7134,12 +7134,13 @@ const CONFINEMENT: Record<string, Mapping> = {
   "pg-exporter": { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
 };
 const CONFINEMENT_KEYS = ["cap_add", "cap_drop", "security_opt", "read_only"];
-/** compose.yaml's named volumes (each the engine's default: driver options bind a host path), each service's mounts and each service's build, exactly; a service not named here mounts or builds nothing. A mount or a build added or changed — a path, a mode, another service's volume, a context — is a change here, on purpose. SMD-2685's review passes 1–3 each found a mount past the rule for which mounts are safe as it then stood (a variable's default joined to a path, a variable the host sets, `ro,rw`, a volume named `..`, `../deploy`, `.GIT` on macOS), so the list is held instead. */
-const COMPOSE_VOLUMES: Mapping = { pgdata: null, ollama: null, "jev-models": null, "n8n-data": null, "auth-data": null, "lgtm-data": null };
+/** compose.yaml's named volumes (each the engine's default: driver options bind a host path), each service's mounts and each service's build, exactly; a service not named here mounts or builds nothing. A mount or a build added or changed — a path, a mode, another service's volume, a context — is a change here, on purpose. SMD-2685's review passes 1–3 each found a mount past the rule for which mounts are safe as it then stood (a variable's default joined to a path, a variable the host sets, `ro,rw`, a volume named `..`, `../deploy`, `.GIT` on macOS), so the list is held instead. sleep's `sleep-dumps` is a named volume of the engine's own, written only when OB1_SLEEP_DUMP_DIR hands the scheduler --dump-dir (SMD-3203). */
+const COMPOSE_VOLUMES: Mapping = { pgdata: null, ollama: null, "jev-models": null, "n8n-data": null, "auth-data": null, "lgtm-data": null, "sleep-dumps": null };
 const CHECKOUT_MODULES = ["../db:/app/db:ro", "../server-portable:/app/server-portable:ro"];
 const SERVICE_MOUNTS: Record<string, unknown[]> = {
   postgres: ["pgdata:/var/lib/postgresql/data"],
-  "board-sync": CHECKOUT_MODULES, extract: CHECKOUT_MODULES, consolidate: CHECKOUT_MODULES, sleep: CHECKOUT_MODULES,
+  "board-sync": CHECKOUT_MODULES, extract: CHECKOUT_MODULES, consolidate: CHECKOUT_MODULES,
+  sleep: [...CHECKOUT_MODULES, "sleep-dumps:/var/lib/ob1/sleep-dumps"],
   ollama: ["ollama:/root/.ollama"],
   jev: ["jev-models:/models"],
   n8n: ["n8n-data:/home/node/.n8n"],

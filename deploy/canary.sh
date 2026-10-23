@@ -140,7 +140,9 @@
 # --volumes also deletes the canary's database: when it is stamped canary,
 # marked by a refresh, or holds nothing (a first refresh that died before its
 # mark); a refusal puts its Postgres back as it was. With no canary volume
-# there is nothing to delete, and nothing is created to find out.
+# there is nothing to delete, and nothing is created to find out. Its sleep
+# worker's dumps go with it (the `sleep-dumps` volume, SMD-3203): the down
+# names the sleep profile, so compose counts that service and its volume.
 # A canary proxy's port is read from the container that publishes it — its
 # forwarder since SMD-2583, its proxy before — running or stopped, and from
 # the canary's env file.
@@ -170,7 +172,7 @@
 #   up --no-smoke         skip step 5
 #   up --no-refresh       keep the canary's database: migrate it in place
 #                         instead of step 3's refresh (SMD-3154)
-#   down --volumes        delete the canary's database as well
+#   down --volumes        delete the canary's database, and its sleep dumps, as well
 #
 # The server image is built from this checkout, as compose.yaml builds stable's,
 # and OB1_GIT_SHA is this checkout's `git describe` unless the shell sets it.
@@ -1094,7 +1096,10 @@ if [ "$CMD" = down ]; then
   elif [ -n "$CONN_URL" ] && ours "$CONN_URL"; then CONN_ACTION=other-scope
   elif [ -n "$CONN_SCOPE" ]; then CONN_ACTION=foreign
   fi
-  canary_compose down --remove-orphans ${VOLS[@]+"${VOLS[@]}"}
+  # With the sleep profile named: canary_compose clears COMPOSE_PROFILES, and a
+  # down without the profile counts neither the sleep worker nor its dump
+  # volume, which --volumes then left behind (SMD-3203).
+  canary_compose --profile sleep down --remove-orphans ${VOLS[@]+"${VOLS[@]}"}
   # A canary from before SMD-2583 made a default network, which compose.yaml
   # no longer names, so `down` leaves it: removed here when compose made it
   # for this project and nothing is on it.
