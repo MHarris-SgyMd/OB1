@@ -50,7 +50,7 @@ import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { capNote, MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
+import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import { sweepOrphans } from "./rebuild.ts";
 import type { PassStop } from "./lease.ts";
@@ -6516,10 +6516,18 @@ if (want("16")) {
   const byPass = await consolidate("--status");
   const byLine = byPass.out.split("\n").find((l) => /pending by pass/.test(l)) ?? "";
   assert(byPass.code === 0 && byLine.startsWith(`  pending by pass: 2 judged by ${passKey}, 1 judged by "consolidate:a key with spaces@p1" (not a key --key takes; listed by --list alone), 1 judged by "consolidate:m@p1$(id)" (not a key --key takes; listed by --list alone), 1 judged by consolidate:zz-k0@p1,`)
-      && byLine.endsWith(`, and 2 more pass(es) with 2 — --list --key <key> lists one pass's`) && (byLine.match(/ judged by /g) ?? []).length === 10 && !byLine.includes("zz-third"),
+      && byLine.endsWith(`, and 2 more pass(es) with 2 pending — --list --key <key> lists one pass's`) && (byLine.match(/ judged by /g) ?? []).length === 10 && !byLine.includes("zz-third"),
     `--status counts the pending by pass, most first, ten at most with the rest counted, a rejected row's pass not among them, a key --key cannot take quoted when it has spaces and said so (${byLine.trim().slice(0, 200)})`);
   await sql`DELETE FROM thoughts WHERE id IN (${rawA}::uuid, ${rawB}::uuid, ${rawC}::uuid)`;
   for (const t of extra) await sql`DELETE FROM thoughts WHERE id = ${t}::uuid`;
+  // The line's builder on rows a brain would need dozens of thoughts for (review pass 4: with one row in each overflow
+  // pass, the passes counted and their rows summed were the same number): twelve passes, the last two of 3 and 2 rows;
+  // a key with a leading - is no key --key takes (the CLI's parser reads it as a flag).
+  const synth = [...Array.from({ length: 10 }, (_, i) => ({ judge_key: `consolidate:k${i}@p1`, n: 9 - (i % 3) })), { judge_key: "-consolidate:x@p1", n: 3 }, { judge_key: "consolidate:last@p1", n: 2 }];
+  const built = pendingByPassLine(synth), builtFew = pendingByPassLine([{ judge_key: "-consolidate:x@p1", n: 4 }]);
+  assert(built.endsWith(", and 2 more pass(es) with 5 pending — --list --key <key> lists one pass's") && (built.match(/ judged by /g) ?? []).length === 10
+      && builtFew === `  pending by pass: 4 judged by "-consolidate:x@p1" (not a key --key takes; listed by --list alone) — --list --key <key> lists one pass's`,
+    `the by-pass line names ten, counts the rest's passes and rows apart, and marks a leading - (${built.slice(-80)} | ${builtFew})`);
   // The capped page's note, every case (review pass 2: a capped --list all --key said to decide and list again, which
   // never drains an all-status page; no suite reached a cap under --key).
   assert(capNote("pending", false) === "--status counts them all" && capNote(undefined, false) === "--status counts them all"

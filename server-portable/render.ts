@@ -26,7 +26,7 @@ import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
 import { parseListCursor } from "./core/list-cursor.ts";
-import { JUDGE_KEY, judgeKeyText } from "./pass-key.ts";
+import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
@@ -74,8 +74,9 @@ const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|sup
 function guard(v: unknown, key = ""): unknown {
   // list_thoughts' cursor (SMD-2995): not a uuid, but held to its own shape, which carries no sentence.
   if (typeof v === "string" && key === "cursor" && v === v.trim() && parseListCursor(v)) return v;
-  // A proposal's pass (SMD-3248): held to a pass key's own shape, which carries no sentence.
-  if (typeof v === "string" && key === "judgeKey") return v.length <= 200 && JUDGE_KEY.test(v) ? v : null;
+  // A proposal's pass (SMD-3248): held to pass-key.ts's one rule — one token, no space, so no sentence — the rule the
+  // input took it by (review pass 4: a full-shape guard nulled keys the input admitted).
+  if (typeof v === "string" && key === "judgeKey") return PASS_KEY_CHARS.test(v) ? v : null;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -175,7 +176,7 @@ const safeList: Safe<ListThoughtsResult> = (v) => ({
 /**
  * list_supersession_proposals: per proposal its ids, verdict, numbers, dates and the pass that judged it — the sides and the
  * reason are in the text. The top-level `judgeKey` is the selection: absent when every pass was listed, the key when one
- * was, and null when the key asked for is not of a pass key's shape (the guard's rule, below; the text names it).
+ * was — always one the guard keeps, since the input took it by the same rule (pass-key.ts's PASS_KEY_CHARS).
  */
 const safeProposals: Safe<ProposalsResult> = (v) => ({
   status: v.status, ...(v.lineage === undefined ? {} : { lineage: v.lineage }), ...(v.judgeKey === undefined ? {} : { judgeKey: v.judgeKey }),
@@ -811,7 +812,7 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
 export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply {
   return render(o, ({ status, lineage, judgeKey, proposals: data }) => {
     // SMD-3248: the pass selected (109) is said with the rest of the selection.
-    const onLineage = (lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "") + (judgeKey === undefined ? "" : ` judged by ${judgeKeyText(judgeKey, snipText)}`);
+    const onLineage = (lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "") + (judgeKey === undefined ? "" : ` judged by ${judgeKeyText(judgeKey)}`);
     if (!data.length) {
       // A lineage pair is never proposed since 066, so an empty lineage
       // selection is not the pass's to fill (maintainer read, third pass).
@@ -882,9 +883,9 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
         : "";
       return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${flags.length ? "  WRITER" : ""}${reason ? `\n   Reason: ${reason}` : ""}${lineageLine}${writerLine}` +
         side("newer", p.newer) + side("older", p.older) +
-        // The key through the one cleaner (review pass 2: a newline in it forged an `ID:` line), quoted when no selection
-        // could take it (pass 3: spaces let it pass for the line's own words).
-        `\n   proposal ${p.id} — judged by ${judgeKeyText(p.judgeKey, snipText)} on ${day(p.judgedAt)}\n${review}`;
+        // A recorded key whole when it is a pass key, else quoted and escaped (pass-key.ts: a newline forged an `ID:` line
+        // in review pass 2, spaces passed for the line's own words in 3, stripped look-alikes for the real key in 4).
+        `\n   proposal ${p.id} — judged by ${judgeKeyText(p.judgeKey)} on ${day(p.judgedAt)}\n${review}`;
     });
     const unread = data.some((p) => !p.older.writer || !p.newer.writer) ? ` ${WRITERS_UNREAD}` : "";
     return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.${unread}\n\n${results.join("\n\n")}`;

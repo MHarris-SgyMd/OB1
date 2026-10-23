@@ -2584,7 +2584,7 @@ if (configFailed) {
                     ? "list_supersession_proposals' four-argument body is not 109's (written by hand, or re-made without its sentinels): the listings run, but nothing vouches that it flags a lineage pair or selects a pass as 109 does"
                     : bodies.lists_pass !== true && bodies.has_four !== true
                     ? "list_supersession_proposals is from before 109 (migration 109 not yet applied, or its form dropped by hand): every listing fails — the CLI's --list, the stores and the MCP tool pass 109's fourth argument, which this form does not take"
-                    : "an older list_supersession_proposals stands beside 109's (029 or 070 re-applied by hand over it): a call both forms take — fewer than three arguments beside 029's, fewer than four beside 070's — is ambiguous (not unique) and fails, so a reader passing fewer than four may error on the queue, while the fork's callers pass four"} (SMD-2313, SMD-3248). ${coverage}`,
+                    : "an older list_supersession_proposals stands beside the four-argument one (029 or 070 re-applied by hand over 109): a call both forms take — fewer than three arguments beside 029's, fewer than four beside 070's — is ambiguous (not unique) and fails, so a reader passing fewer than four may error on the queue, while the fork's callers pass four"} (SMD-2313, SMD-3248). ${coverage}`,
                   ledgerRemedy("109", APPLY_109));
             } else if (Number(c.orphans)) {
               // The other direction (063): a row whose artifact is gone while

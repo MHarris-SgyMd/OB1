@@ -1952,9 +1952,9 @@
             "in": "query",
             "required": false,
             "schema": {
-              "description": "Only the proposals of the pass with exactly this judge key (`consolidate:<model>@p<prompt>`, or under decide mode `consolidate:<decider>+<writer>@p<prompt>d<decide version>`; each proposal names its own, and `consolidate.ts --status` counts the pending by pass); 1–200 letters, digits and `. _ : / @ + -` — in a URL's query string, encode `+` as `%2B`; absent: every pass (migration 109)",
+              "description": "Only the proposals of the pass with exactly this judge key (`consolidate:<model>@p<prompt>`, or under decide mode `consolidate:<decider>+<writer>@p<prompt>d<decide version>`; each proposal names its own, and `consolidate.ts --status` counts the pending by pass); 1–200 letters, digits and `. _ : / @ + -`, starting with a letter or digit — in a URL's query string, encode `+` as `%2B`; absent: every pass (migration 109)",
               "type": "string",
-              "pattern": "^[A-Za-z0-9._:/@+-]{1,200}$"
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$"
             }
           }
         ],

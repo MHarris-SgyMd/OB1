@@ -2001,7 +2001,7 @@ upgrade the server, never re-apply 070. The readers follow: the MCP tool and
 `server-portable/pass-key.ts`: letters, digits and `. _ : / @ + -`, so a key
 offered for pasting runs nothing in a shell; `+` encoded as `%2B` in a query
 string), and each proposal's value carries `judgeKey`,
-held to a pass key's shape; `consolidate.ts --status` counts the pending by
+held to the same rule; `consolidate.ts --status` counts the pending by
 pass, `consolidate.ts --list <status> --key <judge key>` lists one pass's
 proposals, and `--list relations --key` its relations (the key their facet
 names); preflight's `lineage` check reads the
@@ -5300,8 +5300,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3005 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1535 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 916 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1536 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 917 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 86 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 259 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)

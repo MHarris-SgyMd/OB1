@@ -208,6 +208,18 @@ export function capNote(status: string | undefined, keyed: boolean): string {
 
 
 /**
+ * --status's pending-by-pass line (SMD-3248): ten passes at most, most first,
+ * the rest counted. A key is anyone's to record (029's door takes any non-empty
+ * text): one --key cannot take is shown escaped and said so, unfiltered --list
+ * its only listing (review passes 2–4).
+ */
+export function pendingByPassLine(byPass: { judge_key: string; n: number }[]): string {
+  const shown = byPass.slice(0, 10), rest = byPass.slice(10);
+  const one = (b: { judge_key: string; n: number }) => `${b.n} judged by ${judgeKeyText(b.judge_key)}${selectableKey(b.judge_key) ? "" : " (not a key --key takes; listed by --list alone)"}`;
+  return `  pending by pass: ${shown.map(one).join(", ")}${rest.length ? `, and ${rest.length} more pass(es) with ${rest.reduce((a, b) => a + b.n, 0)} pending` : ""} — --list --key <key> lists one pass's`;
+}
+
+/**
  * The longest --stale: stale_entities is given `make_interval(days => n)`
  * subtracted from now(), and a timestamp before 4714 BC is out of range — at
  * about 2.46 million days today, so 3,000,000 ended the listing in a stack
@@ -387,7 +399,7 @@ export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "key" | "a
   if (key !== undefined && (key.length < 1 || key.length > 200)) return "--key takes a judge key of 1 to 200 characters, as each listed row names it (judged by consolidate:…).";
   // A pass key's own characters (pass-key.ts; review passes 1 and 3): one outside them is a typo that would select
   // nothing, or a key no selection takes, said instead.
-  if (key !== undefined && !selectableKey(key)) return "--key takes a judge key of letters, digits and . _ : / @ + -, as each listed row names it (judged by consolidate:…).";
+  if (key !== undefined && !selectableKey(key)) return "--key takes a judge key of letters, digits and . _ : / @ + -, starting with a letter or digit, as each listed row names it (judged by consolidate:…).";
   for (const [name, v] of [["accept", accept], ["reject", reject]] as const) {
     if (v !== undefined && !UUID_RE.test(v)) return `--${name} needs a proposal id (a UUID from --list or the list_supersession_proposals tool).`;
   }
@@ -404,7 +416,8 @@ export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "key" | "a
   if (direction !== undefined && (!accept || !["newer", "older"].includes(direction))) return "--direction takes newer or older, and only with --accept.";
   if (opts.force === true && !accept) return "--force goes with --accept: it accepts a proposal whose thought was edited after it was judged, one gone stale, one standing on a lineage pair (070), or one flagged WRITER (094).";
   // The pass's thought cap: beside --list it would be dropped without a word (SMD-2015's kind) — the
-  // listing prints up to 50 of a status and --status counts them all (adversarial re-run, third review pass).
+  // listing prints up to 50 of a status and --status counts each status (adversarial re-run, third review pass), and,
+  // since SMD-3248, the pending by pass.
   if (opts.limit != null && list !== undefined) return "--limit is the pass's thought cap and goes with a run; --list prints up to 50 of a status (--status counts each status, and the pending by pass).";
   // Read only by the decision: beside anything else it would be dropped without a word (SMD-2015's kind).
   if (note !== undefined && !accept && !reject) return "--note goes with --accept or --reject: it is recorded with the decision.";
@@ -900,7 +913,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       out(sideLines("newer", np.newer, p.newer_created_at));
       out(sideLines("older", np.older, p.older_created_at));
       // The key through the replies' cleaner: a recorded one holding a newline starts no line of its own (review pass 2).
-      out(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${judgeKeyText(p.judge_key, snipText)} on ${day(p.judged_at)}`);
+      out(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${judgeKeyText(p.judge_key)} on ${day(p.judged_at)}`);
       // 070: a lineage pair — one side derived from the other — is never
       // proposed since 066; a row standing on one is said so, with the reject
       // while the row is the reviewer's.
@@ -1104,7 +1117,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       out(`  ${i + 1}. [${r.confidence === null ? "—" : Number(r.confidence).toFixed(2)}] ${phrase[r.relation] ?? r.relation}${marks.length ? `  ${marks.join("  ")}` : ""}`);
       out(`     newer [${day(r.newer_created_at)}] ${snippet(r.newer_content)}\n        ID: ${r.newer_id}`);
       out(`     older [${day(r.older_created_at)}] ${snippet(r.older_content)}\n        ID: ${r.older_id}`);
-      out(`     relation ${r.id}  judged by ${judgeKeyText(r.judge_key, snipText)} on ${day(r.created_at)}\n`);
+      out(`     relation ${r.id}  judged by ${judgeKeyText(r.judge_key)} on ${day(r.created_at)}\n`);
     });
     return rows.length;
   }
@@ -1159,10 +1172,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const byPass = (await sql`
       SELECT judge_key, count(*)::int AS n FROM supersession_proposals WHERE status = 'pending' GROUP BY judge_key ORDER BY n DESC, judge_key`) as { judge_key: string; n: number }[];
     out(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${stale.total ? `, ${staleClause(stale)}` : ""}${q.lineage ? `, ${lineageClause(q.lineage, q.has_109)}` : ""} — --list shows them; --accept / --reject decides one`);
-    // A key is anyone's to record (029's door takes any non-empty text): one --key cannot take is quoted and said so,
-    // unfiltered --list its only listing (review passes 2 and 3); ten passes at most, the rest counted.
-    const shown = byPass.slice(0, 10), rest = byPass.slice(10);
-    if (byPass.length) out(`  pending by pass: ${shown.map((b) => `${b.n} judged by ${judgeKeyText(b.judge_key, snipText)}${selectableKey(b.judge_key) ? "" : " (not a key --key takes; listed by --list alone)"}`).join(", ")}${rest.length ? `, and ${rest.length} more pass(es) with ${rest.reduce((a, b) => a + b.n, 0)}` : ""} — --list --key <key> lists one pass's`);
+    if (byPass.length) out(pendingByPassLine(byPass));
     // 084 (SMD-1873 PR 2): the relations the pass judged, standing.
     if (await has084()) {
       const [r] = (await sql`

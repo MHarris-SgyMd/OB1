@@ -2372,7 +2372,7 @@ else {
   // fork's callers pass four (measured on Postgres, SMD-2313's run-it, first review pass:
   // the arm had said the older body answered). The check counts the forms
   // and warns naming 109, whose DROPs take the older forms.
-  const besideRe = /!  lineage\s+every derived row has its lineage row, but an older list_supersession_proposals stands beside 109's \(029 or 070 re-applied by hand over it\): a call both forms take — fewer than three arguments beside 029's, fewer than four beside 070's — is ambiguous \(not unique\) and fails, so a reader passing fewer than four may error on the queue, while the fork's callers pass four \(SMD-2313, SMD-3248\)/;
+  const besideRe = /!  lineage\s+every derived row has its lineage row, but an older list_supersession_proposals stands beside the four-argument one \(029 or 070 re-applied by hand over 109\): a call both forms take — fewer than three arguments beside 029's, fewer than four beside 070's — is ambiguous \(not unique\) and fails, so a reader passing fewer than four may error on the queue, while the fork's callers pass four \(SMD-2313, SMD-3248\)/;
   const beside029 = await run(SQL_ENV);
   assert(beside029.code === 0 && besideRe.test(beside029.out) && /Apply db\/migrations\/109_listing_selects_a_pass\.sql\./.test(fix(beside029.out, "lineage")),
          `029 re-applied over 109 leaves its two-argument listing beside 109's: a warning naming 109 (${lpLine(beside029.out).slice(0, 200)})`);
@@ -2413,6 +2413,15 @@ else {
     assert(unmarked.code === 0 && /!  lineage\s+every derived row has its lineage row, but list_supersession_proposals' four-argument body is not 109's \(written by hand, or re-made without its sentinels\): the listings run, but nothing vouches that it flags a lineage pair or selects a pass as 109 does/.test(unmarked.out)
              && /Apply db\/migrations\/109_listing_selects_a_pass\.sql\./.test(fix(unmarked.out, "lineage")),
            `a four-argument body without ${sentinel} is named as not 109's — its listings run — with 109 the remedy (review pass 3: it had said every listing fails) (${lpLine(unmarked.out).slice(0, 160)})`);
+    // …and with 070's form beside that body, the leftover is what is named (review pass 4: the beside arm had called
+    // the body 109's), 109 again the remedy.
+    if (sentinel === "ob1:listing-selects-a-pass") {
+      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
+      const both = await run(SQL_ENV);
+      assert(both.code === 0 && besideRe.test(both.out) && /Apply db\/migrations\/109_listing_selects_a_pass\.sql\./.test(fix(both.out, "lineage")),
+             `a body not 109's with 070's form beside it: the leftover named, 109 the remedy (${lpLine(both.out).slice(0, 160)})`);
+      await claims.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
+    }
     await claims.unsafe(String(def));
   }
   const settled = await run(SQL_ENV);

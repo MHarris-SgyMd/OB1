@@ -263,7 +263,9 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     // Review pass 3: and none a shell reads — a key offered for pasting ran `$(…)` in the operator's shell.
     const shell = await rest("GET", `/v1/proposals?judge_key=${encodeURIComponent("consolidate:m@p1$(id)")}`);
     const shellM = await mcp("list_supersession_proposals", { judge_key: "consolidate:m@p2;id" });
-    assert(rr.status === 400 && rr.body.code === "REFUSED_INPUT" && /%2B/.test(JSON.stringify(rr.body)) && mm.isError && ok2.status === 200 && shell.status === 400 && shellM.isError,
+    // …each saying the rule in the same words through both doors (review pass 4: only the %2B and isError were checked).
+    const RULE = "judge_key is a pass key: 1-200 letters, digits and . _ : / @ + -, starting with a letter or digit (in a URL's query, encode + as %2B)";
+    assert(rr.status === 400 && rr.body.code === "REFUSED_INPUT" && JSON.stringify(rr.body).includes(RULE) && mm.isError && mm.text.includes(RULE) && ok2.status === 200 && shell.status === 400 && shellM.isError && shellM.text.includes(RULE),
       `judge_key with an unencoded + (a space once decoded), a newline, or a character a shell reads: refused through both doors, naming %2B; encoded, answered (${rr.status} ${String(rr.body.code)}, ${mm.isError}, ${ok2.status}, ${shell.status}, ${shellM.isError})`);
   }
   // A limit is a whole number of thoughts, 1 to 1000: 0, -1, 1.5 and 1001 are the schema's refusal, not an empty page (review pass 1).
