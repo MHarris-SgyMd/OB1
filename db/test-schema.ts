@@ -12987,10 +12987,9 @@ console.log("\n[76] memorySizing and memoryRows: the valid HNSW indexes against 
          && warnRes.status === "warn" && /are 129 MB and shared_buffers is 128 MB: a vector search walks an index the buffer pool cannot hold\. The OS page cache serves the walk, but not as well — at ten million rows, .* about a third of the throughput/.test(warnRes.detail),
     `the resident row: ok with both sizes; a warning past the pool, with the page cache's measured third (${warnRes.detail.slice(0, 60)}…)`);
   assert(/^Where the host has that much memory free beyond the servers: as a superuser, ALTER SYSTEM SET shared_buffers = '192MB'; then restart postgres/.test(warnRes.fix ?? "")
-         && /`<tier>-postgres`/.test(warnRes.fix ?? "")
          && /If postgres then will not start \(the host could not give it the memory\), take the line back out of the data directory and start it again: /.test(warnRes.fix ?? "")
          && (warnRes.fix ?? "").includes(`compose run --rm --no-deps --entrypoint sh postgres -c "sed -i '/^shared_buffers/d' \\$PGDATA/postgresql.auto.conf"\`, then \`compose start postgres\``),
-    "the resident remedy: the size to set, the restart, the tiers' services, and the way back out of postgresql.auto.conf and up again");
+    "the resident remedy: the size to set, the restart, and the way back out of postgresql.auto.conf and up again");
   // SMD-2871: a staging index 039 is about to adopt is passed apart, sized
   // nothing, and said in either branch, one or two of them; the warning's
   // remedy then has 039 applied first, the way the ledger calls for, with

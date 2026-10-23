@@ -1351,13 +1351,11 @@ jobs:
       - name: Every published port binds loopback
         working-directory: deploy
         run: |
-          # The forwarder's script, as compose renders it in each stack, is
+          # The forwarder's script, as compose renders it, is
           # deploy/forwarder.ts byte for byte: a `$` in it would be read as a
           # variable (check 28 refuses one in the file; this holds the render).
-          for f in compose.yaml compose.tiers.yaml; do
-            docker compose -f "$f" config --format json | jq -j .configs.forwarder.content | cmp - forwarder.ts \
-              || { echo "$f's rendered forwarder script is not deploy/forwarder.ts" >&2; exit 1; }
-          done
+          docker compose -f compose.yaml config --format json | jq -j .configs.forwarder.content | cmp - forwarder.ts \
+            || { echo "compose.yaml's rendered forwarder script is not deploy/forwarder.ts" >&2; exit 1; }
           docker compose -f compose.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and (.services.forwarder.ports | length == 1) and (.services.proxy | has("ports") | not) and (.services.server | has("ports") | not) and (.services.api | has("ports") | not) and (.services.mcp | has("ports") | not) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.forwarder.image | test("@sha256:[0-9a-f]{64}$")) and (.services.proxy.labels["ob1.proxy-routes"] == .configs["proxy-routes"].content) and (.services.forwarder.labels["ob1.forwarder"] == .configs.forwarder.content) and ([.services[] | select(.network_mode != null)] | length == 0)'
           # The REST core's public overlay (SMD-2284) publishes nothing either, and
@@ -1380,13 +1378,6 @@ jobs:
           # port, its forwarder's, on loopback.
           SERVER_PORT=8011 SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES='' docker compose -p open-brain-canary -f compose.yaml config --format json \
             | jq -e '(.networks | length > 0) and all(.networks[]; (.name | startswith("open-brain-canary_")) and (.external != true)) and ([.services[].ports[]?] | length == 1) and (.services.forwarder.ports | length == 1 and .[0].host_ip == "127.0.0.1" and .[0].published == "8011")'
-          # The three-brain stack (SMD-2294) publishes its forwarder alone, on
-          # loopback, the proxy on compose.yaml's pinned image behind it
-          # (SMD-2583), as compose renders it.
-          # Its routes and each tier's wiring are check-fork-consistency's
-          # check 27, which reads the file itself.
-          docker compose -f compose.tiers.yaml --profile local-models config --format json \
-            | jq -e --arg img "$(docker compose -f compose.yaml config --format json | jq -r .services.proxy.image)" '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1")) and (.services.forwarder.ports | length == 1) and (.services.proxy | has("ports") | not) and (.services.proxy.image == $img) and ([.services[] | select(.network_mode != null)] | length == 0)'
           docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3 and all(.host_ip == "127.0.0.1")) and ([.services[] | select(.network_mode != null)] | length == 0)'
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
@@ -1422,8 +1413,8 @@ jobs:
           # that names none is put there); Postgres on the internal `data`
           # alone, beside only what connects to it; the outward networks'
           # members held, the authorization server's and the proxy's each
-          # alone; and the same of the three-brain stack and the canary, every
-          # network of which is its own (SMD-2874).
+          # alone; and the same of the canary, every network of which is its
+          # own (SMD-2874).
           # check-fork-consistency.ts 28 holds the files to the same networks;
           # this holds what compose makes of them, and the full-stack job
           # runs a container on `egress` against Postgres.
@@ -1432,7 +1423,6 @@ jobs:
           # missed it).
           profiles_of() { docker compose -f "$1" config --profiles | sed 's/^/--profile=/'; }
           all=(); while IFS= read -r p; do all+=("$p"); done < <(profiles_of compose.yaml)
-          tiers=(); while IFS= read -r p; do tiers+=("$p"); done < <(profiles_of compose.tiers.yaml)
           [ "${#all[@]}" -ge 8 ] || { echo "compose.yaml lists ${#all[@]} profiles, fewer than the eight it has" >&2; exit 1; }
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           members='def on($n): [.services | to_entries[] | select((.value.networks // {"default": null}) | has($n)) | .key] | sort;'
@@ -1446,8 +1436,6 @@ jobs:
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data", "postgres-port"]) and (on("postgres-port") == ["postgres"])'
           docker compose -f compose.yaml -f compose.grafana-port.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and (on("grafana-port") == ["lgtm"]) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh", "telemetry"])'
-          docker compose -f compose.tiers.yaml "${tiers[@]}" config --format json \
-            | jq -e "$members"' (on("default") == []) and (on("data") == ([["stable", "canary", "working"][] as $t | ["postgres", "migrate", "server", "api"][] | "\($t)-\(.)"] | sort)) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.data.internal == true and .networks.front.internal == true'
           docker compose -p open-brain-canary -f compose.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and (.networks.data.name == "open-brain-canary_data") and all(.networks[]; (.name | startswith("open-brain-canary_")) and (.external != true))'
           # SMD-2424: the workers profile's two followers publish nothing,
@@ -1566,7 +1554,7 @@ jobs:
           [ "$(docker logs ob1-ci-decoy 2>&1 | grep -c 'decoy got a connection')" = 0 ] || { echo "the forwarder connected to the decoy answering as the proxy" >&2; exit 1; }
           docker compose -f compose.yaml logs --no-color --since "$stopped" forwarder | grep -F 'resolved only to addresses the forwarder does not dial'
 
-      # SMD-2658, SMD-2685. check-fork-consistency's checks 27 and 28 hold
+      # SMD-2658, SMD-2685. check-fork-consistency's check 28 holds
       # each compose file as Bun.YAML reads it: the route tables, compose.yaml's
       # proxy, what each overlay declares it sets, the keys compose.yaml's
       # services set, and who joins which network under which names. This
@@ -1576,7 +1564,7 @@ jobs:
       # directory, with no command (a command makes Traefik drop every
       # TRAEFIK_* setting, measured on the pin), volume or other provider.
       # Then for each -f combination (compose.yaml under the canary's project
-      # name, the three-brain stack, the release's overlay):
+      # name, the release's overlay):
       # - compose renders it exactly as it renders Bun.YAML's reading of each
       #   file, so a character, a tag or a number the two read apart
       #   (`!!binary`, !reset, U+2028, 012) fails here whichever file carries
@@ -1620,7 +1608,7 @@ jobs:
           # are held by "Every published port binds loopback" and by check 13.
           declared() {
             case "$1" in
-              compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml) ;;
+              compose.yaml|compose.api-public.yaml|compose.hooks-public.yaml) ;;
               compose.grafana-public.yaml) printf '%s\n' '["services","app","environment","GRAFANA_ROUTE"]' ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' '["services","postgres","networks","postgres-port"]' '["networks","postgres-port"]' ;;
               compose.grafana-port.yaml) printf '%s\n' '["services","lgtm","ports"]' '["services","lgtm","networks","grafana-port"]' '["services","lgtm","environment","LGTM_ORIGIN"]' '["services","app","environment","GRAFANA_LINK"]' '["networks","grafana-port"]' ;;
@@ -1667,7 +1655,7 @@ jobs:
                 rendered+=("$a")
                 paths+="$(declared "$a")"$'\n'
                 if [ -z "$first" ]; then first="$a"; fi
-                # Bun.YAML's reading of the file, which checks 27 and 28 hold; the release's overlay is read by none.
+                # Bun.YAML's reading of the file, which check 28 holds; the release's overlay is read by none.
                 if [ "$a" = compose.release.yaml ]; then twins+=("$a"); else
                   bun -e 'await Bun.write(process.argv.at(-1), JSON.stringify(Bun.YAML.parse(await Bun.file(process.argv.at(-2)).text())))' "$a" ".bun-view.$a.json"
                   twins+=(".bun-view.$a.json")
@@ -1709,7 +1697,6 @@ jobs:
           api='{"source": "proxy-api-route", "target": "/etc/traefik/dynamic/api.yaml", "label": "ob1.proxy-api-route", "file": "compose.api-public.yaml"}'
           hooks='{"source": "proxy-hooks-route", "target": "/etc/traefik/dynamic/hooks.yaml", "label": "ob1.proxy-hooks-route", "file": "compose.hooks-public.yaml"}'
           grafana='{"source": "proxy-grafana-route", "target": "/etc/traefik/dynamic/grafana.yaml", "label": "ob1.proxy-grafana-route", "file": "compose.grafana-public.yaml"}'
-          tiers='{"source": "tier-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.tiers.yaml"}'
           proxy_loads "[$routes]" -f compose.yaml "${profiles[@]}"
           proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml "${profiles[@]}"
           proxy_loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml "${profiles[@]}"
@@ -1722,7 +1709,6 @@ jobs:
           proxy_loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml -f compose.grafana-port.yaml "${profiles[@]}"
           proxy_loads "[$routes, $api, $hooks, $grafana]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml -f compose.grafana-public.yaml "${profiles[@]}"
           proxy_loads "[$routes]" -p open-brain-canary -f compose.yaml "${profiles[@]}"
-          proxy_loads "[$tiers]" -f compose.tiers.yaml --profile=local-models
           # The release's overlay, on the install path deploy/README.md gives:
           # as a rehearsal renders it, and as renderComposeOverlay does with a
           # tag and digests (the CLI refuses tag mode on a tree that is not the

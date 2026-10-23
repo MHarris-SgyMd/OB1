@@ -71,8 +71,8 @@ export type TokenSettings = { issuer: string; audience: string };
  * The settings on a configured stack with a sound origin, else null: no token
  * is accepted. The audience is the stable tier's `<origin>/api`: a brain is
  * its own stack with its own authorization server (docs/one-brain-per-stack.md),
- * and the tiers stack passes no origin (deploy/compose.tiers.yaml), so no REST
- * core of another tier is configured to read it.
+ * and deploy/canary.sh runs a canary with no origin, so no REST core of another
+ * tier is configured to read it.
  */
 export function tokenSettings(env: { COMPOSE_PROFILES?: string; OB1_PUBLIC_ORIGIN?: string }): TokenSettings | null {
   const { origin } = edgeSettings(env);

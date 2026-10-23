@@ -4,9 +4,7 @@
 // is down, so it dials only an address inside the subnet of an interface no default route leaves by,
 // front's. It sends the PROXY protocol's v1 line first, so the proxy, and the authorization server's
 // per-address limits behind it, see each client's address rather than this one's. No dollar sign in
-// this file, which compose would read as a variable, no exclamation mark, which check 27 refuses in
-// compose.tiers.yaml (compose reads one as a YAML tag), and no number written with an underscore,
-// which check 27 reads as YAML 1.1 would: the script is inline in both.
+// this file, which compose would read as a variable: the script is inline in compose.yaml.
 import net from "node:net";
 import { lookup } from "node:dns/promises";
 import { networkInterfaces, type NetworkInterfaceInfo } from "node:os";

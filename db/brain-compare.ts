@@ -3,8 +3,7 @@
  * brain-compare.ts — one "how do these two brains differ" call (SMD-2109).
  *
  * SMD-1806 runs the fork as three brains (stable, canary, working) over one
- * corpus, each a path on one origin since SMD-2294 (/mcp, /canary/mcp,
- * /working/mcp). That only pays off if you can answer, in one step, "are these
+ * corpus, each its own stack on its own port since SMD-2872. That only pays off if you can answer, in one step, "are these
  * two telling me the same thing, and if not, why?" — version, migration, corpus
  * freshness, retrieval. The pieces existed and nothing composed them: brain_info
  * (SMD-2041) reports ONE brain; tier.ts --diff (slice 2) is the merge-time replay
