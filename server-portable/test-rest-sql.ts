@@ -125,6 +125,8 @@ function rendered(render: (v: never) => say.Reply, v: unknown): say.Reply {
     return { content: [{ type: "text", text: `(the REST value does not render: ${(err as Error).message})` }], structuredContent: {} };
   }
 }
+/** A value's shape: its keys, nested, each leaf its JSON type — what two writes of different rows share, so a field one answer drops, renames or leaves out where the other has a 0 differs (review pass 6a·3). */
+const shapeOf = (v: unknown): unknown => Array.isArray(v) ? v.map(shapeOf) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, shapeOf((v as Record<string, unknown>)[k])])) : v === null ? "null" : typeof v;
 const firstDiff = (a: Record<string, unknown>, b: Record<string, unknown>) =>
   [...new Set([...Object.keys(a), ...Object.keys(b)])].find((k) => !same(a[k], b[k])) ?? "-";
 
@@ -315,7 +317,14 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   // REST dropped from update_thought's answer passed the comparison of the REST answer with its own rendering).
   const cdo = await directly("capture_thought", { content: "delta: written in process", source: "rest-suite" });
   const cd = rendered((v) => say.renderCapture(ok(v)), swap(cdo.value as Record<string, unknown>, m.sc));
-  assert(cdo.ok && cd.content[0].text === m.text && same(cd.structuredContent, m.sc), `capture_thought: …and a core of this suite's own says the same (${cdo.ok ? firstDiff(cd.structuredContent, m.sc) : "refused"})`);
+  const cWhole = shapeOf(JSON.parse(JSON.stringify(cdo.value ?? null))) as Record<string, unknown>;
+  // A capture as the MCP server sends it, forwarded: REST answers a carrier the whole value (rest/app.ts), which is
+  // what the MCP server words, so its shape is held too (review pass 6a·3: a field dropped there alone passed).
+  const fwd = await rest("POST", "/v1/thoughts", { content: "delta: written through REST as the MCP server sends it", source: "rest-suite" }, KEYS.writer, KEYS.forwarder);
+  const { embeddingAttached: _fwdAttached, ...forwarded } = fwd.body;
+  assert(fwd.status === 201 && same(shapeOf(forwarded), cWhole), `capture_thought forwarded: the REST answer is the core's value's whole shape (${fwd.status}; ${firstDiff(shapeOf(forwarded) as Record<string, unknown>, cWhole)})`);
+  assert(cdo.ok && cd.content[0].text === m.text && same(cd.structuredContent, m.sc) && same(shapeOf(captured), cWhole),
+    `capture_thought: …and a core of this suite's own says the same, the REST answer its value's whole shape (${cdo.ok ? `${firstDiff(cd.structuredContent, m.sc)} / ${firstDiff(shapeOf(captured) as Record<string, unknown>, cWhole)}` : "refused"})`);
 
   const u = await rest("PATCH", `/v1/thoughts/${ids[0]}`, { metadata_patch: { reviewed: true } });
   assert(u.body.id === ids[0] && typeof u.body.updatedAt === "string", `the REST update answers the thought it changed (${u.body.id})`);
@@ -324,7 +333,9 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   assert(u.status === 200 && ur.content[0].text === um.text && same(ur.structuredContent, um.sc), `update_thought: the same reply (${u.status}; first difference: ${firstDiff(ur.structuredContent, um.sc)})`);
   const udo = await directly("update_thought", { id: ids[2], metadata_patch: { reviewed: true } });
   const ud = rendered((v) => say.renderUpdate(ok(v)), swap(udo.value as Record<string, unknown>, um.sc));
-  assert(udo.ok && ud.content[0].text === um.text && same(ud.structuredContent, um.sc), `update_thought: …and a core of this suite's own says the same (${udo.ok ? firstDiff(ud.structuredContent, um.sc) : "refused"})`);
+  const uWhole = shapeOf(JSON.parse(JSON.stringify(udo.value ?? null))) as Record<string, unknown>;
+  assert(udo.ok && ud.content[0].text === um.text && same(ud.structuredContent, um.sc) && same(shapeOf(u.body), uWhole),
+    `update_thought: …and a core of this suite's own says the same, the REST answer its value's whole shape (${udo.ok ? `${firstDiff(ud.structuredContent, um.sc)} / ${firstDiff(shapeOf(u.body) as Record<string, unknown>, uWhole)}` : "refused"})`);
 
   // A patch naming a stamp key (SMD-2744): REST carries `kept` with the
   // values, MCP the keys and the note, one render of the other; an echo
@@ -348,7 +359,9 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   const doomedDirect = String(cdo.value && (cdo.value as { id?: unknown }).id);
   const ddo = await directly("delete_thought", { id: doomedDirect });
   const dd = rendered((v) => say.renderDelete(ok(v)), swap(ddo.value as Record<string, unknown>, dm.sc));
-  assert(ddo.ok && dd.content[0].text === dm.text && same(dd.structuredContent, dm.sc), `delete_thought: …and a core of this suite's own says the same (${ddo.ok ? firstDiff(dd.structuredContent, dm.sc) : "refused"})`);
+  const dWhole = shapeOf(JSON.parse(JSON.stringify(ddo.value ?? null))) as Record<string, unknown>;
+  assert(ddo.ok && dd.content[0].text === dm.text && same(dd.structuredContent, dm.sc) && same(shapeOf(d.body), dWhole),
+    `delete_thought: …and a core of this suite's own says the same, the REST answer its value's whole shape (${ddo.ok ? `${firstDiff(dd.structuredContent, dm.sc)} / ${firstDiff(shapeOf(d.body) as Record<string, unknown>, dWhole)}` : "refused"})`);
 
   // reset_capture_stamp (SMD-2744): the operator's alone, so the writer is
   // classified for it here and unclassified after. Each door resets the
