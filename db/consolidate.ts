@@ -159,7 +159,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { consolidatePassKey, decidePair } from "../server-portable/consolidate-decide.ts";
+import { consolidatePassKey, decidePair, type DecideNote } from "../server-portable/consolidate-decide.ts";
 import { resolveJevConfig, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeTier, probeUntil, ProviderDown, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
@@ -559,7 +559,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // value the resolver treats as unset (empty, or the metadata model's own name)
   // is the metadata model here too, however it was spelled.
   if (!REVIEW_ONLY) say(`  model:  ${cfg.judgeModel}${cfg.judgeModel !== cfg.metadataModel ? " (OB1_JUDGE_MODEL)" : " (the metadata model; OB1_JUDGE_MODEL gives the judge its own)"} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}; up to ${K} older neighbour(s) per thought at cosine >= ${MIN_SIM}; outdates recorded at confidence >= ${MIN_CONFIDENCE}, the token probability where the endpoint returns one`);
-  if (jev) say(`  decide: ${cfg.decider} through the typed-decision tier at ${jev.endpoint.base} gives each verdict, its P(outdates) the confidence; ${cfg.judgeModel} only writes the proposals it calls at >= ${MIN_CONFIDENCE}, two-sided with the part rule, its quotes read without markdown (OB1_CONSOLIDATE_DECIDER, SMD-3115, SMD-3151)`);
+  if (jev) say(`  decide: ${cfg.decider} through the typed-decision tier at ${jev.endpoint.base} gives each verdict, its P(outdates) the confidence; ${cfg.judgeModel} only writes the proposals it calls at >= ${MIN_CONFIDENCE}, two-sided with the part rule, its quotes read without markdown; it is first asked the mediated-pair test's link step of those pairs and of an evolves the pass would store, and an H or F link caps the pair at related with no proposal (OB1_CONSOLIDATE_DECIDER, SMD-3115, SMD-3151, SMD-3203)`);
   // What may leave the box (SMD-1903): a pair either row of which the gate
   // refuses is not judged, and the thought's claim fails naming the rule.
   if (!REVIEW_ONLY) say(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
@@ -1441,7 +1441,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // 079 (SMD-2448): the judge calls fewer than 066's list would have cost at --k, and the claims whose read failed (counted 0).
     ticketCalls: 0, ticketCallsUnread: 0,
     // Decide mode (SMD-3151): the writer's calls by what came back, and the tier's outdates under the floor it was not asked about.
-    writerAsked: 0, writerStood: 0, writerDeclined: 0, writerQuotesFailed: 0, writerUnparsed: 0, gated: 0,
+    writerAsked: 0, writerStood: 0, writerDeclined: 0, writerQuotesFailed: 0, writerUnparsed: 0, gated: 0, linkAsked: 0, linkCapped: 0, linkUnparsed: 0,
     // 067: the stale rows this run met — replaced in place (proposed again),
     // settled after a judgement that proposes nothing, settled because the
     // pair no longer meets the candidate rule, left waiting for a vector, or
@@ -1586,7 +1586,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         const newerSide = { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined, writer: actorKindOf(row.metadata) };
         const callSignal = AbortSignal.any([AbortSignal.timeout(TIMEOUT_S * 1000), onHardStop.signal]);
         // Decide mode (SMD-3115): the tier's verdict, the judge's model writing only a proposal it calls at this
-        // pass's floor, which it would record (SMD-3151); one deadline for both calls, as for the judge's one.
+        // pass's floor, which it would record (SMD-3151), after the link step that may cap the pair (SMD-3203); one
+        // deadline for all three calls, as for the judge's one.
         j = jev ? await decidePair(olderSide, newerSide, cfg, jev, MIN_CONFIDENCE, callSignal, keyName)
                 : await judgePair(olderSide, newerSide, cfg, callSignal, keyName, { logprobs: JUDGE_LOGPROBS });
       } catch (e) {
@@ -1628,8 +1629,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       const gated = j.decide?.floor !== undefined;
       // A proposing verdict: the writer's standing outdates, or the tier's outdates the gate left.
       const proposing = verdict !== null || gated;
+      // Decide version 4 (SMD-3203): the writer's link step, when it was asked, and whether it capped the pair.
+      const link = j.decide?.link as DecideNote["link"];
+      const cappedBy = link?.capped ? `, capped by the writer's link step (${link.link === "unparsed" ? "no link read" : `an ${link.link} link`}, SMD-3203)` : "";
       if (j.decide) {
-        const writer = j.decide.writer as { current?: string } | undefined;
+        const writer = j.decide.writer as DecideNote["writer"];
         if (gated) totals.gated++;
         else if (writer) {
           totals.writerAsked++;
@@ -1637,6 +1641,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           else if (writer.current === "none") totals.writerDeclined++;
           else if (writer.current === "unparsed") totals.writerUnparsed++;
           else totals.writerQuotesFailed++;
+        }
+        if (link) {
+          totals.linkAsked++;
+          if (link.capped) totals.linkCapped++;
+          if (link.link === "unparsed") totals.linkUnparsed++;
         }
       }
       // SMD-1873: the token probability of a proposing verdict when the
@@ -1655,7 +1664,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // (The older's fingerprint from the read the judge was sent, not the
         // stale read before the candidates — a move between the two would
         // record a text the judge did not see; first review pass, cold read.)
-        if (staleRow && await settleStale(staleRow, !proposing ? `judged again after a text moved — ${j.verdict}` : `judged again after a text moved — ${gated ? "outdates" : j.verdict} at confidence ${scored.confidence.toFixed(2)} (${scored.source === "token" ? "token probability" : "the number the model wrote"}), under the floor ${MIN_CONFIDENCE}${gated ? ", the writer not asked" : ""}`, older.fingerprint, row.fingerprint, proposing ? "under-confidence" : j.verdict)) {
+        if (staleRow && await settleStale(staleRow, !proposing ? `judged again after a text moved — ${j.verdict}${cappedBy}` : `judged again after a text moved — ${gated ? "outdates" : j.verdict} at confidence ${scored.confidence.toFixed(2)} (${scored.source === "token" ? "token probability" : "the number the model wrote"}), under the floor ${MIN_CONFIDENCE}${gated ? ", the writer not asked" : ""}${cappedBy}`, older.fingerprint, row.fingerprint, proposing ? "under-confidence" : j.verdict)) {
           staleMet.settled.add(staleRow.id);
           recorded = "settled";
         }
@@ -1765,13 +1774,16 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         else if (r.action === "closed") totals.relationsClosed++;
       } else if (rv !== null) totals[rv === "distinct" ? "distinctUnstored" : "relationsUnstored"]++;
       if (DUMP) {
+        // The judge's reason and quotes are the brain's text: a file this creates is the owner's alone (SMD-3203).
         appendFileSync(DUMP, JSON.stringify({
           newer: row.id, older: c.older_id, similarity: c.similarity, shared: c.shared_entities, key: JOB,
           verdict: j.verdict, supersedes: j.supersedes, confidence: j.confidence, score: scored.confidence, score_source: scored.source, reason: j.reason, evidence: j.evidence, evidence_found: j.evidenceFound ?? null,
           proposal: proposalId, recorded, relation,
-          // Decide mode: the tier's top and, when it asked no writer, the floor it was held to (SMD-3151).
-          ...(j.decide ? { top: j.decide.top ?? null, floor: j.decide.floor ?? null } : {}),
-        }) + "\n");
+          // Decide mode: the tier's top and, when it asked no writer, the floor it was held to (SMD-3151); the writer's
+          // link step's answer, when it was asked (first, before a proposal; after, on an evolves to store) and whether
+          // it capped the pair (SMD-3203).
+          ...(j.decide ? { top: j.decide.top ?? null, floor: j.decide.floor ?? null, link: link?.link ?? null, asked: link?.asked ?? null, capped: link?.capped ?? null } : {}),
+        }) + "\n", { mode: 0o600 });
       }
     }
     // 067: the stale rows no candidate reached — pairs the candidate rule no
@@ -2293,6 +2305,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       `  decide: the writer asked on ${totals.writerAsked} pair(s) — ${totals.writerStood} stood, ${totals.writerDeclined} declined, ${totals.writerQuotesFailed} with quotes that did not check out, ` +
         `${totals.writerUnparsed} unparsed; ${totals.gated} outdates under the floor ${MIN_CONFIDENCE}, the writer not asked`
     );
+    // Decide version 4 (SMD-3203): the link step's calls, and the pairs it capped at related with no proposal.
+    out(`  decide: the writer's link step asked on ${totals.linkAsked} pair(s) — ${totals.linkCapped} capped at related with no proposal (${totals.linkUnparsed} of them unparsed), ${totals.linkAsked - totals.linkCapped} direct or unlinked`);
   }
   // 084 (SMD-1873 PR 2): what the pass did to the relations it judged.
   // A run that stored relations for any part of it reports what it stored,

@@ -27,21 +27,22 @@
     },
     {
       "id": "5c1d2e3f-0002-4b2a-8e00-000000000002",
-      "name": "brain",
-      "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
-      "typeVersion": 1.2,
+      "name": "brain_search_thoughts",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
       "position": [
         -200,
         220
       ],
       "parameters": {
-        "endpointUrl": "http://server:8000/",
-        "serverTransport": "httpStreamable",
-        "authentication": "headerAuth",
-        "include": "selected",
-        "includeTools": [
-          "search_thoughts"
-        ],
+        "toolDescription": "Search the Open Brain for thoughts about a topic; returns the best matches with their text.",
+        "method": "POST",
+        "url": "http://api:8000/v1/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ query: $fromAI('query', 'What to search for', 'string'), limit: $fromAI('limit', 'How many thoughts to return, 1 to 50', 'number', 3) }) }}",
         "options": {
           "timeout": 60000
         }
@@ -82,7 +83,7 @@
     }
   ],
   "connections": {
-    "brain": {
+    "linear_issue": {
       "ai_tool": [
         [
           {
@@ -93,7 +94,7 @@
         ]
       ]
     },
-    "linear_issue": {
+    "brain_search_thoughts": {
       "ai_tool": [
         [
           {

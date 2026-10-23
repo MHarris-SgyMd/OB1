@@ -71,7 +71,7 @@ The core MCP server (`mcp-server/`, at `/mcp`) exposes:
 
 - `capture_thought`: write a standalone thought, generate embedding, extract metadata, and store it.
 - `search_thoughts`: semantic search over stored thoughts.
-- `list_thoughts`: browse recent thoughts with optional filters.
+- `list_thoughts`: browse thoughts, newest or oldest first, a page at a time (the reply ends with the cursor for the next page), with optional filters.
 - `thought_stats`: summarize total thoughts, types, top topics, and people.
 - `thought_changes`: what changed since a time or a cursor — every capture, edit and deletion, who made it, and what moved (this fork's `server-portable` server only, migration 052).
 - `brain_info`: what this brain is — the server's version and commit, the store and tier, the Postgres and pgvector versions, the highest migration applied against the server's own, row counts, size, vector-index parameters, the board-sync watermark — the newest Linear update any thought reflects — the long-running workers' heartbeats, and what consolidation found: the supersession proposals pending review and the judged relations standing (this fork's `server-portable` server only).

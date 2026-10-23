@@ -645,6 +645,9 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
   const [txSweep, fraction, nan, plain] = await Promise.all([swept({ dryRun: true }, tx()), swept({ limit: 1.5 }), swept({ limit: NaN }), swept({ limit: 0 })]);
   ok(/not a transaction's handle/.test(txSweep) && /limit must be an integer \(1\.5\)/.test(fraction) && /limit must be an integer \(NaN\)/.test(nan) && plain === "stub queried",
      `sweepOrphans refuses a dry run on a transaction's handle and a limit that is no integer before querying, and queries for 0 (${[txSweep, fraction, nan, plain].map((m) => m.slice(0, 30)).join(" | ")})`);
+  // A signal aborted already stops the sweep before its read: the sleep scheduler's wake (SMD-2679).
+  const early = await sweepOrphans(stub() as never, { writer: capture(), signal: AbortSignal.abort() }).then((r) => JSON.stringify(r), (e: Error) => e.message);
+  ok(early === JSON.stringify({ thoughts: 0, touched: 0, deleted: 0, refused: 0, failed: 0, windowed: false, stopped: true, whole: false, last: null }), `…and a signal aborted already stops it before its read (${early})`);
   ok(!closed, "…and never closes the caller's client");
 }
 

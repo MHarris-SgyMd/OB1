@@ -1,10 +1,16 @@
 /**
  * activepieces.ts — the Activepieces candidate's adapter (SMD-1863). Everything
  * through its REST API, no UI: the first sign-up becomes the platform admin
- * (sign-up is invitation-only after it), three connections into its encrypted
- * store, the three flows from this directory imported and published. Its
+ * (sign-up is invitation-only after it), the Linear connection into its
+ * encrypted store, the three flows from this directory imported and published.
+ * The flows reach the brain's REST core (`api:8000`, SMD-2295) with the HTTP
+ * piece, which takes no connection (`auth: None`): the brain keys ride the
+ * steps' own headers, filled into each flow at import from orchestration/.env
+ * and never committed, so they sit in the flow, not the connection store. Its
  * project MCP server is on by default; the flows with an MCP Tool trigger
- * appear on it beside Activepieces' own flow-building tools.
+ * appear on it beside Activepieces' own flow-building tools. Those tools read
+ * a flow's steps, so a holder of that server's token can read the brain keys
+ * too (inferred, not measured): the cost of a piece with no connection.
  *
  * Running the ingestion once on demand goes through that same MCP server:
  * `ap_test_flow` runs the flow end to end in the test environment — the real
@@ -23,7 +29,22 @@ const TAG = "0.91.3";
 const BASE = "http://127.0.0.1:8080";
 const FLOWS = ["linear-ingest.json", "brain-search.json", "linear-issue.json"];
 const INGEST = "OB1 — Linear issues into the brain";
-const PIECES = ["@activepieces/piece-schedule", "@activepieces/piece-linear", "@activepieces/piece-mcp", "@activepieces/piece-mcp-client"];
+const PIECES = ["@activepieces/piece-schedule", "@activepieces/piece-linear", "@activepieces/piece-mcp", "@activepieces/piece-http"];
+/** The placeholders a flow file holds where a brain key goes, and the env value each is filled with at import. */
+const BRAIN_KEYS: Record<string, string> = { __OB1_BRAIN_CAPTURE_KEY__: "ORCH_BRAIN_CAPTURE_KEY", __OB1_BRAIN_READ_KEY__: "ORCH_BRAIN_READ_KEY" };
+
+/** A flow file with its brain-key placeholders filled; refused if a key is unset or a placeholder is left. */
+export function withBrainKeys(text: string, env: Record<string, string>): string {
+  let out = text;
+  for (const [placeholder, name] of Object.entries(BRAIN_KEYS)) {
+    if (!out.includes(placeholder)) continue;
+    if (!env[name]) throw new Error(`${name} is unset in orchestration/.env: a flow needs it for its brain call`);
+    out = out.split(placeholder).join(env[name]);
+  }
+  const left = /__OB1_[A-Z0-9_]+__/i.exec(out);
+  if (left) throw new Error(`a flow still holds a placeholder: ${left[0]}`);
+  return out;
+}
 
 type Session = { token: string; projectId: string };
 
@@ -95,27 +116,21 @@ export const activepieces: Adapter = {
       await waitFor("the pieces in the catalogue after the restart", () => known(s), 300_000, 5_000);
       steps.push("restart (piece index stale at first boot)");
     }
-    const brain = (key: string) => ({
-      type: "CUSTOM_AUTH",
-      props: { serverUrl: "http://server:8000/", protocol: "streamable-http", authType: "api_key", apiKey: key, apiKeyHeader: "x-brain-key" },
-    });
     const connections = [
       { externalId: "linear", displayName: "Linear (read)", pieceName: "@activepieces/piece-linear", value: { type: "SECRET_TEXT", secret_text: env.LINEAR_API_KEY } },
-      { externalId: "brain-capture", displayName: "Brain — capture key", pieceName: "@activepieces/piece-mcp-client", value: brain(env.ORCH_BRAIN_CAPTURE_KEY) },
-      { externalId: "brain-read", displayName: "Brain — read key", pieceName: "@activepieces/piece-mcp-client", value: brain(env.ORCH_BRAIN_READ_KEY) },
     ];
     for (const c of connections) {
       await api("POST", "/v1/app-connections", { ...c, projectId: s.projectId, type: c.value.type }, s.token);
     }
     const existing = await flowsByName(s);
     for (const f of FLOWS) {
-      const request = JSON.parse(readFileSync(join(DIR, f), "utf8"));
+      const request = JSON.parse(withBrainKeys(readFileSync(join(DIR, f), "utf8"), env));
       if (existing.has(request.displayName)) continue;
       const flow = await api("POST", "/v1/flows", { displayName: request.displayName, projectId: s.projectId }, s.token);
       await api("POST", `/v1/flows/${flow.id}`, { type: "IMPORT_FLOW", request }, s.token);
       await api("POST", `/v1/flows/${flow.id}`, { type: "LOCK_AND_PUBLISH", request: {} }, s.token);
     }
-    return [...steps, "app-connections (3)", "flows: create + IMPORT_FLOW + LOCK_AND_PUBLISH (3)"];
+    return [...steps, "app-connections (1)", "flows: create + IMPORT_FLOW + LOCK_AND_PUBLISH (3), the brain keys filled into the HTTP steps"];
   },
   async runIngestion(env) {
     const s = await session(env);
@@ -146,8 +161,8 @@ export const activepieces: Adapter = {
   async mcpServer(env) {
     return mcpEndpoint(await session(env));
   },
-  mcpClient: "the MCP Client piece's call-tool action",
-  nativeMcpClient: true,
+  httpClient: "the HTTP piece's send-request action (the brain key in the flow's step: the piece takes no connection)",
+  nativeHttpClient: true,
   tools: { search: "brain_search", act: "linear_issue" },
   version() {
     return TAG;

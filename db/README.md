@@ -3321,7 +3321,28 @@ tier gives each pair's verdict, not the judge:
   backticks, brackets, escapes' backslashes, underscores at a word's edge and
   a `#` or `>` run opening a word go (not `#433`, whose hashes need a space,
   nor `>=`), an inline link keeps its text and loses its target, and struck text goes with its `~~`, read as withdrawn.
-- **Version 3 is the pass's** (`@p4d3`): version 1's writer, SMD-3114's,
+- **Version 4 is the pass's** (`@p4d4`, SMD-3203): version 3, with the
+  writer's **link step**, the mediated-pair test's step 2
+  (`docs/subject-anchored-claims.md`, version 2, embedded in the pass and held
+  equal to the ADR's by `evals/eval-mediated-pairs.ts --self-check`):
+  - **When:** first on the tier's outdates at the floor, before any proposal
+    is written, and after on a pair the pass would store as evolves (its
+    relation words' mass at the floor).
+  - **The cap:** an H link (one thought's own subject named in passing by the
+    other), an F link (both mention a third subject that is neither's own),
+    or an answer naming none of the four caps the pair: related at most, and
+    no supersession (the ADR's rows 2 and 3). An evolves or a duplicate,
+    whether the tier's verdict or the best a capped outdates takes, becomes
+    related at the tier's P(related), floored on the relation words' mass as
+    any relation is. A related or unrelated verdict stands (an unrelated
+    after the tier's outdates records no distinct, as before). A D or N link
+    leaves the pair to version 3's rules.
+  - **Measured:** SMD-3203 measured the step at κ 0.64 on mediated or not
+    against two raters' agreed labels, at a median 14.3 s of the 27B a pair.
+  - **Reported:** the run's summary counts its calls and the pairs it capped,
+    a dump line carries its link, when it was asked and whether it capped the
+    pair, and a stale proposal settled on a capped pair says so.
+- **Version 3** (`@p4d3`): version 1's writer, SMD-3114's,
   two-sided with the part rule, its quotes read without markdown and asked
   only at the floor (SMD-3151). The writer quotes the words it reads, and on
   SMD-3116's writer test the check refused 11 of the 18 proposals it wrote on
@@ -3346,8 +3367,9 @@ tier gives each pair's verdict, not the judge:
 - **Gating:** both rows are gated for both endpoints before any request.
 - **The key** is `consolidate:<decider>+<writer>@p4d<version>`, so turning it
   on, or a new decide version, starts a fresh pass: the tier again for every
-  pooled thought's candidates, and the writer for each outdates at the floor
-  not yet proposed. The canary's `@p4d1` pass took about 6 hours of sleep, at
+  pooled thought's candidates, the link step for each outdates at the floor
+  and each evolves it would store, and the writer for each outdates at the
+  floor not yet proposed that the link step leaves uncapped. The canary's `@p4d1` pass took about 6 hours of sleep, at
   about 3.8 s a pair.
 - **Refused at start:** the run refuses without `OB1_JEV_BASE_URL`, or with
   `OB1_JEV_MODEL` naming another model.
@@ -3358,7 +3380,8 @@ tier gives each pair's verdict, not the judge:
   `decide_version` and decide mode's prompt hash, and its recipe carries what
   the tier and the writer said (`judged.decide`): since version 3 both of the
   writer's quotes, so a proposal can be checked again under another quote
-  rule, and the floor when the writer was not asked.
+  rule, and the floor when the writer was not asked; since version 4 the link
+  step's answer, when it was asked (`judged.decide.link`).
 
 **Staleness**, the same pass's second output: `stale_entities(window)` names
 the entities nothing has mentioned within the window, quietest first, each
@@ -3556,11 +3579,18 @@ fingerprints, limit, gone, force, orphans, status, dryRun, writer })` is the
 CLI's run in-process, its refusals the CLI's own words and code before any
 connection (`fingerprints` the list the CLI splits from its commas), a
 caller's client used and never closed. `sweepOrphans(sql, { limit, dryRun,
-writer, onFound })` is `--orphans` alone on the caller's client — for the
-sleep scheduler's re-derive pass, a later PR of SMD-2679 — returning the
-thoughts read, those touched, the rows deleted, the calls refused as a value,
-and `windowed` when the lineage table holds more than the 10,001 rows the
-read takes (none found is then not a clean table). A dry run's call is a
+writer, onFound, signal, after, stopOnReplay, skipFailure })` is
+`--orphans` alone on the caller's client — the sleep scheduler's re-derive
+pass, first in each sleep: `signal` stops it between calls, `after` reads the
+window of 10,001 lineage rows in id order past a row, `stopOnReplay` stops it
+at a replay's first refusal, `skipFailure` passes over a call that throws —
+returning the thoughts read, those touched, the rows deleted, the calls
+refused as a value and those passed over, `windowed` when rows lie past the
+window (none found is then not a clean table), `last` (the window's last row,
+the next `after`) and `whole` (every orphan the window holds was called).
+`orphanCensus(sql, { limit, after })` is its read alone. The CLI's
+`--orphans` and `--status` read the first window, in id order; only the
+scheduler walks past it. A dry run's call is a
 transaction of its own, so it holds on a pooled client or a reserved
 connection with no transaction of the caller's open (its rollback would end
 one a raw `BEGIN` opened); a transaction's handle is refused for one.
@@ -3578,6 +3608,7 @@ bun sleep.ts --url …               # wait for quiet, sleep once until both poo
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
 #   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N extraction and, once it joins, N consolidation calls at once)
 #   --budget MINUTES (60; 0 none)   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
+#   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
 #   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 130 a signal before one sleep ended, or a second signal
 ```
 
@@ -3585,9 +3616,10 @@ bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; wr
 runs `sleep.ts --follow` as `sleep`, with `OB1_SLEEP_QUIET`, `OB1_SLEEP_POLL`
 and `OB1_SLEEP_WORKERS` for its three numbers, and `OB1_SLEEP_BUDGET`,
 `OB1_SLEEP_STATEMENT_TIMEOUT`, `OB1_SLEEP_WORK_MEM` and
-`OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only (SMD-2678;
-`deploy/README.md`, "The `sleep` profile instead", has the first start and
-the move from the `workers` profile):
+`OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only, and
+`OB1_SLEEP_DUMP_DIR` for `--dump-dir`, passed only when set (SMD-2678, SMD-3203;
+`deploy/README.md`, "The `sleep` profile instead", has the first start, the
+move from the `workers` profile and the dump's volume):
 
 ```bash
 podman compose -f deploy/compose.yaml --profile sleep up -d sleep
@@ -3616,7 +3648,27 @@ key's writes wake it (reembed, ingest-records, a migration's backfill) until
 `SELECT set_agent_kind('<key name>', 'ingested')` says they are background
 work. The passes it runs write no audit row, so they never wake it.
 
-**What it does asleep.** Extraction alone until its pool drains, then
+**What it does asleep.** First the re-derive pass (SMD-1794's order,
+SMD-2679): `rebuild.ts`'s orphan sweep — the lineage rows whose artifact a raw
+delete or a replay took, deleted through `rebuild_derived`'s orphans-only mode,
+at most 500 thoughts a sleep, no model — on a connection of its own under the
+budget's session; the log says `re-derive: N orphaned lineage row(s) swept`.
+It reads 10,001 lineage rows in id order a sleep, the next window each sleep
+once the one before is swept whole, so a larger table is walked (said once;
+the place is kept in the process, so a restart begins at the first window;
+and `--dry-run` counts the first window's orphans). A wake, a stop or the clock
+spent stops it between thoughts, its call in hand given 2 s before it is
+cancelled on the server (`pg_cancel_backend`), rolled back; a call waiting
+on a lock gives up after 2 s (`lock_timeout`), so no wait behind a row
+holds the supersession lock past it, and is passed over; a wake ends the
+sleep, and a clock spent by the sweep starts no pass. A thought whose call
+fails is passed over, said in the summary with its id, and tried again
+when the sweep comes round; every call failing is said on stderr once. A failure of the sweep itself is said once, a
+replay's refusal stops it said once, and a brain without 063 or a role
+without `EXECUTE` on the function is told once at the start and sweeps
+nothing; the function is `SECURITY INVOKER` over four groups' tables, so a
+role short of one of those grants meets 42501 at the first call, said with
+the grant, and the sweeps end for the process. Then extraction alone until its pool drains, then
 consolidation beside it — the order "Start `extract` alone on a backlog" asks
 of an operator. A wake hard-stops both: every lease returned, the model call in
 hand aborted, the thoughts in hand moved to the back of the queue. A long
@@ -3837,7 +3889,7 @@ key, 079's check, the relations grants; not an operator's `--retry-*` — where 
 used to end the scheduler (SMD-2752). A wake or a stop during that wait stops
 the pass before it began, and a stop is a stop however a pass then ends, unless one throws.
 
-Not yet here: the re-derive pass and a re-embed pass, SMD-2679's later PRs.
+Not yet here: a re-embed pass, SMD-2679's later PRs.
 test-live [38] drives it against a stub model.
 
 ## Extensions
@@ -4717,15 +4769,14 @@ thought stable gained since the refresh can read as a move, and the id-set line
 of the report says how many each holds that the other does not. The replays are
 real searches, which a brain running with `OB1_QUERY_LOG=on` logs.
 
-The three tiers run as one stack, `deploy/compose.tiers.yaml` — three Postgres
-services, one shared Ollama, each tier's MCP server and REST core, and one proxy
-where each tier is a path: `/mcp`, `/canary/mcp`, `/working/mcp` (SMD-2294) —
-built from the checkout (the published stable image is SMD-1860, not yet cut). A
-client reaches the working tier as a second remote MCP entry a transcript can
-tell from stable's:
+Each tier is a brain of its own, a compose project under its own env file and on
+its own port (SMD-2872). `deploy/compose.tiers.yaml`, which ran the three as one
+project behind one proxy with each tier a path, is retired (SMD-2878). A client
+reaches a working tier as a second remote MCP entry a transcript can tell from
+stable's:
 
 ```bash
-claude mcp add --transport http open-brain-working http://127.0.0.1:8000/working/mcp \
+claude mcp add --transport http open-brain-working http://127.0.0.1:<its port>/mcp \
   --header "x-brain-key: <key>"
 ```
 
@@ -5236,9 +5287,9 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2992 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1591 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 989 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 69 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+./with-postgres.sh bun test-live.ts         # 1611 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 990 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 259 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)

@@ -35,7 +35,7 @@
  */
 
 import { SQL } from "bun";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,7 +55,7 @@ import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import { sweepOrphans } from "./rebuild.ts";
 import type { PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
-import { decideKey, DECIDE_PROMPT, DECIDE_VERSION, PART_RULE, RECORD_RULE } from "../server-portable/consolidate-decide.ts";
+import { decideKey, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, PART_RULE, RECORD_RULE } from "../server-portable/consolidate-decide.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, extractionKey } from "../server-portable/entities.ts";
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
 import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
@@ -65,7 +65,7 @@ import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue 
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, rowColumns, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import { endOnRefusal, passStamper, stampKey } from "./pass-stamp.ts";
 import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
-import { run as runSleep } from "./sleep.ts";
+import { passDumpFile, run as runSleep } from "./sleep.ts";
 import { readThoughts } from "./weekly-digest.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
 import { findingGate, findingsSchemaProblem, findingsStep, groupFindings, outcomes, postFindings, selectFindings, summaryLine, type FindingsReport } from "./board-findings.ts";
@@ -7943,8 +7943,11 @@ if (want("16")) {
   // key names both; a standing proposal is recorded at the tier's P(outdates)
   // with decide mode's lineage, a related pair is a relation with no writer
   // call, so is an outdates under the floor, and a writer's "none" leaves
-  // neither. A start without the tier, or with the tier held to
-  // another model, is refused before anything is claimed.
+  // neither. Since decide version 4 (SMD-3203) the writer's link step comes
+  // first on an outdates at the floor and after on an evolves the pass would
+  // store: an F link leaves the gateway pair no proposal, and an H link stores
+  // the pager pair's evolves as related. A start without the tier, or with the
+  // tier held to another model, is refused before anything is claimed.
   {
     const DECIDER = "h2o-stub", WRITER = "stub-writer";
     const DKEY = decideKey(DECIDER, WRITER);
@@ -7967,13 +7970,15 @@ if (want("16")) {
           : /cutover/.test(both) ? { unrelated: 0.05, related: 0.2, evolves: 0.1, duplicate: 0.05, outdates: 0.6 }
           : /runbook/.test(both) ? { unrelated: 0.05, related: 0.7, evolves: 0.15, duplicate: 0.05, outdates: 0.05 }
           : /migration/.test(both) ? { unrelated: 0, related: 0.38, evolves: 0.2, duplicate: 0, outdates: 0.42 }
+          : /gateway/.test(both) ? { unrelated: 0.02, related: 0.15, evolves: 0.1, duplicate: 0.03, outdates: 0.7 }
+          : /pager/.test(both) ? { unrelated: 0.05, related: 0.2, evolves: 0.6, duplicate: 0.05, outdates: 0.1 }
           : { unrelated: 0.9, related: 0.05, evolves: 0.02, duplicate: 0.01, outdates: 0.02 };
         const probabilities: Record<string, number> = { ...Object.fromEntries(d.options.map((o) => [o.id, p[o.id] ?? 0])), __insufficient_evidence__: 0 };
         const ids = Object.keys(probabilities);
         return Response.json({ contract: "ob1-jev/1", model, ms: 1, results: [{ kind: "choice", probabilities, selected: ids.reduce((x, k) => (probabilities[k] > probabilities[x] ? k : x)), abstained: false, p_insufficient: 0, logits: ids.map(() => 0), temperature: 1, tokens: 10, truncated: false }] });
       },
     });
-    let writerCalls = 0, writerPartRule = 0;
+    let writerCalls = 0, writerPartRule = 0, linkCalls = 0;
     const writerModels = new Set<string>();
     const writer = Bun.serve({
       port: 0,
@@ -7981,9 +7986,18 @@ if (want("16")) {
         const body = (await req.json()) as { model?: string; messages?: { content: string }[] };
         const prompt = body.messages?.[0]?.content ?? "";
         if (prompt === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
-        writerCalls++;
         writerModels.add(String(body.model));
-        // The pass's writer (decide version 1's, kept by version 3): the part rule, and not the record rule, version 2's, shelved 2026-10-18.
+        // Decide version 4's link step (SMD-3203): the gateway pair's thoughts share only a third subject, and the
+        // pager pair's one names the other's subject in passing; the rest are direct.
+        if (prompt.endsWith(LINK_ANSWER)) {
+          linkCalls++;
+          const link = /gateway/.test(thoughtsIn(prompt)) ? { link: "F", via: "release 4", reason: "both report release 4's state" }
+            : /pager/.test(thoughtsIn(prompt)) ? { link: "H", via: "the pager rotation", reason: "named in passing" }
+            : { link: "D", via: "", reason: "the two share their own subject" };
+          return Response.json({ choices: [{ message: { content: JSON.stringify(link) } }] });
+        }
+        writerCalls++;
+        // The pass's writer (decide version 1's, kept by versions 3 and 4): the part rule, and not the record rule, version 2's, shelved 2026-10-18.
         if (prompt.includes(PART_RULE.trim()) && !prompt.includes(RECORD_RULE.trim())) writerPartRule++;
         // The migration pair's proposal would stand if the writer were asked: under the floor it must not be, or the
         // standing outdates would record nothing and close the pair's relation (SMD-3151 review pass 4).
@@ -8003,6 +8017,10 @@ if (want("16")) {
       const runNew = await seed("[16d] The runbook has a section on restores.", 52, 0, ["runbook"]);
       const migOld = await seed("[16d] The migration window opens at noon.", 53, 3, ["migration"]);
       const migNew = await seed("[16d] The migration window moved to the evening.", 53, 0, ["migration"]);
+      const gateOld = await seed("[16d] The gateway team reports release 4 blocked.", 54, 3, ["gateway"]);
+      const gateNew = await seed("[16d] The billing team says the gateway waits on release 4.", 54, 0, ["gateway"]);
+      const pagerOld = await seed("[16d] The pager rotation starts in March.", 55, 3, ["pager"]);
+      const pagerNew = await seed("[16d] The pager handbook lists the March rotation among its sources.", 55, 0, ["pager"]);
       const denv: Record<string, string | undefined> = {
         ...env, OB1_LLM_BASE_URL: `http://127.0.0.1:${writer.port}/v1`, OB1_JUDGE_MODEL: WRITER, OB1_CONSOLIDATE_DECIDER: DECIDER,
         OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_MODEL: DECIDER, OB1_JEV_LOCAL: "1",
@@ -8019,28 +8037,36 @@ if (want("16")) {
       const ddry = await decide(denv, "--dry-run");
       const banner = ddry.out.split("\n").filter((l) => /^\s*(job|decide|tier):/.test(l));
       assert(ddry.code === 0 && banner.some((l) => /^\s*job:\s+/.test(l) && l.trim().endsWith(DKEY)) && banner.some((l) => /^\s*decide: h2o-stub through the typed-decision tier at http:\/\/127\.0\.0\.1:\d+ gives each verdict/.test(l))
-          && banner.some((l) => /^\s*tier:\s+/.test(l)) && /add 8 thoughts to the pool/.test(ddry.out) && tierCalls === 0 && writerCalls === 0,
+          && banner.some((l) => /^\s*tier:\s+/.test(l)) && /add 12 thoughts to the pool/.test(ddry.out) && tierCalls === 0 && writerCalls === 0 && linkCalls === 0,
         `a dry run names decide mode's key, its decider and the tier's egress, and asks neither model (exit ${ddry.code}: ${banner.join(" | ").trim().slice(0, 300)})`);
+
+      // The gateway pair carries a proposal under the key whose newer text has since moved, as an earlier version's
+      // proposal on a mediated pair would: the run judges it again, and the link step's cap settles it (SMD-3203).
+      const [{ id: gateProp }] = (await sql`SELECT record_supersession_proposal(${gateOld}::uuid, ${gateNew}::uuid, 'newer_supersedes_older', 0.7, 'the gateway waits on release 4', 0.9, ${DKEY}, NULL) AS id`) as { id: string }[];
+      const movedGate = "[16d] The billing team says the gateway still waits on release 4.";
+      await sql`UPDATE thoughts SET content = ${movedGate}, content_fingerprint = content_fingerprint_of(${movedGate}) WHERE id = ${gateNew}::uuid`;
+      const [{ r: gateRebuilt }] = (await sql`SELECT rebuild_derived(${gateNew}::uuid, 'live: edit') AS r`) as { r: { stale_proposals: number } }[];
 
       // At --min-confidence 0.55, the pass's own floor, which decide version 3's writer gate reads (SMD-3151).
       const drun = await decide(denv, "--min-confidence", "0.55", "--dump", ddump);
       const dprops = (await sql`SELECT sp.older_id::text AS o, sp.newer_id::text AS n, sp.verdict, sp.confidence::float AS confidence, d.recipe
                                   FROM supersession_proposals sp LEFT JOIN derivations d ON d.artifact_kind = 'proposal' AND d.artifact_id = sp.id AND d.produced_by = ${DKEY}
-                                 WHERE sp.judge_key = ${DKEY}`) as { o: string; n: string; verdict: string; confidence: number; recipe: Record<string, unknown> | null }[];
+                                 WHERE sp.judge_key = ${DKEY} AND sp.status = 'pending'`) as { o: string; n: string; verdict: string; confidence: number; recipe: Record<string, unknown> | null }[];
       assert(drun.code === 0 && dprops.length === 1 && dprops[0].o === tenOld && dprops[0].n === tenNew && dprops[0].verdict === "newer_supersedes_older" && dprops[0].confidence === 0.8,
         `the tier's outdates with the writer's standing proposal is the run's one proposal, under decide mode's key at the tier's P(outdates) (exit ${drun.code}: ${JSON.stringify(dprops.map(({ recipe: _, ...r }) => r))}; ${last(drun.out)})`);
-      type DecideRecipe = { model?: string; decider?: string; decide_version?: number; prompt_hash?: string; judged?: { verdict?: string; confidence_source?: string; evidence_found?: boolean; decide?: { top?: string; decider?: { name?: string }; writer?: { model?: string; current?: string; stale_found?: boolean } } } };
+      type DecideRecipe = { model?: string; decider?: string; decide_version?: number; prompt_hash?: string; judged?: { verdict?: string; confidence_source?: string; evidence_found?: boolean; decide?: { top?: string; decider?: { name?: string }; writer?: { model?: string; current?: string; stale_found?: boolean }; link?: { model?: string; asked?: string; link?: string; capped?: boolean } } } };
       const rec = dprops[0]?.recipe as DecideRecipe | null | undefined;
       assert(rec?.model === WRITER && rec.decider === DECIDER && rec.decide_version === DECIDE_VERSION && rec.prompt_hash === promptHash(DECIDE_PROMPT)
           && rec.judged?.verdict === "outdates" && rec.judged.confidence_source === "token" && rec.judged.evidence_found === true
-          && rec.judged.decide?.top === "outdates" && rec.judged.decide.decider?.name === DECIDER && rec.judged.decide.writer?.model === WRITER && rec.judged.decide.writer.current === "newer" && rec.judged.decide.writer.stale_found === true,
-        `its lineage names the writer, the decider and decide mode's prompt, and carries what the tier and the writer said (${JSON.stringify(rec ?? null).slice(0, 400)})`);
+          && rec.judged.decide?.top === "outdates" && rec.judged.decide.decider?.name === DECIDER && rec.judged.decide.writer?.model === WRITER && rec.judged.decide.writer.current === "newer" && rec.judged.decide.writer.stale_found === true
+          && rec.judged.decide.link?.model === WRITER && rec.judged.decide.link.asked === "first" && rec.judged.decide.link.link === "D" && rec.judged.decide.link.capped === false,
+        `its lineage names the writer, the decider and decide mode's prompt, and carries what the tier, the link step and the writer said (${JSON.stringify(rec ?? null).slice(0, 500)})`);
       const drels = (await sql`SELECT thought_id::text AS t, payload->>'target' AS target, payload->>'relation' AS relation, payload->>'judge_key' AS key
                                  FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL
                                   AND thought_id IN (SELECT id FROM thoughts WHERE content LIKE '[16d]%')`) as { t: string; target: string; relation: string; key: string }[];
       const rel = (t: string, target: string) => drels.find((r) => r.t === t && r.target === target && r.relation === "related" && r.key === DKEY);
-      assert(drels.length === 2 && rel(runNew, runOld) !== undefined && rel(migNew, migOld) !== undefined,
-        `the tier's related is a relation under decide mode's key, its outdates under the floor takes the tier's relation, and the writer's "none" leaves the cutover pair neither a proposal nor a relation, the relation words' mass under the floor (${JSON.stringify(drels)})`);
+      assert(drels.length === 3 && rel(runNew, runOld) !== undefined && rel(migNew, migOld) !== undefined && rel(pagerNew, pagerOld) !== undefined,
+        `the tier's related is a relation under decide mode's key, its outdates under the floor takes the tier's relation, the pager pair's evolves is stored related, and the writer's "none" leaves the cutover pair neither a proposal nor a relation, nor the link step the gateway pair, the relation words' mass under the floor (${JSON.stringify(drels)})`);
       // Decide version 3 (SMD-3151 review pass 3): under the floor the writer is not asked, since a standing proposal
       // would record nothing and close the pair's relation; the relation's note names the pass's floor.
       type RelNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; floor?: number; writer?: unknown } } } };
@@ -8053,12 +8079,31 @@ if (want("16")) {
           && run?.recipe.judged?.decide?.top === "related" && run.recipe.judged.decide.floor === undefined
           && migDump?.recorded === "under-confidence" && migDump.top === "outdates" && migDump.floor === 0.55,
         `the tier's outdates under the pass's floor asks no writer: the relation's note names the floor, 0.55, and carries no writer, a related pair's names none, and the dump line records it under the floor (${JSON.stringify(mig?.recipe.judged ?? null).slice(0, 200)}; dump ${JSON.stringify(migDump ?? null)})`);
-      assert(tierCalls === 4 && writerCalls === 2 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2
+      // Decide version 4 (SMD-3203): the gateway pair, an outdates at the floor whose link step finds F, is written no
+      // proposal and takes the tier's related, capped, under the floor, and its stale proposal is settled, the note
+      // saying the link step capped it; the pager pair, an evolves the pass would store, is asked the link step after,
+      // and its H link stores it related at the tier's P(related), at the same floor.
+      const [gateAfter] = (await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${gateProp}::uuid`) as { status: string; review_note: string | null }[];
+      const cappedNote = passSettledNote("judged again after a text moved — related, capped by the writer's link step (an F link, SMD-3203)", DKEY);
+      type LinkNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; link?: { asked?: string; link?: string; capped?: boolean; via?: string }; writer?: unknown } } } };
+      const pager = (await noteOf(pagerNew)) as unknown as LinkNote | undefined;
+      const [pagerConf] = (await sql`SELECT (payload->>'confidence')::float AS c FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND thought_id = ${pagerNew}::uuid`) as { c: number }[];
+      const dumpOf = (n: string, o: string) => readFileSync(ddump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { newer: string; older: string; verdict: string; recorded: string | null; relation: string | null; link?: string | null; asked?: string | null; capped?: boolean | null })
+        .find((l) => l.newer === n && l.older === o);
+      const [gateDump, pagerDump, tenDump] = [dumpOf(gateNew, gateOld), dumpOf(pagerNew, pagerOld), dumpOf(tenNew, tenOld)];
+      const gateProps = dprops.filter((r) => r.o === gateOld || r.n === gateNew);
+      assert(gateRebuilt.stale_proposals === 1 && gateProps.length === 0 && gateAfter?.status === "rejected" && gateAfter.review_note === cappedNote
+          && gateDump?.verdict === "related" && gateDump.recorded === "settled" && gateDump.link === "F" && gateDump.asked === "first" && gateDump.capped === true
+          && pager?.recipe.judged?.verdict === "related" && pager.recipe.judged.decide?.top === "evolves" && pager.recipe.judged.decide.link?.asked === "after" && pager.recipe.judged.decide.link.link === "H" && pager.recipe.judged.decide.link.capped === true
+          && pager.recipe.judged.decide.writer === undefined && pagerConf?.c === 0.2 && pagerDump?.link === "H" && pagerDump.asked === "after" && pagerDump.capped === true && tenDump?.link === "D" && tenDump.asked === "first" && tenDump.capped === false,
+        `the link step caps the gateway pair's outdates (an F link: no proposal, its related under the floor, its stale proposal settled saying so) and stores the pager pair's evolves as related at the tier's P(related) (an H link, asked after), and the dump says which (gateway ${JSON.stringify(gateDump ?? null)}, ${JSON.stringify(gateAfter ?? null)}; pager ${JSON.stringify(pager?.recipe.judged ?? null).slice(0, 300)}, ${pagerConf?.c})`);
+      assert(tierCalls === 6 && writerCalls === 2 && linkCalls === 4 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2
           && /1 under confidence 0\.55 not recorded/.test(drun.out)
-          && /decide: the writer asked on 2 pair\(s\) — 1 stood, 1 declined, 0 with quotes that did not check out, 0 unparsed; 1 outdates under the floor 0\.55, the writer not asked/.test(drun.out),
-        `the tier was asked about each of the four pairs and the writer only about the two it called outdates at the floor, as the judge's model with the part rule and not the record rule, and the run's summary counts both (tier ${tierCalls}, writer ${writerCalls}: ${[...writerModels].join(", ")}; ${drun.out.split("\n").find((l) => /^\s*decide: the writer/.test(l))?.trim() ?? "no decide line"})`);
+          && /decide: the writer asked on 2 pair\(s\) — 1 stood, 1 declined, 0 with quotes that did not check out, 0 unparsed; 1 outdates under the floor 0\.55, the writer not asked/.test(drun.out)
+          && /decide: the writer's link step asked on 4 pair\(s\) — 2 capped at related with no proposal \(0 of them unparsed\), 2 direct or unlinked/.test(drun.out),
+        `the tier was asked about each of the six pairs, the link step about the three outdates at the floor and the evolves the pass would store, and the writer only about the two the link step found direct, as the judge's model with the part rule and not the record rule, and the run's summary counts each (tier ${tierCalls}, link ${linkCalls}, writer ${writerCalls}: ${[...writerModels].join(", ")}; ${drun.out.split("\n").filter((l) => /^\s*decide: the/.test(l)).map((l) => l.trim()).join(" | ") || "no decide line"})`);
       const dclaims = Object.fromEntries(((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${DKEY} GROUP BY status`) as { status: string; c: number }[]).map((r) => [r.status, Number(r.c)]));
-      assert(dclaims.succeeded === 8 && Object.keys(dclaims).length === 1, `every thought's claim succeeded under decide mode's key (${JSON.stringify(dclaims)})`);
+      assert(dclaims.succeeded === 12 && Object.keys(dclaims).length === 1, `every thought's claim succeeded under decide mode's key (${JSON.stringify(dclaims)})`);
 
       // SMD-3151 review pass 4: a stale proposal whose pair the tier calls outdates under the floor is settled as an
       // outdates under the floor, the note naming the floor and that the writer was not asked, and the summary counts
@@ -8067,11 +8112,11 @@ if (want("16")) {
       const movedTenancy = "[16d] The tenancy now runs 90 days, signed in May.";
       await sql`UPDATE thoughts SET content = ${movedTenancy}, content_fingerprint = content_fingerprint_of(${movedTenancy}) WHERE id = ${tenNew}::uuid`;
       const [{ r: tenRebuilt }] = (await sql`SELECT rebuild_derived(${tenNew}::uuid, 'live: edit') AS r`) as { r: { stale_proposals: number } }[];
-      const askedBefore = writerCalls;
+      const askedBefore = writerCalls, linkedBefore = linkCalls;
       const resettle = await decide(denv, "--min-confidence", "0.85");
       const [tenAfter] = (await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${tenId}::uuid`) as { status: string; review_note: string | null }[];
       const underNote = passSettledNote("judged again after a text moved — outdates at confidence 0.80 (token probability), under the floor 0.85, the writer not asked", DKEY);
-      assert(tenRebuilt.stale_proposals === 1 && resettle.code === 0 && tenAfter?.status === "rejected" && tenAfter.review_note === underNote && writerCalls === askedBefore
+      assert(tenRebuilt.stale_proposals === 1 && resettle.code === 0 && tenAfter?.status === "rejected" && tenAfter.review_note === underNote && writerCalls === askedBefore && linkCalls === linkedBefore
           && /1 under confidence 0\.85 not recorded/.test(resettle.out) && /decide: the writer asked on 0 pair\(s\) — .*; 1 outdates under the floor 0\.85, the writer not asked/.test(resettle.out),
         `a stale proposal the tier calls outdates under the floor is settled as one, its note naming the floor and the writer not asked, and counted so (exit ${resettle.code}: ${JSON.stringify(tenAfter ?? null)}; ${resettle.out.split("\n").find((l) => /^\s*decide: the writer/.test(l))?.trim() ?? "no decide line"})`);
 
@@ -8083,7 +8128,7 @@ if (want("16")) {
       const [fo, fe] = await Promise.all([new Response(follower.stdout).text(), new Response(follower.stderr).text()]);
       const fcode = await follower.exited;
       clearTimeout(stopFollower);
-      assert(fcode === 2 && /the tier at http:\/\/127\.0\.0\.1:\d+ serves h2o-other, not h2o-stub at start/.test(fe) && /serve h2o-stub at OB1_JEV_BASE_URL/.test(fe) && tierCalls === 5,
+      assert(fcode === 2 && /the tier at http:\/\/127\.0\.0\.1:\d+ serves h2o-other, not h2o-stub at start/.test(fe) && /serve h2o-stub at OB1_JEV_BASE_URL/.test(fe) && tierCalls === 7,
         `a follower whose tier serves another model is refused at start, naming the remedy, and decides nothing (exit ${fcode}: ${last(fo + fe)})`);
       // …its row, under the decide key, ended with the kind (SMD-3214).
       const [fbeat] = await sql`SELECT value FROM ob1_config WHERE key = ${stampKey("consolidate", DKEY)}`;
@@ -12711,6 +12756,8 @@ if (want("38")) {
   let slowExtract = 0;
   /** Judge calls only: a wake with a judgement in hand. */
   let slowJudge = 0;
+  /** Run at the next extraction call, once: what the database holds as extraction begins (SMD-2679's sweep first). */
+  let onExtract: (() => Promise<void>) | null = null;
   /** Judge calls slowJudge holds now, a call's hold ending with its client's abort: the case reads its claim once one is (SMD-3048). */
   let judgesHeld = 0;
   /** Every request, probes too: the model not served (a 404 naming it) — a refusal at a pass's start. */
@@ -12739,6 +12786,11 @@ if (want("38")) {
       if (badRequest && !judging) return new Response(JSON.stringify({ error: { message: "response_format is not supported by this model" } }), { status: 400 });
       modelCalls.push({ kind: judging ? "judge" : "extract", at: Date.now() });
       if (slow) await Bun.sleep(slow);
+      if (!judging && onExtract) {
+        const first = onExtract;
+        onExtract = null;
+        await first();
+      }
       if (!judging && slowExtract) await Bun.sleep(slowExtract);
       if (judging && slowJudge) {
         judgesHeld++;
@@ -12830,6 +12882,11 @@ if (want("38")) {
     const longPoll = await sleepRun({ poll: 61, dryRun: true });
     assert(/query_log: no row in the last 24 h — either nothing was searched, or OB1_QUERY_LOG is off/.test(dryText) && longPoll === 2 && lines.some((l) => /--poll must be/.test(l)),
       `an empty query log is said at the start, and --poll 61 is refused with 2 (exit ${longPoll})`);
+    // --dump-dir must name a directory this process can write, checked before anything is read (SMD-3203).
+    lines.length = 0;
+    const noDump = await sleepRun({ dryRun: true, dumpDir: join(tmpdir(), `ob1-no-such-dir-${process.pid}`, "dumps") });
+    assert(noDump === 2 && lines.some((l) => /--dump-dir \S+ is not a directory this process can write/.test(l)) && !lines.some((l) => /awake|asleep/.test(l)),
+      `a --dump-dir naming no directory is refused with 2 before the brain is read (exit ${noDump}: ${lines.join(" | ").slice(0, 200)})`);
 
     // A claim follower stamping fresh outside the scheduler does not yield to a
     // live call: a run refuses (2) rather than sleep beside it, and the dry run
@@ -12934,7 +12991,9 @@ if (want("38")) {
     slowExtract = 1500;
     // Bounded: a sleep that never finds both pools drained would wait for ever.
     const acOnce = new AbortController();
-    const onceRun = sleepRun({ signal: acOnce.signal });
+    // With --dump-dir (SMD-3203): the sleep's consolidation pass writes every verdict there too.
+    const onceDumps = mkdtempSync(join(tmpdir(), "ob1-sleep-dump-"));
+    const onceRun = sleepRun({ signal: acOnce.signal, dumpDir: onceDumps });
     const onceRace = await Promise.race([onceRun, Bun.sleep(90_000).then(() => "hung" as const)]);
     // Seen hung once in a full run (SMD-2752 PR 2), one thought of three
     // extracted in 90 s, and not since in 28: read before the stop what the
@@ -12972,6 +13031,16 @@ if (want("38")) {
     assert(relPairs === "deploy→older:1,newer→deploy:1" && (await auditRows()) === auditBefore,
       `…and its related verdicts are relations with their lineage, the deploy note's to each billing note, with no audit row either (${relPairs})`);
     assert(sessionsAfter === sessionsBefore, `…and the sleep done, its passes are stopped: no follower's connection is left (${sessionsBefore} → ${sessionsAfter} session(s))`);
+    // --dump-dir: the pass's three verdicts, one line each in the consolidation key's own file, the owner's alone,
+    // and the file said at the start (SMD-3203).
+    const onceDump = passDumpFile(onceDumps, CO);
+    const dumped = existsSync(onceDump) ? readFileSync(onceDump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { key: string; newer: string; older: string; verdict: string; recorded: string | null; relation: string | null }) : [];
+    const dumpedPairs = dumped.map((d) => `${d.newer === newer ? "newer" : d.newer === deploy ? "deploy" : d.newer}→${d.older === deploy ? "deploy" : d.older === older ? "older" : d.older}:${d.verdict}`).sort().join(",");
+    const dumpMode = existsSync(onceDump) ? statSync(onceDump).mode & 0o777 : -1;
+    assert(dumpedPairs === "deploy→older:related,newer→deploy:related,newer→older:outdates" && dumped.every((d) => d.key === CO) && dumpMode === 0o600
+        && onceDump === join(onceDumps, "consolidate_stub-sleep_p4.jsonl") && onceText.includes(`dump:   each consolidation pass appends every verdict to ${onceDump}`),
+      `with --dump-dir the sleep's pass writes each of its three verdicts to the consolidation key's file, created 0600, which its start names (${dumpedPairs || "no file"}, mode ${dumpMode.toString(8)})`);
+    rmSync(onceDumps, { recursive: true, force: true });
 
     // --follow: a live read wakes it mid-call; the passes stop at once.
     lines.length = 0;
@@ -13060,6 +13129,285 @@ if (want("38")) {
     ac2.abort();
     await late;
     assert(lateWoke, `a capture committed after the sleep began, in a transaction begun before it, wakes it (${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
+
+    // ── The re-derive pass, first (SMD-2679) ─────────────────────────────────
+    // A lineage row whose windows a raw delete took is swept before
+    // extraction's first call; a row whose vector stands is left.
+    lines.length = 0;
+    const orphanOf = await capture("A note whose windows a raw delete took.", "op-sleep", 0, 9);
+    const standing = await capture("A note whose vector stands.", "op-sleep", 0, 9);
+    await sql`DELETE FROM thought_chunks WHERE thought_id = ${orphanOf}::uuid`;
+    await sql`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+              VALUES ('chunks', ${orphanOf}::uuid, ARRAY[${orphanOf}::uuid], ARRAY['fp'], 'zz-sweep', '{"deterministic": true}'),
+                     ('vector', ${standing}::uuid, ARRAY[${standing}::uuid], ARRAY['fp'], 'zz-sweep', '{"deterministic": true}')`;
+    const sweepRows = async () => (await sql`SELECT artifact_kind || ':' || CASE WHEN artifact_id = ${orphanOf}::uuid THEN 'orphan' ELSE 'standing' END AS k
+                                             FROM derivations WHERE produced_by = 'zz-sweep' ORDER BY 1`).map((r: { k: string }) => r.k).join(",");
+    let atFirstExtract = "(no extraction call)";
+    onExtract = async () => { atFirstExtract = await sweepRows(); };
+    const acSweep = new AbortController();
+    const sweepCode = await bounded(sleepRun({ signal: acSweep.signal }), acSweep);
+    onExtract = null;
+    const sweptLine = lines.find((l) => /re-derive: \d+ orphaned lineage row\(s\) swept over \d+ thought\(s\)/.test(l));
+    assert(sweepCode === 0 && atFirstExtract === "vector:standing" && (await sweepRows()) === "vector:standing" && sweptLine !== undefined && lines.indexOf(sweptLine) > lines.findIndex((l) => /asleep:/.test(l)),
+      `each sleep sweeps the lineage rows whose artifact is gone before extraction's first call, and leaves a row whose artifact stands (exit ${sweepCode}; at the first call ${atFirstExtract}; after ${await sweepRows()}; ${sweptLine?.trim()})`);
+    await sql`DELETE FROM derivations WHERE produced_by = 'zz-sweep'`;
+
+    // A live call during the sweep stops it between thoughts and ends the
+    // sleep before any pass claims (review pass 1): the first orphan's delete
+    // is made slow — a trigger sleeps 3 s on it — so the wake lands while its
+    // call runs; the call finishes inside the grace, and no second call starts.
+    // (A row lock gives up at the sweep's 2 s lock_timeout, review pass 3; the
+    // supersession advisory lock would hold the scheduler's own start.)
+    lines.length = 0;
+    const orphanRow = (id: string, by: string) => sql`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+      VALUES ('chunks', ${id}::uuid, ARRAY[${id}::uuid], ARRAY['fp'], ${by}, '{"deterministic": true}')`;
+    const rowsBy = async (by: string) => Number((await sql`SELECT count(*)::int AS n FROM derivations WHERE produced_by = ${by}`)[0].n);
+    /** A trigger that sleeps `secs` in the delete of `by`'s row for one thought: a call that runs long without waiting on a lock. */
+    const slowDelete = (by: string, id: string, secs: number) => sql.unsafe(`CREATE FUNCTION zz_slow_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF OLD.produced_by = '${by}' AND OLD.artifact_id = '${id}' THEN PERFORM pg_sleep(${secs}); END IF; RETURN OLD; END $$;
+      CREATE TRIGGER zz_slow_delete BEFORE DELETE ON derivations FOR EACH ROW EXECUTE FUNCTION zz_slow_delete()`);
+    const fastDelete = () => sql.unsafe(`DROP TRIGGER IF EXISTS zz_slow_delete ON derivations; DROP FUNCTION IF EXISTS zz_slow_delete()`);
+    const wakeOrphans: string[] = [];
+    for (const text of ["An orphan the sweep reaches first.", "An orphan the wake leaves for the next sleep."]) {
+      const id = await capture(text, "op-sleep", 0, 10);
+      await sql`DELETE FROM thought_chunks WHERE thought_id = ${id}::uuid`;
+      await orphanRow(id, "zz-wake");
+      wakeOrphans.push(id);
+    }
+    // The sweep calls in thought-id order: the first is the slow one.
+    await slowDelete("zz-wake", [...wakeOrphans].sort()[0], 3);
+    let extractedDuringSweep = false;
+    onExtract = async () => { extractedDuringSweep = true; };
+    const acWake = new AbortController();
+    // A 3 s quiet: the next sleep, which sweeps the rest, waits that long after the wake, and the case reads before it.
+    const wakeRun = sleepRun({ follow: true, quiet: 3, minStampEveryS: 1, signal: acWake.signal });
+    let wokeInSweep = false;
+    let leftByWake = -1;
+    let extractedAtWake = true;
+    let wakeMark = undefined as { from: string; to: string | null } | undefined;
+    try {
+      // Seen within a few ms, then 1.5 s: the wake lands between the sweep's
+      // first two 1 s polls, half a second from each, and the 3 s call ends
+      // a second inside the grace (review pass 4: a 250 ms poll here could
+      // land it before the first, the grace spent with the call still running).
+      for (const until = Date.now() + 15_000; !lines.some((l) => /asleep:/.test(l)) && Date.now() < until;) await Bun.sleep(3);
+      await Bun.sleep(1500);
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read during the sweep')`;
+      wokeInSweep = await pollUntil(async () => lines.some((l) => /awake: a live read at \S+ during the re-derive sweep — the sleep ends/.test(l)), 15_000);
+      extractedAtWake = extractedDuringSweep;
+      leftByWake = await rowsBy("zz-wake");
+      wakeMark = (await beat())?.slept;
+    } finally {
+      await fastDelete();
+    }
+    // The sleep's mark spans the sweep's reads: it read from == to before (review pass 1).
+    assert(wokeInSweep && leftByWake === 1 && !extractedAtWake && typeof wakeMark?.to === "string" && Date.parse(wakeMark.to) > Date.parse(wakeMark.from),
+      `a live call during the sweep stops it between thoughts — the call in hand finished, the next orphan left for the next sleep — and ends the sleep before extraction calls the model (${leftByWake} of 2 left; extracted ${extractedAtWake}; slept ${JSON.stringify(wakeMark)}${wokeInSweep && leftByWake === 1 && !extractedAtWake ? "" : `; its lines: ${lines.map((l) => l.trim().slice(0, 90)).join(" | ").slice(0, 2500)}`})`);
+    onExtract = null;
+    const sweptNext = await pollUntil(async () => (await rowsBy("zz-wake")) === 0, 20_000);
+    acWake.abort();
+    await wakeRun;
+    assert(sweptNext, `…and the next sleep, after the quiet, sweeps the rest (${await rowsBy("zz-wake")} left)`);
+
+    // A call still running past the grace is cancelled on the server — rolled
+    // back, the supersession lock let go — so the wake ends the sleep within
+    // the poll and twice the grace (review pass 2: a closed socket left it
+    // running, the lock held, the wake with it).
+    // An orphan swept before it: a call cancelled under the stop keeps what the sweep did (review pass 3).
+    lines.length = 0;
+    const heldPair: string[] = [];
+    for (const text of ["An orphan whose delete runs long.", "An orphan beside the long one."]) {
+      const id = await capture(text, "op-sleep", 0, 13);
+      await sql`DELETE FROM thought_chunks WHERE thought_id = ${id}::uuid`;
+      await orphanRow(id, "zz-held");
+      heldPair.push(id);
+    }
+    // The sweep calls in thought-id order: the second is the slow one.
+    const heldOrphan = [...heldPair].sort()[1];
+    await slowDelete("zz-held", heldOrphan, 20);
+    let heldExtracted = false;
+    onExtract = async () => { heldExtracted = true; };
+    const acHeld = new AbortController();
+    const heldRun = sleepRun({ follow: true, quiet: 3, minStampEveryS: 1, signal: acHeld.signal });
+    let heldMs = -1;
+    let heldLeft = -1;
+    let heldExtractedAtWake = true;
+    let lockFreeAtWake = false;
+    try {
+      await pollUntil(async () => lines.some((l) => /asleep:/.test(l)), 15_000);
+      await Bun.sleep(1000);
+      const wokeAt = Date.now();
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read while the sweep runs long')`;
+      if (await pollUntil(async () => lines.some((l) => /awake: a live read at \S+ during the re-derive sweep/.test(l)), 15_000)) heldMs = Date.now() - wokeAt;
+      heldExtractedAtWake = heldExtracted;
+      // The supersession lock, which rebuild_derived takes first: free once the call is cancelled, held while it still runs on the server.
+      lockFreeAtWake = (await sql`SELECT pg_try_advisory_xact_lock(hashtext('ob1:supersession-review')) AS ok`)[0].ok === true;
+    } finally {
+      onExtract = null;
+    }
+    acHeld.abort();
+    await heldRun;
+    await fastDelete();
+    heldLeft = await rowsBy("zz-held");
+    assert(heldMs > 0 && heldMs < 8_000 && heldLeft === 1 && !heldExtractedAtWake && lockFreeAtWake && lines.some((l) => /re-derive: 1 orphaned lineage row\(s\) swept over 1 thought\(s\) — stopped before the rest/.test(l)),
+      `a sweep's call still running past the grace is cancelled: the wake ends the sleep in ${heldMs} ms, the call rolled back (${heldLeft} row left; the supersession lock free at the wake: ${lockFreeAtWake}), the sweep's call before it kept and said (${lines.find((l) => /re-derive:/.test(l))?.trim()}), and no extraction call made`);
+    await sql`DELETE FROM derivations WHERE produced_by = 'zz-held'`;
+
+    // A call waiting on a thought's row lock gives up at the sweep's 2 s
+    // lock_timeout and is passed over, the rest of its window swept, the
+    // supersession lock not held behind the row (review pass 3).
+    lines.length = 0;
+    const lockedOrphan = await capture("An orphan whose thought a long transaction holds.", "op-sleep", 0, 15);
+    const freeOrphan = await capture("An orphan beside it.", "op-sleep", 0, 15);
+    for (const [id, by] of [[lockedOrphan, "zz-locked"], [freeOrphan, "zz-free"]] as const) {
+      await sql`DELETE FROM thought_chunks WHERE thought_id = ${id}::uuid`;
+      await orphanRow(id, by);
+    }
+    const holdRow = await sql.reserve();
+    let lockedCode = -1;
+    let lockFreeBehindRow = false;
+    try {
+      await holdRow`BEGIN`;
+      await holdRow`SELECT 1 FROM thoughts WHERE id = ${lockedOrphan}::uuid FOR NO KEY UPDATE`;
+      const acLocked = new AbortController();
+      lockedCode = await bounded(sleepRun({ signal: acLocked.signal }), acLocked);
+      lockFreeBehindRow = (await sql`SELECT pg_try_advisory_xact_lock(hashtext('ob1:supersession-review')) AS ok`)[0].ok === true;
+    } finally {
+      await holdRow`ROLLBACK`.catch(() => {});
+      holdRow.release();
+    }
+    assert(lockedCode === 0 && lockFreeBehindRow && (await rowsBy("zz-locked")) === 1 && (await rowsBy("zz-free")) === 0 && lines.some((l) => l.includes(`1 thought(s) whose call failed passed over (${lockedOrphan}: canceling statement due to lock timeout)`)),
+      `a call waiting on a held row gives up at the sweep's lock_timeout and is passed over, the rest swept and the supersession lock free while the row is still held (exit ${lockedCode}; ${lines.find((l) => /re-derive:/.test(l))?.trim()})`);
+    await sql`DELETE FROM derivations WHERE produced_by IN ('zz-locked', 'zz-free')`;
+
+    // A thought whose call always fails is passed over, the rest of its window
+    // swept (review pass 2: the first such call ended every sweep at it).
+    lines.length = 0;
+    let poisonId = "";
+    for (const [text, by] of [["An orphan whose delete a trigger refuses.", "zz-poison"], ["An orphan swept past it.", "zz-after"]] as const) {
+      const id = await capture(text, "op-sleep", 0, 14);
+      await sql`DELETE FROM thought_chunks WHERE thought_id = ${id}::uuid`;
+      await orphanRow(id, by);
+      if (by === "zz-poison") poisonId = id;
+    }
+    await sql.unsafe(`CREATE FUNCTION zz_poison() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.produced_by = 'zz-poison' THEN RAISE EXCEPTION 'zz: this row will not go'; END IF; RETURN OLD; END $$;
+      CREATE TRIGGER zz_poison BEFORE DELETE ON derivations FOR EACH ROW EXECUTE FUNCTION zz_poison()`);
+    try {
+      const acPoison = new AbortController();
+      const poisonCode = await bounded(sleepRun({ signal: acPoison.signal }), acPoison);
+      assert(poisonCode === 0 && (await rowsBy("zz-poison")) === 1 && (await rowsBy("zz-after")) === 0 && lines.some((l) => /re-derive: \d+ orphaned lineage row\(s\) swept over \d+ thought\(s\); 1 thought\(s\) whose call failed passed over/.test(l) && l.includes(`(${poisonId}: zz: this row will not go)`)),
+        `a thought whose call fails is passed over and said, named, the rest of the window swept (exit ${poisonCode}; ${lines.find((l) => /re-derive:/.test(l))?.trim()})`);
+      // Only the poisoned orphan left, every call of each sleep's sweep fails:
+      // said on stderr once over two sleeps (review passes 3 and 4: said every sleep).
+      lines.length = 0;
+      const acAllFailed = new AbortController();
+      const allFailedRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acAllFailed.signal });
+      const failedSummary = (l: string) => /re-derive: 0 orphaned lineage row\(s\) swept over 0 thought\(s\); 1 thought\(s\) whose call failed passed over/.test(l);
+      let twoSleeps = false;
+      try {
+        await pollUntil(async () => lines.filter(failedSummary).length >= 1, 20_000);
+        await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read between two failing sweeps')`;
+        twoSleeps = await pollUntil(async () => lines.filter(failedSummary).length >= 2, 20_000);
+      } finally {
+        acAllFailed.abort();
+      }
+      const allFailedCode = await allFailedRun;
+      const saidFailed = lines.filter((l) => /re-derive: every call of this sleep's sweep failed/.test(l));
+      assert(allFailedCode === 0 && twoSleeps && saidFailed.length === 1 && saidFailed[0].includes(`(${poisonId}: zz: this row will not go) — the passes go on`),
+        `a sweep whose every call fails is said as the sweep's trouble, once over two sleeps (exit ${allFailedCode}; two sleeps ${twoSleeps}; ${saidFailed.length} time(s): ${saidFailed.map((l) => l.trim()).join(" | ")})`);
+      // Without skipFailure the call's error rejects, naming its thought: the CLI's "failed on thought <id>" (review pass 4).
+      const thrown = await sweepOrphans(sql, { writer: { out: () => {}, err: () => {} } }).then(() => null, (e: { thought?: string; message?: string }) => e);
+      assert(thrown?.thought === poisonId && /zz: this row will not go/.test(thrown.message ?? ""),
+        `a sweep's call that throws, not passed over, rejects with its thought's id (${JSON.stringify({ thought: thrown?.thought, message: thrown?.message })})`);
+      // The limit filled by failures alone: read again, the window would meet the same thoughts and none past them (review pass 3).
+      const allFailed = await sweepOrphans(sql, { limit: 1, skipFailure: () => true, writer: { out: () => {}, err: () => {} } });
+      assert(allFailed.thoughts === 1 && allFailed.failed === 1 && allFailed.whole,
+        `a window whose every call failed, the limit filled, is whole — the cursor moves past it (${JSON.stringify(allFailed)})`);
+    } finally {
+      await sql.unsafe(`DROP TRIGGER zz_poison ON derivations; DROP FUNCTION zz_poison()`);
+      await sql`DELETE FROM derivations WHERE produced_by IN ('zz-poison', 'zz-after')`;
+    }
+
+    // A window swept whole, the table no larger, sends the next sleep back to
+    // its start: a row below the last one read is reached (review pass 4: no
+    // case read the cursor's reset).
+    lines.length = 0;
+    const cursorFirst = await capture("An orphan the first sleep sweeps whole.", "op-sleep", 0, 17);
+    const cursorLow = await capture("An orphan whose lineage row sorts first.", "op-sleep", 0, 17);
+    await sql`DELETE FROM thought_chunks WHERE thought_id = ${cursorFirst}::uuid`;
+    await orphanRow(cursorFirst, "zz-cursor-a");
+    const acCursor = new AbortController();
+    const cursorRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acCursor.signal });
+    let firstSwept = false;
+    let lowSwept = false;
+    try {
+      firstSwept = await pollUntil(async () => (await rowsBy("zz-cursor-a")) === 0, 20_000);
+      await sql`DELETE FROM thought_chunks WHERE thought_id = ${cursorLow}::uuid`;
+      await sql`INSERT INTO derivations (id, artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+                VALUES ('00000000-0000-4000-8000-000000000001', 'chunks', ${cursorLow}::uuid, ARRAY[${cursorLow}::uuid], ARRAY['fp'], 'zz-cursor-b', '{"deterministic": true}')`;
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after a whole sweep')`;
+      lowSwept = await pollUntil(async () => (await rowsBy("zz-cursor-b")) === 0, 20_000);
+    } finally {
+      acCursor.abort();
+      await cursorRun;
+      await sql`DELETE FROM derivations WHERE produced_by IN ('zz-cursor-a', 'zz-cursor-b')`;
+    }
+    assert(firstSwept && lowSwept, `a window swept whole, the table no larger, sends the next sleep to the table's start: a row below the last one read is swept (first ${firstSwept}; the low row ${lowSwept})`);
+
+    // A lineage table larger than one window: each sleep reads the next, from
+    // where the last left off (review pass 1: read in no order, every sleep
+    // read the same first 10,001 rows and an orphan past them stayed).
+    lines.length = 0;
+    const deep = await capture("An orphan past the first window.", "op-sleep", 0, 11);
+    const anchor = await capture("The thought the filler rows name.", "op-sleep", 0, 11);
+    await sql`DELETE FROM thought_chunks WHERE thought_id = ${deep}::uuid`;
+    await sql`INSERT INTO derivations (id, artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+              VALUES ('ffffffff-ffff-4fff-bfff-fffffffffff0', 'chunks', ${deep}::uuid, ARRAY[${deep}::uuid], ARRAY['fp'], 'zz-deep', '{"deterministic": true}')`;
+    await sql`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+              SELECT 'vector', ${anchor}::uuid, ARRAY[${anchor}::uuid], ARRAY['fp'], 'zz-fill-' || g, '{"deterministic": true}' FROM generate_series(1, 10100) g`;
+    try {
+      const windowDry = await sleepRun({ quiet: 300, dryRun: true });
+      assert(windowDry === 0 && lines.some((l) => /re-derive: \d+ thought\(s\) with a lineage row whose artifact is gone, in the first window of 10,001 lineage rows — the sleeps walk the rest/.test(l)),
+        `--dry-run counts the sweep's pool and says it reads a window (${lines.find((l) => /re-derive:/.test(l))?.trim()})`);
+      lines.length = 0;
+      const acDeep = new AbortController();
+      const deepRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acDeep.signal });
+      const firstWindow = await pollUntil(async () => lines.some((l) => /re-derive: the lineage table holds more than one window of 10,001 rows — each sleep sweeps the next/.test(l)), 20_000);
+      const afterFirst = await rowsBy("zz-deep");
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read between the windows')`;
+      const secondWindow = await pollUntil(async () => (await rowsBy("zz-deep")) === 0, 30_000);
+      acDeep.abort();
+      await deepRun;
+      assert(firstWindow && afterFirst === 1 && secondWindow && lines.filter((l) => /more than one window/.test(l)).length === 1,
+        `a lineage table larger than one window: the first sleep reads its first 10,001 rows, the orphan past them left and the window said once, and the next sleep sweeps on from there (${afterFirst} after the first; ${await rowsBy("zz-deep")} after the next)`);
+    } finally {
+      await sql`DELETE FROM derivations WHERE produced_by = 'zz-deep' OR produced_by LIKE 'zz-fill-%'`;
+    }
+
+    // A replay refuses every call: the sweep stops at its first, said once (review pass 1: a line per orphan, every sleep).
+    lines.length = 0;
+    for (const text of ["An orphan under a replay.", "A second orphan under a replay."]) {
+      const id = await capture(text, "op-sleep", 0, 12);
+      await sql`DELETE FROM thought_chunks WHERE thought_id = ${id}::uuid`;
+      await orphanRow(id, "zz-replay");
+    }
+    const [{ db }] = await sql`SELECT current_database() AS db`;
+    await sql.unsafe(`ALTER DATABASE "${db}" SET ob1.projecting_replay = 'on'`);
+    const acReplay = new AbortController();
+    const replayRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acReplay.signal });
+    let replaySaid = false;
+    try {
+      replaySaid = await pollUntil(async () => lines.some((l) => /re-derive: this session is a replay/.test(l)), 20_000);
+      await Bun.sleep(1000);
+    } finally {
+      await sql.unsafe(`ALTER DATABASE "${db}" RESET ob1.projecting_replay`);
+      acReplay.abort();
+      // A pass the replay refused may have ended the run: the sweep's words are what this case reads.
+      await replayRun.catch(() => {});
+    }
+    assert(replaySaid && lines.filter((l) => /REPLAYING|is a replay/.test(l)).length === 1 && (await rowsBy("zz-replay")) === 2,
+      `a replay refuses the sweep's first call, which stops it, said once, the orphans kept (${lines.filter((l) => /REPLAYING|is a replay/.test(l)).length} line(s); ${await rowsBy("zz-replay")} left)`);
+    await sql`DELETE FROM derivations WHERE produced_by IN ('zz-wake', 'zz-replay')`;
 
     // ── The budget (SMD-2679) ────────────────────────────────────────────────
     // Each pass's connections open with the budget's session settings: a
@@ -13189,6 +13537,68 @@ if (want("38")) {
     acIdle.abort();
     await idleRun;
 
+    // The clock spent during the re-derive sweep starts no pass (review pass
+    // 2), and counts a stop only for work cut (review pass 3): a call the
+    // clock stops mid-way is cut, counted; a sweep done just past the clock,
+    // the pools drained, cut nothing — the sleep ends uncounted, resting.
+    // The pools drained first — the capture's extraction done — so only the sweep's cut counts the stop.
+    const clockOrphan = await capture("An orphan the clock catches mid-call.", "op-sleep", 0, 16);
+    const acClockDrain = new AbortController();
+    const clockDrained = await bounded(sleepRun({ signal: acClockDrain.signal }), acClockDrain);
+    assert(clockDrained === 0 && !(await claims(EX)).pending, `…the pools drained before the clock's sweep cases (exit ${clockDrained}; ${JSON.stringify(await claims(EX))})`);
+    lines.length = 0;
+    await sql`DELETE FROM thought_chunks WHERE thought_id = ${clockOrphan}::uuid`;
+    await orphanRow(clockOrphan, "zz-clock");
+    await slowDelete("zz-clock", clockOrphan, 6);
+    const acSweepClock = new AbortController();
+    const sweepClockRun = sleepRun({ follow: true, budgetMs: 1500, minStampEveryS: 1, signal: acSweepClock.signal });
+    let sweepClockBeat = null as BudgetBeat | null;
+    try {
+      await pollUntil(async () => lines.some((l) => /during the re-derive sweep — no pass starts/.test(l)) && (sweepClockBeat = await budgetBeat())?.resting === true, 20_000);
+    } finally {
+      acSweepClock.abort();
+      await sweepClockRun;
+      await fastDelete();
+    }
+    assert(lines.some((l) => /the sleep's budget is spent \(1500 ms\) during the re-derive sweep — no pass starts/.test(l)) && sweepClockBeat?.slept?.budget === "clock" && sweepClockBeat.budget?.stops === 1 && (await rowsBy("zz-clock")) === 1,
+      `a clock spent mid-call in the sweep starts no pass and counts the stop, the call cancelled and rolled back (${await rowsBy("zz-clock")} row left; ${JSON.stringify(sweepClockBeat)})`);
+    // The clock read spent mid-call — a 3 s call, the first 2 s poll past a
+    // 1 s clock — and the call done a second inside the grace: the sweep was
+    // whole, so nothing was cut (review pass 4: counted as the clock's).
+    lines.length = 0;
+    await slowDelete("zz-clock", clockOrphan, 3);
+    const acInGrace = new AbortController();
+    const inGraceRun = sleepRun({ follow: true, poll: 2, budgetMs: 1000, minStampEveryS: 1, signal: acInGrace.signal });
+    let inGraceBeat = null as BudgetBeat | null;
+    try {
+      // The line first: the last case's row rests until this process stamps its own.
+      await pollUntil(async () => lines.some((l) => /during the re-derive sweep — no pass starts/.test(l)) && (inGraceBeat = await budgetBeat())?.resting === true, 20_000);
+    } finally {
+      acInGrace.abort();
+      await inGraceRun;
+      await fastDelete();
+    }
+    assert(lines.some((l) => /the sleep's budget is spent \(1000 ms\) during the re-derive sweep — no pass starts/.test(l)) && inGraceBeat?.slept?.budget === undefined && inGraceBeat?.budget?.stops === 0 && (await rowsBy("zz-clock")) === 0,
+      `a clock read spent mid-call, the call done inside the grace, cut nothing: no stop counted or marked (${await rowsBy("zz-clock")} row left; ${JSON.stringify(inGraceBeat)})`);
+    // Planted again; its call now 2 s, under a 1 s clock and a 5 s poll: the sweep ends before any poll reads the clock (review pass 4: 3 s left a second).
+    await orphanRow(clockOrphan, "zz-clock");
+    lines.length = 0;
+    await slowDelete("zz-clock", clockOrphan, 2);
+    const acSweptPast = new AbortController();
+    const sweptPastRun = sleepRun({ follow: true, poll: 5, budgetMs: 1000, minStampEveryS: 1, signal: acSweptPast.signal });
+    let sweptPastBeat = null as BudgetBeat | null;
+    try {
+      // The line first: the last case's row rests until this process stamps its own.
+      await pollUntil(async () => lines.some((l) => /during the re-derive sweep — no pass starts/.test(l)) && (sweptPastBeat = await budgetBeat())?.resting === true, 20_000);
+    } finally {
+      acSweptPast.abort();
+      await sweptPastRun;
+      await fastDelete();
+    }
+    assert(lines.some((l) => /the sleep's budget is spent \(1000 ms\) during the re-derive sweep — no pass starts/.test(l)) && sweptPastBeat?.slept?.budget === undefined && sweptPastBeat?.budget?.stops === 0 && (await rowsBy("zz-clock")) === 0,
+      `a sweep done just past the clock, the pools drained, cut nothing: the sleep ends with no stop counted or marked, resting (${await rowsBy("zz-clock")} row left; ${JSON.stringify(sweptPastBeat)})`);
+    await sql`DELETE FROM derivations WHERE produced_by = 'zz-clock'`;
+
     // A pass waiting for its provider is work left, the pools drained or not:
     // the clock's stop is counted, a judge outage no idle night (review pass 3).
     lines.length = 0;
@@ -13196,7 +13606,8 @@ if (want("38")) {
     const acOutage = new AbortController();
     const outageRun = sleepRun({ follow: true, budgetMs: 3000, minStampEveryS: 1, signal: acOutage.signal });
     let downBeat = null as BudgetBeat | null;
-    const downStopped = await pollUntil(async () => (downBeat = await budgetBeat())?.slept?.budget === "clock" && downBeat?.running === false, 30_000);
+    // The line first: the last case's row stands until this process stamps its own.
+    const downStopped = await pollUntil(async () => lines.some((l) => /the sleep's budget is spent \(3000 ms\)/.test(l)) && (downBeat = await budgetBeat())?.slept?.budget === "clock" && downBeat?.running === false, 30_000);
     unavailable = false;
     assert(downStopped && downBeat?.budget?.stops === 1 && lines.some((l) => /the sleep's budget is spent \(3000 ms\) — the passes stop after the thought in hand/.test(l)) && !lines.some((l) => /nothing left to do/.test(l)),
       `a clock spent while the passes wait for the provider is a counted stop, not an idle clock-out (${JSON.stringify(downBeat)})`);

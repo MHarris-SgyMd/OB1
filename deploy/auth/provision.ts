@@ -517,7 +517,7 @@ async function selfCheck(): Promise<number> {
     expect(
       "compose: it restarts unless stopped, and its health is /healthz answering ok, on its timings",
       auth.restart === "unless-stopped" &&
-        JSON.stringify(auth.healthcheck) === JSON.stringify({ test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3000/healthz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"], interval: "10s", timeout: "3s", retries: 3, start_period: "10s" }),
+        JSON.stringify(auth.healthcheck) === JSON.stringify({ test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3000/healthz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"], interval: "10s", timeout: "3s", retries: 3, start_period: "10s", start_interval: "1s" }),
       JSON.stringify(auth.healthcheck),
     );
     expect(

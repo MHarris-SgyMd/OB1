@@ -7,7 +7,8 @@
 import { thoughtTitle, thoughtUrl } from "../thoughts.ts";
 import { mayLeaveBox, type EgressSubject } from "../egress.ts";
 import { providerDown, shownBase } from "../embed.ts";
-import { storeKind, UUID_RE, type AuditChange, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
+import { heardFrom } from "../provider-health.ts";
+import { ListCursorRefused, storeKind, UUID_RE, type AuditChange, type ListPosition, type ListSort, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
 import { keysInOrder, MOVED_READ, movedAmong, typesOf, type Moved, type MovedHit, type MovedType } from "../stated-status.ts";
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
 import { brainInfo as readBrain, type BrainInfo, type ReadOptions, type ServerFacts } from "../brain-info.ts";
@@ -17,6 +18,7 @@ import type { Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
 import { FilterError, parseFilter, trustAtOrAbove, withActorFilter, type Trust } from "./filter.ts";
 import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
+import { listCursor, parseListCursor } from "./list-cursor.ts";
 import { SCAN_DEFAULT, SCAN_MAX, type Input } from "./schemas.ts";
 
 // ── The one search operation ─────────────────────────────────────────────────
@@ -89,20 +91,25 @@ const runSearch: RunSearch = (async (ctx: Ctx, principal: Principal, opts: {
   // Any other failure — a 4xx, a width mismatch — still fails the search, so
   // a misconfigured brain says so, as a capture does (SMD-2888).
   let embedding: number[];
+  const embedStarted = performance.now();
   try {
     embedding = await ctx.embedder.getEmbedding(opts.query, q.subject, "query");
   } catch (e) {
     const down = providerDown(e);
-    if (!down) throw e;
+    if (!down) { heardFrom(ctx.providerHealth, embedStarted, e); throw e; }
     // As a row prints an endpoint: userinfo masked (SMD-2885).
     const base = shownBase(ctx.embedConfig().embeddings);
     console.error(`${opts.tool}: the embedding provider at ${base} was unavailable: ${down.detail}; answered by exact matches alone`);
+    // The provider's state, as every embedding call tells it (SMD-2890).
+    heardFrom(ctx.providerHealth, embedStarted, e);
     const a = await answerWithoutVector(await ctx.store(), opts, { ...down, base });
     // Logged as arm `literal` (106): no arm a replay could take, since a
     // replay's provider answers; db/brain-compare.ts leaves it out of a plan.
     if (logged) await ctx.logSearch(principal, opts.tool, { query: opts.query, limit: opts.limit, threshold: opts.threshold ?? 0, recencyWeight: opts.recencyWeight ?? 0, filter: opts.filter, arm: "literal" }, a.rows);
     return { rows: a.rows, embedding: null, vectorFailed: a.vectorFailed, ...(a.facts ? { facts: a.facts } : {}) };
   }
+  // Answered: the provider's state says so (SMD-2890).
+  heardFrom(ctx.providerHealth, embedStarted);
   // prefer_current (059, SMD-2255) is the same arm through another function,
   // logged as arm `current` so a replay takes the same one.
   const preferCurrent = opts.preferCurrent === true;
@@ -443,17 +450,38 @@ export async function searchThoughtsKeyword(ctx: Ctx, principal: Principal, inpu
 // ── list_thoughts and list_supersession_proposals ────────────────────────────
 
 export type ListedThought = ThoughtListItem & { supersededBy: string | null };
-export type ListThoughtsResult = { thoughts: ListedThought[] };
+/** A page (SMD-2995): the thoughts, the sort they are in, and the cursor for the next page — null when no more follow. */
+export type ListThoughtsResult = { thoughts: ListedThought[]; sort: ListSort; cursor: string | null };
 
-export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, type, topic, person, days, said_by, actor, min_trust }: Input<"list_thoughts">): Promise<Outcome<ListThoughtsResult>> {
+export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, type, topic, person, days, said_by, actor, min_trust, sort, after }: Input<"list_thoughts">): Promise<Outcome<ListThoughtsResult>> {
+  // SMD-2995: the cursor is decided here, before any call: a string that is no
+  // cursor of this tool's, or one made under the other sort, is refused, the
+  // sort it was made under named so the caller can pass it.
+  let from: ListPosition | null = null;
+  // An empty or blank `after` is no cursor, refused (review pass 3): taken for the first page, a client sending
+  // `after=` at the end of a walk read page one again, forever.
+  if (after !== undefined) {
+    const c = parseListCursor(after);
+    if (!c) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after, reason: "shape" });
+    if (c.sort !== sort) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after, reason: "sort", sort: c.sort });
+    from = { at: c.at, id: c.id };
+  }
   // min_trust (SMD-1724) as the ladder's words at or above it: a containment
   // clause's sibling (no ob1_trust_rank call).
-  const data = await (await ctx.store()).listThoughts({ limit, type, topic, person, days, saidBy: said_by, actor, trustIn: min_trust === undefined ? undefined : trustAtOrAbove(min_trust) });
-  if (!data.length) return ok({ thoughts: [] });
+  let page;
+  try {
+    page = await (await ctx.store()).listThoughts({ limit, type, topic, person, days, saidBy: said_by, actor, trustIn: min_trust === undefined ? undefined : trustAtOrAbove(min_trust), sort, after: from });
+  } catch (e) {
+    // A cursor of the right shape whose time Postgres cannot read (review pass 1): the same refusal, not a fault quoting it.
+    if (e instanceof ListCursorRefused && after !== undefined) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after, reason: "shape" });
+    throw e;
+  }
+  const cursor = page.next ? listCursor(sort, page.next.at, page.next.id) : null;
+  if (!page.thoughts.length) return ok({ thoughts: [], sort, cursor });
   // 025 (SMD-1253): mark the listed thoughts a newer thought supersedes,
   // and name the replacement — the same label search_thoughts prints.
-  const superseded = await (await ctx.store()).supersededAmong(data.map((t) => t.id));
-  return ok({ thoughts: data.map((t) => ({ ...t, supersededBy: superseded[t.id] ?? null })) });
+  const superseded = await (await ctx.store()).supersededAmong(page.thoughts.map((t) => t.id));
+  return ok({ thoughts: page.thoughts.map((t) => ({ ...t, supersededBy: superseded[t.id] ?? null })), sort, cursor });
 }
 
 export type ProposalsResult = { status: Input<"list_supersession_proposals">["status"]; lineage?: boolean; proposals: SupersessionProposal[] };
@@ -604,6 +632,7 @@ function serverFacts(ctx: Ctx): ServerFacts {
     store: storeKind(ctx.env()),
     tier: ctx.env().OB1_TIER || null,
     embedding: { model: cfg.embeddingModel, dim: cfg.embeddingDim },
+    provider: { ...ctx.providerHealth.state(), reprobeS: ctx.reprobeS, reprobeByCall: ctx.reprobeByCall },
   };
 }
 

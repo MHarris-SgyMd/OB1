@@ -50,8 +50,7 @@ x-ollama-image: &ollama-image ollama/ollama:0.34.3
 # rather than rotates, so the bound holds and the older lines go (measured on
 # podman 6.0.2; max-file is accepted and has no effect there). Every service
 # below names it, and check 29 of scripts/check-fork-consistency.ts holds
-# that, so a service added without it fails CI; compose.tiers.yaml carries the
-# same, as check 27 holds it to this file.
+# that, so a service added without it fails CI.
 x-logging: &logging
   driver: json-file
   options:
@@ -65,8 +64,7 @@ x-logging: &logging
 x-plugin-env: &plugin-env
   # The plugins the brain runs: names from plugins/registry.ts,
   # comma-separated; unset, none. Both servers serve the same set; preflight
-  # refuses a name that is no plugin. The three-tier stack leaves it out
-  # (check 27's TIER_OMITTED_ENV).
+  # refuses a name that is no plugin.
   OB1_PLUGINS: ${OB1_PLUGINS:-}
   # The password of ob1_plugins, the login role every plugin's SQL runs on:
   # the plugins' pools log in with it, never as postgres.
@@ -88,8 +86,7 @@ x-hook-env: &hook-env
 # below is http://lgtm.ob1.internal.:4318 — and each server keeps its own
 # service name (open-brain-mcp, open-brain-api): no OTEL_SERVICE_NAME here,
 # which would give both one. OB1_OTEL_TRUST_TRACEPARENT stays out on purpose (check
-# 14's NOT_FORWARDED): no proxy in this stack sets a traceparent to trust. The
-# three-brain stack leaves them out (check 27's TIER_OMITTED_ENV);
+# 14's NOT_FORWARDED): no proxy in this stack sets a traceparent to trust.
 # deploy/README.md, "Traces, metrics and log records", says what each does.
 x-otel-env: &otel-env
   OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
@@ -316,9 +313,7 @@ x-forwarder: &forwarder |
   // is down, so it dials only an address inside the subnet of an interface no default route leaves by,
   // front's. It sends the PROXY protocol's v1 line first, so the proxy, and the authorization server's
   // per-address limits behind it, see each client's address rather than this one's. No dollar sign in
-  // this file, which compose would read as a variable, no exclamation mark, which check 27 refuses in
-  // compose.tiers.yaml (compose reads one as a YAML tag), and no number written with an underscore,
-  // which check 27 reads as YAML 1.1 would: the script is inline in both.
+  // this file, which compose would read as a variable: the script is inline in compose.yaml.
   import net from "node:net";
   import { lookup } from "node:dns/promises";
   import { networkInterfaces, type NetworkInterfaceInfo } from "node:os";
@@ -615,10 +610,23 @@ services:
     # container and, through depends_on, the server (SMD-1844; deploy/README.md,
     # "What is reachable from where").
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d openbrain"]
+      # Over TCP, not the socket: on a fresh volume the image runs a temporary
+      # server on the socket alone while it creates the database, and a probe
+      # that passed against it let `migrate`, which dials 5432 once, meet a
+      # refused connection (SMD-3194 review pass 1: 2 runs in 20 on a slow
+      # initdb, under 1 s probes).
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d openbrain"]
       interval: 5s
       timeout: 5s
       retries: 12
+      # Every healthcheck in this file is probed every second during its start
+      # period, until it first passes (SMD-3194): Docker's start interval
+      # defaults to 5 s (and a check with no start period waits its interval),
+      # so each `up --wait` and service_healthy wait sat out about 5 s however
+      # soon the service was up. Check 40 holds every healthcheck to it. Podman
+      # probes at once and drops the key.
+      start_period: 30s
+      start_interval: 1s
     # `data` alone: internal, so no route out, and joined only by what
     # connects to the database (SMD-2583). Not the mesh, beside every
     # backend the proxy reaches: compose names each container by its service
@@ -807,9 +815,12 @@ services:
       # dialled nothing without --deep and said OK; the first capture failed in
       # 7 ms with "Unable to connect", and the server logged nothing. Since
       # SMD-1875 preflight dials an endpoint whose name is local once (GET
-      # /models, 2.5 s) and the container refuses to start on one that answers
-      # nothing, naming by the name's kind the profile, the host aliases or
-      # the stack's own service as the fix. An Ollama
+      # /models, 2.5 s) and the container refuses to start on a name that does
+      # not resolve, on its own loopback, or on one that answers wrongly or
+      # through a proxy, naming by the name's kind the
+      # profile, the host aliases or the stack's own service as the fix; a
+      # resolved one with nothing answering yet starts it degraded, re-probed
+      # until it answers (SMD-2890). An Ollama
       # on the host is http://host.containers.internal:11434/v1 (podman; Docker
       # Desktop: host.docker.internal); OpenRouter is https://openrouter.ai/api/v1
       # with a key — deploy/.env.example, "Model provider". Check 14 holds this
@@ -835,8 +846,7 @@ services:
       OB1_QUERY_LOG_RETENTION_DAYS: ${OB1_QUERY_LOG_RETENTION_DAYS:-}
       OB1_PROPOSALS_WARN_DAYS: ${OB1_PROPOSALS_WARN_DAYS:-}
       # Which pipeline tier this server runs as (SMD-1806); stamped on every
-      # query_log row. Unset is a plain brain. The three-tier compose
-      # (compose.tiers.yaml) sets it per service; here it is a plain forward.
+      # query_log row. Unset is a plain brain; a tier's env file sets it.
       OB1_TIER: ${OB1_TIER:-}
       OB1_AGENT_CACHE_TTL_MS: ${OB1_AGENT_CACHE_TTL_MS:-}
       OPEN_BRAIN_CITATION_BASE_URL: ${OPEN_BRAIN_CITATION_BASE_URL:-}
@@ -867,6 +877,12 @@ services:
       # provider answers (SMD-2889). Unset, 60. Both this server and the REST
       # core read it; a leader lock lets one mend at a time.
       OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
+      # Seconds between re-probes of a local embedding provider that does not
+      # answer (GET /models; one embedding of "probe" where a call failed in a
+      # way /models cannot show), 1 to 3600, 0 or off for the start's probe
+      # alone: the server starts degraded when it is not up yet and leaves
+      # degraded when it answers (SMD-2890). Unset, 15.
+      OB1_PROVIDER_REPROBE_INTERVAL: ${OB1_PROVIDER_REPROBE_INTERVAL:-}
       PORT: "8000"
     environment:
       <<: [*server-env, *plugin-env]
@@ -905,11 +921,11 @@ services:
     # model providers (the stack's Ollama and Jev by name, a host or hosted
     # one outward). Not the mesh: nothing routes to it since SMD-2532 closed
     # the root route, and /mcp is the `mcp` service's below (SMD-2287 PR 5b),
-    # on the mesh alone, as the ADR has it. No shipped template calls it: n8n's
-    # brain calls go to the REST core (SMD-2295), and the orchestration eval's
-    # workflows still call it until SMD-2295's second PR. It retires in
-    # SMD-2287 PR 6. No dns_search here, unlike the proxy: an operator's model
-    # endpoint may be a short name their resolver completes.
+    # on the mesh alone, as the ADR has it. Nothing in the stack calls it:
+    # n8n's brain calls and the orchestration eval's go to the REST core
+    # (SMD-2295). It retires in SMD-2287 PR 6. No dns_search here, unlike the
+    # proxy: an operator's model endpoint may be a short name their resolver
+    # completes.
     networks:
       data: {}
       egress: {}
@@ -959,6 +975,7 @@ services:
       interval: 30s
       timeout: 3s
       start_period: 10s
+      start_interval: 1s
       retries: 3
     logging: *logging
 
@@ -1013,6 +1030,7 @@ services:
       interval: 30s
       timeout: 3s
       start_period: 10s
+      start_interval: 1s
       retries: 3
     logging: *logging
 
@@ -1057,6 +1075,7 @@ services:
       interval: 30s
       timeout: 3s
       start_period: 10s
+      start_interval: 1s
       retries: 3
     logging: *logging
 
@@ -1178,6 +1197,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+      start_period: 10s
+      start_interval: 1s
     # Started after the MCP server, the operator GUI and the REST core behind them, so `up proxy`
     # brings the brain once its image is built (the `server` service builds
     # it: name `server` with `--build`, as the commands below do), and
@@ -1256,6 +1277,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+      start_period: 10s
+      start_interval: 1s
     # After the proxy, so `up forwarder` brings the brain, and the first `up`
     # after SMD-2583 recreates the proxy, which held the port, before this
     # binds it.
@@ -1481,9 +1504,10 @@ services:
 
   # The sleep scheduler, unattended (SMD-1794; this service SMD-2678). Optional
   # — `--profile sleep` — and an alternative to `--profile workers`, not a
-  # companion: `bun db/sleep.ts --follow` runs extraction, then consolidation
-  # beside it, only while the brain is quiet — OB1_SLEEP_QUIET seconds (unset,
-  # 300) with no live write in thought_audit and, when the server logs
+  # companion: `bun db/sleep.ts --follow` runs the re-derive sweep, then
+  # extraction, then consolidation beside it, only while the brain is quiet
+  # — OB1_SLEEP_QUIET seconds (unset, 300) with no live write in
+  # thought_audit and, when the server logs
   # searches (OB1_QUERY_LOG=on) and this role may read the log (the owner, or
   # the opt-in `sleep` grant group), no search — and hard-stops both within
   # OB1_SLEEP_POLL seconds (unset, 5) of the next live call, every lease
@@ -1506,12 +1530,25 @@ services:
   # — and those wait out a database not answering yet, so a stop then waited
   # out the grace. The supervisor installs its own first, and the scheduler
   # is its child, not PID 1 (SMD-3214); the init still reaps.
+  #
+  # OB1_SLEEP_DUMP_DIR (unset, none) hands it --dump-dir: each consolidation
+  # pass appends every verdict, decide mode's link step included, to one file
+  # per pass key there (SMD-3203). Set it to /var/lib/ob1/sleep-dumps, where
+  # the `sleep-dumps` volume is mounted, and copy the files out with
+  # `compose cp` while the service runs. They hold the brain's text: each is
+  # created 0600.
   sleep:
     image: oven/bun:1.4.3-alpine
     profiles: ["sleep"]
     working_dir: /app
     init: true
-    volumes: *claim-worker-mounts
+    # The claim workers' two read-only mounts, copied since YAML merges no
+    # lists (check 28 holds them to the workers'), and the volume --dump-dir
+    # writes to, empty until OB1_SLEEP_DUMP_DIR names it.
+    volumes:
+      - ../db:/app/db:ro
+      - ../server-portable:/app/server-portable:ro
+      - sleep-dumps:/var/lib/ob1/sleep-dumps
     environment:
       <<: *server-env
       PORT: ""
@@ -1523,6 +1560,7 @@ services:
       OB1_SLEEP_STATEMENT_TIMEOUT: ${OB1_SLEEP_STATEMENT_TIMEOUT:-}
       OB1_SLEEP_WORK_MEM: ${OB1_SLEEP_WORK_MEM:-}
       OB1_SLEEP_MAINTENANCE_WORK_MEM: ${OB1_SLEEP_MAINTENANCE_WORK_MEM:-}
+      OB1_SLEEP_DUMP_DIR: ${OB1_SLEEP_DUMP_DIR:-}
     command:
       - bun
       - db/supervise.ts
@@ -1538,7 +1576,7 @@ services:
       - OB1_SLEEP_WORK_MEM
       - OB1_SLEEP_MAINTENANCE_WORK_MEM
       - --run
-      - exec bun db/sleep.ts --follow --quiet "$${OB1_SLEEP_QUIET:-300}" --poll "$${OB1_SLEEP_POLL:-5}" --workers "$${OB1_SLEEP_WORKERS:-1}" --budget "$${OB1_SLEEP_BUDGET:-60}" --statement-timeout "$${OB1_SLEEP_STATEMENT_TIMEOUT:-300}" --work-mem "$${OB1_SLEEP_WORK_MEM:-4}" --maintenance-work-mem "$${OB1_SLEEP_MAINTENANCE_WORK_MEM:-64}"
+      - exec bun db/sleep.ts --follow --quiet "$${OB1_SLEEP_QUIET:-300}" --poll "$${OB1_SLEEP_POLL:-5}" --workers "$${OB1_SLEEP_WORKERS:-1}" --budget "$${OB1_SLEEP_BUDGET:-60}" --statement-timeout "$${OB1_SLEEP_STATEMENT_TIMEOUT:-300}" --work-mem "$${OB1_SLEEP_WORK_MEM:-4}" --maintenance-work-mem "$${OB1_SLEEP_MAINTENANCE_WORK_MEM:-64}" $${OB1_SLEEP_DUMP_DIR:+--dump-dir "$${OB1_SLEEP_DUMP_DIR}"}
     extra_hosts: *host-alias
     # The workers': Postgres on `data`, the model provider on `egress`
     # (SMD-2583). On compose's default network it would wait for a database it
@@ -1580,6 +1618,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+      start_period: 30s
+      start_interval: 1s
     # `egress` alone: it fetches the models it pulls from the registry, and
     # its callers, every one of which calls out too, meet it there. Never
     # `data`: it holds no credential and needs no database (SMD-2583).
@@ -1662,6 +1702,7 @@ services:
       # unhealthy and the server, which waits for it, does not start.
       # Pre-pull on a slow link: compose --profile jev run --rm jev --fetch-only.
       start_period: 600s
+      start_interval: 1s
     # `unless-stopped`, so it comes back after a reboot (SMD-3214): neither
     # runtime starts an `on-failure` container at boot, and with
     # OB1_JEV_BASE_URL naming this service the servers' preflight fails until
@@ -1787,8 +1828,12 @@ services:
       timeout: 5s
       retries: 3
       start_period: 120s
+      start_interval: 1s
+    # The REST core, n8n's one way into the brain (SMD-2295): `up -d n8n`
+    # brings it along. It runs the image `server`'s service builds, so on a
+    # project that has not built it, bring the stack up first.
     depends_on:
-      server:
+      api:
         condition: service_started
     restart: unless-stopped
     logging: *logging
@@ -1939,6 +1984,8 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
+      start_period: 10s
+      start_interval: 1s
     depends_on:
       postgres:
         condition: service_healthy
@@ -2043,6 +2090,7 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
+      start_interval: 1s
     restart: unless-stopped
     logging: *logging
 
@@ -2217,6 +2265,7 @@ services:
       timeout: 8s
       retries: 3
       start_period: 300s
+      start_interval: 1s
     restart: unless-stopped
     logging: *logging
 
@@ -2341,6 +2390,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+      start_interval: 1s
     restart: unless-stopped
     logging: *logging
 
@@ -2394,6 +2444,7 @@ volumes:
   n8n-data:
   auth-data:
   lgtm-data:
+  sleep-dumps:
 
 configs:
   # The proxy's route table, inline: x-proxy-routes at the top of this file.
