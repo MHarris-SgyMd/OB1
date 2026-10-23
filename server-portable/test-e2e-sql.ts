@@ -35,6 +35,7 @@ import { fileURLToPath } from "node:url";
 import { mcpTarget, mcpUnderTest, servedAsNamed, SUITE_CARRIER } from "./test-support.ts";
 import { createCore, newMendState } from "./core/index.ts";
 import { createStore, type ThoughtStore } from "./store.ts";
+import { parseListCursor } from "./core/list-cursor.ts";
 
 const URL_ = process.env.DATABASE_URL;
 if (!URL_) {
@@ -452,6 +453,37 @@ console.log("\n[5] list_thoughts filters");
 
   const windowed = await call("list_thoughts", { limit: 10, days: 1 });
   assert(/3 recent thought/.test(windowed), "days window includes today");
+
+  // SMD-2995: an agent's walk, a page of one at a time, by the cursor the
+  // reply ends with, in each sort: the three thoughts once each, the last
+  // page with no cursor, and the two sorts each other's reverse.
+  const walked: Record<string, string[]> = {};
+  for (const sort of ["newest", "oldest"] as const) {
+    const ids: string[] = [];
+    let after: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const text = await call("list_thoughts", { limit: 1, sort, ...(after ? { after } : {}) });
+      ids.push(...[...text.matchAll(/ID: ([0-9a-f-]{36})/g)].map((m) => m[1]));
+      after = /More follow\. Cursor: (\S+) — pass it as `after`/.exec(text)?.[1];
+      if (!after) break;
+    }
+    walked[sort] = ids;
+  }
+  assert(walked.newest.length === 3 && new Set(walked.newest).size === 3 && walked.oldest.join() === [...walked.newest].reverse().join(),
+    `a page of one at a time by the reply's cursor walks all three once, oldest first the reverse of newest (${walked.newest.length}, ${walked.oldest.length})`);
+  // call() throws a tool error with its words: the refusal's text is the message's.
+  const refusal = (e: Error) => e.message.replace(/^tool error: /, "");
+  const refusedShape = await call("list_thoughts", { limit: 1, after: "not-a-cursor" }).catch(refusal);
+  assert(/^Refused: `after` is not a list_thoughts cursor/.test(refusedShape), `a string that is no cursor is refused naming \`after\` (${refusedShape.slice(0, 60)})`);
+  const firstOldest = await call("list_thoughts", { limit: 1, sort: "oldest" });
+  const oldestCursor = /Cursor: (\S+)/.exec(firstOldest)?.[1] ?? "";
+  const refusedSort = await call("list_thoughts", { limit: 1, after: oldestCursor }).catch(refusal);
+  assert(/^Refused: that cursor was made with `sort: oldest`/.test(refusedSort), `an oldest-first cursor with the default sort is refused, naming the sort it needs (${refusedSort.slice(0, 70)})`);
+  // An oldest-first page says its order, not "oldest" — a page deep in the walk is not the oldest (review pass 3).
+  assert(/^1 thought\(s\), oldest first:/.test(firstOldest), `an oldest-first page is headed by its order (${firstOldest.split("\n")[0]})`);
+  // The cursor beside the text, in structuredContent, the one the text names — through the door this run tests (review pass 2).
+  const typed = await result("list_thoughts", { limit: 1, sort: "oldest" });
+  assert(typeof typed.sc?.cursor === "string" && typed.sc.cursor === /Cursor: (\S+)/.exec(typed.text)?.[1], `structuredContent carries the cursor the text names (${typeof typed.sc?.cursor})`);
 }
 
 console.log("\n[6] thought_stats aggregates the whole corpus");
@@ -3030,6 +3062,8 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
 // that break it.
 const SHAPE = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[+-]?\d{4,6}-\d{2}-\d{2}(?:T[\d:.]+(?:Z|[+-]\d{2}(?::?\d{2})?)?)?|-?infinity|[A-Za-z][A-Za-z0-9_-]{0,39})$/i;
 const wordless = (v: unknown, at = ""): string[] => {
+  // list_thoughts' cursor (SMD-2995) is a token by construction: what it decodes to is a sort word, a time and a uuid, read by the core's own rule.
+  if (typeof v === "string" && at === "cursor" && parseListCursor(v)) return [];
   if (typeof v === "string") return SHAPE.test(v) ? [] : [at || "(root)"];
   if (Array.isArray(v)) return v.flatMap((x, i) => wordless(x, `${at}[${i}]`));
   if (v && typeof v === "object") return Object.entries(v).flatMap(([k, x]) => (at === "" && k === "text" ? [] : wordless(x, at ? `${at}.${k}` : k)));
