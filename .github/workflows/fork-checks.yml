@@ -172,6 +172,14 @@ jobs:
         working-directory: server-portable
         run: bun test-server.ts
 
+      # What test-server held that reads no server under test (SMD-3201):
+      # `bun index.ts` run as the image runs it — a keyed /health's deadline,
+      # the stop on SIGTERM — and brain-info.ts's rules. Once, where
+      # test-server runs in both of OB1_MCP_UNDER_TEST's passes.
+      - name: The server's entry, its stop and brain-info's rules
+        working-directory: server-portable
+        run: bun test-entry.ts
+
       # Scoped keys: a read-scoped key must not merely fail to write, it must not
       # see capture_thought at all. Needs no database.
       - name: Scoped access keys
