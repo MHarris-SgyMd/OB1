@@ -2765,7 +2765,7 @@ console.log("\n[16l] A supersession proposal names who wrote each side, and is f
   const emptyKeyed = renderSupersessionProposals({ ok: true, value: { status: "pending", judgeKey: KEY, proposals: [] } } as never);
   assert(v.every((p) => (p as { judgeKey?: string }).judgeKey === "consolidate:stub@p2") && kv?.judgeKey === KEY && kv?.proposals[0]?.judgeKey === KEY
       && keyed.content[0].text.startsWith(`1 pending supersession proposal(s) judged by ${KEY}, most confident first.`) && keyed.content[0].text.includes(`judged by ${KEY} on `)
-      && emptyKeyed.content[0].text.startsWith(`No pending supersession proposals judged by ${KEY}.`) && (emptyKeyed as unknown as { structuredContent?: { judgeKey?: string } }).structuredContent?.judgeKey === KEY
+      && emptyKeyed.content[0].text.startsWith(`No pending supersession proposals judged by ${KEY}. The match is exact`) && !emptyKeyed.content[0].text.includes("The consolidation pass proposes them") && (emptyKeyed as unknown as { structuredContent?: { judgeKey?: string } }).structuredContent?.judgeKey === KEY
       && !("judgeKey" in ((r1 as unknown as { structuredContent?: Record<string, unknown> }).structuredContent ?? {})),
     `each proposal's value names its judge key; a selection by key says it in the headline and the value, an empty one too, and an unselected listing's value carries none (${keyed.content[0].text.split("\n")[0]})`);
   // The value holds a key to a pass key's shape (the guard's rule: no sentence through a field): a raw recording's key

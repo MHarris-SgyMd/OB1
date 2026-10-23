@@ -6361,8 +6361,10 @@ if (want("16")) {
   // SMD-3248: --key is a listing's — beside anything else, or past the tool's 200 characters, refused before the client.
   const keyAlone = await consolidate("--status", "--key", "consolidate:stub@p1");
   const keyLong = await consolidate("--list", "--key", `consolidate:${"m".repeat(200)}@p1`);
-  assert(keyAlone.code === 2 && /--key goes with --list/.test(keyAlone.out) && keyLong.code === 2 && /--key takes a judge key of 1 to 200 characters/.test(keyLong.out),
-    `--key without --list, and one past 200 characters, are refused (${keyAlone.out.trim().slice(0, 80)} | ${keyLong.out.trim().slice(0, 80)})`);
+  const keySpace = await consolidate("--list", "--key", "consolidate:h2o-lightning-4b qwen3.8:27b@p4d3");
+  assert(keyAlone.code === 2 && /--key goes with --list/.test(keyAlone.out) && keyLong.code === 2 && /--key takes a judge key of 1 to 200 characters/.test(keyLong.out)
+      && keySpace.code === 2 && /--key takes a judge key of printable ASCII with no space/.test(keySpace.out),
+    `--key without --list, one past 200 characters, and one with a space (review pass 1: it selected nothing without a word) are refused (${keyAlone.out.trim().slice(0, 60)} | ${keyLong.out.trim().slice(0, 60)} | ${keySpace.out.trim().slice(0, 60)})`);
 
   // The judge's own model (SMD-1901): unset, the key and the model line name
   // the metadata model and say the knob exists; set, OB1_JUDGE_MODEL moves the
@@ -6495,6 +6497,10 @@ if (want("16")) {
       && listKey.out.includes(`--accept ${directed.id}`) && listKey.out.includes(`--accept ${undirected.id} --direction <newer|older>`)
       && listNobody.code === 0 && /no pending proposals judged by consolidate:nobody@p1/.test(listNobody.out) && same(listKeyC, listKey),
     `--list --key lists this pass's two, the key in the header; a key no pass has lists none; run() in-process the same (${listKey.out.split("\n").find((l) => /judged by/.test(l))?.trim().slice(0, 120)})`);
+  // …and --status counts the pending by pass, the keys --key takes (review pass 1: the total alone hid which passes it held).
+  const byPass = await consolidate("--status");
+  assert(byPass.code === 0 && byPass.out.includes(`pending by pass: 2 judged by ${passKey} — --list --key <key> lists one pass's`),
+    `--status counts the pending by pass (${byPass.out.split("\n").find((l) => /pending by pass/.test(l))?.trim().slice(0, 140)})`);
 
   // The review path, through the worker's flags, audited under the key's name.
   const needDir = await consolidate("--accept", undirected.id);
@@ -7402,7 +7408,7 @@ if (want("16")) {
     const relKey = /relation \S+\s+judged by (\S+) on /.exec(listed.out)?.[1] ?? "";
     const relByKey = await consolidate("--list", "relations", "--key", relKey);
     const relNobody = await consolidate("--list", "relations", "--key", "consolidate:nobody@p1");
-    assert(relKey.startsWith("consolidate:") && relByKey.code === 0 && relByKey.out.includes(rotaNew) && /relation\(s\) judged by \S+, newest first/.test(relByKey.out)
+    assert(relKey.startsWith("consolidate:") && relByKey.code === 0 && relByKey.out.includes(rotaNew) && /relation\(s\) judged by \S+, newest first/.test(relByKey.out) && !/ANOTHER JUDGE KEY/.test(relByKey.out)
         && relNobody.code === 0 && /no relations judged by consolidate:nobody@p1/.test(relNobody.out),
       `--list relations --key lists that pass's edges, said in the header, and none under a key no pass has (${relByKey.out.split("\n").find((l) => /judged by/.test(l))?.trim().slice(0, 120)})`);
     // A side's text moved since the judgement: the edge is flagged (SMD-2726 closes it).

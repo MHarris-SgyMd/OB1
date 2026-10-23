@@ -258,7 +258,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3003 assertions: 3003 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `3005 assertions: 3005 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports one hundred and nine (109) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
@@ -1993,19 +1993,25 @@ another function), and 029's two-argument one with it if a hand re-apply left
 it; a call of two or three arguments — a server or CLI from before the file —
 resolves to the new form through the default. The fork's callers pass four,
 always: 029 or 070 re-applied by hand lands its form beside 109's, and a call
-short of four is then ambiguous and fails. The readers follow: the MCP tool and
-`GET /v1/proposals` take `judge_key`, and each proposal's value carries
-`judgeKey`, held to a pass key's shape; `consolidate.ts --list <status> --key
-<judge key>` lists one pass's proposals, and `--list relations --key` its
-relations (the key their facet names); preflight's `lineage` check reads the
+both forms take (under three arguments beside 029's, under four beside 070's)
+is then ambiguous and fails. An older server's preflight and an older CLI's
+`--status` read a brain at 109 as before 070 (they probe 070's signature):
+upgrade the server, never re-apply 070. The readers follow: the MCP tool and
+`GET /v1/proposals` take `judge_key` (printable ASCII, no space; `+` encoded
+as `%2B` in a query string), and each proposal's value carries `judgeKey`,
+held to a pass key's shape; `consolidate.ts --status` counts the pending by
+pass, `consolidate.ts --list <status> --key <judge key>` lists one pass's
+proposals, and `--list relations --key` its relations (the key their facet
+names); preflight's `lineage` check reads the
 four-argument form and both sentinels, and names 109 where the listing is older
 or an older form stands beside it. Paging past 200 is SMD-3249. DDL alone; no
 row moves; no grant is carried (EXECUTE is PUBLIC). Refuses by name without
 016, 025 or 029; a re-apply is a no-op. test-schema [97] (the selection before
-the cap, exact match, beside status and lineage, 070 re-applied beside it),
-test-upgrade [20ba] (onto a populated brain: the rows listing the same through a
-three-argument call), test-live [16] (`--list --key`, `--list relations --key`,
-a brain at 108), `server-portable/test-preflight.ts`, the store, e2e and REST
+the cap, exact match, beside status and lineage, 029 and 070 re-applied beside
+it), test-upgrade [20ba] (refused without each prerequisite; onto a populated
+brain: the rows listing the same through a three-argument call), test-live [16]
+(`--status`'s pending by pass, `--list --key`, `--list relations --key`, a
+brain at 108), `server-portable/test-preflight.ts`, the store, e2e and REST
 suites.
 
 ## What changed relative to the guide
@@ -3430,7 +3436,7 @@ bun consolidate.ts --url … --dry-run               # what a run would do; writ
 bun consolidate.ts --url … --retry-failed          # failed rows back into the pool first
 bun consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # lineage: unreviewed rows standing on a lineage pair (070)
 bun consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate, with both thoughts (a distinct, 102, is counted by --status, not listed)
-bun consolidate.ts --url … --list [status|relations] --key <judge key>   # one pass's alone, by the key each row names (109)
+bun consolidate.ts --url … --list [<status>|relations] --key <judge key>   # one pass's alone, by the key each row names (109); --status counts the pending by pass
 bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90; at most 2000000, inside Postgres's timestamp range)
@@ -5291,9 +5297,9 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 3003 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1532 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 913 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+bun test-schema.ts                          # 3005 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1533 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 914 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 86 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 259 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)

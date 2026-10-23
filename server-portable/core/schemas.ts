@@ -214,7 +214,10 @@ export const SPECS = {
       limit: z.number().int().min(1).max(200).optional().default(10),
       lineage: z.boolean().optional().describe("true: only proposals standing on a lineage pair (one side's derived_from names the other); false: only the rest; absent: every pair (migration 070)"),
       // SMD-3248: one pass's proposals — its judge_key exactly, selected before the cap (migration 109).
-      judge_key: z.string().min(1).max(200).optional().describe("Only the proposals of the pass with exactly this judge key (`consolidate:<model>@p<prompt>`, or under decide mode `consolidate:<decider>+<writer>@p<prompt>d<decide version>`; each proposal names its own); absent: every pass (migration 109)"),
+      // Printable ASCII, no space (review pass 1): no pass key holds one, and a `+` a query string decoded to a space
+      // selected nothing without a word — and a newline in it reached the headline.
+      judge_key: z.string().min(1).max(200).regex(/^[\x21-\x7e]+$/, "judge_key is a pass key: printable ASCII with no space (in a URL's query, encode + as %2B)").optional()
+        .describe("Only the proposals of the pass with exactly this judge key (`consolidate:<model>@p<prompt>`, or under decide mode `consolidate:<decider>+<writer>@p<prompt>d<decide version>`; each proposal names its own, and `consolidate.ts --status` counts the pending by pass); printable ASCII, no space — in a URL's query string, encode `+` as `%2B`; absent: every pass (migration 109)"),
     },
   },
   thought_stats: {

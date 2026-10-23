@@ -2394,7 +2394,7 @@ if (configFailed) {
                      (SELECT w.prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_tickets,
                      -- 070 (SMD-2313), then 109 (SMD-3248): the listing flags a lineage pair and selects a pass (both sentinels, in 109's
                      -- four-argument form) and stands in one form — 029 or 070 re-applied by hand lands its form BESIDE 109's, and a call
-                     -- passing fewer than four arguments is then ambiguous (42725, not unique) and fails.
+                     -- both take (under three arguments beside 029's, under four beside 070's) is then ambiguous (42725, not unique) and fails.
                      (SELECT w.prosrc LIKE '%ob1:listing-flags-the-lineage-pair%' AND w.prosrc LIKE '%ob1:listing-selects-a-pass%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.list_supersession_proposals(text, int, boolean, text)')) AS lists_pass,
                      (SELECT count(*)::int FROM pg_proc w JOIN pg_namespace wn ON wn.oid = w.pronamespace WHERE wn.nspname = 'public' AND w.proname = 'list_supersession_proposals') AS listing_forms
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
@@ -2570,8 +2570,9 @@ if (configFailed) {
               // hand). Neither is "listed as any other row": the CLI, the
               // stores and the MCP tool pass 109's fourth argument, so on an
               // older form alone every listing fails naming it; with two forms
-              // standing a call short of four arguments is ambiguous (42725,
-              // not unique) and fails, while the fork's callers resolve
+              // standing a call both take is ambiguous (42725, not unique) and
+              // fails — under three arguments beside 029's, under four beside
+              // 070's (review pass 1, measured) — while the fork's callers resolve
               // (SMD-2313's run-it, first review pass: the arm said the older
               // body answered). 109 drops the older forms. Gated on 063 like the arms above:
               // a brain before 063 is the older-bodies arm's, and one at
@@ -2579,7 +2580,7 @@ if (configFailed) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${bodies.lists_pass !== true
                     ? "list_supersession_proposals is from before 109 (migration 109 not yet applied, or its form dropped by hand): every listing fails — the CLI's --list, the stores and the MCP tool pass 109's fourth argument, which this form does not take"
-                    : "an older list_supersession_proposals stands beside 109's (029 or 070 re-applied by hand over it): a call passing fewer than four arguments is ambiguous (not unique) and fails, so every reader outside the fork's callers — which pass four — errors on the queue"} (SMD-2313, SMD-3248). ${coverage}`,
+                    : "an older list_supersession_proposals stands beside 109's (029 or 070 re-applied by hand over it): a call both forms take — fewer than three arguments beside 029's, fewer than four beside 070's — is ambiguous (not unique) and fails, so a reader passing fewer than four may error on the queue, while the fork's callers pass four"} (SMD-2313, SMD-3248). ${coverage}`,
                   ledgerRemedy("109", APPLY_109));
             } else if (Number(c.orphans)) {
               // The other direction (063): a row whose artifact is gone while

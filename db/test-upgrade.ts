@@ -4791,14 +4791,20 @@ console.log("\n[20az] Migration 108: refused by name without 071; onto a populat
   await sql.close();
 }
 
-console.log("\n[20ba] Migration 109: refused by name without 029; onto a populated brain at the file before it — 070's three-argument listing replaced by one form of four, the proposals planted before it listing the same through a three-argument call after it and selecting by their judge key, no proposal, thought or audit row moved; a re-apply a no-op (SMD-3248)");
+console.log("\n[20ba] Migration 109: refused by name without 016, 025 or 029; onto a populated brain at the file before it — 070's three-argument listing replaced by one form of four, the proposals planted before it listing the same through a three-argument call after it and selecting by their judge key, no proposal, thought or audit row moved; a re-apply a no-op (SMD-3248)");
 {
   const the109 = MIGRATIONS.find((f) => f.endsWith("_listing_selects_a_pass.sql"))!;  // by name: renumbered when main takes its number
-  await dropSchema(URL_);
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f < "029" });
-  const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the109 }).then(() => "applied", (e: Error) => e.message);
-  assert(refused === "migration 109 needs 029 (supersession_proposals); this schema lacks it",
-    `109 on a schema stopped before 029 is refused up front, naming what it needs (${refused})`);
+  // Each prerequisite in turn (review pass 1: 016's and 025's refusals survived a mutant).
+  for (const [stop, needs] of [
+    ["016", "migration 109 needs 016 (content_fingerprint_of); this schema lacks it"],
+    ["025", "migration 109 needs 025 (thoughts.derived_from); this schema lacks it"],
+    ["029", "migration 109 needs 029 (supersession_proposals); this schema lacks it"],
+  ] as const) {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
+    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the109 }).then(() => "applied", (e: Error) => e.message);
+    assert(refused === needs, `109 on a schema stopped before ${stop} is refused up front, naming what it needs (${refused})`);
+  }
 
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < the109 });

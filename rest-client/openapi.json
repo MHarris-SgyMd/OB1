@@ -1952,10 +1952,11 @@
             "in": "query",
             "required": false,
             "schema": {
-              "description": "Only the proposals of the pass with exactly this judge key (`consolidate:<model>@p<prompt>`, or under decide mode `consolidate:<decider>+<writer>@p<prompt>d<decide version>`; each proposal names its own); absent: every pass (migration 109)",
+              "description": "Only the proposals of the pass with exactly this judge key (`consolidate:<model>@p<prompt>`, or under decide mode `consolidate:<decider>+<writer>@p<prompt>d<decide version>`; each proposal names its own, and `consolidate.ts --status` counts the pending by pass); printable ASCII, no space — in a URL's query string, encode `+` as `%2B`; absent: every pass (migration 109)",
               "type": "string",
               "minLength": 1,
-              "maxLength": 200
+              "maxLength": 200,
+              "pattern": "^[\\x21-\\x7e]+$"
             }
           }
         ],

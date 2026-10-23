@@ -35,7 +35,8 @@
 --      listing, so no ACL is carried.
 --   2. The readers, in the same change. The stores and db/consolidate.ts
 --      pass four arguments, always: 029 or 070 re-applied by hand lands its
---      form BESIDE this one, and a call passing fewer than four is then
+--      form BESIDE this one, and a call both forms take — under three
+--      arguments beside 029's, under four beside 070's (measured) — is then
 --      ambiguous (42725, not unique) and fails, while four resolve here —
 --      070's rule, one argument on. The MCP tool and the REST core's
 --      GET /v1/proposals take `judge_key`, and each proposal's value gains
@@ -49,7 +50,14 @@
 --   One function dropped and created under a new arity, and one COMMENT.
 --   A caller passing two or three arguments — a server or CLI from before
 --   this file, during an upgrade — resolves to the new form through the
---   default and lists as before. While 070's form ALONE stands (a brain at
+--   default and lists as before. An older server's preflight and an older
+--   CLI's --status probe 070's three-argument form by its signature, which
+--   this file drops, so on a brain at 109 they read the listing as from
+--   before 070 and name 070's file: the fix is this tree's server and CLI,
+--   never that remedy — 070 re-applied would stand its form beside this one
+--   and make the older server's own three-argument calls ambiguous. The
+--   window is a migrate ahead of its server: a release's `up` migrates, then
+--   starts the server from the same tree. While 070's form ALONE stands (a brain at
 --   108 under a server built from this tree), every fork caller fails
 --   naming the four-argument form, and preflight's lineage check names this
 --   file. Nothing runs at apply time but the DDL; no row moves; no table is

@@ -15612,6 +15612,18 @@ console.log("\n[97] Migration 109: the listing selects one pass's proposals — 
   assert(again.startsWith("109_") && (await functionsNamed("list_supersession_proposals")) === 1 && (await q(`SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('list_supersession_proposals(text, int, boolean)')`)).length === 0
       && ids(await list("pending", 50, null, A)) === [a1, a2].join() && ids(await q<{ id: string }>(`SELECT id::text FROM list_supersession_proposals('pending', 3, NULL::boolean)`)) === [b1, b2, b3].join(),
     "109 again drops the three-argument form; one form, the same rows, a three-argument call resolving again — a re-apply a no-op");
+  // 029's two-argument form left by a hand re-apply (stood up by hand here: 029 whole would put back its other bodies
+  // too): beside 109's, only a call both take — under three arguments — is ambiguous, three and four resolve; 109
+  // again drops it (review pass 1: no suite built this state, and 109's DROP of it survived a mutant).
+  await db.exec(`CREATE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20) RETURNS TABLE (id uuid) LANGUAGE sql STABLE AS $f$ SELECT NULL::uuid WHERE false $f$`);
+  const call = async (sql: string) => { try { await q(sql); return "resolved"; } catch (e) { return (e as Error).message; } };
+  const two = await call(`SELECT 1 FROM list_supersession_proposals('pending', 3)`), threeArgs = await call(`SELECT 1 FROM list_supersession_proposals('pending', 3, NULL::boolean)`);
+  assert((await functionsNamed("list_supersession_proposals")) === 2 && /is not unique/.test(two) && threeArgs === "resolved" && ids(await list("pending", 50, null, A)) === [a1, a2].join(),
+    `029's two-argument form beside 109's: a two-argument call ambiguous (${two.slice(0, 60)}), three and four resolving — the wording preflight's beside arm gives`);
+  await reapply("109");
+  assert((await functionsNamed("list_supersession_proposals")) === 1 && (await q(`SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('list_supersession_proposals(text, int)')`)).length === 0
+      && ids(await q<{ id: string }>(`SELECT id::text FROM list_supersession_proposals('pending', 3)`)) === [b1, b2, b3].join(),
+    "…and 109 again drops 029's leftover too: one form, a two-argument call resolving to it");
 
   await db.exec(`SELECT set_config('ob1.actor', '', false)`);
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[97]%'`);

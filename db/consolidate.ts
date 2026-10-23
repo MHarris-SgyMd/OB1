@@ -32,7 +32,7 @@
  *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # the queue, with both thoughts; lineage: the unreviewed rows standing on a lineage pair (070)
  *                                                                                         # each side's writer, and WRITER on a capture-only key's or lower-trust side to stand (094)
  *   bun db/consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate (a distinct, 102, is counted by --status, not listed)
- *   bun db/consolidate.ts --url … --list [status|relations] --key <judge key>   # one pass's alone: its judge key exactly, as each row names it (109, SMD-3248)
+ *   bun db/consolidate.ts --url … --list [<status>|relations] --key <judge key>   # one pass's alone: its judge key exactly, as each row names it (109, SMD-3248)
  *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged, a stale row, a lineage pair (070), or a WRITER flag (094)
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90; at most 2000000, inside Postgres's timestamp range)
@@ -367,10 +367,12 @@ export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "key" | "a
   const { list, accept, reject, direction, note } = { list: opts.list ?? undefined, accept: opts.accept ?? undefined, reject: opts.reject ?? undefined, direction: opts.direction ?? undefined, note: opts.note ?? undefined };
   if (list !== undefined && !LIST_STATUSES.includes(list)) return "--list takes pending, accepted, rejected, stale, lineage, all or relations (or nothing, for pending).";
   // SMD-3248: read only by a listing — beside anything else it would be dropped without a word (SMD-2015's kind). The
-  // tool's bound (1–200 characters), so the two doors take the same keys.
+  // tool's bounds (1–200 characters, printable ASCII, no space), so the two doors take the same keys.
   const key = opts.key ?? undefined;
   if (key !== undefined && list === undefined) return "--key goes with --list: it lists one pass's proposals or relations alone, by its judge key.";
   if (key !== undefined && (key.length < 1 || key.length > 200)) return "--key takes a judge key of 1 to 200 characters, as each listed row names it (judged by consolidate:…).";
+  // No pass key holds a space or a control character (review pass 1): one there is a typo that would select nothing, said instead.
+  if (key !== undefined && !/^[\x21-\x7e]+$/.test(key)) return "--key takes a judge key of printable ASCII with no space, as each listed row names it (judged by consolidate:…).";
   for (const [name, v] of [["accept", accept], ["reject", reject]] as const) {
     if (v !== undefined && !UUID_RE.test(v)) return `--${name} needs a proposal id (a UUID from --list or the list_supersession_proposals tool).`;
   }
@@ -823,9 +825,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   async function printList(status: string | undefined, limit = 50): Promise<number> {
     // 109's four-argument form, always: 029 or 070 re-applied by hand lands
-    // its form beside 109's, and a call short of four is then ambiguous (not
-    // unique) and fails; four resolve (preflight's lineage check names the
-    // leftover). --key selects one pass in the SQL, before the cap (SMD-3248).
+    // its form beside 109's, and a call both forms take (under three arguments
+    // beside 029's, under four beside 070's) is then ambiguous (not unique) and
+    // fails; four resolve (preflight's lineage check names the leftover).
+    // --key selects one pass in the SQL, before the cap (SMD-3248).
     const listed = async (st: string | null, lineage: boolean | null) =>
       (await sql`SELECT * FROM list_supersession_proposals(${st}::text, ${limit}::int, ${lineage}::boolean, ${KEY ?? null}::text)`) as Listed[];
     // --list lineage: the unreviewed rows standing on a lineage pair — the
@@ -862,7 +865,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // the queue ended (review pass 5).
     const hit = (st: string) => listedRows.filter((r) => r.status === st).length === limit;
     const capped = lineageMode ? hit("pending") || hit("stale") : listedRows.length === limit;
-    out(`  ${rows.length} ${what.replace("proposals", "proposal(s)")}${lineageMode ? " (pending, then stale)" : ""}, most confident first${capped ? ` — ${lineageMode ? `pending and stale capped at ${limit} each` : `the first ${limit}`}; --status counts them all` : ""}:\n`);
+    // Under --key, --status counts the pending by pass, not this status's rows; a pending page drains as it is decided (review pass 1).
+    const more = KEY === undefined ? "--status counts them all" : status === "pending" || status === undefined ? "decide these and list again for the rest; --status counts each pass's pending" : "the rest are not listed (SMD-3249 pages)";
+    out(`  ${rows.length} ${what.replace("proposals", "proposal(s)")}${lineageMode ? " (pending, then stale)" : ""}, most confident first${capped ? ` — ${lineageMode ? `pending and stale capped at ${limit} each` : `the first ${limit}`}; ${more}` : ""}:\n`);
     // 067: a stale row's standing against the pools, beside its status. (A
     // row the pass settled needs no tag: its note begins with the marker.)
     const standing = rows.some((p) => p.status === "stale") ? (await readStaleStandings()).byId : new Map<string, never>();
@@ -1077,9 +1082,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       return 0;
     }
     const phrase: Record<string, string> = { related: "related", evolves: "the NEWER evolves from the older", duplicate: "duplicates" };
-    out(`  ${rows.length} relation(s)${KEY === undefined ? "" : ` judged by ${KEY}`}, newest first${rows.length === limit ? ` — the first ${limit}; --status counts them all` : ""}:\n`);
+    out(`  ${rows.length} relation(s)${KEY === undefined ? "" : ` judged by ${KEY}`}, newest first${rows.length === limit ? ` — the first ${limit}; ${KEY === undefined ? "--status counts them all" : "the rest are not listed"}` : ""}:\n`);
     rows.forEach((r, i) => {
-      const marks = [r.edited && "EDITED SINCE JUDGED", r.older_superseded && "OLDER SUPERSEDED", r.newer_superseded && "NEWER SUPERSEDED", r.judge_key !== JOB && "ANOTHER JUDGE KEY"].filter(Boolean);
+      const marks = [r.edited && "EDITED SINCE JUDGED", r.older_superseded && "OLDER SUPERSEDED", r.newer_superseded && "NEWER SUPERSEDED", r.judge_key !== JOB && KEY === undefined && "ANOTHER JUDGE KEY"].filter(Boolean);
       out(`  ${i + 1}. [${r.confidence === null ? "—" : Number(r.confidence).toFixed(2)}] ${phrase[r.relation] ?? r.relation}${marks.length ? `  ${marks.join("  ")}` : ""}`);
       out(`     newer [${day(r.newer_created_at)}] ${snippet(r.newer_content)}\n        ID: ${r.newer_id}`);
       out(`     older [${day(r.older_created_at)}] ${snippet(r.older_content)}\n        ID: ${r.older_id}`);
@@ -1133,7 +1138,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
              to_regprocedure('list_supersession_proposals(text, int, boolean, text)') IS NOT NULL AS has_109
       FROM supersession_proposals`;
     const stale = await readStaleStandings();
+    // SMD-3248: the pending queue by the pass that judged it — the keys --list --key takes, most first. A reviewer grading
+    // one pass (SMD-3115's per-decide-version precision) learns which passes the total holds without reading a listing.
+    const byPass = (await sql`
+      SELECT judge_key, count(*)::int AS n FROM supersession_proposals WHERE status = 'pending' GROUP BY judge_key ORDER BY n DESC, judge_key`) as { judge_key: string; n: number }[];
     out(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${stale.total ? `, ${staleClause(stale)}` : ""}${q.lineage ? `, ${lineageClause(q.lineage, q.has_109)}` : ""} — --list shows them; --accept / --reject decides one`);
+    if (byPass.length) out(`  pending by pass: ${byPass.map((b) => `${b.n} judged by ${b.judge_key}`).join(", ")} — --list --key <key> lists one pass's`);
     // 084 (SMD-1873 PR 2): the relations the pass judged, standing.
     if (await has084()) {
       const [r] = (await sql`

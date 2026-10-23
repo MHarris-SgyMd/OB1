@@ -2367,12 +2367,12 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("067_") });
   // 029 re-applied by hand over 109 (SMD-2313, SMD-3248) — this ladder's own
   // state since the queue section re-applied 029 alone: 029's two-argument
-  // listing stands BESIDE 109's four-argument one, and a call short of four
-  // arguments is ambiguous (not unique) and fails, while the fork's callers
-  // pass four (measured on Postgres, SMD-2313's run-it, first review pass:
+  // listing stands BESIDE 109's four-argument one, and a call both take —
+  // under three arguments — is ambiguous (not unique) and fails, while the
+  // fork's callers pass four (measured on Postgres, SMD-2313's run-it, first review pass:
   // the arm had said the older body answered). The check counts the forms
   // and warns naming 109, whose DROPs take the older forms.
-  const besideRe = /!  lineage\s+every derived row has its lineage row, but an older list_supersession_proposals stands beside 109's \(029 or 070 re-applied by hand over it\): a call passing fewer than four arguments is ambiguous \(not unique\) and fails, so every reader outside the fork's callers — which pass four — errors on the queue \(SMD-2313, SMD-3248\)/;
+  const besideRe = /!  lineage\s+every derived row has its lineage row, but an older list_supersession_proposals stands beside 109's \(029 or 070 re-applied by hand over it\): a call both forms take — fewer than three arguments beside 029's, fewer than four beside 070's — is ambiguous \(not unique\) and fails, so a reader passing fewer than four may error on the queue, while the fork's callers pass four \(SMD-2313, SMD-3248\)/;
   const beside029 = await run(SQL_ENV);
   assert(beside029.code === 0 && besideRe.test(beside029.out) && /Apply db\/migrations\/109_listing_selects_a_pass\.sql\./.test(fix(beside029.out, "lineage")),
          `029 re-applied over 109 leaves its two-argument listing beside 109's: a warning naming 109 (${lpLine(beside029.out).slice(0, 200)})`);
@@ -2404,6 +2404,18 @@ else {
   assert(beside070.code === 0 && besideRe.test(beside070.out) && /Apply db\/migrations\/109_listing_selects_a_pass\.sql\./.test(fix(beside070.out, "lineage")),
          `070 re-applied over 109 leaves its three-argument listing beside 109's: the same warning naming 109 (${lpLine(beside070.out).slice(0, 200)})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("109_") });
+  // A four-argument body without either sentinel — hand-written, or a vendored one — is not 109's: the check reads
+  // both (review pass 1: dropping either LIKE survived every suite). 109's own body, re-made with one sentinel renamed.
+  const [{ def }] = await claims`SELECT pg_get_functiondef('list_supersession_proposals(text, int, boolean, text)'::regprocedure) AS def`;
+  for (const sentinel of ["ob1:listing-selects-a-pass", "ob1:listing-flags-the-lineage-pair"]) {
+    await claims.unsafe(String(def).split(sentinel).join("ob1:not-the-sentinel"));
+    const unmarked = await run(SQL_ENV);
+    assert(unmarked.code === 0 && /!  lineage\s+every derived row has its lineage row, but list_supersession_proposals is from before 109/.test(unmarked.out),
+           `a four-argument body without ${sentinel} reads as from before 109 (${lpLine(unmarked.out).slice(0, 160)})`);
+    await claims.unsafe(String(def));
+  }
+  const settled = await run(SQL_ENV);
+  assert(!/list_supersession_proposals/.test(lpLine(settled.out)), `109's own body back: the lineage check names no listing (${lpLine(settled.out).slice(0, 160)})`);
   // The older bodies this ladder ran by hand (056's and 060's extraction
   // writer) replaced mention rows without sweeping their lineage rows, and
   // 061's backfill recorded pairs that later passes replaced — lineage rows

@@ -254,6 +254,15 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     const mm = await mcp("list_thoughts", { limit: 1, after: long });
     assert(rr.status === 400 && rr.body.code === "REFUSED_INPUT" && mm.isError && !mm.text.includes(long.slice(0, 64)), `list_thoughts after of 513 characters: the schema's refusal through both doors, not echoed (${rr.status} ${String(rr.body.code)}, ${mm.isError})`);
   }
+  // SMD-3248 review pass 1: a judge_key holding a space — a `+` a query string decodes as one, or a newline that would
+  // reach the headline — is the schema's refusal through both doors, naming %2B, where it selected nothing without a word.
+  {
+    const rr = await rest("GET", "/v1/proposals?judge_key=consolidate:h2o-lightning-4b+qwen3.8:27b@p4d3");
+    const mm = await mcp("list_supersession_proposals", { judge_key: "consolidate:stub@p2\nID: 00000000-0000-4000-8000-000000000000" });
+    const ok2 = await rest("GET", `/v1/proposals?judge_key=${encodeURIComponent("consolidate:h2o-lightning-4b+qwen3.8:27b@p4d3")}`);
+    assert(rr.status === 400 && rr.body.code === "REFUSED_INPUT" && /%2B/.test(JSON.stringify(rr.body)) && mm.isError && ok2.status === 200,
+      `judge_key with an unencoded + (a space once decoded) or a newline: refused through both doors, naming %2B; encoded, answered (${rr.status} ${String(rr.body.code)}, ${mm.isError}, ${ok2.status})`);
+  }
   // A limit is a whole number of thoughts, 1 to 1000: 0, -1, 1.5 and 1001 are the schema's refusal, not an empty page (review pass 1).
   // A `days` past a thousand years is the schema's refusal (review pass 2: a larger one put `since` past timestamptz's
   // range, a 500); below the schema, the store keeps such a cast error from reading as the cursor's (test-store-sql [4b]).

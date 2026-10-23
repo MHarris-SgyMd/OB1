@@ -67,8 +67,8 @@ const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|sup
  * decide mode `consolidate:<decider>+<writer>@p<prompt>d<decide version>` — a
  * model name in Ollama's and Hugging Face's characters (letters, digits, `.`,
  * `_`, `:`, `/`, `-`), no space. Held to that shape, it carries no sentence;
- * a key of any other shape (a raw recording's) reads null, its text in the
- * reply's.
+ * a key of any other shape — a raw recording's, or a model named with `@` or
+ * `+` (Cloudflare's `@cf/…`) — reads null, its text in the reply's.
  */
 const JUDGE_KEY = /^consolidate:[A-Za-z0-9._:/-]{1,120}(?:\+[A-Za-z0-9._:/-]{1,120})?@p\d{1,4}(?:d\d{1,4})?$/;
 
@@ -181,7 +181,11 @@ const safeList: Safe<ListThoughtsResult> = (v) => ({
   sort: v.sort,
   cursor: v.cursor,
 });
-/** list_supersession_proposals: per proposal its ids, verdict, numbers, dates and the pass that judged it — the sides and the reason are in the text. */
+/**
+ * list_supersession_proposals: per proposal its ids, verdict, numbers, dates and the pass that judged it — the sides and the
+ * reason are in the text. The top-level `judgeKey` is the selection: absent when every pass was listed, the key when one
+ * was, and null when the key asked for is not of a pass key's shape (the guard's rule, below; the text names it).
+ */
 const safeProposals: Safe<ProposalsResult> = (v) => ({
   status: v.status, ...(v.lineage === undefined ? {} : { lineage: v.lineage }), ...(v.judgeKey === undefined ? {} : { judgeKey: v.judgeKey }),
   proposals: v.proposals.map((p) => ({
@@ -820,6 +824,9 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
     if (!data.length) {
       // A lineage pair is never proposed since 066, so an empty lineage
       // selection is not the pass's to fill (maintainer read, third pass).
+      // SMD-3248 review pass 1: under judge_key, no row is no pass of exactly that key in this status — a typo, or an older
+      // pass's key, which no run will fill — so the advice is the key's, not the pass's.
+      if (judgeKey !== undefined) return `No ${status === "all" ? "" : status + " "}supersession proposals${onLineage}. The match is exact: each proposal names the key that judged it (judged by consolidate:…), and \`cd db && bun consolidate.ts --url $DATABASE_URL --status\` counts the pending by pass.`;
       return `No ${status === "all" ? "" : status + " "}supersession proposals${onLineage}.${lineage === true ? "" : " The consolidation pass proposes them: cd db && bun consolidate.ts --url $DATABASE_URL (after db/extract-entities.ts, which it pairs thoughts by)."}`;
     }
     // SMD-1803: through displayDate, never new Date() on a raw column — an
