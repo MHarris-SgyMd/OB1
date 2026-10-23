@@ -76,6 +76,9 @@ function fixMetaEncoding(text) {
   return clean(fixed.includes("\ufffd") && !s.includes("\ufffd") ? s : fixed);
 }
 
+/** The dates the export gave that this run left out, counted once each and said in the summary. */
+const droppedDates = new Set();
+
 /**
  * An instant the pipeline accepts (ISO-8601 in UTC) from epoch milliseconds,
  * or undefined, which leaves the date to the pipeline: no date, epoch 0, and a
@@ -89,9 +92,6 @@ function fromMs(ms) {
   if (Number.isNaN(t) || t > Date.now() + 86_400_000 || d.getUTCFullYear() < 1 || d.getUTCFullYear() > 9999) { droppedDates.add(String(ms)); return undefined; }
   return d.toISOString();
 }
-
-/** The dates the export gave that this run left out, counted once each and said in the summary. */
-const droppedDates = new Set();
 
 /**
  * A key the pipeline takes: the export's id cleaned and trimmed, within the identity's bound; else a hash of the
@@ -351,7 +351,7 @@ async function main() {
   for (const it of toProcess) {
     // The short-text skip is a whole group's: a short first part before a message cut at the bound is kept.
     if (it.of === 1 && it.content.trim().length < 50) { skipped++; continue; }
-    // Two lines of one identity refuse the whole file, so a batch the export holds twice is emitted once.
+    // Two lines of one identity refuse the whole file, so a thought the export would make twice is emitted once.
     if (seen.has(it.key)) { console.error(`${it.key} appears twice; emitted once`); skipped++; continue; }
     seen.add(it.key);
     const item = {

@@ -8632,10 +8632,12 @@ if (want("19")) {
  * Fixture exports for [19b], two records of each kind each importer reads,
  * every date before 2025 so a row dated by the run stands out, and the shapes
  * a real export brings: grok.com's nested conversation, a conversation two
- * export files both hold, one the parser cannot read, a DM past the 200-message
- * cap, a Blogger category in single quotes and an entry in two `.atom` files.
- * What each importer should emit: one item per thought, each item's kind, and
- * for each key the export's own date and the source record as exported.
+ * export files both hold, one the parser cannot read, members listed newest
+ * first, a group past the 100,000-character bound in each importer that
+ * splits, a Blogger category in single quotes and an entry in two `.atom`
+ * files. What each importer should emit: one item per thought, each item's
+ * kind, and for each key the export's own date and the source record as
+ * exported ("part" and null where a group's parts are checked on their own).
  */
 function writeExportFixtures(root: string) {
   const grok = join(root, "grok");
@@ -8785,7 +8787,7 @@ function writeExportFixtures(root: string) {
 }
 
 if (want("19b")) {
-  console.log("\n[19b] the four export importers emit ingestion-contract items: each fixture export becomes one row per thought through ingest-records.ts and reembed.ts, dated by the export, its vector the stub's under the model's label, its enhanced fields as facets, trust ingested, and a second run writes nothing (SMD-2493)");
+  console.log("\n[19b] the four export importers emit ingestion-contract items: each fixture export becomes one row per thought (a day of tweets or comments, a conversation, a part of one past 100,000 characters) through ingest-records.ts and reembed.ts, dated by the export, its vector the stub's under the model's label, its enhanced fields as facets, trust ingested, and a second run writes nothing (SMD-2493)");
   // A database of its own, migrated forward: reembed.ts pools every row with
   // no vector, and the suite's database holds other sections' bare rows.
   const db = "ob1_importers";
