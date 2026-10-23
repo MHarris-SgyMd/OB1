@@ -14,8 +14,8 @@
  * - /health, the worker mirrors and the job routes answer as index.ts's;
  * - an enabled plugin's operation is a tool where whoami names it, called by
  *   its route and said by render.ts's renderPlugin (PR 4a).
- * test-auth.ts and (PR 3b) test-e2e-sql.ts run against it too, with
- * OB1_MCP_UNDER_TEST=client.
+ * server-portable's suites that drive an MCP server run against it too,
+ * through stack.ts (since PR 6a, never index.ts).
  *
  *   bun test-mcp.ts
  */
@@ -811,8 +811,8 @@ console.log("\n[8f] The entry's stop: it waits for a tool call past its client's
   const err = await new Response(entry.stderr).text();
   const lines = out.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as Record<string, unknown>);
   const cut = lines.filter((l) => l.door === "mcp" && l.tool === "thought_stats");
-  assert(up && cut.length === 1 && cut[0].outcome === "cut" && /SIGTERM: no longer accepting; .*1 tool call running/.test(out) && /cut off by the server's stop/.test(err),
-    `SIGTERM with a tool call running: the stop waits on it, then cuts it, one \`cut\` line (exit ${code}; ${JSON.stringify(cut)}; ${err.split("\n").filter(Boolean).slice(0, 2).join(" | ").slice(0, 200)})`);
+  assert(up && cut.length === 1 && cut[0].outcome === "cut" && cut[0].agent === "laptop" && /SIGTERM: no longer accepting; .*1 tool call running/.test(out) && /cut off by the server's stop/.test(err),
+    `SIGTERM with a tool call running: the stop waits on it, then cuts it, one \`cut\` line naming its key (exit ${code}; ${JSON.stringify(cut)}; ${err.split("\n").filter(Boolean).slice(0, 2).join(" | ").slice(0, 200)})`);
 }
 
 console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a collector as open-brain-mcp, sent at its stop; the REST core's span the child of its tool call's, across two processes; a plugin tool named on its line");

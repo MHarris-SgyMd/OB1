@@ -5,7 +5,7 @@ import { visibleToolNames, READ_TOOL_NAMES, UNLOCKS, type ToolScope } from "./to
 import { openApiDocument } from "./rest/openapi.ts";
 import { pathFields, readsQuery, ROUTES, type Method } from "./rest/routes.ts";
 import { FORK_VERSION } from "../db/version.mjs";
-import { mcpTarget, mcpUnderTest, servedAsNamed } from "./test-support.ts";
+import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 /**
  * test-server.ts
  *
@@ -90,9 +90,9 @@ const JWT = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln";
 process.env.COMPOSE_PROFILES = "local-models, auth";
 process.env.OB1_PUBLIC_ORIGIN = PUBLIC_ORIGIN;
 
-// The server under test: index.ts, or with OB1_MCP_UNDER_TEST=client the MCP server over the REST core (SMD-2287).
+// The server under test: the MCP server over the REST core (SMD-2287).
 const worker = await mcpUnderTest();
-assert(servedAsNamed(), `the server under test is the one OB1_MCP_UNDER_TEST names (${process.env.OB1_MCP_UNDER_TEST || "index"})`);
+assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
 
 // The authorization server's health check, stubbed before any request: up or
 // down as [11b] says, every probe counted, and nothing cached (a TTL of 0), so
@@ -245,7 +245,7 @@ console.log("\n[5] Auth failure — missing key, and an unparseable body");
 
 console.log("\n[5a] A refused body is read only so far (SMD-2309): past REFUSAL_BODY_LIMIT, id: null");
 {
-  const { REFUSAL_BODY_LIMIT } = await import("./index.ts");
+  const { REFUSAL_BODY_LIMIT } = await import("./mcp-edge.ts");
   const request = (pad: number) => JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list", params: { pad: "x".repeat(pad) } });
   const under = await fetch(BASE, { method: "POST", headers: H, body: request(REFUSAL_BODY_LIMIT - 200) });
   assert((await under.json())?.id === 7, "a body under the limit still has its id echoed");
@@ -1584,7 +1584,7 @@ console.log("\n[13b] GET /health with a key is what the brain is; without one it
 
 console.log("\n[13c] A keyed /health answers within its deadline from a database that accepts and never replies, and one that refuses at once says so (SMD-2041 review passes 1–2)");
 {
-  // Two child servers, since this suite's own env is frozen with no store.
+  // Two child REST cores, since this suite's own env is frozen with no store.
   // The first's database is a listener that takes the connection and says
   // nothing: the driver waits out its connect timeout (30 s), and both the
   // registry check and the read wait with it. Before review pass 1 the probe
@@ -1593,9 +1593,11 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
   // database refuses at once: the registry reports it cannot reach it (not a
   // refusal, agents.ts), and the record carries the database's error and the
   // commit the build arg baked.
-  const { HEALTH_DEADLINE_MS } = await import("./index.ts");
+  const { HEALTH_DEADLINE_MS } = await import("./core/reads.ts");
+  // The REST core's keyed /health (SMD-2287 PR 6a: index.ts's answered `ok` as text; the MCP server's comes from here).
+  const OK_BODY = JSON.stringify({ status: "ok" });
   const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
-  const child = (port: number, databaseUrl: string) => Bun.spawn(["bun", "--no-env-file", "index.ts"], {
+  const child = (port: number, databaseUrl: string) => Bun.spawn(["bun", "--no-env-file", "api.ts"], {
     cwd: import.meta.dir,
     env: { ...process.env, PORT: String(port), DATABASE_URL: databaseUrl, MCP_ACCESS_KEY: KEY, OB1_GIT_SHA: "c0ffee1" },
     stdout: "ignore",
@@ -1622,7 +1624,7 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
   try {
     assert(await up(silentPort) && await up(refusedPort), "both child servers answer a keyless probe");
     const get = await keyed(silentPort, "GET");
-    assert(get.status === 200 && get.body === "ok" && get.took < HEALTH_DEADLINE_MS + 1500,
+    assert(get.status === 200 && get.body === OK_BODY && get.took < HEALTH_DEADLINE_MS + 1500,
       `keyed GET /health, the database silent → 200 \`ok\` in ${Math.round(get.took)} ms (deadline ${HEALTH_DEADLINE_MS} ms)`);
     const head = await keyed(silentPort, "HEAD");
     assert(head.status === 200 && head.body === "" && head.took < 500, `keyed HEAD /health reads nothing and answers at once (${Math.round(head.took)} ms)`);
@@ -1641,23 +1643,27 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
 
 console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, exit 0, within OB1_STOP_GRACE less 2 s, and says what it cut; SIGINT the same (SMD-2250)");
 {
-  // Child servers first, run the way the image runs them — index.ts the entry,
-  // which is when the handlers go in. The first request in flight is a keyed
-  // /health against a database that never replies (13c's), answered at its
-  // deadline; the others stall before any response. As a child the process
+  // Child servers first, run the way the image runs them — the REST core's
+  // api.ts or the MCP server's index.ts the entry, which is when the handlers
+  // go in (SMD-2287 PR 6a: server-portable's index.ts was). The first request
+  // in flight is a keyed /health against a database that never replies
+  // (13c's), answered at its deadline; the others stall before any response. As a child the process
   // is not PID 1, so without the handlers SIGTERM's default action kills it
   // at once: the request is cut off and there is no exit code, which is what
   // these rows fail on. Then the bounds against a stand-in server, the call
   // count, the grace period's parse and where compose and preflight read it.
-  const { HEALTH_DEADLINE_MS } = await import("./index.ts");
+  const { HEALTH_DEADLINE_MS } = await import("./core/reads.ts");
   const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  // stdout and stderr both read: the per-request lines are warnings.
-  const start = (env: Record<string, string> = {}) => {
+  // stdout and stderr both read: the per-request lines are warnings. A child is the REST core, on the database that
+  // never replies, or the MCP server's entry (SMD-2287 PR 6a), its REST core a listener that never answers, so a
+  // keyed call stalls at its whoami as one stalls at the registry lookup.
+  const start = (env: Record<string, string> = {}, entry: "api" | "mcp" = "api") => {
     const port = freePort();
-    const proc = Bun.spawn(["bun", "--no-env-file", "index.ts"], {
-      cwd: import.meta.dir,
-      env: { ...process.env, PORT: String(port), DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, MCP_ACCESS_KEY: KEY, ...env },
+    const proc = Bun.spawn(["bun", "--no-env-file", entry === "api" ? "api.ts" : "index.ts"], {
+      cwd: entry === "api" ? import.meta.dir : `${import.meta.dir}/../mcp-server`,
+      env: { ...process.env, PORT: String(port), DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, MCP_ACCESS_KEY: KEY,
+        ...(entry === "mcp" ? { OB1_REST_URL: `http://127.0.0.1:${silent.port}`, OB1_FORWARDER_KEY: "f".repeat(64), OB1_PLUGINS: "" } : {}), ...env },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -1684,11 +1690,11 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   // With no connection string its store never builds, so it holds no pool: its stop must not say it closed one
   // (review pass 2; this child ran the PostgREST store, which held none, until SMD-3152 retired it).
   const ctrlC = start({ DATABASE_URL: "" });
-  const cutter = start();
+  const cutter = start({}, "mcp");
   // OB1_STOP_GRACE=3: the drain's bound is 1 s, so the real bound cuts on real Bun in a second.
-  const graced = start({ OB1_STOP_GRACE: "3" });
+  const graced = start({ OB1_STOP_GRACE: "3" }, "mcp");
   // A drained stop with a record still open (SMD-1849 PR 2c review pass 3).
-  const leftBehind = start({ OB1_STOP_GRACE: "10" });
+  const leftBehind = start({ OB1_STOP_GRACE: "10" }, "mcp");
   try {
     assert(await up(busy.port) && await up(idle.port) && await up(ctrlC.port) && await up(cutter.port) && await up(graced.port) && await up(leftBehind.port), "six child servers answer a keyless probe (the first request, which hands the handlers the server)");
 
@@ -1710,7 +1716,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     const code = await exited(busy.proc, HEALTH_DEADLINE_MS + 5_000);
     const took = performance.now() - t0;
     const log = await busy.out;
-    assert(answered.status === 200 && answered.body === "ok" && answered.at >= HEALTH_DEADLINE_MS - 100,
+    assert(answered.status === 200 && answered.body === JSON.stringify({ status: "ok" }) && answered.at >= HEALTH_DEADLINE_MS - 100,
       `the keyed /health in flight when SIGTERM landed is answered, 200 \`ok\` at its deadline (${Math.round(answered.at)} ms; got ${answered.status} ${answered.body.slice(0, 60)})`);
     assert(late === "refused" && refusedAt < answered.at, `…a new connection after the signal is refused while it is in flight (${late} at ${Math.round(refusedAt)} ms, the request answered at ${Math.round(answered.at)} ms)`);
     assert(code === 0 && took < HEALTH_DEADLINE_MS + 2_500, `…and the server exits 0 once it is, not at the drain bound (${code} at ${Math.round(took)} ms)`);
@@ -1736,13 +1742,13 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     assert(intCode === 0 && /SIGINT: stopped in [\d.]+ s; no database pool was opened; exit 0/.test(intLog),
       `SIGINT stops it the same way, and a store that never built is not said to have a pool closed (${intCode}: ${intLog.split("\n").filter((l) => l.startsWith("SIGINT: stopped")).join("")})`);
 
-    // A keyed call that stalls before its response — the registry lookup, on
-    // the database that never replies — and two SIGTERMs: the second cuts the
-    // drain short, the same path as the bound (onCut, then stop(true) not
-    // waited on), in a fraction of the 8 s. Holds index.ts's flag, which picks
-    // the cut line, on real Bun (review pass 2).
+    // A keyed call that stalls before its response — its whoami, on the REST
+    // core that never answers — and two SIGTERMs: the second cuts the drain
+    // short, the same path as the bound (onCut, then stop(true) not waited
+    // on), in a fraction of the 8 s. Holds the entry's flag, which picks the
+    // cut line, on real Bun (review pass 2).
     const tc = performance.now();
-    const stalled = fetch(`http://127.0.0.1:${cutter.port}/`, {
+    const stalled = fetch(`http://127.0.0.1:${cutter.port}/mcp`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
@@ -1755,17 +1761,17 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     const cutLog = await cutter.out;
     const cutLines = cutLog.split("\n").filter((l) => /^request (cut off|abandoned)/.test(l));
     assert(cutCode === 1 && await stalled === "cut off" && performance.now() - tc < 2_500
-      && cutLines.length === 1 && cutLines[0].startsWith("request cut off by the server's stop after 0.") && /SIGTERM: stopped in [\d.]+ s; database pool not closed: a second signal; exit 1|database pool not closed within 250 ms; exit 1/.test(cutLog),
-      `a call stalled before its response, cut by a second signal: the cut line and not the client's, exit 1, the close given 250 ms (${cutCode} in ${Math.round(performance.now() - tc)} ms: ${cutLines.join(" | ").slice(0, 90)})`);
+      && cutLines.length === 1 && cutLines[0].startsWith("request cut off by the server's stop after 0.") && /SIGTERM: stopped in [\d.]+ s; no database pool was opened; exit 1/.test(cutLog),
+      `a call stalled before its response, cut by a second signal: the cut line and not the client's, exit 1, no pool to close (${cutCode} in ${Math.round(performance.now() - tc)} ms: ${cutLines.join(" | ").slice(0, 90)})`);
     // One SIGTERM, and the bound OB1_STOP_GRACE sets does the cutting.
     const tg = performance.now();
-    const graceStalled = fetch(`http://127.0.0.1:${graced.port}/`, {
+    const graceStalled = fetch(`http://127.0.0.1:${graced.port}/mcp`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     }).then((r) => `answered ${r.status}`, () => "cut off");
-    // Beside it, a keyed mirror held at the registry (the database never
-    // answers; its deadline is 2.5 s, past the 1 s bound): only the stop's
+    // Beside it, a keyed mirror held at its whoami (the REST core never
+    // answers, so no key is named on its line): only the stop's
     // cutOpenRequests can write its line — the MCP call above has its own
     // abort handler, this route none (review pass 4: no test held that call).
     const mirrorStalled = fetch(`http://127.0.0.1:${graced.port}/mcp/worker-status`, { headers: { "x-brain-key": KEY } })
@@ -1779,11 +1785,11 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     const graceLines = graceLog.split("\n").filter((l) => l.startsWith('{"ts"')).map((l) => JSON.parse(l) as Record<string, unknown>);
     assert(graceCode === 1 && await graceStalled === "cut off" && graceTook > 1_200 && graceTook < 3_000
       && /waited on for up to 1 s/.test(graceLog) && /still in flight.* after 1\.\d s, closed unfinished/.test(graceLog) && /^request cut off by the server's stop/m.test(graceLog)
-      && graceLines.filter((l) => l.outcome === "cut" && l.route === undefined && l.agent === "MCP_ACCESS_KEY").length === 1,
+      && graceLines.filter((l) => l.outcome === "cut" && l.route === undefined && l.agent === undefined).length === 1,
       `OB1_STOP_GRACE=3 bounds the drain at 1 s: one SIGTERM, the stalled call cut at the bound with its line and its one JSON line, \`cut\`, exit 1 (${graceCode} in ${Math.round(graceTook)} ms)`);
     const mirrorCut = graceLines.filter((l) => l.route === "/worker-status");
-    assert(mirrorCut.length === 1 && mirrorCut[0]?.outcome === "cut" && mirrorCut[0].tool === "worker_status" && mirrorCut[0].agent === "MCP_ACCESS_KEY" && mirrorCut[0].status === 0,
-      `a keyed mirror held at the registry when the stop cuts it: one \`cut\` line, by its route and key, from the stop's cutOpenRequests (${JSON.stringify(mirrorCut)})`);
+    assert(mirrorCut.length === 1 && mirrorCut[0]?.outcome === "cut" && mirrorCut[0].tool === "worker_status" && mirrorCut[0].agent === undefined && mirrorCut[0].status === 0,
+      `a keyed mirror held at its whoami when the stop cuts it: one \`cut\` line, by its route, from the stop's cutOpenRequests (${JSON.stringify(mirrorCut)})`);
     // A keyed mirror whose client left while it waits on the registry. Bun 1.4.3 counts it done at once, so the stop
     // drains with it open and only the stop's endOpen writes its line — 0, \`abandoned\` (PR 2c review pass 3); Bun 1.4.0,
     // CI's and the image's, still counts it, so the drain waits for its handler, whose line says 200, \`abandoned\`
@@ -1800,7 +1806,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     const leftLines = leftLog.split("\n").filter((l) => l.startsWith('{"ts"')).map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.route === "/jobs/:id");
     const leftCounted = /1 request in flight/.test(leftLog);
     assert(leftCode === 0 && (leftCounted || /0 requests in flight/.test(leftLog)) && leftLines.length === 1 && leftLines[0]?.outcome === "abandoned"
-      && leftLines[0].agent === "MCP_ACCESS_KEY" && leftLines[0].status === (leftCounted ? 200 : 0),
+      && leftLines[0].agent === undefined && leftLines[0].status === (leftCounted ? 200 : 0),
       `a mirror whose client left, at a drained stop: one \`abandoned\` line — the stop's, before the flush, where the runtime let it go; its handler's where the drain waited (${leftCode}, ${leftCounted ? "counted" : "let go"}; ${JSON.stringify(leftLines)})`);
   } finally {
     for (const { proc } of [busy, idle, ctrlC, cutter, graced, leftBehind]) proc.kill("SIGKILL");
@@ -1813,7 +1819,8 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   // yet there is nothing to wait on. The stand-in's stop(true) never resolves
   // either, as Bun's does not while a handler has yet to return (review pass 1).
   const { drainOnSignal, isStoppable, createCallCount, drainBoundFrom } = await import("./shutdown.ts");
-  const { cutByStopLine, abandonedRequestLine, toolCallsRunning } = await import("./index.ts");
+  const { cutByStopLine } = await import("./mcp-edge.ts");
+  const { abandonedRequestLine } = await import("./sse.ts");
   const stuck = () => {
     const calls: string[] = [];
     return { calls, server: { pendingRequests: 1, stop: (force?: boolean) => { calls.push(force ? "stop(true)" : "stop()"); return new Promise<void>(() => {}); } } };
@@ -2096,8 +2103,8 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     aborter.abort();
     await gone;
     await Bun.sleep(150);
-    // The server under test's own count: index.ts's, or the MCP server's (SMD-2287 PR 4b).
-    const running = worker.toolCallsRunning ?? toolCallsRunning;
+    // The server under test's own count, the MCP server's (SMD-2287 PR 4b).
+    const running = worker.toolCallsRunning;
     const whileRunning = running();
     await Bun.sleep(900);
     assert(whileRunning === 1 && running() === 0,
@@ -2195,7 +2202,7 @@ console.log("\n[16] parseFilter bounds and normalises a metadata filter at the t
   // reaches jsonb. Shallow by design (scalars or arrays of scalars) so
   // `metadata @> filter` stays GIN-indexable; a nested object, a non-object, or
   // a filter over the caps is refused here rather than handed to the store.
-  const { parseFilter } = await import("./index.ts") as { parseFilter: (raw: unknown) => Record<string, unknown> };
+  const { parseFilter } = await import("./core/filter.ts") as { parseFilter: (raw: unknown) => Record<string, unknown> };
   assert(JSON.stringify(parseFilter(undefined)) === "{}" && JSON.stringify(parseFilter(null)) === "{}" && JSON.stringify(parseFilter({})) === "{}",
     "absent, null or empty normalises to the unfiltered {}");
   const shallow = { type: "idea", count: 3, flagged: true };
@@ -2234,8 +2241,8 @@ console.log("\n[16b] said_by and actor fold into the filter, and the By: line re
   // The two arguments are sugar over the two metadata keys migration 050
   // stamps, so the store, the log and the plan see one filter; the By: line
   // reads the same keys back. Both pure, both exported for this.
-  const { withActorFilter, actorLine } = await import("./index.ts") as {
-    withActorFilter: (f: Record<string, unknown>, s?: string, a?: string) => Record<string, unknown>;
+  const { withActorFilter } = await import("./core/filter.ts") as { withActorFilter: (f: Record<string, unknown>, s?: string, a?: string) => Record<string, unknown> };
+  const { actorLine } = await import("./render.ts") as {
     actorLine: (m: Record<string, unknown>) => string | null;
   };
   assert(JSON.stringify(withActorFilter({}, undefined, undefined)) === "{}", "neither argument leaves the filter as it was");
@@ -2261,7 +2268,7 @@ console.log("\n[16c] prefer_current's row line, header note and error hint rende
 {
   // Pure, exported for this: the weight is read off the row (score over
   // fused), so the server holds no copy of 059's 0.25.
-  const { demotedLine, currentNote, currentSearchHint } = await import("./index.ts") as {
+  const { demotedLine, currentNote, currentSearchHint } = await import("./render.ts") as {
     demotedLine: (t: { demoted: string[]; score: number; fused: number }) => string | null;
     currentNote: (rows: { window?: { rows: number; known: number; demoted: number; syncedAt: string | null; exact: boolean }; demoted?: string[] }[]) => string | null;
     currentSearchHint: (msg: string) => string;
@@ -2939,7 +2946,7 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
 
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
 {
-  const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./index.ts") as {
+  const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./sse.ts") as {
     withSseKeepalive: (r: Response, opts?: { intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: () => void; onStall?: () => void; label?: string }) => Response;
     requestLabel: (body: string | null) => string;
     abandonedRequestLine: (label: string, elapsedMs: number) => string;
@@ -3272,8 +3279,8 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   // Exactly one line, never zero and never two, however the request ends —
   // each case collected apart, and given time for anything late to arrive.
   type Timing = { intervalMs: number; maxMs: number };
-  // The server under test's own: index.ts's, or the MCP server's (SMD-2287 PR 4b).
-  const useKeepaliveTiming = worker.useKeepaliveTiming ?? (await import("./index.ts") as unknown as { useKeepaliveTiming: (t: Timing) => Timing }).useKeepaliveTiming;
+  // The server under test's own, the MCP server's (SMD-2287 PR 4b).
+  const useKeepaliveTiming: (t: Timing) => Timing = worker.useKeepaliveTiming;
   const { agents } = await import("./root.ts");
   const linesOf = async (run: () => Promise<unknown>, settleMs = 50): Promise<Record<string, unknown>[]> => {
     const got: string[] = [];
@@ -3298,7 +3305,7 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   assert(batch.length === 1 && batch[0]?.rpc === "batch" && !("tool" in batch[0]) && batch[0].outcome === "error" && batch[0].code === "FAILED",
     `a batch is one line, \`batch\`, naming no tool, with its worst call's outcome and code — not the first call's name beside the last call's end (${JSON.stringify(batch)})`);
   // A batch's calls end in whatever order they run: the worst is kept whichever ends last.
-  const { recordCall } = await import("./index.ts") as unknown as { recordCall: (r: { ended?: number; outcome?: string; code?: string }, o: string, c?: string) => void };
+  const { recordCall } = await import("./mcp-edge.ts") as unknown as { recordCall: (r: { ended?: number; outcome?: string; code?: string }, o: string, c?: string) => void };
   const merged = (ends: [string, string?][]) => { const r: { ended?: number; outcome?: string; code?: string } = {}; for (const [o, c] of ends) recordCall(r, o, c); return r; };
   const worstFirst = merged([["error", "FAILED"], ["ok"], ["refused", "NOT_FOUND"]]);
   const worstLast = merged([["ok"], ["refused", "NOT_FOUND"], ["error", "FAILED"]]);
@@ -3383,9 +3390,9 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
     console.error = realError;
   }
   // Through the MCP server the registry's throw is the REST core's 500 to its whoami: the key was never named to it, so
-  // its line names none, where index.ts matched the key's hash first (SMD-2287 PR 4b).
-  assert(thrown.length === 1 && thrown[0]?.status === 500 && thrown[0].outcome === "error" && thrown[0].agent === (mcpTarget() === "client" ? undefined : "MCP_ACCESS_KEY"),
-    `a throw in the route: one 500 \`error\` line, by the key's name where the server knew it (${JSON.stringify(thrown)})`);
+  // its line names none (SMD-2287 PR 4b).
+  assert(thrown.length === 1 && thrown[0]?.status === 500 && thrown[0].outcome === "error" && thrown[0].agent === undefined,
+    `a throw in the route: one 500 \`error\` line, naming no key, which the REST core's whoami never named (${JSON.stringify(thrown)})`);
   assert(revoked.length === 1 && revoked[0]?.outcome === "refused" && revoked[0].code === "REVOKED" && revoked[0].tool === "brain_info" && revoked[0].agent === "MCP_ACCESS_KEY",
     `a revoked key: one \`refused\` line, REVOKED, naming the call and the key (${JSON.stringify(revoked)})`);
 
@@ -4034,7 +4041,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   type Span = ReturnType<typeof exporter.getFinishedSpans>[number];
   const attrs = (s: Span | undefined) => (s?.attributes ?? {}) as Record<string, unknown>;
   const parentOf = (s: Span | undefined) => s?.parentSpanContext?.spanId;
-  /** The MCP server's request spans: index.ts's, or the MCP server's — never the REST core's behind it, whose door is `api`. */
+  /** The MCP server's request spans — never the REST core's behind it, whose door is `api`. */
   const requestSpans = (spans: Span[] = exporter.getFinishedSpans()) => spans.filter((s) => s.kind === SpanKind.SERVER && attrs(s)["ob1.door"] === "mcp");
   const requestSpan = (spans?: Span[]) => requestSpans(spans)[0];
   /** Whether `span` is `ancestor`'s descendant among `spans`. */
@@ -4068,7 +4075,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     const strays = spans.filter((s) => s !== server && !under(spans, s, server?.spanContext().spanId));
     const operation = spans.filter((s) => attrs(s)["ob1.door"] === "api" && attrs(s)["ob1.tool"] === "search_thoughts");
     assert(server !== undefined && tool !== undefined && strays.length === 0 && operation.every((s) => under(spans, s, tool.spanContext().spanId) && s.links.length === 0)
-      && operation.length === (mcpTarget() === "client" ? 1 : 0),
+      && operation.length === 1,
       `the call is one trace: each span its request's descendant, the operation's under the call's span (${JSON.stringify(spans.map((s) => [s.name, attrs(s)["ob1.door"], parentOf(s), s.spanContext().spanId]))})`);
     // What the search threw is on its call's span by its kind alone (PR 2c): one exception event, no message.
     const thrown = (tool?.events ?? []).map((e) => [e.name, Object.keys(e.attributes ?? {}).sort().join()]);
@@ -4098,7 +4105,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     const routeThrew = requestSpan(routeSpans);
     // Through the MCP server the registry is the REST core's: the throw's kind is on its request's span, under the MCP
     // server's (PR 4c), whose own span has the kind of what it met — a 500 — since an answer carries no exception's.
-    const threwAt = mcpTarget() === "client" ? routeSpans.find((sp) => attrs(sp)["ob1.door"] === "api" && under(routeSpans, sp, routeThrew?.spanContext().spanId)) : routeThrew;
+    const threwAt = routeSpans.find((sp) => attrs(sp)["ob1.door"] === "api" && under(routeSpans, sp, routeThrew?.spanContext().spanId));
     const routeEvents = (sp: Span | undefined) => JSON.stringify(sp?.events.map((e) => [e.name, e.attributes]));
     assert(routeEvents(threwAt) === JSON.stringify([["exception", { "exception.type": "RangeError" }]]) && routeEvents(routeThrew)?.includes('"exception"') === true && !JSON.stringify(routeSpans.map((sp) => sp.events)).includes(PLANTED),
       `a throw in the MCP route: its kind on the request's span — through the MCP server, the REST core's under it — no message (${routeEvents(threwAt)} ${routeEvents(routeThrew)})`);
@@ -4232,11 +4239,9 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   const collector = Bun.serve({ port: 0, fetch: async (req) => { (received[new URL(req.url).pathname] ??= []).push(await req.text()); return Response.json({}); } });
   const collectorPort = collector.port;
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  const throughClient = mcpTarget() === "client";
-  const mcp = await serveChild(throughClient ? `${import.meta.dir}/../mcp-server` : import.meta.dir, "index.ts", {
+  const mcp = await serveChild(`${import.meta.dir}/../mcp-server`, "index.ts", {
     OB1_STOP_GRACE: "3", MCP_ACCESS_KEY: KEY, DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collectorPort}`,
-    OTEL_SERVICE_NAME: "ob1-mcp-probe",
-    ...(throughClient ? { OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent.port}`, OB1_PLUGINS: "" } : {}),
+    OTEL_SERVICE_NAME: "ob1-mcp-probe", OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent.port}`, OB1_PLUGINS: "",
   }, { waitForSdk: true });
   let out = "";
   try {
@@ -4277,9 +4282,9 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   const hung = Bun.serve({ port: 0, idleTimeout: 0, fetch: () => new Promise<Response>(() => {}) });
   const hungPort = hung.port;
   const silent2 = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  const mcp2 = await serveChild(throughClient ? `${import.meta.dir}/../mcp-server` : import.meta.dir, "index.ts", {
+  const mcp2 = await serveChild(`${import.meta.dir}/../mcp-server`, "index.ts", {
     OB1_STOP_GRACE: "3", MCP_ACCESS_KEY: KEY, DATABASE_URL: `postgres://u:p@127.0.0.1:${silent2.port}/db`, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${hungPort}`,
-    ...(throughClient ? { OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent2.port}`, OB1_PLUGINS: "" } : {}),
+    OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent2.port}`, OB1_PLUGINS: "",
   }, { waitForSdk: true });
   let out2 = "";
   try {
@@ -5571,8 +5576,8 @@ console.log("\n[30] A request the server did not accept sends its span and log r
     assert(quiet.getFinishedSpans().length === 0 && quietLogs.getFinishedLogRecords().length === ANONYMOUS_PER_MINUTE && counted().at(-1)?.startsWith("telemetry: 5 requests the server did not accept past 60") === true,
       `with every span sampled out, the log records are held to the budget, and the rest said (${JSON.stringify([quiet.getFinishedSpans().length, quietLogs.getFinishedLogRecords().length, counted().at(-1)?.slice(0, 40)])})`);
     // A monitor's keyed HEADs spend none of the budget, so a refusal after them is sent (SMD-2287 PR 4c review pass 1):
-    // index.ts names a valid key, accepted, and holds a wrong one to the budget; the MCP server, which asks the REST core
-    // nothing for a HEAD, so knows neither, sends no span or record for any (review pass 2: marking them accepted, or
+    // the MCP server, which asks the REST core nothing for a HEAD, so knows neither a valid key nor a wrong one, sends
+    // no span or record for any (review pass 2: marking them accepted, or
     // sending them past the budget, passed) — each its line and its point, where the keyless probe has no record at all.
     await stopTelemetry();
     const probed = new InMemorySpanExporter();
@@ -5599,8 +5604,8 @@ console.log("\n[30] A request the server did not accept sends its span and log r
     const headRecords = probedLogs.getFinishedLogRecords().filter((r) => isHead(r.body as Record<string, unknown>)).length;
     const headPoints = durationPoints(probedPoints).filter((pt) => pt.attributes["http.request.method"] === "HEAD").reduce((n, pt) => n + pt.value.count, 0);
     const refusedSpans = probed.getFinishedSpans().filter((sp) => sp.attributes["ob1.door"] === "mcp" && sp.attributes["ob1.outcome"] === "refused" && !isHead(sp.attributes as Record<string, unknown>));
-    // index.ts: the valid key's HEADs sent, accepted, and the wrong keys' within the budget; the MCP server: none.
-    const sentHeads = mcpTarget() === "client" ? 0 : VALID + WRONG;
+    // The MCP server sends none of the HEADs.
+    const sentHeads = 0;
     assert(probeRecords.filter((r) => r.method === "HEAD").length === VALID + WRONG && headPoints === VALID + WRONG && headSpans === sentHeads && headRecords === sentHeads
       && refusedSpans.length === 1 && !counted().at(-1)?.startsWith("telemetry: 1 request"),
       `${VALID} keyed HEADs and ${WRONG} with a wrong key, each its line and its point, ${sentHeads} sending a span and a record: none of the budget spent past them, so the keyless refusal after sends its span (${JSON.stringify([probeRecords.length, headPoints, headSpans, headRecords, refusedSpans.length, counted().at(-1)?.slice(0, 40)])})`);
