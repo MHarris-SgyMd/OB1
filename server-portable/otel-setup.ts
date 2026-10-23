@@ -568,8 +568,8 @@ const SEVERITY = { INFO: 9, WARN: 13, ERROR: 17 } as const;
 
 /** A suite's: each signal into an exporter of its own, each span and log record handed over as it ends, the metrics at a flush. */
 type InMemory = { exporter: SpanExporter; metrics?: PushMetricExporter; logs?: LogRecordExporter };
-/** A server's: each signal with a URL over OTLP/HTTP, batched, what is not sent said through `report`; `oneShot` where the process sends once and exits (preflight --deep), so it sends no uptime gauge. */
-type Collector = { report: Omit<Reporting, "origin" | "noun">; urls: Partial<Record<Signal, string>>; oneShot?: boolean };
+/** A server's: each signal with a URL over OTLP/HTTP, batched, what is not sent said through `report` (a setting held to its bound or read as its default through its `note`, where given, SMD-2909); `oneShot` where the process sends once and exits (preflight --deep), so it sends no uptime gauge. */
+type Collector = { report: Omit<Reporting, "origin" | "noun"> & { note?: (line: string) => void }; urls: Partial<Record<Signal, string>>; oneShot?: boolean };
 
 /** The resource's tier, where OB1_TIER names a pipeline tier (root.ts reads it trimmed and refuses any other at start); none for a plain brain. */
 function tierAttribute(): Attributes {
@@ -749,7 +749,8 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
     throw err;
   }
 
-  for (const line of notes) collector?.report.warn(line);
+  // A setting held to its bound, or not read and its default used, is a note, not a loss: said through `note` where the caller tells them apart (SMD-2909).
+  for (const line of notes) (collector?.report.note ?? collector?.report.warn)?.(line);
   for (const register of registers) register();
   const contextManager = new AsyncLocalStorageContextManager().enable();
   context.setGlobalContextManager(contextManager);
