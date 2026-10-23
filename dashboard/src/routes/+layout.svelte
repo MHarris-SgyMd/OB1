@@ -11,6 +11,10 @@
 		{ href: HOME, label: 'Overview' },
 		{ href: `${base}/thoughts`, label: 'Browse' },
 		{ href: `${base}/search`, label: 'Search' },
+		{ href: `${base}/changes`, label: 'Changes' },
+		{ href: `${base}/proposals`, label: 'Proposals' },
+		{ href: `${base}/workers`, label: 'Workers' },
+		{ href: `${base}/query-log`, label: 'Query log' },
 		{ href: `${base}/status`, label: 'Status' },
 	];
 </script>

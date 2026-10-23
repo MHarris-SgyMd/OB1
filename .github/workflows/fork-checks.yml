@@ -1798,11 +1798,12 @@ jobs:
       # trust filter leaves the untrusted captures out (PR 2a). The smoke holds the
       # sign-in wall; a wrong and a capture-only key, a cookie the server never
       # issued and a cross-site or Origin-null sign-in refused; the cookie's
-      # and the pages' headers; the overview, the status, browse, search and a
-      # thought rendered from the REST core under the write key, the overview,
-      # browse, search and a 404 under the read key; each list's data holding
-      # the fields it shows alone; the key in no page, header, script or
-      # cookie; and sign-out, a
+      # and the pages' headers; the overview, the status, browse, search, the
+      # change feed (walked a change at a time), the proposals, the workers, the
+      # query log (the smoke's own search in it) and a thought rendered from the
+      # REST core under the write key, all but the thought and a 404 under the
+      # read key; each list's data holding the fields it shows alone; the key
+      # in no page, header, script or cookie; and sign-out, a
       # second sign-in and the per-key cap each ending a session on the
       # server. Here, not after the next step: that one configures the
       # authorization server, and the GUI then offers no key sign-in (review
