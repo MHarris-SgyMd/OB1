@@ -23,8 +23,16 @@ export function top(counts: Record<string, number> | null | undefined, n = 8): [
 		.slice(0, n);
 }
 
+/** A metadata word any write key writes (a type, a trust), as a list shows it: cut as a first line is, or null when not a string. */
+export function shortWord(v: unknown): string | null {
+	return typeof v === 'string' ? firstLine(v, 40) : null;
+}
+
 /** A thought's first line, cut at `max` characters, for a list. */
 export function firstLine(text: string, max = 160): string {
 	const line = text.trimStart().split('\n', 1)[0] ?? '';
-	return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+	if (line.length <= max) return line;
+	// Never between a surrogate pair: half an emoji is U+FFFD on the page (SMD-2280 PR 2a review pass 2).
+	const end = /[\uD800-\uDBFF]/.test(line[max - 2] ?? '') ? max - 2 : max - 1;
+	return `${line.slice(0, end)}…`;
 }
