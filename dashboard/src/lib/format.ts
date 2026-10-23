@@ -23,6 +23,11 @@ export function top(counts: Record<string, number> | null | undefined, n = 8): [
 		.slice(0, n);
 }
 
+/** A metadata word any write key writes (a type, a trust), as a list shows it: cut as a first line is, or null when not a string. */
+export function shortWord(v: unknown): string | null {
+	return typeof v === 'string' ? firstLine(v, 40) : null;
+}
+
 /** A thought's first line, cut at `max` characters, for a list. */
 export function firstLine(text: string, max = 160): string {
 	const line = text.trimStart().split('\n', 1)[0] ?? '';

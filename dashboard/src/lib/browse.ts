@@ -76,7 +76,8 @@ const cursor = (v: string) => /^[A-Za-z0-9_-]{1,512}$/.test(v);
 export function readBrowse(params: URLSearchParams): BrowseQuery {
 	const days = Number(params.get('days'));
 	const limit = Number(params.get('limit'));
-	const after = params.get('after') ?? '';
+	const rawAfter = params.get('after') ?? '';
+	const after = cursor(rawAfter) ? rawAfter : undefined;
 	const given = (params.get('back') ?? '').split('.').filter(cursor);
 	const trail = given.slice(-TRAIL_MAX);
 	return {
@@ -90,11 +91,11 @@ export function readBrowse(params: URLSearchParams): BrowseQuery {
 		days: Number.isInteger(days) && days >= 1 && days <= 365_000 ? days : undefined,
 		sort: params.get('sort') === 'oldest' ? 'oldest' : 'newest',
 		limit: Number.isInteger(limit) && limit >= 1 && limit <= PAGE_MAX ? limit : DEFAULT_PAGE_SIZE,
-		after: cursor(after) ? after : undefined,
+		after,
 		// A trail with no page after it is no trail: the first page has nothing before it.
-		trail: cursor(after) ? trail : [],
+		trail: after ? trail : [],
 		// Cut where the address says so, or where it holds more cursors than are kept (a hand-made one: review pass 2).
-		cut: cursor(after) && (params.get('cut') === '1' || given.length > TRAIL_MAX),
+		cut: after !== undefined && (params.get('cut') === '1' || given.length > TRAIL_MAX),
 	};
 }
 

@@ -1,7 +1,7 @@
 import type { PageServerLoad } from './$types';
 import { base } from '$app/paths';
 import { listInput, pageLinks, readBrowse } from '$lib/browse';
-import { firstLine } from '$lib/format';
+import { firstLine, shortWord } from '$lib/format';
 import { read } from '$lib/server/rest';
 import type { ListThoughtsResult } from '$lib/types';
 
@@ -21,9 +21,8 @@ export const load: PageServerLoad = async (event) => {
 			line: firstLine(t.content),
 			created_at: t.created_at,
 			superseded: t.supersededBy !== null,
-			// Any write key writes these: a word as the list shows it, cut as a first line is.
-			type: typeof t.metadata.type === 'string' ? firstLine(t.metadata.type, 40) : null,
-			trust: typeof t.metadata.trust === 'string' ? firstLine(t.metadata.trust, 40) : null,
+			type: shortWord(t.metadata.type),
+			trust: shortWord(t.metadata.trust),
 		})),
 		links: pageLinks(`${base}/thoughts`, q, page.cursor),
 	};

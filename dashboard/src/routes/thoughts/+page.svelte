@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { base } from '$app/paths';
-	import { DEFAULT_PAGE_SIZE, PAGE_SIZES, TRUST_WORDS } from '$lib/browse';
+	import { DEFAULT_PAGE_SIZE, FILTER_KEYS, PAGE_SIZES, TRUST_WORDS } from '$lib/browse';
 	import { when } from '$lib/format';
 	import type { PageData } from './$types';
 
@@ -28,7 +28,7 @@
 	}
 	/** The menu's sizes, and the address's own when it is another (a shared link keeps its size). */
 	const sizes = $derived([...new Set([...PAGE_SIZES, data.q.limit])].sort((a, b) => a - b));
-	const filtered = $derived(['type', 'topic', 'person', 'actor', 'said_by', 'min_trust', 'days'].some((k) => data.q[k as keyof typeof data.q] !== undefined));
+	const filtered = $derived(FILTER_KEYS.some((k) => data.q[k] !== undefined));
 </script>
 
 <svelte:head><title>Browse · Open Brain</title></svelte:head>

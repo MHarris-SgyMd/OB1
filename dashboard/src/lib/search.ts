@@ -7,6 +7,8 @@ export type SearchMode = 'meaning' | 'text';
 /** The result counts the menu offers; the address takes any whole number from 1 to 100, what both reads take. */
 export const SEARCH_SIZES = [10, 25, 50, 100] as const;
 export const DEFAULT_SEARCH_SIZE = 25;
+/** The most results a search asks for: search_thoughts clamps to 100, and the keyword search takes 1–100. */
+const SEARCH_MAX = 100;
 /** The longest query sent: a search box's, well past any question; the address carries it. */
 export const QUERY_MAX = 1000;
 /** How deep the exact-text pages go by offset. */
@@ -47,12 +49,12 @@ export function readSearch(params: URLSearchParams) {
 	return {
 		query,
 		mode,
-		limit: Number.isInteger(size) && size >= 1 && size <= 100 ? size : DEFAULT_SEARCH_SIZE,
+		limit: Number.isInteger(size) && size >= 1 && size <= SEARCH_MAX ? size : DEFAULT_SEARCH_SIZE,
 		offset: mode === 'text' && Number.isInteger(offset) && offset > 0 && offset <= OFFSET_MAX ? offset : 0,
 	};
 }
 
-/** The address of an exact-text page of this search. */
+/** The address of this search in a mode, from `offset` (an exact-text page, or the 504's link to one). */
 export function searchAddress(path: string, s: { query: string; mode: SearchMode; limit: number }, offset: number): string {
 	const p = new URLSearchParams({ q: s.query, mode: s.mode });
 	if (s.limit !== DEFAULT_SEARCH_SIZE) p.set('limit', String(s.limit));

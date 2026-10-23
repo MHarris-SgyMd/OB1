@@ -1,13 +1,10 @@
 import type { PageServerLoad } from './$types';
 import { base } from '$app/paths';
-import { firstLine } from '$lib/format';
+import { firstLine, shortWord } from '$lib/format';
 import { OFFSET_MAX, readSearch, searchAddress, type ListedHit } from '$lib/search';
 import { read } from '$lib/server/rest';
 import type { KeywordResult, SearchThoughtsResult } from '$lib/types';
 import { movedWords, typesOf } from '../../../../server-portable/stated-status.ts';
-
-/** A word any write key writes, as the list shows it: cut as a first line is. */
-const word = (v: unknown) => (typeof v === 'string' ? firstLine(v, 40) : null);
 
 // Search (SMD-2280 PR 2a): by meaning through search_thoughts — a fixed top N,
 // identifier-shaped words and quoted spans matched exactly among them — or by
@@ -28,7 +25,7 @@ export const load: PageServerLoad = async (event) => {
 			line: firstLine(h.content),
 			created_at: h.created_at,
 			superseded: h.supersededBy !== null,
-			trust: word(h.metadata.trust),
+			trust: shortWord(h.metadata.trust),
 			// As the tool says it (render.ts): the similarity when there is one, and beside it an exact match (review pass 1:
 			// an exact hit's similarity was hidden).
 			score: h.similarity === null ? null : Math.round(h.similarity * 100) / 100,
@@ -45,7 +42,7 @@ export const load: PageServerLoad = async (event) => {
 		line: firstLine(h.content),
 		created_at: h.created_at,
 		superseded: null,
-		trust: word(h.metadata.trust),
+		trust: shortWord(h.metadata.trust),
 		score: null,
 		exact: false,
 		moved: null,
