@@ -25,7 +25,7 @@ import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgr
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE } from "./store.ts";
+import { ListCursorRefused, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -34,6 +34,8 @@ import type {
   ChangeFilters,
   Derivative,
   ListFilters,
+  ListPosition,
+  ThoughtListPage,
   DeleteResult,
   ResetStampResult,
   ProvenanceNode,
@@ -342,28 +344,73 @@ export class SqlStore implements ThoughtStore {
     return normaliseThoughtRecord(rows[0]);
   }
 
-  async listThoughts(f: ListFilters): Promise<ThoughtListItem[]> {
+  async listThoughts(f: ListFilters): Promise<ThoughtListPage> {
     // Each filter is jsonb containment, `@>`. Undefined filters are passed as NULL and short-circuited in SQL, which keeps
     // this a single prepared statement instead of a concatenated query.
     const since = f.days ? new Date(Date.now() - f.days * 86_400_000).toISOString() : null;
     // The ladder's words (SMD-1724) as an array literal, toUuidArray's way: Bun
     // binds a JS array comma-joined, without braces. Enum words, no quoting.
     const trustIn = f.trustIn ? `{${f.trustIn.join(",")}}` : null;
-
-    const rows = await this.sql`
-      SELECT id, content, metadata, created_at
-      FROM thoughts
-      WHERE (${f.type ?? null}::text  IS NULL OR metadata @> jsonb_build_object('type', ${f.type ?? null}::text))
-        AND (${f.topic ?? null}::text IS NULL OR metadata @> jsonb_build_object('topics', jsonb_build_array(${f.topic ?? null}::text)))
-        AND (${f.person ?? null}::text IS NULL OR metadata @> jsonb_build_object('people', jsonb_build_array(${f.person ?? null}::text)))
-        AND (${f.saidBy ?? null}::text IS NULL OR metadata @> jsonb_build_object('actor_kind', ${f.saidBy ?? null}::text))
-        AND (${f.actor?.trim() || null}::text IS NULL OR metadata @> jsonb_build_object('actor_name', ${f.actor?.trim() || null}::text))
-        AND (${trustIn}::text[] IS NULL OR metadata->>'trust' = ANY(${trustIn}::text[]))
-        AND (${since}::timestamptz IS NULL OR created_at >= ${since}::timestamptz)
-      ORDER BY created_at DESC
-      LIMIT ${f.limit}::int`;
-
-    return rows.map(normaliseListItem);
+    const filters = this.sql`
+          (${f.type ?? null}::text  IS NULL OR metadata @> jsonb_build_object('type', ${f.type ?? null}::text))
+      AND (${f.topic ?? null}::text IS NULL OR metadata @> jsonb_build_object('topics', jsonb_build_array(${f.topic ?? null}::text)))
+      AND (${f.person ?? null}::text IS NULL OR metadata @> jsonb_build_object('people', jsonb_build_array(${f.person ?? null}::text)))
+      AND (${f.saidBy ?? null}::text IS NULL OR metadata @> jsonb_build_object('actor_kind', ${f.saidBy ?? null}::text))
+      AND (${f.actor?.trim() || null}::text IS NULL OR metadata @> jsonb_build_object('actor_name', ${f.actor?.trim() || null}::text))
+      AND (${trustIn}::text[] IS NULL OR metadata->>'trust' = ANY(${trustIn}::text[]))
+      AND (${since}::timestamptz IS NULL OR created_at >= ${since}::timestamptz)`;
+    // SMD-2995: a keyset on (created_at, id). Newest first is 001's index's
+    // own order, `created_at DESC` with the undated first, ties by id; oldest
+    // first is its reverse. Each order is two runs, the undated and the
+    // dated, and each run is read by a plain index condition — `created_at IS
+    // NULL`, or `created_at <=`/`>=` the cursor's — never a predicate OR-ing
+    // the two, which the planner reads as a filter over every row before the
+    // cursor (oldest first past a dated row read 150,001 rows to return 51,
+    // measured). The first run left is read first; the next only when the
+    // page is not yet full. One row past the page says whether more follow.
+    const want = f.limit + 1;
+    const oldest = f.sort === "oldest";
+    const after = f.after ?? null;
+    const pick = this.sql`SELECT id, content, metadata, created_at, created_at::text AS created_at_text FROM thoughts`;
+    const undated = (id: string | null, limit: number) => oldest
+      ? this.sql`${pick} WHERE ${filters} AND created_at IS NULL AND (${id}::uuid IS NULL OR id > ${id}::uuid) ORDER BY id ASC LIMIT ${limit}::int`
+      : this.sql`${pick} WHERE ${filters} AND created_at IS NULL AND (${id}::uuid IS NULL OR id < ${id}::uuid) ORDER BY id DESC LIMIT ${limit}::int`;
+    const dated = (pos: ListPosition | null, limit: number) => pos === null || pos.at === null
+      ? oldest
+        ? this.sql`${pick} WHERE ${filters} AND created_at IS NOT NULL ORDER BY created_at ASC, id ASC LIMIT ${limit}::int`
+        : this.sql`${pick} WHERE ${filters} AND created_at IS NOT NULL ORDER BY created_at DESC, id DESC LIMIT ${limit}::int`
+      : oldest
+        ? this.sql`${pick} WHERE ${filters} AND created_at >= ${pos.at}::timestamptz AND (created_at > ${pos.at}::timestamptz OR id > ${pos.id}::uuid) ORDER BY created_at ASC, id ASC LIMIT ${limit}::int`
+        : this.sql`${pick} WHERE ${filters} AND created_at <= ${pos.at}::timestamptz AND (created_at < ${pos.at}::timestamptz OR id < ${pos.id}::uuid) ORDER BY created_at DESC, id DESC LIMIT ${limit}::int`;
+    // The runs in this order's turn, each from where the cursor leaves it: newest first the undated then the dated,
+    // oldest first the reverse. A cursor in the second run has passed the first.
+    const runs: ((limit: number) => Promise<Record<string, unknown>[]>)[] = oldest
+      ? after?.at === null ? [(n) => undated(after.id, n)] : [(n) => dated(after, n), (n) => undated(null, n)]
+      : after === null ? [(n) => undated(null, n), (n) => dated(null, n)]
+        : after.at === null ? [(n) => undated(after.id, n), (n) => dated(null, n)] : [(n) => dated(after, n)];
+    const rows: Record<string, unknown>[] = [];
+    try {
+      for (const run of runs) {
+        if (rows.length >= want) break;
+        rows.push(...(await run(want - rows.length)));
+      }
+    } catch (e) {
+      // A time cast that failed: the cursor's time is read alone, and if that fails too it is the caller's value of
+      // the right shape Postgres cannot read, refused. Alone, so a cast error of anything else — `days` read back as
+      // a time — is never taken for the cursor's (review pass 2), and only after a failure, so a good page pays no
+      // round trip before it (review pass 3).
+      const cast = (x: unknown) => ["22007", "22008", "22009"].includes(String((x as { errno?: unknown }).errno ?? ""));
+      if (!after?.at || !cast(e)) throw e;
+      const unread = await this.sql`SELECT ${after.at}::timestamptz`.then(() => false, (p: unknown) => (cast(p) ? true : Promise.reject(p)));
+      if (unread) throw new ListCursorRefused();
+      throw e;
+    }
+    const shown = rows.slice(0, f.limit);
+    const last = shown[shown.length - 1];
+    return {
+      thoughts: shown.map(normaliseListItem),
+      next: rows.length > f.limit && last ? { at: last.created_at_text === null ? null : String(last.created_at_text), id: String(last.id) } : null,
+    };
   }
 
   async countThoughts(): Promise<number> {

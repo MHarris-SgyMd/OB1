@@ -1558,7 +1558,10 @@ jobs:
           # A raw TCP listener, so it counts a connection whatever its first bytes:
           # the forwarder opens with the PROXY line, which an HTTP server refuses
           # unlogged (a forwarder that dialled it went uncounted, measured).
-          docker run -d --name ob1-ci-decoy --network open-brain_edge --network-alias proxy.ob1.internal --entrypoint bun "$IMAGE" -e 'Bun.listen({ hostname: "0.0.0.0", port: 8000, socket: { open(s) { console.log("decoy got a connection"); s.end(); }, data() {} } }); await Bun.sleep(1e9)' > /dev/null
+          # No healthcheck: the server image's probes 127.0.0.1:8000, the
+          # decoy's own port, and since its first probe comes 1 s in
+          # (SMD-3194, 5 s before) it counted as a connection here.
+          docker run -d --name ob1-ci-decoy --no-healthcheck --network open-brain_edge --network-alias proxy.ob1.internal --entrypoint bun "$IMAGE" -e 'Bun.listen({ hostname: "0.0.0.0", port: 8000, socket: { open(s) { console.log("decoy got a connection"); s.end(); }, data() {} } }); await Bun.sleep(1e9)' > /dev/null
           decoy=$(docker inspect -f '{{(index .NetworkSettings.Networks "open-brain_edge").IPAddress}}' ob1-ci-decoy)
           for _ in $(seq 1 20); do docker compose -f compose.yaml exec -T forwarder getent hosts proxy.ob1.internal. | grep -qF "$decoy" && break; sleep 0.5; done
           docker compose -f compose.yaml exec -T forwarder getent hosts proxy.ob1.internal. | grep -qF "$decoy" || { echo "the forwarder does not resolve the decoy, so its refusal below proves nothing" >&2; exit 1; }

@@ -615,10 +615,23 @@ services:
     # container and, through depends_on, the server (SMD-1844; deploy/README.md,
     # "What is reachable from where").
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d openbrain"]
+      # Over TCP, not the socket: on a fresh volume the image runs a temporary
+      # server on the socket alone while it creates the database, and a probe
+      # that passed against it let `migrate`, which dials 5432 once, meet a
+      # refused connection (SMD-3194 review pass 1: 2 runs in 20 on a slow
+      # initdb, under 1 s probes).
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d openbrain"]
       interval: 5s
       timeout: 5s
       retries: 12
+      # Every healthcheck in this file is probed every second during its start
+      # period, until it first passes (SMD-3194): Docker's start interval
+      # defaults to 5 s (and a check with no start period waits its interval),
+      # so each `up --wait` and service_healthy wait sat out about 5 s however
+      # soon the service was up. Check 40 holds every healthcheck to it. Podman
+      # probes at once and drops the key.
+      start_period: 30s
+      start_interval: 1s
     # `data` alone: internal, so no route out, and joined only by what
     # connects to the database (SMD-2583). Not the mesh, beside every
     # backend the proxy reaches: compose names each container by its service
@@ -968,6 +981,7 @@ services:
       interval: 30s
       timeout: 3s
       start_period: 10s
+      start_interval: 1s
       retries: 3
     logging: *logging
 
@@ -1022,6 +1036,7 @@ services:
       interval: 30s
       timeout: 3s
       start_period: 10s
+      start_interval: 1s
       retries: 3
     logging: *logging
 
@@ -1066,6 +1081,7 @@ services:
       interval: 30s
       timeout: 3s
       start_period: 10s
+      start_interval: 1s
       retries: 3
     logging: *logging
 
@@ -1187,6 +1203,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+      start_period: 10s
+      start_interval: 1s
     # Started after the MCP server, the operator GUI and the REST core behind them, so `up proxy`
     # brings the brain once its image is built (the `server` service builds
     # it: name `server` with `--build`, as the commands below do), and
@@ -1265,6 +1283,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+      start_period: 10s
+      start_interval: 1s
     # After the proxy, so `up forwarder` brings the brain, and the first `up`
     # after SMD-2583 recreates the proxy, which held the port, before this
     # binds it.
@@ -1490,9 +1510,10 @@ services:
 
   # The sleep scheduler, unattended (SMD-1794; this service SMD-2678). Optional
   # — `--profile sleep` — and an alternative to `--profile workers`, not a
-  # companion: `bun db/sleep.ts --follow` runs extraction, then consolidation
-  # beside it, only while the brain is quiet — OB1_SLEEP_QUIET seconds (unset,
-  # 300) with no live write in thought_audit and, when the server logs
+  # companion: `bun db/sleep.ts --follow` runs the re-derive sweep, then
+  # extraction, then consolidation beside it, only while the brain is quiet
+  # — OB1_SLEEP_QUIET seconds (unset, 300) with no live write in
+  # thought_audit and, when the server logs
   # searches (OB1_QUERY_LOG=on) and this role may read the log (the owner, or
   # the opt-in `sleep` grant group), no search — and hard-stops both within
   # OB1_SLEEP_POLL seconds (unset, 5) of the next live call, every lease
@@ -1589,6 +1610,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+      start_period: 30s
+      start_interval: 1s
     # `egress` alone: it fetches the models it pulls from the registry, and
     # its callers, every one of which calls out too, meet it there. Never
     # `data`: it holds no credential and needs no database (SMD-2583).
@@ -1671,6 +1694,7 @@ services:
       # unhealthy and the server, which waits for it, does not start.
       # Pre-pull on a slow link: compose --profile jev run --rm jev --fetch-only.
       start_period: 600s
+      start_interval: 1s
     # `unless-stopped`, so it comes back after a reboot (SMD-3214): neither
     # runtime starts an `on-failure` container at boot, and with
     # OB1_JEV_BASE_URL naming this service the servers' preflight fails until
@@ -1796,6 +1820,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 120s
+      start_interval: 1s
     # The REST core, n8n's one way into the brain (SMD-2295): `up -d n8n`
     # brings it along. It runs the image `server`'s service builds, so on a
     # project that has not built it, bring the stack up first.
@@ -1951,6 +1976,8 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
+      start_period: 10s
+      start_interval: 1s
     depends_on:
       postgres:
         condition: service_healthy
@@ -2055,6 +2082,7 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
+      start_interval: 1s
     restart: unless-stopped
     logging: *logging
 
@@ -2229,6 +2257,7 @@ services:
       timeout: 8s
       retries: 3
       start_period: 300s
+      start_interval: 1s
     restart: unless-stopped
     logging: *logging
 
@@ -2353,6 +2382,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+      start_interval: 1s
     restart: unless-stopped
     logging: *logging
 

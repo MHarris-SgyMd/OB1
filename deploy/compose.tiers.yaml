@@ -191,10 +191,13 @@ x-tier-postgres: &tier-postgres
     POSTGRES_DB: openbrain
     POSTGRES_USER: postgres
   healthcheck:
-    test: ["CMD-SHELL", "pg_isready -U postgres -d openbrain"]
+    # Over TCP, as compose.yaml's: the socket answers during initdb (SMD-3194).
+    test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d openbrain"]
     interval: 5s
     timeout: 5s
     retries: 12
+    start_period: 30s
+    start_interval: 1s
   # The internal `data` network alone, as compose.yaml's (SMD-2583).
   networks: [data]
   # Back after a reboot with the tier's servers (SMD-2760).
@@ -532,6 +535,7 @@ services:
       interval: 30s
       timeout: 3s
       start_period: 10s
+      start_interval: 1s
       retries: 3
     logging: *logging
 
@@ -606,6 +610,7 @@ services:
       interval: 30s
       timeout: 3s
       start_period: 10s
+      start_interval: 1s
       retries: 3
     logging: *logging
 
@@ -680,6 +685,7 @@ services:
       interval: 30s
       timeout: 3s
       start_period: 10s
+      start_interval: 1s
       retries: 3
     logging: *logging
 
@@ -728,6 +734,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+      start_period: 10s
+      start_interval: 1s
     # No depends_on: the proxy starts in compose's first wave, before any
     # migrator finishes, so every `up` brings the origin up. Compose stops
     # scheduling once a dependency fails, and a proxy waiting on any tier —
@@ -762,6 +770,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+      start_period: 10s
+      start_interval: 1s
     depends_on:
       proxy:
         condition: service_started
@@ -785,6 +795,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+      start_period: 30s
+      start_interval: 1s
     networks: [egress]
     restart: unless-stopped
     logging: *logging

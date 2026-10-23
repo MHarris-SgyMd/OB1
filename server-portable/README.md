@@ -50,7 +50,7 @@ chat only, beside Ollama:
 | `OB1_EMBEDDING_MODEL` / `OB1_EMBEDDING_DIM` | `openai/text-embedding-3-small` / 1536 | Must match the column; permanent once there is data |
 | `OB1_METADATA_MODEL` | `openai/gpt-4o-mini` | No schema dependency — safe to change anytime |
 | `OB1_JUDGE_MODEL` | the metadata model | The supersession judge's model (`db/consolidate.ts`), for running the judge — the harder task — on a stronger model than every capture's tagging; a model the chat endpoint serves. The pass key carries it, so a change starts a fresh pass (SMD-1901) |
-| `OB1_CONSOLIDATE_DECIDER` | unset (the judge decides) | Consolidation's decide mode: the typed-decision tier's model (`OB1_JEV_BASE_URL`) gives each pair's verdict, and `OB1_JUDGE_MODEL` only writes the proposals it calls outdates at the pass's floor, both quotes checked in the texts without their markdown (SMD-3151). The pass key names both models, so turning it on, or a new decide version, starts a fresh pass; preflight fails it without the tier, or with `OB1_JEV_MODEL` naming another model (SMD-3115) |
+| `OB1_CONSOLIDATE_DECIDER` | unset (the judge decides) | Consolidation's decide mode: the typed-decision tier's model (`OB1_JEV_BASE_URL`) gives each pair's verdict, and `OB1_JUDGE_MODEL` only writes the proposals it calls outdates at the pass's floor, both quotes checked in the texts without their markdown (SMD-3151). Since decide version 4 it first answers the mediated-pair test's link step for those pairs and for an evolves the pass would store, and a pair linked only through a third subject or a passing mention is related at most, with no proposal (SMD-3203). The pass key names both models, so turning it on, or a new decide version, starts a fresh pass; preflight fails it without the tier, or with `OB1_JEV_MODEL` naming another model (SMD-3115) |
 | `OB1_LLM_LOCAL` / `OB1_CHAT_LOCAL` | unset (remote) | `1` declares the embeddings / chat endpoint on this machine or its private network, so the egress gate does not apply to it. Declared, never guessed from the address: a loopback URL with the flag unset is remote to the gate. A chat endpoint at the same base is the same box: either knob declares it (SMD-1903) |
 | `OB1_EGRESS_POLICY` | `deny` | What may leave the box for an endpoint not declared local: `deny` (only what an `OB1_EGRESS_ALLOW` term names), `allow` (everything but what an `OB1_EGRESS_DENY` term names), `off`. A knob that does not parse fails preflight and closes the gate |
 | `OB1_EGRESS_ALLOW` / `OB1_EGRESS_DENY` | none | Comma-separated `unit:value` terms — `actor` (the access key's name), `source`, `type`, `topic` (a row's metadata), `marker` (a literal in the text) — read under `deny` and `allow` respectively |
@@ -164,6 +164,57 @@ after an outage, is embedded on the configured provider — a hosted one's bill
 included — unless the knob is off. `db/reembed.ts` stays the tool for a model
 change or a whole brain at once.
 
+Together these are a brain **serving degraded** (`provider-health.ts`,
+SMD-2890): its embedding provider away, it still captures, searches by exact
+matches and mends after, and it says so. The server keeps the provider's
+state, fed by every embedding call — a capture's, an edit's, a search's, a
+mender tick's — and by its own probes:
+
+- `answering`, at `at`, `by` a call (it embeds) or by the probe (`GET /models`
+  answered: reachable, nothing yet said of the calls). With a `fault`, a call
+  the provider answered and refused or answered unusably — a 4xx (a model not
+  pulled, a key refused), a body that is not JSON, a vector of the wrong
+  width: the provider is there, and a capture fails outright until it is fixed.
+- `unreachable` since `since` (the first outage of the run), `at` the latest,
+  the `reason` word and its `detail` for the latest, and `clears`: `probe`
+  for an outage a `GET /models` can see (the probe's own, a call's failed
+  connection), `call` once a call has failed where `GET /models` is blind (a
+  5xx, 408, 429, a timeout — a proxy that answers `/models` while its backend
+  is down). Set when the outage opens, escalated by a call, reset by an answer.
+  The words say "unreachable" for a connection or a timeout, "failing its
+  calls" for the rest.
+
+Each change is said once in the log (`provider: … does not answer …` or `…
+fails its calls … serving degraded`; `… answers again`; `… refuses its
+embedding calls (…)`). A call that began before the provider was last seen
+answering is not counted against it — before a call last answered, for an
+outage only a call can see — judged on the monotonic clock. A local endpoint
+(the local rule preflight dials by, below) is probed: `GET /models` at start,
+so a server started with its provider down says so before any call, then,
+while unreachable, every `OB1_PROVIDER_REPROBE_INTERVAL` seconds (15 unless
+set, 1 to 3600; `0` or `off` for the start's probe alone): `GET /models`, no
+credential, no redirect followed, 2.5 s, a 5xx, 408 or 429 an outage. Its
+answer ends an outage whose `clears` is `probe`; for one whose `clears` is
+`call` it spends one real call — an embedding of the word `probe`, through the
+server's own embedder, as a query (as preflight's `--deep` sends
+`preflight`) — and that call's answer ends it. So a silent provider costs the
+cheap probe's 2.5 s a round, not a request timeout, and each process ends its
+own outage whether or not its mender holds the lock, on a brain with no
+traffic too. That call costs a model call an interval, only while calls fail;
+it is a `gen_ai` span like any other (the `GET /models` probe makes none), so a
+provider failing it counts toward the provider-failures alert as its failing
+captures do. The egress gate is asked for it once, at start: refused (a
+probeable endpoint not declared local, under deny with terms the word cannot
+meet) it is not made, and the `Provider` row says only a call that is
+answered ends such an outage, and why. An answering provider is not probed;
+probes never overlap. A hosted endpoint is not probed — asking it costs a
+credential — and its state moves with real calls alone. A keyed `/health`
+(`provider`: the state, with `reprobeS` and `reprobeByCall`) and `brain_info`
+(its `Provider` row) report it; the keyless `/health` stays `ok`, liveness
+alone, so a container's health check never restarts a brain that is serving
+degraded. The state is the process's: each server keeps its own (the `/mcp`
+service shows the REST core's), and a restart starts it at `unknown`.
+
 A call the **egress gate** refuses is neither (`egress.ts`, SMD-1903). The
 server asks the gate before either call and makes only the ones it allows: a
 refused embedding lands the capture with its text and fingerprint and no vector,
@@ -188,10 +239,26 @@ A local endpoint — local by its hostname, the credential rule's sense and not
 `OB1_LLM_LOCAL`'s: loopback, a private address, the `ollama` service name, the two
 host aliases — is dialled once on every start, with or without `--deep`: the
 name resolved first, then one `GET /models`, no body, no credential, 2.5 s
-each, and any HTTP answer passes the
-`provider endpoint` row (a `chat endpoint` row for a chat base of its own). One
-that answers nothing — refused, unresolved, or silent — fails it, with a remedy
-for the name's kind: the service name needs `--profile local-models`; inside a
+each, and any HTTP answer but a 5xx, 408 or 429 passes the
+`provider endpoint` row (a `chat endpoint` row for a chat base of its own). A
+name that resolves with nothing answering yet — refused, silent, or no route
+to it (`EHOSTUNREACH`, `ENETUNREACH`) — warns, and the server starts degraded
+(above, SMD-2890): an Ollama on the host started after the stack, or the
+profile's container still starting, is a provider not up yet, not a broken
+brain, and failing preflight on it restart-looped the container until it came
+up. The row says what serving degraded costs (a silent endpoint holds each
+capture and search up to `OB1_LLM_TIMEOUT` first, SMD-3205) and the re-probe
+interval; the chat row's cost is captures landing untagged. Still failures: a
+name that does not resolve — a runtime without it (the `ollama` service
+without its profile, a host alias the runtime does not write) will not grow
+it; in a container (`/.dockerenv` or `/run/.containerenv`), a loopback host,
+which is the container itself, where nothing will start (the maintainer's
+call); an endpoint that answers wrongly (a reset, an untrusted certificate) and
+anything unclassified;
+and any failure through a proxy, the route's before the provider's
+(`startsDegraded`, `provider-health.ts`). A port typo outside a container is
+now the warning. Either way the
+remedy names the name's kind: the service name needs `--profile local-models`; inside a
 container `127.0.0.1` is the container; `host.containers.internal` is podman's
 alias and `host.docker.internal` Docker's, which Linux Docker gets through the
 compose file's `extra_hosts`. A certificate the server would not trust reads
@@ -438,7 +505,7 @@ the latter is unset (`store.ts:databaseUrl`), and preflight says which variable
 supplied the string. An `https://` `SUPABASE_URL` is not a connection string,
 and preflight and the store's first use say so.
 
-Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, and on Bun `OB1_STOP_GRACE` (the platform's grace period for a stop, in whole seconds with no unit; default 10 — see Caveats) and `OB1_VECTOR_MEND_INTERVAL` (seconds between the vector mender's ticks, 1 to 86400; default 60, `0` or `off` for none — see "The vector mender" above).
+Optional: `OPEN_BRAIN_CITATION_BASE_URL`, `PORT`, and on Bun `OB1_STOP_GRACE` (the platform's grace period for a stop, in whole seconds with no unit; default 10 — see Caveats), `OB1_VECTOR_MEND_INTERVAL` (seconds between the vector mender's ticks, 1 to 86400; default 60, `0` or `off` for none — see "The vector mender" above) and `OB1_PROVIDER_REPROBE_INTERVAL` (seconds between re-probes of a local embedding provider that does not answer, 1 to 3600; default 15, `0` or `off` for the start's probe alone — see "serving degraded" above).
 
 On a container these are ordinary environment variables.
 
@@ -651,6 +718,14 @@ discovers through `tools/list` (a capture-only key sees none of them):
 
 - **`list_thought_ids`** (SMD-2244) — the corpus's thought ids, id-only, keyset-paged,
   with a first-page md5 digest, for a cheap cross-brain id-set diff.
+- **`list_thoughts`**, a page at a time (SMD-2995) — `sort` newest (the default) or
+  oldest, and `after`, the cursor the previous page ended with, keyset on
+  `(created_at, id)` in `thoughts_created_at_idx`'s order (undated first, newest
+  first). The cursor holds the sort it was made under and Postgres's own text of the
+  last `created_at`, so a walk sees each thought there when it began once, to the
+  microsecond (newest first, one captured meanwhile is not among them; oldest first,
+  it comes at the end); a cursor of the other sort, or none of this tool's, is
+  `REFUSED_CURSOR` (an empty one too). The reply's `cursor` is null when no more follow.
 - **`list_logged_searches`** (SMD-2245) — the `query_log` search rows (query, arm,
   arguments), most recent first and `since`-windowed, for a log-sourced replay.
 - **`worker_status`** (SMD-2131) — the background-work queues over
@@ -834,7 +909,8 @@ Claude Code, VS Code and Codex show the model `structuredContent` alone when it 
   written, the database's own instant) and otherwise counts as ignored.
 - A refusal answers `{ code, retryable, text }`. The reads': `NOT_FOUND`,
   `REFUSED_FILTER`, `REFUSED_EGRESS` (with its `rule`), `REFUSED_SINCE`,
-  `REFUSED_CURSOR`. Capture's: the pointer and metadata shapes
+  `REFUSED_CURSOR` (list_thoughts' with its `reason`, `shape` or `sort`, and for
+  `sort` the one the cursor was made under). Capture's: the pointer and metadata shapes
   (`REFUSED_SUPERSEDES_SHAPE`, `REFUSED_DERIVED_FROM_SHAPE`,
   `REFUSED_METADATA_SHAPE` with its `problem`, and the `key` unless the key itself
   is malformed; a capture-only key is refused the keys a ticket's lifecycle is read
@@ -947,9 +1023,9 @@ stripped (`X-Forwarded-Prefix`).
   naming each field and zod's reason. A fault is a 500 `FAILED` with its message, as the MCP tool's text
   gives it, and no `retryable` until SMD-2461 — but capture's is a 503
   `STORE_UNAVAILABLE`, retryable, the verdict the session hook keys on. Every 503
-  carries `Retry-After`. Loose core inputs that reach Postgres (an unbounded
-  `list_thoughts` limit, a non-UUID id on update or delete) are still faults
-  through both doors (SMD-2534).
+  carries `Retry-After`. Loose core inputs that reach Postgres (a non-UUID id
+  on update or delete) are still faults through both doors (SMD-2534);
+  `list_thoughts`' limit, `days` and `after` are bounded in its schema since SMD-2995.
 - **The log** is one JSON line per request (`telemetry.ts`, SMD-1849) — the
   method, the route's template, the operation, the key's name, the status, an
   error answer's code and the time — with no query string, key, id or content
@@ -988,16 +1064,16 @@ word any refusal as this one does.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1189 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050), the stop's telemetry flush under a bound of its own and what it cut said by signal, an export past its deadline and a partial success counted (SMD-2902), preflight's telemetry row judged by each line's kind (SMD-2909); the same 1189 with OB1_MCP_UNDER_TEST=client, through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
+bun test-server.ts        # 1190 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050), the stop's telemetry flush under a bound of its own and what it cut said by signal, an export past its deadline and a partial success counted (SMD-2902), a list cursor through structuredContent at its own field alone (SMD-2995), preflight's telemetry row judged by each line's kind (SMD-2909); the same 1190 with OB1_MCP_UNDER_TEST=client, through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
 bun test-auth.ts          # 191 — scoped, hashed, named keys; the same 191 with OB1_MCP_UNDER_TEST=client, against the MCP server as a REST client (mcp-server/, SMD-2287)
-bun test-rest.ts          # 478 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, and `bun api.ts` stopped mid-request
+bun test-rest.ts          # 480 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, and `bun api.ts` stopped mid-request
 bun test-plugins.ts       # 283 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's; the same 283 with OB1_MCP_UNDER_TEST=client (mcp-server/, SMD-2287)
 bun test-thoughts.ts      # 518 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 225 — fully local provider, no credential
-bun run test:sql          # 262 — store conformance, real Postgres in a container
-bun run test:e2e          # 630 — the whole server over MCP with no Supabase at all, OB1_STORE unset; the same 630 with OB1_MCP_UNDER_TEST=client, through the MCP server as a REST client (mcp-server/, SMD-2287)
-../db/with-postgres.sh bun test-rest-sql.ts  # 210 — the REST core beside the MCP server on one database: every operation through both, every refusal's words from the forwarded answer
+bun run test:sql          # 286 — store conformance, real Postgres in a container
+bun run test:e2e          # 673 — the whole server over MCP with no Supabase at all, OB1_STORE unset; the same 673 with OB1_MCP_UNDER_TEST=client, through the MCP server as a REST client (mcp-server/, SMD-2287)
+../db/with-postgres.sh bun test-rest-sql.ts  # 239 — the REST core beside the MCP server on one database: every operation through both, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 107 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row; the same 107 with OB1_MCP_UNDER_TEST=client
 ```
 

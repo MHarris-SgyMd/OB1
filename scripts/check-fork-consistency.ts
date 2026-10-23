@@ -487,9 +487,15 @@
  *      CREATE OR REPLACE FUNCTION <set>() whose body is the bare literal,
  *      else the file is reported. Each rule is the only catch of one of its
  *      probes
+ *  40. every healthcheck in deploy/compose.yaml, deploy/compose.tiers.yaml and
+ *      deploy/edge/compose.yaml — each service's, and each `x-` anchor's — has
+ *      a start period longer than zero and `start_interval: 1s`, so Docker
+ *      probes it every second until its service is up, not after its 5 s
+ *      default (SMD-3194); a disabled healthcheck is passed over. Its probe
+ *      pins what it refuses and what it passes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34, 35, 36, 37 and 38 parse YAML with Bun.YAML)
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34, 35, 36, 37, 38 and 40 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
@@ -6951,6 +6957,58 @@ function checkTierStack() {
   for (const p of base) fail("deploy/compose.tiers.yaml", `${p.message} (SMD-2294)`);
 }
 checkTierStack();
+// ── 40: every healthcheck probes every second until its service is up (SMD-3194) ──
+/**
+ * 40: every healthcheck in the stack's compose files — each service's, and each `x-` anchor's a service merges
+ * in — has a start period longer than zero and probes every second within it, until it first passes. Docker's
+ * start interval defaults to 5 s, and one with no start period waits its interval, so a healthcheck written
+ * without them holds every `up --wait` and service_healthy wait about 5 s however soon its service is up (75
+ * waits of 5.0–5.6 s a Fork Checks run before this). A disabled healthcheck (`disable: true`, or a test of
+ * `NONE`) has nothing to probe and is passed over.
+ */
+const HEALTHCHECK_START_FILES = ["deploy/compose.yaml", "deploy/compose.tiers.yaml", "deploy/edge/compose.yaml"];
+/** A compose duration (`1m30s`, `10s`, `500ms`) in milliseconds; NaN where it is not one. */
+function composeDurationMs(v: unknown): number {
+  const parts = typeof v === "string" ? [...v.matchAll(/(\d+(?:\.\d+)?)(h|ms|m|s|us|ns)/g)] : [];
+  if (!parts.length || parts.map((m) => m[0]).join("") !== v) return NaN;
+  const unit: Record<string, number> = { h: 3_600_000, m: 60_000, s: 1000, ms: 1, us: 0.001, ns: 0.000001 };
+  return parts.reduce((t, m) => t + Number(m[1]) * unit[m[2]], 0);
+}
+function healthcheckStartProblems(doc: unknown): string[] {
+  const out: string[] = [];
+  const d = isMapping(doc) ? doc : {};
+  const holders: [string, unknown][] = [
+    ...Object.entries(isMapping(d.services) ? d.services : {}).map(([n, v]): [string, unknown] => [`services.${n}`, v]),
+    ...Object.entries(d).filter(([k]) => k.startsWith("x-")).map(([k, v]): [string, unknown] => [k, v]),
+  ];
+  for (const [where, m] of holders) {
+    const h = isMapping(m) ? m.healthcheck : undefined;
+    if (!isMapping(h) || h.disable === true || (Array.isArray(h.test) && h.test[0] === "NONE")) continue;
+    const missing: string[] = [];
+    if (!(composeDurationMs(h.start_period) > 0)) missing.push(h.start_period === undefined ? "a start_period (start_interval applies only within it)" : `a start_period longer than zero, not ${JSON.stringify(h.start_period)}`);
+    if (h.start_interval !== "1s") missing.push(h.start_interval === undefined ? "start_interval: 1s" : `start_interval: 1s, not ${JSON.stringify(h.start_interval)}`);
+    if (missing.length) out.push(`${where}.healthcheck needs ${missing.join(" and ")}`);
+  }
+  return out;
+}
+function checkHealthcheckStarts() {
+  const probe = (hc: Record<string, unknown>) => healthcheckStartProblems({ services: { s: { healthcheck: { test: ["CMD", "true"], ...hc } } }, "x-a": { healthcheck: { test: ["CMD", "true"], start_period: "5s", start_interval: "1s" } } }).length;
+  const cases: [Record<string, unknown>, number][] = [
+    [{ start_period: "10s", start_interval: "1s" }, 0], [{ start_period: "1m30s", start_interval: "1s" }, 0],
+    [{ start_period: "10s" }, 1], [{ start_interval: "1s" }, 1], [{}, 1], [{ start_period: "10s", start_interval: "5s" }, 1],
+    [{ start_period: "0s", start_interval: "1s" }, 1], [{ start_period: "ten", start_interval: "1s" }, 1],
+    [{ disable: true }, 0], [{ test: ["NONE"] }, 0],
+  ];
+  const wrong = cases.filter(([hc, n]) => probe(hc) !== n);
+  if (wrong.length || healthcheckStartProblems({ "x-b": { healthcheck: { test: ["CMD", "true"] } } }).length !== 1)
+    fail(SELF, `check 40 no longer reads its probe as written (${JSON.stringify(wrong.map(([hc]) => hc))}): a start period above zero and a 1 s start interval pass, a missing, zero or other one fails, in a service or an x- anchor, and a disabled healthcheck is passed over (SMD-3194)`);
+  if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") return;
+  for (const f of HEALTHCHECK_START_FILES) {
+    if (!existsSync(join(ROOT, f))) continue;
+    for (const p of healthcheckStartProblems(Bun.YAML.parse(readFileSync(join(ROOT, f), "utf8")))) fail(f, `${p} — Docker's first probe waits its 5 s default otherwise, and every wait on the service with it (check 40, SMD-3194)`);
+  }
+}
+checkHealthcheckStarts();
 
 // ── 28: the proxy's other route tables are held byte for byte, and only its backends answer it (SMD-2658, SMD-2685) ──
 //
@@ -7085,7 +7143,7 @@ const PROXY_SERVICE = {
   configs: [{ source: "proxy-routes", target: "/etc/traefik/dynamic/routes.yaml" }],
   networks: { front: { aliases: ["proxy.ob1.internal"] }, mesh: {} },
   dns_search: ["."],
-  healthcheck: { test: ["CMD", "traefik", "healthcheck"], interval: "5s", timeout: "3s", retries: 5 },
+  healthcheck: { test: ["CMD", "traefik", "healthcheck"], interval: "5s", timeout: "3s", retries: 5, start_period: "10s", start_interval: "1s" },
   depends_on: { api: { condition: "service_started" }, mcp: { condition: "service_started" }, app: { condition: "service_started" } },
   restart: "unless-stopped",
 };
@@ -7103,7 +7161,7 @@ const FORWARDER_SERVICE = {
   ports: ["${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"],
   networks: ["edge", "front"],
   dns_search: ["."],
-  healthcheck: { test: ["CMD-SHELL", "grep -qE ':1F40 0+:0000 0A' /proc/net/tcp /proc/net/tcp6"], interval: "5s", timeout: "3s", retries: 5 },
+  healthcheck: { test: ["CMD-SHELL", "grep -qE ':1F40 0+:0000 0A' /proc/net/tcp /proc/net/tcp6"], interval: "5s", timeout: "3s", retries: 5, start_period: "10s", start_interval: "1s" },
   depends_on: { proxy: { condition: "service_started" } },
   restart: "unless-stopped",
 };
@@ -7137,7 +7195,7 @@ const MCP_SERVICE = {
   depends_on: { api: { condition: "service_started" } },
   restart: "unless-stopped",
   networks: { mesh: { aliases: ["mcp.ob1.internal"] } },
-  healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"], interval: "30s", timeout: "3s", start_period: "10s", retries: 3 },
+  healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"], interval: "30s", timeout: "3s", start_period: "10s", start_interval: "1s", retries: 3 },
 };
 /**
  * compose.yaml's `app`, the operator GUI (SMD-2280), whole, its logging aside: the server's image run as
@@ -7165,7 +7223,7 @@ const APP_SERVICE = {
   tmpfs: ["/tmp"],
   cap_drop: ["ALL"],
   security_opt: ["no-new-privileges:true"],
-  healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/dashboard/health >/dev/null || exit 1"], interval: "30s", timeout: "3s", start_period: "10s", retries: 3 },
+  healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/dashboard/health >/dev/null || exit 1"], interval: "30s", timeout: "3s", start_period: "10s", start_interval: "1s", retries: 3 },
 };
 /**
  * compose.yaml's observability collector (SMD-1849 PR 3a) as Bun.YAML reads it, its `logging` (check 29's) and its labels (check 37's,
@@ -7227,7 +7285,7 @@ const LGTM_SERVICE = {
   // The provisioned dashboard and its provider (PR 3c), check 37's, and the alert rules (SMD-3050), check 38's.
   configs: [{ source: "grafana-dashboard", target: DASHBOARD_PATH }, { source: "grafana-dashboard-provider", target: DASHBOARD_PROVIDER_PATH }, { source: "grafana-alert-rules", target: ALERT_RULES_PATH }],
   networks: { mesh: { aliases: ["lgtm.ob1.internal"] }, telemetry: {} },
-  healthcheck: { test: ["CMD", "bash", "-c", "test -f /tmp/ready && for u in 3000/api/health 3100/ready 9090/api/v1/status/runtimeinfo 3200/ready 4040/ready 13133/ready; do curl -fsS -o /dev/null -m 1 http://127.0.0.1:$${u} || exit 1; done"], interval: "10s", timeout: "8s", retries: 3, start_period: "300s" },
+  healthcheck: { test: ["CMD", "bash", "-c", "test -f /tmp/ready && for u in 3000/api/health 3100/ready 9090/api/v1/status/runtimeinfo 3200/ready 4040/ready 13133/ready; do curl -fsS -o /dev/null -m 1 http://127.0.0.1:$${u} || exit 1; done"], interval: "10s", timeout: "8s", retries: 3, start_period: "300s", start_interval: "1s" },
   restart: "unless-stopped",
 };
 /**
@@ -7285,7 +7343,7 @@ const PG_EXPORTER_SERVICE = {
   environment: { DATA_SOURCE_URI: "postgres:5432/openbrain?sslmode=disable", DATA_SOURCE_USER: "ob1_monitor", DATA_SOURCE_PASS: "${OB1_MONITOR_DB_PASSWORD:-}" },
   depends_on: { "pg-monitor-role": { condition: "service_completed_successfully" } },
   networks: { data: {}, telemetry: { aliases: ["pg-exporter.ob1.internal"] } },
-  healthcheck: { test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9188/"], interval: "30s", timeout: "5s", retries: 3, start_period: "30s" },
+  healthcheck: { test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9188/"], interval: "30s", timeout: "5s", retries: 3, start_period: "30s", start_interval: "1s" },
   restart: "unless-stopped",
 };
 const PG_MONITOR_ROLE_SERVICE = {
@@ -8836,7 +8894,7 @@ const edgeService = (profile: string, addresses: string) => ({
   read_only: true,
   volumes: ["./dynamic:/etc/traefik/dynamic:ro,z"],
   labels: { "ob1.edge-routes-sha256": "${EDGE_ROUTES_SHA256:-unrendered}", "ob1.edge-addresses": addresses },
-  healthcheck: { test: ["CMD", "traefik", "healthcheck"], interval: "5s", timeout: "3s", retries: 5 },
+  healthcheck: { test: ["CMD", "traefik", "healthcheck"], interval: "5s", timeout: "3s", retries: 5, start_period: "10s", start_interval: "1s" },
   restart: "unless-stopped",
   logging: EDGE_LOGGING,
 });
