@@ -1425,8 +1425,9 @@ counts — and sends them before it reports, as `open-brain-preflight` unless
 `OTEL_SERVICE_NAME` (or a `service.name` in `OTEL_RESOURCE_ATTRIBUTES`) names
 it. Its `telemetry` row says, within 5 s, whether they went: `ok` with where,
 naming spans, points or both by what is sent; a warning for an export not
-sent, or for an endpoint that is no URL or an SDK that would not start (the
-server would share either); a skip when no collector is named, when spans and
+sent, an endpoint that is no URL or has a query string, an SDK that would not
+start, or a setting held to its bound or not read and its default used (the
+server would share each); a skip when no collector is named, when spans and
 points are both turned off or the SDK is disabled, or when no probe ran —
 run it in `api`, which holds the OTEL settings (`server` holds none since it
 left the mesh, SMD-2287). A plain preflight, the one each container start runs, starts no telemetry, so a
