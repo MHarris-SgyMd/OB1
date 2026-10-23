@@ -2,6 +2,7 @@
 	import { base } from '$app/paths';
 	import { DEFAULT_PAGE_SIZE, FILTER_KEYS, PAGE_SIZES, TRUST_WORDS } from '$lib/browse';
 	import { when } from '$lib/format';
+	import { tidy } from '$lib/tidy';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -12,20 +13,8 @@
 	 * and Enter after it submitted twice (review pass 1).
 	 */
 	const apply = (e: Event) => (e.currentTarget as HTMLSelectElement).form?.requestSubmit();
-	/**
-	 * The address a submit makes holds what is set alone: an empty field, the
-	 * default order and the default size are left out of the form's data as
-	 * SvelteKit reads it (its `new FormData(form)` fires `formdata`), as the
-	 * page's own links leave them. Nothing is disabled: a control disabled for the
-	 * submit lost the focus it had, in Firefox and WebKit (review pass 2). A
-	 * script-free submit carries every field.
-	 */
-	function tidy(e: FormDataEvent) {
-		for (const [k, v] of [...e.formData.entries()]) {
-			// A field of spaces alone is unset too, as readBrowse reads it (review pass 3).
-			if (String(v).trim() === '' || (k === 'sort' && v === 'newest') || (k === 'limit' && v === String(DEFAULT_PAGE_SIZE))) e.formData.delete(k);
-		}
-	}
+	/** The address a submit makes holds what is set alone ($lib/tidy.ts): the default order and size left out, as the page's links leave them. */
+	const tidyForm = tidy({ sort: 'newest', limit: String(DEFAULT_PAGE_SIZE) });
 	/** The menu's sizes, and the address's own when it is another (a shared link keeps its size). */
 	const sizes = $derived([...new Set([...PAGE_SIZES, data.q.limit])].sort((a, b) => a - b));
 	const filtered = $derived(FILTER_KEYS.some((k) => data.q[k] !== undefined));
@@ -38,7 +27,7 @@
 
 	<!-- A GET form: its fields are the address, and a new filter starts at the first page (no cursor rides it).
 	     Focus and scroll stay where they were: a keyboard user applying a filter keeps their place (review pass 1). -->
-	<form method="GET" action="{base}/thoughts" onformdata={tidy} data-sveltekit-keepfocus data-sveltekit-noscroll class="bg-bg-card border border-white/10 rounded-xl p-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-sm" data-testid="filters">
+	<form method="GET" action="{base}/thoughts" onformdata={tidyForm} data-sveltekit-keepfocus data-sveltekit-noscroll class="bg-bg-card border border-white/10 rounded-xl p-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-sm" data-testid="filters">
 		<label class="flex flex-col gap-1">Type<input name="type" value={data.q.type ?? ''} class="field" autocomplete="off" /></label>
 		<label class="flex flex-col gap-1">Topic<input name="topic" value={data.q.topic ?? ''} class="field" autocomplete="off" /></label>
 		<label class="flex flex-col gap-1">Person<input name="person" value={data.q.person ?? ''} class="field" autocomplete="off" /></label>

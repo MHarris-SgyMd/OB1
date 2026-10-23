@@ -1068,7 +1068,7 @@ export const renderThoughtIds = (o: Outcome<ThoughtIdPage>): Reply =>
 
 /** list_logged_searches: the page itself is the text. */
 export const renderLoggedSearches = (o: Outcome<LoggedSearchPage>): Reply =>
-  render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_SINCE" ? "Error: `since` must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z)." : unknownRefusal(r)), AS_JSON);
+  render(o, (v) => JSON.stringify(v), (r) => (r.code === "REFUSED_SINCE" ? "Error: `since` must be an ISO-8601 time with its zone (e.g. 2026-09-24T00:00:00Z) or a date (2026-09-24); a clock with no Z or offset is refused." : unknownRefusal(r)), AS_JSON);
 
 export const loggedSearchesHint = (msg: string): string =>
   /query_log/.test(msg) && /does not exist|could not find/i.test(msg)

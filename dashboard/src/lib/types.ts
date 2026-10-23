@@ -3,6 +3,6 @@
 // page holds its body to the value the core builds. Type-only imports, erased
 // at build: the image carries none of server-portable for them.
 
-export type { ThoughtStats } from '../../../server-portable/store.ts';
 export type { BrainInfo } from '../../../server-portable/brain-info.ts';
-export type { FetchedThought, KeywordResult, ListThoughtsResult, SearchThoughtsResult } from '../../../server-portable/core/reads.ts';
+export type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, SearchThoughtsResult, WorkerStatusResult } from '../../../server-portable/core/reads.ts';
+export type { LoggedSearchPage, ThoughtStats } from '../../../server-portable/store.ts';

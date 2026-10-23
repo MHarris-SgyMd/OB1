@@ -3181,6 +3181,11 @@ console.log("\n[15] Every read tool answers its typed result beside the text, an
   assert(!ls.isError && Array.isArray(ls.sc?.searches) && typeof ls.sc?.truncated === "boolean", "list_logged_searches: the page");
   const lsBad = await result("list_logged_searches", { since: "never" });
   assert(lsBad.isError && lsBad.sc?.code === "REFUSED_SINCE" && /^Error: `since` must be an ISO-8601 time/.test(lsBad.text), "list_logged_searches refuses a since that is no time, REFUSED_SINCE");
+  // SMD-2280 PR 2b review pass 1: what Date.parse takes but timestamptz does not — a bare number, a month's name — and a
+  // clock with no zone are refused before the store, as thought_changes refuses them; a date and a zoned time are read.
+  const lsLoose = await Promise.all(["1", "Oct 23", "2026-10-23T08:00:00", "00000000-0000-4000-8000-000000000000"].map((since) => result("list_logged_searches", { since })));
+  const lsGood = await Promise.all(["2026-10-23", "2026-10-23T08:00:00Z", "2026-10-23 08:00:00+02"].map((since) => result("list_logged_searches", { since })));
+  assert(lsLoose.every((r) => r.isError && r.sc?.code === "REFUSED_SINCE") && lsGood.every((r) => !r.isError), `list_logged_searches refuses a number, a month's name, a zoneless clock and a cursor, and reads a date and a zoned time (${lsLoose.map((r) => r.sc?.code).join(",")}; ${lsGood.map((r) => r.isError).join(",")})`);
 
   const ws = await result("worker_status");
   assert(!ws.isError && Array.isArray(ws.sc?.pools) && JSON.stringify(ws.sc.pools) === ws.text && !("text" in ws.sc), "worker_status: the text is the bare rows it always was; the value keys them (a result is an object) and, being that JSON, carries no text of its own");

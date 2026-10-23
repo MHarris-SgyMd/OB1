@@ -872,6 +872,8 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   ok(emptyLog.exitCode === 2 && /--from-log is empty/.test(emptyLog.stderr.toString()), `parseCompareArgs: an empty --from-log is refused (${emptyLog.exitCode})`);
   const badSince = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay", "--from-log", "z", "--since", "not-a-time"], { cwd: import.meta.dir });
   ok(badSince.exitCode === 2 && /--since must be an ISO-8601 time/.test(badSince.stderr.toString()), `parseCompareArgs: a malformed --since is refused (${badSince.exitCode})`);
+  const zonelessSince = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay", "--from-log", "z", "--since", "2026-10-23 08:00"], { cwd: import.meta.dir });
+  ok(zonelessSince.exitCode === 2 && /with its zone/.test(zonelessSince.stderr.toString()), `parseCompareArgs: a zoneless --since is refused, as the brain's log refuses it (${zonelessSince.exitCode})`);
   const dupLog = Bun.spawnSync(["bun", "tier.ts", "--compare", "a", "b", "--replay", "--from-log", "z", "--from-log", "w"], { cwd: import.meta.dir });
   ok(dupLog.exitCode === 2 && /--from-log given twice/.test(dupLog.stderr.toString()), `parseCompareArgs: a duplicate single-value flag is refused (${dupLog.exitCode})`);
 }
@@ -1034,6 +1036,10 @@ const uid = (n: number) => `${n.toString(16).padStart(8, "0")}-0000-0000-0000-00
   refused(["--diff", "--refresh", "--from", "a", "--to", "b"], /Give exactly one verb/, "--diff with --refresh");
   refused(["--diff", "--from", "a"], /--diff needs --from and --to\./, "--diff with no --to");
   refused(["--diff", "--from", "a", "--to", "b", "--since", "yesterday"], /--since must be an ISO-8601 time/, "--diff with a malformed --since");
+  // SMD-2280 PR 2b review pass 2: what the brain's query log refuses since parseSince reads its start — a clock with no
+  // zone, a bare number Date.parse took — is the CLI's own refusal, not a log that could not be read.
+  refused(["--diff", "--from", "a", "--to", "b", "--since", "2026-10-23T08:00:00"], /--since must be an ISO-8601 time with its zone/, "--diff with a zoneless --since");
+  refused(["--diff", "--from", "a", "--to", "b", "--since", "1"], /--since must be an ISO-8601 time with its zone/, "--diff with a bare-number --since");
   // A redirect is not followed with the key (review pass 4): a 307 elsewhere is a failed read.
   {
     let elsewhere = 0;

@@ -4692,9 +4692,9 @@ verbs are the promotion pipeline:
 # snapshot stable into the canary (or a working copy) and migrate it forward
 bun tier.ts --refresh --from <stable-url> --to <canary-url> [--tier canary|working]
 # replay stable's logged searches on stable and the canary, over HTTP, and report the ranking
-bun tier.ts --replay  --from <stable> --to <canary> [--since <iso-ts>]
+bun tier.ts --replay  --from <stable> --to <canary> [--since <time with its zone, or a date>]
 # the same, as a gate: exit 1 if a ranking moved (or a step failed), 3 if nothing was compared
-bun tier.ts --diff    --from <stable> --to <canary> [--since <iso-ts>]
+bun tier.ts --diff    --from <stable> --to <canary> [--since <time with its zone, or a date>]
 # after a soak: stamp the canary's version onto stable
 bun tier.ts --promote --from <canary-url> --to <stable-url>
 ```
@@ -4784,8 +4784,8 @@ they reach the two brains over HTTP, never Postgres (SMD-2875). `--from` and
 `--to` are each brain's MCP URL or connector name, read with a key as
 `--compare` reads one (`--from-key`/`--to-key`, else a connector's own header or
 a URL's `?key=`, else `OB1_COMPARE_KEY`, which then goes to both brains).
-Stable's logged searches (`list_logged_searches`: the window `--since` names, else
-the most recent page) run on both brains, each on the arm that ran it and each
+Stable's logged searches (`list_logged_searches`: the window `--since` names — a
+time with its zone or a date, as the brain reads it — else the most recent page) run on both brains, each on the arm that ran it and each
 query and arm once, and the ids the two return are diffed: the measured per-PR
 **"what moved"**, in place of the hand-written control run. Each brain embeds its
 own query, so the hybrid and current arms need no model here. A search both

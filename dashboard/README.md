@@ -18,8 +18,9 @@ sign-in through the authorization server, then the old dashboards' retirement).
 | `src/lib/server/session.ts` | The sessions, held in the server's memory |
 | `src/lib/server/rest.ts` | The REST core's client, and a read under the visitor's key |
 | `src/lib/server/signin.ts` | Whether key sign-in is offered, and whoami's answer |
-| `src/routes/` | The pages: the overview, browse, search, the status, a thought, sign-in and sign-out, `/health` |
-| `src/lib/browse.ts`, `src/lib/search.ts` | Browse's and search's addresses: what a page's query means, and the links between pages |
+| `src/routes/` | The pages: the overview, browse, search, the change feed, the proposals, the workers, the query log, the status, a thought, sign-in and sign-out, `/health` |
+| `src/lib/browse.ts`, `src/lib/search.ts`, `src/lib/params.ts` | The views' addresses: what a page's query means, as the core takes it, and the links between pages |
+| `src/lib/tidy.ts` | A GET form's address holding what is set alone |
 | `smoke.ts` | The smoke: drives the GUI as a browser would, through the stack's proxy |
 
 ## In the stack
@@ -101,13 +102,16 @@ https. So the server must know the origin a browser sees:
 | `/dashboard/` | `thought_stats` (the counts, the date range, the largest types, topics and people) and `list_thoughts` (the ten newest; their links are not preloaded on hover, since each open is a click-through) |
 | `/dashboard/thoughts` | `list_thoughts` a page at a time (SMD-2995's keyset): newest or oldest first, 1–100 a page (the menu offers 10, 25, 50 and 100), filtered by type, topic, person, the writing key's name or kind, a trust floor and the last N days. A typed filter applies on Enter or Apply, a menu's choice when it is made; focus stays where it was, and (with script on) the address holds what is set alone. The address holds the page's place: Next carries the core's cursor; Previous and First page go back by the cursors of the pages before (the last 20 kept in the address; past them Previous gives way to First page); the browser's Back works too. Clear filters keeps the order and size. A cursor the core refuses is a 400 saying so, with the first page offered |
 | `/dashboard/search` | By meaning (`search_thoughts`, a fixed top 1–100, identifiers and quoted spans matched exactly; each hit's similarity and, beside it, "exact match" where it holds one, and the tickets it names that moved since it was written, in the tool's words) or by exact text (`search_thoughts_keyword`, the query sent as typed, spaces kept, a page at a time by offset, with how many thoughts hold it). With the embedding provider refusing, a search by meaning says its hits are exact matches alone (or that nothing held the query exactly); with it silent, the core waits out its own 120 s, so the page answers 504 at its 30 s, naming the provider, with the same query by exact text a link away (the core's short-circuit is SMD-3205). With no query it reads nothing; a search, as through any client, is the visitor's own, logged where `OB1_QUERY_LOG` is on, its query sent in a POST body |
+| `/dashboard/changes` | `thought_changes`: every capture, edit and deletion with who made it, the most recent by default, or forward from a time or a date, Next carrying the page's cursor as `after` (so a new filter starts again), each change once; by the writing key, by kind, leaving out this key's own. The core's fields as they are (an edit's fields moved, its supersession, its sources); the tool's words for an edit's kind (marked, re-captured, reset) are render.ts's. A start the core cannot read is a 400 in words |
+| `/dashboard/proposals` | `list_supersession_proposals`: the pairs the consolidation pass judged, most confident first, by status and lineage — the verdict, confidence and reason (one line), each side's first line, writer (with the ingested notice before an ingested side's text) and what supersedes it, and the review. Read only: accept and reject are `db/consolidate.ts`'s, whose `--list` (and the tool) name the writer flags and the pointers an accept would clear, which this page does not |
+| `/dashboard/workers` | `worker_status` (a pool appears once anything is queued for it): each background-work pool's counts — not queued, waiting, in flight, stale, done, failed — whether it is the active pool, and its oldest stale lease |
+| `/dashboard/query-log` | `list_logged_searches`: the logged searches, most recent first, from a time — each query (one line), its arm, tier, the count it asked for (034's `match_count`, not how many it found) and arguments. Every key's searches, as the tool shows them to any key that can read; empty where `OB1_QUERY_LOG` is off |
 | `/dashboard/status` | `brain_info`, laid out as the core's own rows (`brainInfoRows` in `server-portable/brain-info.ts`, the brain_info tool's words): the server's version, commit and migrations, and the database's ledger, sizes, counts, vectors, proposals, findings and workers' heartbeats |
 | `/dashboard/thoughts/<id>` | `fetch`: a thought's text and metadata, with the ingested notice before an ingested thought's text, rendered on the server with no script (the core logs the open as a click-through, as it does any `fetch`: SMD-3212) |
 | `/dashboard/signin`, `/dashboard/signout` | Sign-in and sign-out |
 | `/dashboard/health` | Liveness: `ok`, asking the REST core nothing |
 
-The change feed, the worker queue, the proposals and the query log are SMD-2280's PR 2b;
-plugin pages its third. No list's links are preloaded on hover: a thought's page is a
+Plugin pages are SMD-2280's third PR. No list's links are preloaded on hover: a thought's page is a
 logged `fetch`, and a search page a logged search.
 
 Every page is rendered on the server: the browser calls no API, so there is no proxy
@@ -145,6 +149,8 @@ signed-in tab refused in words, the cookie's and the pages' headers, each page r
 from the REST core, browse walked a page of one at a time in each order (each thought
 once, Previous and First page going back, a trust filter, a refused cursor in words),
 search finding the driven thought by meaning and by exact text and paging the latter,
+the change feed walked a change at a time from a start and a bad start refused in words,
+the proposals and workers rendering, the query log holding the smoke's own search,
 each list's data holding only the fields it shows, no page, header, script or cookie
 holding the key, sign-out and a
 second sign-in each ending a session on the server, and one key's 21st sign-in ending
@@ -152,7 +158,9 @@ its own oldest session. `--require-thought` fails rather than skips the thought 
 when the overview lists none, and `--require-ingested` unless the overview's newest
 thought — the one it drives — is an ingested one, so its notice is driven, and
 `--require-pages` unless the brain holds three thoughts, so browse walks three pages and
-search pages, and the trust filter leaves the untrusted ones out. CI captures three just
-before the smoke (two with no trust, then an ingested one) and runs it in the full-stack job,
+search pages, and the trust filter leaves the untrusted ones out; `--require-rows` unless
+the proposals and workers pages render rows. CI captures three just before the smoke (two
+with no trust, then an ingested one), records a proposal and queues a pool through their
+producers, and runs it in the full-stack job,
 before that job configures the authorization server; after it, the job holds key
 sign-in off.

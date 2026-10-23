@@ -23,6 +23,15 @@ export function top(counts: Record<string, number> | null | undefined, n = 8): [
 		.slice(0, n);
 }
 
+/**
+ * Text any key or a model wrote — a judge's reason, a review note, a logged
+ * query, a change's text — on one line: every run of whitespace (a line break,
+ * a tab) one space, cut at `max` as a first line is (SMD-2280 PR 2b).
+ */
+export function oneLine(text: string | null | undefined, max = 200): string {
+	return firstLine((text ?? '').replace(/\s+/g, ' ').trim(), max);
+}
+
 /** A metadata word any write key writes (a type, a trust), as a list shows it: cut as a first line is, or null when not a string. */
 export function shortWord(v: unknown): string | null {
 	return typeof v === 'string' ? firstLine(v, 40) : null;
