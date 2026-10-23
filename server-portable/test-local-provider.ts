@@ -24,6 +24,7 @@
 import { SQL } from "bun";
 import type { Extraction, ExtractionWindow, ExtractProgress, ExtractWindowObservation } from "./entities.ts";
 import { createAssert, resetSchema } from "../db/test-support.ts";
+import { mcpUnderTest } from "./test-support.ts";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -109,7 +110,7 @@ delete process.env.OB1_LLM_API_KEY;
 delete process.env.SUPABASE_URL;
 delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const worker = (await import("./index.ts")).default as { fetch: (r: Request) => Response | Promise<Response> };
+const worker = await mcpUnderTest();
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const BASE = `http://localhost:${server.port ?? 0}`;
 const H = { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": "local-key" };

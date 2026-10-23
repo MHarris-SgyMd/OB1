@@ -28,6 +28,7 @@
 
 import { SQL } from "bun";
 import { createAssert, resetSchema } from "../db/test-support.ts";
+import { mcpUnderTest } from "./test-support.ts";
 import { hashKey } from "./auth.ts";
 import {
   DEFAULT_EGRESS_MODE, decideCalls, describeEgress, flagOn, localKnob, mayLeaveBox, parseEgressTerms, refusesEverything, resolveEgressPolicy, termMatches,
@@ -284,7 +285,7 @@ process.env.MCP_ACCESS_KEYS = `gated:write:${hashKey(GATED_KEY)},open:write:${ha
 process.env.OB1_EGRESS_ALLOW = "actor:open,type:idea,source:claude-code";
 for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_DENY", "OPENROUTER_API_KEY", "OB1_LLM_API_KEY", "OB1_CHAT_BASE_URL", "OB1_CHAT_API_KEY", "MCP_ACCESS_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "OB1_EMBEDDING_DIMENSIONS", "OB1_CHUNK_CONTEXT"]) delete process.env[k];
 
-const worker = (await import("./index.ts")).default as { fetch: (r: Request) => Response | Promise<Response> };
+const worker = await mcpUnderTest();
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const BASE = `http://localhost:${server.port ?? 0}`;
 let rpcId = 1;
@@ -458,11 +459,25 @@ console.log("\n[9] The provider away, a capture the gate allows is saved without
     `the provider back, the same text sent again lands on the same id with its vector and label (${JSON.stringify(after)})`);
 }
 
+// The MCP server's entry as the stack runs it (SMD-2287): its own process, in front of a REST core at `restPort`,
+// holding the forward key that core's MCP_ACCESS_KEYS lists (FORWARD_ENTRY).
+const FORWARD_KEY = "f0".repeat(32);
+const FORWARD_ENTRY = `mcp-forwarder:forward:${hashKey(FORWARD_KEY)}`;
+const mcpEntry = (port: number | undefined, restPort: number | undefined) => Bun.spawn(["bun", "--no-env-file", "index.ts"], {
+  cwd: `${import.meta.dir}/../mcp-server`,
+  env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: String(port), OB1_REST_URL: `http://127.0.0.1:${restPort}`, OB1_FORWARDER_KEY: FORWARD_KEY, OB1_PLUGINS: "" },
+  stdout: "pipe",
+  stderr: "pipe",
+});
+
 console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD-2889): a capture saved while the provider is down gets its vector once the provider answers, with no hand step — embedded once, though the MCP server and the REST core both run a mender; semantic search finds it, and keyed /health counts none waiting");
 {
-  // A port nothing answers on yet: the provider down. The server's entry is
-  // its own process, as the container runs it, so its mender is the one boot
-  // starts (index.ts under import.meta.main), here every second.
+  // A port nothing answers on yet: the provider down. Each REST core is its
+  // own process, as the container runs it, so its mender is the one boot
+  // starts (api.ts under import.meta.main), here every second. Two of them,
+  // taking turns under the leader lock, and the MCP server's entry in front
+  // of the first for the tool calls (SMD-2287 PR 6a: index.ts was the second
+  // mender, and served the calls itself).
   const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
   const providerPort = free.port;
   free.stop(true);
@@ -472,20 +487,24 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
   const free3 = Bun.serve({ port: 0, fetch: () => new Response(null) });
   const apiPort = free3.port;
   free3.stop(true);
+  const free4 = Bun.serve({ port: 0, fetch: () => new Response(null) });
+  const mcpPort = free4.port;
+  free4.stop(true);
   const childEnv = (port: number | undefined) => ({
     PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: String(port), OB1_STORE: "sql", DATABASE_URL: URL_,
     OB1_LLM_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM), OB1_METADATA_MODEL: META_MODEL,
-    MCP_ACCESS_KEYS: `open:write:${hashKey(OPEN_KEY)}`, OB1_VECTOR_MEND_INTERVAL: "1",
+    MCP_ACCESS_KEYS: `open:write:${hashKey(OPEN_KEY)},${FORWARD_ENTRY}`, OB1_VECTOR_MEND_INTERVAL: "1",
     // A pool of one: the leader lock holds a connection of its own, so the tick's reads and writes
     // and every request still have the pool's (review pass 2: the lock took the only one and the server hung).
     OB1_PG_POOL: "1",
   });
-  const child = Bun.spawn(["bun", "--no-env-file", "index.ts"], { cwd: import.meta.dir, env: childEnv(serverPort), stdout: "pipe", stderr: "pipe" });
-  // The REST core beside it, as the stack runs it: a mender of its own, the two taking turns under the leader lock.
+  // The second REST core: a mender of its own, the two taking turns under the leader lock.
+  const child = Bun.spawn(["bun", "--no-env-file", "api.ts"], { cwd: import.meta.dir, env: childEnv(serverPort), stdout: "pipe", stderr: "pipe" });
   const api = Bun.spawn(["bun", "--no-env-file", "api.ts"], { cwd: import.meta.dir, env: childEnv(apiPort), stdout: "pipe", stderr: "pipe" });
-  const at = `http://127.0.0.1:${serverPort}`;
+  const mcp = mcpEntry(mcpPort, apiPort);
+  const at = `http://127.0.0.1:${mcpPort}`;
   const rpc = async (name: string, args: Record<string, unknown>) => {
-    const r = await fetch(at, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }) });
+    const r = await fetch(`${at}/mcp`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }) });
     const t = await r.text();
     const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
     return { text: (b.result?.content ?? []).map((c: { text?: string }) => c.text ?? "").join("\n") as string, isError: b.result?.isError === true };
@@ -495,10 +514,10 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
   try {
     let up = false;
     for (let deadline = Date.now() + 15_000; !up && Date.now() < deadline; ) {
-      up = (await Promise.all([at, `http://127.0.0.1:${apiPort}`].map((u) => fetch(`${u}/health`, { signal: AbortSignal.timeout(2_000) }).then((r) => r.ok, () => false)))).every(Boolean);
+      up = (await Promise.all([at, `http://127.0.0.1:${serverPort}`, `http://127.0.0.1:${apiPort}`].map((u) => fetch(`${u}/health`, { signal: AbortSignal.timeout(2_000) }).then((r) => r.ok, () => false)))).every(Boolean);
       if (!up) await Bun.sleep(100);
     }
-    assert(up, "both servers' own processes answer /health");
+    assert(up, "the MCP server's and both REST cores' own processes answer /health");
     const content = "mend-verify-marker: a note captured while the provider is down, mended without a hand step";
     const cap = await rpc("capture_thought", { content });
     const id = /id ([0-9a-f-]{36})/.exec(cap.text)?.[1];
@@ -529,9 +548,9 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
     const found = await rpc("search_thoughts", { query: content, limit: 5 });
     assert(!found.isError && found.text.includes(id!), "semantic search finds it");
 
-    // The REST core's mender alone: the MCP server stopped (as mcp-server/ in
-    // front of /mcp holds no store, SMD-2287), the provider down again, a
-    // capture through REST; the provider back, the REST core mends it.
+    // One REST core's mender alone: the second stopped (as the stack runs one,
+    // SMD-2287), the provider down again, a capture through REST; the provider
+    // back, the REST core mends it.
     child.kill();
     await child.exited;
     provider?.stop(true);
@@ -551,12 +570,13 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
     const apiProvider = (await (await fetch(`${apiAt}/health`, { headers: { "x-brain-key": OPEN_KEY } })).json() as { provider?: { status?: string; reprobeS?: number | null } }).provider;
     assert(apiProvider?.reprobeS === 15 && ["unreachable", "answering"].includes(apiProvider.status ?? ""), `the REST core re-probes its provider, at the default 15 s, and its keyed /health says so (${JSON.stringify(apiProvider)})`);
     const restFound = await (await fetch(`${apiAt}/v1/search`, { method: "POST", headers: { "Content-Type": "application/json", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ query: restContent, limit: 5 }) })).text();
-    assert(restMended && restFound.includes(madeBody.id!), "the MCP server gone, the REST core's own mender gives it its vector, and REST search finds it");
+    assert(restMended && restFound.includes(madeBody.id!), "the second REST core gone, the first's own mender gives it its vector, and REST search finds it");
   } finally {
     child.kill();
     api.kill();
-    const hung = setTimeout(() => { child.kill("SIGKILL"); api.kill("SIGKILL"); }, 10_000);
-    const codes = await Promise.all([child.exited, api.exited]);
+    mcp.kill();
+    const hung = setTimeout(() => { child.kill("SIGKILL"); api.kill("SIGKILL"); mcp.kill("SIGKILL"); }, 10_000);
+    const codes = await Promise.all([child.exited, api.exited, mcp.exited]);
     clearTimeout(hung);
     provider?.stop(true);
     const said = (await new Response(child.stdout).text()) + (await new Response(child.stderr).text()) + (await new Response(api.stdout).text()) + (await new Response(api.stderr).text());
@@ -571,24 +591,27 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
 
 console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2890): started with its provider down, it serves degraded — a capture lands, a search answers by exact matches, keyed /health says unreachable since when while keyless /health stays `ok` — and leaves degraded by its re-probe alone within the interval once the provider answers, the same process throughout");
 {
-  // Both ports held at once, then let go, so the two cannot be the same one (review pass 1).
-  const holds = [Bun.serve({ port: 0, fetch: () => new Response(null) }), Bun.serve({ port: 0, fetch: () => new Response(null) })];
-  const [providerPort, serverPort] = holds.map((h) => h.port);
+  // The ports held at once, then let go, so no two can be the same one (review pass 1).
+  const holds = [0, 1, 2].map(() => Bun.serve({ port: 0, fetch: () => new Response(null) }));
+  const [providerPort, serverPort, mcpPort] = holds.map((h) => h.port);
   for (const h of holds) h.stop(true);
-  // The mender off, so the only thing that can see the provider back is the re-probe.
-  const child = Bun.spawn(["bun", "--no-env-file", "index.ts"], {
+  // The REST core, which holds the provider's state, and the MCP server's entry in front of it, as the stack runs
+  // them (SMD-2287 PR 6a: index.ts did both). The mender off, so the only thing that can see the provider back is
+  // the re-probe.
+  const child = Bun.spawn(["bun", "--no-env-file", "api.ts"], {
     cwd: import.meta.dir,
     env: {
       PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: String(serverPort), OB1_STORE: "sql", DATABASE_URL: URL_,
       OB1_LLM_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM), OB1_METADATA_MODEL: META_MODEL,
-      MCP_ACCESS_KEYS: `open:write:${hashKey(OPEN_KEY)}`, OB1_VECTOR_MEND_INTERVAL: "off", OB1_PROVIDER_REPROBE_INTERVAL: "1",
+      MCP_ACCESS_KEYS: `open:write:${hashKey(OPEN_KEY)},${FORWARD_ENTRY}`, OB1_VECTOR_MEND_INTERVAL: "off", OB1_PROVIDER_REPROBE_INTERVAL: "1",
     },
     stdout: "pipe",
     stderr: "pipe",
   });
-  const at = `http://127.0.0.1:${serverPort}`;
+  const mcp = mcpEntry(mcpPort, serverPort);
+  const at = `http://127.0.0.1:${mcpPort}`;
   const rpc = async (name: string, args: Record<string, unknown>) => {
-    const r = await fetch(at, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }) });
+    const r = await fetch(`${at}/mcp`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }) });
     const t = await r.text();
     const b = JSON.parse(t.startsWith("{") ? t : (t.split("\n").find((l) => l.startsWith("data: ")) ?? "").slice(6));
     return { text: (b.result?.content ?? []).map((c: { text?: string }) => c.text ?? "").join("\n") as string, isError: b.result?.isError === true };
@@ -608,10 +631,10 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
   try {
     let up = false;
     for (let deadline = Date.now() + 15_000; !up && Date.now() < deadline; ) {
-      up = await fetch(`${at}/health`, { signal: AbortSignal.timeout(2_000) }).then((r) => r.ok, () => false);
+      up = (await Promise.all([at, `http://127.0.0.1:${serverPort}`].map((u) => fetch(`${u}/health`, { signal: AbortSignal.timeout(2_000) }).then((r) => r.ok, () => false)))).every(Boolean);
       if (!up) await Bun.sleep(100);
     }
-    assert(up, "the server's own process starts with its provider down");
+    assert(up, "the REST core's and the MCP server's own processes start with the provider down");
     let p = await keyed();
     for (let deadline = Date.now() + 5_000; p?.status !== "unreachable" && Date.now() < deadline; ) { await Bun.sleep(100); p = await keyed(); }
     assert(p?.status === "unreachable" && /^\d{4}-\d\d-\d\dT/.test(p.since ?? "") && p.reason === "provider_unreachable" && p.reprobeS === 1,
@@ -672,8 +695,9 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
     assert(child.exitCode === null && !child.killed, "the same process throughout: no exit, no restart");
   } finally {
     child.kill();
-    const hung = setTimeout(() => child.kill("SIGKILL"), 10_000);
-    const code = await child.exited;
+    mcp.kill();
+    const hung = setTimeout(() => { child.kill("SIGKILL"); mcp.kill("SIGKILL"); }, 10_000);
+    const [code] = await Promise.all([child.exited, mcp.exited]);
     clearTimeout(hung);
     provider?.stop(true);
     const said = (await new Response(child.stdout).text()) + (await new Response(child.stderr).text());

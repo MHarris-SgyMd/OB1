@@ -32,7 +32,7 @@ import { hashKey } from "./auth.ts";
 import { trustAtOrAbove, TRUST } from "./core/filter.ts";
 import { INGESTED_NOTICE } from "./render.ts";
 import { fileURLToPath } from "node:url";
-import { mcpTarget, mcpUnderTest, servedAsNamed, SUITE_CARRIER } from "./test-support.ts";
+import { mcpUnderTest, servedByMcpServer, SUITE_CARRIER } from "./test-support.ts";
 import { createCore, newMendState } from "./core/index.ts";
 import { createStore, type ThoughtStore } from "./store.ts";
 import { parseListCursor } from "./core/list-cursor.ts";
@@ -143,15 +143,14 @@ process.env.OB1_TIER = "canary";
 delete process.env.SUPABASE_URL;
 delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// index.ts, or with OB1_MCP_UNDER_TEST=client the MCP server over the REST core (SMD-2287).
+// The MCP server over the REST core (SMD-2287).
 const worker = await mcpUnderTest();
 // Through the MCP server as a REST client, a write is the REST core's: its door (api.ts's API_DOOR), with the MCP
-// server named beside it as the request's carrier (`act`, stack.ts's forwarder key) — where index.ts records its own
-// door and no carrier. The sections that read a door read this one (SMD-2287 PR 3b).
-const VIA_CLIENT = mcpTarget() === "client";
-const DOOR = VIA_CLIENT ? "open-brain-api" : "open-brain";
-const CARRIER = VIA_CLIENT ? SUITE_CARRIER : null;
-assert(servedAsNamed(), `the server under test is the one OB1_MCP_UNDER_TEST names (${process.env.OB1_MCP_UNDER_TEST || "index"})`);
+// server named beside it as the request's carrier (`act`, stack.ts's forwarder key). The sections that read a door
+// read this one (SMD-2287 PR 3b).
+const DOOR = "open-brain-api";
+const CARRIER = SUITE_CARRIER;
+assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const BASE = `http://localhost:${server.port ?? 0}`;
 const H = {
@@ -744,8 +743,7 @@ console.log("\n[6f] Async job handle: scan_thoughts returns a handle, the poll w
 console.log("\n[6g] Durable job store (SMD-2318): a finished job survives a restart, reconcile marks orphans lost, prune_jobs retains (real Postgres)");
 {
   // The suite runs the server in-process (not import.meta.main), so its entry's
-  // startup wiring (index.ts's, or the REST core's api.ts behind the MCP server)
-  // does not fire — set the sink here, sharing jobs.ts's module state with the
+  // startup wiring (the REST core's api.ts, behind the MCP server) does not fire — set the sink here, sharing jobs.ts's module state with the
   // running server. A separate SqlStore on the same database is
   // enough: the durable table is shared. resetJobsForTest() clears the in-memory
   // registry, standing in for a restart.
@@ -3331,8 +3329,8 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
   // store (the registry lookup reads it); the reconcile runs detached after.
   // It reaches server-portable's live rows (door open-brain), not the REST
   // core's (open-brain-api): two servers on one database (078). It spawns
-  // index.ts's entry under OB1_MCP_UNDER_TEST=client too: the MCP server holds
-  // no job store, and the REST core's entry is test-rest-sql's to run.
+  // index.ts's entry though the suite drives the MCP server, which holds no job
+  // store; the REST core's entry is test-rest-sql's to run.
   const sql = new SQL({ url: URL_, max: 1 });
   const jobId = crypto.randomUUID();
   const apiJob = crypto.randomUUID();

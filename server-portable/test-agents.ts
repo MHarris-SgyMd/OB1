@@ -25,7 +25,7 @@
 
 import { SQL } from "bun";
 import { createAssert, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
-import { mcpClient } from "./test-support.ts";
+import { mcpClient, mcpUnderTest, SUITE_CARRIER } from "./test-support.ts";
 import { hashKey, type Principal } from "./auth.ts";
 import { AgentResolver } from "./agents.ts";
 import type { AgentResolution, ThoughtStore } from "./store.ts";
@@ -85,7 +85,7 @@ process.env.OB1_AGENT_CACHE_TTL_MS = "0";
 delete process.env.OPENROUTER_API_KEY;
 delete process.env.SUPABASE_URL;
 
-const worker = (await import("./index.ts")).default as { fetch: (r: Request) => Response | Promise<Response> };
+const worker = await mcpUnderTest();
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const BASE = `http://localhost:${server.port ?? 0}`;
 const laptop = mcpClient(BASE, KEY_A);
@@ -130,11 +130,14 @@ console.log("\n[1] A capture through a named key records that agent's id");
 
   // actor_context is the free-form blob for everything WITHOUT a column. An id
   // recorded in both places is not merely redundant: the two can then disagree,
-  // and nothing says which is authoritative.
+  // and nothing says which is authoritative. Through the MCP server it holds
+  // the carrier alone (`act`, the MCP server's own key and agent, SMD-2287),
+  // never the caller's id.
   const [ctx] = await sql`
-    SELECT actor_context FROM thought_audit WHERE actor_name = 'laptop'`;
-  assert(ctx.actor_context === null,
-         `agent_id is not also duplicated into actor_context (${JSON.stringify(ctx.actor_context)})`);
+    SELECT actor_context, canonical_agent_id FROM thought_audit WHERE actor_name = 'laptop'`;
+  const context = (ctx.actor_context ?? {}) as { act?: { name?: string; agent_id?: string } };
+  assert(JSON.stringify(Object.keys(context)) === JSON.stringify(["act"]) && context.act?.name === SUITE_CARRIER && context.act.agent_id !== ctx.canonical_agent_id,
+         `agent_id is not also duplicated into actor_context: it holds the carrier alone (${JSON.stringify(ctx.actor_context)})`);
 }
 
 console.log("\n[2] The registry distinguishes first sight from a repeat");

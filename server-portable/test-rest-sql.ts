@@ -22,6 +22,7 @@
 
 import { SQL } from "bun";
 import { createAssert, resetSchema } from "../db/test-support.ts";
+import { mcpUnderTest } from "./test-support.ts";
 import { hashKey } from "./auth.ts";
 import { ok } from "./core/refusal.ts";
 import { listCursor } from "./core/list-cursor.ts";
@@ -84,7 +85,7 @@ process.env.MCP_ACCESS_KEYS = [
 ].join(",");
 
 // Both doors in one process, over the one process root (root.ts): one store.
-const mcpServer = Bun.serve({ port: 0, fetch: (await import("./index.ts")).default.fetch });
+const mcpServer = Bun.serve({ port: 0, fetch: (await mcpUnderTest()).fetch });
 const apiServer = Bun.serve({ port: 0, fetch: (await import("./api.ts")).default.fetch });
 const MCP = `http://localhost:${mcpServer.port}`;
 const API = `http://localhost:${apiServer.port}`;

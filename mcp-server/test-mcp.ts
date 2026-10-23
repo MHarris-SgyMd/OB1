@@ -14,8 +14,8 @@
  * - /health, the worker mirrors and the job routes answer as index.ts's;
  * - an enabled plugin's operation is a tool where whoami names it, called by
  *   its route and said by render.ts's renderPlugin (PR 4a).
- * test-auth.ts and (PR 3b) test-e2e-sql.ts run against it too, with
- * OB1_MCP_UNDER_TEST=client.
+ * server-portable's suites that drive an MCP server run against it too,
+ * through stack.ts (since PR 6a, never index.ts).
  *
  *   bun test-mcp.ts
  */

@@ -231,17 +231,16 @@ profiles and `OB1_PLUGINS` from `deploy/.env`, on the mesh alone, with
 
 ```bash
 bun test-mcp.ts                                                  # 191 — the tool list from whoami; each reply what render.ts makes of the core's outcome (a success, a refusal carried whole, a fault, capture's STORE_UNAVAILABLE, the REST core away); a scan's links under the endpoint; the key refusals' envelopes and a notification's bare answer; /health; the mirrors and the job routes; a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault; /health's one deadline, a job stream's answers, a misconfigured forwarder said once; the forwarder's busy key, the registry busy mid-call, one line for a route's throw, the entry's idle timeout and its refusal of a base; a route's throw named with the REST core's address, a client gone unsaid, a base's credentials unprinted, the entry imported throwing; a plugin's operation a tool where whoami names it, its value, refusal and fault as renderPlugin says them, the entry's OB1_PLUGINS, an input's steps run once, a call with no arguments, a batch's shared id refused, a body behind byte-order marks; the entry's stop, a tool call waited on and cut; a fault's line `error` FAILED, the keyed HEADs at once, `/health`'s record beside the key's check, a key turned mid-call; the entry's spans sent at its stop as open-brain-mcp, the REST core's span the child of its tool call's across two processes, a plugin tool named on its line; the method guard; the token exchange: a token traded once and cached by its digest, the REST core sent the exchanged token alone, a read and a write connector of one subject each their own scope, one trade at a time, the cache's margin and bound, refusals on the claims, the authorization server's answers (invalid_grant, invalid_scope, away, busy, 429, a cut-short 200, its client refused) and the REST core's (403, keyless), a revoked subject, job links and mirrors by token, refused ones answered (503 with the authorization server away), /health not, a token beside a key form never sent as one, a dotted raw key in each form and as a bearer with no OAuth, a REST core that checks no token or another origin's, a trade past a job link's deadline, unavailable trades said in the log, a stalled refusal, echoing error codes (a bare 64-hex value too) and a hex key as a bearer, another Host and no secret, a key client with the authorization server away, a token too brief to keep
-cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-auth.ts   # 191 — test-auth's assertions, held to this server with the REST core behind it
-cd ../server-portable && OB1_MCP_UNDER_TEST=client ../db/with-postgres.sh bun test-e2e-sql.ts   # 629 — the whole server over MCP on real Postgres, held to this server the same way
-cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-server.ts   # 1131 — the real server's suite whole: its request lines, its spans, one trace per tool call, the entry's telemetry, a keyed HEAD outside the budget, and its stop
-cd ../server-portable && OB1_MCP_UNDER_TEST=client bun test-plugins.ts   # 283 — plugins in the contract, an enabled plugin's operation as this server's tool
-cd ../server-portable && OB1_MCP_UNDER_TEST=client ../db/with-postgres.sh bun test-plugins-sql.ts   # 107 — the example's operations, pinned over REST and read back through this server
+cd ../server-portable && bun test-auth.ts   # 191 — test-auth's assertions, held to this server with the REST core behind it
+cd ../server-portable && ../db/with-postgres.sh bun test-e2e-sql.ts   # 673 — the whole server over MCP on real Postgres, held to this server the same way
+cd ../server-portable && bun test-server.ts   # 1183 — the real server's suite whole: its request lines, its spans, one trace per tool call, the entry's telemetry, a keyed HEAD outside the budget, and its stop
+cd ../server-portable && bun test-plugins.ts   # 282 — plugins in the contract, an enabled plugin's operation as this server's tool
+cd ../server-portable && ../db/with-postgres.sh bun test-plugins-sql.ts   # 107 — the example's operations, pinned over REST and read back through this server
 ```
 
-`OB1_MCP_UNDER_TEST=client` makes a server-portable suite drive this server through
-`stack.ts` in place of `index.ts` (`server-portable/test-support.ts`'s `mcpUnderTest`); each
-suite first asserts that the server it got is the one the variable names.
-CI runs test-server, test-auth, test-e2e-sql, test-plugins and test-plugins-sql both ways. Where the two servers differ, test-e2e-sql
-says which it expects: a write through this server records the REST core's door,
-`open-brain-api`, with this server as its carrier (`act`). [18] runs server-portable's
-own entry either way: this server holds no job store.
+Every server-portable suite that drives an MCP server drives this one, through `stack.ts`
+(`server-portable/test-support.ts`'s `mcpUnderTest`), and first asserts that it got it
+(SMD-2287 PR 6a: until then five of them also ran against `index.ts`). A write through
+this server records the REST core's door, `open-brain-api`, with this server as its
+carrier (`act`). test-e2e-sql's [18] runs server-portable's own entry: this server holds
+no job store.

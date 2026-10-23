@@ -23,7 +23,7 @@
 
 import { SQL } from "bun";
 import { createAssert, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
-import { mcpClient } from "./test-support.ts";
+import { mcpClient, mcpUnderTest } from "./test-support.ts";
 import { hashKey } from "./auth.ts";
 import { visibleToolNames } from "./tools.ts";
 
@@ -77,7 +77,7 @@ process.env.OB1_CHUNK_TOKENS = "60";
 delete process.env.OPENROUTER_API_KEY;
 delete process.env.SUPABASE_URL;
 
-const worker = (await import("./index.ts")).default as { fetch: (r: Request) => Response | Promise<Response> };
+const worker = await mcpUnderTest();
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const BASE = `http://localhost:${server.port ?? 0}`;
 const writer = mcpClient(BASE, WRITE);
