@@ -152,7 +152,7 @@
     "chatgpt": { "direction": "source", "note": "two fetchers, one vendor: chrome-capture-extension (push and pull) and chatgpt-conversation-import (batch) — the same conversation id from either." },
     "gemini": { "direction": "source", "note": "chrome-capture-extension: a best-effort manual push and a debugger-observed history pull." },
     "perplexity": { "direction": "source", "note": "perplexity-conversation-import over the .xlsx export." },
-    "grok": { "direction": "source", "note": "grok-export-import over the xAI export, and x-twitter-import's grok-conversations.js — the same vendor from two archives." },
+    "grok": { "direction": "source", "note": "grok-export-import over the xAI export, and x-twitter-import's grok-conversations.js — the same vendor from two archives; the second's rows are the x system's (one import, one source, SMD-2493)." },
     "x": { "direction": "source", "note": "x-twitter-import: tweets are activity, DMs are a message stream." },
     "instagram": { "direction": "source", "note": "instagram-import: DMs are a message stream, comments and captions are activity." },
     "blogger": { "direction": "source", "note": "journals-blogger-import over the Atom XML export." },
@@ -210,15 +210,15 @@
     {
       "path": "recipes/grok-export-import",
       "capabilities": [
-        { "vendor": "grok", "family": "conversation-export", "transport": "batch", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "xAI JSON export with MongoDB-style dates; one thought per conversation" }
+        { "vendor": "grok", "family": "conversation-export", "transport": "batch", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "xAI JSON export with MongoDB-style dates; one thought per conversation, in parts past 100,000 characters (SMD-2493)" }
       ]
     },
     {
       "path": "recipes/x-twitter-import",
       "capabilities": [
-        { "vendor": "x", "family": "activity-export", "transport": "batch", "direction": "source", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "tweets.js, batched twenty at a time by date range into one thought" },
-        { "vendor": "x", "family": "message-stream/chat", "transport": "batch", "direction": "source", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "direct-messages.js; a DM conversation of three or more messages is one thought" },
-        { "vendor": "grok", "family": "conversation-export", "transport": "batch", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "grok-conversations.js from the X archive; one thought per chat" }
+        { "vendor": "x", "family": "activity-export", "transport": "batch", "direction": "source", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "tweets.js, one thought per day (SMD-2493)" },
+        { "vendor": "x", "family": "message-stream/chat", "transport": "batch", "direction": "source", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "direct-messages.js; a DM conversation of three or more messages is one thought, in parts past 100,000 characters (SMD-2493)" },
+        { "vendor": "grok", "family": "conversation-export", "transport": "batch", "direction": "source", "cardinality": "1:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "grok-conversations.js from the X archive; one thought per chat (in parts past 100,000 characters), under the x system: one import, one source (SMD-2493)" }
       ]
     },
     {
@@ -242,8 +242,8 @@
     {
       "path": "recipes/instagram-import",
       "capabilities": [
-        { "vendor": "instagram", "family": "message-stream/chat", "transport": "batch", "direction": "source", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "a DM conversation (capped at 200 messages) is one thought" },
-        { "vendor": "instagram", "family": "activity-export", "transport": "batch", "direction": "source", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "comments in batches of fifty and post captions in batches of thirty" }
+        { "vendor": "instagram", "family": "message-stream/chat", "transport": "batch", "direction": "source", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "a DM conversation is one thought, every message in it, in parts past 100,000 characters (SMD-2493)" },
+        { "vendor": "instagram", "family": "activity-export", "transport": "batch", "direction": "source", "cardinality": "many:1", "round_trip": "read-only", "fetcher": "native-driver", "note": "comments and post captions, one thought per day each (SMD-2493)" }
       ]
     },
     {
