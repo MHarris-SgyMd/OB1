@@ -58,9 +58,11 @@ const REQUIRE_THOUGHT = args.includes("--require-thought");
 /** Fail unless the thought driven is an ingested one: CI's capture is, so the notice arm cannot pass on a thought without one. */
 const REQUIRE_INGESTED = args.includes("--require-ingested");
 /** Fail, not skip, when the brain holds fewer than three thoughts: CI captures three, so browse walks three pages and search pages past its first. */
+/** Fail unless the proposals and workers pages render rows, not their empty words: CI plants one proposal and one pool. */
+const REQUIRE_ROWS = args.includes("--require-rows");
 const REQUIRE_PAGES = args.includes("--require-pages");
 if (!BASE || !WRITE_KEY) {
-  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought] [--require-ingested] [--require-pages]");
+  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought] [--require-ingested] [--require-pages] [--require-rows]");
   process.exit(2);
 }
 const ORIGIN = new URL(BASE).origin;
@@ -374,26 +376,40 @@ let searchWord = "";
     const walked: string[] = [];
     let path = "/changes?since=2000-01-01&limit=1";
     let pages = 0;
+    let lastStatus = 200;
     while (path && pages < 60) {
       const r = await get(path);
+      lastStatus = r.status;
       if (r.status !== 200) break;
       walked.push(...changeIds(r.html));
       pages++;
       path = linkOf(r.html, "next");
     }
     const recent = changeIds(changes.html);
-    assert(pages >= 2 && new Set(walked).size === walked.length && (recent.length >= 50 || walked.join() === recent.join()), `…from a start, a change at a time by Next: ${pages} pages, each change once${recent.length < 50 ? ", the same changes as the most recent" : ""} (${walked.length})`);
+    // Ended at its last page — no Next — and not at a page that failed (review pass 1: a big brain's walk hid one).
+    assert(pages >= 2 && lastStatus === 200 && path === "" && new Set(walked).size === walked.length && (recent.length >= 50 || walked.join() === recent.join()), `…from a start, a change at a time by Next: ${pages} pages, each change once${recent.length < 50 ? ", the same changes as the most recent" : ""} (${walked.length})`);
   }
   const badSince = await get("/changes?since=not-a-time");
-  assert(badSince.status === 400 && badSince.html.includes("not a time the brain reads"), `a start the change feed cannot read is a 400 in words (${badSince.status})`);
+  assert(badSince.status === 400 && badSince.html.includes("not a time the brain reads") && badSince.html.includes('data-testid="restart"'), `a start the change feed cannot read is a 400 in words, the newest changes a link away (${badSince.status})`);
+  // Next carries the page's cursor as `after`, never in `since`, which the form shows: a new filter starts again (review pass 1).
+  const firstNext = linkOf((await get("/changes?since=2000-01-01&limit=1")).html, "next");
+  assert(/[?&]after=[0-9a-f-]{36}/.test(firstNext) && !/[?&]since=[0-9a-f]{8}-/.test(firstNext), `…Next carries the cursor as after, not in since (${firstNext.replace(/[0-9a-f-]{36}/, "<cursor>")})`);
+  // A filter that matches nothing says so, and does not read as an empty brain (review pass 1).
+  const none = await get("/changes?agent=no-key-has-this-name-pr2b");
+  assert(none.status === 200 && none.html.includes("No change matches these filters"), `a change-feed filter matching nothing says so (${none.status})`);
+  // A query-log start the core once took and Postgres did not is now the core's refusal, in words: not a 500 (review pass 1).
+  const looseSince = await get("/query-log?since=1");
+  assert(looseSince.status === 400 && looseSince.html.includes("not a time the brain reads"), `a query-log start of "1" is a 400 in words, not the store's 500 (${looseSince.status})`);
   const deletes = await get("/changes?action=delete");
   assert(deletes.status === 200 && !/captured by/.test(deletes.html), `…and the kinds filter keeps its kind: deletions alone list no capture (${deletes.status})`);
 
   // The worker queue, the proposals and the query log (PR 2b): each renders from the core, its rows or its empty words.
   const workers = await get("/workers");
-  assert(workers.status === 200 && (workers.html.includes('data-testid="pools"') || workers.html.includes('data-testid="empty"')), `the worker queue renders its pools or says none is queued (${workers.status})`);
+  const pools = workers.html.includes('data-testid="pools"');
+  assert(workers.status === 200 && (pools || (!REQUIRE_ROWS && workers.html.includes('data-testid="empty"'))), `the worker queue renders its pools${REQUIRE_ROWS ? " (--require-rows: CI queued one)" : " or says none is queued"} (${workers.status}, ${pools ? "rows" : "empty"})`);
   const proposals = await get("/proposals?status=all&limit=5");
-  assert(proposals.status === 200 && (proposals.html.includes('data-testid="proposals"') || proposals.html.includes('data-testid="empty"')), `the proposals render, or say there are none (${proposals.status})`);
+  const proposed = proposals.html.includes('data-testid="proposals"');
+  assert(proposals.status === 200 && (proposed || (!REQUIRE_ROWS && proposals.html.includes('data-testid="empty"'))), `the proposals render${REQUIRE_ROWS ? " (--require-rows: CI recorded one)" : ", or say there are none"} (${proposals.status}, ${proposed ? "rows" : "empty"})`);
   assert(/data-testid="proposals"[^>]*data-sveltekit-preload-data="off"/.test(proposals.html) || proposals.html.includes('data-testid="empty"'), "…their thought links not preloaded on hover");
   const queryLog = await get("/query-log");
   const logged = searchWord !== "" && queryLog.html.includes(`“${searchWord}”`);
@@ -432,7 +448,7 @@ let searchWord = "";
   // Browse's and search's the same way (PR 2a): the fields each list shows, never a thought's content.
   assert(listKeys(pages[4].html, "thoughts") === "created_at,id,line,superseded,trust,type", `browse's data lists each thought as its id, first line, time, flag, type and trust alone (${listKeys(pages[4].html, "thoughts")})`);
   // The change feed's the same way (PR 2b): the core's fields for each change, its text one line.
-  assert(listKeys(pages[8].html, "changes") === "action,at,changed,derivation,id,kind,metadataKeys,present,supersedesAfter,supersedesBefore,text,thoughtId,who", `the change feed's data lists each change by its shown fields alone (${listKeys(pages[8].html, "changes")})`);
+  assert(listKeys(pages[8].html, "changes") === "action,at,changed,derivation,id,metadataKeys,metadataMore,present,supersedesAfter,supersedesBefore,text,thoughtId,who", `the change feed's data lists each change by its shown fields alone (${listKeys(pages[8].html, "changes")})`);
   assert(searchWord === "" || listKeys(pages[6].html, "hits") === "created_at,exact,id,line,moved,occurrences,score,superseded,trust", `search's data lists each hit by its fields alone (${searchWord === "" ? "no word to search" : listKeys(pages[6].html, "hits")})`);
   assert(!leaked && scripts.size > 2, `no page, header, navigation data or script (${scripts.size} modules) holds the key`);
 

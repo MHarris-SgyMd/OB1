@@ -1795,7 +1795,9 @@ jobs:
       # that page's ingested notice is driven, and --require-pages unless
       # browse walks three pages (the third's Previous and First page, a
       # spent cut trail on the last), search pages past its first, and the
-      # trust filter leaves the untrusted captures out (PR 2a). The smoke holds the
+      # trust filter leaves the untrusted captures out (PR 2a), and --require-rows
+      # unless the proposals and workers pages render rows, which the step
+      # plants through the brain's own producers (PR 2b). The smoke holds the
       # sign-in wall; a wrong and a capture-only key, a cookie the server never
       # issued and a cross-site or Origin-null sign-in refused; the cookie's
       # and the pages' headers; the overview, the status, browse, search, the
@@ -1822,7 +1824,12 @@ jobs:
             -H "x-brain-key: $OB1_SMOKE_KEY" -o /tmp/gui-capture \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"capture_thought","arguments":{"content":"The operator GUI smoke reads this thought on its own page, its ingested notice before it (SMD-2280).","trust":"ingested"}}}'
           grep -q 'Captured as' /tmp/gui-capture || { echo "the GUI smoke's capture failed: $(head -c 400 /tmp/gui-capture)" >&2; exit 1; }
-          bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY" --require-thought --require-ingested --require-pages
+          # One proposal and one work pool, each through the brain's own producer — record_supersession_proposal writes
+          # the lineage row preflight asks of every proposal (SMD-1731), enqueue_thoughts the pool's pending claims — so
+          # the proposals and workers pages render rows here, not their empty words (PR 2b review pass 1).
+          (cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -qAtc \
+            "SELECT record_supersession_proposal((SELECT id FROM thoughts ORDER BY created_at, id LIMIT 1), (SELECT id FROM thoughts ORDER BY created_at DESC, id DESC LIMIT 1), 'newer_supersedes_older', 0.9, 'The operator GUI smoke''s proposal (SMD-2280).', 0.8, 'ci-gui-smoke'); SELECT enqueue_thoughts('extract:gui-smoke@ci', ARRAY(SELECT id FROM thoughts));") > /dev/null
+          bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY" --require-thought --require-ingested --require-pages --require-rows
 
       # Where the authorization server's step ran when the full-stack checks
       # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):

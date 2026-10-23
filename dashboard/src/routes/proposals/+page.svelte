@@ -1,15 +1,21 @@
 <script lang="ts">
 	import { base } from '$app/paths';
 	import { when } from '$lib/format';
+	import { tidy } from '$lib/tidy';
 	import { ingestedNotice } from '../../../../server-portable/core/filter.ts';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
 	const apply = (e: Event) => (e.currentTarget as HTMLSelectElement).form?.requestSubmit();
+	const tidyForm = tidy({ status: 'pending', lineage: 'any', limit: '25' });
 	type Side = PageData['proposals'][number]['newer'];
-	/** Who wrote a side, as the read tools' By: line names a writer. */
-	const by = (s: Side) =>
-		s.writer ? `${s.writer.name ?? 'a key not recorded'}${s.writer.kind ? ` (${s.writer.kind})` : ''}${s.writer.trust ? ` · trust ${s.writer.trust}` : ''}${s.writer.captureOnly ? ' · a capture-only key’s text' : ''}` : null;
+	/** Who wrote a side, in the read tools' By: line's words (render.ts's actorLine and proposalWriterLine). */
+	const by = (s: Side) => {
+		if (!s.writer) return null;
+		const w = s.writer;
+		const line = !w.name && !w.kind && !w.trust ? 'not recorded' : `${w.name ?? 'an unnamed key'} (${w.kind ?? 'kind not classified'}) · trust ${w.trust ?? 'not recorded'}`;
+		return w.captureOnly ? `${line} · a capture-only key’s text` : line;
+	};
 </script>
 
 <svelte:head><title>Proposals · Open Brain</title></svelte:head>
@@ -17,7 +23,7 @@
 <section class="space-y-6">
 	<h1 class="text-xl font-semibold">Supersession proposals</h1>
 
-	<form method="GET" action="{base}/proposals" class="bg-bg-card border border-white/10 rounded-xl p-5 grid gap-3 sm:grid-cols-4 text-sm items-end" data-testid="filters" data-sveltekit-keepfocus data-sveltekit-noscroll>
+	<form method="GET" action="{base}/proposals" onformdata={tidyForm} class="bg-bg-card border border-white/10 rounded-xl p-5 grid gap-3 sm:grid-cols-4 text-sm items-end" data-testid="filters" data-sveltekit-keepfocus data-sveltekit-noscroll>
 		<label class="flex flex-col gap-1">Status
 			<select name="status" onchange={apply} class="field">
 				{#each ['pending', 'accepted', 'rejected', 'stale', 'all'] as s (s)}<option value={s} selected={data.q.status === s}>{s}</option>{/each}
@@ -36,7 +42,7 @@
 
 	<div class="bg-bg-card border border-white/10 rounded-xl p-5 space-y-4">
 		<p class="text-sm text-text-muted">
-			The consolidation pass proposes; nothing is written to a thought until a reviewer accepts a proposal (<code>cd db &amp;&amp; bun consolidate.ts --accept</code> or <code>--reject</code>). Most confident first.
+			The consolidation pass proposes; nothing is written to a thought until a reviewer accepts a proposal (<code>cd db &amp;&amp; bun consolidate.ts --url $DATABASE_URL --accept</code> or <code>--reject</code>). Most confident first. Before an accept, read the pair in <code>--list</code> or the list_supersession_proposals tool: they name the writer flags and the pointers an accept would clear, which this page does not.
 		</p>
 		{#if data.proposals.length === 0}
 			<p class="text-sm text-text-muted" data-testid="empty">No {data.q.status === 'all' ? '' : `${data.q.status} `}proposal{data.q.lineage === 'only' ? ' on a lineage pair' : data.q.lineage === 'none' ? ' off a lineage pair' : ''}.</p>

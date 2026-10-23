@@ -3,6 +3,10 @@ import { firstLine, oneLine } from '$lib/format';
 import { wholeIn, wordIn } from '$lib/params';
 import { read } from '$lib/server/rest';
 import type { ProposalsResult } from '$lib/types';
+import { SAID_BY, TRUST } from '../../../../server-portable/core/filter.ts';
+
+/** A word of `words`, or null: a writer's kind and trust are any write key's to set, and the tool keeps only its words (render.ts's actorLine). */
+const wordOf = (words: readonly string[], v: string | null) => (v !== null && words.includes(v) ? v : null);
 
 const STATUSES = ['pending', 'accepted', 'rejected', 'stale', 'all'] as const;
 /** Lineage, as the core's three-way `lineage`: every pair, only lineage pairs, or none of them. */
@@ -36,7 +40,7 @@ export const load: PageServerLoad = async (event) => {
 		line: firstLine(s.content),
 		created_at: s.created_at,
 		edited: s.edited,
-		writer: s.writer && { name: s.writer.name === null ? null : oneLine(s.writer.name, 80), kind: s.writer.kind, trust: s.writer.trust, captureOnly: s.writer.captureOnly },
+		writer: s.writer && { name: s.writer.name === null ? null : oneLine(s.writer.name, 80), kind: wordOf(SAID_BY, s.writer.kind), trust: wordOf(TRUST, s.writer.trust), captureOnly: s.writer.captureOnly },
 		supersededBy: s.supersededBy,
 	});
 	return {

@@ -598,8 +598,12 @@ export async function listThoughtIds(ctx: Ctx, _principal: Principal, { limit, a
 }
 
 export async function listLoggedSearches(ctx: Ctx, _principal: Principal, { since, limit }: Input<"list_logged_searches">): Promise<Outcome<LoggedSearchPage>> {
-  if (since !== undefined && Number.isNaN(Date.parse(since))) return refuse({ code: "REFUSED_SINCE", retryable: false, value: since });
-  return ok(await (await ctx.store()).listLoggedSearches({ since: since ?? null, limit }));
+  // thought_changes's reading of a time (parseSince), its cursor arm excepted: Date.parse took `1` and `Oct 23`, which
+  // Postgres's timestamptz does not, so they reached the store as its 500 (SMD-2280 PR 2b review pass 1); a clock with
+  // no zone, read in the database's, is refused here as there. A change-feed cursor names no time of this log.
+  const start = since === undefined ? { since: null, after: null } : parseSince(since);
+  if ("refused" in start || start.after !== null) return refuse({ code: "REFUSED_SINCE", retryable: false, value: since ?? "" });
+  return ok(await (await ctx.store()).listLoggedSearches({ since: start.since, limit }));
 }
 
 /** The pools, under a key: a JSON result is an object (an array is wrapped by the MCP wire codec, SEP-2106). */

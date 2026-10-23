@@ -27,7 +27,8 @@
 			<!-- The brand is no heading: each page has its one h1 (review pass 6). -->
 			<a href={HOME} class="flex items-center gap-3 text-xl font-bold">Open Brain</a>
 			{#if data.signedIn}
-				<nav class="flex items-center gap-4 text-sm" aria-label="Views">
+				<!-- It wraps: eight views pushed it 218 px past a phone's width, and every page scrolled sideways (PR 2b review pass 1). -->
+				<nav class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm" aria-label="Views">
 					{#each nav as item (item.href)}
 						<a
 							href={item.href}

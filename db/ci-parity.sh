@@ -19,7 +19,8 @@
 # the same directory, with the same flags and the same environment (a step that
 # sets DATABASE_URL is `run`, one that does not is `nodb`), and every directory
 # CI runs `bunx tsc --noEmit` in a `typecheck` line, whether by a step of its
-# own or one .github/ci/typecheck.sh step names (SMD-3202) — or its job or
+# own or one .github/ci/typecheck.sh step names (SMD-3202), as is every
+# directory a step runs `bun run check` in (a SvelteKit app, SMD-2280) — or its job or
 # script is excused there with why. Not here, so: the full stack and the
 # authorization POC (built images and a compose stack), the landing check (a
 # pull request's commit range) and the codemod's round-trip (it rewrites
@@ -100,10 +101,11 @@ typecheck() {
     row ok "$dir" "$how"
   else
     row bad "$dir" "$how"
-    # The first type errors; or, when tsc itself did not run (a bunx
-    # resolution failure has no `error TS` line), the tail of what did print.
-    if printf '%s\n' "$out" | grep -qE 'error TS'; then
-      printf '%s\n' "$out" | grep -E 'error TS' | head -3 | sed 's/^/        /'
+    # The first type errors — tsc's `error TS` lines, svelte-check's `ERROR`
+    # ones; or, when neither ran (a bunx resolution failure has no such line),
+    # the tail of what did print.
+    if printf '%s\n' "$out" | grep -qE 'error TS| ERROR "'; then
+      printf '%s\n' "$out" | grep -E 'error TS| ERROR "' | head -3 | sed 's/^/        /'
     else
       printf '%s\n' "$out" | grep -Ev '^\s*$' | tail -3 | sed 's/^/        /'
     fi

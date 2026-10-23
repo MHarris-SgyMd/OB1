@@ -4214,7 +4214,6 @@ function typecheckSurfaceProblems({ packages, tsconfigs, tscSteps }: TypecheckSu
   for (const d of tscSteps) if (!TYPECHECKED_DIRS.includes(d)) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${d}, which TYPECHECKED_DIRS in ${SELF} does not name — add it there, with its pins and tsconfig, or take it out of the step that type-checks it (SMD-1932)`]);
   return problems;
 }
-/** Each directory a parsed workflow type-checks, in order: a `bunx tsc --noEmit` step's working-directory, and each directory a TSC_SCRIPT step names. */
 /**
  * A SvelteKit directory's typecheck as CI writes it: `bun run check` (svelte-kit
  * sync, then svelte-check) in a step's working-directory, the whole command
@@ -4233,6 +4232,7 @@ function svelteCheckStepsIn(doc: WorkflowDoc): string[] {
   }
   return out;
 }
+/** Each directory a parsed workflow type-checks, in order: a `bunx tsc --noEmit` step's working-directory, and each directory a TSC_SCRIPT step names. */
 function tscStepsIn(doc: WorkflowDoc) {
   const out: string[] = [];
   for (const job of Object.values(doc?.jobs ?? {})) {

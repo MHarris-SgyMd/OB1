@@ -22,6 +22,7 @@ export const load: PageServerLoad = async (event) => {
 			arm: s.arm,
 			tier: s.tier === null ? null : oneLine(s.tier, 40),
 			query: oneLine(s.query, 200),
+			// The count the search asked for (034 logs it with its arguments), not how many it found (review pass 1).
 			matches: s.matchCount,
 			threshold: s.threshold,
 			recencyWeight: s.recencyWeight,
