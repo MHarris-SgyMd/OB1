@@ -1834,7 +1834,7 @@ jobs:
       # the step rather than skip the thought page, --require-ingested unless
       # that page's ingested notice is driven, and --require-pages unless
       # browse and search are walked past their first page and the trust
-      # filter leaves the second capture out (PR 2a). The smoke holds the
+      # filter leaves the untrusted capture out (PR 2a). The smoke holds the
       # sign-in wall; a wrong and a capture-only key, a cookie the server never
       # issued and a cross-site or Origin-null sign-in refused; the cookie's
       # and the pages' headers; the overview, the status, browse, search and a

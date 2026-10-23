@@ -1,12 +1,33 @@
 <script lang="ts">
 	import { base } from '$app/paths';
-	import { PAGE_SIZES, TRUST_WORDS } from '$lib/browse';
+	import { DEFAULT_PAGE_SIZE, PAGE_SIZES, TRUST_WORDS } from '$lib/browse';
 	import { when } from '$lib/format';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
-	/** A filter applies when it is left or Enter is pressed (the form's own submit); a choice, when it is made. */
-	const apply = (e: Event) => (e.currentTarget as HTMLInputElement | HTMLSelectElement).form?.requestSubmit();
+	/**
+	 * A choice applies when it is made; a typed filter when Enter or Apply submits
+	 * the form. Not on leaving its field: that submit raced the click that left it —
+	 * on Next the filter was lost, in WebKit a thought's link landed on the list —
+	 * and Enter after it submitted twice (review pass 1).
+	 */
+	const apply = (e: Event) => (e.currentTarget as HTMLSelectElement).form?.requestSubmit();
+	/**
+	 * The address a submit makes holds what is set alone: an empty field, the
+	 * default order and the default size are left out (disabled for the submit,
+	 * which a script-free submit cannot do), as the page's own links leave them.
+	 */
+	function tidy(e: SubmitEvent) {
+		const form = e.currentTarget as HTMLFormElement;
+		const unset = [...form.elements].filter(
+			(el): el is HTMLInputElement | HTMLSelectElement =>
+				(el instanceof HTMLInputElement || el instanceof HTMLSelectElement) &&
+				(el.value === '' || (el.name === 'sort' && el.value === 'newest') || (el.name === 'limit' && el.value === String(DEFAULT_PAGE_SIZE))),
+		);
+		for (const el of unset) el.disabled = true;
+		// Back once SvelteKit has read the form: its submit listener runs after this one, in the same dispatch.
+		setTimeout(() => unset.forEach((el) => (el.disabled = false)));
+	}
 	/** The menu's sizes, and the address's own when it is another (a shared link keeps its size). */
 	const sizes = $derived([...new Set([...PAGE_SIZES, data.q.limit])].sort((a, b) => a - b));
 	const filtered = $derived(['type', 'topic', 'person', 'actor', 'said_by', 'min_trust', 'days'].some((k) => data.q[k as keyof typeof data.q] !== undefined));
@@ -17,12 +38,13 @@
 <section class="space-y-6">
 	<h1 class="text-xl font-semibold">Browse</h1>
 
-	<!-- A GET form: its fields are the address, and a new filter starts at the first page (no cursor rides it). -->
-	<form method="GET" action="{base}/thoughts" class="bg-bg-card border border-white/10 rounded-xl p-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-sm" data-testid="filters">
-		<label class="flex flex-col gap-1">Type<input name="type" value={data.q.type ?? ''} onchange={apply} class="field" autocomplete="off" /></label>
-		<label class="flex flex-col gap-1">Topic<input name="topic" value={data.q.topic ?? ''} onchange={apply} class="field" autocomplete="off" /></label>
-		<label class="flex flex-col gap-1">Person<input name="person" value={data.q.person ?? ''} onchange={apply} class="field" autocomplete="off" /></label>
-		<label class="flex flex-col gap-1">Written by key<input name="actor" value={data.q.actor ?? ''} onchange={apply} class="field" autocomplete="off" /></label>
+	<!-- A GET form: its fields are the address, and a new filter starts at the first page (no cursor rides it).
+	     Focus and scroll stay where they were: a keyboard user applying a filter keeps their place (review pass 1). -->
+	<form method="GET" action="{base}/thoughts" onsubmit={tidy} data-sveltekit-keepfocus data-sveltekit-noscroll class="bg-bg-card border border-white/10 rounded-xl p-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-sm" data-testid="filters">
+		<label class="flex flex-col gap-1">Type<input name="type" value={data.q.type ?? ''} class="field" autocomplete="off" /></label>
+		<label class="flex flex-col gap-1">Topic<input name="topic" value={data.q.topic ?? ''} class="field" autocomplete="off" /></label>
+		<label class="flex flex-col gap-1">Person<input name="person" value={data.q.person ?? ''} class="field" autocomplete="off" /></label>
+		<label class="flex flex-col gap-1">Written by key<input name="actor" value={data.q.actor ?? ''} class="field" autocomplete="off" /></label>
 		<label class="flex flex-col gap-1">Key kind
 			<select name="said_by" onchange={apply} class="field">
 				<option value="" selected={!data.q.said_by}>any</option>
@@ -35,7 +57,7 @@
 				{#each TRUST_WORDS as w (w)}<option value={w} selected={data.q.min_trust === w}>{w}</option>{/each}
 			</select>
 		</label>
-		<label class="flex flex-col gap-1">Last N days<input name="days" type="number" min="1" max="365000" step="1" value={data.q.days ?? ''} onchange={apply} class="field" /></label>
+		<label class="flex flex-col gap-1">Last N days<input name="days" type="number" min="1" max="365000" step="1" value={data.q.days ?? ''} class="field" /></label>
 		<div class="grid grid-cols-2 gap-3">
 			<label class="flex flex-col gap-1">Order
 				<select name="sort" onchange={apply} class="field">
@@ -50,8 +72,8 @@
 			</label>
 		</div>
 		<div class="flex items-end gap-3 sm:col-span-2 lg:col-span-4">
-			<button type="submit" class="px-3 py-1.5 rounded bg-primary hover:bg-primary-light text-white">Apply</button>
-			{#if filtered}<a href="{base}/thoughts" class="text-text-muted hover:text-text">Clear filters</a>{/if}
+			<button type="submit" class="button">Apply</button>
+			{#if filtered}<a href={data.links.clear} class="text-text-muted hover:text-text" data-testid="clear">Clear filters</a>{/if}
 		</div>
 	</form>
 

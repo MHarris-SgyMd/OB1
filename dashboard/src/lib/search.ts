@@ -20,18 +20,28 @@ export type ListedHit = {
 	/** True when a newer thought supersedes it; null where the read does not say (the exact-text search). */
 	superseded: boolean | null;
 	trust: string | null;
-	/** By meaning: similarity to the query, 0–1, or null for a hit found by an exact identifier or quoted span. */
+	/** By meaning: similarity to the query, 0–1, or null for a hit found without a vector (SMD-2891). */
 	score: number | null;
+	/** By meaning: the hit holds one of the query's identifiers or quoted spans, matched exactly (the tool's "Contains"). */
+	exact: boolean;
 	/** By meaning: the tickets it names that moved since it was written, in the tool's words. */
 	moved: string | null;
 	/** By exact text: how often the text holds the query. */
 	occurrences: number | null;
 };
 
-/** The view's state from the address: a query, a mode, a count and (by exact text) where the page starts. */
+/**
+ * The view's state from the address: a query, a mode, a count and (by exact
+ * text) where the page starts. By exact text the query is sent as given, its
+ * spaces kept: the keyword search is deliberately untrimmed, since `SMD-944 `
+ * trimmed would also match SMD-9440 (migration 012; review pass 1). By meaning
+ * it is trimmed. NUL, which no Postgres text holds, is dropped (SMD-2534); a
+ * query of spaces alone is no query.
+ */
 export function readSearch(params: URLSearchParams) {
-	const query = (params.get('q') ?? '').trim().slice(0, QUERY_MAX);
 	const mode: SearchMode = params.get('mode') === 'text' ? 'text' : 'meaning';
+	const given = (params.get('q') ?? '').replaceAll('\0', '').slice(0, QUERY_MAX);
+	const query = given.trim() === '' ? '' : mode === 'text' ? given : given.trim();
 	const size = Number(params.get('limit'));
 	const offset = Number(params.get('offset'));
 	return {

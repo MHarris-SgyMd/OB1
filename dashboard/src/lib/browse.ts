@@ -15,9 +15,9 @@ export const PAGE_MAX = 100;
 
 /**
  * How many cursors back the address keeps: each is at most 512 characters
- * (the core's bound, SMD-2995) and about 100 in practice, so twenty stay well
- * inside a request line. Past them, Previous still works to the twentieth
- * page back, and First page always does.
+ * (the core's bound, SMD-2995) and about 110 in practice, so twenty stay well
+ * inside a request line. Past them, Previous works to the twentieth page back,
+ * then gives way to First page (`cut`), which always works.
  */
 export const TRAIL_MAX = 20;
 
@@ -39,13 +39,19 @@ export type BrowseQuery = {
 	after?: string;
 	/** The cursors of the pages before this one, oldest first: Previous is the last of them, or the first page. */
 	trail: string[];
+	/** The trail was cut at TRAIL_MAX: the pages before its oldest are lost, so with it spent there is no Previous, only First page (review pass 1). */
+	cut: boolean;
 };
 
 /** The filters alone, for the form and for the links that keep them. */
 export const FILTER_KEYS = ['type', 'topic', 'person', 'actor', 'said_by', 'min_trust', 'days'] as const;
 
+/**
+ * A free-text filter: trimmed, cut at TEXT_MAX, and without NUL, which no
+ * Postgres text holds (the core's 500 for one is SMD-2534); empty is unset.
+ */
 const text = (v: string | null) => {
-	const t = v?.trim();
+	const t = v?.replaceAll('\0', '').trim();
 	return t ? t.slice(0, TEXT_MAX) : undefined;
 };
 const trust = (v: string | null): TrustWord | undefined => (TRUST_WORDS as readonly string[]).includes(v ?? '') ? (v as TrustWord) : undefined;
@@ -78,6 +84,7 @@ export function readBrowse(params: URLSearchParams): BrowseQuery {
 		after: cursor(after) ? after : undefined,
 		// A trail with no page after it is no trail: the first page has nothing before it.
 		trail: cursor(after) ? trail : [],
+		cut: cursor(after) && params.get('cut') === '1',
 	};
 }
 
@@ -91,15 +98,16 @@ export function listInput(q: BrowseQuery) {
 	};
 }
 
-/** The address of a page of this view: these filters, sort and size, from `after` with `trail` behind it. */
-function address(path: string, q: BrowseQuery, after: string | undefined, trail: string[]): string {
+/** The address of a page of this view: these filters (unless `bare`), sort and size, from `after` with `trail` behind it. */
+function address(path: string, q: BrowseQuery, after: string | undefined, trail: string[], cut = false, bare = false): string {
 	const p = new URLSearchParams();
-	for (const k of FILTER_KEYS) if (q[k] !== undefined) p.set(k, String(q[k]));
+	if (!bare) for (const k of FILTER_KEYS) if (q[k] !== undefined) p.set(k, String(q[k]));
 	if (q.sort !== 'newest') p.set('sort', q.sort);
 	if (q.limit !== DEFAULT_PAGE_SIZE) p.set('limit', String(q.limit));
 	if (after) {
 		p.set('after', after);
 		if (trail.length) p.set('back', trail.slice(-TRAIL_MAX).join('.'));
+		if (cut || trail.length > TRAIL_MAX) p.set('cut', '1');
 	}
 	const s = p.toString();
 	return s ? `${path}?${s}` : path;
@@ -108,16 +116,18 @@ function address(path: string, q: BrowseQuery, after: string | undefined, trail:
 /**
  * The links around a page: the next (from the core's cursor, with this page's
  * own cursor pushed onto the trail), the previous (the trail's last, or the
- * first page), and the first page — each keeping the filters. Null where there
- * is none: no next at the end, no previous or first on the first page.
+ * first page), the first page — each keeping the filters — and the first page
+ * with no filter, keeping the order and size. Null where there is none: no next
+ * at the end, no previous or first on the first page, and no previous where a
+ * cut trail is spent (the page before is lost: First page is the way back).
  */
 export function pageLinks(path: string, q: BrowseQuery, next: string | null) {
 	const onFirst = q.after === undefined;
 	const behind = q.trail.length ? q.trail[q.trail.length - 1] : undefined;
 	return {
-		next: next ? address(path, q, next, onFirst ? [] : [...q.trail, q.after!]) : null,
-		// A trail cut at TRAIL_MAX has lost the pages before it: from its oldest page, Previous is the first page.
-		previous: onFirst ? null : address(path, q, behind, q.trail.slice(0, -1)),
+		next: next ? address(path, q, next, onFirst ? [] : [...q.trail, q.after!], q.cut) : null,
+		previous: onFirst || (q.cut && behind === undefined) ? null : address(path, q, behind, q.trail.slice(0, -1), q.cut),
 		first: onFirst ? null : address(path, q, undefined, []),
+		clear: address(path, q, undefined, [], false, true),
 	};
 }

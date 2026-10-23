@@ -33,7 +33,7 @@
 				{#each sizes as n (n)}<option value={n} selected={data.form.limit === n}>{n}</option>{/each}
 			</select>
 		</label>
-		<button type="submit" class="px-3 py-2 rounded-lg bg-primary hover:bg-primary-light text-white">Search</button>
+		<button type="submit" class="button">Search</button>
 	</form>
 
 	{#if data.hits !== null}
@@ -53,7 +53,7 @@
 						<li class="py-2 min-w-0">
 							<a class="hover:text-primary-light [overflow-wrap:anywhere]" href="{base}/thoughts/{h.id}">{h.line}</a>
 							<div class="text-xs text-text-muted [overflow-wrap:anywhere]">
-								{h.created_at ? when(h.created_at) : 'undated'}{h.trust ? ` · ${h.trust}` : ''}{h.score !== null ? ` · similarity ${h.score.toFixed(2)}` : ''}{data.form.mode === 'meaning' && h.score === null ? ' · exact match' : ''}{h.occurrences !== null ? ` · ${h.occurrences}×` : ''}{h.superseded ? ' · superseded' : ''}
+								{h.created_at ? when(h.created_at) : 'undated'}{h.trust ? ` · ${h.trust}` : ''}{h.score !== null ? ` · similarity ${h.score.toFixed(2)}` : ''}{h.exact || (data.form.mode === 'meaning' && h.score === null) ? ' · exact match' : ''}{h.occurrences !== null ? ` · ${h.occurrences}×` : ''}{h.superseded ? ' · superseded' : ''}
 							</div>
 							{#if h.moved}<div class="text-xs text-amber-300 [overflow-wrap:anywhere]" data-testid="moved">⚠ Moved since written: {h.moved}</div>{/if}
 						</li>

@@ -59,7 +59,9 @@ export async function read<K extends CallableOperation>(event: RequestEvent, ses
 	// In words where they are known; the core's code otherwise, for the operator's log (review pass 6).
 	if (answer.status === 404 && name === 'fetch') throw error(404, 'The brain holds no thought with that id.');
 	const words = code ? REFUSAL_WORDS[code] : undefined;
-	throw error(answer.status, words ?? (code ? `The brain refused the read (${code}).` : `The brain answered ${answer.status}.`));
+	// A fault is not a refusal: a 5xx with a code says the brain could not answer (review pass 1).
+	const said = code ? (answer.status >= 500 ? `The brain could not answer the read (${code}).` : `The brain refused the read (${code}).`) : `The brain answered ${answer.status}.`;
+	throw error(answer.status, words ?? said);
 }
 
 /**

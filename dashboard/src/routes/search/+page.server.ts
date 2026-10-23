@@ -29,8 +29,10 @@ export const load: PageServerLoad = async (event) => {
 			created_at: h.created_at,
 			superseded: h.supersededBy !== null,
 			trust: word(h.metadata.trust),
-			// Null for a hit found by an exact identifier or quoted span, or without a vector at all (SMD-2891): the page says exact match.
-			score: h.matchedNeedles.length > 0 || h.similarity === null ? null : Math.round(h.similarity * 100) / 100,
+			// As the tool says it (render.ts): the similarity when there is one, and beside it an exact match (review pass 1:
+			// an exact hit's similarity was hidden).
+			score: h.similarity === null ? null : Math.round(h.similarity * 100) / 100,
+			exact: h.matchedNeedles.length > 0,
 			moved: h.moved && h.moved.length ? movedWords(typesOf(h.moved), h.movedNotRead) : null,
 			occurrences: null,
 		}));
@@ -45,6 +47,7 @@ export const load: PageServerLoad = async (event) => {
 		superseded: null,
 		trust: word(h.metadata.trust),
 		score: null,
+		exact: false,
 		moved: null,
 		occurrences: h.occurrences,
 	}));

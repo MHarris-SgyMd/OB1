@@ -269,19 +269,31 @@ let searchWord = "";
       const [prev, first] = [await get(linkOf(third, "previous")), await get(linkOf(third, "first"))];
       assert(listedIds(prev.html, "browse")[0] === ids[1] && listedIds(first.html, "browse")[0] === ids[0], "…from the third, Previous is the second page and First page the first");
     }
+    if (newest.length >= 2) {
+      // A trail cut at its 20 cursors, spent: the page before is lost, so there is no Previous, only First page (review pass 1).
+      const spent = await get(`${newest[1].path}&cut=1`);
+      assert(linkOf(spent.html, "previous") === "" && linkOf(spent.html, "first") === "/thoughts?limit=1", `…on a cut trail spent, no Previous, and First page the way back (${linkOf(spent.html, "previous") || "none"}, ${linkOf(spent.html, "first")})`);
+    }
     // A filter keeps its rows: trust at least ingested lists the thoughts that carry a trust word, each showing it, and
-    // leaves out those with none (a capture through an unclassified key records none: CI's second, the operator's).
+    // leaves out those with none (a capture through an unclassified key records none: CI's untrusted capture).
     const trusted = await get("/thoughts?min_trust=ingested&limit=100");
     const metas = [...trusted.html.matchAll(/<div class="text-xs text-text-muted[^"]*">([^<]*)<\/div>/g)].map((m) => m[1].trim());
     const drivenTrusted = /<dt[^>]*>trust<\/dt>\s*<dd[^>]*>(?:operator|agent|ingested)</.test(thoughtPage);
     assert(trusted.status === 200 && metas.every((m) => / · (?:operator|agent|ingested)(?: ·|$)/.test(m)) && listedIds(trusted.html, "browse").includes(thoughtId) === drivenTrusted && (REQUIRE_PAGES ? metas.length < count : true),
       `browse at trust ingested and above lists ${metas.length} of ${count}, each with its trust, the driven thought ${drivenTrusted ? "among them" : "(no trust) left out"}`);
   } else if (count > 50) {
-    console.log(`  ·  the brain holds ${count} thoughts: browse's walk of every page skipped`);
+    if (REQUIRE_PAGES) bad(`the brain holds ${count} thoughts, past the 50 the walk reads, and --require-pages asks for the walk`);
+    else console.log(`  ·  the brain holds ${count} thoughts: browse's walk of every page skipped`);
   }
   // A cursor the core refuses is a 400 in the GUI's words, with the way back to the first page — never a fault.
   const refused = await get("/thoughts?after=AAAAAAAAAAAA");
   assert(refused.status === 400 && refused.html.includes("not one the brain reads") && refused.html.includes('data-testid="restart"'), `a browse cursor the core refuses is a 400 in words, offering the first page (${refused.status})`);
+  // NUL, which no Postgres text holds, never reaches the core from a filter or a query: dropped, not a 500 (review pass 1).
+  const [nulFilter, nulQuery] = [await get("/thoughts?type=%00"), await get("/search?q=a%00b&mode=text")];
+  assert(nulFilter.status === 200 && nulQuery.status === 200, `a NUL in a browse filter or a search query is dropped, not the core's 500 (${nulFilter.status}, ${nulQuery.status})`);
+  // Clear filters keeps the order and the size, and drops the filters alone (review pass 1).
+  const kept = await get("/thoughts?type=nothing-holds-this&sort=oldest&limit=7");
+  assert(linkOf(kept.html, "clear") === "/thoughts?sort=oldest&limit=7", `Clear filters keeps the order and the page size (${linkOf(kept.html, "clear")})`);
 
   // Search (PR 2a): the driven thought found by a word of its own, by exact text and by meaning.
   const search = await get("/search");
@@ -292,6 +304,10 @@ let searchWord = "";
     const meaning = await get(`/search?q=${encodeURIComponent(thoughtText.slice(0, 200))}`);
     assert(meaning.status === 200 && listedIds(meaning.html, "hits").includes(thoughtId), `search by meaning for the thought's own words finds it (${meaning.status}${meaning.html.includes('data-testid="vectorless"') ? ", without a vector" : ""})`);
     assert(/data-testid="hits"[^>]*data-sveltekit-preload-data="off"/.test(text.html), "…its hit links not preloaded on hover");
+    // By exact text the query goes as given, its spaces kept: the word and three spaces is not the word (review pass 1;
+    // the keyword search is untrimmed by design, migration 012).
+    const spaced = await get(`/search?q=${encodeURIComponent(`${searchWord}   `)}&mode=text`);
+    assert(spaced.status === 200 && !listedIds(spaced.html, "hits").includes(thoughtId) && spaced.html.includes(`value="${searchWord}   "`), `search by exact text sends the query untrimmed: "${searchWord}" and three spaces does not find the thought, and the field keeps them`);
   }
   if (count >= 2) {
     // A letter nearly every thought holds, a match a page: Next moves on, Previous comes back.
@@ -334,7 +350,7 @@ let searchWord = "";
   assert(listKeys(pages[2].html, "recent") === "created_at,id,line,superseded", `the overview's data lists each thought as its id, first line, time and flag alone (${listKeys(pages[2].html, "recent")})`);
   // Browse's and search's the same way (PR 2a): the fields each list shows, never a thought's content.
   assert(listKeys(pages[4].html, "thoughts") === "created_at,id,line,superseded,trust,type", `browse's data lists each thought as its id, first line, time, flag, type and trust alone (${listKeys(pages[4].html, "thoughts")})`);
-  assert(searchWord === "" || listKeys(pages[6].html, "hits") === "created_at,id,line,moved,occurrences,score,superseded,trust", `search's data lists each hit by its fields alone (${searchWord === "" ? "no word to search" : listKeys(pages[6].html, "hits")})`);
+  assert(searchWord === "" || listKeys(pages[6].html, "hits") === "created_at,exact,id,line,moved,occurrences,score,superseded,trust", `search's data lists each hit by its fields alone (${searchWord === "" ? "no word to search" : listKeys(pages[6].html, "hits")})`);
   assert(!leaked && scripts.size > 2, `no page, header, navigation data or script (${scripts.size} modules) holds the key`);
 
   const out = await signOut();
