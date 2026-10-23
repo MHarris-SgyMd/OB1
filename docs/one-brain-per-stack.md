@@ -152,6 +152,7 @@ MCP SDK v2 and Claude Code send a token request over plain HTTP only to exactly 
 - **Stable's tier routes (2026-10-16):** CHANGELOG 1.6.0 shipped `/canary/mcp` and `/working/mcp`, so FORK.md's MAJOR rule asks a deprecation release first. SMD-3057 adds a `Deprecation` header and `Link` to every answer through them; SMD-2874 PR 3, which removes the routers, their services and `tier-absent`, is held for the v2.0.0 cut beside SMD-2532. `tier-off` can leave compose.yaml's table only once SMD-2532 has closed the legacy route, never before (a `/CANARY/mcp` would then write to stable), and compose.tiers.yaml's keeps its own.
 - **As built (SMD-2874 PR 3):** stable's route table has no `canary` or `working` router, no service for either, and no `tier-absent` or `tier-deprecated` (removed at v2.0.0, a release after SMD-3057 deprecated the routes; SMD-3101); its `tier-off` 404 answers every path under `/canary` and `/working` until SMD-2532 removes the legacy route. Check 28's `PROXY_ROUTE_TABLE` takes `ROUTE_TIER_OFF` alone, and check 27's `TIER_ROUTE_TABLE` keeps `ROUTE_TIER_PATHS` for `compose.tiers.yaml` (SMD-2878). CI's step (now "Stable routes no tier…") keeps the tier-off probes, none carrying a deprecation, and stands a stand-in under each tier's old mesh name and under `server`, which no path reaches, while stable's `/mcp` still reaches stable.
 - **As built (SMD-2532, v2.0.0):** compose.yaml's `legacy` route is gone, and with it `tier-off`, as planned above, which supersedes the `tier-off` parts of PR 3's note above; check 28's `PROXY_ROUTE_TABLE` no longer takes `ROUTE_TIER_OFF`, and PR 2 inlined that constant into `ROUTE_TIER_PATHS`, check 27's, its one user. No router matches a path under `/canary` or `/working`, so every one is the proxy's own 404 (body `404 page not found`), and so is the origin root. compose.tiers.yaml keeps its own `tier-off`.
+- **As built (SMD-2878):** `compose.tiers.yaml` is retired (open question 5), and with it check 27: `tierStack()`, its probes, `TIER_ROUTE_TABLE` and `ROUTE_TIER_PATHS`. So no route table in the tree names a tier, which supersedes what the notes above say check 27 kept, `tier-off` included. Also gone: the file's renders in CI's "Every published port binds loopback" and "The proxy loads only the held route tables", and its text in the READMEs, `deploy/.env.example` and `tier.sh`. Check 28 now reads every compose file in `deploy/`. The number 27 stays unused.
 
 **The tier tools (SMD-2875):** until SMD-2875 one container joined both data networks and held both superuser passwords. Under this decision each brain is reached through its own project:
 - **Refresh** (built, SMD-2875 PR 2): `deploy/tier.sh` runs `tier.ts --refresh` as two halves, each in a container on one project's data network with that project's password. Stable's half dumps, as `pg_read_all_data`; the dump passes container to container through the runtime's `cp`. The canary's half runs the guards, the restore, the re-migrate and the refresh mark. Each half is its own brain's superuser, inside its own project.
@@ -162,7 +163,7 @@ MCP SDK v2 and Claude Code send a token request over plain HTTP only to exactly 
 - the edge proxy: `deploy/edge/`, its own project and port (SMD-2876; built for key clients; sign-in through it waits for TLS at the edge, SMD-3053, and SMD-2286);
 - the federation contract: brain-to-brain operations through the edge, where there are none today beyond compare and refresh (SMD-2877).
 
-**Retired, or replaced:** `compose.tiers.yaml` and check 27, retired or replaced by a launcher of instances and the edge (SMD-2878).
+**Retired:** `compose.tiers.yaml` and check 27 (SMD-2878, open question 5).
 
 **Unchanged:** the release overlay (`compose.release.yaml`, rendered at release by `scripts/release-artifacts.ts`, not in the repo) pins images only and applies to each instance alike.
 
@@ -187,7 +188,7 @@ MCP SDK v2 and Claude Code send a token request over plain HTTP only to exactly 
 - **`deploy/README.md`:** "A canary beside the stack" and "Refreshing a tier" describe path mode and the joined tier container.
 - **`db/brain-compare.ts`:** its header says each tier is "a path on one origin since SMD-2294" and that "two tiers share an origin".
 
-## Open questions (1–3 answered 2026-10-15)
+## Open questions (1–3 answered 2026-10-15, 5 on 2026-10-22)
 
 1. **Answered: how the edge and brains reach each other on each runtime** (SMD-2876). Measured above:
    - an edge on the host reaches loopback-bound brains on both runtimes;
@@ -224,7 +225,12 @@ MCP SDK v2 and Claude Code send a token request over plain HTTP only to exactly 
    - how an idea passed A→B→A is kept from returning as a new thought;
    - per-thought export controls, since a brain holds personal data;
    - what governs the thought text a peer call sends off the box. The egress gate (SMD-1903, `server-portable/egress.ts`) covers model calls (embedding and chat). Since SMD-2681 (#368) it also gates a call that isn't a model's: `db/board-findings.ts` puts each comment it posts to Linear through `mayLeaveBox`, against an endpoint declared not local, with subject units of its own (type `board-finding`). The gate's terms name the text (actor, source, type, topic, marker), never where it goes; of the destination it reads only whether the endpoint is declared local. A peer call could be gated the same way, with units of its own, or by a new rule that names destinations.
-5. **`compose.tiers.yaml`** (SMD-2878): retire it with check 27, or replace it with a launcher of N instances and the edge.
+5. **Answered: `compose.tiers.yaml`** (SMD-2878): retire it with check 27, or replace it with a launcher of N instances and the edge.
+
+   **Answered (the maintainer's choice, 2026-10-22): retired, with check 27.**
+   - SMD-2287 PR 6 deletes `server-portable/index.ts`, which served each tier's `/mcp` in the file. Keeping the file would have meant a `<tier>-mcp` per tier through check 27's generator.
+   - Nothing ran the file: the dogfood Mac doesn't, and CI only rendered it.
+   - A canary already runs as its own instance (SMD-2874), and the edge stands in front where one origin is wanted (SMD-2876). A launcher would have been a fourth shape to hold.
 
 ## Order
 

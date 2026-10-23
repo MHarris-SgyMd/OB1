@@ -2210,7 +2210,7 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
     return new Response(await r.text(), { status: r.status, headers: { ...headers, "Content-Type": r.headers.get("content-type") ?? "application/json" } });
   } });
   const TIER = `http://127.0.0.1:${tierRoute.port}/canary/mcp`;
-  const tierWarned = (err, url, source, date = "@1792108800") => err.includes(`warning: ${url}/ answered through the proxy's deprecated tier route (Deprecation: ${date}), which stops answering at v2.0.0 — set the url in ${source} to the tier itself, a canary's own port (deploy/canary.sh) or the three-brain stack's route, never stable's /mcp (`) && !/legacy route|set the url to its \/mcp/.test(err);
+  const tierWarned = (err, url, source, date = "@1792108800") => err.includes(`warning: ${url}/ answered through the proxy's deprecated tier route (Deprecation: ${date}), which stops answering at v2.0.0 — set the url in ${source} to the tier itself, a canary's own port (deploy/canary.sh), never stable's /mcp (`) && !/legacy route|set the url to its \/mcp/.test(err);
   const checkAt = async (url, answer) => { tierAnswer = answer; writeFileSync(CONFIG, JSON.stringify({ url, key: "cap-key" }), { mode: 0o600 }); return spawnScript(["--check"]); };
   const onTier = await checkAt(TIER, {});
   assert(onTier.code === 0 && tierWarned(onTier.err, TIER, CONFIG),

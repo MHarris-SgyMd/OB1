@@ -35,7 +35,7 @@
  */
 
 import { SQL } from "bun";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,7 +65,7 @@ import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue 
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, rowColumns, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import { endOnRefusal, passStamper, stampKey } from "./pass-stamp.ts";
 import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
-import { run as runSleep } from "./sleep.ts";
+import { passDumpFile, run as runSleep } from "./sleep.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
 import { findingGate, findingsSchemaProblem, findingsStep, groupFindings, outcomes, postFindings, selectFindings, summaryLine, type FindingsReport } from "./board-findings.ts";
 import { linearClient } from "./linear-api.ts";
@@ -8092,14 +8092,14 @@ if (want("16")) {
       type LinkNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; link?: { asked?: string; link?: string; capped?: boolean; via?: string }; writer?: unknown } } } };
       const pager = (await noteOf(pagerNew)) as unknown as LinkNote | undefined;
       const [pagerConf] = (await sql`SELECT (payload->>'confidence')::float AS c FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND thought_id = ${pagerNew}::uuid`) as { c: number }[];
-      const dumpOf = (n: string, o: string) => readFileSync(ddump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { newer: string; older: string; verdict: string; recorded: string | null; relation: string | null; link?: string | null; capped?: boolean | null })
+      const dumpOf = (n: string, o: string) => readFileSync(ddump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { newer: string; older: string; verdict: string; recorded: string | null; relation: string | null; link?: string | null; asked?: string | null; capped?: boolean | null })
         .find((l) => l.newer === n && l.older === o);
       const [gateDump, pagerDump, tenDump] = [dumpOf(gateNew, gateOld), dumpOf(pagerNew, pagerOld), dumpOf(tenNew, tenOld)];
       const gateProps = dprops.filter((r) => r.o === gateOld || r.n === gateNew);
       assert(gateRebuilt.stale_proposals === 1 && gateProps.length === 0 && gateAfter?.status === "rejected" && gateAfter.review_note === cappedNote
-          && gateDump?.verdict === "related" && gateDump.recorded === "settled" && gateDump.link === "F" && gateDump.capped === true
+          && gateDump?.verdict === "related" && gateDump.recorded === "settled" && gateDump.link === "F" && gateDump.asked === "first" && gateDump.capped === true
           && pager?.recipe.judged?.verdict === "related" && pager.recipe.judged.decide?.top === "evolves" && pager.recipe.judged.decide.link?.asked === "after" && pager.recipe.judged.decide.link.link === "H" && pager.recipe.judged.decide.link.capped === true
-          && pager.recipe.judged.decide.writer === undefined && pagerConf?.c === 0.2 && pagerDump?.link === "H" && pagerDump.capped === true && tenDump?.link === "D" && tenDump.capped === false,
+          && pager.recipe.judged.decide.writer === undefined && pagerConf?.c === 0.2 && pagerDump?.link === "H" && pagerDump.asked === "after" && pagerDump.capped === true && tenDump?.link === "D" && tenDump.asked === "first" && tenDump.capped === false,
         `the link step caps the gateway pair's outdates (an F link: no proposal, its related under the floor, its stale proposal settled saying so) and stores the pager pair's evolves as related at the tier's P(related) (an H link, asked after), and the dump says which (gateway ${JSON.stringify(gateDump ?? null)}, ${JSON.stringify(gateAfter ?? null)}; pager ${JSON.stringify(pager?.recipe.judged ?? null).slice(0, 300)}, ${pagerConf?.c})`);
       assert(tierCalls === 6 && writerCalls === 2 && linkCalls === 4 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2
           && /1 under confidence 0\.55 not recorded/.test(drun.out)
@@ -12535,6 +12535,11 @@ if (want("38")) {
     const longPoll = await sleepRun({ poll: 61, dryRun: true });
     assert(/query_log: no row in the last 24 h — either nothing was searched, or OB1_QUERY_LOG is off/.test(dryText) && longPoll === 2 && lines.some((l) => /--poll must be/.test(l)),
       `an empty query log is said at the start, and --poll 61 is refused with 2 (exit ${longPoll})`);
+    // --dump-dir must name a directory this process can write, checked before anything is read (SMD-3203).
+    lines.length = 0;
+    const noDump = await sleepRun({ dryRun: true, dumpDir: join(tmpdir(), `ob1-no-such-dir-${process.pid}`, "dumps") });
+    assert(noDump === 2 && lines.some((l) => /--dump-dir \S+ is not a directory this process can write/.test(l)) && !lines.some((l) => /awake|asleep/.test(l)),
+      `a --dump-dir naming no directory is refused with 2 before the brain is read (exit ${noDump}: ${lines.join(" | ").slice(0, 200)})`);
 
     // A claim follower stamping fresh outside the scheduler does not yield to a
     // live call: a run refuses (2) rather than sleep beside it, and the dry run
@@ -12639,7 +12644,9 @@ if (want("38")) {
     slowExtract = 1500;
     // Bounded: a sleep that never finds both pools drained would wait for ever.
     const acOnce = new AbortController();
-    const onceRun = sleepRun({ signal: acOnce.signal });
+    // With --dump-dir (SMD-3203): the sleep's consolidation pass writes every verdict there too.
+    const onceDumps = mkdtempSync(join(tmpdir(), "ob1-sleep-dump-"));
+    const onceRun = sleepRun({ signal: acOnce.signal, dumpDir: onceDumps });
     const onceRace = await Promise.race([onceRun, Bun.sleep(90_000).then(() => "hung" as const)]);
     // Seen hung once in a full run (SMD-2752 PR 2), one thought of three
     // extracted in 90 s, and not since in 28: read before the stop what the
@@ -12677,6 +12684,16 @@ if (want("38")) {
     assert(relPairs === "deploy→older:1,newer→deploy:1" && (await auditRows()) === auditBefore,
       `…and its related verdicts are relations with their lineage, the deploy note's to each billing note, with no audit row either (${relPairs})`);
     assert(sessionsAfter === sessionsBefore, `…and the sleep done, its passes are stopped: no follower's connection is left (${sessionsBefore} → ${sessionsAfter} session(s))`);
+    // --dump-dir: the pass's three verdicts, one line each in the consolidation key's own file, the owner's alone,
+    // and the file said at the start (SMD-3203).
+    const onceDump = passDumpFile(onceDumps, CO);
+    const dumped = existsSync(onceDump) ? readFileSync(onceDump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { key: string; newer: string; older: string; verdict: string; recorded: string | null; relation: string | null }) : [];
+    const dumpedPairs = dumped.map((d) => `${d.newer === newer ? "newer" : d.newer === deploy ? "deploy" : d.newer}→${d.older === deploy ? "deploy" : d.older === older ? "older" : d.older}:${d.verdict}`).sort().join(",");
+    const dumpMode = existsSync(onceDump) ? statSync(onceDump).mode & 0o777 : -1;
+    assert(dumpedPairs === "deploy→older:related,newer→deploy:related,newer→older:outdates" && dumped.every((d) => d.key === CO) && dumpMode === 0o600
+        && onceDump === join(onceDumps, "consolidate_stub-sleep_p4.jsonl") && onceText.includes(`dump:   each consolidation pass appends every verdict to ${onceDump}`),
+      `with --dump-dir the sleep's pass writes each of its three verdicts to the consolidation key's file, created 0600, which its start names (${dumpedPairs || "no file"}, mode ${dumpMode.toString(8)})`);
+    rmSync(onceDumps, { recursive: true, force: true });
 
     // --follow: a live read wakes it mid-call; the passes stop at once.
     lines.length = 0;
