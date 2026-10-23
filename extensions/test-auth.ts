@@ -493,7 +493,7 @@ console.log("\n[mcpReply: a call silent past a keepalive interval is kept alive 
   let slow: Read, gone: Read;
   try {
     [slow, gone] = await Promise.all([
-      search(50, "a query whose call outlives the idle timeout"),
+      search(50, "a query whose call is silent past a keepalive interval"),
       search(51, "needle-the-line-must-not-carry", AbortSignal.timeout(1500)),
     ]);
     // The abandoned call's tool runs on behind it: held until it has finished too.

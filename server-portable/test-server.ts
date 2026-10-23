@@ -56,7 +56,7 @@ process.env.MCP_ACCESS_KEYS = Object.entries(NAMED_KEYS)
 const CAPTURE_KEY = "contract-capture-key-0123456789";
 process.env.MCP_ACCESS_KEYS += `,contract-capture:capture:${createHash("sha256").update(CAPTURE_KEY).digest("hex")}`;
 
-// The one provider call this suite makes is [17]'s, against a stub that can be
+// The provider calls this suite makes are [13d]'s and [17]'s, against a stub that can be
 // told to answer an embedding slowly — the server's env is read once, at the
 // first request, so the stub's address is set before it. Declared local to the
 // egress gate (SMD-1903), as every suite that boots the server against a stub
@@ -106,7 +106,7 @@ edgeModule.useAuthReachability(new edgeModule.AuthReachability("http://auth.stub
 }) as unknown as typeof fetch));
 
 // Served with every field the export declares, so what the export says about
-// the runtime — and what it leaves at the default — is what [17] measures.
+// the runtime — and what it leaves at the default — is what [17]'s index pass measures.
 const server = Bun.serve({ ...worker, port: 0 });
 const PORT = server.port ?? 0;
 const BASE = `http://localhost:${PORT}`;
@@ -1788,7 +1788,7 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
     "resultLabel: the compat answer's fields only where a ticket moved, in status types, the count only when keys went unread — no empty field and no zero for an older MCP server to pass through");
 }
 
-console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
+console.log(`\n[17] A tool call ${mcpTarget() === "index" ? "outlives the runtime's idle timeout" : "is kept alive by the MCP server's frames (the idle timeout is the first pass's)"}, and a client that leaves is logged (SMD-1864)`);
 {
   const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./index.ts") as {
     withSseKeepalive: (r: Response, opts?: { intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: () => void; onStall?: () => void; label?: string }) => Response;
@@ -1868,12 +1868,14 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   const realWarn = console.warn;
   console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
   embedDelayMs = SLOW_EMBED_MS;
-  const timing = direct ? undefined : worker.useKeepaliveTiming!({ intervalMs: 100, maxMs: 2_000 });
+  let timing: { intervalMs: number; maxMs: number } | undefined;
   let measured: Awaited<ReturnType<typeof premise>> | null, slow: Read, gone: Read;
   try {
+    // A ceiling far past the call: one passed before the first tick sends no frame and settles the call as stalled.
+    if (!direct) timing = worker.useKeepaliveTiming!({ intervalMs: 100, maxMs: 30_000 });
     [measured, slow, gone] = await Promise.all([
       direct ? premise() : null,
-      call(50, "a query whose embedding outlives the idle timeout"),
+      call(50, "a query whose embedding is slow"),
       // A client that gives up: the stream's headers arrive at once, so it is the body read that its signal ends.
       call(51, "needle-the-line-must-not-carry", { signal: AbortSignal.timeout(LEAVE_MS) }),
     ]);
