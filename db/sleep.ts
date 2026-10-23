@@ -43,7 +43,28 @@
  * board-sync's writes as live halves the median sleep at 300 s (6.5 min).
  *
  * ── Asleep ──────────────────────────────────────────────────────────────────
- * The passes in a fixed order. The extraction follower runs alone until its
+ * First the re-derive pass (SMD-1794's order, SMD-2679): rebuild_derived's
+ * orphans-only sweep over the lineage rows whose artifact is gone — windows,
+ * mentions, a vector or tags a raw delete or a replay took — through
+ * rebuild.ts's sweepOrphans, at most 500 thoughts a sleep, no model, on a
+ * connection of its own under the budget's session (Budget). It reads 10,001
+ * lineage rows in id order a sleep, each sleep the next window once the one
+ * before is swept whole, so a larger table is walked, said once — the place
+ * kept in the process, so a restart begins again at the first.
+ * A wake, a stop or the clock spent stops it between thoughts, its call in
+ * hand given 2 s before it is cancelled on the server (pg_cancel_backend),
+ * rolled back, the supersession lock let go; a call waiting on a lock gives
+ * up after 2 s (lock_timeout), so no wait behind a row holds the lock past
+ * it, and is passed over, its thought named. A wake ends the sleep, and a
+ * clock spent by the sweep starts no pass. A thought whose call fails is
+ * passed over, said in the summary, and tried again when the sweep comes
+ * round; a failure of the sweep itself is said once and the passes go on; a replay's refusal
+ * stops it, said once; a brain without 063, or a role without EXECUTE on the
+ * function, is told once at the start and sweeps nothing — and the function
+ * is SECURITY INVOKER over four groups' tables, so a role short of one of
+ * those grants meets 42501 at the first call instead, said with the grant,
+ * and the sweeps end for the process. Then the passes, in a fixed
+ * order. The extraction follower runs alone until its
  * pool is drained — nothing pending, in flight or not yet in the pool —
  * because consolidation judges a thought against neighbours that must be
  * extracted first (consolidate.ts's header; deploy/README.md's "Start extract
@@ -171,7 +192,8 @@
  * call (`resting`), and carries the budget in force with the sleeps stopped
  * on it since the process began (`budget`); one sleep stopped on it exits 1.
  * A restarted scheduler carries the last sleep's word and bound, and sleeps
- * after the quiet alone: the wait is this process's. The clock counts every
+ * after the quiet alone: the wait is this process's. The clock begins with
+ * the sleep, the re-derive sweep inside it, and counts every
  * minute of the sleep, idle ones too: a sleep whose pools drained long ago
  * still ends at it, and a capture a sync write makes after that waits for the
  * next sleep.
@@ -244,8 +266,7 @@
  * every sleep, up to its first claim (SMD-2752).
  *
  * ── Not here ────────────────────────────────────────────────────────────────
- * The re-derive pass (rebuild_derived's orphan sweep, SMD-1732) and a
- * re-embed pass, SMD-2679's later PRs.
+ * A re-embed pass, SMD-2679's later PRs.
  * The frozen-belief scan, decay relabelling and an HNSW heal are their own
  * tickets' passes (SMD-1722, SMD-1736, SMD-1632), as is the awake
  * latency under a sleep at 1M and 10M rows (SMD-1500's harness).
@@ -259,7 +280,8 @@ import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
 import { budgetWords, heldWords, SLEEP_HELD_NAMED, SLEEP_STALLED_JOIN, STALE_AFTER_INTERVALS, type BudgetStop, type SleepHeld } from "../server-portable/brain-info.ts";
 import { run as runExtract } from "./extract-entities.ts";
 import { run as runConsolidate } from "./consolidate.ts";
-import { outageWait, PERMANENT_REFUSALS, throughOutage, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { orphanCensus, sweepOrphans, type SweepResult } from "./rebuild.ts";
+import { databaseUnavailable, outageWait, PERMANENT_REFUSALS, throughOutage, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { MAX_WORKERS, sleepUnless, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { MIN_STAMP_EVERY_S, passStamper, type MalformedBlock, type PassOutcome, type PassStamper, type SleepMark } from "./pass-stamp.ts";
 import { startRefusalRemedy } from "./config.mjs";
@@ -780,6 +802,16 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** The windowing extraction runs under, which a kept row must match to speak for the thought: set only when the rows are readable. */
   const SIG = progressState === "yes" ? JSON.stringify(windowingFor(cfg)) : undefined;
   if (progressState !== "yes") err(`  extraction_progress: ${progressState === "missing" ? "no such table (migration 093 not applied)" : "this role cannot read it (the extraction group's grant)"} — consolidation joins only once extraction is drained, and a thought the wakes hold back goes unnamed; a running scheduler takes it up once restarted`);
+  // The re-derive sweep's function (063) and this role's EXECUTE on it, read
+  // once as the rest are (SMD-2679): without either the sleeps sweep nothing,
+  // said once.
+  const sweepRead = await atStart(async () => (await sql`
+    SELECT CASE WHEN to_regprocedure('rebuild_derived(uuid, text, boolean, text[], boolean, boolean)') IS NULL THEN 'missing'
+                WHEN has_function_privilege('rebuild_derived(uuid, text, boolean, text[], boolean, boolean)', 'EXECUTE') THEN 'yes' ELSE 'denied' END AS s`)[0].s as "yes" | "missing" | "denied");
+  if (sweepRead === null) { err(STOPPED_EARLY); return 130; }
+  /** Whether each sleep runs the re-derive sweep: off for this process once a call is refused its privilege. */
+  let sweeps = sweepRead === "yes";
+  if (!sweeps) err(`  re-derive: ${sweepRead === "missing" ? "rebuild_derived is not on this brain (migration 063 not applied)" : "this role cannot execute rebuild_derived (GRANT EXECUTE ON FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) TO the role, as the owner)"} — the sleeps sweep no orphaned lineage row; a running scheduler takes it up once restarted`);
 
   if (opts.dryRun) {
     const [{ now }] = await sql`SELECT now() AS now`;
@@ -800,6 +832,13 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     if (SIG !== undefined) {
       const held = await heldBack(sql, JOBS.extract, SIG, CUTS);
       if (held.total) out(`  held back across wakes (${held.thoughts.length} of ${held.total}): ${held.thoughts.map(heldWords).join("; ")}`);
+    }
+    // The re-derive sweep's pool, as the first sleep would read it (SMD-2679).
+    if (sweepRead === "yes") {
+      // A role that may call the function but not read the table is the sweep's to meet, not the dry run's to throw on (review pass 2).
+      const census = await orphanCensus(sql).catch((e: Error) => e);
+      if (census instanceof Error) err(`  re-derive: could not read the lineage table (${census.message}) — the first sleep's sweep meets it too`);
+      else out(`  re-derive: ${census.ids.length >= 500 ? "500 or more" : census.ids.length} thought(s) with a lineage row whose artifact is gone${census.windowed ? ", in the first window of 10,001 lineage rows — the sleeps walk the rest" : ""}`);
     }
     return 0;
   }
@@ -1219,6 +1258,169 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     return null;
   };
 
+  /** Said once: a sweep that failed, a replay's refusal, a table larger than one window — so none is a line every sleep. */
+  let saidSweep = false;
+  /** Whether every call of a sweep failing has been said: once, until a sweep's call succeeds (review pass 4: said every sleep). */
+  let saidAllFailed = false;
+  let saidReplay = false;
+  let saidWindowed = false;
+  /**
+   * Where the next sweep's window begins: the lineage rows in id order after
+   * this one, null for the start. Moved on once a window is swept whole — its
+   * orphans fewer than the limit, nothing stopped — so successive sleeps walk
+   * a table larger than one window, which read in no order the same first
+   * rows every sleep and never reached an orphan past them (review pass 1).
+   */
+  let sweepAfter = null as string | null;
+  /** How long a stopped sweep's call in hand may run before it is cancelled on the server: a lock it waits on would hold the wake or the stop (review passes 1 and 2). */
+  const SWEEP_GRACE_MS = 2000;
+  /**
+   * The sweep's lock wait, beside the budget's session: a call waiting on a
+   * thought's row holds the supersession lock, which live deletes, edits and
+   * reviews wait on — uncommitted, so no wake sees them. Past it the call is
+   * passed over, tried again when the sweep comes round (review pass 3).
+   */
+  const SWEEP_LOCK_TIMEOUT = "2s";
+  /** Whether the clock cut the last sweep — stopped it with work in hand or left — which the clock's check after it reads (review pass 4: a sweep the clock stopped after its last call cut nothing). */
+  let sweepCut = false;
+  /**
+   * The re-derive pass, first in each sleep (SMD-1794's order, SMD-2679):
+   * rebuild_derived's orphans-only sweep over the lineage rows whose artifact
+   * is gone (rebuild.ts's sweepOrphans) — no model, at most its 500 thoughts —
+   * on a connection of its own under the budget's session, the wake read every
+   * --poll seconds meanwhile: a live event, a stop or the clock spent stops it
+   * between thoughts, its call in hand given SWEEP_GRACE_MS before it is
+   * cancelled on the server; a wake ends the sleep. A courtesy, as the
+   * tail move is: an error is said once and the passes go on; a replay's
+   * refusal stops it, said once; a call refused its privilege (42501) or a
+   * function gone (42883) ends the sweeps for this process.
+   */
+  const sweep = async (from: Date, began: number): Promise<"woken" | "stopped" | null> => {
+    sweepCut = false;
+    if (!sweeps) return null;
+    const halt = new AbortController();
+    const client = openSql(url, { max: 1, session: { ...SESSION, lock_timeout: SWEEP_LOCK_TIMEOUT } });
+    let replayed = false;
+    /** The sweep's backend, read first on its one connection: what a stop past the grace cancels. */
+    let pid = 0;
+    /** The first call a failure skipped, said in the summary. */
+    let skippedFirst = "";
+    const tag = (l: string) => l.replace(/^ {2}/, "  [re-derive] ");
+    const run = (async () => {
+      pid = Number((await client`SELECT pg_backend_pid() AS pid`)[0].pid);
+      return sweepOrphans(client, {
+        after: sweepAfter, stopOnReplay: true, signal: AbortSignal.any([halt.signal, onStop.signal]),
+        // One thought whose call always fails is passed over, so the rest of
+        // its window is reached; the database going away, a privilege or a
+        // function gone are not (review pass 2). A call cancelled by the stop
+        // never reaches here: sweepOrphans reads its signal first. The thought
+        // is named, so the operator can find it (review pass 4).
+        skipFailure: (e, thought) => {
+          const code = (e as { errno?: string }).errno;
+          if (databaseUnavailable(e) || code === "42501" || code === "42883") return false;
+          skippedFirst ||= `${thought}: ${(e as Error).message}`;
+          return true;
+        },
+        writer: {
+          out: (l) => out(tag(l)),
+          // A replay's refusal is the session's: said once, not once a thought.
+          err: (l) => {
+            if (!/refused REPLAYING/.test(l)) return err(tag(l));
+            replayed = true;
+            if (!saidReplay) err("  re-derive: this session is a replay (ob1.projecting_replay, a database- or role-level default) — rebuild_derived refuses every call, so the sweep stops at its first; each sleep tries one");
+            saidReplay = true;
+          },
+        },
+      });
+    })().then((r) => ({ r }), (e: unknown) => ({ e: e as Error }));
+    /** Why the sweep was stopped, if it was: none of these is a failure to say (review pass 2). */
+    let why = null as "woke" | "stopping" | "spent" | null;
+    /** The live call that woke it, said as the passes' wake is (review pass 4). */
+    let wokeBy = "";
+    let ended = null as { r?: SweepResult; e?: Error } | null;
+    try {
+      while (ended === null) {
+        ended = await Promise.race([run, sleepUnless(POLL * 1000, onStop.signal).then(() => null)]);
+        if (ended !== null) break;
+        // Null only when a stop ended an outage's wait.
+        const live = stopping ? null : await reading(() => newestLive(sql, from, readsLog));
+        if (live !== null) sleptUntil = live.now;
+        const woken = live === null ? null : newer(live.read, live.write);
+        if (live !== null && woken !== null) wokeBy = `${live.read && woken === live.read ? "read" : "write"} at ${woken.toISOString()}`;
+        why = stopping || live === null ? "stopping" : woken !== null ? "woke" : BUDGET_MS > 0 && Date.now() - began >= BUDGET_MS ? "spent" : null;
+        if (why === null) continue;
+        halt.abort();
+        const grace = () => sleepUnless(SWEEP_GRACE_MS, new AbortController().signal).then(() => null);
+        ended = await Promise.race([run, grace()]);
+        if (ended === null) {
+          // A call waiting on a lock outlives a closed socket on the server,
+          // holding the supersession lock as it waits: cancelled there, it
+          // rolls back and lets go (review pass 2: close({ timeout: 0 })
+          // closed nothing on Bun 1.4.3 while a query was in flight).
+          // On a connection of the sweep's own role: a caller's client may be another's, which may not signal it (review pass 3).
+          if (pid) {
+            const killer = openSql(url, { max: 1 });
+            await killer`SELECT pg_cancel_backend(${pid})`.catch(() => {});
+            await killer.close({ timeout: 1 }).catch(() => {});
+          }
+          ended = await Promise.race([run, grace()]);
+          if (ended === null) {
+            await client.close({ timeout: 1 }).catch(() => {});
+            ended = await run;
+          }
+        }
+      }
+    } finally {
+      // A wake read that throws leaves here too: the sweep stops before its next call (review pass 4).
+      halt.abort();
+      await client.close({ timeout: 1 }).catch(() => {});
+    }
+    const woke = why === "woke";
+    sweepCut = why === "spent" && (ended.e !== undefined || ended.r?.stopped === true);
+    if (ended.e) {
+      const code = (ended.e as { errno?: string }).errno;
+      if (code === "42501" || code === "42883") {
+        sweeps = false;
+        err(`  re-derive: ${ended.e.message} — the sleeps sweep no more in this process${code === "42501" ? "; rebuild_derived runs over four groups' tables, so grant the role every group (bun db/migrate.ts --grant <role>) and restart the scheduler" : ""}`);
+      } else if (!saidSweep && why === null) {
+        saidSweep = true;
+        const on = (ended.e as { thought?: string }).thought;
+        err(`  re-derive: the sweep failed (${on ? `${on}: ` : ""}${ended.e.message}) — the passes go on; each sleep tries it again`);
+      }
+    } else if (ended.r) {
+      const r = ended.r;
+      saidSweep = false;
+      // Only a sweep that made a call speaks for the session's replay (review pass 2).
+      if (!replayed && r.touched + r.refused + r.failed > 0) saidReplay = false;
+      if (r.deleted || r.failed) {
+        const skipped = r.failed ? `; ${r.failed} thought(s) whose call failed passed over (${skippedFirst}), tried again when the sweep comes round` : "";
+        // The limit cut it: the next sleep reads this window again (review pass 4: the progress was not said).
+        const cut = !r.whole && !r.stopped ? ` — the first ${r.thoughts} orphaned thought(s) of this window; the next sleep goes on` : "";
+        out(`  re-derive: ${r.deleted} orphaned lineage row(s) swept over ${r.touched} thought(s)${skipped}${r.stopped && !replayed ? ` — stopped before the rest${FOLLOW && why !== "stopping" ? ", which the next sleep sweeps" : ""}` : cut}`);
+      }
+      // Every orphan's call failing is the sweep's own trouble — a grant, a
+      // trigger — more than one bad thought's: said on stderr once, until a
+      // sweep's call succeeds (review passes 3 and 4).
+      if (r.failed > 0 && r.failed === r.thoughts) {
+        if (!saidAllFailed) err(`  re-derive: every call of this sleep's sweep failed (${skippedFirst}) — the passes go on; each sleep tries again`);
+        saidAllFailed = true;
+      } else if (r.touched > 0) saidAllFailed = false;
+      // A window swept whole moves the cursor on; one stopped, or cut at the
+      // limit, is read again.
+      if (r.whole) {
+        if (r.windowed && !saidWindowed) out("  re-derive: the lineage table holds more than one window of 10,001 rows — each sleep sweeps the next, once the one before is swept whole");
+        saidWindowed ||= r.windowed;
+        sweepAfter = r.windowed ? r.last : null;
+      }
+    }
+    if (stopping) return "stopped";
+    if (woke) {
+      out(`  awake: a live ${wokeBy} during the re-derive sweep — the sleep ends`);
+      return "woken";
+    }
+    return null;
+  };
+
   /** The database's now() at the sleep's last read: the end of its `slept` mark (SMD-2678). */
   let sleptUntil = new Date(0);
   /**
@@ -1238,8 +1440,33 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       await stopPasses(hardStopped);
       return "stopped";
     };
-    out(`  asleep: no live call for ${QUIET} s — extracting${FOLLOW ? "" : ", then consolidating, until both pools are drained"}`);
+    out(`  asleep: no live call for ${QUIET} s — ${sweeps ? "the re-derive sweep, then " : ""}extracting${FOLLOW ? "" : ", then consolidating, until both pools are drained"}`);
     sleptUntil = since;
+    // An audit row carries its transaction's start: a capture begun before the
+    // sleep and committed after it was not visible when the brain fell asleep,
+    // and is dated before. The wake reads that far back — within the quiet
+    // just read, where nothing visible then can stand.
+    const from = new Date(since.getTime() - Math.min(QUIET, WAKE_SLACK_S) * 1000);
+    /** The sleep's clock (SMD-2679): when it began — the sweep inside it — and when it was spent, the passes soft-stopped then, or 0. */
+    const began = Date.now();
+    let spentAt = 0;
+    budgetCut = false;
+    budgetWoke = false;
+    // The re-derive pass first, before the passes claim (SMD-1794's order).
+    const swept = await sweep(from, began);
+    if (swept === "stopped") return stopped();
+    if (swept === "woken") return "woken";
+    // The clock spent during the sweep: no pass starts only to be stopped (review pass 2).
+    if (BUDGET_MS > 0 && Date.now() - began >= BUDGET_MS) {
+      budgetKind = "clock";
+      budgetFrom = from;
+      // Cut work: the sweep's, or the passes' pools not drained (review passes 3 and 4: a sweep done just past the clock, or stopped after its last call, cut nothing).
+      const left = sweepCut ? true : await reading(async () => !drained(await poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, true, startedAt)) || !drained(await poolOf(sql, "consolidate", JOBS.consolidate)));
+      if (left === null) return stopped();
+      budgetCut = left;
+      out(`  the sleep's budget is spent (${opts.budgetMs !== undefined ? `${BUDGET_MS} ms` : `${n.budget} min`}) during the re-derive sweep — no pass starts${FOLLOW ? "; the next sleep begins after a live call" : ""}`);
+      return "budget";
+    }
     /** Whether the stopped thoughts can be moved behind newer work: a restart for it is no use otherwise. */
     let reorders = await stoppedLast();
     let consolidating = false;
@@ -1308,16 +1535,6 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     } else {
       start("extract");
     }
-    // An audit row carries its transaction's start: a capture begun before the
-    // sleep and committed after it was not visible when the brain fell asleep,
-    // and is dated before. The wake reads that far back — within the quiet
-    // just read, where nothing visible then can stand.
-    const from = new Date(since.getTime() - Math.min(QUIET, WAKE_SLACK_S) * 1000);
-    /** The sleep's clock (SMD-2679): when it began, and when it was spent — the passes soft-stopped then — or 0. */
-    const began = Date.now();
-    let spentAt = 0;
-    budgetCut = false;
-    budgetWoke = false;
     for (;;) {
       if (stopping) return stopped();
       const live = await reading(() => newestLive(sql, from, readsLog));

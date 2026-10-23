@@ -1404,9 +1404,10 @@ services:
 
   # The sleep scheduler, unattended (SMD-1794; this service SMD-2678). Optional
   # — `--profile sleep` — and an alternative to `--profile workers`, not a
-  # companion: `bun db/sleep.ts --follow` runs extraction, then consolidation
-  # beside it, only while the brain is quiet — OB1_SLEEP_QUIET seconds (unset,
-  # 300) with no live write in thought_audit and, when the server logs
+  # companion: `bun db/sleep.ts --follow` runs the re-derive sweep, then
+  # extraction, then consolidation beside it, only while the brain is quiet
+  # — OB1_SLEEP_QUIET seconds (unset, 300) with no live write in
+  # thought_audit and, when the server logs
   # searches (OB1_QUERY_LOG=on) and this role may read the log (the owner, or
   # the opt-in `sleep` grant group), no search — and hard-stops both within
   # OB1_SLEEP_POLL seconds (unset, 5) of the next live call, every lease
