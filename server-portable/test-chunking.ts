@@ -63,10 +63,18 @@ const provider = Bun.serve({
       if (input.includes("tarpit") && (input === "tarpit" || estimateTokens(input) > BATCH)) {
         await neverAnswers();
       }
+      // A window that never returns, its whole content refused at once below
+      // (over the batch): a caller's stop has to reach the windows' calls too.
+      if (input.includes("stuckwindow") && estimateTokens(input) <= BATCH) {
+        await neverAnswers();
+      }
       // Headers, then a body that never ends — the other way a call can fail to
       // return, and the one a timeout attached to fetch() alone does not name.
+      // Part of the body is sent: Bun.serve sends no headers for a stream with
+      // nothing in it yet, so an empty one tested the headers again (review
+      // pass 1 of SMD-2679 PR 4a-1, measured).
       if (input === "slowbody") {
-        return new Response(new ReadableStream({ start() {} }), { headers: { "content-type": "application/json" } });
+        return new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{"data":')); } }), { headers: { "content-type": "application/json" } });
       }
       // A whole-content call that fails for a reason that says nothing about
       // the next one: the server's embedder must not remember it (nor count it
@@ -88,7 +96,7 @@ const provider = Bun.serve({
     // the blurbs. Two ways not to answer, keyed on the text being processed.
     const asked = JSON.stringify(body.messages ?? "");
     if (asked.includes("slowchat")) {
-      return new Response(new ReadableStream({ start() {} }), { headers: { "content-type": "application/json" } });
+      return new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{"choices":')); } }), { headers: { "content-type": "application/json" } });
     }
     if (asked.includes("blurbtarpit")) {
       await neverAnswers();
@@ -238,6 +246,44 @@ console.log("\n[1b] A pass-shaped embedder asks every long capture itself, and n
     `every blurb timed out, so every window went in bare (${bare.contextFailures} of ${bare.chunks.length})`);
   assert(bare.contextErrors.length === 1 && /Chat completion request .* timed out after 1 s \(OB1_LLM_TIMEOUT\)/.test(bare.contextErrors[0]),
     `…and the result carries the one distinct reason, naming the setting (${JSON.stringify(bare.contextErrors)})`);
+
+  // A caller's stop (db/reembed.ts's hard stop, SMD-2679): the call in hand
+  // ends at once with the caller's AbortError, under a 10 s timeout it is
+  // not, and nothing degrades for it — no head window, no bare window.
+  const said: string[] = [];
+  const stoppable = (context: boolean) => createEmbedder(() => resolveEmbedConfig({ ...(process.env as EmbedEnv), OB1_LLM_TIMEOUT: "10", ...(context ? { OB1_CHUNK_CONTEXT: "on" } : {}) }), { rememberRefusal: false, log: (l) => said.push(l) });
+  const stopAfter = (ms: number) => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), ms);
+    return ac.signal;
+  };
+  const ended = async (call: Promise<unknown>) => {
+    const t = Date.now();
+    const e = await call.then(() => null, (x: Error) => x);
+    return { name: e?.name ?? "resolved", ms: Date.now() - t };
+  };
+  const shortStop = await ended(stoppable(false).getEmbedding("tarpit", SUBJECT, "document", stopAfter(200)));
+  assert(shortStop.name === "AbortError" && shortStop.ms < 2_000, `a caller's stop ends a call that never returns at once, as its AbortError, not the timeout (${shortStop.name} after ${shortStop.ms} ms)`);
+  const bodyStop = await ended(stoppable(false).getEmbedding("slowbody", SUBJECT, "document", stopAfter(200)));
+  assert(bodyStop.name === "AbortError" && bodyStop.ms < 2_000, `…and one whose body stops arriving after the headers, as its AbortError — not a body that was not JSON (${bodyStop.name} after ${bodyStop.ms} ms)`);
+  // A caller's own timeout signal is its stop, not OB1_LLM_TIMEOUT's: the
+  // signal's reason, not "timed out after 10 s" (review pass 2).
+  const callerTimeout = await stoppable(false).getEmbedding("tarpit", SUBJECT, "document", AbortSignal.timeout(200)).then(() => "", (e: Error) => `${e.name}: ${e.message}`);
+  assert(/^TimeoutError/.test(callerTimeout) && !/OB1_LLM_TIMEOUT/.test(callerTimeout), `…and a caller's own timeout signal rejects with its reason, not as OB1_LLM_TIMEOUT's timeout (${callerTimeout})`);
+  // The deadline still holds beside a signal that never fires: the timeout, named.
+  const deadline = await pass.getEmbedding("slowbody", SUBJECT, "document", new AbortController().signal).then(() => "", (e: Error) => e.message);
+  assert(/timed out after 1 s \(OB1_LLM_TIMEOUT\)/.test(deadline), `…and beside a caller's signal that never fires, OB1_LLM_TIMEOUT still ends the call, named (${deadline})`);
+  said.length = 0;
+  const wholeStop = await ended(stoppable(false).embedCapture(`tarpit ${FILLER.repeat(60)}`, SUBJECT, stopAfter(200)));
+  assert(wholeStop.name === "AbortError" && wholeStop.ms < 2_000 && !said.some((l) => /head window/.test(l)),
+    `…and a long capture whose whole-content call hangs, its windows embedded, rejects with it rather than fall back to the head window (${wholeStop.name} after ${wholeStop.ms} ms; ${JSON.stringify(said)})`);
+  const windowStop = await ended(stoppable(false).embedCapture(`stuckwindow ${FILLER.repeat(60)}`, SUBJECT, stopAfter(200)));
+  assert(windowStop.name === "AbortError" && windowStop.ms < 2_000,
+    `…and one whose windows hang, the whole content refused at once, rejects with it too: every window's call takes the stop (${windowStop.name} after ${windowStop.ms} ms)`);
+  said.length = 0;
+  const blurbStop = await ended(stoppable(true).embedCapture(`blurbtarpit ${FILLER.repeat(60)}`, SUBJECT, stopAfter(200)));
+  assert(blurbStop.name === "AbortError" && blurbStop.ms < 2_000 && !said.some((l) => /contextualiseChunk/.test(l)),
+    `…and one whose blurbs hang rejects with it, no window going in bare for the stop (${blurbStop.name} after ${blurbStop.ms} ms; ${JSON.stringify(said)})`);
 }
 
 console.log("\n[2] Chunks are written only for content that needs them");
