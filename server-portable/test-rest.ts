@@ -31,6 +31,17 @@ const { assert, report } = createAssert();
 type Op = { operationId: string; "x-ob1-scope"?: string; parameters?: { name: string; in: string; required?: boolean; schema: { type?: string; items?: { type?: string } } }[]; requestBody?: { content: { "application/json": { schema: { properties?: Record<string, unknown> } } } } };
 const doc = openApiDocument() as { openapi: string; paths: Record<string, Record<string, Op>> };
 
+// [16]'s measurement of what api.ts's idleTimeout is for, on this runtime: a
+// GET whose handler answers after 14 s, served at 255 and at Bun's default
+// (which cuts at its 10 s plus its sweep, about 12 s). Started here, so its
+// 14 s run beside every other section rather than after them all (SMD-3201);
+// [16] awaits it.
+const idleProbe = (idleTimeout?: number) => {
+  const server = Bun.serve({ port: 0, ...(idleTimeout ? { idleTimeout } : {}), fetch: async () => { await Bun.sleep(14_000); return new Response("done"); } });
+  return fetch(`http://127.0.0.1:${server.port}/v1/stats`).then(async (r) => `${r.status} ${await r.text()}`, (e: Error) => `cut: ${e.message.slice(0, 40)}`).finally(() => server.stop(true));
+};
+const idleProbes = Promise.all([idleProbe(255), idleProbe()]);
+
 console.log("[1] Every tool in the manifest has one route, and no two routes share a method and path");
 {
   const names = Object.keys(ROUTES).sort();
@@ -1557,12 +1568,7 @@ console.log("\n[16] The served idle timeout is Bun's ceiling: its 10 s default c
 {
   const api = await import("./api.ts");
   assert(api.IDLE_TIMEOUT_S === 255 && (api.default as { idleTimeout?: number }).idleTimeout === 255, `bun api.ts serves with idleTimeout 255 (${(api.default as { idleTimeout?: number }).idleTimeout})`);
-  // What the setting is for, measured on this runtime: a GET whose handler answers after 14 s (Bun cuts at its 10 s default plus its sweep, about 12 s).
-  const probe = (idleTimeout?: number) => {
-    const server = Bun.serve({ port: 0, ...(idleTimeout ? { idleTimeout } : {}), fetch: async () => { await Bun.sleep(14_000); return new Response("done"); } });
-    return fetch(`http://127.0.0.1:${server.port}/v1/stats`).then(async (r) => `${r.status} ${await r.text()}`, (e: Error) => `cut: ${e.message.slice(0, 40)}`).finally(() => server.stop(true));
-  };
-  const [held, cut] = await Promise.all([probe(255), probe()]);
+  const [held, cut] = await idleProbes;
   assert(held === "200 done", `at 255, a 14-second GET is answered (${held})`);
   // A tripwire: when a Bun bump stops cutting, this fails — revisit IDLE_TIMEOUT_S here and in mcp-server/index.ts, and sse.ts's comment (SMD-2931).
   assert(/^cut: .*ECONNRESET|^cut: .*closed/i.test(cut), `…where Bun's default cuts it, the connection reset — the setting's reason, still true on this runtime; if this fails after a Bun bump, revisit IDLE_TIMEOUT_S (api.ts, mcp-server/index.ts) and sse.ts's comment (${cut})`);
