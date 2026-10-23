@@ -20,13 +20,13 @@
 # sets DATABASE_URL is `run`, one that does not is `nodb`), and every directory
 # CI runs `bunx tsc --noEmit` in a `typecheck` line, whether by a step of its
 # own or one .github/ci/typecheck.sh step names (SMD-3202), as is every
-# directory a step runs `bun run check` in (a SvelteKit app, SMD-2280) — or its job or
-# script is excused there with why. Not here, so: the full stack and the
+# directory a step runs `bun run check` in (a SvelteKit app, SMD-2280) — or its
+# job or script is excused there with why. Not here, so: the full stack and the
 # authorization POC (built images and a compose stack), the landing check (a
-# pull request's commit range) and the codemod's round-trip (it rewrites
-# tracked files). Nor is db/test-bench-reuse.ts, three minutes of 150,000-row
-# builds and exact passes (check 34 excuses it; it would run here — it drops
-# its marker on exit).
+# pull request's commit range) and the codemod's round-trip (it rewrites tracked
+# files). Nor is db/test-bench-reuse.ts, three minutes of 150,000-row builds and
+# exact passes (check 34 excuses it; it would run here — it drops its marker on
+# exit).
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT="$PWD"

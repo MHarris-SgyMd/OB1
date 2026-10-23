@@ -15,6 +15,11 @@ export function textIn(params: URLSearchParams, name: string, max: number): stri
 	return t ? t.slice(0, max) : undefined;
 }
 
+/** `v` when it is one of `words`, else null: a word any write key writes, kept only when the tool would print it (render.ts's oneOf). */
+export function wordOf(words: readonly string[], v: string | null | undefined): string | null {
+	return v != null && words.includes(v) ? v : null;
+}
+
 /** One of `words`, or `fallback`. */
 export function wordIn<const W extends readonly string[]>(params: URLSearchParams, name: string, words: W, fallback: W[number]): W[number] {
 	const v = params.get(name);

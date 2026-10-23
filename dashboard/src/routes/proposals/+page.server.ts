@@ -1,12 +1,9 @@
 import type { PageServerLoad } from './$types';
 import { firstLine, oneLine } from '$lib/format';
-import { wholeIn, wordIn } from '$lib/params';
+import { wholeIn, wordIn, wordOf } from '$lib/params';
 import { read } from '$lib/server/rest';
 import type { ProposalsResult } from '$lib/types';
 import { SAID_BY, TRUST } from '../../../../server-portable/core/filter.ts';
-
-/** A word of `words`, or null: a writer's kind and trust are any write key's to set, and the tool keeps only its words (render.ts's actorLine). */
-const wordOf = (words: readonly string[], v: string | null) => (v !== null && words.includes(v) ? v : null);
 
 const STATUSES = ['pending', 'accepted', 'rejected', 'stale', 'all'] as const;
 /** Lineage, as the core's three-way `lineage`: every pair, only lineage pairs, or none of them. */

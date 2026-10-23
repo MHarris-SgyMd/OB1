@@ -1,7 +1,7 @@
 import type { PageServerLoad } from './$types';
 import { base } from '$app/paths';
 import { oneLine } from '$lib/format';
-import { addressOf, textIn, wholeIn } from '$lib/params';
+import { addressOf, textIn, wholeIn, wordOf } from '$lib/params';
 import { read } from '$lib/server/rest';
 import type { ChangesResult } from '$lib/types';
 import { SAID_BY } from '../../../../server-portable/core/filter.ts';
@@ -65,7 +65,7 @@ export const load: PageServerLoad = async (event) => {
 				// a door, by the door; neither, from outside the server.
 				who:
 					c.actorName !== null
-						? `by ${oneLine(c.actorName, 80)}${c.actorKind && (SAID_BY as readonly string[]).includes(c.actorKind) ? ` (${c.actorKind})` : ''}`
+						? `by ${oneLine(c.actorName, 80)}${wordOf(SAID_BY, c.actorKind) ? ` (${c.actorKind})` : ''}`
 						: c.origin !== null
 							? `by ${oneLine(c.origin, 80)} (no key)`
 							: 'from outside the server',
