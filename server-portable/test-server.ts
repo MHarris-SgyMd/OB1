@@ -1912,9 +1912,11 @@ console.log(`\n[17] A tool call ${mcpTarget() === "index" ? "outlives the runtim
   assert(lines.length === 1, `…and the server logs it once, for that request alone (${lines.length} of ${warned.length} warnings)`);
   const m = /after (\d+\.\d) s/.exec(lines[0] ?? "");
   assert(m !== null && lines[0] === abandonedRequestLine("tools/call search_thoughts", Number(m[1]) * 1000), "…the line is sse.ts's own, naming the method and the tool");
-  // Its line's tenths, from the moment it left to before its call, as long as it took, ended (review pass 2: a starved
-  // client pass's line read 1.1 s beside a call of 2.9 s).
-  assert(m !== null && Number(m[1]) >= LEAVE_MS / 1000 - 0.1 && Number(m[1]) < Math.min(3, slow.ms / 1000), `…at the moment the client left (${m?.[1] ?? "?"} s, the call ${Math.round(slow.ms)} ms)`);
+  // Its line's tenths: from the moment it left to well before its call ended — the call as measured, less half the
+  // nominal gap between leaving and the end, so a line written as the call ends fails (SMD-3201 review passes 2–3: a
+  // starved client pass's line read 1.1 s beside a call of 2.9 s; a bound of the call alone passed a line at its end).
+  const leaveBound = Math.min(3, (slow.ms - (SLOW_EMBED_MS - LEAVE_MS) / 2) / 1000);
+  assert(m !== null && Number(m[1]) >= LEAVE_MS / 1000 - 0.1 && Number(m[1]) < leaveBound, `…at the moment the client left (${m?.[1] ?? "?"} s, under ${leaveBound.toFixed(2)} s; the call ${Math.round(slow.ms)} ms)`);
   assert(!/needle-the-line-must-not-carry/.test(lines[0] ?? ""), "…and never the query");
   assert(
     requestLabel(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "capture_thought", arguments: { content: "the thought" } } })) === "tools/call capture_thought"

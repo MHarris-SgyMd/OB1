@@ -41,12 +41,15 @@ const KEY = "test-key-xyz";
 /** [3]'s query, whose embedding the stub holds: a tool call still running when its client has left and the stop lands. */
 const SLOW_QUERY = "a call the stop waits on";
 const SLOW_CALL_MS = 1_500;
+const PAST_SIGNAL_MS = 500;
 // Its order is the events', not the clock's: the stub says when the embedding
-// has arrived, and answers no sooner than SLOW_CALL_MS after it nor 500 ms
-// after [3] has signalled the child, so a starved runner cannot land the
-// signal after the call has ended (review pass 2).
+// has arrived, and answers no sooner than SLOW_CALL_MS after it nor
+// PAST_SIGNAL_MS after [3] has signalled the child, so a starved runner cannot
+// land the signal after the call has ended (SMD-3201 review pass 2); when it
+// answered is stamped, for [3] to hold the child's exit after it.
 const slowArrived = Promise.withResolvers<void>();
 const slowSignalled = Promise.withResolvers<void>();
+let slowAnsweredAt = Infinity;
 const provider = Bun.serve({
   port: 0,
   async fetch(req) {
@@ -55,7 +58,8 @@ const provider = Bun.serve({
     if (new URL(req.url).pathname.endsWith("/embeddings")) {
       if (String(body.input ?? "").includes(SLOW_QUERY)) {
         slowArrived.resolve();
-        await Promise.all([Bun.sleep(SLOW_CALL_MS), slowSignalled.promise.then(() => Bun.sleep(500))]);
+        await Promise.all([Bun.sleep(SLOW_CALL_MS), slowSignalled.promise.then(() => Bun.sleep(PAST_SIGNAL_MS))]);
+        slowAnsweredAt = performance.now();
       }
       const v = new Array(DEFAULT_EMBEDDING_DIM).fill(0);
       v[String(body.input ?? "").length % DEFAULT_EMBEDDING_DIM] = 1;
@@ -924,9 +928,9 @@ console.log("\n[3] SIGTERM stops the server once what is in flight has ended, ex
     const mirrorCut = graceLines.filter((l) => l.route === "/worker-status");
     assert(mirrorCut.length === 1 && mirrorCut[0]?.outcome === "cut" && mirrorCut[0].tool === "worker_status" && mirrorCut[0].agent === "MCP_ACCESS_KEY" && mirrorCut[0].status === 0,
       `a keyed mirror held at the registry when the stop cuts it: one \`cut\` line, by its route and key, from the stop's cutOpenRequests (${JSON.stringify(mirrorCut)})`);
-    // A keyed mirror whose client left while it waits on the registry. Bun 1.4.3 counts it done at once, so the stop
-    // drains with it open and only the stop's endOpen writes its line — 0, \`abandoned\` (PR 2c review pass 3); Bun 1.4.0,
-    // CI's and the image's, still counts it, so the drain waits for its handler, whose line says 200, \`abandoned\`
+    // A keyed mirror whose client left while it waits on the registry, its handler yet to return. Bun 1.4.3 counts it
+    // done at once, so the stop drains with it open and only the stop's endOpen writes its line — 0, \`abandoned\` (PR 2c
+    // review pass 3); Bun 1.4.0 still counts it, so the drain waits for its handler, whose line says 200, \`abandoned\`
     // (review pass 4). Either way one line, and the branch is read from the child's own count.
     const leaving = new AbortController();
     const left = fetch(`http://127.0.0.1:${leftBehind.port}/mcp/jobs/${crypto.randomUUID()}`, { headers: { "x-brain-key": KEY }, signal: leaving.signal }).then(() => "answered", () => "left");
@@ -942,10 +946,12 @@ console.log("\n[3] SIGTERM stops the server once what is in flight has ended, ex
     assert(leftCode === 0 && (leftCounted || /0 requests in flight/.test(leftLog)) && leftLines.length === 1 && leftLines[0]?.outcome === "abandoned"
       && leftLines[0].agent === "MCP_ACCESS_KEY" && leftLines[0].status === (leftCounted ? 200 : 0),
       `a mirror whose client left, at a drained stop: one \`abandoned\` line — the stop's, before the flush, where the runtime let it go; its handler's where the drain waited (${leftCode}, ${leftCounted ? "counted" : "let go"}; ${JSON.stringify(leftLines)})`);
-    // A tool call whose client has left, still running when SIGTERM lands. Bun (1.4.0 and 1.4.3 alike) counts a request
-    // done once its client has gone, so only index.ts's count of tool calls holds the stop until the call ends; before
-    // review pass 3 a stop like this exited under the call, and its capture was lost. The line may still count the
-    // request where the abort has yet to reach the server; the tool call is counted either way.
+    // A tool call whose client has left, still running when SIGTERM lands. Its handler has already returned the stream,
+    // so Bun (1.4.0 and 1.4.3 alike) counts its request done once the client has gone, and only index.ts's count of tool
+    // calls holds the stop until the call ends; before SMD-2250's review pass 3 a stop like this exited under the call,
+    // and its capture was lost. The line may still count the request where the abort has yet to reach the server; the
+    // tool call is counted either way. The child's exit is held after the stub's answer, not to a clock (SMD-3201 review
+    // pass 3: a starved signal landing past SLOW_CALL_MS made a time bound pass a stop that waited on nothing).
     const tw = performance.now();
     const leaver = new AbortController();
     const waitedOn = fetch(`http://127.0.0.1:${calling.port}/`, {
@@ -961,11 +967,12 @@ console.log("\n[3] SIGTERM stops the server once what is in flight has ended, ex
     calling.proc.kill("SIGTERM");
     slowSignalled.resolve();
     const callCode = await exited(calling.proc, SLOW_CALL_MS + 3_000);
-    const callTook = performance.now() - tw;
+    const exitedAt = performance.now();
+    const callTook = exitedAt - tw;
     const callLog = await calling.out;
     const callStop = callLog.split("\n").find((l) => l.startsWith("SIGTERM: no longer accepting")) ?? "";
-    assert(reached && leftCall === "left" && callCode === 0 && callTook >= SLOW_CALL_MS && /; (?:0 requests|1 request) in flight, 1 tool call running\b/.test(callStop),
-      `a tool call running past its client when SIGTERM lands holds the stop until it ends, exit 0 (${reached ? "reached its embedding" : "no embedding within 5 s"}, ${leftCall}; ${callCode} at ${Math.round(callTook)} ms, the call ${SLOW_CALL_MS} ms; ${callStop})`);
+    assert(reached && leftCall === "left" && callCode === 0 && exitedAt >= slowAnsweredAt && /; (?:0 requests|1 request) in flight, 1 tool call running\b/.test(callStop),
+      `a tool call running past its client when SIGTERM lands holds the stop until it ends, exit 0 (${reached ? "reached its embedding" : "no embedding within 5 s"}, ${leftCall}; ${callCode} at ${Math.round(callTook)} ms, ${slowAnsweredAt === Infinity ? "before the call was answered" : `the call answered at ${Math.round(slowAnsweredAt - tw)} ms`}; ${callStop})`);
   } finally {
     slowSignalled.resolve();
     for (const { proc } of [busy, idle, ctrlC, cutter, graced, leftBehind, calling]) proc.kill("SIGKILL");
