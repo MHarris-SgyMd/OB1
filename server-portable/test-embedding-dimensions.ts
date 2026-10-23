@@ -25,6 +25,7 @@
 
 import { SQL } from "bun";
 import { createAssert, resetSchema } from "../db/test-support.ts";
+import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -87,7 +88,8 @@ process.env.MCP_ACCESS_KEY = "dim-key";
 delete process.env.OPENROUTER_API_KEY;
 delete process.env.SUPABASE_URL;
 
-const worker = (await import("./index.ts")).default as { fetch: (r: Request) => Response | Promise<Response> };
+const worker = await mcpUnderTest();
+assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const BASE = `http://localhost:${server.port ?? 0}`;
 

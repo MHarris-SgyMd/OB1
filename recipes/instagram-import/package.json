@@ -5,10 +5,6 @@
   "type": "module",
   "main": "import-instagram.mjs",
   "scripts": {
-    "import": "node import-instagram.mjs",
-    "dry-run": "node import-instagram.mjs --dry-run"
-  },
-  "dependencies": {
-    "dotenv": "^16.4.0"
+    "emit": "bun import-instagram.mjs"
   }
 }

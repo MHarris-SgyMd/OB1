@@ -9,13 +9,12 @@
   "version": "1.0.0",
   "requires": {
     "open_brain": true,
-    "services": ["OpenRouter API", "Supabase"],
-    "tools": ["Node.js 18+"]
+    "tools": ["Bun"]
   },
   "tags": ["import", "instagram", "meta", "social-media", "messages"],
   "connectors": ["instagram"],
   "difficulty": "intermediate",
   "estimated_time": "20 minutes",
   "created": "2026-03-15",
-  "updated": "2026-03-15"
+  "updated": "2026-10-23"
 }
