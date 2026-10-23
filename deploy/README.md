@@ -16,6 +16,10 @@ backups, no resource limits.
   what `podman compose` runs when it is installed): the proxy's route table is
   an inline `configs:` entry, which older compose does not read, and the Python
   podman-compose refuses the file (1.6.0: `missing networks: default`)
+- To build the images from a checkout (`up --build`): Docker Engine 25 or later,
+  or podman 5.1 or later — the server's Dockerfile sets its healthcheck's
+  `--start-interval`, which older builders refuse (SMD-3194). A release install
+  pulls the images and needs neither
 - A model provider: the stack's own Ollama (`--profile local-models`, one line to
   set: `OB1_LLM_LOCAL=1`), an Ollama on the host, or an OpenRouter key — the shipped defaults are
   local; `deploy/.env.example`, "Model provider", is the one line to choose
@@ -92,6 +96,15 @@ behind it, naming the profile, the two host aliases and a hosted provider as the
 ways out (SMD-1875). Before that row the name counted as local and was not
 dialled, so the stack came up `preflight OK` and the first capture failed on it
 (`getaddrinfo ENOTFOUND ollama`) with the server log ending at `Started server`.
+A name that resolves with nothing answering yet is the other case: an Ollama
+on the host not started yet, or the profile's `ollama` container started and
+not yet listening (one not started at all is a name that does not resolve,
+and still fails). The row warns, and
+the server starts degraded: captures land without their vectors, searches
+answer by exact matches, and keyed `/health` (`provider.status`, `since`) and
+`brain_info` (its `Provider` row, `unreachable since …`) say so. It
+re-probes every `OB1_PROVIDER_REPROBE_INTERVAL` seconds (15) and leaves
+degraded when the provider answers, with no restart (SMD-2890).
 
 The services, in order, the last two with the profile:
 
@@ -243,9 +256,7 @@ compose command for that brain: `ps`, `logs`, `down` and the rest. A canary's
 env file names the canary's project, port, address, tier and profiles
 (SMD-2874), but the refresh and its checks are `canary.sh`'s: stand it up and
 take it down with `canary.sh`, and give compose its file only to look (`ps`,
-`logs`). The three-brain stack reads
-`deploy/.env` too, so a `COMPOSE_PROJECT_NAME` there puts it in that brain's
-project ("What is reachable from where", below). The scripts
+`logs`). The scripts
 take the brain the same way:
 - `deploy/canary.sh --env-file deploy/.env.ob1b.local --port 8021 up` stands `ob1b`'s canary. Its
   project is `ob1b-canary`, its connector `ob1b-canary`, and its env file
@@ -424,37 +435,11 @@ network of its own, `postgres-port`, for its loopback port, and
 | `pg-exporter` (`--profile observability`) | `pg-exporter.ob1.internal:9187` on the internal `telemetry` network, where lgtm's collector scrapes it at `/cgi-bin/metrics`, the one path that answers; nothing on `data` reaches that port, and the exporter itself listens on the container's loopback (SMD-3023). It dials `postgres:5432` on `data` as `ob1_monitor` (a member of `pg_monitor` alone). It shares no network with the model providers or the mesh | Nothing | Nothing |
 | `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on `auth-egress`, its own, through its fetch guard. It shares no network with Postgres, Ollama, Jev, n8n or the workers, and holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
-The three-brain pipeline (`-f deploy/compose.tiers.yaml`, SMD-1806) publishes its
-forwarder alone, in front of its proxy (SMD-2583), on this file's `SERVER_BIND` and `SERVER_PORT`, with each tier a path
-on it (SMD-2294): `/mcp` the stable tier's server, `/canary/mcp` and
-`/working/mcp` the others' (a bodiless 404 while that tier is stopped; stable's
-`/mcp` answers 502 then, as compose.yaml's does). Its
-servers, REST cores, three Postgres services and shared Ollama publish nothing,
-and it has compose.yaml's networks, less the authorization server's.
-Nothing public routes to a REST core, and the root, `/.well-known` and `/api`
-are the proxy's 404: that stack never had compose.yaml's legacy route, and has no authorization server
-and no `/api`. It reads `SERVER_PORT` as this file does, so to run the two side
-by side set `SERVER_PORT` in the shell for one of them, which wins over
-`deploy/.env`. Its proxy waits on no tier and starts in compose's first wave,
-so a canary or working tier whose migration fails is a 404 at its path while
-stable and the origin serve; `up` still exits 1 and names the failed migrator.
-`up proxy` alone therefore brings no tier: name the services, or none.
-Its project is `open-brain-tiers`, the file's `name:`. Leave `COMPOSE_PROJECT_NAME`
-and `-p` alone for it: either one overrides that name, and as `open-brain` the tiers
-would join this stack's project, its `proxy` and its `mesh`, where two servers
-answer as `mcp.ob1.internal`.
 A canary stood beside this
 stack (`deploy/canary.sh`, "A canary beside the stack" below) is this file
 again under the project `open-brain-canary`: the same rows on its own networks,
 its forwarder on a loopback port of its own (SMD-2874). It joins none of this
 stack's networks.
-
-| Service | On the stack's networks | On the host | From another machine |
-| --- | --- | --- | --- |
-| `proxy` | dials each tier's server on `mesh`: `mcp.ob1.internal:8000` (stable), `mcp.canary.ob1.internal:8000`, `mcp.working.ob1.internal:8000`; `proxy.ob1.internal` on `front` | Nothing of its own: `/mcp`, `/canary/mcp`, `/working/mcp` on the forwarder's port | Through the forwarder |
-| `forwarder` | on `edge`, and dials the proxy alone on `front`, as compose.yaml's (SMD-2583) | `127.0.0.1:${SERVER_PORT:-8000}` | Through a TLS proxy or tunnel, as compose.yaml's; `SERVER_BIND=0.0.0.0` only for a proxy on another machine |
-| `<tier>-server` | `<tier>-server:8000` on `data` and `egress`; `mcp.<tier>.ob1.internal` (stable: `mcp.ob1.internal`) on `mesh` | Nothing of its own: its path on the proxy's port | Through the proxy |
-| `<tier>-api` | `api.<tier>.ob1.internal:8000` (stable: `api.ob1.internal`) on `mesh`, and `<tier>-api:8000` on `data` and `egress` — a key is still required for anything but `/health` and `/openapi.json` | Nothing | Nothing |
 
 `docker compose -f deploy/compose.yaml config` renders each mapping with
 `host_ip: 127.0.0.1`, and `scripts/check-fork-consistency.ts` check 13 parses
@@ -863,11 +848,6 @@ root reports that 404 itself.
 | n8n | `http://server:8000/` in an MCP Client node you built | an HTTP Request node against the REST core, `http://api:8000/v1/…` with the key in `x-brain-key`, on the `egress` network and not through the proxy (SMD-2295). `server` answers there only until SMD-2287 PR 6 retires it, and the profile's brain credential is pinned to `api` since SMD-2295, so a node aimed at `server` with it is refused now |
 | any other client: Codex or Cursor, an `mcp-remote` or `supergateway` bridge, a dashboard's `MCP_URL` | the root, with or without `?key=` | put `/mcp` before `?key=` (`https://host/mcp?key=…`), or at the end of a URL without one |
 
-A stack run with `compose.tiers.yaml` never had the legacy route: since SMD-2294 its
-proxy answers the root with a 404, and each tier is `/mcp`, `/canary/mcp` or
-`/working/mcp` on the proxy's port. A client of that stack moves from the
-tier's old host port to its path.
-
 Two more things belong here, though neither applies until the stack has a
 public origin and the `auth` profile on (SMD-2382):
 
@@ -1012,8 +992,7 @@ it now comes back without a hand start (SMD-2834). Check 32
 of `scripts/check-fork-consistency.ts` holds every service's policy, and that
 each follower runs through the supervisor. Postgres
 had none until SMD-2760, so on Docker a reboot would bring the servers back
-without their database. A canary (`canary.sh`) and the three-tier stack
-(`compose.tiers.yaml`) take the same policies.
+without their database. A canary (`canary.sh`) takes the same policies.
 
 - **Docker** starts its `unless-stopped` containers when the daemon starts,
   except one stopped by hand. That needs the daemon itself to start at boot:
@@ -1057,7 +1036,9 @@ without their database. A canary (`canary.sh`) and the three-tier stack
 can start before Postgres answers. Its preflight then fails and the
 container exits (preflight does not wait), and `unless-stopped` starts it
 again until Postgres answers, which takes seconds. Under podman that loop
-has no backoff (SMD-2043). A database the server cannot use keeps it
+has no backoff (SMD-2043). A model provider that is not up yet does not
+restart it: an Ollama on the host that starts after the stack is a preflight warning,
+and the server serves degraded until it answers (SMD-2890). A database the server cannot use keeps it
 restarting; for example, after a lost volume Postgres comes back empty, and
 the migrator does not run at boot. `compose logs server` says why. With the
 schema in place the migrator is not needed at boot; the `up` after an
@@ -1065,8 +1046,7 @@ upgrade runs it.
 
 **A stack from before SMD-2760**, a canary's included, keeps its Postgres
 (and its Ollama, where the profile is on) at `no` until each is recreated
-from this `compose.yaml`; a three-tier stack's three Postgres likewise, from
-`compose.tiers.yaml`. Its servers are already `unless-stopped`, so an
+from this `compose.yaml`. Its servers are already `unless-stopped`, so an
 enabled unit would bring them back without their database. An `up -d`
 recreates them, with a short outage. Or set the policy on each running
 container in place: under podman that kept the same container running, and
@@ -1078,7 +1058,6 @@ container at a time; `docker update --restart unless-stopped` takes several.
 podman update --restart unless-stopped open-brain-postgres-1
 podman update --restart unless-stopped open-brain-canary-postgres-1   # a canary's (deploy/canary.sh)
 podman update --restart unless-stopped open-brain-ollama-1            # with --profile local-models
-podman update --restart unless-stopped open-brain-tiers-stable-postgres-1   # and canary-, working-: the tier stack
 ```
 
 **To check after a reboot**, list the stack with the `-f` files and profiles
@@ -1124,9 +1103,7 @@ with a key it does not show that record to, the pass line says this could not
 be judged. A URL spelled otherwise than the server's origin (`:443`, upper
 case), or a document naming another origin (`http` in front of an `https`
 tunnel), fails with the URL to use instead. A URL under another
-path (a three-brain stack's tier at `/canary/mcp`, reached with keys: no tier
-route carries OAuth, SMD-2286) is asked at its own path form and
-the root form only. A server whose authorization server flips between up and
+path is asked at its own path form and the root form only. A server whose authorization server flips between up and
 down inside one run (its probe's 30 s) can fail it once; run it again.
 
 ## What the servers log
@@ -1216,8 +1193,7 @@ docker logs open-brain-server-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.out
 
 **Every service in `deploy/`'s stacks has a bounded log**: the json-file driver,
 rotated at 10 MB with three files kept (`x-logging` in `compose.yaml`; check 29
-of `scripts/check-fork-consistency.ts` refuses a service there without it, and
-check 27 holds `compose.tiers.yaml` to the same). Podman takes the same keys
+of `scripts/check-fork-consistency.ts` refuses a service there without it). Podman takes the same keys
 and keeps one file, truncated at the bound rather than rotated: every line
 goes at once, so it holds anywhere from nothing to 10 MB (measured on podman
 6.0.2). The driver is named per service, so it
@@ -1855,9 +1831,7 @@ env file is made from stable's at its first `up`: with the endpoint in
 stable's by then, its servers say `ENOTFOUND` for `lgtm.ob1.internal` until
 the endpoint is out of its file (`OTEL_EXPORTER_OTLP_ENDPOINT=
 deploy/canary.sh up`, an empty one in the shell, keeps it out of the canary's
-servers without an edit); `up` says so. `GRAFANA_*` and `OB1_MONITOR_*` are never carried. The
-three-brain stack (`compose.tiers.yaml`) runs no collector and passes the
-servers none of these variables.
+servers without an edit); `up` says so. `GRAFANA_*` and `OB1_MONITOR_*` are never carried.
 
 **Turning it off**: take `observability` and the endpoint out of
 `deploy/.env` and `compose up -d` without the Grafana `-f` files, then
@@ -2176,9 +2150,10 @@ unattended waits on a judge that can tell conflicts apart (SMD-1873).
 `--profile sleep` runs one service, `sleep`: `db/sleep.ts --follow`, the
 sleep scheduler (SMD-1794; this service, SMD-2678). It runs this profile's two
 passes only while the brain is quiet — `OB1_SLEEP_QUIET` seconds (unset, 300)
-with no live call — extraction first, and consolidation beside it once
-extraction's pool is drained, so the backlog order above is built in. On the
-next live call it stops both within `OB1_SLEEP_POLL` seconds (unset, 5): the
+with no live call — the re-derive sweep, then extraction, and consolidation
+beside it once extraction's pool is drained, so the backlog order above is
+built in. On the next live call it stops both within `OB1_SLEEP_POLL` seconds
+(unset, 5; the sweep's call in hand gets 2 s more, then is cancelled): the
 model call in hand is aborted and every lease returned, and the brain is
 quiet again `OB1_SLEEP_QUIET` seconds after the last one. A sleep runs at most
 `OB1_SLEEP_BUDGET` minutes (unset, 60), and the next begins after a live call
@@ -2212,6 +2187,8 @@ is spent (60 min)`, `… still in hand 300 s past the budget — stopped now`, o
 `<pass>: a statement passed the pass's statement_timeout (300 s)` with `the
 sleep stops on its budget` — and a quiet night's clock with nothing left to do
 says `the sleep's clock is spent (60 min) with nothing left to do — it ends`.
+Each sleep begins with the re-derive sweep, which says `re-derive: N orphaned
+lineage row(s) swept` when it deletes any.
 The settings go out as startup parameters, which a transaction pooler
 (PgBouncer, a managed host's pooled endpoint) refuses: the service connects to
 Postgres directly, as the stack's own does. `extract-entities.ts
@@ -2353,9 +2330,6 @@ deploy/tier.sh --env-file ~/OB1/deploy/.env.canary.local --from-env-file ~/OB1/d
 # is stable's and --from-env-file the canary's
 deploy/tier.sh --env-file ~/OB1/deploy/.env --from-env-file ~/OB1/deploy/.env.canary.local \
   --from-project open-brain-canary --promote --from postgres --to postgres
-# the three-tier stack's own database network and services: one project, so
-# both halves on its network, and the image its own (open-brain-tiers-tier)
-deploy/tier.sh --project open-brain-tiers --refresh --from stable-postgres --to canary-postgres
 ```
 
 A working copy on stable's server is a scratch database for a branch's
@@ -2583,9 +2557,8 @@ grant can surface minutes after a start that looked healthy.
 
 ## A canary beside the stack
 
-`compose.tiers.yaml` stands three new brains up from nothing. A stack that is
-already running holds a brain of its own, and SMD-1806 makes it stable, the
-record. `canary.sh` stands the canary beside it, and takes it down again
+A stack that is already running holds a brain of its own, and SMD-1806 makes
+it stable, the record. `canary.sh` stands the canary beside it, and takes it down again
 (SMD-2038):
 
 ```bash

@@ -282,11 +282,14 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
   let freshOutages = 0;
   let outagesInARow = 0;
   let lastOutage: { reason: string; detail: string } | null = null;
+  /** When the call that met the last outage began (performance.now()): an answer seen since passes it over (SMD-2890). */
+  let lastOutageStarted = 0;
   // The provider answered a call of this tick: an outage that stood is over, and its holds go.
   const answer = () => {
     outagesInARow = 0;
     if (answered) return;
     answered = true;
+    ctx.providerHealth.noteUp(); // the provider's state, as every embedding call tells it (SMD-2890)
     state.unanswered = 0;
     if (state.down) {
       state.down = false;
@@ -320,6 +323,7 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
         const embedder = gate.blurbs ? ctx.embedder : (state.bare ??= createEmbedder(() => ({ ...ctx.embedConfig(), chunkContext: false })));
         embeddedRows++;
         let embedded;
+        const callStarted = performance.now();
         try {
           embedded = await embedder.embedCapture(row.content, gate.subject);
         } catch (e) {
@@ -333,6 +337,7 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
             hold(row.id, down.detail, true);
             outages++;
             lastOutage = down;
+            lastOutageStarted = callStarted;
             // Two in a row: the provider away, as far as this tick can tell — it stops, two calls spent.
             if (++outagesInARow >= 2) break outer;
             continue;
@@ -402,6 +407,11 @@ export async function mendOnce(ctx: Ctx, state: MendState, stopped: () => boolea
     // OUTAGE_TICKS, the provider away.
     if (outages > 0 && !answered) {
       tick.down = lastOutage;
+      // A broken body is an outage for the mender's holds (a proxy's page), an
+      // answered call with a fault for the provider's state, as on every
+      // other path (heardFrom; review pass 4).
+      if (lastOutage?.reason === "provider_body") ctx.providerHealth.noteUp({ by: "call", fault: "its answer was not JSON" });
+      else if (lastOutage) ctx.providerHealth.noteDown(lastOutage, { by: "call", startedAt: lastOutageStarted });
       if (freshOutages > 0 && ++state.unanswered >= OUTAGE_TICKS) state.down = true;
     }
     return tick;

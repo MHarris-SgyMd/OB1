@@ -12404,6 +12404,8 @@ if (want("38")) {
   let slowExtract = 0;
   /** Judge calls only: a wake with a judgement in hand. */
   let slowJudge = 0;
+  /** Run at the next extraction call, once: what the database holds as extraction begins (SMD-2679's sweep first). */
+  let onExtract: (() => Promise<void>) | null = null;
   /** Judge calls slowJudge holds now, a call's hold ending with its client's abort: the case reads its claim once one is (SMD-3048). */
   let judgesHeld = 0;
   /** Every request, probes too: the model not served (a 404 naming it) — a refusal at a pass's start. */
@@ -12432,6 +12434,11 @@ if (want("38")) {
       if (badRequest && !judging) return new Response(JSON.stringify({ error: { message: "response_format is not supported by this model" } }), { status: 400 });
       modelCalls.push({ kind: judging ? "judge" : "extract", at: Date.now() });
       if (slow) await Bun.sleep(slow);
+      if (!judging && onExtract) {
+        const first = onExtract;
+        onExtract = null;
+        await first();
+      }
       if (!judging && slowExtract) await Bun.sleep(slowExtract);
       if (judging && slowJudge) {
         judgesHeld++;
@@ -12771,6 +12778,285 @@ if (want("38")) {
     await late;
     assert(lateWoke, `a capture committed after the sleep began, in a transaction begun before it, wakes it (${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
 
+    // ── The re-derive pass, first (SMD-2679) ─────────────────────────────────
+    // A lineage row whose windows a raw delete took is swept before
+    // extraction's first call; a row whose vector stands is left.
+    lines.length = 0;
+    const orphanOf = await capture("A note whose windows a raw delete took.", "op-sleep", 0, 9);
+    const standing = await capture("A note whose vector stands.", "op-sleep", 0, 9);
+    await sql`DELETE FROM thought_chunks WHERE thought_id = ${orphanOf}::uuid`;
+    await sql`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+              VALUES ('chunks', ${orphanOf}::uuid, ARRAY[${orphanOf}::uuid], ARRAY['fp'], 'zz-sweep', '{"deterministic": true}'),
+                     ('vector', ${standing}::uuid, ARRAY[${standing}::uuid], ARRAY['fp'], 'zz-sweep', '{"deterministic": true}')`;
+    const sweepRows = async () => (await sql`SELECT artifact_kind || ':' || CASE WHEN artifact_id = ${orphanOf}::uuid THEN 'orphan' ELSE 'standing' END AS k
+                                             FROM derivations WHERE produced_by = 'zz-sweep' ORDER BY 1`).map((r: { k: string }) => r.k).join(",");
+    let atFirstExtract = "(no extraction call)";
+    onExtract = async () => { atFirstExtract = await sweepRows(); };
+    const acSweep = new AbortController();
+    const sweepCode = await bounded(sleepRun({ signal: acSweep.signal }), acSweep);
+    onExtract = null;
+    const sweptLine = lines.find((l) => /re-derive: \d+ orphaned lineage row\(s\) swept over \d+ thought\(s\)/.test(l));
+    assert(sweepCode === 0 && atFirstExtract === "vector:standing" && (await sweepRows()) === "vector:standing" && sweptLine !== undefined && lines.indexOf(sweptLine) > lines.findIndex((l) => /asleep:/.test(l)),
+      `each sleep sweeps the lineage rows whose artifact is gone before extraction's first call, and leaves a row whose artifact stands (exit ${sweepCode}; at the first call ${atFirstExtract}; after ${await sweepRows()}; ${sweptLine?.trim()})`);
+    await sql`DELETE FROM derivations WHERE produced_by = 'zz-sweep'`;
+
+    // A live call during the sweep stops it between thoughts and ends the
+    // sleep before any pass claims (review pass 1): the first orphan's delete
+    // is made slow — a trigger sleeps 3 s on it — so the wake lands while its
+    // call runs; the call finishes inside the grace, and no second call starts.
+    // (A row lock gives up at the sweep's 2 s lock_timeout, review pass 3; the
+    // supersession advisory lock would hold the scheduler's own start.)
+    lines.length = 0;
+    const orphanRow = (id: string, by: string) => sql`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+      VALUES ('chunks', ${id}::uuid, ARRAY[${id}::uuid], ARRAY['fp'], ${by}, '{"deterministic": true}')`;
+    const rowsBy = async (by: string) => Number((await sql`SELECT count(*)::int AS n FROM derivations WHERE produced_by = ${by}`)[0].n);
+    /** A trigger that sleeps `secs` in the delete of `by`'s row for one thought: a call that runs long without waiting on a lock. */
+    const slowDelete = (by: string, id: string, secs: number) => sql.unsafe(`CREATE FUNCTION zz_slow_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF OLD.produced_by = '${by}' AND OLD.artifact_id = '${id}' THEN PERFORM pg_sleep(${secs}); END IF; RETURN OLD; END $$;
+      CREATE TRIGGER zz_slow_delete BEFORE DELETE ON derivations FOR EACH ROW EXECUTE FUNCTION zz_slow_delete()`);
+    const fastDelete = () => sql.unsafe(`DROP TRIGGER IF EXISTS zz_slow_delete ON derivations; DROP FUNCTION IF EXISTS zz_slow_delete()`);
+    const wakeOrphans: string[] = [];
+    for (const text of ["An orphan the sweep reaches first.", "An orphan the wake leaves for the next sleep."]) {
+      const id = await capture(text, "op-sleep", 0, 10);
+      await sql`DELETE FROM thought_chunks WHERE thought_id = ${id}::uuid`;
+      await orphanRow(id, "zz-wake");
+      wakeOrphans.push(id);
+    }
+    // The sweep calls in thought-id order: the first is the slow one.
+    await slowDelete("zz-wake", [...wakeOrphans].sort()[0], 3);
+    let extractedDuringSweep = false;
+    onExtract = async () => { extractedDuringSweep = true; };
+    const acWake = new AbortController();
+    // A 3 s quiet: the next sleep, which sweeps the rest, waits that long after the wake, and the case reads before it.
+    const wakeRun = sleepRun({ follow: true, quiet: 3, minStampEveryS: 1, signal: acWake.signal });
+    let wokeInSweep = false;
+    let leftByWake = -1;
+    let extractedAtWake = true;
+    let wakeMark = undefined as { from: string; to: string | null } | undefined;
+    try {
+      // Seen within a few ms, then 1.5 s: the wake lands between the sweep's
+      // first two 1 s polls, half a second from each, and the 3 s call ends
+      // a second inside the grace (review pass 4: a 250 ms poll here could
+      // land it before the first, the grace spent with the call still running).
+      for (const until = Date.now() + 15_000; !lines.some((l) => /asleep:/.test(l)) && Date.now() < until;) await Bun.sleep(3);
+      await Bun.sleep(1500);
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read during the sweep')`;
+      wokeInSweep = await pollUntil(async () => lines.some((l) => /awake: a live read at \S+ during the re-derive sweep — the sleep ends/.test(l)), 15_000);
+      extractedAtWake = extractedDuringSweep;
+      leftByWake = await rowsBy("zz-wake");
+      wakeMark = (await beat())?.slept;
+    } finally {
+      await fastDelete();
+    }
+    // The sleep's mark spans the sweep's reads: it read from == to before (review pass 1).
+    assert(wokeInSweep && leftByWake === 1 && !extractedAtWake && typeof wakeMark?.to === "string" && Date.parse(wakeMark.to) > Date.parse(wakeMark.from),
+      `a live call during the sweep stops it between thoughts — the call in hand finished, the next orphan left for the next sleep — and ends the sleep before extraction calls the model (${leftByWake} of 2 left; extracted ${extractedAtWake}; slept ${JSON.stringify(wakeMark)}${wokeInSweep && leftByWake === 1 && !extractedAtWake ? "" : `; its lines: ${lines.map((l) => l.trim().slice(0, 90)).join(" | ").slice(0, 2500)}`})`);
+    onExtract = null;
+    const sweptNext = await pollUntil(async () => (await rowsBy("zz-wake")) === 0, 20_000);
+    acWake.abort();
+    await wakeRun;
+    assert(sweptNext, `…and the next sleep, after the quiet, sweeps the rest (${await rowsBy("zz-wake")} left)`);
+
+    // A call still running past the grace is cancelled on the server — rolled
+    // back, the supersession lock let go — so the wake ends the sleep within
+    // the poll and twice the grace (review pass 2: a closed socket left it
+    // running, the lock held, the wake with it).
+    // An orphan swept before it: a call cancelled under the stop keeps what the sweep did (review pass 3).
+    lines.length = 0;
+    const heldPair: string[] = [];
+    for (const text of ["An orphan whose delete runs long.", "An orphan beside the long one."]) {
+      const id = await capture(text, "op-sleep", 0, 13);
+      await sql`DELETE FROM thought_chunks WHERE thought_id = ${id}::uuid`;
+      await orphanRow(id, "zz-held");
+      heldPair.push(id);
+    }
+    // The sweep calls in thought-id order: the second is the slow one.
+    const heldOrphan = [...heldPair].sort()[1];
+    await slowDelete("zz-held", heldOrphan, 20);
+    let heldExtracted = false;
+    onExtract = async () => { heldExtracted = true; };
+    const acHeld = new AbortController();
+    const heldRun = sleepRun({ follow: true, quiet: 3, minStampEveryS: 1, signal: acHeld.signal });
+    let heldMs = -1;
+    let heldLeft = -1;
+    let heldExtractedAtWake = true;
+    let lockFreeAtWake = false;
+    try {
+      await pollUntil(async () => lines.some((l) => /asleep:/.test(l)), 15_000);
+      await Bun.sleep(1000);
+      const wokeAt = Date.now();
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read while the sweep runs long')`;
+      if (await pollUntil(async () => lines.some((l) => /awake: a live read at \S+ during the re-derive sweep/.test(l)), 15_000)) heldMs = Date.now() - wokeAt;
+      heldExtractedAtWake = heldExtracted;
+      // The supersession lock, which rebuild_derived takes first: free once the call is cancelled, held while it still runs on the server.
+      lockFreeAtWake = (await sql`SELECT pg_try_advisory_xact_lock(hashtext('ob1:supersession-review')) AS ok`)[0].ok === true;
+    } finally {
+      onExtract = null;
+    }
+    acHeld.abort();
+    await heldRun;
+    await fastDelete();
+    heldLeft = await rowsBy("zz-held");
+    assert(heldMs > 0 && heldMs < 8_000 && heldLeft === 1 && !heldExtractedAtWake && lockFreeAtWake && lines.some((l) => /re-derive: 1 orphaned lineage row\(s\) swept over 1 thought\(s\) — stopped before the rest/.test(l)),
+      `a sweep's call still running past the grace is cancelled: the wake ends the sleep in ${heldMs} ms, the call rolled back (${heldLeft} row left; the supersession lock free at the wake: ${lockFreeAtWake}), the sweep's call before it kept and said (${lines.find((l) => /re-derive:/.test(l))?.trim()}), and no extraction call made`);
+    await sql`DELETE FROM derivations WHERE produced_by = 'zz-held'`;
+
+    // A call waiting on a thought's row lock gives up at the sweep's 2 s
+    // lock_timeout and is passed over, the rest of its window swept, the
+    // supersession lock not held behind the row (review pass 3).
+    lines.length = 0;
+    const lockedOrphan = await capture("An orphan whose thought a long transaction holds.", "op-sleep", 0, 15);
+    const freeOrphan = await capture("An orphan beside it.", "op-sleep", 0, 15);
+    for (const [id, by] of [[lockedOrphan, "zz-locked"], [freeOrphan, "zz-free"]] as const) {
+      await sql`DELETE FROM thought_chunks WHERE thought_id = ${id}::uuid`;
+      await orphanRow(id, by);
+    }
+    const holdRow = await sql.reserve();
+    let lockedCode = -1;
+    let lockFreeBehindRow = false;
+    try {
+      await holdRow`BEGIN`;
+      await holdRow`SELECT 1 FROM thoughts WHERE id = ${lockedOrphan}::uuid FOR NO KEY UPDATE`;
+      const acLocked = new AbortController();
+      lockedCode = await bounded(sleepRun({ signal: acLocked.signal }), acLocked);
+      lockFreeBehindRow = (await sql`SELECT pg_try_advisory_xact_lock(hashtext('ob1:supersession-review')) AS ok`)[0].ok === true;
+    } finally {
+      await holdRow`ROLLBACK`.catch(() => {});
+      holdRow.release();
+    }
+    assert(lockedCode === 0 && lockFreeBehindRow && (await rowsBy("zz-locked")) === 1 && (await rowsBy("zz-free")) === 0 && lines.some((l) => l.includes(`1 thought(s) whose call failed passed over (${lockedOrphan}: canceling statement due to lock timeout)`)),
+      `a call waiting on a held row gives up at the sweep's lock_timeout and is passed over, the rest swept and the supersession lock free while the row is still held (exit ${lockedCode}; ${lines.find((l) => /re-derive:/.test(l))?.trim()})`);
+    await sql`DELETE FROM derivations WHERE produced_by IN ('zz-locked', 'zz-free')`;
+
+    // A thought whose call always fails is passed over, the rest of its window
+    // swept (review pass 2: the first such call ended every sweep at it).
+    lines.length = 0;
+    let poisonId = "";
+    for (const [text, by] of [["An orphan whose delete a trigger refuses.", "zz-poison"], ["An orphan swept past it.", "zz-after"]] as const) {
+      const id = await capture(text, "op-sleep", 0, 14);
+      await sql`DELETE FROM thought_chunks WHERE thought_id = ${id}::uuid`;
+      await orphanRow(id, by);
+      if (by === "zz-poison") poisonId = id;
+    }
+    await sql.unsafe(`CREATE FUNCTION zz_poison() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.produced_by = 'zz-poison' THEN RAISE EXCEPTION 'zz: this row will not go'; END IF; RETURN OLD; END $$;
+      CREATE TRIGGER zz_poison BEFORE DELETE ON derivations FOR EACH ROW EXECUTE FUNCTION zz_poison()`);
+    try {
+      const acPoison = new AbortController();
+      const poisonCode = await bounded(sleepRun({ signal: acPoison.signal }), acPoison);
+      assert(poisonCode === 0 && (await rowsBy("zz-poison")) === 1 && (await rowsBy("zz-after")) === 0 && lines.some((l) => /re-derive: \d+ orphaned lineage row\(s\) swept over \d+ thought\(s\); 1 thought\(s\) whose call failed passed over/.test(l) && l.includes(`(${poisonId}: zz: this row will not go)`)),
+        `a thought whose call fails is passed over and said, named, the rest of the window swept (exit ${poisonCode}; ${lines.find((l) => /re-derive:/.test(l))?.trim()})`);
+      // Only the poisoned orphan left, every call of each sleep's sweep fails:
+      // said on stderr once over two sleeps (review passes 3 and 4: said every sleep).
+      lines.length = 0;
+      const acAllFailed = new AbortController();
+      const allFailedRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acAllFailed.signal });
+      const failedSummary = (l: string) => /re-derive: 0 orphaned lineage row\(s\) swept over 0 thought\(s\); 1 thought\(s\) whose call failed passed over/.test(l);
+      let twoSleeps = false;
+      try {
+        await pollUntil(async () => lines.filter(failedSummary).length >= 1, 20_000);
+        await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read between two failing sweeps')`;
+        twoSleeps = await pollUntil(async () => lines.filter(failedSummary).length >= 2, 20_000);
+      } finally {
+        acAllFailed.abort();
+      }
+      const allFailedCode = await allFailedRun;
+      const saidFailed = lines.filter((l) => /re-derive: every call of this sleep's sweep failed/.test(l));
+      assert(allFailedCode === 0 && twoSleeps && saidFailed.length === 1 && saidFailed[0].includes(`(${poisonId}: zz: this row will not go) — the passes go on`),
+        `a sweep whose every call fails is said as the sweep's trouble, once over two sleeps (exit ${allFailedCode}; two sleeps ${twoSleeps}; ${saidFailed.length} time(s): ${saidFailed.map((l) => l.trim()).join(" | ")})`);
+      // Without skipFailure the call's error rejects, naming its thought: the CLI's "failed on thought <id>" (review pass 4).
+      const thrown = await sweepOrphans(sql, { writer: { out: () => {}, err: () => {} } }).then(() => null, (e: { thought?: string; message?: string }) => e);
+      assert(thrown?.thought === poisonId && /zz: this row will not go/.test(thrown.message ?? ""),
+        `a sweep's call that throws, not passed over, rejects with its thought's id (${JSON.stringify({ thought: thrown?.thought, message: thrown?.message })})`);
+      // The limit filled by failures alone: read again, the window would meet the same thoughts and none past them (review pass 3).
+      const allFailed = await sweepOrphans(sql, { limit: 1, skipFailure: () => true, writer: { out: () => {}, err: () => {} } });
+      assert(allFailed.thoughts === 1 && allFailed.failed === 1 && allFailed.whole,
+        `a window whose every call failed, the limit filled, is whole — the cursor moves past it (${JSON.stringify(allFailed)})`);
+    } finally {
+      await sql.unsafe(`DROP TRIGGER zz_poison ON derivations; DROP FUNCTION zz_poison()`);
+      await sql`DELETE FROM derivations WHERE produced_by IN ('zz-poison', 'zz-after')`;
+    }
+
+    // A window swept whole, the table no larger, sends the next sleep back to
+    // its start: a row below the last one read is reached (review pass 4: no
+    // case read the cursor's reset).
+    lines.length = 0;
+    const cursorFirst = await capture("An orphan the first sleep sweeps whole.", "op-sleep", 0, 17);
+    const cursorLow = await capture("An orphan whose lineage row sorts first.", "op-sleep", 0, 17);
+    await sql`DELETE FROM thought_chunks WHERE thought_id = ${cursorFirst}::uuid`;
+    await orphanRow(cursorFirst, "zz-cursor-a");
+    const acCursor = new AbortController();
+    const cursorRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acCursor.signal });
+    let firstSwept = false;
+    let lowSwept = false;
+    try {
+      firstSwept = await pollUntil(async () => (await rowsBy("zz-cursor-a")) === 0, 20_000);
+      await sql`DELETE FROM thought_chunks WHERE thought_id = ${cursorLow}::uuid`;
+      await sql`INSERT INTO derivations (id, artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+                VALUES ('00000000-0000-4000-8000-000000000001', 'chunks', ${cursorLow}::uuid, ARRAY[${cursorLow}::uuid], ARRAY['fp'], 'zz-cursor-b', '{"deterministic": true}')`;
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after a whole sweep')`;
+      lowSwept = await pollUntil(async () => (await rowsBy("zz-cursor-b")) === 0, 20_000);
+    } finally {
+      acCursor.abort();
+      await cursorRun;
+      await sql`DELETE FROM derivations WHERE produced_by IN ('zz-cursor-a', 'zz-cursor-b')`;
+    }
+    assert(firstSwept && lowSwept, `a window swept whole, the table no larger, sends the next sleep to the table's start: a row below the last one read is swept (first ${firstSwept}; the low row ${lowSwept})`);
+
+    // A lineage table larger than one window: each sleep reads the next, from
+    // where the last left off (review pass 1: read in no order, every sleep
+    // read the same first 10,001 rows and an orphan past them stayed).
+    lines.length = 0;
+    const deep = await capture("An orphan past the first window.", "op-sleep", 0, 11);
+    const anchor = await capture("The thought the filler rows name.", "op-sleep", 0, 11);
+    await sql`DELETE FROM thought_chunks WHERE thought_id = ${deep}::uuid`;
+    await sql`INSERT INTO derivations (id, artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+              VALUES ('ffffffff-ffff-4fff-bfff-fffffffffff0', 'chunks', ${deep}::uuid, ARRAY[${deep}::uuid], ARRAY['fp'], 'zz-deep', '{"deterministic": true}')`;
+    await sql`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+              SELECT 'vector', ${anchor}::uuid, ARRAY[${anchor}::uuid], ARRAY['fp'], 'zz-fill-' || g, '{"deterministic": true}' FROM generate_series(1, 10100) g`;
+    try {
+      const windowDry = await sleepRun({ quiet: 300, dryRun: true });
+      assert(windowDry === 0 && lines.some((l) => /re-derive: \d+ thought\(s\) with a lineage row whose artifact is gone, in the first window of 10,001 lineage rows — the sleeps walk the rest/.test(l)),
+        `--dry-run counts the sweep's pool and says it reads a window (${lines.find((l) => /re-derive:/.test(l))?.trim()})`);
+      lines.length = 0;
+      const acDeep = new AbortController();
+      const deepRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acDeep.signal });
+      const firstWindow = await pollUntil(async () => lines.some((l) => /re-derive: the lineage table holds more than one window of 10,001 rows — each sleep sweeps the next/.test(l)), 20_000);
+      const afterFirst = await rowsBy("zz-deep");
+      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read between the windows')`;
+      const secondWindow = await pollUntil(async () => (await rowsBy("zz-deep")) === 0, 30_000);
+      acDeep.abort();
+      await deepRun;
+      assert(firstWindow && afterFirst === 1 && secondWindow && lines.filter((l) => /more than one window/.test(l)).length === 1,
+        `a lineage table larger than one window: the first sleep reads its first 10,001 rows, the orphan past them left and the window said once, and the next sleep sweeps on from there (${afterFirst} after the first; ${await rowsBy("zz-deep")} after the next)`);
+    } finally {
+      await sql`DELETE FROM derivations WHERE produced_by = 'zz-deep' OR produced_by LIKE 'zz-fill-%'`;
+    }
+
+    // A replay refuses every call: the sweep stops at its first, said once (review pass 1: a line per orphan, every sleep).
+    lines.length = 0;
+    for (const text of ["An orphan under a replay.", "A second orphan under a replay."]) {
+      const id = await capture(text, "op-sleep", 0, 12);
+      await sql`DELETE FROM thought_chunks WHERE thought_id = ${id}::uuid`;
+      await orphanRow(id, "zz-replay");
+    }
+    const [{ db }] = await sql`SELECT current_database() AS db`;
+    await sql.unsafe(`ALTER DATABASE "${db}" SET ob1.projecting_replay = 'on'`);
+    const acReplay = new AbortController();
+    const replayRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acReplay.signal });
+    let replaySaid = false;
+    try {
+      replaySaid = await pollUntil(async () => lines.some((l) => /re-derive: this session is a replay/.test(l)), 20_000);
+      await Bun.sleep(1000);
+    } finally {
+      await sql.unsafe(`ALTER DATABASE "${db}" RESET ob1.projecting_replay`);
+      acReplay.abort();
+      // A pass the replay refused may have ended the run: the sweep's words are what this case reads.
+      await replayRun.catch(() => {});
+    }
+    assert(replaySaid && lines.filter((l) => /REPLAYING|is a replay/.test(l)).length === 1 && (await rowsBy("zz-replay")) === 2,
+      `a replay refuses the sweep's first call, which stops it, said once, the orphans kept (${lines.filter((l) => /REPLAYING|is a replay/.test(l)).length} line(s); ${await rowsBy("zz-replay")} left)`);
+    await sql`DELETE FROM derivations WHERE produced_by IN ('zz-wake', 'zz-replay')`;
+
     // ── The budget (SMD-2679) ────────────────────────────────────────────────
     // Each pass's connections open with the budget's session settings: a
     // statement trigger on the claim table records what the passes' own
@@ -12899,6 +13185,68 @@ if (want("38")) {
     acIdle.abort();
     await idleRun;
 
+    // The clock spent during the re-derive sweep starts no pass (review pass
+    // 2), and counts a stop only for work cut (review pass 3): a call the
+    // clock stops mid-way is cut, counted; a sweep done just past the clock,
+    // the pools drained, cut nothing — the sleep ends uncounted, resting.
+    // The pools drained first — the capture's extraction done — so only the sweep's cut counts the stop.
+    const clockOrphan = await capture("An orphan the clock catches mid-call.", "op-sleep", 0, 16);
+    const acClockDrain = new AbortController();
+    const clockDrained = await bounded(sleepRun({ signal: acClockDrain.signal }), acClockDrain);
+    assert(clockDrained === 0 && !(await claims(EX)).pending, `…the pools drained before the clock's sweep cases (exit ${clockDrained}; ${JSON.stringify(await claims(EX))})`);
+    lines.length = 0;
+    await sql`DELETE FROM thought_chunks WHERE thought_id = ${clockOrphan}::uuid`;
+    await orphanRow(clockOrphan, "zz-clock");
+    await slowDelete("zz-clock", clockOrphan, 6);
+    const acSweepClock = new AbortController();
+    const sweepClockRun = sleepRun({ follow: true, budgetMs: 1500, minStampEveryS: 1, signal: acSweepClock.signal });
+    let sweepClockBeat = null as BudgetBeat | null;
+    try {
+      await pollUntil(async () => lines.some((l) => /during the re-derive sweep — no pass starts/.test(l)) && (sweepClockBeat = await budgetBeat())?.resting === true, 20_000);
+    } finally {
+      acSweepClock.abort();
+      await sweepClockRun;
+      await fastDelete();
+    }
+    assert(lines.some((l) => /the sleep's budget is spent \(1500 ms\) during the re-derive sweep — no pass starts/.test(l)) && sweepClockBeat?.slept?.budget === "clock" && sweepClockBeat.budget?.stops === 1 && (await rowsBy("zz-clock")) === 1,
+      `a clock spent mid-call in the sweep starts no pass and counts the stop, the call cancelled and rolled back (${await rowsBy("zz-clock")} row left; ${JSON.stringify(sweepClockBeat)})`);
+    // The clock read spent mid-call — a 3 s call, the first 2 s poll past a
+    // 1 s clock — and the call done a second inside the grace: the sweep was
+    // whole, so nothing was cut (review pass 4: counted as the clock's).
+    lines.length = 0;
+    await slowDelete("zz-clock", clockOrphan, 3);
+    const acInGrace = new AbortController();
+    const inGraceRun = sleepRun({ follow: true, poll: 2, budgetMs: 1000, minStampEveryS: 1, signal: acInGrace.signal });
+    let inGraceBeat = null as BudgetBeat | null;
+    try {
+      // The line first: the last case's row rests until this process stamps its own.
+      await pollUntil(async () => lines.some((l) => /during the re-derive sweep — no pass starts/.test(l)) && (inGraceBeat = await budgetBeat())?.resting === true, 20_000);
+    } finally {
+      acInGrace.abort();
+      await inGraceRun;
+      await fastDelete();
+    }
+    assert(lines.some((l) => /the sleep's budget is spent \(1000 ms\) during the re-derive sweep — no pass starts/.test(l)) && inGraceBeat?.slept?.budget === undefined && inGraceBeat?.budget?.stops === 0 && (await rowsBy("zz-clock")) === 0,
+      `a clock read spent mid-call, the call done inside the grace, cut nothing: no stop counted or marked (${await rowsBy("zz-clock")} row left; ${JSON.stringify(inGraceBeat)})`);
+    // Planted again; its call now 2 s, under a 1 s clock and a 5 s poll: the sweep ends before any poll reads the clock (review pass 4: 3 s left a second).
+    await orphanRow(clockOrphan, "zz-clock");
+    lines.length = 0;
+    await slowDelete("zz-clock", clockOrphan, 2);
+    const acSweptPast = new AbortController();
+    const sweptPastRun = sleepRun({ follow: true, poll: 5, budgetMs: 1000, minStampEveryS: 1, signal: acSweptPast.signal });
+    let sweptPastBeat = null as BudgetBeat | null;
+    try {
+      // The line first: the last case's row rests until this process stamps its own.
+      await pollUntil(async () => lines.some((l) => /during the re-derive sweep — no pass starts/.test(l)) && (sweptPastBeat = await budgetBeat())?.resting === true, 20_000);
+    } finally {
+      acSweptPast.abort();
+      await sweptPastRun;
+      await fastDelete();
+    }
+    assert(lines.some((l) => /the sleep's budget is spent \(1000 ms\) during the re-derive sweep — no pass starts/.test(l)) && sweptPastBeat?.slept?.budget === undefined && sweptPastBeat?.budget?.stops === 0 && (await rowsBy("zz-clock")) === 0,
+      `a sweep done just past the clock, the pools drained, cut nothing: the sleep ends with no stop counted or marked, resting (${await rowsBy("zz-clock")} row left; ${JSON.stringify(sweptPastBeat)})`);
+    await sql`DELETE FROM derivations WHERE produced_by = 'zz-clock'`;
+
     // A pass waiting for its provider is work left, the pools drained or not:
     // the clock's stop is counted, a judge outage no idle night (review pass 3).
     lines.length = 0;
@@ -12906,7 +13254,8 @@ if (want("38")) {
     const acOutage = new AbortController();
     const outageRun = sleepRun({ follow: true, budgetMs: 3000, minStampEveryS: 1, signal: acOutage.signal });
     let downBeat = null as BudgetBeat | null;
-    const downStopped = await pollUntil(async () => (downBeat = await budgetBeat())?.slept?.budget === "clock" && downBeat?.running === false, 30_000);
+    // The line first: the last case's row stands until this process stamps its own.
+    const downStopped = await pollUntil(async () => lines.some((l) => /the sleep's budget is spent \(3000 ms\)/.test(l)) && (downBeat = await budgetBeat())?.slept?.budget === "clock" && downBeat?.running === false, 30_000);
     unavailable = false;
     assert(downStopped && downBeat?.budget?.stops === 1 && lines.some((l) => /the sleep's budget is spent \(3000 ms\) — the passes stop after the thought in hand/.test(l)) && !lines.some((l) => /nothing left to do/.test(l)),
       `a clock spent while the passes wait for the provider is a counted stop, not an idle clock-out (${JSON.stringify(downBeat)})`);

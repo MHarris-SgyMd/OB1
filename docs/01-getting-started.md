@@ -221,7 +221,7 @@ If instead it prints `preflight FAILED` and stops, read the row it names — it 
 
 Leave this terminal running and open a second one for the next steps. (To run it in the background instead, add `-d`; `podman compose -f deploy/compose.yaml logs -f server` shows the server's log.)
 
-✅ **Done when:** the log shows `preflight OK` and `Started server`, and the `ollama-pull` container has exited — `podman compose -f deploy/compose.yaml ps -a` shows it `Exited (0)`. The server does not wait for the pull, so a capture before that fails on a model that is not there yet.
+✅ **Done when:** the log shows `preflight OK` and `Started server`, with no `!  provider endpoint` row above them — or, if there is one (nothing answered at the model endpoint yet, so the server started degraded, capturing without vectors), a later `provider: … answers again` line, which needs no restart (or no line at all, if it came up before the server's own first probe — then a keyed `/health`, Step 5, says `"status":"answering"` under `provider`; with `-d`, `logs -f server api` shows both servers' lines) — and the `ollama-pull` container has exited — `podman compose -f deploy/compose.yaml ps -a` shows it `Exited (0)`. The server does not wait for the pull, so a capture before that fails on a model that is not there yet.
 
 ---
 

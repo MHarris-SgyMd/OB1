@@ -152,8 +152,8 @@ export function releaseFacts(input: FactsInput): { problems: string[]; facts: Fa
   const ollama = ollamaImageOf(input.composeFiles[BASE_COMPOSE] ?? "");
   if (!ollama) problems.push(`deploy/${BASE_COMPOSE} does not pin Ollama — its \`x-ollama-image\` anchor must be \`ollama/ollama:<tag>\` (a tag the job resolves to a digest; not \`latest\`, not a digest itself)`);
   // Every other compose file under deploy/ that names Ollama pins it the same
-  // way — the tiers stack (SMD-1806) has its own anchor, and a second value
-  // beside the base file's would float or lag with nothing reading it.
+  // way: a second value beside the base file's would float or lag with nothing
+  // reading it.
   for (const [file, text] of Object.entries(input.composeFiles)) {
     if (file === BASE_COMPOSE || !/ollama\/ollama/.test(text)) continue;
     const pin = ollamaImageOf(text);
@@ -442,8 +442,8 @@ function selfCheck(): number {
     [{ headOnMain: false }, "not on origin/main", "a tag off main"],
     [{ headOnMain: null }, "cannot tell", "no origin/main to compare with"],
     [{ composeFiles: { "compose.yaml": "services: {}\n" } }, "does not pin Ollama", "no Ollama pin"],
-    [{ composeFiles: { "compose.yaml": composeGood, "compose.tiers.yaml": "services:\n  ollama:\n    image: ollama/ollama:latest\n" } }, "deploy/compose.tiers.yaml names Ollama as something other than", "a second compose file naming Ollama without the anchor"],
-    [{ composeFiles: { "compose.yaml": composeGood, "compose.tiers.yaml": "x-ollama-image: &o ollama/ollama:0.34.2\nservices:\n  ollama:\n    image: *o\n" } }, "names Ollama as `ollama/ollama:0.34.2`", "a second compose file pinning another tag"],
+    [{ composeFiles: { "compose.yaml": composeGood, "compose.other.yaml": "services:\n  ollama:\n    image: ollama/ollama:latest\n" } }, "deploy/compose.other.yaml names Ollama as something other than", "a second compose file naming Ollama without the anchor"],
+    [{ composeFiles: { "compose.yaml": composeGood, "compose.other.yaml": "x-ollama-image: &o ollama/ollama:0.34.2\nservices:\n  ollama:\n    image: *o\n" } }, "names Ollama as `ollama/ollama:0.34.2`", "a second compose file pinning another tag"],
   ];
   for (const [over, phrase, why] of mutants) {
     const { problems } = releaseFacts({ ...base, ...over });
@@ -455,7 +455,7 @@ function selfCheck(): number {
   const rehearsal = releaseFacts({ ...base, mode: "rehearsal", tag: undefined, releases: [], forkVersion: "0.0.0+upstream.9543c29", migrationNumbers: Array.from({ length: 47 }, (_, i) => i + 1), changes: { numbered: numbered([103]), fragments: [{ name: "smd-9.md", ticket: "SMD-9", text: "", lines: 1 }] }, headOnMain: false });
   ok(rehearsal.problems.length === 0 && rehearsal.facts.version === "0.0.0+upstream.9543c29" && rehearsal.facts.tag === REHEARSAL_TAG && rehearsal.facts.image_tag === REHEARSAL_TAG && rehearsal.facts.range_lo === "001" && rehearsal.facts.range_hi === "047" && rehearsal.facts.change_files === "" && rehearsal.facts.previous_tag === "", "a rehearsal on an unreleased tree: FORK_VERSION, the rehearsal tag, the whole migration range, no release checks");
   ok(releaseFacts({ ...base, mode: "rehearsal", composeFiles: { "compose.yaml": "services: {}\n" } }).problems.length === 1, "a rehearsal still wants the Ollama pin");
-  ok(releaseFacts({ ...base, composeFiles: { "compose.yaml": composeGood, "compose.tiers.yaml": composeGood, "compose.host-ports.yaml": "services:\n  postgres:\n    ports: []\n" } }).problems.length === 0, "a second file with the same pin, and one naming no Ollama, are fine");
+  ok(releaseFacts({ ...base, composeFiles: { "compose.yaml": composeGood, "compose.other.yaml": composeGood, "compose.host-ports.yaml": "services:\n  postgres:\n    ports: []\n" } }).problems.length === 0, "a second file with the same pin, and one naming no Ollama, are fine");
   const past = releaseFacts({ ...base, mode: "rehearsal", tag: undefined, migrationNumbers: Array.from({ length: 50 }, (_, i) => i + 1) });
   ok(past.problems.length === 0 && new RegExp(past.facts.preflight_row).test("  !  schema version            the brain reports 1.0.0+upstream.9543c29 but its ledger reaches migration 050, past that release's range (…048) — migrations applied beyond the version it names"), "a rehearsal on a tree two migrations past the last release expects preflight's WARN row, not the OK row (caught: cold read)");
   ok(good.facts.assets === "deploy/compose.yaml=compose.yaml deploy/compose.release.yaml=compose.release.yaml deploy/.env.example=env.example deploy/compose.api-public.yaml=compose.api-public.yaml deploy/compose.hooks-public.yaml=compose.hooks-public.yaml deploy/compose.grafana-port.yaml=compose.grafana-port.yaml deploy/compose.grafana-public.yaml=compose.grafana-public.yaml" && good.facts.yield_asset === "mechanism-yield.txt" && good.facts.head === "abcdef12", "the asset list, the yield name and the tag commit are facts");

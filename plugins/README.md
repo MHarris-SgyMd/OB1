@@ -8,7 +8,7 @@ A plugin adds operations to the brain itself (SMD-2310). It runs inside the brai
 
 ## Turning plugins on
 
-The operator names the plugins a brain runs in `OB1_PLUGINS` in `deploy/.env`, comma-separated. A plugin that is not named registers nothing. A name that is no plugin stops the server, and preflight says so first. The three-tier stack runs none.
+The operator names the plugins a brain runs in `OB1_PLUGINS` in `deploy/.env`, comma-separated. A plugin that is not named registers nothing. A name that is no plugin stops the server, and preflight says so first.
 
 ## What a plugin is
 

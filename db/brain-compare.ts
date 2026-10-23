@@ -3,8 +3,7 @@
  * brain-compare.ts — one "how do these two brains differ" call (SMD-2109).
  *
  * SMD-1806 runs the fork as three brains (stable, canary, working) over one
- * corpus, each a path on one origin since SMD-2294 (/mcp, /canary/mcp,
- * /working/mcp). That only pays off if you can answer, in one step, "are these
+ * corpus, each its own stack on its own port since SMD-2872. That only pays off if you can answer, in one step, "are these
  * two telling me the same thing, and if not, why?" — version, migration, corpus
  * freshness, retrieval. The pieces existed and nothing composed them: brain_info
  * (SMD-2041) reports ONE brain; tier.ts --diff (slice 2) is the merge-time replay
@@ -132,8 +131,9 @@ export async function resolveBrain(ref: string, keyArg: string | undefined, envK
     // `http://u:pw@bad host/mcp`). The userinfo is cut to the last @ first, so
     // a password holding a raw ? or / cannot end the cut early (pass 5).
     if (!parsed) throw new Error(`${how.verb}: ${JSON.stringify(ref.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@]*@/i, "$1…@").split("?")[0])} is not a valid URL.`);
-    // Host and path: two tiers on one origin (SMD-2294) differ only in the path,
-    // /mcp against /canary/mcp, and a host alone would label both alike.
+    // Host and path: two brains on one origin differ only in the path (/mcp
+    // against /canary/mcp, as the tiers did from SMD-2294 until SMD-2878), and a
+    // host alone would label both alike.
     const at = new URL(parsed.base);
     const label = at.host + (at.pathname === "/" ? "" : at.pathname);
     const key = keyArg ?? parsed.urlKey ?? envKey;
