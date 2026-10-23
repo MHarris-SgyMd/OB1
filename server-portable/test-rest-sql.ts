@@ -192,7 +192,17 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
   const b = await rest("GET", "/v1/brain");
   const m = await mcp("brain_info", {});
   const info = rendered((v) => say.renderBrainInfoReply(v), b.body);
-  assert(b.status === 200 && info.content[0].text === m.text && same(info.structuredContent, m.sc), `brain_info: the same record and table (${b.status}; first difference: ${firstDiff(info.structuredContent, m.sc)})`);
+  // The provider's state is each process's own (SMD-2890): the two doors here
+  // are two cores, each answered at its own moment.
+  // Only the times: each core stamps its own (review pass 4: the whole state
+  // set aside hid any other difference) — the status, `by`, the re-probe and
+  // the row's words stay under the comparison.
+  const STAMP = /\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z/g;
+  const noTimes = (v: unknown): Record<string, unknown> => JSON.parse(JSON.stringify(v), (k, x) => (k === "at" || k === "since" ? "<t>" : typeof x === "string" ? x.replace(STAMP, "<t>") : x));
+  assert(b.status === 200 && info.content[0].text.replace(STAMP, "<t>") === m.text.replace(STAMP, "<t>") && same(noTimes(info.structuredContent), noTimes(m.sc)), `brain_info: the same record and table, the times aside (${b.status}; first difference: ${firstDiff(noTimes(info.structuredContent), noTimes(m.sc))})`);
+  const providerOf = (v: unknown) => (((v as { value?: unknown })?.value ?? v) as { provider?: { status?: string; by?: string } }).provider;
+  assert(providerOf(b.body)?.status === "answering" && providerOf(b.body)?.by === "call" && providerOf(m.sc)?.status === "answering" && /^Provider:\s+answering \(an embedding call answered /m.test(m.text),
+    `…and each door's own provider state answering, by a call, after the searches above (${JSON.stringify(providerOf(b.body))} | ${JSON.stringify(providerOf(m.sc))})`);
   covered.add("brain_info");
   // SMD-2995: list_thoughts a page at a time. The first page's cursor, from
   // REST, takes either door to the same next page — text, structuredContent

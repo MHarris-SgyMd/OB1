@@ -37,6 +37,7 @@ import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
 import { mendIntervalFrom } from "./core/mend.ts";
+import { inContainer, isLoopback, PROVIDER_PROBE_TIMEOUT_MS, reprobeIntervalFrom, startsDegraded, type ProbeKind } from "./provider-health.ts";
 import { configuredIn, edgeSettings, originProblem } from "./oauth-edge.ts";
 import { enabledHooks, hookSecrets, loadPlugins, pluginNames, pluginProblem } from "./core/plugins.ts";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -662,7 +663,8 @@ if (chatIsOwn) {
 /**
  * A local endpoint is dialled once, by default: one GET of `/models` with no
  * body and no credential, under a short timeout, and only the connection is
- * judged — any HTTP status is an endpoint that answers; what it serves is
+ * judged — any HTTP status is an endpoint that answers, a 5xx, 408 or 429 one
+ * not ready yet (a warning, since SMD-2890's review pass 2); what it serves is
  * --deep's question. Until this row preflight's credential rule
  * (isLocalEndpoint, above) called an endpoint local by its hostname and
  * connected to nothing without --deep, so an address that reached nothing
@@ -670,11 +672,18 @@ if (chatIsOwn) {
  * `ollama` service name with no profile, `host.docker.internal` where the
  * runtime does not provide it, a typo in the port — was `preflight OK`, and the
  * first capture failed in 7 ms with the server log ending at `Started server`
- * (measured 2026-09-21 on SMD-1843's baseline). A hosted endpoint is not
+ * (measured 2026-09-21 on SMD-1843's baseline). Those still fail — the
+ * name that does not resolve, in a container the loopback, a reset, an
+ * untrusted certificate, anything unclassified, a failure through a proxy — but since
+ * SMD-2890 a resolved name with nothing answering yet only warns, and the
+ * server starts degraded (startsDegraded, provider-health.ts): a port typo
+ * outside a container is now that warning. A hosted endpoint is not
  * dialled here: it costs a credential to prove anything about, which is --deep.
  */
-const LOCAL_PROBE_TIMEOUT_MS = 2500;
+const LOCAL_PROBE_TIMEOUT_MS = PROVIDER_PROBE_TIMEOUT_MS;
 const LOCAL_PROBE_SECONDS = `${LOCAL_PROBE_TIMEOUT_MS / 1000} s`;
+/** Read once: whether this preflight runs in a container, where the loopback is the container's (startsDegraded). */
+const IN_CONTAINER = inContainer();
 /** The three spellings an operator reaches for, in the remedy's own words: the two host aliases, and the stack's own service. */
 const HOST_ALIASES = "http://host.containers.internal:11434/v1 under podman or http://host.docker.internal:11434/v1 under Docker";
 const STACK_OWN = "http://ollama:11434/v1 with --profile local-models";
@@ -694,13 +703,17 @@ const HOST_SPELLINGS = `an Ollama on the host is ${HOST_ALIASES}, and the stack'
  * OB1_CHUNK_CONTEXT=on a windowed capture spends a blurb budget first, then
  * the embedding's (third review pass).
  */
-function probeFailure(e: unknown): { kind: "silent" | "unresolved" | "refused" | "reset" | "tls" | "other"; why: string; then: string } {
+function probeFailure(e: unknown): { kind: ProbeKind; why: string; then: string } {
   const err = e as Error & { code?: string | number; syscall?: string };
   const code = String(err.code ?? "");
   const fast = "the first capture would fail on it in milliseconds";
   if (err.name === "TimeoutError") return { kind: "silent", why: `no HTTP answer in ${LOCAL_PROBE_SECONDS}`, then: "the first capture would wait on it, up to the whole request timeout (OB1_LLM_TIMEOUT), and then fail" };
   if (err.syscall === "getaddrinfo" || code === "ENOTFOUND") return { kind: "unresolved", why: `the name does not resolve${code && code !== "ENOTFOUND" ? ` (${code})` : ""}`, then: fast };
   if (code === "ConnectionRefused" || code === "ECONNREFUSED") return { kind: "refused", why: "the connection was refused", then: fast };
+  // No route to it: a LAN box asleep or booting behind a router that says so
+  // at once (an on-link one is silent instead). The runtime's providerDown
+  // counts both an outage, so the start does too (review pass 1).
+  if (code === "EHOSTUNREACH" || code === "ENETUNREACH") return { kind: "unroutable", why: `there is no route to it (${code})`, then: fast };
   // Accepted and closed with no HTTP: an https endpoint dialled as http, or a
   // listener that is not HTTP at all. Bun's message ends in advice about its
   // own `verbose` option, which is nothing to an operator (fifth review pass).
@@ -720,11 +733,11 @@ function probeRemedy(base: string, knob: string): string {
   if (LOCAL_PROVIDER_SERVICES.includes(host)) {
     return `\`${host}\` is the local-models profile's service and exists only under it: start the stack with --profile local-models, or set ${knob} to an Ollama on the host (${HOST_ALIASES}) or to a hosted provider with a key.`;
   }
-  if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]" || host === "0.0.0.0") {
+  if (isLoopback(host)) {
     return `Inside a container ${host} is the container itself, not the host: ${HOST_SPELLINGS}. From a shell on the host, start the provider or fix the port in ${knob}.`;
   }
   if (host === "host.docker.internal" || host === "host.containers.internal") {
-    return `Nothing on the host answers at that port, or this runtime does not provide the name: podman writes both names; Docker Desktop only host.docker.internal; Docker on Linux neither unless extra_hosts host-gateway is set, and deploy/compose.yaml sets it for host.docker.internal. Start the provider on the host and name it in ${knob} (${HOST_ALIASES}), or use the stack's own (${STACK_OWN}).`;
+    return `Nothing on the host answers at that port, or this runtime does not provide the name: podman writes both names; Docker Desktop only host.docker.internal; Docker on Linux neither unless extra_hosts host-gateway is set, and deploy/compose.yaml sets it for host.docker.internal. Start the provider on the host and name it in ${knob} (${HOST_ALIASES}), or use the stack's own (${STACK_OWN}). On Linux Docker the alias is the host's bridge address, so an Ollama there must listen on it, not only on 127.0.0.1 (OLLAMA_HOST; SETUP.md).`;
   }
   return `Start the provider at that address or fix the host and port in ${knob}; ${HOST_SPELLINGS}.`;
 }
@@ -784,7 +797,27 @@ async function resolveFirst(host: string): Promise<{ why: string; then: string }
   const code = String(outcome.code ?? "").replace(/^DNS_/, "");
   return { why: `the name does not resolve${code && code !== "ENOTFOUND" ? ` (${code})` : ""}`, then: "the first capture would fail on it in milliseconds" };
 }
-async function probeLocal(row: string, at: ProviderEndpoint, knob: string): Promise<void> {
+// The servers re-probe an embedding provider that does not answer (SMD-2890).
+const REPROBE = reprobeIntervalFrom(env.OB1_PROVIDER_REPROBE_INTERVAL);
+/**
+ * What the server does while this endpoint does not answer, for a row that
+ * warns rather than fails: a name that resolves with nothing answering is a
+ * provider not up yet — Ollama on the host started after the stack, the
+ * profile's container still starting — and the brain serves degraded meanwhile
+ * (SMD-2888, SMD-2891) rather than restart-looping on a failed preflight
+ * (SMD-2890). The embeddings row names the re-probe that ends it, and the
+ * tags too when the chat calls share its base (no chat row of their own); the
+ * chat row's state is per capture, so it ends when a capture's call is
+ * answered. A silent endpoint costs each call its wait first (review pass 1).
+ */
+const SILENT_WAIT = "each first waiting on it up to the request timeout (OB1_LLM_TIMEOUT)";
+const DEGRADED = {
+  embeddings: (silent: boolean) =>
+    `the server starts degraded — until it answers, a capture lands without its vector${chatIsOwn && chatEndpoint.base !== embEndpoint.base ? "" : " and untagged (no topics, no type)"} and a search answers by exact matches${silent ? `, ${SILENT_WAIT}` : ""}, and its keyed /health and brain_info say the provider is unreachable; ${REPROBE.intervalS > 0 ? `it re-probes every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) and leaves degraded when it answers` : "OB1_PROVIDER_REPROBE_INTERVAL is off, so after its probe at start it leaves degraded on the first call that is answered"}`,
+  chat: (silent: boolean) =>
+    `the server starts — until it answers, a capture lands untagged (no topics, no type)${silent ? `, ${SILENT_WAIT}` : ""}; the first capture it answers is tagged again`,
+};
+async function probeLocal(row: string, at: ProviderEndpoint, knob: string, degraded: (silent: boolean) => string): Promise<void> {
   const started = performance.now();
   // Userinfo is not in the base (embed.ts takes it out, for the endpoint's
   // Basic header when there is no key) and this probe sends no credential, so
@@ -802,21 +835,43 @@ async function probeLocal(row: string, at: ProviderEndpoint, knob: string): Prom
     // included, under a row that names the base (first review pass).
     const r = await fetch(`${at.base}/models`, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(LOCAL_PROBE_TIMEOUT_MS) });
     await r.body?.cancel();
-    add(row, "ok", `${shown} answers — HTTP ${r.status} to GET /models in ${Math.max(1, Math.round(performance.now() - started))} ms; what it serves is checked under --deep`);
+    const ms = Math.max(1, Math.round(performance.now() - started));
+    // An outage's status (5xx, 408, 429) is the provider there and not ready — a
+    // server still loading, a proxy whose backend is down: the runtime's probe
+    // reads it as an outage, so the start does too (review pass 2).
+    if (r.status >= 500 || r.status === 408 || r.status === 429) {
+      add(row, "warn", `${shown} answers, but not yet — HTTP ${r.status} to GET /models in ${ms} ms; ${degraded(false)}`,
+          "Wait for it, or read its log for why it answers that; the server needs no restart.");
+      return;
+    }
+    add(row, "ok", `${shown} answers — HTTP ${r.status} to GET /models in ${ms} ms; what it serves is checked under --deep`);
   } catch (e) {
     const { kind, why, then } = probeFailure(e);
     const proxy = proxyKnobFor(at.base);
     const host = hostnameOf(at.base);
     const lead = kind === "tls" ? `${shown} answers, but ${why}` : `nothing answers at ${shown} — ${why}`;
     const route = proxy ? `; ${proxy} is set, so this call and every one the server makes go through that proxy unless NO_PROXY names ${host}` : "";
-    add(row, "fail", `${lead} (GET /models, ${LOCAL_PROBE_SECONDS} timeout)${route}; ${then}`,
+    // Resolved, dialled, and nothing there yet: a provider not up yet, which
+    // the server outlasts degraded (SMD-2890); what is and is not, and why,
+    // is startsDegraded's. A name that does not resolve fails above.
+    // In a container the loopback is judged by what the name resolved to as well: an /etc/hosts alias for 127.0.0.1 is the container too (review pass 2).
+    const addresses = IN_CONTAINER ? await Bun.dns.lookup(host).then((rs) => rs.map((r) => r.address), () => [] as string[]) : [];
+    if (startsDegraded(kind, { host, proxy: proxy !== null, container: IN_CONTAINER, addresses })) {
+      add(row, "warn", `nothing answers at ${shown} yet — ${why} (GET /models, ${LOCAL_PROBE_SECONDS} timeout); ${degraded(kind === "silent")}`,
+          `Start the provider if it is not running; the server needs no restart. If it is running, or nothing is meant to answer there: ${probeRemedy(at.base, knob)}`);
+      return;
+    }
+    // Failed only for being in a container: the loopback there is the container's own, where nothing will start.
+    const ownLoopback = !proxy && startsDegraded(kind, { host, proxy: false, container: false });
+    const own = ownLoopback ? `; this is a container, and ${host} in it is the container itself, where nothing will start answering unless it shares another's network (a pod, network_mode)` : "";
+    add(row, "fail", `${lead} (GET /models, ${LOCAL_PROBE_SECONDS} timeout)${route}${own}; ${then}`,
         (proxy ? `Add ${host} to NO_PROXY (and no_proxy) for the server, or unset ${proxy} for it. Otherwise: ` : "") + (kind === "tls" ? TLS_REMEDY : probeRemedy(at.base, knob)));
   }
 }
-if (localEmbeddings) await probeLocal("provider endpoint", embEndpoint, "OB1_LLM_BASE_URL");
+if (localEmbeddings) await probeLocal("provider endpoint", embEndpoint, "OB1_LLM_BASE_URL", DEGRADED.embeddings);
 // A chat endpoint at the same base is the same socket: one probe. Its own
 // local base is its own row, so a down chat server fails by its own name.
-if (chatIsOwn && chatEndpoint.base !== embEndpoint.base && localChat) await probeLocal("chat endpoint", chatEndpoint, "OB1_CHAT_BASE_URL");
+if (chatIsOwn && chatEndpoint.base !== embEndpoint.base && localChat) await probeLocal("chat endpoint", chatEndpoint, "OB1_CHAT_BASE_URL", DEGRADED.chat);
 
 // ── Egress: what may leave the box (SMD-1903) ───────────────────────────────
 
@@ -952,6 +1007,12 @@ if (env.OB1_VECTOR_MEND_INTERVAL !== undefined && env.OB1_VECTOR_MEND_INTERVAL !
   if (MEND.problem) add("vector mender", "warn", MEND.problem, "Set OB1_VECTOR_MEND_INTERVAL to whole seconds from 1 to 86400, or off, or unset it for 60.");
   else if (MEND.intervalS === 0) add("vector mender", "ok", "off (OB1_VECTOR_MEND_INTERVAL) — a thought saved without a vector keeps none until a db/reembed.ts pass gives it one");
   else add("vector mender", "ok", `every ${MEND.intervalS} s (OB1_VECTOR_MEND_INTERVAL) — the servers embed the thoughts saved without a vector once the provider answers and the egress gate allows`);
+}
+// The same for the re-probe (SMD-2890): only when set.
+if (env.OB1_PROVIDER_REPROBE_INTERVAL !== undefined && env.OB1_PROVIDER_REPROBE_INTERVAL !== "") {
+  if (REPROBE.problem) add("provider re-probe", "warn", REPROBE.problem, "Set OB1_PROVIDER_REPROBE_INTERVAL to whole seconds from 1 to 3600, or off, or unset it for 15.");
+  else if (REPROBE.intervalS === 0) add("provider re-probe", "ok", "off (OB1_PROVIDER_REPROBE_INTERVAL) — the servers probe once at start, and a server serving degraded leaves it only when a call is answered (a capture's, an edit's, a search's, the vector mender's)");
+  else add("provider re-probe", "ok", `every ${REPROBE.intervalS} s (OB1_PROVIDER_REPROBE_INTERVAL) while a local embedding provider does not answer — the servers leave degraded when it does`);
 }
 
 // ── Access keys ──────────────────────────────────────────────────────────────
