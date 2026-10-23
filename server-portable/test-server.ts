@@ -2339,6 +2339,19 @@ console.log("\n[16f] A prose value holds each string to the shape its field prom
   let threw = false;
   try { failed(Object.create(null)); } catch { threw = true; }
   assert(!threw && failed(Object.create(null)).content[0].text === "Error: a fault that could not be printed", "a fault String() cannot print is said as a fixed phrase");
+  {
+    // SMD-2995: the guard lets a list cursor through at `cursor` alone, as given: at `after` (a uuid's field) it is
+    // null, and with whitespace around it null (review pass 2).
+    const { renderListThoughts: rl, renderThoughtChanges: rc } = await import("./render.ts");
+    const { listCursor } = await import("./core/list-cursor.ts");
+    const lc = listCursor("newest", "2026-10-22 14:03:12.123456+00", "00000000-0000-4000-8000-000000000001");
+    const sc = (r: { structuredContent?: Record<string, unknown> }) => r.structuredContent ?? {};
+    const listed = sc(rl({ ok: true, value: { thoughts: [], sort: "newest", cursor: lc } } as never));
+    const padded = sc(rl({ ok: true, value: { thoughts: [], sort: "newest", cursor: ` ${lc}\n` } } as never));
+    const changes = sc(rc({ ok: true, value: { changes: [], more: false, bounded: true, since: null, after: lc, agent: null, notAgent: null, actions: null, cursor: null } } as never));
+    assert(listed.cursor === lc && padded.cursor === null && changes.after === null,
+      `structuredContent: a list cursor passes at \`cursor\` as given, and is null padded or at \`after\` (${listed.cursor === lc}, ${padded.cursor}, ${changes.after})`);
+  }
 }
 
 console.log("\n[16g] The read side of trust: the By: line's trust, the ingested notice in every body tool, the field beside it, ChatGPT's in-band marks, and the hint (SMD-1724)");
@@ -2405,19 +2418,6 @@ console.log("\n[16g] The read side of trust: the By: line's trust, the ingested 
 
 console.log("\n[16h] A thought's text is fenced in every prose read tool, so no line of it stands as the reply's own — a forged result block, By: line or list item, under any line break (SMD-2483)");
 {
-  {
-    // SMD-2995: the guard lets a list cursor through at `cursor` alone, as given: at `after` (a uuid's field) it is
-    // null, and with whitespace around it null (review pass 2).
-    const { renderListThoughts: rl, renderThoughtChanges: rc } = await import("./render.ts");
-    const { listCursor } = await import("./core/list-cursor.ts");
-    const lc = listCursor("newest", "2026-10-22 14:03:12.123456+00", "00000000-0000-4000-8000-000000000001");
-    const sc = (r: { structuredContent?: Record<string, unknown> }) => r.structuredContent ?? {};
-    const listed = sc(rl({ ok: true, value: { thoughts: [], sort: "newest", cursor: lc } } as never));
-    const padded = sc(rl({ ok: true, value: { thoughts: [], sort: "newest", cursor: ` ${lc}\n` } } as never));
-    const changes = sc(rc({ ok: true, value: { changes: [], more: false, bounded: true, since: null, after: lc, agent: null, notAgent: null, actions: null, cursor: null } } as never));
-    assert(listed.cursor === lc && padded.cursor === null && changes.after === null,
-      `structuredContent: a list cursor passes at \`cursor\` as given, and is null padded or at \`after\` (${listed.cursor === lc}, ${padded.cursor}, ${changes.after})`);
-  }
   const { fenceText, INGESTED_NOTICE, renderSearchThoughts, renderSearchThoughtsKeyword, renderListThoughts } = await import("./render.ts");
   assert(fenceText("one\n\ntwo") === "│ one\n│\n│ two" && fenceText("a\nb", "   ") === "   │ a\n   │ b" && fenceText("") === "│",
     "every line fenced, an empty one as `│` alone, an indent before the fence");

@@ -958,7 +958,7 @@ stripped (`X-Forwarded-Prefix`).
   `STORE_UNAVAILABLE`, retryable, the verdict the session hook keys on. Every 503
   carries `Retry-After`. Loose core inputs that reach Postgres (a non-UUID id
   on update or delete) are still faults through both doors (SMD-2534);
-  `list_thoughts`' limit and `days` are bounded in its schema since SMD-2995.
+  `list_thoughts`' limit, `days` and `after` are bounded in its schema since SMD-2995.
 - **The log** is one JSON line per request (`telemetry.ts`, SMD-1849) — the
   method, the route's template, the operation, the key's name, the status, an
   error answer's code and the time — with no query string, key, id or content

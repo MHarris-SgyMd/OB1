@@ -397,8 +397,8 @@ export class SqlStore implements ThoughtStore {
     } catch (e) {
       // A time cast that failed: the cursor's time is read alone, and if that fails too it is the caller's value of
       // the right shape Postgres cannot read, refused. Alone, so a cast error of anything else — `days` read back as
-      // a time — is never taken for the cursor's (review pass 2), and only after a failure, so a page is one
-      // statement, not a round trip before it (review pass 3).
+      // a time — is never taken for the cursor's (review pass 2), and only after a failure, so a good page pays no
+      // round trip before it (review pass 3).
       const cast = (x: unknown) => ["22007", "22008", "22009"].includes(String((x as { errno?: unknown }).errno ?? ""));
       if (!after?.at || !cast(e)) throw e;
       const unread = await this.sql`SELECT ${after.at}::timestamptz`.then(() => false, (p: unknown) => (cast(p) ? true : Promise.reject(p)));
