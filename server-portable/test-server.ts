@@ -1804,9 +1804,18 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   // shape, an SSE stream opened at once and written to when the tool returns,
   // and the silence is 13 s: past the last sweep that can catch it, so the
   // control is reset every run and not by the luck of the phase (11.5 s slipped
-  // under it once). Four requests run at once; the section costs the longest.
+  // under it once). Five requests run at once; the section costs the longest.
+  //
+  // Through the MCP server as a REST client the premise and withSseKeepalive's
+  // own rules are not measured again: they are the runtime's and sse.ts's,
+  // which index.ts's pass holds (SMD-3201). That pass keeps the call past the
+  // last sweep too. This one holds the MCP server's own wrap, at its own
+  // timing knob: a frame every 100 ms through a 1 s embedding, the envelope,
+  // and a client that leaves at 300 ms, while its call runs.
+  const direct = mcpTarget() === "index";
   const SILENT_MS = 13_000;
-  const SLOW_EMBED_MS = 13_000;
+  const SLOW_EMBED_MS = direct ? 13_000 : 1_000;
+  const LEAVE_MS = direct ? 1_500 : 300;
   const silentSse = (silentMs = SILENT_MS): Response => {
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -1819,17 +1828,6 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
     });
     return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
   };
-  // The mechanism dropped (bare) beside the mechanism (kept), on the runtime's
-  // defaults. The bare server's kill is what prints Bun's own `warn: Bun.serve()
-  // timed out a request after 10 seconds` after the suite's report: expected.
-  const bare = Bun.serve({ port: 0, fetch: () => silentSse() });
-  const kept = Bun.serve({ port: 0, fetch: (req) => withSseKeepalive(silentSse(), { signal: req.signal }) });
-  // The ceiling, at a small scale: a stream silent for 500 ms with a 20 ms
-  // frame and a 200 ms ceiling stops pinging at the ceiling and says so once.
-  // Nominally nine frames, about twenty-four uncapped; the band below leaves a
-  // loaded runner's timer drift room on both sides.
-  let stalls = 0;
-  const capped = Bun.serve({ port: 0, fetch: (req) => withSseKeepalive(silentSse(500), { intervalMs: 20, maxMs: 200, signal: req.signal, label: "tools/call slow_one", onStall: () => { stalls++; } }) });
   type Read = { ok: boolean; text: string; error: string; ms: number };
   const read = async (url: string, init: RequestInit = {}): Promise<Read> => {
     const t0 = performance.now();
@@ -1845,53 +1843,75 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   const call = (id: number, query: string, init: RequestInit = {}) =>
     read(BASE, { method: "POST", headers: AUTH, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "search_thoughts", arguments: { query } } }), ...init });
   const frames = (t: string) => t.split(": keepalive\n\n").length - 1;
+  // The mechanism dropped (bare) beside the mechanism (kept), on the runtime's
+  // defaults. The bare server's kill is what prints Bun's own `warn: Bun.serve()
+  // timed out a request after 10 seconds` after the suite's report: expected.
+  // The ceiling, at a small scale: a stream silent for 500 ms with a 20 ms
+  // frame and a 200 ms ceiling stops pinging at the ceiling and says so once.
+  // Nominally nine frames, about twenty-four uncapped; the band below leaves a
+  // loaded runner's timer drift room on both sides.
+  let stalls = 0;
+  const premise = async () => {
+    const bare = Bun.serve({ port: 0, fetch: () => silentSse() });
+    const kept = Bun.serve({ port: 0, fetch: (req) => withSseKeepalive(silentSse(), { signal: req.signal }) });
+    const capped = Bun.serve({ port: 0, fetch: (req) => withSseKeepalive(silentSse(500), { intervalMs: 20, maxMs: 200, signal: req.signal, label: "tools/call slow_one", onStall: () => { stalls++; } }) });
+    try {
+      const [bareRun, keptRun, cappedRun] = await Promise.all([bare, kept, capped].map((s) => read(`http://127.0.0.1:${s.port}/`)));
+      return { bareRun, keptRun, cappedRun };
+    } finally {
+      bare.stop(true);
+      kept.stop(true);
+      capped.stop(true);
+    }
+  };
   const warned: string[] = [];
   const realWarn = console.warn;
   console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
   embedDelayMs = SLOW_EMBED_MS;
-  let bareRun: Read, keptRun: Read, cappedRun: Read, slow: Read, gone: Read;
+  const timing = direct ? undefined : worker.useKeepaliveTiming!({ intervalMs: 100, maxMs: 2_000 });
+  let measured: Awaited<ReturnType<typeof premise>> | null, slow: Read, gone: Read;
   try {
-    [bareRun, keptRun, cappedRun, slow, gone] = await Promise.all([
-      read(`http://127.0.0.1:${bare.port}/`),
-      read(`http://127.0.0.1:${kept.port}/`),
-      read(`http://127.0.0.1:${capped.port}/`),
+    [measured, slow, gone] = await Promise.all([
+      direct ? premise() : null,
       call(50, "a query whose embedding outlives the idle timeout"),
-      // A client that gives up: the stream's headers arrive at once, so it is the body read that its 1.5 s signal ends.
-      call(51, "needle-the-line-must-not-carry", { signal: AbortSignal.timeout(1500) }),
+      // A client that gives up: the stream's headers arrive at once, so it is the body read that its signal ends.
+      call(51, "needle-the-line-must-not-carry", { signal: AbortSignal.timeout(LEAVE_MS) }),
     ]);
     await Bun.sleep(500); // the abandoned call's line, and the stub's sleep behind it, settle
   } finally {
     console.warn = realWarn;
     embedDelayMs = 0;
-    bare.stop(true);
-    kept.stop(true);
-    capped.stop(true);
+    if (timing) worker.useKeepaliveTiming!(timing);
   }
-  // The kill lands at a sweep between 8 and 12 s of silence; the bound is the
-  // 13 s answer, so a late sweep on a loaded runner is not read as a pass.
-  assert(!bareRun.ok && bareRun.ms > 7_500 && bareRun.ms < SILENT_MS,
-    `the premise: a streamed response silent past the default is reset at a sweep, before its 13 s event (${bareRun.ok ? "answered" : bareRun.error} after ${Math.round(bareRun.ms)} ms)`);
-  assert(keptRun.ok && /"late":true/.test(keptRun.text), `the same stream through withSseKeepalive reaches its event (${keptRun.ok ? `${Math.round(keptRun.ms)} ms` : keptRun.error})`);
-  assert(frames(keptRun.text) >= 2, `…carrying comment frames on the way (${frames(keptRun.text)} in ${SILENT_MS} ms at one per ${SSE_KEEPALIVE_MS} ms)`);
-  assert(cappedRun.ok && /"late":true/.test(cappedRun.text) && frames(cappedRun.text) >= 4 && frames(cappedRun.text) <= 10,
-    `the ceiling: frames stop at maxMs and the event still arrives (${frames(cappedRun.text)} frames in 500 ms at 20 ms with a 200 ms ceiling)`);
-  assert(stalls === 1, `…and onStall runs once, which is how the route settles the request before the runtime reaps the silent stream (${stalls})`);
-  const stalled = warned.filter((w) => /request still running/.test(w));
-  const sm = /after (\d+) s/.exec(stalled[0] ?? "");
-  assert(stalled.length === 1 && sm !== null && stalled[0] === stalledRequestLine("tools/call slow_one", Number(sm[1]) * 1000),
-    `…and says so once, in sse.ts's own line naming the call (${stalled.length} line)`);
-  assert(slow.ok && slow.ms >= SLOW_EMBED_MS, `the real server answers search_thoughts after a ${SLOW_EMBED_MS} ms embedding, past the last sweep (${slow.ok ? `${Math.round(slow.ms)} ms` : `${slow.error} at ${Math.round(slow.ms)} ms`})`);
+  if (measured) {
+    const { bareRun, keptRun, cappedRun } = measured;
+    // The kill lands at a sweep between 8 and 12 s of silence; the bound is the
+    // 13 s answer, so a late sweep on a loaded runner is not read as a pass.
+    assert(!bareRun.ok && bareRun.ms > 7_500 && bareRun.ms < SILENT_MS,
+      `the premise: a streamed response silent past the default is reset at a sweep, before its 13 s event (${bareRun.ok ? "answered" : bareRun.error} after ${Math.round(bareRun.ms)} ms)`);
+    assert(keptRun.ok && /"late":true/.test(keptRun.text), `the same stream through withSseKeepalive reaches its event (${keptRun.ok ? `${Math.round(keptRun.ms)} ms` : keptRun.error})`);
+    assert(frames(keptRun.text) >= 2, `…carrying comment frames on the way (${frames(keptRun.text)} in ${SILENT_MS} ms at one per ${SSE_KEEPALIVE_MS} ms)`);
+    assert(cappedRun.ok && /"late":true/.test(cappedRun.text) && frames(cappedRun.text) >= 4 && frames(cappedRun.text) <= 10,
+      `the ceiling: frames stop at maxMs and the event still arrives (${frames(cappedRun.text)} frames in 500 ms at 20 ms with a 200 ms ceiling)`);
+    assert(stalls === 1, `…and onStall runs once, which is how the route settles the request before the runtime reaps the silent stream (${stalls})`);
+    const stalled = warned.filter((w) => /request still running/.test(w));
+    const sm = /after (\d+) s/.exec(stalled[0] ?? "");
+    assert(stalled.length === 1 && sm !== null && stalled[0] === stalledRequestLine("tools/call slow_one", Number(sm[1]) * 1000),
+      `…and says so once, in sse.ts's own line naming the call (${stalled.length} line)`);
+  }
+  assert(slow.ok && slow.ms >= SLOW_EMBED_MS, `the real server answers search_thoughts after a ${SLOW_EMBED_MS} ms embedding${direct ? ", past the last sweep" : ""} (${slow.ok ? `${Math.round(slow.ms)} ms` : `${slow.error} at ${Math.round(slow.ms)} ms`})`);
   const dataLine = slow.text.split("\n").find((l) => l.startsWith("data: "));
   let envelope: { jsonrpc?: string; id?: unknown } | null = null;
   try { envelope = dataLine ? JSON.parse(dataLine.slice(6)) : null; } catch { /* not an envelope */ }
   assert(envelope?.jsonrpc === "2.0" && envelope.id === 50, "…with the call's JSON-RPC envelope (no store is configured here, so the tool's answer is its refusal — the point is that it arrived)");
   assert(frames(slow.text) >= 2, `…kept alive by comment frames the client never sees as events (${frames(slow.text)})`);
-  assert(!gone.ok, `a client that gives up at 1.5 s is gone (${gone.ok ? "answered" : gone.error})`);
+  assert(!gone.ok, `a client that gives up at ${LEAVE_MS / 1000} s is gone (${gone.ok ? "answered" : gone.error})`);
   const lines = warned.filter((w) => /request abandoned/.test(w));
   assert(lines.length === 1, `…and the server logs it once, for that request alone (${lines.length} of ${warned.length} warnings)`);
   const m = /after (\d+\.\d) s/.exec(lines[0] ?? "");
   assert(m !== null && lines[0] === abandonedRequestLine("tools/call search_thoughts", Number(m[1]) * 1000), "…the line is sse.ts's own, naming the method and the tool");
-  assert(m !== null && Number(m[1]) >= 1.4 && Number(m[1]) < 3, `…at the moment the client left (${m?.[1] ?? "?"} s)`);
+  // Its line's tenths, from the moment it left to before its call could end.
+  assert(m !== null && Number(m[1]) >= LEAVE_MS / 1000 - 0.1 && Number(m[1]) < Math.min(3, SLOW_EMBED_MS / 1000), `…at the moment the client left (${m?.[1] ?? "?"} s)`);
   assert(!/needle-the-line-must-not-carry/.test(lines[0] ?? ""), "…and never the query");
   assert(
     requestLabel(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "capture_thought", arguments: { content: "the thought" } } })) === "tools/call capture_thought"
