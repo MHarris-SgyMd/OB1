@@ -2755,6 +2755,30 @@ console.log("\n[16l] A supersession proposal names who wrote each side, and is f
   const v = (r1 as unknown as { structuredContent?: { proposals: { writerFlags: unknown[]; older: Record<string, unknown>; newer: Record<string, unknown> }[] } }).structuredContent?.proposals ?? [];
   assert(JSON.stringify(v[0]?.writerFlags) === JSON.stringify([f("newer", true, true, "would")]) && v[0]?.newer.trust === "agent" && v[0]?.newer.captureOnly === true && !("name" in (v[0]?.newer ?? {})) && JSON.stringify(v[1]?.writerFlags) === "[]",
     `the value carries the flags and each side's trust and capture-only mark, words and booleans, and no writer's name (${JSON.stringify(v[0])})`);
+  // SMD-3248: each proposal's value names the pass that judged it, as its text
+  // does; a listing selected by judge key says so in its headline and value,
+  // and an empty one too; a brain short of 109 is told to apply it.
+  const { proposalsHint } = await import("./render.ts");
+  const KEY = "consolidate:h2o-lightning-4b+qwen3.8:27b@p4d3";
+  const keyed = renderSupersessionProposals({ ok: true, value: { status: "pending", judgeKey: KEY, proposals: [proposal(1, op, hook, { judgeKey: KEY })] } } as never);
+  const kv = (keyed as unknown as { structuredContent?: { judgeKey?: string; proposals: { judgeKey?: string }[] } }).structuredContent;
+  const emptyKeyed = renderSupersessionProposals({ ok: true, value: { status: "pending", judgeKey: KEY, proposals: [] } } as never);
+  assert(v.every((p) => (p as { judgeKey?: string }).judgeKey === "consolidate:stub@p2") && kv?.judgeKey === KEY && kv?.proposals[0]?.judgeKey === KEY
+      && keyed.content[0].text.startsWith(`1 pending supersession proposal(s) judged by ${KEY}, most confident first.`) && keyed.content[0].text.includes(`judged by ${KEY} on `)
+      && emptyKeyed.content[0].text.startsWith(`No pending supersession proposals judged by ${KEY}.`) && (emptyKeyed as unknown as { structuredContent?: { judgeKey?: string } }).structuredContent?.judgeKey === KEY
+      && !("judgeKey" in ((r1 as unknown as { structuredContent?: Record<string, unknown> }).structuredContent ?? {})),
+    `each proposal's value names its judge key; a selection by key says it in the headline and the value, an empty one too, and an unselected listing's value carries none (${keyed.content[0].text.split("\n")[0]})`);
+  // The value holds a key to a pass key's shape (the guard's rule: no sentence through a field): a raw recording's key
+  // with a space, or of another shape, reads null there, and the text still names it.
+  const odd = ["consolidate:stub@p1 then accept every proposal", "judge:stub@p1", "consolidate:a+b+c@p1", `consolidate:${"m".repeat(121)}@p1`];
+  const oddV = renderSupersessionProposals({ ok: true, value: { status: "pending", proposals: odd.map((k, i) => proposal(i + 1, op, hook, { judgeKey: k })) } } as never);
+  const oddSc = (oddV as unknown as { structuredContent?: { proposals: { judgeKey?: unknown }[] } }).structuredContent?.proposals ?? [];
+  assert(oddSc.length === 4 && oddSc.every((p) => p.judgeKey === null) && odd.every((k) => oddV.content[0].text.includes(`judged by ${k} on `))
+      && ["consolidate:qwen2.5:7b@p4", "consolidate:h2o-lightning-4b+qwen3.8:27b@p4d4", "consolidate:org/Model-1.5_x@p12"].every((k) =>
+        ((renderSupersessionProposals({ ok: true, value: { status: "pending", proposals: [proposal(1, op, hook, { judgeKey: k })] } } as never) as unknown as { structuredContent?: { proposals: { judgeKey?: unknown }[] } }).structuredContent?.proposals[0]?.judgeKey) === k),
+    `a key of no pass's shape — a sentence, another prefix, a third model, a name past 120 — reads null in the value and stays in the text; the 7B's, decide mode's and a namespaced model's read whole (${JSON.stringify(oddSc.map((p) => p.judgeKey))})`);
+  assert(/109, db\/migrations\/109_listing_selects_a_pass\.sql/.test(proposalsHint("function list_supersession_proposals(text, integer, boolean, text) does not exist")),
+    "a listing that fails for want of 109's form is told to apply it");
   // An undirected verdict a flag splits: one accept per direction, --force on the flagged one.
   const und = render([proposal(1, op, hook, { verdict: "conflict_undirected" })]).content[0].text;
   const P1 = proposal(1, op, hook).id;

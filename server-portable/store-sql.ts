@@ -958,14 +958,15 @@ export class SqlStore implements ThoughtStore {
     return rows.map(normaliseDerivative);
   }
 
-  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean }): Promise<SupersessionProposal[]> {
-    // Migration 029, under 070's three-argument form. NULL status lists every
-    // state, NULL lineage every pair; the function caps the limit. Three
-    // arguments, always: 029 re-applied by hand lands its two-argument form
-    // beside 070's, and a call short of three is then ambiguous (not unique)
-    // and fails; three resolve (preflight's lineage check names the leftover).
+  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean; judgeKey?: string }): Promise<SupersessionProposal[]> {
+    // Migration 029, under 109's four-argument form. NULL status lists every
+    // state, NULL lineage every pair, NULL judge key every pass; the function
+    // caps the limit after the selection. Four arguments, always: 029 or 070
+    // re-applied by hand lands its form beside 109's, and a call short of four
+    // is then ambiguous (not unique) and fails; four resolve (preflight's
+    // lineage check names the leftover).
     const rows = await this.sql`
-      SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int, ${opts.lineage ?? null}::boolean)`;
+      SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int, ${opts.lineage ?? null}::boolean, ${opts.judgeKey ?? null}::text)`;
     // 094 (SMD-2707): each side's writer, by the page's ids. A brain short of
     // 094 has no such function: the page goes out without writers, and the
     // reply says so.

@@ -484,11 +484,12 @@ export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, typ
   return ok({ thoughts: page.thoughts.map((t) => ({ ...t, supersededBy: superseded[t.id] ?? null })), sort, cursor });
 }
 
-export type ProposalsResult = { status: Input<"list_supersession_proposals">["status"]; lineage?: boolean; proposals: SupersessionProposal[] };
+export type ProposalsResult = { status: Input<"list_supersession_proposals">["status"]; lineage?: boolean; judgeKey?: string; proposals: SupersessionProposal[] };
 
-export async function listSupersessionProposals(ctx: Ctx, _principal: Principal, { status, limit, lineage }: Input<"list_supersession_proposals">): Promise<Outcome<ProposalsResult>> {
-  const proposals = await (await ctx.store()).listSupersessionProposals({ status: status === "all" ? null : status, limit, ...(lineage === undefined ? {} : { lineage }) });
-  return ok({ status, ...(lineage === undefined ? {} : { lineage }), proposals });
+export async function listSupersessionProposals(ctx: Ctx, _principal: Principal, { status, limit, lineage, judge_key: judgeKey }: Input<"list_supersession_proposals">): Promise<Outcome<ProposalsResult>> {
+  // SMD-3248: judge_key selects one pass, in the SQL (109), so the cap counts its rows alone.
+  const proposals = await (await ctx.store()).listSupersessionProposals({ status: status === "all" ? null : status, limit, ...(lineage === undefined ? {} : { lineage }), ...(judgeKey === undefined ? {} : { judgeKey }) });
+  return ok({ status, ...(lineage === undefined ? {} : { lineage }), ...(judgeKey === undefined ? {} : { judgeKey }), proposals });
 }
 
 // ── thought_stats and thought_changes ────────────────────────────────────────

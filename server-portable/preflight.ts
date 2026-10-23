@@ -444,7 +444,7 @@ const APPLY_061 = "Apply db/migrations/061_derivations.sql.";
 const APPLY_063 = "Apply db/migrations/063_rebuild_derived.sql.";
 const APPLY_066 = "Apply db/migrations/066_lineage_excludes_candidates.sql.";
 const APPLY_067 = "Apply db/migrations/067_pass_settles_stale.sql.";
-const APPLY_070 = "Apply db/migrations/070_listing_flags_lineage_pair.sql.";
+const APPLY_109 = "Apply db/migrations/109_listing_selects_a_pass.sql.";
 const APPLY_073 = "Apply db/migrations/073_thought_trust_on_the_row.sql.";
 const APPLY_079 = "Apply db/migrations/079_linked_tickets_not_paired.sql.";
 /**
@@ -2392,14 +2392,15 @@ if (configFailed) {
                      (SELECT w.prosrc LIKE '%ob1:lineage-excludes-the-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_lineage,
                      -- 079 (SMD-2448): the candidate body leaves out two tickets Linear links (its sentinel); 063 or 066 re-applied by hand puts one back that does not.
                      (SELECT w.prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_tickets,
-                     -- 070 (SMD-2313): the listing flags a lineage pair (its sentinel) and stands in one form — 029 re-applied by hand lands its
-                     -- two-argument form BESIDE 070's, and a call passing fewer than three arguments is then ambiguous (42725, not unique) and fails.
-                     (SELECT w.prosrc LIKE '%ob1:listing-flags-the-lineage-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.list_supersession_proposals(text, int, boolean)')) AS lists_lineage,
+                     -- 070 (SMD-2313), then 109 (SMD-3248): the listing flags a lineage pair and selects a pass (both sentinels, in 109's
+                     -- four-argument form) and stands in one form — 029 or 070 re-applied by hand lands its form BESIDE 109's, and a call
+                     -- passing fewer than four arguments is then ambiguous (42725, not unique) and fails.
+                     (SELECT w.prosrc LIKE '%ob1:listing-flags-the-lineage-pair%' AND w.prosrc LIKE '%ob1:listing-selects-a-pass%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.list_supersession_proposals(text, int, boolean, text)')) AS lists_pass,
                      (SELECT count(*)::int FROM pg_proc w JOIN pg_namespace wn ON wn.oid = w.pronamespace WHERE wn.nspname = 'public' AND w.proname = 'list_supersession_proposals') AS listing_forms
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_lineage: boolean | null; listing_forms: number }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_pass: boolean | null; listing_forms: number }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
@@ -2562,24 +2563,24 @@ if (configFailed) {
               const review = `cd db && bun consolidate.ts --url <url> --list lineage shows them with both texts; reject each: bun consolidate.ts --url <url> --reject <id> --note "lineage pair (066)".`;
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${n(c.lineage_pairs)} unreviewed proposal(s) stand on a lineage pair (${(c.lineage_pair_ids ?? []).join(", ")})${Number(c.lp_read) >= BOUND ? ` — of the ${BOUND.toLocaleString("en-US")} unreviewed rows read` : ""}: one side's derived_from names the other, so the pair would never be proposed today (066), and an accept would archive a derivation's input while the derivation still names it; the pass never replaces a pending one (SMD-2313). ${coverage}`,
-                  bodies.lists_lineage === true && Number(bodies.listing_forms) === 1 ? `Review them: ${review}` : `${ledgerRemedy("070", APPLY_070)} Then review them: ${review}`);
-            } else if (bodies.has_063 && (bodies.lists_lineage !== true || Number(bodies.listing_forms) !== 1)) {
-              // 070's listing gone — a brain at 068 under this server — or
-              // 029's two-argument form beside it (029 re-applied by hand).
-              // Neither is "listed as any other row": the CLI, the stores and
-              // the MCP tool pass 070's third argument, so on the older form
-              // alone every listing fails naming it; with both forms standing
-              // a call short of three arguments is ambiguous (42725, not
-              // unique) and fails, while the fork's callers resolve (run-it,
-              // first review pass: the arm said the older body answered).
-              // 070 drops the older form. Gated on 063 like the arms above:
+                  bodies.lists_pass === true && Number(bodies.listing_forms) === 1 ? `Review them: ${review}` : `${ledgerRemedy("109", APPLY_109)} Then review them: ${review}`);
+            } else if (bodies.has_063 && (bodies.lists_pass !== true || Number(bodies.listing_forms) !== 1)) {
+              // 109's listing gone — a brain at 108 or before under this
+              // server — or an older form beside it (029 or 070 re-applied by
+              // hand). Neither is "listed as any other row": the CLI, the
+              // stores and the MCP tool pass 109's fourth argument, so on an
+              // older form alone every listing fails naming it; with two forms
+              // standing a call short of four arguments is ambiguous (42725,
+              // not unique) and fails, while the fork's callers resolve
+              // (SMD-2313's run-it, first review pass: the arm said the older
+              // body answered). 109 drops the older forms. Gated on 063 like the arms above:
               // a brain before 063 is the older-bodies arm's, and one at
               // 029..062 the ledger check's (LATEST_MIGRATION), read first.
               add("lineage", "warn",
-                  `every derived row has its lineage row, but ${bodies.lists_lineage !== true
-                    ? "list_supersession_proposals is from before 070 (migration 070 not yet applied, or its form dropped by hand): every listing fails — the CLI's --list, the stores and the MCP tool pass 070's third argument, which this form does not take — and no proposal standing on a lineage pair can be flagged"
-                    : "029's two-argument list_supersession_proposals stands beside 070's (029 re-applied by hand over it): a call passing fewer than three arguments is ambiguous (not unique) and fails, so every reader outside the fork's callers — which pass three — errors on the queue"} (SMD-2313). ${coverage}`,
-                  ledgerRemedy("070", APPLY_070));
+                  `every derived row has its lineage row, but ${bodies.lists_pass !== true
+                    ? "list_supersession_proposals is from before 109 (migration 109 not yet applied, or its form dropped by hand): every listing fails — the CLI's --list, the stores and the MCP tool pass 109's fourth argument, which this form does not take"
+                    : "an older list_supersession_proposals stands beside 109's (029 or 070 re-applied by hand over it): a call passing fewer than four arguments is ambiguous (not unique) and fails, so every reader outside the fork's callers — which pass four — errors on the queue"} (SMD-2313, SMD-3248). ${coverage}`,
+                  ledgerRemedy("109", APPLY_109));
             } else if (Number(c.orphans)) {
               // The other direction (063): a row whose artifact is gone while
               // its thought stands — nothing it describes exists, and the

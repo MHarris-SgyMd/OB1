@@ -173,6 +173,9 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     ["list_thought_ids", { limit: 2 }, "GET", "/v1/thought-ids?limit=2", undefined, (v) => say.renderThoughtIds(ok(v)), has("ids")],
     ["list_logged_searches", {}, "GET", "/v1/logged-searches", undefined, (v) => say.renderLoggedSearches(ok(v)), has("searches")],
     ["list_supersession_proposals", { status: "all" }, "GET", "/v1/proposals?status=all", undefined, (v) => say.renderSupersessionProposals(ok(v)), has("proposals")],
+    // SMD-3248: one pass's proposals by its judge key (109), the key echoed in the value beside each row's.
+    ["list_supersession_proposals", { status: "all", judge_key: "consolidate:stub@p2" }, "GET", "/v1/proposals?status=all&judge_key=consolidate%3Astub%40p2", undefined, (v) => say.renderSupersessionProposals(ok(v)),
+      (v) => v.judgeKey === "consolidate:stub@p2" && Array.isArray(v.proposals) && v.proposals.length > 0 && (v.proposals as { judgeKey: string }[]).every((p) => p.judgeKey === "consolidate:stub@p2")],
     ["thought_stats", {}, "GET", "/v1/stats", undefined, (v) => say.renderThoughtStats(ok(v)), (v) => typeof v.total === "number" && v.total > 0],
     ["thought_changes", { limit: 10, actions: ["capture"] }, "GET", "/v1/changes?limit=10&actions=capture", undefined, (v) => say.renderThoughtChanges(ok(v)), has("changes")],
     ["worker_status", {}, "GET", "/v1/workers", undefined, (v) => say.renderWorkerStatus(ok(v)), has("pools")],

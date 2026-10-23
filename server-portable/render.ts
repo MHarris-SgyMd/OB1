@@ -61,6 +61,16 @@ const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
 const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest)$/;
 const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto)$|Id$/;
+/**
+ * A consolidation pass's key (SMD-3248), as consolidate.ts and
+ * consolidate-decide.ts build it: `consolidate:<model>@p<prompt>`, or under
+ * decide mode `consolidate:<decider>+<writer>@p<prompt>d<decide version>` — a
+ * model name in Ollama's and Hugging Face's characters (letters, digits, `.`,
+ * `_`, `:`, `/`, `-`), no space. Held to that shape, it carries no sentence;
+ * a key of any other shape (a raw recording's) reads null, its text in the
+ * reply's.
+ */
+const JUDGE_KEY = /^consolidate:[A-Za-z0-9._:/-]{1,120}(?:\+[A-Za-z0-9._:/-]{1,120})?@p\d{1,4}(?:d\d{1,4})?$/;
 
 /**
  * The rule at the chokepoint (review pass 6): every string a picker hands over
@@ -73,6 +83,8 @@ const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|sup
 function guard(v: unknown, key = ""): unknown {
   // list_thoughts' cursor (SMD-2995): not a uuid, but held to its own shape, which carries no sentence.
   if (typeof v === "string" && key === "cursor" && v === v.trim() && parseListCursor(v)) return v;
+  // A proposal's pass (SMD-3248): held to a pass key's own shape, which carries no sentence.
+  if (typeof v === "string" && key === "judgeKey") return JUDGE_KEY.test(v) ? v : null;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -169,11 +181,13 @@ const safeList: Safe<ListThoughtsResult> = (v) => ({
   sort: v.sort,
   cursor: v.cursor,
 });
-/** list_supersession_proposals: per proposal its ids, verdict, numbers and dates — the sides, the reason and the judge are in the text. */
+/** list_supersession_proposals: per proposal its ids, verdict, numbers, dates and the pass that judged it — the sides and the reason are in the text. */
 const safeProposals: Safe<ProposalsResult> = (v) => ({
-  status: v.status, ...(v.lineage === undefined ? {} : { lineage: v.lineage }),
+  status: v.status, ...(v.lineage === undefined ? {} : { lineage: v.lineage }), ...(v.judgeKey === undefined ? {} : { judgeKey: v.judgeKey }),
   proposals: v.proposals.map((p) => ({
     id: p.id, status: p.status, verdict: p.verdict, confidence: p.confidence, similarity: p.similarity,
+    // SMD-3248: the judge key names a pass and its models — no writer, so SMD-2707's rule (writers' names in the text) does not hold it back.
+    judgeKey: p.judgeKey,
     judgedAt: p.judgedAt, reviewedAt: p.reviewedAt, supersedingId: p.supersedingId, lineage: p.lineage,
     older: safeSide(p.older), newer: safeSide(p.newer),
     // SMD-2707: the flags are words and booleans; the writers' names are in the text.
@@ -800,8 +814,9 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
 }
 
 export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply {
-  return render(o, ({ status, lineage, proposals: data }) => {
-    const onLineage = lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "";
+  return render(o, ({ status, lineage, judgeKey, proposals: data }) => {
+    // SMD-3248: the pass selected (109) is said with the rest of the selection.
+    const onLineage = (lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "") + (judgeKey === undefined ? "" : ` judged by ${judgeKey}`);
     if (!data.length) {
       // A lineage pair is never proposed since 066, so an empty lineage
       // selection is not the pass's to fill (maintainer read, third pass).
@@ -876,15 +891,16 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
 }
 
 /**
- * The hint a listing error carries. 070 (SMD-2313): the store calls the
- * three-argument form, so a brain short of 070 — or of 029, whose queue the
- * listing reads — fails naming that form (`p_lineage` was PostgREST's word for
- * it, before SMD-3152); the driver's message is the same either way, so one
- * hint names both files (cold read, first and fourth review passes).
+ * The hint a listing error carries. 070 (SMD-2313), then 109 (SMD-3248): the
+ * store calls the four-argument form, so a brain short of 109 — or of 029,
+ * whose queue the listing reads — fails naming that form (`p_lineage` was
+ * PostgREST's word for it, before SMD-3152); the driver's message is the same
+ * either way, so one hint names both files (cold read, first and fourth review
+ * passes).
  */
 export const proposalsHint = (msg: string): string =>
   /list_supersession_proposals|supersession_proposals|p_lineage/.test(msg)
-    ? " — the migrations through 070 are not applied (029, db/migrations/029_supersession_proposals.sql, creates the queue; 070, db/migrations/070_listing_flags_lineage_pair.sql, its current listing)"
+    ? " — the migrations through 109 are not applied (029, db/migrations/029_supersession_proposals.sql, creates the queue; 109, db/migrations/109_listing_selects_a_pass.sql, its current listing)"
     : "";
 
 export function renderThoughtStats(o: Outcome<ThoughtStats>): Reply {

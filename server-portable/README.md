@@ -600,8 +600,9 @@ with no active Linear link between them now (079's `child_of`, `blocks`,
 `blocked_by`, `relates_to`, and a `duplicate_of` either way), so a link made
 after a verdict takes the pair out; not counted before 079 — and the stale
 ones; `none pending` when there is none.
-`consolidate.ts --list` and the `list_supersession_proposals` tool list them,
-and preflight's `proposals` row warns once the oldest has waited past
+`consolidate.ts --list` and the `list_supersession_proposals` tool list them —
+one pass's alone with `--key` or `judge_key`, the pass key each proposal names
+(109) — and preflight's `proposals` row warns once the oldest has waited past
 `OB1_PROPOSALS_WARN_DAYS` (7). `Relations` is the judged relations standing
 (084) by word, with their board pairs counted the same way; nothing waits on
 one, so nothing warns (`consolidate.ts --list relations` shows them); `none
