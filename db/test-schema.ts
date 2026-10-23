@@ -7418,30 +7418,27 @@ console.log("\n[50] Every extension and recipe schema applies to a migrated brai
   // The two groups name exactly what the files created that a grant can
   // reach: every new table and every new view, no sequence (every id is a uuid
   // or text — measured, not recalled, as [40] measured the six bigserials) and
-  // no function (none is REVOKEd FROM PUBLIC now that ob-graph's three
-  // REVOKEs are gone with the roles they named).
+  // no function (none is REVOKEd FROM PUBLIC).
   const GROUPS = ["extensions", "recipes"] as const;
   const objects = grantedObjects([...GROUPS]);
   const presence = (await xdb.query<{ kind: string; name: string; present: boolean }>(grantPresenceSql(objects))).rows;
   const absent = presence.filter((r) => !r.present).map((r) => `${r.kind} ${r.name}`);
-  assert(presence.length === objects.length && objects.length === 63 && absent.length === 0, `every object the two groups name exists once the files are applied (${objects.length}; absent: ${absent.join(", ") || "none"})`);
+  assert(presence.length === objects.length && objects.length === 46 && absent.length === 0, `every object the two groups name exists once the files are applied (${objects.length}; absent: ${absent.join(", ") || "none"})`);
   const listedTables = new Set(grantedTables([...GROUPS]));
   const listedViews = new Set(grantedViews([...GROUPS]));
   const newTables = [...(await tablesNow())].filter((t) => !baseTables.has(t)).sort();
   const newViews = [...(await viewsNow())].filter((v) => !baseViews.has(v)).sort();
-  assert(newTables.length === 48 && listedTables.size === 48 && newTables.every((t) => listedTables.has(t)),
-    `the files created exactly the 48 tables the two groups list — 18 in extensions, 30 in recipes (created: ${newTables.length}; unlisted: ${newTables.filter((t) => !listedTables.has(t)).join(", ") || "none"})`);
-  assert(grantedTables(["extensions"]).length === 18 && grantedTables(["recipes"]).length === 30 && newTables.every((t) => !grantedTables(["community"]).includes(t)),
-    "…18 and 30, and none of them a community table under another name");
+  assert(newTables.length === 31 && listedTables.size === 31 && newTables.every((t) => listedTables.has(t)),
+    `the files created exactly the 31 tables the two groups list — 18 in extensions, 13 in recipes (created: ${newTables.length}; unlisted: ${newTables.filter((t) => !listedTables.has(t)).join(", ") || "none"})`);
+  assert(grantedTables(["extensions"]).length === 18 && grantedTables(["recipes"]).length === 13 && newTables.every((t) => !grantedTables(["community"]).includes(t)),
+    "…18 and 13, and none of them a community table under another name");
   const opsViews = newViews.filter((v) => v.startsWith("ops_")), lintViews = newViews.filter((v) => v.startsWith("lint_"));
   assert(newViews.length === 15 && listedViews.size === 15 && newViews.every((v) => listedViews.has(v)) && opsViews.length === 8 && lintViews.length === 7,
     `…and exactly the fifteen views — eight ops_* and seven lint_*, the guarded ones included since their tables and column are present (${newViews.join(", ")})`);
   const newSeqs = [...(await seqsNow())].filter((s) => !baseSeqs.has(s));
   const newLocked = [...(await lockedFnsNow())].filter((f) => !baseLocked.has(f));
   assert(newSeqs.length === 0 && grantedSequences([...GROUPS]).length === 0, `no sequence was created (every id is a uuid or text), so the groups list none (${newSeqs.join(", ") || "none"})`);
-  assert(newLocked.length === 0 && grantedFunctions([...GROUPS]).length === 0, `no new function is REVOKEd FROM PUBLIC — ob-graph's three keep PUBLIC's EXECUTE — so the groups list none (${newLocked.join(", ") || "none"})`);
-  const graphFns = (await xdb.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('traverse_graph', 'find_shortest_path', 'reconstruct_bfs_path', 'merge_thought_metadata', 'operating_model_save_layer') AND has_function_privilege('ob1_contrib', p.oid, 'EXECUTE')`)).rows[0].n;
-  assert(graphFns === 4, `ob-graph's three functions and work-operating-model's saver are callable by an ungranted role (${graphFns} of 4; gmail-smart-pull's merge is not applied here)`);
+  assert(newLocked.length === 0 && grantedFunctions([...GROUPS]).length === 0, `no new function is REVOKEd FROM PUBLIC, so the groups list none (${newLocked.join(", ") || "none"})`);
 
   // The role: nothing but USAGE on the schema, then [40]'s probe — an INSERT
   // of DEFAULT VALUES answers 42501 until the table is granted and some other
@@ -7467,22 +7464,22 @@ console.log("\n[50] Every extension and recipe schema applies to a migrated brai
   assert(before.length === 0, `ungranted, the role's INSERT into every listed table and SELECT from every listed view is refused with 42501 (${listedTables.size + listedViews.size} objects; exceptions: ${before.join(", ") || "none"})`);
   const present = new Set(presence.map((r) => r.name));
   const statements = grantStatements("ob1_contrib", { groups: [...GROUPS], present });
-  assert(statements.length === 63 && statements.every((s) => /^GRANT (SELECT|SELECT, INSERT, UPDATE(, DELETE)?) ON \w+ TO "ob1_contrib";$/.test(s)) &&
+  assert(statements.length === 46 && statements.every((s) => /^GRANT (SELECT|SELECT, INSERT, UPDATE(, DELETE)?) ON \w+ TO "ob1_contrib";$/.test(s)) &&
          statements.includes(`GRANT SELECT ON ops_graph_coverage TO "ob1_contrib";`) && statements.includes(`GRANT SELECT ON lint_exact_duplicates TO "ob1_contrib";`) && statements.includes(`GRANT SELECT, INSERT, UPDATE ON capture_thresholds TO "ob1_contrib";`),
     `--grant's statements for the two groups: one per table and view (${statements.length}), no sequence or function among them, the views granted as tables are, adaptive-capture's three verbs`);
   for (const s of statements) await xdb.exec(s);
   const after = [...(await codes())].filter(([, c]) => c === "42501").map(([n]) => n);
   assert(after.length === 0, `granted both groups, no listed table refuses the role's INSERT and no view its SELECT (still refused: ${after.join(", ") || "none"})`);
   const verify = (await xdb.query<{ held: boolean; privilege: string; name: string }>(grantVerifySql("ob1_contrib", mergedGrants([...GROUPS], present)))).rows;
-  // One row per privilege plus the schema's USAGE: 18 + 26 four-verb tables, adaptive-capture's four at three, and one SELECT per view.
+  // One row per privilege plus the schema's USAGE: 18 + 9 four-verb tables, adaptive-capture's four at three, and one SELECT per view.
   const fourVerb = listedTables.size - 4;
-  assert(fourVerb === 44 && verify.length === 1 + fourVerb * 4 + 4 * 3 + listedViews.size && verify.every((r) => r.held),
+  assert(fourVerb === 27 && verify.length === 1 + fourVerb * 4 + 4 * 3 + listedViews.size && verify.every((r) => r.held),
     `grantVerifySql holds every privilege of both groups (${verify.length} rows; not held: ${verify.filter((r) => !r.held).map((r) => `${r.privilege} on ${r.name}`).join(", ") || "none"})`);
   // Upstream's privileges, kept where they were narrower: adaptive-capture's
   // API role could not DELETE, so the granted role cannot either — the row
   // that would be widened by a copy-paste of the four DML verbs.
   const narrow = await asRole(`DELETE FROM capture_thresholds WHERE false`);
-  const wide = await asRole(`DELETE FROM graph_nodes WHERE false`);
+  const wide = await asRole(`DELETE FROM life_engine_habits WHERE false`);
   assert(narrow.code === "42501" && wide.code === null, `the role cannot DELETE from adaptive-capture's tables (${narrow.code}) and can from a four-verb table (${wide.code ?? "allowed"})`);
   // And a read that only the role's own SELECT on the view could allow: the
   // ops views are over `thoughts`, which the role was never granted — a view
@@ -15319,10 +15316,16 @@ console.log("\n[94] Migration 105: Linear's duplicate status type known and sett
   assert(JSON.stringify([...back.values()]) === JSON.stringify([...now.values()]) && (await gateOf()) === true && (await drift()) === 0,
     `105 applied over that brain: settled again, the blocker cleared, and its own rebuild leaves the mirror exact (${JSON.stringify(back.get(open))})`);
   const [clean] = await q<{ w: number }>(`SELECT written + deleted AS w FROM ob1_rebuild_source_gate()`);
+  const [once] = await q<{ known: string[]; settled: string[] }>(`SELECT node_lifecycle_types() AS known, node_settled_types() AS settled`);
   await reapply(the105);
   const [again] = await q<{ known: string[]; settled: string[] }>(`SELECT node_lifecycle_types() AS known, node_settled_types() AS settled`);
-  assert(clean.w === 0 && again.known.join() === sets.known.join() && again.settled.join() === sets.settled.join() && (await drift()) === 0,
+  assert(clean.w === 0 && once.known.join() === "triage,backlog,unstarted,started,completed,canceled,duplicate" && again.known.join() === once.known.join() && again.settled.join() === once.settled.join() && (await drift()) === 0,
     `…a rebuild after it finds nothing to fix, and a re-apply changes nothing (${clean.w})`);
+  // 105's sets are this tree's only until a later migration changes one:
+  // the shipped sets back, and 108's comments over 105's (review pass 4),
+  // by name, as [96] finds it.
+  await restoreShipped("node_lifecycle_types", "node_settled_types");
+  await reapply(files.find((f) => f.endsWith("_source_gate_keyed_rebuild.sql")) ?? "no _source_gate_keyed_rebuild.sql");
 
   // 077's finished tickets: a thought about the Duplicate alone is about finished work.
   const [refs] = await q<{ r: string[] | null }>(`SELECT ticket_references_settled('a session about it', '{"topics": ["DUP-2"]}'::jsonb) AS r`);
@@ -15451,6 +15454,96 @@ console.log("\n[95] Migration 107: the listing caps the walks it runs — list_p
   assert(uncapped && (await row(p26)).newer_takes === null && /ob1:listing-walk-cap/.test(await src(SIG)) && (await functionsNamed("list_proposal_writers")) === 1,
     "094 re-applied puts its uncapped listing back (the 26-row side read); 107 restored after it, the cap");
   await db.exec(`DELETE FROM thoughts`);
+}
+
+console.log("\n[96] Migration 108: a keyed rebuild of 071's gate mirror for a status-set change (SMD-3160) — a set change simulated each way: the moved type's rows reconciled and no other, an unrelated drift left for the full rebuild; empty, NULL, all-NULL and repeated types; refused outside READ COMMITTED; the plan refresh altering every reader of the sets; a re-apply a no-op, and each set's comment giving the recipe and the grep that lists its copies");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  // By name, not number: main may take the number.
+  const the108 = files.find((f) => f.endsWith("_source_gate_keyed_rebuild.sql")) ?? "no _source_gate_keyed_rebuild.sql";
+  const row = async (content: string, metadata: Record<string, unknown>) =>
+    (await q<{ id: string }>(`INSERT INTO thoughts (content, metadata) VALUES ($1, $2::jsonb) RETURNING id::text AS id`, [content, JSON.stringify(metadata)]))[0].id;
+  // Two sourced rows of a type no set knows yet, one of a known type, one whose
+  // stored gate will be made wrong by hand (a write with triggers disabled).
+  const w1 = await row("[96] KG-1 — a weird one", { source: "linear", issue: "KG-1", status_type: "kgweird" });
+  const w2 = await row("[96] KG-2 — another", { source: "linear", issue: "KG-2", status_type: "kgweird" });
+  const s1 = await row("[96] KG-3 — started", { source: "linear", issue: "KG-3", status_type: "started" });
+  const d1 = await row("[96] KG-4 — done, its gate made wrong", { source: "linear", issue: "KG-4", status_type: "completed" });
+  for (const [id, key] of [[w1, "KG-1"], [w2, "KG-2"], [s1, "KG-3"], [d1, "KG-4"]]) await q(`SELECT record_thought_source($1::uuid, 'linear', $2, $2, 'text/markdown')`, [id, key]);
+  const gates = async () => new Map((await q<{ id: string; g: boolean }>(`SELECT thought_id::text AS id, gates AS g FROM ob1_source_gate WHERE thought_id = ANY($1::uuid[])`, [[w1, w2, s1, d1]])).map((r) => [r.id, r.g]));
+  const drift = async () => (await q<{ n: number }>(`SELECT count(*)::int AS n FROM ob1_node_projection_drift()`))[0].n;
+  const keyed = async (types: string[] | null) => (await q<{ written: number; deleted: number }>(`SELECT * FROM ob1_rebuild_source_gate_for_types($1::text[])`, [types]))[0];
+  const g0 = await gates();
+  assert(g0.get(w1) === false && g0.get(w2) === false && g0.get(s1) === true && g0.get(d1) === true && (await drift()) === 0,
+    `setup: the unknown type's rows do not gate, the known ones do, nothing drifts (${JSON.stringify([...g0.values()])})`);
+
+  // A set change that adds the type, and an unrelated wrong row beside it.
+  const known = (await q<{ k: string[] }>(`SELECT node_lifecycle_types() AS k`))[0].k;
+  await db.exec(`CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{${[...known, "kgweird"].join(",")}}'::text[] $$`);
+  await q(`UPDATE ob1_source_gate SET gates = false WHERE thought_id = $1`, [d1]);
+  const before = await drift();
+  // The moved type second, behind one no row holds, and named twice: every
+  // type given is read.
+  const added = await keyed(["kgnone", "kgweird", "kgweird"]);
+  const g1 = await gates(), after = await drift();
+  assert(before === 3 && added.written === 2 && added.deleted === 0 && g1.get(w1) === true && g1.get(w2) === true && g1.get(s1) === true && g1.get(d1) === false && after === 1,
+    `a set change that adds a type: the keyed form reconciles that type's two rows and no other — the wrong row it was not asked about stays wrong, drift() still naming it (${before} → ${after}; ${JSON.stringify(added)})`);
+  const [full] = await q<{ written: number; deleted: number }>(`SELECT * FROM ob1_rebuild_source_gate()`);
+  assert(full.written === 1 && (await gates()).get(d1) === true && (await drift()) === 0,
+    `…which the full rebuild, the repair, then fixes (${JSON.stringify(full)})`);
+
+  // Empty, NULL and all-NULL touch nothing; the same call again finds nothing to fix.
+  const [empty, nul, nuls, again] = [await keyed([]), await keyed(null), await keyed([null as unknown as string, null as unknown as string]), await keyed(["kgweird", "nosuchtype"])];
+  assert(JSON.stringify([empty, nul, nuls, again]) === JSON.stringify([{ written: 0, deleted: 0 }, { written: 0, deleted: 0 }, { written: 0, deleted: 0 }, { written: 0, deleted: 0 }]),
+    `an empty, NULL or all-NULL array touches nothing, and on an exact mirror the call writes nothing, a type no row holds included (${JSON.stringify([empty, nul, nuls, again])})`);
+  // …and takes no lock: under REPEATABLE READ, where a call that went on would be refused, it answers.
+  let quiet = "refused";
+  await db.exec(`BEGIN ISOLATION LEVEL REPEATABLE READ`);
+  try { quiet = JSON.stringify(await keyed([null as unknown as string])); } catch (e) { quiet = (e as Error).message; }
+  await db.exec(`ROLLBACK`);
+  assert(quiet === JSON.stringify({ written: 0, deleted: 0 }), `an all-NULL array returns before the isolation check and the locks (${quiet})`);
+
+  // Refused outside READ COMMITTED: its snapshot must postdate its locks.
+  let refused = "ran";
+  await db.exec(`BEGIN ISOLATION LEVEL REPEATABLE READ`);
+  try { await keyed(["kgweird"]); } catch (e) { refused = (e as Error).message; }
+  await db.exec(`ROLLBACK`);
+  assert(/^ob1_rebuild_source_gate_for_types\(\) must run under READ COMMITTED; this transaction is REPEATABLE READ$/.test(refused),
+    `refused under REPEATABLE READ, naming the level (${refused})`);
+
+  // The change undone — a set change that drops the type: the same call puts
+  // the rows back. The set as it was, by hand: 105 re-applied would run its
+  // own full rebuild first and leave the keyed form nothing to do.
+  await db.exec(`CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{${known.join(",")}}'::text[] $$`);
+  const dropBefore = await drift();
+  const dropped = await keyed(["kgweird"]);
+  const g2 = await gates();
+  assert(dropBefore === 2 && dropped.written === 2 && g2.get(w1) === false && g2.get(w2) === false && (await drift()) === 0,
+    `a set change that drops the type: the same call takes the two rows back to not gating, and nothing drifts (${dropBefore}; ${JSON.stringify(dropped)})`);
+
+  // 108 again changes nothing; its comments name it and the full rebuild names it back.
+  let reapplied: string;
+  try { reapplied = await reapply(the108); } catch (e) { reapplied = `threw: ${(e as Error).message}`; }
+  const [c] = await q<{ k: string; f: string; s: string; st: string }>(`SELECT obj_description('ob1_rebuild_source_gate_for_types(text[])'::regprocedure, 'pg_proc') AS k, obj_description('ob1_rebuild_source_gate()'::regprocedure, 'pg_proc') AS f, obj_description('node_lifecycle_types()'::regprocedure, 'pg_proc') AS s, obj_description('node_settled_types()'::regprocedure, 'pg_proc') AS st`);
+  assert(reapplied.endsWith("_source_gate_keyed_rebuild.sql") && (await drift()) === 0 && /Migration 108 \/ SMD-3160/.test(c.k) && /ob1_rebuild_source_gate_for_types/.test(c.f) && /Migrations 071, 108/.test(c.f)
+      && /ob1_rebuild_source_gate_for_types/.test(c.s) && /ob1_refresh_set_readers/.test(c.s) && /Migration 058 \/ SMD-2074/.test(c.s) && /SMD-2935/.test(c.s)
+      && /ob1_refresh_set_readers/.test(c.st) && !/ob1_rebuild_source_gate/.test(c.st) && /board-findings\.ts reads it/.test(c.st) && /Migration 058 \/ SMD-2074/.test(c.st) && /SMD-2935/.test(c.st)
+      && [c.s, c.st].every((x) => x.includes("grep -nwE 'canceled|unstarted' -- ':!db/migrations'")),
+    `a re-apply of 108 is a no-op; its function's comment names it, the full rebuild's names the keyed form for a set change, and each set's own says what a change to it runs — the settled set's the refresh alone — and how to list every copy of it, 058's and 105's tags kept (${reapplied.slice(0, 60)})`);
+
+  // The plan refresh as a call: each of the brain's readers of the sets is
+  // altered (its catalog row rewritten), the refresh itself and the sets not,
+  // and the count says how many.
+  const readerRows = async () => new Map((await q<{ f: string; x: string }>(`SELECT p.oid::regprocedure::text AS f, p.xmin::text AS x FROM pg_proc p
+      WHERE p.pronamespace = 'public'::regnamespace AND p.prosrc ~ 'node_(lifecycle|settled)_types[[:space:]]*[(]'
+        AND p.proname NOT IN ('node_lifecycle_types', 'node_settled_types', 'ob1_refresh_set_readers')`)).map((r) => [r.f, r.x]));
+  const before95 = await readerRows();
+  const [{ n }] = await q<{ n: number }>(`SELECT ob1_refresh_set_readers() AS n`);
+  const after95 = await readerRows();
+  assert(before95.size >= 5 && n === before95.size && [...before95].every(([f, x]) => after95.get(f) !== x),
+    `ob1_refresh_set_readers() alters each of the brain's ${before95.size} readers of the sets and says so (${n})`);
+
+  await db.query(`DELETE FROM thoughts WHERE content LIKE '[96]%'`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

@@ -206,10 +206,6 @@ jobs:
         working-directory: server-portable
         run: bun test-jobs.ts
 
-      - name: Typecheck
-        working-directory: server-portable
-        run: bunx tsc --noEmit
-
       # The REST core's client (SMD-2287), which the MCP server and the
       # operator GUI call the brain through: its generated files against the
       # REST core's own document, so a route or a schema changed without
@@ -219,10 +215,6 @@ jobs:
       - name: Install the REST client's pinned packages
         working-directory: rest-client
         run: bun install --frozen-lockfile
-
-      - name: Typecheck the REST client
-        working-directory: rest-client
-        run: bunx tsc --noEmit
 
       - name: The REST client against the REST core
         working-directory: rest-client
@@ -236,9 +228,18 @@ jobs:
         working-directory: mcp-server
         run: bun install --frozen-lockfile
 
-      - name: Typecheck the MCP server
-        working-directory: mcp-server
-        run: bunx tsc --noEmit
+      # SMD-2280: the operator GUI (dashboard/), checked as the image builds
+      # it: svelte-check over its pages and server code, which import the REST
+      # client above and type their answers by server-portable's own types,
+      # both installed by now. The image's dashboard-build stage runs its
+      # `vite build`, and the full-stack job drives it through the proxy.
+      - name: Install the operator GUI's pinned packages
+        working-directory: dashboard
+        run: bun install --frozen-lockfile
+
+      - name: Check the operator GUI
+        working-directory: dashboard
+        run: bun run check
 
       - name: The MCP server over the REST core
         working-directory: mcp-server
@@ -283,17 +284,9 @@ jobs:
         working-directory: db
         run: bun install --frozen-lockfile
 
-      - name: Typecheck the workers, benches and suites
-        working-directory: db
-        run: bunx tsc --noEmit
-
       - name: Install the evals' pinned packages
         working-directory: evals
         run: bun install --frozen-lockfile
-
-      - name: Typecheck the evals
-        working-directory: evals
-        run: bunx tsc --noEmit
 
       # The typed-decision tier (SMD-2050): its serving process under jev/ and
       # the client in server-portable/jev.ts, which the suite imports — so it
@@ -306,10 +299,6 @@ jobs:
       - name: Install the decision tier's pinned packages
         working-directory: jev
         run: bun install --frozen-lockfile
-
-      - name: Typecheck the decision tier
-        working-directory: jev
-        run: bunx tsc --noEmit
 
       - name: Decision tier — contract, service and client
         working-directory: jev
@@ -361,6 +350,15 @@ jobs:
       - name: Proposal writer rules
         working-directory: evals
         run: bun eval-judge-propose.ts --self-check
+
+      # How the pass could ask the mediated-pair test's question (SMD-3203
+      # item 3): row 2's mapping (F-state distinct, the rest of the mediated
+      # capped), both versions' questions (the writer's read word for word from
+      # the ADR's test, pinned by hash), the gold where both raters agree, κ,
+      # the median, the scoring and the bar at its edges. No tier, no model.
+      - name: Mediated-pair rules
+        working-directory: evals
+        run: bun eval-mediated-pairs.ts --self-check
 
       # The projection-replay spike's rules (SMD-1998): the snapshot key per
       # projection, the replay rule branch by branch, the five scenarios on a
@@ -483,9 +481,15 @@ jobs:
         working-directory: deploy/auth
         run: bun install --frozen-lockfile
 
-      - name: Typecheck the authorization server
-        working-directory: deploy/auth
-        run: bunx tsc --noEmit
+      # The job's type-checked directories, side by side (SMD-3202), here
+      # because each needs its own install, before this step, and this follows
+      # the last of them: a tsc in each, its output a log of its own, printed in
+      # the order named, the step failing naming the directory. One after
+      # another they were seven steps, 25–49 s by runner. Check 18 reads each
+      # directory named as a tsc step, and runs the script against a stub to
+      # hold it to that.
+      - name: Typecheck the server, the REST and MCP clients, the workers, the evals, the decision tier and the authorization server
+        run: .github/ci/typecheck.sh server-portable rest-client mcp-server db evals jev deploy/auth
 
       - name: Authorization server rules
         working-directory: deploy/auth
@@ -779,6 +783,20 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # The upgrade and preflight pair's own Postgres, which the start step's
+      # two legs reach on 5433: its comment has why (SMD-3195).
+      pair-postgres:
+        image: pgvector/pgvector:0.8.6-pg16
+        env:
+          POSTGRES_PASSWORD: ob1test
+          POSTGRES_DB: ob1upgrade
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -792,6 +810,56 @@ jobs:
       - name: Install
         working-directory: server-portable
         run: bun install --frozen-lockfile
+
+      # Two suites side by side, each against its own database (SMD-2219), on
+      # the second service, pair-postgres, which they have to themselves:
+      # started here and run in the background while the job's other suites run
+      # on ob1test (SMD-3195). They were the job's last long step, a median 179
+      # s after 106 s of suites, on the run's critical path. test-upgrade.ts
+      # applies migrations INCREMENTALLY, onto a database that already holds
+      # data — the one situation every other suite avoids by resetting first,
+      # and the only one a real deployment is ever in; most of its time is three
+      # waits on the migrator's 10 s lock_timeout. test-preflight.ts is the
+      # deploy gate: without it a misconfigured server starts, answers the MCP
+      # handshake, passes every HTTP liveness probe, and fails only when a user
+      # captures their first thought; its time is its preflight runs, a
+      # subprocess each. A Postgres of their own, not databases beside ob1test:
+      # a cluster's databases share its transaction horizon, and an open
+      # transaction of theirs hid test-plugins-sql.ts's new index from the
+      # planner (review pass 1, 9 runs in 30). The two connect as one role to
+      # one cluster, so what the cluster shares — a role and its settings,
+      # pg_locks, pg_stat_activity — is scoped in each to its own database, or
+      # named for the suite; both headers say so, and a fixture added to either
+      # keeps to it. Each leg runs in a subshell that outlives this step (the
+      # runner ends a job's leftover processes only at its end) and writes its
+      # log, then its exit code by a rename, so the last step never reads half
+      # of one; `|| rc=$?` keeps -e from ending the subshell before it writes
+      # the code. Each has its own time limit (a hang ends as 124, or 137 when
+      # TERM is ignored). The last step, "Incremental upgrade and preflight
+      # (started at the job's start)", waits on both and prints them.
+      - name: Start the incremental upgrade and preflight, in the background
+        working-directory: db
+        run: |
+          # test-preflight's database; the service creates only test-upgrade's.
+          bun --eval 'const s = new Bun.SQL(process.env.UPGRADE_DATABASE_URL); await s.unsafe("CREATE DATABASE ob1preflight"); await s.close()'
+          limit_s=600
+          echo "$(date +%s) $limit_s" > "$RUNNER_TEMP/pair.started"
+          (
+            rc=0
+            DATABASE_URL=$UPGRADE_DATABASE_URL \
+              timeout --kill-after=10s "${limit_s}s" bun test-upgrade.ts > "$RUNNER_TEMP/test-upgrade.log" 2>&1 || rc=$?
+            echo "$rc" > "$RUNNER_TEMP/test-upgrade.rc.part" && mv "$RUNNER_TEMP/test-upgrade.rc.part" "$RUNNER_TEMP/test-upgrade.rc"
+          ) < /dev/null > /dev/null 2>&1 &
+          (
+            cd ../server-portable
+            rc=0
+            DATABASE_URL=$PREFLIGHT_DATABASE_URL \
+              timeout --kill-after=10s "${limit_s}s" bun test-preflight.ts > "$RUNNER_TEMP/test-preflight.log" 2>&1 || rc=$?
+            echo "$rc" > "$RUNNER_TEMP/test-preflight.rc.part" && mv "$RUNNER_TEMP/test-preflight.rc.part" "$RUNNER_TEMP/test-preflight.rc"
+          ) < /dev/null > /dev/null 2>&1 &
+        env:
+          UPGRADE_DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5433/ob1upgrade
+          PREFLIGHT_DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5433/ob1preflight
 
       - name: Store conformance
         working-directory: server-portable
@@ -966,68 +1034,6 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
-      # Two suites side by side, each against its own database on the service
-      # container (SMD-2219). test-upgrade.ts applies migrations INCREMENTALLY,
-      # onto a database that already holds data — the one situation every other
-      # suite avoids by resetting first, and the only one a real deployment is
-      # ever in; most of its time is three waits on the migrator's 10 s
-      # lock_timeout. test-preflight.ts is the deploy gate: without it a
-      # misconfigured server starts, answers the MCP handshake, passes every
-      # HTTP liveness probe, and fails only when a user captures their first
-      # thought; its time is its preflight runs, a subprocess each. In series
-      # they were the job's two longest steps, and the job was the run's
-      # critical path. Both connect as one role to one cluster, so what the
-      # cluster shares — a role and its settings, pg_locks, pg_stat_activity —
-      # is scoped in each suite to its own database, or named for the suite;
-      # both headers say so, and a fixture added to either keeps to it. The
-      # rest is SMD-2092's step for the schema legs: each run writes its own
-      # log, both are waited on and printed (a passing one folded, a failing
-      # one open), each has its own time limit (a hang ends as 124, or 137 when
-      # TERM is ignored), and the two summary lines close the step. A leg that
-      # fails here and passes alone (db/with-postgres.sh) is load, or a leak
-      # between the two: replay this run: block against one with-postgres.sh
-      # database.
-      - name: Incremental upgrade and preflight, side by side
-        working-directory: db
-        run: |
-          # test-upgrade's database; the service creates only ob1test.
-          bun --eval 'const s = new Bun.SQL(process.env.DATABASE_URL); await s.unsafe("CREATE DATABASE ob1upgrade"); await s.close()'
-          limit=10m
-          DATABASE_URL=$UPGRADE_DATABASE_URL \
-            timeout --kill-after=10s "$limit" bun test-upgrade.ts > "$RUNNER_TEMP/test-upgrade.log" 2>&1 &
-          upgrade_pid=$!
-          (cd ../server-portable && exec timeout --kill-after=10s "$limit" bun test-preflight.ts) > "$RUNNER_TEMP/test-preflight.log" 2>&1 &
-          preflight_pid=$!
-          # `|| rc=$?`, not a bare wait: the step runs under -e, and a bare wait
-          # on a failed run would end the step before either log is printed.
-          upgrade_rc=0; wait "$upgrade_pid" || upgrade_rc=$?
-          preflight_rc=0; wait "$preflight_pid" || preflight_rc=$?
-          summaries=""
-          for leg in "test-upgrade:$upgrade_rc" "test-preflight:$preflight_rc"; do
-            suite=${leg%%:*}
-            rc=${leg#*:}
-            log="$RUNNER_TEMP/$suite.log"
-            case $rc in
-              124) rc="124, over the $limit limit" ;;
-              137) rc="137, killed: over the $limit limit with TERM ignored, or out of memory" ;;
-            esac
-            if [ "$rc" = 0 ]; then
-              echo "::group::$suite.ts — passed"
-              cat "$log"
-              echo "::endgroup::"
-            else
-              echo "::error title=SQL data layer::$suite.ts failed (exit $rc) — its log follows"
-              cat "$log"
-            fi
-            summary=$(grep -aE '^[0-9]+ assertions: ' "$log" | tail -n 1 || true)
-            summaries+="  $suite.ts: ${summary:-no summary line — the run stopped before its report} (exit $rc)"$'\n'
-          done
-          printf '\n%s' "$summaries"
-          [ "$upgrade_rc" -eq 0 ] && [ "$preflight_rc" -eq 0 ]
-        env:
-          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-          UPGRADE_DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1upgrade
-
       # Every vendored writer of a thought's content or vector goes through
       # update_thought or the 3-argument upsert_thought (change 69, SMD-1228):
       # each is driven as deployed against this database — the fork's schema
@@ -1044,7 +1050,7 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
-      # Every tool of the eight servers on the SQL shim, called through
+      # Every tool of the seven servers on the SQL shim, called through
       # tools/call against the extensions' own schema.sql files (applied as
       # they are — no auth.* stub and no Supabase role, since SMD-1810, which
       # also stopped test-writes.ts above creating the three roles on this
@@ -1059,6 +1065,45 @@ jobs:
         run: bun test-tools.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
+
+      # The pair the job started after Install (SMD-3195), waited on up to its
+      # limit and the kill after it, and printed as SMD-2092's step prints the
+      # schema legs: a passing log folded, a failing one open, and the two
+      # summary lines last. It runs when a step before it failed too, so a
+      # failure beside one of the pair's is seen beside it. A leg that fails
+      # here and passes alone (db/with-postgres.sh) is load, or a leak between
+      # the two: replay the start step's two legs against one with-postgres.sh
+      # database.
+      - name: Incremental upgrade and preflight (started at the job's start)
+        if: ${{ !cancelled() }}
+        run: |
+          read -r started limit_s < "$RUNNER_TEMP/pair.started" || { echo "::error title=SQL data layer::the pair was never started: its start step did not run, or failed before it wrote $RUNNER_TEMP/pair.started"; exit 1; }
+          # The limit, the 10 s kill after it, and 20 s for each leg's subshell to write its code.
+          deadline=$((started + limit_s + 30))
+          while { [ ! -f "$RUNNER_TEMP/test-upgrade.rc" ] || [ ! -f "$RUNNER_TEMP/test-preflight.rc" ]; } && [ "$(date +%s)" -lt "$deadline" ]; do sleep 1; done
+          summaries=""
+          failed=0
+          for suite in test-upgrade test-preflight; do
+            log="$RUNNER_TEMP/$suite.log"
+            rc=$(cat "$RUNNER_TEMP/$suite.rc" 2> /dev/null) || rc="none, its subshell wrote no code by ${limit_s} s and 30 s"
+            [ "$rc" = 0 ] || failed=1
+            case $rc in
+              124) rc="124, over the ${limit_s} s limit" ;;
+              137) rc="137, killed: over the ${limit_s} s limit with TERM ignored, or out of memory" ;;
+            esac
+            if [ "$rc" = 0 ]; then
+              echo "::group::$suite.ts — passed"
+              cat "$log"
+              echo "::endgroup::"
+            else
+              echo "::error title=SQL data layer::$suite.ts failed (exit $rc) — its log follows"
+              cat "$log" || true
+            fi
+            summary=$(grep -aE '^[0-9]+ assertions: ' "$log" | tail -n 1 || true)
+            summaries+="  $suite.ts: ${summary:-no summary line — the run stopped before its report} (exit $rc)"$'\n'
+          done
+          printf '\n%s' "$summaries"
+          [ "$failed" = 0 ]
 
   deploy-stack:
     name: Full stack, no Supabase
@@ -1164,82 +1209,123 @@ jobs:
           [ "$CODE" -eq 1 ] || { echo "preflight exited $CODE, expected 1" >&2; cat /tmp/negative.out >&2; exit 1; }
           docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun server preflight.ts | grep -F 'preflight OK'
 
-      # SMD-2424: the workers profile's own command, run for real against
-      # this stack (its database is up; --no-deps starts nothing else). The
-      # `sh -c` refuses without a worker key and on a setting that is not
-      # digits — `--status` as a value once reached the CLI as a flag, ran
-      # and exited 0 — both exit 2 before bun starts; and a well-formed
-      # setting gets as far as the worker, whose own refusal proves the exec
-      # and the arguments were taken: SMD-2599's start probe, which a
-      # --follow worker makes before it registers a key or claims anything,
-      # and which this stack's provider stub (embeddings only, a bare 404
-      # for chat) refuses with exit 2.
-      - name: The workers profile refuses before it starts a follower
+      # SMD-2424, SMD-3214: the workers profile's own command, run for real
+      # against this stack (its database is up; --no-deps starts nothing
+      # else), detached, as the service runs. db/supervise.ts, the command,
+      # holds without a worker key and on a setting that is not digits —
+      # `--status` as a value once reached the CLI as a flag, ran and exited 0
+      # — and starts no follower; a well-formed setting gets as far as the
+      # worker, whose own refusal proves the exec and the arguments were
+      # taken: SMD-2599's start probe, which a --follow worker makes before it
+      # registers a key or claims anything, and which this stack's provider
+      # stub (embeddings only, a bare 404 for chat) refuses with exit 2 — and
+      # the supervisor holds that too, to run it again in a minute. Each case
+      # is still running once its line is logged — the container does not
+      # exit, so `unless-stopped` has nothing to restart in a loop — and a
+      # stop ends it promptly with 0.
+      - name: The workers profile holds a refusal rather than exiting
         working-directory: deploy
         run: |
           # Nothing else in this stack runs the workers' image: pull it first,
           # so the bound below times the command, not Docker Hub.
           docker compose -f compose.yaml --profile workers pull --quiet extract consolidate
-          # Bounded: a refusal that regressed starts a follower, which never exits.
-          worker() { local svc=$1; shift; set +e; timeout 120 docker compose -f compose.yaml --profile workers run --rm --no-deps -T "$@" "$svc" > /tmp/worker.out 2>&1; CODE=$?; set -e; }
-          hold() { if ! grep -qF -- "$1" /tmp/worker.out || [ "$CODE" -ne 2 ]; then echo "--- expected exit 2 and \"$1\"; got $CODE: ---" >&2; cat /tmp/worker.out >&2; exit 1; fi; }
-          worker extract -e OB1_WORKER_KEY=
-          hold 'extract: OB1_WORKER_KEY is not set in deploy/.env'
-          worker consolidate -e OB1_WORKER_KEY=
-          hold 'consolidate: OB1_WORKER_KEY is not set in deploy/.env'
-          worker extract -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=--status
-          hold "OB1_EXTRACT_FOLLOW ('--status') and OB1_EXTRACT_WORKERS ('') take digits only"
-          worker consolidate -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_WORKERS='1 --limit 1'
-          hold "take digits only"
-          # …and each variable is checked, not only the pair's first.
-          worker consolidate -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_FOLLOW=--status
-          hold "OB1_CONSOLIDATE_FOLLOW ('--status') and OB1_CONSOLIDATE_WORKERS ('') take digits only"
-          worker extract -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_WORKERS='1 --limit 1'
-          hold "OB1_EXTRACT_FOLLOW ('') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only"
-          worker extract -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=30
-          hold 'A --follow worker refuses this before it claims anything (SMD-2599)'
-          worker consolidate -e OB1_WORKER_KEY=not-a-key
-          hold 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
+          before="$(q "SELECT key FROM ob1_config WHERE key LIKE 'heartbeat:%'")"
+          # Bounded: each case waits up to 60 s for its line, then is stopped.
+          held() {
+            local svc=$1 want=$2; shift 2
+            local ct="ci-held-$svc-$RANDOM"
+            docker compose -f compose.yaml --profile workers run -d --no-deps --name "$ct" "$@" "$svc" > /dev/null
+            for _ in $(seq 1 30); do docker logs "$ct" 2>&1 | grep -qF -- "$want" && break; sleep 2; done
+            sleep 2
+            docker logs "$ct" > /tmp/held.out 2>&1
+            local running took code
+            running="$(docker inspect -f '{{.State.Running}}' "$ct")"
+            took=$(date +%s); docker stop -t 30 "$ct" > /dev/null; took=$(( $(date +%s) - took ))
+            code="$(docker inspect -f '{{.State.ExitCode}}' "$ct")"
+            docker rm "$ct" > /dev/null
+            if ! grep -qF -- "$want" /tmp/held.out || [ "$running" != true ] || [ "$code" != 0 ] || [ "$took" -gt 15 ]; then
+              echo "--- expected \"$want\", still running after it, then exit 0 within 15 s of a stop; got running=$running, exit $code after ${took} s: ---" >&2; cat /tmp/held.out >&2; exit 1
+            fi
+          }
+          also() { grep -qF -- "$1" /tmp/held.out || { echo "--- expected \"$1\" too: ---" >&2; cat /tmp/held.out >&2; exit 1; }; }
+          held extract 'extract: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          also 'supervise: extract is held, not started'
+          held consolidate 'consolidate: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          held extract "extract: OB1_EXTRACT_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=--status
+          held consolidate "consolidate: OB1_CONSOLIDATE_WORKERS ('1 --limit 1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_WORKERS='1 --limit 1'
+          # …and each setting is checked, not only the pair's first.
+          held consolidate "consolidate: OB1_CONSOLIDATE_FOLLOW ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_CONSOLIDATE_FOLLOW=--status
+          held extract "extract: OB1_EXTRACT_FOLLOW ('x') and OB1_EXTRACT_WORKERS ('1 --limit 1') take digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=x -e OB1_EXTRACT_WORKERS='1 --limit 1'
+          held extract 'supervise: extract exited 2' -e OB1_WORKER_KEY=not-a-key -e OB1_EXTRACT_FOLLOW=30
+          also 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          also 'it runs again at'
+          held consolidate 'supervise: consolidate exited 2' -e OB1_WORKER_KEY=not-a-key
+          also 'A --follow worker refuses this before it claims anything (SMD-2599)'
+          # The held rows the cases wrote go, leaving this stack's later steps the brain they had.
+          for k in $(q "SELECT key FROM ob1_config WHERE key LIKE 'heartbeat:%'"); do
+            printf '%s\n' "$before" | grep -qxF -- "$k" || q "DELETE FROM ob1_config WHERE key = '$k'"
+          done
 
-      # SMD-2678: the sleep profile's own command, the same way. Its `sh -c`
-      # refuses without a worker key and on each setting that is not digits;
-      # a well-formed one reaches the scheduler, whose own refusals prove the
-      # exec and the arguments were taken — --poll past a minute, and a claim
-      # follower's fresh heartbeat in this stack's database, beside which it
-      # will not sleep (the two profiles are alternatives), which also proves
-      # it reaches the database on the server's environment.
-      - name: The sleep profile refuses before it sleeps
+      # SMD-2678, SMD-3214: the sleep profile's own command, the same way. Its
+      # supervisor holds without a worker key and on each setting that is not
+      # digits, and ends heartbeat:sleep with the refusal and no next try, so
+      # preflight says the recreate it waits for; a well-formed setting
+      # reaches the scheduler, whose own refusals prove the exec and the
+      # arguments were taken — --poll past a minute, and a claim follower's
+      # fresh heartbeat in this stack's database, beside which it will not
+      # sleep (the two profiles are alternatives), which also proves it
+      # reaches the database on the server's environment — each held, to run
+      # again in a minute.
+      - name: The sleep profile holds a refusal rather than exiting
         working-directory: deploy
         run: |
-          sleeper() { set +e; timeout 120 docker compose -f compose.yaml --profile sleep run --rm --no-deps -T "$@" sleep > /tmp/sleep.out 2>&1; CODE=$?; set -e; }
-          hold() { if ! grep -qF -- "$1" /tmp/sleep.out || [ "$CODE" -ne 2 ]; then echo "--- expected exit 2 and \"$1\"; got $CODE: ---" >&2; cat /tmp/sleep.out >&2; exit 1; fi; }
           q() { docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -tAc "$1"; }
-          sleeper -e OB1_WORKER_KEY=
-          hold 'sleep: OB1_WORKER_KEY is not set in deploy/.env'
-          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_QUIET=--status
-          hold "sleep: OB1_SLEEP_QUIET ('--status'), OB1_SLEEP_POLL ('') and OB1_SLEEP_WORKERS ('') take digits only"
-          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL='1 --dry-run'
-          hold "OB1_SLEEP_POLL ('1 --dry-run') and OB1_SLEEP_WORKERS ('') take digits only"
-          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
-          hold "OB1_SLEEP_WORKERS ('-1') take digits only"
-          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
-          hold '--poll must be'
-          # SMD-2679: the budget's four settings, a guard of their own, and the
-          # flag each reaches — a clock past a week refused by the scheduler.
-          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
-          hold "sleep: OB1_SLEEP_BUDGET ('60m'), OB1_SLEEP_STATEMENT_TIMEOUT (''), OB1_SLEEP_WORK_MEM ('') and OB1_SLEEP_MAINTENANCE_WORK_MEM ('') take digits only"
-          sleeper -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=10081
-          hold '--budget must be a decimal integer >= 0 and <= 10080'
-          q "INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:ci-outside@p2', '{\"v\":1,\"job\":\"extract:ci-outside@p2\",\"every_s\":60,\"running\":false,\"outcome\":\"ok\"}')"
-          sleeper -e OB1_WORKER_KEY=not-a-key
-          q "DELETE FROM ob1_config WHERE key = 'heartbeat:extract:ci-outside@p2'"
-          hold 'refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:ci-outside@p2'
-          # The refusal ends heartbeat:sleep on a failure, so preflight's sleep
-          # row names the followers keeping it down; then the row goes, leaving
-          # this stack's later steps the brain they had.
-          stamped="$(q "SELECT (value::jsonb->>'outcome') || ':' || (value::jsonb->>'ended') FROM ob1_config WHERE key = 'heartbeat:sleep'")"
+          held() {
+            local want=$1; shift
+            local ct="ci-held-sleep-$RANDOM"
+            docker compose -f compose.yaml --profile sleep run -d --no-deps --name "$ct" "$@" sleep > /dev/null
+            for _ in $(seq 1 30); do docker logs "$ct" 2>&1 | grep -qF -- "$want" && break; sleep 2; done
+            sleep 2
+            docker logs "$ct" > /tmp/held.out 2>&1
+            local running took code
+            running="$(docker inspect -f '{{.State.Running}}' "$ct")"
+            took=$(date +%s); docker stop -t 30 "$ct" > /dev/null; took=$(( $(date +%s) - took ))
+            code="$(docker inspect -f '{{.State.ExitCode}}' "$ct")"
+            docker rm "$ct" > /dev/null
+            if ! grep -qF -- "$want" /tmp/held.out || [ "$running" != true ] || [ "$code" != 0 ] || [ "$took" -gt 15 ]; then
+              echo "--- expected \"$want\", still running after it, then exit 0 within 15 s of a stop; got running=$running, exit $code after ${took} s: ---" >&2; cat /tmp/held.out >&2; exit 1
+            fi
+          }
+          also() { grep -qF -- "$1" /tmp/held.out || { echo "--- expected \"$1\" too: ---" >&2; cat /tmp/held.out >&2; exit 1; }; }
+          row() { q "SELECT concat_ws(':', value::jsonb->>'outcome', value::jsonb->>'ended', value::jsonb->>'refused', value::jsonb#>>'{restart,in_s}', value::jsonb#>>'{restart,code}') FROM ob1_config WHERE key = 'heartbeat:sleep'"; }
+          held 'sleep: OB1_WORKER_KEY is not set in deploy/.env' -e OB1_WORKER_KEY=
+          stamped="$(row)"
           q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
-          [ "$stamped" = "failed:true" ] || { echo "--- expected heartbeat:sleep ended on a failure; got '$stamped' ---" >&2; exit 1; }
+          # concat_ws skips the null in_s: held for a recreate, no next try.
+          [ "$stamped" = "failed:true:identity:2" ] || { echo "--- expected heartbeat:sleep ended, refused (identity), no next try; got '$stamped' ---" >&2; exit 1; }
+          held "sleep: OB1_SLEEP_QUIET ('--status') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_QUIET=--status
+          held "sleep: OB1_SLEEP_POLL ('1 --dry-run') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL='1 --dry-run'
+          held "sleep: OB1_SLEEP_WORKERS ('-1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
+          held '--poll must be' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
+          also 'supervise: sleep exited 2'
+          # SMD-2679: the budget's four settings, each guarded, and the flag
+          # each reaches — a clock past a week refused by the scheduler.
+          held "sleep: OB1_SLEEP_BUDGET ('60m') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
+          held "sleep: OB1_SLEEP_MAINTENANCE_WORK_MEM ('64MB') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_MAINTENANCE_WORK_MEM=64MB
+          held '--budget must be a decimal integer >= 0 and <= 10080' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=10081
+          q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
+          q "INSERT INTO ob1_config (key, value) VALUES ('heartbeat:extract:ci-outside@p2', '{\"v\":1,\"job\":\"extract:ci-outside@p2\",\"every_s\":60,\"running\":false,\"outcome\":\"ok\"}')"
+          held 'supervise: sleep exited 2' -e OB1_WORKER_KEY=not-a-key
+          q "DELETE FROM ob1_config WHERE key = 'heartbeat:extract:ci-outside@p2'"
+          also 'refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:ci-outside@p2'
+          # The refusal ends heartbeat:sleep on a failure, and the supervisor
+          # adds its next try, so preflight's sleep row says it is held and
+          # names the followers keeping it down; then the row goes, leaving
+          # this stack's later steps the brain they had.
+          stamped="$(row)"
+          q "DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'"
+          [ "$stamped" = "failed:true:60:2" ] || { echo "--- expected heartbeat:sleep ended on a failure, its next try in 60 s after exit 2; got '$stamped' ---" >&2; exit 1; }
 
       # SMD-1844. An address-less mapping binds 0.0.0.0; this stack holds a brain
       # behind one password and one key over plain HTTP. Read compose's own
@@ -1299,8 +1385,9 @@ jobs:
           # SMD-2210: the orchestration profile adds n8n's one port, also on
           # loopback, with its image pinned by digest. Its import runner
           # (SMD-2212) publishes none. Without a profile a plain config
-          # names exactly the six services it should: SMD-1846 added the proxy,
-          # SMD-2284 the REST core (`api`, the server's image by name), SMD-2583 the forwarder.
+          # names exactly the eight services it should: SMD-1846 added the proxy,
+          # SMD-2284 the REST core (`api`, the server's image by name), SMD-2583 the forwarder,
+          # SMD-2287 the MCP server on it (`mcp`), SMD-2280 the operator GUI (`app`).
           docker compose -f compose.yaml --profile orchestration config --format json \
             | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.n8n.image | test("@sha256:[0-9a-f]{64}$")) and (.services["orchestration-runner"] | has("ports") | not)'
           # SMD-2285: the authorization server publishes nothing, joins only
@@ -1344,7 +1431,7 @@ jobs:
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data"]) and .networks.data.internal == true
               and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "pg-exporter", "pg-monitor-role", "postgres", "server", "sleep"])
               and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "server", "sleep"])
-              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "auth", "lgtm", "mcp", "proxy"]) and (on("telemetry") == ["lgtm", "pg-exporter"]) and .networks.telemetry.internal == true
+              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "app", "auth", "lgtm", "mcp", "proxy"]) and (on("telemetry") == ["lgtm", "pg-exporter"]) and .networks.telemetry.internal == true
               and ([.services | to_entries[] | select((.value.environment // {}) | keys | any(startswith("OTEL_"))) | .key] == ["api", "mcp"])'
           docker compose -f compose.yaml -f compose.host-ports.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data", "postgres-port"]) and (on("postgres-port") == ["postgres"])'
@@ -1358,24 +1445,27 @@ jobs:
           # keep the key list the worker names itself by (board-sync blanks
           # it), are handed the worker key, mount the checkout read-only,
           # reach a host model by the host alias, wait for the schema, keep
-          # their grace periods (120 s, 60 s), and stop after three refusals
-          # rather than loop; take no plugin knob — the plugin login role's
+          # their grace periods (120 s, 60 s), and come back after a reboot
+          # through db/supervise.ts, which holds a refusal rather than loop
+          # (SMD-3214); take no plugin knob — the plugin login role's
           # password is the two servers' and the migrator's (SMD-2310); and
-          # each command's last line is exactly its
+          # each command is the supervisor with the key guard, the worker's
+          # two settings guarded digits only, and a --run of exactly its
           # worker's exec'd --follow, so no flag (a --switch-key would lift
-          # the model-change refusal) rides along. The refusals themselves
-          # are run, by the step above.
+          # the model-change refusal) rides along. The holds themselves are
+          # run, by the step above.
           docker compose -f compose.yaml --profile workers config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully") and .services.extract.stop_grace_period == "2m0s" and .services.consolidate.stop_grace_period == "1m0s" and (.services.extract.command[2] | test("\nexec bun db/extract-entities\\.ts --follow \\$+\\{OB1_EXTRACT_FOLLOW:\\+\"\\$+OB1_EXTRACT_FOLLOW\"\\} --workers \"\\$+\\{OB1_EXTRACT_WORKERS:-1\\}\"\n?$")) and (.services.consolidate.command[2] | test("\nexec bun db/consolidate\\.ts --follow \\$+\\{OB1_CONSOLIDATE_FOLLOW:\\+\"\\$+OB1_CONSOLIDATE_FOLLOW\"\\} --workers \"\\$+\\{OB1_CONSOLIDATE_WORKERS:-1\\}\"\n?$"))'
+            | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully") and .services.extract.stop_grace_period == "2m0s" and .services.consolidate.stop_grace_period == "1m0s" and (.services.extract.command[:9] == ["bun", "db/supervise.ts", "--worker", "extract", "--require-key", "--digits", "OB1_EXTRACT_FOLLOW", "OB1_EXTRACT_WORKERS", "--run"] and (.services.extract.command | length == 10) and (.services.extract.command[9] | test("^exec bun db/extract-entities\\.ts --follow \\$+\\{OB1_EXTRACT_FOLLOW:\\+\"\\$+OB1_EXTRACT_FOLLOW\"\\} --workers \"\\$+\\{OB1_EXTRACT_WORKERS:-1\\}\"$"))) and (.services.consolidate.command[:9] == ["bun", "db/supervise.ts", "--worker", "consolidate", "--require-key", "--digits", "OB1_CONSOLIDATE_FOLLOW", "OB1_CONSOLIDATE_WORKERS", "--run"] and (.services.consolidate.command | length == 10) and (.services.consolidate.command[9] | test("^exec bun db/consolidate\\.ts --follow \\$+\\{OB1_CONSOLIDATE_FOLLOW:\\+\"\\$+OB1_CONSOLIDATE_FOLLOW\"\\} --workers \"\\$+\\{OB1_CONSOLIDATE_WORKERS:-1\\}\"$")))'
           # SMD-2678: the sleep profile's service holds the same, and more of
           # its own: init (bun as PID 1 ignores SIGTERM until its handlers are
           # in, SMD-2666), the extract service's grace (120 s), its seven
-          # settings handed in — the budget's four since SMD-2679 — the key
-          # guard as its command's first line, and its last exactly the
-          # scheduler's exec'd --follow with them.
+          # settings handed in — the budget's four since SMD-2679 — and its
+          # command the supervisor with the key guard and all seven guarded
+          # digits only, its --run exactly the scheduler's exec'd --follow
+          # with them (SMD-3214).
           docker compose -f compose.yaml --profile sleep config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and (.services.sleep | (has("ports") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_POLL") and has("OB1_SLEEP_WORKERS") and has("OB1_SLEEP_BUDGET") and has("OB1_SLEEP_STATEMENT_TIMEOUT") and has("OB1_SLEEP_WORK_MEM") and has("OB1_SLEEP_MAINTENANCE_WORK_MEM")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "on-failure:3" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and (.command[2] | test("^\\[ -n \"\\$+OB1_WORKER_KEY\" \\] \\|\\| ") and test("\nexec bun db/sleep\\.ts --follow --quiet \"\\$+\\{OB1_SLEEP_QUIET:-300\\}\" --poll \"\\$+\\{OB1_SLEEP_POLL:-5\\}\" --workers \"\\$+\\{OB1_SLEEP_WORKERS:-1\\}\" --budget \"\\$+\\{OB1_SLEEP_BUDGET:-60\\}\" --statement-timeout \"\\$+\\{OB1_SLEEP_STATEMENT_TIMEOUT:-300\\}\" --work-mem \"\\$+\\{OB1_SLEEP_WORK_MEM:-4\\}\" --maintenance-work-mem \"\\$+\\{OB1_SLEEP_MAINTENANCE_WORK_MEM:-64\\}\"\n?$")))'
-          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api forwarder mcp migrate postgres proxy server " ]
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.sleep | (has("ports") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_POLL") and has("OB1_SLEEP_WORKERS") and has("OB1_SLEEP_BUDGET") and has("OB1_SLEEP_STATEMENT_TIMEOUT") and has("OB1_SLEEP_WORK_MEM") and has("OB1_SLEEP_MAINTENANCE_WORK_MEM")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and .command[:14] == ["bun", "db/supervise.ts", "--worker", "sleep", "--require-key", "--digits", "OB1_SLEEP_QUIET", "OB1_SLEEP_POLL", "OB1_SLEEP_WORKERS", "OB1_SLEEP_BUDGET", "OB1_SLEEP_STATEMENT_TIMEOUT", "OB1_SLEEP_WORK_MEM", "OB1_SLEEP_MAINTENANCE_WORK_MEM", "--run"] and (.command | length == 15) and (.command[14] | test("^exec bun db/sleep\\.ts --follow --quiet \"\\$+\\{OB1_SLEEP_QUIET:-300\\}\" --poll \"\\$+\\{OB1_SLEEP_POLL:-5\\}\" --workers \"\\$+\\{OB1_SLEEP_WORKERS:-1\\}\" --budget \"\\$+\\{OB1_SLEEP_BUDGET:-60\\}\" --statement-timeout \"\\$+\\{OB1_SLEEP_STATEMENT_TIMEOUT:-300\\}\" --work-mem \"\\$+\\{OB1_SLEEP_WORK_MEM:-4\\}\" --maintenance-work-mem \"\\$+\\{OB1_SLEEP_MAINTENANCE_WORK_MEM:-64\\}\"$")))'
+          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api app forwarder mcp migrate postgres proxy server " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'
           # SMD-2287: the MCP server built on the REST core runs the server's
@@ -1420,7 +1510,7 @@ jobs:
           img="$(docker compose -f compose.yaml config --format json | jq -r .services.forwarder.image)"
           want="${img#*oven/bun:}"; want="${want%%[-@]*}"
           [[ "$want" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "the forwarder's image $img names no Bun version" >&2; exit 1; }
-          for s in forwarder server mcp; do
+          for s in forwarder server mcp app; do
             got="$(docker compose -f compose.yaml exec -T "$s" bun --version)"
             echo "$s: Bun $got"
             [ "$got" = "$want" ] || { echo "$s runs Bun $got, not the pinned $want (the forwarder's $img)" >&2; exit 1; }
@@ -1521,9 +1611,10 @@ jobs:
           # are held by "Every published port binds loopback" and by check 13.
           declared() {
             case "$1" in
-              compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml|compose.grafana-public.yaml) ;;
+              compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml) ;;
+              compose.grafana-public.yaml) printf '%s\n' '["services","app","environment","GRAFANA_ROUTE"]' ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' '["services","postgres","networks","postgres-port"]' '["networks","postgres-port"]' ;;
-              compose.grafana-port.yaml) printf '%s\n' '["services","lgtm","ports"]' '["services","lgtm","networks","grafana-port"]' '["services","lgtm","environment","LGTM_ORIGIN"]' '["networks","grafana-port"]' ;;
+              compose.grafana-port.yaml) printf '%s\n' '["services","lgtm","ports"]' '["services","lgtm","networks","grafana-port"]' '["services","lgtm","environment","LGTM_ORIGIN"]' '["services","app","environment","GRAFANA_LINK"]' '["networks","grafana-port"]' ;;
               # The release's: an image and its pull policy, on any service but the proxy and its forwarder (SMD-2583).
               compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ] && [ "$s" != forwarder ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
               *) echo "$1 declares nothing here — give it an OVERLAYS entry in check 28 and its paths in declared()" >&2; return 1 ;;
@@ -1638,6 +1729,12 @@ jobs:
             proxy_loads "[$routes, $hooks]" -f compose.yaml -f compose.release.yaml -f compose.hooks-public.yaml "${profiles[@]}"
             proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.release.yaml -f compose.grafana-public.yaml "${profiles[@]}"
             proxy_loads "[$routes]" -f compose.yaml -f compose.release.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+            # Every service compose.yaml runs on a local build's image (the
+            # server's, the migrator's, by the project's name) runs the
+            # release's instead, so a service added there is pinned here too
+            # (SMD-2280 review pass 1: the overlay could drop the GUI and pass).
+            left="$(docker compose -f compose.yaml -f compose.release.yaml "${profiles[@]}" config --format json | jq -r '[.services | to_entries[] | select((.value.image // "") | test("^[^/:@]*-(server|migrate)$")) | .key] | join(" ")')"
+            [ -z "$left" ] || { echo "the release overlay ($mode) leaves on a local build's image: $left" >&2; exit 1; }
           done
           files="$(printf '%s\n' * | grep -iE '^((docker|podman|container)-)?compose.*\.ya?ml$' | LC_ALL=C sort -u | tr '\n' ' ')"
           named="$(printf '%s\n' "${rendered[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
@@ -1718,6 +1815,31 @@ jobs:
         env:
           OB1_SMOKE_COMMIT: ${{ github.sha }}
 
+      # SMD-2280: the operator GUI as a browser uses it, through the stack's
+      # proxy at /dashboard, on the stack configured for no authorization
+      # server (dashboard/smoke.ts). First one capture of its own over /mcp,
+      # ingested, since smoke.sh captures nothing: --require-thought fails
+      # the step rather than skip the thought page, and --require-ingested
+      # unless that page's ingested notice is driven. The smoke holds the
+      # sign-in wall; a wrong and a capture-only key, a cookie the server never
+      # issued and a cross-site or Origin-null sign-in refused; the cookie's
+      # and the pages' headers; the overview, the status and a thought rendered
+      # from the REST core under the write key, the overview and a 404 under
+      # the read key; the overview's data holding each thought's first line
+      # alone; the key in no page, header, script or cookie; and sign-out, a
+      # second sign-in and the per-key cap each ending a session on the
+      # server. Here, not after the next step: that one configures the
+      # authorization server, and the GUI then offers no key sign-in (review
+      # pass 1). The smoke imports nothing, so nothing is installed.
+      - name: The operator GUI, driven through the proxy
+        working-directory: dashboard
+        run: |
+          curl -fsS --max-time 60 -X POST http://127.0.0.1:8010/mcp -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+            -H "x-brain-key: $OB1_SMOKE_KEY" -o /tmp/gui-capture \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"capture_thought","arguments":{"content":"The operator GUI smoke reads this thought on its own page, its ingested notice before it (SMD-2280).","trust":"ingested"}}}'
+          grep -q 'Captured as' /tmp/gui-capture || { echo "the GUI smoke's capture failed: $(head -c 400 /tmp/gui-capture)" >&2; exit 1; }
+          bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY" --require-thought --require-ingested
+
       # Where the authorization server's step ran when the full-stack checks
       # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):
       # deploy/.env configured for the authorization server
@@ -1727,12 +1849,26 @@ jobs:
       # daemon restart and the SIGTERM stop after it meet the server they met
       # then; the smoke just before holds a stack configured for none, which
       # no job held before (deploy-stack-brains' smoke holds this one). Every
-      # compose call after it names its services.
+      # compose call after it names its services. The operator GUI is
+      # recreated on it too (SMD-2280), and holds ADR decision 16: configured,
+      # its public origin offers no key sign-in, whether or not the
+      # authorization server answers — no key field, and a post of the write
+      # key from the origin it is configured for refused with no cookie, by
+      # the GUI's own words (not SvelteKit's cross-site refusal).
       - name: The server is configured for an authorization server that is not running
         working-directory: deploy
         run: |
           ../.github/ci/auth-settings.sh
-          docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps server mcp
+          docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps server mcp app
+          page=$(curl -fsS --max-time 15 http://127.0.0.1:8010/dashboard/signin)
+          grep -q 'Key sign-in is off' <<<"$page" || { echo "the configured GUI's sign-in page does not say key sign-in is off" >&2; exit 1; }
+          if grep -q 'name="key"' <<<"$page"; then echo "the configured GUI offers a key field" >&2; exit 1; fi
+          code=$(curl -s -o /tmp/gui-signin -D /tmp/gui-signin-headers -w '%{http_code}' --max-time 15 -X POST \
+            -H 'content-type: application/x-www-form-urlencoded' -H 'accept: text/html' -H 'origin: https://brain.example.test' \
+            --data-urlencode "key=$OB1_SMOKE_KEY" http://127.0.0.1:8010/dashboard/signin)
+          echo "a key posted to the configured GUI: $code"
+          if [ "$code" != 403 ] || ! grep -q 'Key sign-in is off' /tmp/gui-signin; then echo "the configured GUI did not refuse key sign-in itself" >&2; exit 1; fi
+          if grep -qi '^set-cookie: ob1_dashboard_session=[^;]' /tmp/gui-signin-headers; then echo "the configured GUI set a session cookie" >&2; exit 1; fi
 
       # SMD-2284: the REST core is internal by default — it answers on the mesh
       # as api.ob1.internal, and the proxy's /api is a 404 — until the operator
@@ -2082,19 +2218,20 @@ jobs:
             if [ -z "$id" ]; then echo "absent none none 0001-01-01T00:00:00Z"; return; fi
             docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.HostConfig.RestartPolicy.Name}} {{.State.StartedAt}}' "$id" 2> /dev/null || echo "unreadable none none 0001-01-01T00:00:00Z"
           }
-          # Running and healthy: each of the six declares a healthcheck (the
+          # Running and healthy: each of the seven declares a healthcheck (the
           # server's is its image's, server-portable/Dockerfile; the MCP server
-          # built on the REST core names its own, SMD-2287).
+          # built on the REST core names its own, SMD-2287, and so does the
+          # operator GUI, SMD-2280).
           back() {
             local status health
             read -r status health _ <<<"$(state "$1")"
             [ "$status" = running ] && [ "$health" = healthy ]
           }
           while [ $(($(date -u +%s) - t0)) -lt 120 ]; do
-            if back postgres && back server && back api && back mcp && back proxy && back forwarder; then break; fi
+            if back postgres && back server && back api && back mcp && back app && back proxy && back forwarder; then break; fi
             sleep 2
           done
-          for s in postgres server api mcp proxy forwarder; do
+          for s in postgres server api mcp app proxy forwarder; do
             read -r status health policy started <<<"$(state "$s")"
             at=$(date -d "$started" +%s)
             echo "$s: $status, health $health, policy $policy, started $((at - t0)) s after the restart began"
@@ -2785,6 +2922,16 @@ jobs:
           [ "${#CANARY_KEY}" = 64 ] || { echo "the canary's env file holds no minted OB1_CANARY_KEY" >&2; exit 1; }
           CANARY_FORWARD="$(canary_forward)"
           [ "${#CANARY_FORWARD}" = 64 ] || { echo "the canary's env file holds no minted OB1_FORWARDER_KEY" >&2; exit 1; }
+          # SMD-2280: stable's .env names a public origin here (auth-settings.sh),
+          # and the canary takes none: its file carries no OB1_PUBLIC_ORIGIN, its
+          # operator GUI holds an empty one, and a key sign-in at its loopback
+          # port is taken — with stable's origin it was refused as cross-site.
+          if grep -q '^OB1_PUBLIC_ORIGIN=' .env.canary.local; then echo "the canary's env file carries OB1_PUBLIC_ORIGIN" >&2; exit 1; fi
+          docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose -p open-brain-canary -f compose.yaml ps -q app)" | grep -qx 'OB1_PUBLIC_ORIGIN=' \
+            || { echo "the canary's operator GUI holds a public origin" >&2; exit 1; }
+          gui=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 15 -X POST -H 'content-type: application/x-www-form-urlencoded' -H 'accept: text/html' \
+            -H 'origin: http://127.0.0.1:8011' --data-urlencode "key=$CANARY_KEY" http://127.0.0.1:8011/dashboard/signin)
+          [ "$gui" = "303 http://127.0.0.1:8011/dashboard/" ] || { echo "the canary's operator GUI did not sign its key in at its port: $gui" >&2; exit 1; }
           [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "$(own_keys_with "$CANARY_FORWARD")" ] || { echo "the canary's MCP_ACCESS_KEYS is not its own two keys alone" >&2; exit 1; }
           grep -F "minted the canary's own write key, open-brain-canary" /tmp/canary-up.out
           grep -F "minted the canary's own forward key, open-brain-canary-mcp-forwarder" /tmp/canary-up.out

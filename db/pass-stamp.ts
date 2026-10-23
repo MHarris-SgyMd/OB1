@@ -24,7 +24,9 @@
  * (SleepHeld, SMD-2694), and `budget`, its budget in force and the sleeps
  * stopped on it (SleepBudget, SMD-2679; `slept.budget` says which stopped); and `waitingMidPass`, the passes waiting mid-pass for a
  * provider that stopped answering — the sleep scheduler's by name, a
- * follower's its own (SMD-2905). Each stamp writes the whole value: a restarted follower's first
+ * follower's its own (SMD-2905); and `restart`, on a row ended by db/supervise.ts, the compose
+ * services' command, which runs the follower again on its own (SMD-3214) — written there, not
+ * here. Each stamp writes the whole value: a restarted follower's first
  * stamp carries no block until it judges one. The time is the row's
  * updated_at — now() on the database, so a worker's clock is not read.
  * ob1_config is key/value, so no migration: the `worker` grant group already
@@ -138,7 +140,8 @@ export interface PassStamper {
    * Which start refusal ended the row (`refused` in the value): one of
    * worker-bootstrap.ts's StartRefusal, set before the end that writes it, so
    * preflight names the cause and its remedy rather than "start it again",
-   * which would only refuse again (SMD-2752). Only the scheduler sets it.
+   * which would only refuse again (SMD-2752). The scheduler sets it, and since
+   * SMD-3214 a follower refused at its start, through endOnRefusal.
    */
   refused?(kind: string): void;
   /**
@@ -182,6 +185,30 @@ export interface PassStamper {
    * Cleared by the row's end.
    */
   resting?(on: boolean): void;
+}
+
+/** The longest endOnRefusal waits for its write: the refusal's exit must not wait on a database that does not answer. */
+export const REFUSAL_STAMP_TIMEOUT_MS = 10_000;
+
+/**
+ * A follower's row ended on its start's refusal, the kind on it (SMD-3214):
+ * the claim workers' under `--follow`, board-sync's under `--loop`, so
+ * preflight gives the kind's remedy — and, under db/supervise.ts, which keeps
+ * the follower's own word, says it is held for that cause — where the row
+ * said only "ended on a failure". Bounded by REFUSAL_STAMP_TIMEOUT_MS; a
+ * write that fails or does not land in time leaves the row as it was, and
+ * `onError` hears it.
+ */
+export async function endOnRefusal(opts: { sql: SQL; worker: StampingWorker; job?: string; intervalS: number; kind: string; onError?: (e: Error) => void; timeoutMs?: number }): Promise<void> {
+  const st = passStamper({ sql: opts.sql, worker: opts.worker, job: opts.job, intervalS: opts.intervalS, onError: opts.onError });
+  st.refused?.(opts.kind);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<void>((resolve) => { timer = setTimeout(() => { try { opts.onError?.(new Error(`no answer in ${(opts.timeoutMs ?? REFUSAL_STAMP_TIMEOUT_MS) / 1000} s`)); } catch { /* reporting only */ } resolve(); }, opts.timeoutMs ?? REFUSAL_STAMP_TIMEOUT_MS); });
+  try {
+    await Promise.race([st.end("failed"), late]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

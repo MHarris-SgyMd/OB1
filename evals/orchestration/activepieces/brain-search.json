@@ -25,13 +25,23 @@
       "displayName": "Search the brain",
       "type": "PIECE",
       "settings": {
-        "pieceName": "@activepieces/piece-mcp-client",
-        "pieceVersion": "~0.0.3",
-        "actionName": "call-tool",
+        "pieceName": "@activepieces/piece-http",
+        "pieceVersion": "~0.13.0",
+        "actionName": "send_request",
         "input": {
-          "auth": "{{connections['brain-read']}}",
-          "tool": "search_thoughts",
-          "args": { "query": "{{trigger.query}}", "limit": 3 }
+          "method": "POST",
+          "url": "http://api:8000/v1/search",
+          "headers": { "x-brain-key": "__OB1_BRAIN_READ_KEY__", "content-type": "application/json" },
+          "queryParams": {},
+          "authType": "NONE",
+          "authFields": {},
+          "body_type": "json",
+          "body": { "data": { "query": "{{trigger.query}}", "limit": 3 } },
+          "response_is_binary": false,
+          "use_proxy": false,
+          "timeout": 120,
+          "followRedirects": false,
+          "failureMode": "continue_none"
         },
         "propertySettings": {},
         "errorHandlingOptions": { "continueOnFailure": { "value": false }, "retryOnFailure": { "value": false } }
@@ -45,7 +55,7 @@
           "pieceName": "@activepieces/piece-mcp",
           "pieceVersion": "~0.0.21",
           "actionName": "reply_to_mcp_client",
-          "input": { "mode": "simple", "response": { "response": { "result": "{{step_1.content}}" } }, "respond": "stop" },
+          "input": { "mode": "simple", "response": { "response": { "result": "{{step_1.body}}" } }, "respond": "stop" },
           "propertySettings": {},
           "errorHandlingOptions": { "continueOnFailure": { "value": false }, "retryOnFailure": { "value": false } }
         }

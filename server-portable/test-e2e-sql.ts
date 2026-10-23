@@ -12,6 +12,13 @@
  * OpenRouter would make the suite non-hermetic and cost money. Everything below
  * the tool boundary is real.
  *
+ * Its reads of what a Postgres's databases share — pg_stat_activity,
+ * pg_locks, and the backends it terminates — are scoped to the current
+ * database, so another suite's work in another database of the same Postgres
+ * cannot fail them: [21] counted test-upgrade.ts's advisory lock in
+ * `postgres` while the two shared one (SMD-3195). Its roles (brain_reader,
+ * e2e_server_only) are used by no other suite in CI's data-layer job.
+ *
  *   ../db/with-postgres.sh bun test-e2e-sql.ts
  */
 
@@ -2703,7 +2710,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
     while (!done) {
       const [{ n }] = await sql`
         SELECT count(*)::int AS n FROM pg_stat_activity
-         WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE ${pattern}`;
+         WHERE pid <> pg_backend_pid() AND datname = current_database() AND wait_event_type = 'Lock' AND query LIKE ${pattern}`;
       maxWaiting = Math.max(maxWaiting, n);
       await Bun.sleep(25);
     }
@@ -2858,7 +2865,7 @@ console.log("\n[14] brain_info and the keyed /health body read the live database
   // refused with a retry, since the registry could still say revoked.
   const lockWaits = async () => (await sql`
     SELECT count(*)::int AS n FROM pg_stat_activity
-     WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%resolve_agent%'`)[0].n as number;
+     WHERE pid <> pg_backend_pid() AND datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%resolve_agent%'`)[0].n as number;
   /** An MCP call's outcome under a guard of its own: an uncapped lookup waits for an unlock that comes after it. */
   const guarded = async (p: Promise<string>, ms = 5000) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -3579,10 +3586,10 @@ console.log("\n[21] The vector mender (SMD-2889): rows saved while the provider 
     // the unlock runs on a new session and finds nothing, and the lock went
     // with the old one — let go, not a pooler's keeping.
     const rel = await store.mendLock();
-    await sql`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND query LIKE ${"%pg_try_advisory_lock(hashtext('ob1:vector-mender'))%"}`;
+    await sql`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND datname = current_database() AND query LIKE ${"%pg_try_advisory_lock(hashtext('ob1:vector-mender'))%"}`;
     await Bun.sleep(100);
     const letGo = await rel!().catch(() => true);
-    const [{ held: stillHeld }] = await sql`SELECT count(*)::int AS held FROM pg_locks WHERE locktype = 'advisory'`;
+    const [{ held: stillHeld }] = await sql`SELECT count(*)::int AS held FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`;
     assert(letGo === true && stillHeld === 0, `a lock whose connection dropped: let go, and no advisory lock left (${letGo}, ${stillHeld})`);
 
     // The leader lock: held by another session (another server), a tick reads

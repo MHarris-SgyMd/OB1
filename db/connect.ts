@@ -42,6 +42,18 @@ export function databaseUrl(flag: string | undefined, env: Record<string, string
 }
 
 /**
+ * The script's `--url`, else DATABASE_URL, when one is set and parses; else
+ * null. For a heartbeat written when it can be, never a reason to exit:
+ * db/supervise.ts's, whose container would exit and be restarted in a loop,
+ * and board-sync's refusal, which names its kind on its row before its own
+ * exit 2 (SMD-3214). Never printed.
+ */
+export function databaseUrlIfAny(flag?: string, env: Record<string, string | undefined> = process.env): string | null {
+  const url = flag ?? env.DATABASE_URL;
+  return url === undefined || url.trim() === "" || databaseUrlProblem(url) !== null ? null : url;
+}
+
+/**
  * The refusal of a URL that does not parse. Bun's client would throw a
  * TypeError whose dump prints the URL whole as its `input` — the password with
  * it, when an unencoded `/`, `#` or `?` in it breaks the parse (review pass 1;

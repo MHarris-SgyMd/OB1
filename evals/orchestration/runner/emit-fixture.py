@@ -19,9 +19,10 @@ user site is on: a shared writable HOME let one emitter plant code another
 ran (review pass 3). And it fails if it can reach anything on the network
 (SMD-2289): a DNS answer, the host's Ollama through the host alias, Postgres,
 n8n, the internet, or the runner's own port.
-`--vendor` is a live-API emitter whose pipeline names one host, server:8000
-(SMD-2289). Through the proxy the runner puts in HTTPS_PROXY, TLS naming that
-host must reach it (the brain answers a ClientHello with plain HTTP, which is
+`--vendor` is a live-API emitter whose pipeline names one host, api:8000
+(SMD-2289; the brain's REST core since SMD-2295). Through the proxy the runner
+puts in HTTPS_PROXY, TLS naming that host must reach it (the brain answers a
+ClientHello with plain HTTP, which is
 proof enough); TLS naming another server through the same tunnel must be
 cut off before it reaches anything, and a CONNECT to Postgres refused, both
 named in the run's report; a direct connection must fail. It prints nothing
@@ -138,10 +139,10 @@ def vendor() -> int:
     if not proxy:
         wrong.append("no HTTPS_PROXY in the environment")
     else:
-        named = tls_through(proxy, "server:8000", "server")
+        named = tls_through(proxy, "api:8000", "api")
         if named != "answered":
             wrong.append(f"TLS naming the named host did not reach it: {named}")
-        fronted = tls_through(proxy, "server:8000", "other.example")
+        fronted = tls_through(proxy, "api:8000", "other.example")
         if fronted != "cut":
             wrong.append(f"TLS naming another server through the named host's tunnel was not cut off: {fronted}")
         s, other = tunnel(proxy, "postgres:5432")

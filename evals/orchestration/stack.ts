@@ -14,10 +14,13 @@
  * encryption key, and two brain keys minted the way keygen.ts mints them —
  * `orch-capture` (capture scope: the ingestion workflow's, can add, cannot
  * read) and `orch-read` (read scope: the retrieval tool's). Only their hashes
- * reach MCP_ACCESS_KEYS. The profile's keys sit there under deploy/.env's
- * names (profileKeys, and the profile's own --init). LINEAR_API_KEY is not copied into it: the driver reads
- * it from the usual search path (db/env.ts) and each adapter hands it to its
- * tool's credential store; compose never sees it.
+ * reach MCP_ACCESS_KEYS. Beside them, the MCP server's own forward-scope key,
+ * `orch-mcp-forwarder`, its raw value in OB1_FORWARDER_KEY, which compose
+ * requires since SMD-2287 PR 5b (the stack's `mcp` service holds it). The
+ * profile's keys sit there under deploy/.env's names (profileKeys, and the
+ * profile's own --init). LINEAR_API_KEY is not copied into it: the driver
+ * reads it from the usual search path (db/env.ts) and each adapter hands it
+ * to its tool's credential store; compose never sees it.
  *
  * compose and docker run with an ALLOWLISTED environment, never the driver's
  * whole one. loadEnv() fills process.env from deploy/.env and <repo>/.env —
@@ -27,18 +30,22 @@
  * A knob for a run (ORCH_AP_PIECES_SYNC_MODE) goes in orchestration/.env.
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "../../server-portable/auth.ts";
 import { parseEnv } from "../../db/env.ts";
-import { setEnvValue as setEnvFileValue } from "../../deploy/orchestration/provision.ts";
+import { setEnvValue as setEnvFileValue, setEnvValues } from "../../deploy/orchestration/provision.ts";
 
 export const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..", "..");
 export const ENV_FILE = join(HERE, ".env");
 
-type Keys = { capture: string; read: string };
+type Keys = { capture: string; read: string; forward: string };
+
+/** The MCP server's forward-scope record, as keygen.ts --scope forward prints it. */
+export const FORWARDER_NAME = "orch-mcp-forwarder";
+const forwardRecord = (key: string) => `${FORWARDER_NAME}:forward:${hashKey(key)}`;
 
 /** What docker and compose need from the caller's environment to reach the engine — and nothing else. */
 const PASS_THROUGH = [
@@ -54,21 +61,32 @@ const PASS_THROUGH = [
  * The POC's .env: created on first use, reused after, so a second `--up`
  * meets the database its first one initialised. Returns the parsed values.
  */
-export function ensureEnv(): Record<string, string> {
+export function ensureEnv(file = ENV_FILE): Record<string, string> {
   const hex = (n: number) => randomBytes(n).toString("hex");
-  if (existsSync(ENV_FILE)) {
-    const env = parseEnv(readFileSync(ENV_FILE, "utf8"));
+  if (existsSync(file)) {
+    // It holds the kit's keys and passwords: owner-only, whatever an older run or a hand left it at.
+    // A file this user cannot chmod (another owner, a read-only mount) is warned about, not fatal.
+    try { chmodSync(file, 0o600); } catch (e) { console.error(`warning: could not make ${file} owner-only: ${e instanceof Error ? e.message : String(e)}`); }
+    const env = parseEnv(readFileSync(file, "utf8"));
     // A value a later candidate needs is appended, never a rewrite: the
     // database passwords are the ones the volume was initialised with.
     const later: Record<string, () => string> = { ORCH_MCP_KEY: () => hex(32), ORCH_KEY16: () => hex(16), ORCH_JWT_SECRET: () => hex(32), ...profileKeys(env) };
+    // No capture key to copy (a hand-edited file): no N8N_BRAIN_CAPTURE_KEY line reading "undefined".
+    if (!env.ORCH_BRAIN_CAPTURE_KEY) delete later.N8N_BRAIN_CAPTURE_KEY;
     const missing = Object.keys(later).filter((k) => !env[k]);
-    if (missing.length) {
-      writeFileSync(ENV_FILE, readFileSync(ENV_FILE, "utf8") + missing.map((k) => `${k}=${later[k]()}\n`).join(""), { mode: 0o600 });
-      return parseEnv(readFileSync(ENV_FILE, "utf8"));
+    if (missing.length) writeFileSync(file, readFileSync(file, "utf8") + missing.map((k) => `${k}=${later[k]()}\n`).join(""), { mode: 0o600 });
+    // A file from before SMD-2287 PR 5b has no forward key (or an empty one):
+    // minted once, its record put in the key list in the same write, in place
+    // of any forwarder record already there, and on its own if the file holds
+    // no key list.
+    if (!env.OB1_FORWARDER_KEY) {
+      const forward = hex(32);
+      const kept = (env.MCP_ACCESS_KEYS ?? "").split(",").map((r) => r.trim()).filter((r) => r && !r.startsWith(`${FORWARDER_NAME}:`));
+      setEnvValues(file, { OB1_FORWARDER_KEY: forward, MCP_ACCESS_KEYS: [...kept, forwardRecord(forward)].join(",") });
     }
-    return env;
+    return missing.length || !env.OB1_FORWARDER_KEY ? parseEnv(readFileSync(file, "utf8")) : env;
   }
-  const keys: Keys = { capture: hex(32), read: hex(32) };
+  const keys: Keys = { capture: hex(32), read: hex(32), forward: hex(32) };
   const lines = [
     "# SMD-1863 orchestration POC — throwaway brain + candidate. Generated; gitignored.",
     `POSTGRES_PASSWORD=${hex(16)}`,
@@ -80,7 +98,8 @@ export function ensureEnv(): Record<string, string> {
     `ORCH_ADMIN_PASSWORD=Orch-${hex(8)}`,
     // The candidate's own MCP endpoint's key — what an AI client presents to it.
     `ORCH_MCP_KEY=${hex(32)}`,
-    `MCP_ACCESS_KEYS=orch-capture:capture:${hashKey(keys.capture)},orch-read:read:${hashKey(keys.read)}`,
+    `MCP_ACCESS_KEYS=orch-capture:capture:${hashKey(keys.capture)},orch-read:read:${hashKey(keys.read)},${forwardRecord(keys.forward)}`,
+    `OB1_FORWARDER_KEY=${keys.forward}`,
     `ORCH_BRAIN_CAPTURE_KEY=${keys.capture}`,
     `ORCH_BRAIN_READ_KEY=${keys.read}`,
     // The brain's models: the host's Ollama, declared local to the egress gate.
@@ -93,8 +112,8 @@ export function ensureEnv(): Record<string, string> {
     ...Object.entries(profileKeys({ ORCH_BRAIN_CAPTURE_KEY: keys.capture })).map(([k, f]) => `${k}=${f()}`),
     "",
   ];
-  writeFileSync(ENV_FILE, lines.join("\n"), { mode: 0o600 });
-  return parseEnv(readFileSync(ENV_FILE, "utf8"));
+  writeFileSync(file, lines.join("\n"), { mode: 0o600 });
+  return parseEnv(readFileSync(file, "utf8"));
 }
 
 /**

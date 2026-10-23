@@ -151,8 +151,12 @@
  *      db and evals programs, whose ../server-portable imports pull the
  *      server's copy), its tsconfig compilerOptions equal the server's, and
  *      .github/workflows/fork-checks.yml runs `bunx tsc --noEmit` under it
- *      exactly once; a tsc step under a directory the list does not name is
- *      refused. The workflow is parsed with Bun.YAML (SMD-1932); no exceptions
+ *      exactly once — a step of its own, or a directory a
+ *      .github/ci/typecheck.sh step names, which runs them side by side
+ *      (SMD-3202), and which check 18 then runs against a stub bunx: a tsc
+ *      in each directory once, a failure failing the run, each failing
+ *      directory named with its output; a tsc step under a directory the
+ *      list does not name is refused. The workflow is parsed with Bun.YAML (SMD-1932); no exceptions
  *  19. docs/connector-registry.json — the connector taxonomy's one source — is
  *      sound and complete: the four closed/near-closed facet sets and the
  *      fetcher set equal the ones scripts/connector-registry.ts pins (a
@@ -275,13 +279,14 @@
  *      the class decision is docs/vendored-disposition.md's "PostgREST-
  *      speaking scripts" (an import emits ingestion-contract items, a
  *      maintenance script moves onto compat/supabase-sql, three retire), and
- *      POSTGREST_EXCEPTIONS counts the nineteen files with a call site
+ *      POSTGREST_EXCEPTIONS counts the eighteen files with a call site
  *      (two more reach the gateway through a lib; twenty-eight until
  *      obsidian-vault-import and local-ollama-embeddings retired (SMD-2137,
  *      SMD-2138), brain-backup, lint-sweep and thought-enrichment's three
  *      moved onto the shim (SMD-2144, SMD-2139), weekly-digest retired
- *      for the db/ verb db/weekly-digest.ts (SMD-2239), and brain-smoke-test
- *      retired into deploy/smoke.sh (SMD-2103)) with the ticket that
+ *      for the db/ verb db/weekly-digest.ts (SMD-2239), brain-smoke-test
+ *      retired into deploy/smoke.sh (SMD-2103), and ob-graph's
+ *      smoke-graph-rpcs.mjs went with its recipe (SMD-2920)) with the ticket that
  *      ports or retires each — a landed
  *      port fails until its entry goes, so the
  *      table's size, plus the two lib-reached scripts, is the class's
@@ -393,7 +398,10 @@
  *      `unless-stopped`, so it comes back after a reboot with what it reads;
  *      what runs once "no" — and no service but those held (SMD-2760: Postgres
  *      had none, so on Docker a reboot would bring the servers back without
- *      their database; the tiers file is check 27's)
+ *      their database; the tiers file is check 27's); and a service that runs
+ *      a db/ follower runs it through db/supervise.ts, its --worker the
+ *      follower's and its --run an exec of it (SMD-3214: as `on-failure:3`
+ *      the followers stayed down after every reboot)
  *  33. one Bun, pinned everywhere (SMD-2894): every workflow step that uses
  *      oven-sh/setup-bun names `bun-version`, and every `oven/bun:<tag>` in a
  *      file git tracks or would track names a tag of the version
@@ -466,17 +474,31 @@
  *      no rule paused or recording. What Grafana itself refuses is left to it:
  *      it refuses the file and lgtm does not start, which CI's observability
  *      step sees. Each rule is the only catch of one of its probes
+ *  39. a status-set change runs the refresh and rebuilds the gate it moves
+ *      (SMD-3160): a migration that redefines node_lifecycle_types() or
+ *      node_settled_types() to another set than the last earlier file that
+ *      defined it has, as lines after its definition, SELECT
+ *      ob1_refresh_set_readers(); (from the file that defines it on) and,
+ *      for a lifecycle change, SELECT * FROM ob1_rebuild_source_gate(); or
+ *      SELECT * FROM ob1_rebuild_source_gate_for_types('{…}'); lines naming
+ *      exactly the types it adds and drops. Canonical forms only, on the
+ *      comment-stripped text with every literal's inside blanked: each
+ *      definition of a set anywhere in the file must be a line starting
+ *      CREATE OR REPLACE FUNCTION <set>() whose body is the bare literal,
+ *      else the file is reported. Each rule is the only catch of one of its
+ *      probes
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 27, 28, 29, 32, 33, 34, 35, 36, 37 and 38 parse YAML with Bun.YAML)
  * Exits non-zero on any violation.
  */
 
-import { readFileSync, existsSync, readdirSync, statSync, lstatSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync, lstatSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
-import { coreColumnCommentStatement, coreFunctionStatement, DESTRUCTIVE_SQL_RULES, destructiveSqlIn, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, supabaseIsmsIn } from "../db/config.mjs";
+import { coreColumnCommentStatement, coreFunctionStatement, DESTRUCTIVE_SQL_RULES, destructiveSqlIn, LOCAL_PROVIDER_SERVICES, ownedColumnCommentsIn, ownedFunctionsIn, stripSqlComments, supabaseIsmsIn } from "../db/config.mjs";
 import { CHANGES_DIR, END as INDEX_END, START as INDEX_START, FIRST_FILED, classifyChanges, indexSpan, pad3, readChangeEntries, renderIndex, ticketsOf } from "./fork-index.ts";
 import { FORK_VERSION, REPO_URL, migrationSha, readReleases, schemaVersionValue, semverCompare } from "../db/version.mjs";
 import { fragmentProblems } from "./fragments.ts";
@@ -1458,7 +1480,7 @@ function checkCredentialCompares() {
 // check found nine files with eleven such statements: the two MCP servers
 // (`update-thought-mcp`, `enhanced-mcp`), three HTTP APIs
 // (`agent-memory-api`, `open-brain-rest`, `rest-api`), a worker
-// (`consolidation-workers/bio`), a recipe's server (`repo-learning-coach`), a
+// (`consolidation-workers/bio`), a recipe's server (`repo-learning-coach`, retired since: SMD-2923), a
 // recipe's paste-in snippet (`provenance-chains`) and a README's sample
 // (`telegram-capture`). Every rule the fork put into the
 // writers is bypassed by such a statement: 003/018's fingerprint is left
@@ -1700,7 +1722,7 @@ const THOUGHT_WRITE_PROBES = [
   'const updates: Record<string, unknown> = {};\nif (content !== undefined) {\n  updates.content = content;\n  updates.embedding = `[${embedding.join(",")}]`;\n}\nconst { data, error } = await supabase\n  .from("thoughts")\n  .update(updates)\n  .eq("id", id)\n  .select("id")\n  .single();',
   // enhanced-mcp: a literal over several lines, with the file\'s own fingerprint beside the content.
   'const { error: updateError } = await supabase\n  .from("thoughts")\n  .update({\n    content,\n    content_fingerprint: fingerprint,\n    embedding,\n    type: extracted.type,\n    updated_at: new Date().toISOString(),\n  })\n  .eq("id", id);',
-  // agent-memory-api and repo-learning-coach: the vector alone, after a 2-argument upsert.
+  // agent-memory-api and repo-learning-coach (retired since, SMD-2923): the vector alone, after a 2-argument upsert.
   'if (thoughtId) await supabase.from("thoughts").update({ embedding }).eq("id", thoughtId);',
   "const { error: embeddingError } = await supabase\n  .from('thoughts')\n  .update({ embedding })\n  .eq('id', thoughtId)",
   // open-brain-rest: a literal bound to a name, then sent.
@@ -2026,8 +2048,10 @@ function scan(text: string, from: number, stringsToo: boolean, inExpression: boo
 /**
  * Every import (and export-from) statement's specifier, with the line it starts
  * on, in order. A statement ends at its `;`, or — for one written on a single
- * line with no `;` (recipes/repo-learning-coach is semicolon-less throughout;
- * SMD-1799's second review pass found its twelve files' imports unread) — at
+ * line with no `;` (SMD-1799's second review pass found a semicolon-less
+ * recipe's twelve files' imports unread; that recipe, repo-learning-coach,
+ * retired with SMD-2923, and no file on the shim is semicolon-less now, but
+ * the reading stays until this rule retires with the shim, SMD-3216) — at
  * its line's end. A semicolon-less import that spans lines is still missed (a
  * silent miss, never a false catch), so the rule says so here.
  */
@@ -2141,7 +2165,7 @@ const SPECIFIER_PROBES: [string, string[], string[]][] = [
   ['import { createClient } from "../../compat/supabase-sql/index.ts";\nimport { db } from "./_shared/db.ts";\n', ['import { Pool } from "npm:pg@8";\nexport const db = new Pool();\n'], ["dep0:specifier:npm:pg@8@1"]],
   // `node:` is fine, a relative dynamic import is fine, a specifier in a comment or a string is prose.
   ['import { createHash } from "node:crypto";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst m = await import("./tools.ts");\n// see "jsr:@supabase/functions-js"\nconst s = "npm:hono";\n', [], []],
-  // Semicolon-less, single-line (the second review pass: repo-learning-coach's shape, unread until then).
+  // Semicolon-less, single-line (the second review pass: a semicolon-less recipe's shape, unread until then).
   ["import { Hono } from 'npm:hono@4'\nimport { createClient } from '../../compat/supabase-sql/index.ts'\n", [], ["specifier:npm:hono@4@1"]],
   // The third pass: a `;`-led next line counts the import once; a mixed file credits each import to its own line.
   ["import { a } from 'npm:a'\n;[1].forEach(f)\n", [], ["specifier:npm:a@1"]],
@@ -4158,6 +4182,11 @@ const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals
 const TYPE_PINS = ["@types/bun", "typescript", "@types/node"];
 const WORKFLOW = ".github/workflows/fork-checks.yml";
 const TSC_STEP = /^\s*bunx tsc --noEmit\s*$/;
+/** The script that type-checks the directories it names side by side (SMD-3202), each relative to the repository root; a step that runs it is a tsc step for each. Its whole `run:`, as TSC_STEP's is. */
+const TSC_SCRIPT = ".github/ci/typecheck.sh";
+const TSC_SCRIPT_STEP = /^\s*\.github\/ci\/typecheck\.sh((?:[ \t]+[A-Za-z0-9_.\/-]+)+)\s*$/;
+/** Any `run:` that invokes the script, at a command's start (`bash` or `./` in front allowed): one TSC_SCRIPT_STEP does not read is named as that. A mention of it (shellcheck, echo) is not an invocation. */
+const TSC_SCRIPT_RUN = /(?:^|[;&|(])[ \t]*(?:(?:bash|sh)[ \t]+)?(?:\.\/)?\.github\/ci\/typecheck\.sh(?:\s|$)/m;
 /** What check 18 compares: each directory's package.json and tsconfig.json as read (absent when the file is), and the workflow's tsc steps by directory. */
 type PackageJson = { devDependencies?: Record<string, string> };
 type TsConfig = { compilerOptions?: Record<string, unknown> };
@@ -4187,16 +4216,21 @@ function typecheckSurfaceProblems({ packages, tsconfigs, tscSteps }: TypecheckSu
     if (!opts) problems.push([`${dir}/tsconfig.json`, `missing, or has no compilerOptions (SMD-1932)`]);
     else if (dir !== ref && canon(opts) !== refOpts) problems.push([`${dir}/tsconfig.json`, `compilerOptions differ from ${ref}/tsconfig.json's: ${canon(opts)} vs ${refOpts} (SMD-1932)`]);
     const n = tscSteps.filter((d) => d === dir).length;
-    if (n !== 1) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${dir} ${n} time(s); exactly one step per type-checked directory (SMD-1932)`]);
+    if (n !== 1) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${dir} ${n} time(s); exactly one typecheck per type-checked directory, its own step or a .github/ci/typecheck.sh step naming it (SMD-1932)`]);
   }
-  for (const d of tscSteps) if (!TYPECHECKED_DIRS.includes(d)) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${d}, which TYPECHECKED_DIRS in ${SELF} does not name — add it there, with its pins and tsconfig (SMD-1932)`]);
+  for (const d of tscSteps) if (!TYPECHECKED_DIRS.includes(d)) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${d}, which TYPECHECKED_DIRS in ${SELF} does not name — add it there, with its pins and tsconfig, or take it out of the step that type-checks it (SMD-1932)`]);
   return problems;
 }
-/** The working-directory of every `bunx tsc --noEmit` step in a parsed workflow, in order. */
+/** Each directory a parsed workflow type-checks, in order: a `bunx tsc --noEmit` step's working-directory, and each directory a TSC_SCRIPT step names. */
 function tscStepsIn(doc: WorkflowDoc) {
   const out: string[] = [];
   for (const job of Object.values(doc?.jobs ?? {})) {
-    for (const step of job?.steps ?? []) if (typeof step?.run === "string" && TSC_STEP.test(step.run)) out.push(step["working-directory"] ?? ".");
+    for (const step of job?.steps ?? []) {
+      if (typeof step?.run !== "string") continue;
+      if (TSC_STEP.test(step.run)) out.push(step["working-directory"] ?? ".");
+      const named = TSC_SCRIPT_STEP.exec(step.run);
+      if (named) out.push(...named[1].trim().split(/\s+/).map((d) => posix.normalize(d).replace(/\/+$/, "")));
+    }
   }
   return out;
 }
@@ -4221,6 +4255,13 @@ function checkTypecheckSurface() {
     const got = typecheckSurfaceProblems(g);
     if (got.length !== 1) fail(SELF, `check 18 reports ${got.length} problem(s) for ${why}, not one (its own probe): ${JSON.stringify(got)}`);
   }
+  // The reader: a step of its own, and each directory a TSC_SCRIPT step names; not the script with none, nor a step that only mentions it.
+  const read = tscStepsIn({ jobs: { a: { steps: [
+    { run: "bunx tsc --noEmit", "working-directory": "x" }, { run: `${TSC_SCRIPT} a b/c ./d` }, { run: TSC_SCRIPT }, { run: `echo ${TSC_SCRIPT} z` }, { run: `${TSC_SCRIPT} e && bun f.ts` }, { run: `${TSC_SCRIPT} g/\n` },
+  ] } } });
+  const invoked = [`${TSC_SCRIPT} a`, `bash ${TSC_SCRIPT} a`, `./${TSC_SCRIPT} a`, `|\n  ${TSC_SCRIPT} a \\\n    b`, `cd x && ${TSC_SCRIPT} a`].every((r) => TSC_SCRIPT_RUN.test(r)) && ![`shellcheck ${TSC_SCRIPT}`, `echo ${TSC_SCRIPT} z`, `bash db/typecheck.sh`].some((r) => TSC_SCRIPT_RUN.test(r));
+  if (!invoked) fail(SELF, `check 18 no longer tells an invocation of ${TSC_SCRIPT} from a mention of it (SMD-3202)`);
+  if (JSON.stringify(read) !== JSON.stringify(["x", "a", "b/c", "d", "g"])) fail(SELF, `check 18 no longer reads its probe's tsc steps as ["x","a","b/c","d","g"] (read ${JSON.stringify(read)}) (SMD-3202)`);
 
   if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
     fail(SELF, `check 18 parses ${WORKFLOW} with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1932)`);
@@ -4229,8 +4270,126 @@ function checkTypecheckSurface() {
   const readJson = (rel: string) => (existsSync(join(ROOT, rel)) ? JSON.parse(readFileSync(join(ROOT, rel), "utf8")) : undefined);
   const packages = Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, readJson(`${d}/package.json`)]));
   const tsconfigs = Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, readJson(`${d}/tsconfig.json`)]));
-  const tscSteps = tscStepsIn(Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")) as WorkflowDoc);
+  const doc = Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")) as WorkflowDoc;
+  // One walk over the steps for the script: a step it reads makes check 18 run the script below; one running it in
+  // a form the reader does not take counts for nothing, every directory it names reading as untype-checked, so it
+  // is said once, first, as that (review pass 3).
+  let usesScript = false;
+  for (const job of Object.values(doc?.jobs ?? {})) for (const step of job?.steps ?? []) {
+    if (typeof step?.run !== "string") continue;
+    if (TSC_SCRIPT_STEP.test(step.run)) usesScript = true;
+    else if (TSC_SCRIPT_RUN.test(step.run))
+      fail(WORKFLOW, `runs ${TSC_SCRIPT} in a form check 18 cannot read (${JSON.stringify(step.run.trim().slice(0, 80))}), so the directories it names count as untype-checked below — write the whole \`run:\` as \`${TSC_SCRIPT} DIR…\`: one line or a \`>-\` folded scalar, no \`./\`, \`bash\`, \`\\\` or comment (SMD-3202)`);
+  }
+  const tscSteps = tscStepsIn(doc);
   for (const [where, msg] of typecheckSurfaceProblems({ packages, tsconfigs, tscSteps })) fail(where, msg);
+  // A step naming directories counts only while the script type-checks each of them and fails on any: run, it is held to that.
+  if (usesScript) for (const problem of typecheckScriptProblems(join(ROOT, TSC_SCRIPT))) fail(TSC_SCRIPT, `${problem} (SMD-3202)`);
+}
+/**
+ * TSC_SCRIPT run against a stub `bunx` over directories of a scratch tree, named
+ * relative to the repository root as the step names them, from another working
+ * directory. The stub logs each call's directory and arguments; where a `fail`
+ * file holds an exit code it prints a line on stdout (where tsc prints its
+ * diagnostics) and one on stderr, and exits with that code. One failing
+ * directory's stub waits until another's call is logged, so the two run side by
+ * side and finish in a known order. Three runs — fail, pass, fail, pass; pass,
+ * pass; pass, fail — each held to check 18's promise (a tsc in each directory,
+ * once, exactly `tsc --noEmit`; the run failing if any fails, passing if none
+ * does) and to what the step's log is for (each failing directory's line, with
+ * its own exit code, in the order named; its own output under it, both streams,
+ * and no other's; not folded). Review passes 1–5 found a text guard and then
+ * four smaller probes each passing edits that broke one of these; pass 5
+ * enumerated the contract and this covers every plausible edit it found.
+ */
+function typecheckScriptProblems(script: string): string[] {
+  if (!existsSync(script)) return ["is missing, so nothing type-checks the directories a step names to it — check 18 counts a step naming directories to it as their typecheck"];
+  const tmp = mkdtempSync(join(tmpdir(), "ob1-check18-"));
+  try {
+    const stub = join(tmp, "bin");
+    mkdirSync(stub);
+    writeFileSync(join(stub, "bunx"), [
+      "#!/bin/sh",
+      `printf '%s %s\\n' "$PWD" "$*" >> "$TSC_STUB_LOG"`,
+      // Side by side: wait (2 s at most) for the named directory's call, then a moment for it to finish first.
+      `if [ -f wait-for ]; then w=$(cat wait-for); n=0; until grep -qF "$w tsc" "$TSC_STUB_LOG" || [ "$n" -ge 200 ]; do sleep 0.01; n=$((n + 1)); done; [ "$n" -ge 200 ] && echo "barrier timed out" >> "$TSC_STUB_LOG"; sleep 0.05; fi`,
+      `echo "stub tsc in $PWD"`,
+      `if [ -f fail ]; then echo "stub type error in $PWD"; echo "stub stderr in $PWD" >&2; exit "$(cat fail)"; fi`,
+      "exit 0",
+      "",
+    ].join("\n"));
+    chmodSync(join(stub, "bunx"), 0o755);
+    const dir = (name: string, failCode?: number, waitFor?: string) => {
+      const d = join(tmp, name);
+      mkdirSync(d);
+      writeFileSync(join(d, "tsconfig.json"), "{}");
+      if (failCode !== undefined) writeFileSync(join(d, "fail"), String(failCode));
+      if (waitFor) writeFileSync(join(d, "wait-for"), waitFor);
+      return d;
+    };
+    const c = dir("c", 137);
+    const [a, b, d, e] = [dir("a", 2, c), dir("b"), dir("d"), dir("e", 1)];
+    const failCode = new Map([[a, 2], [c, 137], [e, 1]]);
+    // BASH_ENV and ENV would run a file of the caller's before the script, and could put another bunx ahead of the stub.
+    const env: Record<string, string | undefined> = { ...process.env, PATH: `${stub}:${process.env.PATH}`, BASH_ENV: undefined, ENV: undefined };
+    const rel = (x: string) => relative(ROOT, x);
+    // Run from a directory nested deeper than the repository root is deep, so the step's relative directories
+    // resolve only from the root: from here their `..`s stay inside the scratch tree (review pass 5: from a
+    // shallow directory they climbed to / and resolved anyway, and a script that dropped its `cd` passed).
+    const cwd = join(tmp, ...Array(ROOT.split(sep).filter(Boolean).length + 1).fill("w"));
+    mkdirSync(cwd, { recursive: true });
+    const short = (x: string) => x.replace(tmp, "…").replace(rel(tmp), "…");
+    const run = (dirs: string[], label: string) => {
+      const log = join(tmp, `${label}.log`);
+      writeFileSync(log, "");
+      const r = Bun.spawnSync(["bash", script, ...dirs.map(rel)], { cwd, env: { ...env, TSC_STUB_LOG: log }, stdout: "pipe", stderr: "pipe" });
+      const logged = readFileSync(log, "utf8").split("\n").filter(Boolean);
+      return { dirs, label, code: r.exitCode, lines: `${r.stdout.toString()}${r.stderr.toString()}`.split("\n"), calls: logged.filter((x) => x !== "barrier timed out"), serial: logged.includes("barrier timed out") };
+    };
+    let runs: ReturnType<typeof run>[];
+    try { runs = [run([a, b, c, d], "fail, pass, fail, pass"), run([b, d], "pass, pass"), run([b, e], "pass, fail")]; }
+    catch (err) { return [`cannot be run to hold it (${(err as Error).message.split("\n")[0]}): check 18 runs it with bash, which must be on PATH`]; }
+    const promise = "check 18 counts a step naming directories to it as their typecheck";
+    const forLog = "the step's log is how a failure names its directory";
+    const exactly = "the command is held to `bunx tsc --noEmit` exactly, as a step of its own is, so no flag (--noCheck) can weaken it; an option belongs in the directory's tsconfig.json";
+    const head = "::error title=Typecheck::tsc --noEmit in ";
+    const problems: string[] = [];
+    for (const r of runs) {
+      const failing = r.dirs.filter((x) => failCode.has(x));
+      const on = `on ${r.label}`;
+      if (failing.length ? r.code === 0 : r.code !== 0) problems.push(`exits ${r.code} ${on}, where ${failing.length ? "a failure must fail the run" : "every tsc passed"} — ${promise}`);
+      if (r.serial) problems.push(`runs the directories one after another ${on}, not side by side — the step exists to run them side by side`);
+      if (!(r.calls.length === r.dirs.length && r.dirs.every((x) => r.calls.filter((y) => y === `${x} tsc --noEmit`).length === 1))) {
+        problems.push(`runs ${JSON.stringify(r.calls.map(short))} ${on}, not one \`bunx tsc --noEmit\` in each directory — ${promise}; ${exactly}`);
+        continue;
+      }
+      // Each failing directory's line, in the order named, with its own exit code; its section (to the next ::error or ::group::) holding its own output, both streams, and no other directory's; no group open around it.
+      const named = r.lines.flatMap((l, i) => (l.startsWith(head) ? [i] : []));
+      const want = failing.map((x) => `${head}${rel(x)} failed (exit ${failCode.get(x)})`);
+      const got = named.map((i) => r.lines[i]);
+      if (got.length !== want.length || !want.every((w, k) => got[k] === w || got[k].startsWith(`${w} `))) {
+        problems.push(`names ${JSON.stringify(got.map(short))} ${on}, not ${JSON.stringify(want.map(short))}: each failing directory's line starts \`${head}DIR failed (exit N)\`, N its tsc's own exit code, in the order named — ${forLog}`);
+        continue;
+      }
+      let open = false;
+      r.lines.forEach((l, i) => {
+        if (l.startsWith("::group::")) open = true;
+        else if (l.startsWith("::endgroup::")) open = false;
+        else if (named.includes(i) && open) problems.push(`folds ${short(l.slice(head.length))}'s failure inside a group ${on}: a failing directory's output is left open — ${forLog}`);
+      });
+      for (const [k, i] of named.entries()) {
+        const x = failing[k];
+        const stop = r.lines.findIndex((l, j) => j > i && (l.startsWith("::error") || l.startsWith("::group::")));
+        const section = r.lines.slice(i + 1, stop === -1 ? r.lines.length : stop);
+        if (!section.includes(`stub type error in ${x}`) || !section.includes(`stub stderr in ${x}`)) problems.push(`does not print ${short(rel(x))}'s tsc output, stdout and stderr, under its failure ${on} (tsc writes its diagnostics to stdout) — ${forLog}`);
+        const others = r.dirs.filter((y) => y !== x && section.some((l) => l.endsWith(` in ${y}`)));
+        if (others.length) problems.push(`prints ${JSON.stringify(others.map((y) => short(rel(y))))}'s output under ${short(rel(x))}'s failure ${on}, as if theirs were its — ${forLog}`);
+      }
+    }
+    return [...new Set(problems)];
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }
 checkTypecheckSurface();
 // ── 19: the connector registry (SMD-1933) ────────────────────────────────────
@@ -5795,13 +5954,14 @@ checkWorkflowPins();
 // that says it posts to `/rest/v1/rpc/…` is making a claim about itself), a
 // `rest/v1` path in any string, a supabase-py import or `create_client(`
 // (Python and shell alone), or a `@supabase/postgrest-js` specifier is a hit.
-// POSTGREST_EXCEPTIONS counts the nineteen files with a call site (two
+// POSTGREST_EXCEPTIONS counts the eighteen files with a call site (two
 // more reach the gateway through a lib; twenty-eight until the two retirements,
 // obsidian-vault-import and local-ollama-embeddings — SMD-2137 and SMD-2138 —
 // the first five ports: brain-backup and lint-sweep — SMD-2144 — and
 // thought-enrichment's three — SMD-2139 — weekly-digest's retirement for
-// the db/ verb db/weekly-digest.ts — SMD-2239 — and brain-smoke-test's into
-// deploy/smoke.sh — SMD-2103)
+// the db/ verb db/weekly-digest.ts — SMD-2239 — brain-smoke-test's into
+// deploy/smoke.sh — SMD-2103 — and ob-graph's smoke-graph-rpcs.mjs with its
+// recipe — SMD-2920)
 // with the ticket that ports or retires each: a line past the count fails (a
 // new call beside the documented ones),
 // a count no line reaches fails as stale (the port landed on those lines —
@@ -5900,17 +6060,20 @@ const POSTGREST_PROBES: [string, string, boolean][] = [
 const POSTGREST = (what: string, ticket: string, lines: number): CountedException => ({ why: `${what} — ${ticket}`, lines });
 const IMPORT = "an import that embeds the text itself and POSTs the row raw; it emits ingestion-contract items for `bun db/ingest-records.ts --source items --items` (SMD-2136)";
 const SHIM = "a maintenance script; it moves onto compat/supabase-sql under bun";
+/** SMD-3216 (2026-10-22): the shim retires, so the scripts still to port become clients of the REST core instead. */
+const REST_CLIENT = "a script still to port; it becomes a REST-core client through rest-client/ (SMD-3216), naming any core operation it lacks";
 /**
  * file → the ticket that ports or retires it, and the exact count of lines that speak PostgREST. Thirty files in
  * twenty-one recipes (SMD-2126's survey of f7693c4c, re-measured on d8e3de60); two more of the thirty —
  * atomizer's backfill-gmail-correspondents.mjs and authorship-edges' backfill-authorship.mjs — reach the
- * gateway through their `lib/` file alone and have no line of their own. Four of the thirty are gone:
+ * gateway through their `lib/` file alone and have no line of their own. Five of the thirty are gone:
  * obsidian-vault-import's import-obsidian.py (SMD-2137) and local-ollama-embeddings' embed-local.py (SMD-2138)
  * retired with their recipes, the first entries to leave; weekly-digest's weekly-digest.mjs (SMD-2239),
  * its live mode rebuilt as the db/ verb db/weekly-digest.ts (a sink, not a maintenance script — the
  * recipe's README stays a pointer); and brain-smoke-test's smoke-all.js (SMD-2103), retired with its
  * recipe once deploy/smoke.sh took the wrong-key refusal, the one check of its that applied here and
- * that smoke.sh lacked. Five more are on the shim: brain-backup's
+ * that smoke.sh lacked; and ob-graph's smoke-graph-rpcs.mjs, with its recipe (SMD-2920; SMD-2146
+ * canceled). Five more are on the shim: brain-backup's
  * backup-brain.mjs and lint-sweep's lint-sweep.js (SMD-2144), the first ports to land, and
  * thought-enrichment's enrich-thoughts.mjs, backfill-type.mjs and backfill-sensitivity.mjs (SMD-2139),
  * the first writers.
@@ -5921,28 +6084,26 @@ const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   ["recipes/perplexity-conversation-import/import-perplexity.py", POSTGREST(IMPORT, "SMD-2148", 1)],
   ["recipes/readwise-import/import-readwise.py", POSTGREST("an import on supabase-py that already captures through upsert_thought (SMD-1524) over a transport the fork lacks; it emits contract items", "SMD-2149", 2)],
   ["recipes/google-activity-import/import-google-activity.mjs", POSTGREST(IMPORT, "SMD-2150", 1)],
-  ["recipes/email-history-import/pull-gmail.ts", POSTGREST(IMPORT, "SMD-2021", 2)],
+  ["recipes/email-history-import/pull-gmail.ts", POSTGREST(REST_CLIENT, "SMD-2021", 2)],
   // Retire: the fork's core owns the capability.
   ["recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs", POSTGREST("superseded by migration 023; the file is removed", "SMD-2145", 1)],
   // Maintenance scripts → the shim under bun.
   ["recipes/fingerprint-dedup-backfill/delete-duplicates.mjs", POSTGREST(`${SHIM}, its deletes through delete_thought`, "SMD-2145", 1)],
-  ["recipes/atomizer/audit-gmail-pipeline.mjs", POSTGREST(SHIM, "SMD-2140", 2)],
-  ["recipes/atomizer/lib/entity-resolver.mjs", POSTGREST(`${SHIM} (backfill-gmail-correspondents.mjs reaches the gateway through it)`, "SMD-2140", 2)],
-  ["recipes/atomizer/re-atomize-gmail-thought.mjs", POSTGREST(`${SHIM}, its thought writes through upsert_thought and delete_thought`, "SMD-2140", 2)],
-  ["recipes/authorship-edges/lib/author-edges.mjs", POSTGREST(`${SHIM} (backfill-authorship.mjs reaches the gateway through it)`, "SMD-2141", 2)],
-  ["recipes/typed-edge-classifier/classify-edges.mjs", POSTGREST(SHIM, "SMD-2141", 1)],
-  ["recipes/provenance-chains/backfill.mjs", POSTGREST(SHIM, "SMD-2142", 1)],
-  ["recipes/provenance-chains/eval.mjs", POSTGREST(SHIM, "SMD-2142", 1)],
-  ["recipes/wiki-synthesis/scripts/synthesize-wiki.mjs", POSTGREST(SHIM, "SMD-2143", 1)],
-  ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", POSTGREST(`${SHIM}, its page deletes through delete_thought`, "SMD-2143", 1)],
-  ["recipes/entity-wiki/generate-wiki.mjs", POSTGREST(SHIM, "SMD-2143", 1)],
+  ["recipes/atomizer/audit-gmail-pipeline.mjs", POSTGREST(REST_CLIENT, "SMD-2140", 2)],
+  ["recipes/atomizer/lib/entity-resolver.mjs", POSTGREST(`${REST_CLIENT} (backfill-gmail-correspondents.mjs reaches the gateway through it)`, "SMD-2140", 2)],
+  ["recipes/atomizer/re-atomize-gmail-thought.mjs", POSTGREST(`${REST_CLIENT}, its thought writes through upsert_thought and delete_thought`, "SMD-2140", 2)],
+  ["recipes/authorship-edges/lib/author-edges.mjs", POSTGREST(`${REST_CLIENT} (backfill-authorship.mjs reaches the gateway through it)`, "SMD-2141", 2)],
+  ["recipes/typed-edge-classifier/classify-edges.mjs", POSTGREST(REST_CLIENT, "SMD-2141", 1)],
+  ["recipes/provenance-chains/backfill.mjs", POSTGREST(REST_CLIENT, "SMD-2142", 1)],
+  ["recipes/provenance-chains/eval.mjs", POSTGREST(REST_CLIENT, "SMD-2142", 1)],
+  ["recipes/wiki-synthesis/scripts/synthesize-wiki.mjs", POSTGREST(REST_CLIENT, "SMD-2143", 1)],
+  ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", POSTGREST(`${REST_CLIENT}, its page deletes through delete_thought`, "SMD-2143", 1)],
+  ["recipes/entity-wiki/generate-wiki.mjs", POSTGREST(REST_CLIENT, "SMD-2143", 1)],
   // Not a maintenance script but a sink: it pages thought text and posts it to Telegram, which a shim
   // port would do from below the server's egress gate — the orchestration ADR's decision 9, written for
   // templates, is read to cover it. Its
   // two read-only siblings, brain-backup and lint-sweep, are on the shim (SMD-2144, rescoped 2026-09-26).
-  ["recipes/source-filtering/backfill-metadata.ts", POSTGREST(SHIM, "SMD-2021", 2)],
-  // The one smoke harness left, with its own ticket (brain-smoke-test's retired: deploy/smoke.sh absorbed its applicable checks, SMD-2103).
-  ["recipes/ob-graph/smoke-graph-rpcs.mjs", POSTGREST("the smoke moves onto the shim or into extensions/test-tools.ts", "SMD-2146", 1)],
+  ["recipes/source-filtering/backfill-metadata.ts", POSTGREST(REST_CLIENT, "SMD-2021", 2)],
 ]);
 function checkPostgrestClients() {
   for (const name of ["x.ts", "x.tsx", "x.mts", "x.cts", "x.js", "x.jsx", "x.mjs", "x.cjs", "x.py", "x.sh"]) if (!POSTGREST_CODE_FILE.test(name)) fail(SELF, `check 24's POSTGREST_CODE_FILE no longer reads ${name} (its own probe)`);
@@ -6454,7 +6615,7 @@ const TRUST_PROBES: [string, string, number, number, boolean][] = [
 
 const RAW_IMPORT = (ticket: string): CountedException["why"] =>
   `an import that POSTs its rows raw, so they carry no declared trust (073's trigger strips a payload's, and PostgREST sets no event handoff); its port onto the ingestion contract (${ticket}) writes through db/ingest-records.ts, whose rows take the ingester key's kind — classify that key \`ingested\``;
-const RAW_FALLBACK = "the plain insert its upsert_thought call falls back to on a brain without the function; that call declares, the raw row cannot (SMD-2143 moves the script onto the shim)";
+const RAW_FALLBACK = "the plain insert its upsert_thought call falls back to on a brain without the function; that call declares, the raw row cannot (SMD-2143 makes the script a REST-core client, SMD-3216)";
 const RAW_OWN_DATABASE = "a deployment with a database of its own and none of the fork's migrations: no 073, so no trust to declare (check 10 counts the same insert)";
 /**
  * file → why its raw captures cannot declare, and the exact count of their lines. A line past the count fails (a
@@ -6870,11 +7031,13 @@ const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("hooks-off", "Path(`/hooks`) || PathPrefix(`/hooks/`)", 35, "not-served", "noop@internal")
   + routeRouter("grafana-off", "Path(`/grafana`) || PathPrefix(`/grafana/`)", 35, "not-served", "noop@internal")
   + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "", "mcp")
+  + routeRouter("dashboard", "Path(`/dashboard`) || PathPrefix(`/dashboard/`)", 30, "", "app")
   + routeHealth("mcp")
   + "  middlewares:\n"
   + routeErrors("auth-absent", "502") + routeErrors("api-off", "418") + routeErrors("not-served", "418")
   + "  services:\n" + routeService("mcp", `http://${tierMeshName("mcp", "stable")}.:8000`)
-  + routeService("auth", "http://auth.ob1.internal.:3000");
+  + routeService("auth", "http://auth.ob1.internal.:3000")
+  + routeService("app", "http://app.ob1.internal.:8000");
 /** compose.api-public.yaml's route table, byte for byte, as Bun.YAML reads the block. */
 const API_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("api-public", "Path(`/api`) || PathPrefix(`/api/`)", 36, "api-no-forwarder, api-strip", "api")
@@ -6923,7 +7086,7 @@ const PROXY_SERVICE = {
   networks: { front: { aliases: ["proxy.ob1.internal"] }, mesh: {} },
   dns_search: ["."],
   healthcheck: { test: ["CMD", "traefik", "healthcheck"], interval: "5s", timeout: "3s", retries: 5 },
-  depends_on: { api: { condition: "service_started" }, mcp: { condition: "service_started" } },
+  depends_on: { api: { condition: "service_started" }, mcp: { condition: "service_started" }, app: { condition: "service_started" } },
   restart: "unless-stopped",
 };
 /** The forwarder's script (SMD-2583), deploy/forwarder.ts: compose.yaml carries it inline as x-forwarder, in its `forwarder` config and its label, each held to this byte for byte — the file CI runs --self-check on. It holds no `$`, which compose would read as a variable from deploy/.env or the shell, so the copy compose runs is this file (review pass 1: `${X:-…}` steered the script and passed), and no `!`, which check 27 refuses in compose.tiers.yaml. */
@@ -6975,6 +7138,34 @@ const MCP_SERVICE = {
   restart: "unless-stopped",
   networks: { mesh: { aliases: ["mcp.ob1.internal"] } },
   healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"], interval: "30s", timeout: "3s", start_period: "10s", retries: 3 },
+};
+/**
+ * compose.yaml's `app`, the operator GUI (SMD-2280), whole, its logging aside: the server's image run as
+ * `bun ../dashboard/serve.ts` with auto-install off, holding no key and no secret — only the origin and the
+ * configured switch its sign-in reads (COMPOSE_PROFILES naming auth turns key sign-in off, ADR decision 16, so
+ * dropping or pinning it would reopen that door) — on the mesh alone, its files read-only and no capability, its
+ * health on its own path, and its wait on the REST core. A change to it is made here too, on purpose (review pass 1:
+ * a key list, a forwarder key, `user: root`, another image and COMPOSE_PROFILES dropped each passed the per-key rules).
+ */
+const APP_SERVICE = {
+  image: "${COMPOSE_PROJECT_NAME:-open-brain}-server",
+  pull_policy: "never",
+  entrypoint: ["bun", "--no-install"],
+  command: ["../dashboard/serve.ts"],
+  environment: {
+    OB1_PUBLIC_ORIGIN: "${OB1_PUBLIC_ORIGIN:-}",
+    COMPOSE_PROFILES: "${COMPOSE_PROFILES:-}",
+    OB1_STOP_GRACE: "${OB1_STOP_GRACE:-}",
+  },
+  stop_grace_period: "${OB1_STOP_GRACE:-10}s",
+  depends_on: { api: { condition: "service_started" } },
+  restart: "unless-stopped",
+  networks: { mesh: { aliases: ["app.ob1.internal"] } },
+  read_only: true,
+  tmpfs: ["/tmp"],
+  cap_drop: ["ALL"],
+  security_opt: ["no-new-privileges:true"],
+  healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/dashboard/health >/dev/null || exit 1"], interval: "30s", timeout: "3s", start_period: "10s", retries: 3 },
 };
 /**
  * compose.yaml's observability collector (SMD-1849 PR 3a) as Bun.YAML reads it, its `logging` (check 29's) and its labels (check 37's,
@@ -7109,17 +7300,22 @@ const PG_MONITOR_ROLE_SERVICE = {
 };
 /** compose.grafana-port.yaml's environment on lgtm, by value: Grafana's origin, its loopback port unless GRAFANA_ORIGIN names one, and nothing else — any other key there is Grafana's configuration, its anonymous access included (SMD-1849 PR 3a review passes 3, 6). */
 const GRAFANA_PORT_LGTM_ENV = { LGTM_ORIGIN: "${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}" };
+/** The operator GUI's link to Grafana (SMD-2280), by the overlay that reaches it, by value: the one key each sets on `app`. */
+const GRAFANA_APP_ENV: Record<string, Mapping> = {
+  "compose.grafana-public.yaml": { GRAFANA_ROUTE: "/grafana/" },
+  "compose.grafana-port.yaml": { GRAFANA_LINK: "${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}/grafana/" },
+};
 /** Each overlay, by file: the keys it sets on each service it names (an overlay that carries a table sets only its mount, label and wait on the proxy), and its top-level keys beside `services` (x-* anchors aside). CI's "The proxy loads only the held route tables" holds the same of each combination, in its `declared` paths. */
 const OVERLAYS: Record<string, { services: Record<string, string[]>; top: string[] }> = {
   // The proxy: its table's mount, its label and its wait.
   "compose.api-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
   "compose.hooks-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
   // No wait: the proxy starts with the profile off, and its 502 is a 404 (SMD-1849 PR 3a).
-  "compose.grafana-public.yaml": { services: { proxy: ["configs", "labels"] }, top: ["configs"] },
+  "compose.grafana-public.yaml": { services: { proxy: ["configs", "labels"], app: ["environment"] }, top: ["configs"] },
   // Postgres's port, and the outward network it is published on (SMD-2583); Grafana's, the same way (SMD-1849 PR 3a).
   "compose.host-ports.yaml": { services: { postgres: ["networks", "ports"], ollama: ["ports"], jev: ["ports"] }, top: ["networks"] },
   // Grafana's loopback port: its network, its port and its origin, held by value (GRAFANA_PORT_LGTM_ENV).
-  "compose.grafana-port.yaml": { services: { lgtm: ["networks", "ports", "environment"] }, top: ["networks"] },
+  "compose.grafana-port.yaml": { services: { lgtm: ["networks", "ports", "environment"], app: ["environment"] }, top: ["networks"] },
 };
 /** compose.yaml's top-level keys, x-* anchors aside. */
 const COMPOSE_TOP = ["name", "services", "networks", "volumes", "configs"];
@@ -7131,6 +7327,8 @@ const SERVICE_KEYS = ["build", "image", "pull_policy", "profiles", "command", "e
 const CONFINEMENT: Record<string, Mapping> = {
   "orchestration-runner": { cap_drop: ["ALL"], cap_add: ["SETUID", "SETGID", "KILL", "NET_ADMIN", "SETPCAP"], security_opt: ["no-new-privileges:true"] },
   auth: { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
+  // The operator GUI (SMD-2280): the first service a browser reaches, so the image's files read-only and no capability.
+  app: { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
   lgtm: { cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
   "pg-exporter": { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
 };
@@ -7171,10 +7369,12 @@ const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
   "compose.yaml": {
     postgres: ["data"],
     migrate: ["data"],
-    // Not on the mesh: nothing routes to it since SMD-2532, and /mcp is the MCP server built on the REST core's, on the mesh alone (SMD-2287); no shipped template calls it (n8n's brain calls go to the REST core, SMD-2295), the orchestration eval until SMD-2295's second PR.
+    // Not on the mesh: nothing routes to it since SMD-2532, and /mcp is the MCP server built on the REST core's, on the mesh alone (SMD-2287); nothing in the stack calls it (n8n's brain calls and the orchestration eval's go to the REST core, SMD-2295).
     server: { data: {}, egress: {} },
     api: { data: {}, egress: {}, mesh: { aliases: [tierMeshName("api", "stable")] } },
     mcp: { mesh: { aliases: [tierMeshName("mcp", "stable")] } },
+    // The operator GUI (SMD-2280): a client of the REST core, reached by the proxy alone.
+    app: { mesh: { aliases: ["app.ob1.internal"] } },
     "board-sync": ["data", "egress"],
     extract: ["data", "egress"],
     consolidate: ["data", "egress"],
@@ -7243,6 +7443,11 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
     const mdiffs: string[] = [];
     pathDiffs(JSON.parse(JSON.stringify(omitKeys(mcp, ["logging"]))), MCP_SERVICE, "services.mcp", mdiffs);
     if (mdiffs.length) flag("proxy", `${mdiffs.slice(0, 6).join("; ")}${mdiffs.length > 6 ? `; and ${mdiffs.length - 6} more` : ""} — compose.yaml's mcp is check 28's MCP_SERVICE: it is on the mesh beside the proxy with none of the server's secrets, so a knob handed to it, its entrypoint, its health or its wait on the REST core is changed there too, on purpose (SMD-2287)`);
+    // The operator GUI, whole (SMD-2280): what it holds, how it starts, its confinement, its health.
+    const app = isMapping(services.app) ? services.app : undefined;
+    const adiffs: string[] = [];
+    pathDiffs(JSON.parse(JSON.stringify(omitKeys(app, ["logging"]))), APP_SERVICE, "services.app", adiffs);
+    if (adiffs.length) flag("proxy", `${adiffs.slice(0, 6).join("; ")}${adiffs.length > 6 ? `; and ${adiffs.length - 6} more` : ""} — compose.yaml's app is check 28's APP_SERVICE: the browser's way into the brain, holding no key, so a knob handed to it, its image, user, confinement, health or wait is changed there too, on purpose — and COMPOSE_PROFILES is what turns its key sign-in off while the stack is configured (SMD-2280)`);
     // The observability collector, whole (SMD-1849 PR 3a): Grafana's sign-in, its exposure and what it calls out to are its environment.
     const lgtm = isMapping(services.lgtm) ? services.lgtm : undefined;
     const ldiffs: string[] = [];
@@ -7291,6 +7496,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
       const extra = Object.keys(svc).filter((k) => !may.includes(k));
       if (extra.length) flag("keys", `sets ${extra.map((k) => `services.${name}.${k}`).join(", ")} — an overlay sets only what its OVERLAYS entry declares${may.length ? ` (${name}: ${may.join(", ")})` : ""}; anything else it set would reach the stack in a review of this file alone (a mesh alias, a sidecar in the proxy's PID namespace: SMD-2685)`);
       if (file === "compose.grafana-port.yaml" && name === "lgtm" && canonJson(svc.environment ?? null) !== canonJson(GRAFANA_PORT_LGTM_ENV)) flag("keys", `sets services.lgtm.environment ${JSON.stringify(svc.environment ?? null)} where check 28's GRAFANA_PORT_LGTM_ENV holds ${JSON.stringify(GRAFANA_PORT_LGTM_ENV)} — the loopback port names Grafana's origin and nothing else: any other key there is Grafana's configuration, its anonymous access included`);
+      if (name === "app" && file in GRAFANA_APP_ENV && canonJson(svc.environment ?? null) !== canonJson(GRAFANA_APP_ENV[file])) flag("keys", `sets services.app.environment ${JSON.stringify(svc.environment ?? null)} where check 28's GRAFANA_APP_ENV holds ${JSON.stringify(GRAFANA_APP_ENV[file])} — the overlay names the operator GUI's link to the Grafana it reaches and nothing else: any other key there steers the GUI, its origin or its REST core included (SMD-2280)`);
       continue;
     }
     if (name === "proxy" || name === "forwarder") continue;
@@ -7874,17 +8080,24 @@ await checkPlugins();
 // back without their database; on podman, its unit disabled too, nothing came
 // back, and the dogfood stack stayed down ~47 minutes on 2026-10-09.
 // RESTART_POLICIES holds each service's policy by value: what serves is
-// `unless-stopped`, what runs once is "no", and a service that exits on
-// configuration a restart does not fix is `on-failure:3` (board-sync's
-// comment). A service added, or a policy changed, is a change there on
-// purpose. compose.tiers.yaml takes compose.yaml's postgres and Ollama
+// `unless-stopped`, what runs once is "no". The followers — board-sync, the
+// two claim workers, the sleep scheduler — were `on-failure:3`, so that a
+// refusal stopped rather than looped, and neither runtime starts that policy
+// at boot: on 2026-10-22 both brains' sleep and stable's board-sync stayed
+// down after a podman machine restart (SMD-3214). They are `unless-stopped`
+// now, through db/supervise.ts, which holds a refusal itself: a follower run
+// any other way under that policy is the crash loop again, so
+// supervisorGapsIn holds each one's command. jev is `unless-stopped` too,
+// since it retries its own start (jev/serve.ts, SMD-3214 PR 3): it is no
+// db/ follower, and its image has no db/. A service added, or a policy
+// changed, is a change there on purpose. compose.tiers.yaml takes compose.yaml's postgres and Ollama
 // through check 27, and the overlays name no restart (check 28's OVERLAYS),
 // so this file is the one to read.
 /** Each compose.yaml service's `restart`, exactly. */
 const RESTART_POLICIES: Record<string, string> = {
-  postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", mcp: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
-  "board-sync": "on-failure:3", extract: "on-failure:3", consolidate: "on-failure:3", sleep: "on-failure:3",
-  ollama: "unless-stopped", "ollama-pull": "no", jev: "on-failure:3",
+  postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", mcp: "unless-stopped", app: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
+  "board-sync": "unless-stopped", extract: "unless-stopped", consolidate: "unless-stopped", sleep: "unless-stopped",
+  ollama: "unless-stopped", "ollama-pull": "no", jev: "unless-stopped",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",
   lgtm: "unless-stopped", "pg-monitor-role": "no", "pg-exporter": "unless-stopped",
 };
@@ -7903,6 +8116,43 @@ function restartGapsIn(text: string, held: Record<string, string>): [service: st
   for (const service of Object.keys(held)) if (!(service in doc.services)) gaps.push([service, "held in check 32's RESTART_POLICIES and not in the file"]);
   return gaps;
 }
+/** The db/ followers by script — each runs until stopped — and the --worker db/supervise.ts names it by. */
+const FOLLOWER_WORKERS: Record<string, string> = { "sleep.ts": "sleep", "extract-entities.ts": "extract", "consolidate.ts": "consolidate", "sync-linear.ts": "board-sync" };
+const FOLLOWER_SCRIPT = /\bdb\/(sleep|extract-entities|consolidate|sync-linear)\.ts\b/;
+/**
+ * Where a compose file runs a db/ follower other than through db/supervise.ts
+ * (SMD-3214): the command's first words `bun db/supervise.ts`, its --worker
+ * the follower's, its --run starting `exec bun db/<the follower>`, so the stop
+ * the supervisor passes on reaches the follower and not a shell.
+ */
+function supervisorGapsIn(text: string): [service: string | null, detail: string][] {
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(text); } catch (e) { return [[null, `does not parse: ${(e as Error).message}`]]; }
+  if (!isMapping(doc) || !isMapping(doc.services)) return [[null, "has no top-level `services:` mapping"]];
+  const gaps: [string | null, string][] = [];
+  for (const [service, def] of Object.entries(doc.services)) {
+    const cmd = isMapping(def) ? def.command : undefined;
+    const words = Array.isArray(cmd) ? cmd.map(String) : typeof cmd === "string" ? [cmd] : [];
+    const script = words.map((w) => FOLLOWER_SCRIPT.exec(w)?.[1]).find((m) => m !== undefined);
+    if (script === undefined) continue;
+    const at = (flag: string) => { const i = words.indexOf(flag); return i === -1 ? undefined : words[i + 1]; };
+    if (words[0] !== "bun" || words[1] !== "db/supervise.ts") gaps.push([service, `runs db/${script}.ts other than through db/supervise.ts, which under \`unless-stopped\` restarts its refusal in a loop`]);
+    else if (at("--worker") !== FOLLOWER_WORKERS[`${script}.ts`]) gaps.push([service, `runs db/${script}.ts under --worker ${JSON.stringify(at("--worker") ?? null)}, where its heartbeat is ${FOLLOWER_WORKERS[`${script}.ts`]}'s`]);
+    else if (!at("--run")?.startsWith(`exec bun db/${script}.ts`)) gaps.push([service, `its --run does not begin \`exec bun db/${script}.ts\`, so the stop the supervisor passes on reaches a shell, not the follower`]);
+  }
+  return gaps;
+}
+const SUPERVISED = `services:\n  sleep:\n    command: ["bun", "db/supervise.ts", "--worker", "sleep", "--require-key", "--run", "exec bun db/sleep.ts --follow"]\n  other:\n    command: ["bun", "serve.ts"]\n`;
+/** [what, text, the services (null = the file) the rule reports]. */
+const SUPERVISOR_PROBES: [string, string, (string | null)[]][] = [
+  ["a follower supervised, beside a service that runs none", SUPERVISED, []],
+  ["the sh -c of before SMD-3214", SUPERVISED.replace(/command: \["bun", "db\/supervise\.ts".*\]/, `command: ["sh", "-c", "exec bun db/sleep.ts --follow"]`), ["sleep"]],
+  ["a follower as the whole command", SUPERVISED.replace(/command: \["bun", "db\/supervise\.ts".*\]/, `command: ["bun", "db/sync-linear.ts", "--loop"]`), ["sleep"]],
+  ["a follower in a string command", SUPERVISED.replace(/command: \["bun", "db\/supervise\.ts".*\]/, `command: bun db/consolidate.ts --follow`), ["sleep"]],
+  ["the supervisor naming another worker", SUPERVISED.replace(`"--worker", "sleep"`, `"--worker", "extract"`), ["sleep"]],
+  ["a --run that does not exec", SUPERVISED.replace(`"exec bun db/sleep.ts`, `"bun db/sleep.ts`), ["sleep"]],
+  ["no --run at all", SUPERVISED.replace(`, "--run", "exec bun db/sleep.ts --follow"`, `, "db/sleep.ts"`), ["sleep"]],
+];
 const RESTART_GOOD = `services:\n  postgres:\n    image: x\n    restart: unless-stopped\n  migrate:\n    image: y\n    restart: "no"\n`;
 const RESTART_HELD = { postgres: "unless-stopped", migrate: "no" };
 /** [what, text, the services (null = the file) the rule reports]. */
@@ -7925,6 +8175,13 @@ function checkRestartPolicies() {
   for (const [what, text, expected] of RESTART_PROBES) {
     const got = restartGapsIn(text, RESTART_HELD).map(([service]) => service);
     if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 32 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  for (const [what, text, expected] of SUPERVISOR_PROBES) {
+    const got = supervisorGapsIn(text).map(([service]) => service);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 32 no longer reports exactly ${JSON.stringify(expected)} for its supervisor probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  for (const [service, detail] of supervisorGapsIn(readFileSync(join(ROOT, "deploy/compose.yaml"), "utf8"))) {
+    fail("deploy/compose.yaml", `${service === null ? "the file" : `service \`${service}\``}: ${detail} (SMD-3214)`);
   }
   for (const [service, detail] of restartGapsIn(readFileSync(join(ROOT, "deploy/compose.yaml"), "utf8"), RESTART_POLICIES)) {
     fail("deploy/compose.yaml", `${service === null ? "the file" : `service \`${service}\``}: ${detail} — what serves is \`unless-stopped\`, so it comes back after a reboot with what it reads; what runs once is "no"; a policy is changed there on purpose (SMD-2760, deploy/README.md "After a reboot")`);
@@ -8434,7 +8691,7 @@ function parityProblems(ci: ScriptRun[], ciTsc: string[], ciJobs: string[], pari
   const parityTsc = parity.typechecks.map((t) => t.dir);
   const ciTscDirs = new Set(ciTsc.map((x) => posix.normalize(x)));
   for (const d of ciTscDirs) if (!parityTsc.includes(d)) problems.push([SUITE_WORKFLOW, `type-checks ${d}, which ${PARITY_SCRIPT} does not — add \`typecheck ${d}\``]);
-  for (const t of parity.typechecks) if (!ciTscDirs.has(t.dir)) problems.push([`${PARITY_SCRIPT}:${t.line}`, `type-checks ${t.dir}, which no ${SUITE_WORKFLOW} step does — take it out, or add the step`]);
+  for (const t of parity.typechecks) if (!ciTscDirs.has(t.dir)) problems.push([`${PARITY_SCRIPT}:${t.line}`, `type-checks ${t.dir}, which no ${SUITE_WORKFLOW} step does — take it out, or type-check it there (a step of its own, or a .github/ci/typecheck.sh step naming it)`]);
   for (const [job, why] of Object.entries(notRun.jobs)) {
     if (!ciJobs.includes(job)) problems.push([SELF, `PARITY_NOT_RUN excuses job ${job}, which ${SUITE_WORKFLOW} no longer has — take it off the list`]);
     else if (!why.trim()) problems.push([SELF, `PARITY_NOT_RUN excuses job ${job} with no reason`]);
@@ -9318,6 +9575,220 @@ function checkAlertRules() {
   }
 }
 checkAlertRules();
+
+// ── Check 39: a status-set change runs the refresh and rebuilds the gate it moves (SMD-3160) ──
+// 071's ob1_source_gate stores, per source row, whether its thought's
+// status_type is in node_lifecycle_types(). A migration that changes the set
+// leaves those rows wrong until a rebuild after it — the full one, or 108's
+// keyed one, which reconciles only the types it is given (a type left out
+// stays wrong on every brain, and only drift() would say so) — and a change to
+// either set leaves every pooled session on the old set until
+// ob1_refresh_set_readers() (108) drops their plans. The rule reads canonical
+// forms only and refuses any other: two passes of a statement parser found a
+// seam each, and a loud refusal costs an author a rewrite where a quiet miss
+// costs every brain (review pass 3).
+//   * The text read is comment-stripped, and its literals — '…', E'…', "…"
+//     and $tag$…$tag$ — are blanked for every search below but the set's own
+//     literal and a keyed call's list, read back from the same place.
+//   * Every CREATE [OR REPLACE] FUNCTION [schema.]node_lifecycle_types (or
+//     node_settled_types), and every RENAME TO one, anywhere — in a string, a
+//     body or an EXECUTE included — is a definition. Each must be a line
+//     starting `CREATE OR REPLACE FUNCTION node_lifecycle_types()` outside
+//     any literal, else the file is "unreadable", with the form to write.
+//   * A definition's body — inside its first dollar quote, or to its first
+//     `;` if it has none — must be exactly `SELECT '{a,b}'::text[]`, a plpgsql
+//     `[DECLARE …] BEGIN RETURN '{a,b}'::text[]; END`, or (with no dollar
+//     quote) BEGIN ATOMIC SELECT / RETURN of it: a set built from the literal
+//     (`|| ARRAY['c']`) is not read as the literal. The file's last
+//     definition is the set it leaves, compared to the last earlier file that
+//     defined that set.
+//   * After that definition, the calls are lines outside any literal:
+//     `SELECT * FROM ob1_rebuild_source_gate();` or
+//     `SELECT * FROM ob1_rebuild_source_gate_for_types('{…}');` lines naming
+//     together exactly the types added and dropped (a lifecycle change only),
+//     and, for either set in any file from the one that defines it on,
+//     `SELECT ob1_refresh_set_readers();`.
+type SetChangeRule = "rebuild" | "types" | "refresh" | "unreadable";
+const SET_FUNCTIONS = ["node_lifecycle_types", "node_settled_types"] as const;
+const SET_FORM = (fn: string) => `every definition a line starting CREATE OR REPLACE FUNCTION ${fn}() outside any string or body, whose body is SELECT '{a,b}'::text[] (or a plpgsql BEGIN RETURN '{a,b}'::text[]; END) — e.g. AS $$ SELECT '{a,b}'::text[] $$;`;
+const FULL_LINE = /^SELECT \* FROM ob1_rebuild_source_gate\(\);/m;
+const KEYED_LINE = /^SELECT \* FROM ob1_rebuild_source_gate_for_types\('[^'\n]*'\);/gm;
+const KEYED_LIST = /^SELECT \* FROM ob1_rebuild_source_gate_for_types\('\{([^}']*)\}'\);$/;
+const REFRESH_LINE = /^SELECT ob1_refresh_set_readers\(\);/m;
+const REFRESH_DEF = /^CREATE OR REPLACE FUNCTION ob1_refresh_set_readers\(\)/m;
+const SET_LITERAL = /'\{([^}']*)\}'\s*::\s*text\s*\[\s*\]/g;
+const DOLLAR_AT = /^\$([A-Za-z_][A-Za-z_0-9]*)?\$/;
+const BODY_SHAPES = [/^\s*SELECT\s+SET\s*;?\s*$/i, /^\s*(?:DECLARE\s+(?:[^;]*;\s*)*)?BEGIN\s+RETURN\s+SET\s*;\s*END\s*;?\s*$/i];
+const BARE_SHAPE = /\b(?:BEGIN\s+ATOMIC\s+SELECT|RETURN)\s+SET\s*;$/i;
+const setOf = (literal: string) => new Set(literal.split(",").map((t) => t.trim().replace(/^"(.*)"$/, "$1")).filter((t) => t !== ""));
+/** Where the dollar quote starting at `i` opens (its delimiter), or null: a `$` glued to an identifier (`a$b`) or a `$1` is no quote. */
+function dollarAt(text: string, i: number): string | null {
+  if (text[i] !== "$" || /[A-Za-z0-9_$]/.test(text[i - 1] ?? "")) return null;
+  return DOLLAR_AT.exec(text.slice(i, i + 64))?.[0] ?? null;
+}
+/** The text with the inside of every literal blanked, its length and line breaks kept; an unterminated one runs to the end. */
+function blankLiterals(text: string): string {
+  const out = text.split("");
+  const blank = (from: number, to: number) => { for (let k = from; k < to; k++) if (out[k] !== "\n") out[k] = " "; };
+  for (let i = 0; i < text.length;) {
+    const c = text[i];
+    if (c === "'" || c === '"') {
+      const escapes = c === "'" && /[eE]/.test(text[i - 1] ?? "") && !/[A-Za-z0-9_$]/.test(text[i - 2] ?? "");
+      let j = i + 1;
+      while (j < text.length) {
+        if (escapes && text[j] === "\\") j += 2;
+        else if (text[j] === c) break;  // a doubled quote ends one string and opens the next: blanked alike
+        else j++;
+      }
+      blank(i + 1, Math.min(j, text.length));
+      i = j + 1;
+      continue;
+    }
+    const tag = dollarAt(text, i);
+    if (tag) {
+      const close = text.indexOf(tag, i + tag.length);
+      blank(i + tag.length, close < 0 ? text.length : close);
+      i = close < 0 ? text.length : close + tag.length;
+      continue;
+    }
+    i++;
+  }
+  return out.join("");
+}
+/**
+ * A set's state after a file: null when the file does not define it; else
+ * the set its last definition leaves (null when check 39 cannot read every
+ * definition, or that one's body) and the text after that definition, raw
+ * and blanked alike.
+ */
+function lastSetIn(code: string, blanked: string, fn: string): { set: Set<string> | null; after: string; afterBlanked: string } | null {
+  const anyDef = new RegExp(`\\bCREATE\\s+(?:OR\\s+REPLACE\\s+)?FUNCTION\\s+(?:"?\\w+"?\\s*\\.\\s*)?"?${fn}\\b|\\bRENAME\\s+TO\\s+"?${fn}\\b`, "gi");
+  const defs = [...code.matchAll(anyDef)].length;
+  if (defs === 0) return null;
+  const lines = [...blanked.matchAll(new RegExp(`^CREATE OR REPLACE FUNCTION ${fn}\\(\\)`, "gm"))];
+  const unread = { set: null, after: "", afterBlanked: "" };
+  if (lines.length !== defs) return unread;
+  const last = lines.at(-1)!, at = last.index! + last[0].length;
+  const restB = blanked.slice(at);
+  let open = -1, tag: string | null = null;
+  for (let k = 0; k < restB.length && restB[k] !== ";"; k++) if ((tag = dollarAt(restB, k))) { open = k; break; }
+  let body: string, shapes: RegExp[], endAt: number;
+  if (tag) {
+    const close = restB.indexOf(tag, open + tag.length);
+    if (close < 0) return unread;
+    body = code.slice(at + open + tag.length, at + close);
+    shapes = BODY_SHAPES;
+    endAt = close + tag.length;
+  } else {
+    const semi = restB.indexOf(";");
+    if (semi < 0) return unread;
+    body = code.slice(at, at + semi + 1);
+    shapes = [BARE_SHAPE];
+    endAt = semi + 1;
+  }
+  const literals = [...body.matchAll(SET_LITERAL)];
+  if (literals.length !== 1 || !shapes.some((s) => s.test(body.replace(SET_LITERAL, "SET")))) return unread;
+  return { set: setOf(literals[0][1]), after: code.slice(at + endAt), afterBlanked: restB.slice(endAt) };
+}
+const symmetric = (a: Set<string>, b: Set<string>) => [...[...b].filter((t) => !a.has(t)), ...[...a].filter((t) => !b.has(t))].sort();
+/** Each migration (in order) that changes a set without its follow-up lines after the definition: the refresh (from the file that defines it on), and for node_lifecycle_types() a rebuild of exactly what it moves. */
+function setChangeProblems(files: readonly { name: string; text: string }[]): [SetChangeRule, string, string][] {
+  const out: [SetChangeRule, string, string][] = [];
+  const prev: Record<string, Set<string> | null> = { node_lifecycle_types: null, node_settled_types: null };
+  let refreshKnown = false;
+  for (const { name, text } of files) {
+    const code = stripSqlComments(text) as string;
+    const blanked = blankLiterals(code);
+    if (REFRESH_DEF.test(blanked)) refreshKnown = true;
+    for (const fn of SET_FUNCTIONS) {
+      const found = lastSetIn(code, blanked, fn);
+      if (found === null) continue;
+      if (found.set === null) {
+        out.push(["unreadable", name, `it defines ${fn}() in a place or form check 39 does not read — write ${SET_FORM(fn)} — so the types a change moves are known`]);
+        prev[fn] = null;
+        continue;
+      }
+      const was = prev[fn];
+      prev[fn] = found.set;
+      if (was === null) continue;
+      const moved = symmetric(was, found.set);
+      if (moved.length === 0) continue;
+      const after = found.afterBlanked;
+      if (fn === "node_lifecycle_types") {
+        const keyed = [...after.matchAll(KEYED_LINE)].map((m) => [...setOf(KEYED_LIST.exec(found.after.slice(m.index!, m.index! + m[0].length))?.[1] ?? "")]);
+        const full = FULL_LINE.test(after);
+        const call = `SELECT * FROM ob1_rebuild_source_gate_for_types('{${moved.join(",")}}');`;
+        if (!full && keyed.length === 0) {
+          out.push(["rebuild", name, `it changes node_lifecycle_types() (moving ${moved.join(", ")}) and has no rebuild of 071's gate mirror as a line after it — add the line ${call}`]);
+        } else if (!full) {
+          const named = [...new Set(keyed.flat())].sort();
+          if (named.join() !== moved.join()) out.push(["types", name, `its keyed rebuild lines name {${named.join(",")}}, but the change moves {${moved.join(",")}} — every type it adds and drops: ${call}`]);
+        }
+      }
+      if (refreshKnown && !REFRESH_LINE.test(after)) {
+        out.push(["refresh", name, `it changes ${fn}() and has no SELECT ob1_refresh_set_readers(); line after it — without it pooled sessions, 071's gate triggers among them, keep the old set`]);
+      }
+    }
+  }
+  return out;
+}
+const SET_BASE = { name: "001_base.sql", text: "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\nCREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{b}'::text[] $$;\nCREATE OR REPLACE FUNCTION ob1_refresh_set_readers() RETURNS int LANGUAGE sql AS $$ SELECT 0 $$;\n" };
+const setChange = (body: string) => ({ name: "002_change.sql", text: body });
+const ABC = "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$;\n";
+const RF = "SELECT ob1_refresh_set_readers();\n";
+const SET_PROBES: [string, string, SetChangeRule[]][] = [
+  ["a change with the refresh and the full rebuild", `${ABC}${RF}SELECT * FROM ob1_rebuild_source_gate();\n`, []],
+  ["a change with the refresh and the keyed form", `${ABC}${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["a change that adds and drops, keyed in two lines", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,c}'::text[] $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\nSELECT * FROM ob1_rebuild_source_gate_for_types('{b}');\n`, []],
+  ["the set over two lines, a settled set as a literal after it", `CREATE OR REPLACE FUNCTION node_lifecycle_types()\nRETURNS text[] LANGUAGE sql IMMUTABLE\nAS $$ SELECT '{a,b,c}'::text[] $$;\nCREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{b}'::text[] $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["the set's body over lines, its dollar quote alone on the last", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$\nSELECT '{a,b,c}'::text[]\n$$;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["the set in a BEGIN ATOMIC body", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE\nBEGIN ATOMIC\nSELECT '{a,b,c}'::text[];\nEND;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["the set in a plpgsql body, a declaration and BEGIN at the start of lines", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE plpgsql IMMUTABLE AS $f$\nDECLARE\n  v int;\nBEGIN\nRETURN '{a,b,c}'::text[];\nEND $f$;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["a change to the settled set alone, with the refresh", `CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\n${RF}`, []],
+  ["the same set again", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{b,a}'::text[] $$;\n", []],
+  ["$$ in strings around the real calls, and a $-glued identifier", `${ABC}SELECT 'cost: $$';\nSELECT 1 AS a$b$c;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\nSELECT 'x$$';\n`, []],
+  ["an E-string with an escaped quote and $$ before the calls", `${ABC}SELECT E'it\\'s $$';\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, []],
+  ["a change with the refresh and no rebuild", `${ABC}${RF}`, ["rebuild"]],
+  ["two definitions, the second a change, a refresh and no rebuild", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\nSELECT * FROM ob1_rebuild_source_gate();\n${ABC}${RF}`, ["rebuild"]],
+  ["a change whose rebuild is only in a comment or a DO block", `${ABC}${RF}-- SELECT * FROM ob1_rebuild_source_gate();\nDO $d$\nBEGIN\nSELECT * FROM ob1_rebuild_source_gate();\nEND $d$;\n`, ["rebuild"]],
+  ["a change whose rebuild comes before the set", `SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n${ABC}${RF}`, ["rebuild"]],
+  ["a change whose rebuild is in a wrapper's body", `${ABC}${RF}CREATE OR REPLACE FUNCTION wrap() RETURNS void LANGUAGE plpgsql AS $b$\nBEGIN\n  PERFORM ob1_rebuild_source_gate();\nEND $b$;\n`, ["rebuild"]],
+  ["a change whose rebuild is a line in a wrapper's sql body", `${ABC}${RF}CREATE OR REPLACE FUNCTION wrap() RETURNS SETOF record LANGUAGE sql AS $b$\nSELECT * FROM ob1_rebuild_source_gate();\n$b$;\n`, ["rebuild"]],
+  ["$$ in a string, then the calls in a wrapper's body", `${ABC}SELECT '$$';\nCREATE OR REPLACE FUNCTION wrap() RETURNS SETOF record LANGUAGE sql AS $$\nSELECT ob1_refresh_set_readers();\nSELECT * FROM ob1_rebuild_source_gate();\n$$;\n`, ["rebuild", "refresh"]],
+  ["the calls only inside a comment's string", `${ABC}COMMENT ON FUNCTION node_lifecycle_types() IS 'run after it:\nSELECT ob1_refresh_set_readers();\nSELECT * FROM ob1_rebuild_source_gate();\n';\n`, ["rebuild", "refresh"]],
+  ["a change that adds and drops, keyed with what it adds alone", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,c}'::text[] $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, ["types"]],
+  ["a change keyed with more than it moves", `${ABC}${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c,x}');\n`, ["types"]],
+  ["a change with the rebuild and no refresh", `${ABC}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, ["refresh"]],
+  ["a change whose refresh is a line in a wrapper's sql body", `${ABC}CREATE OR REPLACE FUNCTION wrap() RETURNS int LANGUAGE sql AS $b$\nSELECT ob1_refresh_set_readers();\n$b$;\nSELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\n`, ["refresh"]],
+  ["a change to the settled set alone, with no refresh", "CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\n", ["refresh"]],
+  ["a settled set in a form the check does not read", `CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT ARRAY['a'] $$;\n${RF}`, ["unreadable"]],
+  ["a set in a form the check does not read", "CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT ARRAY['a','b','c'] $$;\n" + RF + "SELECT * FROM ob1_rebuild_source_gate();\n", ["unreadable"]],
+  ["a set defined in an EXECUTE string", `DO $d$ BEGIN EXECUTE 'CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $f$ SELECT 1 $f$'; END $d$;\n${RF}SELECT * FROM ob1_rebuild_source_gate();\n`, ["unreadable"]],
+  ["a body holding two different sets", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT CASE WHEN random() < 2 THEN '{a,b,c}'::text[] ELSE '{a}'::text[] END $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate();\n`, ["unreadable"]],
+  ["a canonical definition, then a qualified one adding a type", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\nCREATE OR REPLACE FUNCTION public.node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,d}'::text[] $$;\n`, ["unreadable"]],
+  ["a canonical definition, then a lowercase one", `${ABC}${RF}SELECT * FROM ob1_rebuild_source_gate();\ncreate or replace function node_lifecycle_types() returns text[] language sql immutable as $$ select '{a,b,c,d}'::text[] $$;\n`, ["unreadable"]],
+  ["a function renamed to the set", `CREATE OR REPLACE FUNCTION new_set() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$;\nALTER FUNCTION new_set() RENAME TO node_lifecycle_types;\n`, ["unreadable"]],
+  ["a canonical definition inside a helper's body, after the change", `${ABC}${RF}SELECT * FROM ob1_rebuild_source_gate_for_types('{c}');\nCREATE OR REPLACE FUNCTION restore_sets() RETURNS void LANGUAGE plpgsql AS $b$\nBEGIN\nEXECUTE $q$\nCREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $f$ SELECT '{a,b}'::text[] $f$\n$q$;\nEND $b$;\n`, ["unreadable"]],
+  ["a set built from the literal", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] || ARRAY['c'] $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate();\n`, ["unreadable"]],
+  ["a BEGIN ATOMIC body built from the literal", `CREATE OR REPLACE FUNCTION node_lifecycle_types() RETURNS text[] LANGUAGE sql IMMUTABLE\nBEGIN ATOMIC\nSELECT '{a,b}'::text[] || ARRAY['c'];\nEND;\n${RF}SELECT * FROM ob1_rebuild_source_gate();\n`, ["unreadable"]],
+  ["a settled set built from the literal", `CREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT array_append('{b}'::text[], 'a') $$;\n${RF}`, ["unreadable"]],
+  ["a set under a quoted, qualified name", `CREATE OR REPLACE FUNCTION "public"."node_lifecycle_types"() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b,c}'::text[] $$;\n${RF}SELECT * FROM ob1_rebuild_source_gate();\n`, ["unreadable"]],
+];
+function checkSetChanges() {
+  for (const [what, body, expected] of SET_PROBES) {
+    const got = setChangeProblems([SET_BASE, setChange(body)]).map(([rule]) => rule);
+    if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 39 no longer reports exactly ${JSON.stringify(expected)} for its probe "${what}" (reported ${JSON.stringify(got)})`);
+  }
+  // The file that defines the refresh is held to it; one before it is not (105's own block).
+  const definer = setChangeProblems([{ name: "001_base.sql", text: SET_BASE.text.split("\n").slice(0, 2).join("\n") }, setChange(`${SET_BASE.text.split("\n")[2]}\nCREATE OR REPLACE FUNCTION node_settled_types() RETURNS text[] LANGUAGE sql IMMUTABLE AS $$ SELECT '{a,b}'::text[] $$;\n`)]).map(([rule]) => rule);
+  if (JSON.stringify(definer) !== JSON.stringify(["refresh"])) fail(SELF, `check 39 no longer reports exactly ["refresh"] for its probe "the file that defines the refresh changes a set without calling it" (reported ${JSON.stringify(definer)})`);
+  const early = setChangeProblems([{ name: "001_base.sql", text: SET_BASE.text.split("\n")[0] }, setChange(`${ABC}SELECT * FROM ob1_rebuild_source_gate();\n`)]).map(([rule]) => rule);
+  if (JSON.stringify(early) !== JSON.stringify([])) fail(SELF, `check 39 no longer reports exactly [] for its probe "a change before the refresh exists, with the full rebuild" (reported ${JSON.stringify(early)})`);
+  const dir = join(ROOT, "db/migrations");
+  const files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort().map((f) => ({ name: f, text: readFileSync(join(dir, f), "utf8") }));
+  for (const [, name, detail] of setChangeProblems(files)) fail(`db/migrations/${name}`, `${detail} (check 39, SMD-3160)`);
+}
+checkSetChanges();
 
 // No display-time filter. One excused `_template` violations, for a placeholder
 // link that contributionDirs() has skipped since the filter was written — so

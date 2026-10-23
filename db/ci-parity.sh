@@ -17,13 +17,15 @@
 # Check 35 in scripts/check-fork-consistency.ts holds this list to the workflow:
 # every script a fork-checks.yml step runs is a `run` or `nodb` line here, from
 # the same directory, with the same flags and the same environment (a step that
-# sets DATABASE_URL is `run`, one that does not is `nodb`), and every typecheck
-# step a `typecheck` line — or its job or script is excused there with why. Not
-# here, so: the full stack and the authorization POC (built images and a compose
-# stack), the landing check (a pull request's commit range) and the codemod's
-# round-trip (it rewrites tracked files). Nor is db/test-bench-reuse.ts, three
-# minutes of 150,000-row builds and exact passes (check 34 excuses it; it would
-# run here — it drops its marker on exit).
+# sets DATABASE_URL is `run`, one that does not is `nodb`), and every directory
+# CI runs `bunx tsc --noEmit` in a `typecheck` line, whether by a step of its
+# own or one .github/ci/typecheck.sh step names (SMD-3202) — or its job or
+# script is excused there with why. Not here, so: the full stack and the
+# authorization POC (built images and a compose stack), the landing check (a
+# pull request's commit range) and the codemod's round-trip (it rewrites
+# tracked files). Nor is db/test-bench-reuse.ts, three minutes of 150,000-row
+# builds and exact passes (check 34 excuses it; it would run here — it drops
+# its marker on exit).
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT="$PWD"
@@ -84,8 +86,9 @@ run() { suite db "$@"; }
 # it (test-cli, test-connect) sees what CI's does.
 nodb() { suite nodb "$@"; }
 
-# CI's Typecheck steps, one per directory with a tsconfig.json: no tally to
-# parse, so the exit code is the verdict. db/ and evals/ resolve their
+# CI's typechecks, one line per directory with a tsconfig.json, run one after
+# another here where CI runs most side by side (.github/ci/typecheck.sh): no
+# tally to parse, so the exit code is the verdict. db/ and evals/ resolve their
 # ../server-portable imports through that directory's install (SMD-1932).
 typecheck() {
   local dir="$1" out
@@ -124,8 +127,10 @@ main() {
   OB1_LIVE_SHARD=sleep run db test-live.ts
   OB1_LIVE_SHARD=long run db test-live.ts
   OB1_LIVE_SHARD=extract run db test-live.ts
-  # CI runs this one later, beside test-preflight.ts, on a database of its
-  # own (SMD-2219); here, in this place and in series, on the shared one.
+  # CI runs this one and test-preflight.ts in the background from the
+  # data-layer job's start, on a Postgres of their own, beside that job's suites
+  # below (SMD-2219, SMD-3195); here, in their places and in series, on the
+  # shared one, test-preflight.ts where CI ran it before SMD-3195.
   run db                 test-upgrade.ts
   run db                 test-search-path.ts
   run server-portable    test-store-sql.ts
@@ -184,6 +189,7 @@ main() {
   nodb evals              eval-judge.ts --self-check
   nodb evals              eval-judge-decide.ts --self-check
   nodb evals              eval-judge-propose.ts --self-check
+  nodb evals              eval-mediated-pairs.ts --self-check
   nodb evals              eval-projection-replay.ts --self-check
   nodb evals              eval-jev-gate.ts --self-check
   nodb evals              eval-transitive-freshness.ts --self-check

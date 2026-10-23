@@ -379,7 +379,8 @@ const candidates = (v: unknown) => [...new Set(strings(v).flatMap((s) => [s, ...
  * fail at run time, so it is refused too. The legacy single MCP_ACCESS_KEY
  * is write scope (server-portable/auth.ts). No workflow holds a write key
  * (decision 4 of docs/orchestration-tool.md), and ingestion's credential
- * cannot silently carry a read key (decision 7).
+ * cannot silently carry a read key (decision 7). A declared brain credential
+ * must also be pinned to the REST core's host alone (brainPinProblem).
  */
 export function checkBrainKey(credential: any, env: Record<string, string>): void {
   const records: { name: string; scope: Scope; sha256: string }[] = [...parseKeyRecords(env.MCP_ACCESS_KEYS ?? "").keys];
@@ -397,6 +398,25 @@ export function checkBrainKey(credential: any, env: Record<string, string>): voi
     if (r.scope !== declared) throw new Error(`credential "${credential.name}" declares brainScope ${declared} and holds ${r.name}, a ${r.scope}-scope key — mint a ${declared} key (server-portable/keygen.ts --scope ${declared})`);
   }
   if (declared && hits.length === 0) throw new Error(`credential "${credential.name}": its brain key's hash is not in MCP_ACCESS_KEYS — mint it with server-portable/keygen.ts --scope ${declared} and add the line keygen prints`);
+  const unpinned = declared ? brainPinProblem(credential) : undefined;
+  if (unpinned) throw new Error(`credential "${credential.name}": ${unpinned}`);
+}
+
+/** The REST core's name on `egress`, the one host a brain credential is sent to (SMD-2295). */
+export const BRAIN_HOST = "api";
+
+/**
+ * A brain credential is pinned to the REST core's host alone (SMD-2211's pin,
+ * SMD-2295's host): n8n then refuses to send it anywhere else, from an HTTP
+ * Request node or an MCP Client node alike, a redirect off the host
+ * included (measured on n8n 2.40.6, docs/orchestration-tool.md posture
+ * step 2). A pin naming another host as well, or none, is refused. Returns
+ * the problem, or undefined. Pure, for the self-check.
+ */
+export function brainPinProblem(credential: any): string | undefined {
+  const data = credential?.data ?? {};
+  if (data.allowedHttpRequestDomains === "domains" && data.allowedDomains === BRAIN_HOST) return undefined;
+  return `a brain credential is pinned to the REST core's host alone: set "allowedHttpRequestDomains": "domains" and "allowedDomains": "${BRAIN_HOST}" (it has allowedHttpRequestDomains ${JSON.stringify(data.allowedHttpRequestDomains ?? null)}, allowedDomains ${JSON.stringify(data.allowedDomains ?? null)})`;
 }
 
 /** Every credential id a workflow's nodes name must be one the credential templates declare. Returns the problems. */
@@ -814,7 +834,8 @@ async function selfCheck(): Promise<number> {
 
   const cap = "c".repeat(64), rd = "r".repeat(64), wr = "w".repeat(64), legacy = "l".repeat(64);
   const env = { MCP_ACCESS_KEYS: `n8n:capture:${hashKey(cap)},eval:read:${hashKey(rd)},laptop:write:${hashKey(wr)}`, MCP_ACCESS_KEY: legacy };
-  const brain = (value: string, brainScope?: string, type = "httpHeaderAuth") => ({ name: "b", type, brainScope, data: { name: "X-Brain-Key", value } });
+  const pin = { allowedHttpRequestDomains: "domains", allowedDomains: BRAIN_HOST };
+  const brain = (value: string, brainScope?: string, type = "httpHeaderAuth") => ({ name: "b", type, brainScope, data: { name: "X-Brain-Key", value, ...pin } });
   expect("a capture key in a capture credential passes", !throws(() => checkBrainKey(brain(cap, "capture"), env), /./));
   expect("a read key in a read credential passes", !throws(() => checkBrainKey(brain(rd, "read"), env), /./));
   expect("a write key is refused", throws(() => checkBrainKey(brain(wr, "capture"), env), /WRITE-scope/));
@@ -823,6 +844,14 @@ async function selfCheck(): Promise<number> {
   expect("a brain key in a credential that declares no brainScope is refused", throws(() => checkBrainKey(brain(cap), env), /declares no brainScope/));
   expect("a brain key under another type or field name is still seen", throws(() => checkBrainKey({ name: "q", type: "httpQueryAuth", data: { name: "key", value: wr } }, env), /WRITE-scope/));
   expect("a declared brain credential with an unlisted key is refused", throws(() => checkBrainKey(brain("u".repeat(64), "capture"), env), /not in MCP_ACCESS_KEYS/));
+  // SMD-2295: the pin to the REST core's host, and nothing else.
+  const pinned = (data: Record<string, unknown>) => ({ name: "p", type: "httpHeaderAuth", brainScope: "capture", data: { name: "x-brain-key", value: cap, ...data } });
+  expect("a brain credential pinned to api passes", !throws(() => checkBrainKey(pinned(pin), env), /./));
+  expect("an unpinned brain credential is refused", throws(() => checkBrainKey(pinned({}), env), /pinned to the REST core's host alone/));
+  expect("a brain credential allowed every domain is refused", throws(() => checkBrainKey(pinned({ allowedHttpRequestDomains: "all", allowedDomains: BRAIN_HOST }), env), /allowedHttpRequestDomains "all"/));
+  expect("a brain credential pinned to another host is refused", throws(() => checkBrainKey(pinned({ ...pin, allowedDomains: "server" }), env), /allowedDomains "server"\)/));
+  expect("a brain credential pinned to api and another host is refused", throws(() => checkBrainKey(pinned({ ...pin, allowedDomains: "api,api.linear.app" }), env), /allowedDomains "api,api\.linear\.app"\)/));
+  expect("a credential that declares no brain scope may be pinned to another host (the runner's shape)", !throws(() => checkBrainKey({ name: "v", type: "httpHeaderAuth", data: { name: "x-runner-key", value: "anything", allowedHttpRequestDomains: "domains", allowedDomains: "orchestration-runner" } }, env), /./));
   expect("a credential holding no brain key and declaring none passes", !throws(() => checkBrainKey({ name: "x", type: "httpHeaderAuth", data: { name: "x-n8n-key", value: "anything" } }, env), /./));
   expect("a key as `Bearer <key>` is seen", throws(() => checkBrainKey({ name: "a", type: "httpHeaderAuth", data: { name: "Authorization", value: `Bearer ${wr}` } }, env), /WRITE-scope/));
   expect("a key in a URL's ?key= is seen", throws(() => checkBrainKey({ name: "u", type: "httpQueryAuth", data: { url: `http://host.example/path?key=${wr}&x=1` } }, env), /WRITE-scope/));
@@ -911,6 +940,10 @@ async function selfCheck(): Promise<number> {
   const KIT = join(HERE, "..", "..", "evals", "orchestration", "n8n");
   const kitIds = existsSync(join(KIT, "credentials.template.json")) ? idsOf(join(KIT, "credentials.template.json")) : [];
   const declaredIds = new Set([...profileIds, ...kitIds]);
+  // The profile's capture key, and the kit's read key where the kit is in the tree.
+  const credentialFiles = [PROFILE_CREDENTIALS, join(KIT, "credentials.template.json")].filter(existsSync);
+  const brainCredentials = credentialFiles.map((f) => (JSON.parse(readFileSync(f, "utf8")) as any[]).filter((c) => c.brainScope !== undefined));
+  expect("every shipped brain credential (the profile's capture key, the kit's read key) is pinned to the REST core's host", brainCredentials.every((inFile) => inFile.length > 0 && inFile.every((c) => brainPinProblem(c) === undefined)));
   const shipped = [...templatesIn(PROFILE_TEMPLATES), ...templatesIn(KIT).filter((f) => !f.endsWith("credentials.template.json"))];
   expect("the profile ships its templates: the act tool's two and the import template", ["act-mcp.json", "act-linear-file-issue.json", `import${PER_PIPELINE}`, `import-on-demand${PER_PIPELINE}`].every((t) => shipped.some((f) => f.endsWith(`/${t}`))));
   for (const t of shipped) for (const p of undeclaredCredentials(JSON.parse(readFileSync(t, "utf8")), declaredIds, t)) fails.push(p);

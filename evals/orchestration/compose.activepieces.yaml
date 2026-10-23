@@ -40,7 +40,7 @@ services:
     depends_on:
       orch-db:
         condition: service_completed_successfully
-      server:
+      api:
         condition: service_started
     # The same port inside and out: the worker fetches piece bundles from the
     # app's own public URL (AP_FRONTEND_URL), so that URL has to resolve inside
@@ -73,8 +73,8 @@ services:
       AP_PIECES_SYNC_MODE: ${ORCH_AP_PIECES_SYNC_MODE:-OFFICIAL_AUTO}
     volumes:
       - activepieces-cache:/usr/src/app/cache
-    # Its database on the brain's Postgres, on `data`; the brain's server
-    # (`server:8000`) and its own port on `egress`, as n8n's (SMD-2583).
+    # Its database on the brain's Postgres, on `data`; the brain's REST core
+    # (`api:8000`, SMD-2295) and its own port on `egress`, as n8n's (SMD-2583).
     networks: [data, egress]
 
 volumes:

@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2982 assertions: 2982 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and seven (107) migrations applied, and
+`bun test-schema.ts` prints `2992 assertions: 2992 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and eight (108) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -534,7 +534,7 @@ server — which cannot import a `db/` script, and whose PostgREST store (retire
 in SMD-3152) reached only RPCs — could not share them. Five functions, all `LANGUAGE sql`, SECURITY
 INVOKER, no SET, not STRICT, so a caller's planner inlines them:
 `node_lifecycle_types()` and `node_settled_types()` (the six status types this
-schema knows, and the two that settle a node — seven and three since 105);
+schema knows, and the two that settle a node — `duplicate` in both since 105);
 `node_lifecycle()` (per thought: status, status_type, the source watermark
 `synced_at` and `created_at` — a row carrying `ticket` or `issue` reads its
 ticket's head; it read `thoughts` alone until 068 stored the heads);
@@ -1004,7 +1004,8 @@ transaction, upgraded the lock and deadlocked bucket-mates ten times in ten. REP
 every status move between known and unknown (a source row's delete and a
 re-record that changes nothing run; the delete raises 40001 if its thought's
 status moved since the snapshot). `ob1_rebuild_source_gate()` repairs the mirror after a write made with
-triggers disabled, and `ob1_node_projection_drift()` gains a `source_gate` arm.
+triggers disabled, and `ob1_node_projection_drift()` gains a `source_gate` arm
+(a status-set change runs 108's keyed form, not the full rebuild).
 `node_dependencies()` keeps its rows and tests each link's system against the
 gating systems, read once per call, instead of grouping every source row with
 its thought. `source_thought()` keeps its
@@ -1926,6 +1927,56 @@ the rows above counted and not the depth, a raw cycle, an accepted row),
 test-live [16] (past the cap `--list` flags nothing and the guard refuses
 the taking), test-upgrade [20ay], test-server [16l].
 
+Migration 108 adds a keyed rebuild of 071's gate mirror for a status-set change
+(SMD-3160): `ob1_rebuild_source_gate_for_types(text[])`. 071 asked a migration
+that changes `node_lifecycle_types()` to run the full
+`ob1_rebuild_source_gate()`, which joins every source row to its thought under
+SHARE locks on `thoughts` and `thought_sources`, so writes wait for as long as
+that takes — 26 ms at 10,000 source rows, 3.3–4.4 s at a million (105, SMD-2935
+review pass 5), an hour or so at the 1B horizon if it stays linear — though a
+change moves only the rows of the types it adds or drops. The keyed form takes
+the same locks after the same READ COMMITTED refusal, finds the sourced thoughts
+whose `status_type` is one of the types given, each type once (a probe of 001's
+GIN index on `thoughts.metadata` per type; a type held by a large share of rows
+is scanned, at about the full rebuild's cost), and reconciles those alone with
+071's `ob1_source_gate_reconcile(ids)`, returning what it wrote and deleted; an
+empty, NULL or all-NULL array touches nothing and takes no lock. No advisory
+lock: SHARE holds off every writer whose triggers could touch the mirror, as the
+full rebuild relies on. At a million source rows a capture waited 1.39 s behind
+it against 8.9 s behind the full rebuild with 21,212 rows of the type, 29 ms
+against 6.2 s with 16, on a host busier than SMD-2935 pass 5's (the ratio is
+what holds). The full rebuild stays for repair after a write with triggers
+disabled, and its comment now names the keyed form; 071's own header is not
+edited. 108 also adds `ob1_refresh_set_readers()`, 105's `DO $touch$` block as a
+call: it alters each of the brain's own functions that name a set to the
+volatility it has, dropping every session's plans built on it, and returns how
+many — without it a pooled session, 071's gate triggers among them, keeps the
+old set, and `drift()` itself reads the old set there (12 phantom rows in a
+warmed session, review pass 3). A migration that changes
+`node_lifecycle_types()` runs, after the change, the lines `SELECT
+ob1_refresh_set_readers();` and `SELECT * FROM
+ob1_rebuild_source_gate_for_types('{<each type it adds or drops>}');`; a change
+to `node_settled_types()` alone runs only the first. Check 39 of
+`scripts/check-fork-consistency.ts` holds both for a lifecycle change and the
+first for a settled one. It reads canonical forms only, with every literal's
+inside blanked: each definition of a set anywhere in the file — a string, a
+body, a qualified name or a `RENAME TO` included — must be a line starting
+`CREATE OR REPLACE FUNCTION node_lifecycle_types()` (or `node_settled_types()`)
+whose body is exactly `SELECT '{…}'::text[]` (or a plpgsql `BEGIN RETURN
+'{…}'::text[]; END`), and the calls lines after the last one outside any
+literal; anything else is reported. Each set's comment says how to list every
+copy that follows it by hand — they all name canceled or unstarted, so `git grep
+-nwE 'canceled|unstarted' -- ':!db/migrations' ':!changes' ':!CHANGELOG.md'
+':!integrations'` finds them, the tests that pin them among them — and which the
+code reads; no sentence counts the types any more. [94] and test-live [41],
+which re-apply 105, put the shipped sets back after. Refuses by name without
+071; a re-apply is a no-op. test-schema [96] (a set change simulated each way:
+the moved type's rows fixed, an unrelated drift left for the full rebuild;
+empty, NULL, all-NULL and repeated types; the READ COMMITTED refusal; the
+refresh altering every reader), test-upgrade [20az] (onto a populated brain; a
+status write and a source-row write wait for it; a set change run by the recipe
+reaches a warmed session).
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -2069,14 +2120,11 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `professional_contacts`, `contact_interactions`, `opportunities` (extensions/professional-crm) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `family_members`, `activities`, `important_dates` (extensions/family-calendar — upstream's file carried no RLS and no grant; listed so the whole path is one grant) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `companies`, `job_postings`, `applications`, `interviews`, `job_contacts` (extensions/job-hunt) | `SELECT, INSERT, UPDATE, DELETE` |
-| **recipes** — the nine recipe SQL files a brain applies as a schema (tables or views; `CONTRIB_SCHEMA_FILES` in `db/test-support.ts`), applied by hand as each README says (SMD-1810). Upstream granted most of these to `service_role` (adaptive-capture's four to `authenticated`; lint-sweep's views nothing), enabled RLS on most with policies on `auth.uid()`, and `REVOKE`d ob-graph's three functions from `anon` and `authenticated`; all cut, the REVOKEs too (none is SECURITY DEFINER, and there is no PostgREST here to expose them), so EXECUTE stays PUBLIC's and no function row is needed. Every id is a `uuid` or text: no sequences. The privileges are upstream's own for its roles | `correction_learnings`, `classification_outcomes`, `capture_thresholds`, `ab_comparisons` (recipes/adaptive-capture-classification — upstream's three privileges to its API role, kept; the recipe deletes nothing) | `SELECT, INSERT, UPDATE` |
+| **recipes** — the six recipe SQL files a brain applies as a schema (tables or views; `CONTRIB_SCHEMA_FILES` in `db/test-support.ts`), applied by hand as each README says (SMD-1810). Upstream granted most of these to `service_role` (adaptive-capture's four to `authenticated`; lint-sweep's views nothing), enabled RLS on most with policies on `auth.uid()`; all cut. No function is `REVOKE`d from PUBLIC (none is SECURITY DEFINER, and there is no PostgREST here to expose one), so EXECUTE stays PUBLIC's and no function row is needed; ob-graph, repo-learning-coach and work-operating-model-activation retired (SMD-2920, SMD-2923). Every id is a `uuid` or text: no sequences. The privileges are upstream's own for its roles | `correction_learnings`, `classification_outcomes`, `capture_thresholds`, `ab_comparisons` (recipes/adaptive-capture-classification — upstream's three privileges to its API role, kept; the recipe deletes nothing) | `SELECT, INSERT, UPDATE` |
 | | views `ops_source_volume_24h`, `ops_recent_thoughts`, `ops_enrichment_gaps`, `ops_type_distribution`, `ops_sensitivity_distribution`, `ops_ingestion_summary`, `ops_stalled_entity_queue`, `ops_graph_coverage` (recipes/brain-health-monitoring, its `ops-views.sql`; the last three exist only where smart-ingest and entity-extraction are applied, and are skipped until then) | `SELECT` |
 | | `chatgpt_conversations` (recipes/chatgpt-conversation-import; `user_id` is a plain nullable `uuid` now — upstream's referenced `auth.users`) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `life_engine_habits`, `life_engine_habit_log`, `life_engine_checkins`, `life_engine_briefings`, `life_engine_evolution`, `life_engine_state` (recipes/life-engine) | `SELECT, INSERT, UPDATE, DELETE` |
 | | views `lint_orphans_by_tag`, `lint_over_tagged`, `lint_empty_content`, `lint_very_long`, `lint_low_signal`, `lint_exact_duplicates`, `lint_high_importance_isolated` (recipes/lint-sweep, its `views.sql`; the last two are guarded on `content_fingerprint` and `thought_entities`, both the migrations', so all seven exist on a migrated brain) | `SELECT` |
-| | `graph_nodes`, `graph_edges` (recipes/ob-graph) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `repo_learning_projects`, `repo_learning_research_documents`, `repo_learning_tracks`, `repo_learning_lessons`, `repo_learning_quizzes`, `repo_learning_quiz_questions`, `repo_learning_lesson_progress`, `repo_learning_quiz_attempts`, `repo_learning_quiz_responses`, `repo_learning_lesson_comments` (recipes/repo-learning-coach) | `SELECT, INSERT, UPDATE, DELETE` |
-| | `operating_model_profiles`, `operating_model_sessions`, `operating_model_layer_checkpoints`, `operating_model_entries`, `operating_model_exports` (recipes/work-operating-model-activation; its three functions keep PUBLIC's EXECUTE — upstream only granted them to its service role) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `world_model_assessments`, `world_model_boundary_flows` (recipes/world-model-diagnostic-activation, its `schema-v2-draft.sql` — a draft its README's V1 does not apply; listed so applying it is one `--grant` away) | `SELECT, INSERT, UPDATE, DELETE` |
 
 Plus `USAGE ON SCHEMA public`, and the right to create a temp table:
@@ -3054,7 +3102,7 @@ and is unchanged by it. The JSON's `options` gains `decayBlocked: false`.
 `ingest-records.ts --items` writes `blocks` / `blocked_by` for any system, and
 both flags read them. A blocker is settled by its row's lifecycle, which a row
 of another system has only if its source stated one (an items file, in
-`facets.status_type`, one of the seven types). So a system gates only when some
+`facets.status_type`, one of the known types). So a system gates only when some
 source row of it states a known status_type in its own metadata — a status a row
 borrows through a Linear ticket claim does not count — and is then read exactly
 as the board is, an unknown blocker blocking. A system that states none cannot
@@ -3273,7 +3321,28 @@ tier gives each pair's verdict, not the judge:
   backticks, brackets, escapes' backslashes, underscores at a word's edge and
   a `#` or `>` run opening a word go (not `#433`, whose hashes need a space,
   nor `>=`), an inline link keeps its text and loses its target, and struck text goes with its `~~`, read as withdrawn.
-- **Version 3 is the pass's** (`@p4d3`): version 1's writer, SMD-3114's,
+- **Version 4 is the pass's** (`@p4d4`, SMD-3203): version 3, with the
+  writer's **link step**, the mediated-pair test's step 2
+  (`docs/subject-anchored-claims.md`, version 2, embedded in the pass and held
+  equal to the ADR's by `evals/eval-mediated-pairs.ts --self-check`):
+  - **When:** first on the tier's outdates at the floor, before any proposal
+    is written, and after on a pair the pass would store as evolves (its
+    relation words' mass at the floor).
+  - **The cap:** an H link (one thought's own subject named in passing by the
+    other), an F link (both mention a third subject that is neither's own),
+    or an answer naming none of the four caps the pair: related at most, and
+    no supersession (the ADR's rows 2 and 3). An evolves or a duplicate,
+    whether the tier's verdict or the best a capped outdates takes, becomes
+    related at the tier's P(related), floored on the relation words' mass as
+    any relation is. A related or unrelated verdict stands (an unrelated
+    after the tier's outdates records no distinct, as before). A D or N link
+    leaves the pair to version 3's rules.
+  - **Measured:** SMD-3203 measured the step at κ 0.64 on mediated or not
+    against two raters' agreed labels, at a median 14.3 s of the 27B a pair.
+  - **Reported:** the run's summary counts its calls and the pairs it capped,
+    a dump line carries its link, and a stale proposal settled on a capped
+    pair says so.
+- **Version 3** (`@p4d3`): version 1's writer, SMD-3114's,
   two-sided with the part rule, its quotes read without markdown and asked
   only at the floor (SMD-3151). The writer quotes the words it reads, and on
   SMD-3116's writer test the check refused 11 of the 18 proposals it wrote on
@@ -3298,8 +3367,9 @@ tier gives each pair's verdict, not the judge:
 - **Gating:** both rows are gated for both endpoints before any request.
 - **The key** is `consolidate:<decider>+<writer>@p4d<version>`, so turning it
   on, or a new decide version, starts a fresh pass: the tier again for every
-  pooled thought's candidates, and the writer for each outdates at the floor
-  not yet proposed. The canary's `@p4d1` pass took about 6 hours of sleep, at
+  pooled thought's candidates, the link step for each outdates at the floor
+  and each evolves it would store, and the writer for each outdates at the
+  floor not yet proposed that the link step leaves uncapped. The canary's `@p4d1` pass took about 6 hours of sleep, at
   about 3.8 s a pair.
 - **Refused at start:** the run refuses without `OB1_JEV_BASE_URL`, or with
   `OB1_JEV_MODEL` naming another model.
@@ -3310,7 +3380,8 @@ tier gives each pair's verdict, not the judge:
   `decide_version` and decide mode's prompt hash, and its recipe carries what
   the tier and the writer said (`judged.decide`): since version 3 both of the
   writer's quotes, so a proposal can be checked again under another quote
-  rule, and the floor when the writer was not asked.
+  rule, and the floor when the writer was not asked; since version 4 the link
+  step's answer, when it was asked (`judged.decide.link`).
 
 **Staleness**, the same pass's second output: `stale_entities(window)` names
 the entities nothing has mentioned within the window, quietest first, each
@@ -3809,7 +3880,7 @@ asks for a stopped follower's row to be retired, not started again.
 
 **A database not answering at its start** is waited out, as one mid-sleep
 is (SMD-2599's schedule), so the service started beside a restarting Postgres
-spends none of its three restarts. A stop during the wait ends an in-process run (`run({ signal })`) with 130; the CLI installs its signal handlers only after the start's reads, so a signal then ends it at once, as a signal ends any process (143 for the compose service's SIGTERM).
+does not end and wait on its supervisor's clock (SMD-3214). A stop during the wait ends an in-process run (`run({ signal })`) with 130; the CLI installs its signal handlers only after the start's reads, so a signal then ends it at once, as a signal ends any process (143 for the SIGTERM the compose service's supervisor passes on).
 So does each pass's start at every sleep: a follower waits out every statement
 up to its first claim — the tables check, the worker key's lookup, extraction's
 key, 079's check, the relations grants; not an operator's `--retry-*` — where it
@@ -4758,6 +4829,21 @@ row's `updated_at`, the database's `now()`.
 - **`ended`:** the worker's process is gone — `stopped` on a signal or a
   follower's `--limit`, `failed` when the provider refused the request itself or
   a pass threw. Its row says so at once rather than "alive" until it goes stale.
+- **`refused`:** on an ended row, the start refusal that ended it, by kind
+  (db/worker-bootstrap.ts's `START_REFUSALS`): the sleep scheduler's at a
+  pass's start (SMD-2752); since SMD-3214 a claim follower's at its own start
+  under `--follow`, board-sync's under `--loop` — `linear-key`, `board`,
+  `usage`, `egress` — and `db/supervise.ts`'s guard's. Preflight gives the
+  kind's remedy. The scheduler's check, and a pass it drives, end no
+  follower's row: the refusal is the scheduler's.
+- **`restart`:** on an ended row, `db/supervise.ts`'s word — the compose
+  services' command since SMD-3214, which runs the follower again when it ends
+  on its own: `in_s`, the seconds from the row's stamp to the next try (`null`
+  when it holds until the service is recreated: no `OB1_WORKER_KEY`, or a
+  setting that is not digits), `code`, the follower's exit status, and
+  `tries`, the ends in a row — 1, 2, 4, 8, then every 15 minutes. It keeps
+  what the follower wrote last, its `refused` included, and writes a row of
+  its own for one that wrote none. The follower's next stamp replaces it.
 
 A pass is stamped `running` as it starts and every `every_s` while it runs, so
 a follower's first pass over a backlog reads alive, as lease renewal keeps its
@@ -4778,7 +4864,9 @@ the record; the heartbeat still counts.
 `workers` row warns, with a remedy for each — for every heartbeat but the
 sleep scheduler's, which has its own `sleep` row ("Sleep", above):
 - when a heartbeat is older than three of its intervals, or its worker ended
-  (the remedy names the command that starts it again);
+  (the remedy names the command that starts it again) — or, held by its
+  supervisor, the cause, when it tries again on its own, and the recreate a
+  fix in `deploy/.env` needs;
 - when a fresh one's last pass failed;
 - when its last block passed the malformed alarm, which a follower otherwise
   says only on stderr.
@@ -4857,14 +4945,18 @@ row no other row of the group supersedes (the chain is the truth; age is the
 tiebreak), and the group is chained under it by `supersedes` (032): head → next →
 … → last, every differing pointer cleared first and then set, so no step closes a
 loop. A pointer the hand set to a thought outside the group is kept at the chain's
-tail, not erased. So a ticket moved back to a state an older paste recorded costs
-no model call: that paste becomes the head and its facets are patched. Nothing is
-deleted; the head's own write lands first, and a pointer the database refuses
-(a hand-set chain through an outside thought that loops back) is reported under
-*chain refusals*, never a reason the text did not land. When none of the ticket's
-rows holds Linear's text but another thought does, that thought is read: one
-that reads as this ticket, or as no ticket at all (a paste made after the row was
-adopted, with or without the header the grammar reads), is folded in as the head
+tail, not erased — except a capture-only key's: 082's lapse clears it only on the
+row its capture wrote it on, so it is never moved to another row. It stays put
+when its row is the tail (ahead of another row's outside pointer, then dropped)
+and is otherwise dropped, the pass saying so; a refused chain does not write it
+back either (SMD-2670). So a ticket moved back to a state an older paste
+recorded costs no model call: that paste becomes the head and its facets are
+patched. Nothing is deleted; the head's own write lands first, and a pointer the
+database refuses (a hand-set chain through an outside thought that loops back)
+is reported under *chain refusals*, never a reason the text did not land. When
+none of the ticket's rows holds Linear's text but another thought does, that
+thought is read: one that reads as this ticket, or as no ticket at all (a paste
+made after the row was adopted, with or without the header the grammar reads), is folded in as the head
 and chained; a text under ANOTHER ticket's claim is an outside holder, refused
 before any model call and never re-keyed — the facets are patched without
 `linear_updated_at` and `text_refused_by` names it, once, so the ticket stays
@@ -5168,12 +5260,12 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2982 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1494 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 896 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 85 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+bun test-schema.ts                          # 2992 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1529 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 910 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 86 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 239 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 259 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

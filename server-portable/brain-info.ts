@@ -207,8 +207,21 @@ export interface WorkerHeartbeat {
    * while none is, and for board-sync.
    */
   waitingMidPass?: ("extract" | "consolidate")[];
-  /** The start refusal that ended the sleep scheduler, one of db/worker-bootstrap.ts's START_REFUSALS (SMD-2752); absent otherwise, and for the other workers. */
+  /**
+   * The start refusal that ended the row, one of db/worker-bootstrap.ts's
+   * START_REFUSALS: the sleep scheduler's at a pass's start (SMD-2752), or
+   * db/supervise.ts's guard holding any compose follower (SMD-3214). Absent
+   * otherwise.
+   */
   refused?: SleepRefusal;
+  /**
+   * db/supervise.ts's word on an ended row (SMD-3214): it runs the follower
+   * again on its own `inS` seconds after the row's stamp — null: not until
+   * the service is recreated, its guard refusing the environment — the
+   * follower having exited `code`, the `tries`th end in a row. Absent from a
+   * row no supervisor ended.
+   */
+  restart?: { inS: number | null; code: number; tries: number };
   /**
    * The thoughts extraction holds back across the sleep scheduler's wakes —
    * pending or in flight with a hard stop counted on them (migration 093,
@@ -295,11 +308,13 @@ function parseHeld(h: unknown): SleepHeld | undefined {
 }
 
 /**
- * db/worker-bootstrap.ts's START_REFUSALS, which a sleep row's `refused`
- * must be one of: kept here, as server-portable reads no db/ module, and
- * held equal to it by test-live [38].
+ * db/worker-bootstrap.ts's START_REFUSALS, which a row's `refused` must be
+ * one of — the sleep scheduler's (SMD-2752), and since SMD-3214 any
+ * follower's: a claim worker's or board-sync's at its start, or
+ * db/supervise.ts's guard: kept here, as server-portable reads no db/
+ * module, and held equal to it by test-live [38].
  */
-export const SLEEP_REFUSALS = ["usage", "egress", "tables", "model", "provider", "identity", "key", "lookup"] as const;
+export const SLEEP_REFUSALS = ["usage", "egress", "tables", "model", "provider", "identity", "key", "lookup", "linear-key", "board"] as const;
 export type SleepRefusal = (typeof SLEEP_REFUSALS)[number];
 
 /** A heartbeat older than this many of its own intervals is stale. */
@@ -386,7 +401,12 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
         && mid.every((p) => p === "extract" || p === "consolidate") && (worker === "sleep" || (mid.length === 1 && mid[0] === worker))
       ? (mid as ("extract" | "consolidate")[])
       : undefined;
-    const refused = worker === "sleep" && typeof v!.refused === "string" && (SLEEP_REFUSALS as readonly string[]).includes(v!.refused) ? (v!.refused as SleepRefusal) : undefined;
+    const refused = typeof v!.refused === "string" && (SLEEP_REFUSALS as readonly string[]).includes(v!.refused) ? (v!.refused as SleepRefusal) : undefined;
+    // The supervisor's next try (SMD-3214), on an ended row alone and left off when not of the shape.
+    const re = v!.ended === true ? (v!.restart as Record<string, unknown> | undefined) : undefined;
+    const restart = re !== null && typeof re === "object" && (re.in_s === null || count(re.in_s, 86_400)) && count(re.code, 255) && count(re.tries)
+      ? { inS: re.in_s as number | null, code: re.code as number, tries: re.tries as number }
+      : undefined;
     // The thoughts its wakes hold back (SMD-2694), left off when not of the shape.
     const held = worker === "sleep" ? parseHeld(v!.held) : undefined;
     // Its budget and the sleeps stopped on it (SMD-2679), left off when not of the shape.
@@ -408,6 +428,7 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ...(waiting ? { waiting } : {}),
       ...(waitingMidPass ? { waitingMidPass } : {}),
       ...(refused ? { refused } : {}),
+      ...(restart ? { restart } : {}),
       ...(held ? { held } : {}),
       ...(budget ? { budget } : {}),
       // Only on a live row: a scheduler killed while it waited leaves it, and speaks for nothing (review pass 2).
@@ -1350,13 +1371,42 @@ export function ago(s: number): string {
   return s < 90 ? `${Math.round(s)} s` : s < 90 * 60 ? `${Math.round(s / 60)} min` : s < 48 * 3600 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} d`;
 }
 
+/**
+ * How long past its supervisor's next try a row may stay unstamped before
+ * the supervisor is taken for gone: db/supervise.ts's longest wait, 15 min —
+ * a follower's start stamps nothing until its first pass, and may wait out
+ * the provider first (SMD-3214).
+ */
+export const RESTART_OVERDUE_S = 900;
+
+/**
+ * db/supervise.ts's word on an ended row, as a reader acts on it (SMD-3214):
+ * held until a recreate, the next try's time, or that try begun and not yet
+ * stamped. Null for a row no supervisor ended.
+ */
+export function restartWords(h: WorkerHeartbeat): string | null {
+  const r = h.restart;
+  if (!r) return null;
+  const why = h.refused ? `refused (${h.refused})` : `exited ${r.code}`;
+  if (r.inS === null) return `held: ${why} — its supervisor runs it again only once the service is recreated`;
+  const left = r.inS - h.ageS;
+  return left > 0
+    ? `held: ${why}, ${r.tries} end(s) in a row — its supervisor runs it again in ${ago(left)}`
+    : `held: ${why}, ${r.tries} end(s) in a row — its supervisor ran it again ${ago(-left)} ago, and it has not stamped since`;
+}
+
 /** One heartbeat's state in a few words: what a reader acts on first. */
 export function heartbeatState(h: WorkerHeartbeat): string {
   const alarm = h.malformed?.alarm ? `; ${h.malformed.bad} of its last ${h.malformed.answers} answers malformed` : "";
   const when = `last stamped ${ago(h.ageS)} ago, every ${h.everyS} s${alarm}`;
+  // Ended, and run again on its own by db/supervise.ts (SMD-3214): not stopped.
+  const held = restartWords(h);
+  if (held !== null) return `${held} (${when})`;
   // A worker that said it ended is stopped, fresh or not (review pass 1: it
-  // read "alive"); one that ended on a failure says so (review pass 2).
-  if (h.ended) return `${h.outcome === "failed" ? "ended on a failure" : "stopped"} (${when})`;
+  // read "alive"); one that ended on a failure says so (review pass 2), and a
+  // follower's start refusal by its kind (SMD-3214) — the sleep scheduler's
+  // row says its own in preflight's words, "at a pass's start".
+  if (h.ended) return `${h.outcome === "failed" ? `ended on a failure${h.refused && h.worker !== "sleep" ? `, refused at its start (${h.refused})` : ""}` : "stopped"} (${when})`;
   if (h.stale) return `stale (${when}${h.outcome === "failed" ? ", its last pass failed" : ""})`;
   // Running says so, and a failed last pass still shows: a follower against a
   // down provider spends most of each pass in its pauses (review pass 3).
@@ -1441,7 +1491,17 @@ export function findingsLine(db: Pick<DatabaseSummary, "findings" | "unread">): 
 
 /** The record as the tool's short table: one fact per line, a label and a value. */
 export function renderBrainInfo(info: BrainInfo): string {
-  const row = (label: string, value: string) => `${`${label}:`.padEnd(16)} ${value}`;
+  return brainInfoRows(info).map(([label, value]) => `${`${label}:`.padEnd(16)} ${value}`).join("\n");
+}
+
+/**
+ * The record's facts as [label, value] rows, in the tool's order and words:
+ * the one wording of each judgement (ledger current or behind, a worker's
+ * state, the proposal queue, a size), which the operator GUI renders as a
+ * table of its own (SMD-2280) and renderBrainInfo lays out as text.
+ */
+export function brainInfoRows(info: BrainInfo): [label: string, value: string][] {
+  const row = (label: string, value: string): [string, string] => [label, value];
   const tail = info.unreleased ? `; this tree adds ${info.unreleased[0] === info.unreleased[1] ? pad3(info.unreleased[0]) : `${pad3(info.unreleased[0])}–${pad3(info.unreleased[1])}`}, unreleased` : "";
   const release = info.releaseRange ? `release range ${pad3(info.releaseRange[0])}–${pad3(info.releaseRange[1])}${tail}` : "no release range recorded";
   const lines = [
@@ -1453,7 +1513,7 @@ export function renderBrainInfo(info: BrainInfo): string {
   const db = info.database;
   if ("error" in db) {
     lines.push(row("Database", `unavailable — ${db.error}`));
-    return lines.join("\n");
+    return lines;
   }
   const counts = db.counts;
   // A count is null when its table is absent (no entry in unread) or its read did not answer.
@@ -1500,5 +1560,5 @@ export function renderBrainInfo(info: BrainInfo): string {
   const unread = Object.entries(db.unread);
   // A deadline's message is its words; every other reason adds the database's.
   if (unread.length) lines.push(row("Not read", unread.map(([k, u]) => `${k} — ${unreadWords(u)}${u.reason === "deadline" ? "" : `: ${u.message}`}`).join("; ")));
-  return lines.join("\n");
+  return lines;
 }

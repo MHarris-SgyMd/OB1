@@ -11,10 +11,11 @@
  * cases need DATABASE_URL; without one they are skipped, not silently passed.
  *
  * CI runs this suite beside db/test-upgrade.ts, each in its own database of one
- * Postgres, as the same role (SMD-2219). What the cluster shares — a role and
- * its settings, pg_locks, pg_stat_activity — is scoped here to the current
- * database, or named for this suite (ob1_pf_capture, pf_reader, pf_nologin,
- * pf_stray_reader, "pf reader's").
+ * Postgres, as the same role (SMD-2219), a Postgres the two have to themselves
+ * while the data-layer job's other suites run (SMD-3195). What the cluster
+ * shares — a role and its settings, pg_locks, pg_stat_activity — is scoped
+ * here to the current database, or named for this suite (pf_*,
+ * ob1_pf_capture, "pf reader's").
  */
 
 import { join, dirname } from "node:path";
@@ -3635,7 +3636,7 @@ else {
     assert(/✓\s+workers\s+board-sync alive \(last stamped 2 min ago, every 300 s\); extract:qwen2\.5:7b@p2 running a pass \(last stamped 30 s ago, every 60 s\)$/m.test(fresh.out),
       `fresh heartbeats read ok, each named with its age and interval (${row(fresh.out, "workers")})`);
 
-    // board-sync's container gone, its restarts used up: 16 minutes against a 5-minute interval, its last pass ok.
+    // board-sync's container gone: 16 minutes against a 5-minute interval, its last pass ok.
     await beat("heartbeat:board-sync", v(), 960);
     const stale = await run(SQL_ENV);
     const staleJson = JSON.parse((await run(SQL_ENV, "--json")).out) as { ok: boolean; checks: { name: string; status: string }[] };
@@ -3688,6 +3689,41 @@ else {
     assert(/!\s+workers\s+extract:qwen2\.5:7b@p2 waiting for the provider mid-pass, its last pass failed \(last stamped 10 s ago, every 60 s\)$/.test(row(followWaitOut.out, "workers"))
            && /extract:qwen2\.5:7b@p2 waits for the provider mid-pass — it stopped answering: check it/.test(fix(followWaitOut.out, "workers")),
       `a follower waiting mid-pass for its provider says so in the workers row, the fix naming the provider (${row(followWaitOut.out, "workers")} | ${fix(followWaitOut.out, "workers")})`);
+
+    // Held by db/supervise.ts (SMD-3214): ended, with its next try. The row
+    // says held, the exit and when; the fix the cause — "its log says which"
+    // with no kind on the row — when it tries again on its own, and the
+    // recreate a fix in deploy/.env needs; never "start it again".
+    await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "failed", ended: true, restart: { in_s: 110, code: 2, tries: 2 } }), 30);
+    const heldOut = await run(SQL_ENV);
+    assert(/!\s+workers\s+extract:qwen2\.5:7b@p2 held: exited 2, 2 end\(s\) in a row — its supervisor runs it again in 80 s \(last stamped 30 s ago, every 60 s\)$/.test(row(heldOut.out, "workers"))
+           && /extract:qwen2\.5:7b@p2 is held: a refusal — its log says which\. Its supervisor runs it again on its own in 80 s, then every 15 min at most while it keeps ending, so a fix outside deploy\/\.env \(a model pulled, the migrations applied\) is met at a try; one in deploy\/\.env needs the service recreated — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract/.test(fix(heldOut.out, "workers"))
+           && !/start it again/.test(fix(heldOut.out, "workers")),
+      `a held follower reads held with its next try, and its fix gives the cause and the recreate, not "start it again" (${row(heldOut.out, "workers")} | ${fix(heldOut.out, "workers")})`);
+    // Its guard's refusal: no next try, the kind's remedy and the recreate it waits for.
+    await beat("heartbeat:board-sync", v({ outcome: "failed", ended: true, every_s: 60, refused: "usage", restart: { in_s: null, code: 2, tries: 0 } }), 10);
+    const guardFix = fix((await run(SQL_ENV)).out, "workers");
+    assert(/board-sync is held by its supervisor, never started: a setting its log names is not one the service takes — decimal digits, in its range .*set it in deploy\/\.env, then recreate the service.*That is deploy\/\.env's to mend, so recreate it then — podman compose -f deploy\/compose\.yaml --profile board-sync up -d --no-deps board-sync/.test(guardFix),
+      `a follower its guard holds gives the kind's remedy and the recreate (${guardFix})`);
+    // Long past its try with nothing stamped: the supervisor is taken for gone, the start and the retire named.
+    await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
+    await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "failed", ended: true, restart: { in_s: 60, code: 1, tries: 1 } }), 1260);
+    const goneFix = fix((await run(SQL_ENV)).out, "workers");
+    assert(/extract:qwen2\.5:7b@p2's supervisor was due to run it again 20 min ago, and nothing has stamped since: if its container is gone, start it — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract.*Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2'\./.test(goneFix),
+      `a held row long past its try names the start and the retire (${goneFix})`);
+    // Ended on its start's refusal with no supervisor's word (a run from a
+    // checkout): the kind and its remedy, then the start (SMD-3214 PR 2).
+    await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "failed", ended: true, refused: "model" }), 40);
+    const refusedRun = await run(SQL_ENV);
+    assert(/!\s+workers\s+extract:qwen2\.5:7b@p2 ended on a failure, refused at its start \(model\) \(last stamped 40 s ago, every 60 s\)$/.test(row(refusedRun.out, "workers"))
+           && /extract:qwen2\.5:7b@p2 ended 40 s ago on its start's refusal \(model\): pull the model its log names.*Then start it again — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract.*; started before that, it refuses again\./.test(fix(refusedRun.out, "workers")),
+      `a follower ended on its start's refusal names the kind and its remedy before the start (${row(refusedRun.out, "workers")} | ${fix(refusedRun.out, "workers")})`);
+    await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract:%'`;
+    await beat("heartbeat:board-sync", v({ every_s: 300, outcome: "failed", ended: true, refused: "board" }), 20);
+    const boardFix = fix((await run(SQL_ENV)).out, "workers");
+    assert(/board-sync ended 20 s ago on its start's refusal \(board\): OB1_LINEAR_INITIATIVE \(unset: "Open Brain"\) must name exactly one Linear initiative/.test(boardFix),
+      `board-sync's own refusal kind gives its remedy (${boardFix})`);
+    await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
 
     // The sleep scheduler's own row (SMD-2678): its heartbeat leaves the
     // workers row; the row says asleep or awake with its last sleep, and what
@@ -3867,6 +3903,19 @@ else {
       // Ended on a failure with no refusal named (an older scheduler, a thrown pass): "start it again", as before.
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, slept: { from: await at(900), to: await at(700) } }), 30);
       assert(/→ sleep ended on a failure 30 s ago — its log says why: start it again —/.test(fix((await run(LOG_ON)).out, "sleep")), "with no refusal on the row, an ended scheduler is told to start again, as before");
+      // Held by its supervisor (SMD-3214), refused at a pass's start: held, the
+      // kind and the next try said once, by the supervisor's words; the fix
+      // the kind's remedy and the recreate, never "start it again".
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, refused: "model", restart: { in_s: 240, code: 2, tries: 3 }, slept: { from: await at(900), to: await at(700) } }), 30);
+      const heldSleep = await run(LOG_ON);
+      assert(/!\s+sleep\s+held: refused \(model\), 3 end\(s\) in a row — its supervisor runs it again in 4 min \(last stamped 30 s ago, every 60 s\); its last sleep ended/.test(row(heldSleep.out, "sleep")) && !/refused at a pass's start/.test(row(heldSleep.out, "sleep"))
+             && /→ sleep is held: pull the model its log names.*Its supervisor runs it again on its own in 4 min.* — podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep/.test(fix(heldSleep.out, "sleep")) && !/start it again/.test(fix(heldSleep.out, "sleep")),
+        `a scheduler its supervisor holds reads held, with the kind's remedy and its next try (${row(heldSleep.out, "sleep")} | ${fix(heldSleep.out, "sleep")})`);
+      // Its guard: no worker key, held until a recreate.
+      await beat("heartbeat:sleep", v({ every_s: 60, outcome: "failed", ended: true, refused: "identity", restart: { in_s: null, code: 2, tries: 0 } }), 10);
+      const guardSleep = fix((await run(LOG_ON)).out, "sleep");
+      assert(/→ sleep is held by its supervisor, never started: an unset OB1_WORKER_KEY needs a key minted .*That is deploy\/\.env's to mend, so recreate it then — podman compose -f deploy\/compose\.yaml --profile sleep up -d --no-deps sleep/.test(guardSleep),
+        `a scheduler held for want of a worker key names the key's remedy and the recreate (${guardSleep})`);
       // Killed while asleep: the sleep never ended, so the row says when it began.
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, slept: { from: await at(900), to: null } }), 600);
       assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last sleep began 15 min ago;/.test(row((await run(LOG_ON)).out, "sleep")), "a scheduler gone stale mid-sleep says when that sleep began");

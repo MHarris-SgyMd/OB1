@@ -604,7 +604,7 @@ extensions/test-auth.ts          # change 64 (new file — the seven servers und
 extensions/package.json          # change 64 (new file — test deps pinned to the extensions' deno.json; since SMD-1800 the pin the other two installs are held to)
 extensions/bun.lock              # change 64 (new file)
 <17 vendored files>              # change 67 (thirteen servers and samples onto scoped keys through _shared/auth.ts; four onto a timing-safe compare, one through the same module)
-recipes/_shared/auth.ts          # change 67 (new file — server-portable/auth.ts byte for byte)
+recipes/_shared/auth.ts          # change 67 (new file — server-portable/auth.ts byte for byte); deleted with ob-graph and work-operating-model-activation by SMD-2920
 recipes/editorial-policy/_shared/auth.ts            # change 67 (new file — the same)
 recipes/edge-function-cost-optimization/examples/_shared/auth.ts  # change 67 (new file — the same); deleted with the recipe by SMD-1800
 integrations/_shared/auth.ts     # change 67 (new file — the same)

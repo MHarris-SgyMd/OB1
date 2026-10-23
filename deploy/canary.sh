@@ -373,7 +373,7 @@ canary_compose() {
   [ ! -f "$CANARY_ENV" ] || env="$CANARY_ENV"
   [ -n "$OWN_KEYS" ] || grep -qE "^[[:space:]]*(export[[:space:]]+)?OB1_FORWARDER_KEY=([^[:space:]#\"']|\"[^\"]|'[^'])" "$env" 2>/dev/null \
     || fwd=(OB1_FORWARDER_KEY=placeholder-until-canary-sh-mints-one)
-  env ${fwd[@]+"${fwd[@]}"} SERVER_PORT="${PORT:-8000}" SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES="" OB1_GIT_SHA="$GIT_SHA" \
+  env ${fwd[@]+"${fwd[@]}"} SERVER_PORT="${PORT:-8000}" SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES="" OB1_PUBLIC_ORIGIN="" OB1_GIT_SHA="$GIT_SHA" \
     "$RUNTIME" compose -p "$CANARY" --env-file "$env" -f "$HERE/compose.yaml" "$@"
 }
 
@@ -396,8 +396,11 @@ canary_compose() {
 CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_[A-Z0-9_]*|OB1_WORKER_KEY|LINEAR_[A-Z0-9_]*|GRAFANA_[A-Z0-9_]*|OB1_MONITOR_[A-Z0-9_]*|MCP_ACCESS_KEYS|MCP_ACCESS_KEY|OB1_FORWARDER_KEY|OB1_HOOK_SECRETS|OB1_PLUGIN_DB_PASSWORD|OB1_CANARY_KEY'
 # What canary_compose sets in the shell for the canary, whatever the file says,
 # so a difference there is no drift. The file is written with the canary's own
-# values of these (env_file write), OB1_GIT_SHA aside, a build's.
-CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_GIT_SHA'
+# values of these (env_file write), OB1_GIT_SHA aside, a build's, and
+# OB1_PUBLIC_ORIGIN, which the canary never has: it is loopback alone and never
+# configured, and stable's origin would have its operator GUI refuse every
+# sign-in on the canary's port as cross-site (SMD-2280 review pass 2).
+CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_PUBLIC_ORIGIN|OB1_GIT_SHA'
 
 # Env files as compose reads them, by value (review pass 2: copying stable's
 # file line by line, less the left-out lines, kept a left-out value's
@@ -422,7 +425,8 @@ CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_GIT_SHA'
 #                               COMPOSE_PROJECT_NAME as the canary's project, so
 #                               the file names its own brain (SMD-2873), and
 #                               CANARY_SET's as the canary's (SERVER_PORT as
-#                               $CANARY_PORT; SMD-2874). A
+#                               $CANARY_PORT; SMD-2874), but OB1_GIT_SHA and
+#                               OB1_PUBLIC_ORIGIN, which get no line. A
 #                               value STABLE builds from the shell (`${X}`),
 #                               which reads otherwise with the shell's
 #                               variables than without, is refused, not
@@ -713,7 +717,7 @@ if mode == "write":
     if built:
         sys.exit("%s in %s take part of their value from the shell (${...}); write the canary'"'"'s file yourself, with the values it should have" % (", ".join(built), stable))
     with os.fdopen(os.open(out, os.O_WRONLY | os.O_TRUNC), "w") as f:
-        f.write("# The canary'"'"'s own env file (deploy/canary.sh, SMD-2583), written by `up`\n# on %s from %s as compose read it: every setting but\n# its database password, port, address, tier and profiles, which are its own,\n# and the other profiles'"'"' secrets.\n# Edit it to carry a change of stable'"'"'s across, or delete it to make it\n# again at the next `up`.\n" % (datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), os.environ["FROM"]))
+        f.write("# The canary'"'"'s own env file (deploy/canary.sh, SMD-2583), written by `up`\n# on %s from %s as compose read it: every setting but\n# its database password, port, address, tier and profiles, which are its own,\n# the public origin, which it has none of, and the other profiles'"'"' secrets.\n# Edit it to carry a change of stable'"'"'s across, or delete it to make it\n# again at the next `up`.\n" % (datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), os.environ["FROM"]))
         for n in cand:
             if not dropped.fullmatch(n) and not set_by_canary.fullmatch(n) and s[n] is not None:
                 f.write("%s=%s\n" % (n, quote(s[n])))
@@ -1391,6 +1395,9 @@ canary_compose up -d --no-deps --force-recreate api
 # image: recreated last, on the build just made and the env file's own
 # OB1_FORWARDER_KEY. It writes nothing, so it was not stopped for the refresh.
 canary_compose up -d --no-deps --force-recreate mcp
+# And the operator GUI at /dashboard (SMD-2280), on the same image for the same
+# reason; it holds only sessions, which a recreate ends.
+canary_compose up -d --no-deps --force-recreate app
 # Its own proxy (SMD-1846) and the forwarder that publishes its port
 # (SMD-2583), left running across a refresh: while the server is stopped the
 # proxy answers 502, and the server's new container is the same name on the
@@ -1414,9 +1421,9 @@ if ! ready; then
   canary_compose logs --no-color --tail 10 proxy forwarder >&2 || true
   # restart: unless-stopped would otherwise restart them without end (hundreds
   # of times a minute under podman), and a registered connector points at them.
-  canary_compose stop server api mcp >/dev/null 2>&1 || true
+  canary_compose stop server api mcp app >/dev/null 2>&1 || true
   ADVISED=1
-  echo "the canary's server, REST core and MCP server are stopped; fix the cause above and re-run $RERUN.$SLEEP_SAID" >&2
+  echo "the canary's server, REST core, MCP server and operator GUI are stopped; fix the cause above and re-run $RERUN.$SLEEP_SAID" >&2
   exit 1
 fi
 
@@ -1548,8 +1555,9 @@ if [ -n "$STOPPED_SLEEP" ]; then
     canary_compose --profile sleep up -d --no-deps --force-recreate sleep
     SLEEP_PENDING=""
   else
-    # Started with no key it exits 2 three times and stays down (on-failure:3),
-    # so it is left stopped and the run says so at its end (SMD-3154).
+    # Started with no key its supervisor holds it, running and sleeping
+    # nothing, until a recreate (SMD-3214), so it is left stopped and the run
+    # says so at its end (SMD-3154).
     SLEEP_LEFT=1
     ADVISED=1
     say "canary sleep worker LEFT STOPPED: $CANARY_ENV holds no OB1_WORKER_KEY (this up cleared stable's) — mint one (cd server-portable && bun keygen.ts --name canary-sleep --scope capture), add its line to MCP_ACCESS_KEYS and the raw key as OB1_WORKER_KEY, then: $SLEEP_START"
