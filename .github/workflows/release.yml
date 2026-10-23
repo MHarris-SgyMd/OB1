@@ -46,13 +46,14 @@ on:
     # What the job builds from, or reads: the two Dockerfiles and what they
     # COPY, the compose files, the manifest, the scripts the job runs or
     # imports, and this file. The server image carries mcp-server/ and
-    # rest-client/ since SMD-2287 PR 5a.
+    # rest-client/ since SMD-2287 PR 5a, and dashboard/ since SMD-2280.
     paths:
       - ".github/workflows/release.yml"
       - "scripts/release-artifacts.ts"
       - "server-portable/**"
       - "mcp-server/**"
       - "rest-client/**"
+      - "dashboard/**"
       - "plugins/**"
       - "scripts/fork-index.ts"
       - "scripts/mechanism-yield.ts"
@@ -89,6 +90,9 @@ jobs:
   release:
     name: Release (images, stack from them, notes)
     runs-on: ubuntu-24.04
+    # A hung build ends here, not at GitHub's six hours (SMD-2280 review pass 2:
+    # a cross-built stage that ran JavaScript under QEMU hung).
+    timeout-minutes: 60
     permissions:
       contents: write   # gh release create
       packages: write   # GHCR
@@ -255,7 +259,8 @@ jobs:
       # two OB1 images with them, which proves the registry serves what was
       # pushed, under the job's token.
       # Since SMD-1875 preflight dials the provider address once (GET /models)
-      # and the container refuses to start when nothing answers, so the same
+      # and the container refuses to start on a name that does not resolve, or
+      # starts degraded where nothing answers yet (SMD-2890), so the same
       # listener the `Full stack, no Supabase` job puts on the runner stands in
       # for the provider here: the runner is the container's host.docker.internal
       # through compose.yaml's extra_hosts host-gateway, bound on every
@@ -294,7 +299,7 @@ jobs:
           # runs the release's image, Ollama's by digest, and the proxy and the
           # forwarder keep compose.yaml's digests (the overlay names neither).
           docker compose -f compose.yaml -f compose.release.yaml --profile local-models config --format json \
-            | jq -e --arg s "$SERVER_IMAGE" --arg m "$MIGRATE_IMAGE" '(.services.server.image | startswith($s)) and .services.server.pull_policy == "missing" and (.services.api.image == .services.server.image) and (.services.mcp.image == .services.server.image) and .services.mcp.pull_policy == "missing" and (.services.migrate.image | startswith($m)) and (.services.ollama.image | test("^ollama/ollama@sha256:")) and (.services.ollama.image == .services["ollama-pull"].image) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.forwarder.image | test("@sha256:[0-9a-f]{64}$"))' >/dev/null
+            | jq -e --arg s "$SERVER_IMAGE" --arg m "$MIGRATE_IMAGE" '(.services.server.image | startswith($s)) and .services.server.pull_policy == "missing" and (.services.api.image == .services.server.image) and (.services.mcp.image == .services.server.image) and .services.mcp.pull_policy == "missing" and (.services.app.image == .services.mcp.image) and .services.app.pull_policy == "missing" and (.services.migrate.image | startswith($m)) and (.services.ollama.image | test("^ollama/ollama@sha256:")) and (.services.ollama.image == .services["ollama-pull"].image) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.forwarder.image | test("@sha256:[0-9a-f]{64}$"))' >/dev/null
           # SMD-2658, SMD-2685: the overlay this run ships changes nothing but
           # the images it pins and their pull policy, on any service but the
           # proxy, as fork-checks' "The proxy loads only the held route tables"

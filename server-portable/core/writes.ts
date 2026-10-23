@@ -6,6 +6,7 @@
 // REST core (SMD-2284) answers it as JSON.
 
 import { providerDown, type EmbedConfig, type EmbeddedCapture } from "../embed.ts";
+import { heardFrom } from "../provider-health.ts";
 import { extractMetadata, metadataRefused, metadataUnavailable, TAG_KEYS } from "../metadata.ts";
 import { captureLineage } from "../lineage.ts";
 import { classifyGenre } from "../genre.ts";
@@ -264,12 +265,18 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // exist nowhere else (SMD-2888). Any other failure — a 4xx, a width
     // mismatch — still fails the capture, so a misconfigured brain says so.
     let vectorFailed: { reason: string; detail: string } | undefined;
+    // The provider's state, as every embedding call tells it (SMD-2890).
+    const embedStarted = performance.now();
     const [embedded, metadata, genre] = await Promise.all([
       gate.embeddings.allowed
-        ? ctx.embedder.embedCapture(content, subject).catch((e: unknown) => {
+        ? ctx.embedder.embedCapture(content, subject).then((v) => {
+            heardFrom(ctx.providerHealth, embedStarted);
+            return v;
+          }, (e: unknown) => {
             const down = providerDown(e);
-            if (!down) throw e;
+            if (!down) { heardFrom(ctx.providerHealth, embedStarted, e); throw e; }
             console.error(`capture: the embedding provider at ${cfg.embeddings.base} was unavailable: ${down.detail}; saved without a vector`);
+            heardFrom(ctx.providerHealth, embedStarted, e);
             vectorFailed = down;
             return undefined;
           })
@@ -581,7 +588,11 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id, conten
   const existing = content !== undefined ? await (await ctx.store()).getThought(id) : null;
   const subject: EgressSubject = { kind: "edit", actor: principal.name, metadata: existing?.metadata ?? { source: "mcp" }, content };
   const gate = content !== undefined ? decideCalls(subject, cfg, cfg.egress) : undefined;
-  const embedded = content !== undefined && gate?.embeddings.allowed ? await ctx.embedder.embedCapture(content, subject) : undefined;
+  // An edit whose provider does not answer is still refused whole; the provider's state hears it either way (SMD-2890, review pass 1).
+  const embedStarted = performance.now();
+  const embedded = content !== undefined && gate?.embeddings.allowed
+    ? await ctx.embedder.embedCapture(content, subject).then((v) => { heardFrom(ctx.providerHealth, embedStarted); return v; }, (e: unknown) => { heardFrom(ctx.providerHealth, embedStarted, e); throw e; })
+    : undefined;
 
   const result = await (await ctx.store()).updateThought({
     id,

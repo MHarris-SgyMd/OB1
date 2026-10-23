@@ -206,10 +206,6 @@ jobs:
         working-directory: server-portable
         run: bun test-jobs.ts
 
-      - name: Typecheck
-        working-directory: server-portable
-        run: bunx tsc --noEmit
-
       # The REST core's client (SMD-2287), which the MCP server and the
       # operator GUI call the brain through: its generated files against the
       # REST core's own document, so a route or a schema changed without
@@ -219,10 +215,6 @@ jobs:
       - name: Install the REST client's pinned packages
         working-directory: rest-client
         run: bun install --frozen-lockfile
-
-      - name: Typecheck the REST client
-        working-directory: rest-client
-        run: bunx tsc --noEmit
 
       - name: The REST client against the REST core
         working-directory: rest-client
@@ -236,9 +228,18 @@ jobs:
         working-directory: mcp-server
         run: bun install --frozen-lockfile
 
-      - name: Typecheck the MCP server
-        working-directory: mcp-server
-        run: bunx tsc --noEmit
+      # SMD-2280: the operator GUI (dashboard/), checked as the image builds
+      # it: svelte-check over its pages and server code, which import the REST
+      # client above and type their answers by server-portable's own types,
+      # both installed by now. The image's dashboard-build stage runs its
+      # `vite build`, and the full-stack job drives it through the proxy.
+      - name: Install the operator GUI's pinned packages
+        working-directory: dashboard
+        run: bun install --frozen-lockfile
+
+      - name: Check the operator GUI
+        working-directory: dashboard
+        run: bun run check
 
       - name: The MCP server over the REST core
         working-directory: mcp-server
@@ -283,17 +284,9 @@ jobs:
         working-directory: db
         run: bun install --frozen-lockfile
 
-      - name: Typecheck the workers, benches and suites
-        working-directory: db
-        run: bunx tsc --noEmit
-
       - name: Install the evals' pinned packages
         working-directory: evals
         run: bun install --frozen-lockfile
-
-      - name: Typecheck the evals
-        working-directory: evals
-        run: bunx tsc --noEmit
 
       # The typed-decision tier (SMD-2050): its serving process under jev/ and
       # the client in server-portable/jev.ts, which the suite imports — so it
@@ -306,10 +299,6 @@ jobs:
       - name: Install the decision tier's pinned packages
         working-directory: jev
         run: bun install --frozen-lockfile
-
-      - name: Typecheck the decision tier
-        working-directory: jev
-        run: bunx tsc --noEmit
 
       - name: Decision tier — contract, service and client
         working-directory: jev
@@ -361,6 +350,15 @@ jobs:
       - name: Proposal writer rules
         working-directory: evals
         run: bun eval-judge-propose.ts --self-check
+
+      # How the pass could ask the mediated-pair test's question (SMD-3203
+      # item 3): row 2's mapping (F-state distinct, the rest of the mediated
+      # capped), both versions' questions (the writer's read word for word from
+      # the ADR's test, pinned by hash), the gold where both raters agree, κ,
+      # the median, the scoring and the bar at its edges. No tier, no model.
+      - name: Mediated-pair rules
+        working-directory: evals
+        run: bun eval-mediated-pairs.ts --self-check
 
       # The projection-replay spike's rules (SMD-1998): the snapshot key per
       # projection, the replay rule branch by branch, the five scenarios on a
@@ -483,9 +481,15 @@ jobs:
         working-directory: deploy/auth
         run: bun install --frozen-lockfile
 
-      - name: Typecheck the authorization server
-        working-directory: deploy/auth
-        run: bunx tsc --noEmit
+      # The job's type-checked directories, side by side (SMD-3202), here
+      # because each needs its own install, before this step, and this follows
+      # the last of them: a tsc in each, its output a log of its own, printed in
+      # the order named, the step failing naming the directory. One after
+      # another they were seven steps, 25–49 s by runner. Check 18 reads each
+      # directory named as a tsc step, and runs the script against a stub to
+      # hold it to that.
+      - name: Typecheck the server, the REST and MCP clients, the workers, the evals, the decision tier and the authorization server
+        run: .github/ci/typecheck.sh server-portable rest-client mcp-server db evals jev deploy/auth
 
       - name: Authorization server rules
         working-directory: deploy/auth
@@ -1046,7 +1050,7 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
-      # Every tool of the eight servers on the SQL shim, called through
+      # Every tool of the seven servers on the SQL shim, called through
       # tools/call against the extensions' own schema.sql files (applied as
       # they are — no auth.* stub and no Supabase role, since SMD-1810, which
       # also stopped test-writes.ts above creating the three roles on this
@@ -1187,22 +1191,32 @@ jobs:
       # Exit 1, the `provider endpoint` row failed, the remedy naming the
       # profile; and the same run with the reachable address (the runner's
       # listener from the first step, still up) passes, so the step proves
-      # the probe and not a broken container.
-      - name: A local endpoint that answers nothing refuses to start
+      # the probe and not a broken container. Since SMD-2890 a resolved name
+      # with nothing answering yet starts degraded, so two more runs hold the
+      # split where it bites, in the image: the container's own loopback still
+      # fails (the maintainer's call — nothing will start there), and the host
+      # alias with nothing on its port warns and exits 0.
+      - name: A local endpoint that cannot answer refuses to start, one not up yet starts degraded
         working-directory: deploy
         run: |
-          set +e
-          docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun -e OB1_LLM_BASE_URL=http://ollama:11434/v1 server preflight.ts > /tmp/negative.out 2>&1
-          CODE=$?
-          set -e
+          pf() { local out=$1; shift; set +e; docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun "$@" server preflight.ts > "$out" 2>&1; CODE=$?; set -e; }
           # The report is printed whole when a line is missing, so a runner
           # whose resolver answers differently is read, not guessed at (the
           # first run read the unknown name as the timeout kind; caught: CI, PR #138).
-          hold() { grep -E "$1" /tmp/negative.out || { echo "--- expected /$1/ in preflight's report: ---" >&2; cat /tmp/negative.out >&2; exit 1; }; }
-          hold '✗ +provider endpoint +nothing answers at http://ollama:11434/v1 — the name does not resolve'
-          hold 'is the local-models profile.*start the stack with --profile local-models'
-          hold 'preflight FAILED'
-          [ "$CODE" -eq 1 ] || { echo "preflight exited $CODE, expected 1" >&2; cat /tmp/negative.out >&2; exit 1; }
+          hold() { grep -E "$2" "$1" || { echo "--- expected /$2/ in preflight's report: ---" >&2; cat "$1" >&2; exit 1; }; }
+          code() { [ "$CODE" -eq "$2" ] || { echo "preflight exited $CODE, expected $2" >&2; cat "$1" >&2; exit 1; }; }
+          pf /tmp/negative.out -e OB1_LLM_BASE_URL=http://ollama:11434/v1
+          hold /tmp/negative.out '✗ +provider endpoint +nothing answers at http://ollama:11434/v1 — the name does not resolve'
+          hold /tmp/negative.out 'is the local-models profile.*start the stack with --profile local-models'
+          hold /tmp/negative.out 'preflight FAILED'
+          code /tmp/negative.out 1
+          pf /tmp/loopback.out -e OB1_LLM_BASE_URL=http://127.0.0.1:11434/v1
+          hold /tmp/loopback.out '✗ +provider endpoint +nothing answers at http://127.0.0.1:11434/v1 — the connection was refused .*this is a container, and 127\.0\.0\.1 in it is the container itself'
+          code /tmp/loopback.out 1
+          pf /tmp/notyet.out -e OB1_LLM_BASE_URL=http://host.docker.internal:1/v1
+          hold /tmp/notyet.out '! +provider endpoint +nothing answers at http://host.docker.internal:1/v1 yet — .*the server starts degraded'
+          hold /tmp/notyet.out 'preflight OK'
+          code /tmp/notyet.out 0
           docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun server preflight.ts | grep -F 'preflight OK'
 
       # SMD-2424, SMD-3214: the workers profile's own command, run for real
@@ -1381,8 +1395,9 @@ jobs:
           # SMD-2210: the orchestration profile adds n8n's one port, also on
           # loopback, with its image pinned by digest. Its import runner
           # (SMD-2212) publishes none. Without a profile a plain config
-          # names exactly the six services it should: SMD-1846 added the proxy,
-          # SMD-2284 the REST core (`api`, the server's image by name), SMD-2583 the forwarder.
+          # names exactly the eight services it should: SMD-1846 added the proxy,
+          # SMD-2284 the REST core (`api`, the server's image by name), SMD-2583 the forwarder,
+          # SMD-2287 the MCP server on it (`mcp`), SMD-2280 the operator GUI (`app`).
           docker compose -f compose.yaml --profile orchestration config --format json \
             | jq -e '([.services[].ports[]?] | length == 2 and all(.host_ip == "127.0.0.1")) and (.services.n8n.image | test("@sha256:[0-9a-f]{64}$")) and (.services["orchestration-runner"] | has("ports") | not)'
           # SMD-2285: the authorization server publishes nothing, joins only
@@ -1426,7 +1441,7 @@ jobs:
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data"]) and .networks.data.internal == true
               and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "pg-exporter", "pg-monitor-role", "postgres", "server", "sleep"])
               and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "server", "sleep"])
-              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "auth", "lgtm", "mcp", "proxy"]) and (on("telemetry") == ["lgtm", "pg-exporter"]) and .networks.telemetry.internal == true
+              and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "app", "auth", "lgtm", "mcp", "proxy"]) and (on("telemetry") == ["lgtm", "pg-exporter"]) and .networks.telemetry.internal == true
               and ([.services | to_entries[] | select((.value.environment // {}) | keys | any(startswith("OTEL_"))) | .key] == ["api", "mcp"])'
           docker compose -f compose.yaml -f compose.host-ports.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data", "postgres-port"]) and (on("postgres-port") == ["postgres"])'
@@ -1460,7 +1475,7 @@ jobs:
           # with them (SMD-3214).
           docker compose -f compose.yaml --profile sleep config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.sleep | (has("ports") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_POLL") and has("OB1_SLEEP_WORKERS") and has("OB1_SLEEP_BUDGET") and has("OB1_SLEEP_STATEMENT_TIMEOUT") and has("OB1_SLEEP_WORK_MEM") and has("OB1_SLEEP_MAINTENANCE_WORK_MEM")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and .command[:14] == ["bun", "db/supervise.ts", "--worker", "sleep", "--require-key", "--digits", "OB1_SLEEP_QUIET", "OB1_SLEEP_POLL", "OB1_SLEEP_WORKERS", "OB1_SLEEP_BUDGET", "OB1_SLEEP_STATEMENT_TIMEOUT", "OB1_SLEEP_WORK_MEM", "OB1_SLEEP_MAINTENANCE_WORK_MEM", "--run"] and (.command | length == 15) and (.command[14] | test("^exec bun db/sleep\\.ts --follow --quiet \"\\$+\\{OB1_SLEEP_QUIET:-300\\}\" --poll \"\\$+\\{OB1_SLEEP_POLL:-5\\}\" --workers \"\\$+\\{OB1_SLEEP_WORKERS:-1\\}\" --budget \"\\$+\\{OB1_SLEEP_BUDGET:-60\\}\" --statement-timeout \"\\$+\\{OB1_SLEEP_STATEMENT_TIMEOUT:-300\\}\" --work-mem \"\\$+\\{OB1_SLEEP_WORK_MEM:-4\\}\" --maintenance-work-mem \"\\$+\\{OB1_SLEEP_MAINTENANCE_WORK_MEM:-64\\}\"$")))'
-          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api forwarder mcp migrate postgres proxy server " ]
+          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api app forwarder mcp migrate postgres proxy server " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'
           # SMD-2287: the MCP server built on the REST core runs the server's
@@ -1505,7 +1520,7 @@ jobs:
           img="$(docker compose -f compose.yaml config --format json | jq -r .services.forwarder.image)"
           want="${img#*oven/bun:}"; want="${want%%[-@]*}"
           [[ "$want" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "the forwarder's image $img names no Bun version" >&2; exit 1; }
-          for s in forwarder server mcp; do
+          for s in forwarder server mcp app; do
             got="$(docker compose -f compose.yaml exec -T "$s" bun --version)"
             echo "$s: Bun $got"
             [ "$got" = "$want" ] || { echo "$s runs Bun $got, not the pinned $want (the forwarder's $img)" >&2; exit 1; }
@@ -1606,9 +1621,10 @@ jobs:
           # are held by "Every published port binds loopback" and by check 13.
           declared() {
             case "$1" in
-              compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml|compose.grafana-public.yaml) ;;
+              compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml) ;;
+              compose.grafana-public.yaml) printf '%s\n' '["services","app","environment","GRAFANA_ROUTE"]' ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' '["services","postgres","networks","postgres-port"]' '["networks","postgres-port"]' ;;
-              compose.grafana-port.yaml) printf '%s\n' '["services","lgtm","ports"]' '["services","lgtm","networks","grafana-port"]' '["services","lgtm","environment","LGTM_ORIGIN"]' '["networks","grafana-port"]' ;;
+              compose.grafana-port.yaml) printf '%s\n' '["services","lgtm","ports"]' '["services","lgtm","networks","grafana-port"]' '["services","lgtm","environment","LGTM_ORIGIN"]' '["services","app","environment","GRAFANA_LINK"]' '["networks","grafana-port"]' ;;
               # The release's: an image and its pull policy, on any service but the proxy and its forwarder (SMD-2583).
               compose.release.yaml) docker compose -f compose.yaml "${profiles[@]}" config --services | while read -r s; do if [ "$s" != proxy ] && [ "$s" != forwarder ]; then printf '["services","%s","image"]\n["services","%s","pull_policy"]\n' "$s" "$s"; fi; done ;;
               *) echo "$1 declares nothing here — give it an OVERLAYS entry in check 28 and its paths in declared()" >&2; return 1 ;;
@@ -1723,6 +1739,12 @@ jobs:
             proxy_loads "[$routes, $hooks]" -f compose.yaml -f compose.release.yaml -f compose.hooks-public.yaml "${profiles[@]}"
             proxy_loads "[$routes, $grafana]" -f compose.yaml -f compose.release.yaml -f compose.grafana-public.yaml "${profiles[@]}"
             proxy_loads "[$routes]" -f compose.yaml -f compose.release.yaml -f compose.grafana-port.yaml "${profiles[@]}"
+            # Every service compose.yaml runs on a local build's image (the
+            # server's, the migrator's, by the project's name) runs the
+            # release's instead, so a service added there is pinned here too
+            # (SMD-2280 review pass 1: the overlay could drop the GUI and pass).
+            left="$(docker compose -f compose.yaml -f compose.release.yaml "${profiles[@]}" config --format json | jq -r '[.services | to_entries[] | select((.value.image // "") | test("^[^/:@]*-(server|migrate)$")) | .key] | join(" ")')"
+            [ -z "$left" ] || { echo "the release overlay ($mode) leaves on a local build's image: $left" >&2; exit 1; }
           done
           files="$(printf '%s\n' * | grep -iE '^((docker|podman|container)-)?compose.*\.ya?ml$' | LC_ALL=C sort -u | tr '\n' ' ')"
           named="$(printf '%s\n' "${rendered[@]}" | LC_ALL=C sort -u | tr '\n' ' ')"
@@ -1803,6 +1825,31 @@ jobs:
         env:
           OB1_SMOKE_COMMIT: ${{ github.sha }}
 
+      # SMD-2280: the operator GUI as a browser uses it, through the stack's
+      # proxy at /dashboard, on the stack configured for no authorization
+      # server (dashboard/smoke.ts). First one capture of its own over /mcp,
+      # ingested, since smoke.sh captures nothing: --require-thought fails
+      # the step rather than skip the thought page, and --require-ingested
+      # unless that page's ingested notice is driven. The smoke holds the
+      # sign-in wall; a wrong and a capture-only key, a cookie the server never
+      # issued and a cross-site or Origin-null sign-in refused; the cookie's
+      # and the pages' headers; the overview, the status and a thought rendered
+      # from the REST core under the write key, the overview and a 404 under
+      # the read key; the overview's data holding each thought's first line
+      # alone; the key in no page, header, script or cookie; and sign-out, a
+      # second sign-in and the per-key cap each ending a session on the
+      # server. Here, not after the next step: that one configures the
+      # authorization server, and the GUI then offers no key sign-in (review
+      # pass 1). The smoke imports nothing, so nothing is installed.
+      - name: The operator GUI, driven through the proxy
+        working-directory: dashboard
+        run: |
+          curl -fsS --max-time 60 -X POST http://127.0.0.1:8010/mcp -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+            -H "x-brain-key: $OB1_SMOKE_KEY" -o /tmp/gui-capture \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"capture_thought","arguments":{"content":"The operator GUI smoke reads this thought on its own page, its ingested notice before it (SMD-2280).","trust":"ingested"}}}'
+          grep -q 'Captured as' /tmp/gui-capture || { echo "the GUI smoke's capture failed: $(head -c 400 /tmp/gui-capture)" >&2; exit 1; }
+          bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY" --require-thought --require-ingested
+
       # Where the authorization server's step ran when the full-stack checks
       # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):
       # deploy/.env configured for the authorization server
@@ -1812,12 +1859,26 @@ jobs:
       # daemon restart and the SIGTERM stop after it meet the server they met
       # then; the smoke just before holds a stack configured for none, which
       # no job held before (deploy-stack-brains' smoke holds this one). Every
-      # compose call after it names its services.
+      # compose call after it names its services. The operator GUI is
+      # recreated on it too (SMD-2280), and holds ADR decision 16: configured,
+      # its public origin offers no key sign-in, whether or not the
+      # authorization server answers — no key field, and a post of the write
+      # key from the origin it is configured for refused with no cookie, by
+      # the GUI's own words (not SvelteKit's cross-site refusal).
       - name: The server is configured for an authorization server that is not running
         working-directory: deploy
         run: |
           ../.github/ci/auth-settings.sh
-          docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps server mcp
+          docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps server mcp app
+          page=$(curl -fsS --max-time 15 http://127.0.0.1:8010/dashboard/signin)
+          grep -q 'Key sign-in is off' <<<"$page" || { echo "the configured GUI's sign-in page does not say key sign-in is off" >&2; exit 1; }
+          if grep -q 'name="key"' <<<"$page"; then echo "the configured GUI offers a key field" >&2; exit 1; fi
+          code=$(curl -s -o /tmp/gui-signin -D /tmp/gui-signin-headers -w '%{http_code}' --max-time 15 -X POST \
+            -H 'content-type: application/x-www-form-urlencoded' -H 'accept: text/html' -H 'origin: https://brain.example.test' \
+            --data-urlencode "key=$OB1_SMOKE_KEY" http://127.0.0.1:8010/dashboard/signin)
+          echo "a key posted to the configured GUI: $code"
+          if [ "$code" != 403 ] || ! grep -q 'Key sign-in is off' /tmp/gui-signin; then echo "the configured GUI did not refuse key sign-in itself" >&2; exit 1; fi
+          if grep -qi '^set-cookie: ob1_dashboard_session=[^;]' /tmp/gui-signin-headers; then echo "the configured GUI set a session cookie" >&2; exit 1; fi
 
       # SMD-2284: the REST core is internal by default — it answers on the mesh
       # as api.ob1.internal, and the proxy's /api is a 404 — until the operator
@@ -2167,19 +2228,20 @@ jobs:
             if [ -z "$id" ]; then echo "absent none none 0001-01-01T00:00:00Z"; return; fi
             docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.HostConfig.RestartPolicy.Name}} {{.State.StartedAt}}' "$id" 2> /dev/null || echo "unreadable none none 0001-01-01T00:00:00Z"
           }
-          # Running and healthy: each of the six declares a healthcheck (the
+          # Running and healthy: each of the seven declares a healthcheck (the
           # server's is its image's, server-portable/Dockerfile; the MCP server
-          # built on the REST core names its own, SMD-2287).
+          # built on the REST core names its own, SMD-2287, and so does the
+          # operator GUI, SMD-2280).
           back() {
             local status health
             read -r status health _ <<<"$(state "$1")"
             [ "$status" = running ] && [ "$health" = healthy ]
           }
           while [ $(($(date -u +%s) - t0)) -lt 120 ]; do
-            if back postgres && back server && back api && back mcp && back proxy && back forwarder; then break; fi
+            if back postgres && back server && back api && back mcp && back app && back proxy && back forwarder; then break; fi
             sleep 2
           done
-          for s in postgres server api mcp proxy forwarder; do
+          for s in postgres server api mcp app proxy forwarder; do
             read -r status health policy started <<<"$(state "$s")"
             at=$(date -d "$started" +%s)
             echo "$s: $status, health $health, policy $policy, started $((at - t0)) s after the restart began"
@@ -2870,6 +2932,16 @@ jobs:
           [ "${#CANARY_KEY}" = 64 ] || { echo "the canary's env file holds no minted OB1_CANARY_KEY" >&2; exit 1; }
           CANARY_FORWARD="$(canary_forward)"
           [ "${#CANARY_FORWARD}" = 64 ] || { echo "the canary's env file holds no minted OB1_FORWARDER_KEY" >&2; exit 1; }
+          # SMD-2280: stable's .env names a public origin here (auth-settings.sh),
+          # and the canary takes none: its file carries no OB1_PUBLIC_ORIGIN, its
+          # operator GUI holds an empty one, and a key sign-in at its loopback
+          # port is taken — with stable's origin it was refused as cross-site.
+          if grep -q '^OB1_PUBLIC_ORIGIN=' .env.canary.local; then echo "the canary's env file carries OB1_PUBLIC_ORIGIN" >&2; exit 1; fi
+          docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose -p open-brain-canary -f compose.yaml ps -q app)" | grep -qx 'OB1_PUBLIC_ORIGIN=' \
+            || { echo "the canary's operator GUI holds a public origin" >&2; exit 1; }
+          gui=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 15 -X POST -H 'content-type: application/x-www-form-urlencoded' -H 'accept: text/html' \
+            -H 'origin: http://127.0.0.1:8011' --data-urlencode "key=$CANARY_KEY" http://127.0.0.1:8011/dashboard/signin)
+          [ "$gui" = "303 http://127.0.0.1:8011/dashboard/" ] || { echo "the canary's operator GUI did not sign its key in at its port: $gui" >&2; exit 1; }
           [ "$(sed -n 's/^MCP_ACCESS_KEYS=//p' .env.canary.local | tr -d "\"'")" = "$(own_keys_with "$CANARY_FORWARD")" ] || { echo "the canary's MCP_ACCESS_KEYS is not its own two keys alone" >&2; exit 1; }
           grep -F "minted the canary's own write key, open-brain-canary" /tmp/canary-up.out
           grep -F "minted the canary's own forward key, open-brain-canary-mcp-forwarder" /tmp/canary-up.out

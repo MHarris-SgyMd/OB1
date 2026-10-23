@@ -66,6 +66,8 @@ const provider = Bun.serve({
   port: 0,
   async fetch(req) {
     const url = new URL(req.url);
+    // A server's re-probe (SMD-2890) asks GET /models: an answer, with no body to parse.
+    if (req.method === "GET") return Response.json({ object: "list", data: [] });
     const body = (await req.json()) as { input?: string };
     if (embedDelayMs > 0) await Bun.sleep(embedDelayMs);
     if (url.pathname.endsWith("/embeddings")) {
@@ -1314,6 +1316,11 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       && /^held: exited 1, 1 end\(s\) in a row — its supervisor ran it again 60 s ago, and it has not stamped since/.test(due)
       && heldState(heldRow(5, undefined)) === "ended on a failure (last stamped 5 s ago, every 60 s)",
     `a held row reads held, its cause and its next try — the try past due said so — and an ended row with none reads as before (${soon} | ${heldGuard} | ${due})`);
+  // A follower ended on its start's refusal says the kind; the scheduler's row leaves it to preflight's own words (SMD-3214).
+  const endedWith = (key: string) => heartbeatState(parseHeartbeats([{ key, value: JSON.stringify({ ...good, every_s: 60, ...ended, refused: "linear-key" }), at, age_s: 5 }]).heartbeats[0]!);
+  assert(endedWith("heartbeat:board-sync") === "ended on a failure, refused at its start (linear-key) (last stamped 5 s ago, every 60 s)"
+      && endedWith("heartbeat:sleep") === "ended on a failure (last stamped 5 s ago, every 60 s)",
+    `an ended follower says its start's refusal by kind, the scheduler's row as before (${endedWith("heartbeat:board-sync")})`);
   // Its budget (SMD-2679): the stop's word on a sleep that is over, of the two, and the budget of the shape; else left off, the row counted.
   const stops = [{ from: at, to: at, budget: "clock" }, { from: at, to: at, budget: "statement" }, { from: at, to: null, budget: "clock" }, { from: at, to: at, budget: "rest" }]
     .map((m) => markOf("heartbeat:sleep", { slept: m })?.slept?.budget ?? null);
@@ -1502,6 +1509,36 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     `not read: why; no table: said (${vectorsLine({ vectorless: null, unread: { vectorless: { reason: "timeout", message: "x" } } })})`);
 }
 
+// The Provider row (SMD-2890): not called yet, answering, or degraded since when, why, and what still works.
+{
+  const { providerWords, renderBrainInfo } = await import("./brain-info.ts");
+  const R = { reprobeS: 15, reprobeByCall: true };
+  assert(providerWords({ status: "unknown", ...R }) === "not called yet", "unknown: not called yet");
+  // What answered says what is known (review pass 4): a call embeds; GET /models only reaches; a call refused or unusable is a fault.
+  assert(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "call", ...R }) === "answering (an embedding call answered 2026-10-22T00:00:00.000Z)", "answering by a call: it embeds");
+  assert(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "probe", ...R }) === "reachable (GET /models answered 2026-10-22T00:00:00.000Z); no embedding call made since", "answering by the probe: reachable, nothing said of the calls");
+  assert(/^answering, but refusing its embedding calls \(it answered 404, 2026-10-22T00:00:00\.000Z\) — a capture fails outright until that is fixed: check the model is pulled and the key$/.test(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "call", fault: "it answered 404", ...R })),
+    "a fault: the provider there, a capture failing outright, what to check");
+  const down = { status: "unreachable" as const, since: "2026-10-22T00:00:00.000Z", at: "2026-10-22T00:01:00.000Z", reason: "provider_unreachable", detail: "the connection was refused", clears: "probe" as const };
+  assert(providerWords({ ...down, ...R }) === "unreachable since 2026-10-22T00:00:00.000Z (the connection was refused) — serving degraded: a capture lands without its vector, a search answers by exact matches; re-probed every 15 s by GET /models",
+    `unreachable: since its first outage, why, what still works, the re-probe (${providerWords({ ...down, ...R })})`);
+  assert(/; it is not re-probed, so a call that is answered clears this$/.test(providerWords({ ...down, reprobeS: null, reprobeByCall: false })), "…and with no re-probe, what clears it");
+  // A call's 5xx GET /models cannot see (a proxy answering /models, its backend down): "failing its calls", re-probed by a call — or, the gate refusing that call, only a call ends it.
+  const proxied = { ...down, reason: "provider_503", detail: "it answered 503", clears: "call" as const };
+  assert(/^failing its calls since .*; re-probed every 15 s by one embedding call, as GET \/models cannot see a call's 503$/.test(providerWords({ ...proxied, ...R })),
+    `a call's 503: failing, re-probed by a call (${providerWords({ ...proxied, ...R })})`);
+  assert(/; GET \/models cannot see a call's 503 and the egress gate refuses the probe's embedding call, so only a call that is answered clears this$/.test(providerWords({ ...proxied, reprobeS: 15, reprobeByCall: false })),
+    "…and with the gate refusing the probe's call, only a call clears it, and why");
+  assert(/^unreachable since .*re-probed every 15 s by one embedding call, as GET \/models cannot see a call's timeout$/.test(providerWords({ ...proxied, reason: "provider_timeout", detail: "the request timed out (OB1_LLM_TIMEOUT)", ...R })),
+    "a call's timeout: unreachable, re-probed by a call");
+  const base = { version: "1.0.0", releaseRange: null, latestMigration: 1, commit: "c", store: "sql", tier: null, embedding: { model: "m", dim: 4 }, database: { error: "x" }, ledgerStatus: null } as never;
+  const shown = renderBrainInfo({ ...(base as object), provider: { ...down, ...R } } as never);
+  const lines = shown.split("\n");
+  const at = lines.findIndex((l) => l.startsWith("Embedding:"));
+  assert(/^Provider:\s+unreachable since 2026-10-22T00:00:00\.000Z/.test(lines[at + 1] ?? ""), `the row follows Embedding (${lines[at + 1]})`);
+  assert(!/^Provider:/m.test(renderBrainInfo(base)), "…and a record without the field (an older server's, forwarded) has no row");
+}
+
 console.log("\n[13b] GET /health with a key is what the brain is; without one it is `ok` (SMD-2041)");
 {
   const get = async (path: string, headers: Record<string, string> = {}) => {
@@ -1536,6 +1573,8 @@ console.log("\n[13b] GET /health with a key is what the brain is; without one it
     assert(info.version === FORK_VERSION, `…version is FORK_VERSION (${info.version})`);
     assert(info.latestMigration === treeLast, `…latestMigration is db/migrations/'s last, ${treeLast} (${info.latestMigration})`);
     assert(info.commit === "unknown" && info.store === "sql" && info.tier === null, `…commit unknown with no OB1_GIT_SHA, the sql store, no tier (${info.commit}, ${info.store}, ${info.tier})`);
+    const provider = info.provider as { status?: string; reprobeS?: unknown } | undefined;
+    assert(["unknown", "answering"].includes(provider?.status ?? "") && "reprobeS" in (provider ?? {}), `…and the provider's state, the stub answering or not yet called (SMD-2890; ${JSON.stringify(provider)})`);
     // No database in this suite: the record still answers, and says why the
     // database's half is missing — the store's own refusal, not a 500.
     const database = info.database as { error?: string } | undefined;
@@ -1980,10 +2019,10 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
       graceFallbacks.push(`${file}:${name}=${/^\$\{OB1_STOP_GRACE:-(\d+)\}s$/.exec(svc.stop_grace_period ?? "")?.[1] ?? svc.stop_grace_period}`);
     }
   }
-  // Nine: the server, the REST core (SMD-2284) and the MCP server (SMD-2287)
-  // in compose.yaml, and each tier's server and REST core in
-  // compose.tiers.yaml (SMD-2294).
-  assert(graceFallbacks.length === 9 &&graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
+  // Ten: the server, the REST core (SMD-2284), the MCP server (SMD-2287) and
+  // the operator GUI (SMD-2280) in compose.yaml, and each tier's server and
+  // REST core in compose.tiers.yaml (SMD-2294).
+  assert(graceFallbacks.length === 10 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
     `every compose server's stop_grace_period is \${OB1_STOP_GRACE:-${DEFAULT_STOP_GRACE_S}}s, the code's default (${graceFallbacks.join(", ")})`);
 
   // Preflight refuses a value compose would render wrong, and reports one it reads.

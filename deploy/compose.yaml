@@ -173,6 +173,9 @@ x-otel-env: &otel-env
 #           page could act on the authorization server's session;
 #   mcp     /mcp and everything under it — the endpoint clients are given —
 #           to the `mcp` service as mcp.ob1.internal (SMD-2287);
+#   dashboard  /dashboard and everything under it, the path kept, to the
+#           operator GUI, the `app` service, as app.ob1.internal (SMD-2280),
+#           which serves under that base and scopes its cookie to it;
 #   health  GET, HEAD and OPTIONS /health at the origin root, for a GET-only
 #           probe and a browser's CORS preflight, to the `mcp` service too.
 # Nothing else is routed, so the proxy answers every other path itself, with
@@ -257,6 +260,11 @@ x-proxy-routes: &proxy-routes |
         priority: 30
         entryPoints: [web]
         service: mcp
+      dashboard:
+        rule: "Path(`/dashboard`) || PathPrefix(`/dashboard/`)"
+        priority: 30
+        entryPoints: [web]
+        service: app
       health:
         rule: "(Path(`/health`) || Path(`/health/`)) && (Method(`GET`) || Method(`HEAD`) || Method(`OPTIONS`))"
         priority: 20
@@ -290,6 +298,10 @@ x-proxy-routes: &proxy-routes |
         loadBalancer:
           servers:
             - url: "http://auth.ob1.internal.:3000"
+      app:
+        loadBalancer:
+          servers:
+            - url: "http://app.ob1.internal.:8000"
 
 # The forwarder's script (SMD-2583): the stack's published port, in front of
 # the proxy, which is on internal networks alone. Inline here, as the route
@@ -795,9 +807,12 @@ services:
       # dialled nothing without --deep and said OK; the first capture failed in
       # 7 ms with "Unable to connect", and the server logged nothing. Since
       # SMD-1875 preflight dials an endpoint whose name is local once (GET
-      # /models, 2.5 s) and the container refuses to start on one that answers
-      # nothing, naming by the name's kind the profile, the host aliases or
-      # the stack's own service as the fix. An Ollama
+      # /models, 2.5 s) and the container refuses to start on a name that does
+      # not resolve, on its own loopback, or on one that answers wrongly or
+      # through a proxy, naming by the name's kind the
+      # profile, the host aliases or the stack's own service as the fix; a
+      # resolved one with nothing answering yet starts it degraded, re-probed
+      # until it answers (SMD-2890). An Ollama
       # on the host is http://host.containers.internal:11434/v1 (podman; Docker
       # Desktop: host.docker.internal); OpenRouter is https://openrouter.ai/api/v1
       # with a key — deploy/.env.example, "Model provider". Check 14 holds this
@@ -855,6 +870,12 @@ services:
       # provider answers (SMD-2889). Unset, 60. Both this server and the REST
       # core read it; a leader lock lets one mend at a time.
       OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
+      # Seconds between re-probes of a local embedding provider that does not
+      # answer (GET /models; one embedding of "probe" where a call failed in a
+      # way /models cannot show), 1 to 3600, 0 or off for the start's probe
+      # alone: the server starts degraded when it is not up yet and leaves
+      # degraded when it answers (SMD-2890). Unset, 15.
+      OB1_PROVIDER_REPROBE_INTERVAL: ${OB1_PROVIDER_REPROBE_INTERVAL:-}
       PORT: "8000"
     environment:
       <<: [*server-env, *plugin-env]
@@ -893,11 +914,11 @@ services:
     # model providers (the stack's Ollama and Jev by name, a host or hosted
     # one outward). Not the mesh: nothing routes to it since SMD-2532 closed
     # the root route, and /mcp is the `mcp` service's below (SMD-2287 PR 5b),
-    # on the mesh alone, as the ADR has it. No shipped template calls it: n8n's
-    # brain calls go to the REST core (SMD-2295), and the orchestration eval's
-    # workflows still call it until SMD-2295's second PR. It retires in
-    # SMD-2287 PR 6. No dns_search here, unlike the proxy: an operator's model
-    # endpoint may be a short name their resolver completes.
+    # on the mesh alone, as the ADR has it. Nothing in the stack calls it:
+    # n8n's brain calls and the orchestration eval's go to the REST core
+    # (SMD-2295). It retires in SMD-2287 PR 6. No dns_search here, unlike the
+    # proxy: an operator's model endpoint may be a short name their resolver
+    # completes.
     networks:
       data: {}
       egress: {}
@@ -1004,6 +1025,50 @@ services:
       retries: 3
     logging: *logging
 
+  # The operator GUI (SMD-2280; docs/operator-surface-tiers.md, decision 2):
+  # `/dashboard` through the proxy, which reaches it as app.ob1.internal on
+  # the mesh. The server's image run as `bun ../dashboard/serve.ts`, without
+  # the image's preflight, as the MCP server is: it reads no store and holds
+  # no key. A visitor signs in with an access key, which the REST core's whoami
+  # checks, and every page is a read on the REST core at api.ob1.internal
+  # under that key, held in the service's memory and never in the browser; a
+  # restart signs everyone out. Key sign-in is off while COMPOSE_PROFILES
+  # names auth (ADR decision 16). OB1_PUBLIC_ORIGIN is the origin its forms
+  # and cookie are judged by behind TLS (dashboard/serve.ts); unset, each
+  # request's own, over plain HTTP. A stop drains within OB1_STOP_GRACE, as
+  # the servers' does. On the mesh alone: nothing outward, no Postgres. Its
+  # files are the image's, read-only, and it keeps no capability.
+  app:
+    image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
+    pull_policy: never
+    entrypoint: ["bun", "--no-install"]
+    command: ["../dashboard/serve.ts"]
+    environment:
+      OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:-}
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+      OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
+    stop_grace_period: ${OB1_STOP_GRACE:-10}s
+    # After the REST core, so `up app` brings it; not held for its health:
+    # while it is down a page is the GUI's own 502.
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      mesh:
+        aliases: [app.ob1.internal]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/dashboard/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    logging: *logging
+
   # The stack's one origin (SMD-1846): a reverse proxy, reached through the
   # forwarder below, which holds the stack's published port (SMD-2583). Each
   # service is a path on it —
@@ -1093,6 +1158,7 @@ services:
     # reaches it as proxy.ob1.internal and nothing else is, and `mesh`, where
     # it reaches every backend — the MCP server as mcp.ob1.internal
     # (SMD-2287), the REST core as api.ob1.internal (SMD-2284), the
+    # operator GUI as app.ob1.internal (SMD-2280), the
     # authorization server as auth.ob1.internal. Until v2.0.0 it also
     # reached a tier's MCP server there as mcp.<tier>.ob1.internal
     # (SMD-2294); a tier is a brain of its own since SMD-2874, and this
@@ -1121,7 +1187,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-    # Started after the MCP server and the REST core behind it, so `up proxy`
+    # Started after the MCP server, the operator GUI and the REST core behind them, so `up proxy`
     # brings the brain once its image is built (the `server` service builds
     # it: name `server` with `--build`, as the commands below do), and
     # `up forwarder`, which waits on the proxy, its port too; not held for their health: while the MCP server is down the
@@ -1134,6 +1200,8 @@ services:
       api:
         condition: service_started
       mcp:
+        condition: service_started
+      app:
         condition: service_started
     restart: unless-stopped
     logging: *logging
@@ -1603,10 +1671,15 @@ services:
       # unhealthy and the server, which waits for it, does not start.
       # Pre-pull on a slow link: compose --profile jev run --rm jev --fetch-only.
       start_period: 600s
-    # A fetch that fails or a file that hashes wrong exits 1 with the file
-    # named; three tries cover a network that was not up yet, then the service
-    # stops and `ps` says so rather than looping (the board-sync rule above).
-    restart: on-failure:3
+    # `unless-stopped`, so it comes back after a reboot (SMD-3214): neither
+    # runtime starts an `on-failure` container at boot, and with
+    # OB1_JEV_BASE_URL naming this service the servers' preflight fails until
+    # it serves (SMD-2834). Serving never exits on its own, so the restart
+    # cannot loop: a fetch that fails or a file that hashes wrong — the file
+    # named — an engine that does not load and a port taken are tried again
+    # after 1, 2, 4, 8, then every 15 minutes, unhealthy meanwhile; a bad
+    # JEV_THREADS holds until a recreate (jev/serve.ts).
+    restart: unless-stopped
     logging: *logging
 
   # The orchestration tool (SMD-2210; docs/orchestration-tool.md, SMD-1863's
@@ -1723,8 +1796,11 @@ services:
       timeout: 5s
       retries: 3
       start_period: 120s
+    # The REST core, n8n's one way into the brain (SMD-2295): `up -d n8n`
+    # brings it along. It runs the image `server`'s service builds, so on a
+    # project that has not built it, bring the stack up first.
     depends_on:
-      server:
+      api:
         condition: service_started
     restart: unless-stopped
     logging: *logging
@@ -2285,7 +2361,7 @@ networks:
   # the network move built them (SMD-2583). Every service names its own, so
   # compose makes no default network and nothing joins one.
   #   mesh   internal: the proxy, the MCP server (mcp.ob1.internal), the REST
-  #          core (api.ob1.internal), the authorization server
+  #          core (api.ob1.internal), the operator GUI (app.ob1.internal), the authorization server
   #          (auth.ob1.internal) and the observability profile's collector
   #          (lgtm.ob1.internal), each called by that name. No other
   #          project joins it: a canary is a brain of its own, on its own

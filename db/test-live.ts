@@ -55,7 +55,7 @@ import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import { sweepOrphans } from "./rebuild.ts";
 import type { PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
-import { decideKey, DECIDE_PROMPT, DECIDE_VERSION, PART_RULE, RECORD_RULE } from "../server-portable/consolidate-decide.ts";
+import { decideKey, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, PART_RULE, RECORD_RULE } from "../server-portable/consolidate-decide.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, extractionKey } from "../server-portable/entities.ts";
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash } from "../server-portable/lineage.ts";
 import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
@@ -63,7 +63,7 @@ import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue } from "./ingest-linear.ts";
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, rowColumns, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
-import { passStamper, stampKey } from "./pass-stamp.ts";
+import { endOnRefusal, passStamper, stampKey } from "./pass-stamp.ts";
 import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
 import { run as runSleep } from "./sleep.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
@@ -4511,6 +4511,14 @@ if (want("10")) {
       const registered = (await sql`SELECT count(*)::int AS n FROM ob1_agent_keys WHERE key_hash = ${hashKey(freshKey)}`)[0].n;
       assert(refusedCode === 2 && refusedOut.some((l) => /does not serve absent-model, OB1_METADATA_MODEL, at start \(404 [^)]*not found/.test(l)) && refusedOut.some((l) => /pull the model, or set OB1_METADATA_MODEL to one the provider serves/.test(l)) && registered === 0,
              `a follower whose model the provider does not serve at start is refused, exit 2, its key not yet registered (exit ${refusedCode}, ${registered} key row(s): ${refusedOut.find((l) => /at start/.test(l))?.trim().slice(0, 140)})`);
+      // …and its row ends on the refusal, the kind on it, so preflight gives the remedy (SMD-3214).
+      const refusedBeat = async (job: string) => {
+        const [r] = await sql`SELECT value, extract(epoch FROM now() - updated_at)::float8 AS age FROM ob1_config WHERE key = ${stampKey("extract", job)}`;
+        return r ? { ...JSON.parse(r.value as string), age: Number(r.age) } : null;
+      };
+      const modelBeat = await refusedBeat(KEY);
+      assert(modelBeat?.ended === true && modelBeat.outcome === "failed" && modelBeat.refused === "model" && modelBeat.age < 10,
+             `a follower refused at its start ends its row with the kind, model (${JSON.stringify(modelBeat)})`);
       // …and so is one whose escalation model the provider does not serve (review pass 1).
       const escOut: string[] = [];
       const stopEsc = new AbortController();
@@ -4536,6 +4544,8 @@ if (want("10")) {
         downUntil = 0;
         assert(mismatchCode === 2 && Date.now() - t0 < 10_000 && mismatchOut.some((l) => /Refusing to extract under a key other than the one ob1_config records without --switch-key/.test(l)) && !mismatchOut.some((l) => /not answering at start/.test(l)),
                `a follower started with the provider down and another model's key is refused at once, not after the wait (exit ${mismatchCode} after ${Date.now() - t0} ms)`);
+        const keyBeat = await refusedBeat(extractionKey("other-model"));
+        assert(keyBeat?.ended === true && keyBeat.refused === "key", `…its row, under the job its model names, ended with the kind, key (${JSON.stringify(keyBeat)})`);
       }
       // …and a model the provider turns out not to serve, once it answers, is
       // refused there rather than waited on for ever (review pass 2).
@@ -4784,6 +4794,7 @@ if (want("10")) {
   refuseCalls = 0;
   const refusedBeat = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
   assert(refusedFollow.code === 2 && refusedBeat.outcome === "failed" && refusedBeat.ended === true, `a follower ended by the provider's refusal stamps its end, failed (exit ${refusedFollow.code}, ${JSON.stringify(refusedBeat)})`);
+  assert(refusedBeat.refused === "provider", `…the refusal named on its row, provider, so preflight and the held row say why (SMD-3214; ${JSON.stringify(refusedBeat)})`);
   await sql`SELECT delete_thought(${refusedNote}::uuid, NULL::jsonb)`;
   // A following pass that throws (here its Writer, on the pass's own counts
   // line) ends the run, and its heartbeat says so as the worker's end (review pass 3).
@@ -7931,8 +7942,11 @@ if (want("16")) {
   // key names both; a standing proposal is recorded at the tier's P(outdates)
   // with decide mode's lineage, a related pair is a relation with no writer
   // call, so is an outdates under the floor, and a writer's "none" leaves
-  // neither. A start without the tier, or with the tier held to
-  // another model, is refused before anything is claimed.
+  // neither. Since decide version 4 (SMD-3203) the writer's link step comes
+  // first on an outdates at the floor and after on an evolves the pass would
+  // store: an F link leaves the gateway pair no proposal, and an H link stores
+  // the pager pair's evolves as related. A start without the tier, or with the
+  // tier held to another model, is refused before anything is claimed.
   {
     const DECIDER = "h2o-stub", WRITER = "stub-writer";
     const DKEY = decideKey(DECIDER, WRITER);
@@ -7955,13 +7969,15 @@ if (want("16")) {
           : /cutover/.test(both) ? { unrelated: 0.05, related: 0.2, evolves: 0.1, duplicate: 0.05, outdates: 0.6 }
           : /runbook/.test(both) ? { unrelated: 0.05, related: 0.7, evolves: 0.15, duplicate: 0.05, outdates: 0.05 }
           : /migration/.test(both) ? { unrelated: 0, related: 0.38, evolves: 0.2, duplicate: 0, outdates: 0.42 }
+          : /gateway/.test(both) ? { unrelated: 0.02, related: 0.15, evolves: 0.1, duplicate: 0.03, outdates: 0.7 }
+          : /pager/.test(both) ? { unrelated: 0.05, related: 0.2, evolves: 0.6, duplicate: 0.05, outdates: 0.1 }
           : { unrelated: 0.9, related: 0.05, evolves: 0.02, duplicate: 0.01, outdates: 0.02 };
         const probabilities: Record<string, number> = { ...Object.fromEntries(d.options.map((o) => [o.id, p[o.id] ?? 0])), __insufficient_evidence__: 0 };
         const ids = Object.keys(probabilities);
         return Response.json({ contract: "ob1-jev/1", model, ms: 1, results: [{ kind: "choice", probabilities, selected: ids.reduce((x, k) => (probabilities[k] > probabilities[x] ? k : x)), abstained: false, p_insufficient: 0, logits: ids.map(() => 0), temperature: 1, tokens: 10, truncated: false }] });
       },
     });
-    let writerCalls = 0, writerPartRule = 0;
+    let writerCalls = 0, writerPartRule = 0, linkCalls = 0;
     const writerModels = new Set<string>();
     const writer = Bun.serve({
       port: 0,
@@ -7969,9 +7985,18 @@ if (want("16")) {
         const body = (await req.json()) as { model?: string; messages?: { content: string }[] };
         const prompt = body.messages?.[0]?.content ?? "";
         if (prompt === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
-        writerCalls++;
         writerModels.add(String(body.model));
-        // The pass's writer (decide version 1's, kept by version 3): the part rule, and not the record rule, version 2's, shelved 2026-10-18.
+        // Decide version 4's link step (SMD-3203): the gateway pair's thoughts share only a third subject, and the
+        // pager pair's one names the other's subject in passing; the rest are direct.
+        if (prompt.endsWith(LINK_ANSWER)) {
+          linkCalls++;
+          const link = /gateway/.test(thoughtsIn(prompt)) ? { link: "F", via: "release 4", reason: "both report release 4's state" }
+            : /pager/.test(thoughtsIn(prompt)) ? { link: "H", via: "the pager rotation", reason: "named in passing" }
+            : { link: "D", via: "", reason: "the two share their own subject" };
+          return Response.json({ choices: [{ message: { content: JSON.stringify(link) } }] });
+        }
+        writerCalls++;
+        // The pass's writer (decide version 1's, kept by versions 3 and 4): the part rule, and not the record rule, version 2's, shelved 2026-10-18.
         if (prompt.includes(PART_RULE.trim()) && !prompt.includes(RECORD_RULE.trim())) writerPartRule++;
         // The migration pair's proposal would stand if the writer were asked: under the floor it must not be, or the
         // standing outdates would record nothing and close the pair's relation (SMD-3151 review pass 4).
@@ -7991,6 +8016,10 @@ if (want("16")) {
       const runNew = await seed("[16d] The runbook has a section on restores.", 52, 0, ["runbook"]);
       const migOld = await seed("[16d] The migration window opens at noon.", 53, 3, ["migration"]);
       const migNew = await seed("[16d] The migration window moved to the evening.", 53, 0, ["migration"]);
+      const gateOld = await seed("[16d] The gateway team reports release 4 blocked.", 54, 3, ["gateway"]);
+      const gateNew = await seed("[16d] The billing team says the gateway waits on release 4.", 54, 0, ["gateway"]);
+      const pagerOld = await seed("[16d] The pager rotation starts in March.", 55, 3, ["pager"]);
+      const pagerNew = await seed("[16d] The pager handbook lists the March rotation among its sources.", 55, 0, ["pager"]);
       const denv: Record<string, string | undefined> = {
         ...env, OB1_LLM_BASE_URL: `http://127.0.0.1:${writer.port}/v1`, OB1_JUDGE_MODEL: WRITER, OB1_CONSOLIDATE_DECIDER: DECIDER,
         OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_MODEL: DECIDER, OB1_JEV_LOCAL: "1",
@@ -8007,28 +8036,36 @@ if (want("16")) {
       const ddry = await decide(denv, "--dry-run");
       const banner = ddry.out.split("\n").filter((l) => /^\s*(job|decide|tier):/.test(l));
       assert(ddry.code === 0 && banner.some((l) => /^\s*job:\s+/.test(l) && l.trim().endsWith(DKEY)) && banner.some((l) => /^\s*decide: h2o-stub through the typed-decision tier at http:\/\/127\.0\.0\.1:\d+ gives each verdict/.test(l))
-          && banner.some((l) => /^\s*tier:\s+/.test(l)) && /add 8 thoughts to the pool/.test(ddry.out) && tierCalls === 0 && writerCalls === 0,
+          && banner.some((l) => /^\s*tier:\s+/.test(l)) && /add 12 thoughts to the pool/.test(ddry.out) && tierCalls === 0 && writerCalls === 0 && linkCalls === 0,
         `a dry run names decide mode's key, its decider and the tier's egress, and asks neither model (exit ${ddry.code}: ${banner.join(" | ").trim().slice(0, 300)})`);
+
+      // The gateway pair carries a proposal under the key whose newer text has since moved, as an earlier version's
+      // proposal on a mediated pair would: the run judges it again, and the link step's cap settles it (SMD-3203).
+      const [{ id: gateProp }] = (await sql`SELECT record_supersession_proposal(${gateOld}::uuid, ${gateNew}::uuid, 'newer_supersedes_older', 0.7, 'the gateway waits on release 4', 0.9, ${DKEY}, NULL) AS id`) as { id: string }[];
+      const movedGate = "[16d] The billing team says the gateway still waits on release 4.";
+      await sql`UPDATE thoughts SET content = ${movedGate}, content_fingerprint = content_fingerprint_of(${movedGate}) WHERE id = ${gateNew}::uuid`;
+      const [{ r: gateRebuilt }] = (await sql`SELECT rebuild_derived(${gateNew}::uuid, 'live: edit') AS r`) as { r: { stale_proposals: number } }[];
 
       // At --min-confidence 0.55, the pass's own floor, which decide version 3's writer gate reads (SMD-3151).
       const drun = await decide(denv, "--min-confidence", "0.55", "--dump", ddump);
       const dprops = (await sql`SELECT sp.older_id::text AS o, sp.newer_id::text AS n, sp.verdict, sp.confidence::float AS confidence, d.recipe
                                   FROM supersession_proposals sp LEFT JOIN derivations d ON d.artifact_kind = 'proposal' AND d.artifact_id = sp.id AND d.produced_by = ${DKEY}
-                                 WHERE sp.judge_key = ${DKEY}`) as { o: string; n: string; verdict: string; confidence: number; recipe: Record<string, unknown> | null }[];
+                                 WHERE sp.judge_key = ${DKEY} AND sp.status = 'pending'`) as { o: string; n: string; verdict: string; confidence: number; recipe: Record<string, unknown> | null }[];
       assert(drun.code === 0 && dprops.length === 1 && dprops[0].o === tenOld && dprops[0].n === tenNew && dprops[0].verdict === "newer_supersedes_older" && dprops[0].confidence === 0.8,
         `the tier's outdates with the writer's standing proposal is the run's one proposal, under decide mode's key at the tier's P(outdates) (exit ${drun.code}: ${JSON.stringify(dprops.map(({ recipe: _, ...r }) => r))}; ${last(drun.out)})`);
-      type DecideRecipe = { model?: string; decider?: string; decide_version?: number; prompt_hash?: string; judged?: { verdict?: string; confidence_source?: string; evidence_found?: boolean; decide?: { top?: string; decider?: { name?: string }; writer?: { model?: string; current?: string; stale_found?: boolean } } } };
+      type DecideRecipe = { model?: string; decider?: string; decide_version?: number; prompt_hash?: string; judged?: { verdict?: string; confidence_source?: string; evidence_found?: boolean; decide?: { top?: string; decider?: { name?: string }; writer?: { model?: string; current?: string; stale_found?: boolean }; link?: { model?: string; asked?: string; link?: string; capped?: boolean } } } };
       const rec = dprops[0]?.recipe as DecideRecipe | null | undefined;
       assert(rec?.model === WRITER && rec.decider === DECIDER && rec.decide_version === DECIDE_VERSION && rec.prompt_hash === promptHash(DECIDE_PROMPT)
           && rec.judged?.verdict === "outdates" && rec.judged.confidence_source === "token" && rec.judged.evidence_found === true
-          && rec.judged.decide?.top === "outdates" && rec.judged.decide.decider?.name === DECIDER && rec.judged.decide.writer?.model === WRITER && rec.judged.decide.writer.current === "newer" && rec.judged.decide.writer.stale_found === true,
-        `its lineage names the writer, the decider and decide mode's prompt, and carries what the tier and the writer said (${JSON.stringify(rec ?? null).slice(0, 400)})`);
+          && rec.judged.decide?.top === "outdates" && rec.judged.decide.decider?.name === DECIDER && rec.judged.decide.writer?.model === WRITER && rec.judged.decide.writer.current === "newer" && rec.judged.decide.writer.stale_found === true
+          && rec.judged.decide.link?.model === WRITER && rec.judged.decide.link.asked === "first" && rec.judged.decide.link.link === "D" && rec.judged.decide.link.capped === false,
+        `its lineage names the writer, the decider and decide mode's prompt, and carries what the tier, the link step and the writer said (${JSON.stringify(rec ?? null).slice(0, 500)})`);
       const drels = (await sql`SELECT thought_id::text AS t, payload->>'target' AS target, payload->>'relation' AS relation, payload->>'judge_key' AS key
                                  FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL
                                   AND thought_id IN (SELECT id FROM thoughts WHERE content LIKE '[16d]%')`) as { t: string; target: string; relation: string; key: string }[];
       const rel = (t: string, target: string) => drels.find((r) => r.t === t && r.target === target && r.relation === "related" && r.key === DKEY);
-      assert(drels.length === 2 && rel(runNew, runOld) !== undefined && rel(migNew, migOld) !== undefined,
-        `the tier's related is a relation under decide mode's key, its outdates under the floor takes the tier's relation, and the writer's "none" leaves the cutover pair neither a proposal nor a relation, the relation words' mass under the floor (${JSON.stringify(drels)})`);
+      assert(drels.length === 3 && rel(runNew, runOld) !== undefined && rel(migNew, migOld) !== undefined && rel(pagerNew, pagerOld) !== undefined,
+        `the tier's related is a relation under decide mode's key, its outdates under the floor takes the tier's relation, the pager pair's evolves is stored related, and the writer's "none" leaves the cutover pair neither a proposal nor a relation, nor the link step the gateway pair, the relation words' mass under the floor (${JSON.stringify(drels)})`);
       // Decide version 3 (SMD-3151 review pass 3): under the floor the writer is not asked, since a standing proposal
       // would record nothing and close the pair's relation; the relation's note names the pass's floor.
       type RelNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; floor?: number; writer?: unknown } } } };
@@ -8041,12 +8078,31 @@ if (want("16")) {
           && run?.recipe.judged?.decide?.top === "related" && run.recipe.judged.decide.floor === undefined
           && migDump?.recorded === "under-confidence" && migDump.top === "outdates" && migDump.floor === 0.55,
         `the tier's outdates under the pass's floor asks no writer: the relation's note names the floor, 0.55, and carries no writer, a related pair's names none, and the dump line records it under the floor (${JSON.stringify(mig?.recipe.judged ?? null).slice(0, 200)}; dump ${JSON.stringify(migDump ?? null)})`);
-      assert(tierCalls === 4 && writerCalls === 2 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2
+      // Decide version 4 (SMD-3203): the gateway pair, an outdates at the floor whose link step finds F, is written no
+      // proposal and takes the tier's related, capped, under the floor, and its stale proposal is settled, the note
+      // saying the link step capped it; the pager pair, an evolves the pass would store, is asked the link step after,
+      // and its H link stores it related at the tier's P(related), at the same floor.
+      const [gateAfter] = (await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${gateProp}::uuid`) as { status: string; review_note: string | null }[];
+      const cappedNote = passSettledNote("judged again after a text moved — related, capped by the writer's link step (an F link, SMD-3203)", DKEY);
+      type LinkNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; link?: { asked?: string; link?: string; capped?: boolean; via?: string }; writer?: unknown } } } };
+      const pager = (await noteOf(pagerNew)) as unknown as LinkNote | undefined;
+      const [pagerConf] = (await sql`SELECT (payload->>'confidence')::float AS c FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND thought_id = ${pagerNew}::uuid`) as { c: number }[];
+      const dumpOf = (n: string, o: string) => readFileSync(ddump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { newer: string; older: string; verdict: string; recorded: string | null; relation: string | null; link?: string | null; capped?: boolean | null })
+        .find((l) => l.newer === n && l.older === o);
+      const [gateDump, pagerDump, tenDump] = [dumpOf(gateNew, gateOld), dumpOf(pagerNew, pagerOld), dumpOf(tenNew, tenOld)];
+      const gateProps = dprops.filter((r) => r.o === gateOld || r.n === gateNew);
+      assert(gateRebuilt.stale_proposals === 1 && gateProps.length === 0 && gateAfter?.status === "rejected" && gateAfter.review_note === cappedNote
+          && gateDump?.verdict === "related" && gateDump.recorded === "settled" && gateDump.link === "F" && gateDump.capped === true
+          && pager?.recipe.judged?.verdict === "related" && pager.recipe.judged.decide?.top === "evolves" && pager.recipe.judged.decide.link?.asked === "after" && pager.recipe.judged.decide.link.link === "H" && pager.recipe.judged.decide.link.capped === true
+          && pager.recipe.judged.decide.writer === undefined && pagerConf?.c === 0.2 && pagerDump?.link === "H" && pagerDump.capped === true && tenDump?.link === "D" && tenDump.capped === false,
+        `the link step caps the gateway pair's outdates (an F link: no proposal, its related under the floor, its stale proposal settled saying so) and stores the pager pair's evolves as related at the tier's P(related) (an H link, asked after), and the dump says which (gateway ${JSON.stringify(gateDump ?? null)}, ${JSON.stringify(gateAfter ?? null)}; pager ${JSON.stringify(pager?.recipe.judged ?? null).slice(0, 300)}, ${pagerConf?.c})`);
+      assert(tierCalls === 6 && writerCalls === 2 && linkCalls === 4 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2
           && /1 under confidence 0\.55 not recorded/.test(drun.out)
-          && /decide: the writer asked on 2 pair\(s\) — 1 stood, 1 declined, 0 with quotes that did not check out, 0 unparsed; 1 outdates under the floor 0\.55, the writer not asked/.test(drun.out),
-        `the tier was asked about each of the four pairs and the writer only about the two it called outdates at the floor, as the judge's model with the part rule and not the record rule, and the run's summary counts both (tier ${tierCalls}, writer ${writerCalls}: ${[...writerModels].join(", ")}; ${drun.out.split("\n").find((l) => /^\s*decide: the writer/.test(l))?.trim() ?? "no decide line"})`);
+          && /decide: the writer asked on 2 pair\(s\) — 1 stood, 1 declined, 0 with quotes that did not check out, 0 unparsed; 1 outdates under the floor 0\.55, the writer not asked/.test(drun.out)
+          && /decide: the writer's link step asked on 4 pair\(s\) — 2 capped at related with no proposal \(0 of them unparsed\), 2 direct or unlinked/.test(drun.out),
+        `the tier was asked about each of the six pairs, the link step about the three outdates at the floor and the evolves the pass would store, and the writer only about the two the link step found direct, as the judge's model with the part rule and not the record rule, and the run's summary counts each (tier ${tierCalls}, link ${linkCalls}, writer ${writerCalls}: ${[...writerModels].join(", ")}; ${drun.out.split("\n").filter((l) => /^\s*decide: the/.test(l)).map((l) => l.trim()).join(" | ") || "no decide line"})`);
       const dclaims = Object.fromEntries(((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${DKEY} GROUP BY status`) as { status: string; c: number }[]).map((r) => [r.status, Number(r.c)]));
-      assert(dclaims.succeeded === 8 && Object.keys(dclaims).length === 1, `every thought's claim succeeded under decide mode's key (${JSON.stringify(dclaims)})`);
+      assert(dclaims.succeeded === 12 && Object.keys(dclaims).length === 1, `every thought's claim succeeded under decide mode's key (${JSON.stringify(dclaims)})`);
 
       // SMD-3151 review pass 4: a stale proposal whose pair the tier calls outdates under the floor is settled as an
       // outdates under the floor, the note naming the floor and that the writer was not asked, and the summary counts
@@ -8055,11 +8111,11 @@ if (want("16")) {
       const movedTenancy = "[16d] The tenancy now runs 90 days, signed in May.";
       await sql`UPDATE thoughts SET content = ${movedTenancy}, content_fingerprint = content_fingerprint_of(${movedTenancy}) WHERE id = ${tenNew}::uuid`;
       const [{ r: tenRebuilt }] = (await sql`SELECT rebuild_derived(${tenNew}::uuid, 'live: edit') AS r`) as { r: { stale_proposals: number } }[];
-      const askedBefore = writerCalls;
+      const askedBefore = writerCalls, linkedBefore = linkCalls;
       const resettle = await decide(denv, "--min-confidence", "0.85");
       const [tenAfter] = (await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${tenId}::uuid`) as { status: string; review_note: string | null }[];
       const underNote = passSettledNote("judged again after a text moved — outdates at confidence 0.80 (token probability), under the floor 0.85, the writer not asked", DKEY);
-      assert(tenRebuilt.stale_proposals === 1 && resettle.code === 0 && tenAfter?.status === "rejected" && tenAfter.review_note === underNote && writerCalls === askedBefore
+      assert(tenRebuilt.stale_proposals === 1 && resettle.code === 0 && tenAfter?.status === "rejected" && tenAfter.review_note === underNote && writerCalls === askedBefore && linkCalls === linkedBefore
           && /1 under confidence 0\.85 not recorded/.test(resettle.out) && /decide: the writer asked on 0 pair\(s\) — .*; 1 outdates under the floor 0\.85, the writer not asked/.test(resettle.out),
         `a stale proposal the tier calls outdates under the floor is settled as one, its note naming the floor and the writer not asked, and counted so (exit ${resettle.code}: ${JSON.stringify(tenAfter ?? null)}; ${resettle.out.split("\n").find((l) => /^\s*decide: the writer/.test(l))?.trim() ?? "no decide line"})`);
 
@@ -8071,8 +8127,12 @@ if (want("16")) {
       const [fo, fe] = await Promise.all([new Response(follower.stdout).text(), new Response(follower.stderr).text()]);
       const fcode = await follower.exited;
       clearTimeout(stopFollower);
-      assert(fcode === 2 && /the tier at http:\/\/127\.0\.0\.1:\d+ serves h2o-other, not h2o-stub at start/.test(fe) && /serve h2o-stub at OB1_JEV_BASE_URL/.test(fe) && tierCalls === 5,
+      assert(fcode === 2 && /the tier at http:\/\/127\.0\.0\.1:\d+ serves h2o-other, not h2o-stub at start/.test(fe) && /serve h2o-stub at OB1_JEV_BASE_URL/.test(fe) && tierCalls === 7,
         `a follower whose tier serves another model is refused at start, naming the remedy, and decides nothing (exit ${fcode}: ${last(fo + fe)})`);
+      // …its row, under the decide key, ended with the kind (SMD-3214).
+      const [fbeat] = await sql`SELECT value FROM ob1_config WHERE key = ${stampKey("consolidate", DKEY)}`;
+      const fv = fbeat ? JSON.parse(fbeat.value as string) : null;
+      assert(fv?.ended === true && fv.outcome === "failed" && fv.refused === "model", `…and its row ends on the refusal, the kind on it, model (${JSON.stringify(fv)})`);
     } finally {
       tier.stop(true);
       writer.stop(true);
@@ -8317,7 +8377,7 @@ if (want("18")) {
         try { await sql.unsafe(readFileSync(join(CONTRIB_DIR, f), "utf8")); }
         catch (e) { contribFailed.push(`${f}: ${(e as Error).message.split("\n")[0]}`); await sql.unsafe("ROLLBACK").catch(() => {}); }
       }
-      assert(contribFiles.length === 15 && contribFailed.length === 0, `…and so does every listed extension and recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
+      assert(contribFiles.length === 12 && contribFailed.length === 0, `…and so does every listed extension and recipe schema after them, with no auth schema either (${contribFiles.length} files; failed: ${contribFailed.join(" | ") || "none"})`);
 
       // After: --grant issues the whole community group, over TCP, in one
       // transaction — views as tables, sequences and functions spelled as GRANT
@@ -12143,6 +12203,39 @@ if (want("37")) {
     await hsql`DELETE FROM ob1_config WHERE key IN ('tier', 'last_refresh')`;
     for (const k of keep as { key: string; value: string }[]) await hsql`INSERT INTO ob1_config (key, value) VALUES (${k.key}, ${k.value})`;
     assert(after2.beats === 0 && after2.tier === "canary" && /^\d{4}-/.test(after2.refreshed ?? ""), `a refresh's settle stamps the tier and its time and leaves no heartbeat (${JSON.stringify(after2)})`);
+
+    // A follower's start refusal ends its row with the kind (SMD-3214):
+    // board-sync's, under --loop alone — its own two kinds, and usage — the
+    // exit still 2; a one-shot run, a dry run and an audit write no row.
+    await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    const boardEnv: Record<string, string> = { ...(process.env as Record<string, string>), OB1_ENV_FILES: "off", DATABASE_URL: URL_! };
+    delete boardEnv.LINEAR_API_KEY;
+    const boardRun = (extra: Record<string, string>, ...argv: string[]) => {
+      const c = Bun.spawnSync(["bun", "--no-env-file", join(HERE, "sync-linear.ts"), ...argv], { cwd: HERE, env: { ...boardEnv, ...extra } });
+      return { code: c.exitCode, err: c.stderr.toString() };
+    };
+    const noKey = boardRun({}, "--loop");
+    const noKeyRow = await row("heartbeat:board-sync");
+    assert(noKey.code === 2 && /LINEAR_API_KEY is not set/.test(noKey.err) && noKeyRow?.ended === true && noKeyRow.outcome === "failed" && noKeyRow.refused === "linear-key" && noKeyRow.age < 10,
+      `board-sync --loop with no LINEAR_API_KEY exits 2 and ends its row with the kind, linear-key (exit ${noKey.code}; ${JSON.stringify(noKeyRow)})`);
+    const badInterval = boardRun({ LINEAR_API_KEY: "lin_api_not_real", OB1_BOARD_SYNC_INTERVAL: "5" }, "--loop");
+    const intervalRow = await row("heartbeat:board-sync");
+    assert(badInterval.code === 2 && /must be a decimal integer >= 10 \(whole seconds\)/.test(badInterval.err) && intervalRow?.refused === "usage",
+      `…and on an interval it does not take, usage (exit ${badInterval.code}; ${JSON.stringify(intervalRow)})`);
+    await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
+    const unlooped = [boardRun({}), boardRun({}, "--loop", "--dry-run"), boardRun({ LINEAR_API_KEY: "lin_api_not_real", OB1_BOARD_SYNC_INTERVAL: "5" })];
+    assert(unlooped.every((r) => r.code === 2) && (await row("heartbeat:board-sync")) === null,
+      `a one-shot run and a dry run refused the same exit 2 and write no row (${unlooped.map((r) => r.code).join(", ")})`);
+    // A database not answering: the end is left within its bound, said, and the refusal goes on.
+    const deadSql = new SQL({ url: "postgres://u@127.0.0.1:1/none", max: 1 });
+    let heardDead = "";
+    const t0dead = Date.now();
+    try {
+      await endOnRefusal({ sql: deadSql, worker: "board-sync", intervalS: 300, kind: "usage", onError: (e) => { heardDead = e.message; }, timeoutMs: 3000 });
+    } finally {
+      await deadSql.close().catch(() => {});
+    }
+    assert(Date.now() - t0dead < 5000 && heardDead !== "", `endOnRefusal on a database not answering returns within its bound and says so (${Date.now() - t0dead} ms: ${heardDead.slice(0, 80)})`);
   } finally {
     await hsql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await hsql.close();
@@ -12811,6 +12904,7 @@ if (want("38")) {
     missing = true;
     // Bounded: a scheduler that misses the refusal would wait for ever.
     const acFirst = new AbortController();
+    const checkFrom = new Date();
     const firstRun = sleepRun({ follow: true, quiet: 300, signal: acFirst.signal, minStampEveryS: 1 });
     const refusedFirst = await Promise.race([firstRun, Bun.sleep(30_000).then(() => "hung" as const)]);
     if (refusedFirst === "hung") { acFirst.abort(); await firstRun; }
@@ -12818,6 +12912,9 @@ if (want("38")) {
     const firstBeat = await beat();
     assert(refusedFirst === 2 && firstBeat?.ended === true && firstBeat.outcome === "failed" && lines.some((l) => /extract's start is refused \(model\) — the scheduler does not start/.test(l)) && !lines.some((l) => /asleep:/.test(l)),
       `a model not served ends --follow with 2 at its start, before any sleep (a quiet of 300 s), the row ended failed (exit ${refusedFirst}; ${JSON.stringify(firstBeat)})`);
+    // The check's refusal is the scheduler's to name: no follower's row of its own is ended beside it (SMD-3214).
+    const followerRows = (await sql`SELECT count(*)::int AS n FROM ob1_config WHERE (key LIKE 'heartbeat:extract:%' OR key LIKE 'heartbeat:consolidate:%') AND updated_at >= ${checkFrom}`)[0].n;
+    assert(followerRows === 0, `the scheduler's check refused writes no follower's row of its own (${followerRows})`);
     // The provider refusing the request itself on the first pass — past the
     // start's probe, before any pass finished — is the configuration's too:
     // it ends the run, not a retry for ever (review pass 2).

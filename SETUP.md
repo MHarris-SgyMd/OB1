@@ -237,8 +237,11 @@ which is sent as `Bearer` in their place (SMD-2885). `OB1_JEV_BASE_URL` and
 `OB1_TELEGRAM_API_BASE` follow the same rule. `preflight.ts` prints a
 row for each endpoint, fails a hosted one with no credential of its own, and probes
 each by name — a local one on every start, a hosted one with `--deep` — so a
-chat endpoint that is down fails its own row while the embeddings row still
-passes (SMD-1875). Note what leaves the host under this
+chat endpoint that is down is named on its own row while the embeddings row
+still passes (SMD-1875); a local one whose name resolves with nothing answering
+yet warns and the server starts all the same — degraded until it answers, for
+the embeddings endpoint; captures untagged until it answers, for the chat one
+(SMD-2890). Note what leaves the host under this
 shape: a capture's full text, for tagging — and only the captures the gate
 lets through. Under the default policy the hosted chat endpoint is refused for
 every thought until an `OB1_EGRESS_ALLOW` term names what may go (above); the
@@ -480,10 +483,11 @@ bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile loca
   podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
-Seven services in order (nine with `local-models`): Postgres with pgvector, a migration job that applies the
-schema and exits, then `server` (no shipped template calls it; it retires in SMD-2287 PR 6), the REST core (internal unless
+Eight services in order (ten with `local-models`): Postgres with pgvector, a migration job that applies the
+schema and exits, then `server` (nothing in the stack calls it; it retires in SMD-2287 PR 6), the REST core (internal unless
 `deploy/compose.api-public.yaml` is named), the MCP server at `/mcp`, which hands every tool call to the REST
-core, and the proxy in front of them with the forwarder that publishes its port. The server runs `preflight.ts` before it
+core, the operator GUI at `/dashboard`, which reads the brain through the REST core too, and the proxy in front of
+them with the forwarder that publishes its port. The server runs `preflight.ts` before it
 serves, so a misconfiguration crashloops rather than starting and failing on your
 first capture. To run a *release* rather than a checkout build — the published
 `ob1-server` and `ob1-migrate` images, Ollama pinned by digest — see
@@ -536,12 +540,28 @@ Opening the connector URL in a browser shows `Method Not Allowed`: the endpoint
 serves POST only, and that answer is expected. `capture_thought` returns the
 new thought's id, which is what the other two take.
 
-### 5. Optional: workflows beside the brain (n8n)
+### 5. Open the dashboard
+
+```
+http://127.0.0.1:8000/dashboard
+```
+
+Sign in with a read or write key: the brain's counts and newest thoughts, its
+status (version, migrations, sizes, the workers' heartbeats) and any thought.
+A capture-only key is refused there, since it reads nothing. Behind a TLS proxy
+or tunnel, set `OB1_PUBLIC_ORIGIN` in `deploy/.env` to the https origin first,
+or the sign-in form is refused as cross-site; once it is set, sign in there and
+not at `127.0.0.1`, where the form is refused the same way. A stack configured
+with the authorization server (`COMPOSE_PROFILES` naming `auth`) offers no key
+sign-in yet: its sign-in is still to come (`dashboard/README.md`).
+
+### 6. Optional: workflows beside the brain (n8n)
 
 For ingestion that runs on its own — a mailbox polled on a schedule, a
 tracker synced — the `orchestration` profile runs n8n beside the stack
 (`docs/orchestration-tool.md`). n8n reaches the brain through its REST
-core, `http://api:8000` (SMD-2295), with no write key. The profile's
+core, `http://api:8000` (SMD-2295), with no write key; its brain credential
+is pinned to `api`, and provisioning refuses one pinned anywhere else. The profile's
 import runner is the one part that writes brain tables, as the pipeline
 does from a checkout, behind a key its allowlist bounds. Two kinds of template ship (SMD-2212):
 - **An act tool:** `linear_file_issue` on `/mcp/ob1-act`. It loads when
@@ -627,6 +647,7 @@ or patient-adjacent data, wherever you host it.
 - `db/README.md` — the schema, migrations, and the runner
 - `server-portable/README.md` — the server and the REST core, and their data layer
 - `mcp-server/README.md` — the MCP server at `/mcp`, a client of the REST core
+- `dashboard/README.md` — the operator GUI at `/dashboard`, a client of the REST core
 - `compat/supabase-sql/README.md` — running recipes and integrations without PostgREST
 - `evals/README.md` — how the local models were chosen, and how to re-run it
 - `deploy/README.md` — the compose stack in detail

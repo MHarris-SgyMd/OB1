@@ -151,8 +151,12 @@
  *      db and evals programs, whose ../server-portable imports pull the
  *      server's copy), its tsconfig compilerOptions equal the server's, and
  *      .github/workflows/fork-checks.yml runs `bunx tsc --noEmit` under it
- *      exactly once; a tsc step under a directory the list does not name is
- *      refused. The workflow is parsed with Bun.YAML (SMD-1932); no exceptions
+ *      exactly once — a step of its own, or a directory a
+ *      .github/ci/typecheck.sh step names, which runs them side by side
+ *      (SMD-3202), and which check 18 then runs against a stub bunx: a tsc
+ *      in each directory once, a failure failing the run, each failing
+ *      directory named with its output; a tsc step under a directory the
+ *      list does not name is refused. The workflow is parsed with Bun.YAML (SMD-1932); no exceptions
  *  19. docs/connector-registry.json — the connector taxonomy's one source — is
  *      sound and complete: the four closed/near-closed facet sets and the
  *      fetcher set equal the ones scripts/connector-registry.ts pins (a
@@ -275,13 +279,14 @@
  *      the class decision is docs/vendored-disposition.md's "PostgREST-
  *      speaking scripts" (an import emits ingestion-contract items, a
  *      maintenance script moves onto compat/supabase-sql, three retire), and
- *      POSTGREST_EXCEPTIONS counts the nineteen files with a call site
+ *      POSTGREST_EXCEPTIONS counts the eighteen files with a call site
  *      (two more reach the gateway through a lib; twenty-eight until
  *      obsidian-vault-import and local-ollama-embeddings retired (SMD-2137,
  *      SMD-2138), brain-backup, lint-sweep and thought-enrichment's three
  *      moved onto the shim (SMD-2144, SMD-2139), weekly-digest retired
- *      for the db/ verb db/weekly-digest.ts (SMD-2239), and brain-smoke-test
- *      retired into deploy/smoke.sh (SMD-2103)) with the ticket that
+ *      for the db/ verb db/weekly-digest.ts (SMD-2239), brain-smoke-test
+ *      retired into deploy/smoke.sh (SMD-2103), and ob-graph's
+ *      smoke-graph-rpcs.mjs went with its recipe (SMD-2920)) with the ticket that
  *      ports or retires each — a landed
  *      port fails until its entry goes, so the
  *      table's size, plus the two lib-reached scripts, is the class's
@@ -488,7 +493,8 @@
  * Exits non-zero on any violation.
  */
 
-import { readFileSync, existsSync, readdirSync, statSync, lstatSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync, lstatSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1474,7 +1480,7 @@ function checkCredentialCompares() {
 // check found nine files with eleven such statements: the two MCP servers
 // (`update-thought-mcp`, `enhanced-mcp`), three HTTP APIs
 // (`agent-memory-api`, `open-brain-rest`, `rest-api`), a worker
-// (`consolidation-workers/bio`), a recipe's server (`repo-learning-coach`), a
+// (`consolidation-workers/bio`), a recipe's server (`repo-learning-coach`, retired since: SMD-2923), a
 // recipe's paste-in snippet (`provenance-chains`) and a README's sample
 // (`telegram-capture`). Every rule the fork put into the
 // writers is bypassed by such a statement: 003/018's fingerprint is left
@@ -1716,7 +1722,7 @@ const THOUGHT_WRITE_PROBES = [
   'const updates: Record<string, unknown> = {};\nif (content !== undefined) {\n  updates.content = content;\n  updates.embedding = `[${embedding.join(",")}]`;\n}\nconst { data, error } = await supabase\n  .from("thoughts")\n  .update(updates)\n  .eq("id", id)\n  .select("id")\n  .single();',
   // enhanced-mcp: a literal over several lines, with the file\'s own fingerprint beside the content.
   'const { error: updateError } = await supabase\n  .from("thoughts")\n  .update({\n    content,\n    content_fingerprint: fingerprint,\n    embedding,\n    type: extracted.type,\n    updated_at: new Date().toISOString(),\n  })\n  .eq("id", id);',
-  // agent-memory-api and repo-learning-coach: the vector alone, after a 2-argument upsert.
+  // agent-memory-api and repo-learning-coach (retired since, SMD-2923): the vector alone, after a 2-argument upsert.
   'if (thoughtId) await supabase.from("thoughts").update({ embedding }).eq("id", thoughtId);',
   "const { error: embeddingError } = await supabase\n  .from('thoughts')\n  .update({ embedding })\n  .eq('id', thoughtId)",
   // open-brain-rest: a literal bound to a name, then sent.
@@ -2042,8 +2048,10 @@ function scan(text: string, from: number, stringsToo: boolean, inExpression: boo
 /**
  * Every import (and export-from) statement's specifier, with the line it starts
  * on, in order. A statement ends at its `;`, or — for one written on a single
- * line with no `;` (recipes/repo-learning-coach is semicolon-less throughout;
- * SMD-1799's second review pass found its twelve files' imports unread) — at
+ * line with no `;` (SMD-1799's second review pass found a semicolon-less
+ * recipe's twelve files' imports unread; that recipe, repo-learning-coach,
+ * retired with SMD-2923, and no file on the shim is semicolon-less now, but
+ * the reading stays until this rule retires with the shim, SMD-3216) — at
  * its line's end. A semicolon-less import that spans lines is still missed (a
  * silent miss, never a false catch), so the rule says so here.
  */
@@ -2157,7 +2165,7 @@ const SPECIFIER_PROBES: [string, string[], string[]][] = [
   ['import { createClient } from "../../compat/supabase-sql/index.ts";\nimport { db } from "./_shared/db.ts";\n', ['import { Pool } from "npm:pg@8";\nexport const db = new Pool();\n'], ["dep0:specifier:npm:pg@8@1"]],
   // `node:` is fine, a relative dynamic import is fine, a specifier in a comment or a string is prose.
   ['import { createHash } from "node:crypto";\nimport { createClient } from "../../compat/supabase-sql/index.ts";\nconst m = await import("./tools.ts");\n// see "jsr:@supabase/functions-js"\nconst s = "npm:hono";\n', [], []],
-  // Semicolon-less, single-line (the second review pass: repo-learning-coach's shape, unread until then).
+  // Semicolon-less, single-line (the second review pass: a semicolon-less recipe's shape, unread until then).
   ["import { Hono } from 'npm:hono@4'\nimport { createClient } from '../../compat/supabase-sql/index.ts'\n", [], ["specifier:npm:hono@4@1"]],
   // The third pass: a `;`-led next line counts the import once; a mixed file credits each import to its own line.
   ["import { a } from 'npm:a'\n;[1].forEach(f)\n", [], ["specifier:npm:a@1"]],
@@ -4174,6 +4182,11 @@ const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals
 const TYPE_PINS = ["@types/bun", "typescript", "@types/node"];
 const WORKFLOW = ".github/workflows/fork-checks.yml";
 const TSC_STEP = /^\s*bunx tsc --noEmit\s*$/;
+/** The script that type-checks the directories it names side by side (SMD-3202), each relative to the repository root; a step that runs it is a tsc step for each. Its whole `run:`, as TSC_STEP's is. */
+const TSC_SCRIPT = ".github/ci/typecheck.sh";
+const TSC_SCRIPT_STEP = /^\s*\.github\/ci\/typecheck\.sh((?:[ \t]+[A-Za-z0-9_.\/-]+)+)\s*$/;
+/** Any `run:` that invokes the script, at a command's start (`bash` or `./` in front allowed): one TSC_SCRIPT_STEP does not read is named as that. A mention of it (shellcheck, echo) is not an invocation. */
+const TSC_SCRIPT_RUN = /(?:^|[;&|(])[ \t]*(?:(?:bash|sh)[ \t]+)?(?:\.\/)?\.github\/ci\/typecheck\.sh(?:\s|$)/m;
 /** What check 18 compares: each directory's package.json and tsconfig.json as read (absent when the file is), and the workflow's tsc steps by directory. */
 type PackageJson = { devDependencies?: Record<string, string> };
 type TsConfig = { compilerOptions?: Record<string, unknown> };
@@ -4203,16 +4216,21 @@ function typecheckSurfaceProblems({ packages, tsconfigs, tscSteps }: TypecheckSu
     if (!opts) problems.push([`${dir}/tsconfig.json`, `missing, or has no compilerOptions (SMD-1932)`]);
     else if (dir !== ref && canon(opts) !== refOpts) problems.push([`${dir}/tsconfig.json`, `compilerOptions differ from ${ref}/tsconfig.json's: ${canon(opts)} vs ${refOpts} (SMD-1932)`]);
     const n = tscSteps.filter((d) => d === dir).length;
-    if (n !== 1) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${dir} ${n} time(s); exactly one step per type-checked directory (SMD-1932)`]);
+    if (n !== 1) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${dir} ${n} time(s); exactly one typecheck per type-checked directory, its own step or a .github/ci/typecheck.sh step naming it (SMD-1932)`]);
   }
-  for (const d of tscSteps) if (!TYPECHECKED_DIRS.includes(d)) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${d}, which TYPECHECKED_DIRS in ${SELF} does not name — add it there, with its pins and tsconfig (SMD-1932)`]);
+  for (const d of tscSteps) if (!TYPECHECKED_DIRS.includes(d)) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${d}, which TYPECHECKED_DIRS in ${SELF} does not name — add it there, with its pins and tsconfig, or take it out of the step that type-checks it (SMD-1932)`]);
   return problems;
 }
-/** The working-directory of every `bunx tsc --noEmit` step in a parsed workflow, in order. */
+/** Each directory a parsed workflow type-checks, in order: a `bunx tsc --noEmit` step's working-directory, and each directory a TSC_SCRIPT step names. */
 function tscStepsIn(doc: WorkflowDoc) {
   const out: string[] = [];
   for (const job of Object.values(doc?.jobs ?? {})) {
-    for (const step of job?.steps ?? []) if (typeof step?.run === "string" && TSC_STEP.test(step.run)) out.push(step["working-directory"] ?? ".");
+    for (const step of job?.steps ?? []) {
+      if (typeof step?.run !== "string") continue;
+      if (TSC_STEP.test(step.run)) out.push(step["working-directory"] ?? ".");
+      const named = TSC_SCRIPT_STEP.exec(step.run);
+      if (named) out.push(...named[1].trim().split(/\s+/).map((d) => posix.normalize(d).replace(/\/+$/, "")));
+    }
   }
   return out;
 }
@@ -4237,6 +4255,13 @@ function checkTypecheckSurface() {
     const got = typecheckSurfaceProblems(g);
     if (got.length !== 1) fail(SELF, `check 18 reports ${got.length} problem(s) for ${why}, not one (its own probe): ${JSON.stringify(got)}`);
   }
+  // The reader: a step of its own, and each directory a TSC_SCRIPT step names; not the script with none, nor a step that only mentions it.
+  const read = tscStepsIn({ jobs: { a: { steps: [
+    { run: "bunx tsc --noEmit", "working-directory": "x" }, { run: `${TSC_SCRIPT} a b/c ./d` }, { run: TSC_SCRIPT }, { run: `echo ${TSC_SCRIPT} z` }, { run: `${TSC_SCRIPT} e && bun f.ts` }, { run: `${TSC_SCRIPT} g/\n` },
+  ] } } });
+  const invoked = [`${TSC_SCRIPT} a`, `bash ${TSC_SCRIPT} a`, `./${TSC_SCRIPT} a`, `|\n  ${TSC_SCRIPT} a \\\n    b`, `cd x && ${TSC_SCRIPT} a`].every((r) => TSC_SCRIPT_RUN.test(r)) && ![`shellcheck ${TSC_SCRIPT}`, `echo ${TSC_SCRIPT} z`, `bash db/typecheck.sh`].some((r) => TSC_SCRIPT_RUN.test(r));
+  if (!invoked) fail(SELF, `check 18 no longer tells an invocation of ${TSC_SCRIPT} from a mention of it (SMD-3202)`);
+  if (JSON.stringify(read) !== JSON.stringify(["x", "a", "b/c", "d", "g"])) fail(SELF, `check 18 no longer reads its probe's tsc steps as ["x","a","b/c","d","g"] (read ${JSON.stringify(read)}) (SMD-3202)`);
 
   if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
     fail(SELF, `check 18 parses ${WORKFLOW} with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1932)`);
@@ -4245,8 +4270,126 @@ function checkTypecheckSurface() {
   const readJson = (rel: string) => (existsSync(join(ROOT, rel)) ? JSON.parse(readFileSync(join(ROOT, rel), "utf8")) : undefined);
   const packages = Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, readJson(`${d}/package.json`)]));
   const tsconfigs = Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, readJson(`${d}/tsconfig.json`)]));
-  const tscSteps = tscStepsIn(Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")) as WorkflowDoc);
+  const doc = Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")) as WorkflowDoc;
+  // One walk over the steps for the script: a step it reads makes check 18 run the script below; one running it in
+  // a form the reader does not take counts for nothing, every directory it names reading as untype-checked, so it
+  // is said once, first, as that (review pass 3).
+  let usesScript = false;
+  for (const job of Object.values(doc?.jobs ?? {})) for (const step of job?.steps ?? []) {
+    if (typeof step?.run !== "string") continue;
+    if (TSC_SCRIPT_STEP.test(step.run)) usesScript = true;
+    else if (TSC_SCRIPT_RUN.test(step.run))
+      fail(WORKFLOW, `runs ${TSC_SCRIPT} in a form check 18 cannot read (${JSON.stringify(step.run.trim().slice(0, 80))}), so the directories it names count as untype-checked below — write the whole \`run:\` as \`${TSC_SCRIPT} DIR…\`: one line or a \`>-\` folded scalar, no \`./\`, \`bash\`, \`\\\` or comment (SMD-3202)`);
+  }
+  const tscSteps = tscStepsIn(doc);
   for (const [where, msg] of typecheckSurfaceProblems({ packages, tsconfigs, tscSteps })) fail(where, msg);
+  // A step naming directories counts only while the script type-checks each of them and fails on any: run, it is held to that.
+  if (usesScript) for (const problem of typecheckScriptProblems(join(ROOT, TSC_SCRIPT))) fail(TSC_SCRIPT, `${problem} (SMD-3202)`);
+}
+/**
+ * TSC_SCRIPT run against a stub `bunx` over directories of a scratch tree, named
+ * relative to the repository root as the step names them, from another working
+ * directory. The stub logs each call's directory and arguments; where a `fail`
+ * file holds an exit code it prints a line on stdout (where tsc prints its
+ * diagnostics) and one on stderr, and exits with that code. One failing
+ * directory's stub waits until another's call is logged, so the two run side by
+ * side and finish in a known order. Three runs — fail, pass, fail, pass; pass,
+ * pass; pass, fail — each held to check 18's promise (a tsc in each directory,
+ * once, exactly `tsc --noEmit`; the run failing if any fails, passing if none
+ * does) and to what the step's log is for (each failing directory's line, with
+ * its own exit code, in the order named; its own output under it, both streams,
+ * and no other's; not folded). Review passes 1–5 found a text guard and then
+ * four smaller probes each passing edits that broke one of these; pass 5
+ * enumerated the contract and this covers every plausible edit it found.
+ */
+function typecheckScriptProblems(script: string): string[] {
+  if (!existsSync(script)) return ["is missing, so nothing type-checks the directories a step names to it — check 18 counts a step naming directories to it as their typecheck"];
+  const tmp = mkdtempSync(join(tmpdir(), "ob1-check18-"));
+  try {
+    const stub = join(tmp, "bin");
+    mkdirSync(stub);
+    writeFileSync(join(stub, "bunx"), [
+      "#!/bin/sh",
+      `printf '%s %s\\n' "$PWD" "$*" >> "$TSC_STUB_LOG"`,
+      // Side by side: wait (2 s at most) for the named directory's call, then a moment for it to finish first.
+      `if [ -f wait-for ]; then w=$(cat wait-for); n=0; until grep -qF "$w tsc" "$TSC_STUB_LOG" || [ "$n" -ge 200 ]; do sleep 0.01; n=$((n + 1)); done; [ "$n" -ge 200 ] && echo "barrier timed out" >> "$TSC_STUB_LOG"; sleep 0.05; fi`,
+      `echo "stub tsc in $PWD"`,
+      `if [ -f fail ]; then echo "stub type error in $PWD"; echo "stub stderr in $PWD" >&2; exit "$(cat fail)"; fi`,
+      "exit 0",
+      "",
+    ].join("\n"));
+    chmodSync(join(stub, "bunx"), 0o755);
+    const dir = (name: string, failCode?: number, waitFor?: string) => {
+      const d = join(tmp, name);
+      mkdirSync(d);
+      writeFileSync(join(d, "tsconfig.json"), "{}");
+      if (failCode !== undefined) writeFileSync(join(d, "fail"), String(failCode));
+      if (waitFor) writeFileSync(join(d, "wait-for"), waitFor);
+      return d;
+    };
+    const c = dir("c", 137);
+    const [a, b, d, e] = [dir("a", 2, c), dir("b"), dir("d"), dir("e", 1)];
+    const failCode = new Map([[a, 2], [c, 137], [e, 1]]);
+    // BASH_ENV and ENV would run a file of the caller's before the script, and could put another bunx ahead of the stub.
+    const env: Record<string, string | undefined> = { ...process.env, PATH: `${stub}:${process.env.PATH}`, BASH_ENV: undefined, ENV: undefined };
+    const rel = (x: string) => relative(ROOT, x);
+    // Run from a directory nested deeper than the repository root is deep, so the step's relative directories
+    // resolve only from the root: from here their `..`s stay inside the scratch tree (review pass 5: from a
+    // shallow directory they climbed to / and resolved anyway, and a script that dropped its `cd` passed).
+    const cwd = join(tmp, ...Array(ROOT.split(sep).filter(Boolean).length + 1).fill("w"));
+    mkdirSync(cwd, { recursive: true });
+    const short = (x: string) => x.replace(tmp, "…").replace(rel(tmp), "…");
+    const run = (dirs: string[], label: string) => {
+      const log = join(tmp, `${label}.log`);
+      writeFileSync(log, "");
+      const r = Bun.spawnSync(["bash", script, ...dirs.map(rel)], { cwd, env: { ...env, TSC_STUB_LOG: log }, stdout: "pipe", stderr: "pipe" });
+      const logged = readFileSync(log, "utf8").split("\n").filter(Boolean);
+      return { dirs, label, code: r.exitCode, lines: `${r.stdout.toString()}${r.stderr.toString()}`.split("\n"), calls: logged.filter((x) => x !== "barrier timed out"), serial: logged.includes("barrier timed out") };
+    };
+    let runs: ReturnType<typeof run>[];
+    try { runs = [run([a, b, c, d], "fail, pass, fail, pass"), run([b, d], "pass, pass"), run([b, e], "pass, fail")]; }
+    catch (err) { return [`cannot be run to hold it (${(err as Error).message.split("\n")[0]}): check 18 runs it with bash, which must be on PATH`]; }
+    const promise = "check 18 counts a step naming directories to it as their typecheck";
+    const forLog = "the step's log is how a failure names its directory";
+    const exactly = "the command is held to `bunx tsc --noEmit` exactly, as a step of its own is, so no flag (--noCheck) can weaken it; an option belongs in the directory's tsconfig.json";
+    const head = "::error title=Typecheck::tsc --noEmit in ";
+    const problems: string[] = [];
+    for (const r of runs) {
+      const failing = r.dirs.filter((x) => failCode.has(x));
+      const on = `on ${r.label}`;
+      if (failing.length ? r.code === 0 : r.code !== 0) problems.push(`exits ${r.code} ${on}, where ${failing.length ? "a failure must fail the run" : "every tsc passed"} — ${promise}`);
+      if (r.serial) problems.push(`runs the directories one after another ${on}, not side by side — the step exists to run them side by side`);
+      if (!(r.calls.length === r.dirs.length && r.dirs.every((x) => r.calls.filter((y) => y === `${x} tsc --noEmit`).length === 1))) {
+        problems.push(`runs ${JSON.stringify(r.calls.map(short))} ${on}, not one \`bunx tsc --noEmit\` in each directory — ${promise}; ${exactly}`);
+        continue;
+      }
+      // Each failing directory's line, in the order named, with its own exit code; its section (to the next ::error or ::group::) holding its own output, both streams, and no other directory's; no group open around it.
+      const named = r.lines.flatMap((l, i) => (l.startsWith(head) ? [i] : []));
+      const want = failing.map((x) => `${head}${rel(x)} failed (exit ${failCode.get(x)})`);
+      const got = named.map((i) => r.lines[i]);
+      if (got.length !== want.length || !want.every((w, k) => got[k] === w || got[k].startsWith(`${w} `))) {
+        problems.push(`names ${JSON.stringify(got.map(short))} ${on}, not ${JSON.stringify(want.map(short))}: each failing directory's line starts \`${head}DIR failed (exit N)\`, N its tsc's own exit code, in the order named — ${forLog}`);
+        continue;
+      }
+      let open = false;
+      r.lines.forEach((l, i) => {
+        if (l.startsWith("::group::")) open = true;
+        else if (l.startsWith("::endgroup::")) open = false;
+        else if (named.includes(i) && open) problems.push(`folds ${short(l.slice(head.length))}'s failure inside a group ${on}: a failing directory's output is left open — ${forLog}`);
+      });
+      for (const [k, i] of named.entries()) {
+        const x = failing[k];
+        const stop = r.lines.findIndex((l, j) => j > i && (l.startsWith("::error") || l.startsWith("::group::")));
+        const section = r.lines.slice(i + 1, stop === -1 ? r.lines.length : stop);
+        if (!section.includes(`stub type error in ${x}`) || !section.includes(`stub stderr in ${x}`)) problems.push(`does not print ${short(rel(x))}'s tsc output, stdout and stderr, under its failure ${on} (tsc writes its diagnostics to stdout) — ${forLog}`);
+        const others = r.dirs.filter((y) => y !== x && section.some((l) => l.endsWith(` in ${y}`)));
+        if (others.length) problems.push(`prints ${JSON.stringify(others.map((y) => short(rel(y))))}'s output under ${short(rel(x))}'s failure ${on}, as if theirs were its — ${forLog}`);
+      }
+    }
+    return [...new Set(problems)];
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }
 checkTypecheckSurface();
 // ── 19: the connector registry (SMD-1933) ────────────────────────────────────
@@ -5811,13 +5954,14 @@ checkWorkflowPins();
 // that says it posts to `/rest/v1/rpc/…` is making a claim about itself), a
 // `rest/v1` path in any string, a supabase-py import or `create_client(`
 // (Python and shell alone), or a `@supabase/postgrest-js` specifier is a hit.
-// POSTGREST_EXCEPTIONS counts the nineteen files with a call site (two
+// POSTGREST_EXCEPTIONS counts the eighteen files with a call site (two
 // more reach the gateway through a lib; twenty-eight until the two retirements,
 // obsidian-vault-import and local-ollama-embeddings — SMD-2137 and SMD-2138 —
 // the first five ports: brain-backup and lint-sweep — SMD-2144 — and
 // thought-enrichment's three — SMD-2139 — weekly-digest's retirement for
-// the db/ verb db/weekly-digest.ts — SMD-2239 — and brain-smoke-test's into
-// deploy/smoke.sh — SMD-2103)
+// the db/ verb db/weekly-digest.ts — SMD-2239 — brain-smoke-test's into
+// deploy/smoke.sh — SMD-2103 — and ob-graph's smoke-graph-rpcs.mjs with its
+// recipe — SMD-2920)
 // with the ticket that ports or retires each: a line past the count fails (a
 // new call beside the documented ones),
 // a count no line reaches fails as stale (the port landed on those lines —
@@ -5916,17 +6060,20 @@ const POSTGREST_PROBES: [string, string, boolean][] = [
 const POSTGREST = (what: string, ticket: string, lines: number): CountedException => ({ why: `${what} — ${ticket}`, lines });
 const IMPORT = "an import that embeds the text itself and POSTs the row raw; it emits ingestion-contract items for `bun db/ingest-records.ts --source items --items` (SMD-2136)";
 const SHIM = "a maintenance script; it moves onto compat/supabase-sql under bun";
+/** SMD-3216 (2026-10-22): the shim retires, so the scripts still to port become clients of the REST core instead. */
+const REST_CLIENT = "a script still to port; it becomes a REST-core client through rest-client/ (SMD-3216), naming any core operation it lacks";
 /**
  * file → the ticket that ports or retires it, and the exact count of lines that speak PostgREST. Thirty files in
  * twenty-one recipes (SMD-2126's survey of f7693c4c, re-measured on d8e3de60); two more of the thirty —
  * atomizer's backfill-gmail-correspondents.mjs and authorship-edges' backfill-authorship.mjs — reach the
- * gateway through their `lib/` file alone and have no line of their own. Four of the thirty are gone:
+ * gateway through their `lib/` file alone and have no line of their own. Five of the thirty are gone:
  * obsidian-vault-import's import-obsidian.py (SMD-2137) and local-ollama-embeddings' embed-local.py (SMD-2138)
  * retired with their recipes, the first entries to leave; weekly-digest's weekly-digest.mjs (SMD-2239),
  * its live mode rebuilt as the db/ verb db/weekly-digest.ts (a sink, not a maintenance script — the
  * recipe's README stays a pointer); and brain-smoke-test's smoke-all.js (SMD-2103), retired with its
  * recipe once deploy/smoke.sh took the wrong-key refusal, the one check of its that applied here and
- * that smoke.sh lacked. Five more are on the shim: brain-backup's
+ * that smoke.sh lacked; and ob-graph's smoke-graph-rpcs.mjs, with its recipe (SMD-2920; SMD-2146
+ * canceled). Five more are on the shim: brain-backup's
  * backup-brain.mjs and lint-sweep's lint-sweep.js (SMD-2144), the first ports to land, and
  * thought-enrichment's enrich-thoughts.mjs, backfill-type.mjs and backfill-sensitivity.mjs (SMD-2139),
  * the first writers.
@@ -5937,28 +6084,26 @@ const POSTGREST_EXCEPTIONS = new Map<string, CountedException>([
   ["recipes/perplexity-conversation-import/import-perplexity.py", POSTGREST(IMPORT, "SMD-2148", 1)],
   ["recipes/readwise-import/import-readwise.py", POSTGREST("an import on supabase-py that already captures through upsert_thought (SMD-1524) over a transport the fork lacks; it emits contract items", "SMD-2149", 2)],
   ["recipes/google-activity-import/import-google-activity.mjs", POSTGREST(IMPORT, "SMD-2150", 1)],
-  ["recipes/email-history-import/pull-gmail.ts", POSTGREST(IMPORT, "SMD-2021", 2)],
+  ["recipes/email-history-import/pull-gmail.ts", POSTGREST(REST_CLIENT, "SMD-2021", 2)],
   // Retire: the fork's core owns the capability.
   ["recipes/fingerprint-dedup-backfill/backfill-fingerprints.mjs", POSTGREST("superseded by migration 023; the file is removed", "SMD-2145", 1)],
   // Maintenance scripts → the shim under bun.
   ["recipes/fingerprint-dedup-backfill/delete-duplicates.mjs", POSTGREST(`${SHIM}, its deletes through delete_thought`, "SMD-2145", 1)],
-  ["recipes/atomizer/audit-gmail-pipeline.mjs", POSTGREST(SHIM, "SMD-2140", 2)],
-  ["recipes/atomizer/lib/entity-resolver.mjs", POSTGREST(`${SHIM} (backfill-gmail-correspondents.mjs reaches the gateway through it)`, "SMD-2140", 2)],
-  ["recipes/atomizer/re-atomize-gmail-thought.mjs", POSTGREST(`${SHIM}, its thought writes through upsert_thought and delete_thought`, "SMD-2140", 2)],
-  ["recipes/authorship-edges/lib/author-edges.mjs", POSTGREST(`${SHIM} (backfill-authorship.mjs reaches the gateway through it)`, "SMD-2141", 2)],
-  ["recipes/typed-edge-classifier/classify-edges.mjs", POSTGREST(SHIM, "SMD-2141", 1)],
-  ["recipes/provenance-chains/backfill.mjs", POSTGREST(SHIM, "SMD-2142", 1)],
-  ["recipes/provenance-chains/eval.mjs", POSTGREST(SHIM, "SMD-2142", 1)],
-  ["recipes/wiki-synthesis/scripts/synthesize-wiki.mjs", POSTGREST(SHIM, "SMD-2143", 1)],
-  ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", POSTGREST(`${SHIM}, its page deletes through delete_thought`, "SMD-2143", 1)],
-  ["recipes/entity-wiki/generate-wiki.mjs", POSTGREST(SHIM, "SMD-2143", 1)],
+  ["recipes/atomizer/audit-gmail-pipeline.mjs", POSTGREST(REST_CLIENT, "SMD-2140", 2)],
+  ["recipes/atomizer/lib/entity-resolver.mjs", POSTGREST(`${REST_CLIENT} (backfill-gmail-correspondents.mjs reaches the gateway through it)`, "SMD-2140", 2)],
+  ["recipes/atomizer/re-atomize-gmail-thought.mjs", POSTGREST(`${REST_CLIENT}, its thought writes through upsert_thought and delete_thought`, "SMD-2140", 2)],
+  ["recipes/authorship-edges/lib/author-edges.mjs", POSTGREST(`${REST_CLIENT} (backfill-authorship.mjs reaches the gateway through it)`, "SMD-2141", 2)],
+  ["recipes/typed-edge-classifier/classify-edges.mjs", POSTGREST(REST_CLIENT, "SMD-2141", 1)],
+  ["recipes/provenance-chains/backfill.mjs", POSTGREST(REST_CLIENT, "SMD-2142", 1)],
+  ["recipes/provenance-chains/eval.mjs", POSTGREST(REST_CLIENT, "SMD-2142", 1)],
+  ["recipes/wiki-synthesis/scripts/synthesize-wiki.mjs", POSTGREST(REST_CLIENT, "SMD-2143", 1)],
+  ["recipes/wiki-synthesis/scripts/backfill-gmail-wikis.mjs", POSTGREST(`${REST_CLIENT}, its page deletes through delete_thought`, "SMD-2143", 1)],
+  ["recipes/entity-wiki/generate-wiki.mjs", POSTGREST(REST_CLIENT, "SMD-2143", 1)],
   // Not a maintenance script but a sink: it pages thought text and posts it to Telegram, which a shim
   // port would do from below the server's egress gate — the orchestration ADR's decision 9, written for
   // templates, is read to cover it. Its
   // two read-only siblings, brain-backup and lint-sweep, are on the shim (SMD-2144, rescoped 2026-09-26).
-  ["recipes/source-filtering/backfill-metadata.ts", POSTGREST(SHIM, "SMD-2021", 2)],
-  // The one smoke harness left, with its own ticket (brain-smoke-test's retired: deploy/smoke.sh absorbed its applicable checks, SMD-2103).
-  ["recipes/ob-graph/smoke-graph-rpcs.mjs", POSTGREST("the smoke moves onto the shim or into extensions/test-tools.ts", "SMD-2146", 1)],
+  ["recipes/source-filtering/backfill-metadata.ts", POSTGREST(REST_CLIENT, "SMD-2021", 2)],
 ]);
 function checkPostgrestClients() {
   for (const name of ["x.ts", "x.tsx", "x.mts", "x.cts", "x.js", "x.jsx", "x.mjs", "x.cjs", "x.py", "x.sh"]) if (!POSTGREST_CODE_FILE.test(name)) fail(SELF, `check 24's POSTGREST_CODE_FILE no longer reads ${name} (its own probe)`);
@@ -6470,7 +6615,7 @@ const TRUST_PROBES: [string, string, number, number, boolean][] = [
 
 const RAW_IMPORT = (ticket: string): CountedException["why"] =>
   `an import that POSTs its rows raw, so they carry no declared trust (073's trigger strips a payload's, and PostgREST sets no event handoff); its port onto the ingestion contract (${ticket}) writes through db/ingest-records.ts, whose rows take the ingester key's kind — classify that key \`ingested\``;
-const RAW_FALLBACK = "the plain insert its upsert_thought call falls back to on a brain without the function; that call declares, the raw row cannot (SMD-2143 moves the script onto the shim)";
+const RAW_FALLBACK = "the plain insert its upsert_thought call falls back to on a brain without the function; that call declares, the raw row cannot (SMD-2143 makes the script a REST-core client, SMD-3216)";
 const RAW_OWN_DATABASE = "a deployment with a database of its own and none of the fork's migrations: no 073, so no trust to declare (check 10 counts the same insert)";
 /**
  * file → why its raw captures cannot declare, and the exact count of their lines. A line past the count fails (a
@@ -6886,11 +7031,13 @@ const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("hooks-off", "Path(`/hooks`) || PathPrefix(`/hooks/`)", 35, "not-served", "noop@internal")
   + routeRouter("grafana-off", "Path(`/grafana`) || PathPrefix(`/grafana/`)", 35, "not-served", "noop@internal")
   + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "", "mcp")
+  + routeRouter("dashboard", "Path(`/dashboard`) || PathPrefix(`/dashboard/`)", 30, "", "app")
   + routeHealth("mcp")
   + "  middlewares:\n"
   + routeErrors("auth-absent", "502") + routeErrors("api-off", "418") + routeErrors("not-served", "418")
   + "  services:\n" + routeService("mcp", `http://${tierMeshName("mcp", "stable")}.:8000`)
-  + routeService("auth", "http://auth.ob1.internal.:3000");
+  + routeService("auth", "http://auth.ob1.internal.:3000")
+  + routeService("app", "http://app.ob1.internal.:8000");
 /** compose.api-public.yaml's route table, byte for byte, as Bun.YAML reads the block. */
 const API_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("api-public", "Path(`/api`) || PathPrefix(`/api/`)", 36, "api-no-forwarder, api-strip", "api")
@@ -6939,7 +7086,7 @@ const PROXY_SERVICE = {
   networks: { front: { aliases: ["proxy.ob1.internal"] }, mesh: {} },
   dns_search: ["."],
   healthcheck: { test: ["CMD", "traefik", "healthcheck"], interval: "5s", timeout: "3s", retries: 5 },
-  depends_on: { api: { condition: "service_started" }, mcp: { condition: "service_started" } },
+  depends_on: { api: { condition: "service_started" }, mcp: { condition: "service_started" }, app: { condition: "service_started" } },
   restart: "unless-stopped",
 };
 /** The forwarder's script (SMD-2583), deploy/forwarder.ts: compose.yaml carries it inline as x-forwarder, in its `forwarder` config and its label, each held to this byte for byte — the file CI runs --self-check on. It holds no `$`, which compose would read as a variable from deploy/.env or the shell, so the copy compose runs is this file (review pass 1: `${X:-…}` steered the script and passed), and no `!`, which check 27 refuses in compose.tiers.yaml. */
@@ -6991,6 +7138,34 @@ const MCP_SERVICE = {
   restart: "unless-stopped",
   networks: { mesh: { aliases: ["mcp.ob1.internal"] } },
   healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:$${PORT:-8000}/health >/dev/null || exit 1"], interval: "30s", timeout: "3s", start_period: "10s", retries: 3 },
+};
+/**
+ * compose.yaml's `app`, the operator GUI (SMD-2280), whole, its logging aside: the server's image run as
+ * `bun ../dashboard/serve.ts` with auto-install off, holding no key and no secret — only the origin and the
+ * configured switch its sign-in reads (COMPOSE_PROFILES naming auth turns key sign-in off, ADR decision 16, so
+ * dropping or pinning it would reopen that door) — on the mesh alone, its files read-only and no capability, its
+ * health on its own path, and its wait on the REST core. A change to it is made here too, on purpose (review pass 1:
+ * a key list, a forwarder key, `user: root`, another image and COMPOSE_PROFILES dropped each passed the per-key rules).
+ */
+const APP_SERVICE = {
+  image: "${COMPOSE_PROJECT_NAME:-open-brain}-server",
+  pull_policy: "never",
+  entrypoint: ["bun", "--no-install"],
+  command: ["../dashboard/serve.ts"],
+  environment: {
+    OB1_PUBLIC_ORIGIN: "${OB1_PUBLIC_ORIGIN:-}",
+    COMPOSE_PROFILES: "${COMPOSE_PROFILES:-}",
+    OB1_STOP_GRACE: "${OB1_STOP_GRACE:-}",
+  },
+  stop_grace_period: "${OB1_STOP_GRACE:-10}s",
+  depends_on: { api: { condition: "service_started" } },
+  restart: "unless-stopped",
+  networks: { mesh: { aliases: ["app.ob1.internal"] } },
+  read_only: true,
+  tmpfs: ["/tmp"],
+  cap_drop: ["ALL"],
+  security_opt: ["no-new-privileges:true"],
+  healthcheck: { test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/dashboard/health >/dev/null || exit 1"], interval: "30s", timeout: "3s", start_period: "10s", retries: 3 },
 };
 /**
  * compose.yaml's observability collector (SMD-1849 PR 3a) as Bun.YAML reads it, its `logging` (check 29's) and its labels (check 37's,
@@ -7125,17 +7300,22 @@ const PG_MONITOR_ROLE_SERVICE = {
 };
 /** compose.grafana-port.yaml's environment on lgtm, by value: Grafana's origin, its loopback port unless GRAFANA_ORIGIN names one, and nothing else — any other key there is Grafana's configuration, its anonymous access included (SMD-1849 PR 3a review passes 3, 6). */
 const GRAFANA_PORT_LGTM_ENV = { LGTM_ORIGIN: "${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}" };
+/** The operator GUI's link to Grafana (SMD-2280), by the overlay that reaches it, by value: the one key each sets on `app`. */
+const GRAFANA_APP_ENV: Record<string, Mapping> = {
+  "compose.grafana-public.yaml": { GRAFANA_ROUTE: "/grafana/" },
+  "compose.grafana-port.yaml": { GRAFANA_LINK: "${GRAFANA_ORIGIN:-http://127.0.0.1:${GRAFANA_PORT:-3000}}/grafana/" },
+};
 /** Each overlay, by file: the keys it sets on each service it names (an overlay that carries a table sets only its mount, label and wait on the proxy), and its top-level keys beside `services` (x-* anchors aside). CI's "The proxy loads only the held route tables" holds the same of each combination, in its `declared` paths. */
 const OVERLAYS: Record<string, { services: Record<string, string[]>; top: string[] }> = {
   // The proxy: its table's mount, its label and its wait.
   "compose.api-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
   "compose.hooks-public.yaml": { services: { proxy: ["configs", "labels", "depends_on"] }, top: ["configs"] },
   // No wait: the proxy starts with the profile off, and its 502 is a 404 (SMD-1849 PR 3a).
-  "compose.grafana-public.yaml": { services: { proxy: ["configs", "labels"] }, top: ["configs"] },
+  "compose.grafana-public.yaml": { services: { proxy: ["configs", "labels"], app: ["environment"] }, top: ["configs"] },
   // Postgres's port, and the outward network it is published on (SMD-2583); Grafana's, the same way (SMD-1849 PR 3a).
   "compose.host-ports.yaml": { services: { postgres: ["networks", "ports"], ollama: ["ports"], jev: ["ports"] }, top: ["networks"] },
   // Grafana's loopback port: its network, its port and its origin, held by value (GRAFANA_PORT_LGTM_ENV).
-  "compose.grafana-port.yaml": { services: { lgtm: ["networks", "ports", "environment"] }, top: ["networks"] },
+  "compose.grafana-port.yaml": { services: { lgtm: ["networks", "ports", "environment"], app: ["environment"] }, top: ["networks"] },
 };
 /** compose.yaml's top-level keys, x-* anchors aside. */
 const COMPOSE_TOP = ["name", "services", "networks", "volumes", "configs"];
@@ -7147,6 +7327,8 @@ const SERVICE_KEYS = ["build", "image", "pull_policy", "profiles", "command", "e
 const CONFINEMENT: Record<string, Mapping> = {
   "orchestration-runner": { cap_drop: ["ALL"], cap_add: ["SETUID", "SETGID", "KILL", "NET_ADMIN", "SETPCAP"], security_opt: ["no-new-privileges:true"] },
   auth: { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
+  // The operator GUI (SMD-2280): the first service a browser reaches, so the image's files read-only and no capability.
+  app: { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
   lgtm: { cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
   "pg-exporter": { read_only: true, cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] },
 };
@@ -7187,10 +7369,12 @@ const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
   "compose.yaml": {
     postgres: ["data"],
     migrate: ["data"],
-    // Not on the mesh: nothing routes to it since SMD-2532, and /mcp is the MCP server built on the REST core's, on the mesh alone (SMD-2287); no shipped template calls it (n8n's brain calls go to the REST core, SMD-2295), the orchestration eval until SMD-2295's second PR.
+    // Not on the mesh: nothing routes to it since SMD-2532, and /mcp is the MCP server built on the REST core's, on the mesh alone (SMD-2287); nothing in the stack calls it (n8n's brain calls and the orchestration eval's go to the REST core, SMD-2295).
     server: { data: {}, egress: {} },
     api: { data: {}, egress: {}, mesh: { aliases: [tierMeshName("api", "stable")] } },
     mcp: { mesh: { aliases: [tierMeshName("mcp", "stable")] } },
+    // The operator GUI (SMD-2280): a client of the REST core, reached by the proxy alone.
+    app: { mesh: { aliases: ["app.ob1.internal"] } },
     "board-sync": ["data", "egress"],
     extract: ["data", "egress"],
     consolidate: ["data", "egress"],
@@ -7259,6 +7443,11 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
     const mdiffs: string[] = [];
     pathDiffs(JSON.parse(JSON.stringify(omitKeys(mcp, ["logging"]))), MCP_SERVICE, "services.mcp", mdiffs);
     if (mdiffs.length) flag("proxy", `${mdiffs.slice(0, 6).join("; ")}${mdiffs.length > 6 ? `; and ${mdiffs.length - 6} more` : ""} — compose.yaml's mcp is check 28's MCP_SERVICE: it is on the mesh beside the proxy with none of the server's secrets, so a knob handed to it, its entrypoint, its health or its wait on the REST core is changed there too, on purpose (SMD-2287)`);
+    // The operator GUI, whole (SMD-2280): what it holds, how it starts, its confinement, its health.
+    const app = isMapping(services.app) ? services.app : undefined;
+    const adiffs: string[] = [];
+    pathDiffs(JSON.parse(JSON.stringify(omitKeys(app, ["logging"]))), APP_SERVICE, "services.app", adiffs);
+    if (adiffs.length) flag("proxy", `${adiffs.slice(0, 6).join("; ")}${adiffs.length > 6 ? `; and ${adiffs.length - 6} more` : ""} — compose.yaml's app is check 28's APP_SERVICE: the browser's way into the brain, holding no key, so a knob handed to it, its image, user, confinement, health or wait is changed there too, on purpose — and COMPOSE_PROFILES is what turns its key sign-in off while the stack is configured (SMD-2280)`);
     // The observability collector, whole (SMD-1849 PR 3a): Grafana's sign-in, its exposure and what it calls out to are its environment.
     const lgtm = isMapping(services.lgtm) ? services.lgtm : undefined;
     const ldiffs: string[] = [];
@@ -7307,6 +7496,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
       const extra = Object.keys(svc).filter((k) => !may.includes(k));
       if (extra.length) flag("keys", `sets ${extra.map((k) => `services.${name}.${k}`).join(", ")} — an overlay sets only what its OVERLAYS entry declares${may.length ? ` (${name}: ${may.join(", ")})` : ""}; anything else it set would reach the stack in a review of this file alone (a mesh alias, a sidecar in the proxy's PID namespace: SMD-2685)`);
       if (file === "compose.grafana-port.yaml" && name === "lgtm" && canonJson(svc.environment ?? null) !== canonJson(GRAFANA_PORT_LGTM_ENV)) flag("keys", `sets services.lgtm.environment ${JSON.stringify(svc.environment ?? null)} where check 28's GRAFANA_PORT_LGTM_ENV holds ${JSON.stringify(GRAFANA_PORT_LGTM_ENV)} — the loopback port names Grafana's origin and nothing else: any other key there is Grafana's configuration, its anonymous access included`);
+      if (name === "app" && file in GRAFANA_APP_ENV && canonJson(svc.environment ?? null) !== canonJson(GRAFANA_APP_ENV[file])) flag("keys", `sets services.app.environment ${JSON.stringify(svc.environment ?? null)} where check 28's GRAFANA_APP_ENV holds ${JSON.stringify(GRAFANA_APP_ENV[file])} — the overlay names the operator GUI's link to the Grafana it reaches and nothing else: any other key there steers the GUI, its origin or its REST core included (SMD-2280)`);
       continue;
     }
     if (name === "proxy" || name === "forwarder") continue;
@@ -7897,16 +8087,17 @@ await checkPlugins();
 // down after a podman machine restart (SMD-3214). They are `unless-stopped`
 // now, through db/supervise.ts, which holds a refusal itself: a follower run
 // any other way under that policy is the crash loop again, so
-// supervisorGapsIn holds each one's command. jev stays `on-failure:3` until
-// it retries its own fetch. A service added, or a policy changed, is a change
-// there on purpose. compose.tiers.yaml takes compose.yaml's postgres and Ollama
+// supervisorGapsIn holds each one's command. jev is `unless-stopped` too,
+// since it retries its own start (jev/serve.ts, SMD-3214 PR 3): it is no
+// db/ follower, and its image has no db/. A service added, or a policy
+// changed, is a change there on purpose. compose.tiers.yaml takes compose.yaml's postgres and Ollama
 // through check 27, and the overlays name no restart (check 28's OVERLAYS),
 // so this file is the one to read.
 /** Each compose.yaml service's `restart`, exactly. */
 const RESTART_POLICIES: Record<string, string> = {
-  postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", mcp: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
+  postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", mcp: "unless-stopped", app: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
   "board-sync": "unless-stopped", extract: "unless-stopped", consolidate: "unless-stopped", sleep: "unless-stopped",
-  ollama: "unless-stopped", "ollama-pull": "no", jev: "on-failure:3",
+  ollama: "unless-stopped", "ollama-pull": "no", jev: "unless-stopped",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",
   lgtm: "unless-stopped", "pg-monitor-role": "no", "pg-exporter": "unless-stopped",
 };
@@ -8500,7 +8691,7 @@ function parityProblems(ci: ScriptRun[], ciTsc: string[], ciJobs: string[], pari
   const parityTsc = parity.typechecks.map((t) => t.dir);
   const ciTscDirs = new Set(ciTsc.map((x) => posix.normalize(x)));
   for (const d of ciTscDirs) if (!parityTsc.includes(d)) problems.push([SUITE_WORKFLOW, `type-checks ${d}, which ${PARITY_SCRIPT} does not — add \`typecheck ${d}\``]);
-  for (const t of parity.typechecks) if (!ciTscDirs.has(t.dir)) problems.push([`${PARITY_SCRIPT}:${t.line}`, `type-checks ${t.dir}, which no ${SUITE_WORKFLOW} step does — take it out, or add the step`]);
+  for (const t of parity.typechecks) if (!ciTscDirs.has(t.dir)) problems.push([`${PARITY_SCRIPT}:${t.line}`, `type-checks ${t.dir}, which no ${SUITE_WORKFLOW} step does — take it out, or type-check it there (a step of its own, or a .github/ci/typecheck.sh step naming it)`]);
   for (const [job, why] of Object.entries(notRun.jobs)) {
     if (!ciJobs.includes(job)) problems.push([SELF, `PARITY_NOT_RUN excuses job ${job}, which ${SUITE_WORKFLOW} no longer has — take it off the list`]);
     else if (!why.trim()) problems.push([SELF, `PARITY_NOT_RUN excuses job ${job} with no reason`]);

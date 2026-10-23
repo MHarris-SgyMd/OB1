@@ -48,7 +48,7 @@
     ],
     "everyHours": 24,
     "network": [
-      "server:8000"
+      "api:8000"
     ]
   }
 ]

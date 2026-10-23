@@ -3703,7 +3703,7 @@ else {
     // Its guard's refusal: no next try, the kind's remedy and the recreate it waits for.
     await beat("heartbeat:board-sync", v({ outcome: "failed", ended: true, every_s: 60, refused: "usage", restart: { in_s: null, code: 2, tries: 0 } }), 10);
     const guardFix = fix((await run(SQL_ENV)).out, "workers");
-    assert(/board-sync is held by its supervisor, never started: a setting its log names is not decimal digits — set it in deploy\/\.env, then recreate the service .*That is deploy\/\.env's to mend, so recreate it then — podman compose -f deploy\/compose\.yaml --profile board-sync up -d --no-deps board-sync/.test(guardFix),
+    assert(/board-sync is held by its supervisor, never started: a setting its log names is not one the service takes — decimal digits, in its range .*set it in deploy\/\.env, then recreate the service.*That is deploy\/\.env's to mend, so recreate it then — podman compose -f deploy\/compose\.yaml --profile board-sync up -d --no-deps board-sync/.test(guardFix),
       `a follower its guard holds gives the kind's remedy and the recreate (${guardFix})`);
     // Long past its try with nothing stamped: the supervisor is taken for gone, the start and the retire named.
     await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
@@ -3711,6 +3711,19 @@ else {
     const goneFix = fix((await run(SQL_ENV)).out, "workers");
     assert(/extract:qwen2\.5:7b@p2's supervisor was due to run it again 20 min ago, and nothing has stamped since: if its container is gone, start it — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract.*Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2'\./.test(goneFix),
       `a held row long past its try names the start and the retire (${goneFix})`);
+    // Ended on its start's refusal with no supervisor's word (a run from a
+    // checkout): the kind and its remedy, then the start (SMD-3214 PR 2).
+    await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, outcome: "failed", ended: true, refused: "model" }), 40);
+    const refusedRun = await run(SQL_ENV);
+    assert(/!\s+workers\s+extract:qwen2\.5:7b@p2 ended on a failure, refused at its start \(model\) \(last stamped 40 s ago, every 60 s\)$/.test(row(refusedRun.out, "workers"))
+           && /extract:qwen2\.5:7b@p2 ended 40 s ago on its start's refusal \(model\): pull the model its log names.*Then start it again — podman compose -f deploy\/compose\.yaml --profile workers up -d --no-deps extract.*; started before that, it refuses again\./.test(fix(refusedRun.out, "workers")),
+      `a follower ended on its start's refusal names the kind and its remedy before the start (${row(refusedRun.out, "workers")} | ${fix(refusedRun.out, "workers")})`);
+    await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:extract:%'`;
+    await beat("heartbeat:board-sync", v({ every_s: 300, outcome: "failed", ended: true, refused: "board" }), 20);
+    const boardFix = fix((await run(SQL_ENV)).out, "workers");
+    assert(/board-sync ended 20 s ago on its start's refusal \(board\): OB1_LINEAR_INITIATIVE \(unset: "Open Brain"\) must name exactly one Linear initiative/.test(boardFix),
+      `board-sync's own refusal kind gives its remedy (${boardFix})`);
+    await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
 
     // The sleep scheduler's own row (SMD-2678): its heartbeat leaves the
     // workers row; the row says asleep or awake with its last sleep, and what
@@ -4247,19 +4260,41 @@ console.log("\n[8] The egress gate is reported: the mode, and per endpoint what 
          "a chat endpoint at the same base with its own key inherits the declaration and names the knob that made it");
 }
 
-console.log("\n[9] A local endpoint is dialled by default, and one that answers nothing fails before the server starts (SMD-1875)");
+console.log("\n[9] A local endpoint is dialled by default: a name that does not resolve, or an endpoint that answers wrongly, fails before the server starts (SMD-1875); a resolved one with nothing answering yet warns, and the server starts degraded (SMD-2890)");
 {
   const THREE = (s: string) => /host\.containers\.internal:11434\/v1/.test(s) && /host\.docker\.internal:11434\/v1/.test(s) && /--profile local-models/.test(s);
 
   // The measured baseline: the code's default inside a container is the
-  // container's own loopback, which reaches nothing. Refused → fail, exit 1,
-  // and the remedy says what 127.0.0.1 is inside a container and names the
-  // three spellings.
+  // container's own loopback, which reaches nothing — and there it still
+  // fails (startsDegraded; CI's image step holds that). This suite runs on
+  // the host, where a refused loopback is a warning (SMD-2890: a provider not
+  // up yet, which the server outlasts degraded), and the remedy says to start
+  // it, then what 127.0.0.1 is inside a
+  // container, and names the three spellings. Exit 1 here is DB_DOWN's.
   const refused = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1" });
-  assert(refused.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:1\/v1 — the connection was refused \(GET \/models, 2\.5 s timeout\); the first capture would fail on it in milliseconds/.test(row(refused.out, "provider endpoint")),
-         `a loopback endpoint nothing listens on fails the provider endpoint row by name (exit ${refused.code})`);
-  assert(/→ Inside a container 127\.0\.0\.1 is the container itself, not the host: an Ollama on the host is/.test(fix(refused.out, "provider endpoint")) && THREE(fix(refused.out, "provider endpoint")),
-         "…with the remedy naming the three spellings — the two host aliases and the stack's own service under its profile");
+  assert(/^\s*!\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:1\/v1 yet — the connection was refused \(GET \/models, 2\.5 s timeout\); the server starts degraded — until it answers, a capture lands without its vector and untagged \(no topics, no type\) and a search answers by exact matches, and its keyed \/health and brain_info say the provider is unreachable; it re-probes every 15 s \(OB1_PROVIDER_REPROBE_INTERVAL\) and leaves degraded when it answers$/.test(row(refused.out, "provider endpoint")),
+         `a loopback endpoint nothing listens on warns on the provider endpoint row, naming the degraded start and the re-probe (${row(refused.out, "provider endpoint").slice(0, 200)})`);
+  assert(/→ Start the provider if it is not running; the server needs no restart\. If it is running, or nothing is meant to answer there: Inside a container 127\.0\.0\.1 is the container itself, not the host: an Ollama on the host is/.test(fix(refused.out, "provider endpoint")) && THREE(fix(refused.out, "provider endpoint")),
+         "…with the remedy to start it first, then the three spellings — the two host aliases and the stack's own service under its profile");
+  // The knob's words on the row: off, and another interval.
+  const reprobeOff = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1", OB1_PROVIDER_REPROBE_INTERVAL: "off" });
+  assert(/OB1_PROVIDER_REPROBE_INTERVAL is off, so after its probe at start it leaves degraded on the first call that is answered$/.test(row(reprobeOff.out, "provider endpoint")) && /✓\s+provider re-probe\s+off \(OB1_PROVIDER_REPROBE_INTERVAL\)/.test(reprobeOff.out),
+         "OB1_PROVIDER_REPROBE_INTERVAL=off: the row says only an answered call ends it, and the knob's own row says off");
+  const reprobe5 = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1", OB1_PROVIDER_REPROBE_INTERVAL: "5" });
+  assert(/it re-probes every 5 s \(OB1_PROVIDER_REPROBE_INTERVAL\)/.test(row(reprobe5.out, "provider endpoint")) && /✓\s+provider re-probe\s+every 5 s/.test(reprobe5.out),
+         "…and a set interval is the one the row names");
+  const reprobeBad = await run({ ...DB_DOWN, ...NO_KEYS, OB1_PROVIDER_REPROBE_INTERVAL: "5m" });
+  assert(/!\s+provider re-probe\s+OB1_PROVIDER_REPROBE_INTERVAL="5m" is not a whole number of seconds from 1 to 3600, or "off"; a provider that does not answer is re-probed every 15 s/.test(reprobeBad.out) && /→ Set OB1_PROVIDER_REPROBE_INTERVAL to whole seconds from 1 to 3600, or off, or unset it for 15\./.test(fix(reprobeBad.out, "provider re-probe")),
+         "…a value that does not read warns, with the default it falls back to");
+  assert(row(refused.out, "provider re-probe") === "", "…and unset, the knob has no row");
+  // With the database up, the warning alone is no failure: exit 0, the server
+  // starts — the restart loop SMD-2887 measured is gone.
+  if (LIVE) {
+    const degradedStart = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1" }, "--json");
+    const dj = JSON.parse(degradedStart.out) as { ok: boolean; checks: { name: string; status: string }[] };
+    assert(degradedStart.code === 0 && dj.ok === true && dj.checks.find((c) => c.name === "provider endpoint")?.status === "warn" && !dj.checks.some((c) => c.status === "fail"),
+           `a provider not up yet beside a reachable, migrated database exits 0 with the row a warning (exit ${degradedStart.code}; failed: ${dj.checks.filter((c) => c.status === "fail").map((c) => c.name).join(", ") || "none"})`);
+  } else skip("a provider not up yet beside a reachable database exits 0");
   assert(/✓\s+model provider\s+http:\/\/127\.0\.0\.1:1\/v1 — embeddings and chat \(local — no credential needed\)/.test(refused.out) && /✓\s+provider credential\s+not required for a local endpoint/.test(refused.out),
          "…while the provider and credential rows still pass: local it is, reachable it is not");
 
@@ -4278,27 +4313,34 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   // An unknown name is "does not resolve" — with its code, or "within 2.5 s"
   // where the resolver stalls (a GitHub runner did, on PR #138's first run) —
   // never the timeout kind: the name is judged before anything is dialled.
-  const serviceWhy = ollamaResolves ? String.raw`(the connection was refused|no HTTP answer in 2\.5 s)` : String.raw`the name does not resolve(?: \([A-Z_]+\)| within 2\.5 s — the resolver did not answer)? \(GET /models, 2\.5 s timeout\); the first capture would (?:fail on it in milliseconds|wait on the resolver)`;
-  assert(service.code === 1 && new RegExp(String.raw`✗\s+provider endpoint\s+nothing answers at http://ollama:1/v1 — ${serviceWhy}`).test(row(service.out, "provider endpoint")),
-         `the ollama service name with nothing behind it fails (exit ${service.code}; the name ${ollamaResolves ? "resolves here, so refused or silent" : "does not resolve here, so that wording, pinned"})`);
-  assert(/→ `ollama` is the local-models profile's service and exists only under it: start the stack with --profile local-models, or set OB1_LLM_BASE_URL to an Ollama on the host \(http:\/\/host\.containers\.internal:11434\/v1 under podman or http:\/\/host\.docker\.internal:11434\/v1 under Docker\) or to a hosted provider with a key\./.test(fix(service.out, "provider endpoint")),
+  // A name that resolves with nothing answering is a provider not up yet — a
+  // warning (SMD-2890); one that does not resolve is a runtime without it — a
+  // failure, as SMD-1875 made it.
+  const serviceWhy = ollamaResolves ? String.raw`!\s+provider endpoint\s+nothing answers at http://ollama:1/v1 yet — (the connection was refused|no HTTP answer in 2\.5 s)` : String.raw`✗\s+provider endpoint\s+nothing answers at http://ollama:1/v1 — the name does not resolve(?: \([A-Z_]+\)| within 2\.5 s — the resolver did not answer)? \(GET /models, 2\.5 s timeout\); the first capture would (?:fail on it in milliseconds|wait on the resolver)`;
+  assert(service.code === 1 && new RegExp(serviceWhy).test(row(service.out, "provider endpoint")),
+         `the ollama service name with nothing behind it ${ollamaResolves ? "warns (it resolves here, so refused or silent)" : "fails (it does not resolve here, so that wording, pinned)"} (exit ${service.code})`);
+  assert(/→ (?:Start the provider if it is not running; the server needs no restart\. If it is running, or nothing is meant to answer there: )?`ollama` is the local-models profile's service and exists only under it: start the stack with --profile local-models, or set OB1_LLM_BASE_URL to an Ollama on the host \(http:\/\/host\.containers\.internal:11434\/v1 under podman or http:\/\/host\.docker\.internal:11434\/v1 under Docker\) or to a hosted provider with a key\./.test(fix(service.out, "provider endpoint")),
          "…and the remedy names the profile first, then the host aliases and a hosted provider");
   const withKey = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://ollama:1/v1", OPENROUTER_API_KEY: "sk-or-1234" });
-  assert(withKey.code === 1 && /✗\s+provider endpoint/.test(withKey.out) && /!\s+provider credential\s+a key is set but the endpoint is local/.test(withKey.out),
-         "a key set beside the fallback address (the URL line left commented) fails on the endpoint, where it used to warn about the key and say OK");
+  assert(withKey.code === 1 && new RegExp(String.raw`${ollamaResolves ? "!" : "✗"}\s+provider endpoint`).test(withKey.out) && /!\s+provider credential\s+a key is set but the endpoint is local/.test(withKey.out),
+         "a key set beside the fallback address (the URL line left commented) fails on the endpoint (warns, where the name resolves), where it used to warn about the key and say OK");
 
   // The host alias on a runtime that does not provide it, or with nothing on
   // the host: the remedy says which runtime provides which name, and that
   // Linux Docker gets host.docker.internal through compose's extra_hosts.
+  // Which side of SMD-2890's split it lands on follows resolution: a runtime
+  // that writes the name and nothing on the host's port is the host's Ollama
+  // not up yet (a warning); one that does not write it fails (SMD-1875).
+  const aliasResolves = await Bun.dns.lookup("host.docker.internal").then(() => true, () => false);
   const alias = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://host.docker.internal:1/v1" });
-  assert(alias.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/host\.docker\.internal:1\/v1/.test(row(alias.out, "provider endpoint")),
-         `the Docker host alias with nothing behind it fails (exit ${alias.code})`);
+  assert(new RegExp(String.raw`${aliasResolves ? "!" : "✗"}\s+provider endpoint\s+nothing answers at http://host\.docker\.internal:1/v1${aliasResolves ? " yet" : " — the name does not resolve"}`).test(row(alias.out, "provider endpoint")),
+         `the Docker host alias with nothing behind it ${aliasResolves ? "warns (it resolves here)" : "fails (it does not resolve here)"} (${row(alias.out, "provider endpoint").slice(0, 120)})`);
   assert(/→ Nothing on the host answers at that port, or this runtime does not provide the name: podman writes both names; Docker Desktop only host\.docker\.internal; Docker on Linux neither unless extra_hosts host-gateway is set, and deploy\/compose\.yaml sets it for host\.docker\.internal\./.test(fix(alias.out, "provider endpoint")),
          "…with the runtimes and the extra_hosts line named");
   assert(THREE(fix(alias.out, "provider endpoint")), "…and the three spellings, this remedy too (third review pass: the pass-2 rewrite had dropped podman's)");
   // A private address (a LAN box): the generic remedy, still with the three spellings.
   const lan = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://192.168.0.1:1/v1" });
-  assert(/✗\s+provider endpoint/.test(lan.out) && /→ Start the provider at that address or fix the host and port in OB1_LLM_BASE_URL;/.test(fix(lan.out, "provider endpoint")) && THREE(fix(lan.out, "provider endpoint")),
+  assert(/[✗!]\s+provider endpoint/.test(lan.out) && /→ (?:Start the provider if it is not running; the server needs no restart\. If it is running, or nothing is meant to answer there: )?Start the provider at that address or fix the host and port in OB1_LLM_BASE_URL;/.test(fix(lan.out, "provider endpoint")) && THREE(fix(lan.out, "provider endpoint")),
          "a private-network address nothing answers on gets the generic remedy, with the three spellings");
 
   // An endpoint that answers passes, whatever it answers: the probe is the
@@ -4319,7 +4361,12 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   assert(new RegExp(String.raw`✓\s+provider endpoint\s+${rx(ANSWERS)} answers — HTTP 404 to GET /models`).test(notFound.out), "a 4xx answer is an endpoint that answers — the API's behaviour is --deep's question");
   status = 500;
   const erroring = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: ANSWERS });
-  assert(/✓\s+provider endpoint\s+\S+ answers — HTTP 500/.test(erroring.out), "…and so is a 5xx");
+  // A 5xx, 408 or 429 is the provider there and not ready: a warning and a degraded start, as the runtime's probe reads it (review pass 2).
+  assert(/^\s*!\s+provider endpoint\s+\S+ answers, but not yet — HTTP 500 to GET \/models in \d+ ms; the server starts degraded/.test(row(erroring.out, "provider endpoint")) && /→ Wait for it, or read its log/.test(fix(erroring.out, "provider endpoint")),
+         `…while a 5xx is an endpoint not ready yet: a warning, the server started degraded (${row(erroring.out, "provider endpoint").slice(0, 160)})`);
+  status = 429;
+  const limited = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: ANSWERS });
+  assert(/!\s+provider endpoint\s+\S+ answers, but not yet — HTTP 429/.test(limited.out), "…and so is a 429");
   answering.stop(true);
 
   // One that accepts the connection and never answers: the timeout, in words,
@@ -4332,8 +4379,8 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   const timedOut = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: `http://127.0.0.1:${hung.port}/v1` });
   const waited = performance.now() - t0;
   hung.stop(true);
-  assert(timedOut.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — no HTTP answer in 2\.5 s \(GET \/models, 2\.5 s timeout\); the first capture would wait on it, up to the whole request timeout \(OB1_LLM_TIMEOUT\), and then fail/.test(row(timedOut.out, "provider endpoint")),
-         `an endpoint that accepts and never answers fails on the timeout, said in seconds, with the hang as the consequence (exit ${timedOut.code})`);
+  assert(/!\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 yet — no HTTP answer in 2\.5 s \(GET \/models, 2\.5 s timeout\); the server starts degraded — until it answers, a capture lands without its vector and untagged \(no topics, no type\) and a search answers by exact matches, each first waiting on it up to the request timeout \(OB1_LLM_TIMEOUT\), and its keyed/.test(row(timedOut.out, "provider endpoint")),
+         `an endpoint that accepts and never answers warns on the timeout, said in seconds, with the capture's wait as its cost (${row(timedOut.out, "provider endpoint").slice(0, 200)})`);
   assert(waited >= 2400 && waited < 10000, `…after about the timeout and not the run's whole patience (${Math.round(waited)} ms)`);
 
   // A redirect is an answer from THIS address and is not followed: the row
@@ -4374,10 +4421,19 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
          "a chat base of its own is probed under its own row");
   chatStub.stop(true);
   const chatDown = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL_STUB, OB1_CHAT_BASE_URL: "http://127.0.0.1:1/v1" });
-  assert(chatDown.code === 1 && /✓\s+provider endpoint/.test(chatDown.out) && /✗\s+chat endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:1\/v1 — the connection was refused/.test(row(chatDown.out, "chat endpoint")),
-         `a down chat server beside a live embedder fails the chat endpoint row and not the provider's (exit ${chatDown.code})`);
+  assert(/✓\s+provider endpoint/.test(chatDown.out) && /^\s*!\s+chat endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:1\/v1 yet — the connection was refused \(GET \/models, 2\.5 s timeout\); the server starts — until it answers, a capture lands untagged \(no topics, no type\); the first capture it answers is tagged again$/.test(row(chatDown.out, "chat endpoint")),
+         `a down chat server beside a live embedder warns on the chat endpoint row, in the chat's own terms, and not the provider's (${row(chatDown.out, "chat endpoint").slice(0, 200)})`);
   assert(/fix the port in OB1_CHAT_BASE_URL\./.test(fix(chatDown.out, "chat endpoint")) && /fix the port in OB1_LLM_BASE_URL\./.test(fix(refused.out, "provider endpoint")),
          "…and each row's remedy names its own knob (fifth review pass)");
+  // A silent chat server: the wait is the chat row's cost too; and an embeddings
+  // row beside a chat base of its own leaves the tags to that row (review pass 1).
+  const hungChat = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+  const chatSilent = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1", OB1_CHAT_BASE_URL: `http://127.0.0.1:${hungChat.port}/v1` });
+  hungChat.stop(true);
+  assert(/^\s*!\s+chat endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 yet — no HTTP answer in 2\.5 s \(GET \/models, 2\.5 s timeout\); the server starts — until it answers, a capture lands untagged \(no topics, no type\), each first waiting on it up to the request timeout \(OB1_LLM_TIMEOUT\); the first capture it answers is tagged again$/.test(row(chatSilent.out, "chat endpoint")),
+         `a silent chat server warns with the wait as its cost (${row(chatSilent.out, "chat endpoint").slice(0, 220)})`);
+  assert(/!\s+provider endpoint\s+.*a capture lands without its vector and a search answers by exact matches, and its keyed/.test(row(chatSilent.out, "provider endpoint")) && !/untagged/.test(row(chatSilent.out, "provider endpoint")),
+         `…and the embeddings row, beside a chat base of its own, says nothing of tags (${row(chatSilent.out, "provider endpoint").slice(0, 220)})`);
   const hostedChat = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: LOCAL_STUB, OB1_CHAT_BASE_URL: "https://provider.invalid/v1", OB1_CHAT_API_KEY: "k-chat" });
   assert(row(hostedChat.out, "chat endpoint") === "" && /✓\s+provider endpoint/.test(hostedChat.out), "…and a hosted chat endpoint beside a local embedder is not dialled");
 
@@ -4391,6 +4447,12 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   assert(deadProxy.code === 1 && /✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — the connection was refused \(GET \/models, 2\.5 s timeout\); HTTP_PROXY is set, so this call and every one the server makes go through that proxy unless NO_PROXY names 127\.0\.0\.1; the first capture/.test(row(deadProxy.out, "provider endpoint")),
          `a live endpoint behind a dead HTTP_PROXY fails naming the proxy variable (exit ${deadProxy.code})`);
   assert(/→ Add 127\.0\.0\.1 to NO_PROXY \(and no_proxy\) for the server, or unset HTTP_PROXY for it\. Otherwise: Inside a container/.test(fix(deadProxy.out, "provider endpoint")), "…with NO_PROXY first in the remedy, the hostname's remedy after");
+  // A proxy that never answers is the route's too: silent through a proxy fails, as refused through one does (review pass 1).
+  const hungProxy = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+  const silentProxy = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: PROXIED, HTTP_PROXY: `http://127.0.0.1:${hungProxy.port}` });
+  hungProxy.stop(true);
+  assert(/✗\s+provider endpoint\s+nothing answers at http:\/\/127\.0\.0\.1:\d+\/v1 — no HTTP answer in 2\.5 s .*HTTP_PROXY is set/.test(row(silentProxy.out, "provider endpoint")),
+         `…and a silent proxy fails the row too, naming it (${row(silentProxy.out, "provider endpoint").slice(0, 200)})`);
   const exempt = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: PROXIED, http_proxy: "http://127.0.0.1:1", NO_PROXY: "127.0.0.1" });
   assert(/✓\s+provider endpoint\s+http:\/\/127\.0\.0\.1:\d+\/v1 answers — HTTP 200/.test(exempt.out) && !/proxy/.test(row(exempt.out, "provider endpoint")), "…and NO_PROXY naming the host passes with no proxy text on the row");
   const httpsProxyOnly = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: PROXIED, HTTPS_PROXY: "http://127.0.0.1:1" });
@@ -4514,7 +4576,7 @@ console.log("\n[9] A local endpoint is dialled by default, and one that answers 
   const asJson = await run({ ...DB_DOWN, ...NO_KEYS, OB1_LLM_BASE_URL: "http://127.0.0.1:1/v1" }, "--json");
   const parsed = JSON.parse(asJson.out) as { ok: boolean; checks: { name: string; status: string; fix?: string }[] };
   const jsonRow = parsed.checks.find((c) => c.name === "provider endpoint");
-  assert(parsed.ok === false && jsonRow?.status === "fail" && THREE(jsonRow?.fix ?? ""), "--json carries the row, its status and its remedy");
+  assert(jsonRow?.status === "warn" && THREE(jsonRow?.fix ?? ""), "--json carries the row, its status and its remedy");
 }
 
 console.log("\n[10] The typed-decision tier is dialled when configured — every run, not only --deep (SMD-2050)");

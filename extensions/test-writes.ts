@@ -714,21 +714,6 @@ try {
     `a postgres:// ENTITY_EXTRACTION_WORKER_URL is refused when the module loads, the message naming the variable and the scheme and not the value (${refused === null ? "loaded" : refused})`);
 }
 
-// ── recipes/repo-learning-coach ──────────────────────────────────────────────
-
-{
-  const F = "recipes/repo-learning-coach/server/brain.ts";
-  console.log(`\n[${F}]`);
-  const { captureLearningArtifact } = await import(join(ROOT, F));
-  const result = await captureLearningArtifact({
-    kind: "takeaway", content: "The runner heals its own search_path before the first migration.",
-    lesson: { slug: "runner", title: "The runner", summary: "How migrate.ts applies", goals: [], status: "complete", confidence: 0.9 },
-  });
-  assert(UUID.test(String(result.thoughtId)), `captureLearningArtifact returns the thought's id (${String(result.thoughtId).slice(0, 8)}…)`);
-  const [{ content }] = await sql`SELECT content FROM thoughts WHERE id = ${result.thoughtId}`;
-  judgeCapture("repo-learning-coach capture", await row(result.thoughtId, content), content);
-}
-
 // ── integrations/readwise-capture (SMD-1524) ─────────────────────────────────
 
 {
@@ -1003,7 +988,7 @@ for (const [file, readme] of [["recipes/vercel-neon-telegram/src/lib/db.ts", "re
 }
 // Every runnable file the three changes touched is driven above, or read: the headers name them.
 const BIO = "integrations/consolidation-workers/bio/index.ts";
-const DRIVEN = ["integrations/agent-memory-api/index.ts", "recipes/repo-learning-coach/server/brain.ts", BIO,
+const DRIVEN = ["integrations/agent-memory-api/index.ts", BIO, // repo-learning-coach's brain.ts retired (SMD-2923)
   "integrations/smart-ingest/index.ts"]; // smart-ingest joined the 3-argument form's callers with SMD-2128
 const TEXT_ONLY = ["recipes/provenance-chains/mcp-tools.ts"];
 const DRIVEN_1524 = ["integrations/readwise-capture/index.ts", "recipes/editorial-policy/auditor/index.ts", BIO];

@@ -92,6 +92,15 @@ behind it, naming the profile, the two host aliases and a hosted provider as the
 ways out (SMD-1875). Before that row the name counted as local and was not
 dialled, so the stack came up `preflight OK` and the first capture failed on it
 (`getaddrinfo ENOTFOUND ollama`) with the server log ending at `Started server`.
+A name that resolves with nothing answering yet is the other case: an Ollama
+on the host not started yet, or the profile's `ollama` container started and
+not yet listening (one not started at all is a name that does not resolve,
+and still fails). The row warns, and
+the server starts degraded: captures land without their vectors, searches
+answer by exact matches, and keyed `/health` (`provider.status`, `since`) and
+`brain_info` (its `Provider` row, `unreachable since …`) say so. It
+re-probes every `OB1_PROVIDER_REPROBE_INTERVAL` seconds (15) and leaves
+degraded when the provider answers, with no restart (SMD-2890).
 
 The services, in order, the last two with the profile:
 
@@ -99,9 +108,10 @@ The services, in order, the last two with the profile:
 | --- | --- |
 | `postgres` | The Supabase-hosted database (`pgvector/pgvector:0.8.6-pg16`) |
 | `migrate` | Pasting SQL into the Supabase dashboard — the `ob1-migrate` image (`db/Dockerfile`) runs `db/migrate.ts`, then exits |
-| `server` | Upstream's Edge Function and its deploy command — on `egress`, called by no shipped template (the orchestration eval still calls it until SMD-2295's second PR), until it retires (SMD-2287 PR 6) |
+| `server` | Upstream's Edge Function and its deploy command — on `egress`, called by nothing in the stack since SMD-2295, until it retires (SMD-2287 PR 6) |
 | `api` | — the REST core: every operation, as JSON, over Postgres and the model provider; internal unless opted in (SMD-2284) |
 | `mcp` | — the MCP server at `/mcp`, a client of the REST core, on the mesh alone (SMD-2287) |
+| `app` | Supabase's dashboard for browsing the brain — the operator GUI at `/dashboard`, a client of the REST core, on the mesh alone (SMD-2280; `dashboard/README.md`) |
 | `proxy` | Supabase's gateway in front of the function — the stack's one origin, with the MCP server at `/mcp` on it ("One origin" below) |
 | `forwarder` | — the stack's one published port, in front of the proxy, which is on internal networks alone (SMD-2583) |
 | `ollama` (profile) | OpenRouter — the model endpoint the server defaults to |
@@ -406,9 +416,10 @@ network of its own, `postgres-port`, for its loopback port, and
 | Service | On the stack's networks | On the host | From another machine |
 | --- | --- | --- | --- |
 | `forwarder` | Listens on 8000, on `edge`, and dials the proxy alone, as `proxy.ob1.internal` on `front`, at an address on `front` and no other; it opens each connection with the PROXY protocol's line naming the client (SMD-2583) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the MCP server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
-| `proxy` | `proxy.ob1.internal:8000` on `front`, which the forwarder dials, and `proxy:8000` on `mesh`; it dials every backend on the `mesh` network, by a name resolved with no search domains: the MCP server (`mcp`) as `mcp.ob1.internal:8000`, `auth.ob1.internal:3000`, and — with `compose.api-public.yaml` named — `api.ob1.internal:8000`, and with `compose.grafana-public.yaml` `lgtm.ob1.internal:3000` | Nothing of its own: the forwarder's port | Through the forwarder |
-| `server` | `server:8000` on `egress`, which no shipped template dials (n8n's brain calls go to the REST core, SMD-2295; the orchestration eval still calls it until SMD-2295's second PR); not on `mesh`: the proxy routes nothing to it since SMD-2532 closed the root, and `/mcp` is `mcp`'s. It dials `postgres:5432` on `data` and the model provider on `egress`. The MCP server the stack had before SMD-2287; it retires in SMD-2287 PR 6 | Nothing | Never |
+| `proxy` | `proxy.ob1.internal:8000` on `front`, which the forwarder dials, and `proxy:8000` on `mesh`; it dials every backend on the `mesh` network, by a name resolved with no search domains: the MCP server (`mcp`) as `mcp.ob1.internal:8000`, the operator GUI (`app`) as `app.ob1.internal:8000`, `auth.ob1.internal:3000`, and — with `compose.api-public.yaml` named — `api.ob1.internal:8000`, and with `compose.grafana-public.yaml` `lgtm.ob1.internal:3000` | Nothing of its own: the forwarder's port | Through the forwarder |
+| `server` | `server:8000` on `egress`, which nothing in the stack dials (n8n's brain calls and the orchestration eval's go to the REST core, SMD-2295); not on `mesh`: the proxy routes nothing to it since SMD-2532 closed the root, and `/mcp` is `mcp`'s. It dials `postgres:5432` on `data` and the model provider on `egress`. The MCP server the stack had before SMD-2287; it retires in SMD-2287 PR 6 | Nothing | Never |
 | `mcp` | `mcp.ob1.internal:8000` on the `mesh` network alone — the proxy. It dials the REST core as `api.ob1.internal:8000` and, on a stack configured with the authorization server, `auth.ob1.internal:3000` to trade a token, both on the mesh: no Postgres, no model provider, nothing outward (SMD-2287) | Nothing of its own: `/mcp`, `/health` and the protected-resource document on the proxy's port | Through the proxy |
+| `app` | `app.ob1.internal:8000` on the `mesh` network alone — the proxy. It dials the REST core as `api.ob1.internal:8000` with each visitor's own key: no Postgres, no model provider, nothing outward (SMD-2280) | Nothing of its own: `/dashboard` on the proxy's port. With `OB1_PUBLIC_ORIGIN` set, sign-in works at that origin only, not here, nor through the edge proxy's host for the brain | Through the proxy; behind TLS, set `OB1_PUBLIC_ORIGIN`, or its sign-in form is refused as cross-site (`dashboard/README.md`, "The origin") |
 | `api` | `api.ob1.internal:8000` on the `mesh` network, and `api:8000` on `data` and `egress`, which every container there can reach — a key is still required for anything but `/health` and `/openapi.json`. It dials `postgres:5432` and the model provider as the server does | Nothing of its own: `/api` on the proxy's port, only with `compose.api-public.yaml` named ("The REST core" below) | Through the proxy, as the server, when `/api` is on |
 | `postgres` | `postgres:5432` on `data` alone — the migrator, the two servers, board-sync, the workers, the sleep scheduler and the import runner; from `egress` the name does not resolve and its address does not answer (CI's "Postgres answers on the data network alone") | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `server` and `api` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` on `egress` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
@@ -503,6 +514,7 @@ paths today:
 | `/api` and everything under it | the proxy's bodiless 404 by default. With `compose.api-public.yaml` named (below), `api` — the REST core, as `api.ob1.internal` on the `mesh` network — with `/api` stripped: `/api/v1/stats` reaches it as `/v1/stats`, and the links it answers carry `/api` back |
 | `/hooks` and everything under it | the proxy's bodiless 404 by default. With `compose.hooks-public.yaml` named ("Plugins' webhooks" below), `api` — the REST core — path kept: `/hooks/<plugin>/<name>` is a plugin's inbound webhook, served only for a plugin `OB1_HOOKS` names (SMD-2310) |
 | `/mcp` and everything under it | `mcp` — the MCP server built on the REST core (SMD-2287), as `mcp.ob1.internal` on the `mesh` network: the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is its 405. Every tool is a call on the REST core, the caller's key beside this server's own forward key |
+| `/dashboard` and everything under it | `app` — the operator GUI (SMD-2280), as `app.ob1.internal` on the `mesh` network, path kept: sign in with a read or write access key, then the brain's counts and newest thoughts, its status (`brain_info`) and any thought, each read from the REST core under that key. Key sign-in is off while `COMPOSE_PROFILES` names `auth` (`dashboard/README.md`). While `app` is stopped or starting, the proxy's own 502 |
 | `/grafana` and everything under it | the proxy's bodiless 404 by default. With `compose.grafana-public.yaml` named ("The observability profile" below), `lgtm` (`--profile observability`), as `lgtm.ob1.internal` on the `mesh` network — its Grafana, serving from `/grafana`, path kept, behind its own sign-in. With the profile off, or the container stopped or still starting, the proxy's bodiless 404 too, and so is a 502 of Grafana's own (a data source it cannot reach) |
 | every path starting with `/canary` or `/working`, in any letter case | the proxy's own 404 (SMD-2874: a canary or a working tier is a brain of its own on its own port, and this stack routes none; from SMD-2294 to v2.0.0 a tier answered at `/canary/mcp` here, deprecated by SMD-3057 for a release before it went). No router matches them, so a client still given a tier's URL here reaches nothing; until v2.0.0 `tier-off` kept them off the legacy route, and went with it (SMD-2532) |
 | `GET`/`HEAD`/`OPTIONS /health` | `mcp` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key; OPTIONS for a browser's CORS preflight |
@@ -638,8 +650,7 @@ through the container engine's socket, which is root on the host, and the
 proxy is the one process a client on the network reaches —
 `docs/orchestration-tool.md` declined the same socket for n8n. The
 authorization server came this way (the `auth` router) and the REST core's
-`api-off`; the dashboard arrives the same way with its own ticket
-(`docs/operator-surface-tiers.md`). A service under a profile gets the `auth`
+`api-off`, and the operator GUI's `dashboard` (SMD-2280). A service under a profile gets the `auth`
 router's shape: an `errors` middleware that turns Traefik's 502 for a name
 that does not resolve into a 404, so its paths answer only while it runs, and
 the service's own 5xx pass through. The service also joins a network the
@@ -858,7 +869,7 @@ root reports that 404 itself.
 | The session-capture hook | `"url": "http://127.0.0.1:<port>/"` in `~/.config/open-brain/session-capture.json` (or the file `OB1_SESSION_CAPTURE_CONFIG` names) | `"url": "http://127.0.0.1:<port>/mcp"`, then `bun recipes/session-capture-hook/session-capture.mjs --check`, which warns while the url answers through a pre-v2.0.0 stack's legacy route, and from v2.0.0 names the root as not the endpoint. `OB1_BRAIN_URL` in the hook's environment overrides the file: move it too |
 | `db/tier.ts --compare` (`db/brain-compare.ts`) | `http://127.0.0.1:<port>/`, or a connector name it reads with `claude mcp get` | `http://127.0.0.1:<port>/mcp`; a connector name follows the Claude Code row |
 | curl, a script, a monitor | `/worker-status`, `/jobs/<id>`, `POST /worker-retry-failed`, `/worker-release-leases`, `/worker-run`, `/health` at the root | the same under `/mcp` (`/mcp/worker-status`, …). `GET /health` at the root stays: it has a route of its own. A `scan_thoughts` handle's links are now under the endpoint the call came to |
-| n8n | `http://server:8000/` in an MCP Client node you built | an HTTP Request node against the REST core, `http://api:8000/v1/…` with the key in `x-brain-key`, on the `egress` network and not through the proxy (SMD-2295). `server` answers there only until SMD-2287 PR 6 retires it |
+| n8n | `http://server:8000/` in an MCP Client node you built | an HTTP Request node against the REST core, `http://api:8000/v1/…` with the key in `x-brain-key`, on the `egress` network and not through the proxy (SMD-2295). `server` answers there only until SMD-2287 PR 6 retires it, and the profile's brain credential is pinned to `api` since SMD-2295, so a node aimed at `server` with it is refused now |
 | any other client: Codex or Cursor, an `mcp-remote` or `supergateway` bridge, a dashboard's `MCP_URL` | the root, with or without `?key=` | put `/mcp` before `?key=` (`https://host/mcp?key=…`), or at the end of a URL without one |
 
 A stack run with `compose.tiers.yaml` never had the legacy route: since SMD-2294 its
@@ -932,8 +943,12 @@ Unset at build, the image reports `unknown`. Rebuild with it:
 OB1_GIT_SHA=$(git describe --always --dirty --abbrev=8) docker compose up -d --build server proxy forwarder
 ```
 
-The REST core and the MCP server at `/mcp` run the server's image by name,
-and the proxy depends on both, so this rebuilds and recreates them too; add
+The REST core, the MCP server at `/mcp` and the operator GUI at `/dashboard`
+run the server's image by name, and the proxy depends on all three, so this
+rebuilds and recreates them too. The first such `up` after the GUI arrived
+(SMD-2280) also creates `app` and recreates the proxy, its route table having
+changed, so the whole origin answers nothing until the servers are back; later
+upgrades leave the proxy running. Add
 `-f compose.api-public.yaml` where `/api` is on.
 
 `proxy` and `forwarder` named beside `server`: the proxy waits on the server
@@ -974,14 +989,14 @@ and SMD-2238.
 
 What comes back after the host, the Docker daemon or a podman machine
 restarts is each container's restart policy; compose is not involved. In
-`compose.yaml` what serves is `unless-stopped`: Postgres, the three servers,
+`compose.yaml` what serves is `unless-stopped`: Postgres, the three servers and the operator GUI,
 the proxy, the forwarder that publishes its port, Ollama, n8n, the
 orchestration runner, the authorization server and the observability
 profile's `lgtm` and `pg-exporter` — and, since SMD-3214, `board-sync`, the
-two workers and the sleep scheduler. What runs once is `"no"`: the migrator,
+two workers, the sleep scheduler and `jev`. What runs once is `"no"`: the migrator,
 `ollama-pull`, the runner's role job and the exporter's.
 
-The four followers were `on-failure:3`, so that a configuration a restart does
+The four followers and `jev` were `on-failure:3`, so that a configuration a restart does
 not fix stopped them rather than looped; but neither runtime starts that
 policy at boot, so every reboot left a brain serving and not sleeping (on
 2026-10-22 both dogfood brains' `sleep` and stable's `board-sync` stayed down
@@ -996,11 +1011,13 @@ not digits, holds it until that recreate, the follower never started.
 Preflight's `workers` and `sleep` rows say a held service is held, its cause
 and its next try, rather than "start it again".
 
-`jev` is still `on-failure:3`, so count on neither runtime to start it at
-boot. The servers can need it: with `OB1_JEV_BASE_URL` naming the `jev`
-service, their preflight fails ("The jev service is not running") until it
-runs, so after a reboot start it by hand, `compose --profile jev up -d jev`
-with the stack's `-f` files (SMD-2834). Check 32
+`jev` is `unless-stopped` as well, and needs no supervisor: serving, it
+never exits on its own. A fetch that fails or hashes wrong, an engine that does
+not load and a port taken are tried again on the same clock, the service
+unhealthy meanwhile; a bad `JEV_THREADS` holds it until a recreate. The servers
+can need it — with `OB1_JEV_BASE_URL` naming the `jev` service, their preflight
+fails ("The jev service is not running") until it serves — and after a reboot
+it now comes back without a hand start (SMD-2834). Check 32
 of `scripts/check-fork-consistency.ts` holds every service's policy, and that
 each follower runs through the supervisor. Postgres
 had none until SMD-2760, so on Docker a reboot would bring the servers back
@@ -1049,7 +1066,9 @@ without their database. A canary (`canary.sh`) and the three-tier stack
 can start before Postgres answers. Its preflight then fails and the
 container exits (preflight does not wait), and `unless-stopped` starts it
 again until Postgres answers, which takes seconds. Under podman that loop
-has no backoff (SMD-2043). A database the server cannot use keeps it
+has no backoff (SMD-2043). A model provider that is not up yet does not
+restart it: an Ollama on the host that starts after the stack is a preflight warning,
+and the server serves degraded until it answers (SMD-2890). A database the server cannot use keeps it
 restarting; for example, after a lost volume Postgres comes back empty, and
 the migrator does not run at boot. `compose logs server` says why. With the
 schema in place the migrator is not needed at boot; the `up` after an
@@ -1200,7 +1219,7 @@ after a person, so the log stays free of names and addresses.
 # every request that did not end `ok`, on each server (the default project's
 # containers; another brain's are <project>-mcp-1, -api-1 and -server-1): /mcp's
 # in the MCP server's; the REST core's own, n8n's among them, in the REST
-# core's; and server's, which no shipped template calls, in its own
+# core's; and server's, which nothing in the stack calls since SMD-2295, in its own
 docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
 docker logs open-brain-api-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
 docker logs open-brain-server-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
@@ -1895,8 +1914,10 @@ Each pass stamps a heartbeat, `heartbeat:board-sync` in `ob1_config`
 (SMD-2261). Preflight's `workers` row, the keyed `/health` body and `brain_info`
 read it. The row warns at once when the loop says it stopped (`compose stop`)
 or its supervisor holds it — a refusal, which it tries again on its own, the
-row saying when (SMD-3214) — and once the heartbeat is older than three
-intervals: its container removed. It names `up -d --no-deps board-sync`, with the
+row saying when and which: no `LINEAR_API_KEY`, an initiative that is not one
+board, an interval or findings cap it does not take, an endpoint the egress
+policy refuses wholesale, each with its remedy (SMD-3214) — and once the
+heartbeat is older than three intervals: its container removed. It names `up -d --no-deps board-sync`, with the
 `-f` files and `-p` the stack was started with. Just after `up`, the server's
 preflight can read the row a `down` left before board-sync's first pass stamps
 it; such a warning in the start-up log clears on the next `bun preflight.ts`.
@@ -2041,7 +2062,8 @@ has removed.
   follower's first call at start — a model it does not serve, a refused key,
   a wrong base URL (SMD-2599). The service does not exit: its supervisor runs
   the follower again after 1, 2, 4, 8, then every 15 minutes, and preflight's
-  `workers` row says it is held, the exit code and the next try (SMD-3214).
+  `workers` row says it is held, the refusal by its kind with the kind's
+  remedy, and the next try (SMD-3214).
   No key, or a setting that is not digits, the supervisor refuses itself,
   before the follower starts, and holds until the service is recreated.
 - **Outages.** A follower waits out the database going away (it checks
@@ -2640,7 +2662,12 @@ setting, each with the value compose read, quoted afresh, but for these:
 - **stable's port, address, tier and profiles**: the file holds the canary's
   own, `SERVER_PORT` its `--port`, `SERVER_BIND="127.0.0.1"`,
   `OB1_TIER="canary"` and `COMPOSE_PROFILES=""` (SMD-2874), which canary.sh
-  also hands compose in the shell on every call;
+  also hands compose in the shell on every call, with an empty
+  `OB1_PUBLIC_ORIGIN`: the canary is loopback alone, and stable's origin would
+  have its operator GUI refuse sign-in as cross-site (SMD-2280). A file written
+  since carries none; one written before may hold stable's, which canary.sh's own
+  calls override, but compose run by hand with that file does not: delete the
+  line;
 - **nothing else**: the file is kept only if compose reads every value in it
   as stable's file reads it, less those, and no value carries stable's
   database password (a `DATABASE_URL` holding it, say, is refused, naming the
@@ -2679,7 +2706,7 @@ From then on the file is the canary's own:
   plugin role a password of its own, and says each by name.
 - **Stable's changes.** A setting stable gains or changes later does not reach
   the canary, and `up` names each one that differs (the name, never the
-  value; the port, address, tier and profiles canary.sh sets are not named).
+  value; the port, address, tier, profiles and public origin canary.sh sets are not named).
   Edit `.env.canary.local` to carry one across, or delete it and the next
   `up` makes it again. `down --volumes` leaves it, and a canary stood up again
   makes its database on it.
@@ -2960,7 +2987,11 @@ The first start fetches the pinned weights (606 MB, about 20 s here) into the
 healthcheck's ten-minute start period and the server, which waits for a
 healthy `jev`, does not start: pre-pull with
 `podman compose -f deploy/compose.yaml --profile jev run --rm jev --fetch-only`; every start verifies each file's sha256 and replaces one
-that does not match (a verify-only restart serves in about a second). About
+that does not match (a verify-only restart serves in about a second). A
+fetch that fails — no network yet after a reboot, the hub down, a file that
+hashes wrong — does not end the service: it is tried again after 1, 2, 4, 8,
+then every 15 minutes, `jev` unhealthy meanwhile, and a bad `JEV_THREADS`
+holds it until a recreate (SMD-3214); `--fetch-only` still exits on either. About
 1 GB resident, outside Ollama's scheduler. With `OB1_JEV_BASE_URL` set the
 server's preflight dials the tier and fails the start when it does not answer,
 so set the knob with the profile, not before it; with the profile the server

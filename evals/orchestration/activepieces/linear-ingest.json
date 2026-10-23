@@ -56,13 +56,23 @@
             "displayName": "Capture into the brain",
             "type": "PIECE",
             "settings": {
-              "pieceName": "@activepieces/piece-mcp-client",
-              "pieceVersion": "~0.0.3",
-              "actionName": "call-tool",
+              "pieceName": "@activepieces/piece-http",
+              "pieceVersion": "~0.13.0",
+              "actionName": "send_request",
               "input": {
-                "auth": "{{connections['brain-capture']}}",
-                "tool": "capture_thought",
-                "args": { "content": "{{step_3.item.content}}" }
+                "method": "POST",
+                "url": "http://api:8000/v1/thoughts",
+                "headers": { "x-brain-key": "__OB1_BRAIN_CAPTURE_KEY__", "content-type": "application/json" },
+                "queryParams": {},
+                "authType": "NONE",
+                "authFields": {},
+                "body_type": "json",
+                "body": { "data": { "content": "{{step_3.item.content}}", "source": "activepieces" } },
+                "response_is_binary": false,
+                "use_proxy": false,
+                "timeout": 120,
+                "followRedirects": false,
+                "failureMode": "continue_none"
               },
               "propertySettings": {},
               "errorHandlingOptions": { "continueOnFailure": { "value": false }, "retryOnFailure": { "value": false } }

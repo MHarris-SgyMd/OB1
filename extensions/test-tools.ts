@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 /**
- * test-tools.ts — every tool of the eight MCP servers with a schema of their
- * own on the SQL shim — seven extension servers and the ob-graph recipe —
- * answers against a real Postgres carrying those schemas.
+ * test-tools.ts — every tool of the seven MCP servers with a schema of their
+ * own on the SQL shim — the extension servers — answers against a real
+ * Postgres carrying those schemas. (The ob-graph recipe was the eighth until it
+ * retired with SMD-2920.)
  *
  * SMD-1798 added the three servers that were still on supabase-js — family-
  * calendar, job-hunt and ob-graph, held there by a grouped `.or()`, a
@@ -31,7 +32,7 @@
  * comes back is read: the row a write stored, the rows a read chose, the
  * embedded relation as an object or null, the trigger's effect, the message a
  * failure carries. The database is the fork's migrations (crm_link_thought
- * reads `thoughts`) plus the seven `schema.sql` files, applied as their READMEs'
+ * reads `thoughts`) plus the six `schema.sql` files, applied as their READMEs'
  * Step 1 says — with no `auth.*` stub and no Supabase role: since SMD-1810 the
  * files carry no policy on auth.uid() and no GRANT to a role Postgres does not
  * have — and dropped again at the end, whether or not the run finished,
@@ -40,10 +41,10 @@
  *
  * The drift guard: each server's `tools/list` under a write key is exactly the
  * set of tools driven here, so a tool added to a server fails this suite until
- * it is driven. Fifty-five tools on eight servers: twenty-nine on the five
+ * it is driven. Forty-five tools on seven servers: twenty-nine on the five
  * change 77 drove (SMD-1588's "twenty-five" counted the four `index.ts` files;
- * the shared meal-planning server's four are the rest), six on family-calendar,
- * ten on job-hunt and ten on ob-graph.
+ * the shared meal-planning server's four are the rest), six on family-calendar
+ * and ten on job-hunt.
  *
  *   ../db/with-postgres.sh bun test-tools.ts
  */
@@ -59,16 +60,16 @@ const ROOT = resolve(HERE, "..");
 const URL_ = requireDatabaseUrl("test-tools.ts");
 const { assert, report } = createAssert();
 
-// ── The database: the fork's schema and the seven extension schemas ──
+// ── The database: the fork's schema and the six extension schemas ──
 
 // The width is pinned as test-writes.ts pins it: one thought is planted through upsert_thought for crm_link_thought, and no
 // vector is involved.
 await resetSchema(URL_, { dim: 1536, model: "openai/text-embedding-3-small" });
 const sql = new SQL({ url: URL_, max: 2 });
 
-/** The eight servers, by the schema that owns their tables (the shared server reads meal-planning's; job-hunt's last tool writes into professional-crm's). */
+/** The seven servers, by the schema that owns their tables (the shared server reads meal-planning's; job-hunt's last tool writes into professional-crm's). */
 const SCHEMAS = ["extensions/household-knowledge/schema.sql", "extensions/home-maintenance/schema.sql", "extensions/meal-planning/schema.sql", "extensions/professional-crm/schema.sql",
-  "extensions/family-calendar/schema.sql", "extensions/job-hunt/schema.sql", "recipes/ob-graph/schema.sql"];
+  "extensions/family-calendar/schema.sql", "extensions/job-hunt/schema.sql"];
 const schemaText = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
 /** What the schemas create, dropped before they are applied and at the end. family-calendar's CREATE TABLE has no IF NOT EXISTS (meal-planning's gained it under SMD-1810's boyscout). */
 async function dropExtensionSchemas() {
@@ -587,67 +588,6 @@ let pastaId = "", saladId = "", shoppingListId = "";
   assert(!ok(missing) && /Failed to retrieve job contact/.test(failure(missing)), `an unknown contact fails by name (${failure(missing).slice(0, 60)})`);
 }
 
-// ── recipes/ob-graph (SMD-1798) ──────────────────────────────────────────────
-
-{
-  const F = "recipes/ob-graph/index.ts";
-  console.log(`\n[${F}]`);
-  const h = await load(F);
-  const c = (name: string, args: Record<string, unknown>) => call(F, h, name, args);
-  const node = async (label: string, node_type: string, properties?: Record<string, unknown>) => {
-    const r = await c("create_node", { label, node_type, ...(properties ? { properties: JSON.stringify(properties) } : {}) });
-    assert(ok(r) && UUID.test(r.body?.node?.id) && r.body?.node?.label === label && r.body?.node?.node_type === node_type, `create_node ${label} (${failure(r)})`);
-    return String(r.body?.node?.id);
-  };
-  const supabase = await node("Supabase", "tool", { url: "https://supabase.com" });
-  const brain = await node("Open Brain", "project");
-  const postgres = await node("Postgres", "tool");
-  const island = await node("Island", "place");
-  const dependsOn = await c("create_edge", { source_node_id: brain, target_node_id: supabase, relationship_type: "depends_on", weight: 0.9 });
-  const runsOn = await c("create_edge", { source_node_id: supabase, target_node_id: postgres, relationship_type: "runs_on" });
-  // weight is a REAL: Bun decodes the float4 into a double (0.8999999761581421), where PostgREST prints Postgres's shortest
-  // spelling (0.9) — a rendering difference the shim does not paper over; the value is the one stored.
-  assert(ok(dependsOn) && ok(runsOn) && UUID.test(dependsOn.body?.edge?.id) && Math.abs(Number(dependsOn.body?.edge?.weight) - 0.9) < 1e-6 && Number(runsOn.body?.edge?.weight) === 1, `create_edge ×2, the weight stored and defaulted (${failure(dependsOn) || failure(runsOn) || dependsOn.body?.edge?.weight})`);
-  const dup = await c("create_edge", { source_node_id: brain, target_node_id: supabase, relationship_type: "depends_on" });
-  assert(!ok(dup) && /Failed to create edge/.test(failure(dup)) && /unique_edge/.test(failure(dup)), `a duplicate edge is refused by the unique constraint, the message the database's (${failure(dup).slice(0, 80)})`);
-  const found = await c("search_nodes", { query: "supa" });
-  assert(ok(found) && found.body?.count === 1 && found.body?.nodes?.[0]?.label === "Supabase" && found.body?.nodes?.[0]?.properties?.url === "https://supabase.com", `search_nodes by label, ILIKE, the properties as JSON (${failure(found) || found.body?.count})`);
-  const tools = await c("search_nodes", { node_type: "tool" });
-  assert(ok(tools) && tools.body?.count === 2, `…by type (${tools.body?.count})`);
-  const neighbours = await c("get_neighbors", { node_id: supabase });
-  const labels = (r: Called) => ((r.body?.neighbors ?? []) as { neighbor: { label: string } | null }[]).map((n) => n.neighbor?.label).sort().join();
-  assert(ok(neighbours) && neighbours.body?.count === 2 && labels(neighbours) === "Open Brain,Postgres", `get_neighbors both ways: the node each edge reaches, embedded through the key the file names (graph_nodes!graph_edges_target_node_id_fkey) — the hint the shim reads since SMD-1798 (${failure(neighbours) || labels(neighbours)})`);
-  const out = neighbours.body?.neighbors?.find((n: { direction: string }) => n.direction === "outgoing");
-  assert(out?.neighbor?.label === "Postgres" && out?.relationship_type === "runs_on" && out?.neighbor?.node_type === "tool" && typeof out?.neighbor?.id === "string", `…the outgoing one Postgres, the neighbour an object of the four named columns (${JSON.stringify(out?.neighbor)})`);
-  const incoming = await c("get_neighbors", { node_id: supabase, direction: "incoming", relationship_type: "depends_on" });
-  assert(ok(incoming) && incoming.body?.count === 1 && labels(incoming) === "Open Brain", `…incoming only, by relationship type (${labels(incoming)})`);
-  const walk = await c("traverse_graph", { start_node_id: brain, max_depth: 3 });
-  const deepest = (walk.body?.nodes ?? []).find((n: { node_label: string }) => n.node_label === "Postgres");
-  assert(ok(walk) && walk.body?.count === 3 && walk.body?.nodes?.[0]?.depth === 0 && deepest?.depth === 2 && deepest?.via_relationship === "runs_on",
-    `traverse_graph from Open Brain: the start, Supabase, Postgres — three rows by depth (${failure(walk) || JSON.stringify(walk.body?.nodes).slice(0, 120)})`);
-  assert(Array.isArray(deepest?.path) && deepest.path.length === 3 && deepest.path[0] === brain && deepest.path[2] === postgres, `…each row's path a list of ids — a uuid[] through to_json, not the literal text Bun left it as (${JSON.stringify(deepest?.path)})`);
-  const typedWalk = await c("traverse_graph", { start_node_id: brain, relationship_type: "depends_on" });
-  assert(ok(typedWalk) && typedWalk.body?.count === 2, `…following one relationship type stops at Supabase (${typedWalk.body?.count})`);
-  const path = await c("find_path", { start_node_id: brain, end_node_id: postgres });
-  assert(ok(path) && path.body?.path_found === true && path.body?.steps === 3 && path.body?.path?.[0]?.node_id === brain && path.body?.path?.[2]?.node_label === "Postgres" && path.body?.path?.[2]?.via_relationship === "runs_on",
-    `find_path Open Brain → Postgres: three steps through Supabase (${failure(path) || JSON.stringify(path.body).slice(0, 120)})`);
-  const noPath = await c("find_path", { start_node_id: brain, end_node_id: island });
-  assert(ok(noPath) && noPath.body?.path_found === false, `…and none to the island (${JSON.stringify(noPath.body)})`);
-  const updated = await c("update_node", { node_id: supabase, label: "Supabase (hosted)", properties: JSON.stringify({ tier: "pro" }) });
-  assert(ok(updated) && updated.body?.node?.label === "Supabase (hosted)" && eqJson(updated.body?.node?.properties, { url: "https://supabase.com", tier: "pro" }), `update_node relabels and merges the properties (${failure(updated) || JSON.stringify(updated.body?.node?.properties)})`);
-  const nothing = await c("update_node", { node_id: supabase });
-  assert(!ok(nothing) && /No fields to update/.test(failure(nothing)), "…and nothing to update is refused by name");
-  const types = await c("list_edge_types", {});
-  assert(ok(types) && types.body?.count === 2 && (types.body?.types ?? []).map((t: { relationship_type: string }) => t.relationship_type).sort().join() === "depends_on,runs_on", `list_edge_types counts each type (${failure(types) || JSON.stringify(types.body?.types)})`);
-  const gone = await c("delete_edge", { edge_id: runsOn.body?.edge?.id });
-  const typesAfter = await c("list_edge_types", {});
-  assert(ok(gone) && ok(typesAfter) && typesAfter.body?.count === 1 && typesAfter.body?.types?.[0]?.relationship_type === "depends_on", `delete_edge removes it (${failure(gone) || typesAfter.body?.count})`);
-  const removed = await c("delete_node", { node_id: supabase });
-  const orphaned = await c("get_neighbors", { node_id: brain });
-  const remaining = await c("search_nodes", {});
-  assert(ok(removed) && ok(orphaned) && orphaned.body?.count === 0 && ok(remaining) && remaining.body?.count === 3, `delete_node removes the node and, by cascade, its edge (${failure(removed) || `${orphaned.body?.count} neighbours, ${remaining.body?.count} nodes`})`);
-}
-
 // ── The connections the servers hold: every request built a client and closed none ──
 
 console.log("\n[the servers' clients share one pool]");
@@ -665,7 +605,7 @@ console.log("\n[the servers' clients share one pool]");
 console.log("\n[every tool each server registers is driven here]");
 {
   const files = ["extensions/household-knowledge/index.ts", "extensions/home-maintenance/index.ts", "extensions/meal-planning/index.ts", "extensions/meal-planning/shared-server.ts", "extensions/professional-crm/index.ts",
-    "extensions/family-calendar/index.ts", "extensions/job-hunt/index.ts", "recipes/ob-graph/index.ts"];
+    "extensions/family-calendar/index.ts", "extensions/job-hunt/index.ts"];
   let total = 0;
   for (const file of files) {
     const handler = handlers.get(file);
@@ -674,7 +614,7 @@ console.log("\n[every tool each server registers is driven here]");
     assert(listed.length > 0 && listed.join() === called.join(), `${file}: tools/list under the write key is exactly the ${called.length} tool(s) driven above (${listed.join(", ")})`);
     total += listed.length;
   }
-  assert(total === 55, `fifty-five tools on the eight servers (${total})`);
+  assert(total === 45, `forty-five tools on the seven servers (${total})`);
   const onShim = [...new Bun.Glob("extensions/**/*.ts").scanSync({ cwd: ROOT })]
     .filter((f) => !f.includes("node_modules") && !f.startsWith("extensions/test-") && /["'][^"'\n]*compat\/supabase-sql\/index\.ts["']/.test(readFileSync(join(ROOT, f), "utf8"))).sort();
   assert(onShim.join() === files.filter((f) => f.startsWith("extensions/")).sort().join(), `every extension file on the SQL shim is driven here (${onShim.join(", ")})`);

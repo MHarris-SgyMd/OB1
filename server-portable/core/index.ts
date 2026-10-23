@@ -9,6 +9,8 @@ import * as reads from "./reads.ts";
 import * as writes from "./writes.ts";
 import * as workers from "./workers.ts";
 import * as mend from "./mend.ts";
+import { PROBE_WORD, startProviderReprobe } from "../provider-health.ts";
+import { mayLeaveBox } from "../egress.ts";
 import { resolveJevConfig } from "../jev.ts";
 import type { PluginSql } from "../store.ts";
 
@@ -21,6 +23,7 @@ export { enabledHooks, hookSecrets, loadPlugins, runHook, runOperation, type Loa
 /** How long a keyed /health takes at most, the registry's word on its key included: either server's (SMD-2287). */
 export { HEALTH_DEADLINE_MS } from "./reads.ts";
 export { mendIntervalFrom, newMendState, type MendState } from "./mend.ts";
+export { reprobeIntervalFrom } from "../provider-health.ts";
 
 /** The operations, each taking the caller's principal and the tool's typed input. */
 export function createCore(deps: CoreDeps) {
@@ -63,6 +66,32 @@ export function createCore(deps: CoreDeps) {
     startVectorMender: bind(ctx, mend.startVectorMender),
     /** One tick of it, for a suite. */
     mendOnce: bind(ctx, mend.mendOnce),
+    /**
+     * The provider's re-probe loop (SMD-2890): both servers start one at boot,
+     * under OB1_PROVIDER_REPROBE_INTERVAL. What it probes, when, and how each
+     * outage ends is startProviderReprobe's; the call it may spend is made
+     * here, the server's own embedding of PROBE_WORD as a query.
+     */
+    startProviderReprobe: (intervalS: number) => {
+      // The probe's call is asked of the gate once, here, as the call itself
+      // would be: refused (a probeable endpoint not declared local, under deny
+      // with terms the word cannot meet), it is not made, and the state's
+      // words say so (review pass 4: made and refused, it said nothing, and
+      // the outage it was there to end stood).
+      const cfg = ctx.embedConfig();
+      const subject = { kind: "query" as const, content: PROBE_WORD };
+      const callAllowed = mayLeaveBox(subject, cfg.embeddings, cfg.egress).allowed;
+      const loop = startProviderReprobe(ctx.providerHealth, {
+        endpoint: () => ctx.embedConfig().embeddings,
+        intervalS,
+        ...(callAllowed ? { call: () => ctx.embedder.getEmbedding(PROBE_WORD, subject, "query") } : {}),
+      });
+      ctx.reprobeS = loop.reprobeS;
+      ctx.reprobeByCall = loop.byCall;
+      return loop;
+    },
+    /** The provider's state, for a suite. */
+    providerHealth: ctx.providerHealth,
   };
 }
 

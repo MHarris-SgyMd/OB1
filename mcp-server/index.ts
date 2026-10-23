@@ -1,6 +1,6 @@
 // The MCP server's entry (SMD-2287): `bun index.ts` serves app.ts on PORT —
 // as mcp.ob1.internal on the stack's mesh and at /mcp through the proxy, as
-// compose.yaml's `mcp` service (PR 5b; server-portable's is routed nowhere, and no shipped template calls it).
+// compose.yaml's `mcp` service (PR 5b; server-portable's is routed nowhere, and nothing in the stack calls it).
 // It calls the REST core at OB1_REST_URL with OB1_FORWARDER_KEY — a
 // forward-scope key MCP_ACCESS_KEYS holds (`bun keygen.ts --name <name> --scope forward`) —
 // beside each caller's key, and reads OB1_PLUGINS as the REST core does, for
@@ -12,7 +12,7 @@
 // a sound OB1_PUBLIC_ORIGIN) it trades each OAuth token at the hop as the
 // `mcp` client, its secret OB1_AUTH_SECRET_MCP (exchange.ts, SMD-2286).
 
-import { createRestClient } from "../rest-client/index.ts";
+import { createRestClient, DEFAULT_REST_URL } from "../rest-client/index.ts";
 import { loadPlugins, type LoadedPlugin } from "../server-portable/core/plugins.ts";
 import { routable } from "../server-portable/auth.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "../server-portable/shutdown.ts";
@@ -20,9 +20,6 @@ import { cutOpenRequests, cutTelemetry, flushTelemetry, knowTools, outgoingTrace
 import { createMcpApp, edgeFrom, REST_TIMEOUT_MS } from "./app.ts";
 import { createExchanger, exchangeSettings } from "./exchange.ts";
 import { originProblem } from "../server-portable/oauth-edge.ts";
-
-/** Where the REST core answers on the mesh unless OB1_REST_URL says otherwise. */
-export const DEFAULT_REST_URL = "http://api.ob1.internal.:8000";
 
 /**
  * The service its signals are named for, unless OTEL_SERVICE_NAME says: apart
