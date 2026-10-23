@@ -3684,9 +3684,10 @@ if (want("9")) {
 
     // The hard stop: the leases returned at once, the row in hand abandoned —
     // its vector not written, its claim not released by the worker — and run()
-    // 130 once the embedding in hand returns. The stub shifts every vector, so
-    // a write shows.
-    slowMs = 1500;
+    // 130 at once, the embedding in hand aborted (SMD-2679: it ran out first).
+    // Once: a third call returns the first's release, said once. The stub
+    // shifts every vector, so a write shows.
+    slowMs = 5000;
     shift = 1;
     const vecBefore = await vectors();
     let hardStop: PassStop | undefined;
@@ -3694,13 +3695,17 @@ if (want("9")) {
     const hardRun = reembedInProcess({ job: stopKey(2), env: STOP_ENV, workers: 1, batch: 1, onPass: (x) => { hardStop = x; } });
     await inHand(stopKey(2), hardFrom);
     hardStop?.();
-    await hardStop?.();
+    const hardAt = Date.now();
+    const firstHard = hardStop?.();
+    const againHard = hardStop?.();
+    await firstHard;
     const hard = await hardRun;
+    const hardMs = Date.now() - hardAt;
     const hardClaims = await keyClaims(stopKey(2));
     const moved = [...(await vectors())].filter(([id, e]) => vecBefore.get(id) !== e).length;
     shift = 0;
-    assert(hard.code === 130 && hard.stderr.includes("second signal — exiting now") && !hardClaims.claimed && !hardClaims.failed && moved === (hardClaims.succeeded ?? 0) && !/no longer this worker's/.test(hard.stderr) && hardStop?.() === null,
-      `the hard stop abandons reembed's row in hand: run() returns 130, every vector written is a succeeded row's, none released after the leases went, and the stop inert after (exit ${hard.code}, ${moved} written, claims ${JSON.stringify(hardClaims)})`);
+    assert(hard.code === 130 && hardMs < 1500 && againHard === firstHard && hard.stderr.split("second signal — exiting now").length === 2 && !hardClaims.claimed && !hardClaims.failed && moved === (hardClaims.succeeded ?? 0) && !/no longer this worker's/.test(hard.stderr) && hardStop?.() === null,
+      `the hard stop abandons reembed's row in hand: run() returns 130 at once, the embedding aborted, every vector written is a succeeded row's, none released after the leases went, a second hard call the first's, said once, and the stop inert after (exit ${hard.code} after ${hardMs} ms, ${moved} written, claims ${JSON.stringify(hardClaims)})`);
 
     // The CLI's signals: one SIGINT after the row in hand, two at once.
     const cliRun = (key: string) => Bun.spawn(["bun", "--no-env-file", join(HERE, "reembed.ts"), "--url", URL_!, "--job", key, "--workers", "1", "--batch", "1"], { env: STOP_ENV as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
