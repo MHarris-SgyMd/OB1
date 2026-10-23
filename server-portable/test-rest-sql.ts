@@ -163,6 +163,28 @@ const ids: string[] = [];
     (${ids[1]}::uuid, 'extract:lease@p1', 'claimed', 'w-mcp', now() - interval '2 hours', now() - interval '2 hours')`;
 }
 
+// A third pipeline (SMD-2287 PR 6a): a core of this suite's own over the one store, called in process with the
+// writer's principal and the tool's input as the MCP SDK parses it, its value rendered — what index.ts's tools were.
+// The MCP reply is render.ts over the REST answer, so this is what holds the REST answer to the core's own value, in
+// [2]'s reads and [3]'s writes: a field the REST answer loses or renames passes the REST-to-MCP comparisons (review
+// passes 1 and 2's mutants).
+const { createCore } = await import("./core/index.ts");
+const { SPECS } = await import("./core/schemas.ts");
+const { db, env } = await import("./root.ts");
+const direct = createCore({ env, store: db, door: "open-brain-direct" });
+const writer = authenticate(KEYS.writer, { MCP_ACCESS_KEYS: process.env.MCP_ACCESS_KEYS }, { admit: CLIENT_SCOPES });
+assert(writer !== null, "the writer's key authenticates in process");
+const CORE_OP: Record<string, keyof typeof direct> = {
+  search: "search", fetch: "fetch", search_thoughts: "searchThoughts", search_thoughts_keyword: "searchThoughtsKeyword", list_thoughts: "listThoughts",
+  list_thought_ids: "listThoughtIds", list_logged_searches: "listLoggedSearches", list_supersession_proposals: "listSupersessionProposals",
+  thought_stats: "thoughtStats", thought_changes: "thoughtChanges", worker_status: "workerStatus",
+  capture_thought: "capture", update_thought: "updateThought", delete_thought: "deleteThought",
+};
+const directly = async (tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; value?: unknown }> => {
+  const input = z.object(SPECS[tool as keyof typeof SPECS].inputSchema as z.ZodRawShape).parse(args);
+  return (direct[CORE_OP[tool]] as unknown as (p: unknown, i: unknown) => Promise<{ ok: boolean; value?: unknown }>)(writer, input);
+};
+
 console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST answer, text and structuredContent");
 {
   // Each case names what makes its page non-empty, so no comparison is two empty pages.
@@ -182,25 +204,6 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     ["thought_changes", { limit: 10, actions: ["capture"] }, "GET", "/v1/changes?limit=10&actions=capture", undefined, (v) => say.renderThoughtChanges(ok(v)), has("changes")],
     ["worker_status", {}, "GET", "/v1/workers", undefined, (v) => say.renderWorkerStatus(ok(v)), has("pools")],
   ];
-  // A third pipeline (SMD-2287 PR 6a): a core of this suite's own over the one store, called in process with the
-  // writer's principal and the tool's input as the MCP SDK parses it, its value rendered — what index.ts's tools were.
-  // The MCP reply is render.ts over the REST answer, so this is what holds the REST answer to the core's own value: a
-  // field the REST answer loses or renames passes the two comparisons above it (review pass 1's mutant).
-  const { createCore } = await import("./core/index.ts");
-  const { SPECS } = await import("./core/schemas.ts");
-  const { db, env } = await import("./root.ts");
-  const direct = createCore({ env, store: db, door: "open-brain-direct" });
-  const writer = authenticate(KEYS.writer, { MCP_ACCESS_KEYS: process.env.MCP_ACCESS_KEYS }, { admit: CLIENT_SCOPES });
-  assert(writer !== null, "the writer's key authenticates in process");
-  const CORE_OP: Record<string, keyof typeof direct> = {
-    search: "search", fetch: "fetch", search_thoughts: "searchThoughts", search_thoughts_keyword: "searchThoughtsKeyword", list_thoughts: "listThoughts",
-    list_thought_ids: "listThoughtIds", list_logged_searches: "listLoggedSearches", list_supersession_proposals: "listSupersessionProposals",
-    thought_stats: "thoughtStats", thought_changes: "thoughtChanges", worker_status: "workerStatus",
-  };
-  const directly = async (tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; value?: unknown }> => {
-    const input = z.object(SPECS[tool as keyof typeof SPECS].inputSchema as z.ZodRawShape).parse(args);
-    return (direct[CORE_OP[tool]] as unknown as (p: unknown, i: unknown) => Promise<{ ok: boolean; value?: unknown }>)(writer, input);
-  };
   const covered = new Set<string>();
   for (const [tool, args, method, path, body, render, filled] of cases) {
     const r = await rest(method, path, body);
@@ -213,8 +216,9 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     assert(same(out.structuredContent, m.sc), `${tool}: …and its structuredContent (first difference: ${firstDiff(out.structuredContent, m.sc)})`);
     const d = await directly(tool, args);
     const own = rendered(render, d.value);
-    assert(d.ok && own.content[0].text === m.text && same(own.structuredContent, m.sc),
-      `${tool}: …and a core of this suite's own, rendered in process, says the same: the REST answer lost nothing (${d.ok ? firstDiff(own.structuredContent, m.sc) : "refused"})`);
+    const whole = JSON.parse(JSON.stringify(d.value ?? null)) as Record<string, unknown>;
+    assert(d.ok && own.content[0].text === m.text && same(own.structuredContent, m.sc) && same(r.body, whole),
+      `${tool}: …and a core of this suite's own says the same: rendered in process, and its whole value the REST answer (${d.ok ? `${firstDiff(own.structuredContent, m.sc)} / ${firstDiff(r.body, whole)}` : "refused"})`);
   }
   // brain_info: the whole record, and the table it renders to.
   const b = await rest("GET", "/v1/brain");
@@ -307,12 +311,20 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   const { embeddingAttached: _attached, ...captured } = r.body;
   const cr = rendered((v) => say.renderCapture(ok(v)), swap(captured, m.sc));
   assert(cr.content[0].text === m.text && same(cr.structuredContent, m.sc), `capture_thought: the same reply (first difference: ${firstDiff(cr.structuredContent, m.sc)})`);
+  // Each write through a core of this suite's own as well (`directly`), on a row of its own (review pass 2: a value
+  // REST dropped from update_thought's answer passed the comparison of the REST answer with its own rendering).
+  const cdo = await directly("capture_thought", { content: "delta: written in process", source: "rest-suite" });
+  const cd = rendered((v) => say.renderCapture(ok(v)), swap(cdo.value as Record<string, unknown>, m.sc));
+  assert(cdo.ok && cd.content[0].text === m.text && same(cd.structuredContent, m.sc), `capture_thought: …and a core of this suite's own says the same (${cdo.ok ? firstDiff(cd.structuredContent, m.sc) : "refused"})`);
 
   const u = await rest("PATCH", `/v1/thoughts/${ids[0]}`, { metadata_patch: { reviewed: true } });
   assert(u.body.id === ids[0] && typeof u.body.updatedAt === "string", `the REST update answers the thought it changed (${u.body.id})`);
   const um = await mcp("update_thought", { id: ids[1], metadata_patch: { reviewed: true } });
   const ur = rendered((v) => say.renderUpdate(ok(v)), swap(u.body, um.sc));
   assert(u.status === 200 && ur.content[0].text === um.text && same(ur.structuredContent, um.sc), `update_thought: the same reply (${u.status}; first difference: ${firstDiff(ur.structuredContent, um.sc)})`);
+  const udo = await directly("update_thought", { id: ids[2], metadata_patch: { reviewed: true } });
+  const ud = rendered((v) => say.renderUpdate(ok(v)), swap(udo.value as Record<string, unknown>, um.sc));
+  assert(udo.ok && ud.content[0].text === um.text && same(ud.structuredContent, um.sc), `update_thought: …and a core of this suite's own says the same (${udo.ok ? firstDiff(ud.structuredContent, um.sc) : "refused"})`);
 
   // A patch naming a stamp key (SMD-2744): REST carries `kept` with the
   // values, MCP the keys and the note, one render of the other; an echo
@@ -333,6 +345,10 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   const dm = await mcp("delete_thought", { id: doomedMcp });
   const dr = rendered((v) => say.renderDelete(ok(v)), swap(d.body, dm.sc));
   assert(d.status === 200 && dr.content[0].text === dm.text && same(dr.structuredContent, dm.sc), `delete_thought: the same reply (${d.status}; first difference: ${firstDiff(dr.structuredContent, dm.sc)})`);
+  const doomedDirect = String(cdo.value && (cdo.value as { id?: unknown }).id);
+  const ddo = await directly("delete_thought", { id: doomedDirect });
+  const dd = rendered((v) => say.renderDelete(ok(v)), swap(ddo.value as Record<string, unknown>, dm.sc));
+  assert(ddo.ok && dd.content[0].text === dm.text && same(dd.structuredContent, dm.sc), `delete_thought: …and a core of this suite's own says the same (${ddo.ok ? firstDiff(dd.structuredContent, dm.sc) : "refused"})`);
 
   // reset_capture_stamp (SMD-2744): the operator's alone, so the writer is
   // classified for it here and unclassified after. Each door resets the
