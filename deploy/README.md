@@ -96,6 +96,15 @@ behind it, naming the profile, the two host aliases and a hosted provider as the
 ways out (SMD-1875). Before that row the name counted as local and was not
 dialled, so the stack came up `preflight OK` and the first capture failed on it
 (`getaddrinfo ENOTFOUND ollama`) with the server log ending at `Started server`.
+A name that resolves with nothing answering yet is the other case: an Ollama
+on the host not started yet, or the profile's `ollama` container started and
+not yet listening (one not started at all is a name that does not resolve,
+and still fails). The row warns, and
+the server starts degraded: captures land without their vectors, searches
+answer by exact matches, and keyed `/health` (`provider.status`, `since`) and
+`brain_info` (its `Provider` row, `unreachable since …`) say so. It
+re-probes every `OB1_PROVIDER_REPROBE_INTERVAL` seconds (15) and leaves
+degraded when the provider answers, with no restart (SMD-2890).
 
 The services, in order, the last two with the profile:
 
@@ -1061,7 +1070,9 @@ without their database. A canary (`canary.sh`) and the three-tier stack
 can start before Postgres answers. Its preflight then fails and the
 container exits (preflight does not wait), and `unless-stopped` starts it
 again until Postgres answers, which takes seconds. Under podman that loop
-has no backoff (SMD-2043). A database the server cannot use keeps it
+has no backoff (SMD-2043). A model provider that is not up yet does not
+restart it: an Ollama on the host that starts after the stack is a preflight warning,
+and the server serves degraded until it answers (SMD-2890). A database the server cannot use keeps it
 restarting; for example, after a lost volume Postgres comes back empty, and
 the migrator does not run at boot. `compose logs server` says why. With the
 schema in place the migrator is not needed at boot; the `up` after an

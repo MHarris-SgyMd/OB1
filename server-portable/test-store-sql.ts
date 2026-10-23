@@ -17,7 +17,7 @@ import { SqlStore } from "./store-sql.ts";
 import { createHash } from "node:crypto";
 import { applyMigrations, createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { MATCH_THOUGHTS_SIGNATURE } from "../db/config.mjs";
-import { createStore, normaliseTicketStatusInputs } from "./store.ts";
+import { createStore, ListCursorRefused, normaliseTicketStatusInputs } from "./store.ts";
 import { SQL } from "bun";
 
 const URL_ = process.env.DATABASE_URL;
@@ -49,6 +49,8 @@ const blend = () => {
 await resetSchema(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 
 const store = new SqlStore(URL_, { max: 4 });
+/** listThoughts' page, its thoughts alone: what every filter case reads (the cursor's cases read the page whole, [4b]). */
+const listedThoughts = async (f: Parameters<typeof store.listThoughts>[0]) => (await store.listThoughts(f)).thoughts;
 
 console.log("[1] The factory selects and validates");
 {
@@ -267,12 +269,12 @@ console.log("\n[3c] hybridThoughts fuses the two, and maps the fused row's shape
 
 console.log("\n[4] listThoughts' filters (jsonb containment, as the PostgREST store's were)");
 {
-  const all = await store.listThoughts({ limit: 10 });
+  const all = await listedThoughts({ limit: 10 });
   assert(all.length === 3, `unfiltered returns everything (got ${all.length})`);
   const firstDate = all[0].created_at, lastDate = all[all.length - 1].created_at;
   assert(firstDate != null && lastDate != null && firstDate >= lastDate, "newest first");
 
-  const byType = await store.listThoughts({ limit: 10, type: "note" });
+  const byType = await listedThoughts({ limit: 10, type: "note" });
   assert(byType.length === 0, "an unmatched type filter returns nothing");
 
   await store.captureThought({
@@ -281,14 +283,14 @@ console.log("\n[4] listThoughts' filters (jsonb containment, as the PostgREST st
     embedding: unit(2),
   });
 
-  assert((await store.listThoughts({ limit: 10, type: "note" })).length === 1, "type filter matches");
-  assert((await store.listThoughts({ limit: 10, topic: "alpha" })).length === 1, "topic filter matches inside an array");
-  assert((await store.listThoughts({ limit: 10, topic: "gamma" })).length === 0, "a topic not present does not match");
-  assert((await store.listThoughts({ limit: 10, person: "Ada" })).length === 1, "person filter matches inside an array");
-  assert((await store.listThoughts({ limit: 10, days: 1 })).length === 4, "days window includes today's rows");
-  assert((await store.listThoughts({ limit: 2 })).length === 2, "limit is honoured");
+  assert((await listedThoughts({ limit: 10, type: "note" })).length === 1, "type filter matches");
+  assert((await listedThoughts({ limit: 10, topic: "alpha" })).length === 1, "topic filter matches inside an array");
+  assert((await listedThoughts({ limit: 10, topic: "gamma" })).length === 0, "a topic not present does not match");
+  assert((await listedThoughts({ limit: 10, person: "Ada" })).length === 1, "person filter matches inside an array");
+  assert((await listedThoughts({ limit: 10, days: 1 })).length === 4, "days window includes today's rows");
+  assert((await listedThoughts({ limit: 2 })).length === 2, "limit is honoured");
 
-  const combined = await store.listThoughts({ limit: 10, type: "note", topic: "beta", person: "Ada", days: 1 });
+  const combined = await listedThoughts({ limit: 10, type: "note", topic: "beta", person: "Ada", days: 1 });
   assert(combined.length === 1, "filters combine with AND");
 
   // SMD-1726: the two keys migration 050 stamps from the write's envelope, as
@@ -299,11 +301,120 @@ console.log("\n[4] listThoughts' filters (jsonb containment, as the PostgREST st
   await raw`SELECT set_agent_kind('op-key', 'operator')`;
   const opRow = await store.captureThought({ content: "the operator's own line", payload: { metadata: { type: "note" } }, embedding: unit(3), actor: { name: "op-key", via: "test-store-sql" } });
   const whoRow = await store.captureThought({ content: "an unclassified key's line", payload: { metadata: {} }, embedding: unit(4), actor: { name: "who-key", via: "test-store-sql" } });
-  assert((await store.listThoughts({ limit: 10, saidBy: "operator" })).map((r) => r.id).join() === opRow.id, "saidBy matches metadata.actor_kind — the operator's row and no other");
-  assert((await store.listThoughts({ limit: 10, actor: "op-key" })).length === 1 && (await store.listThoughts({ limit: 10, actor: "who-key" })).map((r) => r.id).join() === whoRow.id, "actor matches metadata.actor_name, classified key or not");
-  assert((await store.listThoughts({ limit: 10, saidBy: "agent" })).length === 0, "an unmatched kind returns nothing");
-  assert((await store.listThoughts({ limit: 10, saidBy: "operator", type: "note" })).length === 1 && (await store.listThoughts({ limit: 10, saidBy: "operator", type: "idea" })).length === 0, "…and they combine with the others by AND");
+  assert((await listedThoughts({ limit: 10, saidBy: "operator" })).map((r) => r.id).join() === opRow.id, "saidBy matches metadata.actor_kind — the operator's row and no other");
+  assert((await listedThoughts({ limit: 10, actor: "op-key" })).length === 1 && (await listedThoughts({ limit: 10, actor: "who-key" })).map((r) => r.id).join() === whoRow.id, "actor matches metadata.actor_name, classified key or not");
+  assert((await listedThoughts({ limit: 10, saidBy: "agent" })).length === 0, "an unmatched kind returns nothing");
+  assert((await listedThoughts({ limit: 10, saidBy: "operator", type: "note" })).length === 1 && (await listedThoughts({ limit: 10, saidBy: "operator", type: "idea" })).length === 0, "…and they combine with the others by AND");
   await raw`DELETE FROM thoughts WHERE id = ${opRow.id}::uuid OR id = ${whoRow.id}::uuid`;
+  await raw.close();
+}
+
+console.log("\n[4b] listThoughts' keyset (SMD-2995): every row once, in each sort, across ties, microseconds and undated rows");
+{
+  // Rows of a type of their own, so the walk is theirs alone: three at one
+  // instant (a tie the id breaks), two a few microseconds apart inside one
+  // millisecond (a JS Date reads them as one), two undated, ±infinity and a BC
+  // date (timestamptz's own sentinels), and four ordinary days.
+  const raw = new SQL({ url: URL_, max: 1 });
+  const T = "pagewalk-2995";
+  const at = ["2026-10-01 12:00:00+00", "2026-10-01 12:00:00+00", "2026-10-01 12:00:00+00", "2026-10-02 08:00:00.000100+00", "2026-10-02 08:00:00.000900+00",
+    null, null, "infinity", "-infinity", "0044-03-15 00:00:00+00 BC", "2026-09-01 00:00:00+00", "2026-09-02 00:00:00+00", "2026-09-03 00:00:00+00", "2026-09-04 00:00:00+00"];
+  for (const [i, t] of at.entries()) {
+    await raw`INSERT INTO thoughts (content, metadata, created_at) VALUES (${`page walk row ${i} (SMD-2995)`}, ${{ type: T }}::jsonb, ${t}::timestamptz)`;
+  }
+  const expected = async (sort: "newest" | "oldest"): Promise<string[]> => (sort === "newest"
+    ? await raw`SELECT id::text FROM thoughts WHERE metadata @> ${{ type: T }}::jsonb ORDER BY created_at DESC NULLS FIRST, id DESC`
+    : await raw`SELECT id::text FROM thoughts WHERE metadata @> ${{ type: T }}::jsonb ORDER BY created_at ASC NULLS LAST, id ASC`).map((r: { id: string }) => r.id);
+  // A walk: page by page, each page's `next` the following page's `after`, as the core hands its cursor back.
+  const walk = async (sort: "newest" | "oldest", limit: number, between?: (page: number) => Promise<void>) => {
+    const seen: string[] = [];
+    let after: { at: string | null; id: string } | null = null;
+    for (let page = 0; page < 100; page++) {
+      const p = await store.listThoughts({ limit, type: T, sort, after });
+      seen.push(...p.thoughts.map((t) => t.id));
+      if (!p.next) return { seen, pages: page + 1 };
+      after = p.next;
+      if (between) await between(page);
+    }
+    return { seen, pages: -1 };
+  };
+  for (const sort of ["newest", "oldest"] as const) {
+    const want = (await expected(sort)).join();
+    const runs: string[] = [];
+    for (const limit of [1, 2, 3, 5, 14, 20]) {
+      const { seen, pages } = await walk(sort, limit);
+      runs.push(`${limit}:${seen.join() === want ? "ok" : "WRONG"}/${pages}`);
+    }
+    assert(runs.every((r) => r.includes(":ok/")), `${sort} first: a walk at every page size gives each row once, in Postgres's own order — ties by id, microseconds apart, undated ${sort === "newest" ? "first" : "last"}, ±infinity and BC (${runs.join(" ")})`);
+  }
+  // `next` is null exactly when no row follows: a page that ends the list says so, even when it is full.
+  const full = await store.listThoughts({ limit: at.length, type: T });
+  const over = await store.listThoughts({ limit: at.length - 1, type: T });
+  assert(full.thoughts.length === at.length && full.next === null && over.next !== null, `a full last page has no next; one short of it has one (${full.next === null}, ${over.next !== null})`);
+  // The place is Postgres's text, to the microsecond: the two rows 800 µs apart are two places.
+  const micro = await raw`SELECT id::text FROM thoughts WHERE metadata @> ${{ type: T }}::jsonb AND created_at::text LIKE '2026-10-02 08:00:00.000%' ORDER BY created_at DESC`;
+  const p1 = await store.listThoughts({ limit: 1, type: T, after: { at: "2026-10-02 08:00:00.0009+00", id: micro[0].id } });
+  assert(p1.thoughts[0]?.id === micro[1].id, `past the row at .000900, newest first, the next is the row at .000100, not the same millisecond skipped (${p1.thoughts[0]?.id === micro[1].id})`);
+
+  // Captures landing while a walk goes: every row there at its start is seen once, and no row twice.
+  for (const sort of ["newest", "oldest"] as const) {
+    const before = new Set(await expected(sort));
+    let n = 0;
+    const { seen } = await walk(sort, 3, async (page) => {
+      if (page > 2) return;
+      // Now, an hour back, and undated: the ends of each order and the middle.
+      for (const t of [new Date().toISOString(), new Date(Date.now() - 3_600_000).toISOString(), null]) {
+        await raw`INSERT INTO thoughts (content, metadata, created_at) VALUES (${`page walk capture ${sort} ${n++} (SMD-2995)`}, ${{ type: T }}::jsonb, ${t}::timestamptz)`;
+      }
+    });
+    const counts = new Map<string, number>();
+    for (const id of seen) counts.set(id, (counts.get(id) ?? 0) + 1);
+    const twice = [...counts.values()].filter((c) => c > 1).length;
+    const missing = [...before].filter((id) => !counts.has(id)).length;
+    assert(twice === 0 && missing === 0, `${sort} first, with captures landing between pages: every row there at the start seen once, none twice (missing ${missing}, twice ${twice}, ${seen.length - before.size} of ${n} new seen)`);
+  }
+
+  // The filters still hold, a page at a time: `days` drops the undated and the far past, as it always has.
+  const recent = await walk("newest", 2);
+  const windowed: string[] = [];
+  let after: { at: string | null; id: string } | null = null;
+  for (;;) {
+    const p = await store.listThoughts({ limit: 2, type: T, days: 2, after });
+    windowed.push(...p.thoughts.map((t) => t.id));
+    if (!p.next) break;
+    after = p.next;
+  }
+  const inWindow = (await raw`SELECT id::text FROM thoughts WHERE metadata @> ${{ type: T }}::jsonb AND created_at >= now() - interval '2 days' ORDER BY created_at DESC NULLS FIRST, id DESC`).map((r: { id: string }) => r.id);
+  assert(windowed.join() === inWindow.join() && windowed.length < recent.seen.length, `a filter with the cursor: the days window walked page by page is the window's rows in order (${windowed.length} of ${recent.seen.length})`);
+
+  // A cursor time of the right shape Postgres cannot read is refused; a cast error of anything else beside a good
+  // cursor is its own (review pass 3: the store, not the schema's bound on `days`, holds the line). Below the schema,
+  // a `days` of a million puts the window's start in 712 BC, whose JS text, a signed year, Postgres reads as an offset.
+  const fails = (p: Promise<unknown>) => p.then(() => "no error", (e: unknown) => (e instanceof ListCursorRefused ? "refused" : "other"));
+  const good = { at: "2026-10-02 08:00:00.0009+00", id: micro[0].id };
+  const unreadable = await fails(store.listThoughts({ limit: 1, type: T, after: { at: "2026-10-02 08:00:00+16", id: micro[0].id } }));
+  const castBeside = await fails(store.listThoughts({ limit: 1, type: T, days: 1_000_000, after: good }));
+  assert(unreadable === "refused" && castBeside === "other", `a cursor time Postgres cannot read is ListCursorRefused; a days whose start Postgres cannot read beside a good cursor is not (${unreadable}, ${castBeside})`);
+  // The cursor's own read failing for another reason — a connection lost — is that failure, never a refusal of a cursor
+  // that may be good (review pass 4: a probe answering true for any failure survived). Its template alone fails here.
+  {
+    const held = store as unknown as { sql: (...a: unknown[]) => unknown };
+    const real = held.sql;
+    held.sql = new Proxy(real, {
+      apply: (t, self, args) => (Array.isArray(args[0]) && (args[0] as string[]).join("$") === "SELECT $::timestamptz"
+        ? Promise.reject(Object.assign(new Error("connection lost (test)"), { errno: "08006" }))
+        : Reflect.apply(t, self, args)),
+    });
+    let lost: string;
+    try {
+      lost = await fails(store.listThoughts({ limit: 1, type: T, after: { at: "2026-10-02 08:00:00+16", id: micro[0].id } }));
+    } finally {
+      held.sql = real;
+    }
+    assert(lost === "other", `the cursor's read lost to another failure is that failure, not ListCursorRefused (${lost})`);
+  }
+
+  await raw`DELETE FROM thoughts WHERE metadata @> ${{ type: T }}::jsonb`;
   await raw.close();
 }
 
@@ -1354,7 +1465,7 @@ console.log("\n[12] A NULL created_at reads back as null on every read method, n
     assert(hit?.created_at === null, `matchThoughts returns null, not the epoch (got ${JSON.stringify(hit?.created_at)})`);
     const rec = await store.getThought(undatedId);
     assert(rec?.created_at === null, `getThought returns null (got ${JSON.stringify(rec?.created_at)})`);
-    const listed = (await store.listThoughts({ limit: 50 })).find((r) => r.id === undatedId);
+    const listed = (await listedThoughts({ limit: 50 })).find((r) => r.id === undatedId);
     assert(listed?.created_at === null, `listThoughts returns null (got ${JSON.stringify(listed?.created_at)})`);
     // The bug's fingerprint: the fabricated epoch string appears nowhere.
     assert(rec?.created_at !== "1970-01-01T00:00:00.000Z", "the fabricated epoch string is gone");
@@ -1504,8 +1615,8 @@ console.log("\n[16] min_trust and the write's declared trust (SMD-1724): capture
   const [kwAll, kwOp, hyAll, hyOp, cuOp] = [await kw(), await kw("operator"), await hy(), await hy("operator"), await hy("operator", true)];
   assert(has(kwAll, pasted.id) && has(kwOp, own.id) && !has(kwOp, pasted.id), "keyword: minTrust operator keeps the operator's text and leaves the ingested one out");
   assert(has(hyAll, pasted.id) && has(hyOp, own.id) && !has(hyOp, pasted.id) && has(cuOp, own.id) && !has(cuOp, pasted.id), "hybrid and the current read: the same, through 075's 8-argument forms");
-  const ls = await store.listThoughts({ limit: 10, trustIn: ["operator"] });
-  assert(has(ls, own.id) && !has(ls, pasted.id) && has(await store.listThoughts({ limit: 10, trustIn: ["operator", "agent", "ingested"] }), pasted.id), "list: trustIn keeps the rows whose trust is one of the words");
+  const ls = await listedThoughts({ limit: 10, trustIn: ["operator"] });
+  assert(has(ls, own.id) && !has(ls, pasted.id) && has(await listedThoughts({ limit: 10, trustIn: ["operator", "agent", "ingested"] }), pasted.id), "list: trustIn keeps the rows whose trust is one of the words");
 
   // A brain before 074 and 075: 019's 4-argument keyword, 027's 7-argument
   // hybrid and 068's current read (each the last to define it before them),

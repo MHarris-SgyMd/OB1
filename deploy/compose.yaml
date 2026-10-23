@@ -820,9 +820,12 @@ services:
       # dialled nothing without --deep and said OK; the first capture failed in
       # 7 ms with "Unable to connect", and the server logged nothing. Since
       # SMD-1875 preflight dials an endpoint whose name is local once (GET
-      # /models, 2.5 s) and the container refuses to start on one that answers
-      # nothing, naming by the name's kind the profile, the host aliases or
-      # the stack's own service as the fix. An Ollama
+      # /models, 2.5 s) and the container refuses to start on a name that does
+      # not resolve, on its own loopback, or on one that answers wrongly or
+      # through a proxy, naming by the name's kind the
+      # profile, the host aliases or the stack's own service as the fix; a
+      # resolved one with nothing answering yet starts it degraded, re-probed
+      # until it answers (SMD-2890). An Ollama
       # on the host is http://host.containers.internal:11434/v1 (podman; Docker
       # Desktop: host.docker.internal); OpenRouter is https://openrouter.ai/api/v1
       # with a key — deploy/.env.example, "Model provider". Check 14 holds this
@@ -880,6 +883,12 @@ services:
       # provider answers (SMD-2889). Unset, 60. Both this server and the REST
       # core read it; a leader lock lets one mend at a time.
       OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
+      # Seconds between re-probes of a local embedding provider that does not
+      # answer (GET /models; one embedding of "probe" where a call failed in a
+      # way /models cannot show), 1 to 3600, 0 or off for the start's probe
+      # alone: the server starts degraded when it is not up yet and leaves
+      # degraded when it answers (SMD-2890). Unset, 15.
+      OB1_PROVIDER_REPROBE_INTERVAL: ${OB1_PROVIDER_REPROBE_INTERVAL:-}
       PORT: "8000"
     environment:
       <<: [*server-env, *plugin-env]
