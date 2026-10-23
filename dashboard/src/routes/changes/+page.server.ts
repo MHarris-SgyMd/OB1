@@ -49,6 +49,8 @@ export const load: PageServerLoad = async (event) => {
 	})) as ChangesResult;
 	const path = `${base}/changes`;
 	const kept = { others_only: q.others_only, agent: q.agent, action: q.actions, limit: q.limit };
+	// Next keeps the typed start beside the cursor (the cursor wins, `start` above), so the form still shows it and a
+	// new filter after Next starts from it, not from the newest (review pass 2).
 	return {
 		q,
 		filtered: q.others_only || q.agent !== undefined || q.actions.length > 0,
@@ -82,7 +84,7 @@ export const load: PageServerLoad = async (event) => {
 		more: v.more,
 		bounded: v.bounded,
 		// Forward from the page's last change, with the same filters; the newest again, with none.
-		next: v.more && v.bounded && v.cursor ? addressOf(path, { after: v.cursor, ...kept }, { limit: DEFAULT_LIMIT }) : null,
+		next: v.more && v.bounded && v.cursor ? addressOf(path, { since: q.since, after: v.cursor, ...kept }, { limit: DEFAULT_LIMIT }) : null,
 		newest: start ? addressOf(path, kept, { limit: DEFAULT_LIMIT }) : null,
 	};
 };

@@ -393,7 +393,8 @@ let searchWord = "";
   assert(badSince.status === 400 && badSince.html.includes("not a time the brain reads") && badSince.html.includes('data-testid="restart"'), `a start the change feed cannot read is a 400 in words, the newest changes a link away (${badSince.status})`);
   // Next carries the page's cursor as `after`, never in `since`, which the form shows: a new filter starts again (review pass 1).
   const firstNext = linkOf((await get("/changes?since=2000-01-01&limit=1")).html, "next");
-  assert(/[?&]after=[0-9a-f-]{36}/.test(firstNext) && !/[?&]since=[0-9a-f]{8}-/.test(firstNext), `…Next carries the cursor as after, not in since (${firstNext.replace(/[0-9a-f-]{36}/, "<cursor>")})`);
+  // …and keeps the typed start beside it, so the form still shows it and a new filter after Next starts from it (review pass 2).
+  assert(/[?&]after=[0-9a-f-]{36}/.test(firstNext) && !/[?&]since=[0-9a-f]{8}-/.test(firstNext) && /[?&]since=2000-01-01(&|$)/.test(firstNext), `…Next carries the cursor as after, not in since, and keeps the typed start (${firstNext.replace(/[0-9a-f-]{36}/, "<cursor>")})`);
   // A filter that matches nothing says so, and does not read as an empty brain (review pass 1).
   const none = await get("/changes?agent=no-key-has-this-name-pr2b");
   assert(none.status === 200 && none.html.includes("No change matches these filters"), `a change-feed filter matching nothing says so (${none.status})`);

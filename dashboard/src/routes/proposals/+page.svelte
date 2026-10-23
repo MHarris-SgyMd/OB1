@@ -13,7 +13,7 @@
 	const by = (s: Side) => {
 		if (!s.writer) return null;
 		const w = s.writer;
-		const line = !w.name && !w.kind && !w.trust ? 'not recorded' : `${w.name ?? 'an unnamed key'} (${w.kind ?? 'kind not classified'}) · trust ${w.trust ?? 'not recorded'}`;
+		const line = !w.name && !w.kind && !w.trust ? 'not recorded' : `${w.name || 'an unnamed key'} (${w.kind ?? 'kind not classified'}) · trust ${w.trust ?? 'not recorded'}`;
 		return w.captureOnly ? `${line} · a capture-only key’s text` : line;
 	};
 </script>

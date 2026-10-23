@@ -262,7 +262,7 @@ export const SPECS = {
       readOnlyHint: true,
     },
     inputSchema: {
-      since: z.string().optional().describe("An ISO-8601 time (searches logged after it); omit for the most recent"),
+      since: z.string().optional().describe("An ISO-8601 time with its zone (searches logged at or after it; a clock with no Z or offset is refused) or a date (UTC midnight); omit for the most recent"),
       limit: z.number().int().min(1).max(1000).optional().default(200).describe("Searches to return, 1–1000 (default 200), most recent first"),
     },
   },
