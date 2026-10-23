@@ -1458,14 +1458,56 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
       for (const wait of waitFor) if (wait instanceof RegExp && !(await child.until(wait, 10_000))) missed.push(`no ${wait.source} within 10 s`); else if (!(wait instanceof RegExp)) await wait();
       await Promise.all(Array.from({ length: more }, hit)); // then more, at once, behind it
       out = await child.stop();
+    } catch (e) {
+      // Said, never thrown: a case that threw would leave the others' children running (SMD-3263). Its rows fail on its
+      // empty output, and those that name what was missed name this.
+      missed.push(`threw: ${e instanceof Error ? e.message : e}`);
+      console.log(`  a stop case threw: ${e instanceof Error ? e.message : e}`);
     } finally {
       child.kill();
       collector.stop(true);
     }
     return { up: child.up && child.sdk, out, port, missed: missed.join("; "), line: out.split("\n").find((l) => l.startsWith("SIGTERM: stopped")) ?? "" };
   };
-  const slow = await stopWith(async () => { await Bun.sleep(1_500); return Response.json({}); });
-  const hung = await stopWith(() => new Promise<Response>(() => {}));
+  // Three of the collectors the cases answer with — one that trickles, one that rejects in part, one that pushes back —
+  // each told at its case's rows below.
+  const trickle = () => new Response(new ReadableStream({ async start(c) { for (let i = 0; i < 120; i++) { c.enqueue(new TextEncoder().encode(" ")); await Bun.sleep(250); } c.close(); } }), { headers: { "content-type": "application/json" } });
+  const partial = (req: Request) => {
+    const path = new URL(req.url).pathname;
+    const field = path.endsWith("/traces") ? "rejectedSpans" : path.endsWith("/logs") ? "rejectedLogRecords" : "rejectedDataPoints";
+    return Response.json({ partialSuccess: { [field]: "1", errorMessage: "PLANTED-over-quota" } });
+  };
+  const seen: Record<string, number> = {};
+  let answeredLate = 0;
+  const pushback = async (req: Request) => {
+    const path = new URL(req.url).pathname;
+    if (path.endsWith("/metrics")) return Response.json({});
+    seen[path] = (seen[path] ?? 0) + 1;
+    if (seen[path] === 1) return new Response("busy", { status: 503, headers: { "retry-after": "4" } });
+    await Bun.sleep(4_000);
+    answeredLate += 1;
+    return Response.json({});
+  };
+  // The nine cases start at once and are awaited together, so [12] takes its longest case, not their sum: each has its
+  // own collector and child, and shares nothing but the tally (SMD-3263). Their rows follow, in this order.
+  const [slow, hung, crowded, trickled, rejected, perSignal, noSpans, hungFirst, pushedBack] = await Promise.all([
+    stopWith(async () => { await Bun.sleep(1_500); return Response.json({}); }),
+    stopWith(() => new Promise<Response>(() => {})),
+    stopWith(() => new Promise<Response>(() => {}), {
+      OTEL_BLRP_SCHEDULE_DELAY: "200", OTEL_BSP_MAX_QUEUE_SIZE: "1", OTEL_BSP_MAX_EXPORT_BATCH_SIZE: "1", OTEL_BLRP_MAX_QUEUE_SIZE: "1", OTEL_BLRP_MAX_EXPORT_BATCH_SIZE: "1",
+    }, 4),
+    stopWith(trickle, { OTEL_EXPORTER_OTLP_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200" }, 0, [/telemetry: 1 span not sent to \S+ \(no answer in time\)/, /telemetry: 1 log record not sent to \S+ \(no answer in time\)/]),
+    stopWith(partial, { OTEL_BLRP_SCHEDULE_DELAY: "200" }),
+    stopWith(trickle, { OTEL_EXPORTER_OTLP_TRACES_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200" }, 0, [/telemetry: 1 span not sent to \S+ \(no answer in time\)/]),
+    stopWith(partial, { OTEL_BLRP_SCHEDULE_DELAY: "200", OTEL_TRACES_EXPORTER: "none" }),
+    stopWith(() => new Promise<Response>(() => {}), { OTEL_EXPORTER_OTLP_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200" }, 0,
+      [/telemetry: 1 span not sent to \S+ \(timed out\)/, /telemetry: 1 log record not sent to \S+ \(timed out\)/]),
+    stopWith(pushback, { OTEL_EXPORTER_OTLP_TIMEOUT: "5000", OTEL_BLRP_SCHEDULE_DELAY: "200", OB1_STOP_GRACE: "4" }, 0, [async () => {
+      const until = Date.now() + 15_000;
+      while (answeredLate < 2 && Date.now() < until) await Bun.sleep(100);
+      await Bun.sleep(300); // the SDK's callback, a tick after the answer
+    }]),
+  ]);
   const within = Number(/telemetry not all sent within (\d+) ms; exit 0$/.exec(hung.line)?.[1] ?? NaN);
   const stoppedIn = Number(/stopped in ([\d.]+) s/.exec(hung.line)?.[1] ?? NaN);
   const cutLines = hung.out.split("\n").filter((l) => l.includes(`not sent to http://127.0.0.1:${hung.port} (on its way or batched when the flush's ${within} ms ran out)`));
@@ -1479,9 +1521,6 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   // of one, four requests at once behind the first one's exports, which hang. Every span and every log record is said
   // exactly once — dropped (queue full) or cut (on its way or still batched: the log batch holds its queue behind an
   // export on its way) — so each signal's lines add up to the five requests, the drops among them.
-  const crowded = await stopWith(() => new Promise<Response>(() => {}), {
-    OTEL_BLRP_SCHEDULE_DELAY: "200", OTEL_BSP_MAX_QUEUE_SIZE: "1", OTEL_BSP_MAX_EXPORT_BATCH_SIZE: "1", OTEL_BLRP_MAX_QUEUE_SIZE: "1", OTEL_BLRP_MAX_EXPORT_BATCH_SIZE: "1",
-  }, 4);
   const tally = (noun: "span" | "log record") => {
     const by: Record<string, number> = {};
     for (const l of crowded.out.split("\n")) {
@@ -1504,19 +1543,11 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   // is an idle one that the bytes never let fire (a byte a second raced it, review of the first run), so each export
   // is counted at its deadline (twice that 1 s, plus 2 s) as no answer in time, before the stop, which says not all
   // was sent. The case waits on those lines, not a fixed sleep (review pass 1).
-  const trickle = () => new Response(new ReadableStream({ async start(c) { for (let i = 0; i < 120; i++) { c.enqueue(new TextEncoder().encode(" ")); await Bun.sleep(250); } c.close(); } }), { headers: { "content-type": "application/json" } });
-  const trickled = await stopWith(trickle, { OTEL_EXPORTER_OTLP_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200" }, 0, [/telemetry: 1 span not sent to \S+ \(no answer in time\)/, /telemetry: 1 log record not sent to \S+ \(no answer in time\)/]);
   const lateLines = trickled.out.split("\n").filter((l) => l.includes(`not sent to http://127.0.0.1:${trickled.port} (no answer in time)`));
   assert(trickled.up && lateLines.some((l) => l.startsWith("telemetry: 1 span not sent")) && lateLines.some((l) => l.startsWith("telemetry: 1 log record not sent")) && /; telemetry not all sent.*; exit 0$/.test(trickled.line),
     `a collector that trickles its answer: each export past its deadline is said as no answer in time, and the stop says not all was sent (${lateLines.join(" / ") || trickled.out.split("\n").filter((l) => l.includes("not sent")).join(" / ")}; ${trickled.line}${trickled.missed ? `; ${trickled.missed}` : ""})`);
   // A partial success: the collector answers 200 and rejects one item of each export. That one is said as rejected by the
   // collector and the stop says not all was sent; the collector's own message is never said.
-  const partial = (req: Request) => {
-    const path = new URL(req.url).pathname;
-    const field = path.endsWith("/traces") ? "rejectedSpans" : path.endsWith("/logs") ? "rejectedLogRecords" : "rejectedDataPoints";
-    return Response.json({ partialSuccess: { [field]: "1", errorMessage: "PLANTED-over-quota" } });
-  };
-  const rejected = await stopWith(partial, { OTEL_BLRP_SCHEDULE_DELAY: "200" });
   const rejectedLines = rejected.out.split("\n").filter((l) => l.includes(`not sent to http://127.0.0.1:${rejected.port} (rejected by the collector)`));
   const partlyLines = rejected.out.split("\n").filter((l) => l.includes(`not sent to http://127.0.0.1:${rejected.port} (partly rejected by the collector)`));
   assert(rejected.up && ["1 span", "1 log record"].every((n) => rejectedLines.some((l) => l.startsWith(`telemetry: ${n} not sent`))) && partlyLines.some((l) => l.startsWith("telemetry: 1 metric export not sent"))
@@ -1525,41 +1556,21 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   // Each signal's own deadline: only spans' timeout set (OTEL_EXPORTER_OTLP_TRACES_TIMEOUT=1000), so the span is no
   // answer in time at about 4 s while the log record, on the default 22 s, is still on its way when the stop cuts it
   // (review pass 1's mutants: every signal given the spans' timeout survived).
-  const perSignal = await stopWith(trickle, { OTEL_EXPORTER_OTLP_TRACES_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200" }, 0, [/telemetry: 1 span not sent to \S+ \(no answer in time\)/]);
   assert(perSignal.up && /telemetry: 1 span not sent to \S+ \(no answer in time\)/.test(perSignal.out) && /telemetry: 1 log record not sent to \S+ \(on its way or batched when the flush's \d+ ms ran out\)/.test(perSignal.out) && !/log records? not sent to \S+ \(no answer in time\)/.test(perSignal.out),
     `each signal its own deadline: the span past its 1 s timeout's, the log record still on its way at the stop (${perSignal.out.split("\n").filter((l) => l.includes("not sent")).join(" / ")}${perSignal.missed ? `; ${perSignal.missed}` : ""})`);
   // With spans off (OTEL_TRACES_EXPORTER=none), the diag hook still reads the log records' and metrics' partial
   // successes: it hangs off any signal's collector, not the span batch's (review pass 1's mutants).
-  const noSpans = await stopWith(partial, { OTEL_BLRP_SCHEDULE_DELAY: "200", OTEL_TRACES_EXPORTER: "none" });
   const noSpansLines = noSpans.out.split("\n").filter((l) => /not sent to .*rejected by the collector\)/.test(l));
   assert(noSpans.up && noSpansLines.some((l) => l.startsWith("telemetry: 1 log record not sent")) && noSpansLines.some((l) => l.startsWith("telemetry: 1 metric export not sent")) && !noSpansLines.some((l) => / spans? not sent/.test(l)),
-    `with spans off, a log record's and a metric export's partial successes are still counted (${noSpansLines.join(" / ")})`);
+    `with spans off, a log record's and a metric export's partial successes are still counted (${noSpans.out.split("\n").filter((l) => l.includes("not sent")).join(" / ") || "no line said"}; ${noSpans.line}${noSpans.missed ? `; ${noSpans.missed}` : ""})`);
   // A collector that hangs from its first attempt fails at the exporter's own timeout, as timed out, before the
   // watcher's deadline (twice that, plus 2 s) could call it no answer in time.
-  const hungFirst = await stopWith(() => new Promise<Response>(() => {}), { OTEL_EXPORTER_OTLP_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200" }, 0,
-    [/telemetry: 1 span not sent to \S+ \(timed out\)/, /telemetry: 1 log record not sent to \S+ \(timed out\)/]);
   assert(hungFirst.up && /telemetry: 1 span not sent to \S+ \(timed out\)/.test(hungFirst.out) && /telemetry: 1 log record not sent to \S+ \(timed out\)/.test(hungFirst.out) && !hungFirst.out.includes("(no answer in time)"),
     `a collector that hangs: timed out at the exporter's timeout, never no answer in time (${hungFirst.out.split("\n").filter((l) => l.includes("not sent")).join(" / ")}${hungFirst.missed ? `; ${hungFirst.missed}` : ""})`);
   // A collector that pushes back — 503 with Retry-After: 4, then an answer 4 s on — at a 5 s timeout: the SDK retries
   // when the wait fits what is left, and that attempt ends past the timeout plus 2 s (about 8 s), inside twice it plus
   // 2 s (12 s). Answered at all, it is sent: no line, and the stop has nothing left (review pass 1: a deadline of the
   // timeout plus 2 s counted such an export as not sent).
-  const seen: Record<string, number> = {};
-  let answeredLate = 0;
-  const pushback = async (req: Request) => {
-    const path = new URL(req.url).pathname;
-    if (path.endsWith("/metrics")) return Response.json({});
-    seen[path] = (seen[path] ?? 0) + 1;
-    if (seen[path] === 1) return new Response("busy", { status: 503, headers: { "retry-after": "4" } });
-    await Bun.sleep(4_000);
-    answeredLate += 1;
-    return Response.json({});
-  };
-  const pushedBack = await stopWith(pushback, { OTEL_EXPORTER_OTLP_TIMEOUT: "5000", OTEL_BLRP_SCHEDULE_DELAY: "200", OB1_STOP_GRACE: "4" }, 0, [async () => {
-    const until = Date.now() + 15_000;
-    while (answeredLate < 2 && Date.now() < until) await Bun.sleep(100);
-    await Bun.sleep(300); // the SDK's callback, a tick after the answer
-  }]);
   assert(pushedBack.up && answeredLate === 2 && !pushedBack.out.includes("not sent") && /; telemetry sent; exit 0$/.test(pushedBack.line),
     `a collector that answers after a Retry-After, past the timeout plus 2 s: sent, nothing said (${answeredLate} answered late; ${pushedBack.out.split("\n").filter((l) => l.includes("not sent")).join(" / ") || "none"}; ${pushedBack.line})`);
 }
