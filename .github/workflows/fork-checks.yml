@@ -1309,6 +1309,10 @@ jobs:
           held "sleep: OB1_SLEEP_WORKERS ('-1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
           held '--poll must be' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
           also 'supervise: sleep exited 2'
+          # SMD-3203: OB1_SLEEP_DUMP_DIR reaches the scheduler as --dump-dir,
+          # the path one argument with its space, and one it cannot write is
+          # the scheduler's own refusal, before it reads the database.
+          held '--dump-dir /var/lib/ob1/no such dir is not a directory this process can write' -e OB1_WORKER_KEY=not-a-key -e 'OB1_SLEEP_DUMP_DIR=/var/lib/ob1/no such dir'
           # SMD-2679: the budget's four settings, each guarded, and the flag
           # each reaches — a clock past a week refused by the scheduler.
           held "sleep: OB1_SLEEP_BUDGET ('60m') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
