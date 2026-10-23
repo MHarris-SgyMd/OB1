@@ -340,7 +340,9 @@ export function nameRoute(c: { req: { raw: Request } }, route: string, tool: Too
 /**
  * A health path: `health` as the last path segment under any prefix a proxy
  * leaves on the request (`/mcp/health`, `/functions/v1/open-brain-mcp/health`),
- * with at most one trailing slash. deploy/README.md anticipates an unstripped
+ * with at most one trailing slash — except under `/.well-known/`, which the
+ * MCP server's discovery route, registered first, owns (the probe check skips
+ * it too). deploy/README.md anticipates an unstripped
  * prefix, and a probe aimed at `<base>/health` must not 405 there. The breadth
  * ("health under anything") is a stand-in for a base-path setting the server
  * does not have; a mount (the path-axis decision change 42 defers) would match

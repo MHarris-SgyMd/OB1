@@ -1164,8 +1164,8 @@ command -v bun > /dev/null 2>&1 || { echo "up needs bun on PATH: deploy/env-file
 
 # Where the canary's REST core would send its model calls, as compose
 # resolves them for it (the fallbacks included), and its telemetry: the REST
-# core holds both, the server's model knobs and the OTEL block, where `server`
-# holds no OTEL since it left the mesh (SMD-2287 PR 5b review pass 5). A bare name is a service on the
+# core holds both, the server's model knobs and the OTEL block (`server`, which
+# held none from SMD-2287 PR 5b, retired in PR 6b). A bare name is a service on the
 # network the server is on, and the canary's has none of stable's; an address
 # (a dotted name, IPv4 or IPv6) is reached as stable reaches it.
 CONFIG_ERR="$(mktemp "${TMPDIR:-/tmp}/ob1-canary-config.XXXXXX")"
@@ -1312,12 +1312,13 @@ WRITERS_STOPPED=1
 # SMD-2287 PR 6b: a canary stood up before then keeps its container, which this
 # compose.yaml no longer names, so compose would leave it running beside the
 # stack, an orphan holding connections to the canary's database. Found by its
-# project's and service's labels, running or stopped; stopped within its grace
-# first, so a call in flight drains and its stop writes its own jobs lost, as
-# the sleep worker is stopped below (review pass 6b·4), then removed.
+# project's and service's labels, running or stopped; stopped first, within the
+# grace compose gave the container from the canary's own file (the runtime's
+# stop with no -t reads it), so a call in flight drains and its stop writes its
+# own jobs lost (review passes 6b·4 and 6b·5), then removed.
 retired="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=server")"
 if [ -n "$retired" ]; then
-  printf '%s\n' "$retired" | xargs "$RUNTIME" stop -t "${OB1_STOP_GRACE:-10}" >/dev/null 2>&1 || true
+  printf '%s\n' "$retired" | xargs "$RUNTIME" stop >/dev/null 2>&1 || true
   printf '%s\n' "$retired" | xargs "$RUNTIME" rm -f >/dev/null
   say "the canary's server container, retired in SMD-2287 PR 6b, removed"
 fi

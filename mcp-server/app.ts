@@ -1,12 +1,14 @@
 // The brain's MCP server as a client of its REST core (SMD-2287): the MCP
 // endpoint, its public /health and its keyed mirrors, answered as
-// server-portable's index.ts answers them — the same edge (mcp-edge.ts), the
+// server-portable's index.ts answered them — the same edge (mcp-edge.ts), the
 // same words (render.ts) — with every operation a call to the REST core
 // through rest-client, the caller's key forwarded beside this server's
 // forward-scope key. It holds no store, no key list and no model: the REST
 // core authenticates every caller (its whoami says who a key is and what it
 // may call), runs every operation and answers every refusal, carried whole
-// so its words are the ones server-portable says.
+// so its words are the ones server-portable says. `index.ts` in a comment
+// below is that file, the MCP server this one replaced, retired in SMD-2287
+// PR 6b (`git show 52f77d4f:server-portable/index.ts`), never this directory's.
 
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 import { Hono, type Context } from "hono";
@@ -627,11 +629,11 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (!HEALTH_PATH.test(c.req.path)) return next();
     if (presentedKeys(c.req.raw).length === 0) return c.text("ok", 200, corsHeaders);
     if (c.req.method === "HEAD") return headAtOnce(c, "/health", "brain_info");
-    // The first key the REST core knows decides, as index.ts authenticates the
-    // first that matches: a capture or revoked key before a read key is `ok`,
+    // The first key the REST core knows decides, as index.ts authenticated the
+    // first that matched: a capture or revoked key before a read key is `ok`,
     // not the record (review pass 1).
     // One deadline for the key's standing and the record together, as index.ts
-    // starts both under one: the record's call is cut at what is left of it,
+    // started both under one: the record's call is cut at what is left of it,
     // and the route answers `ok` (review pass 2: one after the other, a keyed
     // probe could wait twice the deadline).
     const budget = AbortSignal.timeout(HEALTH_DEADLINE_MS);
@@ -910,7 +912,7 @@ export function createMcpApp(deps: McpDeps): Hono {
     return c.text("Internal Server Error", 500);
   });
 
-  // Whatever no route above matched: 405 with `Allow` (index.ts's notFound) — and a line for a path the first middleware never saw (one holding an encoded line break), as index.ts writes it.
+  // Whatever no route above matched: 405 with `Allow` (index.ts's notFound) — and a line for a path the first middleware never saw (one holding an encoded line break), as index.ts wrote it.
   app.notFound((c) => {
     if (!traceOf(c.req.raw)) beginRequest("mcp", c.req.raw).end({ status: 405, outcome: "refused" });
     return c.text("Method Not Allowed", 405, HEALTH_PATH.test(c.req.path) ? HEALTH_METHOD_NOT_ALLOWED_HEADERS : METHOD_NOT_ALLOWED_HEADERS);
