@@ -85,8 +85,8 @@ jobs:
       # directories a PR happens to touch. The upstream gate only validates
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
-      # and every developer here uses, and checks 13, 14, 18, 20, 23, 27, 28,
-      # 29, 32, 33, 34 and 35 parse YAML with Bun.YAML.
+      # and every developer here uses, and checks 13, 14, 18, 20, 23, 28, 29,
+      # 32 to 38 and 40 parse YAML with Bun.YAML.
       - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, and the edge proxy
         run: bun scripts/check-fork-consistency.ts
 
@@ -1546,7 +1546,10 @@ jobs:
           # A raw TCP listener, so it counts a connection whatever its first bytes:
           # the forwarder opens with the PROXY line, which an HTTP server refuses
           # unlogged (a forwarder that dialled it went uncounted, measured).
-          docker run -d --name ob1-ci-decoy --network open-brain_edge --network-alias proxy.ob1.internal --entrypoint bun "$IMAGE" -e 'Bun.listen({ hostname: "0.0.0.0", port: 8000, socket: { open(s) { console.log("decoy got a connection"); s.end(); }, data() {} } }); await Bun.sleep(1e9)' > /dev/null
+          # No healthcheck: the server image's probes 127.0.0.1:8000, the
+          # decoy's own port, and since its first probe comes 1 s in
+          # (SMD-3194, 5 s before) it counted as a connection here.
+          docker run -d --name ob1-ci-decoy --no-healthcheck --network open-brain_edge --network-alias proxy.ob1.internal --entrypoint bun "$IMAGE" -e 'Bun.listen({ hostname: "0.0.0.0", port: 8000, socket: { open(s) { console.log("decoy got a connection"); s.end(); }, data() {} } }); await Bun.sleep(1e9)' > /dev/null
           decoy=$(docker inspect -f '{{(index .NetworkSettings.Networks "open-brain_edge").IPAddress}}' ob1-ci-decoy)
           for _ in $(seq 1 20); do docker compose -f compose.yaml exec -T forwarder getent hosts proxy.ob1.internal. | grep -qF "$decoy" && break; sleep 0.5; done
           docker compose -f compose.yaml exec -T forwarder getent hosts proxy.ob1.internal. | grep -qF "$decoy" || { echo "the forwarder does not resolve the decoy, so its refusal below proves nothing" >&2; exit 1; }

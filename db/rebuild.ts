@@ -10,7 +10,7 @@
  *   bun db/rebuild.ts --url … --orphans [--limit N] [--dry-run]
  *   bun db/rebuild.ts --url … --status
  *   await run({ url, orphans: true, dryRun: true })   # in-process: import { run } from "./rebuild.ts" (SMD-2304's engine shape, SMD-2679)
- *   await sweepOrphans(sql, { limit, writer })        # the sweep alone on the caller's client, for the sleep scheduler's re-derive pass (SMD-2679)
+ *   await sweepOrphans(sql, { limit, writer })        # the sweep alone on the caller's client: the sleep scheduler's re-derive pass (SMD-2679)
  *
  * ── What a run does ─────────────────────────────────────────────────────────
  * --input calls rebuild_derived(id, reason, gone, fingerprints, force,
@@ -36,7 +36,9 @@
  * stands (preflight's `lineage` WARN names this flag) and calls
  * rebuild_derived once per thought in its orphans-only mode, which deletes
  * each such row and touches no row whose artifact stands — a stale row on
- * the same thought keeps its own reason for its own rebuild.
+ * the same thought keeps its own reason for its own rebuild. It and --status
+ * read the first 10,001 lineage rows by id; the sleep scheduler's sweep walks
+ * the windows past them (db/sleep.ts).
  *
  * --dry-run runs the call inside a transaction and rolls it back: the report
  * is the function's own, and nothing is kept — the honest preview, since the
@@ -182,11 +184,18 @@ async function callRebuild(sql: SQL, dry: boolean, id: string, reason: string, g
  * calls touched, the rows deleted over them, and the calls refused as a value;
  * `windowed` when the lineage table holds more rows than the read window
  * (LINEAGE_WINDOW), so orphans past it went unread — none found is then not
- * a clean table.
+ * a clean table; `stopped` when the caller's signal ended it before every
+ * thought read was called — a call it cut, rolled back, counted in none of
+ * the others — or a replay's refusal did (stopOnReplay); `last`,
+ * the window's last lineage row by id, where a next sweep's `after` picks up;
+ * `failed`, the calls skipFailure passed over; `whole`, when every orphan the
+ * window holds was called — nothing stopped it, and the limit did not cut it
+ * — or every call made failed, so reading the window again would meet the
+ * same thoughts and none past them (review pass 3).
  */
-export type SweepResult = { thoughts: number; touched: number; deleted: number; refused: number; windowed: boolean };
+export type SweepResult = { thoughts: number; touched: number; deleted: number; refused: number; failed: number; windowed: boolean; stopped: boolean; whole: boolean; last: string | null };
 
-/** The lineage rows a sweep or the census reads, in no order: the first LINEAGE_WINDOW. */
+/** The lineage rows a sweep or the census reads, in id order: the first LINEAGE_WINDOW. */
 const LINEAGE_WINDOW = 10001;
 
 /**
@@ -211,51 +220,100 @@ const inTransaction = (sql: SQL): boolean => typeof (sql as { savepoint?: unknow
 const IN_TRANSACTION = "rebuild.ts's dry run is a transaction of its own, rolled back: pass the client itself or a reserved connection, not a transaction's handle";
 
 /**
+ * The orphan census alone: the thoughts, by id, holding a lineage row whose
+ * artifact is gone, read from the window of LINEAGE_WINDOW lineage rows in id
+ * order after `after` (the start when absent) — at most `limit` — with
+ * `windowed` when rows lie past the window and `last`, its last row's id.
+ * One statement, one snapshot: the window's count and its orphans read apart
+ * could disagree, rows committed between them cutting a window the count said
+ * was whole (review pass 2 of PR 1). One row past the window is read to tell
+ * a table of exactly LINEAGE_WINDOW rows, read whole, from a larger one. In id
+ * order, so successive windows walk the table: read in no order, every sleep
+ * read the same first rows and an orphan past them was never found (SMD-2679
+ * PR 3, review pass 1).
+ */
+export async function orphanCensus(sql: SQL, opts: { limit?: number; after?: string | null } = {}): Promise<{ ids: string[]; windowed: boolean; last: string | null }> {
+  const limit = Math.max(1, Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT));
+  const after = opts.after ? sql`WHERE id > ${opts.after}::uuid` : sql``;
+  const [found] = (await sql`
+    WITH w AS MATERIALIZED (SELECT id, artifact_kind, artifact_id, produced_by FROM derivations ${after} ORDER BY id LIMIT ${LINEAGE_WINDOW + 1}),
+         al AS (SELECT * FROM w ORDER BY id LIMIT ${LINEAGE_WINDOW})
+    SELECT (SELECT count(*)::int FROM w) AS n, (SELECT id::text FROM al ORDER BY id DESC LIMIT 1) AS last, ARRAY(
+      SELECT DISTINCT d.artifact_id::text FROM al d
+       WHERE EXISTS (SELECT 1 FROM thoughts t WHERE t.id = d.artifact_id) AND ${orphaned(sql)}
+       ORDER BY 1 LIMIT ${limit}) AS ids`) as { n: number; last: string | null; ids: string[] }[];
+  return { ids: found.ids, windowed: Number(found.n) > LINEAGE_WINDOW, last: found.last };
+}
+
+/**
  * The orphan sweep: the lineage rows whose artifact is gone while the thought
  * stands, grouped by the thought that keys them, then rebuild_derived once
  * per thought in its orphans-only mode, which deletes each such row and
- * touches no row whose artifact stands. It reads the first LINEAGE_WINDOW
- * lineage rows, in no order (`windowed` says when there were more — counted
- * in the same statement, so the two agree), and acts on at most `limit`
+ * touches no row whose artifact stands. It reads orphanCensus's window —
+ * the first LINEAGE_WINDOW lineage rows after `after`, in id order
+ * (`windowed` says when there were more) — and acts on at most `limit`
  * thoughts — an integer, held to 1..10,000. `onFound` is told how many were
  * read, before the first call. A refusal as a value (REPLAYING, NOT_FOUND) is
  * said through the writer and counted; a database error rejects, the calls
- * made before it kept. Needs 063 (hasRebuild).
+ * made before it kept. `signal` stops it between calls — the call in hand
+ * finishes — and, aborted already, before its read (the sleep scheduler's
+ * wake, SMD-2679). `stopOnReplay` stops it at the first REPLAYING refusal: a
+ * session's state, which every call after would meet too. `skipFailure` is
+ * asked of a call that throws, with its thought's id: true counts it
+ * `failed` and goes on to the next thought, so one whose call always fails
+ * does not end every sweep at it; false (and absent) rejects, the error
+ * carrying the thought's id as `thought`. Needs 063 (hasRebuild).
  */
-export async function sweepOrphans(sql: SQL, opts: { limit?: number; dryRun?: boolean; writer?: Writer; onFound?: (thoughts: number) => void } = {}): Promise<SweepResult> {
+export async function sweepOrphans(sql: SQL, opts: { limit?: number; dryRun?: boolean; writer?: Writer; onFound?: (thoughts: number) => void; signal?: AbortSignal; after?: string | null; stopOnReplay?: boolean; skipFailure?: (e: unknown, thought: string) => boolean } = {}): Promise<SweepResult> {
   const { err } = opts.writer ?? consoleWriter;
   if (opts.limit != null && !Number.isInteger(opts.limit)) throw new RangeError(`sweepOrphans: limit must be an integer (${opts.limit})`);
   if (opts.dryRun === true && inTransaction(sql)) throw new Error(IN_TRANSACTION);
+  if (opts.signal?.aborted) return { thoughts: 0, touched: 0, deleted: 0, refused: 0, failed: 0, windowed: false, stopped: true, whole: false, last: null };
   const limit = Math.max(1, Math.min(opts.limit ?? DEFAULT_LIMIT, MAX_LIMIT));
-  // One statement, one snapshot: the window's count and its orphans read
-  // apart could disagree, rows committed between them cutting a window the
-  // count said was whole (review pass 2). One row past the window is read to
-  // tell a table of exactly LINEAGE_WINDOW rows, read whole, from a larger one.
-  const [found] = (await sql`
-    WITH w AS MATERIALIZED (SELECT id, artifact_kind, artifact_id, produced_by FROM derivations LIMIT ${LINEAGE_WINDOW + 1}),
-         al AS (SELECT * FROM w LIMIT ${LINEAGE_WINDOW})
-    SELECT (SELECT count(*)::int FROM w) AS n, ARRAY(
-      SELECT DISTINCT d.artifact_id::text FROM al d
-       WHERE EXISTS (SELECT 1 FROM thoughts t WHERE t.id = d.artifact_id) AND ${orphaned(sql)}
-       ORDER BY 1 LIMIT ${limit}) AS ids`) as { n: number; ids: string[] }[];
-  const n = Number(found.n);
-  const orphans = found.ids.map((id) => ({ id }));
+  const census = await orphanCensus(sql, { limit: opts.limit, after: opts.after });
+  const orphans = census.ids.map((id) => ({ id }));
   opts.onFound?.(orphans.length);
-  let deleted = 0, touched = 0, refused = 0;
+  let deleted = 0, touched = 0, refused = 0, failed = 0;
+  let stopped = false;
   for (const o of orphans) {
+    if (opts.signal?.aborted) {
+      stopped = true;
+      break;
+    }
     // Orphans only: a stale row on the same thought keeps its own reason
     // for its own rebuild (cold read, first review pass). The sweep marks no
     // row, so its reason is the report's label only.
-    const r = await callRebuild(sql, opts.dryRun === true, o.id, "operator: orphan sweep", false, null, false, true);
+    let r: Report;
+    try {
+      r = await callRebuild(sql, opts.dryRun === true, o.id, "operator: orphan sweep", false, null, false, true);
+    } catch (e) {
+      // Cut by the caller's stop — the call cancelled under it — the sweep
+      // keeps what it did, as a stop between calls does (review pass 3).
+      if (opts.signal?.aborted) {
+        stopped = true;
+        break;
+      }
+      if (!opts.skipFailure?.(e, o.id)) {
+        // Named, so the operator can find the thought (review pass 4 of PR 3).
+        if (e !== null && typeof e === "object") (e as { thought?: string }).thought = o.id;
+        throw e;
+      }
+      failed += 1;
+      continue;
+    }
     if (!r.ok) {
       err(`  ${o.id}: refused ${r.error}${r.error === "REPLAYING" ? " — this session is a replay (ob1.projecting_replay, a database- or role-level default); a rebuild is a live operation" : r.error === "NOT_FOUND" ? " — the thought went between the census and the call" : ""}`);
       refused += 1;
+      if (opts.stopOnReplay && r.error === "REPLAYING") {
+        stopped = true;
+        break;
+      }
       continue;
     }
     touched += 1;
     deleted += r.deleted;
   }
-  return { thoughts: orphans.length, touched, deleted, refused, windowed: n > LINEAGE_WINDOW };
+  return { thoughts: orphans.length, touched, deleted, refused, failed, windowed: census.windowed, stopped, whole: !stopped && (orphans.length < limit || failed === orphans.length), last: census.last };
 }
 
 /**
@@ -352,7 +410,7 @@ async function rebuildWith(sql: SQL, o: { INPUT: string | undefined; STATUS: boo
     }
     if (STATUS) {
       const [c] = (await sql`
-        WITH al AS (SELECT id, artifact_kind, artifact_id, produced_by, input_ids, input_fingerprints, recipe, stale_since FROM derivations LIMIT ${LINEAGE_WINDOW}),
+        WITH al AS (SELECT id, artifact_kind, artifact_id, produced_by, input_ids, input_fingerprints, recipe, stale_since FROM derivations ORDER BY id LIMIT ${LINEAGE_WINDOW}),
              st AS (SELECT d.id FROM al d JOIN thoughts t ON t.id = d.input_ids[1]
                      WHERE d.artifact_kind <> 'proposal' AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))),
              orph AS (SELECT d.id FROM al d WHERE ${orphaned(sql)})
@@ -369,7 +427,7 @@ async function rebuildWith(sql: SQL, o: { INPUT: string | undefined; STATUS: boo
       // read one way while the worker's read another); keyless here, so a
       // failed or live claim is named with its judge key.
       const standings = staleStandings((await sql.unsafe(STALE_STANDING_ROWS_SQL)) as StaleStandingRow[], null);
-      const bound = Number(c.rows) >= LINEAGE_WINDOW ? " (the first 10,001 lineage rows read; the rest not)" : "";
+      const bound = Number(c.rows) >= LINEAGE_WINDOW ? " (the first 10,001 lineage rows by id read; the rest not)" : "";
       out(`  lineage:     ${c.rows} row(s)${bound}: ${Object.entries(c.by_kind ?? {}).map(([k, n]) => `${n} ${k}`).join(", ") || "none"}`);
       out(`  stale:       ${c.stale} row(s) whose input's text moved since (the census's read) — bun db/rebuild.ts --input <id> acts on a thought's`);
       out(`  marked:      ${c.marked} row(s) await a re-run rebuild_derived asked for`);
@@ -395,15 +453,17 @@ async function rebuildWith(sql: SQL, o: { INPUT: string | undefined; STATUS: boo
     // keys them; one call per thought.
     const s = await sweepOrphans(sql, { limit: LIMIT, dryRun: DRY, writer: { out, err }, onFound: (n) => { if (n && DRY) out("  dry run: each call runs and rolls back"); } });
     if (s.thoughts === 0) {
-      out("  orphans: none — every lineage row read names an artifact that stands");
+      // A table larger than the window read is no clean one (review pass 2 of PR 3).
+      out(`  orphans: none — every lineage row read names an artifact that stands${s.windowed ? "; the read took the first 10,001 by id, the table holds more, and a running sleep scheduler walks the rest" : ""}`);
       return 0;
     }
-    out(`  orphans:     ${s.thoughts} thought(s) carried a lineage row whose artifact is gone${s.thoughts >= LIMIT ? ` (the first ${LIMIT}; run again for the rest)` : ""}`);
+    out(`  orphans:     ${s.thoughts} thought(s) carried a lineage row whose artifact is gone${s.thoughts >= LIMIT ? ` (the first ${LIMIT}; run again for the rest)` : ""}${s.windowed ? " — in the first 10,001 lineage rows by id; the table holds more, and a running sleep scheduler walks the rest" : ""}`);
     out(`  deleted:     ${s.deleted} lineage row(s) over ${s.touched} thought(s)${DRY ? " (rolled back)" : ""} — nothing else on those thoughts was touched${s.refused ? `; ${s.refused} call(s) refused (above)` : ""}`);
     // A refusal as a value is exit 1 here as under --input (fourth review pass).
     return s.refused ? 1 : 0;
   } catch (e) {
-    err(`  failed: ${(e as Error).message}`);
+    const on = (e as { thought?: string }).thought;
+    err(`  failed${on ? ` on thought ${on}` : ""}: ${(e as Error).message}`);
     return 1;
   }
 }

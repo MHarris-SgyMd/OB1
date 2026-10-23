@@ -16,6 +16,10 @@ backups, no resource limits.
   what `podman compose` runs when it is installed): the proxy's route table is
   an inline `configs:` entry, which older compose does not read, and the Python
   podman-compose refuses the file (1.6.0: `missing networks: default`)
+- To build the images from a checkout (`up --build`): Docker Engine 25 or later,
+  or podman 5.1 or later — the server's Dockerfile sets its healthcheck's
+  `--start-interval`, which older builders refuse (SMD-3194). A release install
+  pulls the images and needs neither
 - A model provider: the stack's own Ollama (`--profile local-models`, one line to
   set: `OB1_LLM_LOCAL=1`), an Ollama on the host, or an OpenRouter key — the shipped defaults are
   local; `deploy/.env.example`, "Model provider", is the one line to choose
@@ -2146,9 +2150,10 @@ unattended waits on a judge that can tell conflicts apart (SMD-1873).
 `--profile sleep` runs one service, `sleep`: `db/sleep.ts --follow`, the
 sleep scheduler (SMD-1794; this service, SMD-2678). It runs this profile's two
 passes only while the brain is quiet — `OB1_SLEEP_QUIET` seconds (unset, 300)
-with no live call — extraction first, and consolidation beside it once
-extraction's pool is drained, so the backlog order above is built in. On the
-next live call it stops both within `OB1_SLEEP_POLL` seconds (unset, 5): the
+with no live call — the re-derive sweep, then extraction, and consolidation
+beside it once extraction's pool is drained, so the backlog order above is
+built in. On the next live call it stops both within `OB1_SLEEP_POLL` seconds
+(unset, 5; the sweep's call in hand gets 2 s more, then is cancelled): the
 model call in hand is aborted and every lease returned, and the brain is
 quiet again `OB1_SLEEP_QUIET` seconds after the last one. A sleep runs at most
 `OB1_SLEEP_BUDGET` minutes (unset, 60), and the next begins after a live call
@@ -2182,6 +2187,8 @@ is spent (60 min)`, `… still in hand 300 s past the budget — stopped now`, o
 `<pass>: a statement passed the pass's statement_timeout (300 s)` with `the
 sleep stops on its budget` — and a quiet night's clock with nothing left to do
 says `the sleep's clock is spent (60 min) with nothing left to do — it ends`.
+Each sleep begins with the re-derive sweep, which says `re-derive: N orphaned
+lineage row(s) swept` when it deletes any.
 The settings go out as startup parameters, which a transaction pooler
 (PgBouncer, a managed host's pooled endpoint) refuses: the service connects to
 Postgres directly, as the stack's own does. `extract-entities.ts

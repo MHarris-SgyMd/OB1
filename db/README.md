@@ -3579,11 +3579,18 @@ fingerprints, limit, gone, force, orphans, status, dryRun, writer })` is the
 CLI's run in-process, its refusals the CLI's own words and code before any
 connection (`fingerprints` the list the CLI splits from its commas), a
 caller's client used and never closed. `sweepOrphans(sql, { limit, dryRun,
-writer, onFound })` is `--orphans` alone on the caller's client — for the
-sleep scheduler's re-derive pass, a later PR of SMD-2679 — returning the
-thoughts read, those touched, the rows deleted, the calls refused as a value,
-and `windowed` when the lineage table holds more than the 10,001 rows the
-read takes (none found is then not a clean table). A dry run's call is a
+writer, onFound, signal, after, stopOnReplay, skipFailure })` is
+`--orphans` alone on the caller's client — the sleep scheduler's re-derive
+pass, first in each sleep: `signal` stops it between calls, `after` reads the
+window of 10,001 lineage rows in id order past a row, `stopOnReplay` stops it
+at a replay's first refusal, `skipFailure` passes over a call that throws —
+returning the thoughts read, those touched, the rows deleted, the calls
+refused as a value and those passed over, `windowed` when rows lie past the
+window (none found is then not a clean table), `last` (the window's last row,
+the next `after`) and `whole` (every orphan the window holds was called).
+`orphanCensus(sql, { limit, after })` is its read alone. The CLI's
+`--orphans` and `--status` read the first window, in id order; only the
+scheduler walks past it. A dry run's call is a
 transaction of its own, so it holds on a pooled client or a reserved
 connection with no transaction of the caller's open (its rollback would end
 one a raw `BEGIN` opened); a transaction's handle is refused for one.
@@ -3639,7 +3646,27 @@ key's writes wake it (reembed, ingest-records, a migration's backfill) until
 `SELECT set_agent_kind('<key name>', 'ingested')` says they are background
 work. The passes it runs write no audit row, so they never wake it.
 
-**What it does asleep.** Extraction alone until its pool drains, then
+**What it does asleep.** First the re-derive pass (SMD-1794's order,
+SMD-2679): `rebuild.ts`'s orphan sweep — the lineage rows whose artifact a raw
+delete or a replay took, deleted through `rebuild_derived`'s orphans-only mode,
+at most 500 thoughts a sleep, no model — on a connection of its own under the
+budget's session; the log says `re-derive: N orphaned lineage row(s) swept`.
+It reads 10,001 lineage rows in id order a sleep, the next window each sleep
+once the one before is swept whole, so a larger table is walked (said once;
+the place is kept in the process, so a restart begins at the first window;
+and `--dry-run` counts the first window's orphans). A wake, a stop or the clock
+spent stops it between thoughts, its call in hand given 2 s before it is
+cancelled on the server (`pg_cancel_backend`), rolled back; a call waiting
+on a lock gives up after 2 s (`lock_timeout`), so no wait behind a row
+holds the supersession lock past it, and is passed over; a wake ends the
+sleep, and a clock spent by the sweep starts no pass. A thought whose call
+fails is passed over, said in the summary with its id, and tried again
+when the sweep comes round; every call failing is said on stderr once. A failure of the sweep itself is said once, a
+replay's refusal stops it said once, and a brain without 063 or a role
+without `EXECUTE` on the function is told once at the start and sweeps
+nothing; the function is `SECURITY INVOKER` over four groups' tables, so a
+role short of one of those grants meets 42501 at the first call, said with
+the grant, and the sweeps end for the process. Then extraction alone until its pool drains, then
 consolidation beside it — the order "Start `extract` alone on a backlog" asks
 of an operator. A wake hard-stops both: every lease returned, the model call in
 hand aborted, the thoughts in hand moved to the back of the queue. A long
@@ -3860,7 +3887,7 @@ key, 079's check, the relations grants; not an operator's `--retry-*` — where 
 used to end the scheduler (SMD-2752). A wake or a stop during that wait stops
 the pass before it began, and a stop is a stop however a pass then ends, unless one throws.
 
-Not yet here: the re-derive pass and a re-embed pass, SMD-2679's later PRs.
+Not yet here: a re-embed pass, SMD-2679's later PRs.
 test-live [38] drives it against a stub model.
 
 ## Extensions
@@ -5233,9 +5260,9 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2992 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1512 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1529 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 910 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 69 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 86 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 259 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
