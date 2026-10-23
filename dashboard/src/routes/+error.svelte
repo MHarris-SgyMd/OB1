@@ -2,17 +2,19 @@
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
 	import { HOME } from '$lib/paths';
+	import { readSearch, searchAddress } from '$lib/search';
 
 	// A refusal the visitor can act on (rest.ts's words say how) is no fault of the GUI's.
 	const refused = $derived(page.status === 400 || page.status === 403);
 	// A browse page the core refused: its first page is the way back in (SMD-2280 PR 2a).
 	const browse = $derived(refused && page.url.pathname === `${base}/thoughts`);
 	// A search by meaning the embedding provider kept past the GUI's deadline (rest.ts's 504): the same query by exact
-	// text, which needs no provider, one click away (review pass 3).
+	// text, which needs no provider, one click away (review pass 3) — as the search read it, trimmed and at its size,
+	// through search.ts's own address (review pass 4: the size was dropped and the spaces it trimmed kept).
 	const exact = $derived.by(() => {
-		const q = page.url.searchParams.get('q');
-		if (page.status !== 504 || page.url.pathname !== `${base}/search` || !q?.trim()) return null;
-		return `${base}/search?${new URLSearchParams({ q, mode: 'text' })}`;
+		const s = readSearch(page.url.searchParams);
+		if (page.status !== 504 || page.url.pathname !== `${base}/search` || s.query === '') return null;
+		return searchAddress(`${base}/search`, { ...s, mode: 'text' }, 0);
 	});
 </script>
 

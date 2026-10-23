@@ -36,9 +36,10 @@ h1, h2, h3 {
 	line-height: 1.2;
 }
 
-/* A form field, as the sign-in page's key field is, and a button (SMD-2280
-   PR 2a: the browse and search forms). Focus shows as a ring, not a border's
-   hue alone, which was 1.07:1 against the border it replaced (review pass 1). */
+/* A form field — the sign-in page's key field and the browse and search
+   forms — and a button (SMD-2280 PR 2a). Focus shows as a ring, not a border's
+   hue alone, which was 1.07:1 against the border it replaced (review pass 1;
+   the key field took it in review pass 4). */
 @layer components {
 	.field {
 		@apply bg-bg-elevated border border-white/40 rounded-lg px-3 py-2 text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-light;
