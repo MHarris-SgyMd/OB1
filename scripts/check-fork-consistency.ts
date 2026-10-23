@@ -4268,15 +4268,19 @@ function checkTypecheckSurface() {
   const packages = Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, readJson(`${d}/package.json`)]));
   const tsconfigs = Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, readJson(`${d}/tsconfig.json`)]));
   const doc = Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")) as WorkflowDoc;
-  // A step running the script in a form the reader does not take counts for nothing, and every directory it names would read as untype-checked: said once, first, as that (review pass 3).
+  // One walk over the steps for the script: a step it reads makes check 18 run the script below; one running it in
+  // a form the reader does not take counts for nothing, every directory it names reading as untype-checked, so it
+  // is said once, first, as that (review pass 3).
+  let usesScript = false;
   for (const job of Object.values(doc?.jobs ?? {})) for (const step of job?.steps ?? []) {
-    if (typeof step?.run === "string" && TSC_SCRIPT_RUN.test(step.run) && !TSC_SCRIPT_STEP.test(step.run))
+    if (typeof step?.run !== "string") continue;
+    if (TSC_SCRIPT_STEP.test(step.run)) usesScript = true;
+    else if (TSC_SCRIPT_RUN.test(step.run))
       fail(WORKFLOW, `runs ${TSC_SCRIPT} in a form check 18 cannot read (${JSON.stringify(step.run.trim().slice(0, 80))}), so the directories it names count as untype-checked below — write the whole \`run:\` as \`${TSC_SCRIPT} DIR…\`: one line or a \`>-\` folded scalar, no \`./\`, \`bash\`, \`\\\` or comment (SMD-3202)`);
   }
   const tscSteps = tscStepsIn(doc);
   for (const [where, msg] of typecheckSurfaceProblems({ packages, tsconfigs, tscSteps })) fail(where, msg);
   // A step naming directories counts only while the script type-checks each of them and fails on any: run, it is held to that.
-  const usesScript = Object.values(doc?.jobs ?? {}).some((job) => (job?.steps ?? []).some((step) => typeof step?.run === "string" && TSC_SCRIPT_STEP.test(step.run)));
   if (usesScript) for (const problem of typecheckScriptProblems(join(ROOT, TSC_SCRIPT))) fail(TSC_SCRIPT, `${problem} (SMD-3202)`);
 }
 /**
