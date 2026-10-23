@@ -162,6 +162,7 @@ CMD ["index.ts"]
 # the server's request log (SMD-1849, telemetry.ts) would write as a refusal —
 # half the log, as the REST core's liveness was before it was left out there;
 # the REST core answered it 404 besides. Readiness — is the database actually
-# reachable — is the entrypoint's job, above.
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+# reachable — is the entrypoint's job, above. Probed every second until it
+# first passes (SMD-3194): Docker's default, 5 s, held every `up --wait`.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --start-interval=1s --retries=3 \
   CMD wget -qO- http://127.0.0.1:${PORT:-8000}/health >/dev/null || exit 1

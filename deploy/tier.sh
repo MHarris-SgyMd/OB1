@@ -34,9 +34,6 @@
 #   # --env-file is stable's and --from-env-file the canary's
 #   deploy/tier.sh --env-file ~/stack/deploy/.env --from-env-file ~/stack/deploy/.env.canary.local \
 #     --from-project open-brain-canary --promote --from postgres --to postgres
-#   # the three-tier stack: one project, so both halves on its network, and its
-#   # image its own
-#   deploy/tier.sh --project open-brain-tiers --refresh --from stable-postgres --to canary-postgres
 #
 # (deploy/canary.sh runs the canary's --refresh itself.) --promote's --from is
 # the canary and its --to stable, so there --env-file is stable's. --replay and
@@ -289,7 +286,7 @@ if [ -n "$FROM_ENV_FILE" ] && [ "$FROM_NETWORK" = "$NETWORK" ]; then
 fi
 
 # Before anything is built: a mistyped network (open-brain_data against
-# open-brain-tiers_data) is a usage error, not the runtime's 125 at the end.
+# open-brain-canary_data) is a usage error, not the runtime's 125 at the end.
 missing_network() {
   "$RUNTIME" network inspect "$1" >/dev/null 2>&1 && return
   echo "no network $1 for the $2 side${3:+ ($3)} — name it with $4. The runtime has:" >&2
