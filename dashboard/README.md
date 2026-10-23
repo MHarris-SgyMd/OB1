@@ -18,8 +18,9 @@ sign-in through the authorization server, then the old dashboards' retirement).
 | `src/lib/server/session.ts` | The sessions, held in the server's memory |
 | `src/lib/server/rest.ts` | The REST core's client, and a read under the visitor's key |
 | `src/lib/server/signin.ts` | Whether key sign-in is offered, and whoami's answer |
-| `src/routes/` | The pages: the overview, browse, search, the status, a thought, sign-in and sign-out, `/health` |
-| `src/lib/browse.ts`, `src/lib/search.ts` | Browse's and search's addresses: what a page's query means, and the links between pages |
+| `src/routes/` | The pages: the overview, browse, search, the change feed, the proposals, the workers, the query log, the status, a thought, sign-in and sign-out, `/health` |
+| `src/lib/browse.ts`, `src/lib/search.ts`, `src/lib/params.ts` | The views' addresses: what a page's query means, as the core takes it, and the links between pages |
+| `src/lib/tidy.ts` | A GET form's address holding what is set alone |
 | `smoke.ts` | The smoke: drives the GUI as a browser would, through the stack's proxy |
 
 ## In the stack
@@ -148,6 +149,8 @@ signed-in tab refused in words, the cookie's and the pages' headers, each page r
 from the REST core, browse walked a page of one at a time in each order (each thought
 once, Previous and First page going back, a trust filter, a refused cursor in words),
 search finding the driven thought by meaning and by exact text and paging the latter,
+the change feed walked a change at a time from a start and a bad start refused in words,
+the proposals and workers rendering, the query log holding the smoke's own search,
 each list's data holding only the fields it shows, no page, header, script or cookie
 holding the key, sign-out and a
 second sign-in each ending a session on the server, and one key's 21st sign-in ending
@@ -155,7 +158,9 @@ its own oldest session. `--require-thought` fails rather than skips the thought 
 when the overview lists none, and `--require-ingested` unless the overview's newest
 thought — the one it drives — is an ingested one, so its notice is driven, and
 `--require-pages` unless the brain holds three thoughts, so browse walks three pages and
-search pages, and the trust filter leaves the untrusted ones out. CI captures three just
-before the smoke (two with no trust, then an ingested one) and runs it in the full-stack job,
+search pages, and the trust filter leaves the untrusted ones out; `--require-rows` unless
+the proposals and workers pages render rows. CI captures three just before the smoke (two
+with no trust, then an ingested one), records a proposal and queues a pool through their
+producers, and runs it in the full-stack job,
 before that job configures the authorization server; after it, the job holds key
 sign-in off.

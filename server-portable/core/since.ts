@@ -5,11 +5,12 @@
 import { UUID_RE } from "../store.ts";
 
 /**
- * thought_changes's `since` (SMD-1296): a uuid is a cursor — the audit row a
- * previous page ended with — and anything else must read as an ISO-8601 time
- * (a date at least, so a bare number is not a year), normalised so the reply
- * echoes one spelling. Neither is a refusal, before any call; `value` is the
- * trimmed text refused.
+ * A read's `since` (SMD-1296; list_logged_searches and db/tier.ts take its
+ * time arm, SMD-2280 PR 2b): a uuid is a cursor — the audit row a previous
+ * change-feed page ended with — and anything else must read as an ISO-8601
+ * time (a date at least, so a bare number is not a year), normalised so the
+ * reply echoes one spelling. Neither is `{ refused }`, the trimmed text, before
+ * any call; empty is no start.
  */
 export function parseSince(raw: string | undefined): { since: string | null; after: string | null } | { refused: string } {
   const v = (raw ?? "").trim();

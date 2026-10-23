@@ -58,9 +58,9 @@ const REQUIRE_THOUGHT = args.includes("--require-thought");
 /** Fail unless the thought driven is an ingested one: CI's capture is, so the notice arm cannot pass on a thought without one. */
 const REQUIRE_INGESTED = args.includes("--require-ingested");
 /** Fail, not skip, when the brain holds fewer than three thoughts: CI captures three, so browse walks three pages and search pages past its first. */
+const REQUIRE_PAGES = args.includes("--require-pages");
 /** Fail unless the proposals and workers pages render rows, not their empty words: CI plants one proposal and one pool. */
 const REQUIRE_ROWS = args.includes("--require-rows");
-const REQUIRE_PAGES = args.includes("--require-pages");
 if (!BASE || !WRITE_KEY) {
   console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought] [--require-ingested] [--require-pages] [--require-rows]");
   process.exit(2);

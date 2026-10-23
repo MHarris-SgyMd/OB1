@@ -97,6 +97,7 @@ import { stampTier, TIERS, type Tier } from "./ingest-records.ts";
 import { runCompare, runTierReplay, type CompareArgs } from "./brain-compare.ts";
 import { commandLine, scriptArgv } from "./cli.ts";
 import { parseSince } from "../server-portable/core/since.ts";
+import { connectedResetRefusal, identityRefusal, openSql, reachedDatabaseRefusal, resetRefusal, toolTarget, type ToolTarget } from "./connect.ts";
 
 /** A --since the brain's list_logged_searches reads (parseSince's time arm, SMD-2280 PR 2b): a date, or a time with its zone. */
 const sinceReadable = (since: string) => {
@@ -104,7 +105,6 @@ const sinceReadable = (since: string) => {
   return !("refused" in t) && t.after === null && t.since !== null;
 };
 const SINCE_REFUSED = "--since must be an ISO-8601 time with its zone (e.g. 2026-09-24T00:00:00Z) or a date (2026-09-24); a clock with no Z or offset is refused, as the brain's query log refuses it.";
-import { connectedResetRefusal, identityRefusal, openSql, reachedDatabaseRefusal, resetRefusal, toolTarget, type ToolTarget } from "./connect.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 

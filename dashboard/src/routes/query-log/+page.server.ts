@@ -11,7 +11,7 @@ import type { LoggedSearchPage } from '$lib/types';
 // searched, every key's, as the tool shows them to any key that can read.
 export const load: PageServerLoad = async (event) => {
 	const params = event.url.searchParams;
-	// An ISO-8601 time; the core refuses another (REFUSED_SINCE, rest.ts's words).
+	// A time with its zone or a date; the core refuses another (REFUSED_SINCE, rest.ts's words).
 	const q = { since: textIn(params, 'since', 100), limit: wholeIn(params, 'limit', 1, 1000, 50) };
 	const v = (await read(event, event.locals.session!, 'list_logged_searches', { limit: q.limit, ...(q.since ? { since: q.since } : {}) })) as LoggedSearchPage;
 	return {

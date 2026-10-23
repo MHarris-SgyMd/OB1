@@ -1752,7 +1752,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "description": "An ISO-8601 time with its zone (searches logged at or after it; a clock with no Z or offset is refused) or a date (UTC midnight); omit for the most recent",
+              "description": "An ISO-8601 time with its zone (searches logged after it; a clock with no Z or offset is refused) or a date (UTC midnight); omit for the most recent",
               "type": "string"
             }
           },
