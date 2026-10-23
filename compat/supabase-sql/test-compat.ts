@@ -852,11 +852,11 @@ try {
   assert(/WHERE "label" = \$1 AND EXISTS \(SELECT 1 FROM "widgets" AS __x1 WHERE __x1\."id" = "gizmos"\."widget_id"\)/.test(innerText), `!inner is an EXISTS on the same key, beside the filters (${innerText.slice(innerText.indexOf("WHERE"))})`);
   const leftSaid = rowsOf(await db.from("gizmos").select("label, widgets!left(name)").order("id"), "!left");
   assert(leftSaid.length === 4 && leftSaid[2]?.widgets === null, `!left is the default said aloud (${leftSaid.length})`);
-  // Key hints where two keys join the tables: by the constraint's name — ob-graph's spelling — and by the column.
+  // Key hints where two keys join the tables: by the constraint's name — PostgREST's spelling — and by the column.
   const byKeys = rowsOf(await db.from("links").select("a:widgets!links_a_id_fkey(name), b:widgets!links_b_id_fkey(name)"), "two keys by name");
   assert(JSON.stringify(byKeys[0]) === JSON.stringify({ a: { name: "alpha" }, b: { name: "beta" } }), `alias:relation!fk_name chooses each key by its constraint's name (${JSON.stringify(byKeys[0])})`);
   const byKeyNoAlias = rowsOf(await db.from("links").select("widgets!links_b_id_fkey(name)"), "key hint, no alias");
-  assert(JSON.stringify(byKeyNoAlias[0]) === JSON.stringify({ widgets: { name: "beta" } }), `…keyed by the relation's name when there is no alias — graph_nodes!graph_edges_target_node_id_fkey(…) (${JSON.stringify(byKeyNoAlias[0])})`);
+  assert(JSON.stringify(byKeyNoAlias[0]) === JSON.stringify({ widgets: { name: "beta" } }), `…keyed by the relation's name when there is no alias — relation!fk_name(…) (${JSON.stringify(byKeyNoAlias[0])})`);
   const byColumnHint = rowsOf(await db.from("links").select("a:widgets!a_id(name)"), "key hint by column");
   assert(JSON.stringify(byColumnHint[0]) === JSON.stringify({ a: { name: "alpha" } }), `…or by the foreign-key column's name (${JSON.stringify(byColumnHint[0])})`);
   assert(/names neither a foreign key/.test(await refusedMsg(() => db.from("links").select("widgets!no_such_key(name)"))), "a hint that names no key is refused, saying so");
@@ -883,7 +883,7 @@ try {
   await admin`INSERT INTO owners (pets) VALUES ('two of them')`;
   await admin`INSERT INTO pets (owner_id, name) VALUES (1, 'rex'), (1, 'tom')`;
   // ignoreDuplicates: the conflicting row is left as it is and not returned — repo-learning-coach's progress upsert
-  // reset a learner's row on every sync while the option went unread.
+  // (retired since, SMD-2923) reset a learner's row on every sync while the option went unread.
   const ignored = await db.from("progress").upsert({ learner: "ann", lesson: "l1", status: "not_started" }, { onConflict: "learner,lesson", ignoreDuplicates: true }).select("status");
   const [{ status }] = await admin`SELECT status FROM progress WHERE learner = 'ann' AND lesson = 'l1'`;
   assert(ignored.error === null && (ignored.data as unknown[]).length === 0 && status === "done", `upsert with ignoreDuplicates leaves the existing row and returns none — DO NOTHING, as Prefer: resolution=ignore-duplicates is (${ignored.error?.message ?? `${(ignored.data as unknown[])?.length} rows, status ${status}`})`);

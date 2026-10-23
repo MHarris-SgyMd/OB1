@@ -29,11 +29,11 @@ Tier 1 and Tier 2 run against your brain's Postgres through `compat/supabase-sql
 - Working [Open Brain setup](../../docs/01-getting-started.md) with `public.thoughts` populated
 - [Bun](https://bun.sh) 1.4 or later, and a checkout of this repository — the script imports `../../compat/supabase-sql`, so it runs in place, not copied out
 - The `enhanced-thoughts` schema (`schemas/enhanced-thoughts/schema.sql`): Tier 1 reads the `importance` and `source_type` columns it adds to `thoughts`, Tier 2 `importance`, Tier 3 those two and `type`; without it the sweep stops at its first read of those columns
-- (Optional, Tier 2) The `entity-extraction` schema applied (ships the `entities`, `edges`, and `thought_entities` tables Tier 2 walks). If your brain was set up before that schema landed, see the schema PRs [#197](https://github.com/NateBJones-Projects/OB1/pull/197) and [#199](https://github.com/NateBJones-Projects/OB1/pull/199). Tier 2 is skipped gracefully when these tables are absent — it does NOT use the `ob-graph` recipe's `graph_nodes` / `graph_edges` tables. On a fork brain `thought_entities` is migration 016's (entity ids into `ob1_entities`); Tier 2's link check reads it as it is, and its zero-edge check reads the schema's `entities` and `edges` (`from_entity_id`, `to_entity_id`).
+- (Optional, Tier 2) The `entity-extraction` schema applied (ships the `entities`, `edges`, and `thought_entities` tables Tier 2 walks). If your brain was set up before that schema landed, see the schema PRs [#197](https://github.com/NateBJones-Projects/OB1/pull/197) and [#199](https://github.com/NateBJones-Projects/OB1/pull/199). Tier 2 is skipped gracefully when these tables are absent. On a fork brain `thought_entities` is migration 016's (entity ids into `ob1_entities`); Tier 2's link check reads it as it is, and its zero-edge check reads the schema's `entities` and `edges` (`from_entity_id`, `to_entity_id`).
 - (Optional, Tier 3) An OpenRouter API key with credit available
 
 > [!IMPORTANT]
-> Tier 2 depends on the `entity-extraction` schema (`entities`, `edges`, `thought_entities`), not the `ob-graph` recipe. `ob-graph` creates differently-named tables (`graph_nodes`, `graph_edges`) and is not compatible with Tier 2. If you only have `ob-graph` installed, Tier 2 will log the tables as missing and skip.
+> Tier 2 depends on the `entity-extraction` schema (`entities`, `edges`, `thought_entities`). Without it, Tier 2 logs the tables as missing and skips.
 
 ## Credential Tracker
 
@@ -282,7 +282,7 @@ Solution: The connection's role lacks SELECT on the table named — a table the 
 Solution: Your brain predates the [content-fingerprint-dedup](../content-fingerprint-dedup/) primitive — apply that recipe (and the [fingerprint-dedup-backfill](../fingerprint-dedup-backfill/) recipe) to get duplicate detection. Not reachable on a fork brain, where migration 003 adds the column: this is an upstream brain reached by its `postgres://` string, and it and Tier 2's absent graph tables (42P01) are the only two conditions the sweep reads as absence rather than refusing.
 
 **Issue: Tier 2 reports `Graph tables absent`** (a table that exists but the role may not read is not this — that aborts the run with `42501`, above)
-Solution: Tier 2 requires the `entity-extraction` schema (`entities`, `edges`, `thought_entities`). If your brain predates that schema, see PRs [#197](https://github.com/NateBJones-Projects/OB1/pull/197) and [#199](https://github.com/NateBJones-Projects/OB1/pull/199), or skip Tier 2 entirely by running `--tier=1` and `--tier=3` separately. Note: the `ob-graph` recipe uses different table names (`graph_nodes`, `graph_edges`) and does NOT satisfy this dependency.
+Solution: Tier 2 requires the `entity-extraction` schema (`entities`, `edges`, `thought_entities`). If your brain predates that schema, see PRs [#197](https://github.com/NateBJones-Projects/OB1/pull/197) and [#199](https://github.com/NateBJones-Projects/OB1/pull/199), or skip Tier 2 entirely by running `--tier=1` and `--tier=3` separately.
 
 **Issue: Tier 3 fails with `OpenRouter HTTP 401`**
 Solution: Your `OPENROUTER_API_KEY` is missing, wrong, or out of credit. Verify at https://openrouter.ai/keys. The sweep does not fall back to a different provider on its own.
@@ -297,5 +297,5 @@ Solution: Run with `--verbose` to see the raw response. Switch to a stronger mod
 
 - **[content-fingerprint-dedup](../content-fingerprint-dedup/)** — installs the `content_fingerprint` column Tier 1 needs for duplicate detection.
 - **[fingerprint-dedup-backfill](../fingerprint-dedup-backfill/)** — backfills fingerprints on pre-existing rows so Tier 1 duplicate scanning is accurate.
-- **`entity-extraction` schema** — installs the `entities`, `edges`, and `thought_entities` tables Tier 2 walks. See PRs [#197](https://github.com/NateBJones-Projects/OB1/pull/197) and [#199](https://github.com/NateBJones-Projects/OB1/pull/199). (The `ob-graph` recipe is a separate build with different table names and is NOT compatible with Tier 2.)
+- **`entity-extraction` schema** — installs the `entities`, `edges`, and `thought_entities` tables Tier 2 walks. See PRs [#197](https://github.com/NateBJones-Projects/OB1/pull/197) and [#199](https://github.com/NateBJones-Projects/OB1/pull/199).
 - **[thought-enrichment recipe (PR #192)](https://github.com/NateBJones-Projects/OB1/pull/192)** — populates `metadata.topics`, `metadata.tags`, and `metadata.people` so Tier 1 orphan-by-tag detection is meaningful.

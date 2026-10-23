@@ -74,10 +74,11 @@
  * supabase/functions/, one level under which every function sits, and
  * `_shared/` beside it is the one place a shared module can live — so a
  * byte-for-byte copy of this file sits in every directory that holds a
- * function directory: extensions/_shared/, recipes/_shared/,
+ * function directory: extensions/_shared/,
  * recipes/editorial-policy/_shared/, integrations/_shared/ and
- * integrations/consolidation-workers/_shared/ (a sixth, the cost recipe's
- * examples/_shared/, went with that recipe — SMD-1800).
+ * integrations/consolidation-workers/_shared/ (recipes/_shared/ went with
+ * ob-graph and work-operating-model-activation — SMD-2920 — and the cost
+ * recipe's examples/_shared/ with that recipe — SMD-1800).
  * `bun run sync-auth` in extensions/ rewrites them all from this file;
  * extensions/test-auth.ts fails if any copy differs or is missing from either list.
  * Everything here is runtime-neutral — node:crypto and node:buffer resolve on
