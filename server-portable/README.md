@@ -655,8 +655,9 @@ discovers through `tools/list` (a capture-only key sees none of them):
   oldest, and `after`, the cursor the previous page ended with, keyset on
   `(created_at, id)` in `thoughts_created_at_idx`'s order (undated first, newest
   first). The cursor holds the sort it was made under and Postgres's own text of the
-  last `created_at`, so a walk sees each thought once, to the microsecond, whatever is
-  captured meanwhile; a cursor of the other sort, or none of this tool's, is
+  last `created_at`, so a walk sees each thought there when it began once, to the
+  microsecond (newest first, one captured meanwhile is not among them; oldest first,
+  it comes at the end); a cursor of the other sort, or none of this tool's, is
   `REFUSED_CURSOR` (an empty one too). The reply's `cursor` is null when no more follow.
 - **`list_logged_searches`** (SMD-2245) — the `query_log` search rows (query, arm,
   arguments), most recent first and `since`-windowed, for a log-sourced replay.
@@ -1003,9 +1004,9 @@ bun test-plugins.ts       # 283 — plugins in the contract: manifests, OB1_PLUG
 bun test-thoughts.ts      # 518 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 225 — fully local provider, no credential
-bun run test:sql          # 285 — store conformance, real Postgres in a container
+bun run test:sql          # 286 — store conformance, real Postgres in a container
 bun run test:e2e          # 673 — the whole server over MCP with no Supabase at all, OB1_STORE unset; the same 673 with OB1_MCP_UNDER_TEST=client, through the MCP server as a REST client (mcp-server/, SMD-2287)
-../db/with-postgres.sh bun test-rest-sql.ts  # 237 — the REST core beside the MCP server on one database: every operation through both, every refusal's words from the forwarded answer
+../db/with-postgres.sh bun test-rest-sql.ts  # 238 — the REST core beside the MCP server on one database: every operation through both, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 107 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row; the same 107 with OB1_MCP_UNDER_TEST=client
 ```
 

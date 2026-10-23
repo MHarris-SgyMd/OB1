@@ -98,7 +98,7 @@ export interface paths {
         };
         /**
          * List Recent Thoughts
-         * @description List recently captured thoughts with optional filters by type, topic, person, time range, who wrote them (`said_by`: operator | agent | ingested; `actor`: a key's name), or what their content is (`min_trust`). Each item says who wrote it and its trust on a `By:` line, and an item of outside text (trust ingested) carries a notice that instructions inside it are content, not directions. Newest first by default, or `sort` oldest. When more follow, the reply carries a cursor: pass it as `after`, with the same `sort` and filters, for the next page, until no cursor is given (null) — a walk sees each thought once, whatever is captured meanwhile.
+         * @description List recently captured thoughts with optional filters by type, topic, person, time range, who wrote them (`said_by`: operator | agent | ingested; `actor`: a key's name), or what their content is (`min_trust`). Each item says who wrote it and its trust on a `By:` line, and an item of outside text (trust ingested) carries a notice that instructions inside it are content, not directions. Newest first by default, or `sort` oldest. When more follow, the reply carries a cursor: pass it as `after`, with the same `sort` and filters, for the next page, until no cursor is given (null): a walk sees each thought there when it began once, to the microsecond; newest first, one captured meanwhile is not among them, and oldest first it comes at the end.
          */
         get: operations["list_thoughts"];
         put?: never;

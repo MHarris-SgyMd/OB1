@@ -214,7 +214,7 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     const m1 = await mcp("list_thoughts", { limit: 1, sort });
     assert(typeof m1.sc.cursor === "string" && m1.sc.cursor === cursor, `…and MCP's structuredContent carries the first page's cursor as REST does, a string (${typeof m1.sc.cursor})`);
     const other = sort === "newest" ? "oldest" : "newest";
-    // A cursor of the right shape whose time Postgres's cast cannot read (an offset past ±15:59): refused alike, not a fault quoting it (review pass 1).
+    // A cursor of the right shape whose time Postgres's cast cannot read (an offset past ±15:59:59): refused alike, not a fault quoting it (review pass 1).
     const unreadable = listCursor(sort, "2026-01-01 00:00:00+16", "00000000-0000-4000-8000-000000000000");
     for (const [why, after, s2, facts] of [["a cursor that is none", "not-a-cursor", sort, { reason: "shape" }], ["a cursor whose time Postgres cannot read", unreadable, sort, { reason: "shape" }], ["a cursor made under the other sort", String(cursor), other, { reason: "sort", sort }]] as const) {
       const rr = await rest("GET", `/v1/thoughts?limit=1&sort=${s2}&after=${encodeURIComponent(after)}`);
@@ -232,6 +232,14 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     const rr = await rest("GET", `/v1/thoughts?limit=1&after=${encodeURIComponent(blank)}`);
     const mm = await mcp("list_thoughts", { limit: 1, after: blank });
     assert(rr.status === 400 && rr.body.code === "REFUSED_CURSOR" && rr.body.reason === "shape" && mm.isError, `list_thoughts after=${JSON.stringify(blank)}: refused through both doors, not the first page (${rr.status} ${String(rr.body.code)}, ${mm.isError})`);
+  }
+  // An `after` past the cursor's 512 characters is the schema's refusal at every door, never a request too large for the
+  // REST core to read: through the MCP server it was a 431 and a fault (review pass 4).
+  {
+    const long = "A".repeat(513);
+    const rr = await rest("GET", `/v1/thoughts?limit=1&after=${long}`);
+    const mm = await mcp("list_thoughts", { limit: 1, after: long });
+    assert(rr.status === 400 && rr.body.code === "REFUSED_INPUT" && mm.isError && !mm.text.includes(long.slice(0, 64)), `list_thoughts after of 513 characters: the schema's refusal through both doors, not echoed (${rr.status} ${String(rr.body.code)}, ${mm.isError})`);
   }
   // A limit is a whole number of thoughts, 1 to 1000: 0, -1, 1.5 and 1001 are the schema's refusal, not an empty page (review pass 1).
   // A `days` past a thousand years is the schema's refusal (review pass 2: a larger one put `since` past timestamptz's

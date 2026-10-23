@@ -389,12 +389,30 @@ console.log("\n[4b] listThoughts' keyset (SMD-2995): every row once, in each sor
 
   // A cursor time of the right shape Postgres cannot read is refused; a cast error of anything else beside a good
   // cursor is its own (review pass 3: the store, not the schema's bound on `days`, holds the line). Below the schema,
-  // a `days` of a million puts the window's start before timestamptz's range.
+  // a `days` of a million puts the window's start in 712 BC, whose JS text, a signed year, Postgres reads as an offset.
   const fails = (p: Promise<unknown>) => p.then(() => "no error", (e: unknown) => (e instanceof ListCursorRefused ? "refused" : "other"));
   const good = { at: "2026-10-02 08:00:00.0009+00", id: micro[0].id };
   const unreadable = await fails(store.listThoughts({ limit: 1, type: T, after: { at: "2026-10-02 08:00:00+16", id: micro[0].id } }));
   const castBeside = await fails(store.listThoughts({ limit: 1, type: T, days: 1_000_000, after: good }));
-  assert(unreadable === "refused" && castBeside === "other", `a cursor time Postgres cannot read is ListCursorRefused; days past timestamptz's range beside a good cursor is not (${unreadable}, ${castBeside})`);
+  assert(unreadable === "refused" && castBeside === "other", `a cursor time Postgres cannot read is ListCursorRefused; a days whose start Postgres cannot read beside a good cursor is not (${unreadable}, ${castBeside})`);
+  // The cursor's own read failing for another reason — a connection lost — is that failure, never a refusal of a cursor
+  // that may be good (review pass 4: a probe answering true for any failure survived). Its template alone fails here.
+  {
+    const held = store as unknown as { sql: (...a: unknown[]) => unknown };
+    const real = held.sql;
+    held.sql = new Proxy(real, {
+      apply: (t, self, args) => (Array.isArray(args[0]) && (args[0] as string[]).join("$") === "SELECT $::timestamptz"
+        ? Promise.reject(Object.assign(new Error("connection lost (test)"), { errno: "08006" }))
+        : Reflect.apply(t, self, args)),
+    });
+    let lost: string;
+    try {
+      lost = await fails(store.listThoughts({ limit: 1, type: T, after: { at: "2026-10-02 08:00:00+16", id: micro[0].id } }));
+    } finally {
+      held.sql = real;
+    }
+    assert(lost === "other", `the cursor's read lost to another failure is that failure, not ListCursorRefused (${lost})`);
+  }
 
   await raw`DELETE FROM thoughts WHERE metadata @> ${{ type: T }}::jsonb`;
   await raw.close();

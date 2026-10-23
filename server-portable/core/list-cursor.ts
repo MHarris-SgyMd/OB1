@@ -22,7 +22,7 @@ export function listCursor(sort: ListSort, at: string | null, id: string): strin
  * as Postgres writes it (a date, a clock to the microsecond, an offset, a BC,
  * or ±infinity), held to a shape and a date that exists before it reaches the
  * SQL. One that still makes Postgres's cast fail — a year 0, past its range,
- * an offset past ±15:59 — is the store's to refuse (ListCursorRefused in
+ * an offset past ±15:59:59 — is the store's to refuse (ListCursorRefused in
  * store.ts, review pass 1): the bounds depend on the offset.
  */
 export function parseListCursor(raw: string): { sort: ListSort; at: string | null; id: string } | null {

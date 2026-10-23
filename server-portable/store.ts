@@ -311,7 +311,7 @@ export type ListPosition = { at: string | null; id: string };
 /**
  * The store's refusal of a list_thoughts cursor whose time Postgres's cast
  * cannot read (SQLSTATE 22007, 22008, 22009: a year 0, past timestamptz's
- * range, an offset past ±15:59), which the core says as REFUSED_CURSOR rather
+ * range, an offset past ±15:59:59), which the core says as REFUSED_CURSOR rather
  * than a fault quoting the value (SMD-2995 review pass 1).
  */
 export class ListCursorRefused extends Error {
