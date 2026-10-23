@@ -53,12 +53,12 @@ services:
     depends_on:
       orch-db:
         condition: service_completed_successfully
-      server:
+      api:
         condition: service_started
     ports:
       - "127.0.0.1:8090:8000"
-    # Its database on the brain's Postgres, on `data`; the brain's server
-    # (`server:8000`) and its own port on `egress`, as n8n's (SMD-2583).
+    # Its database on the brain's Postgres, on `data`; the brain's REST core
+    # (`api:8000`, SMD-2295) and its own port on `egress`, as n8n's (SMD-2583).
     networks: [data, egress]
     environment:
       DATABASE_URL: postgres://orch:${ORCH_DB_PASSWORD}@postgres:5432/orchestration?sslmode=disable

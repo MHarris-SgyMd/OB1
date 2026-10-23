@@ -31,7 +31,7 @@ services:
   #   before anything is written;
   # - `snoop`: an emitter an export has taken over, which must find nothing
   #   to read, reach nothing on the network and leave nothing running;
-  # - `vendor`: a live-API stand-in whose pipeline names server:8000, which it
+  # - `vendor`: a live-API stand-in whose pipeline names api:8000, which it
   #   must reach through its proxy and nothing else (SMD-2289).
   orchestration-runner:
     volumes:

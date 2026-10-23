@@ -1,10 +1,9 @@
 // OB1 — Linear issues into the brain (Windmill script f/ob1/linear_ingest).
-// Windmill has no Linear trigger and no MCP-client step: the fetch and the MCP
-// session are this script's own, the Linear key and the brain's capture key are
-// secret variables in Windmill's store, and a schedule runs it every 15 minutes.
+// Windmill has no Linear trigger and no HTTP step outside a script: the fetch
+// and the captures are this script's own, against the brain's REST core
+// (SMD-2295). The Linear key and the brain's capture key are secret variables
+// in Windmill's store, and a schedule runs it every 15 minutes.
 import * as wmill from "windmill-client";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const QUERY = `query { issues(first: 10, filter: { team: { key: { eq: "SMD" } }, number: { in: [949, 1813, 1814, 1815, 1816, 1817, 1818, 1863, 1933, 1954] } }) { nodes { identifier title url description state { name } project { name } } } }`;
 
@@ -21,24 +20,23 @@ export async function main() {
   if (!r.ok) throw new Error(`Linear ${r.status}: ${await r.text()}`);
   const issues: Issue[] = (await r.json()).data.issues.nodes;
 
-  const client = new Client({ name: "windmill-ob1-ingest", version: "1" });
-  await client.connect(new StreamableHTTPClientTransport(new URL("http://server:8000/"), { requestInit: { headers: { "x-brain-key": brainKey } } }));
   const captured: string[] = [];
-  try {
-    for (const i of issues) {
-      const content = [
-        `${i.identifier} — ${i.title}`,
-        `State: ${i.state?.name ?? ""} · Project: ${i.project?.name ?? ""}`,
-        i.url,
-        "",
-        i.description ?? "",
-      ].join("\n").trim();
-      const res = await client.callTool({ name: "capture_thought", arguments: { content } }, undefined, { timeout: 180_000 });
-      if (res.isError) throw new Error(`capture_thought failed for ${i.identifier}`);
-      captured.push(i.identifier);
-    }
-  } finally {
-    await client.close();
+  for (const i of issues) {
+    const content = [
+      `${i.identifier} — ${i.title}`,
+      `State: ${i.state?.name ?? ""} · Project: ${i.project?.name ?? ""}`,
+      i.url,
+      "",
+      i.description ?? "",
+    ].join("\n").trim();
+    const res = await fetch("http://api:8000/v1/thoughts", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-brain-key": brainKey },
+      body: JSON.stringify({ content, source: "windmill" }),
+      signal: AbortSignal.timeout(180_000),
+    });
+    if (!res.ok) throw new Error(`capture for ${i.identifier}: ${res.status} ${(await res.text()).slice(0, 300)}`);
+    captured.push(i.identifier);
   }
   return { captured };
 }
