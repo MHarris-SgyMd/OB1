@@ -45,7 +45,7 @@ import { SQL } from "bun";
 import { join } from "node:path";
 import { resetSchema } from "../db/test-support.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { mcpClient, mcpUnderTest } from "../server-portable/test-support.ts";
+import { mcpClient, mcpUnderTest, servedByMcpServer } from "../server-portable/test-support.ts";
 import { DELIVERABLES, READER_K, SESSIONS, SUBJECTS, type SubjectKey } from "./write-path-corpus.ts";
 import {
   ARMS, FORWARDED_ENV, STUB_DIM, STUB_EMBED_MODEL, decide, parseCapturedId, parseHits, parseProposalIds, renderDeliverable, stubChat, vectorFor,
@@ -116,6 +116,7 @@ process.env.OB1_AGENT_CACHE_TTL_MS = "0";
 for (const k of ["MCP_ACCESS_KEY", "OPENROUTER_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) delete process.env[k];
 
 const worker = await mcpUnderTest();
+if (!servedByMcpServer()) throw new Error("the server under test is not the MCP server (mcp-server/stack.ts)");
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const BASE = `http://localhost:${server.port ?? 0}`;
 const asOp = mcpClient(BASE, OP_RAW);

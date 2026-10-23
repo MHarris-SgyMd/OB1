@@ -24,7 +24,7 @@ import { estimateTokens } from "./chunk.ts";
 import { SqlStore } from "./store-sql.ts";
 import { createEmbedder, resolveEmbedConfig, type EmbedEnv } from "./embed.ts";
 import { createAssert, neverAnswers, requireDatabaseUrl, resetSchema } from "../db/test-support.ts";
-import { mcpClient, mcpUnderTest } from "./test-support.ts";
+import { mcpClient, mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 
 const URL_ = requireDatabaseUrl("test-chunking.ts");
 
@@ -117,6 +117,7 @@ delete process.env.OPENROUTER_API_KEY;
 delete process.env.SUPABASE_URL;
 
 const worker = await mcpUnderTest();
+assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const BASE = `http://localhost:${server.port ?? 0}`;
 

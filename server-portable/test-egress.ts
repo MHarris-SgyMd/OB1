@@ -28,7 +28,7 @@
 
 import { SQL } from "bun";
 import { createAssert, resetSchema } from "../db/test-support.ts";
-import { mcpUnderTest } from "./test-support.ts";
+import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { hashKey } from "./auth.ts";
 import {
   DEFAULT_EGRESS_MODE, decideCalls, describeEgress, flagOn, localKnob, mayLeaveBox, parseEgressTerms, refusesEverything, resolveEgressPolicy, termMatches,
@@ -286,6 +286,7 @@ process.env.OB1_EGRESS_ALLOW = "actor:open,type:idea,source:claude-code";
 for (const k of ["OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_DENY", "OPENROUTER_API_KEY", "OB1_LLM_API_KEY", "OB1_CHAT_BASE_URL", "OB1_CHAT_API_KEY", "MCP_ACCESS_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "OB1_EMBEDDING_DIMENSIONS", "OB1_CHUNK_CONTEXT"]) delete process.env[k];
 
 const worker = await mcpUnderTest();
+assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const BASE = `http://localhost:${server.port ?? 0}`;
 let rpcId = 1;
@@ -470,7 +471,7 @@ const mcpEntry = (port: number | undefined, restPort: number | undefined) => Bun
   stderr: "pipe",
 });
 
-console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD-2889): a capture saved while the provider is down gets its vector once the provider answers, with no hand step — embedded once, though the MCP server and the REST core both run a mender; semantic search finds it, and keyed /health counts none waiting");
+console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD-2889): a capture saved while the provider is down gets its vector once the provider answers, with no hand step — embedded once, though two REST cores each run a mender; semantic search finds it, and keyed /health counts none waiting");
 {
   // A port nothing answers on yet: the provider down. Each REST core is its
   // own process, as the container runs it, so its mender is the one boot
@@ -639,8 +640,12 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
     for (let deadline = Date.now() + 5_000; p?.status !== "unreachable" && Date.now() < deadline; ) { await Bun.sleep(100); p = await keyed(); }
     assert(p?.status === "unreachable" && /^\d{4}-\d\d-\d\dT/.test(p.since ?? "") && p.reason === "provider_unreachable" && p.reprobeS === 1,
       `keyed /health: the provider unreachable since its first probe, re-probed every second (${JSON.stringify(p)})`);
+    // Both processes' keyless /health: the MCP server's answers `ok` without asking anyone, so the one that can say
+    // otherwise is the REST core's, which holds the degraded state and is what compose's healthcheck asks (review pass 1).
     const keyless = await fetch(`${at}/health`);
-    assert(keyless.status === 200 && (await keyless.text()) === "ok", "keyless /health stays liveness: `ok`, so nothing restarts a degraded brain");
+    const keylessCore = await fetch(`http://127.0.0.1:${serverPort}/health`);
+    assert(keyless.status === 200 && (await keyless.text()) === "ok" && keylessCore.status === 200 && (await keylessCore.text()) === JSON.stringify({ status: "ok" }),
+      "keyless /health stays liveness, the REST core's and the MCP server's, so nothing restarts a degraded brain");
     const content = "degraded-verify-marker DGV-2890: a note captured while the provider is not up yet";
     const cap = await rpc("capture_thought", { content });
     const id = /id ([0-9a-f-]{36})/.exec(cap.text)?.[1];

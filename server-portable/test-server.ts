@@ -3392,7 +3392,7 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   // Through the MCP server the registry's throw is the REST core's 500 to its whoami: the key was never named to it, so
   // its line names none (SMD-2287 PR 4b).
   assert(thrown.length === 1 && thrown[0]?.status === 500 && thrown[0].outcome === "error" && thrown[0].agent === undefined,
-    `a throw in the route: one 500 \`error\` line, by the key's name where the server knew it (${JSON.stringify(thrown)})`);
+    `a throw in the route: one 500 \`error\` line, naming no key, which the REST core's whoami never named (${JSON.stringify(thrown)})`);
   assert(revoked.length === 1 && revoked[0]?.outcome === "refused" && revoked[0].code === "REVOKED" && revoked[0].tool === "brain_info" && revoked[0].agent === "MCP_ACCESS_KEY",
     `a revoked key: one \`refused\` line, REVOKED, naming the call and the key (${JSON.stringify(revoked)})`);
 

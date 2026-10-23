@@ -11,13 +11,14 @@
  * and prints `RESULT <found> <chunkRows>` for the parent to parse.
  */
 
-import { mcpUnderTest } from "../server-portable/test-support.ts";
+import { mcpUnderTest, servedByMcpServer } from "../server-portable/test-support.ts";
 
 const CASES = JSON.parse(process.env.OB1_EVAL_CASES ?? "[]") as {
   key: string; query: string; text: string;
 }[];
 
 const worker = await mcpUnderTest();
+if (!servedByMcpServer()) throw new Error("the server under test is not the MCP server (mcp-server/stack.ts)");
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const BASE = `http://localhost:${server.port ?? 0}`;
 

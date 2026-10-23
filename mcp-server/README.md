@@ -7,7 +7,7 @@ server (SMD-2287): MCP over streamable HTTP on SDK v2. Every tool is a call to t
 core through [`../rest-client`](../rest-client/README.md), carrying the caller's key
 beside this server's forward-scope key. It holds no store, no key list and no model.
 
-It is built to answer as `server-portable/index.ts` does, from the same pieces. How far that holds is what its suites measure (below):
+It is built to answer as `server-portable/index.ts` did, from the same pieces; server-portable's suites, which drive this server (below), hold it to that:
 - **The endpoint's HTTP edge**, `server-portable/mcp-edge.ts`:
   - the methods served and the CORS headers;
   - the JSON-RPC refusal envelopes, and a refused notification's bare 202 or 503;
@@ -135,7 +135,7 @@ It is built to answer as `server-portable/index.ts` does, from the same pieces. 
   registry busy on this server's own key is busy, `-32003` with `Retry-After`, not a
   misconfiguration.
 
-**Known differences from `index.ts` (the parity runs below):**
+**Known differences from `index.ts` (found by the parity runs SMD-2287 PR 6a retired):**
 - **Writes** record the REST core's door, `open-brain-api`, with this server named as
   `act` (the forwarder key's name), where server-portable records `open-brain`.
 - **The key on a line.** `index.ts` matches a key's hash before it asks the registry;
