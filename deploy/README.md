@@ -2917,6 +2917,9 @@ leaves. A refusal puts the canary's Postgres back as it found it. The volume
 is looked for by name (`<stable>-canary_pgdata`, `open-brain-canary_pgdata`
 beside the default stable), which is how `compose down --volumes` removes it.
 With none there is nothing to delete, and nothing is started to find out.
+The canary's sleep dumps (its `sleep-dumps` volume, SMD-3203) go with the
+database: the down names the sleep profile, so compose counts that service and
+its volume.
 Neither touches stable: `down` acts on the canary's project alone.
 
 On every PR, the deploy-stack-brains CI job runs `canary.sh` beside its stack, in
