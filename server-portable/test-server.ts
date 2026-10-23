@@ -5,7 +5,8 @@ import { visibleToolNames, READ_TOOL_NAMES, UNLOCKS, type ToolScope } from "./to
 import { openApiDocument } from "./rest/openapi.ts";
 import { pathFields, readsQuery, ROUTES, type Method } from "./rest/routes.ts";
 import { FORK_VERSION } from "../db/version.mjs";
-import { mcpTarget, mcpUnderTest, servedAsNamed } from "./test-support.ts";
+import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
+import { hashKey } from "./auth.ts";
 /**
  * test-server.ts
  *
@@ -56,12 +57,14 @@ process.env.MCP_ACCESS_KEYS = Object.entries(NAMED_KEYS)
 const CAPTURE_KEY = "contract-capture-key-0123456789";
 process.env.MCP_ACCESS_KEYS += `,contract-capture:capture:${createHash("sha256").update(CAPTURE_KEY).digest("hex")}`;
 
-// The provider calls this suite makes are [13d]'s and [17]'s, against a stub that can be
+// The one provider call this suite makes is [17]'s, against a stub that can be
 // told to answer an embedding slowly — the server's env is read once, at the
 // first request, so the stub's address is set before it. Declared local to the
 // egress gate (SMD-1903), as every suite that boots the server against a stub
 // does. One-hot, like test-local-provider's, at the width the server expects.
 let embedDelayMs = 0;
+/** [13d]'s hold on one embedding, by its input: a tool call kept running past its client and the stop (SMD-3201). */
+let embedHold: ((input: string) => Promise<void>) | undefined;
 const provider = Bun.serve({
   port: 0,
   async fetch(req) {
@@ -69,6 +72,7 @@ const provider = Bun.serve({
     // A server's re-probe (SMD-2890) asks GET /models: an answer, with no body to parse.
     if (req.method === "GET") return Response.json({ object: "list", data: [] });
     const body = (await req.json()) as { input?: string };
+    if (embedHold && url.pathname.endsWith("/embeddings")) await embedHold(String(body.input ?? ""));
     if (embedDelayMs > 0) await Bun.sleep(embedDelayMs);
     if (url.pathname.endsWith("/embeddings")) {
       const v = new Array(DEFAULT_EMBEDDING_DIM).fill(0);
@@ -90,9 +94,9 @@ const JWT = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln";
 process.env.COMPOSE_PROFILES = "local-models, auth";
 process.env.OB1_PUBLIC_ORIGIN = PUBLIC_ORIGIN;
 
-// The server under test: index.ts, or with OB1_MCP_UNDER_TEST=client the MCP server over the REST core (SMD-2287).
+// The server under test: the MCP server over the REST core (SMD-2287).
 const worker = await mcpUnderTest();
-assert(servedAsNamed(), `the server under test is the one OB1_MCP_UNDER_TEST names (${process.env.OB1_MCP_UNDER_TEST || "index"})`);
+assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
 
 // The authorization server's health check, stubbed before any request: up or
 // down as [11b] says, every probe counted, and nothing cached (a TTL of 0), so
@@ -106,7 +110,7 @@ edgeModule.useAuthReachability(new edgeModule.AuthReachability("http://auth.stub
 }) as unknown as typeof fetch));
 
 // Served with every field the export declares, so what the export says about
-// the runtime — and what it leaves at the default — is what [17]'s index pass measures.
+// the runtime — and what it leaves at the default — is what [17] measures.
 const server = Bun.serve({ ...worker, port: 0 });
 const PORT = server.port ?? 0;
 const BASE = `http://localhost:${PORT}`;
@@ -245,7 +249,7 @@ console.log("\n[5] Auth failure — missing key, and an unparseable body");
 
 console.log("\n[5a] A refused body is read only so far (SMD-2309): past REFUSAL_BODY_LIMIT, id: null");
 {
-  const { REFUSAL_BODY_LIMIT } = await import("./index.ts");
+  const { REFUSAL_BODY_LIMIT } = await import("./mcp-edge.ts");
   const request = (pad: number) => JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list", params: { pad: "x".repeat(pad) } });
   const under = await fetch(BASE, { method: "POST", headers: H, body: request(REFUSAL_BODY_LIMIT - 200) });
   assert((await under.json())?.id === 7, "a body under the limit still has its id echoed");
@@ -888,6 +892,657 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
   assert(postHealth.status === 200 && (await mcpBody(postHealth))?.result != null, `POST /health with the key is the MCP endpoint (${postHealth.status})`);
 }
 
+console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's judgement, the rendering, why a read did not answer, the deadline keeping what was read, a failed savepoint or COMMIT (SMD-2041)");
+{
+  const { ago, boardPairsValue, boardSyncValue, brainInfo, deniedObject, formatBytes, heartbeatState, ledgerStatus, newProgress, snapshotFacts, parseHeartbeats, parseHnswOptions, proposalsValue, readDatabaseFacts, relationsValue, renderBrainInfo, unreadReason } = await import("./brain-info.ts");
+  type Facts = Awaited<ReturnType<typeof readDatabaseFacts>>;
+  assert(ledgerStatus(52, 52) === "current" && ledgerStatus(51, 52) === "behind" && ledgerStatus(53, 52) === "ahead" && ledgerStatus(null, 52) === null,
+    "the ledger's highest against the tree's last: current, behind, ahead, unjudged");
+  const hn = [parseHnswOptions("m=24,ef_construction=100"), parseHnswOptions("ef_construction=200"), parseHnswOptions(null), parseHnswOptions("m=8")];
+  assert(JSON.stringify(hn) === JSON.stringify([{ m: 24, efConstruction: 100 }, { m: 16, efConstruction: 200 }, { m: 16, efConstruction: 64 }, { m: 8, efConstruction: 64 }]),
+    `HNSW reloptions are read per key, pgvector's defaults where unset (${JSON.stringify(hn)})`);
+  const sizes = [formatBytes(999), formatBytes(1000), formatBytes(45_200_000), formatBytes(10_779_671)];
+  assert(sizes.join("|") === "999 B|1.0 kB|45.2 MB|10.8 MB", `bytes in decimal units, one place (${sizes.join("|")})`);
+  const pgError = (msg: string, errno: string) => Object.assign(new Error(msg), { errno });
+  assert(unreadReason(pgError("x", "42501")) === "refused" && unreadReason(pgError("x", "57014")) === "timeout" && unreadReason(pgError("x", "55P03")) === "timeout" && unreadReason(new Error("x")) === "error",
+    "a failed read's reason is its SQLSTATE's: refused, timeout (statement or lock), anything else");
+
+  // A fake client answering by statement text, in one transaction with a
+  // savepoint per guarded read: ob1_entities refused, the ledger timed out,
+  // thought_chunks absent everywhere, thought_audit present only in a schema
+  // this role does not resolve. Each lands in `unread` by its own reason and
+  // the rest answer.
+  const statements: string[] = [];
+  const hang = new Set<string>();
+  let answerLedger = false;
+  const answer = (text: string): unknown[] => {
+    statements.push(text);
+    if (lockFacets && /FROM thought_facets f\b/.test(text) && !/NOT consolidation_tickets_linked/.test(text)) throw pgError("canceling statement due to lock timeout", "55P03");
+    if (lockProposals && /FROM supersession_proposals p\b/.test(text) && !/NOT consolidation_tickets_linked/.test(text)) throw pgError("canceling statement due to lock timeout", "55P03");
+    if (/FROM board_findings_posted/.test(text)) {
+      if (findingsRefused) throw pgError("permission denied for table board_findings_posted", "42501");
+      return findingsAnswer;
+    }
+    if (/FROM ob1_entities/.test(text)) throw pgError("permission denied for table ob1_entities", "42501");
+    if (/FROM schema_migrations/.test(text)) {
+      if (answerLedger) return [{ name: "051_schema_version.sql" }, { name: "052_thought_changes.sql" }];
+      throw pgError("canceling statement due to lock timeout", "55P03");
+    }
+    if (/set_config/.test(text)) return [{}];
+    if (/server_version/.test(text)) {
+      return [{
+        postgres: "16.15", vec_version: "0.8.6", vec_schema: "public",
+        resolved: { ob1_config: true, schema_migrations: true, thoughts: true, thought_audit: false, thought_chunks: false, ob1_entities: true, supersession_proposals: true, thought_facets: true, board_findings_posted: catalogFindings },
+        anywhere: { ob1_config: "public", schema_migrations: "public", thoughts: "public", thought_audit: "vault", ob1_entities: "public", ...(catalogFindings ? { board_findings_posted: "public" } : {}) },
+        hnsw: [{ index: "thoughts_embedding_idx", table: "thoughts", opts: "m=24,ef_construction=100" }],
+        tickets_linked: catalogLinked,
+      }];
+    }
+    if (/pg_database_size/.test(text)) return [{ n: 10_779_671 }];
+    if (/linear_updated_at/.test(text)) return [{ w: boardAnswer }];
+    if (/LIKE 'heartbeat:%'/.test(text)) return heartbeatRows;
+    if (/NOT consolidation_tickets_linked/.test(text)) {
+      if (boardTimeout) throw pgError("canceling statement due to statement timeout", "57014");
+      return [{ n: /FROM supersession_proposals/.test(text) ? proposalsAnswer.board_pairs : 11 }];
+    }
+    if (/FROM supersession_proposals/.test(text)) return [proposalsAnswer];
+    if (/FROM thought_facets/.test(text)) return [relationsAnswer];
+    if (/FROM ob1_config/.test(text)) return [{ key: "schema_version", value: "1.1.0+upstream.9543c29" }];
+    if (lockThoughts && /FROM thoughts\b/.test(text) && /count\(\*\)::float8/.test(text)) throw pgError("canceling statement due to lock timeout", "55P03");
+    if (/count\(\*\)/.test(text)) return [{ n: 7 }];
+    throw new Error(`unexpected statement: ${text.slice(0, 60)}`);
+  };
+  let boardAnswer: unknown = "2026-09-24T12:00:00.000Z";
+  let heartbeatRows: unknown[] = [];
+  let lockThoughts = false;
+  let catalogLinked = true;
+  let boardTimeout = false;
+  let lockFacets = false;
+  let relationsAnswer: Record<string, unknown> = { related: 9, evolves: 4, duplicate: 1, distinct: 3 };
+  // 087's table: absent from the catalog unless a case puts it there (SMD-2682).
+  let catalogFindings = false;
+  let findingsRefused = false;
+  let lockProposals = false;
+  let findingsAnswer: Record<string, unknown>[] = [];
+  let failRelease: RegExp | null = null;
+  let proposalsAnswer: Record<string, unknown> = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
+  const slow = new Set<string>();
+  const tag = (strings: TemplateStringsArray) => {
+    const text = strings.join("?");
+    for (const h of hang) if (text.includes(h)) return new Promise<unknown[]>(() => {});
+    for (const h of slow) if (text.includes(h)) return Bun.sleep(150).then(() => answer(text));
+    return Promise.resolve().then(() => answer(text));
+  };
+  // The savepoint's RELEASE and the transaction's COMMIT can be slowed or
+  // failed, to put a deadline or an error between a read and its end.
+  let releaseMs = 0;
+  let savepointMs = 0;
+  let failCommit = false;
+  const tx = Object.assign(tag, {
+    savepoint: async <T>(fn: (sp: typeof tag) => Promise<T>) => {
+      if (savepointMs) await Bun.sleep(savepointMs);
+      const before = statements.length;
+      const r = await fn(tag);
+      if (releaseMs) await Bun.sleep(releaseMs);
+      if (failRelease && statements.slice(before).some((t) => failRelease!.test(t))) throw pgError("server closed the connection unexpectedly", "08006");
+      return r;
+    },
+  });
+  const fake = Object.assign(tag, {
+    begin: async <T>(fn: (t: typeof tx) => Promise<T>) => { const r = await fn(tx); if (failCommit) throw pgError("terminating connection due to administrator command", "57P01"); return r; },
+  });
+  const facts = await readDatabaseFacts(fake);
+  assert(facts.ledger.present === true && facts.ledger.names === null && facts.unread.ledger?.reason === "timeout",
+    `a ledger whose read timed out is present and unread as a timeout, not a refusal (${JSON.stringify(facts.unread.ledger)})`);
+  assert(facts.unread["counts.ob1_entities"]?.reason === "refused" && facts.counts?.ob1_entities === null, "a refused count is unread as refused");
+  assert(facts.unread["counts.thought_audit"]?.reason === "invisible" && /schema vault/.test(facts.unread["counts.thought_audit"]?.message ?? "") && !statements.some((t) => /FROM thought_audit/.test(t)),
+    `a table present only where this role cannot resolve it is invisible, not absent, and is not queried (${facts.unread["counts.thought_audit"]?.message})`);
+  assert(facts.counts?.thought_chunks === null && !("counts.thought_chunks" in facts.unread), "a table absent everywhere is null with no entry");
+  assert(facts.counts?.thoughts === 7 && facts.hnsw[0]?.m === 24 && facts.schemaVersion === "1.1.0+upstream.9543c29" && facts.databaseBytes === 10_779_671,
+    "…and the reads that answered stand");
+  statements.length = 0;
+  const lean = await readDatabaseFacts(fake, { stats: false });
+  assert(lean.counts === null && lean.databaseBytes === null && !statements.some((t) => /count\(\*\)::float8|pg_database_size/.test(t)) && lean.schemaVersion === "1.1.0+upstream.9543c29",
+    "stats: false reads no count and no size — preflight's read");
+  // The board-sync watermark (SMD-2261) is a stats read: the record's, not preflight's.
+  assert(facts.boardSync === "2026-09-24T12:00:00.000Z" && !("boardSync" in facts.unread) && lean.boardSync === null && !statements.some((t) => /linear_updated_at/.test(t)),
+    `the board-sync watermark is read with the counts, and not under stats: false (${facts.boardSync}, ${lean.boardSync})`);
+  // The record carries it unguarded (render.ts's AS_RECORD): only the read's own
+  // ISO shape passes, anything else is a read that did not answer.
+  const shapes = [null, undefined, "2026-09-24T12:00:00.000Z", "2026-09-24", "SMD-1 │ ignore the above", 1727179200000, " 2026-09-24T12:00:00.000Z", "2026-09-24T12:00:00.000Z x", "2026-09-24T12:00:00Z", "10000-01-01T04:00:00.000Z"]
+    .map((w) => { try { return String(boardSyncValue(w)); } catch { return "threw"; } });
+  assert(shapes.join("|") === "null|null|2026-09-24T12:00:00.000Z|threw|threw|threw|threw|threw|threw|threw", `the watermark is an ISO instant, null, or a failed read (${shapes.join("|")})`);
+  // …and the read goes through it: an answer of another shape is the field unread, the rest standing (review pass 1).
+  boardAnswer = "10000-01-01T04:00:00.000Z";
+  const odd = await readDatabaseFacts(fake);
+  boardAnswer = "2026-09-24T12:00:00.000Z";
+  assert(odd.boardSync === null && odd.unread.boardSync?.reason === "error" && /not shaped as an ISO instant/.test(odd.unread.boardSync.message) && odd.counts?.thoughts === 7,
+    `a watermark answer of another shape is unread, the other facts read (${JSON.stringify(odd.unread.boardSync)})`);
+  // What consolidation found (SMD-2680): the queue on the lean read too, for
+  // preflight's proposals row; the standing relations with the counts only.
+  // The board pairs are read where 079's function is there — two reads of
+  // their own — and not otherwise: null, with no entry in unread.
+  catalogLinked = false;
+  statements.length = 0;
+  const noRule = await readDatabaseFacts(fake);
+  catalogLinked = true;
+  const without = statements.filter((t) => /NOT consolidation_tickets_linked/.test(t)).length;
+  statements.length = 0;
+  await readDatabaseFacts(fake);
+  const withRule = statements.filter((t) => /NOT consolidation_tickets_linked/.test(t)).length;
+  assert(without === 0 && withRule === 2 && noRule.proposals?.pending === 6 && noRule.proposals?.boardPairs === null && noRule.relations?.boardPairs === null && !Object.keys(noRule.unread).some((k) => /boardPairs/.test(k)),
+    `the board pairs read 079's rule when the catalog has it — two reads — and are null, unnamed, without it (${without}, ${withRule}, ${JSON.stringify(noRule.proposals)})`);
+  // An empty queue and no standing relation pair nothing: neither board
+  // statement is sent, so a refusal of 079's predicate cannot speak for them
+  // (run-it, review pass 4).
+  proposalsAnswer = { pending: 0, stale: 2, oldest_s: null, board_pairs: 4 };
+  relationsAnswer = { related: 0, evolves: 0, duplicate: 0, distinct: 0 };
+  boardTimeout = true;
+  statements.length = 0;
+  const emptyQueue = await readDatabaseFacts(fake);
+  boardTimeout = false;
+  proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
+  relationsAnswer = { related: 9, evolves: 4, duplicate: 1, distinct: 3 };
+  assert(emptyQueue.proposals?.boardPairs === 0 && emptyQueue.relations?.boardPairs === 0 && !Object.keys(emptyQueue.unread).some((k) => /boardPairs/.test(k)) && !statements.some((t) => /NOT consolidation_tickets_linked/.test(t)),
+    `an empty queue and no relation send no board statement and count none (${JSON.stringify(emptyQueue.proposals)}, ${JSON.stringify(emptyQueue.unread)})`);
+  // …and under a refused lock on thoughts, or at a deadline, an empty queue
+  // still reads 0 with no entry, and a queue not read leaves no board entry
+  // beside its own (review pass 5).
+  proposalsAnswer = { pending: 0, stale: 0, oldest_s: null, board_pairs: 0 };
+  lockThoughts = true;
+  const emptyLocked = await readDatabaseFacts(fake);
+  lockThoughts = false;
+  proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
+  // At a deadline in the queue's board read, with no relation standing, the
+  // snapshot names the queue's board count and settles the relations' to 0.
+  relationsAnswer = { related: 0, evolves: 0, duplicate: 0, distinct: 0 };
+  hang.add("NOT consolidation_tickets_linked");
+  const dlProgress = newProgress();
+  void readDatabaseFacts(fake, {}, dlProgress);
+  await Bun.sleep(200);
+  const dl = snapshotFacts(dlProgress)!;
+  hang.delete("NOT consolidation_tickets_linked");
+  relationsAnswer = { related: 9, evolves: 4, duplicate: 1, distinct: 3 };
+  proposalsAnswer = { pending: 1, stale: "x", oldest_s: 1, board_pairs: 0 };
+  const parentLost = await readDatabaseFacts(fake);
+  proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
+  assert(emptyLocked.proposals?.boardPairs === 0 && !("proposals.boardPairs" in emptyLocked.unread) && dl.unread["proposals.boardPairs"]?.reason === "deadline" && dl.relations?.boardPairs === 0 && !("relations.boardPairs" in dl.unread)
+      && parentLost.proposals === null && !("proposals.boardPairs" in parentLost.unread),
+    `an empty queue under a lock reads 0, unnamed; a deadline names a board count only beside a read queue; a queue not read leaves no board entry (${JSON.stringify(emptyLocked.proposals)}, ${JSON.stringify(Object.keys(dl.unread))}, ${JSON.stringify(Object.keys(parentLost.unread))})`);
+  // A board read that times out takes its count alone: the queue and the
+  // relations stand (run-it, review pass 2: at ~45k pending the one statement
+  // passed the health cap and the whole queue went unread).
+  boardTimeout = true;
+  const slowBoard = await readDatabaseFacts(fake);
+  boardTimeout = false;
+  assert(slowBoard.proposals?.pending === 6 && slowBoard.proposals?.boardPairs === null && slowBoard.unread["proposals.boardPairs"]?.reason === "timeout"
+      && slowBoard.relations?.related === 9 && slowBoard.relations?.boardPairs === null && slowBoard.unread["relations.boardPairs"]?.reason === "timeout" && !("proposals" in slowBoard.unread),
+    `a board-pair read that times out leaves the queue and the relations read (${JSON.stringify(slowBoard.proposals)}, ${JSON.stringify(Object.keys(slowBoard.unread))})`);
+  statements.length = 0;
+  const leanFindings = await readDatabaseFacts(fake, { stats: false });
+  assert(JSON.stringify(facts.proposals) === JSON.stringify({ pending: 6, stale: 2, oldestPendingS: 259207, boardPairs: 4 }) && JSON.stringify(leanFindings.proposals) === JSON.stringify(facts.proposals)
+      && JSON.stringify(facts.relations) === JSON.stringify({ related: 9, evolves: 4, duplicate: 1, distinct: 3, boardPairs: 11 }) && leanFindings.relations === null && !statements.some((t) => /FROM thought_facets f\b/.test(t)),
+    `the queue is read with or without the stats, the relations with them only (${JSON.stringify(leanFindings.proposals)}, ${JSON.stringify(leanFindings.relations)})`);
+  // What became of the findings posted to the board (SMD-2682): a stats read
+  // where 087's table resolves, each (pair, word) by its outcome, the found
+  // apart; null and unnamed without the table; refused, malformed or behind a
+  // refused lock on thought_facets, unread with the rest standing.
+  const day = 86_400;
+  const at0 = new Date("2026-10-01T00:00:00.000Z");
+  const fRow = (o: Record<string, unknown>) => ({ posted_on: o.ticket_b, origin: "posted", posted_at: at0, linked_s: null, accepted: 0, rejected: 0, stale: 0, pending: 0, accepted_s: null, rejected_s: null, stands: null, ...o });
+  findingsAnswer = [
+    fRow({ ticket_a: "SMD-1", ticket_b: "SMD-2", word: "related", age_s: 40 * day, linked_s: 3 * day, stands: true }),
+    fRow({ ticket_a: "SMD-1", ticket_b: "SMD-2", word: "outdates", age_s: 40 * day, accepted: 1, accepted_s: 1 * day }),
+    fRow({ ticket_a: "SMD-3", ticket_b: "SMD-4", word: "outdates", age_s: 10 * day, posted_at: new Date("2026-10-02T00:00:00.000Z"), rejected: 1, rejected_s: 2 * day, linked_s: day }),
+    fRow({ ticket_a: "SMD-5", ticket_b: "SMD-6", word: "evolves", age_s: 40 * day, stands: true }),
+    fRow({ ticket_a: "SMD-7", ticket_b: "SMD-8", word: "related", age_s: 5 * day, stands: true }),
+    fRow({ ticket_a: "SMD-9", ticket_b: "SMD-10", word: "outdates", age_s: 5 * day, stale: 1 }),
+    fRow({ ticket_a: "SMD-11", ticket_b: "SMD-12", word: "duplicate", origin: "found", age_s: 2 * day, stands: false }),
+  ];
+  catalogFindings = true;
+  statements.length = 0;
+  const told = await readDatabaseFacts(fake);
+  const leanTold = await readDatabaseFacts(fake, { stats: false });
+  const toldSent = statements.filter((t) => /FROM board_findings_posted/.test(t)).length;
+  findingsRefused = true;
+  const toldRefused = await readDatabaseFacts(fake);
+  findingsRefused = false;
+  lockFacets = true;
+  const toldLocked = await readDatabaseFacts(fake);
+  lockFacets = false;
+  // A lock refused on the queue's table: the queue's read waits on it once,
+  // and the findings read — after it, joining it — is not tried (review pass 1:
+  // it ran first and waited too).
+  lockProposals = true;
+  statements.length = 0;
+  const toldQueueLocked = await readDatabaseFacts(fake);
+  const queueSent = statements.filter((t) => /FROM supersession_proposals/.test(t)).length;
+  lockProposals = false;
+  findingsAnswer = [fRow({ ticket_a: "SMD-1", ticket_b: "SMD-2", word: "supersedes", age_s: 1 })];
+  const toldOdd = await readDatabaseFacts(fake);
+  findingsAnswer = [];
+  const toldNone = await readDatabaseFacts(fake);
+  catalogFindings = false;
+  const wantTold = { posted: 6, comments: 5, found: 1, accepted: 2, rejected: 1, withdrawn: 0, open: 2, unanswered: 1, windowDays: 30, medianAnswerS: 2 * day };
+  assert(JSON.stringify(told.findings) === JSON.stringify(wantTold) && !("findings" in told.unread) && leanTold.findings === null && toldSent === 1 && facts.findings === null && !("findings" in facts.unread)
+      && toldRefused.findings === null && toldRefused.unread.findings?.reason === "refused" && toldRefused.relations?.related === 9
+      && toldLocked.findings === null && /not tried — a lock on thought_facets/.test(toldLocked.unread.findings?.message ?? "")
+      && toldQueueLocked.proposals === null && toldQueueLocked.unread.proposals?.reason === "timeout" && /not tried — a lock on supersession_proposals/.test(toldQueueLocked.unread.findings?.message ?? "") && queueSent === 1
+      && toldOdd.findings === null && toldOdd.unread.findings?.reason === "error" && JSON.stringify(toldNone.findings) === JSON.stringify({ ...wantTold, posted: 0, comments: 0, found: 0, accepted: 0, rejected: 0, withdrawn: 0, open: 0, unanswered: 0, medianAnswerS: null }),
+    `the findings posted are a stats read of 087's table, by outcome, the found apart; absent, null and unnamed; refused, malformed or behind a refused lock, unread (${JSON.stringify(told.findings)}, ${JSON.stringify(toldLocked.unread.findings)}, ${JSON.stringify(toldOdd.unread.findings)})`);
+  const fServer = { version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };
+  const toldText = renderBrainInfo(await brainInfo(fServer, async () => told, 1000));
+  const toldRows = [toldText, renderBrainInfo(await brainInfo(fServer, async () => toldNone, 1000)), renderBrainInfo(await brainInfo(fServer, async () => toldRefused, 1000)), renderBrainInfo(await brainInfo(fServer, async () => facts, 1000)),
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldNone, findings: { ...toldNone.findings!, posted: 2, comments: 1, open: 2 } }), 1000)),
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldNone, findings: { ...toldNone.findings!, posted: 1, comments: 1, withdrawn: 1 } }), 1000)), renderBrainInfo(await brainInfo(fServer, async () => leanTold, 1000)), renderBrainInfo(await brainInfo(fServer, async () => toldLocked, 1000)),
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "timeout" as const, message: "canceling statement due to lock timeout" } } }), 1000)),
+    // A brain behind this server: the read names 091's column (SMD-2913, review pass 1).
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "error" as const, message: "column x.pass_settled_at does not exist" } } }), 1000)),
+    renderBrainInfo(await brainInfo(fServer, async () => ({ ...toldLocked, unread: { findings: { reason: "error" as const, message: "column x.reviewed_at does not exist" } } }), 1000))]
+    .map((t) => t.split("\n").find((l) => l.startsWith("Findings")) ?? "(no row)");
+  assert(toldRows.join("\n") === [
+    "Findings:        6 posted in 5 comment(s): 2 accepted, 1 rejected, 1 unanswered after 30 d, 2 open, 0 withdrawn — acceptance 50% (2 of 4: accepted over accepted, rejected and unanswered), median 2 d to an answer; 1 found on the board from another poster",
+    "Findings:        none posted",
+    "Findings:        ? (board_findings_posted not readable by this role)",
+    "Findings:        no table — migration 087 is not applied",
+    "Findings:        2 posted in 1 comment(s): 0 accepted, 0 rejected, 0 unanswered after 30 d, 2 open, 0 withdrawn — no rate yet (none answered, none past the window)",
+    "Findings:        1 posted in 1 comment(s): 0 accepted, 0 rejected, 0 unanswered after 30 d, 0 open, 1 withdrawn — no rate yet (none answered, none past the window)",
+    "(no row)",
+    "Findings:        ? (thought_facets not read in time)",
+    "Findings:        ? (not read in time)",
+    "Findings:        ? (migration 091 is not applied)",
+    "Findings:        ? (not read)",
+  ].join("\n"), `the table's Findings row: the outcomes and the rate, none, ? when refused, no table, no rate yet, no row without the stats, and 091 named when its column is absent (${toldRows.join(" / ")})`);
+  // The record carries both unguarded (render.ts's AS_RECORD): counts only, or the read did not answer.
+  const qShapes = [
+    { pending: 0, stale: 0, oldest_s: null }, { pending: "3", stale: 0, oldest_s: "12.6" }, { pending: 0, stale: 1, oldest_s: 99 }, { pending: 1, stale: 0, oldest_s: -5 },
+    { pending: -1, stale: 0, oldest_s: null }, { pending: 1.5, stale: 0, oldest_s: 1 }, { pending: 1, stale: "x", oldest_s: 1 }, { pending: 1, stale: 0, oldest_s: "soon" }, undefined,
+  ].map((r) => { try { return JSON.stringify(proposalsValue(r)); } catch { return "threw"; } });
+  assert(qShapes.join("|") === '{"pending":0,"stale":0,"oldestPendingS":null,"boardPairs":null}|{"pending":3,"stale":0,"oldestPendingS":13,"boardPairs":null}|{"pending":0,"stale":1,"oldestPendingS":null,"boardPairs":null}|{"pending":1,"stale":0,"oldestPendingS":0,"boardPairs":null}|threw|threw|threw|threw|threw',
+    `the queue's counts are counts and its age whole seconds, or the read did not answer (${qShapes.join("|")})`);
+  const rShapes = [{ related: 1, evolves: 0, duplicate: 0, distinct: 2 }, { related: 1, evolves: null, duplicate: 0, distinct: 0 }, { related: "1; DROP", evolves: 0, duplicate: 0, distinct: 0 }, { related: 1, evolves: 0, duplicate: 0 }, { related: 1, evolves: 0, duplicate: 0, distinct: -1 }, undefined]
+    .map((r) => { try { return JSON.stringify(relationsValue(r)); } catch { return "threw"; } });
+  const bShapes = [{ n: 4 }, { n: "4" }, { n: -1 }, { n: null }, {}, undefined].map((r) => { try { return String(boardPairsValue("x", r)); } catch { return "threw"; } });
+  assert(rShapes.join("|") === '{"related":1,"evolves":0,"duplicate":0,"distinct":2,"boardPairs":null}|threw|threw|threw|threw|threw' && bShapes.join("|") === "4|4|threw|threw|threw|threw",
+    `the relations' and the board pairs' counts are counts, or the read did not answer (${rShapes.join("|")} / ${bShapes.join("|")})`);
+  proposalsAnswer = { pending: 1, stale: "two", oldest_s: 1, board_pairs: 0 };
+  const oddQueue = await readDatabaseFacts(fake);
+  proposalsAnswer = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
+  assert(oddQueue.proposals === null && oddQueue.unread.proposals?.reason === "error" && oddQueue.counts?.thoughts === 7,
+    `a queue answer that is not counts is unread, the other facts read (${JSON.stringify(oddQueue.unread.proposals)})`);
+  // A table whose lock a read of it alone was refused is not waited on again
+  // in the same read (SMD-2680): the watermark and the two board counts touch
+  // thoughts, and none is sent once its count was refused; the queue and the
+  // relations, which do not, stand.
+  lockThoughts = true;
+  statements.length = 0;
+  const lockProgress = newProgress();
+  const lockedOut = await readDatabaseFacts(fake, {}, lockProgress);
+  lockThoughts = false;
+  // …and leaves nothing pending, so a deadline after it cannot rename it (run-it, review pass 1).
+  assert(lockProgress.pending.size === 0, `a read not tried leaves nothing pending (${[...lockProgress.pending].join(", ")})`);
+  const skipped = ["boardSync", "relations.boardPairs", "proposals.boardPairs"].filter((f) => lockedOut.unread[f]?.reason === "timeout" && /^not tried — a lock on thoughts \(the table or one of its indexes\) was refused/.test(lockedOut.unread[f]?.message ?? ""));
+  assert(lockedOut.unread["counts.thoughts"]?.reason === "timeout" && skipped.length === 3 && lockedOut.proposals?.pending === 6 && lockedOut.relations?.related === 9 && !statements.some((t) => /linear_updated_at|NOT consolidation_tickets_linked/.test(t)) && lockedOut.schemaVersion !== null,
+    `after a refused lock on thoughts the reads that touch it are named, not sent (${skipped.join(", ")})`);
+  // A lock refused to the relations' read (thought_facets alone) is not
+  // waited on by the queue's board count, which reads it through 079's
+  // predicate (run-it, review pass 3).
+  lockFacets = true;
+  statements.length = 0;
+  const facetsLocked = await readDatabaseFacts(fake);
+  lockFacets = false;
+  assert(facetsLocked.unread.relations?.reason === "timeout" && /^not tried — a lock on thought_facets/.test(facetsLocked.unread["proposals.boardPairs"]?.message ?? "")
+      && facetsLocked.proposals?.pending === 6 && !statements.some((t) => /NOT consolidation_tickets_linked/.test(t)),
+    `after a refused lock on thought_facets the queue's board count is not sent (${JSON.stringify(facetsLocked.unread["proposals.boardPairs"])})`);
+  // A board read whose release fails takes its count back (review pass 3).
+  failRelease = /NOT consolidation_tickets_linked/;
+  const boardReleaseFailed = await readDatabaseFacts(fake);
+  failRelease = null;
+  assert(boardReleaseFailed.proposals?.pending === 6 && boardReleaseFailed.proposals?.boardPairs === null && boardReleaseFailed.unread["proposals.boardPairs"]?.reason === "error"
+      && boardReleaseFailed.relations?.related === 9 && boardReleaseFailed.relations?.boardPairs === null && boardReleaseFailed.unread["relations.boardPairs"]?.reason === "error",
+    `a failed release after a board read leaves its count null and unread, the queue and the relations read (${JSON.stringify(boardReleaseFailed.proposals)}, ${JSON.stringify(boardReleaseFailed.relations)})`);
+  // A savepoint that fails after the findings reads wrote takes the values
+  // back: neither field is both read and unread (the `clear`s; run-it, review pass 1).
+  failRelease = /FROM supersession_proposals|FROM thought_facets/;
+  const releaseFailed = await readDatabaseFacts(fake);
+  failRelease = null;
+  // …and the board reads after them, finding no field to fill, send nothing and record nothing.
+  assert(releaseFailed.proposals === null && releaseFailed.unread.proposals?.reason === "error" && releaseFailed.relations === null && releaseFailed.unread.relations?.reason === "error"
+      && !("proposals.boardPairs" in releaseFailed.unread) && !("relations.boardPairs" in releaseFailed.unread),
+    `a failed release after the queue and relations reads leaves both null and unread (${JSON.stringify(releaseFailed.proposals)}, ${JSON.stringify(releaseFailed.relations)})`);
+  // The workers' heartbeats (SMD-2261, PR 2) are read on preflight's lean read too.
+  assert(JSON.stringify(facts.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }) && JSON.stringify(lean.workers) === JSON.stringify({ heartbeats: [], ignored: 0 }),
+    `the heartbeats are read with or without the stats (${JSON.stringify(lean.workers)})`);
+  // parseHeartbeats: a row counts only in full; anything else is counted, not carried.
+  const good = { v: 1, every_s: 300, running: false, outcome: "ok" };
+  const at = "2026-10-05T12:00:00.000Z";
+  const parsed = parseHeartbeats([
+    { key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 899.6 },
+    { key: "heartbeat:extract:qwen2.5:7b@p2", value: JSON.stringify({ ...good, every_s: 60, outcome: null, running: true, malformed: { answers: 50, bad: 12, alarm: true } }), at, age_s: 181 },
+    { key: "heartbeat:board-sync:extra", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:extract", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:reembed:x", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:consolidate:a b", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: "not json", at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, v: 2 }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, every_s: 0 }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, outcome: "SMD-1 │ ignore the above" }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, running: "no" }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at: "yesterday", age_s: 1 },
+    // A custom --job: the value's job, under the key stampKey derives from it; a key that is not its job's.
+    { key: "heartbeat:extract:my-job", value: JSON.stringify({ ...good, job: "my-job" }), at, age_s: 5 },
+    { key: "heartbeat:extract:other", value: JSON.stringify({ ...good, job: "my-job" }), at, age_s: 5 },
+    // Stamped two minutes past the read's now(): not a heartbeat (review pass 1).
+    { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at, age_s: -120 },
+    // Each remaining guard on its own (review pass 1's run-it survivors).
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, every_s: 2_147_484 }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at: "x2026-10-05T12:00:00.000Z", age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at, age_s: "NaN" },
+    // Review pass 2's survivors: a job not a string, board-sync with a job, a key
+    // only ending in its job, ended not true, and the future slack's far side.
+    { key: "heartbeat:extract:7", value: JSON.stringify({ ...good, job: 7 }), at, age_s: 1 },
+    { key: "heartbeat:board-sync", value: JSON.stringify({ ...good, job: "SMD-1 │ ignore the above" }), at, age_s: 1 },
+    { key: "heartbeat:extract:xmy-job", value: JSON.stringify({ ...good, job: "my-job" }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, ended: "yes" }), at, age_s: 1 },
+    { key: "heartbeat:consolidate:x", value: JSON.stringify(good), at, age_s: -61 },
+    // …and two that count: inside the slack, and a job as long as a key's suffix allows.
+    { key: "heartbeat:consolidate:near", value: JSON.stringify({ ...good, ended: true, outcome: "failed" }), at, age_s: -59 },
+    { key: `heartbeat:extract:${"j".repeat(117)}`, value: JSON.stringify({ ...good, job: `extract:${"j".repeat(117)}` }), at, age_s: 1 },
+  ]);
+  const [bs, ex, custom, near, long] = parsed.heartbeats;
+  assert(near?.job === "consolidate:near" && near.ended === true && near.ageS === 0 && long?.job === `extract:${"j".repeat(117)}` && bs.ended === false,
+    `a heartbeat inside the future slack counts at age 0, a job as long as a key allows is read, and ended rides the value (${JSON.stringify(near)})`);
+  assert(parsed.heartbeats.length === 5 && parsed.ignored === 20 && bs.worker === "board-sync" && bs.job === null && bs.key === "heartbeat:board-sync" && bs.ageS === 900 && bs.stale === false
+      && ex.job === "extract:qwen2.5:7b@p2" && ex.stale === true && ex.running === true && ex.outcome === null && ex.malformed?.alarm === true
+      && custom.job === "my-job" && custom.key === "heartbeat:extract:my-job",
+    `three rows in full count — board-sync at 899.6 s of 3 × 300 not stale, extract at 181 s of 3 × 60 stale, a custom job as given — and twenty not of the shape are counted only (${parsed.heartbeats.length}, ${parsed.ignored})`);
+  // A malformed block not of the shape is left off and the heartbeat still counts (review pass 3).
+  const blocks = parseHeartbeats([{ answers: 5, bad: 6, alarm: false }, { answers: 50, bad: 1, alarm: "yes" }, null, { answers: -1, bad: 0, alarm: true }, { answers: 1.5, bad: 1, alarm: false }, { answers: "x", bad: 1, alarm: true }, { answers: 1, bad: "x", alarm: true }]
+    .map((malformed, i) => ({ key: `heartbeat:consolidate:b${i}`, value: JSON.stringify({ ...good, malformed }), at, age_s: 1 })));
+  assert(blocks.heartbeats.length === 7 && blocks.ignored === 0 && blocks.heartbeats.every((h) => h.malformed === null),
+    `a heartbeat whose block is not of the shape counts, its block left off (${blocks.heartbeats.length}, ${blocks.ignored})`);
+  const capped = parseHeartbeats([{ key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 1, total: 53 }]);
+  assert(capped.heartbeats.length === 1 && capped.ignored === 52, `rows past the read's bound are counted as ignored (${capped.ignored})`);
+  // The sleep scheduler's row (SMD-1794): read as board-sync's is, with no job.
+  const slept = parseHeartbeats([
+    { key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, running: true }), at, age_s: 30 },
+    { key: "heartbeat:sleep:x", value: JSON.stringify(good), at, age_s: 1 },
+    { key: "heartbeat:sleep", value: JSON.stringify({ ...good, job: "x" }), at, age_s: 1 },
+  ]);
+  assert(slept.heartbeats.length === 1 && slept.ignored === 2 && slept.heartbeats[0].worker === "sleep" && slept.heartbeats[0].job === null && slept.heartbeats[0].running === true,
+    `heartbeat:sleep is read with no job, and one carrying a job, in its key or its value, is not (${slept.heartbeats.length}, ${slept.ignored})`);
+  // Its sleep's mark (SMD-2678): carried when of the shape — a UTC instant from,
+  // and to one or null — left off otherwise, the heartbeat still counted; and
+  // never read off another worker's row.
+  const marks = [
+    { from: at, to: null }, { from: at, to: at },
+    { from: "yesterday", to: null }, { from: at, to: "later" }, { from: at }, { to: at }, null, "x",
+  ];
+  const marked = parseHeartbeats(marks.map((s) => ({ key: "heartbeat:sleep", value: JSON.stringify({ ...good, slept: s }), at, age_s: 1 })));
+  assert(marked.heartbeats.length === 8 && marked.ignored === 0
+      && JSON.stringify(marked.heartbeats.map((h) => h.slept ?? null)) === JSON.stringify([{ from: at, to: null }, { from: at, to: at }, null, null, null, null, null, null]),
+    `a sleep mark is carried only when of the shape, and its row counts either way (${JSON.stringify(marked.heartbeats.map((h) => h.slept ?? null))})`);
+  const otherMark = parseHeartbeats([{ key: "heartbeat:board-sync", value: JSON.stringify({ ...good, slept: { from: at, to: null } }), at, age_s: 1 }]);
+  assert(otherMark.heartbeats.length === 1 && otherMark.heartbeats[0].slept === undefined, "…and another worker's row carries none");
+  // Its word on reading the query log (review pass 1): one of three, else left off; never another worker's.
+  const readsOf = (key: string, reads: unknown) => parseHeartbeats([{ key, value: JSON.stringify({ ...good, reads }), at, age_s: 1 }]).heartbeats[0]?.reads;
+  assert(readsOf("heartbeat:sleep", "yes") === "yes" && readsOf("heartbeat:sleep", "denied") === "denied" && readsOf("heartbeat:sleep", "missing") === "missing"
+      && readsOf("heartbeat:sleep", "maybe") === undefined && readsOf("heartbeat:sleep", true) === undefined && readsOf("heartbeat:board-sync", "yes") === undefined,
+    "the scheduler's reads word is carried when one of three, and never off another worker's row");
+  // Its waiting passes and its refusal (SMD-2752): carried when of the shape, else left off; never another worker's.
+  const markOf = (key: string, extra: Record<string, unknown>) => parseHeartbeats([{ key, value: JSON.stringify({ ...good, ...extra }), at, age_s: 1 }]).heartbeats[0];
+  const waits = [["extract"], ["extract", "consolidate"], [], ["extract", "extract"], ["board-sync"], "extract", ["extract", "consolidate", "extract"]].map((w) => markOf("heartbeat:sleep", { waiting: w })?.waiting ?? null);
+  assert(JSON.stringify(waits) === JSON.stringify([["extract"], ["extract", "consolidate"], null, null, null, null, null]) && markOf("heartbeat:board-sync", { waiting: ["extract"] })?.waiting === undefined,
+    `the scheduler's waiting passes are carried by name, each once, and never off another worker's row (${JSON.stringify(waits)})`);
+  const refusals = ["key", "identity", "lookup", "made-up", 2, null].map((r) => markOf("heartbeat:sleep", { refused: r })?.refused ?? null);
+  // Since SMD-3214 db/supervise.ts's guard writes one on any compose follower's row, so every worker's is read.
+  assert(JSON.stringify(refusals) === JSON.stringify(["key", "identity", "lookup", null, null, null]) && markOf("heartbeat:board-sync", { refused: "key" })?.refused === "key" && markOf("heartbeat:extract:x", { refused: "identity" })?.refused === "identity" && markOf("heartbeat:extract:x", { refused: "made-up" })?.refused === undefined && markOf("heartbeat:sleep", { refused: "made-up" }) !== undefined,
+    `a refusal is carried when one of the list, on any worker's row, and its row counts either way (${JSON.stringify(refusals)})`);
+  // The supervisor's next try (SMD-3214): on an ended row, of the shape, else left off — the row counted either way.
+  const ended = { ended: true, outcome: "failed" };
+  const restarts = [
+    { in_s: 60, code: 2, tries: 1 }, { in_s: null, code: 2, tries: 0 }, { in_s: 900, code: 1, tries: 7 },
+    { in_s: -1, code: 2, tries: 1 }, { in_s: 86_401, code: 2, tries: 1 }, { in_s: 60, code: 256, tries: 1 }, { in_s: 60, code: 2 }, { in_s: "60", code: 2, tries: 1 }, null, "soon",
+  ].map((r) => markOf("heartbeat:board-sync", { ...ended, restart: r }));
+  assert(restarts.every((h) => h !== undefined)
+      && JSON.stringify(restarts.map((h) => h?.restart ?? null)) === JSON.stringify([{ inS: 60, code: 2, tries: 1 }, { inS: null, code: 2, tries: 0 }, { inS: 900, code: 1, tries: 7 }, null, null, null, null, null, null, null])
+      && markOf("heartbeat:extract:x", { restart: { in_s: 60, code: 2, tries: 1 } })?.restart === undefined,
+    `a restart is carried on an ended row when of the shape, never on a live one, and its row counts either way (${JSON.stringify(restarts.map((h) => h?.restart ?? null))})`);
+  // Its words: held, with the cause and the next try by the row's own clock — the try past due said so — and none for a row no supervisor ended.
+  const heldRow = (age_s: number, restart: unknown, extra: Record<string, unknown> = {}) =>
+    parseHeartbeats([{ key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, ...ended, restart, ...extra }), at, age_s }]).heartbeats[0];
+  const heldState = (h: ReturnType<typeof heldRow>) => heartbeatState(h!);
+  const soon = heldState(heldRow(20, { in_s: 80, code: 2, tries: 2 }));
+  const heldGuard = heldState(heldRow(5, { in_s: null, code: 2, tries: 0 }, { refused: "identity" }));
+  const due = heldState(heldRow(120, { in_s: 60, code: 1, tries: 1 }));
+  assert(/^held: exited 2, 2 end\(s\) in a row — its supervisor runs it again in 60 s \(last stamped 20 s ago/.test(soon)
+      && /^held: refused \(identity\) — its supervisor runs it again only once the service is recreated/.test(heldGuard)
+      && /^held: exited 1, 1 end\(s\) in a row — its supervisor ran it again 60 s ago, and it has not stamped since/.test(due)
+      && heldState(heldRow(5, undefined)) === "ended on a failure (last stamped 5 s ago, every 60 s)",
+    `a held row reads held, its cause and its next try — the try past due said so — and an ended row with none reads as before (${soon} | ${heldGuard} | ${due})`);
+  // A follower ended on its start's refusal says the kind; the scheduler's row leaves it to preflight's own words (SMD-3214).
+  const endedWith = (key: string) => heartbeatState(parseHeartbeats([{ key, value: JSON.stringify({ ...good, every_s: 60, ...ended, refused: "linear-key" }), at, age_s: 5 }]).heartbeats[0]!);
+  assert(endedWith("heartbeat:board-sync") === "ended on a failure, refused at its start (linear-key) (last stamped 5 s ago, every 60 s)"
+      && endedWith("heartbeat:sleep") === "ended on a failure (last stamped 5 s ago, every 60 s)",
+    `an ended follower says its start's refusal by kind, the scheduler's row as before (${endedWith("heartbeat:board-sync")})`);
+  // Its budget (SMD-2679): the stop's word on a sleep that is over, of the two, and the budget of the shape; else left off, the row counted.
+  const stops = [{ from: at, to: at, budget: "clock" }, { from: at, to: at, budget: "statement" }, { from: at, to: null, budget: "clock" }, { from: at, to: at, budget: "rest" }]
+    .map((m) => markOf("heartbeat:sleep", { slept: m })?.slept?.budget ?? null);
+  // The bound rides with the word only, within its kind's range; `resting` only true, only the scheduler's.
+  const limits = [{ budget: "clock", limit: 60 }, { budget: "statement", limit: 0 }, { budget: "clock", limit: 10_081 }, { budget: "statement", limit: -1 }, { limit: 60 }]
+    .map((m) => markOf("heartbeat:sleep", { slept: { from: at, to: at, ...m } })?.slept?.limit ?? null);
+  assert(JSON.stringify(limits) === JSON.stringify([60, 0, null, null, null]) && markOf("heartbeat:sleep", { resting: true })?.resting === true
+      && markOf("heartbeat:sleep", { resting: "yes" })?.resting === undefined && markOf("heartbeat:board-sync", { resting: true })?.resting === undefined
+      // Not on a row that speaks for nothing running: ended, or stale (review pass 2).
+      && markOf("heartbeat:sleep", { resting: true, ended: true, outcome: "stopped" })?.resting === undefined
+      && parseHeartbeats([{ key: "heartbeat:sleep", value: JSON.stringify({ ...good, every_s: 60, resting: true }), at, age_s: 181 }]).heartbeats[0]?.resting === undefined,
+    `a stop's bound is carried with its word and within its kind's range, and resting only when true on the scheduler's row (${JSON.stringify(limits)})`);
+  const BUDGET = { minutes: 60, statementTimeoutS: 300, workMemMb: 4, maintenanceWorkMemMb: 64, stops: 3 };
+  const budgets = [BUDGET, { ...BUDGET, stops: -1 }, { ...BUDGET, workMemMb: 0 }, { ...BUDGET, minutes: 10_081 }, { ...BUDGET, statementTimeoutS: "300" }, null]
+    .map((b) => markOf("heartbeat:sleep", { budget: b })?.budget?.stops ?? null);
+  assert(JSON.stringify(stops) === JSON.stringify(["clock", "statement", null, null]) && JSON.stringify(budgets) === JSON.stringify([3, null, null, null, null, null])
+      && markOf("heartbeat:board-sync", { budget: BUDGET })?.budget === undefined && markOf("heartbeat:sleep", { budget: { ...BUDGET, stops: -1 } }) !== undefined,
+    `the scheduler's budget stop is carried on a sleep that is over and of the two, its budget when of the shape, never off another worker's row (${JSON.stringify(stops)}; ${JSON.stringify(budgets)})`);
+  assert(heartbeatState(bs) === "alive (last stamped 15 min ago, every 300 s)" && heartbeatState(ex) === "stale (last stamped 3 min ago, every 60 s; 12 of its last 50 answers malformed)"
+      && heartbeatState({ ...bs, outcome: "failed" }) === "alive, its last pass failed (last stamped 15 min ago, every 300 s)"
+      && heartbeatState({ ...bs, running: true, waiting: ["extract"] }) === "waiting for the provider at a pass's start (last stamped 15 min ago, every 300 s)" && heartbeatState({ ...bs, running: true }) === "running a pass (last stamped 15 min ago, every 300 s)"
+      && heartbeatState({ ...bs, stale: true, outcome: "failed" }) === "stale (last stamped 15 min ago, every 300 s, its last pass failed)"
+      && heartbeatState({ ...bs, outcome: "stopped", ended: true }) === "stopped (last stamped 15 min ago, every 300 s)"
+      && heartbeatState({ ...bs, outcome: "failed", ended: true }) === "ended on a failure (last stamped 15 min ago, every 300 s)"
+      && heartbeatState({ ...bs, outcome: "failed", ended: true, stale: true }) === "ended on a failure (last stamped 15 min ago, every 300 s)"
+      && heartbeatState({ ...bs, running: true, outcome: "failed" }) === "running a pass, its last pass failed (last stamped 15 min ago, every 300 s)",
+    `heartbeatState words alive, failed, stale, stopped (fresh or not) and the alarm (${heartbeatState(ex)})`);
+  assert([ago(45), ago(120), ago(5400), ago(200000)].join("|") === "45 s|2 min|2 h|2 d", `ago reads seconds, minutes, hours, days (${[ago(45), ago(120), ago(5400), ago(200000)].join("|")})`);
+  const server0 = () => ({ version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } });
+  heartbeatRows = [{ key: "heartbeat:board-sync", value: JSON.stringify(good), at, age_s: 10 }, { key: "heartbeat:x", value: "{}", at, age_s: 1 }];
+  const withBeats = renderBrainInfo(await brainInfo(server0(), async () => readDatabaseFacts(fake), 1000));
+  heartbeatRows = [];
+  assert(/^Workers: +board-sync alive \(last stamped 10 s ago, every 300 s\) \(1 heartbeat row\(s\) not of the shape, ignored\)$/m.test(withBeats),
+    `the table's Workers row names each heartbeat and the rows ignored (${withBeats.split("\n").find((l) => l.startsWith("Workers"))})`);
+  // The row's other states: none stamped (with what was ignored), and ob1_config not read.
+  heartbeatRows = [{ key: "heartbeat:x", value: "{}", at, age_s: 1 }];
+  const noneRow = renderBrainInfo(await brainInfo(server0(), async () => readDatabaseFacts(fake), 1000)).split("\n").find((l) => l.startsWith("Workers"));
+  heartbeatRows = [];
+  const lostRow = renderBrainInfo(await brainInfo(server0(), async () => ({ ...facts, workers: null, unread: { workers: { reason: "refused", message: "permission denied for table ob1_config" } } }), 1000)).split("\n").find((l) => l.startsWith("Workers"));
+  assert(/^Workers: +none stamped — no long-running worker has run here \(1 heartbeat row\(s\) not of the shape, ignored\)$/.test(noneRow ?? "") && /^Workers: +\? \(ob1_config not readable by this role\)$/.test(lostRow ?? ""),
+    `the Workers row reads none stamped, or ? when not read (${noneRow} / ${lostRow})`);
+
+
+  const server = { version: FORK_VERSION, releaseRange: [49, 51] as const, latestMigration: 52, commit: "abc1234", store: "sql", tier: null, embedding: { model: "m", dim: 1024 } };
+  const planted = (highest: number | null, over: Partial<Facts> = {}): Facts => ({ ...facts, ledger: { present: true, names: highest === null ? [] : [`${highest}_x.sql`] }, highestMigration: highest, unread: {}, ...over });
+  const ahead = await brainInfo(server, async () => planted(53), 1000);
+  const aheadText = renderBrainInfo(ahead);
+  assert(ahead.ledgerStatus === "ahead" && /^Migrations: +053 applied — this server's tree ends at 052 \(the brain is ahead of it\)$/m.test(aheadText),
+    `a ledger past the tree is ahead, in the record and the table (${aheadText.split("\n").find((l) => l.startsWith("Migrations"))})`);
+  const behindText = renderBrainInfo(await brainInfo(server, async () => planted(51), 1000));
+  assert(/^Migrations: +051 applied — this server's tree ends at 052 \(the brain is behind it\)$/m.test(behindText), "…one short of it is behind");
+  const db = ahead.database as { ledger: Record<string, unknown> };
+  assert(JSON.stringify(db.ledger) === JSON.stringify({ present: true, readable: true }), `the record carries the ledger's standing, not its names (${JSON.stringify(db.ledger)})`);
+  const unreadText = renderBrainInfo(await brainInfo(server, async () => planted(52, { unread: { ob1_config: { reason: "refused", message: "permission denied for table ob1_config" } }, schemaVersion: null }), 1000));
+  assert(/^Schema version: +\? \(ob1_config not readable by this role\)$/m.test(unreadText) && /^Brain embedding: +\? \(ob1_config not readable by this role\)$/m.test(unreadText) && /^Not read: +ob1_config — not readable by this role: permission denied/m.test(unreadText),
+    "an ob1_config this role cannot read is `?`, not `none recorded`");
+  const readText = renderBrainInfo(await brainInfo(server, async () => facts, 1000));
+  assert(/^Rows: +7 thoughts · \? audit events · no table chunks · \? entities$/m.test(readText) && /^Migrations: +schema_migrations not read in time/m.test(readText) && /^Database size: +10\.8 MB$/m.test(readText),
+    `the table says which count was not read and which table is absent, and a timed-out ledger is not called a grant (${readText.split("\n").find((l) => l.startsWith("Migrations"))})`);
+  const noBoard = renderBrainInfo(await brainInfo(server, async () => planted(52, { boardSync: null }), 1000));
+  const lostBoard = renderBrainInfo(await brainInfo(server, async () => planted(52, { boardSync: null, unread: { boardSync: { reason: "timeout", message: "canceling statement due to statement timeout" } } }), 1000));
+  assert(/^Board sync: +2026-09-24T12:00:00\.000Z$/m.test(readText) && /^Board sync: +none — no thought carries a usable Linear watermark$/m.test(noBoard) && /^Board sync: +\?$/m.test(lostBoard),
+    `the table's board-sync row: the watermark, none, or ? when not read (${[readText, noBoard, lostBoard].map((t) => t.split("\n").find((l) => l.startsWith("Board sync"))).join(" / ")})`);
+  // The findings rows (SMD-2680): the queue and the relations, none, ? when not read, and no table.
+  const quiet = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 0, oldestPendingS: null, boardPairs: 0 }, relations: { related: 0, evolves: 0, duplicate: 0, distinct: 0, boardPairs: 0 } }), 1000));
+  const staleOnly = renderBrainInfo(await brainInfo(server, async () => planted(84, { proposals: { pending: 0, stale: 3, oldestPendingS: null, boardPairs: 0 }, relations: { related: 2, evolves: 0, duplicate: 0, distinct: 0, boardPairs: 0 } }), 1000));
+  // 102 (SMD-3117): the pairs judged distinct, beside the relations and outside their count — with relations, alone, and one.
+  const withApart = renderBrainInfo(await brainInfo(server, async () => planted(100, { relations: { related: 2, evolves: 0, duplicate: 0, distinct: 5, boardPairs: 0 } }), 1000));
+  const onlyApart = renderBrainInfo(await brainInfo(server, async () => planted(100, { relations: { related: 0, evolves: 0, duplicate: 0, distinct: 1, boardPairs: 0 } }), 1000));
+  const lostFindings = renderBrainInfo(await brainInfo(server, async () => planted(52, { proposals: null, relations: null, unread: { proposals: { reason: "refused", message: "permission denied for table supersession_proposals" }, relations: { reason: "timeout", message: "canceling statement due to statement timeout" } } }), 1000));
+  const boardLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { unread: { "proposals.boardPairs": { reason: "timeout", message: "canceling statement due to statement timeout" } }, proposals: { pending: 6, stale: 0, oldestPendingS: 60, boardPairs: null } }), 1000));
+  const execLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { unread: { "proposals.boardPairs": { reason: "refused", message: "permission denied for function consolidation_tickets_linked" } }, proposals: { pending: 6, stale: 0, oldestPendingS: 60, boardPairs: null } }), 1000));
+  const relBoardLost = renderBrainInfo(await brainInfo(server, async () => planted(84, { relations: { related: 2, evolves: 0, duplicate: 0, distinct: 0, boardPairs: null }, unread: { "relations.boardPairs": { reason: "timeout", message: "x" } } }), 1000));
+  const pre079 = renderBrainInfo(await brainInfo(server, async () => planted(78, { proposals: { pending: 2, stale: 0, oldestPendingS: 60, boardPairs: null } }), 1000));
+  const denied = [deniedObject("permission denied for table thoughts"), deniedObject("permission denied for function consolidation_tickets_linked"), deniedObject("canceling statement due to lock timeout")];
+  assert(JSON.stringify(denied) === '[{"kind":"table","name":"thoughts"},{"kind":"function","name":"consolidation_tickets_linked"},null]', `a refusal names its table or function (${JSON.stringify(denied)})`);
+  const noTables = renderBrainInfo(await brainInfo(server, async () => planted(52, { proposals: null, relations: null }), 1000));
+  const pre084 = renderBrainInfo(await brainInfo(server, async () => planted(83, { relations: { related: 0, evolves: 0, duplicate: 0, distinct: 0, boardPairs: 0 } }), 1000));
+  const line = (t: string, label: string) => t.split("\n").find((l) => l.startsWith(label)) ?? "";
+  assert(/^Proposals: +6 pending \(the oldest judged 3 d ago; 4 pair two tickets the board does not link\); 2 stale$/m.test(readText) && /^Relations: +14 standing \(9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link\); 3 pairs judged distinct$/m.test(readText)
+      && /^Relations: +2 standing \(2 related, 0 evolves, 0 duplicate\); 5 pairs judged distinct$/m.test(withApart) && /^Relations: +none standing; 1 pair judged distinct$/m.test(onlyApart)
+      && /^Relations: +none — migration 084 is not applied$/m.test(pre084)
+      && /^Proposals: +none pending$/m.test(quiet) && /^Relations: +none standing$/m.test(quiet)
+      && /^Proposals: +none pending; 3 stale$/m.test(staleOnly) && /^Relations: +2 standing \(2 related, 0 evolves, 0 duplicate\)$/m.test(staleOnly)
+      && /^Proposals: +\? \(supersession_proposals not readable by this role\)$/m.test(lostFindings) && /^Proposals: +2 pending \(the oldest judged 60 s ago\)$/m.test(pre079) && /^Proposals: +6 pending \(the oldest judged 60 s ago; board pairs \? \(not read in time\)\)$/m.test(boardLost) && /^Relations: +2 standing \(2 related, 0 evolves, 0 duplicate; board pairs \? \(not read in time\)\)$/m.test(relBoardLost) && /^Proposals: +6 pending \(the oldest judged 60 s ago; board pairs \? \(079's predicate not executable by this role\)\)$/m.test(execLost) && /^Relations: +\? \(thought_facets not read in time\)$/m.test(lostFindings)
+      && /^Proposals: +no table — migration 029 is not applied$/m.test(noTables) && /^Relations: +no table — migration 042 is not applied$/m.test(noTables),
+    `the table's findings rows: the counts, none (before 084, why), ? when not read, no table (${[readText, quiet, staleOnly, lostFindings, noTables, pre084].map((t) => `${line(t, "Proposals")} + ${line(t, "Relations")}`).join(" / ")})`);
+
+  // The deadline keeps what was read (review pass 2: it threw every fact away).
+  // A count that never answers: the catalog, the config and the ledger stand,
+  // the hanging read and every one after it are `deadline`. Each call raced
+  // against a guard of its own, so a missing deadline fails here by name.
+  const guard = <T>(p: Promise<T>) => Promise.race([p, Bun.sleep(3000).then(() => null)]);
+  hang.add("FROM thoughts");
+  const t0 = performance.now();
+  const partial = await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 100));
+  const took = performance.now() - t0;
+  hang.clear();
+  const pd = partial && !("error" in partial.database) ? partial.database : null;
+  assert(pd !== null && took < 1000 && pd.postgres === "16.15" && pd.schemaVersion === "1.1.0+upstream.9543c29"
+      && pd.unread["counts.thoughts"]?.reason === "deadline" && pd.unread["counts.thoughts"]?.message === "not read before the deadline"
+      && pd.unread.databaseBytes?.reason === "deadline" && pd.unread.ledger?.reason === "timeout",
+    `at the deadline the facts read so far stand and the rest are named (${Math.round(took)} ms, ${JSON.stringify(pd?.unread)})`);
+  // A table absent everywhere was settled before any read, so the deadline
+  // never names it (review pass 3: it rendered '?' for 'no table').
+  assert(pd !== null && !("counts.thought_chunks" in pd.unread) && pd.unread["counts.thought_audit"]?.reason === "invisible",
+    "at the deadline an absent table is still absent, an invisible one still invisible");
+  // A deadline between a read's write and its savepoint's RELEASE: the fact is
+  // read, and not named `deadline` (review pass 3: the snapshot tore).
+  releaseMs = 150;
+  const torn = await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 60));
+  releaseMs = 0;
+  const td = torn && !("error" in torn.database) ? torn.database : null;
+  assert(td !== null && td.schemaVersion === "1.1.0+upstream.9543c29" && !("ob1_config" in td.unread),
+    `a fact written before its savepoint's release is read, not deadline (${JSON.stringify(td?.unread.ob1_config)})`);
+  // A failure after the catalog answered — here the COMMIT — keeps what was
+  // read (review pass 3: it threw every fact away).
+  failCommit = true;
+  const dropped = await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 1000));
+  failCommit = false;
+  assert(dropped !== null && !("error" in dropped.database) && dropped.database.postgres === "16.15" && dropped.database.schemaVersion === "1.1.0+upstream.9543c29"
+      && /terminating connection/.test(dropped.database.unread.transaction?.message ?? ""),
+    `a failure after every read answered keeps the facts, and is named rather than lost (review pass 4: ${JSON.stringify(dropped && !("error" in dropped.database) ? dropped.database.unread.transaction : null)})`);
+  // A savepoint that fails after its read wrote (its RELEASE): the value is
+  // taken back, so the ledger is not both read and unread (review pass 4:
+  // `current` beside "schema_migrations not read").
+  answerLedger = true;
+  const tx2Facts = await (async () => {
+    // The first savepoint is ob1_config's, the second the heartbeats'
+    // (SMD-2261); fail the third, the ledger's.
+    // Fresh function objects: Object.assign onto `tag` would replace the
+    // shared fake's own savepoint and begin.
+    let n = 0;
+    const run = (strings: TemplateStringsArray) => tag(strings);
+    const counting = Object.assign((strings: TemplateStringsArray) => run(strings), {
+      savepoint: async <T>(fn: (sp: typeof run) => Promise<T>) => {
+        const r = await fn(run);
+        if (++n === 3) throw pgError("server closed the connection unexpectedly", "08006");
+        return r;
+      },
+    });
+    const client = Object.assign((strings: TemplateStringsArray) => run(strings), { begin: async <T>(fn: (t: typeof counting) => Promise<T>) => fn(counting) });
+    return readDatabaseFacts(client);
+  })();
+  answerLedger = false;
+  assert(tx2Facts.unread.ledger?.reason === "error" && tx2Facts.highestMigration === null && tx2Facts.ledger.names === null,
+    `a ledger read whose savepoint then failed is unread, its highest taken back (${tx2Facts.highestMigration}, ${JSON.stringify(tx2Facts.unread.ledger)})`);
+  // A deadline during a SAVEPOINT round trip starts no statement after it
+  // (review pass 4: the abandoned read ran one more count).
+  savepointMs = 120;
+  statements.length = 0;
+  await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 60));
+  await Bun.sleep(300);
+  savepointMs = 0;
+  assert(!statements.some((t) => /FROM ob1_config/.test(t)), "a deadline during the SAVEPOINT round trip: the read inside it never runs");
+
+  // Between cuts the version stays the last cut's; the tail says what this
+  // tree adds (review pass 4). A release image's tree ends at the range.
+  const between = await brainInfo(server, async () => planted(52), 1000);
+  const cut = await brainInfo({ ...server, latestMigration: 51 }, async () => planted(51), 1000);
+  assert(JSON.stringify(between.unreleased) === "[52,52]" && /^Version: .*\(release range 049–051; this tree adds 052, unreleased\)$/m.test(renderBrainInfo(between)) && cut.unreleased === null,
+    `the version names the unreleased tail between cuts, and none at a cut (${JSON.stringify(between.unreleased)}, ${JSON.stringify(cut.unreleased)})`);
+  // An abandoned read starts nothing more: a count that answers after the
+  // deadline is the last statement it runs — no size read follows it.
+  slow.add("FROM thoughts");
+  statements.length = 0;
+  await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 50));
+  await Bun.sleep(300);
+  slow.clear();
+  assert(statements.some((t) => /FROM thoughts/.test(t)) && !statements.some((t) => /FROM thought_chunks|pg_database_size/.test(t)),
+    "an abandoned read stops at the deadline: no read is started after it");
+  hang.add("server_version");
+  const none = await guard(brainInfo(server, (progress) => readDatabaseFacts(fake, {}, progress), 50));
+  hang.clear();
+  assert(none !== null && "error" in none.database && /no answer within 50 ms/.test(none.database.error) && none.ledgerStatus === null,
+    "a catalog that never answers is the database's error at the deadline, the server's facts still there");
+}
+
+// The Vectors row (SMD-2889): how many wait, none, or why not read.
+{
+  const { vectorsLine } = await import("./brain-info.ts");
+  assert(vectorsLine({ vectorless: 0, unread: {} }) === "every thought has one", "none waiting: said");
+  assert(vectorsLine({ vectorless: 1, unread: {} }) === "1 thought waits for a vector — the servers' vector mender embeds it once the provider answers and the egress gate allows the call", `one: singular (${vectorsLine({ vectorless: 1, unread: {} })})`);
+  assert(/^1,204 thoughts wait for a vector — the servers' vector mender embeds them/.test(vectorsLine({ vectorless: 1204, unread: {} })), "many: counted, plural");
+  assert(/^\? \(thoughts /.test(vectorsLine({ vectorless: null, unread: { vectorless: { reason: "timeout", message: "canceling statement due to statement timeout" } } })) && vectorsLine({ vectorless: null, unread: {} }) === "no table",
+    `not read: why; no table: said (${vectorsLine({ vectorless: null, unread: { vectorless: { reason: "timeout", message: "x" } } })})`);
+}
+
+// The Provider row (SMD-2890): not called yet, answering, or degraded since when, why, and what still works.
+{
+  const { providerWords, renderBrainInfo } = await import("./brain-info.ts");
+  const R = { reprobeS: 15, reprobeByCall: true };
+  assert(providerWords({ status: "unknown", ...R }) === "not called yet", "unknown: not called yet");
+  // What answered says what is known (review pass 4): a call embeds; GET /models only reaches; a call refused or unusable is a fault.
+  assert(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "call", ...R }) === "answering (an embedding call answered 2026-10-22T00:00:00.000Z)", "answering by a call: it embeds");
+  assert(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "probe", ...R }) === "reachable (GET /models answered 2026-10-22T00:00:00.000Z); no embedding call made since", "answering by the probe: reachable, nothing said of the calls");
+  assert(/^answering, but refusing its embedding calls \(it answered 404, 2026-10-22T00:00:00\.000Z\) — a capture fails outright until that is fixed: check the model is pulled and the key$/.test(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "call", fault: "it answered 404", ...R })),
+    "a fault: the provider there, a capture failing outright, what to check");
+  const down = { status: "unreachable" as const, since: "2026-10-22T00:00:00.000Z", at: "2026-10-22T00:01:00.000Z", reason: "provider_unreachable", detail: "the connection was refused", clears: "probe" as const };
+  assert(providerWords({ ...down, ...R }) === "unreachable since 2026-10-22T00:00:00.000Z (the connection was refused) — serving degraded: a capture lands without its vector, a search answers by exact matches; re-probed every 15 s by GET /models",
+    `unreachable: since its first outage, why, what still works, the re-probe (${providerWords({ ...down, ...R })})`);
+  assert(/; it is not re-probed, so a call that is answered clears this$/.test(providerWords({ ...down, reprobeS: null, reprobeByCall: false })), "…and with no re-probe, what clears it");
+  // A call's 5xx GET /models cannot see (a proxy answering /models, its backend down): "failing its calls", re-probed by a call — or, the gate refusing that call, only a call ends it.
+  const proxied = { ...down, reason: "provider_503", detail: "it answered 503", clears: "call" as const };
+  assert(/^failing its calls since .*; re-probed every 15 s by one embedding call, as GET \/models cannot see a call's 503$/.test(providerWords({ ...proxied, ...R })),
+    `a call's 503: failing, re-probed by a call (${providerWords({ ...proxied, ...R })})`);
+  assert(/; GET \/models cannot see a call's 503 and the egress gate refuses the probe's embedding call, so only a call that is answered clears this$/.test(providerWords({ ...proxied, reprobeS: 15, reprobeByCall: false })),
+    "…and with the gate refusing the probe's call, only a call clears it, and why");
+  assert(/^unreachable since .*re-probed every 15 s by one embedding call, as GET \/models cannot see a call's timeout$/.test(providerWords({ ...proxied, reason: "provider_timeout", detail: "the request timed out (OB1_LLM_TIMEOUT)", ...R })),
+    "a call's timeout: unreachable, re-probed by a call");
+  const base = { version: "1.0.0", releaseRange: null, latestMigration: 1, commit: "c", store: "sql", tier: null, embedding: { model: "m", dim: 4 }, database: { error: "x" }, ledgerStatus: null } as never;
+  const shown = renderBrainInfo({ ...(base as object), provider: { ...down, ...R } } as never);
+  const lines = shown.split("\n");
+  const at = lines.findIndex((l) => l.startsWith("Embedding:"));
+  assert(/^Provider:\s+unreachable since 2026-10-22T00:00:00\.000Z/.test(lines[at + 1] ?? ""), `the row follows Embedding (${lines[at + 1]})`);
+  assert(!/^Provider:/m.test(renderBrainInfo(base)), "…and a record without the field (an older server's, forwarded) has no row");
+}
+
 console.log("\n[13b] GET /health with a key is what the brain is; without one it is `ok` (SMD-2041)");
 {
   const get = async (path: string, headers: Record<string, string> = {}) => {
@@ -931,15 +1586,566 @@ console.log("\n[13b] GET /health with a key is what the brain is; without one it
   }
 }
 
-console.log("\n[13d] A tool call runs on past its client leaving, and the server under test counts it until its handler ends (SMD-2250 review pass 3)");
+console.log("\n[13c] A keyed /health answers within its deadline from a database that accepts and never replies, and one that refuses at once says so (SMD-2041 review passes 1–2)");
 {
-  // Bun's request count does not see a call whose client has gone, so the
-  // stop waits on this count too: a call served in-process with the provider
-  // slowed, its client leaving mid-call. The rest of SMD-2250's stop — real
-  // child servers, the drain's bounds, the call count's own rules — is
-  // test-entry.ts's, which runs once: none of it reads the server under test
-  // (SMD-3201).
-  const { toolCallsRunning } = await import("./index.ts");
+  // Two child REST cores, since this suite's own env is frozen with no store.
+  // The first's database is a listener that takes the connection and says
+  // nothing: the driver waits out its connect timeout (30 s), and both the
+  // registry check and the read wait with it. Before review pass 1 the probe
+  // got no reply at all. Since pass 2 a registry with no answer by the
+  // deadline gets `ok` — it could still have said revoked. The second's
+  // database refuses at once: the registry reports it cannot reach it (not a
+  // refusal, agents.ts), and the record carries the database's error and the
+  // commit the build arg baked.
+  const { HEALTH_DEADLINE_MS } = await import("./core/reads.ts");
+  // The REST core's keyed /health (SMD-2287 PR 6a: index.ts's answered `ok` as text; the MCP server's comes from here).
+  const OK_BODY = JSON.stringify({ status: "ok" });
+  const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
+  const child = (port: number, databaseUrl: string) => Bun.spawn(["bun", "--no-env-file", "api.ts"], {
+    cwd: import.meta.dir,
+    env: { ...process.env, PORT: String(port), DATABASE_URL: databaseUrl, MCP_ACCESS_KEY: KEY, OB1_GIT_SHA: "c0ffee1" },
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  const up = async (port: number) => {
+    for (let i = 0; i < 100; i++) {
+      if (await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok, () => false)) return true;
+      await Bun.sleep(50);
+    }
+    return false;
+  };
+  const keyed = async (port: number, method: string) => {
+    const t0 = performance.now();
+    const r = await fetch(`http://127.0.0.1:${port}/health`, { method, headers: { "x-brain-key": KEY }, signal: AbortSignal.timeout(HEALTH_DEADLINE_MS + 5000) }).catch((e: Error) => e);
+    const took = performance.now() - t0;
+    return { took, status: r instanceof Response ? r.status : r.name, body: r instanceof Response ? await r.text() : "" };
+  };
+  const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
+  const silentPort = freePort();
+  const quiet = child(silentPort, `postgres://u:p@127.0.0.1:${silent.port}/db`);
+  const refusedPort = freePort();
+  const refusing = child(refusedPort, `postgres://u:p@127.0.0.1:${freePort()}/db`);
+  try {
+    assert(await up(silentPort) && await up(refusedPort), "both child servers answer a keyless probe");
+    const get = await keyed(silentPort, "GET");
+    assert(get.status === 200 && get.body === OK_BODY && get.took < HEALTH_DEADLINE_MS + 1500,
+      `keyed GET /health, the database silent → 200 \`ok\` in ${Math.round(get.took)} ms (deadline ${HEALTH_DEADLINE_MS} ms)`);
+    const head = await keyed(silentPort, "HEAD");
+    assert(head.status === 200 && head.body === "" && head.took < 500, `keyed HEAD /health reads nothing and answers at once (${Math.round(head.took)} ms)`);
+    const refused = await keyed(refusedPort, "GET");
+    let info: Record<string, any> = {};
+    try { info = JSON.parse(refused.body); } catch { /* asserted below */ }
+    assert(refused.status === 200 && refused.took < HEALTH_DEADLINE_MS && typeof info.database?.error === "string" && info.ledgerStatus === null,
+      `keyed GET /health, the database refusing → the record with the database's error in ${Math.round(refused.took)} ms (${info.database?.error})`);
+    assert(info.version === FORK_VERSION && info.commit === "c0ffee1", `…carrying the server's own facts — the commit OB1_GIT_SHA names (${info.commit})`);
+  } finally {
+    quiet.kill();
+    refusing.kill();
+    silent.stop(true);
+  }
+}
+
+console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, exit 0, within OB1_STOP_GRACE less 2 s, and says what it cut; SIGINT the same (SMD-2250)");
+{
+  // Child servers first, run the way the image runs them — the REST core's
+  // api.ts or the MCP server's index.ts the entry, which is when the handlers
+  // go in (SMD-2287 PR 6a: server-portable's index.ts was). The first request
+  // in flight is a keyed /health against a database that never replies
+  // (13c's), answered at its deadline; the others stall before any response. As a child the process
+  // is not PID 1, so without the handlers SIGTERM's default action kills it
+  // at once: the request is cut off and there is no exit code, which is what
+  // these rows fail on. Then the bounds against a stand-in server, the call
+  // count, the grace period's parse and where compose and preflight read it.
+  const { HEALTH_DEADLINE_MS } = await import("./core/reads.ts");
+  const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
+  const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
+  // stdout and stderr both read: the per-request lines are warnings. A child is the REST core, on the database that
+  // never replies, or the MCP server's entry (SMD-2287 PR 6a), its REST core a listener that never answers, so a
+  // keyed call stalls at its whoami as one stalls at the registry lookup.
+  const start = (env: Record<string, string> = {}, entry: "api" | "mcp" = "api") => {
+    const port = freePort();
+    const proc = Bun.spawn(["bun", "--no-env-file", entry === "api" ? "api.ts" : "index.ts"], {
+      cwd: entry === "api" ? import.meta.dir : `${import.meta.dir}/../mcp-server`,
+      env: { ...process.env, PORT: String(port), DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, MCP_ACCESS_KEY: KEY,
+        ...(entry === "mcp" ? { OB1_REST_URL: `http://127.0.0.1:${silent.port}`, OB1_FORWARDER_KEY: "f".repeat(64), OB1_PLUGINS: "" } : {}), ...env },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const err = new Response(proc.stderr).text();
+    return { port, proc, out: new Response(proc.stdout).text().then(async (o) => o + (await err)) };
+  };
+  const up = async (port: number) => {
+    for (let i = 0; i < 200; i++) {
+      if (await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok, () => false)) return true;
+      await Bun.sleep(50);
+    }
+    return false;
+  };
+  // Bounded, and a child still running is killed, so its stdout ends and the row reads it rather than hanging.
+  const exited = async (proc: ReturnType<typeof Bun.spawn>, ms: number) => {
+    const code = await Promise.race([proc.exited.then(() => proc.exitCode), Bun.sleep(ms).then(() => "still running" as const)]);
+    if (code === "still running") proc.kill("SIGKILL");
+    return code;
+  };
+
+  const busy = start();
+  // A malformed grace period: said, and read as the default (8 s of drain).
+  const idle = start({ OB1_STOP_GRACE: "soon" });
+  // With no connection string its store never builds, so it holds no pool: its stop must not say it closed one
+  // (review pass 2; this child ran the PostgREST store, which held none, until SMD-3152 retired it).
+  const ctrlC = start({ DATABASE_URL: "" });
+  const cutter = start({}, "mcp");
+  // OB1_STOP_GRACE=3: the drain's bound is 1 s, so the real bound cuts on real Bun in a second.
+  const graced = start({ OB1_STOP_GRACE: "3" }, "mcp");
+  // A drained stop with a record still open (SMD-1849 PR 2c review pass 3).
+  const leftBehind = start({ OB1_STOP_GRACE: "10" }, "mcp");
+  // A tool call running past its client at the stop (SMD-2250 review pass 3, SMD-3201): the MCP server's entry over a
+  // REST core of its own, with no store, so the call runs to its embedding, which this suite's provider stub holds.
+  const stopForwarder = "e".repeat(64);
+  const callingCore = start({ DATABASE_URL: "", MCP_ACCESS_KEYS: [process.env.MCP_ACCESS_KEYS, `stop-forwarder:forward:${hashKey(stopForwarder)}`].filter(Boolean).join(",") });
+  const calling = start({ OB1_REST_URL: `http://127.0.0.1:${callingCore.port}`, OB1_FORWARDER_KEY: stopForwarder }, "mcp");
+  try {
+    assert(await up(busy.port) && await up(idle.port) && await up(ctrlC.port) && await up(cutter.port) && await up(graced.port) && await up(leftBehind.port)
+      && await up(callingCore.port) && await up(calling.port), "eight child servers answer a keyless probe (the first request, which hands the handlers the server)");
+
+    const t0 = performance.now();
+    const inFlight = fetch(`http://127.0.0.1:${busy.port}/health`, { headers: { "x-brain-key": KEY } })
+      .then(async (r) => ({ status: r.status, body: await r.text(), at: performance.now() - t0 }), (e: Error) => ({ status: 0, body: e.message, at: performance.now() - t0 }));
+    await Bun.sleep(300);
+    busy.proc.kill("SIGTERM");
+    // Polled, not slept on: a loaded runner may take a while to deliver the
+    // signal, and until then the child rightly answers (review pass 1).
+    let late = "";
+    let refusedAt = Infinity;
+    for (let i = 0; i < 40 && late !== "refused"; i++) {
+      late = await fetch(`http://127.0.0.1:${busy.port}/health`).then((r) => `answered ${r.status}`, () => "refused");
+      if (late === "refused") refusedAt = performance.now() - t0;
+      else await Bun.sleep(50);
+    }
+    const answered = await inFlight;
+    const code = await exited(busy.proc, HEALTH_DEADLINE_MS + 5_000);
+    const took = performance.now() - t0;
+    const log = await busy.out;
+    assert(answered.status === 200 && answered.body === JSON.stringify({ status: "ok" }) && answered.at >= HEALTH_DEADLINE_MS - 100,
+      `the keyed /health in flight when SIGTERM landed is answered, 200 \`ok\` at its deadline (${Math.round(answered.at)} ms; got ${answered.status} ${answered.body.slice(0, 60)})`);
+    assert(late === "refused" && refusedAt < answered.at, `…a new connection after the signal is refused while it is in flight (${late} at ${Math.round(refusedAt)} ms, the request answered at ${Math.round(answered.at)} ms)`);
+    assert(code === 0 && took < HEALTH_DEADLINE_MS + 2_500, `…and the server exits 0 once it is, not at the drain bound (${code} at ${Math.round(took)} ms)`);
+    assert(/SIGTERM: no longer accepting; 1 request in flight/.test(log) && /SIGTERM: stopped in [\d.]+ s; database pool not closed within 1000 ms; exit 0/.test(log),
+      `…saying so on stdout, the request counted (${log.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")})`);
+
+    const t1 = performance.now();
+    idle.proc.kill("SIGTERM");
+    const idleCode = await exited(idle.proc, 3_000);
+    const idleLog = await idle.out;
+    // Since SMD-2284 PR 3 the entry builds its store at start (root.ts's
+    // serveHere, so the job reconcile runs then): the idle server holds a pool
+    // on this silent database, and its stop closes it within the close bound.
+    assert(idleCode === 0 && performance.now() - t1 < 2_500 && /0 requests in flight/.test(idleLog) && /database pool (?:closed|not closed within 1000 ms); exit 0/.test(idleLog),
+      `an idle server stops at once — no request to drain, its pool within the close bound — exit 0 (${idleCode} in ${Math.round(performance.now() - t1)} ms)`);
+    assert(/OB1_STOP_GRACE="soon" is not a whole number of seconds from 1 to 3600, with no unit .*; the stop drains as for 10 s/.test(idleLog) && /waited on for up to 8 s/.test(idleLog),
+      "…and a malformed OB1_STOP_GRACE is said at start-up and read as the default, 8 s of drain");
+
+    await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY } }); // builds its store
+    ctrlC.proc.kill("SIGINT");
+    const intCode = await exited(ctrlC.proc, 3_000);
+    const intLog = await ctrlC.out;
+    assert(intCode === 0 && /SIGINT: stopped in [\d.]+ s; no database pool was opened; exit 0/.test(intLog),
+      `SIGINT stops it the same way, and a store that never built is not said to have a pool closed (${intCode}: ${intLog.split("\n").filter((l) => l.startsWith("SIGINT: stopped")).join("")})`);
+
+    // A keyed call that stalls before its response — its whoami, on the REST
+    // core that never answers — and two SIGTERMs: the second cuts the drain
+    // short, the same path as the bound (onCut, then stop(true) not waited
+    // on), in a fraction of the 8 s. Holds the entry's flag, which picks the
+    // cut line, on real Bun (review pass 2).
+    const tc = performance.now();
+    const stalled = fetch(`http://127.0.0.1:${cutter.port}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    }).then((r) => `answered ${r.status}`, () => "cut off");
+    await Bun.sleep(300);
+    cutter.proc.kill("SIGTERM");
+    await Bun.sleep(200);
+    cutter.proc.kill("SIGTERM");
+    const cutCode = await exited(cutter.proc, 3_000);
+    const cutLog = await cutter.out;
+    const cutLines = cutLog.split("\n").filter((l) => /^request (cut off|abandoned)/.test(l));
+    assert(cutCode === 1 && await stalled === "cut off" && performance.now() - tc < 2_500
+      && cutLines.length === 1 && cutLines[0].startsWith("request cut off by the server's stop after 0.") && /SIGTERM: stopped in [\d.]+ s; no database pool was opened; exit 1/.test(cutLog),
+      `a call stalled before its response, cut by a second signal: the cut line and not the client's, exit 1, no pool to close (${cutCode} in ${Math.round(performance.now() - tc)} ms: ${cutLines.join(" | ").slice(0, 90)})`);
+    // One SIGTERM, and the bound OB1_STOP_GRACE sets does the cutting.
+    const tg = performance.now();
+    const graceStalled = fetch(`http://127.0.0.1:${graced.port}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    }).then((r) => `answered ${r.status}`, () => "cut off");
+    // Beside it, a keyed mirror held at its whoami (the REST core never
+    // answers, so no key is named on its line): only the stop's
+    // cutOpenRequests can write its line — the MCP call above has its own
+    // abort handler, this route none (review pass 4: no test held that call).
+    const mirrorStalled = fetch(`http://127.0.0.1:${graced.port}/mcp/worker-status`, { headers: { "x-brain-key": KEY } })
+      .then((r) => `answered ${r.status}`, () => "cut off");
+    await Bun.sleep(300);
+    graced.proc.kill("SIGTERM");
+    const graceCode = await exited(graced.proc, 4_000);
+    const graceLog = await graced.out;
+    const graceTook = performance.now() - tg;
+    await mirrorStalled;
+    const graceLines = graceLog.split("\n").filter((l) => l.startsWith('{"ts"')).map((l) => JSON.parse(l) as Record<string, unknown>);
+    assert(graceCode === 1 && await graceStalled === "cut off" && graceTook > 1_200 && graceTook < 3_000
+      && /waited on for up to 1 s/.test(graceLog) && /still in flight.* after 1\.\d s, closed unfinished/.test(graceLog) && /^request cut off by the server's stop/m.test(graceLog)
+      && graceLines.filter((l) => l.outcome === "cut" && l.route === undefined && l.agent === undefined).length === 1,
+      `OB1_STOP_GRACE=3 bounds the drain at 1 s: one SIGTERM, the stalled call cut at the bound with its line and its one JSON line, \`cut\`, exit 1 (${graceCode} in ${Math.round(graceTook)} ms)`);
+    const mirrorCut = graceLines.filter((l) => l.route === "/worker-status");
+    assert(mirrorCut.length === 1 && mirrorCut[0]?.outcome === "cut" && mirrorCut[0].tool === "worker_status" && mirrorCut[0].agent === undefined && mirrorCut[0].status === 0,
+      `a keyed mirror held at its whoami when the stop cuts it: one \`cut\` line, by its route, from the stop's cutOpenRequests (${JSON.stringify(mirrorCut)})`);
+    // A keyed mirror whose client left while it waits on the registry. Bun 1.4.3 counts it done at once, so the stop
+    // drains with it open and only the stop's endOpen writes its line — 0, \`abandoned\` (PR 2c review pass 3); Bun 1.4.0,
+    // CI's and the image's, still counts it, so the drain waits for its handler, whose line says 200, \`abandoned\`
+    // (review pass 4). Either way one line, and the branch is read from the child's own count.
+    const leaving = new AbortController();
+    const left = fetch(`http://127.0.0.1:${leftBehind.port}/mcp/jobs/${crypto.randomUUID()}`, { headers: { "x-brain-key": KEY }, signal: leaving.signal }).then(() => "answered", () => "left");
+    await Bun.sleep(200);
+    leaving.abort();
+    await left;
+    await Bun.sleep(50);
+    leftBehind.proc.kill("SIGTERM");
+    const leftCode = await exited(leftBehind.proc, 6_000);
+    const leftLog = await leftBehind.out;
+    const leftLines = leftLog.split("\n").filter((l) => l.startsWith('{"ts"')).map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.route === "/jobs/:id");
+    const leftCounted = /1 request in flight/.test(leftLog);
+    assert(leftCode === 0 && (leftCounted || /0 requests in flight/.test(leftLog)) && leftLines.length === 1 && leftLines[0]?.outcome === "abandoned"
+      && leftLines[0].agent === undefined && leftLines[0].status === (leftCounted ? 200 : 0),
+      `a mirror whose client left, at a drained stop: one \`abandoned\` line — the stop's, before the flush, where the runtime let it go; its handler's where the drain waited (${leftCode}, ${leftCounted ? "counted" : "let go"}; ${JSON.stringify(leftLines)})`);
+    // A tool call whose client has left, still running when SIGTERM lands. Its handler has already returned the stream,
+    // so Bun counts its request done once the client has gone, and only the entry's count of tool calls holds the stop
+    // until the call ends; before SMD-2250's review pass 3 a stop like this exited under the call, and its capture was
+    // lost. Nothing held the entry's stop to that count until SMD-3201. Its order is the events', not the clock's: the
+    // stub says when the embedding has arrived, and answers no sooner than SLOW_CALL_MS after it nor PAST_SIGNAL_MS after
+    // the signal, stamping when; the entry's exit is held after that answer.
+    const SLOW_QUERY = "a call the stop waits on";
+    const SLOW_CALL_MS = 1_500;
+    const PAST_SIGNAL_MS = 500;
+    const arrived = Promise.withResolvers<void>();
+    const signalled = Promise.withResolvers<void>();
+    let answeredAt = Infinity;
+    embedHold = async (input) => {
+      if (!input.includes(SLOW_QUERY)) return;
+      arrived.resolve();
+      await Promise.all([Bun.sleep(SLOW_CALL_MS), signalled.promise.then(() => Bun.sleep(PAST_SIGNAL_MS))]);
+      answeredAt = performance.now();
+    };
+    try {
+      const tw = performance.now();
+      const leaver = new AbortController();
+      const waitedOn = fetch(`http://127.0.0.1:${calling.port}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
+        signal: leaver.signal,
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "search_thoughts", arguments: { query: SLOW_QUERY } } }),
+      }).then(async (r) => { await r.text(); return "read"; }, () => "left");
+      const reached = await Promise.race([arrived.promise.then(() => true), Bun.sleep(5_000).then(() => false)]);
+      leaver.abort();
+      const leftCall = await waitedOn;
+      await Bun.sleep(100); // the abort reaches the entry, so its request is let go and the call alone holds the stop
+      calling.proc.kill("SIGTERM");
+      signalled.resolve();
+      const callCode = await exited(calling.proc, SLOW_CALL_MS + 3_000);
+      const exitedAt = performance.now();
+      const callLog = await calling.out;
+      const callStop = callLog.split("\n").find((l) => l.startsWith("SIGTERM: no longer accepting")) ?? "";
+      assert(reached && leftCall === "left" && callCode === 0 && exitedAt >= answeredAt && /; (?:0 requests|1 request) in flight, 1 tool call running\b/.test(callStop),
+        `a tool call running past its client when SIGTERM lands holds the MCP server's stop until it ends, exit 0 (${reached ? "reached its embedding" : "no embedding within 5 s"}, ${leftCall}; ${callCode} at ${Math.round(exitedAt - tw)} ms, ${answeredAt === Infinity ? "before the call was answered" : `the call answered at ${Math.round(answeredAt - tw)} ms`}; ${callStop})`);
+    } finally {
+      signalled.resolve();
+      embedHold = undefined;
+    }
+  } finally {
+    for (const { proc } of [busy, idle, ctrlC, cutter, graced, leftBehind, calling, callingCore]) proc.kill("SIGKILL");
+    silent.stop(true);
+  }
+
+  // The bounds, against a stand-in server: a request that never finishes is
+  // cut off at the drain bound (exit 1, named), a second signal cuts the wait
+  // short, a pool that will not close is left at its bound, and with no server
+  // yet there is nothing to wait on. The stand-in's stop(true) never resolves
+  // either, as Bun's does not while a handler has yet to return (review pass 1).
+  const { drainOnSignal, isStoppable, createCallCount, drainBoundFrom } = await import("./shutdown.ts");
+  const { cutByStopLine } = await import("./mcp-edge.ts");
+  const { abandonedRequestLine } = await import("./sse.ts");
+  const stuck = () => {
+    const calls: string[] = [];
+    return { calls, server: { pendingRequests: 1, stop: (force?: boolean) => { calls.push(force ? "stop(true)" : "stop()"); return new Promise<void>(() => {}); } } };
+  };
+  const harness = (opts: Partial<Parameters<typeof drainOnSignal>[0]> & { server: () => any }) => {
+    const handlers = new Map<string, () => void>();
+    const lines: string[] = [];
+    const exits: number[] = [];
+    // The flush's budget at the close's bound, so a stalled collector's row takes 100 ms, not FLUSH_BUDGET_MS (SMD-2902).
+    const { stopped } = drainOnSignal({ close: async () => true, drainBoundMs: 200, closeBoundMs: 100, flushBudgetMs: 100, log: (l) => lines.push(l), exit: (c) => exits.push(c), on: (s, h) => handlers.set(s, h), ...opts });
+    return { handlers, lines, exits, stopped };
+  };
+  /** The stop's exit code, or -1 when it has not run to its exit within 3 s: a hang fails its row rather than the suite. */
+  const settled = (p: Promise<number>) => Promise.race([p, Bun.sleep(3_000).then(() => -1)]);
+
+  let s = stuck();
+  let h = harness({ server: () => s.server, onCut: () => s.calls.push("onCut") });
+  const b0 = performance.now();
+  h.handlers.get("SIGTERM")!();
+  let c = await settled(h.stopped);
+  assert(c === 1 && h.exits.join() === "1" && performance.now() - b0 >= 190 && s.calls.join() === "stop(),onCut,stop(true)" && h.lines.some((l) => /1 request still in flight after 0\.\d s, closed unfinished/.test(l)),
+    `a request that never finishes is cut off at the drain bound: stop(), the cut told, stop(true) not waited on, exit 1, the line naming it (${s.calls.join()}; ${h.lines.join(" | ")})`);
+
+  s = stuck();
+  h = harness({ server: () => s.server, close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000, closeAfterCutMs: 50 });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 1 && /database pool not closed within 50 ms; exit 1$/.test(h.lines.at(-1) ?? ""),
+    `after a cut the pool is given the shorter bound, not the full one (${h.lines.at(-1)})`);
+
+  s = stuck();
+  h = harness({ server: () => s.server, drainBoundMs: 60_000 });
+  const b1 = performance.now();
+  h.handlers.get("SIGTERM")!();
+  h.handlers.get("SIGINT")!();
+  c = await settled(h.stopped);
+  assert(c === 1 && performance.now() - b1 < 1_000 && h.lines.some((l) => l === "SIGINT again: not waiting for the rest") && s.calls.join() === "stop(),stop(true)",
+    `a second signal cuts a 60 s wait short (${Math.round(performance.now() - b1)} ms, exit ${c})`);
+
+  h = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}) });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && h.lines.some((l) => /0 requests in flight/.test(l)) && h.lines.some((l) => /database pool not closed within 100 ms; exit 0/.test(l)),
+    `no server yet: nothing to wait on, exit 0; a pool that will not close is left at its bound and said (${h.lines.at(-1)})`);
+
+  h = harness({ server: () => undefined, close: () => Promise.reject(new Error("boom")) });
+  h.handlers.get("SIGTERM")!();
+  assert(await settled(h.stopped) === 0 && /database pool not closed: boom; exit 0/.test(h.lines.at(-1) ?? ""), "a pool whose close throws is said, and the stop still exits 0");
+
+  h = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000 });
+  const b2 = performance.now();
+  h.handlers.get("SIGTERM")!();
+  await Bun.sleep(20);
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && performance.now() - b2 < 1_000 && /database pool not closed: a second signal; exit 0/.test(h.lines.at(-1) ?? ""),
+    `…and a second signal during the pool's close ends that wait too (${Math.round(performance.now() - b2)} ms: ${h.lines.at(-1)})`);
+
+  h = harness({ server: () => undefined, close: async () => false });
+  h.handlers.get("SIGTERM")!();
+  assert(await settled(h.stopped) === 0 && /; no database pool was opened; exit 0$/.test(h.lines.at(-1) ?? ""), "no pool opened is said as such, not as a pool closed");
+
+  // The telemetry's flush is said on its own (SMD-1849 PR 2b review passes 1–2): a
+  // collector that stalls is the telemetry's, never the pool's; none set, nothing said.
+  type Flush = () => Promise<import("./shutdown.ts").FlushResult | undefined>;
+  const flushLine = async (flush: Flush, close: () => Promise<boolean> = async () => false) => {
+    const fh = harness({ server: () => undefined, close, flush });
+    fh.handlers.get("SIGTERM")!();
+    return { code: await settled(fh.stopped), line: fh.lines.at(-1) ?? "" };
+  };
+  const stalled = await flushLine(() => new Promise(() => {}));
+  const went = await flushLine(async () => "sent", async () => true);
+  const unset = await flushLine(async () => undefined, async () => true);
+  const failed = await flushLine(async () => "failed");
+  const none = await flushLine(async () => "none");
+  const timedOut = await flushLine(async () => "timeout");
+  assert(stalled.code === 0 && /; no database pool was opened; telemetry not all sent within 100 ms; exit 0$/.test(stalled.line) && /; database pool closed; telemetry sent; exit 0$/.test(went.line)
+    && /; database pool closed; exit 0$/.test(unset.line) && /; telemetry not all sent; exit 0$/.test(failed.line) && /; no telemetry left to send; exit 0$/.test(none.line) && /; telemetry not all sent within 100 ms; exit 0$/.test(timedOut.line),
+    `the telemetry's flush is its own clause: sent, not sent, none left, not within its bound — a stalled collector is not the pool's (${[stalled.line, went.line, unset.line, failed.line, none.line, timedOut.line].join(" | ")})`);
+  // What the runtime no longer counts but a record holds open ends before the flush, on a drained stop and a cut
+  // alike; and a cut that throws (a sink that fell over) leaves the flush and the exit to run (PR 2c review pass 3).
+  const drainedOrder: string[] = [];
+  const drainedStop = harness({ server: () => ({ pendingRequests: 0, stop: async () => {} }), endOpen: () => drainedOrder.push("endOpen"), flush: async () => { drainedOrder.push("flush"); return "sent" as const; } });
+  drainedStop.handlers.get("SIGTERM")!();
+  const drainedCode = await settled(drainedStop.stopped);
+  const cutStuck = stuck();
+  const cutOrder: string[] = [];
+  const throwingCut = harness({ server: () => cutStuck.server, onCut: () => { cutOrder.push("onCut"); throw new Error("the sink fell over"); }, endOpen: () => cutOrder.push("endOpen"), flush: async () => { cutOrder.push("flush"); return "sent" as const; } });
+  throwingCut.handlers.get("SIGTERM")!();
+  const throwingCode = await settled(throwingCut.stopped);
+  assert(drainedCode === 0 && drainedOrder.join() === "endOpen,flush" && throwingCode === 1 && cutOrder.join() === "onCut,endOpen,flush" && /; telemetry sent; exit 1$/.test(throwingCut.lines.at(-1) ?? ""),
+    `open records ended before the flush on either path; a cut that throws still flushes and exits (${drainedOrder.join()} / ${cutOrder.join()}; ${throwingCut.lines.at(-1)})`);
+  // Beside the pool's close, not after it: both stalled take the longer bound, not the two added (SMD-2902: each its
+  // own, 300 ms and 400); and a second signal ends the flush's wait as it ends the pool's (review pass 2).
+  const both = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 300, flushBudgetMs: 400, flush: () => new Promise(() => {}) });
+  const b3 = performance.now();
+  both.handlers.get("SIGTERM")!();
+  await settled(both.stopped);
+  const bothMs = performance.now() - b3;
+  const twice = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000, flush: () => new Promise(() => {}) });
+  const b4 = performance.now();
+  twice.handlers.get("SIGTERM")!();
+  await Bun.sleep(20);
+  twice.handlers.get("SIGTERM")!();
+  await settled(twice.stopped);
+  assert(bothMs >= 390 && bothMs < 650 && /database pool not closed within 300 ms; telemetry not all sent within 400 ms; exit 0$/.test(both.lines.at(-1) ?? "")
+    && performance.now() - b4 < 1_000 && /database pool not closed: a second signal; telemetry not all sent: a second signal; exit 0$/.test(twice.lines.at(-1) ?? ""),
+    `a stalled pool and a stalled collector take the longer of their bounds, not both (${Math.round(bothMs)} ms of 300 and 400: ${both.lines.at(-1)}), and a second signal ends both waits (${twice.lines.at(-1)})`);
+
+  // SMD-2902: the flush's own bound — its budget, inside what the grace period leaves less a second before the kill,
+  // never less than the close's — and, cut short, what each signal still held said (`unsent`) before the stop's line.
+  const bounded = async (opts: Partial<Parameters<typeof drainOnSignal>[0]> & { server: () => any }) => {
+    const told: string[] = [];
+    const bh = harness({ unsent: (kind) => { told.push(kind); bh.lines.push(`unsent: ${kind}`); }, ...opts });
+    const t = performance.now();
+    bh.handlers.get("SIGTERM")!();
+    const code = await settled(bh.stopped);
+    return { code, ms: performance.now() - t, told, lines: bh.lines, line: bh.lines.at(-1) ?? "", within: Number(/telemetry not all sent within (\d+) ms/.exec(bh.lines.at(-1) ?? "")?.[1] ?? NaN) };
+  };
+  const stall = () => new Promise<never>(() => {});
+  // A collector slower than the pool's close, inside the flush's budget: sent, not cut at the close's 100 ms.
+  const slower = await bounded({ server: () => undefined, flushBudgetMs: 600, flush: () => Bun.sleep(300).then(() => "sent" as const) });
+  // The grace period caps the budget: 1.4 s less the margin leaves about 400 ms of a 5 s budget.
+  const capped = await bounded({ server: () => undefined, graceMs: 1_400, flushBudgetMs: 5_000, flush: stall });
+  // A grace period with nothing left past the margin: the close's bound, as before.
+  const floored = await bounded({ server: () => undefined, graceMs: 1_000, flushBudgetMs: 5_000, flush: stall });
+  // After a cut at the 200 ms drain bound: what the grace leaves (1.5 s less 1 s less the 0.2 s drained), not the budget.
+  const cutStall = stuck();
+  const afterCut = await bounded({ server: () => cutStall.server, graceMs: 1_500, flushBudgetMs: 5_000, closeAfterCutMs: 50, flush: stall });
+  assert(slower.code === 0 && /; database pool closed; telemetry sent; exit 0$/.test(slower.line) && slower.told.length === 0
+    && capped.within >= 370 && capped.within <= 400 && capped.ms < 700 && floored.within === 100 && afterCut.code === 1 && afterCut.within >= 250 && afterCut.within <= 300,
+    `the flush's own bound: a 300 ms collector sent under a 600 ms budget (${slower.line}); a 1.4 s grace caps a 5 s budget at ${capped.within} ms; a 1 s grace leaves the close's 100 ms (${floored.within}); after a cut at 200 ms, a 1.5 s grace leaves ${afterCut.within} ms`);
+  const cutWord = (r: { told: string[]; lines: string[] }) => r.told.join("|") + " @" + r.lines.findIndex((l) => l.startsWith("unsent: ")) + "/" + (r.lines.length - 1);
+  assert(capped.told.length === 1 && capped.told[0] === `on its way or batched when the flush's ${capped.within} ms ran out` && capped.lines.at(-2)?.startsWith("unsent: ")
+    && afterCut.told.length === 1 && afterCut.lines.at(-2)?.startsWith("unsent: "),
+    `a flush cut at its bound says what was still on its way, once, just before the stop's line (${cutWord(capped)}; ${cutWord(afterCut)})`);
+  // A second signal while the flush waits, the pool already closed: the flush ends, and says what it held.
+  const told2: string[] = [];
+  const again = harness({ server: () => undefined, close: async () => true, flushBudgetMs: 60_000, flush: stall, unsent: (kind) => told2.push(kind) });
+  const b5 = performance.now();
+  again.handlers.get("SIGTERM")!();
+  await Bun.sleep(30);
+  again.handlers.get("SIGTERM")!();
+  // A third at once: what the batches held is said once — a second cut would count them again (review pass 2).
+  again.handlers.get("SIGTERM")!();
+  const againCode = await settled(again.stopped);
+  // A sink that throws is the telemetry's: the stop still says its line and exits.
+  const throwing = await bounded({ server: () => undefined, graceMs: 1_200, flushBudgetMs: 5_000, flush: stall, unsent: () => { throw new Error("the sink fell over"); } });
+  assert(againCode === 0 && performance.now() - b5 < 1_000 && /; database pool closed; telemetry not all sent: a second signal; exit 0$/.test(again.lines.at(-1) ?? "") && told2.length === 1 && told2.join() === "on its way or batched at a second signal"
+    && throwing.code === 0 && /telemetry not all sent within \d+ ms; exit 0$/.test(throwing.line),
+    `a second signal ends the flush's own wait and says what it held (${told2.join()}; ${again.lines.at(-1)}); an unsent sink that throws leaves the line and the exit (${throwing.line})`);
+  // A second signal during the drain (review pass 1): the operator waits for none of the rest, so the flush gets the
+  // close's after-cut bound, not its budget, and says what it held as the second signal's.
+  const drainStuck = stuck();
+  const told3: string[] = [];
+  const duringDrain = harness({ server: () => drainStuck.server, drainBoundMs: 60_000, closeAfterCutMs: 50, flushBudgetMs: 60_000, graceMs: 120_000, flush: stall, unsent: (kind) => told3.push(kind) });
+  const b6 = performance.now();
+  duringDrain.handlers.get("SIGTERM")!();
+  await Bun.sleep(30);
+  duringDrain.handlers.get("SIGTERM")!();
+  const duringCode = await settled(duringDrain.stopped);
+  const duringMs = performance.now() - b6;
+  // A flush that ended before a second signal cuts the close: nothing more is said of it (review pass 1).
+  const told4: string[] = [];
+  const ended = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000, flush: async () => "sent" as const, unsent: (kind) => told4.push(kind) });
+  ended.handlers.get("SIGTERM")!();
+  await Bun.sleep(30);
+  ended.handlers.get("SIGTERM")!();
+  const endedCode = await settled(ended.stopped);
+  const told5: string[] = [];
+  const rejected = harness({ server: () => undefined, close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000, flush: () => Promise.reject(new Error("the SDK fell over")), unsent: (kind) => told5.push(kind) });
+  rejected.handlers.get("SIGTERM")!();
+  await Bun.sleep(30);
+  rejected.handlers.get("SIGTERM")!();
+  const rejectedCode = await settled(rejected.stopped);
+  assert(rejectedCode === 0 && told5.length === 0 && /database pool not closed: a second signal; telemetry not all sent; exit 0$/.test(rejected.lines.at(-1) ?? ""),
+    `a flush that rejected has ended too: a second signal says nothing more of it (${told5.length}: ${rejected.lines.at(-1)})`);
+  assert(duringCode === 1 && duringMs < 400 && /; telemetry not all sent: a second signal; exit 1$/.test(duringDrain.lines.at(-1) ?? "") && told3.join() === "on its way or batched at a second signal"
+    && endedCode === 0 && told4.length === 0 && /database pool not closed: a second signal; telemetry sent; exit 0$/.test(ended.lines.at(-1) ?? ""),
+    `a second signal during the drain cuts the flush to the close's bound (${Math.round(duringMs)} ms, ${told3.join()}: ${duringDrain.lines.at(-1)}); a flush that had ended says nothing more (${told4.length}: ${ended.lines.at(-1)})`);
+
+  const cut = cutByStopLine("tools/call capture_thought", 8_400);
+  assert(cut.startsWith("request cut off by the server's stop after 8.4 s: tools/call capture_thought — still running when the stop closed it") && !/runs to its end/.test(cut) && cut !== abandonedRequestLine("tools/call capture_thought", 8_400),
+    "a request the stop cuts off is said to be the stop's, not the client leaving (SMD-1864's line says the call runs to its end, which it will not)");
+
+  const g = (raw: string | undefined) => { const r = drainBoundFrom(raw); return `${r.graceS}/${r.drainBoundMs}/${r.problem ? "said" : "-"}`; };
+  const graceCases = [g(undefined), g(""), g("30"), g(" 20 "), g("2"), g("1"), g("3600"), g("0"), g("-5"), g("ten"), g("1.5"), g("30s"), g("1m"), g("3601"), g("1e3")];
+  assert(graceCases.join(" ") === "10/8000/- 10/8000/- 30/28000/- 20/18000/- 2/500/- 1/500/- 3600/3598000/- 10/8000/said 10/8000/said 10/8000/said 10/8000/said 10/8000/said 10/8000/said 10/8000/said 10/8000/said",
+    `drainBoundFrom: whole seconds from 1 to 3600, less 2 s, at least 0.5 s; unset and "" the default; a fraction, a unit, 0, a negative or past an hour the default, said (${graceCases.join(" ")})`);
+
+  // Compose appends `s` to OB1_STOP_GRACE for every server's stop_grace_period,
+  // with its own fallback: held equal to the code's default, since check 14
+  // reads environment forwards only (review pass 4 — FORK.md's value defined twice).
+  const { DEFAULT_STOP_GRACE_S } = await import("./shutdown.ts");
+  const graceFallbacks: string[] = [];
+  for (const file of ["compose.yaml"]) {
+    const doc = Bun.YAML.parse(await Bun.file(new URL(`../deploy/${file}`, import.meta.url)).text()) as { services: Record<string, { build?: { dockerfile?: string }; image?: string; stop_grace_period?: string }> };
+    const builds = (svc: { build?: { dockerfile?: string } }) => svc.build?.dockerfile === "server-portable/Dockerfile";
+    // The server's image, built here or (a REST core) run by a building service's name.
+    const serverImages = new Set(Object.values(doc.services).filter(builds).map((svc) => svc.image).filter(Boolean));
+    for (const [name, svc] of Object.entries(doc.services)) {
+      if (!builds(svc) && !serverImages.has(svc.image)) continue;
+      graceFallbacks.push(`${file}:${name}=${/^\$\{OB1_STOP_GRACE:-(\d+)\}s$/.exec(svc.stop_grace_period ?? "")?.[1] ?? svc.stop_grace_period}`);
+    }
+  }
+  // Four: the server, the REST core (SMD-2284), the MCP server (SMD-2287) and
+  // the operator GUI (SMD-2280).
+  assert(graceFallbacks.length === 4 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
+    `every compose server's stop_grace_period is \${OB1_STOP_GRACE:-${DEFAULT_STOP_GRACE_S}}s, the code's default (${graceFallbacks.join(", ")})`);
+
+  // Preflight refuses a value compose would render wrong, and reports one it reads.
+  const preflightWith = async (grace: string) => {
+    const p = Bun.spawn(["bun", "--no-env-file", "preflight.ts"], { cwd: import.meta.dir, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", OB1_STOP_GRACE: grace }, stdout: "pipe", stderr: "pipe" });
+    const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
+    await p.exited;
+    return out;
+  };
+  const badGrace = await preflightWith("1m");
+  const goodGrace = await preflightWith("30");
+  assert(/✗\s+stop grace\s+OB1_STOP_GRACE="1m" is not a whole number of seconds/.test(badGrace) && /30, not 30s/.test(badGrace) && /✓\s+stop grace\s+30 s \(OB1_STOP_GRACE\) — a stop drains what is in flight for up to 28 s/.test(goodGrace),
+    "preflight fails a stop grace compose would render wrong (1m → a 1 ms kill), with the fix, and reports one it reads");
+  // The vector mender's knob (SMD-2889): said when set — its interval, off, or a value the servers read as the default.
+  const preflightMend = async (v: string) => {
+    const p = Bun.spawn(["bun", "--no-env-file", "preflight.ts"], { cwd: import.meta.dir, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", OB1_VECTOR_MEND_INTERVAL: v }, stdout: "pipe", stderr: "pipe" });
+    const out = (await new Response(p.stdout).text()) + (await new Response(p.stderr).text());
+    await p.exited;
+    return out;
+  };
+  const [mendBad, mendOff, mendEvery] = await Promise.all([preflightMend("1d"), preflightMend("off"), preflightMend("120")]);
+  assert(/vector mender\s+OB1_VECTOR_MEND_INTERVAL="1d" is not a whole number of seconds from 1 to 86400/.test(mendBad) && /✓\s+vector mender\s+off \(OB1_VECTOR_MEND_INTERVAL\)/.test(mendOff) && /✓\s+vector mender\s+every 120 s/.test(mendEvery),
+    `preflight says the mender's knob: a bad value warned, off, an interval (${mendBad.split("\n").find((l) => /vector mender/.test(l))?.trim()})`);
+
+  // A tool call runs on after its client has gone, which Bun's request count
+  // does not see (review pass 3: a stop whose only call's client had just left
+  // exited under it, and the capture was lost). The count, then the drain
+  // waiting on it, then the wrap in index.ts counting a real call past its
+  // client, served in-process with the provider slowed.
+  const count = createCallCount();
+  let release: () => void = () => {};
+  const held = count.track(() => new Promise<string>((resolve) => { release = () => resolve("done"); }));
+  const failing = count.track(async () => { throw new Error("boom"); }).catch((e: Error) => e.message);
+  const idleEarly = await Promise.race([count.idle().then(() => "idle"), Bun.sleep(30).then(() => "waiting")]);
+  const during = count.running;
+  release();
+  const results = [await held, await failing];
+  const idleAfter = await Promise.race([count.idle().then(() => "idle"), Bun.sleep(30).then(() => "waiting")]);
+  assert(during === 1 && idleEarly === "waiting" && idleAfter === "idle" && count.running === 0 && results.join() === "done,boom",
+    `the call count: a running call holds idle(), a failed one is still let go, each result passed through (${during} running, ${idleEarly} → ${idleAfter})`);
+
+  let callsLeft = 1;
+  let callsIdle: () => void = () => {};
+  const bc = performance.now();
+  h = harness({ server: () => ({ pendingRequests: 0, stop: () => Promise.resolve() }), calls: { get running() { return callsLeft; }, idle: () => new Promise<void>((resolve) => { callsIdle = resolve; }) }, drainBoundMs: 5_000 });
+  h.handlers.get("SIGTERM")!();
+  setTimeout(() => { callsLeft = 0; callsIdle(); }, 150);
+  c = await settled(h.stopped);
+  assert(c === 0 && performance.now() - bc >= 140 && h.lines[0].includes("0 requests in flight, 1 tool call running"),
+    `the drain waits for a tool call its request no longer counts, and says so (${Math.round(performance.now() - bc)} ms: ${h.lines[0].slice(0, 70)})`);
+
+  h = harness({ server: () => ({ pendingRequests: 0, stop: () => new Promise<void>(() => {}) }), calls: { running: 0, idle: () => Promise.resolve() } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && !h.lines.some((l) => /closed unfinished/.test(l)),
+    `a bound that finds nothing left in flight is a drain, not "0 still in flight, closed unfinished" and exit 1 (${h.lines.at(-1)})`);
+
+  h = harness({ server: () => ({ pendingRequests: 1, stop: () => Bun.sleep(170) }), close: () => new Promise<boolean>(() => {}), closeBoundMs: 60_000, closeAfterCutMs: 30 });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  const lateClose = Number(/database pool not closed within (\d+) ms; exit 0$/.exec(h.lines.at(-1) ?? "")?.[1] ?? NaN);
+  assert(c === 0 && lateClose >= 30 && lateClose <= 70,
+    `a drain that ends late gives the close what is left of the bound, not its full second (${lateClose} ms of a 200 ms bound ended at about 170)`);
+
   const aborter = new AbortController();
   embedDelayMs = 700;
   const gone = fetch(BASE, { method: "POST", headers: AUTH, signal: aborter.signal, body: JSON.stringify({ jsonrpc: "2.0", id: 60, method: "tools/call", params: { name: "search_thoughts", arguments: { query: "a call whose client leaves" } } }) }).then(async (r) => { await r.text(); return "read"; }, () => "left");
@@ -950,8 +2156,8 @@ console.log("\n[13d] A tool call runs on past its client leaving, and the server
     aborter.abort();
     await gone;
     await Bun.sleep(150);
-    // The server under test's own count: index.ts's, or the MCP server's (SMD-2287 PR 4b).
-    const running = worker.toolCallsRunning ?? toolCallsRunning;
+    // The server under test's own count, the MCP server's (SMD-2287 PR 4b).
+    const running = worker.toolCallsRunning;
     const whileRunning = running();
     await Bun.sleep(900);
     assert(whileRunning === 1 && running() === 0,
@@ -960,6 +2166,9 @@ console.log("\n[13d] A tool call runs on past its client leaving, and the server
     console.warn = quiet;
     embedDelayMs = 0;
   }
+
+  assert(isStoppable({ stop: () => Promise.resolve(), pendingRequests: 0 }) && !isStoppable({ OB1_STORE: "sql" }) && !isStoppable(undefined) && !isStoppable(null),
+    "isStoppable: Bun's server shape, not an env record, not nothing");
 }
 
 console.log("\n[14] OB1_STORE unset selects the SQL store, the only one; postgrest is refused by name (SMD-1797, SMD-3152)");
@@ -1046,7 +2255,7 @@ console.log("\n[16] parseFilter bounds and normalises a metadata filter at the t
   // reaches jsonb. Shallow by design (scalars or arrays of scalars) so
   // `metadata @> filter` stays GIN-indexable; a nested object, a non-object, or
   // a filter over the caps is refused here rather than handed to the store.
-  const { parseFilter } = await import("./index.ts") as { parseFilter: (raw: unknown) => Record<string, unknown> };
+  const { parseFilter } = await import("./core/filter.ts") as { parseFilter: (raw: unknown) => Record<string, unknown> };
   assert(JSON.stringify(parseFilter(undefined)) === "{}" && JSON.stringify(parseFilter(null)) === "{}" && JSON.stringify(parseFilter({})) === "{}",
     "absent, null or empty normalises to the unfiltered {}");
   const shallow = { type: "idea", count: 3, flagged: true };
@@ -1085,8 +2294,8 @@ console.log("\n[16b] said_by and actor fold into the filter, and the By: line re
   // The two arguments are sugar over the two metadata keys migration 050
   // stamps, so the store, the log and the plan see one filter; the By: line
   // reads the same keys back. Both pure, both exported for this.
-  const { withActorFilter, actorLine } = await import("./index.ts") as {
-    withActorFilter: (f: Record<string, unknown>, s?: string, a?: string) => Record<string, unknown>;
+  const { withActorFilter } = await import("./core/filter.ts") as { withActorFilter: (f: Record<string, unknown>, s?: string, a?: string) => Record<string, unknown> };
+  const { actorLine } = await import("./render.ts") as {
     actorLine: (m: Record<string, unknown>) => string | null;
   };
   assert(JSON.stringify(withActorFilter({}, undefined, undefined)) === "{}", "neither argument leaves the filter as it was");
@@ -1112,7 +2321,7 @@ console.log("\n[16c] prefer_current's row line, header note and error hint rende
 {
   // Pure, exported for this: the weight is read off the row (score over
   // fused), so the server holds no copy of 059's 0.25.
-  const { demotedLine, currentNote, currentSearchHint } = await import("./index.ts") as {
+  const { demotedLine, currentNote, currentSearchHint } = await import("./render.ts") as {
     demotedLine: (t: { demoted: string[]; score: number; fused: number }) => string | null;
     currentNote: (rows: { window?: { rows: number; known: number; demoted: number; syncedAt: string | null; exact: boolean }; demoted?: string[] }[]) => string | null;
     currentSearchHint: (msg: string) => string;
@@ -1788,9 +2997,9 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
     "resultLabel: the compat answer's fields only where a ticket moved, in status types, the count only when keys went unread — no empty field and no zero for an older MCP server to pass through");
 }
 
-console.log(`\n[17] A tool call ${mcpTarget() === "index" ? "outlives the runtime's idle timeout" : "is kept alive by the MCP server's frames (the idle timeout is the first pass's)"}, and a client that leaves is logged (SMD-1864)`);
+console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
 {
-  const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./index.ts") as {
+  const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./sse.ts") as {
     withSseKeepalive: (r: Response, opts?: { intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: () => void; onStall?: () => void; label?: string }) => Response;
     requestLabel: (body: string | null) => string;
     abandonedRequestLine: (label: string, elapsedMs: number) => string;
@@ -1804,18 +3013,9 @@ console.log(`\n[17] A tool call ${mcpTarget() === "index" ? "outlives the runtim
   // shape, an SSE stream opened at once and written to when the tool returns,
   // and the silence is 13 s: past the last sweep that can catch it, so the
   // control is reset every run and not by the luck of the phase (11.5 s slipped
-  // under it once). Five requests run at once; the section costs the longest.
-  //
-  // Through the MCP server as a REST client the premise and withSseKeepalive's
-  // own rules are not measured again: they are the runtime's and sse.ts's,
-  // which index.ts's pass holds (SMD-3201). That pass keeps the call past the
-  // last sweep too. This one holds the MCP server's own wrap, at its own
-  // timing knob: a frame every 100 ms through a 1 s embedding, the envelope,
-  // and a client that leaves at 300 ms, while its call runs.
-  const direct = mcpTarget() === "index";
+  // under it once). Four requests run at once; the section costs the longest.
   const SILENT_MS = 13_000;
-  const SLOW_EMBED_MS = direct ? 13_000 : 1_000;
-  const LEAVE_MS = direct ? 1_500 : 300;
+  const SLOW_EMBED_MS = 13_000;
   const silentSse = (silentMs = SILENT_MS): Response => {
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -1828,6 +3028,17 @@ console.log(`\n[17] A tool call ${mcpTarget() === "index" ? "outlives the runtim
     });
     return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
   };
+  // The mechanism dropped (bare) beside the mechanism (kept), on the runtime's
+  // defaults. The bare server's kill is what prints Bun's own `warn: Bun.serve()
+  // timed out a request after 10 seconds` after the suite's report: expected.
+  const bare = Bun.serve({ port: 0, fetch: () => silentSse() });
+  const kept = Bun.serve({ port: 0, fetch: (req) => withSseKeepalive(silentSse(), { signal: req.signal }) });
+  // The ceiling, at a small scale: a stream silent for 500 ms with a 20 ms
+  // frame and a 200 ms ceiling stops pinging at the ceiling and says so once.
+  // Nominally nine frames, about twenty-four uncapped; the band below leaves a
+  // loaded runner's timer drift room on both sides.
+  let stalls = 0;
+  const capped = Bun.serve({ port: 0, fetch: (req) => withSseKeepalive(silentSse(500), { intervalMs: 20, maxMs: 200, signal: req.signal, label: "tools/call slow_one", onStall: () => { stalls++; } }) });
   type Read = { ok: boolean; text: string; error: string; ms: number };
   const read = async (url: string, init: RequestInit = {}): Promise<Read> => {
     const t0 = performance.now();
@@ -1843,80 +3054,53 @@ console.log(`\n[17] A tool call ${mcpTarget() === "index" ? "outlives the runtim
   const call = (id: number, query: string, init: RequestInit = {}) =>
     read(BASE, { method: "POST", headers: AUTH, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "search_thoughts", arguments: { query } } }), ...init });
   const frames = (t: string) => t.split(": keepalive\n\n").length - 1;
-  // The mechanism dropped (bare) beside the mechanism (kept), on the runtime's
-  // defaults. The bare server's kill is what prints Bun's own `warn: Bun.serve()
-  // timed out a request after 10 seconds` after the suite's report: expected.
-  // The ceiling, at a small scale: a stream silent for 500 ms with a 20 ms
-  // frame and a 200 ms ceiling stops pinging at the ceiling and says so once.
-  // Nominally nine frames, about twenty-four uncapped; the band below leaves a
-  // loaded runner's timer drift room on both sides.
-  let stalls = 0;
-  const premise = async () => {
-    const bare = Bun.serve({ port: 0, fetch: () => silentSse() });
-    const kept = Bun.serve({ port: 0, fetch: (req) => withSseKeepalive(silentSse(), { signal: req.signal }) });
-    const capped = Bun.serve({ port: 0, fetch: (req) => withSseKeepalive(silentSse(500), { intervalMs: 20, maxMs: 200, signal: req.signal, label: "tools/call slow_one", onStall: () => { stalls++; } }) });
-    try {
-      const [bareRun, keptRun, cappedRun] = await Promise.all([bare, kept, capped].map((s) => read(`http://127.0.0.1:${s.port}/`)));
-      return { bareRun, keptRun, cappedRun };
-    } finally {
-      bare.stop(true);
-      kept.stop(true);
-      capped.stop(true);
-    }
-  };
   const warned: string[] = [];
   const realWarn = console.warn;
   console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
   embedDelayMs = SLOW_EMBED_MS;
-  let timing: { intervalMs: number; maxMs: number } | undefined;
-  let measured: Awaited<ReturnType<typeof premise>> | null, slow: Read, gone: Read;
+  let bareRun: Read, keptRun: Read, cappedRun: Read, slow: Read, gone: Read;
   try {
-    // A ceiling far past the call: one passed before the first tick sends no frame and settles the call as stalled.
-    if (!direct) timing = worker.useKeepaliveTiming!({ intervalMs: 100, maxMs: 30_000 });
-    [measured, slow, gone] = await Promise.all([
-      direct ? premise() : null,
-      call(50, "a query whose embedding is slow"),
-      // A client that gives up: the stream's headers arrive at once, so it is the body read that its signal ends.
-      call(51, "needle-the-line-must-not-carry", { signal: AbortSignal.timeout(LEAVE_MS) }),
+    [bareRun, keptRun, cappedRun, slow, gone] = await Promise.all([
+      read(`http://127.0.0.1:${bare.port}/`),
+      read(`http://127.0.0.1:${kept.port}/`),
+      read(`http://127.0.0.1:${capped.port}/`),
+      call(50, "a query whose embedding outlives the idle timeout"),
+      // A client that gives up: the stream's headers arrive at once, so it is the body read that its 1.5 s signal ends.
+      call(51, "needle-the-line-must-not-carry", { signal: AbortSignal.timeout(1500) }),
     ]);
     await Bun.sleep(500); // the abandoned call's line, and the stub's sleep behind it, settle
   } finally {
     console.warn = realWarn;
     embedDelayMs = 0;
-    if (timing) worker.useKeepaliveTiming!(timing);
+    bare.stop(true);
+    kept.stop(true);
+    capped.stop(true);
   }
-  if (measured) {
-    const { bareRun, keptRun, cappedRun } = measured;
-    // The kill lands at a sweep between 8 and 12 s of silence; the bound is the
-    // 13 s answer, so a late sweep on a loaded runner is not read as a pass.
-    assert(!bareRun.ok && bareRun.ms > 7_500 && bareRun.ms < SILENT_MS,
-      `the premise: a streamed response silent past the default is reset at a sweep, before its 13 s event (${bareRun.ok ? "answered" : bareRun.error} after ${Math.round(bareRun.ms)} ms)`);
-    assert(keptRun.ok && /"late":true/.test(keptRun.text), `the same stream through withSseKeepalive reaches its event (${keptRun.ok ? `${Math.round(keptRun.ms)} ms` : keptRun.error})`);
-    assert(frames(keptRun.text) >= 2, `…carrying comment frames on the way (${frames(keptRun.text)} in ${SILENT_MS} ms at one per ${SSE_KEEPALIVE_MS} ms)`);
-    assert(cappedRun.ok && /"late":true/.test(cappedRun.text) && frames(cappedRun.text) >= 4 && frames(cappedRun.text) <= 10,
-      `the ceiling: frames stop at maxMs and the event still arrives (${frames(cappedRun.text)} frames in 500 ms at 20 ms with a 200 ms ceiling)`);
-    assert(stalls === 1, `…and onStall runs once, which is how the route settles the request before the runtime reaps the silent stream (${stalls})`);
-    const stalled = warned.filter((w) => /request still running/.test(w));
-    const sm = /after (\d+) s/.exec(stalled[0] ?? "");
-    assert(stalled.length === 1 && sm !== null && stalled[0] === stalledRequestLine("tools/call slow_one", Number(sm[1]) * 1000),
-      `…and says so once, in sse.ts's own line naming the call (${stalled.length} line)`);
-  }
-  assert(slow.ok && slow.ms >= SLOW_EMBED_MS, `the real server answers search_thoughts after a ${SLOW_EMBED_MS} ms embedding${direct ? ", past the last sweep" : ""} (${slow.ok ? `${Math.round(slow.ms)} ms` : `${slow.error} at ${Math.round(slow.ms)} ms`})`);
+  // The kill lands at a sweep between 8 and 12 s of silence; the bound is the
+  // 13 s answer, so a late sweep on a loaded runner is not read as a pass.
+  assert(!bareRun.ok && bareRun.ms > 7_500 && bareRun.ms < SILENT_MS,
+    `the premise: a streamed response silent past the default is reset at a sweep, before its 13 s event (${bareRun.ok ? "answered" : bareRun.error} after ${Math.round(bareRun.ms)} ms)`);
+  assert(keptRun.ok && /"late":true/.test(keptRun.text), `the same stream through withSseKeepalive reaches its event (${keptRun.ok ? `${Math.round(keptRun.ms)} ms` : keptRun.error})`);
+  assert(frames(keptRun.text) >= 2, `…carrying comment frames on the way (${frames(keptRun.text)} in ${SILENT_MS} ms at one per ${SSE_KEEPALIVE_MS} ms)`);
+  assert(cappedRun.ok && /"late":true/.test(cappedRun.text) && frames(cappedRun.text) >= 4 && frames(cappedRun.text) <= 10,
+    `the ceiling: frames stop at maxMs and the event still arrives (${frames(cappedRun.text)} frames in 500 ms at 20 ms with a 200 ms ceiling)`);
+  assert(stalls === 1, `…and onStall runs once, which is how the route settles the request before the runtime reaps the silent stream (${stalls})`);
+  const stalled = warned.filter((w) => /request still running/.test(w));
+  const sm = /after (\d+) s/.exec(stalled[0] ?? "");
+  assert(stalled.length === 1 && sm !== null && stalled[0] === stalledRequestLine("tools/call slow_one", Number(sm[1]) * 1000),
+    `…and says so once, in sse.ts's own line naming the call (${stalled.length} line)`);
+  assert(slow.ok && slow.ms >= SLOW_EMBED_MS, `the real server answers search_thoughts after a ${SLOW_EMBED_MS} ms embedding, past the last sweep (${slow.ok ? `${Math.round(slow.ms)} ms` : `${slow.error} at ${Math.round(slow.ms)} ms`})`);
   const dataLine = slow.text.split("\n").find((l) => l.startsWith("data: "));
   let envelope: { jsonrpc?: string; id?: unknown } | null = null;
   try { envelope = dataLine ? JSON.parse(dataLine.slice(6)) : null; } catch { /* not an envelope */ }
   assert(envelope?.jsonrpc === "2.0" && envelope.id === 50, "…with the call's JSON-RPC envelope (no store is configured here, so the tool's answer is its refusal — the point is that it arrived)");
   assert(frames(slow.text) >= 2, `…kept alive by comment frames the client never sees as events (${frames(slow.text)})`);
-  assert(!gone.ok, `a client that gives up at ${LEAVE_MS / 1000} s is gone (${gone.ok ? "answered" : gone.error})`);
+  assert(!gone.ok, `a client that gives up at 1.5 s is gone (${gone.ok ? "answered" : gone.error})`);
   const lines = warned.filter((w) => /request abandoned/.test(w));
   assert(lines.length === 1, `…and the server logs it once, for that request alone (${lines.length} of ${warned.length} warnings)`);
   const m = /after (\d+\.\d) s/.exec(lines[0] ?? "");
   assert(m !== null && lines[0] === abandonedRequestLine("tools/call search_thoughts", Number(m[1]) * 1000), "…the line is sse.ts's own, naming the method and the tool");
-  // Its line's tenths: from the moment it left to well before its call ended — the call as measured, less half the
-  // nominal gap between leaving and the end, so a line written as the call ends fails (SMD-3201 review passes 2–3: a
-  // starved client pass's line read 1.1 s beside a call of 2.9 s; a bound of the call alone passed a line at its end).
-  const leaveBound = Math.min(3, (slow.ms - (SLOW_EMBED_MS - LEAVE_MS) / 2) / 1000);
-  assert(m !== null && Number(m[1]) >= LEAVE_MS / 1000 - 0.1 && Number(m[1]) < leaveBound, `…at the moment the client left (${m?.[1] ?? "?"} s, under ${leaveBound.toFixed(2)} s; the call ${Math.round(slow.ms)} ms)`);
+  assert(m !== null && Number(m[1]) >= 1.4 && Number(m[1]) < 3, `…at the moment the client left (${m?.[1] ?? "?"} s)`);
   assert(!/needle-the-line-must-not-carry/.test(lines[0] ?? ""), "…and never the query");
   assert(
     requestLabel(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "capture_thought", arguments: { content: "the thought" } } })) === "tools/call capture_thought"
@@ -2148,8 +3332,8 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   // Exactly one line, never zero and never two, however the request ends —
   // each case collected apart, and given time for anything late to arrive.
   type Timing = { intervalMs: number; maxMs: number };
-  // The server under test's own: index.ts's, or the MCP server's (SMD-2287 PR 4b).
-  const useKeepaliveTiming = worker.useKeepaliveTiming ?? (await import("./index.ts") as unknown as { useKeepaliveTiming: (t: Timing) => Timing }).useKeepaliveTiming;
+  // The server under test's own, the MCP server's (SMD-2287 PR 4b).
+  const useKeepaliveTiming: (t: Timing) => Timing = worker.useKeepaliveTiming;
   const { agents } = await import("./root.ts");
   const linesOf = async (run: () => Promise<unknown>, settleMs = 50): Promise<Record<string, unknown>[]> => {
     const got: string[] = [];
@@ -2174,7 +3358,7 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   assert(batch.length === 1 && batch[0]?.rpc === "batch" && !("tool" in batch[0]) && batch[0].outcome === "error" && batch[0].code === "FAILED",
     `a batch is one line, \`batch\`, naming no tool, with its worst call's outcome and code — not the first call's name beside the last call's end (${JSON.stringify(batch)})`);
   // A batch's calls end in whatever order they run: the worst is kept whichever ends last.
-  const { recordCall } = await import("./index.ts") as unknown as { recordCall: (r: { ended?: number; outcome?: string; code?: string }, o: string, c?: string) => void };
+  const { recordCall } = await import("./mcp-edge.ts") as unknown as { recordCall: (r: { ended?: number; outcome?: string; code?: string }, o: string, c?: string) => void };
   const merged = (ends: [string, string?][]) => { const r: { ended?: number; outcome?: string; code?: string } = {}; for (const [o, c] of ends) recordCall(r, o, c); return r; };
   const worstFirst = merged([["error", "FAILED"], ["ok"], ["refused", "NOT_FOUND"]]);
   const worstLast = merged([["ok"], ["refused", "NOT_FOUND"], ["error", "FAILED"]]);
@@ -2259,9 +3443,9 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
     console.error = realError;
   }
   // Through the MCP server the registry's throw is the REST core's 500 to its whoami: the key was never named to it, so
-  // its line names none, where index.ts matched the key's hash first (SMD-2287 PR 4b).
-  assert(thrown.length === 1 && thrown[0]?.status === 500 && thrown[0].outcome === "error" && thrown[0].agent === (mcpTarget() === "client" ? undefined : "MCP_ACCESS_KEY"),
-    `a throw in the route: one 500 \`error\` line, by the key's name where the server knew it (${JSON.stringify(thrown)})`);
+  // its line names none (SMD-2287 PR 4b).
+  assert(thrown.length === 1 && thrown[0]?.status === 500 && thrown[0].outcome === "error" && thrown[0].agent === undefined,
+    `a throw in the route: one 500 \`error\` line, naming no key, which the REST core's whoami never named (${JSON.stringify(thrown)})`);
   assert(revoked.length === 1 && revoked[0]?.outcome === "refused" && revoked[0].code === "REVOKED" && revoked[0].tool === "brain_info" && revoked[0].agent === "MCP_ACCESS_KEY",
     `a revoked key: one \`refused\` line, REVOKED, naming the call and the key (${JSON.stringify(revoked)})`);
 
@@ -2542,41 +3726,51 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     { [GENERIC]: "http://collector:4318", OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://tempo:4318/v1/traces", OTEL_SDK_DISABLED: " True" },
   ].map((env) => planTelemetry(env));
   const nowhere = (why: string, words: string) => `telemetry: ${why}: no ${words} are sent (SMD-1849)`;
-  assert(JSON.stringify(plans) === JSON.stringify([
-    { urls: {}, lines: [], goes: [] },
-    { urls: { traces: "http://collector:4318/v1/traces", metrics: "http://collector:4318/v1/metrics", logs: "http://collector:4318/v1/logs" }, lines: [], goes: [{ variable: GENERIC, origin: "http://collector:4318", words: ["spans", "metrics", "log records"] }] },
+  // Each plan's reasons as their kinds (SMD-2909), beside the lines they make.
+  assert(JSON.stringify(plans.map(({ urls, reasons, goes }) => ({ urls, lines: reasons.map((r) => r.line), goes, kinds: reasons.map((r) => r.kind) }))) === JSON.stringify([
+    { urls: {}, lines: [], goes: [], kinds: [] },
+    { urls: { traces: "http://collector:4318/v1/traces", metrics: "http://collector:4318/v1/metrics", logs: "http://collector:4318/v1/logs" }, lines: [], goes: [{ variable: GENERIC, origin: "http://collector:4318", words: ["spans", "metrics", "log records"] }], kinds: [] },
     { urls: { traces: "https://tempo:4318/v1/traces", metrics: "http://collector:4318/otlp/v1/metrics" }, lines: [nowhere(`${GENERIC} is set, but OTEL_LOGS_EXPORTER=none`, "log records")],
-      goes: [{ variable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", origin: "https://tempo:4318", words: ["spans"] }, { variable: GENERIC, origin: "http://collector:4318", words: ["metrics"] }] },
-    { urls: { metrics: "http://u:pw@prom:9090/api/v1/otlp/v1/metrics" }, lines: [], goes: [{ variable: "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", origin: "http://prom:9090", words: ["metrics"] }] },
-    { urls: {}, lines: [nowhere(`${GENERIC} is not an http(s) URL`, "spans, metrics or log records")], goes: [] },
-    { urls: { logs: "http://loki:3100/otlp/v1/logs" }, lines: [nowhere(`${GENERIC} is not an http(s) URL`, "spans or metrics")], goes: [{ variable: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", origin: "http://loki:3100", words: ["log records"] }] },
-    { urls: {}, lines: [nowhere(`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and ${GENERIC} are set, but OTEL_SDK_DISABLED=true`, "spans, metrics or log records")], goes: [] },
-  ]), `each signal's URL, what goes nowhere said by the variable's name, and where the rest go by origin alone (${JSON.stringify(plans)})`);
+      goes: [{ variable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", origin: "https://tempo:4318", words: ["spans"] }, { variable: GENERIC, origin: "http://collector:4318", words: ["metrics"] }], kinds: ["off"] },
+    { urls: { metrics: "http://u:pw@prom:9090/api/v1/otlp/v1/metrics" }, lines: [], goes: [{ variable: "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", origin: "http://prom:9090", words: ["metrics"] }], kinds: [] },
+    { urls: {}, lines: [nowhere(`${GENERIC} is not an http(s) URL`, "spans, metrics or log records")], goes: [], kinds: ["no-url"] },
+    { urls: { logs: "http://loki:3100/otlp/v1/logs" }, lines: [nowhere(`${GENERIC} is not an http(s) URL`, "spans or metrics")], goes: [{ variable: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", origin: "http://loki:3100", words: ["log records"] }], kinds: ["no-url"] },
+    { urls: {}, lines: [nowhere(`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and ${GENERIC} are set, but OTEL_SDK_DISABLED=true`, "spans, metrics or log records")], goes: [], kinds: ["off"] },
+  ]), `each signal's URL, what goes nowhere said by the variable's name (each reason with its kind), and where the rest go by origin alone (${JSON.stringify(plans)})`);
+  // The other two kinds a plan gives (SMD-2909 review pass 4): a shared endpoint with a query string, an exporter not read.
+  const queried = planTelemetry({ [GENERIC]: "http://collector:4318/?tenant=x" }).reasons.map((r) => r.kind);
+  const unreadKinds = planTelemetry({ [GENERIC]: "http://collector:4318", OTEL_TRACES_EXPORTER: "console" }).reasons.map((r) => r.kind);
+  assert(queried.join() === "query" && unreadKinds.join() === "unread", `a query string's reason is query, an exporter not read is unread (${queried.join()} | ${unreadKinds.join()})`);
   // startTelemetry sets up nothing where every signal goes nowhere, and says why.
   const said: string[] = [];
+  const saidKinds: import("./telemetry.ts").SaidKind[] = [];
   const savedGeneric = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
   let refused: boolean | undefined;
   try {
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "not a url";
-    refused = await startTelemetry("probe", (l) => said.push(l));
+    refused = await startTelemetry("probe", (l, kind) => { said.push(l); saidKinds.push(kind); });
   } finally {
     if (savedGeneric === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedGeneric;
   }
-  assert(refused === false && said.join(" / ") === nowhere(`${GENERIC} is not an http(s) URL`, "spans, metrics or log records"), `no SDK where every signal goes nowhere, said (${said.join(" / ")})`);
+  // The start passes the plan's kind with its line (SMD-2909 review pass 4): preflight's row reads it.
+  assert(refused === false && said.join(" / ") === nowhere(`${GENERIC} is not an http(s) URL`, "spans, metrics or log records") && saidKinds.length === 1 && saidKinds[0] === "no-url",
+    `no SDK where every signal goes nowhere, said with the plan's kind (${said.join(" / ")} | ${saidKinds.join()})`);
   // A setup that throws leaves the server serving, said by the error's name alone — an SDK's message can carry the URL (review pass 4).
   const thrown: string[] = [];
+  const thrownKinds: import("./telemetry.ts").SaidKind[] = [];
   const savedEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
   let started: boolean | undefined;
   try {
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
-    started = await startTelemetry("probe", (l) => thrown.push(l), async () => ({ setUpTelemetry: () => { throw new TypeError(`Could not parse 'http://u:s3cret@collector' ${PLANTED}`); } }));
+    started = await startTelemetry("probe", (l, kind) => { thrown.push(l); thrownKinds.push(kind); }, async () => ({ setUpTelemetry: () => { throw new TypeError(`Could not parse 'http://u:s3cret@collector' ${PLANTED}`); } }));
   } finally {
     if (savedEndpoint === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedEndpoint;
   }
   assert(started === false && thrown.length === 1 && thrown[0] === "telemetry: not started (TypeError): no spans, metrics or log records are sent (SMD-1849)" && !thrown.join().includes("s3cret") && !thrown.join().includes(PLANTED),
     `a setup that throws: not started, said by the error's name, nothing of its message (${thrown.join(" / ")})`);
+  assert(thrownKinds.length === 1 && thrownKinds[0] === "not-started", `…and passed to the start's reader as not-started, so preflight's row reads the kind (SMD-2909) (${thrownKinds.join()})`);
   // A start line whose sink throws: the SDK is up all the same, and not said to have failed (review pass 5).
   const { stopTelemetry } = await import("./telemetry.ts");
   await stopTelemetry();
@@ -2900,7 +4094,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   type Span = ReturnType<typeof exporter.getFinishedSpans>[number];
   const attrs = (s: Span | undefined) => (s?.attributes ?? {}) as Record<string, unknown>;
   const parentOf = (s: Span | undefined) => s?.parentSpanContext?.spanId;
-  /** The MCP server's request spans: index.ts's, or the MCP server's — never the REST core's behind it, whose door is `api`. */
+  /** The MCP server's request spans — never the REST core's behind it, whose door is `api`. */
   const requestSpans = (spans: Span[] = exporter.getFinishedSpans()) => spans.filter((s) => s.kind === SpanKind.SERVER && attrs(s)["ob1.door"] === "mcp");
   const requestSpan = (spans?: Span[]) => requestSpans(spans)[0];
   /** Whether `span` is `ancestor`'s descendant among `spans`. */
@@ -2934,7 +4128,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     const strays = spans.filter((s) => s !== server && !under(spans, s, server?.spanContext().spanId));
     const operation = spans.filter((s) => attrs(s)["ob1.door"] === "api" && attrs(s)["ob1.tool"] === "search_thoughts");
     assert(server !== undefined && tool !== undefined && strays.length === 0 && operation.every((s) => under(spans, s, tool.spanContext().spanId) && s.links.length === 0)
-      && operation.length === (mcpTarget() === "client" ? 1 : 0),
+      && operation.length === 1,
       `the call is one trace: each span its request's descendant, the operation's under the call's span (${JSON.stringify(spans.map((s) => [s.name, attrs(s)["ob1.door"], parentOf(s), s.spanContext().spanId]))})`);
     // What the search threw is on its call's span by its kind alone (PR 2c): one exception event, no message.
     const thrown = (tool?.events ?? []).map((e) => [e.name, Object.keys(e.attributes ?? {}).sort().join()]);
@@ -2964,7 +4158,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     const routeThrew = requestSpan(routeSpans);
     // Through the MCP server the registry is the REST core's: the throw's kind is on its request's span, under the MCP
     // server's (PR 4c), whose own span has the kind of what it met — a 500 — since an answer carries no exception's.
-    const threwAt = mcpTarget() === "client" ? routeSpans.find((sp) => attrs(sp)["ob1.door"] === "api" && under(routeSpans, sp, routeThrew?.spanContext().spanId)) : routeThrew;
+    const threwAt = routeSpans.find((sp) => attrs(sp)["ob1.door"] === "api" && under(routeSpans, sp, routeThrew?.spanContext().spanId));
     const routeEvents = (sp: Span | undefined) => JSON.stringify(sp?.events.map((e) => [e.name, e.attributes]));
     assert(routeEvents(threwAt) === JSON.stringify([["exception", { "exception.type": "RangeError" }]]) && routeEvents(routeThrew)?.includes('"exception"') === true && !JSON.stringify(routeSpans.map((sp) => sp.events)).includes(PLANTED),
       `a throw in the MCP route: its kind on the request's span — through the MCP server, the REST core's under it — no message (${routeEvents(threwAt)} ${routeEvents(routeThrew)})`);
@@ -3098,11 +4292,9 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   const collector = Bun.serve({ port: 0, fetch: async (req) => { (received[new URL(req.url).pathname] ??= []).push(await req.text()); return Response.json({}); } });
   const collectorPort = collector.port;
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  const throughClient = mcpTarget() === "client";
-  const mcp = await serveChild(throughClient ? `${import.meta.dir}/../mcp-server` : import.meta.dir, "index.ts", {
+  const mcp = await serveChild(`${import.meta.dir}/../mcp-server`, "index.ts", {
     OB1_STOP_GRACE: "3", MCP_ACCESS_KEY: KEY, DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collectorPort}`,
-    OTEL_SERVICE_NAME: "ob1-mcp-probe",
-    ...(throughClient ? { OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent.port}`, OB1_PLUGINS: "" } : {}),
+    OTEL_SERVICE_NAME: "ob1-mcp-probe", OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent.port}`, OB1_PLUGINS: "",
   }, { waitForSdk: true });
   let out = "";
   try {
@@ -3143,9 +4335,9 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   const hung = Bun.serve({ port: 0, idleTimeout: 0, fetch: () => new Promise<Response>(() => {}) });
   const hungPort = hung.port;
   const silent2 = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  const mcp2 = await serveChild(throughClient ? `${import.meta.dir}/../mcp-server` : import.meta.dir, "index.ts", {
+  const mcp2 = await serveChild(`${import.meta.dir}/../mcp-server`, "index.ts", {
     OB1_STOP_GRACE: "3", MCP_ACCESS_KEY: KEY, DATABASE_URL: `postgres://u:p@127.0.0.1:${silent2.port}/db`, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${hungPort}`,
-    ...(throughClient ? { OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent2.port}`, OB1_PLUGINS: "" } : {}),
+    OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent2.port}`, OB1_PLUGINS: "",
   }, { waitForSdk: true });
   let out2 = "";
   try {
@@ -3434,6 +4626,52 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   }
   assert(!cutThrew && openRequestCount() === 0, `a cut whose sink throws ends every record and throws nothing (${cutThrew}, ${openRequestCount()} open)`);
 
+  // A setting read as its default is said through `note` where the caller tells it apart from a loss (SMD-2909): the
+  // start passes it to preflight's row as a note. (A setting held to its bound goes through the same `notes`.)
+  const notes: string[] = [];
+  const losses: string[] = [];
+  const intervalSaved = process.env.OTEL_METRIC_EXPORT_INTERVAL;
+  process.env.OTEL_METRIC_EXPORT_INTERVAL = "500";
+  // A collector that takes the reading: a refused one would hold the shutdown through the exporter's retries (SMD-2909 review pass 2).
+  const noteTaker = Bun.serve({ port: 0, fetch: () => Response.json({}) });
+  try {
+    const noted = setUpTelemetry("open-brain-test", { report: { warn: (l) => losses.push(l), note: (l) => notes.push(l) }, urls: { metrics: `http://127.0.0.1:${noteTaker.port}/v1/metrics` } });
+    await noted.shutdown();
+  } finally {
+    if (intervalSaved === undefined) delete process.env.OTEL_METRIC_EXPORT_INTERVAL;
+    else process.env.OTEL_METRIC_EXPORT_INTERVAL = intervalSaved;
+    noteTaker.stop(true);
+  }
+  assert(notes.some((l) => /OTEL_METRIC_EXPORT_INTERVAL "500" is not a whole number of at least 1000/.test(l)) && !losses.some((l) => /OTEL_METRIC_EXPORT_INTERVAL/.test(l)),
+    `a setting read as its default goes to the note sink, not the losses' (${notes.join(" / ")} | ${losses.join(" / ")})`);
+  // The start passes each line with its kind (SMD-2909), from a real setUpTelemetry: where the signals go (goes), a
+  // setting read as its default (note), and a full span queue's drop (not-sent) — the kinds preflight's row reads.
+  {
+    const { startTelemetry: startReal, stopTelemetry: stopReal, flushTelemetry: flushReal } = await import("./telemetry.ts");
+    const { trace: traceApi } = await import("@opentelemetry/api");
+    const taker = Bun.serve({ port: 0, fetch: () => Response.json({}) });
+    const kindsSaid: import("./telemetry.ts").Said[] = [];
+    const saved = { endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT, queue: process.env.OTEL_BSP_MAX_QUEUE_SIZE, batch: process.env.OTEL_BSP_MAX_EXPORT_BATCH_SIZE, delay: process.env.OTEL_BSP_SCHEDULE_DELAY, interval: process.env.OTEL_METRIC_EXPORT_INTERVAL };
+    Object.assign(process.env, { OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${taker.port}`, OTEL_BSP_MAX_QUEUE_SIZE: "1", OTEL_BSP_MAX_EXPORT_BATCH_SIZE: "1", OTEL_BSP_SCHEDULE_DELAY: "60000", OTEL_METRIC_EXPORT_INTERVAL: "500" });
+    try {
+      // Nothing an earlier row started is still starting: a pending start would be returned, its lines said elsewhere.
+      await stopReal();
+      await startReal("probe", (line, kind) => kindsSaid.push({ line, kind }));
+      for (let i = 0; i < 3; i++) traceApi.getTracer("probe").startSpan(`kind ${i}`).end();
+      await flushReal();
+    } finally {
+      await stopReal();
+      for (const [name, value] of [["OTEL_EXPORTER_OTLP_ENDPOINT", saved.endpoint], ["OTEL_BSP_MAX_QUEUE_SIZE", saved.queue], ["OTEL_BSP_MAX_EXPORT_BATCH_SIZE", saved.batch], ["OTEL_BSP_SCHEDULE_DELAY", saved.delay], ["OTEL_METRIC_EXPORT_INTERVAL", saved.interval]] as const) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      taker.stop(true);
+    }
+    const kindOf = (pattern: RegExp) => kindsSaid.find(({ line }) => pattern.test(line))?.kind;
+    assert(kindOf(/ go to http:\/\/127\.0\.0\.1:/) === "goes" && kindOf(/OTEL_METRIC_EXPORT_INTERVAL "500"/) === "note" && kindOf(/spans? not sent to .*\(queue full\)/) === "not-sent",
+      `the start's kinds from a real setup: where signals go, goes; a setting read as its default, note; a full queue's drop, not-sent (${kindsSaid.map(({ line, kind }) => `${kind}: ${line.slice(0, 60)}`).join(" / ")})`);
+  }
+
   // Each signal's losses said by itself (PR 2c): a collector that takes spans and refuses metrics and log records,
   // and a log batch whose queue holds one record — its drops counted as the batch drops them. The first record goes
   // as it comes (a batch of one), the second waits in the queue, the third finds it full.
@@ -3570,7 +4808,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
     { OTEL_EXPORTER_OTLP_ENDPOINT: "http://c:4318", OTEL_TRACES_EXPORTER: "AKIAIOSFODNN7EXAMPLE", OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf" },
   ].map((env) => planTelemetry(env));
   const said1849 = (text: string) => `telemetry: ${text} (SMD-1849)`;
-  assert(JSON.stringify(more.map((p) => [Object.keys(p.urls), p.lines, p.goes])) === JSON.stringify([
+  assert(JSON.stringify(more.map((p) => [Object.keys(p.urls), p.reasons.map((r) => r.line), p.goes])) === JSON.stringify([
     [["traces", "metrics", "logs"], [], [{ variable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", origin: "http://127.0.0.1:9", words: ["spans"] }, { variable: "OTEL_EXPORTER_OTLP_ENDPOINT", origin: "http://127.0.0.1:9", words: ["metrics", "log records"] }]],
     [[], [said1849("OTEL_EXPORTER_OTLP_ENDPOINT has a query string or a fragment, which the signal's path would follow: no spans, metrics or log records are sent")], []],
     [["traces", "metrics", "logs"], [], [{ variable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", origin: "http://c:4318", words: ["spans"] }, { variable: "OTEL_EXPORTER_OTLP_ENDPOINT", origin: "http://c:4318", words: ["metrics", "log records"] }]],
@@ -3585,7 +4823,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
       [{ variable: "OTEL_EXPORTER_OTLP_ENDPOINT", origin: "http://c:4318", words: ["spans", "metrics", "log records"] }]],
   ]) && more[0].urls.metrics === "http://127.0.0.1:9/v1/metrics" && more[4].urls.traces === "http://c:4318/otlp/v1/traces" && more[5].urls.traces === "http://c:4318/v1/traces"
     && more[6].urls.traces === "http://c:4318/v1/traces?tenant=x",
-    `a signal's own URL checked, a query string on the shared endpoint refused and on an own one kept, values trimmed, a list naming none off, one line per variable and origin, what is not read said (${JSON.stringify(more.map((p) => [p.urls, p.lines, p.goes]))})`);
+    `a signal's own URL checked, a query string on the shared endpoint refused and on an own one kept, values trimmed, a list naming none off, one line per variable and origin, what is not read said (${JSON.stringify(more.map((p) => [p.urls, p.reasons.map((r) => r.line), p.goes]))})`);
   // Each place the signals go is said, in a line of its own.
   const startLines: string[] = [];
   const startEnv = { traces: process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, generic: process.env.OTEL_EXPORTER_OTLP_ENDPOINT };
@@ -4110,34 +5348,61 @@ console.log("\n[26] A provider call, a store operation and a job's body under sp
   }
 }
 
-console.log("\n[27] preflight --deep's telemetry row, cell by cell, from what the start and the send said, the signals that go, the probes made and how the send went (SMD-1849 PR 2d review pass 2)");
+console.log("\n[27] preflight --deep's telemetry row, cell by cell, from what the start and the send said, the signals that go, the probes made and how the send went (SMD-1849 PR 2d review pass 2), judged by each line's kind (SMD-2909)");
   {
-    const { telemetryRow } = await import("./telemetry.ts");
-    const GOES = "telemetry: open-brain-preflight's spans and metrics go to http://c:4318 over OTLP/HTTP (OTEL_EXPORTER_OTLP_ENDPOINT, SMD-1849)";
-    const BOTH = { traces: "http://c:4318/v1/traces", metrics: "http://c:4318/v1/metrics" };
-    const base = { started: true, said: [GOES], urls: BOTH, probes: 2, sent: "sent" as const, boundMs: 5000 };
-    const cells = [
-      telemetryRow({ ...base, started: false, said: [], urls: {} }),
-      telemetryRow({ ...base, started: false, said: ["telemetry: OTEL_EXPORTER_OTLP_ENDPOINT is set, but OTEL_SDK_DISABLED=true: no spans, metrics or log records are sent (SMD-1849)"], urls: {} }),
-      telemetryRow({ ...base, started: false, said: ["telemetry: OTEL_EXPORTER_OTLP_ENDPOINT is not an http(s) URL: no spans, metrics or log records are sent (SMD-1849)"], urls: {} }),
-      telemetryRow({ ...base, urls: { logs: "http://c:4318/v1/logs" }, said: [GOES, "telemetry: OTEL_EXPORTER_OTLP_ENDPOINT is set, but OTEL_TRACES_EXPORTER=none: no spans are sent (SMD-1849)"] }),
-      telemetryRow({ ...base, probes: 0, sent: "none" }),
-      telemetryRow({ ...base, probes: 0, sent: "none", said: [GOES, "telemetry: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT is not an http(s) URL: no log records are sent (SMD-1849)"] }),
-      telemetryRow({ ...base, sent: "none" }),
-      telemetryRow({ ...base, said: [GOES, 'telemetry: OTEL_TRACES_EXPORTER "console" is not read (only otlp or none): spans go as OTLP/HTTP JSON (SMD-1849)'] }),
-      telemetryRow({ ...base, said: [GOES, "telemetry: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT is not an http(s) URL: no log records are sent (SMD-1849)"] }),
-      telemetryRow({ ...base, sent: "failed", said: [GOES, "telemetry: 1 metric export not sent to http://c:4318 (HTTP 400)", "telemetry: 1 metric export not sent to http://c:4318 (HTTP 400)"] }),
-      telemetryRow({ ...base, sent: "timeout" }),
-      telemetryRow({ ...base, urls: { traces: BOTH.traces } }),
+    // Each cell from planTelemetry over an environment and the start's own lines (goesLines), each line with its kind:
+    // the row judges by the kinds alone (SMD-2909), so no cell's status rests on a sentence written here.
+    const { telemetryRow, planTelemetry, goesLines } = await import("./telemetry.ts");
+    type RowState = Parameters<typeof telemetryRow>[0];
+    const E = "http://c:4318";
+    const input = (env: Record<string, string>, more: Partial<RowState> = {}): RowState => {
+      const plan = planTelemetry(env);
+      const started = plan.goes.length > 0;
+      return { started, said: [...plan.reasons, ...(started ? goesLines("open-brain-preflight", plan) : [])], urls: started ? plan.urls : {}, probes: 2, sent: "sent", boundMs: 5000, ...more };
+    };
+    const shared = { OTEL_EXPORTER_OTLP_ENDPOINT: E };
+    // What a watched exporter says of a refused export, kind not-sent: the start passes it as such.
+    const refusedTwice = (env: Record<string, string>) => [...input(env).said, ...Array.from({ length: 2 }, () => ({ line: `telemetry: 1 metric export not sent to ${E} (HTTP 400) (SMD-1849)`, kind: "not-sent" as const }))];
+    const inputs: RowState[] = [
+      input({}),
+      input({ ...shared, OTEL_SDK_DISABLED: "true" }),
+      input({ OTEL_EXPORTER_OTLP_ENDPOINT: "ftp://c" }),
+      input({ ...shared, OTEL_TRACES_EXPORTER: "none", OTEL_METRICS_EXPORTER: "none" }),
+      input(shared, { probes: 0, sent: "none" }),
+      input({ ...shared, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "nope" }, { probes: 0, sent: "none" }),
+      input(shared, { sent: "none" }),
+      input({ ...shared, OTEL_TRACES_EXPORTER: "console" }),
+      input({ ...shared, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "nope" }),
+      input(shared, { sent: "failed", said: refusedTwice(shared) }),
+      input(shared, { sent: "timeout" }),
+      input({ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `${E}/v1/traces` }),
     ];
+    const cells = inputs.map((i) => telemetryRow(i));
     assert(JSON.stringify(cells.map((c) => [c.status, c.fix !== undefined])) === JSON.stringify([
       ["skip", false], ["skip", false], ["warn", true], ["skip", false], ["skip", false], ["warn", true], ["ok", false], ["ok", false], ["warn", true], ["warn", true], ["warn", true], ["ok", false],
     ]) && /^no collector named/.test(cells[0].detail) && /^the probes' spans and points go nowhere — .*OTEL_TRACES_EXPORTER=none/.test(cells[3].detail)
-      && /^no provider probe ran/.test(cells[4].detail) && /^the provider probes' spans and points sent — open-brain-preflight's spans and metrics go to http:\/\/c:4318 over OTLP\/HTTP \(OTEL_EXPORTER_OTLP_ENDPOINT\)$/.test(cells[6].detail)
+      && /^no provider probe ran/.test(cells[4].detail) && /^the provider probes' spans and points sent — open-brain-preflight's spans, metrics and log records go to http:\/\/c:4318 over OTLP\/HTTP \(OTEL_EXPORTER_OTLP_ENDPOINT\)$/.test(cells[6].detail)
       && /^the provider probes' spans and points sent — .*is not an http\(s\) URL/.test(cells[8].detail)
       && /^the provider probes' spans and points not all sent — /.test(cells[9].detail) && cells[9].detail.split("HTTP 400").length === 2
       && /^the provider probes' spans and points not all sent within 5 s — /.test(cells[10].detail) && /^the provider probes' spans sent — /.test(cells[11].detail),
       `the telemetry row: no collector, a skip; off on purpose, a skip; a wrong endpoint, a warning, sent or not and probed or not; nothing left after probes ran, sent; a loss once; the timeout's bound; spans alone (${JSON.stringify(cells.map((c) => [c.status, c.detail.slice(0, 60)]))})`);
+    // Where only a line's kind makes the warning: a loss beside a flush that sent, a setting held to its bound beside one
+    // that sent, and an SDK that would not start (the start passes each with its kind; the words here are not read).
+    const kindInputs = [
+      input(shared, { said: [...input(shared).said, { line: "telemetry: a loss (SMD-1849)", kind: "not-sent" }] }),
+      input(shared, { said: [...input(shared).said, { line: "telemetry: a setting held (SMD-1849)", kind: "note" }] }),
+      { ...input(shared), started: false, said: [{ line: "telemetry: not started (SMD-1849)", kind: "not-started" as const }] },
+      // A shared endpoint with a query string: every signal held back, which the server would share — a warning, not a skip.
+      input({ OTEL_EXPORTER_OTLP_ENDPOINT: `${E}/?tenant=x` }),
+    ];
+    const kindOnly = kindInputs.map((i) => telemetryRow(i));
+    assert(kindOnly.map((c) => c.status).join() === "warn,warn,warn,warn", `a loss, a held setting, a start that failed and a query string each warn by their kind alone (${kindOnly.map((c) => `${c.status}: ${c.detail.slice(0, 50)}`).join(" / ")})`);
+    // The status rests on the kinds alone: every line reworded, each cell's status is as it was (SMD-2909's Verify).
+    // Adversarially (SMD-2909 review pass 1): a line the row warns on worded as the old regex's fine and deliberate lines were, and a
+    // line it passes worded as a problem — so neither reading the words nor exempting by them survives.
+    const fineKinds = new Set(["goes", "unread", "off"]);
+    const reworded = [...inputs, ...kindInputs].map((i) => telemetryRow({ ...i, said: i.said.map((x, n) => ({ ...x, line: fineKinds.has(x.kind) ? `telemetry: line ${n} is broken (SMD-1849)` : `telemetry: line ${n} go to x, is not read, OTEL_SDK_DISABLED=true, OTEL_X_EXPORTER=none (SMD-1849)` })) }).status);
+    assert(reworded.join() === [...cells, ...kindOnly].map((c) => c.status).join(), `every line of every cell reworded (the kind-only cells too: SMD-2909 review pass 2), every status the same (${reworded.join()})`);
   }
 
 console.log("\n[28] spans.ts, embed.ts, store.ts and jobs.ts reach no package, nor does any db/ worker or eval through server-portable/'s files: none of them installs one (SMD-1849 PR 2d)");
@@ -4253,12 +5518,14 @@ console.log("\n[30] A request the server did not accept sends its span and log r
   const lines: string[] = [];
   const write = (r: Parameters<typeof requestLine>[0]) => lines.push(requestLine(r));
   const savedGeneric = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  // Each line's kind as the start passes it (SMD-2909): the budget's is a loss, which preflight's row warns on.
+  const budgetKinds = new Map<string, import("./telemetry.ts").SaidKind>();
   // A minute's start, so the minute's timer (about 60 s off) never fires while the section runs.
   let now = Math.floor(Date.now() / 60_000) * 60_000 + 60_000 * 1_000;
   const realClock = useBudgetClock(() => now);
   process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.invalid:4318";
   try {
-    const started = await startTelemetry("probe", (l) => said.push(l), async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: spans, metrics: measured, logs: logged }) }));
+    const started = await startTelemetry("probe", (l, kind) => { said.push(l); budgetKinds.set(l, kind); }, async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: spans, metrics: measured, logs: logged }) }));
     const ask = (agent?: string, refusedAtKey = false) => {
       const r = beginRequest("mcp", new Request("http://mcp/mcp", { method: "POST" }), write);
       Object.assign(r, { rpc: "tools/call", agent, refusedAtKey });
@@ -4284,6 +5551,7 @@ console.log("\n[30] A request the server did not accept sends its span and log r
       `past ${ANONYMOUS_PER_MINUTE} in a minute, a request the server did not accept — no key, a revoked one, a delivery its plugin refused — sends no span and no record; its point and line still count it; a key accepted, or a delivery its plugin accepted, is never held (${JSON.stringify([doors(true), doors(false), hookSpans(), logged.getFinishedLogRecords().length, pointsCount(), lines.length])})`);
     assert(unsaidBeforeFlush === 0 && counted().length === 1 && counted()[0] === "telemetry: 7 requests the server did not accept past 60 in a minute sent no span or log record, counted on the request-duration histogram and in the line alone (SMD-1849)",
       `the flush a server's stop runs says the count, once (${JSON.stringify([unsaidBeforeFlush, counted()])})`);
+    assert(budgetKinds.get(counted()[0]) === "not-sent", `…passed to the start's reader as not-sent (SMD-2909) (${budgetKinds.get(counted()[0])})`);
     // The next minute: a fresh budget, and nothing more said.
     now += 60_000;
     ask();
@@ -4361,8 +5629,8 @@ console.log("\n[30] A request the server did not accept sends its span and log r
     assert(quiet.getFinishedSpans().length === 0 && quietLogs.getFinishedLogRecords().length === ANONYMOUS_PER_MINUTE && counted().at(-1)?.startsWith("telemetry: 5 requests the server did not accept past 60") === true,
       `with every span sampled out, the log records are held to the budget, and the rest said (${JSON.stringify([quiet.getFinishedSpans().length, quietLogs.getFinishedLogRecords().length, counted().at(-1)?.slice(0, 40)])})`);
     // A monitor's keyed HEADs spend none of the budget, so a refusal after them is sent (SMD-2287 PR 4c review pass 1):
-    // index.ts names a valid key, accepted, and holds a wrong one to the budget; the MCP server, which asks the REST core
-    // nothing for a HEAD, so knows neither, sends no span or record for any (review pass 2: marking them accepted, or
+    // the MCP server, which asks the REST core nothing for a HEAD, so knows neither a valid key nor a wrong one, sends
+    // no span or record for any (review pass 2: marking them accepted, or
     // sending them past the budget, passed) — each its line and its point, where the keyless probe has no record at all.
     await stopTelemetry();
     const probed = new InMemorySpanExporter();
@@ -4389,8 +5657,8 @@ console.log("\n[30] A request the server did not accept sends its span and log r
     const headRecords = probedLogs.getFinishedLogRecords().filter((r) => isHead(r.body as Record<string, unknown>)).length;
     const headPoints = durationPoints(probedPoints).filter((pt) => pt.attributes["http.request.method"] === "HEAD").reduce((n, pt) => n + pt.value.count, 0);
     const refusedSpans = probed.getFinishedSpans().filter((sp) => sp.attributes["ob1.door"] === "mcp" && sp.attributes["ob1.outcome"] === "refused" && !isHead(sp.attributes as Record<string, unknown>));
-    // index.ts: the valid key's HEADs sent, accepted, and the wrong keys' within the budget; the MCP server: none.
-    const sentHeads = mcpTarget() === "client" ? 0 : VALID + WRONG;
+    // The MCP server sends none of the HEADs.
+    const sentHeads = 0;
     assert(probeRecords.filter((r) => r.method === "HEAD").length === VALID + WRONG && headPoints === VALID + WRONG && headSpans === sentHeads && headRecords === sentHeads
       && refusedSpans.length === 1 && !counted().at(-1)?.startsWith("telemetry: 1 request"),
       `${VALID} keyed HEADs and ${WRONG} with a wrong key, each its line and its point, ${sentHeads} sending a span and a record: none of the budget spent past them, so the keyless refusal after sends its span (${JSON.stringify([probeRecords.length, headPoints, headSpans, headRecords, refusedSpans.length, counted().at(-1)?.slice(0, 40)])})`);

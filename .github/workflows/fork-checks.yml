@@ -85,8 +85,8 @@ jobs:
       # directories a PR happens to touch. The upstream gate only validates
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
-      # and every developer here uses, and checks 13, 14, 18, 20, 23, 27, 28,
-      # 29, 32, 33, 34 and 35 parse YAML with Bun.YAML.
+      # and every developer here uses, and checks 13, 14, 18, 20, 23, 28, 29,
+      # 32 to 38 and 40 parse YAML with Bun.YAML.
       - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, FORK.md's change files, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, and the edge proxy
         run: bun scripts/check-fork-consistency.ts
 
@@ -166,39 +166,11 @@ jobs:
         working-directory: server-portable
         run: bun install --frozen-lockfile
 
-      # Imports the real server rather than a mirror of it, so there is no drift
-      # guard here and none is needed.
-      - name: Test against the real server
-        working-directory: server-portable
-        run: bun test-server.ts
-
-      # What test-server held that reads no server under test (SMD-3201):
-      # `bun index.ts` run as the image runs it — a keyed /health's deadline,
-      # the stop on SIGTERM — and brain-info.ts's rules. Once, where
-      # test-server runs in both of OB1_MCP_UNDER_TEST's passes.
-      - name: The server's entry, its stop and brain-info's rules
-        working-directory: server-portable
-        run: bun test-entry.ts
-
-      # Scoped keys: a read-scoped key must not merely fail to write, it must not
-      # see capture_thought at all. Needs no database.
-      - name: Scoped access keys
-        working-directory: server-portable
-        run: bun test-auth.ts
-
       # The REST core's surface (SMD-2284) over a stub core: the routes against
       # the manifest, the OpenAPI document, the authorization ladder, the log.
       - name: The REST core's routes and authorization
         working-directory: server-portable
         run: bun test-rest.ts
-
-      # Plugins in the contract (SMD-2310) over a stub core: the manifests,
-      # OB1_PLUGINS, an enabled plugin's operation through REST, OpenAPI,
-      # whoami and MCP tools/list behind the scope gate, ctx.call's gate, the
-      # plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks.
-      - name: Plugins in the contract
-        working-directory: server-portable
-        run: bun test-plugins.ts
 
       # Pure logic — the alias table, title truncation, citation URLs. No database
       # and no provider, so it runs in the fast job rather than the Postgres one.
@@ -229,9 +201,10 @@ jobs:
         run: bun test-client.ts
 
       # The MCP server as a client of the REST core (SMD-2287): its own suite
-      # over the real REST app with a stub core, then test-auth's assertions
-      # held to it with the REST core behind it in process — the same suite
-      # the step above runs against server-portable's index.ts.
+      # over the real REST app with a stub core, then server-portable's suites
+      # that drive an MCP server, each through it with the REST core behind it
+      # in process (test-support.ts's mcpUnderTest; SMD-2287 PR 6a retired
+      # their run against index.ts).
       - name: Install the MCP server's pinned packages
         working-directory: mcp-server
         run: bun install --frozen-lockfile
@@ -253,27 +226,27 @@ jobs:
         working-directory: mcp-server
         run: bun test-mcp.ts
 
-      - name: Scoped access keys, through the MCP server as a REST client
+      # Scoped keys: a read-scoped key must not merely fail to write, it must not
+      # see capture_thought at all. Needs no database.
+      - name: Scoped access keys
         working-directory: server-portable
-        env:
-          OB1_MCP_UNDER_TEST: client
         run: bun test-auth.ts
 
-      # An enabled plugin's operation as the MCP server's tool, called on the
+      # Plugins in the contract (SMD-2310) over a stub core: the manifests,
+      # OB1_PLUGINS, an enabled plugin's operation through REST, OpenAPI,
+      # whoami and MCP tools/list behind the scope gate, ctx.call's gate, the
+      # plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks;
+      # an enabled plugin's operation as the MCP server's tool, called on the
       # REST core by its route (SMD-2287 PR 4a).
-      - name: Plugins in the contract, through the MCP server as a REST client
+      - name: Plugins in the contract
         working-directory: server-portable
-        env:
-          OB1_MCP_UNDER_TEST: client
         run: bun test-plugins.ts
 
-      # The real server's suite through the MCP server as a REST client
-      # (SMD-2287 PR 4b and 4c): its request lines, its refusals, its mirrors,
-      # its stop's count of tool calls, and its spans, one trace per tool call.
-      - name: Test against the real server, through the MCP server as a REST client
+      # The real server's suite (SMD-2287 PR 4b and 4c): its request lines,
+      # its refusals, its mirrors, its stop's count of tool calls, and its
+      # spans, one trace per tool call.
+      - name: Test against the real server
         working-directory: server-portable
-        env:
-          OB1_MCP_UNDER_TEST: client
         run: bun test-server.ts
 
       # db/ and evals/ import this server's modules and are the first callers to
@@ -875,20 +848,13 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
-      # The one that matters: the real MCP server, driven over JSON-RPC, with
-      # OB1_STORE unset — the SQL store, the only one (change 97, SMD-3152) —
-      # and no Supabase configuration present at all.
-      - name: End-to-end over MCP with no Supabase
-        working-directory: server-portable
-        run: bun test-e2e-sql.ts
-        env:
-          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-
-      # The same suite through the MCP server as a client of the REST core
-      # (SMD-2287 PR 3b), the REST core in process behind it: the same
-      # assertions, but a write records the REST core's door with the MCP
-      # server as its carrier. The two installs pin its cross-directory
-      # imports; Bun would otherwise fetch them (SMD-2978).
+      # The one that matters: the real MCP server — the MCP server as a client
+      # of the REST core, the REST core in process behind it (SMD-2287) —
+      # driven over JSON-RPC, with OB1_STORE unset — the SQL store, the only
+      # one (change 97, SMD-3152) — and no Supabase configuration present at
+      # all. A write records the REST core's door with the MCP server as its
+      # carrier. The two installs pin its cross-directory imports, which every
+      # suite below takes too; Bun would otherwise fetch them (SMD-2978).
       - name: Install the REST client's pinned packages
         working-directory: rest-client
         run: bun install --frozen-lockfile
@@ -897,12 +863,11 @@ jobs:
         working-directory: mcp-server
         run: bun install --frozen-lockfile
 
-      - name: End-to-end over MCP, through the MCP server as a REST client
+      - name: End-to-end over MCP with no Supabase
         working-directory: server-portable
         run: bun test-e2e-sql.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-          OB1_MCP_UNDER_TEST: client
 
       # The REST core beside the MCP server on one database (SMD-2284): every
       # operation through both doors, the MCP reply what render.ts makes of the
@@ -915,21 +880,13 @@ jobs:
 
       # A plugin's tables (SMD-2310): the migrator's plugin ledger, the plugin
       # role's boundary (its own schema, none of the core's tables), the
-      # example plugin's operations through both servers, preflight's row.
+      # example plugin's operations through both servers, read back through
+      # the MCP server as a REST client (SMD-2287 PR 4a), preflight's row.
       - name: Plugin tables, their ledger and their role
         working-directory: server-portable
         run: bun test-plugins-sql.ts
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-
-      # The example's operations read back through the MCP server as a REST
-      # client (SMD-2287 PR 4a), on the installs above.
-      - name: Plugin tables, through the MCP server as a REST client
-        working-directory: server-portable
-        run: bun test-plugins-sql.ts
-        env:
-          DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
-          OB1_MCP_UNDER_TEST: client
 
       # The fully local path: both model calls go to a configured endpoint with no
       # credential, and a wrong-width vector is refused rather than stored.
@@ -1327,6 +1284,10 @@ jobs:
           held "sleep: OB1_SLEEP_WORKERS ('-1') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_WORKERS=-1
           held '--poll must be' -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_POLL=61
           also 'supervise: sleep exited 2'
+          # SMD-3203: OB1_SLEEP_DUMP_DIR reaches the scheduler as --dump-dir,
+          # the path one argument with its space, and one it cannot write is
+          # the scheduler's own refusal, before it reads the database.
+          held '--dump-dir /var/lib/ob1/no such dir is not a directory this process can write' -e OB1_WORKER_KEY=not-a-key -e 'OB1_SLEEP_DUMP_DIR=/var/lib/ob1/no such dir'
           # SMD-2679: the budget's four settings, each guarded, and the flag
           # each reaches — a clock past a week refused by the scheduler.
           held "sleep: OB1_SLEEP_BUDGET ('60m') takes digits only" -e OB1_WORKER_KEY=not-a-key -e OB1_SLEEP_BUDGET=60m
@@ -1360,13 +1321,11 @@ jobs:
       - name: Every published port binds loopback
         working-directory: deploy
         run: |
-          # The forwarder's script, as compose renders it in each stack, is
+          # The forwarder's script, as compose renders it, is
           # deploy/forwarder.ts byte for byte: a `$` in it would be read as a
           # variable (check 28 refuses one in the file; this holds the render).
-          for f in compose.yaml compose.tiers.yaml; do
-            docker compose -f "$f" config --format json | jq -j .configs.forwarder.content | cmp - forwarder.ts \
-              || { echo "$f's rendered forwarder script is not deploy/forwarder.ts" >&2; exit 1; }
-          done
+          docker compose -f compose.yaml config --format json | jq -j .configs.forwarder.content | cmp - forwarder.ts \
+            || { echo "compose.yaml's rendered forwarder script is not deploy/forwarder.ts" >&2; exit 1; }
           docker compose -f compose.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and (.services.forwarder.ports | length == 1) and (.services.proxy | has("ports") | not) and (.services.server | has("ports") | not) and (.services.api | has("ports") | not) and (.services.mcp | has("ports") | not) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.forwarder.image | test("@sha256:[0-9a-f]{64}$")) and (.services.proxy.labels["ob1.proxy-routes"] == .configs["proxy-routes"].content) and (.services.forwarder.labels["ob1.forwarder"] == .configs.forwarder.content) and ([.services[] | select(.network_mode != null)] | length == 0)'
           # The REST core's public overlay (SMD-2284) publishes nothing either, and
@@ -1389,13 +1348,6 @@ jobs:
           # port, its forwarder's, on loopback.
           SERVER_PORT=8011 SERVER_BIND=127.0.0.1 OB1_TIER=canary COMPOSE_PROFILES='' docker compose -p open-brain-canary -f compose.yaml config --format json \
             | jq -e '(.networks | length > 0) and all(.networks[]; (.name | startswith("open-brain-canary_")) and (.external != true)) and ([.services[].ports[]?] | length == 1) and (.services.forwarder.ports | length == 1 and .[0].host_ip == "127.0.0.1" and .[0].published == "8011")'
-          # The three-brain stack (SMD-2294) publishes its forwarder alone, on
-          # loopback, the proxy on compose.yaml's pinned image behind it
-          # (SMD-2583), as compose renders it.
-          # Its routes and each tier's wiring are check-fork-consistency's
-          # check 27, which reads the file itself.
-          docker compose -f compose.tiers.yaml --profile local-models config --format json \
-            | jq -e --arg img "$(docker compose -f compose.yaml config --format json | jq -r .services.proxy.image)" '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1")) and (.services.forwarder.ports | length == 1) and (.services.proxy | has("ports") | not) and (.services.proxy.image == $img) and ([.services[] | select(.network_mode != null)] | length == 0)'
           docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
             | jq -e '([.services[].ports[]?] | length == 3 and all(.host_ip == "127.0.0.1")) and ([.services[] | select(.network_mode != null)] | length == 0)'
           SERVER_BIND=0.0.0.0 docker compose -f compose.yaml -f compose.host-ports.yaml --profile local-models config --format json \
@@ -1431,17 +1383,16 @@ jobs:
           # that names none is put there); Postgres on the internal `data`
           # alone, beside only what connects to it; the outward networks'
           # members held, the authorization server's and the proxy's each
-          # alone; and the same of the three-brain stack and the canary, every
-          # network of which is its own (SMD-2874).
+          # alone; and the same of the canary, every network of which is its
+          # own (SMD-2874).
           # check-fork-consistency.ts 28 holds the files to the same networks;
           # this holds what compose makes of them, and the full-stack job
           # runs a container on `egress` against Postgres.
-          # Every profile each file defines, read from it, so a service under
+          # Every profile compose.yaml defines, read from it, so a service under
           # a new one is in the render (review pass 1: a list written here
           # missed it).
           profiles_of() { docker compose -f "$1" config --profiles | sed 's/^/--profile=/'; }
           all=(); while IFS= read -r p; do all+=("$p"); done < <(profiles_of compose.yaml)
-          tiers=(); while IFS= read -r p; do tiers+=("$p"); done < <(profiles_of compose.tiers.yaml)
           [ "${#all[@]}" -ge 8 ] || { echo "compose.yaml lists ${#all[@]} profiles, fewer than the eight it has" >&2; exit 1; }
           # shellcheck disable=SC2016 # jq's variables, not the shell's
           members='def on($n): [.services | to_entries[] | select((.value.networks // {"default": null}) | has($n)) | .key] | sort;'
@@ -1455,8 +1406,6 @@ jobs:
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data", "postgres-port"]) and (on("postgres-port") == ["postgres"])'
           docker compose -f compose.yaml -f compose.grafana-port.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and (on("grafana-port") == ["lgtm"]) and ((.services.lgtm.networks | keys) == ["grafana-port", "mesh", "telemetry"])'
-          docker compose -f compose.tiers.yaml "${tiers[@]}" config --format json \
-            | jq -e "$members"' (on("default") == []) and (on("data") == ([["stable", "canary", "working"][] as $t | ["postgres", "migrate", "server", "api"][] | "\($t)-\(.)"] | sort)) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.data.internal == true and .networks.front.internal == true'
           docker compose -p open-brain-canary -f compose.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and (.networks.data.name == "open-brain-canary_data") and all(.networks[]; (.name | startswith("open-brain-canary_")) and (.external != true))'
           # SMD-2424: the workers profile's two followers publish nothing,
@@ -1476,13 +1425,15 @@ jobs:
             | jq -e '([.services[].ports[]?] | length == 1) and all(.services.extract, .services.consolidate; (has("ports") | not) and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully") and .services.extract.stop_grace_period == "2m0s" and .services.consolidate.stop_grace_period == "1m0s" and (.services.extract.command[:9] == ["bun", "db/supervise.ts", "--worker", "extract", "--require-key", "--digits", "OB1_EXTRACT_FOLLOW", "OB1_EXTRACT_WORKERS", "--run"] and (.services.extract.command | length == 10) and (.services.extract.command[9] | test("^exec bun db/extract-entities\\.ts --follow \\$+\\{OB1_EXTRACT_FOLLOW:\\+\"\\$+OB1_EXTRACT_FOLLOW\"\\} --workers \"\\$+\\{OB1_EXTRACT_WORKERS:-1\\}\"$"))) and (.services.consolidate.command[:9] == ["bun", "db/supervise.ts", "--worker", "consolidate", "--require-key", "--digits", "OB1_CONSOLIDATE_FOLLOW", "OB1_CONSOLIDATE_WORKERS", "--run"] and (.services.consolidate.command | length == 10) and (.services.consolidate.command[9] | test("^exec bun db/consolidate\\.ts --follow \\$+\\{OB1_CONSOLIDATE_FOLLOW:\\+\"\\$+OB1_CONSOLIDATE_FOLLOW\"\\} --workers \"\\$+\\{OB1_CONSOLIDATE_WORKERS:-1\\}\"$")))'
           # SMD-2678: the sleep profile's service holds the same, and more of
           # its own: init (bun as PID 1 ignores SIGTERM until its handlers are
-          # in, SMD-2666), the extract service's grace (120 s), its seven
-          # settings handed in — the budget's four since SMD-2679 — and its
-          # command the supervisor with the key guard and all seven guarded
-          # digits only, its --run exactly the scheduler's exec'd --follow
-          # with them (SMD-3214).
+          # in, SMD-2666), the extract service's grace (120 s), its eight
+          # settings handed in — the budget's four since SMD-2679, the dump
+          # directory since SMD-3203 — the workers' two read-only mounts and
+          # the dump volume, and its command the supervisor with the key guard
+          # and the seven numbers guarded digits only, its --run exactly the
+          # scheduler's exec'd --follow with them, --dump-dir only when its
+          # setting is (SMD-3214).
           docker compose -f compose.yaml --profile sleep config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1) and (.services.sleep | (has("ports") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_POLL") and has("OB1_SLEEP_WORKERS") and has("OB1_SLEEP_BUDGET") and has("OB1_SLEEP_STATEMENT_TIMEOUT") and has("OB1_SLEEP_WORK_MEM") and has("OB1_SLEEP_MAINTENANCE_WORK_MEM")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 2 and all(.read_only == true)) and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and .command[:14] == ["bun", "db/supervise.ts", "--worker", "sleep", "--require-key", "--digits", "OB1_SLEEP_QUIET", "OB1_SLEEP_POLL", "OB1_SLEEP_WORKERS", "OB1_SLEEP_BUDGET", "OB1_SLEEP_STATEMENT_TIMEOUT", "OB1_SLEEP_WORK_MEM", "OB1_SLEEP_MAINTENANCE_WORK_MEM", "--run"] and (.command | length == 15) and (.command[14] | test("^exec bun db/sleep\\.ts --follow --quiet \"\\$+\\{OB1_SLEEP_QUIET:-300\\}\" --poll \"\\$+\\{OB1_SLEEP_POLL:-5\\}\" --workers \"\\$+\\{OB1_SLEEP_WORKERS:-1\\}\" --budget \"\\$+\\{OB1_SLEEP_BUDGET:-60\\}\" --statement-timeout \"\\$+\\{OB1_SLEEP_STATEMENT_TIMEOUT:-300\\}\" --work-mem \"\\$+\\{OB1_SLEEP_WORK_MEM:-4\\}\" --maintenance-work-mem \"\\$+\\{OB1_SLEEP_MAINTENANCE_WORK_MEM:-64\\}\"$")))'
+            | jq -e '([.services[].ports[]?] | length == 1) and (.services.sleep | (has("ports") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_POLL") and has("OB1_SLEEP_WORKERS") and has("OB1_SLEEP_BUDGET") and has("OB1_SLEEP_STATEMENT_TIMEOUT") and has("OB1_SLEEP_WORK_MEM") and has("OB1_SLEEP_MAINTENANCE_WORK_MEM") and has("OB1_SLEEP_DUMP_DIR")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 3) and ([.volumes[] | select(.type == "bind")] | length == 2 and all(.read_only == true)) and ([.volumes[] | select(.type == "volume") | "\(.source):\(.target)"] == ["sleep-dumps:/var/lib/ob1/sleep-dumps"]) and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and .command[:14] == ["bun", "db/supervise.ts", "--worker", "sleep", "--require-key", "--digits", "OB1_SLEEP_QUIET", "OB1_SLEEP_POLL", "OB1_SLEEP_WORKERS", "OB1_SLEEP_BUDGET", "OB1_SLEEP_STATEMENT_TIMEOUT", "OB1_SLEEP_WORK_MEM", "OB1_SLEEP_MAINTENANCE_WORK_MEM", "--run"] and (.command | length == 15) and (.command[14] | test("^exec bun db/sleep\\.ts --follow --quiet \"\\$+\\{OB1_SLEEP_QUIET:-300\\}\" --poll \"\\$+\\{OB1_SLEEP_POLL:-5\\}\" --workers \"\\$+\\{OB1_SLEEP_WORKERS:-1\\}\" --budget \"\\$+\\{OB1_SLEEP_BUDGET:-60\\}\" --statement-timeout \"\\$+\\{OB1_SLEEP_STATEMENT_TIMEOUT:-300\\}\" --work-mem \"\\$+\\{OB1_SLEEP_WORK_MEM:-4\\}\" --maintenance-work-mem \"\\$+\\{OB1_SLEEP_MAINTENANCE_WORK_MEM:-64\\}\" \\$+\\{OB1_SLEEP_DUMP_DIR:\\+--dump-dir \"\\$+\\{OB1_SLEEP_DUMP_DIR\\}\"\\}$")))'
           [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api app forwarder mcp migrate postgres proxy server " ]
           docker compose -f compose.yaml config --format json \
             | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'
@@ -1578,7 +1529,7 @@ jobs:
           [ "$(docker logs ob1-ci-decoy 2>&1 | grep -c 'decoy got a connection')" = 0 ] || { echo "the forwarder connected to the decoy answering as the proxy" >&2; exit 1; }
           docker compose -f compose.yaml logs --no-color --since "$stopped" forwarder | grep -F 'resolved only to addresses the forwarder does not dial'
 
-      # SMD-2658, SMD-2685. check-fork-consistency's checks 27 and 28 hold
+      # SMD-2658, SMD-2685. check-fork-consistency's check 28 holds
       # each compose file as Bun.YAML reads it: the route tables, compose.yaml's
       # proxy, what each overlay declares it sets, the keys compose.yaml's
       # services set, and who joins which network under which names. This
@@ -1588,7 +1539,7 @@ jobs:
       # directory, with no command (a command makes Traefik drop every
       # TRAEFIK_* setting, measured on the pin), volume or other provider.
       # Then for each -f combination (compose.yaml under the canary's project
-      # name, the three-brain stack, the release's overlay):
+      # name, the release's overlay):
       # - compose renders it exactly as it renders Bun.YAML's reading of each
       #   file, so a character, a tag or a number the two read apart
       #   (`!!binary`, !reset, U+2028, 012) fails here whichever file carries
@@ -1632,7 +1583,7 @@ jobs:
           # are held by "Every published port binds loopback" and by check 13.
           declared() {
             case "$1" in
-              compose.yaml|compose.tiers.yaml|compose.api-public.yaml|compose.hooks-public.yaml) ;;
+              compose.yaml|compose.api-public.yaml|compose.hooks-public.yaml) ;;
               compose.grafana-public.yaml) printf '%s\n' '["services","app","environment","GRAFANA_ROUTE"]' ;;
               compose.host-ports.yaml) printf '%s\n' '["services","postgres","ports"]' '["services","ollama","ports"]' '["services","jev","ports"]' '["services","postgres","networks","postgres-port"]' '["networks","postgres-port"]' ;;
               compose.grafana-port.yaml) printf '%s\n' '["services","lgtm","ports"]' '["services","lgtm","networks","grafana-port"]' '["services","lgtm","environment","LGTM_ORIGIN"]' '["services","app","environment","GRAFANA_LINK"]' '["networks","grafana-port"]' ;;
@@ -1679,7 +1630,7 @@ jobs:
                 rendered+=("$a")
                 paths+="$(declared "$a")"$'\n'
                 if [ -z "$first" ]; then first="$a"; fi
-                # Bun.YAML's reading of the file, which checks 27 and 28 hold; the release's overlay is read by none.
+                # Bun.YAML's reading of the file, which check 28 holds; the release's overlay is read by none.
                 if [ "$a" = compose.release.yaml ]; then twins+=("$a"); else
                   bun -e 'await Bun.write(process.argv.at(-1), JSON.stringify(Bun.YAML.parse(await Bun.file(process.argv.at(-2)).text())))' "$a" ".bun-view.$a.json"
                   twins+=(".bun-view.$a.json")
@@ -1721,7 +1672,6 @@ jobs:
           api='{"source": "proxy-api-route", "target": "/etc/traefik/dynamic/api.yaml", "label": "ob1.proxy-api-route", "file": "compose.api-public.yaml"}'
           hooks='{"source": "proxy-hooks-route", "target": "/etc/traefik/dynamic/hooks.yaml", "label": "ob1.proxy-hooks-route", "file": "compose.hooks-public.yaml"}'
           grafana='{"source": "proxy-grafana-route", "target": "/etc/traefik/dynamic/grafana.yaml", "label": "ob1.proxy-grafana-route", "file": "compose.grafana-public.yaml"}'
-          tiers='{"source": "tier-routes", "target": "/etc/traefik/dynamic/routes.yaml", "label": "ob1.proxy-routes", "file": "compose.tiers.yaml"}'
           proxy_loads "[$routes]" -f compose.yaml "${profiles[@]}"
           proxy_loads "[$routes, $api]" -f compose.yaml -f compose.api-public.yaml "${profiles[@]}"
           proxy_loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml "${profiles[@]}"
@@ -1734,7 +1684,6 @@ jobs:
           proxy_loads "[$routes]" -f compose.yaml -f compose.host-ports.yaml -f compose.grafana-port.yaml "${profiles[@]}"
           proxy_loads "[$routes, $api, $hooks, $grafana]" -f compose.yaml -f compose.api-public.yaml -f compose.hooks-public.yaml -f compose.grafana-public.yaml "${profiles[@]}"
           proxy_loads "[$routes]" -p open-brain-canary -f compose.yaml "${profiles[@]}"
-          proxy_loads "[$tiers]" -f compose.tiers.yaml --profile=local-models
           # The release's overlay, on the install path deploy/README.md gives:
           # as a rehearsal renders it, and as renderComposeOverlay does with a
           # tag and digests (the CLI refuses tag mode on a tree that is not the
@@ -1838,28 +1787,41 @@ jobs:
 
       # SMD-2280: the operator GUI as a browser uses it, through the stack's
       # proxy at /dashboard, on the stack configured for no authorization
-      # server (dashboard/smoke.ts). First one capture of its own over /mcp,
-      # ingested, since smoke.sh captures nothing: --require-thought fails
-      # the step rather than skip the thought page, and --require-ingested
-      # unless that page's ingested notice is driven. The smoke holds the
+      # server (dashboard/smoke.ts). First three captures of its own over /mcp,
+      # since smoke.sh captures nothing: two with no trust recorded (the smoke
+      # key is unclassified), then an ingested one, the newest, which the
+      # thought page drives. --require-thought fails
+      # the step rather than skip the thought page, --require-ingested unless
+      # that page's ingested notice is driven, and --require-pages unless
+      # browse walks three pages (the third's Previous and First page, a
+      # spent cut trail on the last), search pages past its first, and the
+      # trust filter leaves the untrusted captures out (PR 2a). The smoke holds the
       # sign-in wall; a wrong and a capture-only key, a cookie the server never
       # issued and a cross-site or Origin-null sign-in refused; the cookie's
-      # and the pages' headers; the overview, the status and a thought rendered
-      # from the REST core under the write key, the overview and a 404 under
-      # the read key; the overview's data holding each thought's first line
-      # alone; the key in no page, header, script or cookie; and sign-out, a
+      # and the pages' headers; the overview, the status, browse, search and a
+      # thought rendered from the REST core under the write key, the overview,
+      # browse, search and a 404 under the read key; each list's data holding
+      # the fields it shows alone; the key in no page, header, script or
+      # cookie; and sign-out, a
       # second sign-in and the per-key cap each ending a session on the
       # server. Here, not after the next step: that one configures the
       # authorization server, and the GUI then offers no key sign-in (review
-      # pass 1). The smoke imports nothing, so nothing is installed.
+      # pass 1). The smoke imports only dashboard/src/lib/browse.ts and
+      # format.ts, which import nothing, so nothing is installed.
       - name: The operator GUI, driven through the proxy
         working-directory: dashboard
         run: |
+          for n in 1 2; do
+            curl -fsS --max-time 60 -X POST http://127.0.0.1:8010/mcp -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+              -H "x-brain-key: $OB1_SMOKE_KEY" -o /tmp/gui-capture-untrusted \
+              -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"capture_thought","arguments":{"content":"Thought '"$n"' with no trust for the operator GUI smoke, so browse and search page past their first (SMD-2280)."}}}'
+            grep -q 'Captured as' /tmp/gui-capture-untrusted || { echo "the GUI smoke's untrusted capture $n failed: $(head -c 400 /tmp/gui-capture-untrusted)" >&2; exit 1; }
+          done
           curl -fsS --max-time 60 -X POST http://127.0.0.1:8010/mcp -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
             -H "x-brain-key: $OB1_SMOKE_KEY" -o /tmp/gui-capture \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"capture_thought","arguments":{"content":"The operator GUI smoke reads this thought on its own page, its ingested notice before it (SMD-2280).","trust":"ingested"}}}'
           grep -q 'Captured as' /tmp/gui-capture || { echo "the GUI smoke's capture failed: $(head -c 400 /tmp/gui-capture)" >&2; exit 1; }
-          bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY" --require-thought --require-ingested
+          bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY" --require-thought --require-ingested --require-pages
 
       # Where the authorization server's step ran when the full-stack checks
       # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):

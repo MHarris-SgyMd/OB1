@@ -558,10 +558,26 @@ const SIGNALS = [["traces", "spans", "TRACES"], ["metrics", "metrics", "METRICS"
 /** Words as a sentence lists them: `a`, `a and b`, `a, b and c`. */
 const listed = (words: readonly string[], last: "and" | "or") => (words.length < 2 ? words.join("") : `${words.slice(0, -1).join(", ")} ${last} ${words[words.length - 1]}`);
 
-/** Where each signal goes, by startTelemetry's reading of the environment: each signal's URL, the lines that say why one goes nowhere, and where the others go. */
+/**
+ * What a telemetry line says, beside its words (SMD-2909), so a reader judges by the kind and never the prose:
+ * `goes` (where signals go), `unread` (a setting not read; the signal goes anyway), `off` (switched off on purpose:
+ * OTEL_SDK_DISABLED or an exporter's `none`), `no-url` (an endpoint that is no http(s) URL), `query` (the shared
+ * endpoint with a query string or fragment), `not-started` (the SDK would not load or set up), `not-sent` (what an
+ * export, a full queue or the anonymous budget lost) and `note` (a setting held to its bound, or not read and its
+ * default used). `unread` is no problem and `note` a warning: what is unread changes nothing that is sent (a console
+ * exporter, a protocol), while a note's default changes how the server sends (its interval, batch or queue).
+ */
+export type SaidKind = "goes" | "unread" | "off" | "no-url" | "query" | "not-started" | "not-sent" | "note";
+/** A telemetry line and what it says. */
+export interface Said {
+  line: string;
+  kind: SaidKind;
+}
+
+/** Where each signal goes, by startTelemetry's reading of the environment: each signal's URL, why one goes nowhere or what is not read (`reasons`, each a line and its kind), and where the others go. */
 export interface TelemetryPlan {
   urls: Partial<Record<"traces" | "metrics" | "logs", string>>;
-  lines: string[];
+  reasons: Said[];
   goes: { variable: string; origin: string; words: string[] }[];
 }
 
@@ -582,7 +598,7 @@ export interface TelemetryPlan {
  * whitespace inside is no URL (review pass 2).
  */
 export function planTelemetry(env: Record<string, string | undefined> = process.env): TelemetryPlan {
-  const plan: TelemetryPlan = { urls: {}, lines: [], goes: [] };
+  const plan: TelemetryPlan = { urls: {}, reasons: [], goes: [] };
   // A value is read trimmed, and one that is blank is unset (review pass 2: a trailing space after a path was sent to `/%20/…`).
   const read = (name: string) => env[name]?.trim() || undefined;
   const named = SIGNALS.flatMap(([signal, word, part]) => {
@@ -593,10 +609,11 @@ export function planTelemetry(env: Record<string, string | undefined> = process.
   if (named.length === 0) return plan;
   if (env.OTEL_SDK_DISABLED?.trim().toLowerCase() === "true") {
     const variables = [...new Set(named.map((n) => n.variable))];
-    plan.lines.push(`telemetry: ${listed(variables, "and")} ${variables.length === 1 ? "is" : "are"} set, but OTEL_SDK_DISABLED=true: no ${listed(named.map((n) => n.word), "or")} are sent (SMD-1849)`);
+    plan.reasons.push({ line: `telemetry: ${listed(variables, "and")} ${variables.length === 1 ? "is" : "are"} set, but OTEL_SDK_DISABLED=true: no ${listed(named.map((n) => n.word), "or")} are sent (SMD-1849)`, kind: "off" });
     return plan;
   }
-  const nowhere = new Map<string, string[]>();
+  // Each why with its kind (SMD-2909), and the signals it holds back.
+  const nowhere = new Map<string, { kind: SaidKind; words: string[] }>();
   const unread = new Map<string, string[]>();
   const somewhere = new Map<string, { variable: string; origin: string; words: string[] }>();
   const add = (map: Map<string, string[]>, key: string, word: string) => map.set(key, [...(map.get(key) ?? []), word]);
@@ -615,12 +632,12 @@ export function planTelemetry(env: Record<string, string | undefined> = process.
     // An exporter is a list (`otlp,console`): one that names `none` is off, as the SDK's own reading has it (review pass 2).
     const exporterValue = read(`OTEL_${part}_EXPORTER`);
     const exporters = (exporterValue ?? "").toLowerCase().split(",").map((e) => e.trim()).filter((e) => e !== "");
-    const why = exporters.includes("none") ? `${variable} is set, but OTEL_${part}_EXPORTER=none`
-      : url === undefined || (url.protocol !== "http:" && url.protocol !== "https:") || /\s/.test(endpoint) ? `${variable} is not an http(s) URL`
-      : shared && /[?#]/.test(endpoint) ? `${variable} has a query string or a fragment, which the signal's path would follow` : undefined;
+    const [why, kind]: [string, SaidKind] | [undefined, undefined] = exporters.includes("none") ? [`${variable} is set, but OTEL_${part}_EXPORTER=none`, "off"]
+      : url === undefined || (url.protocol !== "http:" && url.protocol !== "https:") || /\s/.test(endpoint) ? [`${variable} is not an http(s) URL`, "no-url"]
+      : shared && /[?#]/.test(endpoint) ? [`${variable} has a query string or a fragment, which the signal's path would follow`, "query"] : [undefined, undefined];
     // No URL is always a why (no http(s) URL), so past this a URL is there.
     if (why !== undefined || url === undefined) {
-      add(nowhere, why!, word);
+      nowhere.set(why!, { kind: kind!, words: [...(nowhere.get(why!)?.words ?? []), word] });
       continue;
     }
     if (exporters.some((e) => e !== "otlp")) add(unread, `OTEL_${part}_EXPORTER ${quoted(exporterValue!)} is not read (only otlp or none)`, word);
@@ -633,40 +650,46 @@ export function planTelemetry(env: Record<string, string | undefined> = process.
     goes.words.push(word);
     somewhere.set(key, goes);
   }
-  for (const [why, words] of nowhere) plan.lines.push(`telemetry: ${why}: no ${listed(words, "or")} are sent (SMD-1849)`);
-  for (const [what, words] of unread) plan.lines.push(`telemetry: ${what}: ${listed(words, "and")} go as OTLP/HTTP JSON (SMD-1849)`);
+  for (const [why, { kind, words }] of nowhere) plan.reasons.push({ line: `telemetry: ${why}: no ${listed(words, "or")} are sent (SMD-1849)`, kind });
+  for (const [what, words] of unread) plan.reasons.push({ line: `telemetry: ${what}: ${listed(words, "and")} go as OTLP/HTTP JSON (SMD-1849)`, kind: "unread" });
   plan.goes = [...somewhere.values()];
   return plan;
+}
+
+/** The lines saying where a plan's signals go, as a start that set the SDK up says them (SMD-2909: shared, so a reader's cells are the start's own). */
+export function goesLines(serviceName: string, plan: TelemetryPlan): Said[] {
+  return plan.goes.map((goes) => ({ line: `telemetry: ${labelPart(serviceName)}'s ${listed(goes.words, "and")} go to ${goes.origin} over OTLP/HTTP (${goes.variable}, SMD-1849)`, kind: "goes" }));
 }
 
 /**
  * Sets up the OpenTelemetry SDK where an operator names a collector — a server
  * calls it where it serves, and the SDK (otel-setup.ts) is loaded only then, so
  * a process that names no collector never loads it. Each signal goes where
- * planTelemetry says, and what goes nowhere is said, by planTelemetry's lines.
+ * planTelemetry says, and what goes nowhere is said, by planTelemetry's reasons.
  * Says where the rest go — the variable and the endpoint's origin alone, so a
  * credential in it stays out of the log — or that its SDK could not be loaded
  * or set up, by the error's name alone (a message can carry the URL). A
  * request that arrives before the SDK has loaded (tens of milliseconds) has a
  * no-op span; one that also ends before has no point and no log record, and
  * one that ends after has both, with no trace id, as its line has none (review
- * pass 3). `load` is otel-setup.ts but for a suite. Returns whether it set one
- * up.
+ * pass 3). `log` is given each line with its kind (`Said`), which preflight's
+ * row reads; `load` is otel-setup.ts but for a suite. Returns whether it set
+ * one up.
  */
 export function startTelemetry(
   serviceName: string,
-  log: (line: string) => void = (line) => console.warn(line),
+  log: (line: string, kind: SaidKind) => void = (line) => console.warn(line),
   load: () => Promise<Pick<typeof import("./otel-setup.ts"), "setUpTelemetry">> = () => import("./otel-setup.ts"),
   { oneShot = false }: { oneShot?: boolean } = {},
 ): Promise<boolean> {
   if (starting) return starting;
   const plan = planTelemetry();
-  for (const line of plan.lines) log(line);
+  for (const { line, kind } of plan.reasons) log(line, kind);
   if (plan.goes.length === 0) return Promise.resolve(false);
   const own = generation;
   // After a stop still in progress, so this start's SDK is never the one it shuts down (review pass 7).
   starting = (stopping ?? Promise.resolve()).then(load).then(async ({ setUpTelemetry }) => {
-    const set = setUpTelemetry(serviceName, { report: { warn: log }, urls: plan.urls, oneShot });
+    const set = setUpTelemetry(serviceName, { report: { warn: (line) => log(line, "not-sent"), note: (line) => log(line, "note") }, urls: plan.urls, oneShot });
     // A stop came while this loaded: this start is not the SDK's, and goes before the stop returns (review passes 6–7).
     if (own !== generation) {
       await set.shutdown();
@@ -676,17 +699,17 @@ export function startTelemetry(
     // A count left by a stop (requests ended while it shut down) is said before the reset (review pass 6).
     sayUnsent();
     anonymous = { minute: -1, sent: 0, unsent: 0 };
-    telemetryLog = log;
+    telemetryLog = (line) => log(line, "not-sent");
     return set;
   }).catch((err: unknown) => {
     // The import's failure or the setup's, a server that serves either way (review pass 4: a throw in the setup killed it).
-    log(`telemetry: not started (${err instanceof Error ? err.name : "error"}): no ${listed(plan.goes.flatMap((g) => g.words), "or")} are sent (SMD-1849)`);
+    log(`telemetry: not started (${err instanceof Error ? err.name : "error"}): no ${listed(plan.goes.flatMap((g) => g.words), "or")} are sent (SMD-1849)`, "not-started");
     return undefined;
   }).then((set) => {
     // Said outside the guard, of this start's own SDK: a sink that throws here leaves it running, and is not read as a failed start (review pass 5).
     if (set) {
       try {
-        for (const goes of plan.goes) log(`telemetry: ${labelPart(set.serviceName)}'s ${listed(goes.words, "and")} go to ${goes.origin} over OTLP/HTTP (${goes.variable}, SMD-1849)`);
+        for (const { line, kind } of goesLines(set.serviceName, plan)) log(line, kind);
       } catch {}
     }
     return set !== undefined;
@@ -696,22 +719,24 @@ export function startTelemetry(
 
 /**
  * `preflight --deep`'s telemetry row (PR 2d review passes 1–2), from what the
- * start and the send said (`said`, startTelemetry's lines), the signals with a
- * URL, the provider probes made and how the send went: `ok` where the probes'
- * spans or points went — by the signals that go, a flush that found nothing
- * left counted as gone, since a span batch may have sent them first; a warning
- * for what the server would share — an export not sent, an endpoint that is no
- * URL or has a query string, an SDK that would not start — whatever was sent;
- * a skip where no collector is named, a signal is off on purpose
- * (`OTEL_SDK_DISABLED`, an exporter's `none`), spans and points both go
- * nowhere, or no probe ran. A line that says where a signal goes, or what is
- * not read, is no problem. Each line once, in a row's words.
+ * start and the send said (`said`, startTelemetry's lines, each with its kind:
+ * the status reads the kinds alone, the words only make the detail, SMD-2909),
+ * the signals with a URL, the provider probes made and how the send went: `ok`
+ * where the probes' spans or points went — by the signals that go, a flush
+ * that found nothing left counted as gone, since a span batch may have sent
+ * them first; a warning for what the server would share — an export not sent,
+ * an endpoint that is no URL or has a query string, an SDK that would not
+ * start, a setting held to its bound or read as its default — whatever was
+ * sent; a skip where no collector is named, spans and points both go nowhere
+ * (a signal off on purpose by `OTEL_SDK_DISABLED` or an exporter's `none`
+ * among them), or no probe ran. A line that says where a signal goes, what is
+ * not read, or what is off is no problem. Each line once, in a row's words.
  */
-export function telemetryRow(state: { started: boolean; said: readonly string[]; urls: TelemetryPlan["urls"]; probes: number; sent?: FlushResult; boundMs: number }): { status: "ok" | "warn" | "skip"; detail: string; fix?: string } {
-  // No `telemetry:` before, no ticket after; one of each: the flush and the shutdown each send the metrics' reading, so a refused one is said twice.
-  const said = [...new Set(state.said.map((line) => line.replace(/^telemetry: /, "").replace(/ \(SMD-1849\)$/, "").replace(/, SMD-1849\)$/, ")")))];
-  const deliberate = (line: string) => /OTEL_SDK_DISABLED=true|_EXPORTER=none/.test(line);
-  const wrong = said.some((line) => !/ go to | is not read/.test(line) && !deliberate(line));
+export function telemetryRow(state: { started: boolean; said: readonly Said[]; urls: TelemetryPlan["urls"]; probes: number; sent?: FlushResult; boundMs: number }): { status: "ok" | "warn" | "skip"; detail: string; fix?: string } {
+  // Judged by each line's kind, never its words (SMD-2909); the skips below come from what goes, not from a kind.
+  const wrong = state.said.some(({ kind }) => kind !== "goes" && kind !== "unread" && kind !== "off");
+  // The detail: no `telemetry:` before, no ticket after; one of each: the flush and the shutdown each send the metrics' reading, so a refused one is said twice.
+  const said = [...new Set(state.said.map(({ line }) => line.replace(/^telemetry: /, "").replace(/ \(SMD-1849\)$/, "").replace(/, SMD-1849\)$/, ")")))];
   const row = (status: "ok" | "warn" | "skip", detail: string) => status === "warn"
     ? { status, detail, fix: "Fix what the row names, or check the collector is up and reachable from here; the server reads the same variables and sends to the same." }
     : { status, detail };

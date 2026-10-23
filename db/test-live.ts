@@ -35,7 +35,7 @@
  */
 
 import { SQL } from "bun";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,7 +65,8 @@ import { labelNames, linearAdapter, renderIssue, SAMPLE_ISSUE, type LinearIssue 
 import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, rowColumns, syncIssue, type BrainRow, type Writer } from "./sync-linear.ts";
 import { endOnRefusal, passStamper, stampKey } from "./pass-stamp.ts";
 import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
-import { run as runSleep } from "./sleep.ts";
+import { passDumpFile, run as runSleep } from "./sleep.ts";
+import { readThoughts } from "./weekly-digest.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
 import { findingGate, findingsSchemaProblem, findingsStep, groupFindings, outcomes, postFindings, selectFindings, summaryLine, type FindingsReport } from "./board-findings.ts";
 import { linearClient } from "./linear-api.ts";
@@ -8087,14 +8088,14 @@ if (want("16")) {
       type LinkNote = { recipe: { judged?: { verdict?: string; decide?: { top?: string; link?: { asked?: string; link?: string; capped?: boolean; via?: string }; writer?: unknown } } } };
       const pager = (await noteOf(pagerNew)) as unknown as LinkNote | undefined;
       const [pagerConf] = (await sql`SELECT (payload->>'confidence')::float AS c FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND thought_id = ${pagerNew}::uuid`) as { c: number }[];
-      const dumpOf = (n: string, o: string) => readFileSync(ddump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { newer: string; older: string; verdict: string; recorded: string | null; relation: string | null; link?: string | null; capped?: boolean | null })
+      const dumpOf = (n: string, o: string) => readFileSync(ddump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { newer: string; older: string; verdict: string; recorded: string | null; relation: string | null; link?: string | null; asked?: string | null; capped?: boolean | null })
         .find((l) => l.newer === n && l.older === o);
       const [gateDump, pagerDump, tenDump] = [dumpOf(gateNew, gateOld), dumpOf(pagerNew, pagerOld), dumpOf(tenNew, tenOld)];
       const gateProps = dprops.filter((r) => r.o === gateOld || r.n === gateNew);
       assert(gateRebuilt.stale_proposals === 1 && gateProps.length === 0 && gateAfter?.status === "rejected" && gateAfter.review_note === cappedNote
-          && gateDump?.verdict === "related" && gateDump.recorded === "settled" && gateDump.link === "F" && gateDump.capped === true
+          && gateDump?.verdict === "related" && gateDump.recorded === "settled" && gateDump.link === "F" && gateDump.asked === "first" && gateDump.capped === true
           && pager?.recipe.judged?.verdict === "related" && pager.recipe.judged.decide?.top === "evolves" && pager.recipe.judged.decide.link?.asked === "after" && pager.recipe.judged.decide.link.link === "H" && pager.recipe.judged.decide.link.capped === true
-          && pager.recipe.judged.decide.writer === undefined && pagerConf?.c === 0.2 && pagerDump?.link === "H" && pagerDump.capped === true && tenDump?.link === "D" && tenDump.capped === false,
+          && pager.recipe.judged.decide.writer === undefined && pagerConf?.c === 0.2 && pagerDump?.link === "H" && pagerDump.asked === "after" && pagerDump.capped === true && tenDump?.link === "D" && tenDump.asked === "first" && tenDump.capped === false,
         `the link step caps the gateway pair's outdates (an F link: no proposal, its related under the floor, its stale proposal settled saying so) and stores the pager pair's evolves as related at the tier's P(related) (an H link, asked after), and the dump says which (gateway ${JSON.stringify(gateDump ?? null)}, ${JSON.stringify(gateAfter ?? null)}; pager ${JSON.stringify(pager?.recipe.judged ?? null).slice(0, 300)}, ${pagerConf?.c})`);
       assert(tierCalls === 6 && writerCalls === 2 && linkCalls === 4 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartRule === 2
           && /1 under confidence 0\.55 not recorded/.test(drun.out)
@@ -8670,6 +8671,357 @@ if (want("19")) {
   assert(cfg.tier === "stable" && /^\d{4}-\d\d-\d\dT/.test(cfg.last_ingest ?? ""), "ob1_config records tier=stable and a last_ingest timestamp");
 
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`; // per-id: Bun binds a JS array as a comma string, not a {…} literal
+}
+
+/**
+ * Fixture exports for [19b], two records of each kind each importer reads,
+ * every date before 2025 so a row dated by the run stands out, and the shapes
+ * a real export brings: grok.com's nested conversation, a conversation two
+ * export files both hold, one the parser cannot read, members listed newest
+ * first, a group past the 100,000-character bound in each importer that
+ * splits, a Blogger category in single quotes and an entry in two `.atom`
+ * files. What each importer should emit: one item per thought, each item's
+ * kind, and for each key the export's own date and the source record as
+ * exported ("part" and null where a group's parts are checked on their own).
+ */
+function writeExportFixtures(root: string) {
+  const grok = join(root, "grok");
+  mkdirSync(grok, { recursive: true });
+  const conv1 = { id: "conv-1", title: "Sourdough starters", create_time: { $date: { $numberLong: String(Date.parse("2024-03-05T09:30:00Z")) } }, conversation: [
+    { sender: "user", message: "How do I keep a sourdough starter alive through a week away from home?\u0000" },
+    { sender: "assistant", message: "Feed it, refrigerate it, and refresh it twice when you return before baking." }] };
+  // A date with no offset, read as UTC whatever the machine's zone ([19b] emits under America/Los_Angeles).
+  const conv2 = { conversation: { id: "conv-2", title: "Bike gearing", create_time: "2024-04-10 18:00:00" }, responses: [
+    { response: { sender: "human", message: "What gear ratio suits a hilly forty kilometre commute on a steel frame?" } },
+    { response: { sender: "assistant", message: "A compact double with an eleven to thirty-four cassette covers most climbs comfortably." } }] };
+  // A date the pipeline would refuse (the whole file with it): left out, and the brain dates the row.
+  const conv3 = { id: "conv-3", title: "Tide tables", create_time: "2999-01-01T00:00:00Z", conversation: [
+    { sender: "user", message: "Where can I find tide tables for the estuary this coming weekend, by the hour?" }] };
+  // Past the bound (40 turns of 3,000 characters): two parts, the first keyed as the conversation.
+  const conv4 = { id: "conv-4", title: "Long chat", create_time: "2024-05-05T05:05:05Z", conversation: Array.from({ length: 40 }, (_, k) => ({ sender: k % 2 ? "assistant" : "user", message: `Turn ${k + 1}: ${"the long conversation goes on ".repeat(100)}` })) };
+  // One message past the bound alone: cut, saying so.
+  const conv5 = { id: "conv-5", title: "Pasted log", create_time: "2024-06-06T06:06:06Z", conversation: [{ sender: "user", message: `Here is the whole log: ${"0123456789".repeat(12_000)}` }] };
+  writeFileSync(join(grok, "grok-export.json"), JSON.stringify({ conversations: [conv1, conv2, conv4, conv5] }));
+  writeFileSync(join(grok, "grok-export-2.json"), JSON.stringify({ conversations: [conv1, null, conv3] }));
+  const ig = join(root, "instagram", "your_instagram_activity");
+  const dms: Record<string, unknown> = {};
+  // dave_888's thread passes the bound (300 messages of ~400 characters): two parts.
+  for (const [dir, who, t0, n] of [["alice_123", "Alice", 1700000000000, 205], ["bob_456", "Bob", 1700500000000, 3], ["dave_888", "Dave", 1701000000000, 300]] as const) {
+    mkdirSync(join(ig, "messages", "inbox", dir), { recursive: true });
+    const pad = dir === "dave_888" ? ` ${"and the talk went on ".repeat(18)}` : "";
+    const messages = Array.from({ length: n }, (_, k) => ({ sender_name: k % 2 ? "Me" : who, timestamp_ms: t0 + k * 60000, content: `Message ${k + 1} from ${k % 2 ? "me" : who} about meeting at the gallery${pad}` }));
+    // An emoji the export holds whole: the Meta repair is for latin1 mojibake only.
+    if (dir === "bob_456") messages.push({ sender_name: who, timestamp_ms: t0 + n * 60000, content: "See you there \u{1F600}" });
+    const file = { participants: [{ name: who }], messages };
+    dms[dir] = file;
+    writeFileSync(join(ig, "messages", "inbox", dir, "message_1.json"), JSON.stringify(file));
+  }
+  // Newest first, as the exports list them: the importer sorts before it groups.
+  // Two on one day (2023-07-22, 04:26 and 07:13 UTC), the later first.
+  const comments = [
+    { string_map_data: { Comment: { value: "This recipe worked perfectly the second time" }, Time: { timestamp: 1690010000 } } },
+    { string_map_data: { Comment: { value: "What a lovely view of the harbour at dusk" }, Time: { timestamp: 1690000000 } } },
+    { string_map_data: { Comment: { value: "A comment dated in the year three thousand" }, Time: { timestamp: 32503680000 } } }];
+  mkdirSync(join(ig, "comments"), { recursive: true });
+  writeFileSync(join(ig, "comments", "post_comments_1.json"), JSON.stringify({ comments_media_comments: comments }));
+  const posts = [
+    { title: "Homemade pasta, take three, finally the right thickness", creation_timestamp: 1680010000 },
+    { title: "First light over the ridge after a cold night camping", creation_timestamp: 1680000000 }];
+  mkdirSync(join(ig, "content"), { recursive: true });
+  writeFileSync(join(ig, "content", "posts_1.json"), JSON.stringify(posts));
+  // A download cut short: the importer refuses it rather than import a conversation with messages missing.
+  const igBad = join(root, "instagram-bad", "your_instagram_activity", "messages", "inbox", "carol_789");
+  mkdirSync(igBad, { recursive: true });
+  writeFileSync(join(igBad, "message_1.json"), `{"participants": [{"name": "Carol"}], "messages": [{"sender_name": "Carol", "content": "cut sh`);
+  const blogger = join(root, "blogger");
+  mkdirSync(blogger, { recursive: true });
+  const entry = (id: string, kind: string, title: string, published: string, body: string, q = '"') =>
+    `<entry><id>tag:blogger.com,1999:blog-1.${id}</id><published>${published}</published><category scheme="http://schemas.google.com/g/2005#kind" term=${q}http://schemas.google.com/blogger/2008/kind#${kind}${q}/><title type="text">${title}</title><content type="html">${body}</content></entry>`;
+  const entries = {
+    "post-1": entry("post-1", "post", "Winter garden notes", "2015-01-12T08:00:00.000-08:00", "&lt;p&gt;The kale survived the frost &amp;amp; the garlic is already showing green tips.&lt;/p&gt;"),
+    "post-2": entry("post-2", "post", "Moving day", "2016-06-01T12:00:00.000Z", "Boxes everywhere, but the new kitchen gets the morning sun all year.", "'"),
+    "post-1.comment-1": entry("post-1.comment-1", "comment", "", "2015-01-13T10:00:00.000Z", "Lovely to hear the kale made it, ours did not survive this year at all."),
+    // February the 30th: a day the calendar lacks, left out rather than rolled into March.
+    "post-2.comment-2": entry("post-2.comment-2", "comment", "", "2016-02-30T10:00:00.000Z", "Congratulations on the move, the morning light sounds wonderful indeed."),
+  };
+  writeFileSync(join(blogger, "feed.atom"), `<?xml version="1.0"?><feed>`
+    + `<entry><id>tag:blogger.com,1999:blog-1.settings.X</id><category term="http://schemas.google.com/blogger/2008/kind#settings"/><content>a setting the importer skips</content></entry>`
+    + Object.values(entries).join("") + `</feed>`);
+  writeFileSync(join(blogger, "backup.atom"), `<?xml version="1.0"?><feed>${entries["post-2"]}</feed>`);
+  const x = join(root, "x", "data");
+  mkdirSync(x, { recursive: true });
+  // Newest first, as the archive lists them; the year 2999 is a date the pipeline would refuse, so that tweet is `undated`.
+  const tweets = [
+    { tweet: { id_str: "1700000000000000009", created_at: "Wed Jan 01 00:00:00 +0000 2999", full_text: "A tweet whose date the archive mangled into the far future." } },
+    { tweet: { id_str: "1700000000000000004", created_at: "Mon Apr 01 08:00:00 +0000 2019", full_text: "Spring at last: the first swifts are back over the old church tower." } },
+    { tweet: { id_str: "1700000000000000003", created_at: "Thu Mar 07 11:00:00 +0000 2019", full_text: "RT @someone: a retweet, which the importer skips entirely" } },
+    { tweet: { id_str: "1700000000000000002", created_at: "Tue Mar 05 15:00:00 +0000 2019", full_text: "Coffee experiments: a coarser grind made the pour-over far less bitter." } },
+    { tweet: { id_str: "1700000000000000001", created_at: "Tue Mar 05 10:00:00 +0000 2019", full_text: "Finally finished the long trail across the national park this weekend." } }];
+  // A busy day past the bound (400 tweets of ~320 characters on 5 May 2019): two parts, listed newest first as the archive lists them.
+  for (let k = 399; k >= 0; k--) tweets.push({ tweet: { id_str: `17100000000000${String(k).padStart(5, "0")}`, created_at: new Date(Date.UTC(2019, 4, 5) + k * 120_000).toUTCString(), full_text: `Busy day tweet ${k + 1}: ${"a long thread of thoughts about the match ".repeat(7)}` } });
+  writeFileSync(join(x, "tweets.js"), `window.YTD.tweets.part0 = ${JSON.stringify(tweets)}`);
+  // The second id carries a trailing space, which a key may not: the key is the id trimmed.
+  const conversations = [1, 2].map((n) => ({ conversationId: n === 2 ? "111-222 " : "111-221", messages: [
+    { messageCreate: { senderId: "111", text: `Message one of conversation ${n} about the book club`, createdAt: `2020-0${n}-01T09:00:00.000Z` } },
+    { messageCreate: { senderId: `22${n}`, text: "Reply about the chapter\u0000 we read", createdAt: `2020-0${n}-01T09:05:00.000Z` } },
+    { messageCreate: { senderId: "111", text: "Agreed, see you Thursday", createdAt: `2020-0${n}-01T09:10:00.000Z` } }] }));
+  // A thread past the bound (300 messages of ~400 characters): two parts. And one whose id holds a `#`, escaped so it cannot read as that thread's part 2.
+  const longDm = { conversationId: "777", messages: Array.from({ length: 300 }, (_, k) => ({ messageCreate: { senderId: String(k % 2 ? 777 : 1), text: `Long thread message ${k + 1}: ${"we kept talking about the plan ".repeat(12)}`, createdAt: new Date(Date.UTC(2021, 2, 1) + k * 3_600_000).toISOString() } })) };
+  const hashDm = { conversationId: "777#2", messages: [1, 2, 3].map((k) => ({ messageCreate: { senderId: "5", text: `A short thread whose id holds a hash, message ${k}`, createdAt: `2021-04-0${k}T10:00:00.000Z` } })) };
+  writeFileSync(join(x, "direct-messages.js"), `window.YTD.direct_messages.part0 = ${JSON.stringify([...conversations, longDm, hashDm].map((c) => ({ dmConversation: c })))}`);
+  const chats = [
+    { chatId: "c1", sender: "USER", message: "Summarise the causes of the tides in two sentences please", createdAt: "2024-05-01T08:00:00.000Z" },
+    { chatId: "c1", sender: "ASSISTANT", message: "The moon's gravity pulls the oceans; the sun adds a smaller pull.", createdAt: "2024-05-01T08:00:05.000Z" },
+    { chatId: "c2", sender: "USER", message: "Suggest a name for a grey kitten with white paws", createdAt: "2024-06-01T08:00:00.000Z" },
+    { chatId: "c2", sender: "ASSISTANT", message: "Perhaps Mittens, Smoke, or Socks would suit the kitten well.", createdAt: "2024-06-01T08:00:05.000Z" }];
+  writeFileSync(join(x, "grok-conversations.js"), `window.YTD.grok.part0 = ${JSON.stringify(chats)}`);
+  // createdAt undefined: a date the pipeline would refuse, left out, so the brain dates the row.
+  // canonical null: a part of a thread past the bound, checked against the conversation below.
+  const at = (createdAt: string | undefined, canonical: string | null) => ({ createdAt, canonical });
+  const tw = (id: string) => tweets.find((t) => t.tweet.id_str === id)!.tweet;
+  const imports = [
+    { system: "grok", script: "grok-export-import/import-grok.mjs", input: grok, kinds: [undefined, undefined, undefined, undefined, undefined, undefined], type: "reference", source_type: "grok_import", sensitivity_tier: "standard", expect: {
+      "conv-1": at("2024-03-05T09:30:00.000Z", JSON.stringify(conv1)),
+      "conv-2": at("2024-04-10T18:00:00.000Z", JSON.stringify(conv2)),
+      "conv-3": at(undefined, JSON.stringify(conv3)),
+      "conv-4": at("part", null),
+      "conv-4#2": at("part", null),
+      "conv-5": at("2024-06-06T06:06:06.000Z", JSON.stringify(conv5)) } },
+    { system: "instagram", script: "instagram-import/import-instagram.mjs", input: join(root, "instagram"), kinds: ["dm", "dm", "dm", "dm", "comments", "comments", "captions"], type: "reference", source_type: "instagram_import", sensitivity_tier: "personal", expect: {
+      "dm:123": at("2023-11-14T22:13:20.000Z", JSON.stringify([dms.alice_123])),
+      "dm:456": at("2023-11-20T17:06:40.000Z", JSON.stringify([dms.bob_456])),
+      "dm:888": at("part", null),
+      "dm:888#2": at("part", null),
+      "comments:2023-07-22": at("2023-07-22T04:26:40.000Z", JSON.stringify([comments[1], comments[0]])),
+      "comments:undated": at(undefined, JSON.stringify([comments[2]])),
+      "captions:2023-03-28": at("2023-03-28T10:40:00.000Z", JSON.stringify([posts[1], posts[0]])) } },
+    { system: "blogger", script: "journals-blogger-import/import-blogger.mjs", input: blogger, kinds: ["post", "post", "comment", "comment"], type: "journal", source_type: "blogger_import", sensitivity_tier: "standard", expect: {
+      "tag:blogger.com,1999:blog-1.post-1": at("2015-01-12T16:00:00.000Z", entries["post-1"]),
+      "tag:blogger.com,1999:blog-1.post-2": at("2016-06-01T12:00:00.000Z", entries["post-2"]),
+      "tag:blogger.com,1999:blog-1.post-1.comment-1": at("2015-01-13T10:00:00.000Z", entries["post-1.comment-1"]),
+      "tag:blogger.com,1999:blog-1.post-2.comment-2": at(undefined, entries["post-2.comment-2"]) } },
+    { system: "x", script: "x-twitter-import/import-x-twitter.mjs", input: join(root, "x"), kinds: ["tweets", "tweets", "tweets", "tweets", "tweets", "dm", "dm", "dm", "dm", "dm", "grok", "grok"], type: "reference", source_type: "x_twitter_import", sensitivity_tier: "standard", expect: {
+      "tweets:2019-03-05": at("2019-03-05T10:00:00.000Z", JSON.stringify([tw("1700000000000000001"), tw("1700000000000000002")])),
+      "tweets:2019-04-01": at("2019-04-01T08:00:00.000Z", JSON.stringify([tw("1700000000000000004")])),
+      "tweets:2019-05-05": at("part", null),
+      "tweets:2019-05-05#2": at("part", null),
+      "dm:777": at("part", null),
+      "dm:777#2": at("part", null),
+      "dm:777%232": at("2021-04-01T10:00:00.000Z", JSON.stringify(hashDm)),
+      "tweets:undated": at(undefined, JSON.stringify([tw("1700000000000000009")])),
+      "dm:111-221": at("2020-01-01T09:00:00.000Z", JSON.stringify(conversations[0])),
+      "dm:111-222": at("2020-02-01T09:00:00.000Z", JSON.stringify(conversations[1])),
+      "grok:c1": at("2024-05-01T08:00:00.000Z", JSON.stringify(chats.slice(0, 2))),
+      "grok:c2": at("2024-06-01T08:00:00.000Z", JSON.stringify(chats.slice(2))) } },
+  ] as const;
+  const iso = (v: string | number) => new Date(v).toISOString();
+  return {
+    imports,
+    /** Each group past the bound: its key, its members in order as exported (its parts' source records join to them), and a member's date (a part's createdAt is its first member's; Grok's is the conversation's). */
+    splits: [
+      { system: "grok", key: "conv-4", members: conv4.conversation as unknown[], dateOf: () => "2024-05-05T05:05:05.000Z", label: "Conversation title: Long chat" },
+      { system: "x", key: "dm:777", members: longDm.messages.map((m) => m.messageCreate) as unknown[], dateOf: (m: any) => iso(m.createdAt), label: "X/Twitter DM conversation" },
+      { system: "x", key: "tweets:2019-05-05", members: tweets.filter((t) => t.tweet.id_str.startsWith("17100000000000")).map((t) => t.tweet).reverse() as unknown[], dateOf: (m: any) => iso(m.created_at), label: "X/Twitter tweets on 2019-05-05" },
+      { system: "instagram", key: "dm:888", members: (dms.dave_888 as { messages: unknown[] }).messages, dateOf: (m: any) => iso(m.timestamp_ms), label: "Instagram DM conversation with dave" },
+    ],
+    instagramBad: join(root, "instagram-bad"),
+    /** A later archive: the tweets given, written over tweets.js. */
+    reexportTweets: (list: typeof tweets) => writeFileSync(join(x, "tweets.js"), `window.YTD.tweets.part0 = ${JSON.stringify(list)}`),
+    tweets,
+  };
+}
+
+if (want("19b")) {
+  console.log("\n[19b] the four export importers emit ingestion-contract items: each fixture export becomes one row per thought (a day of tweets or comments, a conversation, a part of one past 100,000 characters) through ingest-records.ts and reembed.ts, dated by the export, its vector the stub's under the model's label, its enhanced fields as facets, trust ingested, and a second run writes nothing (SMD-2493)");
+  // A database of its own, migrated forward: reembed.ts pools every row with
+  // no vector, and the suite's database holds other sections' bare rows.
+  const db = "ob1_importers";
+  const dbUrl = (() => { const u = new URL(URL_!); u.pathname = `/${db}`; return u.toString(); })();
+  const dir = join(tmpdir(), `ob1-importers-${process.pid}`);
+  const DIM = EMBEDDING_DIM;
+  const axisFor = (text: string) => {
+    let h = 0;
+    for (const ch of text) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    return 1 + (h % (DIM - 1));
+  };
+  const provider = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      if (req.method === "GET") return Response.json({ object: "list", data: [] });
+      const body = (await req.json()) as { input?: string };
+      const v = new Array(DIM).fill(0);
+      v[axisFor(String(body.input ?? ""))] = 1;
+      return Response.json({ data: [{ embedding: v }] });
+    },
+  });
+  let side: SQL | null = null;
+  try {
+    await sql.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
+    await sql.unsafe(`CREATE DATABASE ${db}`);
+    assert((await runMigrator(dbUrl, undefined)).code === 0, "a database of the importers' own migrates forward with this tree");
+    side = new SQL({ url: dbUrl, max: 2 });
+    // Classified before any write: 073 stamps the trust of the writer's kind at the write.
+    await side`SELECT set_agent_kind('ingest-records', 'ingested')`;
+    rmSync(dir, { recursive: true, force: true });
+    const { imports, splits, instagramBad, reexportTweets, tweets } = writeExportFixtures(join(dir, "exports"));
+    const oneLine = (s: string) => s.trim().split("\n").join(" | ");
+    const ingest = (...extra: string[]) => {
+      const p = Bun.spawnSync(["bun", join(HERE, "ingest-records.ts"), "--url", dbUrl, "--source", "items", ...extra], { cwd: HERE, env: { ...process.env, OB1_INGEST_ALLOW: "" }, stdout: "pipe", stderr: "pipe" });
+      return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString() };
+    };
+    const rowsOf = async (system: string) => (await side!`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'source' = ${system}`)[0].c as number;
+    type Item = { identity: { key: string }; canonical: { form: string }; text: string; createdAt?: string };
+    const emitted = new Map<string, { file: string; items: Item[]; err: string }>();
+    // A zone that is not UTC, so a date with no offset read as local time shows (CI runs in UTC).
+    const emit = (im: { script: string; input: string }) =>
+      Bun.spawnSync(["bun", join(HERE, "..", "recipes", im.script), im.input], { cwd: tmpdir(), env: { PATH: process.env.PATH ?? "", TZ: "America/Los_Angeles" }, stdout: "pipe", stderr: "pipe" });
+    for (const im of imports) {
+      const scope = `${im.system}:export`;
+      const file = join(dir, `${im.system}.jsonl`);
+      const e = emit(im);
+      writeFileSync(file, e.stdout);
+      const lines = e.stdout.toString().split("\n").filter(Boolean);
+      const items = lines.map((l) => JSON.parse(l));
+      emitted.set(im.system, { file, items, err: e.stderr.toString() });
+      const expect = im.expect as Record<string, { createdAt: string | undefined; canonical: string }>;
+      assert(e.exitCode === 0 && lines.length === im.kinds.length && items.every((it) => it.identity.system === im.system && it.scope === scope),
+        `${im.script} emits ${im.kinds.length} items, one per thought, each ${im.system}'s under ${scope}, from an environment holding no database URL or key (exit ${e.exitCode}, ${lines.length} lines: ${oneLine(e.stderr.toString()).slice(0, 160)})`);
+      assert(JSON.stringify(items.map((it) => it.identity.key).sort()) === JSON.stringify(Object.keys(expect).sort()),
+        `…each keyed by the export's own id, or by its day (or part) where the importer groups (${items.map((it) => it.identity.key).join(", ")})`);
+      assert(items.every((it) => expect[it.identity.key]?.canonical === null || it.canonical.form === expect[it.identity.key]?.canonical),
+        `…each item's canonical the source records as exported (${items.filter((it) => it.canonical.form !== expect[it.identity.key]?.canonical).map((it) => it.identity.key).join(", ") || "all"})`);
+      assert(JSON.stringify(items.map((it) => it.facets.kind)) === JSON.stringify(im.kinds) && items.every((it) => it.facets.type === im.type && it.facets.source_type === im.source_type && it.facets.sensitivity_tier === im.sensitivity_tier && typeof it.facets.importance === "number" && typeof it.facets.quality_score === "number"),
+        `…each item's kind, and the enhanced fields the import set as columns, carried as facets (${JSON.stringify(items.map((it) => it.facets))})`);
+      assert(items.every((it) => expect[it.identity.key]?.createdAt === "part" || it.createdAt === expect[it.identity.key]?.createdAt), `…each dated by the export, not the run, and a date the pipeline would refuse left out (${items.map((it) => it.createdAt).join(", ")})`);
+      const twice = emit(im);
+      assert(twice.exitCode === 0 && Buffer.compare(twice.stdout, e.stdout) === 0, `…and a second run over the same export prints the same bytes: the keys hold across runs (exit ${twice.exitCode})`);
+      const dry = ingest("--items", file, "--allow", scope, "--dry-run");
+      assert(dry.code === 0 && new RegExp(`items: ${lines.length} record\\(s\\) \\(${im.system} ${lines.length}\\)`).test(dry.out) && (await rowsOf(im.system)) === 0,
+        `ingest-records.ts --dry-run counts the ${im.system} file and writes nothing (exit ${dry.code}: ${oneLine(dry.out).slice(0, 160)} ${oneLine(dry.err).slice(0, 160)})`);
+      const live = ingest("--items", file, "--allow", scope);
+      assert(live.code === 0 && new RegExp(`inserted ${lines.length} `).test(live.out) && (await rowsOf(im.system)) === lines.length,
+        `…and the live ingest writes its ${lines.length} rows (exit ${live.code}: ${oneLine(live.out).slice(0, 160)} ${oneLine(live.err).slice(0, 160)})`);
+    }
+    // The shapes one importer each meets: the record the parser cannot read, the
+    // one two files hold and the date left out are named on stderr; a NUL is
+    // out of the text (the dry runs above would have refused the file); the DM
+    // past the cap keeps 200 messages in its text and all 205 in its source
+    // record; an emoji the export holds whole stays whole; an escaped post
+    // loses its tags and its entities; a file cut short is refused.
+    const grokErr = emitted.get("grok")!.err;
+    assert(/conversation 2: cannot be read/.test(grokErr) && /conversation conv-1 appears twice; emitted once/.test(grokErr) && /1 date\(s\) left out/.test(grokErr),
+      `grok names the conversation it cannot read, the one two export files hold and the date it left out, and emits the rest (${oneLine(grokErr).slice(0, 240)})`);
+    assert([...emitted.values()].every(({ items }) => items.every((it) => !it.text.includes("\u0000"))), "no item's text holds the NUL its export did");
+    const alice = emitted.get("instagram")!.items.find((it) => it.identity.key === "dm:123");
+    assert(alice?.text.split("\n").length === 207 && (JSON.parse(alice.canonical.form)[0].messages as unknown[]).length === 205,
+      `an Instagram DM of 205 messages holds every one in its text and its source record (${alice?.text.split("\n").length} text lines)`);
+    // Each group past the bound, in each importer that splits: two parts in
+    // order, each body (the text after its header's blank line) within
+    // 100,000 characters, the first keyed as the group and unlabelled, the
+    // second `#2` and "(part 2)" in its header and title, each dated by its
+    // own first member (a Grok part by its conversation), and their source
+    // records joining to the group's members as exported.
+    const asList = (it: Item) => { const v = JSON.parse(it.canonical.form); return Array.isArray(v) ? v : [v]; };
+    const bodyOf = (it: Item) => it.text.slice(it.text.indexOf("\n\n") + 2);
+    for (const s of splits) {
+      const [p1, p2] = [s.key, `${s.key}#2`].map((k) => emitted.get(s.system)!.items.find((it) => it.identity.key === k) as (Item & { facets: { title: string } }) | undefined);
+      const m1 = p1 ? asList(p1) : [], m2 = p2 ? asList(p2) : [];
+      const head1 = p1?.text.slice(0, s.label.length + 1);
+      assert(p1 !== undefined && p2 !== undefined && !emitted.get(s.system)!.items.some((it) => it.identity.key === `${s.key}#3`)
+        && bodyOf(p1).length <= 100_000 && bodyOf(p2).length <= 100_000 && (head1 === `${s.label}:` || head1 === `${s.label}\n`),
+        `${s.system} ${s.key}: two parts, each body within the bound, the first unlabelled (${p1 && bodyOf(p1).length} + ${p2 && bodyOf(p2).length} characters)`);
+      assert(p2 !== undefined && p2.text.startsWith(`${s.label} (part 2)`) && /\(part 2\)$/.test(p2.facets.title) && p1 !== undefined && !/\(part/.test(p1.facets.title)
+        && (!s.key.startsWith("dm:") || (p1.facets.title.includes(`(${m1.length} messages)`) && p2.facets.title.includes(`(${m2.length} messages)`))),
+        `…the second labelled "(part 2)" in its header and title, the first in neither; a DM part's title counts its own messages, so growth leaves earlier parts' titles alone (${JSON.stringify(p1?.facets.title)}, ${JSON.stringify(p2?.facets.title)})`);
+      assert(p1?.createdAt === s.dateOf(m1[0]) && p2?.createdAt === s.dateOf(m2[0]),
+        `…each dated by its own first member (${p1?.createdAt}, ${p2?.createdAt})`);
+      assert(JSON.stringify([...m1, ...m2]) === JSON.stringify(s.members),
+        `…their source records joining to the group's ${s.members.length} members as exported, in order (${m1.length} + ${m2.length})`);
+    }
+    const cutLog = emitted.get("grok")!.items.find((it) => it.identity.key === "conv-5");
+    assert(cutLog !== undefined && bodyOf(cutLog).length <= 100_000 && cutLog.text.endsWith("[… cut here; the source record holds it whole]") && cutLog.canonical.form.includes("0123456789".repeat(12_000)),
+      `one message past the bound alone is cut, saying so, and its source record keeps it whole (${cutLog && bodyOf(cutLog).length} characters)`);
+    const bob = emitted.get("instagram")!.items.find((it) => it.identity.key === "dm:456");
+    assert(bob?.text.endsWith("Bob: See you there \u{1F600}") === true, `an emoji the export holds whole is not put through the Meta repair (${JSON.stringify(bob?.text.slice(-30))})`);
+    const cut = emit({ script: "instagram-import/import-instagram.mjs", input: instagramBad });
+    assert(cut.exitCode === 2 && cut.stdout.length === 0 && /message_1\.json: not a JSON file of the export/.test(cut.stderr.toString()),
+      `an Instagram export with a file cut short is refused, naming it, and nothing is emitted (exit ${cut.exitCode}: ${oneLine(cut.stderr.toString()).slice(0, 160)})`);
+    const post1 = emitted.get("blogger")!.items.find((it) => it.identity.key === "tag:blogger.com,1999:blog-1.post-1");
+    assert(post1?.text.endsWith("\n\nThe kale survived the frost & the garlic is already showing green tips.") === true && !/<p|&amp;/.test(post1.text),
+      `a Blogger post's escaped HTML reaches the text without its tags or entities (${JSON.stringify(post1?.text.slice(-80))})`);
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      DATABASE_URL: dbUrl,
+      OB1_LLM_BASE_URL: `http://127.0.0.1:${provider.port}/v1`,
+      OB1_LLM_LOCAL: "1",
+      OB1_EMBEDDING_MODEL: "stub-embed",
+      OB1_EMBEDDING_DIM: String(DIM),
+    };
+    delete env.OB1_EMBEDDING_DIMENSIONS;
+    delete env.OB1_CHUNK_CONTEXT;
+    delete env.OB1_LLM_API_KEY;
+    const total = imports.reduce((a, im) => a + im.kinds.length, 0);
+    const re = await runScript(["bun", join(HERE, "reembed.ts"), "--url", dbUrl, "--switch-model"], { env: env as Record<string, string>, cwd: HERE });
+    assert(re.code === 0 && new RegExp(`${total} re-embedded, 0 failed`).test(re.out), `reembed.ts embeds the ${total} rows against the stub (exit ${re.code}: ${re.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
+    for (const im of imports) {
+      const { items } = emitted.get(im.system)!;
+      const rows = await side`SELECT t.content, t.metadata, t.created_at, t.embedding_model AS m, t.embedding::text AS e, s.identity, s.canonical FROM thoughts t JOIN thought_sources s ON s.thought_id = t.id WHERE s.system = ${im.system}`;
+      type Row = { content: string; metadata: Record<string, unknown>; created_at: Date; m: string | null; e: string; identity: string; canonical: string };
+      const byKey = new Map((rows as Row[]).map((r) => [r.identity, r]));
+      const pairs = items.map((it) => [it, byKey.get(it.identity.key)] as const);
+      assert(rows.length === items.length && pairs.every(([it, r]) => r && r.content === it.text && r.canonical === it.canonical.form && r.metadata.source === im.system),
+        `every ${im.system} item is one row: its text, its source record under thought_sources.system ${im.system} byte for byte, labelled ${im.system} (${rows.length} rows)`);
+      assert(pairs.every(([it, r]) => r && (it.createdAt ? new Date(r.created_at).toISOString() === it.createdAt : Math.abs(Date.now() - new Date(r.created_at).getTime()) < 86_400_000)),
+        `…each row dated by the export, not the run, or by the brain where the emitter left the date out (${pairs.map(([, r]) => r && new Date(r.created_at).toISOString()).join(", ")})`);
+      assert(pairs.every(([it, r]) => r && r.m === "stub-embed" && JSON.parse(r.e).indexOf(1) === axisFor(it.text)),
+        `…each with the stub's vector for its own text, under the model's label (${pairs.map(([, r]) => r?.m).join(", ")})`);
+      assert(pairs.every(([, r]) => r && r.metadata.type === im.type && r.metadata.source_type === im.source_type && r.metadata.sensitivity_tier === im.sensitivity_tier && typeof r.metadata.importance === "number" && r.metadata.trust === "ingested"),
+        `…its enhanced fields as facets, and trust ingested from the classified ingester (${JSON.stringify(rows.map((r: { metadata: Record<string, unknown> }) => ({ type: r.metadata.type, trust: r.metadata.trust })))})`);
+      const again = ingest("--items", emitted.get(im.system)!.file, "--allow", `${im.system}:export`);
+      assert(again.code === 0 && new RegExp(`inserted 0 {2}updated 0 {2}patched 0 {2}unchanged ${items.length}`).test(again.out) && (await rowsOf(im.system)) === items.length,
+        `…and the same ${im.system} file again writes nothing (${oneLine(again.out).slice(0, 160)})`);
+    }
+    // A later archive: one tweet of 5 March deleted (its other tweet stays),
+    // one added on 1 April. Grouped by day, only those two days' thoughts move,
+    // each updated in place; no row is added and no tweet lands in two rows
+    // (batches of a fixed size shifted at the deletion and duplicated every
+    // batch after it).
+    const xItems = emitted.get("x")!.items.length;
+    reexportTweets([
+      { tweet: { id_str: "1700000000000000005", created_at: "Mon Apr 01 09:30:00 +0000 2019", full_text: "Two weeks of swifts now, and the house martins have joined them." } },
+      ...tweets.filter((t) => t.tweet.id_str !== "1700000000000000001"),
+    ]);
+    const later = emit(imports.find((im) => im.system === "x")!);
+    const laterFile = join(dir, "x-later.jsonl");
+    writeFileSync(laterFile, later.stdout);
+    const laterItems = later.stdout.toString().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Item);
+    const firstKeys = emitted.get("x")!.items.map((it) => it.identity.key).sort();
+    assert(later.exitCode === 0 && JSON.stringify(laterItems.map((it) => it.identity.key).sort()) === JSON.stringify(firstKeys),
+      `a later X archive with one tweet deleted and one added emits the same keys (${laterItems.map((it) => it.identity.key).join(", ")})`);
+    const regrouped = ingest("--items", laterFile, "--allow", "x:export");
+    const [{ n: tweetRows }] = await side`SELECT count(*)::int AS n FROM thoughts WHERE metadata->>'source' = 'x' AND content LIKE ${"%Finally finished the long trail%"}`;
+    assert(regrouped.code === 0 && new RegExp(`inserted 0 {2}updated 2 {2}patched 0 {2}unchanged ${xItems - 2}`).test(regrouped.out) && (await rowsOf("x")) === xItems && tweetRows === 0,
+      `…and ingests as two days updated in place, no row added, the deleted tweet in no row (${oneLine(regrouped.out).slice(0, 160)}; ${tweetRows} row(s) with it)`);
+    // The weekly digest's privacy filter reads the facet too: with
+    // schemas/enhanced-thoughts' column at its default 'standard', the
+    // Instagram rows' `personal` facet still keeps them out unless
+    // --include-personal says otherwise.
+    await side`ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS sensitivity_tier text DEFAULT 'standard'`;
+    const digestRows = async (includePersonal: boolean) => {
+      const r = await readThoughts(side!, { windowDays: 100000, includePersonal, noSensitivityFilter: false });
+      return r.failClosed ? null : r.rows.map((t) => String((t.metadata as Record<string, unknown>)?.source));
+    };
+    const filtered = await digestRows(false);
+    const withPersonal = await digestRows(true);
+    const igRows = emitted.get("instagram")!.items.length;
+    assert(filtered !== null && filtered.length === total - igRows && !filtered.includes("instagram") && withPersonal?.filter((s) => s === "instagram").length === igRows,
+      `weekly-digest's read leaves out the rows whose metadata says personal under a column left at 'standard', and keeps them with --include-personal (${filtered?.length} of ${total}; ${withPersonal?.filter((s) => s === "instagram").length} Instagram with it)`);
+  } finally {
+    provider.stop(true);
+    await side?.close();
+    rmSync(dir, { recursive: true, force: true });
+    await sql.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
+  }
 }
 
 if (want("20")) {
@@ -12530,6 +12882,11 @@ if (want("38")) {
     const longPoll = await sleepRun({ poll: 61, dryRun: true });
     assert(/query_log: no row in the last 24 h — either nothing was searched, or OB1_QUERY_LOG is off/.test(dryText) && longPoll === 2 && lines.some((l) => /--poll must be/.test(l)),
       `an empty query log is said at the start, and --poll 61 is refused with 2 (exit ${longPoll})`);
+    // --dump-dir must name a directory this process can write, checked before anything is read (SMD-3203).
+    lines.length = 0;
+    const noDump = await sleepRun({ dryRun: true, dumpDir: join(tmpdir(), `ob1-no-such-dir-${process.pid}`, "dumps") });
+    assert(noDump === 2 && lines.some((l) => /--dump-dir \S+ is not a directory this process can write/.test(l)) && !lines.some((l) => /awake|asleep/.test(l)),
+      `a --dump-dir naming no directory is refused with 2 before the brain is read (exit ${noDump}: ${lines.join(" | ").slice(0, 200)})`);
 
     // A claim follower stamping fresh outside the scheduler does not yield to a
     // live call: a run refuses (2) rather than sleep beside it, and the dry run
@@ -12634,7 +12991,9 @@ if (want("38")) {
     slowExtract = 1500;
     // Bounded: a sleep that never finds both pools drained would wait for ever.
     const acOnce = new AbortController();
-    const onceRun = sleepRun({ signal: acOnce.signal });
+    // With --dump-dir (SMD-3203): the sleep's consolidation pass writes every verdict there too.
+    const onceDumps = mkdtempSync(join(tmpdir(), "ob1-sleep-dump-"));
+    const onceRun = sleepRun({ signal: acOnce.signal, dumpDir: onceDumps });
     const onceRace = await Promise.race([onceRun, Bun.sleep(90_000).then(() => "hung" as const)]);
     // Seen hung once in a full run (SMD-2752 PR 2), one thought of three
     // extracted in 90 s, and not since in 28: read before the stop what the
@@ -12672,6 +13031,16 @@ if (want("38")) {
     assert(relPairs === "deploy→older:1,newer→deploy:1" && (await auditRows()) === auditBefore,
       `…and its related verdicts are relations with their lineage, the deploy note's to each billing note, with no audit row either (${relPairs})`);
     assert(sessionsAfter === sessionsBefore, `…and the sleep done, its passes are stopped: no follower's connection is left (${sessionsBefore} → ${sessionsAfter} session(s))`);
+    // --dump-dir: the pass's three verdicts, one line each in the consolidation key's own file, the owner's alone,
+    // and the file said at the start (SMD-3203).
+    const onceDump = passDumpFile(onceDumps, CO);
+    const dumped = existsSync(onceDump) ? readFileSync(onceDump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { key: string; newer: string; older: string; verdict: string; recorded: string | null; relation: string | null }) : [];
+    const dumpedPairs = dumped.map((d) => `${d.newer === newer ? "newer" : d.newer === deploy ? "deploy" : d.newer}→${d.older === deploy ? "deploy" : d.older === older ? "older" : d.older}:${d.verdict}`).sort().join(",");
+    const dumpMode = existsSync(onceDump) ? statSync(onceDump).mode & 0o777 : -1;
+    assert(dumpedPairs === "deploy→older:related,newer→deploy:related,newer→older:outdates" && dumped.every((d) => d.key === CO) && dumpMode === 0o600
+        && onceDump === join(onceDumps, "consolidate_stub-sleep_p4.jsonl") && onceText.includes(`dump:   each consolidation pass appends every verdict to ${onceDump}`),
+      `with --dump-dir the sleep's pass writes each of its three verdicts to the consolidation key's file, created 0600, which its start names (${dumpedPairs || "no file"}, mode ${dumpMode.toString(8)})`);
+    rmSync(onceDumps, { recursive: true, force: true });
 
     // --follow: a live read wakes it mid-call; the passes stop at once.
     lines.length = 0;

@@ -1472,7 +1472,7 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   assert(slow.up && /; no database pool was opened; telemetry sent; exit 0$/.test(slow.line),
     `a collector that answers in 1.5 s gets the stop's telemetry, under the flush's own bound (${slow.line})`);
   // Each signal's line: the span and the log record the request made, and the metric reading the flush sent. The order
-  // against the stop's line is test-entry [3]'s to hold: serveChild returns stdout, then stderr.
+  // against the stop's line is test-server [13d]'s to hold: serveChild returns stdout, then stderr.
   assert(hung.up && within >= 2_500 && within <= 3_000 && stoppedIn < 3.5 && ["1 span", "1 log record", "1 metric export"].every((n) => cutLines.some((l) => l.startsWith(`telemetry: ${n} not sent`))),
     `a collector that never answers: the stop cuts its flush at what a 4 s grace leaves (${within} ms, stopped in ${stoppedIn} s), and says by signal what was still on its way (${cutLines.join(" / ") || hung.out.split("\n").filter((l) => l.includes("not sent")).join(" / ")})`);
   // What the batches still held, and what their full queues dropped, each counted once (review pass 1's mutants): queues

@@ -135,10 +135,8 @@ main() {
   run db                 test-search-path.ts
   run server-portable    test-store-sql.ts
   run server-portable    test-e2e-sql.ts
-  OB1_MCP_UNDER_TEST=client run server-portable test-e2e-sql.ts
   run server-portable    test-rest-sql.ts
   run server-portable    test-plugins-sql.ts
-  OB1_MCP_UNDER_TEST=client run server-portable test-plugins-sql.ts
   run server-portable    test-local-provider.ts
   run evals              eval-write-path.ts --gate
   # The check drops the schema and refuses a database holding thoughts unless
@@ -172,7 +170,6 @@ main() {
   nodb .                 deploy/edge/edge.ts --self-check
   nodb .                 deploy/test-tier-sh.ts
   nodb server-portable    test-server.ts
-  nodb server-portable    test-entry.ts
   nodb server-portable    test-auth.ts
   nodb server-portable    test-rest.ts
   nodb server-portable    test-plugins.ts
@@ -180,9 +177,6 @@ main() {
   nodb server-portable    test-jobs.ts
   nodb rest-client        test-client.ts
   nodb mcp-server         test-mcp.ts
-  OB1_MCP_UNDER_TEST=client nodb server-portable test-auth.ts
-  OB1_MCP_UNDER_TEST=client nodb server-portable test-plugins.ts
-  OB1_MCP_UNDER_TEST=client nodb server-portable test-server.ts
   nodb jev                test-jev.ts
   nodb evals              eval-thought-kinds.ts --self-check
   nodb evals              eval-calibration.ts --self-check

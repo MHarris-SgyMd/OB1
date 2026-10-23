@@ -39,7 +39,7 @@
 						required
 						aria-invalid={form?.error ? 'true' : undefined}
 						aria-describedby={form?.error ? 'key-error' : 'key-help'}
-						class="mt-2 w-full bg-bg-elevated border border-white/40 rounded-lg px-3 py-2 focus:outline-none focus:border-primary"
+						class="mt-2 w-full field"
 					/>
 				</div>
 
