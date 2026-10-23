@@ -1067,7 +1067,7 @@ console.log("\n[16] parseFilter bounds and normalises a metadata filter at the t
   assert(throws({ t: "世".repeat(1400) }), "a multibyte filter over the byte cap but under the code-unit count is refused — bytes, not UTF-16 length");
 }
 
-console.log("\n[17] tierProblem validates OB1_TIER at the boundary initEnv and preflight share (SMD-1953)");
+console.log("\n[16a] tierProblem validates OB1_TIER at the boundary initEnv and preflight share (SMD-1953)");
 {
   // The one validator db/config.mjs owns; root.ts's initEnv throws on it and
   // preflight's tier check fails on it, so a wrong OB1_TIER cannot reach the
