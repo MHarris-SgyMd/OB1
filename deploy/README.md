@@ -2269,9 +2269,12 @@ where the service mounts its `sleep-dumps` volume, each consolidation pass
 appends every verdict to one JSONL file per pass key there, as
 `db/consolidate.ts --dump` writes them. That includes decide mode's link step,
 when it was asked and whether it capped the pair, which a capped pair that
-stores no relation leaves nowhere else. Copy them out with `podman compose -f deploy/compose.yaml cp
-sleep:/var/lib/ob1/sleep-dumps <dir>`. They hold the brain's text, each file
-created 0600; unset, nothing is written and the volume stays empty.
+stores no relation leaves nowhere else. Copy them out while `sleep` runs, to a
+directory outside any checkout: `podman compose -f deploy/compose.yaml cp
+sleep:/var/lib/ob1/sleep-dumps <dir>`. From a stopped container podman's copy
+says it copied and puts the files elsewhere or nowhere (SMD-3203). They hold
+the brain's text, each file created 0600, and a copy keeps that mode; unset,
+nothing is written and the volume stays empty.
 
 **Changing the model** is the `workers` profile's procedure above with `sleep`
 in place of the two followers: stop `sleep` before the change reaches it, run

@@ -1510,8 +1510,9 @@ services:
   # OB1_SLEEP_DUMP_DIR (unset, none) hands it --dump-dir: each consolidation
   # pass appends every verdict, decide mode's link step included, to one file
   # per pass key there (SMD-3203). Set it to /var/lib/ob1/sleep-dumps, where
-  # the `sleep-dumps` volume is mounted, and read the files with `compose cp`.
-  # They hold the brain's text: each is created 0600.
+  # the `sleep-dumps` volume is mounted, and copy the files out with
+  # `compose cp` while the service runs. They hold the brain's text: each is
+  # created 0600.
   sleep:
     image: oven/bun:1.4.3-alpine
     profiles: ["sleep"]
