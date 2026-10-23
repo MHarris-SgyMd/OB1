@@ -905,11 +905,11 @@ services:
     # model providers (the stack's Ollama and Jev by name, a host or hosted
     # one outward). Not the mesh: nothing routes to it since SMD-2532 closed
     # the root route, and /mcp is the `mcp` service's below (SMD-2287 PR 5b),
-    # on the mesh alone, as the ADR has it. No shipped template calls it: n8n's
-    # brain calls go to the REST core (SMD-2295), and the orchestration eval's
-    # workflows still call it until SMD-2295's second PR. It retires in
-    # SMD-2287 PR 6. No dns_search here, unlike the proxy: an operator's model
-    # endpoint may be a short name their resolver completes.
+    # on the mesh alone, as the ADR has it. Nothing in the stack calls it:
+    # n8n's brain calls and the orchestration eval's go to the REST core
+    # (SMD-2295). It retires in SMD-2287 PR 6. No dns_search here, unlike the
+    # proxy: an operator's model endpoint may be a short name their resolver
+    # completes.
     networks:
       data: {}
       egress: {}
@@ -1787,8 +1787,11 @@ services:
       timeout: 5s
       retries: 3
       start_period: 120s
+    # The REST core, n8n's one way into the brain (SMD-2295): `up -d n8n`
+    # brings it along. It runs the image `server`'s service builds, so on a
+    # project that has not built it, bring the stack up first.
     depends_on:
-      server:
+      api:
         condition: service_started
     restart: unless-stopped
     logging: *logging
