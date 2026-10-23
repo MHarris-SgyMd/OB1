@@ -502,7 +502,7 @@ const MAX_TIMER = 2_147_483_647;
  * secret pasted into the wrong variable, and one of digits alone parses as a
  * number too (SMD-3235 review pass 1). Nor the other value of a pair: where
  * `max` is a value the operator set in `pair`, the notes name `pair`, as the
- * bound and as a fallback equal to it (review pass 2).
+ * bound and as a fallback equal to it (SMD-3235 review pass 2).
  */
 function wholeNumber(asked: string | undefined, name: string, fallback: number, notes: string[], { min = 1, max = Infinity, pair = "" } = {}): number {
   if (asked === undefined || asked.trim() === "") return fallback;

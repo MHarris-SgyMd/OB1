@@ -4594,7 +4594,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   // A secret pasted into any variable read as a whole number is said nowhere (SMD-3235): planted in all ten, through a
   // real setup with every signal on, so each batch and the metric reader read their own. Text is no whole number and
   // digits alone are held to the bound; each note is held to its whole shape and holds no four characters of the secret
-  // (review pass 1: a four-character leak passed a check for the secret's words).
+  // (SMD-3235 review pass 1: a four-character leak passed a check for the secret's words).
   for (const [SECRET, why] of [["sk-live-S3CRET-I-abcdefghijklmnopqrstuvwxyz", "is not a whole number"], ["4111111111111111", "is held to"]] as const) {
     const numeric = ["OTEL_BSP", "OTEL_BLRP"].flatMap((p) => [`${p}_MAX_QUEUE_SIZE`, `${p}_MAX_EXPORT_BATCH_SIZE`, `${p}_SCHEDULE_DELAY`, `${p}_EXPORT_TIMEOUT`]).concat("OTEL_METRIC_EXPORT_INTERVAL", "OTEL_METRIC_EXPORT_TIMEOUT");
     const saved = Object.fromEntries(numeric.map((k) => [k, process.env[k]]));
@@ -4971,7 +4971,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
     && unshown[2] === "telemetry: OTEL_BSP_MAX_QUEUE_SIZE (a value not shown) is not a whole number of at least 1: 2048 is used (SMD-1849)",
     `no value said: not text, a fraction, digits held to the bound or below the least, nor an infinity (${unshown.join(" | ")})`);
   // Nor the value of the other in a pair, where the operator set it: the export size's bound and fallback are the
-  // queue's, the metric timeout's the interval's, so they are named (review pass 2). A default is no one's secret.
+  // queue's, the metric timeout's the interval's, so they are named (SMD-3235 review pass 2). A default is no one's secret.
   const paired = [batchSizes("4321", "99999").notes, batchSizes("377", "oops").notes, metricTimes("7654", "oops").notes, metricTimes("1234567890", "1234567891").notes, batchSizes("9876", "x").notes, metricTimes(undefined, "99999999").notes,
     batchSizes(undefined, "99999").notes, batchSizes(" ", "99999").notes, metricTimes(" ", "99999999").notes, batchSizes("1000000", "99999999").notes, metricTimes("3000000000", "4000000000").notes].map((n) => n.join(" / "));
   const pairLeaks = ["4321", "377", "7654", "1234567890", "9876"].filter((v) => paired.join("\n").includes(v));
@@ -4981,7 +4981,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
     && paired[3] === "telemetry: OTEL_METRIC_EXPORT_TIMEOUT (a value not shown) is held to the value of OTEL_METRIC_EXPORT_INTERVAL (SMD-1849)"
     && paired[4] === "telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE (a value not shown) is not a whole number of at least 1: 512 is used (SMD-1849)"
     && paired[5] === "telemetry: OTEL_METRIC_EXPORT_TIMEOUT (a value not shown) is held to 60000 (SMD-1849)"
-    // A queue or interval unset, blank or itself held is no one's value: its number is said, its name not (review pass 3).
+    // A queue or interval unset, blank or itself held is no one's value: its number is said, its name not (SMD-3235 review pass 3).
     && paired[6] === "telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE (a value not shown) is held to 2048 (SMD-1849)" && paired[7] === paired[6]
     && paired[8] === "telemetry: OTEL_METRIC_EXPORT_TIMEOUT (a value not shown) is held to 60000 (SMD-1849)"
     && paired[9] === "telemetry: OTEL_BSP_MAX_QUEUE_SIZE (a value not shown) is held to 65536 (SMD-1849) / telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE (a value not shown) is held to 65536 (SMD-1849)"
