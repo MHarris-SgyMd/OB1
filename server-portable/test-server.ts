@@ -2009,7 +2009,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   // reads environment forwards only (review pass 4 — FORK.md's value defined twice).
   const { DEFAULT_STOP_GRACE_S } = await import("./shutdown.ts");
   const graceFallbacks: string[] = [];
-  for (const file of ["compose.yaml", "compose.tiers.yaml"]) {
+  for (const file of ["compose.yaml"]) {
     const doc = Bun.YAML.parse(await Bun.file(new URL(`../deploy/${file}`, import.meta.url)).text()) as { services: Record<string, { build?: { dockerfile?: string }; image?: string; stop_grace_period?: string }> };
     const builds = (svc: { build?: { dockerfile?: string } }) => svc.build?.dockerfile === "server-portable/Dockerfile";
     // The server's image, built here or (a REST core) run by a building service's name.
@@ -2019,10 +2019,9 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
       graceFallbacks.push(`${file}:${name}=${/^\$\{OB1_STOP_GRACE:-(\d+)\}s$/.exec(svc.stop_grace_period ?? "")?.[1] ?? svc.stop_grace_period}`);
     }
   }
-  // Ten: the server, the REST core (SMD-2284), the MCP server (SMD-2287) and
-  // the operator GUI (SMD-2280) in compose.yaml, and each tier's server and
-  // REST core in compose.tiers.yaml (SMD-2294).
-  assert(graceFallbacks.length === 10 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
+  // Four: the server, the REST core (SMD-2284), the MCP server (SMD-2287) and
+  // the operator GUI (SMD-2280).
+  assert(graceFallbacks.length === 4 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
     `every compose server's stop_grace_period is \${OB1_STOP_GRACE:-${DEFAULT_STOP_GRACE_S}}s, the code's default (${graceFallbacks.join(", ")})`);
 
   // Preflight refuses a value compose would render wrong, and reports one it reads.

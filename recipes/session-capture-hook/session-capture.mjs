@@ -2427,7 +2427,7 @@ export async function main(argv) {
       const link = cfg.deprecationLink ?? "";
       const tierRoute = cfg.deprecation === "@1792108800" || (cfg.deprecation !== "@1790899200" && (/rel="deprecation"/.test(link) ? /#a-canary-beside-the-stack>/.test(link) : /^\/(canary|working)\/mcp(\/|$)/.test(u.pathname)));
       if (tierRoute) {
-        console.error(`warning: ${shownUrl(cfg.url)} answered through the proxy's deprecated tier route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url in ${urlSource()} to the tier itself, a canary's own port (deploy/canary.sh) or the three-brain stack's route, never stable's /mcp (deploy/README.md, "A canary beside the stack")`);
+        console.error(`warning: ${shownUrl(cfg.url)} answered through the proxy's deprecated tier route (Deprecation: ${cfg.deprecation}), which stops answering at v2.0.0 — set the url in ${urlSource()} to the tier itself, a canary's own port (deploy/canary.sh), never stable's /mcp (deploy/README.md, "A canary beside the stack")`);
       } else {
         let to = "its /mcp";
         if (u.pathname === "/") to = shownUrl(`${u.origin}/mcp${u.search}`);

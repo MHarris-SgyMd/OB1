@@ -4742,15 +4742,14 @@ thought stable gained since the refresh can read as a move, and the id-set line
 of the report says how many each holds that the other does not. The replays are
 real searches, which a brain running with `OB1_QUERY_LOG=on` logs.
 
-The three tiers run as one stack, `deploy/compose.tiers.yaml` — three Postgres
-services, one shared Ollama, each tier's MCP server and REST core, and one proxy
-where each tier is a path: `/mcp`, `/canary/mcp`, `/working/mcp` (SMD-2294) —
-built from the checkout (the published stable image is SMD-1860, not yet cut). A
-client reaches the working tier as a second remote MCP entry a transcript can
-tell from stable's:
+Each tier is a brain of its own, a compose project under its own env file and on
+its own port (SMD-2872). `deploy/compose.tiers.yaml`, which ran the three as one
+project behind one proxy with each tier a path, is retired (SMD-2878). A client
+reaches a working tier as a second remote MCP entry a transcript can tell from
+stable's:
 
 ```bash
-claude mcp add --transport http open-brain-working http://127.0.0.1:8000/working/mcp \
+claude mcp add --transport http open-brain-working http://127.0.0.1:<its port>/mcp \
   --header "x-brain-key: <key>"
 ```
 
