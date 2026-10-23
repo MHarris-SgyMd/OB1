@@ -66,6 +66,8 @@ const provider = Bun.serve({
   port: 0,
   async fetch(req) {
     const url = new URL(req.url);
+    // A server's re-probe (SMD-2890) asks GET /models: an answer, with no body to parse.
+    if (req.method === "GET") return Response.json({ object: "list", data: [] });
     const body = (await req.json()) as { input?: string };
     if (embedDelayMs > 0) await Bun.sleep(embedDelayMs);
     if (url.pathname.endsWith("/embeddings")) {
@@ -1507,6 +1509,36 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     `not read: why; no table: said (${vectorsLine({ vectorless: null, unread: { vectorless: { reason: "timeout", message: "x" } } })})`);
 }
 
+// The Provider row (SMD-2890): not called yet, answering, or degraded since when, why, and what still works.
+{
+  const { providerWords, renderBrainInfo } = await import("./brain-info.ts");
+  const R = { reprobeS: 15, reprobeByCall: true };
+  assert(providerWords({ status: "unknown", ...R }) === "not called yet", "unknown: not called yet");
+  // What answered says what is known (review pass 4): a call embeds; GET /models only reaches; a call refused or unusable is a fault.
+  assert(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "call", ...R }) === "answering (an embedding call answered 2026-10-22T00:00:00.000Z)", "answering by a call: it embeds");
+  assert(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "probe", ...R }) === "reachable (GET /models answered 2026-10-22T00:00:00.000Z); no embedding call made since", "answering by the probe: reachable, nothing said of the calls");
+  assert(/^answering, but refusing its embedding calls \(it answered 404, 2026-10-22T00:00:00\.000Z\) — a capture fails outright until that is fixed: check the model is pulled and the key$/.test(providerWords({ status: "answering", at: "2026-10-22T00:00:00.000Z", by: "call", fault: "it answered 404", ...R })),
+    "a fault: the provider there, a capture failing outright, what to check");
+  const down = { status: "unreachable" as const, since: "2026-10-22T00:00:00.000Z", at: "2026-10-22T00:01:00.000Z", reason: "provider_unreachable", detail: "the connection was refused", clears: "probe" as const };
+  assert(providerWords({ ...down, ...R }) === "unreachable since 2026-10-22T00:00:00.000Z (the connection was refused) — serving degraded: a capture lands without its vector, a search answers by exact matches; re-probed every 15 s by GET /models",
+    `unreachable: since its first outage, why, what still works, the re-probe (${providerWords({ ...down, ...R })})`);
+  assert(/; it is not re-probed, so a call that is answered clears this$/.test(providerWords({ ...down, reprobeS: null, reprobeByCall: false })), "…and with no re-probe, what clears it");
+  // A call's 5xx GET /models cannot see (a proxy answering /models, its backend down): "failing its calls", re-probed by a call — or, the gate refusing that call, only a call ends it.
+  const proxied = { ...down, reason: "provider_503", detail: "it answered 503", clears: "call" as const };
+  assert(/^failing its calls since .*; re-probed every 15 s by one embedding call, as GET \/models cannot see a call's 503$/.test(providerWords({ ...proxied, ...R })),
+    `a call's 503: failing, re-probed by a call (${providerWords({ ...proxied, ...R })})`);
+  assert(/; GET \/models cannot see a call's 503 and the egress gate refuses the probe's embedding call, so only a call that is answered clears this$/.test(providerWords({ ...proxied, reprobeS: 15, reprobeByCall: false })),
+    "…and with the gate refusing the probe's call, only a call clears it, and why");
+  assert(/^unreachable since .*re-probed every 15 s by one embedding call, as GET \/models cannot see a call's timeout$/.test(providerWords({ ...proxied, reason: "provider_timeout", detail: "the request timed out (OB1_LLM_TIMEOUT)", ...R })),
+    "a call's timeout: unreachable, re-probed by a call");
+  const base = { version: "1.0.0", releaseRange: null, latestMigration: 1, commit: "c", store: "sql", tier: null, embedding: { model: "m", dim: 4 }, database: { error: "x" }, ledgerStatus: null } as never;
+  const shown = renderBrainInfo({ ...(base as object), provider: { ...down, ...R } } as never);
+  const lines = shown.split("\n");
+  const at = lines.findIndex((l) => l.startsWith("Embedding:"));
+  assert(/^Provider:\s+unreachable since 2026-10-22T00:00:00\.000Z/.test(lines[at + 1] ?? ""), `the row follows Embedding (${lines[at + 1]})`);
+  assert(!/^Provider:/m.test(renderBrainInfo(base)), "…and a record without the field (an older server's, forwarded) has no row");
+}
+
 console.log("\n[13b] GET /health with a key is what the brain is; without one it is `ok` (SMD-2041)");
 {
   const get = async (path: string, headers: Record<string, string> = {}) => {
@@ -1541,6 +1573,8 @@ console.log("\n[13b] GET /health with a key is what the brain is; without one it
     assert(info.version === FORK_VERSION, `…version is FORK_VERSION (${info.version})`);
     assert(info.latestMigration === treeLast, `…latestMigration is db/migrations/'s last, ${treeLast} (${info.latestMigration})`);
     assert(info.commit === "unknown" && info.store === "sql" && info.tier === null, `…commit unknown with no OB1_GIT_SHA, the sql store, no tier (${info.commit}, ${info.store}, ${info.tier})`);
+    const provider = info.provider as { status?: string; reprobeS?: unknown } | undefined;
+    assert(["unknown", "answering"].includes(provider?.status ?? "") && "reprobeS" in (provider ?? {}), `…and the provider's state, the stub answering or not yet called (SMD-2890; ${JSON.stringify(provider)})`);
     // No database in this suite: the record still answers, and says why the
     // database's half is missing — the store's own refusal, not a 500.
     const database = info.database as { error?: string } | undefined;

@@ -3321,7 +3321,28 @@ tier gives each pair's verdict, not the judge:
   backticks, brackets, escapes' backslashes, underscores at a word's edge and
   a `#` or `>` run opening a word go (not `#433`, whose hashes need a space,
   nor `>=`), an inline link keeps its text and loses its target, and struck text goes with its `~~`, read as withdrawn.
-- **Version 3 is the pass's** (`@p4d3`): version 1's writer, SMD-3114's,
+- **Version 4 is the pass's** (`@p4d4`, SMD-3203): version 3, with the
+  writer's **link step**, the mediated-pair test's step 2
+  (`docs/subject-anchored-claims.md`, version 2, embedded in the pass and held
+  equal to the ADR's by `evals/eval-mediated-pairs.ts --self-check`):
+  - **When:** first on the tier's outdates at the floor, before any proposal
+    is written, and after on a pair the pass would store as evolves (its
+    relation words' mass at the floor).
+  - **The cap:** an H link (one thought's own subject named in passing by the
+    other), an F link (both mention a third subject that is neither's own),
+    or an answer naming none of the four caps the pair: related at most, and
+    no supersession (the ADR's rows 2 and 3). An evolves or a duplicate,
+    whether the tier's verdict or the best a capped outdates takes, becomes
+    related at the tier's P(related), floored on the relation words' mass as
+    any relation is. A related or unrelated verdict stands (an unrelated
+    after the tier's outdates records no distinct, as before). A D or N link
+    leaves the pair to version 3's rules.
+  - **Measured:** SMD-3203 measured the step at κ 0.64 on mediated or not
+    against two raters' agreed labels, at a median 14.3 s of the 27B a pair.
+  - **Reported:** the run's summary counts its calls and the pairs it capped,
+    a dump line carries its link, and a stale proposal settled on a capped
+    pair says so.
+- **Version 3** (`@p4d3`): version 1's writer, SMD-3114's,
   two-sided with the part rule, its quotes read without markdown and asked
   only at the floor (SMD-3151). The writer quotes the words it reads, and on
   SMD-3116's writer test the check refused 11 of the 18 proposals it wrote on
@@ -3346,8 +3367,9 @@ tier gives each pair's verdict, not the judge:
 - **Gating:** both rows are gated for both endpoints before any request.
 - **The key** is `consolidate:<decider>+<writer>@p4d<version>`, so turning it
   on, or a new decide version, starts a fresh pass: the tier again for every
-  pooled thought's candidates, and the writer for each outdates at the floor
-  not yet proposed. The canary's `@p4d1` pass took about 6 hours of sleep, at
+  pooled thought's candidates, the link step for each outdates at the floor
+  and each evolves it would store, and the writer for each outdates at the
+  floor not yet proposed that the link step leaves uncapped. The canary's `@p4d1` pass took about 6 hours of sleep, at
   about 3.8 s a pair.
 - **Refused at start:** the run refuses without `OB1_JEV_BASE_URL`, or with
   `OB1_JEV_MODEL` naming another model.
@@ -3358,7 +3380,8 @@ tier gives each pair's verdict, not the judge:
   `decide_version` and decide mode's prompt hash, and its recipe carries what
   the tier and the writer said (`judged.decide`): since version 3 both of the
   writer's quotes, so a proposal can be checked again under another quote
-  rule, and the floor when the writer was not asked.
+  rule, and the floor when the writer was not asked; since version 4 the link
+  step's answer, when it was asked (`judged.decide.link`).
 
 **Staleness**, the same pass's second output: `stale_entities(window)` names
 the entities nothing has mentioned within the window, quietest first, each
@@ -5210,8 +5233,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2992 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1511 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 909 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1512 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 910 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 69 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 259 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)

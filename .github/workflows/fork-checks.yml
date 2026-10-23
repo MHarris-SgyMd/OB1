@@ -206,10 +206,6 @@ jobs:
         working-directory: server-portable
         run: bun test-jobs.ts
 
-      - name: Typecheck
-        working-directory: server-portable
-        run: bunx tsc --noEmit
-
       # The REST core's client (SMD-2287), which the MCP server and the
       # operator GUI call the brain through: its generated files against the
       # REST core's own document, so a route or a schema changed without
@@ -219,10 +215,6 @@ jobs:
       - name: Install the REST client's pinned packages
         working-directory: rest-client
         run: bun install --frozen-lockfile
-
-      - name: Typecheck the REST client
-        working-directory: rest-client
-        run: bunx tsc --noEmit
 
       - name: The REST client against the REST core
         working-directory: rest-client
@@ -235,10 +227,6 @@ jobs:
       - name: Install the MCP server's pinned packages
         working-directory: mcp-server
         run: bun install --frozen-lockfile
-
-      - name: Typecheck the MCP server
-        working-directory: mcp-server
-        run: bunx tsc --noEmit
 
       # SMD-2280: the operator GUI (dashboard/), checked as the image builds
       # it: svelte-check over its pages and server code, which import the REST
@@ -296,17 +284,9 @@ jobs:
         working-directory: db
         run: bun install --frozen-lockfile
 
-      - name: Typecheck the workers, benches and suites
-        working-directory: db
-        run: bunx tsc --noEmit
-
       - name: Install the evals' pinned packages
         working-directory: evals
         run: bun install --frozen-lockfile
-
-      - name: Typecheck the evals
-        working-directory: evals
-        run: bunx tsc --noEmit
 
       # The typed-decision tier (SMD-2050): its serving process under jev/ and
       # the client in server-portable/jev.ts, which the suite imports — so it
@@ -319,10 +299,6 @@ jobs:
       - name: Install the decision tier's pinned packages
         working-directory: jev
         run: bun install --frozen-lockfile
-
-      - name: Typecheck the decision tier
-        working-directory: jev
-        run: bunx tsc --noEmit
 
       - name: Decision tier — contract, service and client
         working-directory: jev
@@ -374,6 +350,15 @@ jobs:
       - name: Proposal writer rules
         working-directory: evals
         run: bun eval-judge-propose.ts --self-check
+
+      # How the pass could ask the mediated-pair test's question (SMD-3203
+      # item 3): row 2's mapping (F-state distinct, the rest of the mediated
+      # capped), both versions' questions (the writer's read word for word from
+      # the ADR's test, pinned by hash), the gold where both raters agree, κ,
+      # the median, the scoring and the bar at its edges. No tier, no model.
+      - name: Mediated-pair rules
+        working-directory: evals
+        run: bun eval-mediated-pairs.ts --self-check
 
       # The projection-replay spike's rules (SMD-1998): the snapshot key per
       # projection, the replay rule branch by branch, the five scenarios on a
@@ -496,9 +481,15 @@ jobs:
         working-directory: deploy/auth
         run: bun install --frozen-lockfile
 
-      - name: Typecheck the authorization server
-        working-directory: deploy/auth
-        run: bunx tsc --noEmit
+      # The job's type-checked directories, side by side (SMD-3202), here
+      # because each needs its own install, before this step, and this follows
+      # the last of them: a tsc in each, its output a log of its own, printed in
+      # the order named, the step failing naming the directory. One after
+      # another they were seven steps, 25–49 s by runner. Check 18 reads each
+      # directory named as a tsc step, and runs the script against a stub to
+      # hold it to that.
+      - name: Typecheck the server, the REST and MCP clients, the workers, the evals, the decision tier and the authorization server
+        run: .github/ci/typecheck.sh server-portable rest-client mcp-server db evals jev deploy/auth
 
       - name: Authorization server rules
         working-directory: deploy/auth
@@ -1200,22 +1191,32 @@ jobs:
       # Exit 1, the `provider endpoint` row failed, the remedy naming the
       # profile; and the same run with the reachable address (the runner's
       # listener from the first step, still up) passes, so the step proves
-      # the probe and not a broken container.
-      - name: A local endpoint that answers nothing refuses to start
+      # the probe and not a broken container. Since SMD-2890 a resolved name
+      # with nothing answering yet starts degraded, so two more runs hold the
+      # split where it bites, in the image: the container's own loopback still
+      # fails (the maintainer's call — nothing will start there), and the host
+      # alias with nothing on its port warns and exits 0.
+      - name: A local endpoint that cannot answer refuses to start, one not up yet starts degraded
         working-directory: deploy
         run: |
-          set +e
-          docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun -e OB1_LLM_BASE_URL=http://ollama:11434/v1 server preflight.ts > /tmp/negative.out 2>&1
-          CODE=$?
-          set -e
+          pf() { local out=$1; shift; set +e; docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun "$@" server preflight.ts > "$out" 2>&1; CODE=$?; set -e; }
           # The report is printed whole when a line is missing, so a runner
           # whose resolver answers differently is read, not guessed at (the
           # first run read the unknown name as the timeout kind; caught: CI, PR #138).
-          hold() { grep -E "$1" /tmp/negative.out || { echo "--- expected /$1/ in preflight's report: ---" >&2; cat /tmp/negative.out >&2; exit 1; }; }
-          hold '✗ +provider endpoint +nothing answers at http://ollama:11434/v1 — the name does not resolve'
-          hold 'is the local-models profile.*start the stack with --profile local-models'
-          hold 'preflight FAILED'
-          [ "$CODE" -eq 1 ] || { echo "preflight exited $CODE, expected 1" >&2; cat /tmp/negative.out >&2; exit 1; }
+          hold() { grep -E "$2" "$1" || { echo "--- expected /$2/ in preflight's report: ---" >&2; cat "$1" >&2; exit 1; }; }
+          code() { [ "$CODE" -eq "$2" ] || { echo "preflight exited $CODE, expected $2" >&2; cat "$1" >&2; exit 1; }; }
+          pf /tmp/negative.out -e OB1_LLM_BASE_URL=http://ollama:11434/v1
+          hold /tmp/negative.out '✗ +provider endpoint +nothing answers at http://ollama:11434/v1 — the name does not resolve'
+          hold /tmp/negative.out 'is the local-models profile.*start the stack with --profile local-models'
+          hold /tmp/negative.out 'preflight FAILED'
+          code /tmp/negative.out 1
+          pf /tmp/loopback.out -e OB1_LLM_BASE_URL=http://127.0.0.1:11434/v1
+          hold /tmp/loopback.out '✗ +provider endpoint +nothing answers at http://127.0.0.1:11434/v1 — the connection was refused .*this is a container, and 127\.0\.0\.1 in it is the container itself'
+          code /tmp/loopback.out 1
+          pf /tmp/notyet.out -e OB1_LLM_BASE_URL=http://host.docker.internal:1/v1
+          hold /tmp/notyet.out '! +provider endpoint +nothing answers at http://host.docker.internal:1/v1 yet — .*the server starts degraded'
+          hold /tmp/notyet.out 'preflight OK'
+          code /tmp/notyet.out 0
           docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun server preflight.ts | grep -F 'preflight OK'
 
       # SMD-2424, SMD-3214: the workers profile's own command, run for real
