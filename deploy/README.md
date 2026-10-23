@@ -429,7 +429,7 @@ network of its own, `postgres-port`, for its loopback port, and
 | `sleep` (`--profile sleep`) | Listens on nothing; dials `postgres:5432` on `data` and the model provider on `egress` | Nothing | Nothing |
 | `n8n` (`--profile orchestration`) | `n8n:5678` on `egress`, which nothing in the stack dials; n8n dials `orchestration-runner:8090` and the vendors its workflows name, and its brain calls go to the REST core as `api:8000` (SMD-2295), all on `egress`. Not the mesh, where every backend the proxy reaches is (a tier of another project joined it, its server `server` too, from SMD-2294 to SMD-2874) | `127.0.0.1:${N8N_PORT:-5678}`: the editor, the public API (`/api/v1`), webhooks (`/webhook/…`) and MCP endpoints (`/mcp/…`), behind the owner's password and the keys provisioning stores | Through a TLS proxy, as the server. `N8N_BIND=0.0.0.0` only for a proxy on another machine, and then its keys ride every request in clear until the proxy |
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090` on `egress`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` on `data` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
-| `lgtm` (`--profile observability`) | `lgtm.ob1.internal` on the `mesh` network: the MCP server and the REST core send their OTLP to `:4318` there (`server`, off the mesh, sends none), and with `compose.grafana-public.yaml` the proxy dials its Grafana at `:3000` for `/grafana`. On the internal `telemetry` network its collector scrapes `pg-exporter` every 30 s. Its Prometheus, Tempo, Loki and Pyroscope listen on its own loopback. It dials nothing else by itself — a data source its admin adds reaches any name on `mesh` or `telemetry` ("The observability profile" below) — and shares no network with Postgres or the model providers | Nothing by default. `compose.grafana-port.yaml` publishes its Grafana on `${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}`, an origin of its own; `compose.grafana-public.yaml` routes `/grafana` on the proxy's port | Grafana's own sign-in, anonymous access off: through a TLS proxy to the loopback port (`GRAFANA_ORIGIN` its https origin), or at `/grafana` with `compose.grafana-public.yaml`, which shares the stack's origin ("The observability profile" below) |
+| `lgtm` (`--profile observability`) | `lgtm.ob1.internal` on the `mesh` network: the MCP server and the REST core send their OTLP to `:4318` there, and with `compose.grafana-public.yaml` the proxy dials its Grafana at `:3000` for `/grafana`. On the internal `telemetry` network its collector scrapes `pg-exporter` every 30 s. Its Prometheus, Tempo, Loki and Pyroscope listen on its own loopback. It dials nothing else by itself — a data source its admin adds reaches any name on `mesh` or `telemetry` ("The observability profile" below) — and shares no network with Postgres or the model providers | Nothing by default. `compose.grafana-port.yaml` publishes its Grafana on `${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}`, an origin of its own; `compose.grafana-public.yaml` routes `/grafana` on the proxy's port | Grafana's own sign-in, anonymous access off: through a TLS proxy to the loopback port (`GRAFANA_ORIGIN` its https origin), or at `/grafana` with `compose.grafana-public.yaml`, which shares the stack's origin ("The observability profile" below) |
 | `pg-exporter` (`--profile observability`) | `pg-exporter.ob1.internal:9187` on the internal `telemetry` network, where lgtm's collector scrapes it at `/cgi-bin/metrics`, the one path that answers; nothing on `data` reaches that port, and the exporter itself listens on the container's loopback (SMD-3023). It dials `postgres:5432` on `data` as `ob1_monitor` (a member of `pg_monitor` alone). It shares no network with the model providers or the mesh | Nothing | Nothing |
 | `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on `auth-egress`, its own, through its fetch guard. It shares no network with Postgres, Ollama, Jev, n8n or the workers, and holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
@@ -557,8 +557,8 @@ checkout, or, on a release install, the new tag's `compose.yaml` and
 stack, `ps`, `logs` and `down` among them, naming it, before anything changes:
 inspect or stop the old stack with the old `compose.yaml`, or hand one command
 `OB1_FORWARDER_KEY=x` in the shell. The `up` creates `mcp` and recreates
-the proxy, which waits on the MCP server and the REST core; on a release
-since SMD-2287 PR 6b, take its upgrade below with it, `--remove-orphans`
+the proxy, which waits on the MCP server and the REST core; from a checkout or
+a release since SMD-2287 PR 6b, take its upgrade below with it, `--remove-orphans`
 included. On a stack running the observability profile, the `ob1-server-silent`
 alert fires for up to a day after it: `server` stops sending its series as it
 goes, which the alert reads as a server gone quiet. Then
@@ -606,14 +606,14 @@ the port, measured on podman. The last
 loading; an SDK client connected across it saw one 404 and went on (measured).
 A client still configured at the root stops working there from v2.0.0: move it
 to `/mcp` first ("Moving a client to /mcp").
-On that first `up` name the proxy and the forwarder wherever you name the server
-(`up -d --build server proxy forwarder`): `up server` alone recreates the server
-without its port and never creates either. Once they run, recreating the server
-alone is fine — the forwarder keeps the port and the proxy finds the new
-container by name —
-but a rebuild names the REST core too, or the proxy, which depends on it ("The
-REST core", below): `api` runs the server's image, and a container keeps the
-image it started on. **Rolling back** to
+On that first `up` name the proxy and the forwarder wherever you name the REST
+core (`up -d --build api proxy forwarder`): `up api` alone never creates either.
+Once they run, recreating the REST core alone is fine — the forwarder keeps the
+port and the proxy finds the new container by name — but a rebuild names the
+proxy too, which depends on the MCP server and the operator GUI as well ("The
+REST core", below): they run the image `api` builds, and a container keeps the
+image it started on. (Until SMD-2287 PR 6b the server image's builder was
+`server`, the MCP server `server-portable/index.ts` was.) **Rolling back** to
 a `compose.yaml` from before it needs `up -d --remove-orphans`: without it the
 proxy, now an orphan, keeps the port and the old server cannot bind it
 (measured: "address already in use", the stack down).
@@ -957,7 +957,7 @@ their first thought, with the real error buried inside a tool response.
 On Supabase this mattered less: the platform injected the database credentials, so
 they could not be wrong. Off Supabase every one is hand-written.
 
-So the container's entrypoint runs `bun preflight.ts` and, only if it passes, `exec bun index.ts` (the REST core's service runs `api.ts` instead). A
+So the container's entrypoint runs `bun preflight.ts` and, only if it passes, `exec bun api.ts`, the image's default command (`index.ts` until SMD-2287 PR 6b); the MCP server and the operator GUI run their own entries from the image without it, as they read no store. A
 misconfigured deployment crashloops, which is visible, instead of looking healthy,
 which is not. `preflight.ts --json` suits a pipeline gate; `--deep` also calls
 OpenRouter and checks the embedding width still matches the schema.
@@ -2837,9 +2837,8 @@ stable is redeployed:
    shell is not used, since canary.sh unsets it (compose would let it win
    over the canary's file) and tier.sh refuses one beside
    `--from-env-file`.
-3. It builds the server from this checkout and recreates it and the REST
-   core, which runs the server's image, so their pools open on the refreshed
-   database, then the MCP server at `/mcp` (SMD-2287), on the same image and
+3. It builds the server image from this checkout (as `api`) and recreates the
+   REST core, so its pool opens on the refreshed database, then the MCP server at `/mcp` (SMD-2287), on the same image and
    the file's own forward key, and starts its own proxy and forwarder,
    recreated only when their port changed. It waits for the keyed `/health` to
    be the REST core's record, which the MCP server answers only once the REST

@@ -112,9 +112,8 @@
 #      file holds no OB1_WORKER_KEY (then it is left stopped and `up` exits
 #      1, said). A running service of another profile (the workers,
 #      board-sync) is refused before anything changes: stop it first;
-#   4. builds the server from this checkout and (re)creates it and the REST
-#      core, which runs the server's image, so their pools open on the
-#      refreshed database. Standing servers are stopped before the refresh, so
+#   4. builds the server image from this checkout (as `api`) and (re)creates
+#      the REST core, so its pool opens on the refreshed database. Standing servers are stopped before the refresh, so
 #      nothing serves or writes a half-restored copy. The canary's own proxy
 #      and forwarder are (re)started, its port published on loopback;
 #   5. smoke-tests it with its own key, OB1_CANARY_KEY (a write key: smoke.sh
@@ -1312,12 +1311,15 @@ WRITERS_STOPPED=1
 # The canary's `server`, the MCP server server-portable/index.ts was, retired in
 # SMD-2287 PR 6b: a canary stood up before then keeps its container, which this
 # compose.yaml no longer names, so compose would leave it running beside the
-# stack, an orphan holding connections to the canary's database. Removed by its
-# project's and service's labels, running or stopped.
+# stack, an orphan holding connections to the canary's database. Found by its
+# project's and service's labels, running or stopped; stopped within its grace
+# first, so a call in flight drains and its stop writes its own jobs lost, as
+# the sleep worker is stopped below (review pass 6b·4), then removed.
 retired="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=server")"
 if [ -n "$retired" ]; then
-  say "the canary's server container, retired in SMD-2287 PR 6b, removed"
+  printf '%s\n' "$retired" | xargs "$RUNTIME" stop -t "${OB1_STOP_GRACE:-10}" >/dev/null 2>&1 || true
   printf '%s\n' "$retired" | xargs "$RUNTIME" rm -f >/dev/null
+  say "the canary's server container, retired in SMD-2287 PR 6b, removed"
 fi
 STOPPED_API=""
 if [ -n "$(container_of "$CANARY" api)" ]; then

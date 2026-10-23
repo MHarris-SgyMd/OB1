@@ -184,7 +184,7 @@ When you generate a new key on openrouter.ai/keys, the old key is revoked immedi
 
 **Places your OpenRouter key lives (update ALL of them):**
 
-1. **The server's environment** — This is the most common one to miss. Your MCP server reads the key from `deploy/.env` once, at start.
+1. **The server's environment** — This is the most common one to miss. The REST core, which makes the brain's model calls, reads the key from `deploy/.env` once, at start.
 
    ```bash
    # edit OPENROUTER_API_KEY in deploy/.env, then
