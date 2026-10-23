@@ -5,7 +5,7 @@ import { visibleToolNames, READ_TOOL_NAMES, UNLOCKS, type ToolScope } from "./to
 import { openApiDocument } from "./rest/openapi.ts";
 import { pathFields, readsQuery, ROUTES, type Method } from "./rest/routes.ts";
 import { FORK_VERSION } from "../db/version.mjs";
-import { mcpTarget, mcpUnderTest, servedAsNamed } from "./test-support.ts";
+import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 /**
  * test-server.ts
  *
@@ -90,9 +90,9 @@ const JWT = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln";
 process.env.COMPOSE_PROFILES = "local-models, auth";
 process.env.OB1_PUBLIC_ORIGIN = PUBLIC_ORIGIN;
 
-// The server under test: index.ts, or with OB1_MCP_UNDER_TEST=client the MCP server over the REST core (SMD-2287).
+// The server under test: the MCP server over the REST core (SMD-2287).
 const worker = await mcpUnderTest();
-assert(servedAsNamed(), `the server under test is the one OB1_MCP_UNDER_TEST names (${process.env.OB1_MCP_UNDER_TEST || "index"})`);
+assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
 
 // The authorization server's health check, stubbed before any request: up or
 // down as [11b] says, every probe counted, and nothing cached (a TTL of 0), so
@@ -245,7 +245,7 @@ console.log("\n[5] Auth failure — missing key, and an unparseable body");
 
 console.log("\n[5a] A refused body is read only so far (SMD-2309): past REFUSAL_BODY_LIMIT, id: null");
 {
-  const { REFUSAL_BODY_LIMIT } = await import("./index.ts");
+  const { REFUSAL_BODY_LIMIT } = await import("./mcp-edge.ts");
   const request = (pad: number) => JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list", params: { pad: "x".repeat(pad) } });
   const under = await fetch(BASE, { method: "POST", headers: H, body: request(REFUSAL_BODY_LIMIT - 200) });
   assert((await under.json())?.id === 7, "a body under the limit still has its id echoed");
@@ -1584,7 +1584,7 @@ console.log("\n[13b] GET /health with a key is what the brain is; without one it
 
 console.log("\n[13c] A keyed /health answers within its deadline from a database that accepts and never replies, and one that refuses at once says so (SMD-2041 review passes 1–2)");
 {
-  // Two child servers, since this suite's own env is frozen with no store.
+  // Two child REST cores, since this suite's own env is frozen with no store.
   // The first's database is a listener that takes the connection and says
   // nothing: the driver waits out its connect timeout (30 s), and both the
   // registry check and the read wait with it. Before review pass 1 the probe
@@ -1593,9 +1593,11 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
   // database refuses at once: the registry reports it cannot reach it (not a
   // refusal, agents.ts), and the record carries the database's error and the
   // commit the build arg baked.
-  const { HEALTH_DEADLINE_MS } = await import("./index.ts");
+  const { HEALTH_DEADLINE_MS } = await import("./core/reads.ts");
+  // The REST core's keyed /health (SMD-2287 PR 6a: index.ts's answered `ok` as text; the MCP server's comes from here).
+  const OK_BODY = JSON.stringify({ status: "ok" });
   const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
-  const child = (port: number, databaseUrl: string) => Bun.spawn(["bun", "--no-env-file", "index.ts"], {
+  const child = (port: number, databaseUrl: string) => Bun.spawn(["bun", "--no-env-file", "api.ts"], {
     cwd: import.meta.dir,
     env: { ...process.env, PORT: String(port), DATABASE_URL: databaseUrl, MCP_ACCESS_KEY: KEY, OB1_GIT_SHA: "c0ffee1" },
     stdout: "ignore",
@@ -1622,7 +1624,7 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
   try {
     assert(await up(silentPort) && await up(refusedPort), "both child servers answer a keyless probe");
     const get = await keyed(silentPort, "GET");
-    assert(get.status === 200 && get.body === "ok" && get.took < HEALTH_DEADLINE_MS + 1500,
+    assert(get.status === 200 && get.body === OK_BODY && get.took < HEALTH_DEADLINE_MS + 1500,
       `keyed GET /health, the database silent → 200 \`ok\` in ${Math.round(get.took)} ms (deadline ${HEALTH_DEADLINE_MS} ms)`);
     const head = await keyed(silentPort, "HEAD");
     assert(head.status === 200 && head.body === "" && head.took < 500, `keyed HEAD /health reads nothing and answers at once (${Math.round(head.took)} ms)`);
@@ -1641,23 +1643,27 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
 
 console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, exit 0, within OB1_STOP_GRACE less 2 s, and says what it cut; SIGINT the same (SMD-2250)");
 {
-  // Child servers first, run the way the image runs them — index.ts the entry,
-  // which is when the handlers go in. The first request in flight is a keyed
-  // /health against a database that never replies (13c's), answered at its
-  // deadline; the others stall before any response. As a child the process
+  // Child servers first, run the way the image runs them — the REST core's
+  // api.ts or the MCP server's index.ts the entry, which is when the handlers
+  // go in (SMD-2287 PR 6a: server-portable's index.ts was). The first request
+  // in flight is a keyed /health against a database that never replies
+  // (13c's), answered at its deadline; the others stall before any response. As a child the process
   // is not PID 1, so without the handlers SIGTERM's default action kills it
   // at once: the request is cut off and there is no exit code, which is what
   // these rows fail on. Then the bounds against a stand-in server, the call
   // count, the grace period's parse and where compose and preflight read it.
-  const { HEALTH_DEADLINE_MS } = await import("./index.ts");
+  const { HEALTH_DEADLINE_MS } = await import("./core/reads.ts");
   const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  // stdout and stderr both read: the per-request lines are warnings.
-  const start = (env: Record<string, string> = {}) => {
+  // stdout and stderr both read: the per-request lines are warnings. A child is the REST core, on the database that
+  // never replies, or the MCP server's entry (SMD-2287 PR 6a), its REST core a listener that never answers, so a
+  // keyed call stalls at its whoami as one stalls at the registry lookup.
+  const start = (env: Record<string, string> = {}, entry: "api" | "mcp" = "api") => {
     const port = freePort();
-    const proc = Bun.spawn(["bun", "--no-env-file", "index.ts"], {
-      cwd: import.meta.dir,
-      env: { ...process.env, PORT: String(port), DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, MCP_ACCESS_KEY: KEY, ...env },
+    const proc = Bun.spawn(["bun", "--no-env-file", entry === "api" ? "api.ts" : "index.ts"], {
+      cwd: entry === "api" ? import.meta.dir : `${import.meta.dir}/../mcp-server`,
+      env: { ...process.env, PORT: String(port), DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, MCP_ACCESS_KEY: KEY,
+        ...(entry === "mcp" ? { OB1_REST_URL: `http://127.0.0.1:${silent.port}`, OB1_FORWARDER_KEY: "f".repeat(64), OB1_PLUGINS: "" } : {}), ...env },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -1684,11 +1690,11 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   // With no connection string its store never builds, so it holds no pool: its stop must not say it closed one
   // (review pass 2; this child ran the PostgREST store, which held none, until SMD-3152 retired it).
   const ctrlC = start({ DATABASE_URL: "" });
-  const cutter = start();
+  const cutter = start({}, "mcp");
   // OB1_STOP_GRACE=3: the drain's bound is 1 s, so the real bound cuts on real Bun in a second.
-  const graced = start({ OB1_STOP_GRACE: "3" });
+  const graced = start({ OB1_STOP_GRACE: "3" }, "mcp");
   // A drained stop with a record still open (SMD-1849 PR 2c review pass 3).
-  const leftBehind = start({ OB1_STOP_GRACE: "10" });
+  const leftBehind = start({ OB1_STOP_GRACE: "10" }, "mcp");
   try {
     assert(await up(busy.port) && await up(idle.port) && await up(ctrlC.port) && await up(cutter.port) && await up(graced.port) && await up(leftBehind.port), "six child servers answer a keyless probe (the first request, which hands the handlers the server)");
 
@@ -1710,7 +1716,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     const code = await exited(busy.proc, HEALTH_DEADLINE_MS + 5_000);
     const took = performance.now() - t0;
     const log = await busy.out;
-    assert(answered.status === 200 && answered.body === "ok" && answered.at >= HEALTH_DEADLINE_MS - 100,
+    assert(answered.status === 200 && answered.body === JSON.stringify({ status: "ok" }) && answered.at >= HEALTH_DEADLINE_MS - 100,
       `the keyed /health in flight when SIGTERM landed is answered, 200 \`ok\` at its deadline (${Math.round(answered.at)} ms; got ${answered.status} ${answered.body.slice(0, 60)})`);
     assert(late === "refused" && refusedAt < answered.at, `…a new connection after the signal is refused while it is in flight (${late} at ${Math.round(refusedAt)} ms, the request answered at ${Math.round(answered.at)} ms)`);
     assert(code === 0 && took < HEALTH_DEADLINE_MS + 2_500, `…and the server exits 0 once it is, not at the drain bound (${code} at ${Math.round(took)} ms)`);
@@ -1736,13 +1742,13 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     assert(intCode === 0 && /SIGINT: stopped in [\d.]+ s; no database pool was opened; exit 0/.test(intLog),
       `SIGINT stops it the same way, and a store that never built is not said to have a pool closed (${intCode}: ${intLog.split("\n").filter((l) => l.startsWith("SIGINT: stopped")).join("")})`);
 
-    // A keyed call that stalls before its response — the registry lookup, on
-    // the database that never replies — and two SIGTERMs: the second cuts the
-    // drain short, the same path as the bound (onCut, then stop(true) not
-    // waited on), in a fraction of the 8 s. Holds index.ts's flag, which picks
-    // the cut line, on real Bun (review pass 2).
+    // A keyed call that stalls before its response — its whoami, on the REST
+    // core that never answers — and two SIGTERMs: the second cuts the drain
+    // short, the same path as the bound (onCut, then stop(true) not waited
+    // on), in a fraction of the 8 s. Holds the entry's flag, which picks the
+    // cut line, on real Bun (review pass 2).
     const tc = performance.now();
-    const stalled = fetch(`http://127.0.0.1:${cutter.port}/`, {
+    const stalled = fetch(`http://127.0.0.1:${cutter.port}/mcp`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
@@ -1755,17 +1761,17 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     const cutLog = await cutter.out;
     const cutLines = cutLog.split("\n").filter((l) => /^request (cut off|abandoned)/.test(l));
     assert(cutCode === 1 && await stalled === "cut off" && performance.now() - tc < 2_500
-      && cutLines.length === 1 && cutLines[0].startsWith("request cut off by the server's stop after 0.") && /SIGTERM: stopped in [\d.]+ s; database pool not closed: a second signal; exit 1|database pool not closed within 250 ms; exit 1/.test(cutLog),
-      `a call stalled before its response, cut by a second signal: the cut line and not the client's, exit 1, the close given 250 ms (${cutCode} in ${Math.round(performance.now() - tc)} ms: ${cutLines.join(" | ").slice(0, 90)})`);
+      && cutLines.length === 1 && cutLines[0].startsWith("request cut off by the server's stop after 0.") && /SIGTERM: stopped in [\d.]+ s; no database pool was opened; exit 1/.test(cutLog),
+      `a call stalled before its response, cut by a second signal: the cut line and not the client's, exit 1, no pool to close (${cutCode} in ${Math.round(performance.now() - tc)} ms: ${cutLines.join(" | ").slice(0, 90)})`);
     // One SIGTERM, and the bound OB1_STOP_GRACE sets does the cutting.
     const tg = performance.now();
-    const graceStalled = fetch(`http://127.0.0.1:${graced.port}/`, {
+    const graceStalled = fetch(`http://127.0.0.1:${graced.port}/mcp`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     }).then((r) => `answered ${r.status}`, () => "cut off");
-    // Beside it, a keyed mirror held at the registry (the database never
-    // answers; its deadline is 2.5 s, past the 1 s bound): only the stop's
+    // Beside it, a keyed mirror held at its whoami (the REST core never
+    // answers, so no key is named on its line): only the stop's
     // cutOpenRequests can write its line — the MCP call above has its own
     // abort handler, this route none (review pass 4: no test held that call).
     const mirrorStalled = fetch(`http://127.0.0.1:${graced.port}/mcp/worker-status`, { headers: { "x-brain-key": KEY } })
@@ -1779,11 +1785,11 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     const graceLines = graceLog.split("\n").filter((l) => l.startsWith('{"ts"')).map((l) => JSON.parse(l) as Record<string, unknown>);
     assert(graceCode === 1 && await graceStalled === "cut off" && graceTook > 1_200 && graceTook < 3_000
       && /waited on for up to 1 s/.test(graceLog) && /still in flight.* after 1\.\d s, closed unfinished/.test(graceLog) && /^request cut off by the server's stop/m.test(graceLog)
-      && graceLines.filter((l) => l.outcome === "cut" && l.route === undefined && l.agent === "MCP_ACCESS_KEY").length === 1,
+      && graceLines.filter((l) => l.outcome === "cut" && l.route === undefined && l.agent === undefined).length === 1,
       `OB1_STOP_GRACE=3 bounds the drain at 1 s: one SIGTERM, the stalled call cut at the bound with its line and its one JSON line, \`cut\`, exit 1 (${graceCode} in ${Math.round(graceTook)} ms)`);
     const mirrorCut = graceLines.filter((l) => l.route === "/worker-status");
-    assert(mirrorCut.length === 1 && mirrorCut[0]?.outcome === "cut" && mirrorCut[0].tool === "worker_status" && mirrorCut[0].agent === "MCP_ACCESS_KEY" && mirrorCut[0].status === 0,
-      `a keyed mirror held at the registry when the stop cuts it: one \`cut\` line, by its route and key, from the stop's cutOpenRequests (${JSON.stringify(mirrorCut)})`);
+    assert(mirrorCut.length === 1 && mirrorCut[0]?.outcome === "cut" && mirrorCut[0].tool === "worker_status" && mirrorCut[0].agent === undefined && mirrorCut[0].status === 0,
+      `a keyed mirror held at its whoami when the stop cuts it: one \`cut\` line, by its route, from the stop's cutOpenRequests (${JSON.stringify(mirrorCut)})`);
     // A keyed mirror whose client left while it waits on the registry. Bun 1.4.3 counts it done at once, so the stop
     // drains with it open and only the stop's endOpen writes its line — 0, \`abandoned\` (PR 2c review pass 3); Bun 1.4.0,
     // CI's and the image's, still counts it, so the drain waits for its handler, whose line says 200, \`abandoned\`
@@ -1800,7 +1806,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     const leftLines = leftLog.split("\n").filter((l) => l.startsWith('{"ts"')).map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.route === "/jobs/:id");
     const leftCounted = /1 request in flight/.test(leftLog);
     assert(leftCode === 0 && (leftCounted || /0 requests in flight/.test(leftLog)) && leftLines.length === 1 && leftLines[0]?.outcome === "abandoned"
-      && leftLines[0].agent === "MCP_ACCESS_KEY" && leftLines[0].status === (leftCounted ? 200 : 0),
+      && leftLines[0].agent === undefined && leftLines[0].status === (leftCounted ? 200 : 0),
       `a mirror whose client left, at a drained stop: one \`abandoned\` line — the stop's, before the flush, where the runtime let it go; its handler's where the drain waited (${leftCode}, ${leftCounted ? "counted" : "let go"}; ${JSON.stringify(leftLines)})`);
   } finally {
     for (const { proc } of [busy, idle, ctrlC, cutter, graced, leftBehind]) proc.kill("SIGKILL");
@@ -1813,7 +1819,8 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   // yet there is nothing to wait on. The stand-in's stop(true) never resolves
   // either, as Bun's does not while a handler has yet to return (review pass 1).
   const { drainOnSignal, isStoppable, createCallCount, drainBoundFrom } = await import("./shutdown.ts");
-  const { cutByStopLine, abandonedRequestLine, toolCallsRunning } = await import("./index.ts");
+  const { cutByStopLine } = await import("./mcp-edge.ts");
+  const { abandonedRequestLine } = await import("./sse.ts");
   const stuck = () => {
     const calls: string[] = [];
     return { calls, server: { pendingRequests: 1, stop: (force?: boolean) => { calls.push(force ? "stop(true)" : "stop()"); return new Promise<void>(() => {}); } } };
@@ -2096,8 +2103,8 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     aborter.abort();
     await gone;
     await Bun.sleep(150);
-    // The server under test's own count: index.ts's, or the MCP server's (SMD-2287 PR 4b).
-    const running = worker.toolCallsRunning ?? toolCallsRunning;
+    // The server under test's own count, the MCP server's (SMD-2287 PR 4b).
+    const running = worker.toolCallsRunning;
     const whileRunning = running();
     await Bun.sleep(900);
     assert(whileRunning === 1 && running() === 0,
@@ -2195,7 +2202,7 @@ console.log("\n[16] parseFilter bounds and normalises a metadata filter at the t
   // reaches jsonb. Shallow by design (scalars or arrays of scalars) so
   // `metadata @> filter` stays GIN-indexable; a nested object, a non-object, or
   // a filter over the caps is refused here rather than handed to the store.
-  const { parseFilter } = await import("./index.ts") as { parseFilter: (raw: unknown) => Record<string, unknown> };
+  const { parseFilter } = await import("./core/filter.ts") as { parseFilter: (raw: unknown) => Record<string, unknown> };
   assert(JSON.stringify(parseFilter(undefined)) === "{}" && JSON.stringify(parseFilter(null)) === "{}" && JSON.stringify(parseFilter({})) === "{}",
     "absent, null or empty normalises to the unfiltered {}");
   const shallow = { type: "idea", count: 3, flagged: true };
@@ -2234,8 +2241,8 @@ console.log("\n[16b] said_by and actor fold into the filter, and the By: line re
   // The two arguments are sugar over the two metadata keys migration 050
   // stamps, so the store, the log and the plan see one filter; the By: line
   // reads the same keys back. Both pure, both exported for this.
-  const { withActorFilter, actorLine } = await import("./index.ts") as {
-    withActorFilter: (f: Record<string, unknown>, s?: string, a?: string) => Record<string, unknown>;
+  const { withActorFilter } = await import("./core/filter.ts") as { withActorFilter: (f: Record<string, unknown>, s?: string, a?: string) => Record<string, unknown> };
+  const { actorLine } = await import("./render.ts") as {
     actorLine: (m: Record<string, unknown>) => string | null;
   };
   assert(JSON.stringify(withActorFilter({}, undefined, undefined)) === "{}", "neither argument leaves the filter as it was");
@@ -2261,7 +2268,7 @@ console.log("\n[16c] prefer_current's row line, header note and error hint rende
 {
   // Pure, exported for this: the weight is read off the row (score over
   // fused), so the server holds no copy of 059's 0.25.
-  const { demotedLine, currentNote, currentSearchHint } = await import("./index.ts") as {
+  const { demotedLine, currentNote, currentSearchHint } = await import("./render.ts") as {
     demotedLine: (t: { demoted: string[]; score: number; fused: number }) => string | null;
     currentNote: (rows: { window?: { rows: number; known: number; demoted: number; syncedAt: string | null; exact: boolean }; demoted?: string[] }[]) => string | null;
     currentSearchHint: (msg: string) => string;
@@ -2939,7 +2946,7 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
 
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
 {
-  const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./index.ts") as {
+  const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./sse.ts") as {
     withSseKeepalive: (r: Response, opts?: { intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: () => void; onStall?: () => void; label?: string }) => Response;
     requestLabel: (body: string | null) => string;
     abandonedRequestLine: (label: string, elapsedMs: number) => string;
@@ -3272,8 +3279,8 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   // Exactly one line, never zero and never two, however the request ends —
   // each case collected apart, and given time for anything late to arrive.
   type Timing = { intervalMs: number; maxMs: number };
-  // The server under test's own: index.ts's, or the MCP server's (SMD-2287 PR 4b).
-  const useKeepaliveTiming = worker.useKeepaliveTiming ?? (await import("./index.ts") as unknown as { useKeepaliveTiming: (t: Timing) => Timing }).useKeepaliveTiming;
+  // The server under test's own, the MCP server's (SMD-2287 PR 4b).
+  const useKeepaliveTiming: (t: Timing) => Timing = worker.useKeepaliveTiming;
   const { agents } = await import("./root.ts");
   const linesOf = async (run: () => Promise<unknown>, settleMs = 50): Promise<Record<string, unknown>[]> => {
     const got: string[] = [];
@@ -3298,7 +3305,7 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   assert(batch.length === 1 && batch[0]?.rpc === "batch" && !("tool" in batch[0]) && batch[0].outcome === "error" && batch[0].code === "FAILED",
     `a batch is one line, \`batch\`, naming no tool, with its worst call's outcome and code — not the first call's name beside the last call's end (${JSON.stringify(batch)})`);
   // A batch's calls end in whatever order they run: the worst is kept whichever ends last.
-  const { recordCall } = await import("./index.ts") as unknown as { recordCall: (r: { ended?: number; outcome?: string; code?: string }, o: string, c?: string) => void };
+  const { recordCall } = await import("./mcp-edge.ts") as unknown as { recordCall: (r: { ended?: number; outcome?: string; code?: string }, o: string, c?: string) => void };
   const merged = (ends: [string, string?][]) => { const r: { ended?: number; outcome?: string; code?: string } = {}; for (const [o, c] of ends) recordCall(r, o, c); return r; };
   const worstFirst = merged([["error", "FAILED"], ["ok"], ["refused", "NOT_FOUND"]]);
   const worstLast = merged([["ok"], ["refused", "NOT_FOUND"], ["error", "FAILED"]]);
@@ -3383,9 +3390,9 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
     console.error = realError;
   }
   // Through the MCP server the registry's throw is the REST core's 500 to its whoami: the key was never named to it, so
-  // its line names none, where index.ts matched the key's hash first (SMD-2287 PR 4b).
-  assert(thrown.length === 1 && thrown[0]?.status === 500 && thrown[0].outcome === "error" && thrown[0].agent === (mcpTarget() === "client" ? undefined : "MCP_ACCESS_KEY"),
-    `a throw in the route: one 500 \`error\` line, by the key's name where the server knew it (${JSON.stringify(thrown)})`);
+  // its line names none (SMD-2287 PR 4b).
+  assert(thrown.length === 1 && thrown[0]?.status === 500 && thrown[0].outcome === "error" && thrown[0].agent === undefined,
+    `a throw in the route: one 500 \`error\` line, naming no key, which the REST core's whoami never named (${JSON.stringify(thrown)})`);
   assert(revoked.length === 1 && revoked[0]?.outcome === "refused" && revoked[0].code === "REVOKED" && revoked[0].tool === "brain_info" && revoked[0].agent === "MCP_ACCESS_KEY",
     `a revoked key: one \`refused\` line, REVOKED, naming the call and the key (${JSON.stringify(revoked)})`);
 
@@ -3666,41 +3673,51 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     { [GENERIC]: "http://collector:4318", OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://tempo:4318/v1/traces", OTEL_SDK_DISABLED: " True" },
   ].map((env) => planTelemetry(env));
   const nowhere = (why: string, words: string) => `telemetry: ${why}: no ${words} are sent (SMD-1849)`;
-  assert(JSON.stringify(plans) === JSON.stringify([
-    { urls: {}, lines: [], goes: [] },
-    { urls: { traces: "http://collector:4318/v1/traces", metrics: "http://collector:4318/v1/metrics", logs: "http://collector:4318/v1/logs" }, lines: [], goes: [{ variable: GENERIC, origin: "http://collector:4318", words: ["spans", "metrics", "log records"] }] },
+  // Each plan's reasons as their kinds (SMD-2909), beside the lines they make.
+  assert(JSON.stringify(plans.map(({ urls, reasons, goes }) => ({ urls, lines: reasons.map((r) => r.line), goes, kinds: reasons.map((r) => r.kind) }))) === JSON.stringify([
+    { urls: {}, lines: [], goes: [], kinds: [] },
+    { urls: { traces: "http://collector:4318/v1/traces", metrics: "http://collector:4318/v1/metrics", logs: "http://collector:4318/v1/logs" }, lines: [], goes: [{ variable: GENERIC, origin: "http://collector:4318", words: ["spans", "metrics", "log records"] }], kinds: [] },
     { urls: { traces: "https://tempo:4318/v1/traces", metrics: "http://collector:4318/otlp/v1/metrics" }, lines: [nowhere(`${GENERIC} is set, but OTEL_LOGS_EXPORTER=none`, "log records")],
-      goes: [{ variable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", origin: "https://tempo:4318", words: ["spans"] }, { variable: GENERIC, origin: "http://collector:4318", words: ["metrics"] }] },
-    { urls: { metrics: "http://u:pw@prom:9090/api/v1/otlp/v1/metrics" }, lines: [], goes: [{ variable: "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", origin: "http://prom:9090", words: ["metrics"] }] },
-    { urls: {}, lines: [nowhere(`${GENERIC} is not an http(s) URL`, "spans, metrics or log records")], goes: [] },
-    { urls: { logs: "http://loki:3100/otlp/v1/logs" }, lines: [nowhere(`${GENERIC} is not an http(s) URL`, "spans or metrics")], goes: [{ variable: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", origin: "http://loki:3100", words: ["log records"] }] },
-    { urls: {}, lines: [nowhere(`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and ${GENERIC} are set, but OTEL_SDK_DISABLED=true`, "spans, metrics or log records")], goes: [] },
-  ]), `each signal's URL, what goes nowhere said by the variable's name, and where the rest go by origin alone (${JSON.stringify(plans)})`);
+      goes: [{ variable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", origin: "https://tempo:4318", words: ["spans"] }, { variable: GENERIC, origin: "http://collector:4318", words: ["metrics"] }], kinds: ["off"] },
+    { urls: { metrics: "http://u:pw@prom:9090/api/v1/otlp/v1/metrics" }, lines: [], goes: [{ variable: "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", origin: "http://prom:9090", words: ["metrics"] }], kinds: [] },
+    { urls: {}, lines: [nowhere(`${GENERIC} is not an http(s) URL`, "spans, metrics or log records")], goes: [], kinds: ["no-url"] },
+    { urls: { logs: "http://loki:3100/otlp/v1/logs" }, lines: [nowhere(`${GENERIC} is not an http(s) URL`, "spans or metrics")], goes: [{ variable: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", origin: "http://loki:3100", words: ["log records"] }], kinds: ["no-url"] },
+    { urls: {}, lines: [nowhere(`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and ${GENERIC} are set, but OTEL_SDK_DISABLED=true`, "spans, metrics or log records")], goes: [], kinds: ["off"] },
+  ]), `each signal's URL, what goes nowhere said by the variable's name (each reason with its kind), and where the rest go by origin alone (${JSON.stringify(plans)})`);
+  // The other two kinds a plan gives (SMD-2909 review pass 4): a shared endpoint with a query string, an exporter not read.
+  const queried = planTelemetry({ [GENERIC]: "http://collector:4318/?tenant=x" }).reasons.map((r) => r.kind);
+  const unreadKinds = planTelemetry({ [GENERIC]: "http://collector:4318", OTEL_TRACES_EXPORTER: "console" }).reasons.map((r) => r.kind);
+  assert(queried.join() === "query" && unreadKinds.join() === "unread", `a query string's reason is query, an exporter not read is unread (${queried.join()} | ${unreadKinds.join()})`);
   // startTelemetry sets up nothing where every signal goes nowhere, and says why.
   const said: string[] = [];
+  const saidKinds: import("./telemetry.ts").SaidKind[] = [];
   const savedGeneric = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
   let refused: boolean | undefined;
   try {
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "not a url";
-    refused = await startTelemetry("probe", (l) => said.push(l));
+    refused = await startTelemetry("probe", (l, kind) => { said.push(l); saidKinds.push(kind); });
   } finally {
     if (savedGeneric === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedGeneric;
   }
-  assert(refused === false && said.join(" / ") === nowhere(`${GENERIC} is not an http(s) URL`, "spans, metrics or log records"), `no SDK where every signal goes nowhere, said (${said.join(" / ")})`);
+  // The start passes the plan's kind with its line (SMD-2909 review pass 4): preflight's row reads it.
+  assert(refused === false && said.join(" / ") === nowhere(`${GENERIC} is not an http(s) URL`, "spans, metrics or log records") && saidKinds.length === 1 && saidKinds[0] === "no-url",
+    `no SDK where every signal goes nowhere, said with the plan's kind (${said.join(" / ")} | ${saidKinds.join()})`);
   // A setup that throws leaves the server serving, said by the error's name alone — an SDK's message can carry the URL (review pass 4).
   const thrown: string[] = [];
+  const thrownKinds: import("./telemetry.ts").SaidKind[] = [];
   const savedEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
   let started: boolean | undefined;
   try {
     process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:1";
-    started = await startTelemetry("probe", (l) => thrown.push(l), async () => ({ setUpTelemetry: () => { throw new TypeError(`Could not parse 'http://u:s3cret@collector' ${PLANTED}`); } }));
+    started = await startTelemetry("probe", (l, kind) => { thrown.push(l); thrownKinds.push(kind); }, async () => ({ setUpTelemetry: () => { throw new TypeError(`Could not parse 'http://u:s3cret@collector' ${PLANTED}`); } }));
   } finally {
     if (savedEndpoint === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = savedEndpoint;
   }
   assert(started === false && thrown.length === 1 && thrown[0] === "telemetry: not started (TypeError): no spans, metrics or log records are sent (SMD-1849)" && !thrown.join().includes("s3cret") && !thrown.join().includes(PLANTED),
     `a setup that throws: not started, said by the error's name, nothing of its message (${thrown.join(" / ")})`);
+  assert(thrownKinds.length === 1 && thrownKinds[0] === "not-started", `…and passed to the start's reader as not-started, so preflight's row reads the kind (SMD-2909) (${thrownKinds.join()})`);
   // A start line whose sink throws: the SDK is up all the same, and not said to have failed (review pass 5).
   const { stopTelemetry } = await import("./telemetry.ts");
   await stopTelemetry();
@@ -4024,7 +4041,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   type Span = ReturnType<typeof exporter.getFinishedSpans>[number];
   const attrs = (s: Span | undefined) => (s?.attributes ?? {}) as Record<string, unknown>;
   const parentOf = (s: Span | undefined) => s?.parentSpanContext?.spanId;
-  /** The MCP server's request spans: index.ts's, or the MCP server's — never the REST core's behind it, whose door is `api`. */
+  /** The MCP server's request spans — never the REST core's behind it, whose door is `api`. */
   const requestSpans = (spans: Span[] = exporter.getFinishedSpans()) => spans.filter((s) => s.kind === SpanKind.SERVER && attrs(s)["ob1.door"] === "mcp");
   const requestSpan = (spans?: Span[]) => requestSpans(spans)[0];
   /** Whether `span` is `ancestor`'s descendant among `spans`. */
@@ -4058,7 +4075,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     const strays = spans.filter((s) => s !== server && !under(spans, s, server?.spanContext().spanId));
     const operation = spans.filter((s) => attrs(s)["ob1.door"] === "api" && attrs(s)["ob1.tool"] === "search_thoughts");
     assert(server !== undefined && tool !== undefined && strays.length === 0 && operation.every((s) => under(spans, s, tool.spanContext().spanId) && s.links.length === 0)
-      && operation.length === (mcpTarget() === "client" ? 1 : 0),
+      && operation.length === 1,
       `the call is one trace: each span its request's descendant, the operation's under the call's span (${JSON.stringify(spans.map((s) => [s.name, attrs(s)["ob1.door"], parentOf(s), s.spanContext().spanId]))})`);
     // What the search threw is on its call's span by its kind alone (PR 2c): one exception event, no message.
     const thrown = (tool?.events ?? []).map((e) => [e.name, Object.keys(e.attributes ?? {}).sort().join()]);
@@ -4088,7 +4105,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     const routeThrew = requestSpan(routeSpans);
     // Through the MCP server the registry is the REST core's: the throw's kind is on its request's span, under the MCP
     // server's (PR 4c), whose own span has the kind of what it met — a 500 — since an answer carries no exception's.
-    const threwAt = mcpTarget() === "client" ? routeSpans.find((sp) => attrs(sp)["ob1.door"] === "api" && under(routeSpans, sp, routeThrew?.spanContext().spanId)) : routeThrew;
+    const threwAt = routeSpans.find((sp) => attrs(sp)["ob1.door"] === "api" && under(routeSpans, sp, routeThrew?.spanContext().spanId));
     const routeEvents = (sp: Span | undefined) => JSON.stringify(sp?.events.map((e) => [e.name, e.attributes]));
     assert(routeEvents(threwAt) === JSON.stringify([["exception", { "exception.type": "RangeError" }]]) && routeEvents(routeThrew)?.includes('"exception"') === true && !JSON.stringify(routeSpans.map((sp) => sp.events)).includes(PLANTED),
       `a throw in the MCP route: its kind on the request's span — through the MCP server, the REST core's under it — no message (${routeEvents(threwAt)} ${routeEvents(routeThrew)})`);
@@ -4222,11 +4239,9 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   const collector = Bun.serve({ port: 0, fetch: async (req) => { (received[new URL(req.url).pathname] ??= []).push(await req.text()); return Response.json({}); } });
   const collectorPort = collector.port;
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  const throughClient = mcpTarget() === "client";
-  const mcp = await serveChild(throughClient ? `${import.meta.dir}/../mcp-server` : import.meta.dir, "index.ts", {
+  const mcp = await serveChild(`${import.meta.dir}/../mcp-server`, "index.ts", {
     OB1_STOP_GRACE: "3", MCP_ACCESS_KEY: KEY, DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collectorPort}`,
-    OTEL_SERVICE_NAME: "ob1-mcp-probe",
-    ...(throughClient ? { OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent.port}`, OB1_PLUGINS: "" } : {}),
+    OTEL_SERVICE_NAME: "ob1-mcp-probe", OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent.port}`, OB1_PLUGINS: "",
   }, { waitForSdk: true });
   let out = "";
   try {
@@ -4267,9 +4282,9 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   const hung = Bun.serve({ port: 0, idleTimeout: 0, fetch: () => new Promise<Response>(() => {}) });
   const hungPort = hung.port;
   const silent2 = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  const mcp2 = await serveChild(throughClient ? `${import.meta.dir}/../mcp-server` : import.meta.dir, "index.ts", {
+  const mcp2 = await serveChild(`${import.meta.dir}/../mcp-server`, "index.ts", {
     OB1_STOP_GRACE: "3", MCP_ACCESS_KEY: KEY, DATABASE_URL: `postgres://u:p@127.0.0.1:${silent2.port}/db`, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${hungPort}`,
-    ...(throughClient ? { OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent2.port}`, OB1_PLUGINS: "" } : {}),
+    OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: `http://127.0.0.1:${silent2.port}`, OB1_PLUGINS: "",
   }, { waitForSdk: true });
   let out2 = "";
   try {
@@ -4558,6 +4573,52 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   }
   assert(!cutThrew && openRequestCount() === 0, `a cut whose sink throws ends every record and throws nothing (${cutThrew}, ${openRequestCount()} open)`);
 
+  // A setting read as its default is said through `note` where the caller tells it apart from a loss (SMD-2909): the
+  // start passes it to preflight's row as a note. (A setting held to its bound goes through the same `notes`.)
+  const notes: string[] = [];
+  const losses: string[] = [];
+  const intervalSaved = process.env.OTEL_METRIC_EXPORT_INTERVAL;
+  process.env.OTEL_METRIC_EXPORT_INTERVAL = "500";
+  // A collector that takes the reading: a refused one would hold the shutdown through the exporter's retries (SMD-2909 review pass 2).
+  const noteTaker = Bun.serve({ port: 0, fetch: () => Response.json({}) });
+  try {
+    const noted = setUpTelemetry("open-brain-test", { report: { warn: (l) => losses.push(l), note: (l) => notes.push(l) }, urls: { metrics: `http://127.0.0.1:${noteTaker.port}/v1/metrics` } });
+    await noted.shutdown();
+  } finally {
+    if (intervalSaved === undefined) delete process.env.OTEL_METRIC_EXPORT_INTERVAL;
+    else process.env.OTEL_METRIC_EXPORT_INTERVAL = intervalSaved;
+    noteTaker.stop(true);
+  }
+  assert(notes.some((l) => /OTEL_METRIC_EXPORT_INTERVAL "500" is not a whole number of at least 1000/.test(l)) && !losses.some((l) => /OTEL_METRIC_EXPORT_INTERVAL/.test(l)),
+    `a setting read as its default goes to the note sink, not the losses' (${notes.join(" / ")} | ${losses.join(" / ")})`);
+  // The start passes each line with its kind (SMD-2909), from a real setUpTelemetry: where the signals go (goes), a
+  // setting read as its default (note), and a full span queue's drop (not-sent) — the kinds preflight's row reads.
+  {
+    const { startTelemetry: startReal, stopTelemetry: stopReal, flushTelemetry: flushReal } = await import("./telemetry.ts");
+    const { trace: traceApi } = await import("@opentelemetry/api");
+    const taker = Bun.serve({ port: 0, fetch: () => Response.json({}) });
+    const kindsSaid: import("./telemetry.ts").Said[] = [];
+    const saved = { endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT, queue: process.env.OTEL_BSP_MAX_QUEUE_SIZE, batch: process.env.OTEL_BSP_MAX_EXPORT_BATCH_SIZE, delay: process.env.OTEL_BSP_SCHEDULE_DELAY, interval: process.env.OTEL_METRIC_EXPORT_INTERVAL };
+    Object.assign(process.env, { OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${taker.port}`, OTEL_BSP_MAX_QUEUE_SIZE: "1", OTEL_BSP_MAX_EXPORT_BATCH_SIZE: "1", OTEL_BSP_SCHEDULE_DELAY: "60000", OTEL_METRIC_EXPORT_INTERVAL: "500" });
+    try {
+      // Nothing an earlier row started is still starting: a pending start would be returned, its lines said elsewhere.
+      await stopReal();
+      await startReal("probe", (line, kind) => kindsSaid.push({ line, kind }));
+      for (let i = 0; i < 3; i++) traceApi.getTracer("probe").startSpan(`kind ${i}`).end();
+      await flushReal();
+    } finally {
+      await stopReal();
+      for (const [name, value] of [["OTEL_EXPORTER_OTLP_ENDPOINT", saved.endpoint], ["OTEL_BSP_MAX_QUEUE_SIZE", saved.queue], ["OTEL_BSP_MAX_EXPORT_BATCH_SIZE", saved.batch], ["OTEL_BSP_SCHEDULE_DELAY", saved.delay], ["OTEL_METRIC_EXPORT_INTERVAL", saved.interval]] as const) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      taker.stop(true);
+    }
+    const kindOf = (pattern: RegExp) => kindsSaid.find(({ line }) => pattern.test(line))?.kind;
+    assert(kindOf(/ go to http:\/\/127\.0\.0\.1:/) === "goes" && kindOf(/OTEL_METRIC_EXPORT_INTERVAL "500"/) === "note" && kindOf(/spans? not sent to .*\(queue full\)/) === "not-sent",
+      `the start's kinds from a real setup: where signals go, goes; a setting read as its default, note; a full queue's drop, not-sent (${kindsSaid.map(({ line, kind }) => `${kind}: ${line.slice(0, 60)}`).join(" / ")})`);
+  }
+
   // Each signal's losses said by itself (PR 2c): a collector that takes spans and refuses metrics and log records,
   // and a log batch whose queue holds one record — its drops counted as the batch drops them. The first record goes
   // as it comes (a batch of one), the second waits in the queue, the third finds it full.
@@ -4694,7 +4755,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
     { OTEL_EXPORTER_OTLP_ENDPOINT: "http://c:4318", OTEL_TRACES_EXPORTER: "AKIAIOSFODNN7EXAMPLE", OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf" },
   ].map((env) => planTelemetry(env));
   const said1849 = (text: string) => `telemetry: ${text} (SMD-1849)`;
-  assert(JSON.stringify(more.map((p) => [Object.keys(p.urls), p.lines, p.goes])) === JSON.stringify([
+  assert(JSON.stringify(more.map((p) => [Object.keys(p.urls), p.reasons.map((r) => r.line), p.goes])) === JSON.stringify([
     [["traces", "metrics", "logs"], [], [{ variable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", origin: "http://127.0.0.1:9", words: ["spans"] }, { variable: "OTEL_EXPORTER_OTLP_ENDPOINT", origin: "http://127.0.0.1:9", words: ["metrics", "log records"] }]],
     [[], [said1849("OTEL_EXPORTER_OTLP_ENDPOINT has a query string or a fragment, which the signal's path would follow: no spans, metrics or log records are sent")], []],
     [["traces", "metrics", "logs"], [], [{ variable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", origin: "http://c:4318", words: ["spans"] }, { variable: "OTEL_EXPORTER_OTLP_ENDPOINT", origin: "http://c:4318", words: ["metrics", "log records"] }]],
@@ -4709,7 +4770,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
       [{ variable: "OTEL_EXPORTER_OTLP_ENDPOINT", origin: "http://c:4318", words: ["spans", "metrics", "log records"] }]],
   ]) && more[0].urls.metrics === "http://127.0.0.1:9/v1/metrics" && more[4].urls.traces === "http://c:4318/otlp/v1/traces" && more[5].urls.traces === "http://c:4318/v1/traces"
     && more[6].urls.traces === "http://c:4318/v1/traces?tenant=x",
-    `a signal's own URL checked, a query string on the shared endpoint refused and on an own one kept, values trimmed, a list naming none off, one line per variable and origin, what is not read said (${JSON.stringify(more.map((p) => [p.urls, p.lines, p.goes]))})`);
+    `a signal's own URL checked, a query string on the shared endpoint refused and on an own one kept, values trimmed, a list naming none off, one line per variable and origin, what is not read said (${JSON.stringify(more.map((p) => [p.urls, p.reasons.map((r) => r.line), p.goes]))})`);
   // Each place the signals go is said, in a line of its own.
   const startLines: string[] = [];
   const startEnv = { traces: process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, generic: process.env.OTEL_EXPORTER_OTLP_ENDPOINT };
@@ -5234,34 +5295,61 @@ console.log("\n[26] A provider call, a store operation and a job's body under sp
   }
 }
 
-console.log("\n[27] preflight --deep's telemetry row, cell by cell, from what the start and the send said, the signals that go, the probes made and how the send went (SMD-1849 PR 2d review pass 2)");
+console.log("\n[27] preflight --deep's telemetry row, cell by cell, from what the start and the send said, the signals that go, the probes made and how the send went (SMD-1849 PR 2d review pass 2), judged by each line's kind (SMD-2909)");
   {
-    const { telemetryRow } = await import("./telemetry.ts");
-    const GOES = "telemetry: open-brain-preflight's spans and metrics go to http://c:4318 over OTLP/HTTP (OTEL_EXPORTER_OTLP_ENDPOINT, SMD-1849)";
-    const BOTH = { traces: "http://c:4318/v1/traces", metrics: "http://c:4318/v1/metrics" };
-    const base = { started: true, said: [GOES], urls: BOTH, probes: 2, sent: "sent" as const, boundMs: 5000 };
-    const cells = [
-      telemetryRow({ ...base, started: false, said: [], urls: {} }),
-      telemetryRow({ ...base, started: false, said: ["telemetry: OTEL_EXPORTER_OTLP_ENDPOINT is set, but OTEL_SDK_DISABLED=true: no spans, metrics or log records are sent (SMD-1849)"], urls: {} }),
-      telemetryRow({ ...base, started: false, said: ["telemetry: OTEL_EXPORTER_OTLP_ENDPOINT is not an http(s) URL: no spans, metrics or log records are sent (SMD-1849)"], urls: {} }),
-      telemetryRow({ ...base, urls: { logs: "http://c:4318/v1/logs" }, said: [GOES, "telemetry: OTEL_EXPORTER_OTLP_ENDPOINT is set, but OTEL_TRACES_EXPORTER=none: no spans are sent (SMD-1849)"] }),
-      telemetryRow({ ...base, probes: 0, sent: "none" }),
-      telemetryRow({ ...base, probes: 0, sent: "none", said: [GOES, "telemetry: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT is not an http(s) URL: no log records are sent (SMD-1849)"] }),
-      telemetryRow({ ...base, sent: "none" }),
-      telemetryRow({ ...base, said: [GOES, 'telemetry: OTEL_TRACES_EXPORTER "console" is not read (only otlp or none): spans go as OTLP/HTTP JSON (SMD-1849)'] }),
-      telemetryRow({ ...base, said: [GOES, "telemetry: OTEL_EXPORTER_OTLP_LOGS_ENDPOINT is not an http(s) URL: no log records are sent (SMD-1849)"] }),
-      telemetryRow({ ...base, sent: "failed", said: [GOES, "telemetry: 1 metric export not sent to http://c:4318 (HTTP 400)", "telemetry: 1 metric export not sent to http://c:4318 (HTTP 400)"] }),
-      telemetryRow({ ...base, sent: "timeout" }),
-      telemetryRow({ ...base, urls: { traces: BOTH.traces } }),
+    // Each cell from planTelemetry over an environment and the start's own lines (goesLines), each line with its kind:
+    // the row judges by the kinds alone (SMD-2909), so no cell's status rests on a sentence written here.
+    const { telemetryRow, planTelemetry, goesLines } = await import("./telemetry.ts");
+    type RowState = Parameters<typeof telemetryRow>[0];
+    const E = "http://c:4318";
+    const input = (env: Record<string, string>, more: Partial<RowState> = {}): RowState => {
+      const plan = planTelemetry(env);
+      const started = plan.goes.length > 0;
+      return { started, said: [...plan.reasons, ...(started ? goesLines("open-brain-preflight", plan) : [])], urls: started ? plan.urls : {}, probes: 2, sent: "sent", boundMs: 5000, ...more };
+    };
+    const shared = { OTEL_EXPORTER_OTLP_ENDPOINT: E };
+    // What a watched exporter says of a refused export, kind not-sent: the start passes it as such.
+    const refusedTwice = (env: Record<string, string>) => [...input(env).said, ...Array.from({ length: 2 }, () => ({ line: `telemetry: 1 metric export not sent to ${E} (HTTP 400) (SMD-1849)`, kind: "not-sent" as const }))];
+    const inputs: RowState[] = [
+      input({}),
+      input({ ...shared, OTEL_SDK_DISABLED: "true" }),
+      input({ OTEL_EXPORTER_OTLP_ENDPOINT: "ftp://c" }),
+      input({ ...shared, OTEL_TRACES_EXPORTER: "none", OTEL_METRICS_EXPORTER: "none" }),
+      input(shared, { probes: 0, sent: "none" }),
+      input({ ...shared, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "nope" }, { probes: 0, sent: "none" }),
+      input(shared, { sent: "none" }),
+      input({ ...shared, OTEL_TRACES_EXPORTER: "console" }),
+      input({ ...shared, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "nope" }),
+      input(shared, { sent: "failed", said: refusedTwice(shared) }),
+      input(shared, { sent: "timeout" }),
+      input({ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `${E}/v1/traces` }),
     ];
+    const cells = inputs.map((i) => telemetryRow(i));
     assert(JSON.stringify(cells.map((c) => [c.status, c.fix !== undefined])) === JSON.stringify([
       ["skip", false], ["skip", false], ["warn", true], ["skip", false], ["skip", false], ["warn", true], ["ok", false], ["ok", false], ["warn", true], ["warn", true], ["warn", true], ["ok", false],
     ]) && /^no collector named/.test(cells[0].detail) && /^the probes' spans and points go nowhere — .*OTEL_TRACES_EXPORTER=none/.test(cells[3].detail)
-      && /^no provider probe ran/.test(cells[4].detail) && /^the provider probes' spans and points sent — open-brain-preflight's spans and metrics go to http:\/\/c:4318 over OTLP\/HTTP \(OTEL_EXPORTER_OTLP_ENDPOINT\)$/.test(cells[6].detail)
+      && /^no provider probe ran/.test(cells[4].detail) && /^the provider probes' spans and points sent — open-brain-preflight's spans, metrics and log records go to http:\/\/c:4318 over OTLP\/HTTP \(OTEL_EXPORTER_OTLP_ENDPOINT\)$/.test(cells[6].detail)
       && /^the provider probes' spans and points sent — .*is not an http\(s\) URL/.test(cells[8].detail)
       && /^the provider probes' spans and points not all sent — /.test(cells[9].detail) && cells[9].detail.split("HTTP 400").length === 2
       && /^the provider probes' spans and points not all sent within 5 s — /.test(cells[10].detail) && /^the provider probes' spans sent — /.test(cells[11].detail),
       `the telemetry row: no collector, a skip; off on purpose, a skip; a wrong endpoint, a warning, sent or not and probed or not; nothing left after probes ran, sent; a loss once; the timeout's bound; spans alone (${JSON.stringify(cells.map((c) => [c.status, c.detail.slice(0, 60)]))})`);
+    // Where only a line's kind makes the warning: a loss beside a flush that sent, a setting held to its bound beside one
+    // that sent, and an SDK that would not start (the start passes each with its kind; the words here are not read).
+    const kindInputs = [
+      input(shared, { said: [...input(shared).said, { line: "telemetry: a loss (SMD-1849)", kind: "not-sent" }] }),
+      input(shared, { said: [...input(shared).said, { line: "telemetry: a setting held (SMD-1849)", kind: "note" }] }),
+      { ...input(shared), started: false, said: [{ line: "telemetry: not started (SMD-1849)", kind: "not-started" as const }] },
+      // A shared endpoint with a query string: every signal held back, which the server would share — a warning, not a skip.
+      input({ OTEL_EXPORTER_OTLP_ENDPOINT: `${E}/?tenant=x` }),
+    ];
+    const kindOnly = kindInputs.map((i) => telemetryRow(i));
+    assert(kindOnly.map((c) => c.status).join() === "warn,warn,warn,warn", `a loss, a held setting, a start that failed and a query string each warn by their kind alone (${kindOnly.map((c) => `${c.status}: ${c.detail.slice(0, 50)}`).join(" / ")})`);
+    // The status rests on the kinds alone: every line reworded, each cell's status is as it was (SMD-2909's Verify).
+    // Adversarially (SMD-2909 review pass 1): a line the row warns on worded as the old regex's fine and deliberate lines were, and a
+    // line it passes worded as a problem — so neither reading the words nor exempting by them survives.
+    const fineKinds = new Set(["goes", "unread", "off"]);
+    const reworded = [...inputs, ...kindInputs].map((i) => telemetryRow({ ...i, said: i.said.map((x, n) => ({ ...x, line: fineKinds.has(x.kind) ? `telemetry: line ${n} is broken (SMD-1849)` : `telemetry: line ${n} go to x, is not read, OTEL_SDK_DISABLED=true, OTEL_X_EXPORTER=none (SMD-1849)` })) }).status);
+    assert(reworded.join() === [...cells, ...kindOnly].map((c) => c.status).join(), `every line of every cell reworded (the kind-only cells too: SMD-2909 review pass 2), every status the same (${reworded.join()})`);
   }
 
 console.log("\n[28] spans.ts, embed.ts, store.ts and jobs.ts reach no package, nor does any db/ worker or eval through server-portable/'s files: none of them installs one (SMD-1849 PR 2d)");
@@ -5377,12 +5465,14 @@ console.log("\n[30] A request the server did not accept sends its span and log r
   const lines: string[] = [];
   const write = (r: Parameters<typeof requestLine>[0]) => lines.push(requestLine(r));
   const savedGeneric = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  // Each line's kind as the start passes it (SMD-2909): the budget's is a loss, which preflight's row warns on.
+  const budgetKinds = new Map<string, import("./telemetry.ts").SaidKind>();
   // A minute's start, so the minute's timer (about 60 s off) never fires while the section runs.
   let now = Math.floor(Date.now() / 60_000) * 60_000 + 60_000 * 1_000;
   const realClock = useBudgetClock(() => now);
   process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://collector.invalid:4318";
   try {
-    const started = await startTelemetry("probe", (l) => said.push(l), async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: spans, metrics: measured, logs: logged }) }));
+    const started = await startTelemetry("probe", (l, kind) => { said.push(l); budgetKinds.set(l, kind); }, async () => ({ setUpTelemetry: () => setUpTelemetry("open-brain-test", { exporter: spans, metrics: measured, logs: logged }) }));
     const ask = (agent?: string, refusedAtKey = false) => {
       const r = beginRequest("mcp", new Request("http://mcp/mcp", { method: "POST" }), write);
       Object.assign(r, { rpc: "tools/call", agent, refusedAtKey });
@@ -5408,6 +5498,7 @@ console.log("\n[30] A request the server did not accept sends its span and log r
       `past ${ANONYMOUS_PER_MINUTE} in a minute, a request the server did not accept — no key, a revoked one, a delivery its plugin refused — sends no span and no record; its point and line still count it; a key accepted, or a delivery its plugin accepted, is never held (${JSON.stringify([doors(true), doors(false), hookSpans(), logged.getFinishedLogRecords().length, pointsCount(), lines.length])})`);
     assert(unsaidBeforeFlush === 0 && counted().length === 1 && counted()[0] === "telemetry: 7 requests the server did not accept past 60 in a minute sent no span or log record, counted on the request-duration histogram and in the line alone (SMD-1849)",
       `the flush a server's stop runs says the count, once (${JSON.stringify([unsaidBeforeFlush, counted()])})`);
+    assert(budgetKinds.get(counted()[0]) === "not-sent", `…passed to the start's reader as not-sent (SMD-2909) (${budgetKinds.get(counted()[0])})`);
     // The next minute: a fresh budget, and nothing more said.
     now += 60_000;
     ask();
@@ -5485,8 +5576,8 @@ console.log("\n[30] A request the server did not accept sends its span and log r
     assert(quiet.getFinishedSpans().length === 0 && quietLogs.getFinishedLogRecords().length === ANONYMOUS_PER_MINUTE && counted().at(-1)?.startsWith("telemetry: 5 requests the server did not accept past 60") === true,
       `with every span sampled out, the log records are held to the budget, and the rest said (${JSON.stringify([quiet.getFinishedSpans().length, quietLogs.getFinishedLogRecords().length, counted().at(-1)?.slice(0, 40)])})`);
     // A monitor's keyed HEADs spend none of the budget, so a refusal after them is sent (SMD-2287 PR 4c review pass 1):
-    // index.ts names a valid key, accepted, and holds a wrong one to the budget; the MCP server, which asks the REST core
-    // nothing for a HEAD, so knows neither, sends no span or record for any (review pass 2: marking them accepted, or
+    // the MCP server, which asks the REST core nothing for a HEAD, so knows neither a valid key nor a wrong one, sends
+    // no span or record for any (review pass 2: marking them accepted, or
     // sending them past the budget, passed) — each its line and its point, where the keyless probe has no record at all.
     await stopTelemetry();
     const probed = new InMemorySpanExporter();
@@ -5513,8 +5604,8 @@ console.log("\n[30] A request the server did not accept sends its span and log r
     const headRecords = probedLogs.getFinishedLogRecords().filter((r) => isHead(r.body as Record<string, unknown>)).length;
     const headPoints = durationPoints(probedPoints).filter((pt) => pt.attributes["http.request.method"] === "HEAD").reduce((n, pt) => n + pt.value.count, 0);
     const refusedSpans = probed.getFinishedSpans().filter((sp) => sp.attributes["ob1.door"] === "mcp" && sp.attributes["ob1.outcome"] === "refused" && !isHead(sp.attributes as Record<string, unknown>));
-    // index.ts: the valid key's HEADs sent, accepted, and the wrong keys' within the budget; the MCP server: none.
-    const sentHeads = mcpTarget() === "client" ? 0 : VALID + WRONG;
+    // The MCP server sends none of the HEADs.
+    const sentHeads = 0;
     assert(probeRecords.filter((r) => r.method === "HEAD").length === VALID + WRONG && headPoints === VALID + WRONG && headSpans === sentHeads && headRecords === sentHeads
       && refusedSpans.length === 1 && !counted().at(-1)?.startsWith("telemetry: 1 request"),
       `${VALID} keyed HEADs and ${WRONG} with a wrong key, each its line and its point, ${sentHeads} sending a span and a record: none of the budget spent past them, so the keyless refusal after sends its span (${JSON.stringify([probeRecords.length, headPoints, headSpans, headRecords, refusedSpans.length, counted().at(-1)?.slice(0, 40)])})`);
