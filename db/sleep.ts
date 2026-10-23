@@ -1350,7 +1350,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         why = stopping || live === null ? "stopping" : woken !== null ? "woke" : BUDGET_MS > 0 && Date.now() - began >= BUDGET_MS ? "spent" : null;
         if (why === null) continue;
         halt.abort();
-        const grace = () => sleepUnless(SWEEP_GRACE_MS, new AbortController().signal).then(() => null);
+        const grace = () => Bun.sleep(SWEEP_GRACE_MS).then(() => null);
         ended = await Promise.race([run, grace()]);
         if (ended === null) {
           // A call waiting on a lock outlives a closed socket on the server,

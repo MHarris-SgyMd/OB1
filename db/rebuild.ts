@@ -36,7 +36,9 @@
  * stands (preflight's `lineage` WARN names this flag) and calls
  * rebuild_derived once per thought in its orphans-only mode, which deletes
  * each such row and touches no row whose artifact stands — a stale row on
- * the same thought keeps its own reason for its own rebuild.
+ * the same thought keeps its own reason for its own rebuild. It and --status
+ * read the first 10,001 lineage rows by id; the sleep scheduler's sweep walks
+ * the windows past them (db/sleep.ts).
  *
  * --dry-run runs the call inside a transaction and rolls it back: the report
  * is the function's own, and nothing is kept — the honest preview, since the
@@ -183,7 +185,8 @@ async function callRebuild(sql: SQL, dry: boolean, id: string, reason: string, g
  * `windowed` when the lineage table holds more rows than the read window
  * (LINEAGE_WINDOW), so orphans past it went unread — none found is then not
  * a clean table; `stopped` when the caller's signal ended it before every
- * thought read was called, or a replay's refusal did (stopOnReplay); `last`,
+ * thought read was called — a call it cut, rolled back, counted in none of
+ * the others — or a replay's refusal did (stopOnReplay); `last`,
  * the window's last lineage row by id, where a next sweep's `after` picks up;
  * `failed`, the calls skipFailure passed over; `whole`, when every orphan the
  * window holds was called — nothing stopped it, and the limit did not cut it
@@ -424,7 +427,7 @@ async function rebuildWith(sql: SQL, o: { INPUT: string | undefined; STATUS: boo
       // read one way while the worker's read another); keyless here, so a
       // failed or live claim is named with its judge key.
       const standings = staleStandings((await sql.unsafe(STALE_STANDING_ROWS_SQL)) as StaleStandingRow[], null);
-      const bound = Number(c.rows) >= LINEAGE_WINDOW ? " (the first 10,001 lineage rows read; the rest not)" : "";
+      const bound = Number(c.rows) >= LINEAGE_WINDOW ? " (the first 10,001 lineage rows by id read; the rest not)" : "";
       out(`  lineage:     ${c.rows} row(s)${bound}: ${Object.entries(c.by_kind ?? {}).map(([k, n]) => `${n} ${k}`).join(", ") || "none"}`);
       out(`  stale:       ${c.stale} row(s) whose input's text moved since (the census's read) — bun db/rebuild.ts --input <id> acts on a thought's`);
       out(`  marked:      ${c.marked} row(s) await a re-run rebuild_derived asked for`);
