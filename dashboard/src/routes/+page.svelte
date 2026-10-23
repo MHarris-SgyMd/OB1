@@ -32,14 +32,16 @@
 
 	<div class="grid gap-4 md:grid-cols-3">
 		{#each breakdowns as b (b.label)}
-			<div class="bg-bg-card border border-white/10 rounded-xl p-5">
+			<!-- min-w-0: a grid item is as wide as its content otherwise, and a long name inside took the page with it. -->
+			<div class="bg-bg-card border border-white/10 rounded-xl p-5 min-w-0">
 				<h2 class="text-sm text-text-muted mb-3">{b.label}</h2>
 				{#if b.counts.length === 0}
 					<p class="text-sm text-text-muted">None recorded.</p>
 				{:else}
 					<ul class="space-y-1 text-sm">
 						{#each b.counts as [name, n] (name)}
-							<li class="flex justify-between gap-4"><span class="truncate">{name}</span><span class="text-text-muted">{n}</span></li>
+							<!-- min-w-0, so the name truncates in its row: a 22,000 px person's name scrolled the overview sideways (PR 2b review pass 1). -->
+							<li class="flex justify-between gap-4"><span class="truncate min-w-0">{name}</span><span class="text-text-muted shrink-0">{n}</span></li>
 						{/each}
 					</ul>
 				{/if}

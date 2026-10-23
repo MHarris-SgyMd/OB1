@@ -32,8 +32,13 @@
  *     time, flag, type and trust alone;
  *   - search (PR 2a) finds the driven thought by meaning and by exact text,
  *     pages the exact-text matches, and sends each hit's fields alone;
- *   - the read key signs in as a read key, browses and searches, and a thought
- *     the brain does not hold is a 404.
+ *   - the change feed (PR 2b) lists the driven thought's capture, walks every
+ *     change a page of one at a time from a start, each once, and refuses a
+ *     start it cannot read in words; the workers, proposals and query-log
+ *     pages render, the query log holding the smoke's own search where
+ *     query_log is on; each list's data its shown fields alone;
+ *   - the read key signs in as a read key, browses, searches and reads the four
+ *     operator views, and a thought the brain does not hold is a 404.
  *
  * Exit 0 when every assertion holds, 1 otherwise. Read-only against the
  * brain, but for the click-through each thought page's `fetch` logs.
@@ -54,8 +59,10 @@ const REQUIRE_THOUGHT = args.includes("--require-thought");
 const REQUIRE_INGESTED = args.includes("--require-ingested");
 /** Fail, not skip, when the brain holds fewer than three thoughts: CI captures three, so browse walks three pages and search pages past its first. */
 const REQUIRE_PAGES = args.includes("--require-pages");
+/** Fail unless the proposals and workers pages render rows, not their empty words: CI plants one proposal and one pool. */
+const REQUIRE_ROWS = args.includes("--require-rows");
 if (!BASE || !WRITE_KEY) {
-  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought] [--require-ingested] [--require-pages]");
+  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought] [--require-ingested] [--require-pages] [--require-rows]");
   process.exit(2);
 }
 const ORIGIN = new URL(BASE).origin;
@@ -131,7 +138,7 @@ function listKeys(json: string, field: string): string {
 }
 const toSignin = (r: { status: number; location: string }) => r.status === 303 && r.location === "/dashboard/signin";
 /** Every page the GUI renders, by its path under the base. */
-const PAGES = ["/", "/status", "/thoughts", "/search", "/thoughts/00000000-0000-0000-0000-000000000000"];
+const PAGES = ["/", "/status", "/thoughts", "/search", "/changes", "/proposals", "/workers", "/query-log", "/thoughts/00000000-0000-0000-0000-000000000000"];
 
 /** The thought ids a list page links to, in its order, within the element marked `testid`. */
 const listedIds = (html: string, testid: string) => {
@@ -360,6 +367,55 @@ let searchWord = "";
     assert(Boolean(a && b && a !== b && prev && listedIds(prev.html, "hits")[0] === a), `search by exact text pages a match at a time: Next is another, Previous the first again (${Boolean(next)})`);
   }
 
+  // The change feed (PR 2b): the driven thought's capture among the most recent, then every change from a start a page
+  // of one at a time by the page's own Next, each once; a start the core cannot read is a 400 in words.
+  const changes = await get("/changes");
+  const changeIds = (html: string) => [...html.matchAll(/data-change="([0-9a-f-]{36})"/g)].map((m) => m[1]);
+  assert(changes.status === 200 && (!thoughtId || listedIds(changes.html, "changes").includes(thoughtId)) && /captured by/.test(changes.html), `the change feed lists the most recent changes, the driven thought's capture among them (${changes.status}, ${changeIds(changes.html).length})`);
+  if (REQUIRE_PAGES || count > 1) {
+    const walked: string[] = [];
+    let path = "/changes?since=2000-01-01&limit=1";
+    let pages = 0;
+    let lastStatus = 200;
+    while (path && pages < 60) {
+      const r = await get(path);
+      lastStatus = r.status;
+      if (r.status !== 200) break;
+      walked.push(...changeIds(r.html));
+      pages++;
+      path = linkOf(r.html, "next");
+    }
+    const recent = changeIds(changes.html);
+    // Ended at its last page — no Next — and not at a page that failed (review pass 1: a big brain's walk hid one).
+    assert(pages >= 2 && lastStatus === 200 && path === "" && new Set(walked).size === walked.length && (recent.length >= 50 || walked.join() === recent.join()), `…from a start, a change at a time by Next: ${pages} pages, each change once${recent.length < 50 ? ", the same changes as the most recent" : ""} (${walked.length})`);
+  }
+  const badSince = await get("/changes?since=not-a-time");
+  assert(badSince.status === 400 && badSince.html.includes("not a time the brain reads") && badSince.html.includes('data-testid="restart"'), `a start the change feed cannot read is a 400 in words, the newest changes a link away (${badSince.status})`);
+  // Next carries the page's cursor as `after`, never in `since`, which the form shows: a new filter starts again (review pass 1).
+  const firstNext = linkOf((await get("/changes?since=2000-01-01&limit=1")).html, "next");
+  // …and keeps the typed start beside it, so the form still shows it and a new filter after Next starts from it (review pass 2).
+  assert(/[?&]after=[0-9a-f-]{36}/.test(firstNext) && !/[?&]since=[0-9a-f]{8}-/.test(firstNext) && /[?&]since=2000-01-01(&|$)/.test(firstNext), `…Next carries the cursor as after, not in since, and keeps the typed start (${firstNext.replace(/[0-9a-f-]{36}/, "<cursor>")})`);
+  // A filter that matches nothing says so, and does not read as an empty brain (review pass 1).
+  const none = await get("/changes?agent=no-key-has-this-name-pr2b");
+  assert(none.status === 200 && none.html.includes("No change matches these filters"), `a change-feed filter matching nothing says so (${none.status})`);
+  // A query-log start the core once took and Postgres did not is now the core's refusal, in words: not a 500 (review pass 1).
+  const looseSince = await get("/query-log?since=1");
+  assert(looseSince.status === 400 && looseSince.html.includes("not a time the brain reads"), `a query-log start of "1" is a 400 in words, not the store's 500 (${looseSince.status})`);
+  const deletes = await get("/changes?action=delete");
+  assert(deletes.status === 200 && !/captured by/.test(deletes.html), `…and the kinds filter keeps its kind: deletions alone list no capture (${deletes.status})`);
+
+  // The worker queue, the proposals and the query log (PR 2b): each renders from the core, its rows or its empty words.
+  const workers = await get("/workers");
+  const pools = workers.html.includes('data-testid="pools"');
+  assert(workers.status === 200 && (pools || (!REQUIRE_ROWS && workers.html.includes('data-testid="empty"'))), `the worker queue renders its pools${REQUIRE_ROWS ? " (--require-rows: CI queued one)" : " or says none is queued"} (${workers.status}, ${pools ? "rows" : "empty"})`);
+  const proposals = await get("/proposals?status=all&limit=5");
+  const proposed = proposals.html.includes('data-testid="proposals"');
+  assert(proposals.status === 200 && (proposed || (!REQUIRE_ROWS && proposals.html.includes('data-testid="empty"'))), `the proposals render${REQUIRE_ROWS ? " (--require-rows: CI recorded one)" : ", or say there are none"} (${proposals.status}, ${proposed ? "rows" : "empty"})`);
+  assert(/data-testid="proposals"[^>]*data-sveltekit-preload-data="off"/.test(proposals.html) || proposals.html.includes('data-testid="empty"'), "…their thought links not preloaded on hover");
+  const queryLog = await get("/query-log");
+  const logged = searchWord !== "" && queryLog.html.includes(`“${searchWord}”`);
+  assert(queryLog.status === 200 && (!REQUIRE_PAGES || logged), `the query log renders${REQUIRE_PAGES ? ", the smoke's own exact-text search in it (CI's stack logs searches)" : ""} (${queryLog.status}${logged ? ", logged" : ""})`);
+
   // A wrong key posted from a tab still signed in is refused in words, and the session it came from stands (review pass 2).
   const held = cookie;
   const stray = await signIn("not-a-key");
@@ -371,7 +427,8 @@ let searchWord = "";
   // entries SvelteKit imports inline, and every module they import in turn —
   // and none of the data a client-side navigation fetches (__data.json).
   const pages = [home, status, await get("/__data.json"), await get("/status/__data.json"), await get("/thoughts/__data.json"), browse,
-    await get(searchWord ? `/search/__data.json?q=${encodeURIComponent(searchWord)}&mode=text` : "/search/__data.json"), search];
+    await get(searchWord ? `/search/__data.json?q=${encodeURIComponent(searchWord)}&mode=text` : "/search/__data.json"), search,
+    await get("/changes/__data.json"), changes, workers, proposals, queryLog];
   const queue = pages.flatMap((p) => [...p.html.matchAll(/["'](\/dashboard\/_app\/[^"']+\.js)["']/g)].map((m) => m[1]));
   const scripts = new Set<string>();
   let leaked = pages.some((p) => p.html.includes(WRITE_KEY) || [...p.headers.values()].some((v) => v.includes(WRITE_KEY)));
@@ -384,13 +441,15 @@ let searchWord = "";
     // A chunk names the others it imports relative to itself: "./x.js", "../chunks/y.js".
     for (const m of text.matchAll(/["'](\.{1,2}\/[^"']+\.js)["']/g)) queue.push(new URL(m[1], `${ORIGIN}${s}`).pathname);
   }
-  assert([2, 3, 4, 6].every((i) => pages[i].status === 200), `the pages' navigation data answers for the session (${[2, 3, 4, 6].map((i) => pages[i].status).join(", ")})`);
+  assert([2, 3, 4, 6, 8].every((i) => pages[i].status === 200), `the pages' navigation data answers for the session (${[2, 3, 4, 6, 8].map((i) => pages[i].status).join(", ")})`);
   // The overview sends each thought's first line, not its content: ten large thoughts made it 18.8 MB (review pass 4).
   // Held by the data's structure — each listed thought's keys — not by a word, which a thought's own text can hold
   // (review pass 6: a first line reading `content:` failed a search for the word).
   assert(listKeys(pages[2].html, "recent") === "created_at,id,line,superseded", `the overview's data lists each thought as its id, first line, time and flag alone (${listKeys(pages[2].html, "recent")})`);
   // Browse's and search's the same way (PR 2a): the fields each list shows, never a thought's content.
   assert(listKeys(pages[4].html, "thoughts") === "created_at,id,line,superseded,trust,type", `browse's data lists each thought as its id, first line, time, flag, type and trust alone (${listKeys(pages[4].html, "thoughts")})`);
+  // The change feed's the same way (PR 2b): the core's fields for each change, its text one line.
+  assert(listKeys(pages[8].html, "changes") === "action,at,changed,derivation,id,metadataKeys,metadataMore,present,supersedesAfter,supersedesBefore,text,thoughtId,who", `the change feed's data lists each change by its shown fields alone (${listKeys(pages[8].html, "changes")})`);
   assert(searchWord === "" || listKeys(pages[6].html, "hits") === "created_at,exact,id,line,moved,occurrences,score,superseded,trust", `search's data lists each hit by its fields alone (${searchWord === "" ? "no word to search" : listKeys(pages[6].html, "hits")})`);
   assert(!leaked && scripts.size > 2, `no page, header, navigation data or script (${scripts.size} modules) holds the key`);
 
@@ -444,6 +503,8 @@ if (READ_KEY) {
   assert(home.status === 200 && home.html.includes("read key"), `the overview renders for the read key and names its scope (${home.status})`);
   const [browse, search] = [await get("/thoughts"), await get(`/search?q=${encodeURIComponent(searchWord || "e")}&mode=text`)];
   assert(browse.status === 200 && search.status === 200, `…browses and searches by exact text (${browse.status}, ${search.status})`);
+  const views = await Promise.all(["/changes", "/workers", "/proposals", "/query-log"].map(async (v) => (await get(v)).status));
+  assert(views.every((st) => st === 200), `…and reads the change feed, the workers, the proposals and the query log (${views.join(", ")})`);
   const missing = await get("/thoughts/00000000-0000-0000-0000-000000000000");
   assert(missing.status === 404, `a thought the brain does not hold is a 404 (${missing.status})`);
   const out = await signOut();

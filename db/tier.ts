@@ -96,7 +96,15 @@ import { alignVectorSearchPath, DB_LEVEL_SETTINGS_SQL, parseSetConfig, quoteIden
 import { stampTier, TIERS, type Tier } from "./ingest-records.ts";
 import { runCompare, runTierReplay, type CompareArgs } from "./brain-compare.ts";
 import { commandLine, scriptArgv } from "./cli.ts";
+import { parseSince } from "../server-portable/core/since.ts";
 import { connectedResetRefusal, identityRefusal, openSql, reachedDatabaseRefusal, resetRefusal, toolTarget, type ToolTarget } from "./connect.ts";
+
+/** A --since the brain's list_logged_searches reads (parseSince's time arm, SMD-2280 PR 2b): a date, or a time with its zone. */
+const sinceReadable = (since: string) => {
+  const t = parseSince(since);
+  return !("refused" in t) && t.after === null && t.since !== null;
+};
+const SINCE_REFUSED = "--since must be an ISO-8601 time with its zone (e.g. 2026-09-24T00:00:00Z) or a date (2026-09-24); a clock with no Z or offset is refused, as the brain's query log refuses it.";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -883,7 +891,7 @@ export function parseCompareArgs(args: string[]): CompareArgs {
   out.fromLog = cli.value("from-log");
   const since = cli.value("since");
   if (since !== undefined) {
-    if (Number.isNaN(Date.parse(since))) refuse("--since must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z).");
+    if (!sinceReadable(since)) refuse(SINCE_REFUSED);
     out.since = since;
   }
   if (out.hybrid && !out.replay) refuse("--hybrid only applies with --replay.");
@@ -951,8 +959,8 @@ async function main(): Promise<void> {
       }
     }
     const since = cli.value("since");
-    if (since !== undefined && Number.isNaN(Date.parse(since))) {
-      console.error("--since must be an ISO-8601 time (e.g. 2026-09-24T00:00:00Z).");
+    if (since !== undefined && !sinceReadable(since)) {
+      console.error(SINCE_REFUSED);
       process.exit(2);
     }
     process.exit(await runTierReplay({ from, to, fromKey: cli.value("from-key"), toKey: cli.value("to-key"), since, gate: verb === "diff", json: cli.has("json") }));
