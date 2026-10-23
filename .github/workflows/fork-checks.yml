@@ -1827,16 +1827,21 @@ jobs:
 
       # SMD-2280: the operator GUI as a browser uses it, through the stack's
       # proxy at /dashboard, on the stack configured for no authorization
-      # server (dashboard/smoke.ts). First one capture of its own over /mcp,
-      # ingested, since smoke.sh captures nothing: --require-thought fails
-      # the step rather than skip the thought page, and --require-ingested
-      # unless that page's ingested notice is driven. The smoke holds the
+      # server (dashboard/smoke.ts). First two captures of its own over /mcp,
+      # since smoke.sh captures nothing: one with no trust recorded (the smoke
+      # key is unclassified), then an ingested one, the newest, which the
+      # thought page drives. --require-thought fails
+      # the step rather than skip the thought page, --require-ingested unless
+      # that page's ingested notice is driven, and --require-pages unless
+      # browse and search are walked past their first page and the trust
+      # filter leaves the second capture out (PR 2a). The smoke holds the
       # sign-in wall; a wrong and a capture-only key, a cookie the server never
       # issued and a cross-site or Origin-null sign-in refused; the cookie's
-      # and the pages' headers; the overview, the status and a thought rendered
-      # from the REST core under the write key, the overview and a 404 under
-      # the read key; the overview's data holding each thought's first line
-      # alone; the key in no page, header, script or cookie; and sign-out, a
+      # and the pages' headers; the overview, the status, browse, search and a
+      # thought rendered from the REST core under the write key, the overview,
+      # browse, search and a 404 under the read key; each list's data holding
+      # the fields it shows alone; the key in no page, header, script or
+      # cookie; and sign-out, a
       # second sign-in and the per-key cap each ending a session on the
       # server. Here, not after the next step: that one configures the
       # authorization server, and the GUI then offers no key sign-in (review
@@ -1845,10 +1850,14 @@ jobs:
         working-directory: dashboard
         run: |
           curl -fsS --max-time 60 -X POST http://127.0.0.1:8010/mcp -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+            -H "x-brain-key: $OB1_SMOKE_KEY" -o /tmp/gui-capture-untrusted \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"capture_thought","arguments":{"content":"A second thought for the operator GUI smoke, so browse and search page past their first (SMD-2280)."}}}'
+          grep -q 'Captured as' /tmp/gui-capture-untrusted || { echo "the GUI smoke's untrusted capture failed: $(head -c 400 /tmp/gui-capture-untrusted)" >&2; exit 1; }
+          curl -fsS --max-time 60 -X POST http://127.0.0.1:8010/mcp -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
             -H "x-brain-key: $OB1_SMOKE_KEY" -o /tmp/gui-capture \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"capture_thought","arguments":{"content":"The operator GUI smoke reads this thought on its own page, its ingested notice before it (SMD-2280).","trust":"ingested"}}}'
           grep -q 'Captured as' /tmp/gui-capture || { echo "the GUI smoke's capture failed: $(head -c 400 /tmp/gui-capture)" >&2; exit 1; }
-          bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY" --require-thought --require-ingested
+          bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY" --require-thought --require-ingested --require-pages
 
       # Where the authorization server's step ran when the full-stack checks
       # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):

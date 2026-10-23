@@ -31,3 +31,11 @@ h1, h2, h3 {
 	font-weight: 600;
 	line-height: 1.2;
 }
+
+/* A form field, as the sign-in page's key field is (SMD-2280 PR 2a: the
+   browse and search forms). */
+@layer components {
+	.field {
+		@apply bg-bg-elevated border border-white/40 rounded-lg px-3 py-2 text-text focus:outline-none focus:border-primary;
+	}
+}

@@ -22,8 +22,15 @@
  *   - sign-out ends the session on the server, and so does a second sign-in
  *     over it; one key's 21st sign-in ends its own oldest session, not
  *     another key's;
- *   - the read key signs in as a read key, and a thought the brain does not
- *     hold is a 404.
+ *   - browse (PR 2a) walks every thought a page of one at a time, newest and
+ *     oldest first, each once, the one order the other's reverse; Previous
+ *     and First page go back; a filter keeps its rows; a cursor the core
+ *     refuses is a 400 in words; its data is each thought's id, first line,
+ *     time, flag, type and trust alone;
+ *   - search (PR 2a) finds the driven thought by meaning and by exact text,
+ *     pages the exact-text matches, and sends each hit's fields alone;
+ *   - the read key signs in as a read key, browses and searches, and a thought
+ *     the brain does not hold is a 404.
  *
  * Exit 0 when every assertion holds, 1 otherwise. Read-only against the
  * brain, but for the click-through each thought page's `fetch` logs.
@@ -39,8 +46,10 @@ const CAPTURE_KEY = flag("capture-key");
 const REQUIRE_THOUGHT = args.includes("--require-thought");
 /** Fail unless the thought driven is an ingested one: CI's capture is, so the notice arm cannot pass on a thought without one. */
 const REQUIRE_INGESTED = args.includes("--require-ingested");
+/** Fail, not skip, when the brain holds fewer than two thoughts: CI captures two, so browse and search are driven past their first page. */
+const REQUIRE_PAGES = args.includes("--require-pages");
 if (!BASE || !WRITE_KEY) {
-  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought] [--require-ingested]");
+  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought] [--require-ingested] [--require-pages]");
   process.exit(2);
 }
 const ORIGIN = new URL(BASE).origin;
@@ -93,29 +102,55 @@ const signOut = async () => {
   return r;
 };
 /**
- * The keys of the overview's `recent` items in its __data.json, sorted and joined, the same for every item, or what
- * differs. SvelteKit's data is devalue's flat array: the node's root object maps each key to an index, so object keys
- * are the payload's structure and a thought's text is only ever a string element.
+ * The keys of a page's listed items — the root field `field` of its __data.json, an array of objects — sorted and
+ * joined, the same for every item, or what differs. SvelteKit's data is devalue's flat array: the node's root object
+ * maps each key to an index, so object keys are the payload's structure and a thought's text is only ever a string
+ * element.
  */
-function recentKeys(json: string): string {
+function listKeys(json: string, field: string): string {
   try {
     const doc = JSON.parse(json) as { nodes?: ({ data?: unknown[] } | null)[] };
     for (const node of doc.nodes ?? []) {
       const data = node?.data;
       const root = data?.[0] as Record<string, number> | undefined;
-      if (!data || !root || typeof root !== "object" || !("recent" in root)) continue;
-      const items = (data[root.recent] as number[]).map((i) => Object.keys(data[i] as object).sort().join(","));
+      if (!data || !root || typeof root !== "object" || !(field in root)) continue;
+      const items = (data[root[field]] as number[]).map((i) => Object.keys(data[i] as object).sort().join(","));
       const kinds = [...new Set(items)];
       return items.length === 0 ? "no items listed" : kinds.length === 1 ? kinds[0] : `items differ: ${kinds.join(" | ")}`;
     }
-    return "no recent in the data";
+    return `no ${field} in the data`;
   } catch (err) {
     return `unreadable: ${err instanceof Error ? err.message : String(err)}`;
   }
 }
 const toSignin = (r: { status: number; location: string }) => r.status === 303 && r.location === "/dashboard/signin";
 /** Every page the GUI renders, by its path under the base. */
-const PAGES = ["/", "/status", "/thoughts/00000000-0000-0000-0000-000000000000"];
+const PAGES = ["/", "/status", "/thoughts", "/search", "/thoughts/00000000-0000-0000-0000-000000000000"];
+
+/** The thought ids a list page links to, in its order, within the element marked `testid`. */
+const listedIds = (html: string, testid: string) => {
+  const at = html.indexOf(`data-testid="${testid}"`);
+  if (at < 0) return [];
+  const end = html.indexOf("</ul>", at);
+  return [...html.slice(at, end < 0 ? undefined : end).matchAll(/href="\/dashboard\/thoughts\/([0-9a-f-]{36})"/g)].map((m) => m[1]);
+};
+/** A link's address under the base, by its testid, as the page wrote it (attributes unescaped); "" when there is none. */
+const linkOf = (html: string, testid: string) => {
+  const m = new RegExp(`<a href="([^"]+)"[^>]*data-testid="${testid}"`).exec(html);
+  return m ? m[1].replaceAll("&amp;", "&").replace(/^\/dashboard/, "") : "";
+};
+/** Every page of a browse from `start`, by its Next links: each page's ids, and its address. At most 60 pages. */
+async function walkBrowse(start: string) {
+  const pages: { path: string; ids: string[]; html: string }[] = [];
+  let path = start;
+  while (path && pages.length < 60) {
+    const r = await get(path);
+    if (r.status !== 200) break;
+    pages.push({ path, ids: listedIds(r.html, "browse"), html: r.html });
+    path = linkOf(r.html, "next");
+  }
+  return pages;
+}
 
 console.log(`▸ dashboard ${BASE}`);
 
@@ -166,6 +201,9 @@ console.log(`▸ dashboard ${BASE}`);
 
 // The write key.
 let thoughtId = "";
+let thoughtText = "";
+let thoughtPage = "";
+let searchWord = "";
 {
   const r = await signIn(WRITE_KEY);
   assert(r.status === 303 && r.location === "/dashboard/", `the write key signs in: 303 to /dashboard/ (${r.status} → ${r.location})`);
@@ -189,7 +227,11 @@ let thoughtId = "";
 
   if (thoughtId) {
     const t = await get(`/thoughts/${thoughtId}`);
+    thoughtPage = t.html;
     assert(t.status === 200 && t.html.includes('data-testid="text"') && t.html.includes(thoughtId), `a thought's page renders its text and id (${t.status})`);
+    // Its text, for search to find it by (PR 2a): the page's, unescaped, and its longest word for the exact-text search.
+    thoughtText = (/data-testid="text">([^<]*)</.exec(t.html)?.[1] ?? "").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&quot;", '"').replaceAll("&#39;", "'").replaceAll("&amp;", "&").trim();
+    searchWord = thoughtText.split(/[^A-Za-z0-9]+/).sort((x, y) => y.length - x.length)[0] ?? "";
     // Rendered on the server alone, so its text rides once (review pass 4: twice, with the hydration data).
     assert(!t.html.includes("<script"), "…with no script, so its text is in the page once");
     // The ingested notice exactly where the thought's trust is ingested, before its text (SMD-1724; CI's capture is one).
@@ -203,6 +245,64 @@ let thoughtId = "";
     console.log("  ·  the brain holds no thought: the thought page's arm skipped");
   }
 
+  // Browse (PR 2a): every thought a page of one at a time, by the pages' own Next links, in each order.
+  const count = Number((total ?? "0").replace(/[^\d]/g, ""));
+  if (REQUIRE_PAGES && count < 2) bad(`the brain holds ${count} thought(s), and --require-pages asks for two: browse and search went undriven past their first page`);
+  const browse = await get("/thoughts");
+  assert(browse.status === 200 && browse.html.includes('data-testid="filters"') && (count === 0 || listedIds(browse.html, "browse").length > 0), `browse renders its filters and lists thoughts from the REST core (${browse.status})`);
+  assert(count === 0 || /data-testid="browse"[^>]*data-sveltekit-preload-data="off"/.test(browse.html), "…its thought links not preloaded on hover");
+  if (count > 0 && count <= 50) {
+    const newest = await walkBrowse("/thoughts?limit=1");
+    const oldest = await walkBrowse("/thoughts?limit=1&sort=oldest");
+    const ids = newest.flatMap((p) => p.ids);
+    const back = oldest.flatMap((p) => p.ids);
+    assert(newest.every((p) => p.ids.length === 1) && ids.length === count && new Set(ids).size === count, `browse newest first, a page of one: ${newest.length} pages, each thought once, the overview's ${count} in all (${ids.length} listed, ${new Set(ids).size} distinct)`);
+    assert(back.join() === [...ids].reverse().join(), `…and oldest first, the same thoughts in reverse (${back.length})`);
+    if (newest.length >= 2) {
+      // Previous from the second page is the first, which First page would repeat, so it is not offered there.
+      const second = newest[1].html;
+      const prev = await get(linkOf(second, "previous"));
+      assert(listedIds(prev.html, "browse")[0] === ids[0] && linkOf(second, "first") === "", `…Previous from the second page is the first page (${listedIds(prev.html, "browse")[0] === ids[0]}), with no separate First page link`);
+    }
+    if (newest.length >= 3) {
+      const third = newest[2].html;
+      const [prev, first] = [await get(linkOf(third, "previous")), await get(linkOf(third, "first"))];
+      assert(listedIds(prev.html, "browse")[0] === ids[1] && listedIds(first.html, "browse")[0] === ids[0], "…from the third, Previous is the second page and First page the first");
+    }
+    // A filter keeps its rows: trust at least ingested lists the thoughts that carry a trust word, each showing it, and
+    // leaves out those with none (a capture through an unclassified key records none: CI's second, the operator's).
+    const trusted = await get("/thoughts?min_trust=ingested&limit=100");
+    const metas = [...trusted.html.matchAll(/<div class="text-xs text-text-muted[^"]*">([^<]*)<\/div>/g)].map((m) => m[1].trim());
+    const drivenTrusted = /<dt[^>]*>trust<\/dt>\s*<dd[^>]*>(?:operator|agent|ingested)</.test(thoughtPage);
+    assert(trusted.status === 200 && metas.every((m) => / · (?:operator|agent|ingested)(?: ·|$)/.test(m)) && listedIds(trusted.html, "browse").includes(thoughtId) === drivenTrusted && (REQUIRE_PAGES ? metas.length < count : true),
+      `browse at trust ingested and above lists ${metas.length} of ${count}, each with its trust, the driven thought ${drivenTrusted ? "among them" : "(no trust) left out"}`);
+  } else if (count > 50) {
+    console.log(`  ·  the brain holds ${count} thoughts: browse's walk of every page skipped`);
+  }
+  // A cursor the core refuses is a 400 in the GUI's words, with the way back to the first page — never a fault.
+  const refused = await get("/thoughts?after=AAAAAAAAAAAA");
+  assert(refused.status === 400 && refused.html.includes("not one the brain reads") && refused.html.includes('data-testid="restart"'), `a browse cursor the core refuses is a 400 in words, offering the first page (${refused.status})`);
+
+  // Search (PR 2a): the driven thought found by a word of its own, by exact text and by meaning.
+  const search = await get("/search");
+  assert(search.status === 200 && search.html.includes('data-testid="search-form"') && !search.html.includes('data-testid="hits"'), `search renders its form, and with no query reads nothing (${search.status})`);
+  if (thoughtText) {
+    const text = await get(`/search?q=${encodeURIComponent(searchWord)}&mode=text`);
+    assert(text.status === 200 && listedIds(text.html, "hits").includes(thoughtId) && /data-testid="total">\d/.test(text.html), `search by exact text for "${searchWord}" finds the driven thought, and says how many hold it (${text.status})`);
+    const meaning = await get(`/search?q=${encodeURIComponent(thoughtText.slice(0, 200))}`);
+    assert(meaning.status === 200 && listedIds(meaning.html, "hits").includes(thoughtId), `search by meaning for the thought's own words finds it (${meaning.status}${meaning.html.includes('data-testid="vectorless"') ? ", without a vector" : ""})`);
+    assert(/data-testid="hits"[^>]*data-sveltekit-preload-data="off"/.test(text.html), "…its hit links not preloaded on hover");
+  }
+  if (count >= 2) {
+    // A letter nearly every thought holds, a match a page: Next moves on, Previous comes back.
+    const one = await get("/search?q=e&mode=text&limit=1");
+    const next = linkOf(one.html, "next");
+    const two = next ? await get(next) : undefined;
+    const prev = two ? await get(linkOf(two.html, "previous")) : undefined;
+    const [a, b] = [listedIds(one.html, "hits")[0], two ? listedIds(two.html, "hits")[0] : undefined];
+    assert(Boolean(a && b && a !== b && prev && listedIds(prev.html, "hits")[0] === a), `search by exact text pages a match at a time: Next is another, Previous the first again (${Boolean(next)})`);
+  }
+
   // A wrong key posted from a tab still signed in is refused in words, and the session it came from stands (review pass 2).
   const held = cookie;
   const stray = await signIn("not-a-key");
@@ -213,7 +313,8 @@ let thoughtId = "";
   // The key reaches no page, no header, no script the pages load — the
   // entries SvelteKit imports inline, and every module they import in turn —
   // and none of the data a client-side navigation fetches (__data.json).
-  const pages = [home, status, await get("/__data.json"), await get("/status/__data.json")];
+  const pages = [home, status, await get("/__data.json"), await get("/status/__data.json"), await get("/thoughts/__data.json"), browse,
+    await get(searchWord ? `/search/__data.json?q=${encodeURIComponent(searchWord)}&mode=text` : "/search/__data.json"), search];
   const queue = pages.flatMap((p) => [...p.html.matchAll(/["'](\/dashboard\/_app\/[^"']+\.js)["']/g)].map((m) => m[1]));
   const scripts = new Set<string>();
   let leaked = pages.some((p) => p.html.includes(WRITE_KEY) || [...p.headers.values()].some((v) => v.includes(WRITE_KEY)));
@@ -226,11 +327,14 @@ let thoughtId = "";
     // A chunk names the others it imports relative to itself: "./x.js", "../chunks/y.js".
     for (const m of text.matchAll(/["'](\.{1,2}\/[^"']+\.js)["']/g)) queue.push(new URL(m[1], `${ORIGIN}${s}`).pathname);
   }
-  assert(pages[2].status === 200 && pages[3].status === 200, `the pages' navigation data answers for the session (${pages[2].status}, ${pages[3].status})`);
+  assert([2, 3, 4, 6].every((i) => pages[i].status === 200), `the pages' navigation data answers for the session (${[2, 3, 4, 6].map((i) => pages[i].status).join(", ")})`);
   // The overview sends each thought's first line, not its content: ten large thoughts made it 18.8 MB (review pass 4).
   // Held by the data's structure — each listed thought's keys — not by a word, which a thought's own text can hold
   // (review pass 6: a first line reading `content:` failed a search for the word).
-  assert(recentKeys(pages[2].html) === "created_at,id,line,superseded", `the overview's data lists each thought as its id, first line, time and flag alone (${recentKeys(pages[2].html)})`);
+  assert(listKeys(pages[2].html, "recent") === "created_at,id,line,superseded", `the overview's data lists each thought as its id, first line, time and flag alone (${listKeys(pages[2].html, "recent")})`);
+  // Browse's and search's the same way (PR 2a): the fields each list shows, never a thought's content.
+  assert(listKeys(pages[4].html, "thoughts") === "created_at,id,line,superseded,trust,type", `browse's data lists each thought as its id, first line, time, flag, type and trust alone (${listKeys(pages[4].html, "thoughts")})`);
+  assert(searchWord === "" || listKeys(pages[6].html, "hits") === "created_at,id,line,moved,occurrences,score,superseded,trust", `search's data lists each hit by its fields alone (${searchWord === "" ? "no word to search" : listKeys(pages[6].html, "hits")})`);
   assert(!leaked && scripts.size > 2, `no page, header, navigation data or script (${scripts.size} modules) holds the key`);
 
   const out = await signOut();
@@ -281,6 +385,8 @@ if (READ_KEY) {
   assert(r.status === 303 && cookie !== "", `the read key signs in (${r.status})`);
   const home = await get("/");
   assert(home.status === 200 && home.html.includes("read key"), `the overview renders for the read key and names its scope (${home.status})`);
+  const [browse, search] = [await get("/thoughts"), await get(`/search?q=${encodeURIComponent(searchWord || "e")}&mode=text`)];
+  assert(browse.status === 200 && search.status === 200, `…browses and searches by exact text (${browse.status}, ${search.status})`);
   const missing = await get("/thoughts/00000000-0000-0000-0000-000000000000");
   assert(missing.status === 404, `a thought the brain does not hold is a 404 (${missing.status})`);
   const out = await signOut();

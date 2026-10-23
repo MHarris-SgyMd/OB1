@@ -9,6 +9,8 @@
 	let { children, data }: { children: Snippet; data: LayoutData } = $props();
 	const nav = [
 		{ href: HOME, label: 'Overview' },
+		{ href: `${base}/thoughts`, label: 'Browse' },
+		{ href: `${base}/search`, label: 'Search' },
 		{ href: `${base}/status`, label: 'Status' },
 	];
 </script>
