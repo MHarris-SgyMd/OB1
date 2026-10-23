@@ -25,8 +25,9 @@ export const TRAIL_MAX = 20;
  * The longest free-text filter kept from the address: `actor` at the core's
  * own bound, 200; a type, topic or person, which the core matches exactly at
  * any length, at 2,000 — a longer one cut would match nothing (review pass 2:
- * a 307-character topic found nothing), and one longer still is a request line
- * too long for the core (SMD-3234).
+ * a 307-character topic found nothing). The visitor's own address meets the
+ * GUI's server's request-line limit first (about 16 kB: some 1,780 characters
+ * of a CJK filter, percent-encoded), a 431; the core's call is shorter.
  */
 const ACTOR_MAX = 200;
 const TEXT_MAX = 2000;

@@ -22,7 +22,8 @@
 	 */
 	function tidy(e: FormDataEvent) {
 		for (const [k, v] of [...e.formData.entries()]) {
-			if (v === '' || (k === 'sort' && v === 'newest') || (k === 'limit' && v === String(DEFAULT_PAGE_SIZE))) e.formData.delete(k);
+			// A field of spaces alone is unset too, as readBrowse reads it (review pass 3).
+			if (String(v).trim() === '' || (k === 'sort' && v === 'newest') || (k === 'limit' && v === String(DEFAULT_PAGE_SIZE))) e.formData.delete(k);
 		}
 	}
 	/** The menu's sizes, and the address's own when it is another (a shared link keeps its size). */
@@ -90,7 +91,8 @@
 				{/each}
 			</ul>
 		{/if}
-		{#if data.links.previous || data.links.next}
+		<!-- First page counts too: on a last page past a spent cut trail it is the only way back (review pass 3: hidden there). -->
+		{#if data.links.previous || data.links.next || data.links.first}
 			<nav class="flex flex-wrap gap-4 pt-4 text-sm" aria-label="Pages" data-testid="pages">
 				{#if data.links.first && data.links.first !== data.links.previous}<a href={data.links.first} class="text-text-muted hover:text-text" data-testid="first">First page</a>{/if}
 				{#if data.links.previous}<a href={data.links.previous} rel="prev" class="text-text-muted hover:text-text" data-testid="previous">Previous</a>{/if}

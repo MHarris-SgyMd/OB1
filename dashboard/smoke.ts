@@ -22,6 +22,9 @@
  *   - sign-out ends the session on the server, and so does a second sign-in
  *     over it; one key's 21st sign-in ends its own oldest session, not
  *     another key's;
+ *   - on their own, before any request: browse's trail walked 26 pages over
+ *     synthetic cursors (Previous to the 20th page back, then First page), and
+ *     a list's first line cut beside an emoji keeping it whole;
  *   - browse (PR 2a) walks every thought a page of one at a time, newest and
  *     oldest first, each once, the one order the other's reverse; Previous
  *     and First page go back; a filter keeps its rows; a cursor the core
@@ -49,7 +52,7 @@ const CAPTURE_KEY = flag("capture-key");
 const REQUIRE_THOUGHT = args.includes("--require-thought");
 /** Fail unless the thought driven is an ingested one: CI's capture is, so the notice arm cannot pass on a thought without one. */
 const REQUIRE_INGESTED = args.includes("--require-ingested");
-/** Fail, not skip, when the brain holds fewer than two thoughts: CI captures two, so browse and search are driven past their first page. */
+/** Fail, not skip, when the brain holds fewer than three thoughts: CI captures three, so browse walks three pages and search pages past its first. */
 const REQUIRE_PAGES = args.includes("--require-pages");
 if (!BASE || !WRITE_KEY) {
   console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought] [--require-ingested] [--require-pages]");
@@ -177,6 +180,9 @@ console.log(`▸ dashboard ${BASE}`);
     `browse's trail: from page 26, Previous steps back to page ${want[want.length - 1]} one page at a time, then gives way to First page (${landed.join(",")})`);
   const onward = at(pageLinks("/t", q, "c99").next!);
   assert(onward.cut && !at(links.first!).cut, "…Next from a cut page stays cut, and First page is not");
+  // An address holding more cursors than are kept is cut too, though it carries no mark (a hand-made one: review pass 2).
+  const handMade = at(`/t?limit=1&after=c30&back=${Array.from({ length: TRAIL_MAX + 1 }, (_, i) => `c${i + 1}`).join(".")}`);
+  assert(handMade.cut && handMade.trail.length === TRAIL_MAX, `…and an address with ${TRAIL_MAX + 1} cursors behind it is cut, keeping ${TRAIL_MAX}`);
 }
 // A list's first line cut at its length never splits a surrogate pair (review pass 2: half an emoji was U+FFFD).
 {
@@ -277,7 +283,7 @@ let searchWord = "";
 
   // Browse (PR 2a): every thought a page of one at a time, by the pages' own Next links, in each order.
   const count = Number((total ?? "0").replace(/[^\d]/g, ""));
-  if (REQUIRE_PAGES && count < 2) bad(`the brain holds ${count} thought(s), and --require-pages asks for two: browse and search went undriven past their first page`);
+  if (REQUIRE_PAGES && count < 3) bad(`the brain holds ${count} thought(s), and --require-pages asks for three: browse, the cut trail and search went undriven past their first pages`);
   const browse = await get("/thoughts");
   assert(browse.status === 200 && browse.html.includes('data-testid="filters"') && (count === 0 || listedIds(browse.html, "browse").length > 0), `browse renders its filters and lists thoughts from the REST core (${browse.status})`);
   assert(count === 0 || /data-testid="browse"[^>]*data-sveltekit-preload-data="off"/.test(browse.html), "…its thought links not preloaded on hover");
@@ -300,8 +306,13 @@ let searchWord = "";
       assert(listedIds(prev.html, "browse")[0] === ids[1] && listedIds(first.html, "browse")[0] === ids[0], "…from the third, Previous is the second page and First page the first");
     }
     if (newest.length >= 2) {
-      // A trail cut at its 20 cursors, spent: the page before is lost, so there is no Previous, only First page (review pass 1).
-      const spent = await get(`${newest[1].path}&cut=1`);
+      // A trail cut at its 20 cursors, spent: the page before is lost, so there is no Previous, only First page (review pass 1)
+      // — on the walk's last page, where nothing else would carry the pager (review pass 3: CI's brain, it was hidden).
+      // Its own trail stripped, so the cut is spent there: only the page's cursor and the mark (review pass 3).
+      const last = new URL(newest[newest.length - 1].path, "http://x");
+      last.searchParams.delete("back");
+      last.searchParams.set("cut", "1");
+      const spent = await get(`${last.pathname}${last.search}`);
       assert(linkOf(spent.html, "previous") === "" && linkOf(spent.html, "first") === "/thoughts?limit=1", `…on a cut trail spent, no Previous, and First page the way back (${linkOf(spent.html, "previous") || "none"}, ${linkOf(spent.html, "first")})`);
     }
     // A filter keeps its rows: trust at least ingested lists the thoughts that carry a trust word, each showing it, and
