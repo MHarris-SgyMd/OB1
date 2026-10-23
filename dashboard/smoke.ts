@@ -36,6 +36,9 @@
  * brain, but for the click-through each thought page's `fetch` logs.
  */
 
+import { pageLinks, readBrowse, TRAIL_MAX } from "./src/lib/browse.ts";
+import { firstLine } from "./src/lib/format.ts";
+
 const args = process.argv.slice(2);
 const flag = (n: string) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : undefined; };
 const BASE = flag("url")?.replace(/\/$/, "");
@@ -153,6 +156,33 @@ async function walkBrowse(start: string) {
 }
 
 console.log(`▸ dashboard ${BASE}`);
+
+// Browse's trail, on its own (src/lib/browse.ts imports nothing): 26 pages walked by Next over synthetic cursors, then
+// back by Previous. No brain of CI's holds 22 pages of thoughts, so this is where the trail's cut is made and spent
+// (review pass 2: nothing held the half that makes it).
+{
+  const at = (address: string) => readBrowse(new URL(address, "http://x").searchParams);
+  let q = at("/t?limit=1");
+  const page = (qq: ReturnType<typeof readBrowse>) => (qq.after === undefined ? 1 : Number(qq.after.slice(1)) + 1);
+  for (let n = 1; n < 26; n++) q = at(pageLinks("/t", q, `c${n}`).next!);
+  const landed: number[] = [];
+  let links = pageLinks("/t", q, null);
+  while (links.previous && landed.length < 30) {
+    q = at(links.previous);
+    landed.push(page(q));
+    links = pageLinks("/t", q, null);
+  }
+  const want = Array.from({ length: TRAIL_MAX }, (_, i) => 25 - i);
+  assert(landed.join() === want.join() && links.previous === null && links.first !== null && at(links.first).after === undefined,
+    `browse's trail: from page 26, Previous steps back to page ${want[want.length - 1]} one page at a time, then gives way to First page (${landed.join(",")})`);
+  const onward = at(pageLinks("/t", q, "c99").next!);
+  assert(onward.cut && !at(links.first!).cut, "…Next from a cut page stays cut, and First page is not");
+}
+// A list's first line cut at its length never splits a surrogate pair (review pass 2: half an emoji was U+FFFD).
+{
+  const cutAt = [158, 159, 160].map((n) => firstLine(`${"a".repeat(n)}\u{1F600}\u{1F600}tail`));
+  assert(cutAt.every((l) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(l) && l.endsWith("…")), "a list's first line, cut beside an emoji, holds no half of one");
+}
 
 // Signed out.
 {

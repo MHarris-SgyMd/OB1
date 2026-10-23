@@ -46,6 +46,11 @@ export async function read<K extends CallableOperation>(event: RequestEvent, ses
 	} catch (err) {
 		// A visitor who left aborted the call: nothing went wrong, and nobody reads the answer (review pass 4).
 		if (!event.request.signal.aborted) console.error(`[dashboard] ${name}: the REST core did not answer: ${err instanceof Error ? err.message : String(err)}`);
+		// A search by meaning waits on the embedding provider, whose own deadline (OB1_LLM_TIMEOUT, 120 s) outlasts this
+		// one: a slow or silent provider is this page's timeout, before the core's exact-match answer (review pass 2;
+		// the core's short-circuit is SMD-3205). Said, with the search that needs no provider.
+		if (name === 'search_thoughts' && err instanceof Error && err.name === 'TimeoutError')
+			throw error(504, `The brain did not answer within ${REST_TIMEOUT_MS / 1000} s. A search by meaning waits on the embedding provider, which may be slow or not answering; search by exact text, which needs none.`);
 		throw error(502, 'The brain did not answer. The dashboard log has the reason.');
 	}
 	if (answer.ok) return answer.body;

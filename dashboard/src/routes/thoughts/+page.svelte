@@ -14,19 +14,16 @@
 	const apply = (e: Event) => (e.currentTarget as HTMLSelectElement).form?.requestSubmit();
 	/**
 	 * The address a submit makes holds what is set alone: an empty field, the
-	 * default order and the default size are left out (disabled for the submit,
-	 * which a script-free submit cannot do), as the page's own links leave them.
+	 * default order and the default size are left out of the form's data as
+	 * SvelteKit reads it (its `new FormData(form)` fires `formdata`), as the
+	 * page's own links leave them. Nothing is disabled: a control disabled for the
+	 * submit lost the focus it had, in Firefox and WebKit (review pass 2). A
+	 * script-free submit carries every field.
 	 */
-	function tidy(e: SubmitEvent) {
-		const form = e.currentTarget as HTMLFormElement;
-		const unset = [...form.elements].filter(
-			(el): el is HTMLInputElement | HTMLSelectElement =>
-				(el instanceof HTMLInputElement || el instanceof HTMLSelectElement) &&
-				(el.value === '' || (el.name === 'sort' && el.value === 'newest') || (el.name === 'limit' && el.value === String(DEFAULT_PAGE_SIZE))),
-		);
-		for (const el of unset) el.disabled = true;
-		// Back once SvelteKit has read the form: its submit listener runs after this one, in the same dispatch.
-		setTimeout(() => unset.forEach((el) => (el.disabled = false)));
+	function tidy(e: FormDataEvent) {
+		for (const [k, v] of [...e.formData.entries()]) {
+			if (v === '' || (k === 'sort' && v === 'newest') || (k === 'limit' && v === String(DEFAULT_PAGE_SIZE))) e.formData.delete(k);
+		}
 	}
 	/** The menu's sizes, and the address's own when it is another (a shared link keeps its size). */
 	const sizes = $derived([...new Set([...PAGE_SIZES, data.q.limit])].sort((a, b) => a - b));
@@ -40,7 +37,7 @@
 
 	<!-- A GET form: its fields are the address, and a new filter starts at the first page (no cursor rides it).
 	     Focus and scroll stay where they were: a keyboard user applying a filter keeps their place (review pass 1). -->
-	<form method="GET" action="{base}/thoughts" onsubmit={tidy} data-sveltekit-keepfocus data-sveltekit-noscroll class="bg-bg-card border border-white/10 rounded-xl p-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-sm" data-testid="filters">
+	<form method="GET" action="{base}/thoughts" onformdata={tidy} data-sveltekit-keepfocus data-sveltekit-noscroll class="bg-bg-card border border-white/10 rounded-xl p-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-sm" data-testid="filters">
 		<label class="flex flex-col gap-1">Type<input name="type" value={data.q.type ?? ''} class="field" autocomplete="off" /></label>
 		<label class="flex flex-col gap-1">Topic<input name="topic" value={data.q.topic ?? ''} class="field" autocomplete="off" /></label>
 		<label class="flex flex-col gap-1">Person<input name="person" value={data.q.person ?? ''} class="field" autocomplete="off" /></label>

@@ -7,12 +7,16 @@
 	let { data }: { data: PageData } = $props();
 	/** The menu's counts, and the address's own when it is another. */
 	const sizes = $derived([...new Set([...SEARCH_SIZES, data.form.limit])].sort((a, b) => a - b));
-	/** What a provider-down search could match, said as the tool says it (SMD-2891). */
+	/**
+	 * What a provider-down search matched (SMD-2891): the thoughts holding the
+	 * query's identifiers or quoted spans, or else the query as one text — and,
+	 * where nothing held either, that alone, never a claim of hits (review pass 2).
+	 */
 	const VECTORLESS: Record<string, string> = {
-		literals: "The embedding provider did not answer: these are the query's identifiers and quoted spans, matched exactly — nothing was ranked by meaning.",
-		text: 'The embedding provider did not answer: these are the thoughts holding the query as one text — nothing was ranked by meaning.',
-		none: 'The embedding provider did not answer, and the query held nothing to match exactly. Try again, or search by exact text.',
+		literals: "The embedding provider did not answer: these thoughts hold the query's identifiers or quoted spans, matched exactly — nothing was ranked by meaning.",
+		text: 'The embedding provider did not answer: these thoughts hold the query as one text, matched exactly — nothing was ranked by meaning.',
 	};
+	const NOTHING_HELD = "The embedding provider did not answer, and no thought holds the query's identifiers, quoted spans or text exactly. Try again later, or search by exact text.";
 </script>
 
 <svelte:head><title>Search · Open Brain</title></svelte:head>
@@ -39,7 +43,7 @@
 	{#if data.hits !== null}
 		<div class="bg-bg-card border border-white/10 rounded-xl p-5 space-y-3">
 			{#if data.vectorless}
-				<p class="text-sm text-amber-300" role="note" data-testid="vectorless">{VECTORLESS[data.vectorless] ?? VECTORLESS.none}</p>
+				<p class="text-sm text-amber-300" role="note" data-testid="vectorless">{data.hits.length > 0 ? (VECTORLESS[data.vectorless] ?? NOTHING_HELD) : NOTHING_HELD}</p>
 			{/if}
 			{#if data.hits.length === 0}
 				<p class="text-sm text-text-muted" data-testid="no-hits">{data.offset > 0 ? 'No more matches.' : 'No thought matched.'}</p>

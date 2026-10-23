@@ -21,8 +21,15 @@ export const PAGE_MAX = 100;
  */
 export const TRAIL_MAX = 20;
 
-/** The longest free-text filter kept from the address: the core's `actor` bound, and ample for a type, topic or person. */
-const TEXT_MAX = 200;
+/**
+ * The longest free-text filter kept from the address: `actor` at the core's
+ * own bound, 200; a type, topic or person, which the core matches exactly at
+ * any length, at 2,000 — a longer one cut would match nothing (review pass 2:
+ * a 307-character topic found nothing), and one longer still is a request line
+ * too long for the core (SMD-3234).
+ */
+const ACTOR_MAX = 200;
+const TEXT_MAX = 2000;
 
 /** The view's state, read from the address: every filter as the core takes it, absent when unset or unreadable. */
 export type BrowseQuery = {
@@ -50,9 +57,9 @@ export const FILTER_KEYS = ['type', 'topic', 'person', 'actor', 'said_by', 'min_
  * A free-text filter: trimmed, cut at TEXT_MAX, and without NUL, which no
  * Postgres text holds (the core's 500 for one is SMD-2534); empty is unset.
  */
-const text = (v: string | null) => {
+const text = (v: string | null, max = TEXT_MAX) => {
 	const t = v?.replaceAll('\0', '').trim();
-	return t ? t.slice(0, TEXT_MAX) : undefined;
+	return t ? t.slice(0, max) : undefined;
 };
 const trust = (v: string | null): TrustWord | undefined => (TRUST_WORDS as readonly string[]).includes(v ?? '') ? (v as TrustWord) : undefined;
 /** A cursor's characters (base64url), at most the core's 512: anything else is no cursor, left for the first page rather than sent. */
@@ -69,12 +76,13 @@ export function readBrowse(params: URLSearchParams): BrowseQuery {
 	const days = Number(params.get('days'));
 	const limit = Number(params.get('limit'));
 	const after = params.get('after') ?? '';
-	const trail = (params.get('back') ?? '').split('.').filter(cursor).slice(-TRAIL_MAX);
+	const given = (params.get('back') ?? '').split('.').filter(cursor);
+	const trail = given.slice(-TRAIL_MAX);
 	return {
 		type: text(params.get('type')),
 		topic: text(params.get('topic')),
 		person: text(params.get('person')),
-		actor: text(params.get('actor')),
+		actor: text(params.get('actor'), ACTOR_MAX),
 		said_by: trust(params.get('said_by')),
 		min_trust: trust(params.get('min_trust')),
 		// The core takes up to 365,000 days; a whole number of them here.
@@ -84,7 +92,8 @@ export function readBrowse(params: URLSearchParams): BrowseQuery {
 		after: cursor(after) ? after : undefined,
 		// A trail with no page after it is no trail: the first page has nothing before it.
 		trail: cursor(after) ? trail : [],
-		cut: cursor(after) && params.get('cut') === '1',
+		// Cut where the address says so, or where it holds more cursors than are kept (a hand-made one: review pass 2).
+		cut: cursor(after) && (params.get('cut') === '1' || given.length > TRAIL_MAX),
 	};
 }
 
