@@ -1814,10 +1814,11 @@ jobs:
       # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):
       # deploy/.env configured for the authorization server
       # (.github/ci/auth-settings.sh) and the MCP server /mcp reaches recreated
-      # on it (SMD-2287), with `server` beside it — with no authorization
-      # server running. The REST core, the plugin webhook, the
-      # daemon restart and the SIGTERM stop after it meet the server they met
-      # then; the smoke just before holds a stack configured for none, which
+      # on it (SMD-2287), with the REST core beside it — with no authorization
+      # server running. The REST core, the plugin webhook, the daemon restart
+      # and the SIGTERM stop after it meet that stack: the REST core's token
+      # check on, which only a JWT-shaped bearer reaches (rest/app.ts), so the
+      # keys they send are read as before; the smoke just before holds a stack configured for none, which
       # no job held before (deploy-stack-brains' smoke holds this one). Every
       # compose call after it names its services. The operator GUI is
       # recreated on it too (SMD-2280), and holds ADR decision 16: configured,
@@ -2282,7 +2283,10 @@ jobs:
           if [ "$mcode" != 0 ] || ! [[ "$mlast" =~ ^SIGTERM:\ stopped\ in\ [0-9]+\.[0-9]\ s\;\ no\ database\ pool\ was\ opened\;\ exit\ 0$ ]]; then docker compose -f compose.yaml logs --tail 20 mcp; echo "the MCP server's stop did not exit 0 with its own stop line" >&2; exit 1; fi
           doc=$(curl -s --max-time 10 -o /tmp/doc-body -w '%{http_code}' http://127.0.0.1:8010/.well-known/oauth-protected-resource/mcp || true)
           if ! { [ "$doc" = 404 ] && [ ! -s /tmp/doc-body ]; }; then echo "the document with the MCP server stopped answered $doc '$(head -c 80 /tmp/doc-body)', not the proxy's bodiless 404" >&2; exit 1; fi
-          docker compose -f compose.yaml start mcp > /dev/null 2>&1
+          # By its container, not `compose start mcp`: compose starts what a named
+          # service depends on too, and that would start `api` here, serving,
+          # before the in-preflight stop below (review pass 6b·2).
+          docker start "$(docker compose -f compose.yaml ps -aq mcp)" > /dev/null
           last=$(docker compose -f compose.yaml logs --no-log-prefix api | grep '^SIGTERM: stopped' | tail -1 || true)
           echo "$last"
           if ! [[ "$last" =~ ^SIGTERM:\ stopped\ in\ ([0-9]+)\.[0-9]\ s\;\ database\ pool\ closed\;\ exit\ 0$ ]] || [ "${BASH_REMATCH[1]}" -ge 5 ]; then echo "the stop's line does not say it stopped in under 5 s, the pool closed and exit 0" >&2; exit 1; fi
@@ -2492,7 +2496,7 @@ jobs:
       # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):
       # deploy/.env configured for the authorization server
       # (.github/ci/auth-settings.sh) and the MCP server /mcp reaches recreated
-      # on it (SMD-2287), with `server` beside it — with no authorization
+      # on it (SMD-2287), with the REST core beside it — with no authorization
       # server running. The steps after it meet the stack
       # they met then: smoke.sh takes its branch for a server configured but
       # not advertising, and canary.sh has OB1_AUTH_ lines to leave out of the
@@ -3545,7 +3549,7 @@ jobs:
       # document at loopback's Host is the MCP server's own 404, and the
       # callback reaches the auth router with the authorization server gone.
       # /mcp and /health are the `mcp` service's since SMD-2287, so their lines
-      # are in its log, and nothing of the proxy's reaches `server`'s.
+      # are in its log, not the REST core's.
       # Its search_thoughts is a semantic search the query log keeps, in a
       # job whose stack no tier step replays.
       - name: The proxy answers discovery itself, logs no key and streams unbuffered
@@ -3666,7 +3670,7 @@ jobs:
       # The stack the observability step met in deploy-stack, where it ran
       # until SMD-3170: deploy/.env configured for an authorization server
       # (.github/ci/auth-settings.sh) and the MCP server /mcp reaches recreated
-      # on it (SMD-2287), with `server` beside it — with none running. So
+      # on it (SMD-2287), with the REST core beside it — with none running. So
       # lgtm starts on an https public origin, Grafana's root URL under it and
       # its cookie secure (compose.yaml's lgtm command), which no other job
       # starts it on.
