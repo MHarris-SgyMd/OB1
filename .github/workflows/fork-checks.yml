@@ -206,10 +206,6 @@ jobs:
         working-directory: server-portable
         run: bun test-jobs.ts
 
-      - name: Typecheck
-        working-directory: server-portable
-        run: bunx tsc --noEmit
-
       # The REST core's client (SMD-2287), which the MCP server and the
       # operator GUI call the brain through: its generated files against the
       # REST core's own document, so a route or a schema changed without
@@ -219,10 +215,6 @@ jobs:
       - name: Install the REST client's pinned packages
         working-directory: rest-client
         run: bun install --frozen-lockfile
-
-      - name: Typecheck the REST client
-        working-directory: rest-client
-        run: bunx tsc --noEmit
 
       - name: The REST client against the REST core
         working-directory: rest-client
@@ -235,10 +227,6 @@ jobs:
       - name: Install the MCP server's pinned packages
         working-directory: mcp-server
         run: bun install --frozen-lockfile
-
-      - name: Typecheck the MCP server
-        working-directory: mcp-server
-        run: bunx tsc --noEmit
 
       - name: The MCP server over the REST core
         working-directory: mcp-server
@@ -283,17 +271,9 @@ jobs:
         working-directory: db
         run: bun install --frozen-lockfile
 
-      - name: Typecheck the workers, benches and suites
-        working-directory: db
-        run: bunx tsc --noEmit
-
       - name: Install the evals' pinned packages
         working-directory: evals
         run: bun install --frozen-lockfile
-
-      - name: Typecheck the evals
-        working-directory: evals
-        run: bunx tsc --noEmit
 
       # The typed-decision tier (SMD-2050): its serving process under jev/ and
       # the client in server-portable/jev.ts, which the suite imports — so it
@@ -306,10 +286,6 @@ jobs:
       - name: Install the decision tier's pinned packages
         working-directory: jev
         run: bun install --frozen-lockfile
-
-      - name: Typecheck the decision tier
-        working-directory: jev
-        run: bunx tsc --noEmit
 
       - name: Decision tier — contract, service and client
         working-directory: jev
@@ -483,9 +459,15 @@ jobs:
         working-directory: deploy/auth
         run: bun install --frozen-lockfile
 
-      - name: Typecheck the authorization server
-        working-directory: deploy/auth
-        run: bunx tsc --noEmit
+      # The job's type-checked directories, side by side (SMD-3202), here
+      # because each needs its own install, before this step, and this follows
+      # the last of them: a tsc in each, its output a log of its own, printed in
+      # the order named, the step failing naming the directory. One after
+      # another they were seven steps, 25–49 s by runner. Check 18 reads each
+      # directory named as a tsc step, and runs the script against a stub to
+      # hold it to that.
+      - name: Typecheck the server, the REST and MCP clients, the workers, the evals, the decision tier and the authorization server
+        run: .github/ci/typecheck.sh server-portable rest-client mcp-server db evals jev deploy/auth
 
       - name: Authorization server rules
         working-directory: deploy/auth

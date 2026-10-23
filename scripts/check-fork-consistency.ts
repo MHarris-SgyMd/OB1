@@ -151,8 +151,12 @@
  *      db and evals programs, whose ../server-portable imports pull the
  *      server's copy), its tsconfig compilerOptions equal the server's, and
  *      .github/workflows/fork-checks.yml runs `bunx tsc --noEmit` under it
- *      exactly once; a tsc step under a directory the list does not name is
- *      refused. The workflow is parsed with Bun.YAML (SMD-1932); no exceptions
+ *      exactly once — a step of its own, or a directory a
+ *      .github/ci/typecheck.sh step names, which runs them side by side
+ *      (SMD-3202), and which check 18 then runs against a stub bunx: a tsc
+ *      in each directory once, a failure failing the run, each failing
+ *      directory named with its output; a tsc step under a directory the
+ *      list does not name is refused. The workflow is parsed with Bun.YAML (SMD-1932); no exceptions
  *  19. docs/connector-registry.json — the connector taxonomy's one source — is
  *      sound and complete: the four closed/near-closed facet sets and the
  *      fetcher set equal the ones scripts/connector-registry.ts pins (a
@@ -488,7 +492,8 @@
  * Exits non-zero on any violation.
  */
 
-import { readFileSync, existsSync, readdirSync, statSync, lstatSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync, lstatSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join, dirname, relative, sep, posix } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -4174,6 +4179,11 @@ const TYPECHECKED_DIRS = ["server-portable", "compat/supabase-sql", "db", "evals
 const TYPE_PINS = ["@types/bun", "typescript", "@types/node"];
 const WORKFLOW = ".github/workflows/fork-checks.yml";
 const TSC_STEP = /^\s*bunx tsc --noEmit\s*$/;
+/** The script that type-checks the directories it names side by side (SMD-3202), each relative to the repository root; a step that runs it is a tsc step for each. Its whole `run:`, as TSC_STEP's is. */
+const TSC_SCRIPT = ".github/ci/typecheck.sh";
+const TSC_SCRIPT_STEP = /^\s*\.github\/ci\/typecheck\.sh((?:[ \t]+[A-Za-z0-9_.\/-]+)+)\s*$/;
+/** Any `run:` that invokes the script, at a command's start (`bash` or `./` in front allowed): one TSC_SCRIPT_STEP does not read is named as that. A mention of it (shellcheck, echo) is not an invocation. */
+const TSC_SCRIPT_RUN = /(?:^|[;&|(])[ \t]*(?:(?:bash|sh)[ \t]+)?(?:\.\/)?\.github\/ci\/typecheck\.sh(?:\s|$)/m;
 /** What check 18 compares: each directory's package.json and tsconfig.json as read (absent when the file is), and the workflow's tsc steps by directory. */
 type PackageJson = { devDependencies?: Record<string, string> };
 type TsConfig = { compilerOptions?: Record<string, unknown> };
@@ -4203,16 +4213,21 @@ function typecheckSurfaceProblems({ packages, tsconfigs, tscSteps }: TypecheckSu
     if (!opts) problems.push([`${dir}/tsconfig.json`, `missing, or has no compilerOptions (SMD-1932)`]);
     else if (dir !== ref && canon(opts) !== refOpts) problems.push([`${dir}/tsconfig.json`, `compilerOptions differ from ${ref}/tsconfig.json's: ${canon(opts)} vs ${refOpts} (SMD-1932)`]);
     const n = tscSteps.filter((d) => d === dir).length;
-    if (n !== 1) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${dir} ${n} time(s); exactly one step per type-checked directory (SMD-1932)`]);
+    if (n !== 1) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${dir} ${n} time(s); exactly one typecheck per type-checked directory, its own step or a .github/ci/typecheck.sh step naming it (SMD-1932)`]);
   }
-  for (const d of tscSteps) if (!TYPECHECKED_DIRS.includes(d)) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${d}, which TYPECHECKED_DIRS in ${SELF} does not name — add it there, with its pins and tsconfig (SMD-1932)`]);
+  for (const d of tscSteps) if (!TYPECHECKED_DIRS.includes(d)) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${d}, which TYPECHECKED_DIRS in ${SELF} does not name — add it there, with its pins and tsconfig, or take it out of the step that type-checks it (SMD-1932)`]);
   return problems;
 }
-/** The working-directory of every `bunx tsc --noEmit` step in a parsed workflow, in order. */
+/** Each directory a parsed workflow type-checks, in order: a `bunx tsc --noEmit` step's working-directory, and each directory a TSC_SCRIPT step names. */
 function tscStepsIn(doc: WorkflowDoc) {
   const out: string[] = [];
   for (const job of Object.values(doc?.jobs ?? {})) {
-    for (const step of job?.steps ?? []) if (typeof step?.run === "string" && TSC_STEP.test(step.run)) out.push(step["working-directory"] ?? ".");
+    for (const step of job?.steps ?? []) {
+      if (typeof step?.run !== "string") continue;
+      if (TSC_STEP.test(step.run)) out.push(step["working-directory"] ?? ".");
+      const named = TSC_SCRIPT_STEP.exec(step.run);
+      if (named) out.push(...named[1].trim().split(/\s+/).map((d) => posix.normalize(d).replace(/\/+$/, "")));
+    }
   }
   return out;
 }
@@ -4237,6 +4252,13 @@ function checkTypecheckSurface() {
     const got = typecheckSurfaceProblems(g);
     if (got.length !== 1) fail(SELF, `check 18 reports ${got.length} problem(s) for ${why}, not one (its own probe): ${JSON.stringify(got)}`);
   }
+  // The reader: a step of its own, and each directory a TSC_SCRIPT step names; not the script with none, nor a step that only mentions it.
+  const read = tscStepsIn({ jobs: { a: { steps: [
+    { run: "bunx tsc --noEmit", "working-directory": "x" }, { run: `${TSC_SCRIPT} a b/c ./d` }, { run: TSC_SCRIPT }, { run: `echo ${TSC_SCRIPT} z` }, { run: `${TSC_SCRIPT} e && bun f.ts` }, { run: `${TSC_SCRIPT} g/\n` },
+  ] } } });
+  const invoked = [`${TSC_SCRIPT} a`, `bash ${TSC_SCRIPT} a`, `./${TSC_SCRIPT} a`, `|\n  ${TSC_SCRIPT} a \\\n    b`, `cd x && ${TSC_SCRIPT} a`].every((r) => TSC_SCRIPT_RUN.test(r)) && ![`shellcheck ${TSC_SCRIPT}`, `echo ${TSC_SCRIPT} z`, `bash db/typecheck.sh`].some((r) => TSC_SCRIPT_RUN.test(r));
+  if (!invoked) fail(SELF, `check 18 no longer tells an invocation of ${TSC_SCRIPT} from a mention of it (SMD-3202)`);
+  if (JSON.stringify(read) !== JSON.stringify(["x", "a", "b/c", "d", "g"])) fail(SELF, `check 18 no longer reads its probe's tsc steps as ["x","a","b/c","d","g"] (read ${JSON.stringify(read)}) (SMD-3202)`);
 
   if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {
     fail(SELF, `check 18 parses ${WORKFLOW} with Bun.YAML (Bun 1.2+) and this runtime has none — run \`bun ${SELF}\`, as CI does (SMD-1932)`);
@@ -4245,8 +4267,122 @@ function checkTypecheckSurface() {
   const readJson = (rel: string) => (existsSync(join(ROOT, rel)) ? JSON.parse(readFileSync(join(ROOT, rel), "utf8")) : undefined);
   const packages = Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, readJson(`${d}/package.json`)]));
   const tsconfigs = Object.fromEntries(TYPECHECKED_DIRS.map((d) => [d, readJson(`${d}/tsconfig.json`)]));
-  const tscSteps = tscStepsIn(Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")) as WorkflowDoc);
+  const doc = Bun.YAML.parse(readFileSync(join(ROOT, WORKFLOW), "utf8")) as WorkflowDoc;
+  // A step running the script in a form the reader does not take counts for nothing, and every directory it names would read as untype-checked: said once, first, as that (review pass 3).
+  for (const job of Object.values(doc?.jobs ?? {})) for (const step of job?.steps ?? []) {
+    if (typeof step?.run === "string" && TSC_SCRIPT_RUN.test(step.run) && !TSC_SCRIPT_STEP.test(step.run))
+      fail(WORKFLOW, `runs ${TSC_SCRIPT} in a form check 18 cannot read (${JSON.stringify(step.run.trim().slice(0, 80))}), so the directories it names count as untype-checked below — write the whole \`run:\` as \`${TSC_SCRIPT} DIR…\`: one line or a \`>-\` folded scalar, no \`./\`, \`bash\`, \`\\\` or comment (SMD-3202)`);
+  }
+  const tscSteps = tscStepsIn(doc);
   for (const [where, msg] of typecheckSurfaceProblems({ packages, tsconfigs, tscSteps })) fail(where, msg);
+  // A step naming directories counts only while the script type-checks each of them and fails on any: run, it is held to that.
+  const usesScript = Object.values(doc?.jobs ?? {}).some((job) => (job?.steps ?? []).some((step) => typeof step?.run === "string" && TSC_SCRIPT_STEP.test(step.run)));
+  if (usesScript) for (const problem of typecheckScriptProblems(join(ROOT, TSC_SCRIPT))) fail(TSC_SCRIPT, `${problem} (SMD-3202)`);
+}
+/**
+ * TSC_SCRIPT run against a stub `bunx` over directories of a scratch tree, named
+ * relative to the repository root as the step names them, from another working
+ * directory. The stub logs each call's directory and arguments; where a `fail`
+ * file holds an exit code it prints a line on stdout (where tsc prints its
+ * diagnostics) and one on stderr, and exits with that code. One failing
+ * directory's stub waits until another's call is logged, so the two run side by
+ * side and finish in a known order. Three runs — fail, pass, fail, pass; pass,
+ * pass; pass, fail — each held to check 18's promise (a tsc in each directory,
+ * once, exactly `tsc --noEmit`; the run failing if any fails, passing if none
+ * does) and to what the step's log is for (each failing directory's line, with
+ * its own exit code, in the order named; its own output under it, both streams,
+ * and no other's; not folded). Review passes 1–5 found a text guard and then
+ * four smaller probes each passing edits that broke one of these; pass 5
+ * enumerated the contract and this covers every plausible edit it found.
+ */
+function typecheckScriptProblems(script: string): string[] {
+  if (!existsSync(script)) return ["is missing, so nothing type-checks the directories a step names to it — check 18 counts a step naming directories to it as their typecheck"];
+  const tmp = mkdtempSync(join(tmpdir(), "ob1-check18-"));
+  try {
+    const stub = join(tmp, "bin");
+    mkdirSync(stub);
+    writeFileSync(join(stub, "bunx"), [
+      "#!/bin/sh",
+      `printf '%s %s\\n' "$PWD" "$*" >> "$TSC_STUB_LOG"`,
+      // Side by side: wait (2 s at most) for the named directory's call, then a moment for it to finish first.
+      `if [ -f wait-for ]; then w=$(cat wait-for); n=0; until grep -qF "$w tsc" "$TSC_STUB_LOG" || [ "$n" -ge 200 ]; do sleep 0.01; n=$((n + 1)); done; [ "$n" -ge 200 ] && echo "barrier timed out" >> "$TSC_STUB_LOG"; sleep 0.05; fi`,
+      `echo "stub tsc in $PWD"`,
+      `if [ -f fail ]; then echo "stub type error in $PWD"; echo "stub stderr in $PWD" >&2; exit "$(cat fail)"; fi`,
+      "exit 0",
+      "",
+    ].join("\n"));
+    chmodSync(join(stub, "bunx"), 0o755);
+    const dir = (name: string, failCode?: number, waitFor?: string) => {
+      const d = join(tmp, name);
+      mkdirSync(d);
+      writeFileSync(join(d, "tsconfig.json"), "{}");
+      if (failCode !== undefined) writeFileSync(join(d, "fail"), String(failCode));
+      if (waitFor) writeFileSync(join(d, "wait-for"), waitFor);
+      return d;
+    };
+    const c = dir("c", 137);
+    const [a, b, d, e] = [dir("a", 2, c), dir("b"), dir("d"), dir("e", 1)];
+    const failCode = new Map([[a, 2], [c, 137], [e, 1]]);
+    // BASH_ENV and ENV would run a file of the caller's before the script, and could put another bunx ahead of the stub.
+    const env: Record<string, string | undefined> = { ...process.env, PATH: `${stub}:${process.env.PATH}`, BASH_ENV: undefined, ENV: undefined };
+    const rel = (x: string) => relative(ROOT, x);
+    // Run from a directory nested deeper than the repository root is deep, so the step's relative directories
+    // resolve only from the root: from here their `..`s stay inside the scratch tree (review pass 5: from a
+    // shallow directory they climbed to / and resolved anyway, and a script that dropped its `cd` passed).
+    const cwd = join(tmp, ...Array(ROOT.split(sep).filter(Boolean).length + 1).fill("w"));
+    mkdirSync(cwd, { recursive: true });
+    const short = (x: string) => x.replace(tmp, "…").replace(rel(tmp), "…");
+    const run = (dirs: string[], label: string) => {
+      const log = join(tmp, `${label}.log`);
+      writeFileSync(log, "");
+      const r = Bun.spawnSync(["bash", script, ...dirs.map(rel)], { cwd, env: { ...env, TSC_STUB_LOG: log }, stdout: "pipe", stderr: "pipe" });
+      const logged = readFileSync(log, "utf8").split("\n").filter(Boolean);
+      return { dirs, label, code: r.exitCode, lines: `${r.stdout.toString()}${r.stderr.toString()}`.split("\n"), calls: logged.filter((x) => x !== "barrier timed out"), serial: logged.includes("barrier timed out") };
+    };
+    let runs: ReturnType<typeof run>[];
+    try { runs = [run([a, b, c, d], "fail, pass, fail, pass"), run([b, d], "pass, pass"), run([b, e], "pass, fail")]; }
+    catch (err) { return [`cannot be run to hold it (${(err as Error).message.split("\n")[0]}): check 18 runs it with bash, which must be on PATH`]; }
+    const promise = "check 18 counts a step naming directories to it as their typecheck";
+    const forLog = "the step's log is how a failure names its directory";
+    const exactly = "the command is held to `bunx tsc --noEmit` exactly, as a step of its own is, so no flag (--noCheck) can weaken it; an option belongs in the directory's tsconfig.json";
+    const head = "::error title=Typecheck::tsc --noEmit in ";
+    const problems: string[] = [];
+    for (const r of runs) {
+      const failing = r.dirs.filter((x) => failCode.has(x));
+      const on = `on ${r.label}`;
+      if (failing.length ? r.code === 0 : r.code !== 0) problems.push(`exits ${r.code} ${on}, where ${failing.length ? "a failure must fail the run" : "every tsc passed"} — ${promise}`);
+      if (r.serial) problems.push(`runs the directories one after another ${on}, not side by side — the step exists to run them side by side`);
+      if (!(r.calls.length === r.dirs.length && r.dirs.every((x) => r.calls.filter((y) => y === `${x} tsc --noEmit`).length === 1))) {
+        problems.push(`runs ${JSON.stringify(r.calls.map(short))} ${on}, not one \`bunx tsc --noEmit\` in each directory — ${promise}; ${exactly}`);
+        continue;
+      }
+      // Each failing directory's line, in the order named, with its own exit code; its section (to the next ::error or ::group::) holding its own output, both streams, and no other directory's; no group open around it.
+      const named = r.lines.flatMap((l, i) => (l.startsWith(head) ? [i] : []));
+      const want = failing.map((x) => `${head}${rel(x)} failed (exit ${failCode.get(x)})`);
+      const got = named.map((i) => r.lines[i]);
+      if (got.length !== want.length || !want.every((w, k) => got[k] === w || got[k].startsWith(`${w} `))) {
+        problems.push(`names ${JSON.stringify(got.map(short))} ${on}, not ${JSON.stringify(want.map(short))}: each failing directory's line starts \`${head}DIR failed (exit N)\`, N its tsc's own exit code, in the order named — ${forLog}`);
+        continue;
+      }
+      let open = false;
+      r.lines.forEach((l, i) => {
+        if (l.startsWith("::group::")) open = true;
+        else if (l.startsWith("::endgroup::")) open = false;
+        else if (named.includes(i) && open) problems.push(`folds ${short(l.slice(head.length))}'s failure inside a group ${on}: a failing directory's output is left open — ${forLog}`);
+      });
+      for (const [k, i] of named.entries()) {
+        const x = failing[k];
+        const stop = r.lines.findIndex((l, j) => j > i && (l.startsWith("::error") || l.startsWith("::group::")));
+        const section = r.lines.slice(i + 1, stop === -1 ? r.lines.length : stop);
+        if (!section.includes(`stub type error in ${x}`) || !section.includes(`stub stderr in ${x}`)) problems.push(`does not print ${short(rel(x))}'s tsc output, stdout and stderr, under its failure ${on} (tsc writes its diagnostics to stdout) — ${forLog}`);
+        const others = r.dirs.filter((y) => y !== x && section.some((l) => l.endsWith(` in ${y}`)));
+        if (others.length) problems.push(`prints ${JSON.stringify(others.map((y) => short(rel(y))))}'s output under ${short(rel(x))}'s failure ${on}, as if theirs were its — ${forLog}`);
+      }
+    }
+    return [...new Set(problems)];
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }
 checkTypecheckSurface();
 // ── 19: the connector registry (SMD-1933) ────────────────────────────────────
@@ -8500,7 +8636,7 @@ function parityProblems(ci: ScriptRun[], ciTsc: string[], ciJobs: string[], pari
   const parityTsc = parity.typechecks.map((t) => t.dir);
   const ciTscDirs = new Set(ciTsc.map((x) => posix.normalize(x)));
   for (const d of ciTscDirs) if (!parityTsc.includes(d)) problems.push([SUITE_WORKFLOW, `type-checks ${d}, which ${PARITY_SCRIPT} does not — add \`typecheck ${d}\``]);
-  for (const t of parity.typechecks) if (!ciTscDirs.has(t.dir)) problems.push([`${PARITY_SCRIPT}:${t.line}`, `type-checks ${t.dir}, which no ${SUITE_WORKFLOW} step does — take it out, or add the step`]);
+  for (const t of parity.typechecks) if (!ciTscDirs.has(t.dir)) problems.push([`${PARITY_SCRIPT}:${t.line}`, `type-checks ${t.dir}, which no ${SUITE_WORKFLOW} step does — take it out, or type-check it there (a step of its own, or a .github/ci/typecheck.sh step naming it)`]);
   for (const [job, why] of Object.entries(notRun.jobs)) {
     if (!ciJobs.includes(job)) problems.push([SELF, `PARITY_NOT_RUN excuses job ${job}, which ${SUITE_WORKFLOW} no longer has — take it off the list`]);
     else if (!why.trim()) problems.push([SELF, `PARITY_NOT_RUN excuses job ${job} with no reason`]);
