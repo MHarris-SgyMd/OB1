@@ -1518,7 +1518,8 @@ services:
     profiles: ["sleep"]
     working_dir: /app
     init: true
-    # The claim workers' two read-only mounts, and the volume --dump-dir
+    # The claim workers' two read-only mounts, copied since YAML merges no
+    # lists (check 28 holds them to the workers'), and the volume --dump-dir
     # writes to, empty until OB1_SLEEP_DUMP_DIR names it.
     volumes:
       - ../db:/app/db:ro

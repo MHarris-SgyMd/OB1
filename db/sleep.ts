@@ -620,8 +620,9 @@ function refusedLine(pass: PassName, kind: StartRefusal | undefined, ends: strin
 
 /**
  * The file a consolidation pass's verdicts go to under --dump-dir (SMD-3203): one per pass key, so a new judge or
- * decide version starts a file of its own, and each sleep of a pass appends to it. The key's ":", "+" and "@" become
- * "_".
+ * decide version starts a file of its own, and each sleep of a pass appends to it. Each run of characters outside
+ * letters, digits, ".", "_" and "-" (the key's ":", "+" and "@", a model name's "/") becomes one "_", so two keys
+ * differing only there share a file; each line names its key.
  */
 export function passDumpFile(dir: string, key: string): string {
   return join(dir, `${key.replace(/[^A-Za-z0-9._-]+/g, "_")}.jsonl`);

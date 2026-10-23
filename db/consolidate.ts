@@ -159,7 +159,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { consolidatePassKey, decidePair } from "../server-portable/consolidate-decide.ts";
+import { consolidatePassKey, decidePair, type DecideNote } from "../server-portable/consolidate-decide.ts";
 import { resolveJevConfig, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeTier, probeUntil, ProviderDown, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
@@ -1630,10 +1630,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // A proposing verdict: the writer's standing outdates, or the tier's outdates the gate left.
       const proposing = verdict !== null || gated;
       // Decide version 4 (SMD-3203): the writer's link step, when it was asked, and whether it capped the pair.
-      const link = j.decide?.link as { link?: string; capped?: boolean; asked?: string } | undefined;
+      const link = j.decide?.link as DecideNote["link"];
       const cappedBy = link?.capped ? `, capped by the writer's link step (${link.link === "unparsed" ? "no link read" : `an ${link.link} link`}, SMD-3203)` : "";
       if (j.decide) {
-        const writer = j.decide.writer as { current?: string } | undefined;
+        const writer = j.decide.writer as DecideNote["writer"];
         if (gated) totals.gated++;
         else if (writer) {
           totals.writerAsked++;
