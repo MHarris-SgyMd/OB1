@@ -131,8 +131,9 @@ export async function resolveBrain(ref: string, keyArg: string | undefined, envK
     // `http://u:pw@bad host/mcp`). The userinfo is cut to the last @ first, so
     // a password holding a raw ? or / cannot end the cut early (pass 5).
     if (!parsed) throw new Error(`${how.verb}: ${JSON.stringify(ref.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@]*@/i, "$1…@").split("?")[0])} is not a valid URL.`);
-    // Host and path: two tiers on one origin (SMD-2294) differ only in the path,
-    // /mcp against /canary/mcp, and a host alone would label both alike.
+    // Host and path: two brains on one origin differ only in the path (/mcp
+    // against /canary/mcp, as the tiers did from SMD-2294 until SMD-2878), and a
+    // host alone would label both alike.
     const at = new URL(parsed.base);
     const label = at.host + (at.pathname === "/" ? "" : at.pathname);
     const key = keyArg ?? parsed.urlKey ?? envKey;

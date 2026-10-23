@@ -1418,7 +1418,7 @@ jobs:
           # check-fork-consistency.ts 28 holds the files to the same networks;
           # this holds what compose makes of them, and the full-stack job
           # runs a container on `egress` against Postgres.
-          # Every profile each file defines, read from it, so a service under
+          # Every profile compose.yaml defines, read from it, so a service under
           # a new one is in the render (review pass 1: a list written here
           # missed it).
           profiles_of() { docker compose -f "$1" config --profiles | sed 's/^/--profile=/'; }
