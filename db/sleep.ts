@@ -10,6 +10,7 @@
  *   await run({ url, follow: true, signal })         # in-process: import { run } from "./sleep.ts" (SMD-2304's engine shape)
  *   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1, for each pass)
  *   --budget MINUTES (60; 0 none)   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
+ *   --dump-dir DIR (none)   each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump (SMD-3203)
  *   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (a pass's start checked before the first quiet included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start earlier, which is retried — "Refusals" below) · 130 a signal before one sleep ended, or a second signal (at once)
  *
  * ── Quiet ───────────────────────────────────────────────────────────────────
@@ -252,7 +253,9 @@
  */
 
 import type { SQL } from "bun";
+import { accessSync, constants, statSync } from "node:fs";
 import { hostname } from "node:os";
+import { join } from "node:path";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractionKey, windowingFor } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
@@ -266,8 +269,8 @@ import { startRefusalRemedy } from "./config.mjs";
 import { commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 
-const FLAGS = { url: "one", quiet: "one", poll: "one", workers: "one", budget: "one", "statement-timeout": "one", "work-mem": "one", "maintenance-work-mem": "one", follow: "none", "dry-run": "none" } as const;
-const HINTS = { url: "<postgres://…>", quiet: "<SECONDS>", poll: "<SECONDS>", workers: "<N>", budget: "<MINUTES>", "statement-timeout": "<SECONDS>", "work-mem": "<MB>", "maintenance-work-mem": "<MB>" };
+const FLAGS = { url: "one", quiet: "one", poll: "one", workers: "one", budget: "one", "statement-timeout": "one", "work-mem": "one", "maintenance-work-mem": "one", "dump-dir": "one", follow: "none", "dry-run": "none" } as const;
+const HINTS = { url: "<postgres://…>", quiet: "<SECONDS>", poll: "<SECONDS>", workers: "<N>", budget: "<MINUTES>", "statement-timeout": "<SECONDS>", "work-mem": "<MB>", "maintenance-work-mem": "<MB>", "dump-dir": "<DIR>" };
 
 /** The quiet before a sleep, from the stable brain's logs replayed (the header): 93% of the time asleep, a median sleep of 16.6 min. */
 const DEFAULT_QUIET_S = 300;
@@ -348,6 +351,12 @@ export interface SleepOptions {
   workMem?: number;
   /** Each pass's maintenance_work_mem in MB (DEFAULT_MAINTENANCE_WORK_MEM_MB): --maintenance-work-mem. */
   maintenanceWorkMem?: number;
+  /**
+   * --dump-dir: a directory each consolidation pass appends every verdict to, one JSONL file per pass key
+   * (passDumpFile), as consolidate.ts's --dump writes them. A decide-mode pass can then be read pair by pair, its
+   * link step's answer included: a pair it caps may store nothing at all (SMD-3203).
+   */
+  dumpDir?: string;
   /** The clock in ms in place of `budget`'s minutes, when a test drives it faster. */
   budgetMs?: number;
   /** The grace after the clock in ms (BUDGET_GRACE_S), when a test drives it faster. */
@@ -609,6 +618,27 @@ function refusedLine(pass: PassName, kind: StartRefusal | undefined, ends: strin
   return `  ${pass}'s start is refused${kind ? ` (${kind})` : ""} — ${ends}: fix what it names, then start the service again${remedy}`;
 }
 
+/**
+ * The file a consolidation pass's verdicts go to under --dump-dir (SMD-3203): one per pass key, so a new judge or
+ * decide version starts a file of its own, and each sleep of a pass appends to it. The key's ":", "+" and "@" become
+ * "_".
+ */
+export function passDumpFile(dir: string, key: string): string {
+  return join(dir, `${key.replace(/[^A-Za-z0-9._-]+/g, "_")}.jsonl`);
+}
+
+/** Why --dump-dir cannot be used, or null: it must name a directory this process can write, checked before anything runs. */
+export function dumpDirProblem(dir: string): string | null {
+  if (dir.trim() === "") return "--dump-dir is blank: name a directory, or leave the flag out";
+  try {
+    if (!statSync(dir).isDirectory()) return `--dump-dir ${dir} is not a directory`;
+    accessSync(dir, constants.W_OK);
+    return null;
+  } catch {
+    return `--dump-dir ${dir} is not a directory this process can write`;
+  }
+}
+
 /** The scheduler's numbers from its options, or the refusal of the first that breaks its flag's rule. */
 function numbers(opts: SleepOptions): Numbers | string {
   const read = (flag: string, v: number | null | undefined, absent: number, rule: { min: number; max?: number }): number | string => {
@@ -650,6 +680,11 @@ export async function run(opts: SleepOptions): Promise<number> {
     err(settled);
     return 2;
   }
+  const dumpProblem = opts.dumpDir === undefined ? null : dumpDirProblem(opts.dumpDir);
+  if (dumpProblem !== null) {
+    err(`${dumpProblem}\n${flagList(FLAGS, HINTS)}`);
+    return 2;
+  }
   // A caller's, not an operator's, so thrown: 0 would hand the passes no
   // --follow at all. The rule the flags' numbers keep (SMD-3048).
   const followProblem = opts.passFollowS === undefined ? null : numberProblem("passFollowS", opts.passFollowS, { min: 1 });
@@ -686,6 +721,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const cfg = resolveEmbedConfig(env as EmbedEnv);
   // Consolidation's key is decide mode's when OB1_CONSOLIDATE_DECIDER is set (SMD-3115), the judge's otherwise.
   const JOBS: Record<PassName, string> = { extract: extractionKey(cfg.metadataModel), consolidate: consolidatePassKey(cfg) };
+  /** --dump-dir: every consolidation verdict, appended to the pass key's own file (SMD-3203). */
+  const DUMP = opts.dumpDir === undefined ? undefined : passDumpFile(opts.dumpDir, JOBS.consolidate);
 
   // The start's reads wait out a database not answering yet, as the sleep's
   // own do (reading, below): the compose service starts beside a Postgres that
@@ -703,6 +740,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const readsLog = logState === "yes";
   out(`  quiet:  ${QUIET} s with no write in thought_audit but sync's (actor_kind 'ingested') and the vector mender's (marked background)${readsLog ? " and no read logged in query_log" : " — reads are not watched"}`);
   out(`  budget: ${budgetWords({ minutes: n.budget, statementTimeoutS: n.statementTimeout, workMemMb: n.workMem, maintenanceWorkMemMb: n.maintenanceWorkMem, stops: 0 })}${BUDGET_MS ? ` — then the passes stop after the thought in hand${opts.follow === true ? ", and the next sleep waits for a live call" : ""}` : ""}`);
+  if (DUMP) out(`  dump:   each consolidation pass appends every verdict to ${DUMP}`);
   if (logState === "denied") err("  query_log: this role cannot read it — only writes wake the brain; grant it the sleep group (bun db/migrate.ts --grant <role> --groups sleep) or run as the owner for reads to wake it");
   else if (logState === "missing") err("  query_log: no such table (migration 034 not applied) — only writes wake the brain");
   else {
@@ -1050,7 +1088,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     };
     const ended = passEnded;
     // Extraction's stall floor is its own (consolidation counts no stall).
-    p.done = (name === "extract" ? runExtract({ ...common, stallFloorMs: opts.stallFloorMs }) : runConsolidate(common)).then((code) => {
+    p.done = (name === "extract" ? runExtract({ ...common, stallFloorMs: opts.stallFloorMs }) : runConsolidate(DUMP ? { ...common, dump: DUMP } : common)).then((code) => {
       p.settled = true;
       p.code = code;
       ended.abort();
@@ -1691,11 +1729,13 @@ if (import.meta.main) {
   const statementTimeout = cli.int("statement-timeout", { absent: DEFAULT_STATEMENT_TIMEOUT_S, min: 0, max: MAX_STATEMENT_TIMEOUT_S });
   const workMem = cli.int("work-mem", { absent: DEFAULT_WORK_MEM_MB, min: 1, max: MAX_MEM_MB });
   const maintenanceWorkMem = cli.int("maintenance-work-mem", { absent: DEFAULT_MAINTENANCE_WORK_MEM_MB, min: 1, max: MAX_MEM_MB });
+  const dumpDir = cli.value("dump-dir");
   const sql = openSql(url, { max: 2, session: schedulerSession({ workMem, maintenanceWorkMem }) });
   let uninstall = () => {};
   await closeThenExit(sql, async () => {
     return run({
       sql, url, quiet, poll, workers, budget, statementTimeout, workMem, maintenanceWorkMem,
+      ...(dumpDir === undefined ? {} : { dumpDir }),
       follow: cli.has("follow"),
       dryRun: cli.has("dry-run"),
       onPass: (stop) => { uninstall = stopOnSignals(stop); },

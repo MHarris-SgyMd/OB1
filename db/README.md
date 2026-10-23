@@ -3340,8 +3340,8 @@ tier gives each pair's verdict, not the judge:
   - **Measured:** SMD-3203 measured the step at κ 0.64 on mediated or not
     against two raters' agreed labels, at a median 14.3 s of the 27B a pair.
   - **Reported:** the run's summary counts its calls and the pairs it capped,
-    a dump line carries its link, and a stale proposal settled on a capped
-    pair says so.
+    a dump line carries its link, when it was asked and whether it capped the
+    pair, and a stale proposal settled on a capped pair says so.
 - **Version 3** (`@p4d3`): version 1's writer, SMD-3114's,
   two-sided with the part rule, its quotes read without markdown and asked
   only at the floor (SMD-3151). The writer quotes the words it reads, and on
@@ -3601,6 +3601,7 @@ bun sleep.ts --url …               # wait for quiet, sleep once until both poo
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
 #   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N extraction and, once it joins, N consolidation calls at once)
 #   --budget MINUTES (60; 0 none)   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
+#   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
 #   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 130 a signal before one sleep ended, or a second signal
 ```
 
@@ -3608,9 +3609,10 @@ bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; wr
 runs `sleep.ts --follow` as `sleep`, with `OB1_SLEEP_QUIET`, `OB1_SLEEP_POLL`
 and `OB1_SLEEP_WORKERS` for its three numbers, and `OB1_SLEEP_BUDGET`,
 `OB1_SLEEP_STATEMENT_TIMEOUT`, `OB1_SLEEP_WORK_MEM` and
-`OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only (SMD-2678;
-`deploy/README.md`, "The `sleep` profile instead", has the first start and
-the move from the `workers` profile):
+`OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only, and
+`OB1_SLEEP_DUMP_DIR` for `--dump-dir`, passed only when set (SMD-2678, SMD-3203;
+`deploy/README.md`, "The `sleep` profile instead", has the first start, the
+move from the `workers` profile and the dump's volume):
 
 ```bash
 podman compose -f deploy/compose.yaml --profile sleep up -d sleep
@@ -5234,9 +5236,9 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2992 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1512 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1514 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 910 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 69 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 71 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 259 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)

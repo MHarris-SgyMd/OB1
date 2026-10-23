@@ -1506,12 +1506,23 @@ services:
   # — and those wait out a database not answering yet, so a stop then waited
   # out the grace. The supervisor installs its own first, and the scheduler
   # is its child, not PID 1 (SMD-3214); the init still reaps.
+  #
+  # OB1_SLEEP_DUMP_DIR (unset, none) hands it --dump-dir: each consolidation
+  # pass appends every verdict, decide mode's link step included, to one file
+  # per pass key there (SMD-3203). Set it to /var/lib/ob1/sleep-dumps, where
+  # the `sleep-dumps` volume is mounted, and read the files with `compose cp`.
+  # They hold the brain's text: each is created 0600.
   sleep:
     image: oven/bun:1.4.3-alpine
     profiles: ["sleep"]
     working_dir: /app
     init: true
-    volumes: *claim-worker-mounts
+    # The claim workers' two read-only mounts, and the volume --dump-dir
+    # writes to, empty until OB1_SLEEP_DUMP_DIR names it.
+    volumes:
+      - ../db:/app/db:ro
+      - ../server-portable:/app/server-portable:ro
+      - sleep-dumps:/var/lib/ob1/sleep-dumps
     environment:
       <<: *server-env
       PORT: ""
@@ -1523,6 +1534,7 @@ services:
       OB1_SLEEP_STATEMENT_TIMEOUT: ${OB1_SLEEP_STATEMENT_TIMEOUT:-}
       OB1_SLEEP_WORK_MEM: ${OB1_SLEEP_WORK_MEM:-}
       OB1_SLEEP_MAINTENANCE_WORK_MEM: ${OB1_SLEEP_MAINTENANCE_WORK_MEM:-}
+      OB1_SLEEP_DUMP_DIR: ${OB1_SLEEP_DUMP_DIR:-}
     command:
       - bun
       - db/supervise.ts
@@ -1538,7 +1550,7 @@ services:
       - OB1_SLEEP_WORK_MEM
       - OB1_SLEEP_MAINTENANCE_WORK_MEM
       - --run
-      - exec bun db/sleep.ts --follow --quiet "$${OB1_SLEEP_QUIET:-300}" --poll "$${OB1_SLEEP_POLL:-5}" --workers "$${OB1_SLEEP_WORKERS:-1}" --budget "$${OB1_SLEEP_BUDGET:-60}" --statement-timeout "$${OB1_SLEEP_STATEMENT_TIMEOUT:-300}" --work-mem "$${OB1_SLEEP_WORK_MEM:-4}" --maintenance-work-mem "$${OB1_SLEEP_MAINTENANCE_WORK_MEM:-64}"
+      - exec bun db/sleep.ts --follow --quiet "$${OB1_SLEEP_QUIET:-300}" --poll "$${OB1_SLEEP_POLL:-5}" --workers "$${OB1_SLEEP_WORKERS:-1}" --budget "$${OB1_SLEEP_BUDGET:-60}" --statement-timeout "$${OB1_SLEEP_STATEMENT_TIMEOUT:-300}" --work-mem "$${OB1_SLEEP_WORK_MEM:-4}" --maintenance-work-mem "$${OB1_SLEEP_MAINTENANCE_WORK_MEM:-64}" $${OB1_SLEEP_DUMP_DIR:+--dump-dir "$${OB1_SLEEP_DUMP_DIR}"}
     extra_hosts: *host-alias
     # The workers': Postgres on `data`, the model provider on `egress`
     # (SMD-2583). On compose's default network it would wait for a database it
@@ -2397,6 +2409,7 @@ volumes:
   n8n-data:
   auth-data:
   lgtm-data:
+  sleep-dumps:
 
 configs:
   # The proxy's route table, inline: x-proxy-routes at the top of this file.
