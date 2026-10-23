@@ -145,14 +145,14 @@ USER bun
 # once its imports have loaded: a stop in that fraction of a second is still
 # the grace period's kill.
 #
-# The entry is the command: index.ts, the MCP server, unless a service names
-# another — the REST core's `command: ["api.ts"]` in deploy/compose.yaml
-# (SMD-2284): one image, one preflight, two servers. Two more run without
-# it, with `bun` as the entrypoint: ../mcp-server/index.ts (SMD-2287) and
-# the operator GUI's ../dashboard/serve.ts (SMD-2280), which read no store and
+# The entry is the command: api.ts, the REST core (SMD-2284), the one server
+# that reads the store; until SMD-2287 PR 6b it was index.ts, the MCP server
+# that read it itself. Two more run from this image without the preflight,
+# with `bun` as the entrypoint: ../mcp-server/index.ts (SMD-2287) and the
+# operator GUI's ../dashboard/serve.ts (SMD-2280), which read no store and
 # hold no key list — the REST core does both.
 ENTRYPOINT ["/bin/sh", "-c", "trap 'exit 143' TERM; trap 'exit 130' INT; bun preflight.ts & wait $! || exit $?; exec bun \"$@\"", "entry"]
-CMD ["index.ts"]
+CMD ["api.ts"]
 
 # Liveness only: a keyless GET of /health, which all three servers answer 200 with
 # no key, no store and nothing about the brain. Not a POST to the MCP

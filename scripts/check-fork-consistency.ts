@@ -84,7 +84,8 @@
  *      the legacy MCP_ACCESS_KEY — are the stack's own wiring or another
  *      target's, outside this rule) — and a server source reading one
  *      straight from the environment declares it there — is forwarded by deploy/compose.yaml's
- *      `server.environment` as `${NAME}` or `${NAME:-…}` under its own name
+ *      `api.environment` (the REST core, the one server that reads them since
+ *      SMD-2287 PR 6b retired `server`) as `${NAME}` or `${NAME:-…}` under its own name
  *      (a bare list item is refused; or excused by name in NOT_FORWARDED,
  *      with the reason) and documented in deploy/.env.example; a forwarded
  *      name the server does not declare is a typo; a documented knob no
@@ -291,9 +292,9 @@
  *      port fails until its entry goes, so the
  *      table's size, plus the two lib-reached scripts, is the class's
  *      remaining size (SMD-2126)
- *  25. a tripwire on server-portable/index.ts, its HTTP edge (mcp-edge.ts,
- *      SMD-2287), the process root it builds on (root.ts) and the REST core
- *      (api.ts, rest/*.ts), for the logic a move to server-portable/core/
+ *  25. a tripwire on the REST core (api.ts, rest/*.ts), the process root it
+ *      builds on (root.ts) and the MCP endpoint's HTTP edge (mcp-edge.ts,
+ *      SMD-2287; server-portable/index.ts until SMD-2287 PR 6b), for the logic a move to server-portable/core/
  *      leaves behind (SMD-2283, SMD-2284): each file's import and export statements
  *      name only its own TRANSPORT_FILES list's modules, whole or by the names
  *      listed and under those names (never egress.ts, embed.ts, metadata.ts
@@ -1907,7 +1908,7 @@ function checkThoughtWritesAround() {
 // that this check held as each file's first import. SMD-1799 gave the files
 // Bun's own shape instead: `process.env` for the environment and
 // `export default { port, fetch }` at the tail — the shape server-portable/index.ts
-// has, and what `bun <file>` serves — and the polyfill is gone. This holds
+// had (api.ts's too), and what `bun <file>` serves — and the polyfill is gone. This holds
 // the tree there:
 //   - no code file under the seven category directories or docs/ reaches
 //     `Deno` — any member, or the bare name (an alias, a bracket, a
@@ -3018,8 +3019,6 @@ const REQUIRED_FORM = (k: string) => new RegExp(`^\\$\\{${k}:\\?[^$}]+\\}$`);
 /** Knobs the server declares that compose.yaml must NOT forward, with the reason its own comment gives. */
 const NOT_FORWARDED: Record<string, string> = {
   OB1_OTEL_TRUST_TRACEPARENT: "trusting a caller's traceparent (SMD-1849 PR 2b) is a proxy deployment's to say, by an operator's own -f file outside deploy/, not any stack here: forwarded by the server, it would be one setting in deploy/.env from continuing every caller's trace",
-  OB1_HOOKS: "the plugins whose webhooks the REST core serves (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook",
-  OB1_HOOK_SECRETS: "the plugins' webhook secrets (SMD-2310): the REST core's alone, by compose.yaml's x-hook-env — the MCP server serves no webhook, so it is not handed the secrets",
   OB1_STORE: "the SQL store is the server's only store (FORK.md change 97; the PostgREST store retired in SMD-3152) — forwarding it would only carry a value the server refuses",
   OB1_GIT_SHA: "the commit the image was built from, baked by server-portable/Dockerfile from the build arg of the same name (compose's `build.args`) — a runtime forward would override the baked value with whatever deploy/.env names, a commit the image need not have been built from (SMD-2041)",
 };
@@ -3232,6 +3231,8 @@ type ServerEnvGap =
  * the server, its declaration and excuse; then the base file's universe;
  * stale excuses; dead switches; the fallback.
  */
+/** The service whose environment check 14 holds: the REST core, the one server that reads the knobs (until SMD-2287 PR 6b, `server`, the MCP server index.ts was). */
+const KNOB_SERVICE = "api";
 function serverEnvGapsIn(declared: string[], documented: Set<string>, files: ComposeFile[], excused: Record<string, string> = NOT_FORWARDED, fileOnly: Record<string, string> = FILE_ONLY, required: Record<string, string> = REQUIRED_KNOBS) {
   const gaps: ServerEnvGap[] = [];
   const anywhere = new Set<string>();
@@ -3249,24 +3250,24 @@ function serverEnvGapsIn(declared: string[], documented: Set<string>, files: Com
         anywhere.add(k);
         if (v === null) gaps.push(["bare-item", name, service, k, ""]);
         else if (k in required ? !REQUIRED_FORM(k).test(v) : !HOUSE_FORM(k).test(v)) gaps.push(["not-house-form", name, service, k, v]);
-        if (service === "server") {
-          if (!declared.includes(k)) gaps.push(["undeclared", name, "server", k, v]);
-          else if (k in excused) gaps.push(["excused-forwarded", name, "server", k, excused[k]]);
+        if (service === KNOB_SERVICE) {
+          if (!declared.includes(k)) gaps.push(["undeclared", name, KNOB_SERVICE, k, v]);
+          else if (k in excused) gaps.push(["excused-forwarded", name, KNOB_SERVICE, k, excused[k]]);
         }
       }
     }
     if (name === "compose.yaml") {
       baseSeen = true;
       baseDoc = doc;
-      server = forwarded.get("server") ?? null;
-      if (!server && !read.some(([kind, service]) => kind === "no-services" || (kind === "unreadable" && service === "server"))) gaps.push(["no-server", name, null, null, ""]);
+      server = forwarded.get(KNOB_SERVICE) ?? null;
+      if (!server && !read.some(([kind, service]) => kind === "no-services" || (kind === "unreadable" && service === KNOB_SERVICE))) gaps.push(["no-server", name, null, null, ""]);
     }
   }
   if (!baseSeen) gaps.push(["no-base", "compose.yaml", null, null, ""]);
   if (!server) return gaps;
   for (const k of declared.filter((n) => KNOB.test(n))) {
     if (k in excused) continue; // forwarding it is refused above
-    if (!server.has(k)) gaps.push(["unforwarded", "compose.yaml", "server", k, ""]);
+    if (!server.has(k)) gaps.push(["unforwarded", "compose.yaml", KNOB_SERVICE, k, ""]);
     if (!documented.has(k)) gaps.push(["undocumented", ".env.example", null, k, ""]);
   }
   for (const k of Object.keys(excused)) {
@@ -3287,7 +3288,7 @@ function serverEnvGapsIn(declared: string[], documented: Set<string>, files: Com
   // container (the fifth pass found only the base file's read) — and the
   // service may be defined in that file or the base.
   for (const { name, doc } of files) {
-    const env = forwardedBy.get(name)!.get("server"); // set for every file by the first loop
+    const env = forwardedBy.get(name)!.get(KNOB_SERVICE); // set for every file by the first loop
     // The captured default of a house-form value; a value the shape rule refused was reported above and draws no second report here.
     const fb = HOUSE_FORM("OB1_LLM_BASE_URL").exec(env?.get("OB1_LLM_BASE_URL") ?? "");
     if (!fb?.[1]) continue;
@@ -3296,7 +3297,7 @@ function serverEnvGapsIn(declared: string[], documented: Set<string>, files: Com
     const host = m ? m[1].toLowerCase() : null;
     const defined = (d: YamlValue | null) => Object.keys((d as Record<string, unknown> | null)?.services ?? {}).some((s) => s.toLowerCase() === host); // `?.services` on a non-mapping is undefined, which the `?? {}` answers; the cast says only that
     const ok = host && LOCAL_PROVIDER_SERVICES.includes(host) && (defined(baseDoc) || defined(doc));
-    if (!ok) gaps.push(["bad-fallback", name, "server", "OB1_LLM_BASE_URL", fb[1]]);
+    if (!ok) gaps.push(["bad-fallback", name, KNOB_SERVICE, "OB1_LLM_BASE_URL", fb[1]]);
   }
   return gaps;
 }
@@ -3305,7 +3306,7 @@ function serverEnvGapsIn(declared: string[], documented: Set<string>, files: Com
 // under node before any check reported (the seventh review pass).
 const BASE = (yaml: string) => ({ name: "compose.yaml", yaml });
 const OVERLAY = (yaml: string) => ({ name: "compose.x.yaml", yaml });
-const SRV = (env: string) => `services:\n  server:\n    environment:\n${env}`;
+const SRV = (env: string) => `services:\n  api:\n    environment:\n${env}`;
 const DECISION_PROBES: [string[], string[], { name: string; yaml: string }[], string[], Record<string, string>?, Record<string, string>?, Record<string, string>?][] = [
   // [declared, documented, files, expected "kind:name" list, excused (none unless given), file-only (none unless given), required (none unless given)]
   // A required knob is forwarded as `${X:?…}` and in no other form; another service may forward it (SMD-2287).
@@ -3331,22 +3332,22 @@ const DECISION_PROBES: [string[], string[], { name: string; yaml: string }[], st
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A:?x}\n"))], ["not-house-form:OB1_A"]],
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A}\n"))], []],
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      - OB1_A=${OB1_A:-}\n"))], []],
-  [["OB1_A"], ["OB1_A"], [BASE("services:\n  server:\n    env_file: .env\n    environment:\n      OB1_A: ${OB1_A:-}\n")], ["env-file:"]],
+  [["OB1_A"], ["OB1_A"], [BASE("services:\n  api:\n    env_file: .env\n    environment:\n      OB1_A: ${OB1_A:-}\n")], ["env-file:"]],
   [["OB1_A"], ["OB1_A"], [BASE("services:\n  migrate:\n    environment:\n      OB1_A: ${OB1_A:-}\n")], ["no-server:"]],
   // An unreadable server is check 13's one report, not a cascade of "never forwards" here.
-  [["OB1_A"], ["OB1_A"], [BASE("services:\n  server: x\n")], []],
+  [["OB1_A"], ["OB1_A"], [BASE("services:\n  api: x\n")], []],
   [["OB1_A"], ["OB1_A"], [OVERLAY(SRV("      OB1_A: ${OB1_A:-}\n"))], ["no-base:"]],
   // A knob not declared by the server is excused in NOT_FORWARDED: the entry is stale.
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n"))], ["excuse-stale:OB1_STORE"], { OB1_STORE: "why" }],
   // The fallback: the stack's own model service passes; another service, or a name the list lacks, does not.
-  [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}\n  ollama:\n    image: x\n")], []],
-  [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://postgres:11434/v1}\n  postgres:\n    image: x\n")], ["bad-fallback:OB1_LLM_BASE_URL"]],
-  [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}\n")], ["bad-fallback:OB1_LLM_BASE_URL"]],
+  [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  api:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}\n  ollama:\n    image: x\n")], []],
+  [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  api:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://postgres:11434/v1}\n  postgres:\n    image: x\n")], ["bad-fallback:OB1_LLM_BASE_URL"]],
+  [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  api:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}\n")], ["bad-fallback:OB1_LLM_BASE_URL"]],
   // An overlay's fallback is held too: a hosted one is refused; the stack's own service, defined in the overlay, passes.
-  [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}\n  ollama:\n    image: x\n"), OVERLAY(SRV("      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-https://openrouter.ai/api/v1}\n"))], ["bad-fallback:OB1_LLM_BASE_URL"]],
-  [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE(SRV("      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-}\n")), OVERLAY("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}\n  ollama:\n    image: x\n")], []],
+  [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  api:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}\n  ollama:\n    image: x\n"), OVERLAY(SRV("      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-https://openrouter.ai/api/v1}\n"))], ["bad-fallback:OB1_LLM_BASE_URL"]],
+  [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE(SRV("      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-}\n")), OVERLAY("services:\n  api:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://ollama:11434/v1}\n  ollama:\n    image: x\n")], []],
   // Names compare as DNS does: a service spelled Ollama, a fallback spelled OLLAMA.
-  [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  server:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://OLLAMA:11434/v1}\n  Ollama:\n    image: x\n")], []],
+  [["OB1_LLM_BASE_URL"], ["OB1_LLM_BASE_URL"], [BASE("services:\n  api:\n    environment:\n      OB1_LLM_BASE_URL: ${OB1_LLM_BASE_URL:-http://OLLAMA:11434/v1}\n  Ollama:\n    image: x\n")], []],
   // Overlays: the server's names are held there too; a knob forwarded only in an overlay is not a dead switch.
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n")), OVERLAY(SRV("      OB1_Z: ${OB1_Z:-}\n"))], ["undeclared:OB1_Z"]],
   [["OB1_A"], ["OB1_A", "OB1_C"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n")), OVERLAY("services:\n  migrate:\n    environment:\n      OB1_C: ${OB1_C:-}\n")], []],
@@ -3467,11 +3468,11 @@ function checkServerEnvForwarded() {
       case "not-house-form": fail(at(file, service, name), name in REQUIRED_KNOBS
         ? `\`${name}: ${detail}\` under \`${service}\` — REQUIRED_KNOBS holds it required: ${REQUIRED_KNOBS[name]}; it is forwarded as \`\${${name}:?<the fix>}\`, so compose refuses a stack without it and names the fix (SMD-2287)`
         : `\`${name}: ${detail}\` under \`${service}\` — ${forwardForm(detail, name)}; a knob is forwarded as ${HOUSE(name)}, the operator's value under its own name (SMD-1843)`); break;
-      case "undeclared": fail(at(file, "server", name), `\`server.environment\` forwards \`${name}\`, which ${SERVER_ENV_SOURCE} does not declare — \`type Env\` there is the one list of what the container's process reads, so this is a typo, a knob that died, or a knob a module reads without declaring (two were, when this rule first ran): declare it there with what it does, or drop it here (SMD-1843)`); break;
-      case "excused-forwarded": fail(at(file, "server", name), `forwards \`${name}\`, which NOT_FORWARDED in ${SELF} says the stack must not: ${detail} (SMD-1843)`); break;
-      case "no-server": fail(`deploy/${file}`, `has no \`server\` service — check 14 reads what it forwards to the server (SMD-1843)`); break;
+      case "undeclared": fail(at(file, KNOB_SERVICE, name), `\`${KNOB_SERVICE}.environment\` forwards \`${name}\`, which ${SERVER_ENV_SOURCE} does not declare — \`type Env\` there is the one list of what the container's process reads, so this is a typo, a knob that died, or a knob a module reads without declaring (two were, when this rule first ran): declare it there with what it does, or drop it here (SMD-1843)`); break;
+      case "excused-forwarded": fail(at(file, KNOB_SERVICE, name), `forwards \`${name}\`, which NOT_FORWARDED in ${SELF} says the stack must not: ${detail} (SMD-1843)`); break;
+      case "no-server": fail(`deploy/${file}`, `has no \`${KNOB_SERVICE}\` service — check 14 reads what it forwards to the REST core, the server that reads the knobs (SMD-1843, SMD-2287 PR 6b)`); break;
       case "no-base": fail(rel, `missing — check 14 reads the server's environment from it, and SETUP.md brings the stack up with it (SMD-1843)`); break;
-      case "unforwarded": fail(at(file, "server", "environment"), `the server reads \`${name}\` (${SERVER_ENV_SOURCE}, type Env) and \`server.environment\` never forwards it, so a value in deploy/.env does nothing and says nothing — add \`${name}: \${${name}:-}\` (or, when the stack must not forward it, the name and the reason to NOT_FORWARDED in ${SELF}) (SMD-1843)`); break;
+      case "unforwarded": fail(at(file, KNOB_SERVICE, "environment"), `the server reads \`${name}\` (${SERVER_ENV_SOURCE}, type Env) and \`${KNOB_SERVICE}.environment\` never forwards it, so a value in deploy/.env does nothing and says nothing — add \`${name}: \${${name}:-}\` (or, when the stack must not forward it, the name and the reason to NOT_FORWARDED in ${SELF}) (SMD-1843)`); break;
       case "undocumented": fail("deploy/.env.example", name in REQUIRED_KNOBS
         ? `does not document \`${name}\`, which compose refuses to run without (REQUIRED_KNOBS) — add its live \`${name}=\` line with what it is and how to mint it, and keep it in check 13's ENV_EXAMPLE_LIVE (SMD-2287)`
         : `does not document \`${name}\`, which the server reads and compose forwards — an operator cannot find the knob; add a \`# ${name}=\` line with what it does (SMD-1843)`); break;
@@ -3479,7 +3480,7 @@ function checkServerEnvForwarded() {
       case "file-only-forwarded": fail(`deploy/.env.example${exampleLine(name) ? `:${exampleLine(name)}` : ""}`, `\`${name}\` is forwarded to a container, which FILE_ONLY in ${SELF} says no compose service forwards: ${detail}`); break;
       case "file-only-stale": fail(SELF, `FILE_ONLY names \`${name}\`, which deploy/.env.example no longer documents — drop the entry`); break;
       case "dead-switch": fail(`deploy/.env.example${exampleLine(name) ? `:${exampleLine(name)}` : ""}`, `documents \`${name}\`, and no service's \`environment:\` in any deploy/compose*.yaml forwards it, so setting it in deploy/.env does nothing and says nothing — a mention in a comment or on a command line is not a forward (SMD-1843)`); break;
-      case "bad-fallback": fail(at(file, "server", name), `OB1_LLM_BASE_URL falls back to \`${detail}\` — the fallback is \`http://<service>:11434/v1\` for a service this file or compose.yaml defines and db/config.mjs's LOCAL_PROVIDER_SERVICES names (${LOCAL_PROVIDER_SERVICES.map((n) => `\`${n}\``).join(", ")}: what preflight calls local), the one address that means something inside the compose network; any other default belongs in db/config.mjs or the operator's deploy/.env (SMD-1843)`); break;
+      case "bad-fallback": fail(at(file, KNOB_SERVICE, name), `OB1_LLM_BASE_URL falls back to \`${detail}\` — the fallback is \`http://<service>:11434/v1\` for a service this file or compose.yaml defines and db/config.mjs's LOCAL_PROVIDER_SERVICES names (${LOCAL_PROVIDER_SERVICES.map((n) => `\`${n}\``).join(", ")}: what preflight calls local), the one address that means something inside the compose network; any other default belongs in db/config.mjs or the operator's deploy/.env (SMD-1843)`); break;
       default: throw new Error(`check 14: no message for kind ${kind}`);
     }
   }
@@ -6142,7 +6143,7 @@ function checkPostgrestClients() {
 }
 checkPostgrestClients();
 
-// ── 25: the MCP server's index.ts is transport; the logic is core/'s (SMD-2283) ──
+// ── 25: the REST core and the HTTP edge are transport; the logic is core/'s (SMD-2283) ──
 //
 // SMD-2283 moved every tool's logic — the store reads and writes, the egress
 // gate, the embedding and extraction calls, the action log — into
@@ -6151,14 +6152,16 @@ checkPostgrestClients();
 // core (SMD-2284) calls the same operations: one gateway, not two (SMD-1931).
 // The process root both entries build on — the environment, the store and the
 // agent registry — is root.ts, and the REST core (api.ts, rest/) is held as
-// index.ts is (SMD-2284), as is the endpoint's HTTP edge, mcp-edge.ts
-// (SMD-2287). This is a tripwire for the forms a move leaves
+// index.ts was (SMD-2284), as is the endpoint's HTTP edge, mcp-edge.ts
+// (SMD-2287). SMD-2287 PR 6b deleted index.ts: the REST core is the one entry
+// that reads the store, and its allowlist stays as the probes' (PROBE_ROLE).
+// This is a tripwire for the forms a move leaves
 // behind, not a proof: a text scan cannot follow a value. In each of
 // TRANSPORT_FILES:
 //   - every import and re-export statement (comments and strings blanked, so
 //     a sentence naming a file is not one) names a module the file's own list
 //     allows, whole or by the names it lists, under their own names — for
-//     index.ts the root's readers, core/reads.ts's deadlines, core/filter.ts's
+//     the probes' role the root's readers, core/reads.ts's deadlines, core/filter.ts's
 //     parsers; for root.ts the store's factory, a notice, its kind and its
 //     type, and db/config.mjs's two env helpers — never egress.ts, embed.ts,
 //     metadata.ts or a store backend; no side-effect import, no dynamic import
@@ -6184,7 +6187,8 @@ checkPostgrestClients();
 type TransportImports = ReadonlyMap<string, "*" | ReadonlySet<string>>;
 /** A file check 25 reads: what it may import, whether it holds the store's wiring, and an import its reader must find (so a broken reader is not a clean file). */
 type TransportRole = { imports: TransportImports; wiring: boolean; mustImport: string };
-const INDEX_ROLE: TransportRole = {
+/** The probes' role: index.ts's allowlist, the MCP server's entry until SMD-2287 PR 6b deleted it — a transport file's widest set of imports, for the probes to hold the reader's rules over. */
+const PROBE_ROLE: TransportRole = {
   imports: new Map<string, "*" | ReadonlySet<string>>([
     ["@modelcontextprotocol/server", "*"], ["hono", "*"],
     // The process root's readers: the environment, the store's builder and closer, the agent registry, the enabled plugins.
@@ -6236,8 +6240,7 @@ const ROOT_ROLE: TransportRole = {
   wiring: true,
   mustImport: "./store.ts",
 };
-// The REST core (SMD-2284): its entry builds the core over the root's readers
-// as index.ts does; rest/ routes, authorizes and answers, and reaches the
+// The REST core (SMD-2284): its entry builds the core over the root's readers; rest/ routes, authorizes and answers, and reaches the
 // store, the gate and the models through the core alone.
 const API_ROLE: TransportRole = {
   imports: new Map<string, "*" | ReadonlySet<string>>([
@@ -6268,7 +6271,6 @@ const REST_IMPORTS = new Map<string, "*" | ReadonlySet<string>>([
 ]);
 const REST_ROLE: TransportRole = { imports: REST_IMPORTS, wiring: false, mustImport: "../core/index.ts" };
 const TRANSPORT_FILES = new Map<string, TransportRole>([
-  ["server-portable/index.ts", INDEX_ROLE],
   ["server-portable/mcp-edge.ts", EDGE_ROLE],
   ["server-portable/root.ts", ROOT_ROLE],
   ["server-portable/api.ts", API_ROLE],
@@ -6297,7 +6299,7 @@ function wiringSpans(bare: string): Map<string, [number, number]> {
   return spans;
 }
 /** The lines of `text` (one of TRANSPORT_FILES, read as `role`) that reach past the core, each with what it reached. Pure over a text. */
-function transportLeaksIn(text: string, role: TransportRole = INDEX_ROLE): { line: number; what: string }[] {
+function transportLeaksIn(text: string, role: TransportRole = PROBE_ROLE): { line: number; what: string }[] {
   const hits: { line: number; what: string }[] = [];
   const lineAt = (i: number) => text.slice(0, i).split("\n").length;
   const code = blanked(text, false); // comments blanked: a specifier is read here
@@ -6482,7 +6484,7 @@ function checkTransportOnly() {
       for (const name of STORE_WIRING) if (!spans.has(name)) fail(file, `check 25 finds no function ${name}() — STORE_WIRING names the functions that build and close the store; rename it there with the function`);
     }
     for (const { line, what } of transportLeaksIn(text, role)) {
-      fail(`${file}:${line}`, `${what} — the MCP server's index.ts validates, calls a core operation and renders its answer (SMD-2283), over the process root in root.ts (SMD-2284); the store, the egress gate and the model calls are server-portable/core/'s, so the REST core (SMD-2284) makes the same calls: move the logic into core/, or, for a module or name that holds no logic, add it to the file's TRANSPORT_FILES list`);
+      fail(`${file}:${line}`, `${what} — a transport file validates, calls a core operation and answers (SMD-2283), over the process root in root.ts (SMD-2284); the store, the egress gate and the model calls are server-portable/core/'s, so the REST core (SMD-2284) makes the same calls: move the logic into core/, or, for a module or name that holds no logic, add it to the file's TRANSPORT_FILES list`);
     }
   }
 }
@@ -7122,7 +7124,7 @@ const OVERLAYS: Record<string, { services: Record<string, string[]>; top: string
 const COMPOSE_TOP = ["name", "services", "networks", "volumes", "configs"];
 /** compose.yaml's configs beside its route table: the forwarder's script (SMD-2583), the observability profile's dashboard and its provider (SMD-1849 PR 3c, check 37's) and its alert rules (SMD-3050, check 38's), each its content alone; where each lands is SERVICE_CONFIGS'. */
 const BASE_CONFIGS = ["forwarder", "grafana-dashboard", "grafana-dashboard-provider", "grafana-alert-rules"];
-/** The keys a compose.yaml service sets that act inside its own container: none shares another's namespaces (`pid`, `ipc`, `network_mode`, `volumes_from`), lifts its confinement (`privileged`, `devices`, `userns_mode`), runs a hook (`post_start`, which may be privileged), names it on a network (`container_name`, `hostname`), or reads a host file (`env_file`). The confinement keys are CONFINEMENT's, and `build`, `volumes` and `configs` SERVICE_BUILDS', SERVICE_MOUNTS' and SERVICE_CONFIGS', by value (a build's `network`, `privileged`, `entitlements`, `secrets` or `additional_contexts` act on the host's builder); `networks` is the networks rule's; `ports` is check 13's. A key added here is added on purpose: `x-env` is an extension compose ignores, under which compose.yaml's server anchors its block so the two servers alone add the plugin knobs no worker takes (SMD-2310). */
+/** The keys a compose.yaml service sets that act inside its own container: none shares another's namespaces (`pid`, `ipc`, `network_mode`, `volumes_from`), lifts its confinement (`privileged`, `devices`, `userns_mode`), runs a hook (`post_start`, which may be privileged), names it on a network (`container_name`, `hostname`), or reads a host file (`env_file`). The confinement keys are CONFINEMENT's, and `build`, `volumes` and `configs` SERVICE_BUILDS', SERVICE_MOUNTS' and SERVICE_CONFIGS', by value (a build's `network`, `privileged`, `entitlements`, `secrets` or `additional_contexts` act on the host's builder); `networks` is the networks rule's; `ports` is check 13's. A key added here is added on purpose: `x-env` is an extension compose ignores, under which compose.yaml's REST core anchors its block so it alone adds the plugin knobs no worker takes (SMD-2310). */
 const SERVICE_KEYS = ["build", "image", "pull_policy", "profiles", "command", "entrypoint", "working_dir", "user", "environment", "labels", "depends_on", "healthcheck", "restart", "stop_grace_period", "stop_signal", "init", "tmpfs", "shm_size", "mem_limit", "pids_limit", "ulimits", "logging", "expose", "extra_hosts", "cap_drop", "cap_add", "security_opt", "read_only", "volumes", "configs", "networks", "ports", "x-env"];
 /** Each compose.yaml service's confinement — its `cap_add`, `cap_drop`, `security_opt` and `read_only` — exactly; a service not named here sets none of them. A capability added, or a drop or no-new-privileges removed, is a change here, on purpose. The proxy's are PROXY_SERVICE's. */
 const CONFINEMENT: Record<string, Mapping> = {
@@ -7154,7 +7156,7 @@ const SERVICE_CONFIGS: Record<string, unknown[]> = {
 };
 const SERVICE_BUILDS: Record<string, unknown> = {
   migrate: { context: "..", dockerfile: "db/Dockerfile" },
-  server: { context: "..", dockerfile: "server-portable/Dockerfile", args: { OB1_GIT_SHA: "${OB1_GIT_SHA:-unknown}" } },
+  api: { context: "..", dockerfile: "server-portable/Dockerfile", args: { OB1_GIT_SHA: "${OB1_GIT_SHA:-unknown}" } },
   jev: { context: "..", dockerfile: "jev/Dockerfile" },
   "orchestration-runner": { context: "..", dockerfile: "deploy/orchestration/runner.Dockerfile" },
   auth: { context: "./auth" },
@@ -7171,8 +7173,6 @@ const SERVICE_NETWORKS: Record<string, Record<string, Mapping | string[]>> = {
   "compose.yaml": {
     postgres: ["data"],
     migrate: ["data"],
-    // Not on the mesh: nothing routes to it since SMD-2532, and /mcp is the MCP server built on the REST core's, on the mesh alone (SMD-2287); nothing in the stack calls it (n8n's brain calls and the orchestration eval's go to the REST core, SMD-2295).
-    server: { data: {}, egress: {} },
     api: { data: {}, egress: {}, mesh: { aliases: [meshName("api")] } },
     mcp: { mesh: { aliases: [meshName("mcp")] } },
     // The operator GUI (SMD-2280): a client of the REST core, reached by the proxy alone.
@@ -7895,7 +7895,7 @@ await checkPlugins();
 // so this file is the one to read.
 /** Each compose.yaml service's `restart`, exactly. */
 const RESTART_POLICIES: Record<string, string> = {
-  postgres: "unless-stopped", migrate: "no", server: "unless-stopped", api: "unless-stopped", mcp: "unless-stopped", app: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
+  postgres: "unless-stopped", migrate: "no", api: "unless-stopped", mcp: "unless-stopped", app: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
   "board-sync": "unless-stopped", extract: "unless-stopped", consolidate: "unless-stopped", sleep: "unless-stopped",
   ollama: "unless-stopped", "ollama-pull": "no", jev: "unless-stopped",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",

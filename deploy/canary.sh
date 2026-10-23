@@ -1288,9 +1288,9 @@ if [ -z "$stable_stamp" ]; then
   psql_in "$STABLE_PG" "INSERT INTO ob1_config (key, value) VALUES ('tier', 'stable') ON CONFLICT (key) DO NOTHING" >/dev/null
   say "stamped $STABLE_PG tier=stable (it had no tier stamp)"
 fi
-stable_server="$(container_of "$STABLE" server)"
+stable_server="$(container_of "$STABLE" api)"
 if [ -n "$stable_server" ] && ! "$RUNTIME" inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$stable_server" | grep -qx 'OB1_TIER=stable'; then
-  say "note: $stable_server runs without OB1_TIER=stable — set it in $ENV_FILE and recreate the servers (up -d server api), so its query log says which tier answered"
+  say "note: $stable_server runs without OB1_TIER=stable — set it in $ENV_FILE and recreate the REST core (up -d api), so its query log says which tier answered"
 fi
 
 # A standing canary's servers would serve the copy mid-restore (through the
@@ -1304,16 +1304,20 @@ fi
 # nothing stopped, and the writers stay down only for the change itself
 # (SMD-3154).
 say "canary images (commit $GIT_SHA)"
-canary_compose build server
+canary_compose build api
 [ $REFRESH = 1 ] || canary_compose build migrate
 FOR="the refresh"
 [ $REFRESH = 1 ] || FOR="the migration"
 WRITERS_STOPPED=1
-STOPPED_SERVER=""
-if [ -n "$(container_of "$CANARY" server)" ]; then
-  say "canary server stopped for $FOR"
-  canary_compose stop server >/dev/null
-  STOPPED_SERVER=1
+# The canary's `server`, the MCP server server-portable/index.ts was, retired in
+# SMD-2287 PR 6b: a canary stood up before then keeps its container, which this
+# compose.yaml no longer names, so compose would leave it running beside the
+# stack, an orphan holding connections to the canary's database. Removed by its
+# project's and service's labels, running or stopped.
+retired="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=server")"
+if [ -n "$retired" ]; then
+  say "the canary's server container, retired in SMD-2287 PR 6b, removed"
+  printf '%s\n' "$retired" | xargs "$RUNTIME" rm -f >/dev/null
 fi
 STOPPED_API=""
 if [ -n "$(container_of "$CANARY" api)" ]; then
@@ -1372,7 +1376,7 @@ if [ $REFRESH = 1 ]; then
     # tier.sh's own usage errors exit 2, which from here would read as "refused
     # before anything changed" — stable may be stamped by now, a server stopped.
     ADVISED=1
-    [ -z "$STOPPED_SERVER$STOPPED_API" ] || echo "the canary's servers are stopped (for the refresh), so a connector registered for it answers nothing until \`up\` succeeds." >&2
+    [ -z "$STOPPED_API" ] || echo "the canary's servers are stopped (for the refresh), so a connector registered for it answers nothing until \`up\` succeeds." >&2
     echo "the refresh failed (tier.sh exit $refresh_rc). Re-run up once that is fixed: the canary carries the refresh mark, so the retry resets it.$SLEEP_SAID" >&2
     exit 1
   fi
@@ -1392,9 +1396,8 @@ else
 fi
 
 say "canary servers, MCP and REST core (commit $GIT_SHA)"
-canary_compose up -d --no-deps --force-recreate server
-# The REST core runs the server's image by name: recreated after it, it runs
-# the build just made, not the one it was stopped on.
+# The REST core builds the server image the MCP server and the GUI run by name:
+# recreated, it runs the build just made, not the one it was stopped on.
 canary_compose up -d --no-deps --force-recreate api
 # And the MCP server built on it (SMD-2287), which /mcp reaches, on the same
 # image: recreated last, on the build just made and the env file's own
@@ -1426,9 +1429,9 @@ if ! ready; then
   canary_compose logs --no-color --tail 10 proxy forwarder >&2 || true
   # restart: unless-stopped would otherwise restart them without end (hundreds
   # of times a minute under podman), and a registered connector points at them.
-  canary_compose stop server api mcp app >/dev/null 2>&1 || true
+  canary_compose stop api mcp app >/dev/null 2>&1 || true
   ADVISED=1
-  echo "the canary's server, REST core, MCP server and operator GUI are stopped; fix the cause above and re-run $RERUN.$SLEEP_SAID" >&2
+  echo "the canary's REST core, MCP server and operator GUI are stopped; fix the cause above and re-run $RERUN.$SLEEP_SAID" >&2
   exit 1
 fi
 

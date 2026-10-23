@@ -119,7 +119,7 @@ Key ChatGPT guidance:
 
 ## Common Troubleshooting
 
-Start with logs and configuration. Do not tell users to rewrite `server-portable/index.ts` unless logs prove the code is the issue.
+Start with logs and configuration. Do not tell users to rewrite the brain's server code (`server-portable/`, `mcp-server/`) unless logs prove the code is the issue.
 
 Common issues:
 

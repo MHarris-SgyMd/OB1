@@ -285,8 +285,17 @@ export function env(): Env {
  * (migration 078, SMD-2284).
  */
 let serving: string | null = null;
-export function serveHere(door: string): void {
+/** Doors no server serves any more, whose live jobs the serving one reconciles as its own (serveHere's `retired`). */
+let retiredDoors: readonly string[] = [];
+/**
+ * `retired` names doors no server starts under any more, whose jobs a stopped
+ * server left live: the REST core takes in `open-brain`, the MCP server
+ * index.ts was until SMD-2287 PR 6b, so a stack upgraded with one in flight
+ * gets a terminal answer for it, not a running job no process runs.
+ */
+export function serveHere(door: string, retired: readonly string[] = []): void {
   serving = door;
+  retiredDoors = retired;
   // The store built now, not at the first keyed request, so the reconcile of
   // this server's jobs a prior run left live happens at start-up: an internal
   // REST core may wait long for its first caller, and meanwhile the other
@@ -325,7 +334,9 @@ export function db(): Promise<ThoughtStore> {
         // means it can only touch a prior process's rows — never a job this
         // process just started (which would race the reconcile's UPDATE and be
         // wrongly cut to lost).
-        const lost = await s.reconcileRunningLost();
+        let lost = await s.reconcileRunningLost();
+        // A retired door's rows, before the sink too: no process of this one can have started them.
+        for (const retired of retiredDoors) lost += (await store.jobSink(retired)?.reconcileRunningLost()) ?? 0;
         setJobSink(s);
         if (lost > 0) console.warn(`startup reconciled ${lost} job${lost === 1 ? "" : "s"} left running by a prior process: marked lost (SMD-2318)`);
       }).catch(() => { /* no durable store: the registry stays in-memory */ });

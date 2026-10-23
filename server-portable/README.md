@@ -1,8 +1,11 @@
 # server-portable
 
-A runtime-neutral build of the Open Brain MCP server. Same tools, same wire
-behaviour as upstream's Edge Function build (`server/index.ts`, in this fork
-until SMD-1800), with no dependency on Deno or on Supabase's function host.
+The Open Brain REST core (`api.ts`) and the core every brain operation runs
+in, with no dependency on Deno or on Supabase's function host. It began as a
+runtime-neutral build of the MCP server, with the same tools and wire behaviour
+as upstream's Edge Function build (`server/index.ts`, in this fork until
+SMD-1800); that MCP server, this directory's `index.ts`, retired in SMD-2287
+PR 6b, and `/mcp` is `mcp-server/`, a client of this REST core.
 
 This exists so the runtime decision in the Supabase migration could be made
 last. It was: the brain runs on Bun, as the compose stack (`SETUP.md`). The
@@ -99,11 +102,11 @@ fails the search.
 
 The **vector mender** (`core/mend.ts`, SMD-2889) is what gives a thought with
 no vector its vector, by itself — one the provider did not answer for, one the
-gate refused, or one an import wrote bare. Both servers run one (`index.ts` and
-`api.ts`), every `OB1_VECTOR_MEND_INTERVAL` seconds (60 unless set, 1 to 86400;
+gate refused, or one an import wrote bare. The REST core runs one (`api.ts`;
+`index.ts` did too until SMD-2287 PR 6b), every `OB1_VECTOR_MEND_INTERVAL` seconds (60 unless set, 1 to 86400;
 `0` or `off` for none), and a tick acts only while it holds a Postgres advisory
 lock (`ob1:vector-mender`) taken on a connection of its own, never the pool's,
-so one tick acts at a time across the two and across replicas. Each server
+so one tick acts at a time across replicas. Each server
 keeps its own cursor, holds and log; the lock only takes turns, so a brain's
 two servers mend up to 8 rows a tick each (16 an interval), and a held row is
 tried by each on its own schedule. A session lock needs a session: behind a
@@ -483,10 +486,10 @@ in one file, bump it in both in the same commit.**
 
 ### 2. Run it
 
-The brain deploys as the compose stack (SMD-2282's decision 6): this server is
-its `server` service, built from `Dockerfile`, and [`SETUP.md`](../SETUP.md)
-and [`deploy/README.md`](../deploy/README.md) bring it up. `bun index.ts`
-serves the same app on `PORT` (default 8000), as this directory's tests do.
+The brain deploys as the compose stack (SMD-2282's decision 6): the REST core
+is its `api` service, built from `Dockerfile` (the image's default command), and
+[`SETUP.md`](../SETUP.md) and [`deploy/README.md`](../deploy/README.md) bring it
+up. `bun api.ts` serves it on `PORT` (default 8000).
 
 ### 3. Provide configuration
 
@@ -830,10 +833,12 @@ MCP tools do rather than a copy of it:
   the provider settings and the one embedder, the query log, the door a write records.
 - **`render.ts`** — the words: each tool's reply rendered from that value, the text the
   tools have always said.
-- **`index.ts`** — the Hono app, authentication, and the registration that joins the
-  two: validate (the SDK runs the spec's schema), call the operation, render. It
+- **`api.ts`** and **`rest/`** — the REST core: the routes, authentication and the
+  JSON answer, which the MCP server (`mcp-server/`) renders with `render.ts`. It
   builds no store and makes no egress or embedding call: it hands root.ts's readers to
-  the core, says it serves (`serveHere()`) and closes the store at a stop.
+  the core, says it serves (`serveHere()`) and closes the store at a stop. Until
+  SMD-2287 PR 6b, `index.ts` joined the two for MCP the same way: validate (the SDK
+  ran the spec's schema), call the operation, render.
 - **`mcp-edge.ts`** — what the MCP endpoint answers around the SDK's transport:
   - the methods it serves and its CORS headers;
   - the JSON-RPC refusal envelopes, and a notification's bare 202 or 503 (SMD-2106);
@@ -845,13 +850,13 @@ MCP tools do rather than a copy of it:
 
   It is HTTP alone, with no store, no provider and no environment. It was moved out of
   `index.ts` as it was (SMD-2287 PR 2), so the MCP server as a REST client answers at
-  its edge as this one does.
+  its edge as that one did.
 - **`root.ts`** — the process root a serving entry builds on (SMD-2284): `type Env`,
   the one list of what the container's process reads; `initEnv()` and `env()`; the
   store's wiring — `db()` builds it and wires the job sink, `closeStore()` closes it at a
   stop; and the agent registry the keys are looked up through. `sse.ts` keeps an event
-  stream alive while a call runs (SMD-1864). Both are moved out of `index.ts` so the
-  REST core (SMD-2284) can build on them rather than on a copy.
+  stream alive while a call runs (SMD-1864). Both were moved out of `index.ts` so the
+  REST core (SMD-2284) could build on them rather than on a copy.
 - **`telemetry.ts`** — the one JSON line written per request, on every route of both
   servers but the keyless liveness probe (SMD-1849), from one per-request record
   each server's first middleware makes (notFound, for a path that middleware
@@ -877,7 +882,7 @@ MCP tools do rather than a copy of it:
   spans and log records batched, the AsyncLocalStorage context manager and the
   W3C propagator.
 
-`scripts/check-fork-consistency.ts` check 25 is a tripwire on `index.ts`, `mcp-edge.ts`
+`scripts/check-fork-consistency.ts` check 25 is a tripwire on `api.ts`, `rest/`, `mcp-edge.ts`
 and `root.ts` for what a move would leave behind: an import outside the file's list, a
 SQL call or `fetch`, the store named outside `root.ts`'s wiring.
 
@@ -1037,7 +1042,7 @@ stripped (`X-Forwarded-Prefix`).
   (SMD-2287). A dead keep-alive socket on the stack's internal network is held up to
   255 s.
 - **`GET /health`** is liveness with no key, for the container's healthcheck, and
-  writes no line. With a key it answers as `index.ts`'s `/health` does: the brain's
+  writes no line. With a key it answers as `index.ts`'s `/health` did: the brain's
   record on the health surface (statements capped, within `HEALTH_DEADLINE_MS`) for a
   key that may read `brain_info` and that the registry clears in time, and liveness
   for any other key, never a refusal. The MCP server as a REST client (`mcp-server/`,
@@ -1178,7 +1183,7 @@ stored in the same write").
   period and was killed (exit 137), cutting off any call in flight. Run with
   an init as PID 1 (`docker run --init`, compose's `init: true`, Fly), under
   systemd or in a terminal, Bun died at the signal at once; it now drains the
-  same way, and Ctrl-C exits 0. Only when `index.ts` is Bun's entry: a suite
+  same way, and Ctrl-C exits 0. Only when `api.ts` is Bun's entry: a suite
   that imports the module keeps its own. What the
   container's exit code says:
 
@@ -1187,7 +1192,7 @@ stored in the same write").
   | 0 | Stopped once everything in flight had ended (or nothing was) |
   | 1 | The stop cut calls off at the bound or on a second signal — or preflight refused the configuration, or the server failed; the last `SIGTERM: stopped` line tells which |
   | 143 / 130 | Stopped by SIGTERM / SIGINT during preflight, before it served (the Dockerfile's traps) |
-  | 137 | Killed: the stop outlasted the grace period, or the signal landed while `index.ts` was still loading |
+  | 137 | Killed: the stop outlasted the grace period, or the signal landed while the entry was still loading |
 
   Under podman, `podman restart` and `docker compose restart` without `-t`
   kill the server at once (exit 137, measured on podman 6.0.2) rather than

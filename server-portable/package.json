@@ -7,7 +7,7 @@
     "test:sql": "../db/with-postgres.sh bun test-store-sql.ts",
     "test:e2e": "../db/with-postgres.sh bun test-e2e-sql.ts",
     "typecheck": "tsc --noEmit",
-    "dev": "bun --watch index.ts",
+    "dev": "bun --watch api.ts",
     "preflight": "bun preflight.ts",
     "test:preflight": "../db/with-postgres.sh bun test-preflight.ts",
     "test:chunk-context": "../db/with-postgres.sh bun test-chunk-context.ts",

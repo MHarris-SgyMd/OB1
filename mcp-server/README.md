@@ -7,7 +7,7 @@ server (SMD-2287): MCP over streamable HTTP on SDK v2. Every tool is a call to t
 core through [`../rest-client`](../rest-client/README.md), carrying the caller's key
 beside this server's forward-scope key. It holds no store, no key list and no model.
 
-It is built to answer as `server-portable/index.ts` did, from the same pieces; server-portable's suites, which drive this server (below), hold it to that:
+It is built to answer as `server-portable/index.ts` did, from the same pieces; server-portable's suites, which drive this server (below), hold it to that. That file, the MCP server this one replaced, retired in SMD-2287 PR 6b; a comparison below with `index.ts` means it, and this server's own entry is `index.ts` in the table:
 - **The endpoint's HTTP edge**, `server-portable/mcp-edge.ts`:
   - the methods served and the CORS headers;
   - the JSON-RPC refusal envelopes, and a refused notification's bare 202 or 503;
@@ -86,7 +86,7 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
   - a fault (`FAILED`, or capture's `STORE_UNAVAILABLE`) in the tool's fault words.
 
   A forwarded capture is answered the whole value, whatever the key's scope, so a
-  capture-only key's capture is said as `index.ts` says it. A reply `render.ts` cannot
+  capture-only key's capture is said as `index.ts` said it. A reply `render.ts` cannot
   say is the tool's fault, coded, never the SDK's uncoded error. tools/list keeps
   `index.ts`'s order.
 
@@ -100,7 +100,7 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
   a tool, `<plugin>_<operation>`, after the core's, where whoami names it among the
   caller's operations. The SDK holds its input and answer to the manifest's schemas;
   the arguments its client sent go to its route through `rest-client`'s `callPath`, for
-  the REST core to parse once as `index.ts`'s SDK does (none is `{}`; two calls of a
+  the REST core to parse once as `index.ts`'s SDK did (none is `{}`; two calls of a
   batch under one id are refused, their arguments no one's to pick), and its answer is
   said by `render.ts`'s `renderPlugin`: a value, the refusal the forwarder slot
   carries whole, or a fault. Give this server and the REST core the same
@@ -110,7 +110,7 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
   one whose route or schema differs between the two builds answers a fault. A name
   that is no plugin stops the entry, exit 2 in words, as it stops the REST core.
 - **`/health`** is plain `ok` without a key. With a key, the first key the REST core
-  knows decides, as `index.ts` authenticates the first, and the route shows the REST
+  knows decides, as `index.ts` authenticated the first, and the route shows the REST
   core's keyed `/health`: the brain's record on the health surface, for a key that may
   read it and that the registry clears within the deadline, with this server's view of
   the public origin beside it as `oauth`. Any other key gets `ok`.
@@ -121,7 +121,7 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
   `/health`'s, is held to `HEALTH_DEADLINE_MS` (`server-portable/deadlines.ts`): a
   registry that does not answer by then is shown `ok`, the lookup aborted. On
   `/health` one deadline covers the key's standing and the record, asked together, as
-  `index.ts` starts both — for the first key presented, and the next once one is found
+  `index.ts` started both — for the first key presented, and the next once one is found
   unknown, so no key that could not decide is read. A job poll or stream whose read
   faults is a 500; a key the registry turns busy or revoked between its check and the
   call is `ok`, its line `refused` BUSY or REVOKED. A fault finding the caller or the
@@ -138,16 +138,16 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
 **Known differences from `index.ts` (found by the parity runs SMD-2287 PR 6a retired):**
 - **Writes** record the REST core's door, `open-brain-api`, with this server named as
   `act` (the forwarder key's name), where server-portable records `open-brain`.
-- **The key on a line.** `index.ts` matches a key's hash before it asks the registry;
+- **The key on a line.** `index.ts` matched a key's hash before it asked the registry;
   this server knows a key only by the REST core's whoami. So these lines name no key: a
   registry that throws (at a keyed route `error` FAILED, shown `ok`; at the endpoint a
   500 `error` with no JSON-RPC method or tool read yet), one silent past
   `HEALTH_DEADLINE_MS` or a REST core that hangs (`refused`), and a keyed HEAD (`ok`,
-  any key, a wrong one included, where `index.ts`'s reads `refused`). A revoked or busy
+  any key, a wrong one included, where `index.ts`'s read `refused`). A revoked or busy
   key is named, the REST core naming it to its forwarder — before its scope is weighed,
-  where `index.ts` shows a key out of scope nothing first (a capture key presented first
+  where `index.ts` showed a key out of scope nothing first (a capture key presented first
   at `/health` or a mirror is resolved, so registered and stamped, and waits on a busy
-  registry, where `index.ts` answers it at once); one the
+  registry, where `index.ts` answered it at once); one the
   registry turns revoked or busy between whoami and `/health`'s record is `refused`
   with no code, the REST core's keyed `/health` answering liveness. With this
   server's forwarder misconfigured, an unknown key reads `refused`, the REST core
@@ -156,28 +156,28 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
   (its whoami and its `/health`, asked together), and two for each unknown key before
   it, `refused`.
 - **A key turned during a tool call** (revoked or busy after this server's whoami) is
-  the tool's fault, FAILED, where `index.ts` refuses a key turned before the call.
+  the tool's fault, FAILED, where `index.ts` refused a key turned before the call.
 - **The stop** counts this server's tool calls; a scan's job body runs in the REST core,
-  whose own stop marks it lost, where `index.ts` counts it among its tool calls.
+  whose own stop marks it lost, where `index.ts` counted it among its tool calls.
 - **A throw's kind on a span.** What the REST core throws (its registry, its store) is
   on the REST core's span, under this server's; this server's own span has the kind of
   what it met, a 500, since an answer carries no exception.
 - **A keyed HEAD's telemetry.** Knowing no key, it sends no span or log record — its
   line and its point on the request-duration histogram kept, where the keyless probe
   has no record at all — so a monitor's probes spend none of the budget for requests
-  no key was accepted for (`telemetry.ts`), where `index.ts` names the key and sends
-  both. A wrong key's HEAD sends its point alone, its line `ok`, where `index.ts`'s is
+  no key was accepted for (`telemetry.ts`), where `index.ts` named the key and sent
+  both. A wrong key's HEAD sends its point alone, its line `ok`, where `index.ts`'s was
   `refused`, its span and record within the budget. A HEAD at `/mcp` itself is a 405, held to the
-  budget as `index.ts`'s is: point a monitor at `/health`.
+  budget as `index.ts`'s was: point a monitor at `/health`.
 
-**Every request's line** is this server's own, `door: "mcp"`, as `index.ts` writes it
+**Every request's line** is this server's own, `door: "mcp"`, as `index.ts` wrote it
 (SMD-1849): the route as a template, the JSON-RPC method and tool, the key's name once
 known, how it ended — a batch its worst call, a call that never ran `unrun`, a client
 gone `abandoned`, a stall `stalled` — and the bytes a stream wrote. The REST core's
 lines are its own process's.
 
 **Spans, metrics and log records** (SMD-1849) go where `OTEL_EXPORTER_OTLP_ENDPOINT`
-says, as `index.ts`'s do, under the service name `open-brain-mcp` (`OTEL_SERVICE_NAME`
+says, as `index.ts`'s did, under the service name `open-brain-mcp` (`OTEL_SERVICE_NAME`
 says otherwise): each request a span, each tool call an `execute_tool` span beneath it.
 Every call on the REST core carries the current span's `traceparent`, which the REST
 core continues for a request its forwarder carried — a forward-scope key in

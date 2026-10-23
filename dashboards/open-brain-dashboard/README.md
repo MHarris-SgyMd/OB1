@@ -113,9 +113,11 @@ HOSTING
   as the compose stack reaches it as `http://host.docker.internal:8000/mcp`
   (`host.containers.internal` on podman) where the VM forwards to the host's
   loopback — Docker Desktop, podman machine; on a Linux host that name is the
-  bridge gateway, which a `127.0.0.1` publish does not answer, so put the
-  dashboard on the stack's `egress` network (`open-brain_egress`) and use
-  `http://server:8000/mcp`, or set `SERVER_BIND`.
+  bridge gateway, which a `127.0.0.1` publish does not answer, so set
+  `SERVER_BIND` to that gateway's address and use it in the URL. No service on
+  the stack's own networks serves MCP to another project's container: the MCP
+  server is on the mesh alone, and `server`, which a container on `egress`
+  could reach as `http://server:8000/mcp`, retired in SMD-2287 PR 6b.
 
 The session cookie is marked `Secure` when the request's URL is HTTPS — Vercel
 and Netlify hand the app the browser's URL — and not on plain HTTP (`bun run

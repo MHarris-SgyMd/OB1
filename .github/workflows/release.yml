@@ -299,7 +299,7 @@ jobs:
           # runs the release's image, Ollama's by digest, and the proxy and the
           # forwarder keep compose.yaml's digests (the overlay names neither).
           docker compose -f compose.yaml -f compose.release.yaml --profile local-models config --format json \
-            | jq -e --arg s "$SERVER_IMAGE" --arg m "$MIGRATE_IMAGE" '(.services.server.image | startswith($s)) and .services.server.pull_policy == "missing" and (.services.api.image == .services.server.image) and (.services.mcp.image == .services.server.image) and .services.mcp.pull_policy == "missing" and (.services.app.image == .services.mcp.image) and .services.app.pull_policy == "missing" and (.services.migrate.image | startswith($m)) and (.services.ollama.image | test("^ollama/ollama@sha256:")) and (.services.ollama.image == .services["ollama-pull"].image) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.forwarder.image | test("@sha256:[0-9a-f]{64}$"))' >/dev/null
+            | jq -e --arg s "$SERVER_IMAGE" --arg m "$MIGRATE_IMAGE" '(.services.api.image | startswith($s)) and .services.api.pull_policy == "missing" and (.services.mcp.image == .services.api.image) and .services.mcp.pull_policy == "missing" and (.services.app.image == .services.mcp.image) and .services.app.pull_policy == "missing" and (.services.migrate.image | startswith($m)) and (.services.ollama.image | test("^ollama/ollama@sha256:")) and (.services.ollama.image == .services["ollama-pull"].image) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.forwarder.image | test("@sha256:[0-9a-f]{64}$"))' >/dev/null
           # SMD-2658, SMD-2685: the overlay this run ships changes nothing but
           # the images it pins and their pull policy, on any service but the
           # proxy, as fork-checks' "The proxy loads only the held route tables"
@@ -337,7 +337,7 @@ jobs:
             done
           done
           pull=(postgres proxy forwarder)
-          if [ "$PUBLISH" = true ]; then pull+=(server api mcp migrate); fi
+          if [ "$PUBLISH" = true ]; then pull+=(api mcp migrate); fi
           docker compose -f compose.yaml -f compose.release.yaml pull "${pull[@]}"
           docker compose -f compose.yaml -f compose.release.yaml up -d --pull never --wait --wait-timeout 240
         env:
@@ -354,7 +354,7 @@ jobs:
         env:
           PREFLIGHT_ROW: ${{ steps.facts.outputs.preflight_row }}
         run: |
-          LOG="$(docker compose -f compose.yaml -f compose.release.yaml logs --no-color server)"
+          LOG="$(docker compose -f compose.yaml -f compose.release.yaml logs --no-color api)"
           grep -E 'model provider +http://host\.docker\.internal:11434/v1\b.*\(local — no credential needed\)' <<<"$LOG"
           grep -E '✓ +provider endpoint +http://host\.docker\.internal:11434/v1 answers — HTTP 200 to GET /models' <<<"$LOG"
           grep -E 'embeddings egress +http://host\.docker\.internal:11434/v1 is declared local \(OB1_LLM_LOCAL\)' <<<"$LOG"
@@ -369,7 +369,7 @@ jobs:
       - name: Confirm no Supabase CLI anywhere in the stack
         working-directory: deploy
         run: |
-          if docker compose -f compose.yaml -f compose.release.yaml exec -T server sh -c 'command -v supabase' 2>/dev/null; then
+          if docker compose -f compose.yaml -f compose.release.yaml exec -T api sh -c 'command -v supabase' 2>/dev/null; then
             echo "A supabase binary is present in the server image." >&2
             exit 1
           fi
@@ -434,7 +434,7 @@ jobs:
           cp deploy/.env "$RUNNER_TEMP/ob1-release-files/.env"
           cd "$RUNNER_TEMP/ob1-release-files"
           docker compose -f compose.yaml -f compose.release.yaml up -d --pull never --wait --wait-timeout 240
-          docker compose -f compose.yaml -f compose.release.yaml logs --no-color server | grep -F 'preflight OK'
+          docker compose -f compose.yaml -f compose.release.yaml logs --no-color api | grep -F 'preflight OK'
           # The REST core too, from the release's server image (SMD-2284): before
           # the overlay pinned it, `up` here tried to build it from a context
           # this directory does not have.
