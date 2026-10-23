@@ -1997,8 +1997,10 @@ both forms take (under three arguments beside 029's, under four beside 070's)
 is then ambiguous and fails. An older server's preflight and an older CLI's
 `--status` read a brain at 109 as before 070 (they probe 070's signature):
 upgrade the server, never re-apply 070. The readers follow: the MCP tool and
-`GET /v1/proposals` take `judge_key` (printable ASCII, no space; `+` encoded
-as `%2B` in a query string), and each proposal's value carries `judgeKey`,
+`GET /v1/proposals` take `judge_key` (1–200 of a pass key's own characters,
+`server-portable/pass-key.ts`: letters, digits and `. _ : / @ + -`, so a key
+offered for pasting runs nothing in a shell; `+` encoded as `%2B` in a query
+string), and each proposal's value carries `judgeKey`,
 held to a pass key's shape; `consolidate.ts --status` counts the pending by
 pass, `consolidate.ts --list <status> --key <judge key>` lists one pass's
 proposals, and `--list relations --key` its relations (the key their facet

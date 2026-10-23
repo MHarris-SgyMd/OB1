@@ -39,8 +39,9 @@
 --      arguments beside 029's, under four beside 070's (measured) — is then
 --      ambiguous (42725, not unique) and fails, while four resolve here —
 --      070's rule, one argument on. The MCP tool and the REST core's
---      GET /v1/proposals take `judge_key`, and each proposal's value gains
---      `judgeKey`; db/consolidate.ts --list takes --key, for the proposal
+--      GET /v1/proposals take `judge_key`, and each proposal's MCP value
+--      gains `judgeKey` (the REST answer carried it); db/consolidate.ts
+--      --list takes --key, for the proposal
 --      listings and for --list relations (whose rows carry the key in their
 --      facet's payload). Preflight's lineage check reads this form and its
 --      sentinel and names this file where the listing is older, or where an

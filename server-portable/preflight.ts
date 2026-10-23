@@ -2396,11 +2396,13 @@ if (configFailed) {
                      -- four-argument form) and stands in one form — 029 or 070 re-applied by hand lands its form BESIDE 109's, and a call
                      -- both take (under three arguments beside 029's, under four beside 070's) is then ambiguous (42725, not unique) and fails.
                      (SELECT w.prosrc LIKE '%ob1:listing-flags-the-lineage-pair%' AND w.prosrc LIKE '%ob1:listing-selects-a-pass%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.list_supersession_proposals(text, int, boolean, text)')) AS lists_pass,
+                     -- …and whether a four-argument form stands at all: one without the sentinels is not 109's, but its listings work (review pass 3).
+                     to_regprocedure('public.list_supersession_proposals(text, int, boolean, text)') IS NOT NULL AS has_four,
                      (SELECT count(*)::int FROM pg_proc w JOIN pg_namespace wn ON wn.oid = w.pronamespace WHERE wn.nspname = 'public' AND w.proname = 'list_supersession_proposals') AS listing_forms
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_pass: boolean | null; listing_forms: number }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_pass: boolean | null; has_four: boolean; listing_forms: number }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
@@ -2578,7 +2580,9 @@ if (configFailed) {
               // a brain before 063 is the older-bodies arm's, and one at
               // 029..062 the ledger check's (LATEST_MIGRATION), read first.
               add("lineage", "warn",
-                  `every derived row has its lineage row, but ${bodies.lists_pass !== true
+                  `every derived row has its lineage row, but ${bodies.lists_pass !== true && bodies.has_four === true && Number(bodies.listing_forms) === 1
+                    ? "list_supersession_proposals' four-argument body is not 109's (written by hand, or re-made without its sentinels): the listings run, but nothing vouches that it flags a lineage pair or selects a pass as 109 does"
+                    : bodies.lists_pass !== true && bodies.has_four !== true
                     ? "list_supersession_proposals is from before 109 (migration 109 not yet applied, or its form dropped by hand): every listing fails — the CLI's --list, the stores and the MCP tool pass 109's fourth argument, which this form does not take"
                     : "an older list_supersession_proposals stands beside 109's (029 or 070 re-applied by hand over it): a call both forms take — fewer than three arguments beside 029's, fewer than four beside 070's — is ambiguous (not unique) and fails, so a reader passing fewer than four may error on the queue, while the fork's callers pass four"} (SMD-2313, SMD-3248). ${coverage}`,
                   ledgerRemedy("109", APPLY_109));

@@ -9,6 +9,7 @@ import { z } from "zod";
 import type { ToolName } from "../tools.ts";
 import { SAID_BY, TRUST } from "./filter.ts";
 import { META_KEYS_MAX, TICKET_META_KEYS_TEXT } from "./refusal.ts";
+import { PASS_KEY_CHARS } from "../pass-key.ts";
 
 /** One tool's self-description: the fields an MCP `registerTool` config and an OpenAPI operation both draw on. */
 export type ToolSpec = {
@@ -214,10 +215,10 @@ export const SPECS = {
       limit: z.number().int().min(1).max(200).optional().default(10),
       lineage: z.boolean().optional().describe("true: only proposals standing on a lineage pair (one side's derived_from names the other); false: only the rest; absent: every pair (migration 070)"),
       // SMD-3248: one pass's proposals — its judge_key exactly, selected before the cap (migration 109).
-      // Printable ASCII, no space (review pass 1): no pass key holds one, and a `+` a query string decoded to a space
-      // selected nothing without a word — and a newline in it reached the headline.
-      judge_key: z.string().max(200).regex(/^[\x21-\x7e]+$/, "judge_key is a pass key: printable ASCII with no space (in a URL's query, encode + as %2B)").optional()
-        .describe("Only the proposals of the pass with exactly this judge key (`consolidate:<model>@p<prompt>`, or under decide mode `consolidate:<decider>+<writer>@p<prompt>d<decide version>`; each proposal names its own, and `consolidate.ts --status` counts the pending by pass); printable ASCII, no space — in a URL's query string, encode `+` as `%2B`; absent: every pass (migration 109)"),
+      // A pass key's own characters (pass-key.ts; review passes 1 and 3): no space — a `+` a query string decoded to one
+      // selected nothing without a word — no newline, which reached the headline, and none a shell reads.
+      judge_key: z.string().regex(PASS_KEY_CHARS, "judge_key is a pass key: 1-200 letters, digits and . _ : / @ + - (in a URL's query, encode + as %2B)").optional()
+        .describe("Only the proposals of the pass with exactly this judge key (`consolidate:<model>@p<prompt>`, or under decide mode `consolidate:<decider>+<writer>@p<prompt>d<decide version>`; each proposal names its own, and `consolidate.ts --status` counts the pending by pass); 1–200 letters, digits and `. _ : / @ + -` — in a URL's query string, encode `+` as `%2B`; absent: every pass (migration 109)"),
     },
   },
   thought_stats: {

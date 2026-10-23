@@ -26,6 +26,7 @@ import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
 import { parseListCursor } from "./core/list-cursor.ts";
+import { JUDGE_KEY, judgeKeyText } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
@@ -61,17 +62,6 @@ const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
 const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest)$/;
 const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto)$|Id$/;
-/**
- * A consolidation pass's key (SMD-3248), as consolidate.ts and
- * consolidate-decide.ts build it: `consolidate:<model>@p<prompt>`, or under
- * decide mode `consolidate:<decider>+<writer>@p<prompt>d<decide version>` — a
- * model name in Ollama's, Hugging Face's and Cloudflare's characters
- * (letters, digits, `.`, `_`, `:`, `/`, `@`, `-`; `@cf/meta/…` since review
- * pass 2), no space, 200 characters at most — the input's own bound. Held to
- * that shape, it carries no sentence; a key of any other shape (a raw
- * recording's, a model named with `+`) reads null, its text in the reply's.
- */
-const JUDGE_KEY = /^consolidate:[A-Za-z0-9._:/@-]{1,120}(?:\+[A-Za-z0-9._:/@-]{1,120})?@p\d{1,4}(?:d\d{1,4})?$/;
 
 /**
  * The rule at the chokepoint (review pass 6): every string a picker hands over
@@ -821,7 +811,7 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
 export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply {
   return render(o, ({ status, lineage, judgeKey, proposals: data }) => {
     // SMD-3248: the pass selected (109) is said with the rest of the selection.
-    const onLineage = (lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "") + (judgeKey === undefined ? "" : ` judged by ${snipText(judgeKey, 260)}`);
+    const onLineage = (lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "") + (judgeKey === undefined ? "" : ` judged by ${judgeKeyText(judgeKey, snipText)}`);
     if (!data.length) {
       // A lineage pair is never proposed since 066, so an empty lineage
       // selection is not the pass's to fill (maintainer read, third pass).
@@ -892,8 +882,9 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
         : "";
       return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${flags.length ? "  WRITER" : ""}${reason ? `\n   Reason: ${reason}` : ""}${lineageLine}${writerLine}` +
         side("newer", p.newer) + side("older", p.older) +
-        // The key through the one cleaner (review pass 2): any key a recorder wrote — a newline in it forged an `ID:` line.
-        `\n   proposal ${p.id} — judged by ${snipText(p.judgeKey, 260)} on ${day(p.judgedAt)}\n${review}`;
+        // The key through the one cleaner (review pass 2: a newline in it forged an `ID:` line), quoted when no selection
+        // could take it (pass 3: spaces let it pass for the line's own words).
+        `\n   proposal ${p.id} — judged by ${judgeKeyText(p.judgeKey, snipText)} on ${day(p.judgedAt)}\n${review}`;
     });
     const unread = data.some((p) => !p.older.writer || !p.newer.writer) ? ` ${WRITERS_UNREAD}` : "";
     return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.${unread}\n\n${results.join("\n\n")}`;

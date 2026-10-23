@@ -2410,8 +2410,9 @@ else {
   for (const sentinel of ["ob1:listing-selects-a-pass", "ob1:listing-flags-the-lineage-pair"]) {
     await claims.unsafe(String(def).split(sentinel).join("ob1:not-the-sentinel"));
     const unmarked = await run(SQL_ENV);
-    assert(unmarked.code === 0 && /!  lineage\s+every derived row has its lineage row, but list_supersession_proposals is from before 109/.test(unmarked.out),
-           `a four-argument body without ${sentinel} reads as from before 109 (${lpLine(unmarked.out).slice(0, 160)})`);
+    assert(unmarked.code === 0 && /!  lineage\s+every derived row has its lineage row, but list_supersession_proposals' four-argument body is not 109's \(written by hand, or re-made without its sentinels\): the listings run, but nothing vouches that it flags a lineage pair or selects a pass as 109 does/.test(unmarked.out)
+             && /Apply db\/migrations\/109_listing_selects_a_pass\.sql\./.test(fix(unmarked.out, "lineage")),
+           `a four-argument body without ${sentinel} is named as not 109's — its listings run — with 109 the remedy (review pass 3: it had said every listing fails) (${lpLine(unmarked.out).slice(0, 160)})`);
     await claims.unsafe(String(def));
   }
   const settled = await run(SQL_ENV);

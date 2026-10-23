@@ -6362,8 +6362,9 @@ if (want("16")) {
   const keyAlone = await consolidate("--status", "--key", "consolidate:stub@p1");
   const keyLong = await consolidate("--list", "--key", `consolidate:${"m".repeat(200)}@p1`);
   const keySpace = await consolidate("--list", "--key", "consolidate:h2o-lightning-4b qwen3.8:27b@p4d3");
+  const keyShell = await consolidate("--list", "--key", "consolidate:m@p1$(id)");
   assert(keyAlone.code === 2 && /--key goes with --list/.test(keyAlone.out) && keyLong.code === 2 && /--key takes a judge key of 1 to 200 characters/.test(keyLong.out)
-      && keySpace.code === 2 && /--key takes a judge key of printable ASCII with no space/.test(keySpace.out),
+      && keySpace.code === 2 && /--key takes a judge key of letters, digits and \. _ : \/ @ \+ -/.test(keySpace.out) && keyShell.code === 2 && /--key takes a judge key of letters/.test(keyShell.out),
     `--key without --list, one past 200 characters, and one with a space (review pass 1: it selected nothing without a word) are refused (${keyAlone.out.trim().slice(0, 60)} | ${keyLong.out.trim().slice(0, 60)} | ${keySpace.out.trim().slice(0, 60)})`);
 
   // The judge's own model (SMD-1901): unset, the key and the model line name
@@ -6507,12 +6508,18 @@ if (want("16")) {
   const rejectedRaw = (await sql`SELECT record_supersession_proposal(${rawA}::uuid, ${rawC}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:zz-third@p1', NULL) AS id`)[0].id as string;
   await sql`SELECT review_supersession_proposal(${rejectedRaw}::uuid, 'reject', 'raw', NULL, NULL)`;
   await sql`SELECT record_supersession_proposal(${rawB}::uuid, ${rawC}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:a key with spaces@p1', NULL)`;
+  // Review pass 3: a key a shell reads is no key --key takes (one offered unmarked ran `$(…)` when pasted), and a key
+  // with spaces is quoted, so it cannot pass for the line's own words; past ten passes the rest are counted.
+  await sql`SELECT record_supersession_proposal(${rawC}::uuid, ${rawA}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:m@p1$(id)', NULL)`;
+  const extra = await Promise.all([1, 2, 3, 4, 5, 6, 7, 8].map((i) => rawThought(`[16] a raw pass's side ${i}`)));
+  for (const [i, t] of extra.entries()) await sql`SELECT record_supersession_proposal(${rawA}::uuid, ${t}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, ${`consolidate:zz-k${i}@p1`}, NULL)`;
   const byPass = await consolidate("--status");
   const byLine = byPass.out.split("\n").find((l) => /pending by pass/.test(l)) ?? "";
-  assert(byPass.code === 0 && byLine.includes(`pending by pass: 2 judged by ${passKey}, 1 judged by consolidate:a key with spaces@p1 (not a key --key takes; listed by --list alone), 1 judged by consolidate:zz-second@p1 — --list --key <key> lists one pass's`)
-      && !byLine.includes("zz-third"),
-    `--status counts the pending by pass, most first, a rejected row's pass not among them and a key --key cannot take said so (${byLine.trim().slice(0, 200)})`);
+  assert(byPass.code === 0 && byLine.startsWith(`  pending by pass: 2 judged by ${passKey}, 1 judged by "consolidate:a key with spaces@p1" (not a key --key takes; listed by --list alone), 1 judged by "consolidate:m@p1$(id)" (not a key --key takes; listed by --list alone), 1 judged by consolidate:zz-k0@p1,`)
+      && byLine.endsWith(`, and 2 more pass(es) with 2 — --list --key <key> lists one pass's`) && (byLine.match(/ judged by /g) ?? []).length === 10 && !byLine.includes("zz-third"),
+    `--status counts the pending by pass, most first, ten at most with the rest counted, a rejected row's pass not among them, a key --key cannot take quoted when it has spaces and said so (${byLine.trim().slice(0, 200)})`);
   await sql`DELETE FROM thoughts WHERE id IN (${rawA}::uuid, ${rawB}::uuid, ${rawC}::uuid)`;
+  for (const t of extra) await sql`DELETE FROM thoughts WHERE id = ${t}::uuid`;
   // The capped page's note, every case (review pass 2: a capped --list all --key said to decide and list again, which
   // never drains an all-status page; no suite reached a cap under --key).
   assert(capNote("pending", false) === "--status counts them all" && capNote(undefined, false) === "--status counts them all"

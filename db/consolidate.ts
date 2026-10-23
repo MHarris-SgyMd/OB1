@@ -170,6 +170,7 @@ import {
 } from "../server-portable/consolidate.ts";
 import { actorPayload, isoDay, normaliseProposal, withWriters, WRITERS_MISSING, type ProposalSide, type ProposalWriter } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
+import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
@@ -205,8 +206,6 @@ export function capNote(status: string | undefined, keyed: boolean): string {
   return status === "pending" ? "decide these and list again for the rest; --status counts each pass's pending" : "the rest are not listed (SMD-3249 pages)";
 }
 
-/** Whether a judge key is one --key takes: the tool's bounds, 1–200 characters of printable ASCII with no space (SMD-3248). */
-export const selectableKey = (key: string): boolean => key.length >= 1 && key.length <= 200 && /^[\x21-\x7e]+$/.test(key);
 
 /**
  * The longest --stale: stale_entities is given `make_interval(days => n)`
@@ -382,12 +381,13 @@ export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "key" | "a
   const { list, accept, reject, direction, note } = { list: opts.list ?? undefined, accept: opts.accept ?? undefined, reject: opts.reject ?? undefined, direction: opts.direction ?? undefined, note: opts.note ?? undefined };
   if (list !== undefined && !LIST_STATUSES.includes(list)) return "--list takes pending, accepted, rejected, stale, lineage, all or relations (or nothing, for pending).";
   // SMD-3248: read only by a listing — beside anything else it would be dropped without a word (SMD-2015's kind). The
-  // tool's bounds (1–200 characters, printable ASCII, no space), so the two doors take the same keys.
+  // tool's bounds (pass-key.ts's PASS_KEY_CHARS), so the two doors take the same keys.
   const key = opts.key ?? undefined;
   if (key !== undefined && list === undefined) return "--key goes with --list: it lists one pass's proposals or relations alone, by its judge key.";
   if (key !== undefined && (key.length < 1 || key.length > 200)) return "--key takes a judge key of 1 to 200 characters, as each listed row names it (judged by consolidate:…).";
-  // No pass key holds a space or a control character (review pass 1): one there is a typo that would select nothing, said instead.
-  if (key !== undefined && !selectableKey(key)) return "--key takes a judge key of printable ASCII with no space, as each listed row names it (judged by consolidate:…).";
+  // A pass key's own characters (pass-key.ts; review passes 1 and 3): one outside them is a typo that would select
+  // nothing, or a key no selection takes, said instead.
+  if (key !== undefined && !selectableKey(key)) return "--key takes a judge key of letters, digits and . _ : / @ + -, as each listed row names it (judged by consolidate:…).";
   for (const [name, v] of [["accept", accept], ["reject", reject]] as const) {
     if (v !== undefined && !UUID_RE.test(v)) return `--${name} needs a proposal id (a UUID from --list or the list_supersession_proposals tool).`;
   }
@@ -405,7 +405,7 @@ export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "key" | "a
   if (opts.force === true && !accept) return "--force goes with --accept: it accepts a proposal whose thought was edited after it was judged, one gone stale, one standing on a lineage pair (070), or one flagged WRITER (094).";
   // The pass's thought cap: beside --list it would be dropped without a word (SMD-2015's kind) — the
   // listing prints up to 50 of a status and --status counts them all (adversarial re-run, third review pass).
-  if (opts.limit != null && list !== undefined) return "--limit is the pass's thought cap and goes with a run; --list prints up to 50 of a status (--status counts them all).";
+  if (opts.limit != null && list !== undefined) return "--limit is the pass's thought cap and goes with a run; --list prints up to 50 of a status (--status counts each status, and the pending by pass).";
   // Read only by the decision: beside anything else it would be dropped without a word (SMD-2015's kind).
   if (note !== undefined && !accept && !reject) return "--note goes with --accept or --reject: it is recorded with the decision.";
   // 067: the marker is the pass's own — a person's note beginning with it would
@@ -900,7 +900,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       out(sideLines("newer", np.newer, p.newer_created_at));
       out(sideLines("older", np.older, p.older_created_at));
       // The key through the replies' cleaner: a recorded one holding a newline starts no line of its own (review pass 2).
-      out(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${snippet(p.judge_key, 260)} on ${day(p.judged_at)}`);
+      out(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${judgeKeyText(p.judge_key, snipText)} on ${day(p.judged_at)}`);
       // 070: a lineage pair — one side derived from the other — is never
       // proposed since 066; a row standing on one is said so, with the reject
       // while the row is the reviewer's.
@@ -1104,7 +1104,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       out(`  ${i + 1}. [${r.confidence === null ? "—" : Number(r.confidence).toFixed(2)}] ${phrase[r.relation] ?? r.relation}${marks.length ? `  ${marks.join("  ")}` : ""}`);
       out(`     newer [${day(r.newer_created_at)}] ${snippet(r.newer_content)}\n        ID: ${r.newer_id}`);
       out(`     older [${day(r.older_created_at)}] ${snippet(r.older_content)}\n        ID: ${r.older_id}`);
-      out(`     relation ${r.id}  judged by ${snippet(r.judge_key, 260)} on ${day(r.created_at)}\n`);
+      out(`     relation ${r.id}  judged by ${judgeKeyText(r.judge_key, snipText)} on ${day(r.created_at)}\n`);
     });
     return rows.length;
   }
@@ -1159,9 +1159,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const byPass = (await sql`
       SELECT judge_key, count(*)::int AS n FROM supersession_proposals WHERE status = 'pending' GROUP BY judge_key ORDER BY n DESC, judge_key`) as { judge_key: string; n: number }[];
     out(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${stale.total ? `, ${staleClause(stale)}` : ""}${q.lineage ? `, ${lineageClause(q.lineage, q.has_109)}` : ""} — --list shows them; --accept / --reject decides one`);
-    // A key is anyone's to record (029's door takes any non-empty text): quoted through the replies' cleaner, and one
-    // --key cannot take — a space, past 200 — said so, unfiltered --list its only listing (review pass 2).
-    if (byPass.length) out(`  pending by pass: ${byPass.map((b) => `${b.n} judged by ${snippet(b.judge_key, 260)}${selectableKey(b.judge_key) ? "" : " (not a key --key takes; listed by --list alone)"}`).join(", ")} — --list --key <key> lists one pass's`);
+    // A key is anyone's to record (029's door takes any non-empty text): one --key cannot take is quoted and said so,
+    // unfiltered --list its only listing (review passes 2 and 3); ten passes at most, the rest counted.
+    const shown = byPass.slice(0, 10), rest = byPass.slice(10);
+    if (byPass.length) out(`  pending by pass: ${shown.map((b) => `${b.n} judged by ${judgeKeyText(b.judge_key, snipText)}${selectableKey(b.judge_key) ? "" : " (not a key --key takes; listed by --list alone)"}`).join(", ")}${rest.length ? `, and ${rest.length} more pass(es) with ${rest.reduce((a, b) => a + b.n, 0)}` : ""} — --list --key <key> lists one pass's`);
     // 084 (SMD-1873 PR 2): the relations the pass judged, standing.
     if (await has084()) {
       const [r] = (await sql`
