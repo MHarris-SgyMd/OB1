@@ -50,6 +50,13 @@ export type Env = {
    */
   OB1_VECTOR_MEND_INTERVAL?: string;
   /**
+   * Seconds between re-probes of a local embedding provider that does not
+   * answer (provider-health.ts, SMD-2890): whole seconds from 1 to 3600, `0`
+   * or `off` for the start's probe alone; 15 unless set, and a value that does not read is the
+   * default, said. Read once, at start-up, by index.ts and api.ts.
+   */
+  OB1_PROVIDER_REPROBE_INTERVAL?: string;
+  /**
    * `1` continues a caller's W3C `traceparent` (telemetry.ts, SMD-1849 PR 2b),
    * for a deployment whose proxy sets it; unset, a request starts its own
    * trace and links the caller's. Read per request from the process's
