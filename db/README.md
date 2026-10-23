@@ -4587,6 +4587,31 @@ bun ingest-records.ts --url postgres://… --source items --items items.jsonl --
 bun reembed.ts --url postgres://…                                                                              # the vectors
 ```
 
+The JavaScript shape is the four export importers' (SMD-2493):
+`recipes/grok-export-import`, `instagram-import`, `journals-blogger-import`
+and `x-twitter-import` each keep their parser and print items, with no
+database client and no embedding call. Each names an item by the export's own
+id where it has one (a conversation, an Atom `<id>`, an inbox folder's thread
+id), cleaned and trimmed, else a hash of the record. Where it groups many
+records into one thought (tweets, comments, captions) the group is a calendar
+day (`tweets:2019-03-05`), so a later export that adds or drops one record
+changes only that day's row, in place: a group of a fixed size shifted at
+every record added or dropped before it, and every shifted group landed as a
+new row beside the old. A thought's text holds at most 100,000 characters
+and a short header, since a search hit returns its thought whole and a
+re-embed sends all of its windows: a longer conversation (or day) continues
+in parts packed in order (`dm:123#2`; an id's own `#` is escaped), so one
+that grows only extends its last part. One that shrinks by a part leaves its
+old last part's row behind, its messages in two thoughts: an emitter cannot
+retire a row, since it does not know which ones the brain holds. Since one bad
+line refuses the whole file, each
+emitter drops what a line must not hold: a NUL and a lone surrogate from the
+text, and a date this pipeline would refuse (it leaves `createdAt` out, as it
+does where the export gives no date, rather than writing now, and counts the
+dates it left out on stderr). It emits an identity it meets twice once, and
+skips, naming it, a record its parser cannot read. `test-live.ts`
+[19b] runs each on a fixture export through this pipeline and `reembed.ts`.
+
 `bun ingest-items.ts --self-check` runs the rules over a good line and every
 malformed kind, naming the line and field each is refused on; `test-live.ts`
 [19] drives the flag end to end through the CLI against a real server.
@@ -5262,8 +5287,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 2992 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1531 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 910 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1611 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 990 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 259 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
@@ -5459,7 +5484,10 @@ term the send is refused, the refusal names the rule, and the digest is printed
 to stdout instead — nothing reaches Telegram; `--output stdout|file` never leaves
 the box (the synthesis still does). The sensitivity boundary is fail-closed: with
 no `sensitivity_tier` column the run refuses rather than page every row, unless
-`--no-sensitivity-filter` says so. `test-weekly-digest.ts` holds the ranking, the
+`--no-sensitivity-filter` says so. A row is left out by the column or by its
+`metadata.sensitivity_tier`, whichever says `restricted` (or `personal` without
+`--include-personal`): the import recipes set the facet and leave the column
+at its default (SMD-2493). `test-weekly-digest.ts` holds the ranking, the
 chunking and the gate over a digest subject (the drop-the-gate mutant and each
 allow term); `test-live.ts` [36] the sink end to end — a stub that records zero
 Telegram sends under deny and one when allowed.
