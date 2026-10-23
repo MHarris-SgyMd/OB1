@@ -17,7 +17,7 @@ import { SqlStore } from "./store-sql.ts";
 import { createHash } from "node:crypto";
 import { applyMigrations, createAssert, ISO_RE, plantLegacyRow, resetSchema } from "../db/test-support.ts";
 import { MATCH_THOUGHTS_SIGNATURE } from "../db/config.mjs";
-import { createStore, normaliseTicketStatusInputs } from "./store.ts";
+import { createStore, ListCursorRefused, normaliseTicketStatusInputs } from "./store.ts";
 import { SQL } from "bun";
 
 const URL_ = process.env.DATABASE_URL;
@@ -386,6 +386,15 @@ console.log("\n[4b] listThoughts' keyset (SMD-2995): every row once, in each sor
   }
   const inWindow = (await raw`SELECT id::text FROM thoughts WHERE metadata @> ${{ type: T }}::jsonb AND created_at >= now() - interval '2 days' ORDER BY created_at DESC NULLS FIRST, id DESC`).map((r: { id: string }) => r.id);
   assert(windowed.join() === inWindow.join() && windowed.length < recent.seen.length, `a filter with the cursor: the days window walked page by page is the window's rows in order (${windowed.length} of ${recent.seen.length})`);
+
+  // A cursor time of the right shape Postgres cannot read is refused; a cast error of anything else beside a good
+  // cursor is its own (review pass 3: the store, not the schema's bound on `days`, holds the line). Below the schema,
+  // a `days` of a million puts the window's start before timestamptz's range.
+  const fails = (p: Promise<unknown>) => p.then(() => "no error", (e: unknown) => (e instanceof ListCursorRefused ? "refused" : "other"));
+  const good = { at: "2026-10-02 08:00:00.0009+00", id: micro[0].id };
+  const unreadable = await fails(store.listThoughts({ limit: 1, type: T, after: { at: "2026-10-02 08:00:00+16", id: micro[0].id } }));
+  const castBeside = await fails(store.listThoughts({ limit: 1, type: T, days: 1_000_000, after: good }));
+  assert(unreadable === "refused" && castBeside === "other", `a cursor time Postgres cannot read is ListCursorRefused; days past timestamptz's range beside a good cursor is not (${unreadable}, ${castBeside})`);
 
   await raw`DELETE FROM thoughts WHERE metadata @> ${{ type: T }}::jsonb`;
   await raw.close();

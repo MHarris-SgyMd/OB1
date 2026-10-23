@@ -226,9 +226,16 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
       assert(mm.isError && mm.text === said.content[0].text, `…and MCP words that refusal as render.ts does (${mm.text.slice(0, 70)})`);
     }
   }
+  // An empty or blank `after` is no cursor, refused as list_thought_ids refuses one, never the first page again: a client
+  // templating `after=${cursor ?? ""}` would read page one forever (review pass 3).
+  for (const blank of ["", "  "]) {
+    const rr = await rest("GET", `/v1/thoughts?limit=1&after=${encodeURIComponent(blank)}`);
+    const mm = await mcp("list_thoughts", { limit: 1, after: blank });
+    assert(rr.status === 400 && rr.body.code === "REFUSED_CURSOR" && rr.body.reason === "shape" && mm.isError, `list_thoughts after=${JSON.stringify(blank)}: refused through both doors, not the first page (${rr.status} ${String(rr.body.code)}, ${mm.isError})`);
+  }
   // A limit is a whole number of thoughts, 1 to 1000: 0, -1, 1.5 and 1001 are the schema's refusal, not an empty page (review pass 1).
-  // A `days` past a thousand years is the schema's refusal, never taken for the cursor's beside it (review pass 2: a large
-  // one put `since` past timestamptz's range, and with a cursor set the cast error read as REFUSED_CURSOR).
+  // A `days` past a thousand years is the schema's refusal (review pass 2: a larger one put `since` past timestamptz's
+  // range, a 500); below the schema, the store keeps such a cast error from reading as the cursor's (test-store-sql [4b]).
   {
     const first = await rest("GET", "/v1/thoughts?limit=1");
     const r = await rest("GET", `/v1/thoughts?limit=1&days=1000000&after=${encodeURIComponent(String(first.body.cursor))}`);

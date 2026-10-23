@@ -22,7 +22,7 @@ export type Refusal =
   | { code: "REFUSED_FILTER"; retryable: false; message: string }     // a metadata filter (or said_by/actor) the boundary refuses
   | { code: "REFUSED_EGRESS"; retryable: false; rule: string; reason: string; actor: string } // the query may not leave for its embedding (SMD-1903)
   | { code: "REFUSED_SINCE"; retryable: false; value: string }        // a `since` that is neither a time nor a cursor
-  | { code: "REFUSED_CURSOR"; retryable: false; value: string; reason?: "shape" | "sort"; sort?: "newest" | "oldest" } // list_thought_ids' `after` is not a thought id; list_thoughts' is no cursor of its (shape) or was made under the other `sort` (sort: the one it was made under)
+  | { code: "REFUSED_CURSOR"; retryable: false; value: string; reason?: "shape" | "sort"; sort?: "newest" | "oldest" } // list_thought_ids' `after` is not a thought id; list_thoughts' is none of this tool's cursors (shape) or was made under the other `sort` (sort: the one it was made under)
   // The compat search found nothing while its query's embedding provider did not answer (SMD-2891): what was
   // matched without a vector (the query's literals, or with none the query as one text) and why nothing came of it.
   | { code: "EMBEDDING_PROVIDER_UNAVAILABLE"; retryable: true; reason: string; detail: string; base: string; matched: "literals" | "text" | "none"; needles: string[]; commonNeedles: string[] }

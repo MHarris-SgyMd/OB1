@@ -452,7 +452,9 @@ export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, typ
   // cursor of this tool's, or one made under the other sort, is refused, the
   // sort it was made under named so the caller can pass it.
   let from: ListPosition | null = null;
-  if (after !== undefined && after.trim() !== "") {
+  // An empty or blank `after` is no cursor, refused (review pass 3): taken for the first page, a client sending
+  // `after=` at the end of a walk read page one again, forever.
+  if (after !== undefined) {
     const c = parseListCursor(after);
     if (!c) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after, reason: "shape" });
     if (c.sort !== sort) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after, reason: "sort", sort: c.sort });

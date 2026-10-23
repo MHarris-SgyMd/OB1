@@ -478,10 +478,12 @@ console.log("\n[5] list_thoughts filters");
   const firstOldest = await call("list_thoughts", { limit: 1, sort: "oldest" });
   const oldestCursor = /Cursor: (\S+)/.exec(firstOldest)?.[1] ?? "";
   const refusedSort = await call("list_thoughts", { limit: 1, after: oldestCursor }).catch(refusal);
+  assert(/^Refused: that cursor was made with `sort: oldest`/.test(refusedSort), `an oldest-first cursor with the default sort is refused, naming the sort it needs (${refusedSort.slice(0, 70)})`);
+  // An oldest-first page says its order, not "oldest" — a page deep in the walk is not the oldest (review pass 3).
+  assert(/^1 thought\(s\), oldest first:/.test(firstOldest), `an oldest-first page is headed by its order (${firstOldest.split("\n")[0]})`);
   // The cursor beside the text, in structuredContent, the one the text names — through the door this run tests (review pass 2).
   const typed = await result("list_thoughts", { limit: 1, sort: "oldest" });
   assert(typeof typed.sc?.cursor === "string" && typed.sc.cursor === /Cursor: (\S+)/.exec(typed.text)?.[1], `structuredContent carries the cursor the text names (${typeof typed.sc?.cursor})`);
-  assert(/^Refused: that cursor was made with `sort: oldest`/.test(refusedSort), `an oldest-first cursor with the default sort is refused, naming the sort it needs (${refusedSort.slice(0, 70)})`);
 }
 
 console.log("\n[6] thought_stats aggregates the whole corpus");

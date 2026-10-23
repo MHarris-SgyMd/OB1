@@ -388,20 +388,22 @@ export class SqlStore implements ThoughtStore {
       ? after?.at === null ? [(n) => undated(after.id, n)] : [(n) => dated(after, n), (n) => undated(null, n)]
       : after === null ? [(n) => undated(null, n), (n) => dated(null, n)]
         : after.at === null ? [(n) => undated(after.id, n), (n) => dated(null, n)] : [(n) => dated(after, n)];
-    // The cursor's time read alone first: a value of the right shape Postgres cannot read is the caller's, refused.
-    // Alone, so a cast error of anything else — `days` read back as a time — is never taken for the cursor's (review pass 2).
-    if (after?.at) {
-      try {
-        await this.sql`SELECT ${after.at}::timestamptz`;
-      } catch (e) {
-        if (["22007", "22008", "22009"].includes(String((e as { errno?: unknown }).errno ?? ""))) throw new ListCursorRefused();
-        throw e;
-      }
-    }
     const rows: Record<string, unknown>[] = [];
-    for (const run of runs) {
-      if (rows.length >= want) break;
-      rows.push(...(await run(want - rows.length)));
+    try {
+      for (const run of runs) {
+        if (rows.length >= want) break;
+        rows.push(...(await run(want - rows.length)));
+      }
+    } catch (e) {
+      // A time cast that failed: the cursor's time is read alone, and if that fails too it is the caller's value of
+      // the right shape Postgres cannot read, refused. Alone, so a cast error of anything else — `days` read back as
+      // a time — is never taken for the cursor's (review pass 2), and only after a failure, so a page is one
+      // statement, not a round trip before it (review pass 3).
+      const cast = (x: unknown) => ["22007", "22008", "22009"].includes(String((x as { errno?: unknown }).errno ?? ""));
+      if (!after?.at || !cast(e)) throw e;
+      const unread = await this.sql`SELECT ${after.at}::timestamptz`.then(() => false, (p: unknown) => (cast(p) ? true : Promise.reject(p)));
+      if (unread) throw new ListCursorRefused();
+      throw e;
     }
     const shown = rows.slice(0, f.limit);
     const last = shown[shown.length - 1];
