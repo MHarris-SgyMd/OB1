@@ -10,6 +10,8 @@
 	--color-text-muted: #9a9aa0;
 	--color-primary: #6366f1;
 	--color-primary-light: #818cf8;
+	/* A button's fill: white on it is 6.3:1, where on --color-primary it is 4.47:1, under AA (review pass 1). */
+	--color-primary-strong: #4f46e5;
 	--font-sans: ui-sans-serif, system-ui, sans-serif;
 	--font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
@@ -18,6 +20,8 @@
    three lines on a phone (review pass 6: links hid behind it). */
 html {
 	scroll-padding-top: 8rem;
+	/* Native controls drawn dark: a <select>'s menu was light grey with near-white text in WebKit (review pass 1). */
+	color-scheme: dark;
 }
 
 body {
@@ -30,4 +34,17 @@ body {
 h1, h2, h3 {
 	font-weight: 600;
 	line-height: 1.2;
+}
+
+/* A form field — the sign-in page's key field and the browse and search
+   forms — and a button (SMD-2280 PR 2a). Focus shows as a ring, not a border's
+   hue alone, which was 1.07:1 against the border it replaced (review pass 1;
+   the key field took it in review pass 4). */
+@layer components {
+	.field {
+		@apply bg-bg-elevated border border-white/40 rounded-lg px-3 py-2 text-text focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-light;
+	}
+	.button {
+		@apply px-3 py-2 rounded-lg bg-primary-strong hover:bg-primary text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-light;
+	}
 }

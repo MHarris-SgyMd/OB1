@@ -4906,11 +4906,11 @@ function rejectedRemedy(at: ProviderEndpoint, keyKnob: string, baseKnob: string)
 // starts no SDK. What the start says, and how the send went, is the telemetry
 // row's.
 const telemetry = deep ? await import("./telemetry.ts") : undefined;
-const telemetrySaid: string[] = [];
+const telemetrySaid: import("./telemetry.ts").Said[] = [];
 /** The provider probes made, for the telemetry row: a flush that found nothing left is no proof none ran (the span batch may have sent them). */
 let probes = 0;
 // One export and exit: no uptime gauge, which the observability profile's silent-server rule would read as a server gone (SMD-3050).
-const telemetryStarted = telemetry ? await telemetry.startTelemetry(PREFLIGHT_SERVICE, (line) => telemetrySaid.push(line), undefined, { oneShot: true }) : false;
+const telemetryStarted = telemetry ? await telemetry.startTelemetry(PREFLIGHT_SERVICE, (line, kind) => telemetrySaid.push({ line, kind }), undefined, { oneShot: true }) : false;
 
 /**
  * A probe as a provider call's span and point, marked `ob1.probe` so a backend

@@ -4850,7 +4850,7 @@ console.log("\n[11] --deep's provider probes are each a span and a point where a
 
   // What the row says by the signals that go: spans alone; spans to a URL that is none and points that go; neither (review pass 1).
   posted.length = 0;
-  // With no batch delay the probes' spans are sent as they end, so the flush may find none left: the row still says they went (review pass 2; every cell is test-server [26]'s).
+  // With no batch delay the probes' spans are sent as they end, so the flush may find none left: the row still says they went (review pass 2; every cell is test-server [27]'s).
   const tracesOnly = await run({ ...ENV, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `${COLLECTOR}/v1/traces`, OTEL_BSP_SCHEDULE_DELAY: "0" }, "--deep");
   assert(/✓\s+telemetry\s+the provider probes' spans sent — /.test(tracesOnly.out) && posted.every((p) => p.path === "/v1/traces"),
     `a traces endpoint alone: the row says spans, not points, and only spans went (${row(tracesOnly.out, "telemetry").trim().slice(0, 160)})`);

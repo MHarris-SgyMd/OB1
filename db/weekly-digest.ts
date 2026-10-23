@@ -49,8 +49,9 @@
  *
  * ── Sensitivity, fail-closed ────────────────────────────────────────────────
  * `sensitivity_tier` is an optional TEXT column. Rows tagged `restricted`
- * (always) and `personal` (unless --include-personal) are excluded; NULL and
- * every other tier are kept. If the column is ABSENT the run REFUSES rather than
+ * (always) and `personal` (unless --include-personal) are excluded, by the
+ * column or by `metadata.sensitivity_tier` (the import recipes' facet, under a
+ * column left at its default — SMD-2493); NULL and every other tier are kept. If the column is ABSENT the run REFUSES rather than
  * page every row unfiltered — the privacy boundary the recipe promised —
  * unless --no-sensitivity-filter says, in as many words, to send everything.
  */
@@ -224,7 +225,8 @@ const FAIL_CLOSED =
 
 /**
  * The week's rows, ordered newest first and capped. `restricted` (always) and
- * `personal` (unless includePersonal) are excluded when the column exists;
+ * `personal` (unless includePersonal) are excluded when the column exists, by
+ * the column or the row's `metadata.sensitivity_tier`;
  * `importance` is selected only when the column exists (else read from
  * metadata). Returns the rows, or `{ failClosed: true }` when the sensitivity
  * column is missing and the filter was not waived.
@@ -255,7 +257,10 @@ export async function readThoughts(
   let where = "created_at >= now() - make_interval(days => $1::int)";
   if (filter && hasSensitivity) {
     const excluded = opts.includePersonal ? ["restricted"] : ["restricted", "personal"];
-    where += " AND (sensitivity_tier IS NULL OR sensitivity_tier <> ALL($2))";
+    // The tier a row's metadata carries counts as the column's does: an import
+    // through the ingestion pipeline sets the facet, and the column keeps its
+    // default 'standard' (SMD-2493).
+    where += " AND (sensitivity_tier IS NULL OR sensitivity_tier <> ALL($2)) AND (metadata->>'sensitivity_tier' IS NULL OR metadata->>'sensitivity_tier' <> ALL($2))";
     params.push(sql.array(excluded, "TEXT"));
   }
 

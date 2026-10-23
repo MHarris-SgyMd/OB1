@@ -11,19 +11,14 @@
  * and prints `RESULT <found> <chunkRows>` for the parent to parse.
  */
 
-// A module, not a script: this file imports and exports nothing, and without
-// this line tsc reads it into one global scope with every other such file —
-// eval-extraction.ts and this one each declare CASES and BASE — and refuses
-// its top-level await. Bun treats every file as a module (SMD-1932).
-export {};
+import { mcpUnderTest, servedByMcpServer } from "../server-portable/test-support.ts";
 
 const CASES = JSON.parse(process.env.OB1_EVAL_CASES ?? "[]") as {
   key: string; query: string; text: string;
 }[];
 
-const worker = (await import("../server-portable/index.ts")).default as {
-  fetch: (r: Request) => Response | Promise<Response>;
-};
+const worker = await mcpUnderTest();
+if (!servedByMcpServer()) throw new Error("the server under test is not the MCP server (mcp-server/stack.ts)");
 const server = Bun.serve({ port: 0, fetch: worker.fetch });
 const BASE = `http://localhost:${server.port ?? 0}`;
 

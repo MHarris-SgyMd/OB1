@@ -21,7 +21,7 @@ import { createCore, type Core } from "./core/index.ts";
 import { ok as coreOk, refuse as coreRefuse } from "./core/refusal.ts";
 import type { AgentOutcome } from "./agents.ts";
 import { createRestApp } from "./rest/app.ts";
-import { mcpUnderTest, servedAsNamed } from "./test-support.ts";
+import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { definePlugin, ok, operation, refuse, z, type PluginManifest } from "./plugin-sdk.ts";
 import { PLUGINS } from "../plugins/registry.ts";
 import { pluginLoginUrl } from "../db/config.mjs";
@@ -423,9 +423,9 @@ console.log("\n[6] Over REST: a path field decoded and held to the schema, a bod
 
 console.log("\n[7] The MCP server: an enabled plugin's operation is a tool for the keys whose scope reaches it");
 {
-  // index.ts, or with OB1_MCP_UNDER_TEST=client the MCP server over the REST core (SMD-2287 PR 4a).
+  // The MCP server over the REST core (SMD-2287 PR 4a).
   const worker = await mcpUnderTest();
-  assert(servedAsNamed(), `the server under test is the one OB1_MCP_UNDER_TEST names (${process.env.OB1_MCP_UNDER_TEST || "index"})`);
+  assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
   const H = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
   const rpc = async (key: string, method: string, params: Record<string, unknown>) => {
     const r = await worker.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { ...H, "x-brain-key": key }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) }));
@@ -511,8 +511,9 @@ console.log("\n[9] The MCP reply: the value as JSON text and as structured conte
 }
 
 console.log("\n[10] Each server refuses to start on a name in OB1_PLUGINS that is no plugin");
-for (const entry of ["index.ts", "api.ts"]) {
-  const p = Bun.spawnSync(["bun", "--no-env-file", entry], { cwd: import.meta.dir, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_PLUGINS: "example,nope" }, stdout: "pipe", stderr: "pipe", timeout: 20_000 });
+// The MCP server's entry (SMD-2287 PR 6a, where index.ts was; it needs its forward key to get that far) and the REST core's.
+for (const [entry, dir] of [["mcp-server/index.ts", `${import.meta.dir}/../mcp-server`], ["api.ts", import.meta.dir]]) {
+  const p = Bun.spawnSync(["bun", "--no-env-file", entry.split("/").at(-1)!], { cwd: dir, env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_PLUGINS: "example,nope", OB1_FORWARDER_KEY: "f".repeat(64) }, stdout: "pipe", stderr: "pipe", timeout: 20_000 });
   const said = p.stderr.toString() + p.stdout.toString();
   assert(p.exitCode !== 0 && p.exitCode !== null && /"nope", which is no plugin/.test(said), `${entry} exits at its start, naming the name (exit ${p.exitCode}: ${said.match(/OB1_PLUGINS[^\n]*/)?.[0] ?? said.slice(0, 120)})`);
 }

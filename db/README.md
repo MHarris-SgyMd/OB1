@@ -3379,8 +3379,8 @@ tier gives each pair's verdict, not the judge:
   - **Measured:** SMD-3203 measured the step at κ 0.64 on mediated or not
     against two raters' agreed labels, at a median 14.3 s of the 27B a pair.
   - **Reported:** the run's summary counts its calls and the pairs it capped,
-    a dump line carries its link, and a stale proposal settled on a capped
-    pair says so.
+    a dump line carries its link, when it was asked and whether it capped the
+    pair, and a stale proposal settled on a capped pair says so.
 - **Version 3** (`@p4d3`): version 1's writer, SMD-3114's,
   two-sided with the part rule, its quotes read without markdown and asked
   only at the floor (SMD-3151). The writer quotes the words it reads, and on
@@ -3648,6 +3648,7 @@ bun sleep.ts --url …               # wait for quiet, sleep once until both poo
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
 #   --quiet SECONDS (300)   --poll SECONDS (5; at most 60)   --workers N (1 for each pass: N extraction and, once it joins, N consolidation calls at once)
 #   --budget MINUTES (60; 0 none)   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
+#   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
 #   exits 0 done, or --follow stopped by one signal · 1 one sleep woken before both pools drained, or stopped on its budget, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first quiet, included), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 130 a signal before one sleep ended, or a second signal
 ```
 
@@ -3655,9 +3656,10 @@ bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; wr
 runs `sleep.ts --follow` as `sleep`, with `OB1_SLEEP_QUIET`, `OB1_SLEEP_POLL`
 and `OB1_SLEEP_WORKERS` for its three numbers, and `OB1_SLEEP_BUDGET`,
 `OB1_SLEEP_STATEMENT_TIMEOUT`, `OB1_SLEEP_WORK_MEM` and
-`OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only (SMD-2678;
-`deploy/README.md`, "The `sleep` profile instead", has the first start and
-the move from the `workers` profile):
+`OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only, and
+`OB1_SLEEP_DUMP_DIR` for `--dump-dir`, passed only when set (SMD-2678, SMD-3203;
+`deploy/README.md`, "The `sleep` profile instead", has the first start, the
+move from the `workers` profile and the dump's volume):
 
 ```bash
 podman compose -f deploy/compose.yaml --profile sleep up -d sleep
@@ -4625,6 +4627,31 @@ bun ingest-records.ts --url postgres://… --source items --items items.jsonl --
 bun reembed.ts --url postgres://…                                                                              # the vectors
 ```
 
+The JavaScript shape is the four export importers' (SMD-2493):
+`recipes/grok-export-import`, `instagram-import`, `journals-blogger-import`
+and `x-twitter-import` each keep their parser and print items, with no
+database client and no embedding call. Each names an item by the export's own
+id where it has one (a conversation, an Atom `<id>`, an inbox folder's thread
+id), cleaned and trimmed, else a hash of the record. Where it groups many
+records into one thought (tweets, comments, captions) the group is a calendar
+day (`tweets:2019-03-05`), so a later export that adds or drops one record
+changes only that day's row, in place: a group of a fixed size shifted at
+every record added or dropped before it, and every shifted group landed as a
+new row beside the old. A thought's text holds at most 100,000 characters
+and a short header, since a search hit returns its thought whole and a
+re-embed sends all of its windows: a longer conversation (or day) continues
+in parts packed in order (`dm:123#2`; an id's own `#` is escaped), so one
+that grows only extends its last part. One that shrinks by a part leaves its
+old last part's row behind, its messages in two thoughts: an emitter cannot
+retire a row, since it does not know which ones the brain holds. Since one bad
+line refuses the whole file, each
+emitter drops what a line must not hold: a NUL and a lone surrogate from the
+text, and a date this pipeline would refuse (it leaves `createdAt` out, as it
+does where the export gives no date, rather than writing now, and counts the
+dates it left out on stderr). It emits an identity it meets twice once, and
+skips, naming it, a record its parser cannot read. `test-live.ts`
+[19b] runs each on a fixture export through this pipeline and `reembed.ts`.
+
 `bun ingest-items.ts --self-check` runs the rules over a good line and every
 malformed kind, naming the line and field each is refused on; `test-live.ts`
 [19] drives the flag end to end through the CLI against a real server.
@@ -5300,9 +5327,9 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3005 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1536 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 917 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
-OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 86 assertions: the shards SHARDS lists in test-live.ts, each its own cell
+./with-postgres.sh bun test-live.ts         # 1618 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 997 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 259 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
@@ -5431,9 +5458,10 @@ the CLI and run() share. The model and width are read from `env` by
 config.mjs's own rules (`embeddingContract`), so the key, the checks and the
 vectors name one model. It resolves no worker key, so a caller's `sql` needs
 no `url` beside it. `--retire` and `--accept-failed` write, and stop under an
-aborted signal as a run does; the hard stop abandons the row in hand once its
-call returns (the embedder takes no signal; a database statement waiting on a
-lock has no bound, and a vector already sent lands).
+aborted signal as a run does; the hard stop abandons the row in hand and
+aborts its embedding call (`embed.ts`'s `embedCapture` takes the caller's
+signal, SMD-2679), so run() returns at once, as extract's does — a database
+statement waiting on a lock has no bound, and a vector already sent lands.
 
 The claim workers bootstrap their egress, identity and error handling through
 `worker-bootstrap.ts` (SMD-2303). **Egress:** one banner line, and one blanket
@@ -5497,7 +5525,10 @@ term the send is refused, the refusal names the rule, and the digest is printed
 to stdout instead — nothing reaches Telegram; `--output stdout|file` never leaves
 the box (the synthesis still does). The sensitivity boundary is fail-closed: with
 no `sensitivity_tier` column the run refuses rather than page every row, unless
-`--no-sensitivity-filter` says so. `test-weekly-digest.ts` holds the ranking, the
+`--no-sensitivity-filter` says so. A row is left out by the column or by its
+`metadata.sensitivity_tier`, whichever says `restricted` (or `personal` without
+`--include-personal`): the import recipes set the facet and leave the column
+at its default (SMD-2493). `test-weekly-digest.ts` holds the ranking, the
 chunking and the gate over a digest subject (the drop-the-gate mutant and each
 allow term); `test-live.ts` [36] the sink end to end — a stub that records zero
 Telegram sends under deny and one when allowed.

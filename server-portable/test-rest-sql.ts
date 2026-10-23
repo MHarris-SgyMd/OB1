@@ -22,7 +22,9 @@
 
 import { SQL } from "bun";
 import { createAssert, resetSchema } from "../db/test-support.ts";
-import { hashKey } from "./auth.ts";
+import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
+import { authenticate, CLIENT_SCOPES, hashKey } from "./auth.ts";
+import { z } from "zod";
 import { ok } from "./core/refusal.ts";
 import { listCursor } from "./core/list-cursor.ts";
 import * as say from "./render.ts";
@@ -83,8 +85,11 @@ process.env.MCP_ACCESS_KEYS = [
   `fresh:write:${hashKey(KEYS.fresh)}`, // never used but by [6b]'s refused forwarded request
 ].join(",");
 
-// Both doors in one process, over the one process root (root.ts): one store.
-const mcpServer = Bun.serve({ port: 0, fetch: (await import("./index.ts")).default.fetch });
+// Both doors in one process, over the one process root (root.ts): one store. The MCP server is the REST core's
+// client (SMD-2287), so its reply is render.ts over the REST answer by construction; [2] holds both to a core of this
+// suite's own besides (`directly`).
+const mcpServer = Bun.serve({ port: 0, fetch: (await mcpUnderTest()).fetch });
+assert(servedByMcpServer(), "the server under test is the MCP server, the REST core behind it");
 const apiServer = Bun.serve({ port: 0, fetch: (await import("./api.ts")).default.fetch });
 const MCP = `http://localhost:${mcpServer.port}`;
 const API = `http://localhost:${apiServer.port}`;
@@ -120,6 +125,8 @@ function rendered(render: (v: never) => say.Reply, v: unknown): say.Reply {
     return { content: [{ type: "text", text: `(the REST value does not render: ${(err as Error).message})` }], structuredContent: {} };
   }
 }
+/** A value's shape: its keys, nested, each leaf its JSON type — what two writes of different rows share, so a field one answer drops, renames or leaves out where the other has a 0 differs (review pass 6a·3). */
+const shapeOf = (v: unknown): unknown => Array.isArray(v) ? v.map(shapeOf) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, shapeOf((v as Record<string, unknown>)[k])])) : v === null ? "null" : typeof v;
 const firstDiff = (a: Record<string, unknown>, b: Record<string, unknown>) =>
   [...new Set([...Object.keys(a), ...Object.keys(b)])].find((k) => !same(a[k], b[k])) ?? "-";
 
@@ -158,6 +165,28 @@ const ids: string[] = [];
     (${ids[1]}::uuid, 'extract:lease@p1', 'claimed', 'w-mcp', now() - interval '2 hours', now() - interval '2 hours')`;
 }
 
+// A third pipeline (SMD-2287 PR 6a): a core of this suite's own over the one store, called in process with the
+// writer's principal and the tool's input as the MCP SDK parses it, its value rendered — what index.ts's tools were.
+// The MCP reply is render.ts over the REST answer, so this is what holds the REST answer to the core's own value, in
+// [2]'s reads and [3]'s writes: a field the REST answer loses or renames passes the REST-to-MCP comparisons (review
+// passes 1 and 2's mutants).
+const { createCore } = await import("./core/index.ts");
+const { SPECS } = await import("./core/schemas.ts");
+const { db, env } = await import("./root.ts");
+const direct = createCore({ env, store: db, door: "open-brain-direct" });
+const writer = authenticate(KEYS.writer, { MCP_ACCESS_KEYS: process.env.MCP_ACCESS_KEYS }, { admit: CLIENT_SCOPES });
+assert(writer !== null, "the writer's key authenticates in process");
+const CORE_OP: Record<string, keyof typeof direct> = {
+  search: "search", fetch: "fetch", search_thoughts: "searchThoughts", search_thoughts_keyword: "searchThoughtsKeyword", list_thoughts: "listThoughts",
+  list_thought_ids: "listThoughtIds", list_logged_searches: "listLoggedSearches", list_supersession_proposals: "listSupersessionProposals",
+  thought_stats: "thoughtStats", thought_changes: "thoughtChanges", worker_status: "workerStatus",
+  capture_thought: "capture", update_thought: "updateThought", delete_thought: "deleteThought",
+};
+const directly = async (tool: string, args: Record<string, unknown>): Promise<{ ok: boolean; value?: unknown }> => {
+  const input = z.object(SPECS[tool as keyof typeof SPECS].inputSchema as z.ZodRawShape).parse(args);
+  return (direct[CORE_OP[tool]] as unknown as (p: unknown, i: unknown) => Promise<{ ok: boolean; value?: unknown }>)(writer, input);
+};
+
 console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST answer, text and structuredContent");
 {
   // Each case names what makes its page non-empty, so no comparison is two empty pages.
@@ -190,22 +219,28 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     assert(filled(r.body), `${tool}: …over something, not an empty page (${JSON.stringify(r.body).slice(0, 60)})`);
     assert(out.content[0].text === m.text, `${tool}: the MCP text is the REST value rendered (${out.content[0].text === m.text ? "same" : `REST→ ${out.content[0].text.slice(0, 80)} | MCP ${m.text.slice(0, 60)}`})`);
     assert(same(out.structuredContent, m.sc), `${tool}: …and its structuredContent (first difference: ${firstDiff(out.structuredContent, m.sc)})`);
+    const d = await directly(tool, args);
+    const own = rendered(render, d.value);
+    const whole = JSON.parse(JSON.stringify(d.value ?? null)) as Record<string, unknown>;
+    assert(d.ok && own.content[0].text === m.text && same(own.structuredContent, m.sc) && same(r.body, whole),
+      `${tool}: …and a core of this suite's own says the same: rendered in process, and its whole value the REST answer (${d.ok ? `${firstDiff(own.structuredContent, m.sc)} / ${firstDiff(r.body, whole)}` : "refused"})`);
   }
   // brain_info: the whole record, and the table it renders to.
   const b = await rest("GET", "/v1/brain");
   const m = await mcp("brain_info", {});
   const info = rendered((v) => say.renderBrainInfoReply(v), b.body);
-  // The provider's state is each process's own (SMD-2890): the two doors here
-  // are two cores, each answered at its own moment.
-  // Only the times: each core stamps its own (review pass 4: the whole state
-  // set aside hid any other difference) — the status, `by`, the re-probe and
-  // the row's words stay under the comparison.
+  // The provider's state is the REST core's (SMD-2890), read by each door at
+  // its own moment (until SMD-2287 PR 6a the MCP door was a core of its own).
+  // Only the times set aside (review pass 4: the whole state set aside hid any
+  // other difference) — the status, `by`, the re-probe and the row's words
+  // stay under the comparison. A core of this suite's own (`directly`, above)
+  // is left out here: its provider state is its own, and it has probed nothing.
   const STAMP = /\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z/g;
   const noTimes = (v: unknown): Record<string, unknown> => JSON.parse(JSON.stringify(v), (k, x) => (k === "at" || k === "since" ? "<t>" : typeof x === "string" ? x.replace(STAMP, "<t>") : x));
   assert(b.status === 200 && info.content[0].text.replace(STAMP, "<t>") === m.text.replace(STAMP, "<t>") && same(noTimes(info.structuredContent), noTimes(m.sc)), `brain_info: the same record and table, the times aside (${b.status}; first difference: ${firstDiff(noTimes(info.structuredContent), noTimes(m.sc))})`);
   const providerOf = (v: unknown) => (((v as { value?: unknown })?.value ?? v) as { provider?: { status?: string; by?: string } }).provider;
   assert(providerOf(b.body)?.status === "answering" && providerOf(b.body)?.by === "call" && providerOf(m.sc)?.status === "answering" && /^Provider:\s+answering \(an embedding call answered /m.test(m.text),
-    `…and each door's own provider state answering, by a call, after the searches above (${JSON.stringify(providerOf(b.body))} | ${JSON.stringify(providerOf(m.sc))})`);
+    `…and the REST core's provider state answering, by a call, after the searches above, through either door (${JSON.stringify(providerOf(b.body))} | ${JSON.stringify(providerOf(m.sc))})`);
   covered.add("brain_info");
   // SMD-2995: list_thoughts a page at a time. The first page's cursor, from
   // REST, takes either door to the same next page — text, structuredContent
@@ -295,12 +330,29 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   const { embeddingAttached: _attached, ...captured } = r.body;
   const cr = rendered((v) => say.renderCapture(ok(v)), swap(captured, m.sc));
   assert(cr.content[0].text === m.text && same(cr.structuredContent, m.sc), `capture_thought: the same reply (first difference: ${firstDiff(cr.structuredContent, m.sc)})`);
+  // Each write through a core of this suite's own as well (`directly`), on a row of its own (review pass 2: a value
+  // REST dropped from update_thought's answer passed the comparison of the REST answer with its own rendering).
+  const cdo = await directly("capture_thought", { content: "delta: written in process", source: "rest-suite" });
+  const cd = rendered((v) => say.renderCapture(ok(v)), swap(cdo.value as Record<string, unknown>, m.sc));
+  const cWhole = shapeOf(JSON.parse(JSON.stringify(cdo.value ?? null))) as Record<string, unknown>;
+  // A capture as the MCP server sends it, forwarded: REST answers a carrier the whole value (rest/app.ts), which is
+  // what the MCP server words, so its shape is held too (review pass 6a·3: a field dropped there alone passed).
+  const fwd = await rest("POST", "/v1/thoughts", { content: "delta: written through REST as the MCP server sends it", source: "rest-suite" }, KEYS.writer, KEYS.forwarder);
+  const { embeddingAttached: _fwdAttached, ...forwarded } = fwd.body;
+  assert(fwd.status === 201 && same(shapeOf(forwarded), cWhole), `capture_thought forwarded: the REST answer is the core's value's whole shape (${fwd.status}; ${firstDiff(shapeOf(forwarded) as Record<string, unknown>, cWhole)})`);
+  assert(cdo.ok && cd.content[0].text === m.text && same(cd.structuredContent, m.sc) && same(shapeOf(captured), cWhole),
+    `capture_thought: …and a core of this suite's own says the same, the REST answer its value's whole shape (${cdo.ok ? `${firstDiff(cd.structuredContent, m.sc)} / ${firstDiff(shapeOf(captured) as Record<string, unknown>, cWhole)}` : "refused"})`);
 
   const u = await rest("PATCH", `/v1/thoughts/${ids[0]}`, { metadata_patch: { reviewed: true } });
   assert(u.body.id === ids[0] && typeof u.body.updatedAt === "string", `the REST update answers the thought it changed (${u.body.id})`);
   const um = await mcp("update_thought", { id: ids[1], metadata_patch: { reviewed: true } });
   const ur = rendered((v) => say.renderUpdate(ok(v)), swap(u.body, um.sc));
   assert(u.status === 200 && ur.content[0].text === um.text && same(ur.structuredContent, um.sc), `update_thought: the same reply (${u.status}; first difference: ${firstDiff(ur.structuredContent, um.sc)})`);
+  const udo = await directly("update_thought", { id: ids[2], metadata_patch: { reviewed: true } });
+  const ud = rendered((v) => say.renderUpdate(ok(v)), swap(udo.value as Record<string, unknown>, um.sc));
+  const uWhole = shapeOf(JSON.parse(JSON.stringify(udo.value ?? null))) as Record<string, unknown>;
+  assert(udo.ok && ud.content[0].text === um.text && same(ud.structuredContent, um.sc) && same(shapeOf(u.body), uWhole),
+    `update_thought: …and a core of this suite's own says the same, the REST answer its value's whole shape (${udo.ok ? `${firstDiff(ud.structuredContent, um.sc)} / ${firstDiff(shapeOf(u.body) as Record<string, unknown>, uWhole)}` : "refused"})`);
 
   // A patch naming a stamp key (SMD-2744): REST carries `kept` with the
   // values, MCP the keys and the note, one render of the other; an echo
@@ -321,6 +373,12 @@ console.log("\n[3] Every write: the same reply through either door, the ids each
   const dm = await mcp("delete_thought", { id: doomedMcp });
   const dr = rendered((v) => say.renderDelete(ok(v)), swap(d.body, dm.sc));
   assert(d.status === 200 && dr.content[0].text === dm.text && same(dr.structuredContent, dm.sc), `delete_thought: the same reply (${d.status}; first difference: ${firstDiff(dr.structuredContent, dm.sc)})`);
+  const doomedDirect = String(cdo.value && (cdo.value as { id?: unknown }).id);
+  const ddo = await directly("delete_thought", { id: doomedDirect });
+  const dd = rendered((v) => say.renderDelete(ok(v)), swap(ddo.value as Record<string, unknown>, dm.sc));
+  const dWhole = shapeOf(JSON.parse(JSON.stringify(ddo.value ?? null))) as Record<string, unknown>;
+  assert(ddo.ok && dd.content[0].text === dm.text && same(dd.structuredContent, dm.sc) && same(shapeOf(d.body), dWhole),
+    `delete_thought: …and a core of this suite's own says the same, the REST answer its value's whole shape (${ddo.ok ? `${firstDiff(dd.structuredContent, dm.sc)} / ${firstDiff(shapeOf(d.body) as Record<string, unknown>, dWhole)}` : "refused"})`);
 
   // reset_capture_stamp (SMD-2744): the operator's alone, so the writer is
   // classified for it here and unclassified after. Each door resets the

@@ -490,7 +490,7 @@ paths today:
 | `/api` and everything under it | the proxy's bodiless 404 by default. With `compose.api-public.yaml` named (below), `api` — the REST core, as `api.ob1.internal` on the `mesh` network — with `/api` stripped: `/api/v1/stats` reaches it as `/v1/stats`, and the links it answers carry `/api` back |
 | `/hooks` and everything under it | the proxy's bodiless 404 by default. With `compose.hooks-public.yaml` named ("Plugins' webhooks" below), `api` — the REST core — path kept: `/hooks/<plugin>/<name>` is a plugin's inbound webhook, served only for a plugin `OB1_HOOKS` names (SMD-2310) |
 | `/mcp` and everything under it | `mcp` — the MCP server built on the REST core (SMD-2287), as `mcp.ob1.internal` on the `mesh` network: the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is its 405. Every tool is a call on the REST core, the caller's key beside this server's own forward key |
-| `/dashboard` and everything under it | `app` — the operator GUI (SMD-2280), as `app.ob1.internal` on the `mesh` network, path kept: sign in with a read or write access key, then the brain's counts and newest thoughts, its status (`brain_info`) and any thought, each read from the REST core under that key. Key sign-in is off while `COMPOSE_PROFILES` names `auth` (`dashboard/README.md`). While `app` is stopped or starting, the proxy's own 502 |
+| `/dashboard` and everything under it | `app` — the operator GUI (SMD-2280), as `app.ob1.internal` on the `mesh` network, path kept: sign in with a read or write access key, then the brain's counts and newest thoughts, every thought a page at a time by its filters, search by meaning or by exact text, its status (`brain_info`) and any thought, each read from the REST core under that key. Key sign-in is off while `COMPOSE_PROFILES` names `auth` (`dashboard/README.md`). While `app` is stopped or starting, the proxy's own 502 |
 | `/grafana` and everything under it | the proxy's bodiless 404 by default. With `compose.grafana-public.yaml` named ("The observability profile" below), `lgtm` (`--profile observability`), as `lgtm.ob1.internal` on the `mesh` network — its Grafana, serving from `/grafana`, path kept, behind its own sign-in. With the profile off, or the container stopped or still starting, the proxy's bodiless 404 too, and so is a 502 of Grafana's own (a data source it cannot reach) |
 | every path starting with `/canary` or `/working`, in any letter case | the proxy's own 404 (SMD-2874: a canary or a working tier is a brain of its own on its own port, and this stack routes none; from SMD-2294 to v2.0.0 a tier answered at `/canary/mcp` here, deprecated by SMD-3057 for a release before it went). No router matches them, so a client still given a tier's URL here reaches nothing; until v2.0.0 `tier-off` kept them off the legacy route, and went with it (SMD-2532) |
 | `GET`/`HEAD`/`OPTIONS /health` | `mcp` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key; OPTIONS for a browser's CORS preflight |
@@ -1409,8 +1409,9 @@ counts — and sends them before it reports, as `open-brain-preflight` unless
 `OTEL_SERVICE_NAME` (or a `service.name` in `OTEL_RESOURCE_ATTRIBUTES`) names
 it. Its `telemetry` row says, within 5 s, whether they went: `ok` with where,
 naming spans, points or both by what is sent; a warning for an export not
-sent, or for an endpoint that is no URL or an SDK that would not start (the
-server would share either); a skip when no collector is named, when spans and
+sent, an endpoint that is no URL or has a query string, an SDK that would not
+start, or a setting held to its bound or not read and its default used (the
+server would share each); a skip when no collector is named, when spans and
 points are both turned off or the SDK is disabled, or when no probe ran —
 run it in `api`, which holds the OTEL settings (`server` holds none since it
 left the mesh, SMD-2287). A plain preflight, the one each container start runs, starts no telemetry, so a
@@ -2241,6 +2242,18 @@ environment once, so recreate the service after changing any of them, the
 key or the model: `podman compose -f deploy/compose.yaml --profile sleep up -d
 sleep`. A `restart` keeps the values it was created with.
 
+**Reading a pass pair by pair** (SMD-3203). With
+`OB1_SLEEP_DUMP_DIR=/var/lib/ob1/sleep-dumps`, where the service mounts its
+`sleep-dumps` volume, each consolidation pass appends every verdict to one
+JSONL file per pass key there, as `db/consolidate.ts --dump` writes them. That
+includes decide mode's link step, when it was asked and whether it capped the
+pair, which a capped pair that stores no relation leaves nowhere else. Copy
+them out while `sleep` runs, to a directory outside any checkout:
+`podman compose -f deploy/compose.yaml cp sleep:/var/lib/ob1/sleep-dumps <dir>`.
+From a stopped container podman's copy says it copied and puts the files
+elsewhere or nowhere. They hold the brain's text, each file created 0600, and
+a copy keeps that mode; unset, nothing is written and the volume stays empty.
+
 **Changing the model** is the `workers` profile's procedure above with `sleep`
 in place of the two followers: stop `sleep` before the change reaches it, run
 the switch, then bring back `server api sleep`. The switch extracts the backlog
@@ -2881,6 +2894,9 @@ leaves. A refusal puts the canary's Postgres back as it found it. The volume
 is looked for by name (`<stable>-canary_pgdata`, `open-brain-canary_pgdata`
 beside the default stable), which is how `compose down --volumes` removes it.
 With none there is nothing to delete, and nothing is started to find out.
+The canary's sleep dumps (its `sleep-dumps` volume, SMD-3203) go with the
+database: the down names the sleep profile, so compose counts that service and
+its volume.
 Neither touches stable: `down` acts on the canary's project alone.
 
 On every PR, the deploy-stack-brains CI job runs `canary.sh` beside its stack, in

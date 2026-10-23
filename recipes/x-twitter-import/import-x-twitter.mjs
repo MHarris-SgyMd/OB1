@@ -1,19 +1,20 @@
-#!/usr/bin/env node
-// MIGRATED OFF SUPABASE: imports compat/supabase-sql instead of @supabase/supabase-js.
-// Same API, but it speaks SQL directly. The environment variable NAMES are
-// unchanged — set SUPABASE_URL to a postgres:// connection string, and
-// SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
-// ob1-original-import: @supabase/supabase-js
-// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
+#!/usr/bin/env bun
 /**
- * X/Twitter Import for Open Brain (OB1-compatible)
+ * X/Twitter Import for Open Brain — an emitter of ingestion-contract items
  *
- * Parses X (Twitter) data exports — tweets, DMs, and Grok chats — and imports
- * them as thoughts with embeddings.
+ * Parses X (Twitter) data exports (tweets, DMs and Grok chats) and prints one
+ * ingestion-contract item per thought, one JSON object per line, for the
+ * brain's pipeline to write (db/README.md, "Items from a file"). It holds no
+ * database client and makes no model call: the pipeline owns the row, the
+ * fingerprint and the source record, and `db/reembed.ts` embeds at the
+ * brain's model (SMD-2493).
+ *
+ * Every item is the `x` system's, the Grok chats from the X archive included:
+ * one import, one source (the import runner refuses a pipeline that emits two).
  *
  * Usage:
- *   node import-x-twitter.mjs /path/to/twitter-export [--dry-run] [--skip N] [--limit N]
- *   node import-x-twitter.mjs /path/to/twitter-export --types tweets,dms
+ *   bun import-x-twitter.mjs /path/to/twitter-export [--skip N] [--limit N] > items.jsonl
+ *   bun import-x-twitter.mjs /path/to/twitter-export --types tweets,dms
  *
  * Expected directory structure:
  *   twitter-export/
@@ -23,44 +24,158 @@
  *       └── grok-conversations.js
  */
 
-import { createClient } from "../../compat/supabase-sql/index.ts";
-import { createHash } from "crypto";
-import { readFile, readdir, stat } from "fs/promises";
-import { join, basename } from "path";
-import { config } from "dotenv";
+import { createHash } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
+import { join } from "node:path";
 
-config();
+const SYSTEM = "x";
+const SCOPE = "x:export";
+const TYPES = ["tweets", "dms", "grok"];
+const USAGE = "Usage: bun import-x-twitter.mjs /path/to/twitter-export [--skip N] [--limit N] [--types tweets,dms,grok] > items.jsonl";
+/** The enhanced fields every item carries as facets, as the import set them before (SMD-2493). */
+const ENHANCED = { type: "reference", source_type: "x_twitter_import", importance: 2, quality_score: 40, sensitivity_tier: "standard" };
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "openai/text-embedding-3-small";
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !OPENROUTER_API_KEY) {
-  console.error("Missing required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OPENROUTER_API_KEY");
-  process.exit(1);
+function parseArgs(argv) {
+  const out = { path: undefined, skip: 0, limit: Infinity, types: TYPES };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--skip" || a === "--limit") {
+      const n = Number(argv[++i]);
+      if (!Number.isInteger(n) || n < 0) fail(`${a} takes a whole number`);
+      out[a.slice(2)] = n;
+    } else if (a === "--types") {
+      out.types = (argv[++i] ?? "").split(",").map((t) => t.trim()).filter(Boolean);
+      const bad = out.types.filter((t) => !TYPES.includes(t));
+      if (!out.types.length || bad.length) fail(`--types takes ${TYPES.join(", ")}${bad.length ? `, not ${bad.join(", ")}` : ""}`);
+    } else if (a === "--dry-run") {
+      fail("the emitter writes nothing; count what it emits with the pipeline's own --dry-run (bun db/ingest-records.ts --source items --items items.jsonl --allow x:export --dry-run)");
+    } else if (a.startsWith("--")) {
+      fail(`unknown flag ${a}`);
+    } else if (out.path === undefined) {
+      out.path = a;
+    } else {
+      fail(`one export path, not two (${out.path}, ${a})`);
+    }
+  }
+  if (out.path === undefined) fail(USAGE);
+  return out;
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-
-const args = process.argv.slice(2);
-const dirPath = args.find((a) => !a.startsWith("--"));
-const dryRun = args.includes("--dry-run");
-const skip = parseInt(args[args.indexOf("--skip") + 1]) || 0;
-const limit = parseInt(args[args.indexOf("--limit") + 1]) || Infinity;
-const typesArg = args.indexOf("--types") !== -1
-  ? args[args.indexOf("--types") + 1].split(",")
-  : ["tweets", "dms", "grok"];
-
-if (!dirPath) {
-  console.error("Usage: node import-x-twitter.mjs /path/to/twitter-export [--dry-run] [--skip N] [--limit N] [--types tweets,dms,grok]");
-  process.exit(1);
+function fail(why) {
+  console.error(`import-x-twitter: ${why}`);
+  process.exit(2);
 }
 
-function contentFingerprint(text) {
-  const normalized = text.trim().replace(/\s+/g, " ").toLowerCase();
-  return createHash("sha256").update(normalized).digest("hex");
+const sha256 = (s) => createHash("sha256").update(s).digest("hex");
+
+/** Text a row can hold: a NUL or a lone surrogate would refuse the whole file at the pipeline, so they go here. */
+const clean = (s) => String(s).replaceAll("\u0000", "").toWellFormed();
+
+/** The dates the export gave that this run left out, counted once each and said in the summary. */
+const droppedDates = new Set();
+
+/**
+ * An instant the pipeline accepts (ISO-8601 in UTC), or undefined, which
+ * leaves the date to the pipeline: no date, epoch 0, and a date it would
+ * refuse (before year 1, past 9999, more than a day ahead, a day the calendar
+ * lacks), since one refused date refuses the whole file. A date and time with
+ * no offset is read as UTC, not as the machine's local time.
+ */
+function instant(v) {
+  if (v === undefined || v === null || v === "" || v === 0) return undefined;
+  const drop = () => { droppedDates.add(String(v)); return undefined; };
+  let s = v;
+  if (typeof v === "string") {
+    const t = v.trim();
+    const ymd = /^(\d{4})-(\d\d)-(\d\d)/.exec(t);
+    // February the 30th is left out, not rolled into March as Date.parse does.
+    if (ymd) {
+      const [y, m, d] = ymd.slice(1).map(Number);
+      const day = new Date(Date.UTC(y, m - 1, d));
+      if (day.getUTCMonth() !== m - 1 || day.getUTCDate() !== d) return drop();
+    }
+    if (/^\d{4}-\d\d-\d\d$/.test(t)) s = `${t}T00:00:00Z`;
+    else if (/^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d(\.\d+)?)?$/.test(t)) s = `${t.replace(" ", "T")}Z`;
+  }
+  const d = new Date(s);
+  const ms = d.getTime();
+  if (Number.isNaN(ms) || ms === 0 || ms > Date.now() + 86_400_000 || d.getUTCFullYear() < 1 || d.getUTCFullYear() > 9999) return drop();
+  return d.toISOString();
 }
+
+/**
+ * A key the pipeline takes: the export's id cleaned and trimmed, within the identity's bound; else a hash of the
+ * record as exported. `%` and `#` are escaped, so no id can read as a part's `<key>#k` (an id `abc#2` beside a
+ * conversation `abc` in two parts took one key twice, and the file was refused).
+ */
+function keyFrom(id, record) {
+  const k = typeof id === "string" || typeof id === "number" ? clean(String(id)).trim().replaceAll("%", "%25").replaceAll("#", "%23") : "";
+  return k && [...k].length <= 480 ? k : `sha256:${sha256(JSON.stringify(record))}`;
+}
+
+/**
+ * The most text one thought holds, in characters. A search hit returns its
+ * thought whole and a re-embed sends every one of its windows, so a thought
+ * of hundreds of KB (a busy month, a long thread) was more than a client takes
+ * and was re-embedded whole at every change (SMD-2493).
+ */
+const TEXT_BOUND = 100_000;
+
+/**
+ * Members grouped by the calendar day (UTC) of their date, oldest first, one
+ * thought a day: so a member a later export adds or drops changes only its
+ * own day's thought, which updates in place, and no other. (Batches of a
+ * fixed size shifted at every member added or dropped before them, and the
+ * shifted batches landed as new rows beside the old: the pipeline adds and
+ * updates, it does not remove.) Members with no date are the `undated` day.
+ * Within a day the order is by date, then by `tie`, so it is the same
+ * however the export lists them.
+ */
+function byDay(members, dateOf, tie) {
+  const days = new Map();
+  for (const m of members) {
+    const at = dateOf(m);
+    const day = at ? at.slice(0, 10) : "undated";
+    if (!days.has(day)) days.set(day, []);
+    days.get(day).push({ m, at: at ?? "", tie: tie(m) });
+  }
+  const order = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  return [...days.keys()].sort(order).map((day) => ({
+    day,
+    members: days.get(day).sort((a, b) => order(a.at, b.at) || order(a.tie, b.tie)).map((x) => x.m),
+  }));
+}
+
+/**
+ * A group's members as thoughts within TEXT_BOUND, packed greedily in order:
+ * members appended (a thread that grew) only extend the last part or start a
+ * new one, so earlier parts keep their text and their key. The first part's
+ * key is the group's own, the k-th's `<key>#k`. A member with no line is left
+ * out; one whose line alone passes the bound is cut, and says so (its source
+ * record keeps it whole).
+ */
+function parts(key, members, lineOf, sep) {
+  const out = [];
+  let cur = null;
+  for (const m of members) {
+    let line = lineOf(m);
+    if (!line) continue;
+    if (line.length > TEXT_BOUND) line = `${clean(line.slice(0, TEXT_BOUND - 60))} [… cut here; the source record holds it whole]`;
+    if (cur && cur.size + sep.length + line.length > TEXT_BOUND) cur = null;
+    if (cur) cur.size += sep.length;
+    else out.push((cur = { members: [], lines: [], size: 0 }));
+    cur.members.push(m);
+    cur.lines.push(line);
+    cur.size += line.length;
+  }
+  return out.map((p, i) => ({ key: i ? `${key}#${i + 1}` : key, part: i + 1, of: out.length, members: p.members, text: p.lines.join(sep) }));
+}
+
+/** A part's label in its header and title: nothing for the first, so a thread that grows a second part leaves the first one's text as it was. */
+const partLabel = (p) => (p.part > 1 ? ` (part ${p.part})` : "");
+
+/** A tweet's or a message's text, as a string. */
+const textOf = (v) => (typeof v === "string" ? clean(v) : "");
 
 function parseTwitterJsFile(content) {
   // Twitter JS files start with "window.YTD.tweets.part0 = " or similar
@@ -70,6 +185,11 @@ function parseTwitterJsFile(content) {
 }
 
 async function findDataDir(dir) {
+  try {
+    await stat(dir);
+  } catch {
+    fail(`${dir}: no such folder`);
+  }
   // Look for data/ subdirectory
   const dataDir = join(dir, "data");
   try {
@@ -80,114 +200,77 @@ async function findDataDir(dir) {
   }
 }
 
-async function getEmbedding(text) {
-  const truncated = text.length > 8000 ? text.substring(0, 8000) : text;
-  const response = await fetch("https://openrouter.ai/api/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ model: EMBEDDING_MODEL, input: truncated }),
-  });
-  if (!response.ok) {
-    const msg = await response.text().catch(() => "");
-    throw new Error(`Embedding failed: ${response.status} ${msg}`);
-  }
-  const data = await response.json();
-  return data.data[0].embedding;
-}
-
-async function upsertThought(content, metadata, embedding, createdAt, sourceType) {
-  const { data, error } = await supabase.rpc("upsert_thought", {
-    p_content: content,
-    p_payload: {
-      type: "reference",
-      source_type: sourceType,
-      importance: 2,
-      quality_score: 40,
-      sensitivity_tier: "standard",
-      metadata: { ...metadata, source: "x_twitter_import", source_type: sourceType },
-      embedding: JSON.stringify(embedding),
-      created_at: createdAt,
-      // SMD-1724: an export is outside text — the write event declares it, and
-      // the database stamps the thought's trust ingested whatever the key.
-      event: { trust: "ingested" },
-    },
-  });
-  if (error) throw new Error(`upsert_thought failed: ${error.message}`);
-  return data;
-}
-
 // ── Tweet Processing ─────────────────────────────────────────────────────
 
 function processTweets(rawTweets) {
   const tweets = rawTweets
-    .map((t) => t.tweet || t)
+    .map((t) => t?.tweet || t)
     .filter((t) => {
-      const text = t.full_text || t.text || "";
+      if (!t || typeof t !== "object") return false;
+      const text = textOf(t.full_text || t.text);
       if (text.length < 30) return false;
       if (text.startsWith("RT @")) return false; // Skip retweets
       return true;
-    })
-    .sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
-
-  // Group tweets into batches of 20 by date range
-  const batches = [];
-  for (let i = 0; i < tweets.length; i += 20) {
-    const batch = tweets.slice(i, i + 20);
-    const first = batch[0];
-    const last = batch[batch.length - 1];
-    const firstDate = first.created_at ? new Date(first.created_at).toISOString().slice(0, 10) : "unknown";
-    const lastDate = last.created_at ? new Date(last.created_at).toISOString().slice(0, 10) : "unknown";
-
-    const content = batch
-      .map((t) => {
-        const text = t.full_text || t.text || "";
-        const date = t.created_at ? new Date(t.created_at).toISOString().slice(0, 10) : "";
-        return `Tweet (${date}): ${text}`;
-      })
-      .join("\n\n");
-
-    batches.push({
-      content: `X/Twitter tweets from ${firstDate} to ${lastDate}:\n\n${content}`,
-      createdAt: first.created_at ? new Date(first.created_at).toISOString() : new Date().toISOString(),
-      title: `Tweets ${firstDate} to ${lastDate}`,
     });
-  }
 
-  return batches;
+  // One thought a day (byDay), the tweets in date order, ties by id; a day past the bound in parts.
+  const lineOf = (t) => {
+    const time = instant(t.created_at)?.slice(11, 16);
+    return `Tweet${time ? ` (${time} UTC)` : ""}: ${textOf(t.full_text || t.text)}`;
+  };
+  return byDay(tweets, (t) => instant(t.created_at), (t) => String(t.id_str ?? t.id ?? JSON.stringify(t))).flatMap(({ day, members }) =>
+    parts(`tweets:${day}`, members, lineOf, "\n\n").map((p) => {
+      const label = `${day === "undated" ? "with no date" : `on ${day}`}${partLabel(p)}`;
+      return {
+        key: p.key, of: p.of,
+        kind: "tweets",
+        canonical: JSON.stringify(p.members),
+        content: `X/Twitter tweets ${label}:\n\n${p.text}`,
+        createdAt: instant(p.members[0].created_at),
+        title: `Tweets ${label}`,
+      };
+    }));
 }
 
 // ── DM Processing ────────────────────────────────────────────────────────
 
+/** Messages by date, undated first, ties kept in the archive's order (a date that does not parse no longer unsettles the sort). */
+const byDate = (a, b) => {
+  const x = instant(a.createdAt) ?? "", y = instant(b.createdAt) ?? "";
+  return x < y ? -1 : x > y ? 1 : 0;
+};
+
 function processDMs(rawDMs) {
   const conversations = rawDMs
-    .map((dm) => dm.dmConversation || dm)
+    .map((dm) => dm?.dmConversation || dm)
     .filter((conv) => {
-      const messages = conv.messages || [];
+      const messages = Array.isArray(conv?.messages) ? conv.messages : [];
       return messages.length >= 3; // Skip very short conversations
     });
 
-  return conversations.map((conv) => {
-    const messages = (conv.messages || [])
-      .map((m) => m.messageCreate || m)
-      .filter((m) => m.text)
-      .sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
+  // A conversation the archive lists twice is taken from its first copy alone: deduping part by part could mix the copies' parts.
+  const seenConversations = new Set();
+  return conversations.flatMap((conv) => {
+    const id = keyFrom(conv.conversationId, conv);
+    if (seenConversations.has(id)) { console.error(`dm:${id} appears twice; emitted once`); return []; }
+    seenConversations.add(id);
+    const messages = conv.messages
+      .map((m) => m?.messageCreate || m)
+      .filter((m) => m && textOf(m.text))
+      .sort(byDate);
 
-    const content = messages
-      .map((m) => `${m.senderId || "sender"}: ${m.text}`)
-      .join("\n");
-
-    const firstDate = messages[0]?.createdAt
-      ? new Date(messages[0].createdAt).toISOString()
-      : new Date().toISOString();
-
-    return {
-      content: `X/Twitter DM conversation:\n\n${content}`,
-      createdAt: firstDate,
-      title: `Twitter DM (${messages.length} messages)`,
-    };
+    // The archive's conversation id survives a re-export; a thread past the bound is in parts, its earlier parts fixed as it grows.
+    const all = parts(`dm:${id}`, messages, (m) => `${clean(m.senderId || "sender")}: ${textOf(m.text)}`, "\n");
+    return all.map((p) => ({
+      key: p.key, of: p.of,
+      kind: "dm",
+      // One part: the conversation as the archive holds it. Several: each part's messages.
+      canonical: JSON.stringify(p.of === 1 ? conv : p.members),
+      content: `X/Twitter DM conversation${partLabel(p)}:\n\n${p.text}`,
+      createdAt: p.members.map((m) => instant(m.createdAt)).find(Boolean),
+      // The part's own count: the thread's would move every part's title as the thread grows.
+      title: `Twitter DM (${p.members.length} messages)${partLabel(p)}`,
+    }));
   });
 }
 
@@ -197,127 +280,111 @@ function processGrokChats(rawGrok) {
   const chats = {};
 
   for (const entry of rawGrok) {
-    const chatId = entry.chatId || "default";
+    if (!entry || typeof entry !== "object") continue;
+    const chatId = keyFrom(entry.chatId || "default", entry);
     if (!chats[chatId]) chats[chatId] = [];
     chats[chatId].push(entry);
   }
 
-  return Object.entries(chats).map(([chatId, messages]) => {
-    messages.sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
+  return Object.entries(chats).flatMap(([chatId, messages]) => {
+    messages.sort(byDate);
 
-    const content = messages
-      .map((m) => {
-        const role = (m.sender || "user").toUpperCase() === "USER" ? "USER" : "ASSISTANT";
-        return `${role}: ${m.message || m.text || ""}`;
-      })
-      .filter((line) => line.length > 10)
-      .join("\n\n");
-
-    const firstDate = messages[0]?.createdAt
-      ? new Date(messages[0].createdAt).toISOString()
-      : new Date().toISOString();
-
-    return {
-      content: `Grok chat conversation:\n\n${content}`,
-      createdAt: firstDate,
-      title: `Grok chat (${messages.length} messages)`,
+    const lineOf = (m) => {
+      const role = String(m.sender || "user").toUpperCase() === "USER" ? "USER" : "ASSISTANT";
+      const line = `${role}: ${textOf(m.message || m.text)}`;
+      return line.length > 10 ? line : "";
     };
+    // A chat past the bound is in parts, its earlier parts fixed as it grows.
+    return parts(`grok:${chatId}`, messages, lineOf, "\n\n").map((p) => ({
+      key: p.key, of: p.of,
+      kind: "grok",
+      canonical: JSON.stringify(p.of === 1 ? messages : p.members),
+      content: `Grok chat conversation${partLabel(p)}:\n\n${p.text}`,
+      createdAt: p.members.map((m) => instant(m.createdAt)).find(Boolean),
+      title: `Grok chat (${p.members.length} messages)${partLabel(p)}`,
+    }));
   });
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────
 
-async function main() {
-  console.log(`X/Twitter Import`);
-  console.log(`Directory: ${dirPath}`);
-  console.log(`Types: ${typesArg.join(", ")}`);
-  console.log(`Mode: ${dryRun ? "DRY RUN" : "LIVE IMPORT"}`);
-  console.log();
-
-  const dataDir = await findDataDir(dirPath);
-  const allItems = [];
-
-  // Process tweets
-  if (typesArg.includes("tweets")) {
-    for (const name of ["tweets.js", "tweet.js"]) {
-      try {
-        const raw = await readFile(join(dataDir, name), "utf-8");
-        const tweets = parseTwitterJsFile(raw);
-        const batches = processTweets(tweets);
-        allItems.push(...batches.map((b) => ({ ...b, sourceType: "x_twitter_import" })));
-        console.log(`Tweets: ${tweets.length} tweets → ${batches.length} batched thoughts`);
-      } catch { /* file not found */ }
-    }
-  }
-
-  // Process DMs
-  if (typesArg.includes("dms")) {
-    for (const name of ["direct-messages.js", "direct-message.js"]) {
-      try {
-        const raw = await readFile(join(dataDir, name), "utf-8");
-        const dms = parseTwitterJsFile(raw);
-        const convs = processDMs(dms);
-        allItems.push(...convs.map((c) => ({ ...c, sourceType: "x_twitter_import" })));
-        console.log(`DMs: ${dms.length} conversations → ${convs.length} thoughts`);
-      } catch { /* file not found */ }
-    }
-  }
-
-  // Process Grok chats
-  if (typesArg.includes("grok")) {
-    for (const name of ["grok-conversations.js", "grokConversations.js"]) {
-      try {
-        const raw = await readFile(join(dataDir, name), "utf-8");
-        const grok = parseTwitterJsFile(raw);
-        const chats = processGrokChats(grok);
-        allItems.push(...chats.map((c) => ({ ...c, sourceType: "x_twitter_import" })));
-        console.log(`Grok chats: ${grok.length} messages → ${chats.length} thoughts`);
-      } catch { /* file not found */ }
-    }
-  }
-
-  console.log(`\nTotal items: ${allItems.length}`);
-
-  const toProcess = allItems.slice(skip, skip + limit);
-  console.log(`Processing ${toProcess.length} (skip=${skip}, limit=${limit === Infinity ? "all" : limit})`);
-  console.log();
-
-  let imported = 0, skipped = 0, errors = 0;
-
-  for (let i = 0; i < toProcess.length; i++) {
-    const item = toProcess[i];
+/** The first of the names the archive holds, parsed; null when it holds none. A file that is there but does not parse is refused, not taken for absent. */
+async function readArchiveFile(dataDir, names) {
+  for (const name of names) {
+    let raw;
     try {
-      if (item.content.trim().length < 50) { skipped++; continue; }
-
-      const truncated = item.content.length > 30000
-        ? item.content.substring(0, 30000) + "\n\n[... truncated]"
-        : item.content;
-      const fingerprint = contentFingerprint(truncated);
-
-      if (dryRun) {
-        console.log(`[${i + 1}/${toProcess.length}] Would import: "${item.title}" (${truncated.length} chars)`);
-        imported++;
-        continue;
-      }
-
-      const embedding = await getEmbedding(truncated);
-      const result = await upsertThought(
-        truncated,
-        { title: item.title, content_fingerprint: fingerprint },
-        embedding,
-        item.createdAt,
-        item.sourceType
-      );
-      console.log(`[${i + 1}/${toProcess.length}] ${result.action}: #${result.thought_id} "${item.title}"`);
-      imported++;
-    } catch (err) {
-      console.error(`[${i + 1}/${toProcess.length}] Error: ${err.message}`);
-      errors++;
+      raw = await readFile(join(dataDir, name), "utf-8");
+    } catch {
+      continue; // file not found
+    }
+    try {
+      return { name, rows: parseTwitterJsFile(raw) };
+    } catch (e) {
+      fail(`${join(dataDir, name)}: not an archive file (${e.message})`);
     }
   }
-
-  console.log();
-  console.log(`Done! Imported: ${imported}, Skipped: ${skipped}, Errors: ${errors}`);
+  return null;
 }
 
-main().catch((err) => { console.error("Fatal error:", err); process.exit(1); });
+async function main() {
+  const { path, skip, limit, types } = parseArgs(process.argv.slice(2));
+
+  const dataDir = await findDataDir(path);
+  const allItems = [];
+
+  if (types.includes("tweets")) {
+    const f = await readArchiveFile(dataDir, ["tweets.js", "tweet.js"]);
+    if (f) {
+      const days = processTweets(f.rows);
+      allItems.push(...days);
+      console.error(`Tweets (${f.name}): ${f.rows.length} tweets → ${days.length} daily thoughts`);
+    } else console.error(`Tweets: no tweets.js or tweet.js in ${dataDir}`);
+  }
+
+  if (types.includes("dms")) {
+    const f = await readArchiveFile(dataDir, ["direct-messages.js", "direct-message.js"]);
+    if (f) {
+      const convs = processDMs(f.rows);
+      allItems.push(...convs);
+      console.error(`DMs (${f.name}): ${f.rows.length} conversations → ${convs.length} thoughts`);
+    } else console.error(`DMs: no direct-messages.js or direct-message.js in ${dataDir}`);
+  }
+
+  if (types.includes("grok")) {
+    const f = await readArchiveFile(dataDir, ["grok-conversations.js", "grokConversations.js"]);
+    if (f) {
+      const chats = processGrokChats(f.rows);
+      allItems.push(...chats);
+      console.error(`Grok chats (${f.name}): ${f.rows.length} messages → ${chats.length} thoughts`);
+    } else console.error(`Grok chats: no grok-conversations.js or grokConversations.js in ${dataDir}`);
+  }
+
+  const toProcess = allItems.slice(skip, skip + limit);
+  const seen = new Set();
+  let emitted = 0, skipped = 0;
+
+  for (const it of toProcess) {
+    // The short-text skip is a whole group's: a short first part before a message cut at the bound is kept.
+    if (it.of === 1 && it.content.trim().length < 50) { skipped++; continue; }
+    // Two lines of one identity refuse the whole file, so a conversation the archive lists twice is emitted once.
+    if (seen.has(it.key)) { console.error(`${it.key} appears twice; emitted once`); skipped++; continue; }
+    seen.add(it.key);
+    const item = {
+      identity: { system: SYSTEM, key: it.key },
+      scope: SCOPE,
+      canonical: { form: it.canonical, mediaType: "application/json" },
+      text: it.content,
+      links: [],
+      mentions: [],
+      facets: { title: it.title, kind: it.kind, ...ENHANCED },
+    };
+    if (it.createdAt) item.createdAt = it.createdAt;
+    process.stdout.write(`${JSON.stringify(item)}\n`);
+    emitted++;
+  }
+
+  console.error(`Emitted ${emitted} item(s), skipped ${skipped} (of ${toProcess.length}; skip=${skip}, limit=${limit === Infinity ? "all" : limit})`);
+  if (droppedDates.size) console.error(`${droppedDates.size} date(s) left out, not ones the brain accepts (it dates those thoughts when it writes them): ${[...droppedDates].slice(0, 5).map((d) => JSON.stringify(d.slice(0, 40))).join(", ")}`);
+}
+
+await main();
