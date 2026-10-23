@@ -628,8 +628,8 @@ services:
       # period, until it first passes (SMD-3194): Docker's start interval
       # defaults to 5 s (and a check with no start period waits its interval),
       # so each `up --wait` and service_healthy wait sat out about 5 s however
-      # soon the service was up. Check 40 holds every healthcheck to it.
-      # Podman probes at once and drops the key.
+      # soon the service was up. Check 40 holds every healthcheck to it. Podman
+      # probes at once and drops the key.
       start_period: 30s
       start_interval: 1s
     # `data` alone: internal, so no route out, and joined only by what
