@@ -91,24 +91,20 @@
     {
       "id": "3b7b8f0e-0004-4c1a-9f00-000000000004",
       "name": "Capture into the brain",
-      "type": "@n8n/n8n-nodes-langchain.mcpClient",
-      "typeVersion": 1.1,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [
         660,
         0
       ],
       "parameters": {
-        "serverTransport": "httpStreamable",
-        "endpointUrl": "http://server:8000/",
-        "authentication": "headerAuth",
-        "tool": {
-          "__rl": true,
-          "mode": "list",
-          "value": "capture_thought",
-          "cachedResultName": "capture_thought"
-        },
-        "inputMode": "json",
-        "jsonInput": "={{ JSON.stringify({ content: $json.content }) }}",
+        "method": "POST",
+        "url": "http://api:8000/v1/thoughts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ content: $json.content, source: 'n8n' }) }}",
         "options": {
           "timeout": 120000
         }

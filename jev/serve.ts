@@ -26,6 +26,17 @@
  *
  * The API is unauthenticated, like Ollama's: it binds loopback unless told
  * otherwise, and compose publishes nothing (deploy/compose.yaml).
+ *
+ * Serving, nothing at start exits on its own (SMD-3214): the compose service
+ * is `restart: unless-stopped`, so it comes back after a reboot — the
+ * servers' preflight fails while a configured tier is down (SMD-2834) — and
+ * an exit would be restarted at once, with no backoff, in a loop. A fetch
+ * that fails or hashes wrong, an engine that does not load and a port taken
+ * are tried again after 1, 2, 4, 8, then every 15 minutes (RETRY_MS, as
+ * db/supervise.ts's clock), each failure said; a bad JEV_PORT or JEV_THREADS,
+ * which nothing mends without a recreate, holds until the service is
+ * stopped. --fetch-only is a one-shot still: it exits 1 on a failed fetch
+ * and 2 on a bad knob, so `serve.ts --fetch-only && …` stops there.
  */
 
 import { rmSync } from "node:fs";
@@ -114,17 +125,42 @@ export function createHandler(engine: Engine): (req: Request) => Promise<Respons
   };
 }
 
-/** A positive whole number from a knob, or the fallback; anything else is a start-up refusal. */
-function intKnob(name: string, fallback: number, max: number): number {
-  const raw = process.env[name]?.trim();
+/** A positive whole number from a knob, or the fallback; anything else is a start-up refusal, its words returned. */
+export function intKnob(name: string, fallback: number, max: number, env: Record<string, string | undefined> = process.env): number | { error: string } {
+  const raw = env[name]?.trim();
   if (!raw) return fallback;
   // Digits only: Number() also reads 0x1f, 1e3 and 8020.0 (third review pass).
   const n = /^\d+$/.test(raw) ? Number(raw) : NaN;
-  if (!Number.isInteger(n) || n < 1 || n > max) {
-    console.error(`${name}=${raw} is not a whole number from 1 to ${max}`);
-    process.exit(2);
-  }
+  if (!Number.isInteger(n) || n < 1 || n > max) return { error: `${name}=${raw} is not a whole number from 1 to ${max}` };
   return n;
+}
+
+/** The waits between failed starts: the first, and the cap it doubles to — db/supervise.ts's clock (SMD-3214). */
+export const RETRY_MS = { first: 60_000, max: 900_000 } as const;
+
+/** The wait after `tries` failed starts in a row (1 for the first). */
+export function retryWait(tries: number, waits: { first: number; max: number } = RETRY_MS): number {
+  return Math.min(waits.max, waits.first * 2 ** Math.min(Math.max(0, tries - 1), 30));
+}
+
+/**
+ * `attempt` until it resolves, waiting retryWait after each failure, each
+ * failure said once with when it is tried again (SMD-3214). A stop is the
+ * signal handler's, which exits the process wherever this stands; a caller
+ * that needs one sooner passes `sleep`.
+ */
+export async function untilReady<T>(attempt: () => Promise<T>, opts: { err: (line: string) => void; waits?: { first: number; max: number }; sleep?: (ms: number) => Promise<void> }): Promise<T> {
+  const sleep = opts.sleep ?? ((ms: number) => Bun.sleep(ms));
+  for (let tries = 1; ; tries++) {
+    try {
+      return await attempt();
+    } catch (e) {
+      const waitMs = retryWait(tries, opts.waits);
+      opts.err(`jev: ${(e as Error).message}`);
+      opts.err(`jev: not serving — tried again in ${waitMs < 120_000 ? `${Math.round(waitMs / 1000)} s` : `${Math.round(waitMs / 60_000)} min`} (failure ${tries} in a row), then every 15 min at most; the healthcheck reads unhealthy meanwhile, and a stop ends it (SMD-3214)`);
+      await sleep(waitMs);
+    }
+  }
 }
 
 if (import.meta.main) {
@@ -135,8 +171,9 @@ if (import.meta.main) {
     process.exit(2);
   }
   const host = process.env.JEV_HOST?.trim() || "127.0.0.1";
-  const port = intKnob("JEV_PORT", 8020, 65_535);
-  const threads = intKnob("JEV_THREADS", 4, 256);
+  const fetchOnly = args.includes("--fetch-only");
+  const portKnob = intKnob("JEV_PORT", 8020, 65_535);
+  const threadsKnob = intKnob("JEV_THREADS", 4, 256);
   const dir = (process.env.JEV_MODEL_DIR?.trim() || `${homedir()}/.cache/ob1-jev/${VERDICT.revision}`).replace(/\/+$/, "");
   const log = (line: string) => console.log(`jev: ${line}`);
   // Before the fetch and the load, not after: as a container's PID 1 the
@@ -154,25 +191,55 @@ if (import.meta.main) {
       process.exit(0);
     });
   }
-  try {
+  // A knob that is not a number: --fetch-only exits 2, as it always did; the
+  // service holds, idle, until it is stopped — nothing changes it short of a
+  // recreate, and an exit would be restarted in a loop (SMD-3214).
+  const knobError = [portKnob, threadsKnob].find((k): k is { error: string } => typeof k !== "number");
+  if (knobError) {
+    console.error(knobError.error);
+    if (fetchOnly) process.exit(2);
+    console.error("jev: held, not serving — set it in deploy/.env and recreate the service; a stop ends it (SMD-3214)");
+    // The handlers above end it; the timer keeps the process waiting for them.
+    setInterval(() => {}, 2 ** 30);
+    await new Promise<never>(() => {});
+  }
+  const port = portKnob as number;
+  const threads = threadsKnob as number;
+  const fetchModel = async () => {
     const got = await ensureModel(dir, { hub: process.env.JEV_HUB?.trim() || DEFAULT_HUB, fetch: !args.includes("--no-fetch"), log });
     log(`${VERDICT.repo}@${VERDICT.revision.slice(0, 8)} in ${dir}: ${got.fetched.length ? `fetched ${got.fetched.join(", ")}; ` : ""}every file matches its pin (${got.ms.toFixed(0)} ms)`);
-  } catch (e) {
-    console.error(`jev: ${(e as Error).message}`);
-    process.exit(1);
+  };
+  if (fetchOnly) {
+    try {
+      await fetchModel();
+    } catch (e) {
+      console.error(`jev: ${(e as Error).message}`);
+      process.exit(1);
+    }
+    process.exit(0);
   }
-  if (args.includes("--fetch-only")) process.exit(0);
-  const t0 = performance.now();
-  const engine = await createVerdictEngine(dir, { threads });
-  server = Bun.serve({
-    hostname: host,
-    port,
-    // Bun 1.4 keeps a connection open while its handler is pending — a
-    // request waiting its turn answered 200 at 13 s under the default
-    // (measured, seventh review pass); this bounds a connection idle with
-    // nothing in flight, generously.
-    idleTimeout: 120,
-    fetch: createHandler(engine),
-  });
-  log(`${VERDICT.name} loaded in ${(performance.now() - t0).toFixed(0)} ms (${threads} threads, rss ${(process.memoryUsage().rss / 2 ** 20).toFixed(0)} MB); serving ${JEV_CONTRACT} on http://${host}:${server.port}`);
+  // The files, the engine and the port, tried again until all three hold.
+  // Until the engine loads, each try verifies the files afresh, so a part a
+  // failed fetch left is removed and a file replaced since is read as it now
+  // is; once loaded it is kept — about 1 GB resident — and only the port is
+  // tried again (SMD-3214).
+  let engine: Engine | undefined;
+  await untilReady(async () => {
+    const t0 = performance.now();
+    if (!engine) {
+      await fetchModel();
+      engine = await createVerdictEngine(dir, { threads });
+    }
+    server = Bun.serve({
+      hostname: host,
+      port,
+      // Bun 1.4 keeps a connection open while its handler is pending — a
+      // request waiting its turn answered 200 at 13 s under the default
+      // (measured, seventh review pass); this bounds a connection idle with
+      // nothing in flight, generously.
+      idleTimeout: 120,
+      fetch: createHandler(engine),
+    });
+    log(`${VERDICT.name} loaded in ${(performance.now() - t0).toFixed(0)} ms (${threads} threads, rss ${(process.memoryUsage().rss / 2 ** 20).toFixed(0)} MB); serving ${JEV_CONTRACT} on http://${host}:${server.port}`);
+  }, { err: (line) => console.error(line) });
 }

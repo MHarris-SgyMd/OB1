@@ -155,7 +155,7 @@ Major recipe categories:
 
 - Data imports: ChatGPT, Perplexity, X/Twitter, Instagram, Google Activity, Grok, Blogger/Journals, Gmail. An Obsidian or Markdown vault is the fork's `db/` tooling, not a recipe: `bun db/ingest-records.ts --url postgres://… --source markdown --markdown /path/to/vault --allow /path/to/vault`, then `bun db/reembed.ts --url postgres://…` with the embedding model declared as the server has it (`OB1_LLM_LOCAL=1` — the egress gate refuses a run that declares nothing — and the model variables, `SETUP.md`) (SMD-2137).
 - Capture and workflow: auto-capture, panning for gold, schema-aware routing, source filtering, daily digest, research-to-decision workflow.
-- Knowledge graph/wiki: OB graph, entity wiki, wiki compiler, wiki synthesis, typed edge classifier.
+- Knowledge graph/wiki: entity wiki, wiki compiler, wiki synthesis, typed edge classifier.
 - Agent workflows: OpenClaw Agent Memory, code review memory, TaskFlow work log.
 - Alternate architecture: Vercel/Neon/Telegram. The brain itself deploys as the compose stack only (the Kubernetes deployment retired, SMD-2288). Local embedding is the fork's default stack — a local Ollama, declared local by the operator — not a recipe (SMD-2138).
 
@@ -171,7 +171,6 @@ Examples:
 - `skills/autodream-brain-sync`: syncs Claude Code local memories to Open Brain.
 - `skills/panning-for-gold`: turns brain dumps and transcripts into evaluated idea inventories.
 - `skills/claudeception`: extracts reusable lessons and creates skills from work sessions.
-- `skills/work-operating-model`: interviews users about how their work runs and saves approved operating context.
 - `skills/world-model-diagnostic`: runs a world-model readiness diagnostic.
 - `skills/openclaw-agent-memory`: teaches OpenClaw agents to recall, write back, respect policy, and report memory usage.
 

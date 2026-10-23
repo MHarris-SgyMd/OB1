@@ -375,6 +375,15 @@ jobs:
         working-directory: evals
         run: bun eval-judge-propose.ts --self-check
 
+      # How the pass could ask the mediated-pair test's question (SMD-3203
+      # item 3): row 2's mapping (F-state distinct, the rest of the mediated
+      # capped), both versions' questions (the writer's read word for word from
+      # the ADR's test, pinned by hash), the gold where both raters agree, κ,
+      # the median, the scoring and the bar at its edges. No tier, no model.
+      - name: Mediated-pair rules
+        working-directory: evals
+        run: bun eval-mediated-pairs.ts --self-check
+
       # The projection-replay spike's rules (SMD-1998): the snapshot key per
       # projection, the replay rule branch by branch, the five scenarios on a
       # hand-known corpus, the sample, the cost arithmetic, the verdict against
@@ -1059,7 +1068,7 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:ob1test@127.0.0.1:5432/ob1test
 
-      # Every tool of the eight servers on the SQL shim, called through
+      # Every tool of the seven servers on the SQL shim, called through
       # tools/call against the extensions' own schema.sql files (applied as
       # they are — no auth.* stub and no Supabase role, since SMD-1810, which
       # also stopped test-writes.ts above creating the three roles on this

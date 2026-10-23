@@ -537,7 +537,7 @@ type SelectItem =
  * tree's deepest, SMD-1798) and hinted: `relation!inner(…)` keeps only the
  * rows that have an embedded row, `relation!fk_name(…)` and
  * `relation!fk_column(…)` choose the key where two join the tables
- * (`graph_nodes!graph_edges_target_node_id_fkey(…)`), `!left` is the default
+ * (`nodes!edges_target_node_id_fkey(…)`), `!left` is the default
  * said aloud. What is refused is refused here, at the call, as a programming
  * error: a cast or a JSON path in the list (ident() refuses those), an embed
  * with no columns, text around one.
@@ -669,8 +669,9 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
     this.payload = Array.isArray(values) ? values : [values];
     this.conflictTarget = opts?.onConflict ?? null;
     // supabase-js's `Prefer: resolution=ignore-duplicates`: a conflicting row is left as it is and not returned.
-    // Unread until SMD-1798's first review pass, so repo-learning-coach's progress upsert (db.ts) — the one caller,
-    // `ignoreDuplicates: true` on a fresh learner's row — reset an existing row's progress on every sync.
+    // Unread until SMD-1798's first review pass, so repo-learning-coach's progress upsert (retired since, SMD-2923)
+    // reset an existing row's progress on every sync. Kept: three scripts awaiting their port send the header
+    // (atomizer, authorship-edges, wiki-synthesis — SMD-2140, SMD-2141, SMD-2143).
     this.ignoreDuplicates = opts?.ignoreDuplicates === true;
     return this;
   }
@@ -1020,8 +1021,8 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
    * recipe_id (…)`: many-to-one through that key), or a table with exactly one
    * foreign key between the two, in either direction — the base's key to it is
    * many-to-one, its key to the base one-to-many — or, with a hint, the key the
-   * hint names: a constraint's name (`graph_nodes!graph_edges_target_node_id_
-   * fkey`) or a foreign-key column of the base, which is how PostgREST
+   * hint names: a constraint's name (`nodes!edges_target_node_id_fkey`) or a
+   * foreign-key column of the base, which is how PostgREST
    * disambiguates two keys to one table (SMD-1798). `!inner` is not a key.
    */
   private async resolveEmbed(item: Extract<SelectItem, { kind: "embed" }>, base: string): Promise<{ fk: ForeignKey; manyToOne: boolean }> {
