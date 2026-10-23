@@ -159,7 +159,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { consolidatePassKey, decidePair } from "../server-portable/consolidate-decide.ts";
+import { consolidatePassKey, decidePair, type DecideNote } from "../server-portable/consolidate-decide.ts";
 import { resolveJevConfig, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeTier, probeUntil, ProviderDown, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
@@ -1630,10 +1630,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // A proposing verdict: the writer's standing outdates, or the tier's outdates the gate left.
       const proposing = verdict !== null || gated;
       // Decide version 4 (SMD-3203): the writer's link step, when it was asked, and whether it capped the pair.
-      const link = j.decide?.link as { link?: string; capped?: boolean } | undefined;
+      const link = j.decide?.link as DecideNote["link"];
       const cappedBy = link?.capped ? `, capped by the writer's link step (${link.link === "unparsed" ? "no link read" : `an ${link.link} link`}, SMD-3203)` : "";
       if (j.decide) {
-        const writer = j.decide.writer as { current?: string } | undefined;
+        const writer = j.decide.writer as DecideNote["writer"];
         if (gated) totals.gated++;
         else if (writer) {
           totals.writerAsked++;
@@ -1774,14 +1774,16 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         else if (r.action === "closed") totals.relationsClosed++;
       } else if (rv !== null) totals[rv === "distinct" ? "distinctUnstored" : "relationsUnstored"]++;
       if (DUMP) {
+        // The judge's reason and quotes are the brain's text: a file this creates is the owner's alone (SMD-3203).
         appendFileSync(DUMP, JSON.stringify({
           newer: row.id, older: c.older_id, similarity: c.similarity, shared: c.shared_entities, key: JOB,
           verdict: j.verdict, supersedes: j.supersedes, confidence: j.confidence, score: scored.confidence, score_source: scored.source, reason: j.reason, evidence: j.evidence, evidence_found: j.evidenceFound ?? null,
           proposal: proposalId, recorded, relation,
           // Decide mode: the tier's top and, when it asked no writer, the floor it was held to (SMD-3151); the writer's
-          // link step's answer, when it was asked, and whether it capped the pair (SMD-3203).
-          ...(j.decide ? { top: j.decide.top ?? null, floor: j.decide.floor ?? null, link: link?.link ?? null, capped: link?.capped ?? null } : {}),
-        }) + "\n");
+          // link step's answer, when it was asked (first, before a proposal; after, on an evolves to store) and whether
+          // it capped the pair (SMD-3203).
+          ...(j.decide ? { top: j.decide.top ?? null, floor: j.decide.floor ?? null, link: link?.link ?? null, asked: link?.asked ?? null, capped: link?.capped ?? null } : {}),
+        }) + "\n", { mode: 0o600 });
       }
     }
     // 067: the stale rows no candidate reached — pairs the candidate rule no
