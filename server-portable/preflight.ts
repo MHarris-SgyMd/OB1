@@ -4754,7 +4754,7 @@ if (configFailed) {
                 : !log
                 ? null
                 : !logged
-                  ? "Set OB1_QUERY_LOG=on in deploy/.env for the server (read here from this preflight's environment) and recreate it — podman compose -f deploy/compose.yaml up -d server api — so a search wakes the scheduler; until then it can run its passes through a session of searches."
+                  ? "Set OB1_QUERY_LOG=on in deploy/.env for the server (read here from this preflight's environment) and recreate it — podman compose -f deploy/compose.yaml up -d api — so a search wakes the scheduler; until then it can run its passes through a session of searches."
                   : !readable
                     ? "Grant the scheduler's role the opt-in sleep group, `bun db/migrate.ts --grant <role> --groups <its groups>,sleep` (db/README.md, \"Grants for a capturing role\"), or run it as the owner, then restart it (its start reads the privilege once) — until then a search does not wake it."
                     : null;
@@ -5069,9 +5069,9 @@ if (!jevCfg) {
   const START = "Start it — compose --profile jev, reached as http://jev:8020, or bun jev/serve.ts on the host, reached as http://127.0.0.1:8020 from a checkout and from a container as http://host.containers.internal:8020 under podman machine or http://host.docker.internal:8020 under Docker Desktop (serve.ts binds loopback, which rootless podman and Docker on Linux do not reach: the profile is the route there) — fix OB1_JEV_BASE_URL, or unset it to turn the tier off.";
   const host = hostnameOf(base);
   // The stack's own service name resolves only while the service runs: the
-  // profile is down, or `compose restart server` ran — which does not start
+  // profile is down, or `compose restart api` ran — which does not start
   // what the server depends on (fifth review pass: ~5 restarts a second).
-  const NOT_RUNNING = "The jev service is not running: bring the profile up — compose --profile jev up -d (compose restart server does not start it) — or unset OB1_JEV_BASE_URL to turn the tier off.";
+  const NOT_RUNNING = "The jev service is not running: bring the profile up — compose --profile jev up -d (compose restart api does not start it) — or unset OB1_JEV_BASE_URL to turn the tier off.";
   // It resolves and answers nothing: it runs but does not listen yet — it
   // listens only after the fetch and the load, ~20 s on a first start — or is
   // restarting, or the port is not its 8020 (sixth review pass: the

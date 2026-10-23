@@ -1163,7 +1163,7 @@ stored in the same write").
   (SMD-2250). On SIGTERM or SIGINT the server stops accepting, waits for the
   requests in flight (a tool call's stream included) and for the tool calls
   still running (one whose client has gone runs on, and a capture may still
-  land), closes the database pool and exits 0: `docker compose stop server`
+  land), closes the database pool and exits 0: `docker compose stop api`
   returns in about 0.1 s idle, or when the last call ends. The wait is
   `OB1_STOP_GRACE` less 2 s (at least 0.5 s): the platform's grace period in
   whole seconds from 1 to 3600, no unit, 10 unless set (Docker's, so 8 s of
@@ -1196,7 +1196,7 @@ stored in the same write").
 
   Under podman, `podman restart` and `docker compose restart` without `-t`
   kill the server at once (exit 137, measured on podman 6.0.2) rather than
-  signal it; `compose stop server` then `compose start server`, or
+  signal it; `compose stop api` then `compose start api`, or
   `podman restart -t 10`, drains.
 
 ## Related

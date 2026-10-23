@@ -3017,6 +3017,16 @@ const REQUIRED_LIVE_PROBES: [string, string[]][] = [["OB1_R=\n", []], ["# OB1_R=
 /** The one shape a required knob is forwarded in: `${NAME:?message}`, the message naming the fix. */
 const REQUIRED_FORM = (k: string) => new RegExp(`^\\$\\{${k}:\\?[^$}]+\\}$`);
 /** Knobs the server declares that compose.yaml must NOT forward, with the reason its own comment gives. */
+/**
+ * Knobs only the REST core is handed (KNOB_SERVICE): any other service forwarding one is refused. Until SMD-2287 PR 6b
+ * NOT_FORWARDED held these from `server`, the MCP server; with the REST core the service check 14 reads, the hold is
+ * on everything else — a worker merging the `x-env` block they were added to would take a plugin's webhook secrets
+ * (review pass 6b·1, measured).
+ */
+const KNOB_SERVICE_ONLY: Record<string, string> = {
+  OB1_HOOKS: "the plugins whose webhooks the REST core serves (SMD-2310): compose.yaml's x-hook-env, merged by the REST core alone",
+  OB1_HOOK_SECRETS: "the plugins' webhook secrets (SMD-2310): compose.yaml's x-hook-env, merged by the REST core alone — no other service serves a webhook, so none is handed the secrets",
+};
 const NOT_FORWARDED: Record<string, string> = {
   OB1_OTEL_TRUST_TRACEPARENT: "trusting a caller's traceparent (SMD-1849 PR 2b) is a proxy deployment's to say, by an operator's own -f file outside deploy/, not any stack here: forwarded by the server, it would be one setting in deploy/.env from continuing every caller's trace",
   OB1_STORE: "the SQL store is the server's only store (FORK.md change 97; the PostgREST store retired in SMD-3152) — forwarding it would only carry a value the server refuses",
@@ -3216,7 +3226,7 @@ type ComposeFile = { name: string; doc: YamlValue };
  */
 type ServerEnvGap =
   | [kind: "env-file" | "environment-not-mapping" | "environment-item-not-string", file: string, service: string, name: null, detail: string]
-  | [kind: "bare-item" | "not-house-form" | "excused-forwarded" | "unforwarded" | "bad-fallback", file: string, service: string, name: string, detail: string]
+  | [kind: "bare-item" | "not-house-form" | "excused-forwarded" | "knob-service-only" | "unforwarded" | "bad-fallback", file: string, service: string, name: string, detail: string]
   | [kind: "undeclared", file: string, service: string, name: string, detail: string | null]
   | [kind: "no-server" | "no-base", file: string, service: null, name: null, detail: string]
   | [kind: "undocumented" | "dead-switch", file: string, service: null, name: string, detail: string]
@@ -3250,6 +3260,7 @@ function serverEnvGapsIn(declared: string[], documented: Set<string>, files: Com
         anywhere.add(k);
         if (v === null) gaps.push(["bare-item", name, service, k, ""]);
         else if (k in required ? !REQUIRED_FORM(k).test(v) : !HOUSE_FORM(k).test(v)) gaps.push(["not-house-form", name, service, k, v]);
+        if (service !== KNOB_SERVICE && k in KNOB_SERVICE_ONLY) gaps.push(["knob-service-only", name, service, k, KNOB_SERVICE_ONLY[k]]);
         if (service === KNOB_SERVICE) {
           if (!declared.includes(k)) gaps.push(["undeclared", name, KNOB_SERVICE, k, v]);
           else if (k in excused) gaps.push(["excused-forwarded", name, KNOB_SERVICE, k, excused[k]]);
@@ -3322,6 +3333,8 @@ const DECISION_PROBES: [string[], string[], { name: string; yaml: string }[], st
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n      OB1_Z: ${OB1_Z:-}\n"))], ["undeclared:OB1_Z"]],
   [["OB1_A", "OB1_B"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n      OB1_B: ${OB1_B:-}\n"))], ["undocumented:OB1_B"]],
   [["OB1_A", "OB1_STORE"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_A:-}\n      OB1_STORE: ${OB1_STORE:-}\n"))], ["excused-forwarded:OB1_STORE"], { OB1_STORE: "why" }],
+  // The webhook keys are the REST core's alone (KNOB_SERVICE_ONLY): a worker forwarding one, as merging the x-env block they were added to would (review pass 6b·1).
+  [["OB1_HOOK_SECRETS"], ["OB1_HOOK_SECRETS"], [BASE(`${SRV("      OB1_HOOK_SECRETS: ${OB1_HOOK_SECRETS:-}\n")}  extract:\n    environment:\n      OB1_HOOK_SECRETS: \${OB1_HOOK_SECRETS:-}\n`)], ["knob-service-only:OB1_HOOK_SECRETS"]],
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: ${OB1_B:-}\n"))], ["not-house-form:OB1_A"]],
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      OB1_A: on\n"))], ["not-house-form:OB1_A"]],
   [["OB1_A"], ["OB1_A"], [BASE(SRV("      - OB1_A\n"))], ["bare-item:OB1_A"]],
@@ -3469,6 +3482,7 @@ function checkServerEnvForwarded() {
         ? `\`${name}: ${detail}\` under \`${service}\` — REQUIRED_KNOBS holds it required: ${REQUIRED_KNOBS[name]}; it is forwarded as \`\${${name}:?<the fix>}\`, so compose refuses a stack without it and names the fix (SMD-2287)`
         : `\`${name}: ${detail}\` under \`${service}\` — ${forwardForm(detail, name)}; a knob is forwarded as ${HOUSE(name)}, the operator's value under its own name (SMD-1843)`); break;
       case "undeclared": fail(at(file, KNOB_SERVICE, name), `\`${KNOB_SERVICE}.environment\` forwards \`${name}\`, which ${SERVER_ENV_SOURCE} does not declare — \`type Env\` there is the one list of what the container's process reads, so this is a typo, a knob that died, or a knob a module reads without declaring (two were, when this rule first ran): declare it there with what it does, or drop it here (SMD-1843)`); break;
+      case "knob-service-only": fail(at(file, service, name), `\`${service}\` forwards \`${name}\`, which KNOB_SERVICE_ONLY in ${SELF} holds to the REST core (\`${KNOB_SERVICE}\`) alone: ${detail} (SMD-2310, SMD-2287 PR 6b)`); break;
       case "excused-forwarded": fail(at(file, KNOB_SERVICE, name), `forwards \`${name}\`, which NOT_FORWARDED in ${SELF} says the stack must not: ${detail} (SMD-1843)`); break;
       case "no-server": fail(`deploy/${file}`, `has no \`${KNOB_SERVICE}\` service — check 14 reads what it forwards to the REST core, the server that reads the knobs (SMD-1843, SMD-2287 PR 6b)`); break;
       case "no-base": fail(rel, `missing — check 14 reads the server's environment from it, and SETUP.md brings the stack up with it (SMD-1843)`); break;

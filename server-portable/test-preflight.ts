@@ -3815,7 +3815,7 @@ else {
       // The log off: writes alone wake it, a warning with the switch.
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(400), to: await at(100) } }), 20);
       const offOut = await run(SQL_ENV);
-      assert(/!\s+sleep\s+.*; writes alone wake it — OB1_QUERY_LOG is off here, so this server logs no search$/.test(row(offOut.out, "sleep")) && /→ Set OB1_QUERY_LOG=on in deploy\/\.env for the server \(read here from this preflight.s environment\) and recreate it — podman compose -f deploy\/compose\.yaml up -d server api — so/.test(fix(offOut.out, "sleep")),
+      assert(/!\s+sleep\s+.*; writes alone wake it — OB1_QUERY_LOG is off here, so this server logs no search$/.test(row(offOut.out, "sleep")) && /→ Set OB1_QUERY_LOG=on in deploy\/\.env for the server \(read here from this preflight.s environment\) and recreate it — podman compose -f deploy\/compose\.yaml up -d api — so/.test(fix(offOut.out, "sleep")),
         `the log off warns that a search does not wake it, with the switch (${row(offOut.out, "sleep")} | ${fix(offOut.out, "sleep")})`);
 
       // The log on but this role cannot read it: the opt-in sleep group is the fix; granted it, a search wakes it.
@@ -4661,7 +4661,7 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   const proxied = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", HTTP_PROXY: "http://127.0.0.1:9", http_proxy: undefined, NO_PROXY: undefined, no_proxy: undefined });
   assert(/✗\s+jev tier\s+.*HTTP_PROXY is set, so this call goes through that proxy unless NO_PROXY names 127\.0\.0\.1/.test(proxied.out) && /→ Add 127\.0\.0\.1 to NO_PROXY/.test(proxied.out), "a proxy variable in the way is named, with NO_PROXY as the fix");
   const stopped = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://jev:8020", OB1_JEV_LOCAL: "1" });
-  assert(/→ The jev service is not running: bring the profile up — compose --profile jev up -d \(compose restart server does not start it\)/.test(stopped.out), "the stack's own service unresolved: not running, and restart server does not start it");
+  assert(/→ The jev service is not running: bring the profile up — compose --profile jev up -d \(compose restart api does not start it\)/.test(stopped.out), "the stack's own service unresolved: not running, and restart server does not start it");
   // A proxy that answers — with an error status — is an answer not from the
   // tier, and the row still names the proxy as the route.
   const badProxy = Bun.serve({ port: 0, fetch: () => new Response("bad gateway", { status: 502 }) });

@@ -182,4 +182,4 @@ Solution: `MCP_URL` is wrong, or the server is not up; the dashboard's own log h
 Solution: You signed in with a read key. Mint a write key (`--scope write`) and sign in again.
 
 **Issue: Search returns "No thoughts found" but stats show thoughts exist**
-Solution: Search is semantic (vector similarity), so it needs the server's embedding provider. If the server's preflight reports the provider unreachable, or thoughts were captured before embeddings were configured, search finds nothing. The server's own log (`docker compose logs server`) names the provider and the failure.
+Solution: Search is semantic (vector similarity), so it needs the server's embedding provider. If the server's preflight reports the provider unreachable, or thoughts were captured before embeddings were configured, search finds nothing. The REST core's log (`docker compose logs api`) names the provider and the failure.

@@ -2254,14 +2254,15 @@ jobs:
             if [ "$code" != "$2" ]; then docker compose -f compose.yaml logs --tail 20 api; echo "$1: expected exit $2 (137 is the kill at the end of the grace period: ${3:-10} s)" >&2; exit 1; fi
           }
           # A keyed call first, so the pool this stop closes — open since the
-          # server's start (SMD-2284) — has served this step, whatever ran
-          # before it (review pass 2). From inside its container: no path of
-          # the proxy reaches `server` since SMD-2532 closed the root and /mcp
-          # became the `mcp` service's (SMD-2287), and its answer is read, so a
-          # call that never reached the database fails here, not silently.
+          # REST core's start (SMD-2284) — has served this step, whatever ran
+          # before it (review pass 2). From inside its container, on its own
+          # route (`/v1/stats`, thought_stats' operation), and its answer is
+          # read, so a call that never reached the database fails here, not
+          # silently. (`server`, which this step stopped until SMD-2287 PR 6b,
+          # took an MCP tools/call at its root.)
           KEY="$OB1_SMOKE_KEY" docker compose -f compose.yaml exec -T -e KEY api bun \
-            -e 'const r = await fetch("http://127.0.0.1:8000/", { method: "POST", signal: AbortSignal.timeout(15000), headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": process.env.KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "thought_stats", arguments: {} } }) }); const t = await r.text(); if (!r.ok || !t.includes("Total thoughts: ")) { console.error(`the server answered the keyed warm-up ${r.status}: ${t.slice(0, 160)}`); process.exit(1); }' \
-            || { echo "the keyed call before the stop did not reach the server's database (above)" >&2; exit 1; }
+            -e 'const r = await fetch("http://127.0.0.1:8000/v1/stats", { signal: AbortSignal.timeout(15000), headers: { "x-brain-key": process.env.KEY } }); const t = await r.text(); let total; try { total = JSON.parse(t).total; } catch {} if (!r.ok || typeof total !== "number") { console.error(`the REST core answered the keyed warm-up ${r.status}: ${t.slice(0, 160)}`); process.exit(1); }' \
+            || { echo "the keyed call before the stop did not reach the REST core's database (above)" >&2; exit 1; }
           # The daemon restart above (SMD-2760) left a line of its own: this
           # stop must add one.
           stops() { docker compose -f compose.yaml logs --no-log-prefix api | grep -c '^SIGTERM: stopped' || true; }
@@ -3356,7 +3357,7 @@ jobs:
           # answers, and the fallback sign-in paths are the proxy's 404. Each
           # helper's curl may fail without ending the step, so the check after
           # it says what came back. /mcp is the `mcp` service's since SMD-2287;
-          # `server`, which nothing here routes to, is recreated beside it.
+          # the REST core is recreated beside it.
           auth up -d --wait --wait-timeout 120 --no-deps api mcp
           O=(-H 'Host: brain.example.test')
           # "<status> <WWW-Authenticate or ->" for an initialize POSTed to /mcp with these curl arguments.

@@ -868,7 +868,7 @@ services:
       # service, which lists them itself) advertises OAuth at <origin>/mcp only
       # while COMPOSE_PROFILES names auth, the request's Host is the origin's,
       # and the authorization server answers its probe on the mesh (SMD-2382,
-      # oauth-edge.ts). The REST core takes this block, and and accepts the authorization server's tokens only while
+      # oauth-edge.ts). The REST core takes this block, and accepts the authorization server's tokens only while
       # both are set (SMD-2286, oauth-token.ts): drop them from it and it takes
       # keys alone. Its preflight prints the same `public origin` row, naming
       # the MCP server.
