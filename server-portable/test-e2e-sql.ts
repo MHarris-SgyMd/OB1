@@ -3084,8 +3084,8 @@ const wordless = (v: unknown, at = ""): string[] => {
   // list_thoughts' cursor (SMD-2995) is a token by construction: what it decodes to is a sort word, a time and a uuid, read by the core's own rule.
   if (typeof v === "string" && at === "cursor" && parseListCursor(v)) return [];
   // A proposal's pass (SMD-3248) is a pass key by construction — consolidate:<model>[+<writer>]@p<N>[d<N>], a model name in
-  // letters, digits and . _ : / - — spelled here apart from render.ts's guard, so a guard widened past it fails this rule.
-  if (typeof v === "string" && /(?:^|\.)judgeKey$/.test(at) && /^consolidate:[A-Za-z0-9._:/-]{1,120}(?:\+[A-Za-z0-9._:/-]{1,120})?@p\d{1,4}(?:d\d{1,4})?$/.test(v)) return [];
+  // letters, digits and . _ : / @ -, 200 characters at most — spelled here apart from render.ts's guard, so a guard widened past it fails this rule.
+  if (typeof v === "string" && /(?:^|\.)judgeKey$/.test(at) && v.length <= 200 && /^consolidate:[A-Za-z0-9._:/@-]{1,120}(?:\+[A-Za-z0-9._:/@-]{1,120})?@p\d{1,4}(?:d\d{1,4})?$/.test(v)) return [];
   if (typeof v === "string") return SHAPE.test(v) ? [] : [at || "(root)"];
   if (Array.isArray(v)) return v.flatMap((x, i) => wordless(x, `${at}[${i}]`));
   if (v && typeof v === "object") return Object.entries(v).flatMap(([k, x]) => (at === "" && k === "text" ? [] : wordless(x, at ? `${at}.${k}` : k)));

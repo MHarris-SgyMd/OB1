@@ -65,12 +65,13 @@ const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|sup
  * A consolidation pass's key (SMD-3248), as consolidate.ts and
  * consolidate-decide.ts build it: `consolidate:<model>@p<prompt>`, or under
  * decide mode `consolidate:<decider>+<writer>@p<prompt>d<decide version>` — a
- * model name in Ollama's and Hugging Face's characters (letters, digits, `.`,
- * `_`, `:`, `/`, `-`), no space. Held to that shape, it carries no sentence;
- * a key of any other shape — a raw recording's, or a model named with `@` or
- * `+` (Cloudflare's `@cf/…`) — reads null, its text in the reply's.
+ * model name in Ollama's, Hugging Face's and Cloudflare's characters
+ * (letters, digits, `.`, `_`, `:`, `/`, `@`, `-`; `@cf/meta/…` since review
+ * pass 2), no space, 200 characters at most — the input's own bound. Held to
+ * that shape, it carries no sentence; a key of any other shape (a raw
+ * recording's, a model named with `+`) reads null, its text in the reply's.
  */
-const JUDGE_KEY = /^consolidate:[A-Za-z0-9._:/-]{1,120}(?:\+[A-Za-z0-9._:/-]{1,120})?@p\d{1,4}(?:d\d{1,4})?$/;
+const JUDGE_KEY = /^consolidate:[A-Za-z0-9._:/@-]{1,120}(?:\+[A-Za-z0-9._:/@-]{1,120})?@p\d{1,4}(?:d\d{1,4})?$/;
 
 /**
  * The rule at the chokepoint (review pass 6): every string a picker hands over
@@ -84,7 +85,7 @@ function guard(v: unknown, key = ""): unknown {
   // list_thoughts' cursor (SMD-2995): not a uuid, but held to its own shape, which carries no sentence.
   if (typeof v === "string" && key === "cursor" && v === v.trim() && parseListCursor(v)) return v;
   // A proposal's pass (SMD-3248): held to a pass key's own shape, which carries no sentence.
-  if (typeof v === "string" && key === "judgeKey") return JUDGE_KEY.test(v) ? v : null;
+  if (typeof v === "string" && key === "judgeKey") return v.length <= 200 && JUDGE_KEY.test(v) ? v : null;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -820,13 +821,14 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
 export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply {
   return render(o, ({ status, lineage, judgeKey, proposals: data }) => {
     // SMD-3248: the pass selected (109) is said with the rest of the selection.
-    const onLineage = (lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "") + (judgeKey === undefined ? "" : ` judged by ${judgeKey}`);
+    const onLineage = (lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "") + (judgeKey === undefined ? "" : ` judged by ${snipText(judgeKey, 260)}`);
     if (!data.length) {
       // A lineage pair is never proposed since 066, so an empty lineage
       // selection is not the pass's to fill (maintainer read, third pass).
       // SMD-3248 review pass 1: under judge_key, no row is no pass of exactly that key in this status — a typo, or an older
       // pass's key, which no run will fill — so the advice is the key's, not the pass's.
-      if (judgeKey !== undefined) return `No ${status === "all" ? "" : status + " "}supersession proposals${onLineage}. The match is exact: each proposal names the key that judged it (judged by consolidate:…), and \`cd db && bun consolidate.ts --url $DATABASE_URL --status\` counts the pending by pass.`;
+      // Review pass 2: the key may be right and the status or lineage filter what emptied it.
+      if (judgeKey !== undefined) return `No ${status === "all" ? "" : status + " "}supersession proposals${onLineage}. Either that pass has none in this selection, or no pass has exactly this key: the match is exact, each proposal names the key that judged it (judged by consolidate:…), and \`cd db && bun consolidate.ts --url $DATABASE_URL --status\` counts the pending by pass.`;
       return `No ${status === "all" ? "" : status + " "}supersession proposals${onLineage}.${lineage === true ? "" : " The consolidation pass proposes them: cd db && bun consolidate.ts --url $DATABASE_URL (after db/extract-entities.ts, which it pairs thoughts by)."}`;
     }
     // SMD-1803: through displayDate, never new Date() on a raw column — an
@@ -890,7 +892,8 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
         : "";
       return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${flags.length ? "  WRITER" : ""}${reason ? `\n   Reason: ${reason}` : ""}${lineageLine}${writerLine}` +
         side("newer", p.newer) + side("older", p.older) +
-        `\n   proposal ${p.id} — judged by ${p.judgeKey} on ${day(p.judgedAt)}\n${review}`;
+        // The key through the one cleaner (review pass 2): any key a recorder wrote — a newline in it forged an `ID:` line.
+        `\n   proposal ${p.id} — judged by ${snipText(p.judgeKey, 260)} on ${day(p.judgedAt)}\n${review}`;
     });
     const unread = data.some((p) => !p.older.writer || !p.newer.writer) ? ` ${WRITERS_UNREAD}` : "";
     return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.${unread}\n\n${results.join("\n\n")}`;

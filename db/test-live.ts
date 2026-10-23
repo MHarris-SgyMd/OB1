@@ -50,7 +50,7 @@ import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
+import { capNote, MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import { sweepOrphans } from "./rebuild.ts";
 import type { PassStop } from "./lease.ts";
@@ -6497,10 +6497,28 @@ if (want("16")) {
       && listKey.out.includes(`--accept ${directed.id}`) && listKey.out.includes(`--accept ${undirected.id} --direction <newer|older>`)
       && listNobody.code === 0 && /no pending proposals judged by consolidate:nobody@p1/.test(listNobody.out) && same(listKeyC, listKey),
     `--list --key lists this pass's two, the key in the header; a key no pass has lists none; run() in-process the same (${listKey.out.split("\n").find((l) => /judged by/.test(l))?.trim().slice(0, 120)})`);
-  // …and --status counts the pending by pass, the keys --key takes (review pass 1: the total alone hid which passes it held).
+  // …and --status counts the pending by pass, the keys --key takes (review pass 1: the total alone hid which passes it
+  // held). Two more passes planted raw (review pass 2: under one key alone, the count's status term and order had no
+  // teeth): one pending under a second key, one rejected under a third and one pending under a key --key cannot take,
+  // on two thoughts outside the pool; gone with them after.
+  const rawThought = async (text: string) => ((await sql`SELECT upsert_thought(${text}, ${{ metadata: { source: "test" } }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
+  const [rawA, rawB, rawC] = [await rawThought("[16] a raw pass's older side"), await rawThought("[16] a raw pass's newer side"), await rawThought("[16] a raw pass's third side")];
+  await sql`SELECT record_supersession_proposal(${rawA}::uuid, ${rawB}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:zz-second@p1', NULL)`;
+  const rejectedRaw = (await sql`SELECT record_supersession_proposal(${rawA}::uuid, ${rawC}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:zz-third@p1', NULL) AS id`)[0].id as string;
+  await sql`SELECT review_supersession_proposal(${rejectedRaw}::uuid, 'reject', 'raw', NULL, NULL)`;
+  await sql`SELECT record_supersession_proposal(${rawB}::uuid, ${rawC}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:a key with spaces@p1', NULL)`;
   const byPass = await consolidate("--status");
-  assert(byPass.code === 0 && byPass.out.includes(`pending by pass: 2 judged by ${passKey} — --list --key <key> lists one pass's`),
-    `--status counts the pending by pass (${byPass.out.split("\n").find((l) => /pending by pass/.test(l))?.trim().slice(0, 140)})`);
+  const byLine = byPass.out.split("\n").find((l) => /pending by pass/.test(l)) ?? "";
+  assert(byPass.code === 0 && byLine.includes(`pending by pass: 2 judged by ${passKey}, 1 judged by consolidate:a key with spaces@p1 (not a key --key takes; listed by --list alone), 1 judged by consolidate:zz-second@p1 — --list --key <key> lists one pass's`)
+      && !byLine.includes("zz-third"),
+    `--status counts the pending by pass, most first, a rejected row's pass not among them and a key --key cannot take said so (${byLine.trim().slice(0, 200)})`);
+  await sql`DELETE FROM thoughts WHERE id IN (${rawA}::uuid, ${rawB}::uuid, ${rawC}::uuid)`;
+  // The capped page's note, every case (review pass 2: a capped --list all --key said to decide and list again, which
+  // never drains an all-status page; no suite reached a cap under --key).
+  assert(capNote("pending", false) === "--status counts them all" && capNote(undefined, false) === "--status counts them all"
+      && capNote("pending", true) === "decide these and list again for the rest; --status counts each pass's pending"
+      && ["accepted", "rejected", "stale", "lineage", undefined].every((st) => capNote(st, true) === "the rest are not listed (SMD-3249 pages)"),
+    "a capped page's note: --status's total unselected; under --key, pending drains as it is decided and every other selection waits for paging");
 
   // The review path, through the worker's flags, audited under the key's name.
   const needDir = await consolidate("--accept", undirected.id);
@@ -7673,6 +7691,14 @@ if (want("16")) {
     const apartA = await outside("A note on the boiler room, judged apart."), apartB = await outside("A note on the boiler's warranty, judged apart.");
     await sql`SELECT record_thought_relation(${apartB}::uuid, ${apartA}::uuid, 'distinct', 0.7, 'consolidate:other-model@p4', NULL, 'a', 'b', NULL)`;
     const marked = await consolidate("--list", "relations");
+    // Under --key that other pass's own (review pass 2: under this pass's key the mark never showed anyway): its row
+    // keeps OLDER SUPERSEDED and loses ANOTHER JUDGE KEY, the pass being chosen.
+    const markedLines = marked.out.split("\n");
+    const otherAt = markedLines.findIndex((l) => /\] related  .*ANOTHER JUDGE KEY/.test(l));
+    const otherKey = markedLines.slice(otherAt).map((l) => /relation \S+\s+judged by (\S+) on /.exec(l)?.[1]).find(Boolean) ?? "";
+    const markedKeyed = await consolidate("--list", "relations", "--key", otherKey);
+    assert(otherKey.startsWith("consolidate:") && /\] related  .*OLDER SUPERSEDED/.test(markedKeyed.out) && !/ANOTHER JUDGE KEY/.test(markedKeyed.out),
+      `--list relations --key <the other pass's key> keeps OLDER SUPERSEDED and drops ANOTHER JUDGE KEY (${otherKey}: ${markedKeyed.out.split("\n").find((l) => /\] related/.test(l))?.trim().slice(0, 120)})`);
     const statusOther = await consolidate("--status");
     assert(/\] related  .*OLDER SUPERSEDED.*ANOTHER JUDGE KEY/.test(marked.out) && /1 judged under another key, which this pass replaces only for the pairs it judges again/.test(statusOther.out),
       `--list relations marks a relation whose older side is superseded and one judged under another key, and --status counts the other key's — not the distinct's (${marked.out.split("\n").find((l) => /\] related/.test(l))?.trim()})`);
