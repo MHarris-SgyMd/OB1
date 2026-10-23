@@ -12,6 +12,9 @@
  * for the eval's brain tool). Then come the profile's own templates,
  * instanced for the kit's runner pipelines, then the kit's workflows. On-demand runs go through a
  * workflow's own Webhook trigger, which takes the run key, never the MCP one.
+ * The workflows reach the brain through its REST core, `http://api:8000`,
+ * with HTTP Request nodes and the brain credentials pinned to `api`
+ * (SMD-2295); the MCP Client node they used before is gone from them.
  * What a run did is read back from `GET /executions`.
  *
  * On top of C1–C3, extraChecks covers what the profile adds:
@@ -228,7 +231,7 @@ async function inRunData(env: Record<string, string>, names: string[], value: st
  *   once the run answers (review pass 2). It reaches nothing on the network:
  *   no DNS answer, not the host alias, Postgres, n8n, the internet or the
  *   runner's own port (SMD-2289);
- * - `vendor`'s pipeline names one host, server:8000. Its emitter reaches that
+ * - `vendor`'s pipeline names one host, api:8000. Its emitter reaches that
  *   host through its proxy with TLS naming it, is cut off when TLS through
  *   the same tunnel names another server (review pass 1), has a CONNECT to
  *   Postgres refused, and opens no direct connection. The report names the
@@ -283,7 +286,7 @@ async function importChecks(env: Record<string, string>, ctx: Ctx): Promise<Chec
     && stray.status === 422 && /the runner answered 422: one-source/.test(stray.report?.why ?? "") && /identity\.system "gmail"/.test(stray.report?.why ?? "") && n3 === IMPORT.rows && leaked === 0
     && snoop.status === 200 && snoop.report?.emitted === 0 && leftovers === 0 && daily
     && vendor.status === 200 && vendor.report?.emitted === 0 && vendor.report?.egress?.length === 2
-    && /^CONNECT server:8000: the TLS ClientHello names other\.example, not server$/.test(vendor.report.egress[0]) && /^CONNECT postgres:5432: not a host vendor names \(network: server:8000\)$/.test(vendor.report.egress[1])
+    && /^CONNECT api:8000: the TLS ClientHello names other\.example, not api$/.test(vendor.report.egress[0]) && /^CONNECT postgres:5432: not a host vendor names \(network: api:8000\)$/.test(vendor.report.egress[1])
     && (down === null || (down.status === 502 && /did not answer/.test(down.report?.why ?? "")))
     && runKey.runs > 0 && runKey.holding === 0 && runnerKey.holding === 0
     && who.role === RUNNER_ROLE && who.superuser === false && who.beyond.length === 0 && who.serverOnly.length === 0;
@@ -325,8 +328,12 @@ function runnerIdentity(): { role: string | null; superuser: boolean | null; nam
   return { role: got.role, superuser: got.superuser, names: got.names.length, beyond: got.names.filter((n) => !allowed.has(n)).sort(), serverOnly: got.names.filter((n) => SERVER_ONLY.includes(n)).sort() };
 }
 
-/** The compose services whose names are n8n's own network's, bare or with one of its search domains. */
-const SERVICES = ["server", "n8n", "n8n-front", "egress-watch", "postgres", "orchestration-runner"];
+/**
+ * The compose services whose names are n8n's own network's, bare or with one
+ * of its search domains. The brain is the REST core, `api` (SMD-2295):
+ * `server` is not here, so a template that still named it fails E.
+ */
+const SERVICES = ["api", "n8n", "n8n-front", "egress-watch", "postgres", "orchestration-runner"];
 
 /** What the judge is told rather than infers: read from n8n's /etc/resolv.conf and the engine. `problem` is set when a read failed. */
 export type EgressFacts = { resolvers: string[]; searchDomains: string[]; brain: string[]; runner?: string[]; problem?: string };
@@ -355,7 +362,7 @@ export type EgressFacts = { resolvers: string[]; searchDomains: string[]; brain:
  * judge names, and says so rather than pass.
  *
  * A name is inside when it is a service's, bare or with a search domain.
- * Expansions with the host's own search domains (`server.<isp domain>`) are
+ * Expansions with the host's own search domains (`api.<isp domain>`) are
  * reported apart: fixed names, carrying nothing. Anything else fails unless a
  * kit template names its host. The brain must have been seen, or the capture
  * proves nothing.
@@ -473,14 +480,14 @@ export function factsFrom(raw: RawFacts): EgressFacts {
   return { resolvers, searchDomains, brain, runner, problem };
 }
 
-/** The facts E is judged against, read live: n8n's resolv.conf, the brain's addresses (v4 and v6), and the watcher's and n8n's state, from the engine. */
+/** The facts E is judged against, read live: n8n's resolv.conf, the brain's addresses (the REST core's, v4 and v6), and the watcher's and n8n's state, from the engine. */
 function egressFacts(): EgressFacts {
   const idOf = (service: string) => compose("n8n", ["ps", "-q", service]).out.trim();
   const inspect = (id: string, format: string) => (id ? run(["docker", "inspect", id, "--format", format]) : null);
-  const [server, watcher, n8nId, runnerId] = [idOf("server"), idOf("egress-watch"), idOf("n8n"), idOf("orchestration-runner")];
+  const [api, watcher, n8nId, runnerId] = [idOf("api"), idOf("egress-watch"), idOf("n8n"), idOf("orchestration-runner")];
   return factsFrom({
     resolv: compose("n8n", ["exec", "-T", "n8n", "cat", "/etc/resolv.conf"]),
-    brain: inspect(server, "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}"),
+    brain: inspect(api, "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}"),
     runner: inspect(runnerId, "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}"),
     watcher: inspect(watcher, "{{.State.Running}} {{.State.StartedAt}}"),
     n8nStarted: inspect(n8nId, "{{.State.StartedAt}}")?.out.trim() ?? "",
@@ -542,8 +549,8 @@ export const n8n: Adapter = {
   async mcpServer(env) {
     return { url: `${BASE}/mcp/ob1`, headers: { "x-n8n-key": env.N8N_MCP_KEY } };
   },
-  mcpClient: "n8n's MCP Client node",
-  nativeMcpClient: true,
+  httpClient: "n8n's HTTP Request node",
+  nativeHttpClient: true,
   tools: { search: "brain_search_thoughts", act: "linear_issue" },
   version() {
     return compose("n8n", ["exec", "-T", "n8n", "n8n", "--version"]).out.trim();

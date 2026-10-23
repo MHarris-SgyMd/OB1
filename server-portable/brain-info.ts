@@ -310,10 +310,11 @@ function parseHeld(h: unknown): SleepHeld | undefined {
 /**
  * db/worker-bootstrap.ts's START_REFUSALS, which a row's `refused` must be
  * one of — the sleep scheduler's (SMD-2752), and since SMD-3214 any
- * follower's db/supervise.ts held: kept here, as server-portable reads no
- * db/ module, and held equal to it by test-live [38].
+ * follower's: a claim worker's or board-sync's at its start, or
+ * db/supervise.ts's guard: kept here, as server-portable reads no db/
+ * module, and held equal to it by test-live [38].
  */
-export const SLEEP_REFUSALS = ["usage", "egress", "tables", "model", "provider", "identity", "key", "lookup"] as const;
+export const SLEEP_REFUSALS = ["usage", "egress", "tables", "model", "provider", "identity", "key", "lookup", "linear-key", "board"] as const;
 export type SleepRefusal = (typeof SLEEP_REFUSALS)[number];
 
 /** A heartbeat older than this many of its own intervals is stale. */
@@ -1402,8 +1403,10 @@ export function heartbeatState(h: WorkerHeartbeat): string {
   const held = restartWords(h);
   if (held !== null) return `${held} (${when})`;
   // A worker that said it ended is stopped, fresh or not (review pass 1: it
-  // read "alive"); one that ended on a failure says so (review pass 2).
-  if (h.ended) return `${h.outcome === "failed" ? "ended on a failure" : "stopped"} (${when})`;
+  // read "alive"); one that ended on a failure says so (review pass 2), and a
+  // follower's start refusal by its kind (SMD-3214) — the sleep scheduler's
+  // row says its own in preflight's words, "at a pass's start".
+  if (h.ended) return `${h.outcome === "failed" ? `ended on a failure${h.refused && h.worker !== "sleep" ? `, refused at its start (${h.refused})` : ""}` : "stopped"} (${when})`;
   if (h.stale) return `stale (${when}${h.outcome === "failed" ? ", its last pass failed" : ""})`;
   // Running says so, and a failed last pass still shows: a follower against a
   // down provider spends most of each pass in its pauses (review pass 3).
@@ -1488,7 +1491,17 @@ export function findingsLine(db: Pick<DatabaseSummary, "findings" | "unread">): 
 
 /** The record as the tool's short table: one fact per line, a label and a value. */
 export function renderBrainInfo(info: BrainInfo): string {
-  const row = (label: string, value: string) => `${`${label}:`.padEnd(16)} ${value}`;
+  return brainInfoRows(info).map(([label, value]) => `${`${label}:`.padEnd(16)} ${value}`).join("\n");
+}
+
+/**
+ * The record's facts as [label, value] rows, in the tool's order and words:
+ * the one wording of each judgement (ledger current or behind, a worker's
+ * state, the proposal queue, a size), which the operator GUI renders as a
+ * table of its own (SMD-2280) and renderBrainInfo lays out as text.
+ */
+export function brainInfoRows(info: BrainInfo): [label: string, value: string][] {
+  const row = (label: string, value: string): [string, string] => [label, value];
   const tail = info.unreleased ? `; this tree adds ${info.unreleased[0] === info.unreleased[1] ? pad3(info.unreleased[0]) : `${pad3(info.unreleased[0])}–${pad3(info.unreleased[1])}`}, unreleased` : "";
   const release = info.releaseRange ? `release range ${pad3(info.releaseRange[0])}–${pad3(info.releaseRange[1])}${tail}` : "no release range recorded";
   const lines = [
@@ -1500,7 +1513,7 @@ export function renderBrainInfo(info: BrainInfo): string {
   const db = info.database;
   if ("error" in db) {
     lines.push(row("Database", `unavailable — ${db.error}`));
-    return lines.join("\n");
+    return lines;
   }
   const counts = db.counts;
   // A count is null when its table is absent (no entry in unread) or its read did not answer.
@@ -1547,5 +1560,5 @@ export function renderBrainInfo(info: BrainInfo): string {
   const unread = Object.entries(db.unread);
   // A deadline's message is its words; every other reason adds the database's.
   if (unread.length) lines.push(row("Not read", unread.map(([k, u]) => `${k} — ${unreadWords(u)}${u.reason === "deadline" ? "" : `: ${u.message}`}`).join("; ")));
-  return lines.join("\n");
+  return lines;
 }
