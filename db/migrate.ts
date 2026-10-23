@@ -1357,7 +1357,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     // The file applied by hand, into this database, from the repository's root or into the compose stack's Postgres (review pass 3: a psql with no database named created it in another).
     // The database's name in a shell's single quotes, so a name with `$`, a backquote or a double quote pastes as itself (review pass 4: an identifier's double quotes ran a command substitution).
     const shq = (v: string) => `'${v.replaceAll("'", `'\\''`)}'`;
-    const byHand = (db: string) => `psql -d ${shq(db)} -v ON_ERROR_STOP=1 -f db/migrations/${file.name}, or in the compose stack compose exec -T postgres psql -U postgres -d ${shq(db)} -v ON_ERROR_STOP=1 -f - < db/migrations/${file.name} (a pipeline tier's service is <tier>-postgres)`;
+    const byHand = (db: string) => `psql -d ${shq(db)} -v ON_ERROR_STOP=1 -f db/migrations/${file.name}, or in the compose stack compose exec -T postgres psql -U postgres -d ${shq(db)} -v ON_ERROR_STOP=1 -f - < db/migrations/${file.name}`;
     try {
       const before = await state();
       if (!before.installed) {
