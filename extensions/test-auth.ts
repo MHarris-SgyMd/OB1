@@ -169,10 +169,6 @@ const SERVERS: Server[] = [
   ext("meal-planning/shared-server.ts", ["view_meal_plan", "view_recipes", "view_shopping_list"], ["mark_item_purchased"],
     { keys: "MCP_HOUSEHOLD_ACCESS_KEYS", legacy: "MCP_HOUSEHOLD_ACCESS_KEY" }),
   // The recipes and integrations (change 67).
-  vendored("recipes/ob-graph/index.ts", "mcp", ["search_nodes", "get_neighbors", "traverse_graph", "find_path", "list_edge_types"],
-    ["create_node", "create_edge", "update_node", "delete_node", "delete_edge"], { health: "/health" }),
-  vendored("recipes/work-operating-model-activation/index.ts", "mcp", ["query_operating_model"],
-    ["start_operating_model_session", "save_operating_model_layer", "generate_operating_model_exports"], { health: "/health" }),
   vendored("integrations/agent-memory-api/index.ts", "rest",
     ["GET /health", "POST /recall", "GET /memories/review", "GET /memories", "GET /memories/:id", "GET /recall-traces/:request_id"],
     ["POST /writeback", "POST /recall/:request_id/usage", "PATCH /memories/:id/review"], { url: PG_REFUSED, readProbe: "POST /recall" }),
@@ -193,9 +189,9 @@ const WEBHOOK = { file: "integrations/readwise-capture/index.ts", secretEnv: "RE
 // keepalive every MCP server's reply leaves through (SMD-2001): a copy beside
 // each directory of MCP servers — no worker or webhook directory holds one — and
 // sync-sse.
-const COPIES = ["extensions/_shared/auth.ts", "recipes/_shared/auth.ts", "recipes/editorial-policy/_shared/auth.ts",
+const COPIES = ["extensions/_shared/auth.ts", "recipes/editorial-policy/_shared/auth.ts",
   "integrations/_shared/auth.ts", "integrations/consolidation-workers/_shared/auth.ts"];
-const SSE_COPIES = ["extensions/_shared/sse.ts", "recipes/_shared/sse.ts"];
+const SSE_COPIES = ["extensions/_shared/sse.ts"]; // recipes/_shared/ went with ob-graph and work-operating-model-activation (SMD-2920)
 for (const [module, copies, script] of [["auth.ts", COPIES, "sync-auth"], ["sse.ts", SSE_COPIES, "sync-sse"]] as const) {
   const core = readFileSync(join(ROOT, "server-portable", module), "utf8");
   for (const copy of copies) {
@@ -220,7 +216,7 @@ for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
 process.env.SUPABASE_SERVICE_ROLE_KEY = "stub";
 process.env.SUPABASE_HOUSEHOLD_KEY = "stub";
 process.env.DEFAULT_USER_ID = "00000000-0000-4000-8000-000000000001";
-process.env.MCP_ACCESS_KEYS = KEYS; // work-operating-model-activation refuses to start without a key configured
+process.env.MCP_ACCESS_KEYS = KEYS;
 process.env[WEBHOOK.secretEnv] = WEBHOOK.secret;
 try {
   for (const s of SERVERS) {
@@ -524,11 +520,11 @@ console.log("\n[mcpReply: a call slower than the idle timeout is answered, and a
 
 // ── mcpReply's edges ─────────────────────────────────────────────────────────
 //
-// What passes untouched, a client gone before the call or mid-upload (at a
-// vendored server's real route and transport), the line at the ceiling and
+// What passes untouched, a client gone before the call or mid-upload (at an
+// extension server's real route and transport), the line at the ceiling and
 // mcpReply's wiring of it, and the real transport's answer the slow probe's
 // stand-in copies.
-const MID_UPLOAD = SERVERS.find((s) => s.file === "recipes/ob-graph/index.ts")!;
+const MID_UPLOAD = SERVERS.find((s) => s.file === "extensions/family-calendar/index.ts")!;
 {
   // mcpReply's edges, on a context as a route hands it: `c.req.raw` and a body reader.
   const ctx = (req: Request) => ({ req: { raw: req, text: () => req.text() } });
@@ -536,8 +532,8 @@ const MID_UPLOAD = SERVERS.find((s) => s.file === "recipes/ob-graph/index.ts")!;
   const realWarn = console.warn;
   console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
   try {
-    // Only a POST carries a call (review pass 1): ob-graph hands a GET to the
-    // transport, whose stream only the client ends, so its reply passes as it
+    // Only a POST carries a call (review pass 1): a GET handed to the
+    // transport opens a stream only the client ends, so its reply passes as it
     // is and its close is no abandoned call.
     const leaving = new AbortController();
     const stream = new Response(new ReadableStream(), { headers: { "content-type": "text/event-stream" } });
@@ -554,7 +550,7 @@ const MID_UPLOAD = SERVERS.find((s) => s.file === "recipes/ob-graph/index.ts")!;
     const early = await mcpReply(ctx(new Request("http://extension.test/mcp", { method: "POST", body, signal: gone })), () => { calls++; return stream; });
     assert(early?.status === 408 && calls === 0 && warned.length === 1 && warned[0] === abandonedRequestLine("?", Number(/after (\d+\.\d) s/.exec(warned[0])?.[1]) * 1000),
       `a POST whose client is already gone is logged once and answered 408, and the tool never runs (${early?.status}, ${calls} calls, ${warned.length} lines)`);
-    // A client that leaves mid-upload (review passes 3 and 4), at ob-graph's real route and
+    // A client that leaves mid-upload (review passes 3 and 4), at family-calendar's real route and
     // transport: logged once. On Bun 1.4.0 the signal aborts before the body read rejects (20 of 20
     // measured), so the listener registered before the read is what logs it; a read that failed first
     // would reach the transport's 400, which settles the request, and the abort after it would log nothing.
@@ -707,8 +703,7 @@ const fill = (path: string) => path.replace(/:[a-z_]+/g, "test-id");
 const LIVE: Live[] = [
   ...SERVERS.filter((s) => onShim(s.file)).map((s): Live => ({
     file: s.file,
-    // work-operating-model-activation refuses to start without SUPABASE_SERVICE_ROLE_KEY (its README says to set any value); the rest read it and ignore it.
-    env: { [s.keys]: KEYS, SUPABASE_URL: s.url, ...(s.file === "recipes/work-operating-model-activation/index.ts" ? { SUPABASE_SERVICE_ROLE_KEY: "unused-by-the-shim" } : {}) },
+    env: { [s.keys]: KEYS, SUPABASE_URL: s.url },
     probe: async (base) => {
       if (s.kind === "mcp") {
         const all = [...s.reads, ...s.writes].sort();
@@ -941,7 +936,7 @@ console.log("\n[a Host the URL parser refuses, none, userinfo or a path: each se
 // ── Drift guards ─────────────────────────────────────────────────────────────
 
 /** Stored functions a tool or route may call and still be a read; any other `.rpc(` is a write. */
-const RPC_READS = ["crm_search_contacts_fts", "traverse_graph", "find_shortest_path", "match_thoughts", "search_thoughts_text", "brain_stats_aggregate", "get_thought_connections"];
+const RPC_READS = ["crm_search_contacts_fts", "match_thoughts", "search_thoughts_text", "brain_stats_aggregate", "get_thought_connections"];
 /** Tables a READ may insert into: a recall records itself (for a write-scoped key). An update or delete on them, or an insert anywhere else, is a write. */
 const LOG_TABLES = ["agent_memory_recall_traces", "agent_memory_recall_items", "agent_memory_audit_events"];
 const LOG_INSERT = new RegExp(String.raw`\.from\("(?:${LOG_TABLES.join("|")})"\)\s*\.insert\(`);

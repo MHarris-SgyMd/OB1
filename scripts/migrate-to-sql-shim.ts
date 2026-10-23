@@ -107,7 +107,7 @@ type Finding = { file: string; rel: string; already: boolean; handPorted: boolea
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
     // SKIP_DIRS names top-level directories. Matching at every depth silently
-    // skipped recipes/repo-learning-coach/server/, which does need migrating.
+    // skipped recipes/repo-learning-coach/server/ (retired since, SMD-2923), which did need migrating.
     const isTopLevel = resolve(dir) === ROOT;
     if (name === "node_modules" || name === ".git") continue;
     if (isTopLevel && SKIP_DIRS.has(name)) continue;
