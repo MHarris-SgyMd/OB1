@@ -829,6 +829,22 @@ export async function startedPort(stdout: ReturnType<typeof watchStream>, ms: nu
 }
 
 /**
+ * A port that refuses, for a stub that must refuse until it binds or a database that refuses: free when picked, and
+ * below every kernel's range for port 0 (Linux 32768–60999, macOS 49152–65535), so no server bound at port 0, a child
+ * at PORT 0 included, can be handed it once it is freed (SMD-3296 review pass 2).
+ */
+export function quietPort(): number {
+  for (let tries = 0; tries < 100; tries++) {
+    const port = 20_000 + Math.floor(Math.random() * 10_000);
+    try {
+      Bun.serve({ port, fetch: () => new Response(null) }).stop(true);
+      return port;
+    } catch {}
+  }
+  throw new Error("no free port between 20000 and 30000 in 100 tries");
+}
+
+/**
  * A server entry run as the image runs it (`bun --no-env-file <entry>`), on a
  * port of its own, with `env` beside PATH, HOME and PORT and no other: `up`
  * once its /health answers (30 s at most, each poll 1 s, none once it has

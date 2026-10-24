@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { askRaw, createAssert, leaveMidUpload, pendingSettled, requestHead, RuntimeUrl, serveChild, startedPort, watchStream } from "../db/test-support.ts";
+import { askRaw, createAssert, leaveMidUpload, pendingSettled, quietPort, requestHead, RuntimeUrl, serveChild, startedPort, watchStream } from "../db/test-support.ts";
 import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES, UNLOCKS, type ToolScope } from "./tools.ts";
 import { openApiDocument } from "./rest/openapi.ts";
@@ -1598,9 +1598,8 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
   const { HEALTH_DEADLINE_MS } = await import("./core/reads.ts");
   // The REST core's keyed /health (SMD-2287 PR 6a: index.ts's answered `ok` as text; the MCP server's comes from here).
   const OK_BODY = JSON.stringify({ status: "ok" });
-  // A port nothing listens on, for the database that refuses: bound for a moment and freed. Each child binds PORT 0
-  // and says its port, so neither can be handed one another server takes in between (SMD-3296).
-  const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
+  // Each child binds PORT 0 and says its port; the database that refuses is a quiet port, below the kernels' ranges for
+  // port 0, so neither child can be handed it (SMD-3296 review pass 2).
   const child = async (databaseUrl: string) => {
     const proc = Bun.spawn(["bun", "--no-env-file", "api.ts"], {
       cwd: import.meta.dir,
@@ -1614,7 +1613,8 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
   // status alone (SMD-3296 review pass 1).
   const up = async (port: number) => {
     for (let i = 0; i < 100; i++) {
-      if (await fetch(`http://127.0.0.1:${port}/health`).then(async (r) => r.ok && (await r.text()) === OK_BODY, () => false)) return true;
+      // The body read inside the catch too: one cut while it arrives is a retry, not a throw (review pass 2).
+      if (await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.text().then((t) => r.ok && t === OK_BODY)).catch(() => false)) return true;
       await Bun.sleep(50);
     }
     return false;
@@ -1626,7 +1626,7 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
     return { took, status: r instanceof Response ? r.status : r.name, body: r instanceof Response ? await r.text() : "" };
   };
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  const [quiet, refusing] = await Promise.all([child(`postgres://u:p@127.0.0.1:${silent.port}/db`), child(`postgres://u:p@127.0.0.1:${freePort()}/db`)]);
+  const [quiet, refusing] = await Promise.all([child(`postgres://u:p@127.0.0.1:${silent.port}/db`), child(`postgres://u:p@127.0.0.1:${quietPort()}/db`)]);
   const silentPort = quiet.port, refusedPort = refusing.port;
   try {
     assert(await up(silentPort) && await up(refusedPort), "both child servers answer a keyless probe");
@@ -1683,7 +1683,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   // (SMD-3296 review pass 1).
   const up = async ({ port, health }: { port: number; health: string }) => {
     for (let i = 0; i < 200; i++) {
-      if (await fetch(`http://127.0.0.1:${port}/health`).then(async (r) => r.ok && (await r.text()) === health, () => false)) return true;
+      if (await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.text().then((t) => r.ok && t === health)).catch(() => false)) return true;
       await Bun.sleep(50);
     }
     return false;
@@ -1715,8 +1715,9 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   // Its REST core's port known, the calling MCP server starts.
   const calling = await start({ OB1_REST_URL: `http://127.0.0.1:${callingCore.port}`, OB1_FORWARDER_KEY: stopForwarder }, "mcp");
   try {
-    assert(await up(busy) && await up(idle) && await up(ctrlC) && await up(cutter) && await up(graced) && await up(leftBehind)
-      && await up(callingCore) && await up(calling), "eight child servers answer a keyless probe (the first request, which hands the handlers the server)");
+    const notUp: string[] = [];
+    for (const [name, kid] of Object.entries({ busy, idle, ctrlC, cutter, graced, leftBehind, callingCore, calling })) if (!(await up(kid))) notUp.push(`${name} on ${kid.port}`);
+    assert(notUp.length === 0, `eight child servers answer a keyless probe with their own body (the first request, which hands the handlers the server)${notUp.length ? `; not up: ${notUp.join(", ")}` : ""}`);
 
     const t0 = performance.now();
     const inFlight = fetch(`http://127.0.0.1:${busy.port}/health`, { headers: { "x-brain-key": KEY } })
@@ -1756,13 +1757,13 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
       "…and a malformed OB1_STOP_GRACE is said at start-up and read as the default, 8 s of drain");
 
     // A keyed request first, which would build a store if it had a connection string; it has none, so the stop has no
-    // pool to say. Caught: a dead child fails the row below, not the suite (SMD-3296 review pass 1).
-    await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY } }).catch(() => {});
+    // pool to say. Its answer is the row's too: the child was serving when SIGINT landed (SMD-3296 review passes 1, 2).
+    const keyedCtrlC = await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY } }).then((r) => r.status, () => 0);
     ctrlC.proc.kill("SIGINT");
     const intCode = await exited(ctrlC.proc, 3_000);
     const intLog = await ctrlC.out;
-    assert(intCode === 0 && /SIGINT: stopped in [\d.]+ s; no database pool was opened; exit 0/.test(intLog),
-      `SIGINT stops it the same way, and a store that never built is not said to have a pool closed (${intCode}: ${intLog.split("\n").filter((l) => l.startsWith("SIGINT: stopped")).join("")})`);
+    assert(keyedCtrlC === 200 && intCode === 0 && /SIGINT: stopped in [\d.]+ s; no database pool was opened; exit 0/.test(intLog),
+      `SIGINT stops it the same way, and a store that never built is not said to have a pool closed (keyed /health ${keyedCtrlC}; ${intCode}: ${intLog.split("\n").filter((l) => l.startsWith("SIGINT: stopped")).join("")})`);
 
     // A keyed call that stalls before its response — its whoami, on the REST
     // core that never answers — and two SIGTERMs: the second cuts the drain
@@ -1789,7 +1790,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     const cutLines = cutLog.split("\n").filter((l) => /^request (cut off|abandoned)/.test(l));
     assert(cutCode === 1 && await stalled === "cut off" && performance.now() - tc < 2_500
       && cutLines.length === 1 && cutLines[0].startsWith("request cut off by the server's stop after 0.") && /SIGTERM: stopped in [\d.]+ s; no database pool was opened; exit 1/.test(cutLog),
-      `a call stalled before its response, cut by a second signal: the cut line and not the client's, exit 1, no pool to close (${cutCode} in ${Math.round(performance.now() - tc)} ms: ${cutLines.join(" | ").slice(0, 90)})`);
+      `a call stalled before its response, cut by a second signal: the cut line and not the client's, exit 1, no pool to close (${cutCode} in ${Math.round(performance.now() - tc)} ms, the call ${await stalled}: ${cutLines.join(" | ").slice(0, 90)})`);
     // One SIGTERM, and the bound OB1_STOP_GRACE sets does the cutting.
     const tg = performance.now();
     const graceStalled = fetch(`http://127.0.0.1:${graced.port}/mcp`, {
@@ -1802,8 +1803,9 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     // answers, so no key is named on its line): only the stop's
     // cutOpenRequests can write its line — the MCP call above has its own
     // abort handler, this route none (review pass 4: no test held that call).
+    // Its outcome is read from the log, not here: the timeout only bounds it.
     const mirrorStalled = fetch(`http://127.0.0.1:${graced.port}/mcp/worker-status`, { headers: { "x-brain-key": KEY }, signal: AbortSignal.timeout(10_000) })
-      .then(outcome, failed);
+      .then(() => {}, () => {});
     await Bun.sleep(300);
     graced.proc.kill("SIGTERM");
     const graceCode = await exited(graced.proc, 4_000);
@@ -1814,7 +1816,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     assert(graceCode === 1 && await graceStalled === "cut off" && graceTook > 1_200 && graceTook < 3_000
       && /waited on for up to 1 s/.test(graceLog) && /still in flight.* after 1\.\d s, closed unfinished/.test(graceLog) && /^request cut off by the server's stop/m.test(graceLog)
       && graceLines.filter((l) => l.outcome === "cut" && l.route === undefined && l.agent === undefined).length === 1,
-      `OB1_STOP_GRACE=3 bounds the drain at 1 s: one SIGTERM, the stalled call cut at the bound with its line and its one JSON line, \`cut\`, exit 1 (${graceCode} in ${Math.round(graceTook)} ms)`);
+      `OB1_STOP_GRACE=3 bounds the drain at 1 s: one SIGTERM, the stalled call cut at the bound with its line and its one JSON line, \`cut\`, exit 1 (${graceCode} in ${Math.round(graceTook)} ms, the call ${await graceStalled})`);
     const mirrorCut = graceLines.filter((l) => l.route === "/worker-status");
     assert(mirrorCut.length === 1 && mirrorCut[0]?.outcome === "cut" && mirrorCut[0].tool === "worker_status" && mirrorCut[0].agent === undefined && mirrorCut[0].status === 0,
       `a keyed mirror held at its whoami when the stop cuts it: one \`cut\` line, by its route, from the stop's cutOpenRequests (${JSON.stringify(mirrorCut)})`);

@@ -3380,7 +3380,7 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
       // The REST core's own keyless body, not any 200: a server that took the child's port would pass a status alone
       // (SMD-3296 review pass 1).
       answered = await realFetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) })
-        .then(async (r) => r.ok && (await r.text()) === JSON.stringify({ status: "ok" }), () => false);
+        .then((r) => r.text().then((t) => r.ok && t === JSON.stringify({ status: "ok" }))).catch(() => false);
       if (!answered) await Bun.sleep(100);
     }
     assert(answered, "the entry answers a keyless /health, which builds no store");
