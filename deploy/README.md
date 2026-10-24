@@ -1248,6 +1248,12 @@ traces, which would refuse the rest and have their losses said every minute.
 | `OTEL_RESOURCE_ATTRIBUTES` | more of the resource (`deployment.environment.name=home` on a plain brain; a `service.namespace` would make Prometheus's `job` `<namespace>/<name>`); a key it names wins, `service.version` included — but not over a pipeline tier's `deployment.environment.name`, which a canary's env file would otherwise take from stable's |
 | `OTEL_TRACES_SAMPLER` | the SDK's sampler; by default `parentbased_always_on`. A request's own trace is a root, so a caller decides nothing — unless its `traceparent` is trusted, when the `parentbased_` samplers follow its sampled flag and `traceidratio` reads its trace id; the REST core trusts its forwarder's, so it samples the MCP server's tool calls as the MCP server does. Under `always_off` a line names a trace no span was exported for |
 
+A batch or metric setting above that is ignored or held is said at start,
+and in `preflight --deep`'s telemetry row, by its name and the value used,
+never the value set: it may be a secret pasted into the wrong variable, even
+one of digits alone, which parses as a number. Where the value used is a
+queue or interval the operator set, that variable is named instead (SMD-3235).
+
 In `deploy/`'s compose stacks the MCP server at `/mcp` and the REST core take
 `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`,
 `OTEL_RESOURCE_ATTRIBUTES`, the three `OTEL_*_EXPORTER` switches,
