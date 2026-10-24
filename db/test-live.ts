@@ -50,7 +50,7 @@ import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
+import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import { sweepOrphans } from "./rebuild.ts";
 import type { PassStop } from "./lease.ts";
@@ -6364,6 +6364,14 @@ if (want("16")) {
     `…while a batch whose k calls exceed the lease, refused until 031, is not: the heartbeat sizes the lease now, and --dry-run says which (exit ${bigBatch.code})`);
   const badList = await consolidate("--list", "maybe");
   assert(badList.code === 2 && /--list takes pending/.test(badList.out), "a status outside the four is refused");
+  // SMD-3248: --key is a listing's — beside anything else, or past the tool's 200 characters, refused before the client.
+  const keyAlone = await consolidate("--status", "--key", "consolidate:stub@p1");
+  const keyLong = await consolidate("--list", "--key", `consolidate:${"m".repeat(200)}@p1`);
+  const keySpace = await consolidate("--list", "--key", "consolidate:h2o-lightning-4b qwen3.8:27b@p4d3");
+  const keyShell = await consolidate("--list", "--key", "consolidate:m@p1$(id)");
+  assert(keyAlone.code === 2 && /--key goes with --list/.test(keyAlone.out) && keyLong.code === 2 && /--key takes a judge key of 1 to 200 characters/.test(keyLong.out)
+      && keySpace.code === 2 && /--key takes a judge key of letters, digits and \. _ : \/ @ \+ -/.test(keySpace.out) && keyShell.code === 2 && /--key takes a judge key of letters/.test(keyShell.out),
+    `--key without --list, one past 200 characters, and one with a space (review pass 1: it selected nothing without a word) are refused (${keyAlone.out.trim().slice(0, 60)} | ${keyLong.out.trim().slice(0, 60)} | ${keySpace.out.trim().slice(0, 60)})`);
 
   // The judge's own model (SMD-1901): unset, the key and the model line name
   // the metadata model and say the knob exists; set, OB1_JUDGE_MODEL moves the
@@ -6486,6 +6494,52 @@ if (want("16")) {
          "…with the thought ids and the accept command, asking for a direction where the judge gave none");
   const listC = await consolidateInProcess({ list: "pending" });
   assert(same(listC, list), `consolidate run() in-process lists the queue as the spawned --list does, byte for byte (exit ${listC.code})`);
+  // SMD-3248: --key lists one pass's alone, by the key each row names — this pass's two, said in the header; a key no
+  // pass has, none; in-process as spawned.
+  const passKey = /judged by (\S+) on /.exec(list.out)?.[1] ?? "";
+  const listKey = await consolidate("--list", "--key", passKey);
+  const listNobody = await consolidate("--list", "pending", "--key", "consolidate:nobody@p1");
+  const listKeyC = await consolidateInProcess({ list: "pending", key: passKey });
+  assert(passKey.startsWith("consolidate:") && listKey.code === 0 && new RegExp(`2 pending proposal\\(s\\) judged by ${passKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, most confident first`).test(listKey.out)
+      && listKey.out.includes(`--accept ${directed.id}`) && listKey.out.includes(`--accept ${undirected.id} --direction <newer|older>`)
+      && listNobody.code === 0 && /no pending proposals judged by consolidate:nobody@p1/.test(listNobody.out) && same(listKeyC, listKey),
+    `--list --key lists this pass's two, the key in the header; a key no pass has lists none; run() in-process the same (${listKey.out.split("\n").find((l) => /judged by/.test(l))?.trim().slice(0, 120)})`);
+  // …and --status counts the pending by pass, the keys --key takes (review pass 1: the total alone hid which passes it
+  // held). Two more passes planted raw (review pass 2: under one key alone, the count's status term and order had no
+  // teeth): one pending under a second key, one rejected under a third and one pending under a key --key cannot take,
+  // on two thoughts outside the pool; gone with them after.
+  const rawThought = async (text: string) => ((await sql`SELECT upsert_thought(${text}, ${{ metadata: { source: "test" } }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
+  const [rawA, rawB, rawC] = [await rawThought("[16] a raw pass's older side"), await rawThought("[16] a raw pass's newer side"), await rawThought("[16] a raw pass's third side")];
+  await sql`SELECT record_supersession_proposal(${rawA}::uuid, ${rawB}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:zz-second@p1', NULL)`;
+  const rejectedRaw = (await sql`SELECT record_supersession_proposal(${rawA}::uuid, ${rawC}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:zz-third@p1', NULL) AS id`)[0].id as string;
+  await sql`SELECT review_supersession_proposal(${rejectedRaw}::uuid, 'reject', 'raw', NULL, NULL)`;
+  await sql`SELECT record_supersession_proposal(${rawB}::uuid, ${rawC}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:a key with spaces@p1', NULL)`;
+  // Review pass 3: a key a shell reads is no key --key takes (one offered unmarked ran `$(…)` when pasted), and a key
+  // with spaces is quoted, so it cannot pass for the line's own words; past ten passes the rest are counted.
+  await sql`SELECT record_supersession_proposal(${rawC}::uuid, ${rawA}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:m@p1$(id)', NULL)`;
+  const extra = await Promise.all([1, 2, 3, 4, 5, 6, 7, 8].map((i) => rawThought(`[16] a raw pass's side ${i}`)));
+  for (const [i, t] of extra.entries()) await sql`SELECT record_supersession_proposal(${rawA}::uuid, ${t}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, ${`consolidate:zz-k${i}@p1`}, NULL)`;
+  const byPass = await consolidate("--status");
+  const byLine = byPass.out.split("\n").find((l) => /pending by pass/.test(l)) ?? "";
+  assert(byPass.code === 0 && byLine.startsWith(`  pending by pass: 2 judged by ${passKey}, 1 judged by "consolidate:a key with spaces@p1" (not a key --key takes; listed by --list alone), 1 judged by "consolidate:m@p1$(id)" (not a key --key takes; listed by --list alone), 1 judged by consolidate:zz-k0@p1,`)
+      && byLine.endsWith(`, and 2 more pass(es) with 2 pending — --list --key <key> lists one pass's`) && (byLine.match(/ judged by /g) ?? []).length === 10 && !byLine.includes("zz-third"),
+    `--status counts the pending by pass, most first, ten at most with the rest counted, a rejected row's pass not among them, a key --key cannot take quoted when it has spaces and said so (${byLine.trim().slice(0, 200)})`);
+  await sql`DELETE FROM thoughts WHERE id IN (${rawA}::uuid, ${rawB}::uuid, ${rawC}::uuid)`;
+  for (const t of extra) await sql`DELETE FROM thoughts WHERE id = ${t}::uuid`;
+  // The line's builder on rows a brain would need dozens of thoughts for (review pass 4: with one row in each overflow
+  // pass, the passes counted and their rows summed were the same number): twelve passes, the last two of 3 and 2 rows;
+  // a key with a leading - is no key --key takes (the CLI's parser reads it as a flag).
+  const synth = [...Array.from({ length: 10 }, (_, i) => ({ judge_key: `consolidate:k${i}@p1`, n: 9 - (i % 3) })), { judge_key: "-consolidate:x@p1", n: 3 }, { judge_key: "consolidate:last@p1", n: 2 }];
+  const built = pendingByPassLine(synth), builtFew = pendingByPassLine([{ judge_key: "-consolidate:x@p1", n: 4 }]);
+  assert(built.endsWith(", and 2 more pass(es) with 5 pending — --list --key <key> lists one pass's") && (built.match(/ judged by /g) ?? []).length === 10
+      && builtFew === `  pending by pass: 4 judged by "-consolidate:x@p1" (not a key --key takes; listed by --list alone) — --list --key <key> lists one pass's`,
+    `the by-pass line names ten, counts the rest's passes and rows apart, and marks a leading - (${built.slice(-80)} | ${builtFew})`);
+  // The capped page's note, every case (review pass 2: a capped --list all --key said to decide and list again, which
+  // never drains an all-status page; no suite reached a cap under --key).
+  assert(capNote("pending", false) === "--status counts them all" && capNote(undefined, false) === "--status counts them all"
+      && capNote("pending", true) === "decide these and list again for the rest; --status counts each pass's pending"
+      && ["accepted", "rejected", "stale", "lineage", undefined].every((st) => capNote(st, true) === "the rest are not listed (SMD-3249 pages)"),
+    "a capped page's note: --status's total unselected; under --key, pending drains as it is decided and every other selection waits for paging");
 
   // The review path, through the worker's flags, audited under the key's name.
   const needDir = await consolidate("--accept", undirected.id);
@@ -6639,24 +6693,27 @@ if (want("16")) {
     // …and the accept is refused without --force — a guard on the one accept
     // door, not a verdict: the row stays pending, nothing is written
     // (definitions probe, second review pass: the accept went through under
-    // the reject's own advice). A brain without 070's listing gets the file
-    // named on --list, not a driver stack: the form dropped and put back.
+    // the reject's own advice). A brain without the listing's current form
+    // (109's since SMD-3248, 070's before) gets the file named on --list, not
+    // a driver stack: the form dropped and put back.
     const acceptLineage = await consolidate("--accept", atlas!.id);
     assert(acceptLineage.code === 1 && /accept refused: one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it\./.test(acceptLineage.out) && acceptLineage.out.includes(`--reject ${atlas!.id} --note "lineage pair (066)" is the expected decision; pass --force (with --direction on an undirected verdict) if the pointer is what you mean`)
            && (await proposalRow(atlas!.id)).status === "pending" && (await sql`SELECT supersedes FROM thoughts WHERE id = ${atlasNew}::uuid`)[0].supersedes === null,
            `--accept on a lineage pair is refused naming the reject and --force, the row still pending and no pointer written (exit ${acceptLineage.code}: ${acceptLineage.out.trim().slice(0, 200)})`);
-    // R3 tooth (mutant 2): the catch names 070 for the one error it is for — an unrelated failure inside the listing is shown as itself.
-    await sql.unsafe(`CREATE OR REPLACE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20, p_lineage boolean DEFAULT NULL) RETURNS TABLE (id uuid, status text, verdict text, confidence numeric, reason text, similarity real, judge_key text, judged_at timestamptz, reviewed_at timestamptz, review_note text, superseding_id uuid, older_id uuid, older_content text, older_created_at timestamptz, newer_id uuid, newer_content text, newer_created_at timestamptz, older_edited boolean, newer_edited boolean, lineage boolean) LANGUAGE plpgsql STABLE AS $f$ BEGIN RAISE EXCEPTION 'boom: an unrelated failure inside the listing'; END $f$`);
+    // R3 tooth (mutant 2): the catch names the file for the one error it is for — an unrelated failure inside the listing is shown as itself.
+    await sql.unsafe(`CREATE OR REPLACE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20, p_lineage boolean DEFAULT NULL, p_judge_key text DEFAULT NULL) RETURNS TABLE (id uuid, status text, verdict text, confidence numeric, reason text, similarity real, judge_key text, judged_at timestamptz, reviewed_at timestamptz, review_note text, superseding_id uuid, older_id uuid, older_content text, older_created_at timestamptz, newer_id uuid, newer_content text, newer_created_at timestamptz, older_edited boolean, newer_edited boolean, lineage boolean) LANGUAGE plpgsql STABLE AS $f$ BEGIN RAISE EXCEPTION 'boom: an unrelated failure inside the listing'; END $f$`);
     const listBoom = await consolidate("--list", "lineage");
-    assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 070/.test(listBoom.out),
-           `an unrelated error inside --list is shown as itself, not as a missing 070 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
-    await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
-    assert(/1 unreviewed standing on a lineage pair \(apply migration 070 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
-           "--status still counts the row on a brain without 070 and says the listing needs the file before pointing at it");
-    const listPre070 = await consolidate("--list", "lineage");
-    assert(listPre070.code === 1 && /--list needs migration 070 \(db\/migrations\/070_listing_flags_lineage_pair\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre070.out) && !/PostgresError/.test(listPre070.out),
-           `on a brain without 070 --list names the file, not a driver error (exit ${listPre070.code}: ${listPre070.out.trim().slice(0, 160)})`);
+    assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 109/.test(listBoom.out),
+           `an unrelated error inside --list is shown as itself, not as a missing 109 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
+    // A brain at 108: 070's three-argument form alone, 109's gone.
+    await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean, text)`);
     await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
+    assert(/1 unreviewed standing on a lineage pair \(apply migration 109 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
+           "--status still counts the row on a brain without 109 and says the listing needs the file before pointing at it");
+    const listPre109 = await consolidate("--list", "lineage");
+    assert(listPre109.code === 1 && /--list needs migration 109 \(db\/migrations\/109_listing_selects_a_pass\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre109.out) && !/PostgresError/.test(listPre109.out),
+           `on a brain without 109 --list names the file, not a driver error (exit ${listPre109.code}: ${listPre109.out.trim().slice(0, 160)})`);
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("109_") });
     await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${atlasNew}::uuid`;
     // The edit resolves the conflict (the stub reads the new pair as unrelated); the rebuild sets the row stale.
     const atlasFp2 = await moveRaw(atlasNew, "Invoices for the atlas account follow the deploy calendar.");
@@ -7386,6 +7443,13 @@ if (want("16")) {
     const listed = await consolidate("--list", "relations");
     assert(listed.code === 0 && /relation\(s\), newest first/.test(listed.out) && listed.out.includes(rotaNew) && listed.out.includes(rotaOld) && /\] related/.test(listed.out) && !/EDITED SINCE JUDGED/.test(listed.out),
       `--list relations shows the edge with both thoughts, and nothing edited since it was judged (exit ${listed.code})`);
+    // SMD-3248: --key selects the relations of one pass, by the key each edge's facet names.
+    const relKey = /relation \S+\s+judged by (\S+) on /.exec(listed.out)?.[1] ?? "";
+    const relByKey = await consolidate("--list", "relations", "--key", relKey);
+    const relNobody = await consolidate("--list", "relations", "--key", "consolidate:nobody@p1");
+    assert(relKey.startsWith("consolidate:") && relByKey.code === 0 && relByKey.out.includes(rotaNew) && /relation\(s\) judged by \S+, newest first/.test(relByKey.out) && !/ANOTHER JUDGE KEY/.test(relByKey.out)
+        && relNobody.code === 0 && /no relations judged by consolidate:nobody@p1/.test(relNobody.out),
+      `--list relations --key lists that pass's edges, said in the header, and none under a key no pass has (${relByKey.out.split("\n").find((l) => /judged by/.test(l))?.trim().slice(0, 120)})`);
     // A side's text moved since the judgement: the edge is flagged (SMD-2726 closes it).
     await sql`UPDATE thoughts SET content = content || ' — on weekdays' WHERE id = ${rotaOld}::uuid`;
     const listedEdited = await consolidate("--list", "relations");
@@ -7648,6 +7712,14 @@ if (want("16")) {
     const apartA = await outside("A note on the boiler room, judged apart."), apartB = await outside("A note on the boiler's warranty, judged apart.");
     await sql`SELECT record_thought_relation(${apartB}::uuid, ${apartA}::uuid, 'distinct', 0.7, 'consolidate:other-model@p4', NULL, 'a', 'b', NULL)`;
     const marked = await consolidate("--list", "relations");
+    // Under --key that other pass's own (review pass 2: under this pass's key the mark never showed anyway): its row
+    // keeps OLDER SUPERSEDED and loses ANOTHER JUDGE KEY, the pass being chosen.
+    const markedLines = marked.out.split("\n");
+    const otherAt = markedLines.findIndex((l) => /\] related  .*ANOTHER JUDGE KEY/.test(l));
+    const otherKey = markedLines.slice(otherAt).map((l) => /relation \S+\s+judged by (\S+) on /.exec(l)?.[1]).find(Boolean) ?? "";
+    const markedKeyed = await consolidate("--list", "relations", "--key", otherKey);
+    assert(otherKey.startsWith("consolidate:") && /\] related  .*OLDER SUPERSEDED/.test(markedKeyed.out) && !/ANOTHER JUDGE KEY/.test(markedKeyed.out),
+      `--list relations --key <the other pass's key> keeps OLDER SUPERSEDED and drops ANOTHER JUDGE KEY (${otherKey}: ${markedKeyed.out.split("\n").find((l) => /\] related/.test(l))?.trim().slice(0, 120)})`);
     const statusOther = await consolidate("--status");
     assert(/\] related  .*OLDER SUPERSEDED.*ANOTHER JUDGE KEY/.test(marked.out) && /1 judged under another key, which this pass replaces only for the pairs it judges again/.test(statusOther.out),
       `--list relations marks a relation whose older side is superseded and one judged under another key, and --status counts the other key's — not the distinct's (${marked.out.split("\n").find((l) => /\] related/.test(l))?.trim()})`);

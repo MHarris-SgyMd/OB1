@@ -1018,16 +1018,35 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
          "lineage: true selects it and false leaves it out, each said in the headline");
   await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${newer}::uuid`;
   assert(!/LINEAGE PAIR/.test(await call("list_supersession_proposals", {})), "…and cleared, no tag");
-  // A brain at 068 under this server: the three-argument form is missing and
-  // the hint names 070, not 029 (cold read, first review pass: it named 029
-  // for every error on the name). The form dropped by hand here; the file
-  // puts it back.
-  await sql`DROP FUNCTION list_supersession_proposals(text, int, boolean)`;
-  const pre070 = await call("list_supersession_proposals", {}).catch((e: Error) => e.message);
-  assert(/list_supersession_proposals\(text, integer, boolean\) does not exist/.test(pre070) && /the migrations through 070 are not applied \(029, db\/migrations\/029_supersession_proposals\.sql, creates the queue; 070, db\/migrations\/070_listing_flags_lineage_pair\.sql, its current listing\)/.test(pre070),
-         `on a brain without 070 the tool's error names the migrations through 070, 029's queue and 070's listing both (${pre070.replace(/\n/g, " ").slice(0, 200)})`);
+  // SMD-3248: judge_key selects one pass (109) — a second proposal under
+  // another pass's key, more confident, so a page of one shows the selection
+  // comes before the cap; the headline names the key, and a key no pass has
+  // selects nothing, said so.
+  const third = await seed("queue third: the plan is C", 1);
+  const OTHER = "consolidate:h2o-lightning-4b+qwen3.8:27b@p4d4";
+  const [{ id: pid2 }] = await sql`
+    SELECT record_supersession_proposal(${newer}::uuid, ${third}::uuid, 'newer_supersedes_older', 0.95, 'C over B', 0.9, ${OTHER}::text, NULL) AS id`;
+  const both = await call("list_supersession_proposals", {});
+  const stubOnly = await call("list_supersession_proposals", { judge_key: "consolidate:stub@p2", limit: 1 });
+  const otherOnly = await call("list_supersession_proposals", { judge_key: OTHER });
+  assert(/2 pending supersession proposal\(s\), most confident first/.test(both) && stubOnly.includes(`proposal ${pid} — judged by consolidate:stub@p2`) && !stubOnly.includes(pid2)
+      && /^1 pending supersession proposal\(s\) judged by consolidate:stub@p2, most confident first/.test(stubOnly)
+      && otherOnly.includes(`proposal ${pid2} — judged by ${OTHER}`) && !otherOnly.includes(`proposal ${pid} `)
+      && /^No pending supersession proposals judged by consolidate:nobody@p1\./.test(await call("list_supersession_proposals", { judge_key: "consolidate:nobody@p1" })),
+         `judge_key lists one pass's alone, before the cap (a page of one under the less confident key holds its row), said in the headline; a key no pass has, nothing (${stubOnly.split("\n")[0]})`);
+  await sql`DELETE FROM supersession_proposals WHERE id = ${pid2}::uuid`;
+  await sql`SELECT delete_thought(${third}::uuid, NULL::jsonb)`;
+  // A brain at 108 under this server: 070's three-argument form alone, the
+  // four-argument one missing, and the hint names 109, not 029 (SMD-2313's
+  // cold read, first review pass: it named 029 for every error on the name).
+  // The form dropped by hand and 070's put back here; 109 puts its own back.
+  await sql`DROP FUNCTION list_supersession_proposals(text, int, boolean, text)`;
   await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
-  assert(/1 pending supersession proposal/.test(await call("list_supersession_proposals", {})), "…and 070 applied, the queue lists again");
+  const pre109 = await call("list_supersession_proposals", {}).catch((e: Error) => e.message);
+  assert(/list_supersession_proposals\(text, integer, boolean, text\) does not exist/.test(pre109) && /the migrations through 109 are not applied \(029, db\/migrations\/029_supersession_proposals\.sql, creates the queue; 109, db\/migrations\/109_listing_selects_a_pass\.sql, its current listing\)/.test(pre109),
+         `on a brain without 109 the tool's error names the migrations through 109, 029's queue and 109's listing both (${pre109.replace(/\n/g, " ").slice(0, 200)})`);
+  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("109_") });
+  assert(/1 pending supersession proposal/.test(await call("list_supersession_proposals", {})), "…and 109 applied, the queue lists again");
   await sql`SELECT update_thought(${newer}::uuid, ${"queue newer: the plan is B, revised"}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`;
   const edited = await call("list_supersession_proposals", { status: "pending", limit: 5 });
   assert(/newer \[[^\]]+\] \(edited since judged\)/.test(edited) && edited.includes(`--accept ${pid} --direction <newer|older> --force`) && /verdict is about an earlier text/.test(edited),
@@ -3062,6 +3081,9 @@ const SHAPE = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|
 const wordless = (v: unknown, at = ""): string[] => {
   // list_thoughts' cursor (SMD-2995) is a token by construction: what it decodes to is a sort word, a time and a uuid, read by the core's own rule.
   if (typeof v === "string" && at === "cursor" && parseListCursor(v)) return [];
+  // A proposal's pass (SMD-3248) is one token by pass-key.ts's rule — 1–200 letters, digits and . _ : / @ + -, the first a
+  // letter or digit, no space — spelled here apart from the guard's, so a guard widened past it fails this rule.
+  if (typeof v === "string" && /(?:^|\.)judgeKey$/.test(at) && /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$/.test(v)) return [];
   if (typeof v === "string") return SHAPE.test(v) ? [] : [at || "(root)"];
   if (Array.isArray(v)) return v.flatMap((x, i) => wordless(x, `${at}[${i}]`));
   if (v && typeof v === "object") return Object.entries(v).flatMap(([k, x]) => (at === "" && k === "text" ? [] : wordless(x, at ? `${at}.${k}` : k)));
@@ -3326,25 +3348,25 @@ console.log("\n[17] Every worker action answers its result beside the text, and 
   }
 }
 
-console.log("\n[18] The serving entry wires the durable job store when it first builds the store: a job a prior process left running is marked lost, and the REST core's live job on the same database is left alone (SMD-2318; root.ts's serveHere and migration 078, SMD-2284)");
+console.log("\n[18] The serving entry wires the durable job store when it first builds the store: the jobs a prior process left running are marked lost, its own and the retired MCP server's, and no other door's (SMD-2318, SMD-2287 PR 6b)");
 {
-  // `bun index.ts` as Bun's entry, not an import: only the entry says it
-  // serves (serveHere), and only then does the store's first build reconcile
-  // the rows a prior process left live. Its first keyed request builds the
-  // store (the registry lookup reads it); the reconcile runs detached after.
-  // It reaches server-portable's live rows (door open-brain), not the REST
-  // core's (open-brain-api): two servers on one database (078). It spawns
-  // index.ts's entry though the suite drives the MCP server, which holds no job
-  // store; the REST core's entry is test-rest-sql's to run.
+  // `bun api.ts` as Bun's entry, not an import: only the entry says it serves
+  // (serveHere), and only then does the store's first build reconcile the rows
+  // a prior process left live (the MCP server holds no job store). It reaches
+  // its own door's rows (open-brain-api) and the retired MCP server's
+  // (open-brain, 078's default: index.ts until SMD-2287 PR 6b), and leaves a
+  // door it does not name alone.
   const sql = new SQL({ url: URL_, max: 1 });
   const jobId = crypto.randomUUID();
   const apiJob = crypto.randomUUID();
+  const otherJob = crypto.randomUUID();
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at) VALUES (${jobId}::uuid, 'scan_thoughts', ${hashKey("e2e-key")}, 'e2e', 'running', now())`;
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${apiJob}::uuid, 'scan_thoughts', ${hashKey("e2e-key")}, 'e2e', 'running', now(), 'open-brain-api')`;
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${otherJob}::uuid, 'scan_thoughts', ${hashKey("e2e-key")}, 'e2e', 'running', now(), 'open-brain-elsewhere')`;
   const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
   const port = free.port;
   free.stop(true);
-  const child = Bun.spawn([process.execPath, "index.ts"], {
+  const child = Bun.spawn([process.execPath, "api.ts"], {
     cwd: dirname(fileURLToPath(import.meta.url)),
     env: { ...process.env, PORT: String(port), MCP_ACCESS_KEYS: "", MCP_ACCESS_KEY: "e2e-key" },
     stdout: "ignore", stderr: "pipe",
@@ -3365,9 +3387,14 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
       status = (await sql`SELECT status FROM jobs WHERE id = ${jobId}::uuid`)[0]?.status;
       if (status === "running") await Bun.sleep(100);
     }
-    assert(status === "lost", `the job a prior process left running is reconciled to lost at start-up, before any keyed request (${status})`);
-    const [{ status: other }] = await sql`SELECT status FROM jobs WHERE id = ${apiJob}::uuid`;
-    assert(other === "running", `…and the REST core's live job on the same database is not (${other})`);
+    assert(status === "lost", `the retired MCP server's job (door open-brain) is reconciled to lost at start-up, before any keyed request (${status})`);
+    let own = "running";
+    while (own === "running" && Date.now() < deadline) {
+      own = (await sql`SELECT status FROM jobs WHERE id = ${apiJob}::uuid`)[0]?.status;
+      if (own === "running") await Bun.sleep(100);
+    }
+    const [{ status: other }] = await sql`SELECT status FROM jobs WHERE id = ${otherJob}::uuid`;
+    assert(own === "lost" && other === "running", `…and the REST core's own prior one, while a door it does not name is left alone (${own}, ${other})`);
   } finally {
     child.kill();
     // Its stop drains for at most the grace period less 2 s (shutdown.ts); one
@@ -3377,7 +3404,7 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
     clearTimeout(hung);
     // What the entry said, when it did not do what was asked of it.
     if (status !== "lost") console.log((await new Response(child.stderr).text()).split("\n").slice(-10).map((l) => `      ${l}`).join("\n"));
-    await sql`DELETE FROM jobs WHERE id IN (${jobId}::uuid, ${apiJob}::uuid)`;
+    await sql`DELETE FROM jobs WHERE id IN (${jobId}::uuid, ${apiJob}::uuid, ${otherJob}::uuid)`;
     await sql.close();
   }
 }

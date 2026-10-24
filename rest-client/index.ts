@@ -160,8 +160,9 @@ const refusedHere = (field: string, message: string): Answer => ({
  * here, nothing sent: the REST core's own answer to a key that matches none
  * (401 UNAUTHORIZED) — the core reads keys from headers alone, so no key it
  * could match is such a value (`health` reads none, and is answered so too).
- * A legacy raw key past U+00FF, which `?key=` carries to server-portable
- * today, cannot reach the REST core at all.
+ * A legacy raw key past U+00FF, which `?key=` carried to server-portable's
+ * index.ts until SMD-2287 PR 6b retired it, cannot reach the REST core at all:
+ * its client needs a new key.
  */
 const unauthorizedHere = (): Answer => ({
   status: 401, ok: false, sent: false, headers: new Headers({ ...JSON_TYPE, "www-authenticate": "Bearer" }),

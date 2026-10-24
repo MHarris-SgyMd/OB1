@@ -231,7 +231,7 @@ code=$(status "$BASE/")
 # 4. GET /health is 200 with the body `ok`: the liveness target for a platform
 #    probe that can only GET. "$BASE/health" is right whether or not the proxy
 #    strips its prefix; the match rule is the comment above server-portable/
-#    index.ts's /health route (HEALTH_PATH is mcp-edge.ts's). No key, for the same reasons as check 3. The body
+#    mcp-edge.ts's HEALTH_PATH. No key, for the same reasons as check 3. The body
 #    is asserted because a 200 alone proves nothing here: upstream's server has
 #    no such route and answers a keyless GET with a 200 JSON-RPC refusal, and a
 #    proxy that redirects unknown paths to a landing page answers 200 too.
