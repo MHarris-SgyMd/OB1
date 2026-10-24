@@ -25,13 +25,13 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 const SYSTEM = "x";
 const SCOPE = "x:export";
 const TYPES = ["tweets", "dms", "grok"];
-const USAGE = "Usage: bun import-x-twitter.mjs /path/to/twitter-export [--skip N] [--limit N] [--types tweets,dms,grok] > items.jsonl";
+const USAGE = "Usage: bun import-x-twitter.mjs /path/to/twitter-export [--skip N] [--limit N] [--if-present] [--types tweets,dms,grok] > items.jsonl";
 /** The enhanced fields every item carries as facets, as the import set them before (SMD-2493). */
 const ENHANCED = { type: "reference", source_type: "x_twitter_import", importance: 2, quality_score: 40, sensitivity_tier: "standard" };
 
@@ -44,9 +44,11 @@ function parseArgs(argv) {
       if (!Number.isInteger(n) || n < 0) fail(`${a} takes a whole number`);
       out[a.slice(2)] = n;
     } else if (a === "--types") {
-      out.types = (argv[++i] ?? "").split(",").map((t) => t.trim()).filter(Boolean);
+      out.types = [...new Set((argv[++i] ?? "").split(",").map((t) => t.trim()).filter(Boolean))];
       const bad = out.types.filter((t) => !TYPES.includes(t));
       if (!out.types.length || bad.length) fail(`--types takes ${TYPES.join(", ")}${bad.length ? `, not ${bad.join(", ")}` : ""}`);
+    } else if (a === "--if-present") {
+      ifPresent = true;
     } else if (a === "--dry-run") {
       fail("the emitter writes nothing; count what it emits with the pipeline's own --dry-run (bun db/ingest-records.ts --source items --items items.jsonl --allow x:export --dry-run)");
     } else if (a.startsWith("--")) {
@@ -59,6 +61,31 @@ function parseArgs(argv) {
   }
   if (out.path === undefined) fail(USAGE);
   return out;
+}
+
+/** A name every walk passes over: a dot-file or dot-folder, __MACOSX and the `._*` AppleDouble files a zip made on a Mac carries. */
+const skipped = (name) => name.startsWith(".") || name === "__MACOSX";
+
+/**
+ * `--if-present`: a path that is not there is no export yet, not a mistake, so
+ * nothing is emitted and the run succeeds. The import runner passes it, since
+ * a pipeline's folder need not exist until an export is put in it (SMD-2493 PR 2).
+ */
+let ifPresent = false;
+
+/**
+ * The export's path, checked before anything reads it. One that is not there
+ * is "no export yet" under --if-present (nothing emitted, exit 0) and a
+ * mistake otherwise. One there but unreadable is refused, naming why: a green
+ * run that read nothing would hide it.
+ */
+async function exportRoot(path) {
+  try {
+    return await stat(path);
+  } catch (e) {
+    if (e.code === "ENOENT" && ifPresent) { console.error(`${path}: no export there yet; nothing emitted`); process.exit(0); }
+    fail(e.code === "ENOENT" ? `${path}: no such file or folder` : `${path}: cannot be read (${e.code ?? e.message})`);
+  }
 }
 
 function fail(why) {
@@ -180,25 +207,46 @@ const textOf = (v) => (typeof v === "string" ? clean(v) : "");
 function parseTwitterJsFile(content) {
   // Twitter JS files start with "window.YTD.tweets.part0 = " or similar
   const jsonStart = content.indexOf("[");
-  if (jsonStart === -1) return [];
+  // No array at all (a file cut short) is refused as one that does not parse, not read as an empty one (review pass 6).
+  if (jsonStart === -1) throw new Error("no JSON array");
   return JSON.parse(content.substring(jsonStart));
 }
 
 async function findDataDir(dir) {
+  await exportRoot(dir);
+  // An archive's data/ folder: at the top, or one level down, an archive extracted into the folder (the import
+  // runner's imports/x-twitter/twitter-2024-…/data). Two would be read as one import with duplicates, so they are
+  // refused, naming them; a folder that cannot be searched is refused too, since an archive may be in it.
+  const isDir = async (p) => {
+    try {
+      return (await stat(p)).isDirectory();
+    } catch (e) {
+      if (e.code === "ENOENT" || e.code === "ENOTDIR") return false;
+      fail(`${p}: cannot be read (${e.code ?? e.message})`);
+    }
+  };
+  let entries;
   try {
-    await stat(dir);
-  } catch {
-    fail(`${dir}: no such folder`);
+    entries = (await readdir(dir, { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  } catch (e) {
+    fail(`${dir}: cannot be read (${e.code ?? e.message})`);
   }
-  // Look for data/ subdirectory
-  const dataDir = join(dir, "data");
-  try {
-    await stat(dataDir);
-    return dataDir;
-  } catch {
-    return dir; // Maybe files are in the root
+  const archives = [];
+  // The archive's files loose at the top are an archive too, so beside one in a subfolder they are two.
+  if (entries.some((e) => ARCHIVE_FILES.includes(e.name))) archives.push(dir);
+  if (await isDir(join(dir, "data"))) archives.push(join(dir, "data"));
+  for (const e of entries) {
+    if (!e.isDirectory() || skipped(e.name) || e.name === "data") continue;
+    if (await isDir(join(dir, e.name, "data"))) archives.push(join(dir, e.name, "data"));
   }
+  if (archives.length > 1) fail(`${dir} holds ${archives.length} archives (${archives.join(", ")}); keep one, the newest, or merge the parts of one archive into one folder`);
+  // Something there but no archive is not "no export yet": a zip, or an archive nested more than one folder down.
+  if (!archives.length && entries.some((e) => !skipped(e.name))) fail(`${dir} holds no X archive: a .zip to extract first, or an archive nested more than one folder down`);
+  return archives[0] ?? null;
 }
+
+/** The archive files this importer reads, any one of which marks a folder as an archive's data. */
+const ARCHIVE_FILES = ["tweets.js", "tweet.js", "direct-messages.js", "direct-message.js", "grok-conversations.js", "grokConversations.js"];
 
 // ── Tweet Processing ─────────────────────────────────────────────────────
 
@@ -314,13 +362,16 @@ async function readArchiveFile(dataDir, names) {
     let raw;
     try {
       raw = await readFile(join(dataDir, name), "utf-8");
-    } catch {
-      continue; // file not found
+    } catch (e) {
+      if (e.code === "ENOENT") continue; // file not found
+      // One it cannot read is refused, not taken for absent: the import would quietly lack it.
+      fail(`${join(dataDir, name)}: cannot be read (${e.code ?? e.message})`);
     }
     try {
       return { name, rows: parseTwitterJsFile(raw) };
-    } catch (e) {
-      fail(`${join(dataDir, name)}: not an archive file (${e.message})`);
+    } catch {
+      // As the other refusals: a parse error is said without the parser's words, which quote the export's text into the run report (review pass 5).
+      fail(`${join(dataDir, name)}: not an archive file (it does not parse as the archive's JSON)`);
     }
   }
   return null;
@@ -330,11 +381,22 @@ async function main() {
   const { path, skip, limit, types } = parseArgs(process.argv.slice(2));
 
   const dataDir = await findDataDir(path);
+  // An empty folder (the import runner's, before an archive is put in it) is no export: nothing to emit (review
+  // pass 5: the end rule below refused it, every week).
+  if (!dataDir) { console.error(`No X archive under ${path}; nothing emitted. Point the script at the extracted archive.`); return; }
   const allItems = [];
+  /**
+   * Records of the archive's kind read, before the importer's filters (short, retweets): what the end rule counts.
+   * A record is one with the text this importer reads, so a vendor shape it does not know counts none (review pass
+   * 6: rows of any shape were counted, and [1,2,3] passed as read).
+   */
+  let rows = 0;
+  const hasText = (o, ...fields) => !!o && typeof o === "object" && fields.some((f) => typeof o[f] === "string");
 
   if (types.includes("tweets")) {
     const f = await readArchiveFile(dataDir, ["tweets.js", "tweet.js"]);
     if (f) {
+      rows += (Array.isArray(f.rows) ? f.rows : []).filter((r) => hasText(r?.tweet ?? r, "full_text", "text")).length;
       const days = processTweets(f.rows);
       allItems.push(...days);
       console.error(`Tweets (${f.name}): ${f.rows.length} tweets → ${days.length} daily thoughts`);
@@ -344,6 +406,7 @@ async function main() {
   if (types.includes("dms")) {
     const f = await readArchiveFile(dataDir, ["direct-messages.js", "direct-message.js"]);
     if (f) {
+      rows += (Array.isArray(f.rows) ? f.rows : []).flatMap((r) => (Array.isArray((r?.dmConversation ?? r)?.messages) ? (r?.dmConversation ?? r).messages : [])).filter((m) => hasText(m?.messageCreate ?? m, "text")).length;
       const convs = processDMs(f.rows);
       allItems.push(...convs);
       console.error(`DMs (${f.name}): ${f.rows.length} conversations → ${convs.length} thoughts`);
@@ -353,6 +416,7 @@ async function main() {
   if (types.includes("grok")) {
     const f = await readArchiveFile(dataDir, ["grok-conversations.js", "grokConversations.js"]);
     if (f) {
+      rows += (Array.isArray(f.rows) ? f.rows : []).filter((r) => hasText(r, "message", "text")).length;
       const chats = processGrokChats(f.rows);
       allItems.push(...chats);
       console.error(`Grok chats (${f.name}): ${f.rows.length} messages → ${chats.length} thoughts`);
@@ -361,13 +425,16 @@ async function main() {
 
   const toProcess = allItems.slice(skip, skip + limit);
   const seen = new Set();
-  let emitted = 0, skipped = 0;
+  let emitted = 0, dropped = 0;
+  // Printed once, at the end: a refusal mid-run (a record in two files) prints nothing, so a pipe into the
+  // pipeline never ingests half an export.
+  const lines = [];
 
   for (const it of toProcess) {
     // The short-text skip is a whole group's: a short first part before a message cut at the bound is kept.
-    if (it.of === 1 && it.content.trim().length < 50) { skipped++; continue; }
+    if (it.of === 1 && it.content.trim().length < 50) { dropped++; continue; }
     // Two lines of one identity refuse the whole file, so a conversation the archive lists twice is emitted once.
-    if (seen.has(it.key)) { console.error(`${it.key} appears twice; emitted once`); skipped++; continue; }
+    if (seen.has(it.key)) { console.error(`${it.key} appears twice; emitted once`); dropped++; continue; }
     seen.add(it.key);
     const item = {
       identity: { system: SYSTEM, key: it.key },
@@ -379,12 +446,20 @@ async function main() {
       facets: { title: it.title, kind: it.kind, ...ENHANCED },
     };
     if (it.createdAt) item.createdAt = it.createdAt;
-    process.stdout.write(`${JSON.stringify(item)}\n`);
+    lines.push(JSON.stringify(item));
     emitted++;
   }
 
-  console.error(`Emitted ${emitted} item(s), skipped ${skipped} (of ${toProcess.length}; skip=${skip}, limit=${limit === Infinity ? "all" : limit})`);
+  if (lines.length) process.stdout.write(`${lines.join("\n")}\n`);
+  console.error(`Emitted ${emitted} item(s), skipped ${dropped} (of ${toProcess.length} thought(s) from ${rows} record(s) read; skip=${skip}, limit=${limit === Infinity ? "all" : limit})`);
+  // An export found but no record of this importer's kind parsed from it is refused, not reported as no export:
+  // another product's file of the name it reads, or a vendor shape it does not know, would otherwise be a green
+  // run that writes nothing, every week (review pass 4). Records parsed and all skipped by the importer's own
+  // filters (short, retweets) are a correct read, and exit 0 (review pass 5). Under --skip, --limit or --types the
+  // window is the request's.
+  if (!rows && skip === 0 && limit === Infinity && types.length === TYPES.length) fail(`${dataDir}: found an archive's data folder but no tweet, DM or Grok chat in it (tweets.js, direct-messages.js, grok-conversations.js): an archive with none, its media-only part, or a layout this importer does not read`);
   if (droppedDates.size) console.error(`${droppedDates.size} date(s) left out, not ones the brain accepts (it dates those thoughts when it writes them): ${[...droppedDates].slice(0, 5).map((d) => JSON.stringify(d.slice(0, 40))).join(", ")}`);
 }
 
-await main();
+// A failure no check foresaw (a file unreadable mid-run) is named, not left a stack trace in the runner's report.
+await main().catch((e) => fail(e instanceof Error ? e.message : String(e)));

@@ -62,6 +62,12 @@ db/*.ts
 !db/worker-bootstrap.ts
 !db/lease.ts
 !evals/linear-corpus.ts
+# ...and the emitters its pipelines.json names (SMD-2493), let back into a
+# context that otherwise keeps recipes/ out.
+!recipes/grok-export-import/import-grok.mjs
+!recipes/instagram-import/import-instagram.mjs
+!recipes/journals-blogger-import/import-blogger.mjs
+!recipes/x-twitter-import/import-x-twitter.mjs
 # The authorization server's proof of concept (evals/auth/Dockerfile, SMD-2285)
 # builds from this root too, so its image holds the deploy's modules beside its
 # own (deploy/ is in the context already).

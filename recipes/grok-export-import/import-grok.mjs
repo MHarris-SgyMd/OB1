@@ -11,7 +11,7 @@
  *
  * Usage:
  *   bun import-grok.mjs /path/to/grok-export.json [--skip N] [--limit N] > items.jsonl
- *   bun import-grok.mjs /path/to/a-folder-of-exports       # every *.json in it
+ *   bun import-grok.mjs /path/to/a-folder                  # one export: its *.json at the top, or one folder down
  */
 
 import { createHash } from "node:crypto";
@@ -20,7 +20,7 @@ import { join } from "node:path";
 
 const SYSTEM = "grok";
 const SCOPE = "grok:export";
-const USAGE = "Usage: bun import-grok.mjs /path/to/grok-export.json|folder [--skip N] [--limit N] > items.jsonl";
+const USAGE = "Usage: bun import-grok.mjs /path/to/grok-export.json|folder [--skip N] [--limit N] [--if-present] > items.jsonl";
 
 function parseArgs(argv) {
   const out = { path: undefined, skip: 0, limit: Infinity };
@@ -30,6 +30,8 @@ function parseArgs(argv) {
       const n = Number(argv[++i]);
       if (!Number.isInteger(n) || n < 0) fail(`${a} takes a whole number`);
       out[a.slice(2)] = n;
+    } else if (a === "--if-present") {
+      ifPresent = true;
     } else if (a === "--dry-run") {
       fail("the emitter writes nothing; count what it emits with the pipeline's own --dry-run (bun db/ingest-records.ts --source items --items items.jsonl --allow grok:export --dry-run)");
     } else if (a.startsWith("--")) {
@@ -42,6 +44,31 @@ function parseArgs(argv) {
   }
   if (out.path === undefined) fail(USAGE);
   return out;
+}
+
+/** A name every walk passes over: a dot-file or dot-folder, __MACOSX and the `._*` AppleDouble files a zip made on a Mac carries. */
+const skipped = (name) => name.startsWith(".") || name === "__MACOSX";
+
+/**
+ * `--if-present`: a path that is not there is no export yet, not a mistake, so
+ * nothing is emitted and the run succeeds. The import runner passes it, since
+ * a pipeline's folder need not exist until an export is put in it (SMD-2493 PR 2).
+ */
+let ifPresent = false;
+
+/**
+ * The export's path, checked before anything reads it. One that is not there
+ * is "no export yet" under --if-present (nothing emitted, exit 0) and a
+ * mistake otherwise. One there but unreadable is refused, naming why: a green
+ * run that read nothing would hide it.
+ */
+async function exportRoot(path) {
+  try {
+    return await stat(path);
+  } catch (e) {
+    if (e.code === "ENOENT" && ifPresent) { console.error(`${path}: no export there yet; nothing emitted`); process.exit(0); }
+    fail(e.code === "ENOENT" ? `${path}: no such file or folder` : `${path}: cannot be read (${e.code ?? e.message})`);
+  }
 }
 
 function fail(why) {
@@ -200,28 +227,51 @@ function parts(key, members, lineOf, sep) {
 /** A part's label in its header and title: nothing for the first, so a conversation that grows a second part leaves the first one's text as it was. */
 const partLabel = (p) => (p.part > 1 ? ` (part ${p.part})` : "");
 
-/** The export files: the path itself, or every *.json directly inside it (the import runner hands an emitter its folder). */
+/** The export files: the path itself, or the one export's *.json at the top of the folder or one folder down (the import runner hands an emitter its folder). */
 async function exportFiles(path) {
-  let s;
-  try {
-    s = await stat(path);
-  } catch {
-    fail(`${path}: no such file or folder`);
-  }
+  const s = await exportRoot(path);
   if (!s.isDirectory()) return [path];
-  const names = (await readdir(path)).filter((n) => n.toLowerCase().endsWith(".json")).sort();
-  return names.map((n) => join(path, n));
+  const list = async (dir, opts) => {
+    try {
+      return await readdir(dir, opts);
+    } catch (e) {
+      // A folder it cannot read is refused, not passed over: an export may be in it.
+      fail(`${dir}: cannot be read (${e.code ?? e.message})`);
+    }
+  };
+  const jsonIn = async (dir) => (await list(dir)).filter((n) => !skipped(n) && n.toLowerCase().endsWith(".json")).sort().map((n) => join(dir, n));
+  // The JSON at the top (one export, in one file or several), or an export unzipped into a folder of its own one
+  // level down (the import runner's imports/grok/<export>/). Two exports would be read as one, the older copy of a
+  // conversation winning wherever its folder sorts first, so they are refused, naming them.
+  const exports = [];
+  const here = await jsonIn(path);
+  if (here.length) exports.push({ at: path, files: here });
+  for (const d of (await list(path, { withFileTypes: true })).filter((e) => e.isDirectory() && !skipped(e.name)).map((e) => e.name).sort()) {
+    const files = await jsonIn(join(path, d));
+    if (files.length) exports.push({ at: join(path, d), files });
+  }
+  if (exports.length > 1) fail(`${path} holds ${exports.length} exports (${exports.map((x) => x.at).join(", ")}); keep one, the newest, or merge the parts of one export into one folder`);
+  // Something there but no JSON export is not "no export yet": a zip, or the JSON nested deeper than one folder.
+  if (!exports.length && (await list(path)).some((n) => !skipped(n))) fail(`${path} holds no JSON export: a .zip to extract first, or the conversations JSON nested more than one folder down (put the file itself here)`);
+  return exports[0]?.files ?? [];
 }
 
 async function main() {
   const { path, skip, limit } = parseArgs(process.argv.slice(2));
   const conversations = [];
-  for (const file of await exportFiles(path)) {
-    let parsed;
+  const files = await exportFiles(path);
+  for (const file of files) {
+    let text, parsed;
     try {
-      parsed = JSON.parse(await readFile(file, "utf-8"));
+      text = await readFile(file, "utf-8");
     } catch (e) {
-      fail(`${file}: not a JSON export (${e.message})`);
+      fail(`${file}: cannot be read (${e.code ?? e.message})`);
+    }
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      // As the other refusals: a parse error is said without the parser's words, which quote the export's text into the run report (review pass 5).
+      fail(`${file}: not a JSON export (it does not parse as JSON)`);
     }
     // Grok exports can have conversations at top level or nested
     const found = Array.isArray(parsed?.conversations) ? parsed.conversations
@@ -229,30 +279,43 @@ async function main() {
       : parsed && typeof parsed === "object" && !("conversations" in parsed) ? [parsed]
       : fail(`${file}: neither a list of conversations nor an object holding one`);
     console.error(`${file}: ${found.length} conversations`);
-    conversations.push(...found);
+    conversations.push(...found.map((conv) => ({ conv, file })));
   }
 
-  const toProcess = conversations.slice(skip, skip + limit);
-  const seen = new Set();
-  let emitted = 0, skipped = 0, malformed = 0;
+  // Every conversation is read for the two-files check below; --skip and --limit choose only which are emitted
+  // (review pass 4: two overlapping exports passed with a window that held one copy).
+  const inWindow = (i) => i >= skip && i < skip + limit;
+  const windowed = conversations.filter((_, i) => inWindow(i)).length;
+  /** Each conversation's key and the file it came from. */
+  const seen = new Map();
+  let emitted = 0, dropped = 0, malformed = 0, parsedConvs = 0;
+  // Printed once, at the end: a refusal mid-run (a record in two files) prints nothing, so a pipe into the
+  // pipeline never ingests half an export.
+  const lines = [];
 
-  for (let i = 0; i < toProcess.length; i++) {
-    const conv = toProcess[i];
+  for (let i = 0; i < conversations.length; i++) {
+    const { conv, file } = conversations[i];
+    const emit = inWindow(i);
     let cs;
     try {
       if (!conv || typeof conv !== "object") throw new Error("not an object");
       cs = normalizeConversation(conv);
     } catch (e) {
       // One conversation the parser cannot read is skipped and named, as the importer always did; the rest are emitted.
-      console.error(`conversation ${skip + i + 1}: cannot be read (${e.message}); skipped`);
-      malformed++;
+      if (emit) { console.error(`conversation ${i + 1}: cannot be read (${e.message}); skipped`); malformed++; }
       continue;
     }
-    if (!cs.length || cs[0].content.trim().length < 100) { skipped++; continue; }
-    // Two lines of one identity refuse the whole file, so a conversation listed twice (two export files) is emitted once.
-    if (seen.has(cs[0].key)) { console.error(`conversation ${cs[0].key} appears twice; emitted once`); skipped++; continue; }
+    if (cs.length) parsedConvs++;
+    if (!cs.length || cs[0].content.trim().length < 100) { if (emit) dropped++; continue; }
+    // A conversation in two files is two exports: read as one, the older copy would win wherever its file sorts
+    // first, so it is refused, naming both. One file listing it twice is emitted once (two lines of one identity
+    // would refuse the whole items file).
+    const first = seen.get(cs[0].key);
+    if (first !== undefined && first !== file) fail(`conversation ${cs[0].key} is in two files (${first}, ${file}): two exports; keep one, the newest`);
+    if (first !== undefined) { if (emit) { console.error(`conversation ${cs[0].key} appears twice; emitted once`); dropped++; } continue; }
     for (const c of cs) {
-      seen.add(c.key);
+      seen.set(c.key, file);
+      if (!emit) continue;
       const item = {
         identity: { system: SYSTEM, key: c.key },
         scope: SCOPE,
@@ -263,13 +326,21 @@ async function main() {
         facets: { title: c.title, type: "reference", source_type: "grok_import", importance: 3, quality_score: 50, sensitivity_tier: "standard" },
       };
       if (c.createdAt) item.createdAt = c.createdAt;
-      process.stdout.write(`${JSON.stringify(item)}\n`);
+      lines.push(JSON.stringify(item));
       emitted++;
     }
   }
 
-  console.error(`Emitted ${emitted} item(s), skipped ${skipped}${malformed ? `, ${malformed} unreadable` : ""} (of ${toProcess.length}; skip=${skip}, limit=${limit === Infinity ? "all" : limit})`);
+  if (lines.length) process.stdout.write(`${lines.join("\n")}\n`);
+  console.error(`Emitted ${emitted} item(s), skipped ${dropped}${malformed ? `, ${malformed} unreadable` : ""} (of ${windowed}; skip=${skip}, limit=${limit === Infinity ? "all" : limit})`);
+  // An export found but no record of this importer's kind parsed from it is refused, not reported as no export:
+  // another product's file of the name it reads, or a vendor shape it does not know, would otherwise be a green
+  // run that writes nothing, every week (review pass 4). Records parsed and all skipped by the importer's own
+  // filters (short, retweets) are a correct read, and exit 0 (review pass 5). Under --skip or --limit the window
+  // is the request's.
+  if (!parsedConvs && files.length && skip === 0 && limit === Infinity) fail(`${path}: read ${files.length} JSON file(s) and found no conversation with a message in them (${conversations.length} entr${conversations.length === 1 ? "y" : "ies"}, ${malformed} unreadable): an export with none, or not a Grok export`);
   if (droppedDates.size) console.error(`${droppedDates.size} date(s) left out, not ones the brain accepts (it dates those thoughts when it writes them): ${[...droppedDates].slice(0, 5).map((d) => JSON.stringify(d.slice(0, 40))).join(", ")}`);
 }
 
-await main();
+// A failure no check foresaw (a file unreadable mid-run) is named, not left a stack trace in the runner's report.
+await main().catch((e) => fail(e instanceof Error ? e.message : String(e)));
