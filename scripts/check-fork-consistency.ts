@@ -7861,7 +7861,9 @@ const PLUGIN_ROUTE_FILES = new Set(["+page.svelte", "+page.server.ts"]);
  * the brain only through the access the gate hands back, never rest.ts or the
  * REST client.
  */
-const PLUGIN_PAGE_IMPORT = /^(?:@sveltejs\/kit|\$app\/[a-z/]+|\.\/\$types|\$lib\/server\/plugins|\$lib\/(?!server\/)[\w/.-]+)$/;
+const PLUGIN_PAGE_IMPORT = /^(?:@sveltejs\/kit|\$app\/(?:paths|navigation|environment|forms|state)|\.\/\$types|\$lib\/server\/plugins|\$lib\/(?!server\/)[\w/.-]+)$/;
+/** A page's path as the core holds it (core/plugins.ts's GUI_PATH): checked first, so a malformed one is said as such, not as a route to make. */
+const GUI_PAGE_PATH = /^(?:\/[a-z0-9]+(?:-[a-z0-9]+)*)+$/;
 /** A `.` or `..` segment, which would spell a server module another way (`$lib/./server/rest`): refused in any import (review pass 3). */
 const DOT_SEGMENT = /(?:^|\/)\.{1,2}(?:\/|$)/;
 /** What reaches past pluginAccess with no import: a global or a module's own reach (review pass 3: a bare fetch with the session's key needed none). */
@@ -7882,7 +7884,8 @@ const PLUGIN_PAGE_REACH = /\b(?:fetch|process|require|globalThis|Bun|locals)\b|\
  */
 function pluginPageProblems(declared: Record<string, string[]>, files: Record<string, string>): { where: string; what: string }[] {
   const problems: { where: string; what: string }[] = [];
-  const pages = new Set(Object.entries(declared).flatMap(([name, paths]) => paths.map((path) => `${name}${path}`)));
+  for (const [name, paths] of Object.entries(declared)) for (const path of paths) if (!GUI_PAGE_PATH.test(path)) problems.push({ where: `plugins/${name}/index.ts`, what: `declares the page ${JSON.stringify(path)}, which is no page path: segments of lower-case words and hyphens, each after a slash ("/notes", "/notes/all"), as the server holds them (bun test-plugins.ts in server-portable/ says the same)` });
+  const pages = new Set(Object.entries(declared).flatMap(([name, paths]) => paths.filter((path) => GUI_PAGE_PATH.test(path)).map((path) => `${name}${path}`)));
   for (const page of pages) {
     for (const f of PLUGIN_ROUTE_FILES) if (!(`${page}/${f}` in files)) problems.push({ where: `${PLUGIN_ROUTES}/${page}`, what: `no ${f}: the plugin's manifest declares this page, and the GUI renders each declared page from its route here, its load reaching the plugin through pluginAccess` });
     const load = files[`${page}/+page.server.ts`];
@@ -7907,7 +7910,7 @@ function pluginPageProblems(declared: Record<string, string[]>, files: Record<st
 }
 
 /** pluginPageProblems' probes: each declared, files and how many problems. */
-const GATED = "import { fail } from '@sveltejs/kit';\nimport { base } from '$app/paths';\nimport type { PageServerLoad } from './$types';\nimport { oneLine } from '$lib/format';\nimport { pluginAccess } from '$lib/server/plugins';\nexport const load = async (event) => { const ex = await pluginAccess(event, 'example', '/notes'); return {}; };";
+const GATED = "import { fail } from '@sveltejs/kit';\nimport { base } from '$app/paths';\nimport type { PageServerLoad } from './$types';\nimport { oneLine } from '$lib/format';\nimport { pluginAccess } from '$lib/server/plugins';\nexport const load = async (event) => { const ex = await pluginAccess(event); return {}; };";
 const PLUGIN_PAGE_PROBES: [Record<string, string[]>, Record<string, string>, number][] = [
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED }, 0],
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "" }, 1],
@@ -7930,6 +7933,9 @@ const PLUGIN_PAGE_PROBES: [Record<string, string[]>, Record<string, string>, num
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED, "example/other/+page.svelte": "" }, 1],
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED, "+layout.server.ts": "" }, 1],
   [{}, { "example/notes/+page.svelte": "" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nimport { getRequestEvent } from '$app/server';" }, 1],
+  [{ example: ["recent/"] }, {}, 1],
+  [{ example: ["/notes", "Notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED }, 1],
 ];
 
 async function checkPlugins() {
@@ -7973,7 +7979,8 @@ async function checkPlugins() {
     declared[d] = [...(manifest.match(/\bgui\s*:\s*\{\s*pages\s*:\s*\[([\s\S]*?)\]/)?.[1] ?? "").matchAll(/\bpath\s*:\s*["']([^"']+)["']/g)].map((m) => m[1]);
     if (name !== d) fail(`${where}/index.ts`, `its manifest's name is ${JSON.stringify(name ?? null)}, not its directory's (${d}): OB1_PLUGINS, the migrator and the server name a plugin by one name`);
     // Every file in the directory: TypeScript, its migrations, a README and metadata.json — a .js file is code this check would not read.
-    const files = walk(join(base, d), [], /^[^.]/).filter((f) => !f.includes(`${sep}node_modules${sep}`));
+    // Every file, dotfiles included: Bun imports `./.helper.ts`, so a dotfile is code this check must refuse (review pass 4).
+    const files = walk(join(base, d), [], /$/).filter((f) => !f.includes(`${sep}node_modules${sep}`));
     const migrationFiles: string[] = [];
     for (const f of files) {
       const rel = relative(join(base, d), f).split(sep).join("/");

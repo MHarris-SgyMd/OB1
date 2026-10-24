@@ -239,6 +239,13 @@ const pin = async (thought: string, note: string) => {
   const r = await fetch(`${BASE}${NOTES_PATH}?thought=${thought}&/pin`, { method: "POST", redirect: "manual", headers: headers(FORM), body: new URLSearchParams({ thought_id: thought, note }).toString() });
   return { status: r.status, location: r.headers.get("location") ?? "", html: await r.text() };
 };
+/** The pin form as the page renders it: its action, unescaped, and its hidden fields — what a browser posts (review pass 4: the smoke built its own post, so a broken form passed). */
+const pinFormOf = (html: string) => {
+  const form = /<form[^>]*data-testid="pin"[^>]*>[\s\S]*?<\/form>/.exec(html)?.[0] ?? "";
+  const action = (/action="([^"]*)"/.exec(form)?.[1] ?? "").replaceAll("&amp;", "&");
+  const fields = Object.fromEntries([...form.matchAll(/<input[^>]*type="hidden"[^>]*>/g)].map((m) => [/name="([^"]*)"/.exec(m[0])?.[1] ?? "", /value="([^"]*)"/.exec(m[0])?.[1] ?? ""]));
+  return { action, fields };
+};
 const notesListed = (html: string) => [...(/data-testid="notes"[\s\S]*?<\/ol>/.exec(html)?.[0] ?? "").matchAll(/<li[\s\S]*?<\/li>/g)].map((m) => m[0]);
 /** The GUI's own 404 — the gate's, words SvelteKit's error page gives a page it has no route for — never the core's refusal in words. */
 const guiNotFound = (r: { status: number; html: string }) => r.status === 404 && r.html.includes('data-testid="error">No page at this address.<');
@@ -250,6 +257,11 @@ async function notesArm() {
   const signedIn = await signIn(WRITE_KEY!);
   const home = await get("/");
   assert(signedIn.status === 303 && home.status === 200, `the write key signs in for the Notes arm (${signedIn.status}, ${home.status})`);
+  // The root layout reads the address, so SvelteKit runs it again at every navigation and the nav follows the registry (review pass 2; pass 4: only a browser run held it).
+  const rootData = await get("/__data.json");
+  let rereads = false;
+  try { rereads = (JSON.parse(rootData.html) as { nodes?: ({ uses?: { url?: number } } | null)[] }).nodes?.[0]?.uses?.url === 1; } catch { /* asserted below */ }
+  assert(rereads, `the root layout's data says it reads the address, so it runs again at every navigation (${rootData.status})`);
   const on = NOTES === undefined ? namesNotes(home.html) : NOTES === "on";
   // Only --notes on writes: unset, a plugin found on is read, never pinned to (review pass 1: a plain run wrote a note).
   const writes = NOTES === "on";
@@ -282,6 +294,8 @@ async function notesArm() {
   const thought = recent[0] ?? NO_THOUGHT;
   const before = await get(`${NOTES_PATH}?thought=${thought}`);
   assert(before.status === 200 && before.html.includes('data-testid="pin"'), `…a thought's notes, with a pin form for the write key (${before.status})`);
+  const upper = await get(`${NOTES_PATH}?thought=${thought.toUpperCase()}`);
+  assert(upper.status === 200 && pinFormOf(upper.html).fields.thought_id === thought, `…an id in capitals reads as the same thought, written back in lower case (${upper.status})`);
   const badId = await get(`${NOTES_PATH}?thought=not-an-id`);
   assert(badId.status === 200 && badId.html.includes('data-testid="bad-id"'), `…and an address naming no thought id says so (${badId.status})`);
   const data = await get(`${NOTES_PATH}/__data.json?thought=${thought}`);
@@ -299,7 +313,12 @@ async function notesArm() {
   const lines = [`Pinned by the GUI smoke <b>${stamp}</b> & kept as typed.`, "x".repeat(600), "y".repeat(600)];
   lines.push("z".repeat(2000 - lines.join("\n").length - 1));
   const note = lines.join("\n");
-  const pinned = await pin(thought, `  ${lines.join("\r\n")}  `);
+  // Posted as the page's own form, its hidden thought id and its action as rendered.
+  const form = pinFormOf(before.html);
+  assert(form.fields.thought_id === thought && form.action.startsWith(`/dashboard${NOTES_PATH}?thought=${thought}&/pin`), `…its pin form carries the thought and posts to its own action (${form.action})`);
+  const posted = await fetch(`${ORIGIN}${form.action}`, { method: "POST", redirect: "manual", headers: headers(FORM), body: new URLSearchParams({ ...form.fields, note: `  ${lines.join("\r\n")}  ` }).toString() });
+  const pinned = { status: posted.status, location: posted.headers.get("location") ?? "" };
+  await posted.text();
   assert(pinned.status === 303 && pinned.location === `/dashboard${NOTES_PATH}?thought=${thought}#pin`, `…the write key pins a note of 2,000 characters sent with CRLF breaks and spaces around it: 303 back to the thought's notes (${pinned.status} → ${pinned.location})`);
   const after = await get(`${NOTES_PATH}?thought=${thought}`);
   const escaped = note.replaceAll("&", "&amp;").replaceAll("<", "&lt;");

@@ -150,7 +150,9 @@ Then open `http://127.0.0.1:5174/dashboard`. `OB1_REST_URL` there is a REST core
 can reach: the stack's `/api` with `deploy/compose.api-public.yaml`, as above, or one
 run from a checkout. Not port 8000, the stack's own: on macOS a listener on every
 address beside the stack's loopback one starts without an error, and the browser keeps
-reaching the stack.
+reaching the stack. A plugin page reads the registry of the REST core it is pointed at, so a
+page new in the checkout needs a REST core built from the same tree, with `OB1_PLUGINS`
+naming its plugin: the stack's lists only its own build's pages, and the new one is a 404.
 
 ## Smoke
 

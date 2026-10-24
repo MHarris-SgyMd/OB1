@@ -1,10 +1,12 @@
 <script lang="ts">
 	import { base } from '$app/paths';
+	import { page } from '$app/state';
 	import { when } from '$lib/format';
 	import type { ActionData, PageData } from './$types';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
-	const here = `${base}/plugins/example/notes`;
+	// The page's own address, not one spelled out: a page copied to another plugin's directory posts to itself (review pass 4).
+	const here = $derived(page.url.pathname);
 </script>
 
 <svelte:head><title>Notes · Open Brain</title></svelte:head>

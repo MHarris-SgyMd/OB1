@@ -92,9 +92,15 @@ export type PluginAccess = {
  * Every plugin page's load and action starts here: the page's 404 unless the
  * registry lists it to this key — the plugin not enabled, a page it does not
  * declare, or a key that may call none of it — and then the plugin's
- * operations, bound to the plugin, under the visitor's key.
+ * operations, bound to the plugin, under the visitor's key. The plugin and the
+ * page are the route's own, `/plugins/<name><path>`, so a page copied into
+ * another plugin's directory gates on that plugin, never the one it was
+ * copied from (review pass 4).
  */
-export async function pluginAccess(event: RequestEvent, name: string, path: string): Promise<PluginAccess> {
+export async function pluginAccess(event: RequestEvent): Promise<PluginAccess> {
+	const route = /^\/plugins\/([a-z0-9-]+)(\/.+)$/.exec(event.route.id ?? '');
+	if (!route) throw error(404, 'Not Found');
+	const [, name, path] = route;
 	const plugin = (await pluginsFor(event)).find((p) => p.name === name);
 	if (!plugin || !plugin.pages.some((g) => g.path === path)) throw error(404, 'Not Found');
 	const session = event.locals.session!;
