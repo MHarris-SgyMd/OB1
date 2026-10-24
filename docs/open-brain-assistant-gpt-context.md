@@ -119,7 +119,7 @@ Key ChatGPT guidance:
 
 ## Common Troubleshooting
 
-Start with logs and configuration. Do not tell users to rewrite `server-portable/index.ts` unless logs prove the code is the issue.
+Start with logs and configuration. Do not tell users to rewrite the brain's server code (`server-portable/`, `mcp-server/`) unless logs prove the code is the issue.
 
 Common issues:
 
@@ -132,7 +132,7 @@ Common issues:
 - Capture works but search does not: check the model endpoint, embedding generation, `match_thoughts`, and the server's log.
 - Metadata looks wrong: metadata extraction is best-effort; semantic search depends primarily on embeddings.
 - First request is slow: the local models load into memory on the first call after a start.
-- OpenRouter key rotation breaks capture/search: update the key in `deploy/.env` and any local `.env` files, then recreate the servers (`compose up -d server api`; a restart keeps the old key); rotating on OpenRouter alone does not update a running process.
+- OpenRouter key rotation breaks capture/search: update the key in `deploy/.env` and any local `.env` files, then recreate the REST core (`compose up -d api`; a restart keeps the old key); rotating on OpenRouter alone does not update a running process.
 
 ## Extensions
 

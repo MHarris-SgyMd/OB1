@@ -730,11 +730,11 @@ console.log("\n[8] The log: one line per request, with no query, key, id or cont
   for (const s of ["private words", ids[2], "trace=1", "someone-named", "must not be logged", KEYS.writer]) assert(!all.includes(s), `no ${s.slice(0, 20)} in the log`);
 }
 
-console.log("\n[9] `bun api.ts` as the entry wires the durable job store for the REST core: its own job left running is reconciled to lost, the MCP server's is left alone, and a job it starts is recorded as its own (migration 078, SMD-2284)");
+console.log("\n[9] `bun api.ts` as the entry wires the durable job store for the REST core: its own job left running is reconciled to lost, another door's is left alone (the retired MCP server's is test-e2e-sql [18]'s), and a job it starts is recorded as its own (migration 078, SMD-2284)");
 {
   const mine = crypto.randomUUID(), theirs = crypto.randomUUID();
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${mine}::uuid, 'scan_thoughts', ${hashKey(KEYS.reader)}, 'reader', 'running', now(), 'open-brain-api')`;
-  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${theirs}::uuid, 'scan_thoughts', ${hashKey(KEYS.reader)}, 'reader', 'running', now(), 'open-brain')`;
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${theirs}::uuid, 'scan_thoughts', ${hashKey(KEYS.reader)}, 'reader', 'running', now(), 'open-brain-elsewhere')`;
   const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
   const port = free.port;
   free.stop(true);
@@ -759,7 +759,7 @@ console.log("\n[9] `bun api.ts` as the entry wires the durable job store for the
       if (mineStatus === "running") await Bun.sleep(100);
     }
     assert(mineStatus === "lost", `the REST core's own job left running is reconciled to lost at start-up, before any keyed request (${mineStatus})`);
-    assert((await status(theirs)) === "running", "…and the MCP server's live job on the same database is not");
+    assert((await status(theirs)) === "running", "…and a live job of a door it does not name, on the same database, is not");
     const scan = await realFetch(`http://127.0.0.1:${port}/v1/scans`, { method: "POST", headers: { "x-brain-key": KEYS.reader, "content-type": "application/json" }, body: JSON.stringify({ limit: 5 }) });
     const { jobId } = await scan.json() as { jobId: string };
     let door: string | undefined;

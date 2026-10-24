@@ -10,10 +10,10 @@
 // Why the servers, on a timer: a server is the one process every brain runs
 // — the workers and the sleep scheduler are profiles a brain may not run —
 // and it already holds what the call needs: the capture's embedder
-// (embed.ts), the egress policy and the store. Both servers start one (the
-// MCP server, index.ts, and the REST core, api.ts, which outlives it once the
-// MCP endpoint is mcp-server/'s, SMD-2287), and a tick acts only while it
-// holds the store's leader lock, so one tick acts at a time across processes
+// (embed.ts), the egress policy and the store. The REST core, api.ts, starts
+// one (the MCP server index.ts did too, until SMD-2287 PR 6b retired it), and
+// a tick acts only while it holds the store's leader lock, so one tick acts at
+// a time across processes
 // and replicas. Each server keeps its own cursor and holds; the lock only
 // takes turns. A few rows a tick, never the LLM drain the bulk passes are
 // (entities.ts) — though a long row is a call per window and one for the

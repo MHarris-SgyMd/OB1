@@ -48,7 +48,7 @@ After updating your MCP server, rebuild and restart it, then refresh or recreate
 
 Pause. The problems are almost never in the code. They're in the configuration: a secret that doesn't match, a URL that's missing the key, a step that got skipped. Letting an AI rewrite working code when the issue is a mismatched environment variable will make things harder to debug, not easier.
 
-Read the servers' logs first (`podman compose -f deploy/compose.yaml logs mcp api`, and `logs server` for preflight) — and the row preflight failed on, if it did. That'll tell you what's actually happening.
+Read the servers' logs first (`podman compose -f deploy/compose.yaml logs mcp api`; `api`'s holds preflight's) — and the row preflight failed on, if it did. That'll tell you what's actually happening.
 
 ### "Search isn't working but I can capture recent thoughts"
 
@@ -184,11 +184,11 @@ When you generate a new key on openrouter.ai/keys, the old key is revoked immedi
 
 **Places your OpenRouter key lives (update ALL of them):**
 
-1. **The server's environment** — This is the most common one to miss. Your MCP server reads the key from `deploy/.env` once, at start.
+1. **The server's environment** — This is the most common one to miss. The REST core, which makes the brain's model calls, reads the key from `deploy/.env` once, at start.
 
    ```bash
    # edit OPENROUTER_API_KEY in deploy/.env, then
-   podman compose -f deploy/compose.yaml up -d server proxy forwarder
+   podman compose -f deploy/compose.yaml up -d api proxy forwarder
    ```
 
    A running server keeps the key it started with, so the restart is what makes the new one take effect. Every extension, worker or gateway you run under `bun` with the key in its environment is restarted the same way. (If the stack runs the `local-models` profile, there is no OpenRouter key to rotate.)

@@ -3348,25 +3348,25 @@ console.log("\n[17] Every worker action answers its result beside the text, and 
   }
 }
 
-console.log("\n[18] The serving entry wires the durable job store when it first builds the store: a job a prior process left running is marked lost, and the REST core's live job on the same database is left alone (SMD-2318; root.ts's serveHere and migration 078, SMD-2284)");
+console.log("\n[18] The serving entry wires the durable job store when it first builds the store: the jobs a prior process left running are marked lost, its own and the retired MCP server's, and no other door's (SMD-2318, SMD-2287 PR 6b)");
 {
-  // `bun index.ts` as Bun's entry, not an import: only the entry says it
-  // serves (serveHere), and only then does the store's first build reconcile
-  // the rows a prior process left live. Its first keyed request builds the
-  // store (the registry lookup reads it); the reconcile runs detached after.
-  // It reaches server-portable's live rows (door open-brain), not the REST
-  // core's (open-brain-api): two servers on one database (078). It spawns
-  // index.ts's entry though the suite drives the MCP server, which holds no job
-  // store; the REST core's entry is test-rest-sql's to run.
+  // `bun api.ts` as Bun's entry, not an import: only the entry says it serves
+  // (serveHere), and only then does the store's first build reconcile the rows
+  // a prior process left live (the MCP server holds no job store). It reaches
+  // its own door's rows (open-brain-api) and the retired MCP server's
+  // (open-brain, 078's default: index.ts until SMD-2287 PR 6b), and leaves a
+  // door it does not name alone.
   const sql = new SQL({ url: URL_, max: 1 });
   const jobId = crypto.randomUUID();
   const apiJob = crypto.randomUUID();
+  const otherJob = crypto.randomUUID();
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at) VALUES (${jobId}::uuid, 'scan_thoughts', ${hashKey("e2e-key")}, 'e2e', 'running', now())`;
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${apiJob}::uuid, 'scan_thoughts', ${hashKey("e2e-key")}, 'e2e', 'running', now(), 'open-brain-api')`;
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${otherJob}::uuid, 'scan_thoughts', ${hashKey("e2e-key")}, 'e2e', 'running', now(), 'open-brain-elsewhere')`;
   const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
   const port = free.port;
   free.stop(true);
-  const child = Bun.spawn([process.execPath, "index.ts"], {
+  const child = Bun.spawn([process.execPath, "api.ts"], {
     cwd: dirname(fileURLToPath(import.meta.url)),
     env: { ...process.env, PORT: String(port), MCP_ACCESS_KEYS: "", MCP_ACCESS_KEY: "e2e-key" },
     stdout: "ignore", stderr: "pipe",
@@ -3387,9 +3387,14 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
       status = (await sql`SELECT status FROM jobs WHERE id = ${jobId}::uuid`)[0]?.status;
       if (status === "running") await Bun.sleep(100);
     }
-    assert(status === "lost", `the job a prior process left running is reconciled to lost at start-up, before any keyed request (${status})`);
-    const [{ status: other }] = await sql`SELECT status FROM jobs WHERE id = ${apiJob}::uuid`;
-    assert(other === "running", `…and the REST core's live job on the same database is not (${other})`);
+    assert(status === "lost", `the retired MCP server's job (door open-brain) is reconciled to lost at start-up, before any keyed request (${status})`);
+    let own = "running";
+    while (own === "running" && Date.now() < deadline) {
+      own = (await sql`SELECT status FROM jobs WHERE id = ${apiJob}::uuid`)[0]?.status;
+      if (own === "running") await Bun.sleep(100);
+    }
+    const [{ status: other }] = await sql`SELECT status FROM jobs WHERE id = ${otherJob}::uuid`;
+    assert(own === "lost" && other === "running", `…and the REST core's own prior one, while a door it does not name is left alone (${own}, ${other})`);
   } finally {
     child.kill();
     // Its stop drains for at most the grace period less 2 s (shutdown.ts); one
@@ -3399,7 +3404,7 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
     clearTimeout(hung);
     // What the entry said, when it did not do what was asked of it.
     if (status !== "lost") console.log((await new Response(child.stderr).text()).split("\n").slice(-10).map((l) => `      ${l}`).join("\n"));
-    await sql`DELETE FROM jobs WHERE id IN (${jobId}::uuid, ${apiJob}::uuid)`;
+    await sql`DELETE FROM jobs WHERE id IN (${jobId}::uuid, ${apiJob}::uuid, ${otherJob}::uuid)`;
     await sql.close();
   }
 }

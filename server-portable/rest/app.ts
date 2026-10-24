@@ -279,8 +279,8 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // statements capped to fit the deadline). Any other key — a wrong one, one
   // whose scope lacks the tool, a revoked one, one the registry is busy on or
   // does not answer for in time — is answered liveness as no key is: this
-  // route shows nothing, and refuses no one. The rules are server-portable
-  // index.ts's /health's. The forwarder slot is not read here (the middleware
+  // route shows nothing, and refuses no one. The rules were server-portable
+  // index.ts's /health's (retired in SMD-2287 PR 6b). The forwarder slot is not read here (the middleware
   // reads it for the span's parent alone): the record is the caller's key's to
   // see, whoever carried it.
   app.get("/health", async (c) => {
@@ -310,7 +310,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     // A HEAD has no body to carry the record: liveness, and no read for nothing.
     if (c.req.method === "HEAD") return c.body(null, 200, { "content-type": "application/json" });
     // The read and the registry's word start together, under one deadline, as
-    // index.ts's /health starts them: a registry that has not answered by then
+    // index.ts's /health started them: a registry that has not answered by then
     // could still say revoked, so the key is shown nothing.
     const info = deps.core.brainInfo("health");
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -433,7 +433,7 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     const carrier = forwarded === null ? null : checked !== undefined ? checked : authenticate(forwarded, keys, { admit: ["forward"] });
     if (forwarded !== null && !carrier) return refuse(c, 401, { code: "UNAUTHORIZED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
     const identity = await deps.resolve(principal);
-    // Named to a forwarder, whose own line names the key as index.ts's does (SMD-2287 PR 4b): the caller presented it,
+    // Named to a forwarder, whose own line names the key as index.ts's did (SMD-2287 PR 4b): the caller presented it,
     // and the forwarder's key matched its digest above. Its own revocation is read after the caller's (PR 3a's lock
     // order), so a revoked forwarder holding a revoked caller's key is told that key's name — its label, no more.
     const named = carrier ? { name: principal.name } : {};

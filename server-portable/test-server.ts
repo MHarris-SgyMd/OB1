@@ -188,19 +188,17 @@ console.log("[1] The module is importable at all");
 
 console.log("\n[2] Runtime neutrality");
 {
-  const src = await Bun.file(new URL("./index.ts", import.meta.url)).text();
-  // The process root the server builds on and its stream keepalive (SMD-2284) stay runtime-neutral too.
-  const rootSrc = await Bun.file(new URL("./root.ts", import.meta.url)).text();
-  const sseSrc = await Bun.file(new URL("./sse.ts", import.meta.url)).text();
-  // The endpoint's HTTP edge, out of index.ts since SMD-2287 PR 2, as index.ts is.
-  const edgeSrc = await Bun.file(new URL("./mcp-edge.ts", import.meta.url)).text();
-  for (const [file, text] of [["index.ts", src], ["root.ts", rootSrc], ["sse.ts", sseSrc], ["mcp-edge.ts", edgeSrc]]) {
+  // The two HTTP apps that serve — the REST core's and the MCP server's (SMD-2287 PR 6b: index.ts was the one) — the
+  // process root they build on and its stream keepalive (SMD-2284), and the MCP endpoint's HTTP edge.
+  const read = (rel: string) => Bun.file(new URL(rel, import.meta.url)).text();
+  const rootSrc = await read("./root.ts");
+  const files: [string, string][] = [["rest/app.ts", await read("./rest/app.ts")], ["mcp-server/app.ts", await read("../mcp-server/app.ts")], ["root.ts", rootSrc], ["sse.ts", await read("./sse.ts")], ["mcp-edge.ts", await read("./mcp-edge.ts")]];
+  for (const [file, text] of files) {
     assert(!/\bDeno\./.test(text), `${file}: no Deno.* references`);
     assert(!/\bBun\./.test(text), `${file}: no Bun.* references`);
     assert(!/jsr:/.test(text), `${file}: no jsr: imports`);
   }
-  assert(/initEnv\(c\.env/.test(src), "seeds env from the request context");
-  // initEnv is the in-process guard (a direct `bun index.ts` runs no preflight): a bad
+  // initEnv is the in-process guard (a direct `bun api.ts` runs no preflight): a bad
   // OB1_TIER throws here at the env-freeze boundary, so it never reaches the
   // best-effort log write that would silently drop every query_log row (SMD-1953).
   // The throw must come BEFORE `ENV = candidate`: the `if (ENV) return` at the top
@@ -855,7 +853,7 @@ console.log("\n[13] The MCP endpoint answers GET with 405, not an SSE stream not
 
   // /health is the probe target for platforms that can only GET and want 2xx:
   // it needs no key, and without one it says `ok` and nothing else. The match
-  // rule is the comment above index.ts's /health route (HEALTH_PATH is mcp-edge.ts's); these rows pin it. A key
+  // rule is the comment above mcp-edge.ts's HEALTH_PATH; these rows pin it. A key
   // presented changes the body (SMD-2041, below), never the status.
   for (const [label, path, init] of [
     ["GET /health", "/health", {}],
@@ -2069,19 +2067,17 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   // reads environment forwards only (review pass 4 — FORK.md's value defined twice).
   const { DEFAULT_STOP_GRACE_S } = await import("./shutdown.ts");
   const graceFallbacks: string[] = [];
-  for (const file of ["compose.yaml"]) {
-    const doc = Bun.YAML.parse(await Bun.file(new URL(`../deploy/${file}`, import.meta.url)).text()) as { services: Record<string, { build?: { dockerfile?: string }; image?: string; stop_grace_period?: string }> };
-    const builds = (svc: { build?: { dockerfile?: string } }) => svc.build?.dockerfile === "server-portable/Dockerfile";
-    // The server's image, built here or (a REST core) run by a building service's name.
-    const serverImages = new Set(Object.values(doc.services).filter(builds).map((svc) => svc.image).filter(Boolean));
-    for (const [name, svc] of Object.entries(doc.services)) {
-      if (!builds(svc) && !serverImages.has(svc.image)) continue;
-      graceFallbacks.push(`${file}:${name}=${/^\$\{OB1_STOP_GRACE:-(\d+)\}s$/.exec(svc.stop_grace_period ?? "")?.[1] ?? svc.stop_grace_period}`);
-    }
+  const doc = Bun.YAML.parse(await Bun.file(new URL("../deploy/compose.yaml", import.meta.url)).text()) as { services: Record<string, { build?: { dockerfile?: string }; image?: string; stop_grace_period?: string }> };
+  const builds = (svc: { build?: { dockerfile?: string } }) => svc.build?.dockerfile === "server-portable/Dockerfile";
+  // The server image, built by one service and run by the others by its name.
+  const serverImages = new Set(Object.values(doc.services).filter(builds).map((svc) => svc.image).filter(Boolean));
+  for (const [name, svc] of Object.entries(doc.services)) {
+    if (!builds(svc) && !serverImages.has(svc.image)) continue;
+    graceFallbacks.push(`${name}=${/^\$\{OB1_STOP_GRACE:-(\d+)\}s$/.exec(svc.stop_grace_period ?? "")?.[1] ?? svc.stop_grace_period}`);
   }
-  // Four: the server, the REST core (SMD-2284), the MCP server (SMD-2287) and
-  // the operator GUI (SMD-2280).
-  assert(graceFallbacks.length === 4 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
+  // Three: the REST core (SMD-2284), which builds the image, the MCP server
+  // (SMD-2287) and the operator GUI (SMD-2280); `server` retired in SMD-2287 PR 6b.
+  assert(graceFallbacks.length === 3 && graceFallbacks.every((x) => x.endsWith(`=${DEFAULT_STOP_GRACE_S}`)),
     `every compose server's stop_grace_period is \${OB1_STOP_GRACE:-${DEFAULT_STOP_GRACE_S}}s, the code's default (${graceFallbacks.join(", ")})`);
 
   // Preflight refuses a value compose would render wrong, and reports one it reads.
