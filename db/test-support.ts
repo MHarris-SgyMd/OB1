@@ -771,12 +771,12 @@ export function requestHead(method: string, target: string, host: string | null)
 }
 
 /**
- * A child's output stream (serveChild's stderr), drained as it arrives — so
+ * A child's output stream (serveChild's stdout and stderr), drained as it arrives — so
  * a child that writes a lot there is never blocked on a full pipe (review
  * pass 4) — with `until`, which
  * waits for a pattern (or `ms`, or the stream's end) and says whether it came,
  * and `rest`, all of it once the stream ends (SMD-1849 PR 2b: a child's suite
- * waits for its start line, "… go to <origin> over OTLP/HTTP", not a fixed sleep),
+ * waits for the SDK's line, "… go to <origin> over OTLP/HTTP", not a fixed sleep),
  * and `sofar`, what has come yet.
  */
 export function watchStream(stream: ReadableStream<Uint8Array>): { until: (pattern: RegExp, ms: number) => Promise<boolean>; rest: () => Promise<string>; sofar: () => string } {
@@ -809,8 +809,12 @@ export function watchStream(stream: ReadableStream<Uint8Array>): { until: (patte
   };
 }
 
-/** Bun's start line for a file's default export, on stdout: `Started development server: http://localhost:<port>` (`Started server:` in production). */
-const BUN_START_LINE = /^Started (?:development )?server: \S+:(\d+)\/?$/m;
+/**
+ * Bun's start line for a file's default export, on stdout: `Started development server: http://localhost:<port>`
+ * (`Started server:` in production), its newline asked for, so a line read in two pieces is never half a port. It is
+ * Bun's own debug line, not an API: a Bun that changes or drops it leaves every child not up, which every row says.
+ */
+const BUN_START_LINE = /^Started (?:development )?server: \S+:(\d+)\/?\r?\n/m;
 
 /**
  * A server entry run as the image runs it (`bun --no-env-file <entry>`), on a
@@ -825,6 +829,9 @@ const BUN_START_LINE = /^Started (?:development )?server: \S+:(\d+)\/?$/m;
  * by that server would read as this child's (SMD-3263, test-rest [12] starts
  * nine at once). The waits are deadlines, not sleeps: nine starts at once on a
  * busy runner are slower than one, and a deadline costs a quick child nothing.
+ * The entry must be served by its `export default` and read PORT, as api.ts and
+ * mcp-server/index.ts are: one that calls Bun.serve itself prints no start line,
+ * and is never up.
  */
 export async function serveChild(cwd: string, entry: string, env: Record<string, string>, { waitForSdk = false } = {}): Promise<{ port: number; up: boolean; sdk: boolean; until: (pattern: RegExp, ms: number) => Promise<boolean>; stop: () => Promise<string>; kill: () => void }> {
   const child = Bun.spawn([process.execPath, "--no-env-file", entry], {

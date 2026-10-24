@@ -1426,7 +1426,7 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     && !loneOut.includes("otel-secret") && !loneOut.includes("s3cr3t-header"),
     `its collector failing, the stop says the telemetry was not all sent, the pool's clause its own; the failure is said by origin and kind, no credential (${stopLine} / ${loneOut.split("\n").filter((l) => l.includes("not sent to")).join(" / ")})`);
 
-  // A child a signal kills (an OOM kill, a panic) is seen as gone at once, not waited on 15 s (review pass 5).
+  // A child a signal kills (an OOM kill, a panic) is seen as gone at once, not waited on serveChild's 30 s (review pass 5).
   const { tmpdir } = await import("node:os");
   const suicide = `${tmpdir()}/smd1849-kills-itself-${process.pid}.ts`;
   await Bun.write(suicide, "process.kill(process.pid, 'SIGKILL');\n");
@@ -1436,6 +1436,14 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   killed.kill();
   await Bun.file(suicide).delete();
   assert(!killed.up && killedMs < 3_000, `a child killed by a signal: not up, seen in ${Math.round(killedMs)} ms`);
+  // A child that binds but whose /health answers 503 is not up: serveChild reads the port from the child's start line and
+  // up from its /health, never from the bind alone (SMD-3263 review pass 2). It exits in a second, which ends the wait.
+  const busy = `${tmpdir()}/smd3263-busy-${process.pid}.ts`;
+  await Bun.write(busy, "export default { port: Number(process.env.PORT), fetch: () => new Response('busy', { status: 503 }) };\nsetTimeout(() => process.exit(0), 1_000);\n");
+  const busyChild = await serveChild(tmpdir(), busy, {});
+  busyChild.kill();
+  await Bun.file(busy).delete();
+  assert(busyChild.port > 0 && !busyChild.up, `a child bound whose /health answers 503: its port read (${busyChild.port}), not up`);
 
   // An export already on its way when the stop comes: the flush waits for it, under a bound of its own (SMD-2902) —
   // its budget inside what OB1_STOP_GRACE leaves less a second, here a 4 s grace's — not the pool's second (review
@@ -1483,15 +1491,31 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     const field = path.endsWith("/traces") ? "rejectedSpans" : path.endsWith("/logs") ? "rejectedLogRecords" : "rejectedDataPoints";
     return Response.json({ partialSuccess: { [field]: "1", errorMessage: "PLANTED-over-quota" } });
   };
-  const seen: Record<string, number> = {};
+  // Each signal's attempts and late answer, by when they came, and the port asked: a row holds its own case's result to
+  // its collector, not to what another case's output would pass as well (SMD-3263 review pass 2).
+  const attempts: Record<string, number[]> = {};
+  const answeredAt: Record<string, number> = {};
   let answeredLate = 0;
+  let pushbackPort = 0;
   const pushback = async (req: Request) => {
-    const path = new URL(req.url).pathname;
+    const { pathname: path, port } = new URL(req.url);
+    pushbackPort = Number(port);
     if (path.endsWith("/metrics")) return Response.json({});
-    seen[path] = (seen[path] ?? 0) + 1;
-    if (seen[path] === 1) return new Response("busy", { status: 503, headers: { "retry-after": "4" } });
+    (attempts[path] ??= []).push(performance.now());
+    if (attempts[path].length === 1) return new Response("busy", { status: 503, headers: { "retry-after": "4" } });
     await Bun.sleep(4_000);
+    answeredAt[path] = performance.now();
     answeredLate += 1;
+    return Response.json({});
+  };
+  // And one that answers in 1.5 s, counting the span exports it was sent.
+  let slowPort = 0;
+  let slowSpans = 0;
+  const slowly = async (req: Request) => {
+    const { pathname, port } = new URL(req.url);
+    slowPort = Number(port);
+    if (pathname.endsWith("/traces")) slowSpans += 1;
+    await Bun.sleep(1_500);
     return Response.json({});
   };
   // The nine cases start at once and are awaited together, so [12] takes its longest case, not their sum: each has its
@@ -1499,8 +1523,8 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   // from it, so no case's port is picked while another's is free (SMD-3263). Their rows follow, in this order, each
   // case's result read by its name, not its place in the list (review pass 1: two places swapped passed slow's and
   // pushedBack's rows).
-  const { slow, hung, crowded, trickled, rejected, perSignal, noSpans, hungFirst, pushedBack } = Object.fromEntries((await Promise.all([
-    stopWith("slow", async () => { await Bun.sleep(1_500); return Response.json({}); }),
+  const cases = Object.fromEntries((await Promise.all([
+    stopWith("slow", slowly),
     stopWith("hung", () => new Promise<Response>(() => {})),
     stopWith("crowded", () => new Promise<Response>(() => {}), {
       OTEL_BLRP_SCHEDULE_DELAY: "200", OTEL_BSP_MAX_QUEUE_SIZE: "1", OTEL_BSP_MAX_EXPORT_BATCH_SIZE: "1", OTEL_BLRP_MAX_QUEUE_SIZE: "1", OTEL_BLRP_MAX_EXPORT_BATCH_SIZE: "1",
@@ -1517,13 +1541,18 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
       await Bun.sleep(300); // the SDK's callback, a tick after the answer
     }]),
   ])).map((c) => [c.name, c]));
+  const { slow, hung, crowded, trickled, rejected, perSignal, noSpans, hungFirst, pushedBack } = cases;
+  // A case that threw, or whose wait ran out, is said here whatever its rows read: its output is kept, and a row could
+  // pass on it (SMD-3263 review pass 2).
+  const misses = Object.values(cases).filter((c) => c.missed).map((c) => `${c.name}: ${c.missed}`);
+  assert(misses.length === 0, `every stop case ran to its stop, no wait run out (${misses.join(" / ") || "none"})`);
   const within = Number(/telemetry not all sent within (\d+) ms; exit 0$/.exec(hung.line)?.[1] ?? NaN);
   const stoppedIn = Number(/stopped in ([\d.]+) s/.exec(hung.line)?.[1] ?? NaN);
   const cutLines = hung.out.split("\n").filter((l) => l.includes(`not sent to http://127.0.0.1:${hung.port} (on its way or batched when the flush's ${within} ms ran out)`));
-  assert(slow.up && /; no database pool was opened; telemetry sent; exit 0$/.test(slow.line),
-    `a collector that answers in 1.5 s gets the stop's telemetry, under the flush's own bound (${slow.line})`);
-  // Each signal's line: the span and the log record the request made, and the metric reading the flush sent. The order
-  // against the stop's line is test-server [13d]'s to hold: serveChild returns stdout, then stderr.
+  assert(slow.up && slow.port === slowPort && slowSpans >= 1 && /; no database pool was opened; telemetry sent; exit 0$/.test(slow.line),
+    `a collector that answers in 1.5 s gets the stop's telemetry, under the flush's own bound (${slowSpans} span exports to ${slowPort}, the case's collector ${slow.port}; ${slow.line})`);
+  // Each signal's line: the span and the log record the request made, and the metric reading the flush sent. Their order
+  // against the stop's line is not held: serveChild returns stdout, then stderr.
   assert(hung.up && within >= 2_500 && within <= 3_000 && stoppedIn < 3.5 && ["1 span", "1 log record", "1 metric export"].every((n) => cutLines.some((l) => l.startsWith(`telemetry: ${n} not sent`))),
     `a collector that never answers: the stop cuts its flush at what a 4 s grace leaves (${within} ms, stopped in ${stoppedIn} s), and says by signal what was still on its way (${cutLines.join(" / ") || hung.out.split("\n").filter((l) => l.includes("not sent")).join(" / ")})`);
   // What the batches still held, and what their full queues dropped, each counted once (review pass 1's mutants): queues
@@ -1579,10 +1608,13 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   // A collector that pushes back — 503 with Retry-After: 4, then an answer 4 s on — at a 5 s timeout: the SDK retries
   // when the wait fits what is left, and that attempt ends past the timeout plus 2 s (about 8 s), inside twice it plus
   // 2 s (12 s). Answered at all, it is sent: no line, and the stop has nothing left (review pass 1: a deadline of the
-  // timeout plus 2 s counted such an export as not sent). Each signal's two attempts are counted, so a collector that
-  // never pushed back cannot pass it (SMD-3263 review pass 1).
-  assert(pushedBack.up && answeredLate === 2 && seen["/v1/traces"] === 2 && seen["/v1/logs"] === 2 && !pushedBack.out.includes("not sent") && /; telemetry sent; exit 0$/.test(pushedBack.line),
-    `a collector that answers after a Retry-After, past the timeout plus 2 s: sent, nothing said (${answeredLate} answered late, attempts ${JSON.stringify(seen)}; ${pushedBack.out.split("\n").filter((l) => l.includes("not sent")).join(" / ") || "none"}; ${pushedBack.line})`);
+  // timeout plus 2 s counted such an export as not sent). Each signal's retry comes the Retry-After's 4 s after its first
+  // attempt, and its answer past the timeout plus 2 s, both read at the collector (SMD-3263 review passes 1 and 2).
+  const pushedSignals = ["/v1/traces", "/v1/logs"].map((path) => ({ path, tries: attempts[path] ?? [], at: answeredAt[path] ?? NaN }));
+  const timeline = pushedSignals.map((p) => `${p.path}: retry +${Math.round((p.tries[1] ?? NaN) - p.tries[0])} ms, answered +${Math.round(p.at - p.tries[0])} ms`).join(", ");
+  assert(pushedBack.up && pushedBack.port === pushbackPort && answeredLate === 2 && pushedSignals.every((p) => p.tries.length === 2 && p.tries[1] - p.tries[0] >= 3_900 && p.at - p.tries[0] > 7_000)
+    && !pushedBack.out.includes("not sent") && /; telemetry sent; exit 0$/.test(pushedBack.line),
+    `a collector that answers after a Retry-After, past the timeout plus 2 s: sent, nothing said (${answeredLate} answered late; ${timeline}; ${pushedBack.out.split("\n").filter((l) => l.includes("not sent")).join(" / ") || "none"}; ${pushedBack.line})`);
 }
 
 console.log("\n[16] The served idle timeout is Bun's ceiling: its 10 s default cuts a GET whose handler has not answered (SMD-2287 PR 3a review pass 3)");
