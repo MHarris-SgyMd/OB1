@@ -1426,7 +1426,8 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     && !loneOut.includes("otel-secret") && !loneOut.includes("s3cr3t-header"),
     `its collector failing, the stop says the telemetry was not all sent, the pool's clause its own; the failure is said by origin and kind, no credential (${stopLine} / ${loneOut.split("\n").filter((l) => l.includes("not sent to")).join(" / ")})`);
 
-  // A child a signal kills (an OOM kill, a panic) is seen as gone at once, not waited on serveChild's 30 s (review pass 5).
+  // A child a signal kills (an OOM kill, a panic) is seen as gone at once, not waited on serveChild's 30 s (review
+  // pass 5).
   const { tmpdir } = await import("node:os");
   const suicide = `${tmpdir()}/smd1849-kills-itself-${process.pid}.ts`;
   await Bun.write(suicide, "process.kill(process.pid, 'SIGKILL');\n");
@@ -1436,8 +1437,9 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   killed.kill();
   await Bun.file(suicide).delete();
   assert(!killed.up && killedMs < 3_000, `a child killed by a signal: not up, seen in ${Math.round(killedMs)} ms`);
-  // A child that binds but whose /health answers 503 is not up: serveChild reads the port from the child's start line and
-  // up from its /health, never from the bind alone (SMD-3263 review pass 2). It exits in a second, which ends the wait.
+  // A child that binds but whose /health answers 503 is not up: serveChild reads the port from the child's start line
+  // and up from its /health, never from the bind alone (SMD-3263 review pass 2). It exits in a second, which ends the
+  // wait.
   const busy = `${tmpdir()}/smd3263-busy-${process.pid}.ts`;
   await Bun.write(busy, "export default { port: Number(process.env.PORT), fetch: () => new Response('busy', { status: 503 }) };\nsetTimeout(() => process.exit(0), 1_000);\n");
   const busyChild = await serveChild(tmpdir(), busy, {});
@@ -1483,16 +1485,16 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     }
     return { name, up: !!child?.up && !!child?.sdk, out, port, missed: missed.join("; "), line: out.split("\n").find((l) => l.startsWith("SIGTERM: stopped")) ?? "" };
   };
-  // Three of the collectors the cases answer with — one that trickles, one that rejects in part, one that pushes back —
-  // each told at its case's rows below.
+  // The collectors the cases answer with — one that trickles, one that rejects in part, one that pushes back, one that
+  // answers in 1.5 s — each told at its case's rows below.
   const trickle = () => new Response(new ReadableStream({ async start(c) { for (let i = 0; i < 120; i++) { c.enqueue(new TextEncoder().encode(" ")); await Bun.sleep(250); } c.close(); } }), { headers: { "content-type": "application/json" } });
   const partial = (req: Request) => {
     const path = new URL(req.url).pathname;
     const field = path.endsWith("/traces") ? "rejectedSpans" : path.endsWith("/logs") ? "rejectedLogRecords" : "rejectedDataPoints";
     return Response.json({ partialSuccess: { [field]: "1", errorMessage: "PLANTED-over-quota" } });
   };
-  // Each signal's attempts and late answer, by when they came, and the port asked: a row holds its own case's result to
-  // its collector, not to what another case's output would pass as well (SMD-3263 review pass 2).
+  // pushback and slowly keep what they were asked, when, and on which port: a row holds its own case's result to its
+  // collector, not to what another case's output would pass as well (SMD-3263 review pass 2).
   const attempts: Record<string, number[]> = {};
   const answeredAt: Record<string, number> = {};
   let answeredLate = 0;
@@ -1508,7 +1510,6 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     answeredLate += 1;
     return Response.json({});
   };
-  // And one that answers in 1.5 s, counting the span exports it was sent.
   let slowPort = 0;
   let slowSpans = 0;
   const slowly = async (req: Request) => {
@@ -1519,10 +1520,10 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     return Response.json({});
   };
   // The nine cases start at once and are awaited together, so [12] takes its longest case, not their sum: each has its
-  // own collector and child, and shares nothing but the tally: each child binds a port of its own, which serveChild reads
-  // from it, so no case's port is picked while another's is free (SMD-3263). Their rows follow, in this order, each
-  // case's result read by its name, not its place in the list (review pass 1: two places swapped passed slow's and
-  // pushedBack's rows).
+  // own collector and child, and shares nothing but the tally. Each child binds a port of its own, which serveChild
+  // reads from it, so no case's port is picked while another's is free (SMD-3263). Their rows follow, in this order,
+  // each case's result read by its name, not its place in the list (review pass 1: two places swapped passed slow's
+  // and pushedBack's rows).
   const cases = Object.fromEntries((await Promise.all([
     stopWith("slow", slowly),
     stopWith("hung", () => new Promise<Response>(() => {})),
@@ -1608,8 +1609,9 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   // A collector that pushes back — 503 with Retry-After: 4, then an answer 4 s on — at a 5 s timeout: the SDK retries
   // when the wait fits what is left, and that attempt ends past the timeout plus 2 s (about 8 s), inside twice it plus
   // 2 s (12 s). Answered at all, it is sent: no line, and the stop has nothing left (review pass 1: a deadline of the
-  // timeout plus 2 s counted such an export as not sent). Each signal's retry comes the Retry-After's 4 s after its first
-  // attempt, and its answer past the timeout plus 2 s, both read at the collector (SMD-3263 review passes 1 and 2).
+  // timeout plus 2 s counted such an export as not sent). Each signal's retry comes the Retry-After's 4 s after its
+  // first attempt, and its answer past the timeout plus 2 s, both read at the collector (SMD-3263 review passes 1 and
+  // 2).
   const pushedSignals = ["/v1/traces", "/v1/logs"].map((path) => ({ path, tries: attempts[path] ?? [], at: answeredAt[path] ?? NaN }));
   const timeline = pushedSignals.map((p) => `${p.path}: retry +${Math.round((p.tries[1] ?? NaN) - p.tries[0])} ms, answered +${Math.round(p.at - p.tries[0])} ms`).join(", ");
   assert(pushedBack.up && pushedBack.port === pushbackPort && answeredLate === 2 && pushedSignals.every((p) => p.tries.length === 2 && p.tries[1] - p.tries[0] >= 3_900 && p.at - p.tries[0] > 7_000)

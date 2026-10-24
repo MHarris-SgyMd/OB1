@@ -844,7 +844,7 @@ export async function serveChild(cwd: string, entry: string, env: Record<string,
   const err = watchStream(child.stderr);
   const deadline = Date.now() + 30_000;
   // 0 until the start line comes; never, for a child that exits first.
-  const port = (await out.until(BUN_START_LINE, 30_000)) ? Number(BUN_START_LINE.exec(out.sofar())![1]) : 0;
+  const port = (await out.until(BUN_START_LINE, deadline - Date.now())) ? Number(BUN_START_LINE.exec(out.sofar())![1]) : 0;
   let up = false;
   while (port > 0 && Date.now() < deadline && child.exitCode === null && child.signalCode === null && !(up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false))) await Bun.sleep(100);
   const sdk = waitForSdk ? await err.until(/ go to \S+ over OTLP\/HTTP/, 20_000) : false;
