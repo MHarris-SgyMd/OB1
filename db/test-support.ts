@@ -172,6 +172,8 @@ const FUNCTIONS = [
   "list_supersession_proposals(text, int, boolean)",
   // 109 (SMD-3248): 070's listing under a fourth parameter; the forms above stand on a schema stopped before 109.
   "list_supersession_proposals(text, int, boolean, text)",
+  // 110 (SMD-3249): 109's listing under the after-cursor's three parameters; the forms above stand on a schema stopped before 110.
+  "list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid)",
   "thought_changes(timestamptz, uuid, text, text, text[], int)",
   // 053 (SMD-1867); its table is listed above, its two indexes drop with thought_facets,
   // and record_thought_entities / thought_facets_validate are 016's and 042's names.

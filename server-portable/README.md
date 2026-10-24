@@ -605,7 +605,8 @@ after a verdict takes the pair out; not counted before 079 — and the stale
 ones; `none pending` when there is none.
 `consolidate.ts --list` and the `list_supersession_proposals` tool list them —
 one pass's alone with `--key` or `judge_key`, the pass key each proposal names
-(109) — and preflight's `proposals` row warns once the oldest has waited past
+(109), a page at a time past 200 with `--after` or `after`, the cursor the page
+before ended with (110) — and preflight's `proposals` row warns once the oldest has waited past
 `OB1_PROPOSALS_WARN_DAYS` (7). `Relations` is the judged relations standing
 (084) by word, with their board pairs counted the same way; nothing waits on
 one, so nothing warns (`consolidate.ts --list relations` shows them); `none

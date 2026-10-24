@@ -18,7 +18,7 @@ import type { Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
 import { FilterError, parseFilter, trustAtOrAbove, withActorFilter, type Trust } from "./filter.ts";
 import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
-import { listCursor, parseListCursor } from "./list-cursor.ts";
+import { listCursor, parseListCursor, parseProposalCursor, proposalCursor } from "./list-cursor.ts";
 import { parseSince } from "./since.ts";
 import { SCAN_DEFAULT, SCAN_MAX, type Input } from "./schemas.ts";
 
@@ -485,12 +485,27 @@ export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, typ
   return ok({ thoughts: page.thoughts.map((t) => ({ ...t, supersededBy: superseded[t.id] ?? null })), sort, cursor });
 }
 
-export type ProposalsResult = { status: Input<"list_supersession_proposals">["status"]; lineage?: boolean; judgeKey?: string; proposals: SupersessionProposal[] };
+/**
+ * A page of the queue (SMD-3249): `cursor` the next page's `after` while more follow, else null; `remaining` how many
+ * the selection holds from this page's first on (110), so `remaining - proposals.length` more follow.
+ */
+export type ProposalsResult = { status: Input<"list_supersession_proposals">["status"]; lineage?: boolean; judgeKey?: string; proposals: SupersessionProposal[]; cursor: string | null; remaining: number | null };
 
-export async function listSupersessionProposals(ctx: Ctx, _principal: Principal, { status, limit, lineage, judge_key: judgeKey }: Input<"list_supersession_proposals">): Promise<Outcome<ProposalsResult>> {
-  // SMD-3248: judge_key selects one pass, in the SQL (109), so the cap counts its rows alone.
-  const proposals = await (await ctx.store()).listSupersessionProposals({ status: status === "all" ? null : status, limit, ...(lineage === undefined ? {} : { lineage }), ...(judgeKey === undefined ? {} : { judgeKey }) });
-  return ok({ status, ...(lineage === undefined ? {} : { lineage }), ...(judgeKey === undefined ? {} : { judgeKey }), proposals });
+export async function listSupersessionProposals(ctx: Ctx, _principal: Principal, { status, limit, lineage, judge_key: judgeKey, after }: Input<"list_supersession_proposals">): Promise<Outcome<ProposalsResult>> {
+  // SMD-3249: `after` is a cursor a page ended with — one of this listing's, read before the store sees it; list_thoughts'
+  // shape and refusal (SMD-2995).
+  const position = after === undefined ? undefined : parseProposalCursor(after);
+  if (position === null) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after!, reason: "shape" });
+  let page;
+  try {
+    // SMD-3248: judge_key selects one pass, in the SQL (109), so the cap counts its rows alone.
+    page = await (await ctx.store()).listSupersessionProposals({ status: status === "all" ? null : status, limit, ...(lineage === undefined ? {} : { lineage }), ...(judgeKey === undefined ? {} : { judgeKey }), ...(position ? { after: position } : {}) });
+  } catch (e) {
+    if (e instanceof ListCursorRefused && after !== undefined) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after, reason: "shape" });
+    throw e;
+  }
+  const cursor = page.next ? proposalCursor(page.next.confidence, page.next.judgedAt, page.next.id) : null;
+  return ok({ status, ...(lineage === undefined ? {} : { lineage }), ...(judgeKey === undefined ? {} : { judgeKey }), proposals: page.proposals, cursor, remaining: page.remaining });
 }
 
 // ── thought_stats and thought_changes ────────────────────────────────────────

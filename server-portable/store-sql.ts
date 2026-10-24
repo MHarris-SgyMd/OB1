@@ -25,7 +25,7 @@ import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgr
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { ListCursorRefused, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE } from "./store.ts";
+import { ListCursorRefused, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -958,16 +958,36 @@ export class SqlStore implements ThoughtStore {
     return rows.map(normaliseDerivative);
   }
 
-  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean; judgeKey?: string }): Promise<SupersessionProposal[]> {
-    // Migration 029, under 109's four-argument form. NULL status lists every
-    // state, NULL lineage every pair, NULL judge key every pass; the function
-    // caps the limit after the selection. Four arguments, always: 029 or 070
-    // re-applied by hand lands its form beside 109's, and a call both forms
-    // take (under three arguments beside 029's, under four beside 070's) is
-    // then ambiguous (not unique) and fails; four resolve (preflight's lineage
-    // check names the leftover).
-    const rows = await this.sql`
-      SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int, ${opts.lineage ?? null}::boolean, ${opts.judgeKey ?? null}::text)`;
+  async listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean; judgeKey?: string; after?: ProposalPosition }): Promise<ProposalPage> {
+    // Migration 029, under 110's seven-argument form. NULL status lists every
+    // state, NULL lineage every pair, NULL judge key every pass, a NULL cursor
+    // from the top; the function caps the limit after the selection. Seven
+    // arguments, always: 029, 070 or 109 re-applied by hand lands its form
+    // beside 110's, and a call both forms take (under three arguments beside
+    // 029's, four beside 070's, five beside 109's) is then ambiguous (not
+    // unique) and fails; seven resolve (preflight's lineage check names the
+    // leftover).
+    const a = opts.after;
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await this.sql`
+        SELECT * FROM list_supersession_proposals(${opts.status === undefined ? "pending" : opts.status}::text, ${opts.limit ?? null}::int, ${opts.lineage ?? null}::boolean, ${opts.judgeKey ?? null}::text,
+                                                  ${a?.confidence ?? null}::numeric, ${a?.judgedAt ?? null}::timestamptz, ${a?.id ?? null}::uuid)`;
+    } catch (e) {
+      // list_thoughts' rule (SMD-2995): a time cast that failed is read alone, and only a cursor time Postgres cannot
+      // read is the caller's, refused; anything else is the store's fault.
+      const cast = (x: unknown) => ["22007", "22008", "22009"].includes(String((x as { errno?: unknown }).errno ?? ""));
+      if (!a || !cast(e)) throw e;
+      const unread = await this.sql`SELECT ${a.judgedAt}::timestamptz`.then(() => false, (p: unknown) => (cast(p) ? true : Promise.reject(p)));
+      if (unread) throw new ListCursorRefused();
+      throw e;
+    }
+    // 110: each row's page_key is its place for the next call; remaining counts the selection from this page's first
+    // on, so more follow when it exceeds the rows listed. Read off the listing as it came back, before a row the
+    // writers' read drops (a proposal gone in between).
+    const remaining = rows.length ? Number(rows[0].remaining) : 0;
+    const lastKey = rows.length && remaining > rows.length ? JSON.parse(String(rows[rows.length - 1].page_key)) as string[] : null;
+    const next: ProposalPosition | null = lastKey ? { confidence: lastKey[0], judgedAt: lastKey[1], id: lastKey[2] } : null;
     // 094 (SMD-2707): each side's writer, by the page's ids. A brain short of
     // 094 has no such function: the page goes out without writers, and the
     // reply says so.
@@ -981,7 +1001,7 @@ export class SqlStore implements ThoughtStore {
         if (!WRITERS_MISSING.test((e as Error).message)) throw e;
       }
     }
-    return withWriters(rows, writers, read).map(normaliseProposal);
+    return { proposals: withWriters(rows, writers, read).map(normaliseProposal), next, remaining };
   }
 
   async listChanges(f: ChangeFilters): Promise<AuditChange[]> {

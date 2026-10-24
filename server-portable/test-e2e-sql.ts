@@ -1034,19 +1034,28 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
       && otherOnly.includes(`proposal ${pid2} — judged by ${OTHER}`) && !otherOnly.includes(`proposal ${pid} `)
       && /^No pending supersession proposals judged by consolidate:nobody@p1\./.test(await call("list_supersession_proposals", { judge_key: "consolidate:nobody@p1" })),
          `judge_key lists one pass's alone, before the cap (a page of one under the less confident key holds its row), said in the headline; a key no pass has, nothing (${stubOnly.split("\n")[0]})`);
+  // SMD-3249: the two pending proposals a page of one at a time — the first page's cursor, through the tool, lists the
+  // second, whose cursor is null; a cursor of list_thoughts' is refused in this listing's words.
+  const pg1 = await result("list_supersession_proposals", { limit: 1 });
+  const pg2 = await result("list_supersession_proposals", { limit: 1, after: String(pg1.sc?.cursor) });
+  const wrongCur = await result("list_supersession_proposals", { after: String((await result("list_thoughts", { limit: 1 })).sc?.cursor) });
+  assert(!pg1.isError && pg1.text.includes(`proposal ${pid2} `) && typeof pg1.sc?.cursor === "string" && pg1.sc?.remaining === 2 && /1 more follow — pass after: /.test(pg1.text)
+      && !pg2.isError && pg2.text.includes(`proposal ${pid} `) && !pg2.text.includes(`proposal ${pid2} `) && pg2.sc?.cursor === null && pg2.sc?.remaining === 1
+      && wrongCur.isError && wrongCur.sc?.code === "REFUSED_CURSOR" && /is not a list_supersession_proposals cursor/.test(wrongCur.text),
+    `pages of one through the tool: the more confident first with a cursor, the cursor listing the other with none after; list_thoughts' cursor refused (${pg1.text.split("\n")[0]} | ${pg2.text.split("\n")[0]})`);
   await sql`DELETE FROM supersession_proposals WHERE id = ${pid2}::uuid`;
   await sql`SELECT delete_thought(${third}::uuid, NULL::jsonb)`;
-  // A brain at 108 under this server: 070's three-argument form alone, the
-  // four-argument one missing, and the hint names 109, not 029 (SMD-2313's
+  // A brain at 109 under this server: 109's four-argument form alone, the
+  // seven-argument one missing, and the hint names 110, not 029 (SMD-2313's
   // cold read, first review pass: it named 029 for every error on the name).
-  // The form dropped by hand and 070's put back here; 109 puts its own back.
-  await sql`DROP FUNCTION list_supersession_proposals(text, int, boolean, text)`;
-  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
-  const pre109 = await call("list_supersession_proposals", {}).catch((e: Error) => e.message);
-  assert(/list_supersession_proposals\(text, integer, boolean, text\) does not exist/.test(pre109) && /the migrations through 109 are not applied \(029, db\/migrations\/029_supersession_proposals\.sql, creates the queue; 109, db\/migrations\/109_listing_selects_a_pass\.sql, its current listing\)/.test(pre109),
-         `on a brain without 109 the tool's error names the migrations through 109, 029's queue and 109's listing both (${pre109.replace(/\n/g, " ").slice(0, 200)})`);
+  // The form dropped by hand and 109's put back here; 110 puts its own back.
+  await sql`DROP FUNCTION list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid)`;
   await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("109_") });
-  assert(/1 pending supersession proposal/.test(await call("list_supersession_proposals", {})), "…and 109 applied, the queue lists again");
+  const pre110 = await call("list_supersession_proposals", {}).catch((e: Error) => e.message);
+  assert(/list_supersession_proposals\(text, integer, boolean, text, numeric, timestamp with time zone, uuid\) does not exist/.test(pre110) && /the migrations through 110 are not applied \(029, db\/migrations\/029_supersession_proposals\.sql, creates the queue; 110, db\/migrations\/110_listing_pages\.sql, its current listing\)/.test(pre110),
+         `on a brain without 110 the tool's error names the migrations through 110, 029's queue and 110's listing both (${pre110.replace(/\n/g, " ").slice(0, 200)})`);
+  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("110_") });
+  assert(/1 pending supersession proposal/.test(await call("list_supersession_proposals", {})), "…and 110 applied, the queue lists again");
   await sql`SELECT update_thought(${newer}::uuid, ${"queue newer: the plan is B, revised"}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`;
   const edited = await call("list_supersession_proposals", { status: "pending", limit: 5 });
   assert(/newer \[[^\]]+\] \(edited since judged\)/.test(edited) && edited.includes(`--accept ${pid} --direction <newer|older> --force`) && /verdict is about an earlier text/.test(edited),
