@@ -52,7 +52,8 @@
 				</ol>
 			{/if}
 			{#if data.canPin}
-				<form method="POST" action="{here}?thought={data.thought}&/pin" class="space-y-2 text-sm" data-testid="pin">
+				<!-- #pin: the answer lands at the form and its refusal, script on or off, not at the top of a long list (review pass 2). -->
+				<form method="POST" action="{here}?thought={data.thought}&/pin#pin" id="pin" class="space-y-2 text-sm" data-testid="pin">
 					<input type="hidden" name="thought_id" value={data.thought} />
 					<label class="flex flex-col gap-1">Pin a note
 						<textarea name="note" rows="3" maxlength="2000" required class="field" value={form?.note ?? ''}></textarea>

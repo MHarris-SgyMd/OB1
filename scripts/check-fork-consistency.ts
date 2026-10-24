@@ -385,9 +385,9 @@
  *      a manifest's name is its directory's, and its migration files are
  *      named by the core's rule; each GUI page a manifest declares has its
  *      route at dashboard/src/routes/plugins/<name><path>/ (a +page.svelte
- *      and at most a +page.server.ts), the layout there gates them all, and
- *      no route there is undeclared (SMD-2280 PR 3); each held by in-memory
- *      probes
+ *      and a +page.server.ts whose load reaches the plugin through
+ *      pluginAccess alone), and no route there is undeclared (SMD-2280 PR 3);
+ *      each held by in-memory probes
  *  32. every service deploy/compose.yaml defines has the restart policy
  *      RESTART_POLICIES holds for it, value for value — what serves
  *      `unless-stopped`, so it comes back after a reboot with what it reads;
@@ -7626,10 +7626,10 @@ checkHostIpTemplates();
 //    named by the core's rule;
 //  - its GUI pages (SMD-2280 PR 3), which the GUI renders, since a plugin's
 //    directory holds no Svelte: each page its manifest declares has its route
-//    at dashboard/src/routes/plugins/<name><path>/, a +page.svelte and at most
-//    a +page.server.ts; the layout there gates every page (pluginPageAt), so
-//    a disabled plugin's page is a 404; and no route there is a page no
-//    manifest declares.
+//    at dashboard/src/routes/plugins/<name><path>/, a +page.svelte and a
+//    +page.server.ts alone, whose load awaits pluginAccess and imports nothing
+//    else that reaches the brain, so a disabled plugin's page is a 404 before
+//    any call; and no route there is a page no manifest declares.
 
 /** The core's tables: every CREATE TABLE in db/migrations/, uncommented, and the two ledgers. */
 function coreTables(): Set<string> {
@@ -7852,54 +7852,69 @@ const PLUGIN_PROBES: [string, "sql" | "ts", boolean][] = [
 
 /** Where the GUI renders a plugin's pages (SMD-2280 PR 3): under this, one directory per page, `<name><path>/`. */
 const PLUGIN_ROUTES = "dashboard/src/routes/plugins";
-/** The layout whose load gates every page under PLUGIN_ROUTES: the page its route names, as the registry lists it, or a 404. */
-const PLUGIN_GATE = "+layout.server.ts";
-/** The files a plugin page's route may hold: its markup, and a server load. A `+server.ts` or a universal `+page.ts` would answer without the gate's load. */
+/** The files a plugin page's route holds: its markup, and the server load that reaches the plugin through pluginAccess. A `+server.ts`, a `+page.ts` or a layout would answer without it. */
 const PLUGIN_ROUTE_FILES = new Set(["+page.svelte", "+page.server.ts"]);
+/**
+ * What a plugin page's server load may import: SvelteKit's, the GUI's own
+ * modules but the server ones, and of those pluginAccess's alone — so it reaches
+ * the brain only through the access the gate hands back, never rest.ts or the
+ * REST client.
+ */
+const PLUGIN_PAGE_IMPORT = /^(?:@sveltejs\/kit|\$app\/[a-z/]+|\.\/\$types|\$lib\/server\/plugins|\$lib\/(?!server\/)[\w/.-]+)$/;
 
 /**
  * A plugin's GUI pages against the GUI's routes for them, each problem where it
  * is found. `declared`: each plugin's page paths, as its manifest's `gui.pages`
  * names them; `files`: every file under PLUGIN_ROUTES, by its path there, and
- * its text. The gate stands — PLUGIN_GATE at the top, its load calling
- * pluginPageAt — so every page under it is a 404 while its plugin is off or to
- * a key that may call none of it (review pass 1: a gate each page called for
- * itself could be left out, or name another page, and pass). Each declared
- * page has its directory, `<name><path>/`, with a `+page.svelte`; a directory
- * holds PLUGIN_ROUTE_FILES alone, and none is a page no manifest declares. Pure.
+ * its text. Each declared page has its directory, `<name><path>/`, holding a
+ * `+page.svelte` and a `+page.server.ts` and nothing else, and none is a page
+ * no manifest declares. The load awaits pluginAccess — the page's 404 unless
+ * the registry lists it to the key, then the plugin's operations — and imports
+ * nothing else that reaches the brain, so no load or action calls the plugin
+ * ungated (review pass 2: a layout's gate is skipped on a __data.json request
+ * that does not ask for it; pass 1: a page's own gate, read as text, could be
+ * left out). Pure.
  */
 function pluginPageProblems(declared: Record<string, string[]>, files: Record<string, string>): { where: string; what: string }[] {
   const problems: { where: string; what: string }[] = [];
   const pages = new Set(Object.entries(declared).flatMap(([name, paths]) => paths.map((path) => `${name}${path}`)));
-  if (Object.keys(files).length > 0 || pages.size > 0) {
-    const gate = files[PLUGIN_GATE];
-    if (gate === undefined || !/\bpluginPageAt\s*\(/.test(blanked(gate, false))) problems.push({ where: `${PLUGIN_ROUTES}/${PLUGIN_GATE}`, what: "does not gate the plugin pages: its load calls pluginPageAt, so every page under it is a 404 while its plugin is off or to a key that may call none of it" });
+  for (const page of pages) {
+    for (const f of PLUGIN_ROUTE_FILES) if (!(`${page}/${f}` in files)) problems.push({ where: `${PLUGIN_ROUTES}/${page}`, what: `no ${f}: the plugin's manifest declares this page, and the GUI renders each declared page from its route here, its load reaching the plugin through pluginAccess` });
+    const load = files[`${page}/+page.server.ts`];
+    if (load === undefined) continue;
+    const code = blanked(load, false);
+    const where = `${PLUGIN_ROUTES}/${page}/+page.server.ts`;
+    if (!/\bawait\s+pluginAccess\s*\(/.test(code)) problems.push({ where, what: "does not await pluginAccess: a plugin page reaches its plugin through the access the gate hands back, so a disabled plugin's page is a 404 before any call" });
+    const imports = [...code.matchAll(/\b(?:import|export)\b[^;'"`]*?\bfrom\s*["']([^"']+)["']|\bimport\s*["']([^"']+)["']/g)].map((m) => m[1] ?? m[2]);
+    for (const spec of imports) if (!PLUGIN_PAGE_IMPORT.test(spec)) problems.push({ where, what: `imports ${JSON.stringify(spec)}: a plugin page's load reaches the brain through pluginAccess alone ($lib/server/plugins), never rest.ts or the REST client` });
+    if (/\bimport\s*\(/.test(code)) problems.push({ where, what: "a dynamic import(): a plugin page's load imports statically, so this check reads what it reaches" });
   }
-  for (const page of pages) if (!(`${page}/+page.svelte` in files)) problems.push({ where: `${PLUGIN_ROUTES}/${page}`, what: "no +page.svelte: the plugin's manifest declares this page, and the GUI renders each declared page from its route here" });
   for (const rel of Object.keys(files)) {
-    if (rel === PLUGIN_GATE) continue;
     const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
     const file = rel.slice(rel.lastIndexOf("/") + 1);
-    if (!pages.has(dir)) problems.push({ where: `${PLUGIN_ROUTES}/${rel}`, what: "is in no page a plugin's manifest declares (gui.pages): the nav would never name it, and the gate answers it 404" });
-    else if (!PLUGIN_ROUTE_FILES.has(file)) problems.push({ where: `${PLUGIN_ROUTES}/${rel}`, what: "a plugin page's route holds its +page.svelte and a +page.server.ts alone: a +server.ts, a universal +page.ts or a layout would answer without the gate's load" });
+    if (!pages.has(dir)) problems.push({ where: `${PLUGIN_ROUTES}/${rel}`, what: "is in no page a plugin's manifest declares (gui.pages): the nav would never name it, and a plugin page holds its +page.svelte and +page.server.ts alone" });
+    else if (!PLUGIN_ROUTE_FILES.has(file)) problems.push({ where: `${PLUGIN_ROUTES}/${rel}`, what: "a plugin page's route holds its +page.svelte and +page.server.ts alone: a +server.ts, a +page.ts or a layout would answer without pluginAccess" });
   }
   return problems;
 }
 
 /** pluginPageProblems' probes: each declared, files and how many problems. */
-const GATE_TEXT = "export const load = async (event) => { await pluginPageAt(event); return {}; };";
+const GATED = "import { fail } from '@sveltejs/kit';\nimport { base } from '$app/paths';\nimport type { PageServerLoad } from './$types';\nimport { oneLine } from '$lib/format';\nimport { pluginAccess } from '$lib/server/plugins';\nexport const load = async (event) => { const ex = await pluginAccess(event, 'example', '/notes'); return {}; };";
 const PLUGIN_PAGE_PROBES: [Record<string, string[]>, Record<string, string>, number][] = [
-  [{ example: ["/notes"] }, { [PLUGIN_GATE]: GATE_TEXT, "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "" }, 0],
-  [{ example: ["/notes"] }, { [PLUGIN_GATE]: GATE_TEXT, "example/notes/+page.svelte": "" }, 0],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED }, 0],
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "" }, 1],
-  [{ example: ["/notes"] }, { [PLUGIN_GATE]: "// pluginPageAt(event)\nexport const load = () => ({});", "example/notes/+page.svelte": "" }, 1],
-  [{ example: ["/notes"] }, { [PLUGIN_GATE]: GATE_TEXT }, 1],
-  [{ example: ["/notes"] }, { [PLUGIN_GATE]: GATE_TEXT, "example/notes/+page.svelte": "", "example/notes/+server.ts": "" }, 1],
-  [{ example: ["/notes"] }, { [PLUGIN_GATE]: GATE_TEXT, "example/notes/+page.svelte": "", "example/notes/+page.ts": "" }, 1],
-  [{ example: ["/notes"] }, { [PLUGIN_GATE]: GATE_TEXT, "example/notes/+page.svelte": "", "example/other/+page.svelte": "" }, 1],
-  [{ example: ["/notes"] }, { [PLUGIN_GATE]: GATE_TEXT, "example/notes/+page.svelte": "", "+server.ts": "" }, 1],
-  [{}, { "example/notes/+page.svelte": "" }, 2],
-  [{}, {}, 0],
+  [{ example: ["/notes"] }, {}, 2],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "export const load = async (event) => { pluginAccess(event, 'example', '/notes'); return {}; };" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "// await pluginAccess(event, 'example', '/notes')\nexport const load = () => ({});" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nimport { read } from '$lib/server/rest';" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nimport { createRestClient } from '../../../../../../rest-client/index.ts';" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nexport { read } from '$lib/server/rest';" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nconst m = await import('$lib/server/rest');" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED, "example/notes/+server.ts": "" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED, "example/notes/+page.ts": "" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED, "example/other/+page.svelte": "" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED, "+layout.server.ts": "" }, 1],
+  [{}, { "example/notes/+page.svelte": "" }, 1],
 ];
 
 async function checkPlugins() {

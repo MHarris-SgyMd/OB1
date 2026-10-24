@@ -6,6 +6,9 @@ import { pluginNav } from '$lib/server/plugins';
 // The key itself stays in locals: the page learns whose it is and what it may do.
 export const load: LayoutServerLoad = async (event) => {
 	const { session } = event.locals;
+	// Read on every navigation, not once per full load: a plugin turned on or off shows in the nav at the next page, and
+	// no stale entry leads to a 404 (review pass 2). Reading the address is what makes SvelteKit run this again.
+	void event.url.pathname;
 	return {
 		signedIn: session !== null,
 		name: session?.name ?? null,

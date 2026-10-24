@@ -4,16 +4,18 @@
 // The pages are the GUI's to render, each a route of this tree at
 // src/routes/plugins/<name><path>/ — a plugin's directory holds no Svelte
 // (check 31) — so the nav names a page only where the registry lists it and
-// this build has its route, and the route answers 404 unless the registry
-// lists it for this key: a disabled plugin's page is no page at all. That 404
-// is routes/plugins/+layout.server.ts's, for every page under it, so no page
-// can leave it out (review pass 1); an action, which runs before any load,
-// reaches the plugin's operations as the visitor, and the REST core refuses
-// a disabled plugin's route or an operation the key may not call.
+// this build has its route. A page reaches its plugin through pluginAccess
+// alone, which answers 404 unless the registry lists the page to this key — a
+// disabled plugin's page is no page at all — and only then hands back the
+// plugin's operations, so a load or an action cannot call one ungated (review
+// pass 2: a layout's gate is skipped on a __data.json request that does not
+// ask for it, and loads run side by side). Check 31 holds every plugin page's
+// load to it.
 
 import { error, isHttpError, isRedirect, type RequestEvent } from '@sveltejs/kit';
 import { base } from '$app/paths';
-import { read } from './rest';
+import { callPlugin, codeOf, read, readPlugin } from './rest';
+import type { Method } from '../../../../rest-client/index.ts';
 
 /** An enabled plugin as the registry lists it to this key. */
 export type ListedPlugin = { name: string; title: string; description: string; pages: { path: string; label: string }[]; operations: string[] };
@@ -62,16 +64,40 @@ export async function pluginNav(event: RequestEvent): Promise<{ href: string; la
 	}
 }
 
-/** The gate for the plugin page a route id names, `/plugins/<name><path>`: routes/plugins/+layout.server.ts's load. */
-export function pluginPageAt(event: RequestEvent): Promise<ListedPlugin> {
-	const m = /^\/plugins\/([^/]+)(\/.+)$/.exec(event.route.id ?? '');
-	if (!m) throw error(404, 'Not Found');
-	return pluginPage(event, m[1], m[2]);
-}
+/** A plugin operation's answer, as an action reads it: its status, and the core's code on a refusal. */
+export type PluginAnswer = { ok: boolean; status: number; code: string | undefined };
 
-/** A plugin page's load starts here: the plugin as the registry lists it to this key, or the page's 404 — not enabled, a page it does not declare, or a key that may call none of it. */
-export async function pluginPage(event: RequestEvent, name: string, path: string): Promise<ListedPlugin> {
+/** What a plugin page may do: the plugin as the registry lists it to this key, and its operations under the visitor's key, each by its key in the manifest and its route under the plugin's. */
+export type PluginAccess = {
+	plugin: ListedPlugin;
+	/** Whether this key may call the operation. */
+	may(op: string): boolean;
+	/** A read: its body, or the page's error, as any read of the GUI's. */
+	read(op: string, method: Method, route: string, input: Record<string, unknown>): Promise<unknown>;
+	/** A write: its answer, for the action to say a refusal beside its form. */
+	call(op: string, method: Method, route: string, input: Record<string, unknown>): Promise<PluginAnswer>;
+};
+
+/**
+ * Every plugin page's load and action starts here: the page's 404 unless the
+ * registry lists it to this key — the plugin not enabled, a page it does not
+ * declare, or a key that may call none of it — and then the plugin's
+ * operations, bound to the plugin, under the visitor's key.
+ */
+export async function pluginAccess(event: RequestEvent, name: string, path: string): Promise<PluginAccess> {
 	const plugin = (await pluginsFor(event)).find((p) => p.name === name);
 	if (!plugin || !plugin.pages.some((g) => g.path === path)) throw error(404, 'Not Found');
-	return plugin;
+	const session = event.locals.session!;
+	// The tool's name as the core names it: a hyphen in the plugin's name read as `_` (core/plugins.ts's toolNameOf).
+	const tool = (op: string) => `${name.replaceAll('-', '_')}_${op}`;
+	const at = (route: string) => `/v1/plugins/${name}${route}`;
+	return {
+		plugin,
+		may: (op) => plugin.operations.includes(tool(op)),
+		read: (op, method, route, input) => readPlugin(event, session, tool(op), method, at(route), input),
+		call: async (op, method, route, input) => {
+			const answer = await callPlugin(event, session, tool(op), method, at(route), input);
+			return { ok: answer.ok, status: answer.status, code: codeOf(answer.body) };
+		},
+	};
 }

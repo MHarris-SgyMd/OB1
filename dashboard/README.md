@@ -116,16 +116,16 @@ https. So the server must know the origin a browser sees:
 No list's links are preloaded on hover: a thought's page is a logged `fetch`, and a search page a logged search.
 
 **Plugin pages** (SMD-2310's GUI half). A plugin's directory holds no Svelte (check 31), so
-its pages are routes here, `src/routes/plugins/<name><path>/`: a `+page.svelte` and at most
-a `+page.server.ts`, which calls the plugin's own operations under the visitor's key. The nav
-names a page where `GET /v1/plugins` lists it to that key — an enabled plugin of which the
-key may call an operation, so never to a capture-only key — and this build has its route;
-any other time the route is a 404, a disabled plugin's included: `src/routes/plugins/+layout.server.ts`
-asks the registry for the page its route names (`pluginPageAt` in `src/lib/server/plugins.ts`)
-before any page under it renders. A form action runs before any load, so the REST core is
-its gate: it refuses a disabled plugin's route and an operation the key may not call. Check
-31 holds the layout in place, each page a manifest declares to its route here, and each
-route here to a declared page.
+its pages are routes here, `src/routes/plugins/<name><path>/`: a `+page.svelte` and a
+`+page.server.ts`. The nav names a page where `GET /v1/plugins` lists it to that key — an
+enabled plugin of which the key may call an operation, so never to a capture-only key — and
+this build has its route. The load and any action start with `pluginAccess` (in
+`src/lib/server/plugins.ts`): the page's 404 unless the registry lists it to the key, a
+disabled plugin's included, and then the plugin's own operations under the visitor's key,
+which is the only way the page reaches them. Check 31 holds each page a manifest declares
+to its route here, each route here to a declared page, and each load to `pluginAccess`, with
+nothing else imported that reaches the brain. The nav is read again at every navigation, so
+a plugin turned on or off shows at the next page.
 
 Every page is rendered on the server: the browser calls no API, so there is no proxy
 in the GUI to the REST core, and a page reads only the operations its own load names.
@@ -174,8 +174,10 @@ thought — the one it drives — is an ingested one, so its notice is driven, a
 search pages, and the trust filter leaves the untrusted ones out; `--require-rows` unless
 the proposals and workers pages render rows. `--notes on` drives the example plugin's Notes page
 (in the write and read keys' navs, a note pinned by the write key and refused to the read
-key) and `--notes off` holds it absent and its route a 404; `--notes-only` runs that arm
-alone. CI captures three just before the smoke (two
+key): it writes one 2,000-character note a run, which the plugin has no operation to delete,
+so point it at a scratch brain. `--notes off` holds the page absent and its route the GUI's
+404 (pinning to a held thought, which the gate refuses); unset, a Notes page the nav names
+is read and never written to. `--notes-only` runs that arm alone. CI captures three just before the smoke (two
 with no trust, then an ingested one), records a proposal and queues a pool through their
 producers, and runs it in the full-stack job,
 before that job configures the authorization server, with `--notes off`; the next step turns
