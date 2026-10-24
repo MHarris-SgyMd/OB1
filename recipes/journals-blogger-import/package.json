@@ -5,10 +5,6 @@
   "type": "module",
   "main": "import-blogger.mjs",
   "scripts": {
-    "import": "node import-blogger.mjs",
-    "dry-run": "node import-blogger.mjs --dry-run"
-  },
-  "dependencies": {
-    "dotenv": "^16.4.0"
+    "emit": "bun import-blogger.mjs"
   }
 }

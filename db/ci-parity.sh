@@ -19,13 +19,14 @@
 # the same directory, with the same flags and the same environment (a step that
 # sets DATABASE_URL is `run`, one that does not is `nodb`), and every directory
 # CI runs `bunx tsc --noEmit` in a `typecheck` line, whether by a step of its
-# own or one .github/ci/typecheck.sh step names (SMD-3202) — or its job or
-# script is excused there with why. Not here, so: the full stack and the
+# own or one .github/ci/typecheck.sh step names (SMD-3202), as is every
+# directory a step runs `bun run check` in (a SvelteKit app, SMD-2280) — or its
+# job or script is excused there with why. Not here, so: the full stack and the
 # authorization POC (built images and a compose stack), the landing check (a
-# pull request's commit range) and the codemod's round-trip (it rewrites
-# tracked files). Nor is db/test-bench-reuse.ts, three minutes of 150,000-row
-# builds and exact passes (check 34 excuses it; it would run here — it drops
-# its marker on exit).
+# pull request's commit range) and the codemod's round-trip (it rewrites tracked
+# files). Nor is db/test-bench-reuse.ts, three minutes of 150,000-row builds and
+# exact passes (check 34 excuses it; it would run here — it drops its marker on
+# exit).
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT="$PWD"
@@ -89,17 +90,22 @@ nodb() { suite nodb "$@"; }
 # CI's typechecks, one line per directory with a tsconfig.json, run one after
 # another here where CI runs most side by side (.github/ci/typecheck.sh): no
 # tally to parse, so the exit code is the verdict. db/ and evals/ resolve their
-# ../server-portable imports through that directory's install (SMD-1932).
+# ../server-portable imports through that directory's install (SMD-1932). A
+# SvelteKit directory (svelte.config.js) is checked as CI checks it, `bun run
+# check` — svelte-kit sync, then svelte-check — since its tsconfig extends the
+# one sync generates (SMD-2280 PR 2b; check 35 reads CI's step as its typecheck).
 typecheck() {
-  local dir="$1" out
-  if out=$(cd "$ROOT/$dir" && bunx tsc --noEmit 2>&1); then
-    row ok "$dir" "tsc --noEmit"
+  local dir="$1" out how="tsc --noEmit"
+  [ -f "$ROOT/$dir/svelte.config.js" ] && how="bun run check"
+  if out=$(cd "$ROOT/$dir" && if [ "$how" = "bun run check" ]; then bun run check; else bunx tsc --noEmit; fi 2>&1); then
+    row ok "$dir" "$how"
   else
-    row bad "$dir" "tsc --noEmit"
-    # The first type errors; or, when tsc itself did not run (a bunx
-    # resolution failure has no `error TS` line), the tail of what did print.
-    if printf '%s\n' "$out" | grep -qE 'error TS'; then
-      printf '%s\n' "$out" | grep -E 'error TS' | head -3 | sed 's/^/        /'
+    row bad "$dir" "$how"
+    # The first type errors — tsc's `error TS` lines, svelte-check's `ERROR`
+    # ones; or, when neither ran (a bunx resolution failure has no such line),
+    # the tail of what did print.
+    if printf '%s\n' "$out" | grep -qE 'error TS| ERROR "'; then
+      printf '%s\n' "$out" | grep -E 'error TS| ERROR "' | head -3 | sed 's/^/        /'
     else
       printf '%s\n' "$out" | grep -Ev '^\s*$' | tail -3 | sed 's/^/        /'
     fi
@@ -110,7 +116,7 @@ typecheck() {
 main() {
   FAILED=0
   BASE_ENV=$(env | LC_ALL=C sort)
-  for dir in server-portable rest-client mcp-server db evals jev deploy/auth extensions scripts compat/supabase-sql; do install "$dir"; done
+  for dir in server-portable rest-client mcp-server db evals jev deploy/auth extensions scripts compat/supabase-sql dashboard; do install "$dir"; done
 
   # The schema on PGlite, at the default width and at 768, as db-schema runs it.
   nodb db                 test-schema.ts
@@ -222,6 +228,7 @@ main() {
   typecheck jev
   typecheck deploy/auth
   typecheck compat/supabase-sql
+  typecheck dashboard
   echo
   [ "$FAILED" -eq 0 ] && echo "  all suites passed" || echo "  FAILURES above"
   return "$FAILED"

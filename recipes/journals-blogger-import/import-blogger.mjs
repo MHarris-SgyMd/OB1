@@ -1,70 +1,131 @@
-#!/usr/bin/env node
-// MIGRATED OFF SUPABASE: imports compat/supabase-sql instead of @supabase/supabase-js.
-// Same API, but it speaks SQL directly. The environment variable NAMES are
-// unchanged — set SUPABASE_URL to a postgres:// connection string, and
-// SUPABASE_SERVICE_ROLE_KEY is ignored (credentials live in the URL).
-// ob1-original-import: @supabase/supabase-js
-// Revert with: bun scripts/migrate-to-sql-shim.ts --revert <file>
+#!/usr/bin/env bun
 /**
- * Journals/Blogger Import for Open Brain (OB1-compatible)
+ * Journals/Blogger Import for Open Brain — an emitter of ingestion-contract items
  *
- * Parses Google Blogger Atom XML exports and imports blog posts as thoughts
- * with embeddings. Works with any Atom feed export.
+ * Parses Google Blogger Atom XML exports and prints one ingestion-contract
+ * item per post or comment, one JSON object per line, for the brain's
+ * pipeline to write (db/README.md, "Items from a file"). Works with any Atom
+ * feed export. It holds no database client and makes no model call: the
+ * pipeline owns the row, the fingerprint and the source record, and
+ * `db/reembed.ts` embeds at the brain's model (SMD-2493).
  *
  * Usage:
- *   node import-blogger.mjs /path/to/blogger-exports [--dry-run] [--skip N] [--limit N]
+ *   bun import-blogger.mjs /path/to/blogger-exports [--skip N] [--limit N] > items.jsonl
  *
  * Expects a directory containing .atom files (Blogger export format).
  */
 
-import { createClient } from "../../compat/supabase-sql/index.ts";
-import { createHash } from "crypto";
-import { readFile, readdir } from "fs/promises";
-import { join } from "path";
-import { config } from "dotenv";
+import { createHash } from "node:crypto";
+import { readFile, readdir } from "node:fs/promises";
+import { join } from "node:path";
 
-config();
+const SYSTEM = "blogger";
+const SCOPE = "blogger:export";
+const USAGE = "Usage: bun import-blogger.mjs /path/to/blogger-exports [--skip N] [--limit N] > items.jsonl";
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || "openai/text-embedding-3-small";
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !OPENROUTER_API_KEY) {
-  console.error("Missing required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OPENROUTER_API_KEY");
-  process.exit(1);
+function parseArgs(argv) {
+  const out = { path: undefined, skip: 0, limit: Infinity };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--skip" || a === "--limit") {
+      const n = Number(argv[++i]);
+      if (!Number.isInteger(n) || n < 0) fail(`${a} takes a whole number`);
+      out[a.slice(2)] = n;
+    } else if (a === "--dry-run") {
+      fail("the emitter writes nothing; count what it emits with the pipeline's own --dry-run (bun db/ingest-records.ts --source items --items items.jsonl --allow blogger:export --dry-run)");
+    } else if (a.startsWith("--")) {
+      fail(`unknown flag ${a}`);
+    } else if (out.path === undefined) {
+      out.path = a;
+    } else {
+      fail(`one export path, not two (${out.path}, ${a})`);
+    }
+  }
+  if (out.path === undefined) fail(USAGE);
+  return out;
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-
-const args = process.argv.slice(2);
-const dirPath = args.find((a) => !a.startsWith("--"));
-const dryRun = args.includes("--dry-run");
-const skip = parseInt(args[args.indexOf("--skip") + 1]) || 0;
-const limit = parseInt(args[args.indexOf("--limit") + 1]) || Infinity;
-
-if (!dirPath) {
-  console.error("Usage: node import-blogger.mjs /path/to/blogger-exports [--dry-run] [--skip N] [--limit N]");
-  process.exit(1);
+function fail(why) {
+  console.error(`import-blogger: ${why}`);
+  process.exit(2);
 }
 
-function contentFingerprint(text) {
-  const normalized = text.trim().replace(/\s+/g, " ").toLowerCase();
-  return createHash("sha256").update(normalized).digest("hex");
+const sha256 = (s) => createHash("sha256").update(s).digest("hex");
+
+/**
+ * The most text one thought holds, in characters. A search hit returns its
+ * thought whole and a re-embed sends every one of its windows, so a thought
+ * of hundreds of KB was more than a client takes (SMD-2493).
+ */
+const TEXT_BOUND = 100_000;
+
+/** Text a row can hold: a NUL or a lone surrogate would refuse the whole file at the pipeline, so they go here. */
+const clean = (s) => String(s).replaceAll("\u0000", "").toWellFormed();
+
+/** The dates the export gave that this run left out, counted once each and said in the summary. */
+const droppedDates = new Set();
+
+/**
+ * An instant the pipeline accepts (ISO-8601 in UTC), or undefined, which
+ * leaves the date to the pipeline: no date, epoch 0, and a date it would
+ * refuse (before year 1, past 9999, more than a day ahead, a day the calendar
+ * lacks), since one refused date refuses the whole file. A date and time with
+ * no offset is read as UTC, not as the machine's local time.
+ */
+function instant(v) {
+  if (v === undefined || v === null || v === "" || v === 0) return undefined;
+  const drop = () => { droppedDates.add(String(v)); return undefined; };
+  let s = v;
+  if (typeof v === "string") {
+    const t = v.trim();
+    const ymd = /^(\d{4})-(\d\d)-(\d\d)/.exec(t);
+    // February the 30th is left out, not rolled into March as Date.parse does.
+    if (ymd) {
+      const [y, m, d] = ymd.slice(1).map(Number);
+      const day = new Date(Date.UTC(y, m - 1, d));
+      if (day.getUTCMonth() !== m - 1 || day.getUTCDate() !== d) return drop();
+    }
+    if (/^\d{4}-\d\d-\d\d$/.test(t)) s = `${t}T00:00:00Z`;
+    else if (/^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d(\.\d+)?)?$/.test(t)) s = `${t.replace(" ", "T")}Z`;
+  }
+  const d = new Date(s);
+  const ms = d.getTime();
+  if (Number.isNaN(ms) || ms === 0 || ms > Date.now() + 86_400_000 || d.getUTCFullYear() < 1 || d.getUTCFullYear() > 9999) return drop();
+  return d.toISOString();
 }
 
+/**
+ * A key the pipeline takes: the export's id cleaned and trimmed, within the identity's bound; else a hash of the
+ * record as exported. `%` and `#` are escaped, so no id can read as a part's `<key>#k` (an id `abc#2` beside a
+ * conversation `abc` in two parts took one key twice, and the file was refused).
+ */
+function keyFrom(id, record) {
+  const k = typeof id === "string" || typeof id === "number" ? clean(String(id)).trim().replaceAll("%", "%25").replaceAll("#", "%23") : "";
+  return k && [...k].length <= 480 ? k : `sha256:${sha256(JSON.stringify(record))}`;
+}
+
+/** One level of entity escaping undone; `&amp;` last, so `&amp;lt;` stays the text `&lt;`. */
+const unescapeEntities = (s) => s
+  .replace(/&lt;/g, "<")
+  .replace(/&gt;/g, ">")
+  .replace(/&quot;/g, '"')
+  .replace(/&#39;|&apos;/g, "'")
+  .replace(/&nbsp;/g, " ")
+  .replace(/&amp;/g, "&");
+
+/**
+ * The text of a `type="html"` element: the XML escaping undone first, which
+ * gives the post's HTML, then its tags stripped, then the HTML's own entities.
+ * Stripping before unescaping left every `<p>` of an escaped post in its text.
+ */
 function stripHtml(html) {
-  return html
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<p>/gi, "\n")
-    .replace(/<\/p>/gi, "")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, " ")
+  return unescapeEntities(
+    unescapeEntities(html)
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<p(\s[^>]*)?>/gi, "\n")
+      .replace(/<\/p>/gi, "")
+      .replace(/<[^>]+>/g, ""),
+  )
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -80,25 +141,32 @@ function parseAtomFile(xml) {
     const entry = block.substring(0, endIdx);
 
     // Check if it's a POST or COMMENT (skip settings, templates, etc.)
-    const categoryMatch = entry.match(/term="http:\/\/schemas\.google\.com\/blogger\/2008\/kind#(\w+)"/);
+    const categoryMatch = entry.match(/term=["']http:\/\/schemas\.google\.com\/blogger\/2008\/kind#(\w+)["']/);
     const kind = categoryMatch ? categoryMatch[1] : "";
     if (kind !== "post" && kind !== "comment") continue;
 
     // Extract fields
     const titleMatch = entry.match(/<title[^>]*>([^<]*)<\/title>/);
-    const title = titleMatch ? titleMatch[1].trim() : "";
+    const title = titleMatch ? clean(unescapeEntities(titleMatch[1])).trim() : "";
 
     const contentMatch = entry.match(/<content[^>]*>([\s\S]*?)<\/content>/);
     const rawContent = contentMatch ? contentMatch[1] : "";
-    const content = stripHtml(rawContent);
+    const content = clean(stripHtml(rawContent));
 
     const publishedMatch = entry.match(/<published>([^<]+)<\/published>/);
     const published = publishedMatch ? publishedMatch[1] : "";
 
+    // The entry's Atom id (tag:blogger.com,1999:blog-….post-…) survives a re-export.
+    const idMatch = entry.match(/<id>([^<]+)<\/id>/);
+    const xmlEntry = `<entry>${entry}</entry>`;
+    const key = keyFrom(idMatch?.[1], xmlEntry);
+
     // Skip very short entries
     if (content.length < 20) continue;
+    // The canonical is the entry's bytes, which a NUL would refuse at the pipeline (and the whole file with it).
+    if (xmlEntry.includes("\u0000")) { console.error(`entry ${key} holds a NUL byte; skipped`); continue; }
 
-    entries.push({ title, content, published, kind });
+    entries.push({ key, xml: xmlEntry, title, content, published, kind });
   }
 
   return entries;
@@ -109,7 +177,7 @@ async function findAtomFiles(dir) {
 
   async function walk(d, depth) {
     if (depth > 3) return;
-    const entries = await readdir(d, { withFileTypes: true });
+    const entries = (await readdir(d, { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     for (const e of entries) {
       const fullPath = join(d, e.name);
       if (e.isFile() && (e.name.endsWith(".atom") || e.name === "feed.atom")) {
@@ -120,113 +188,61 @@ async function findAtomFiles(dir) {
     }
   }
 
-  await walk(dir, 0);
+  try {
+    await walk(dir, 0);
+  } catch {
+    fail(`${dir}: no such folder`);
+  }
   return results;
 }
 
-async function getEmbedding(text) {
-  const truncated = text.length > 8000 ? text.substring(0, 8000) : text;
-  const response = await fetch("https://openrouter.ai/api/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ model: EMBEDDING_MODEL, input: truncated }),
-  });
-  if (!response.ok) {
-    const msg = await response.text().catch(() => "");
-    throw new Error(`Embedding failed: ${response.status} ${msg}`);
-  }
-  const data = await response.json();
-  return data.data[0].embedding;
-}
-
-async function upsertThought(content, metadata, embedding, createdAt) {
-  const { data, error } = await supabase.rpc("upsert_thought", {
-    p_content: content,
-    p_payload: {
-      type: "journal",
-      source_type: "blogger_import",
-      importance: 3,
-      quality_score: 60,
-      sensitivity_tier: "standard",
-      metadata: { ...metadata, source: "blogger_import", source_type: "blogger_import" },
-      embedding: JSON.stringify(embedding),
-      created_at: createdAt,
-      // SMD-1724: an export is outside text — the write event declares it, and
-      // the database stamps the thought's trust ingested whatever the key.
-      event: { trust: "ingested" },
-    },
-  });
-  if (error) throw new Error(`upsert_thought failed: ${error.message}`);
-  return data;
-}
-
 async function main() {
-  console.log(`Journals/Blogger Import`);
-  console.log(`Directory: ${dirPath}`);
-  console.log(`Mode: ${dryRun ? "DRY RUN" : "LIVE IMPORT"}`);
-  console.log();
+  const { path, skip, limit } = parseArgs(process.argv.slice(2));
 
-  const atomFiles = await findAtomFiles(dirPath);
-  console.log(`Found ${atomFiles.length} Atom files`);
+  const atomFiles = await findAtomFiles(path);
+  console.error(`Found ${atomFiles.length} Atom files`);
 
   const allPosts = [];
   for (const file of atomFiles) {
     const xml = await readFile(file, "utf-8");
     const entries = parseAtomFile(xml);
-    console.log(`  ${file}: ${entries.length} entries`);
+    console.error(`  ${file}: ${entries.length} entries`);
     allPosts.push(...entries);
   }
 
-  console.log(`\nTotal entries: ${allPosts.length}`);
-
   const toProcess = allPosts.slice(skip, skip + limit);
-  console.log(`Processing ${toProcess.length} (skip=${skip}, limit=${limit === Infinity ? "all" : limit})`);
-  console.log();
+  const seen = new Set();
+  let emitted = 0, skipped = 0;
 
-  let imported = 0, skipped = 0, errors = 0;
+  for (const post of toProcess) {
+    const thoughtContent = post.title
+      ? `Blog post: ${post.title}\nPublished: ${post.published}\n\n${post.content}`
+      : post.content;
 
-  for (let i = 0; i < toProcess.length; i++) {
-    const post = toProcess[i];
-    try {
-      const thoughtContent = post.title
-        ? `Blog post: ${post.title}\nPublished: ${post.published}\n\n${post.content}`
-        : post.content;
+    if (thoughtContent.trim().length < 50) { skipped++; continue; }
+    // Two lines of one identity refuse the whole file, so an entry two export files both hold is emitted once.
+    if (seen.has(post.key)) { console.error(`entry ${post.key} appears twice; emitted once`); skipped++; continue; }
+    seen.add(post.key);
 
-      if (thoughtContent.trim().length < 50) { skipped++; continue; }
-
-      const truncated = thoughtContent.length > 30000
-        ? thoughtContent.substring(0, 30000) + "\n\n[... truncated]"
-        : thoughtContent;
-      const fingerprint = contentFingerprint(truncated);
-      const createdAt = post.published || new Date().toISOString();
-      const title = post.title || `Blog ${post.kind} (${createdAt.slice(0, 10)})`;
-
-      if (dryRun) {
-        console.log(`[${i + 1}/${toProcess.length}] Would import: "${title}" (${truncated.length} chars)`);
-        imported++;
-        continue;
-      }
-
-      const embedding = await getEmbedding(truncated);
-      const result = await upsertThought(
-        truncated,
-        { title, kind: post.kind, content_fingerprint: fingerprint },
-        embedding,
-        createdAt
-      );
-      console.log(`[${i + 1}/${toProcess.length}] ${result.action}: #${result.thought_id} "${title}"`);
-      imported++;
-    } catch (err) {
-      console.error(`[${i + 1}/${toProcess.length}] Error: ${err.message}`);
-      errors++;
-    }
+    const createdAt = instant(post.published);
+    const title = post.title || `Blog ${post.kind}${createdAt ? ` (${createdAt.slice(0, 10)})` : ""}`;
+    const item = {
+      identity: { system: SYSTEM, key: post.key },
+      scope: SCOPE,
+      canonical: { form: post.xml, mediaType: "application/atom+xml" },
+      // A post past the bound is cut, and says so; its <entry> keeps it whole.
+      text: thoughtContent.length > TEXT_BOUND ? `${clean(thoughtContent.slice(0, TEXT_BOUND - 60))} [… cut here; the source record holds it whole]` : thoughtContent,
+      links: [],
+      mentions: [],
+      facets: { title, kind: post.kind, type: "journal", source_type: "blogger_import", importance: 3, quality_score: 60, sensitivity_tier: "standard" },
+    };
+    if (createdAt) item.createdAt = createdAt;
+    process.stdout.write(`${JSON.stringify(item)}\n`);
+    emitted++;
   }
 
-  console.log();
-  console.log(`Done! Imported: ${imported}, Skipped: ${skipped}, Errors: ${errors}`);
+  console.error(`Emitted ${emitted} item(s), skipped ${skipped} (of ${toProcess.length}; skip=${skip}, limit=${limit === Infinity ? "all" : limit})`);
+  if (droppedDates.size) console.error(`${droppedDates.size} date(s) left out, not ones the brain accepts (it dates those thoughts when it writes them): ${[...droppedDates].slice(0, 5).map((d) => JSON.stringify(d.slice(0, 40))).join(", ")}`);
 }
 
-main().catch((err) => { console.error("Fatal error:", err); process.exit(1); });
+await main();

@@ -19,6 +19,7 @@ import type { Ctx } from "./context.ts";
 import { FilterError, parseFilter, trustAtOrAbove, withActorFilter, type Trust } from "./filter.ts";
 import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
 import { listCursor, parseListCursor } from "./list-cursor.ts";
+import { parseSince } from "./since.ts";
 import { SCAN_DEFAULT, SCAN_MAX, type Input } from "./schemas.ts";
 
 // ── The one search operation ─────────────────────────────────────────────────
@@ -500,42 +501,9 @@ export async function thoughtStats(ctx: Ctx, _principal: Principal, _input: Inpu
   return ok(await (await ctx.store()).statsSummary());
 }
 
-/**
- * thought_changes's `since` (SMD-1296): a uuid is a cursor — the audit row a
- * previous page ended with — and anything else must read as an ISO-8601 time
- * (a date at least, so a bare number is not a year), normalised so the reply
- * echoes one spelling. Neither is a refusal, before any call; `value` is the
- * trimmed text refused.
- */
-export function parseSince(raw: string | undefined): { since: string | null; after: string | null } | { refused: string } {
-  const v = (raw ?? "").trim();
-  if (v === "") return { since: null, after: null };
-  if (UUID_RE.test(v)) return { since: null, after: v.toLowerCase() };
-  const refused = { refused: v };
-  // A date, or a date with a clock that names its zone — a clock with no Z or
-  // offset would be read in the server's zone (13:00Z for 08:00 on a Chicago
-  // laptop, 08:00Z in the container). Any ISO-8601 fraction (Python's
-  // isoformat gives six digits) and an hour-only offset (psql prints `+00`)
-  // are normalised to what Date parses: a T, three fraction digits, a colon in
-  // the offset — completed only when the shape has one, since a bare date's
-  // own `-01` is a day, not a zone.
-  const shape = /^(\d{4}-\d{2}-\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(Z|[+-]\d{2}(?::?\d{2})?))?$/i.exec(v);
-  if (!shape) return refused;
-  // Upper-cased: the shape is matched case-blind, and a lowercase t or z is
-  // ISO-8601 to JSC (Bun) but not to every Date parser the server runs on.
-  let iso = v.toUpperCase().replace(" ", "T").replace(/(\.\d{3})\d+/, "$1");
-  if (shape[2] && !/^z$/i.test(shape[2])) iso = iso.replace(/([+-]\d{2})(\d{2})$/, "$1:$2").replace(/([+-]\d{2})$/, "$1:00");
-  const d = new Date(iso);
-  // The date part round-trips on its own, whatever the clock or zone beside it
-  // (2026-02-30 would otherwise slide to March, at any hour), and the year
-  // stays where timestamptz has room: a late time with an offset rolls past
-  // 9999, an early one below 1, and either would come back as Postgres's raw
-  // error (review passes 1–3).
-  const day = new Date(`${shape[1]}T00:00:00Z`);
-  if (Number.isNaN(d.getTime()) || Number.isNaN(day.getTime()) || day.toISOString().slice(0, 10) !== shape[1]) return refused;
-  if (d.getUTCFullYear() < 1 || d.getUTCFullYear() > 9999) return refused;
-  return { since: d.toISOString(), after: null };
-}
+// thought_changes's `since`, and list_logged_searches's (its time arm): its own module, which imports no package, so
+// db/tier.ts reads --since by the same rule without reaching zod through this file (SMD-2280 PR 2b review pass 2).
+export { parseSince };
 
 export type ChangesResult = {
   /** The page, oldest first. */
@@ -598,8 +566,12 @@ export async function listThoughtIds(ctx: Ctx, _principal: Principal, { limit, a
 }
 
 export async function listLoggedSearches(ctx: Ctx, _principal: Principal, { since, limit }: Input<"list_logged_searches">): Promise<Outcome<LoggedSearchPage>> {
-  if (since !== undefined && Number.isNaN(Date.parse(since))) return refuse({ code: "REFUSED_SINCE", retryable: false, value: since });
-  return ok(await (await ctx.store()).listLoggedSearches({ since: since ?? null, limit }));
+  // thought_changes's reading of a time (parseSince), its cursor arm excepted: Date.parse took `1` and `Oct 23`, which
+  // Postgres's timestamptz does not, so they reached the store as its 500 (SMD-2280 PR 2b review pass 1); a clock with
+  // no zone, read in the database's, is refused here as there. A change-feed cursor names no time of this log.
+  const start = since === undefined ? { since: null, after: null } : parseSince(since);
+  if ("refused" in start || start.after !== null) return refuse({ code: "REFUSED_SINCE", retryable: false, value: (since ?? "").trim() });
+  return ok(await (await ctx.store()).listLoggedSearches({ since: start.since, limit }));
 }
 
 /** The pools, under a key: a JSON result is an object (an array is wrapped by the MCP wire codec, SEP-2106). */

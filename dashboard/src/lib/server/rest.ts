@@ -46,6 +46,11 @@ export async function read<K extends CallableOperation>(event: RequestEvent, ses
 	} catch (err) {
 		// A visitor who left aborted the call: nothing went wrong, and nobody reads the answer (review pass 4).
 		if (!event.request.signal.aborted) console.error(`[dashboard] ${name}: the REST core did not answer: ${err instanceof Error ? err.message : String(err)}`);
+		// A search by meaning waits on the embedding provider, whose own deadline (OB1_LLM_TIMEOUT, 120 s) outlasts this
+		// one: a slow or silent provider is this page's timeout, before the core's exact-match answer (review pass 2;
+		// the core's short-circuit is SMD-3205). Said, with the search that needs no provider.
+		if (name === 'search_thoughts' && err instanceof Error && err.name === 'TimeoutError')
+			throw error(504, `The brain did not answer within ${REST_TIMEOUT_MS / 1000} s. A search by meaning waits on the embedding provider, which may be slow or not answering; search by exact text, which needs none.`);
 		throw error(502, 'The brain did not answer. The dashboard log has the reason.');
 	}
 	if (answer.ok) return answer.body;
@@ -58,5 +63,22 @@ export async function read<K extends CallableOperation>(event: RequestEvent, ses
 	if (answer.status >= 500) console.error(`[dashboard] ${name}: ${answer.status} ${code ?? ''}`.trimEnd());
 	// In words where they are known; the core's code otherwise, for the operator's log (review pass 6).
 	if (answer.status === 404 && name === 'fetch') throw error(404, 'The brain holds no thought with that id.');
-	throw error(answer.status, code ? `The brain refused the read (${code}).` : `The brain answered ${answer.status}.`);
+	const words = code ? REFUSAL_WORDS[code] : undefined;
+	// A fault is not a refusal: a 5xx with a code says the brain could not answer (review pass 1).
+	const said = code ? (answer.status >= 500 ? `The brain could not answer the read (${code}).` : `The brain refused the read (${code}).`) : `The brain answered ${answer.status}.`;
+	throw error(answer.status, words ?? said);
 }
+
+/**
+ * The refusals a visitor can act on, in words that say how (SMD-2280 PR 2a).
+ * None quotes what was sent: a cursor or a query rides in the address or the
+ * form, and the visitor already has it.
+ */
+const REFUSAL_WORDS: Record<string, string> = {
+	// A browse link whose cursor the core does not read: altered, or made under the other order.
+	REFUSED_CURSOR: 'That page link is not one the brain reads. Start the list again from its first page.',
+	// A start the change feed or the query log cannot read (SMD-2280 PR 2b).
+	REFUSED_SINCE: 'That start is not a time the brain reads: give a time with its zone (2026-10-23T08:00:00Z), a date (2026-10-23), or for changes the cursor a page ended with.',
+	// The egress rules keep this key's query from the embedding provider (SMD-1903).
+	REFUSED_EGRESS: "The brain's egress rules keep this query from the embedding provider. Search by exact text instead.",
+};
