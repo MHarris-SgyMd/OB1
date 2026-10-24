@@ -42,9 +42,9 @@
  *   - the example plugin's Notes page (PR 3): with `--notes on`, the write and
  *     read keys' navs name it, it lists the newest thoughts and a thought's
  *     notes, the write key pins one of 2,000 characters sent with CRLF breaks
- *     (an empty note, one of 2,001, a NUL, a thought not held and an address
- *     naming no id refused in words), the read key sees it with no pin form
- *     and its pin is refused; with `--notes off`, no nav names it and its page
+ *     (an empty note, one of 2,001, a NUL and a thought not held refused in
+ *     words; an address naming no id says so), the read key sees it with no
+ *     pin form and its pin is refused; with `--notes off`, no nav names it and its page
  *     and pin are the GUI's 404 (pinning to a held thought only once the page
  *     is); unset, a Notes page the nav names is read but not pinned to.
  *     `--notes-only` runs that arm alone.

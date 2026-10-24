@@ -76,7 +76,7 @@ Held by check 31 of `scripts/check-fork-consistency.ts`, on every push. It is an
   - It takes no session advisory lock, holds no cursor `WITH HOLD`, and runs no `LISTEN` or `DISCARD`.
   - Outside a plpgsql body, it runs no `BEGIN`, `END`, `ABORT`, `COMMIT`, `ROLLBACK` (`ROLLBACK TO` aside), `START TRANSACTION`, `PREPARE` or `EXECUTE` as a statement. Inside one, it runs no `EXECUTE` (dynamic SQL this check cannot read), `COMMIT` or `ROLLBACK`.
 - **The registry and the directories agree.** `plugins/registry.ts` imports and lists exactly the plugin directories, and a manifest's name is its directory's.
-- **Its GUI pages have their routes.** Each page a manifest declares has its directory in `dashboard/src/routes/plugins/<name><path>/`, holding a `+page.svelte` and a `+page.server.ts` alone (no `+server.ts`, `+page.ts` or layout, which would answer without the gate), whose load awaits `pluginAccess` and imports nothing else that reaches the brain; no directory there is a page no manifest declares.
+- **Its GUI pages have their routes.** Each page a manifest declares has its directory in `dashboard/src/routes/plugins/<name><path>/`, holding a `+page.svelte` and a `+page.server.ts` alone (no `+server.ts`, `+page.ts` or layout, which would answer without the gate), which awaits `pluginAccess` and reaches the brain by nothing else (no other server module, `fetch`, `locals`, `import.meta` or `import()`); no directory there is a page no manifest declares.
 
 Held by the maintainer's review:
 

@@ -7627,9 +7627,10 @@ checkHostIpTemplates();
 //  - its GUI pages (SMD-2280 PR 3), which the GUI renders, since a plugin's
 //    directory holds no Svelte: each page its manifest declares has its route
 //    at dashboard/src/routes/plugins/<name><path>/, a +page.svelte and a
-//    +page.server.ts alone, whose load awaits pluginAccess and imports nothing
-//    else that reaches the brain, so a disabled plugin's page is a 404 before
-//    any call; and no route there is a page no manifest declares.
+//    +page.server.ts alone, which awaits pluginAccess and reaches the brain by
+//    nothing else (no other server module, fetch, process, locals,
+//    import.meta or import()), so a disabled plugin's page is a 404 before any
+//    call; and no route there is a page no manifest declares.
 
 /** The core's tables: every CREATE TABLE in db/migrations/, uncommented, and the two ledgers. */
 function coreTables(): Set<string> {
@@ -7861,6 +7862,10 @@ const PLUGIN_ROUTE_FILES = new Set(["+page.svelte", "+page.server.ts"]);
  * REST client.
  */
 const PLUGIN_PAGE_IMPORT = /^(?:@sveltejs\/kit|\$app\/[a-z/]+|\.\/\$types|\$lib\/server\/plugins|\$lib\/(?!server\/)[\w/.-]+)$/;
+/** A `.` or `..` segment, which would spell a server module another way (`$lib/./server/rest`): refused in any import (review pass 3). */
+const DOT_SEGMENT = /(?:^|\/)\.{1,2}(?:\/|$)/;
+/** What reaches past pluginAccess with no import: a global or a module's own reach (review pass 3: a bare fetch with the session's key needed none). */
+const PLUGIN_PAGE_REACH = /\b(?:fetch|process|require|globalThis|Bun|locals)\b|\bimport\s*\.\s*meta\b|\bimport\s*\(/;
 
 /**
  * A plugin's GUI pages against the GUI's routes for them, each problem where it
@@ -7882,12 +7887,15 @@ function pluginPageProblems(declared: Record<string, string[]>, files: Record<st
     for (const f of PLUGIN_ROUTE_FILES) if (!(`${page}/${f}` in files)) problems.push({ where: `${PLUGIN_ROUTES}/${page}`, what: `no ${f}: the plugin's manifest declares this page, and the GUI renders each declared page from its route here, its load reaching the plugin through pluginAccess` });
     const load = files[`${page}/+page.server.ts`];
     if (load === undefined) continue;
+    // Strings kept to read the imports' specifiers; blanked too, so a string spelling a call or a name is neither.
     const code = blanked(load, false);
+    const bare = blanked(load, true);
     const where = `${PLUGIN_ROUTES}/${page}/+page.server.ts`;
-    if (!/\bawait\s+pluginAccess\s*\(/.test(code)) problems.push({ where, what: "does not await pluginAccess: a plugin page reaches its plugin through the access the gate hands back, so a disabled plugin's page is a 404 before any call" });
+    if (!/\bawait\s+pluginAccess\s*\(/.test(bare)) problems.push({ where, what: "does not await pluginAccess: a plugin page reaches its plugin through the access the gate hands back, so a disabled plugin's page is a 404 before any call" });
     const imports = [...code.matchAll(/\b(?:import|export)\b[^;'"`]*?\bfrom\s*["']([^"']+)["']|\bimport\s*["']([^"']+)["']/g)].map((m) => m[1] ?? m[2]);
-    for (const spec of imports) if (!PLUGIN_PAGE_IMPORT.test(spec)) problems.push({ where, what: `imports ${JSON.stringify(spec)}: a plugin page's load reaches the brain through pluginAccess alone ($lib/server/plugins), never rest.ts or the REST client` });
-    if (/\bimport\s*\(/.test(code)) problems.push({ where, what: "a dynamic import(): a plugin page's load imports statically, so this check reads what it reaches" });
+    for (const spec of imports) if (!PLUGIN_PAGE_IMPORT.test(spec) || (spec !== "./$types" && DOT_SEGMENT.test(spec))) problems.push({ where, what: `imports ${JSON.stringify(spec)}: a plugin page's load reaches the brain through pluginAccess alone ($lib/server/plugins), never rest.ts or the REST client` });
+    const reach = PLUGIN_PAGE_REACH.exec(bare);
+    if (reach) problems.push({ where, what: `names ${JSON.stringify(reach[0].replace(/\s+/g, ""))}: a plugin page's load reaches the brain through pluginAccess alone — no fetch, process, require, globalThis, Bun, locals, import.meta or import() — so this check reads all it reaches` });
   }
   for (const rel of Object.keys(files)) {
     const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
@@ -7910,6 +7918,13 @@ const PLUGIN_PAGE_PROBES: [Record<string, string[]>, Record<string, string>, num
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nimport { createRestClient } from '../../../../../../rest-client/index.ts';" }, 1],
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nexport { read } from '$lib/server/rest';" }, 1],
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nconst m = await import('$lib/server/rest');" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nimport { read } from '$lib/./server/rest';" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nimport { read } from '$lib/../lib/server/rest';" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nconst m = import.meta.glob('/src/lib/server/rest.ts', { eager: true });" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nconst r = await fetch('http://api/v1/plugins/example/notes');" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nconst k = event.locals.session;" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "const s = 'await pluginAccess(';\nexport const load = () => ({});" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nconst words = 'a fetch of the notes';" }, 0],
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED, "example/notes/+server.ts": "" }, 1],
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED, "example/notes/+page.ts": "" }, 1],
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED, "example/other/+page.svelte": "" }, 1],

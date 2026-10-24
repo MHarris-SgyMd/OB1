@@ -756,7 +756,11 @@ for a plugin named in `OB1_HOOKS`, which must also be enabled in
 # deploy/.env: OB1_PLUGINS=example, OB1_PLUGIN_DB_PASSWORD=…, OB1_HOOKS=example,
 #              OB1_HOOK_SECRETS=example=<openssl rand -hex 32>
 docker compose -f compose.yaml -f compose.hooks-public.yaml up -d
+docker compose -f compose.yaml -f compose.hooks-public.yaml up -d --force-recreate --no-deps app
 ```
+
+The second line gives the GUI the recreated REST core's address at once
+(signing everyone out of it: its sessions live in its memory).
 
 Keep every other `-f` the stack already runs with on the same command —
 `compose.release.yaml`, `compose.api-public.yaml` — or the proxy is recreated

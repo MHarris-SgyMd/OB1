@@ -1,4 +1,4 @@
-import { fail, isHttpError, redirect } from '@sveltejs/kit';
+import { fail, redirect } from '@sveltejs/kit';
 import { base } from '$app/paths';
 import type { Actions, PageServerLoad } from './$types';
 import { firstLine, oneLine } from '$lib/format';
@@ -61,18 +61,12 @@ export const actions: Actions = {
 		if (note.trim().length > NOTE_MAX) return fail(400, { ...kept, error: `A note is at most ${NOTE_MAX.toLocaleString('en-US')} characters; this one is ${note.trim().length.toLocaleString('en-US')}.` });
 		// No Postgres text holds a NUL: the core's 500 (SMD-2534). Refused here, not stripped, since the note is the visitor's words.
 		if (note.includes('\0')) return fail(400, { ...kept, error: 'A note cannot hold a NUL character.' });
-		let answer;
-		try {
-			// The gate first, as the load's: an action runs before any load, so a plugin turned off, or a key that may call
-			// none of it, is the page's 404 here too, before any call.
-			const ex = await pluginAccess(event, PLUGIN, PAGE);
-			answer = await ex.call('add_note', 'POST', '/notes', { thought_id: thought, note });
-		} catch (err) {
-			// The core did not answer, the registry's read or the pin's (logged where it failed): said beside the form, the
-			// note kept, not the error page (review passes 1 and 2).
-			if (isHttpError(err) && err.status >= 500) return fail(err.status, { ...kept, error: 'The brain did not answer, and the note may not be pinned. The dashboard log has the reason.' });
-			throw err;
-		}
+		// The gate first, as the load's: an action runs before any load, so a plugin turned off, or a key that may call
+		// none of it, is the page's 404 here too, before any call. A core that does not answer is the error page: after a
+		// refusal the page's loads run again to render it, and fail the same (review pass 3 took back a catch that kept
+		// the note only in a race).
+		const ex = await pluginAccess(event, PLUGIN, PAGE);
+		const answer = await ex.call('add_note', 'POST', '/notes', { thought_id: thought, note });
 		// Back at the form, the new note just above it, not at the top of a long list (review pass 2).
 		if (answer.ok) throw redirect(303, `${HERE}?thought=${thought.toLowerCase()}#pin`);
 		const { code } = answer;

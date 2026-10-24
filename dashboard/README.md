@@ -123,9 +123,12 @@ this build has its route. The load and any action start with `pluginAccess` (in
 `src/lib/server/plugins.ts`): the page's 404 unless the registry lists it to the key, a
 disabled plugin's included, and then the plugin's own operations under the visitor's key,
 which is the only way the page reaches them. Check 31 holds each page a manifest declares
-to its route here, each route here to a declared page, and each load to `pluginAccess`, with
-nothing else imported that reaches the brain. The nav is read again at every navigation, so
-a plugin turned on or off shows at the next page.
+to its route here, each route here to a declared page, and each page's server file to
+awaiting `pluginAccess`, with nothing else that reaches the brain (no other server module,
+`fetch`, `locals`, `import.meta` or `import()`). The nav reads the registry again at every
+navigation — one read a page, waiting 2 s at most before it renders without the plugins'
+pages — so a plugin turned on or off with the GUI left running shows at the next page;
+recreating `app`, as the example's README does, signs everyone out instead.
 
 Every page is rendered on the server: the browser calls no API, so there is no proxy
 in the GUI to the REST core, and a page reads only the operations its own load names.

@@ -9,8 +9,8 @@
 // disabled plugin's page is no page at all — and only then hands back the
 // plugin's operations, so a load or an action cannot call one ungated (review
 // pass 2: a layout's gate is skipped on a __data.json request that does not
-// ask for it, and loads run side by side). Check 31 holds every plugin page's
-// load to it.
+// ask for it, and loads run side by side). Check 31 holds a plugin page's
+// server file to awaiting it and to nothing else that reaches the brain.
 
 import { error, isHttpError, isRedirect, type RequestEvent } from '@sveltejs/kit';
 import { base } from '$app/paths';
@@ -47,20 +47,30 @@ function listed(body: unknown): ListedPlugin[] {
 	);
 }
 
+/** How long the nav waits for the registry before it renders without the plugins' pages: a page's own reads have the full deadline. */
+const NAV_WAIT_MS = 2000;
+
 /**
  * The nav's plugin entries: each page the registry lists that this build
- * renders. The nav is no page's to fail, so a registry the core will not read
- * leaves it without them (the page's own read says why); a key it no longer
- * takes still goes to /signin.
+ * renders. The nav is no page's to fail or to hold up, so a registry the core
+ * will not read, or has not read within NAV_WAIT_MS, leaves it without them
+ * (review pass 3: a stalled read held every page, a 404 included, for the
+ * client's 30 s); a key the core no longer takes still goes to /signin.
  */
 export async function pluginNav(event: RequestEvent): Promise<{ href: string; label: string }[]> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		return (await pluginsFor(event)).flatMap((p) => p.pages.filter((g) => BUILT.has(`${p.name}${g.path}`)).map((g) => ({ href: `${base}/plugins/${p.name}${g.path}`, label: g.label })));
+		// The read itself runs on, shared through locals with a plugin page's own access.
+		const listed = await Promise.race([pluginsFor(event), new Promise<null>((done) => (timer = setTimeout(() => done(null), NAV_WAIT_MS)))]);
+		if (listed === null) return [];
+		return listed.flatMap((p) => p.pages.filter((g) => BUILT.has(`${p.name}${g.path}`)).map((g) => ({ href: `${base}/plugins/${p.name}${g.path}`, label: g.label })));
 	} catch (err) {
 		if (isRedirect(err)) throw err;
 		// A refusal or fault the read already logged; anything else is the GUI's own bug, said here (review pass 1).
 		if (!isHttpError(err)) console.error(`[dashboard] the plugin nav: ${err instanceof Error ? err.message : String(err)}`);
 		return [];
+	} finally {
+		clearTimeout(timer);
 	}
 }
 
