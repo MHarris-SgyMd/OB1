@@ -46,7 +46,7 @@ export function recordCall(record: CallRecord, outcome: RequestOutcome, code: st
 // and names the 405's `Allow`, so the two cannot drift. FORK.md change 75.
 export const MCP_METHODS = ["POST"];
 export const ALLOWED_METHODS = [...MCP_METHODS, "OPTIONS"].join(", ");
-// A health path serves GET and HEAD (index.ts's /health route) AND the MCP
+// A health path serves GET and HEAD (the /health route) AND the MCP
 // methods, since the MCP handler is registered at every path. Derived from the
 // same list.
 export const HEALTH_ALLOWED_METHODS = ["GET", "HEAD", ...MCP_METHODS, "OPTIONS"].join(", ");
@@ -339,8 +339,22 @@ export function nameRoute(c: { req: { raw: Request } }, route: string, tool: Too
 
 /**
  * A health path: `health` as the last path segment under any prefix a proxy
- * leaves on the request, with at most one trailing slash — index.ts's
- * /health route says why so broad, and why a test rather than a route pattern.
+ * leaves on the request (`/mcp/health`, `/functions/v1/open-brain-mcp/health`),
+ * with at most one trailing slash — except under `/.well-known/`, which the
+ * MCP server's discovery route, registered first, owns (the probe check skips
+ * it too). deploy/README.md anticipates an unstripped
+ * prefix, and a probe aimed at `<base>/health` must not 405 there. The breadth
+ * ("health under anything") is a stand-in for a base-path setting the server
+ * does not have; a mount (the path-axis decision change 42 defers) would match
+ * `${base}/health` exactly. The name is exact after Hono's decodeURI
+ * (`/he%61lth` is it; /healthz and /Health are not; an encoded slash `%2F`
+ * stays encoded and is not a slash; an empty segment `//health` passes). A
+ * test against the path rather than a route pattern because on Hono 4.9.2 a
+ * `:param` route sharing the root with a static route makes the RegExpRouter
+ * throw at registration, and the TrieRouter the SmartRouter falls back to
+ * miscounts a `{.+}` prefix of three or more segments. The route that applies
+ * it is the MCP server's (mcp-server/app.ts); index.ts's was until SMD-2287
+ * PR 6b. FORK.md change 75.
  */
 export const HEALTH_PATH = /(^|\/)health\/?$/;
 

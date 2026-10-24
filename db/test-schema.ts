@@ -10818,7 +10818,9 @@ console.log("\n[64] Migration 070: a proposal standing on a lineage pair is visi
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
-  const SIG = "list_supersession_proposals(text, int, boolean)";
+  // 109 (SMD-3248) is the listing's last definer: 070's body under a fourth, defaulted parameter. This section's calls
+  // pass three arguments, as a caller before 109 does, and resolve to it through the default.
+  const SIG = "list_supersession_proposals(text, int, boolean, text)";
   const MODEL = EMBEDDING_MODEL;
   const ACTOR = { name: "op-key", via: "test-door" };
   const EXTRACT = "extract:stub@p1";
@@ -10844,15 +10846,15 @@ console.log("\n[64] Migration 070: a proposal standing on a lineage pair is visi
   await db.exec(`SELECT set_agent_kind('op-key', 'operator')`);
   await db.exec(`SELECT set_config('ob1.actor', '${JSON.stringify(ACTOR)}', false)`);
 
-  // The shape: one form, 070's — 029's nineteen columns then lineage, the
-  // sentinel, both directions in 066's spelling (the regex pins the array
-  // form: `'["a"]'::jsonb @> '"a"'` is TRUE, so to_jsonb(id::text) would pass
-  // every behavioural assertion below), the two-argument form gone, the
-  // comment.
+  // The shape: one form, 109's on 070's body — 029's nineteen columns then
+  // lineage, the sentinel, both directions in 066's spelling (the regex pins
+  // the array form: `'["a"]'::jsonb @> '"a"'` is TRUE, so to_jsonb(id::text)
+  // would pass every behavioural assertion below), the two- and
+  // three-argument forms gone, the comment.
   const body = await src(SIG);
   const cols = (await one<{ c: string }>(`SELECT array_to_string(array(SELECT n FROM unnest(proargnames, proargmodes) AS u(n, m) WHERE m = 't'), ',') AS c FROM pg_proc WHERE oid = $1::regprocedure`, [SIG])).c;
-  assert((await functionsNamed("list_supersession_proposals")) === 1 && lastDefinerOf("list_supersession_proposals").startsWith("070") && (await q(`SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('list_supersession_proposals(text, int)')`)).length === 0 && /ob1:listing-flags-the-lineage-pair/.test(body),
-    `one list_supersession_proposals, 070 its last definer, the two-argument form gone, the sentinel in the body (${lastDefinerOf("list_supersession_proposals")})`);
+  assert((await functionsNamed("list_supersession_proposals")) === 1 && lastDefinerOf("list_supersession_proposals").startsWith("109") && (await q(`SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('list_supersession_proposals(text, int)') OR oid = to_regprocedure('list_supersession_proposals(text, int, boolean)')`)).length === 0 && /ob1:listing-flags-the-lineage-pair/.test(body),
+    `one list_supersession_proposals, 109 its last definer (070's body), the two- and three-argument forms gone, 070's sentinel in the body (${lastDefinerOf("list_supersession_proposals")})`);
   assert(cols === "id,status,verdict,confidence,reason,similarity,judge_key,judged_at,reviewed_at,review_note,superseding_id,older_id,older_content,older_created_at,newer_id,newer_content,newer_created_at,older_edited,newer_edited,lineage",
     `029's nineteen columns in their order, then lineage (${cols})`);
   assert(/COALESCE\(n\.derived_from @> jsonb_build_array\(o\.id::text\), false\)/.test(body) && /COALESCE\(o\.derived_from @> jsonb_build_array\(n\.id::text\), false\)/.test(body) && /p_lineage IS NULL/.test(body),
@@ -10931,8 +10933,9 @@ console.log("\n[64] Migration 070: a proposal standing on a lineage pair is visi
   const spelled = (file: string) => readFileSync(join(HERE, file), "utf8").split(PREDICATE).length - 1;
   assert(spelled("consolidate.ts") === 2 && spelled("../server-portable/preflight.ts") === 1 && (await src(SIG)).split("COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false)").length - 1 === 2,
     `the TypeScript readers spell 066's predicate as the body does — twice in consolidate.ts (the guard, --status), once in preflight.ts (the census) (${spelled("consolidate.ts")}, ${spelled("../server-portable/preflight.ts")})`);
-  // A re-apply is a no-op: one form, the flag reading the same.
-  await reapply("070");
+  // A re-apply of the last definer is a no-op: one form, the flag reading the
+  // same. (070 re-applied lands its form beside 109's: [97]'s case.)
+  await reapply("109");
   assert((await functionsNamed("list_supersession_proposals")) === 1 && /ob1:listing-flags-the-lineage-pair/.test(await src(SIG)) && idsOf(await list(null, true)) === [pX, pN].sort().join(), "a re-apply leaves one form carrying the flag");
   await db.exec(`SELECT set_config('ob1.actor', '', false)`);
   await db.exec(`DELETE FROM thoughts`);
@@ -14324,11 +14327,11 @@ console.log("\n[84] Migration 094: list_proposal_writers names who wrote each si
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
   const cols = (await one<{ c: string }>(`SELECT array_to_string(array(SELECT n FROM unnest(proargnames, proargmodes) AS u(n, m) WHERE m = 't'), ',') AS c FROM pg_proc WHERE oid = $1::regprocedure`, [SIG])).c;
   assert((await functionsNamed("list_proposal_writers")) === 1 && lastDefinerOf("list_proposal_writers").startsWith("107") && lastDefinerOf("ob1_capture_only_text").startsWith("094")
-      && lastDefinerOf("list_supersession_proposals").startsWith("070") && /ob1:listing-names-the-writers/.test(await src(SIG))
+      && lastDefinerOf("list_supersession_proposals").startsWith("109") && /ob1:listing-names-the-writers/.test(await src(SIG))
       && lastDefinerOf("ob1_accept_lapses").startsWith("097") && /ob1:accept-lapses-read/.test(await src("ob1_accept_lapses(uuid, uuid)")) && /094 \/ SMD-2707/.test(await comment("ob1_accept_lapses(uuid, uuid)"))
       && lastDefinerOf("ob1_accept_takes").startsWith("094") && /094 \/ SMD-2707/.test(await comment("ob1_accept_takes(uuid, uuid)"))
       && /094 \/ SMD-2707/.test(await comment(SIG)) && /094 \/ SMD-2707/.test(await comment("ob1_capture_only_text(uuid)")),
-    "ob1_capture_only_text 094's, the writers' read 107's since SMD-3036 (its walks capped, [95]), ob1_accept_lapses 097's since SMD-3035, each its comment, the sentinels in the bodies; 070's listing untouched");
+    "ob1_capture_only_text 094's, the writers' read 107's since SMD-3036 (its walks capped, [95]), ob1_accept_lapses 097's since SMD-3035, each its comment, the sentinels in the bodies; the listing untouched by 094 (070's body, 109's since SMD-3248)");
   assert(cols === "id,older_actor_name,older_actor_kind,older_trust,older_capture_only,older_superseded_by,older_lapses,older_takes,newer_actor_name,newer_actor_kind,newer_trust,newer_capture_only,newer_superseded_by,newer_lapses,newer_takes,same_capturer",
     `the proposal's id, each side's writer and superseder, then same_capturer (${cols})`);
 
@@ -15543,6 +15546,87 @@ console.log("\n[96] Migration 108: a keyed rebuild of 071's gate mirror for a st
     `ob1_refresh_set_readers() alters each of the brain's ${before95.size} readers of the sets and says so (${n})`);
 
   await db.query(`DELETE FROM thoughts WHERE content LIKE '[96]%'`);
+}
+
+console.log("\n[97] Migration 109: the listing selects one pass's proposals — list_supersession_proposals redefined on 070's body with p_judge_key, its judge key exactly, selected before the order and the cap; NULL every pass; beside status and lineage; a call of two or three arguments resolves through the default; 070 re-applied by hand lands its form beside and a short call is ambiguous while four resolve, and 109 again takes it away; a re-apply a no-op (SMD-3248)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const SIG = "list_supersession_proposals(text, int, boolean, text)";
+  const ACTOR = { name: "op-key", via: "test-door" };
+  await restoreShipped("list_supersession_proposals", "record_supersession_proposal");
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[97]%'`);
+  await db.exec(`SELECT set_config('ob1.actor', '${JSON.stringify(ACTOR)}', false)`);
+
+  // The shape: one form, 109's, both sentinels, the comment.
+  const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
+  assert((await functionsNamed("list_supersession_proposals")) === 1 && lastDefinerOf("list_supersession_proposals").startsWith("109")
+      && /ob1:listing-selects-a-pass/.test(await src(SIG)) && /ob1:listing-flags-the-lineage-pair/.test(await src(SIG)) && /p_judge_key IS NULL OR p\.judge_key = p_judge_key/.test(await src(SIG))
+      && /109/.test(comment) && /p_judge_key/.test(comment) && /before the cap/.test(comment),
+    `one list_supersession_proposals, 109's: both sentinels, the exact-match term, the comment naming 109, the selector and that it comes before the cap (${lastDefinerOf("list_supersession_proposals")})`);
+
+  // The corpus: eight thoughts, a day apart, and seven proposals over distinct
+  // pairs (029 holds one per pair) — three under pass A, four under pass B,
+  // every B row more confident than every A row, so a cap that came before the
+  // selection would leave no A row on a short page. One A row is rejected.
+  const t: string[] = [];
+  for (let i = 0; i < 8; i++) {
+    const id = (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [`[97] thought ${i}`, JSON.stringify({ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: EMBEDDING_MODEL }), unit(i)])).r.id;
+    await db.query(`UPDATE thoughts SET created_at = now() - make_interval(days => $2) WHERE id = $1::uuid`, [id, 10 - i]);
+    t.push(id);
+  }
+  const A = "consolidate:h2o-lightning-4b+qwen3.8:27b@p4d3", B = "consolidate:h2o-lightning-4b+qwen3.8:27b@p4d4";
+  const propose = async (o: number, n: number, confidence: number, key: string) =>
+    (await one<{ id: string }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', $3::numeric, 'stub', 0.9, $4::text) AS id`, [t[o], t[n], confidence, key])).id;
+  const a1 = await propose(0, 1, 0.60, A), a2 = await propose(0, 2, 0.55, A), a3 = await propose(0, 3, 0.50, A);
+  const b1 = await propose(1, 4, 0.95, B), b2 = await propose(1, 5, 0.94, B), b3 = await propose(1, 6, 0.93, B), b4 = await propose(1, 7, 0.92, B);
+  const rej = (await one<{ r: { ok: boolean } }>(`SELECT review_supersession_proposal($1::uuid, 'reject', 'stub', NULL, $2::jsonb) AS r`, [a3, JSON.stringify(ACTOR)])).r;
+  const list = (status: string | null, limit: number, lineage: boolean | null, key: string | null) =>
+    q<{ id: string; judge_key: string }>(`SELECT id::text, judge_key FROM list_supersession_proposals($1::text, $2::int, $3::boolean, $4::text)`, [status, limit, lineage, key]);
+  const ids = (rows: { id: string }[]) => rows.map((r) => r.id).join();
+
+  assert(rej.ok === true && ids(await list("pending", 50, null, A)) === [a1, a2].join() && (await list("pending", 50, null, A)).every((r) => r.judge_key === A),
+    "pending under pass A: its two standing rows alone, most confident first (the rejected one is under rejected)");
+  assert(ids(await list("pending", 2, null, A)) === [a1, a2].join() && ids(await list("pending", 2, null, null)) === [b1, b2].join(),
+    "the selection comes before the cap: a page of two under A holds A's two, where the unselected page of two is B's — a cap first would leave A none");
+  assert(ids(await list(null, 50, null, A)) === [a1, a2, a3].join() && ids(await list("rejected", 50, null, A)) === a3 && ids(await list("rejected", 50, null, B)) === "",
+    "beside status: every status of A's (NULL), its rejected row under rejected, none of B's");
+  assert(ids(await list("pending", 50, null, null)) === [b1, b2, b3, b4, a1, a2].join() && ids(await list("pending", 50, false, B)) === [b1, b2, b3, b4].join() && ids(await list("pending", 50, true, B)) === "",
+    "NULL selects every pass; beside lineage, B's rows read not-lineage (no pair names the other)");
+  assert(ids(await list("pending", 50, null, "consolidate:h2o-lightning-4b+qwen3.8:27b")) === "" && ids(await list("pending", 50, null, `${A} `)) === "" && ids(await list("pending", 50, null, A.toUpperCase())) === "",
+    "the key matches exactly: a prefix, a trailing space and another case select nothing");
+  assert(ids(await q<{ id: string }>(`SELECT id::text FROM list_supersession_proposals('pending', 3)`)) === [b1, b2, b3].join() && ids(await q<{ id: string }>(`SELECT id::text FROM list_supersession_proposals('pending', 3, NULL::boolean)`)) === [b1, b2, b3].join(),
+    "a two- or three-argument call — a caller from before 109 — resolves to this form through the default and lists every pass");
+
+  // 070 re-applied by hand lands its three-argument form beside 109's: a call
+  // passing three is ambiguous (not unique) and fails, four resolve — why the
+  // fork's callers pass four, and what preflight names. 109 again drops it.
+  await reapply("070");
+  let short = "resolved";
+  try { await q(`SELECT 1 FROM list_supersession_proposals('pending', 3, NULL::boolean)`); } catch (e) { short = (e as Error).message; }
+  const four = ids(await list("pending", 50, null, A));
+  assert((await functionsNamed("list_supersession_proposals")) === 2 && /is not unique/.test(short) && four === [a1, a2].join(),
+    `070 re-applied by hand: two forms, a three-argument call ambiguous (${short.slice(0, 80)}), four resolving to 109's`);
+  const again = await reapply("109");
+  assert(again.startsWith("109_") && (await functionsNamed("list_supersession_proposals")) === 1 && (await q(`SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('list_supersession_proposals(text, int, boolean)')`)).length === 0
+      && ids(await list("pending", 50, null, A)) === [a1, a2].join() && ids(await q<{ id: string }>(`SELECT id::text FROM list_supersession_proposals('pending', 3, NULL::boolean)`)) === [b1, b2, b3].join(),
+    "109 again drops the three-argument form; one form, the same rows, a three-argument call resolving again — a re-apply a no-op");
+  // 029's two-argument form left by a hand re-apply (stood up by hand here: 029 whole would put back its other bodies
+  // too): beside 109's, only a call both take — under three arguments — is ambiguous, three and four resolve; 109
+  // again drops it (review pass 1: no suite built this state, and 109's DROP of it survived a mutant).
+  await db.exec(`CREATE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20) RETURNS TABLE (id uuid) LANGUAGE sql STABLE AS $f$ SELECT NULL::uuid WHERE false $f$`);
+  const call = async (sql: string) => { try { await q(sql); return "resolved"; } catch (e) { return (e as Error).message; } };
+  const two = await call(`SELECT 1 FROM list_supersession_proposals('pending', 3)`), threeArgs = await call(`SELECT 1 FROM list_supersession_proposals('pending', 3, NULL::boolean)`);
+  assert((await functionsNamed("list_supersession_proposals")) === 2 && /is not unique/.test(two) && threeArgs === "resolved" && ids(await list("pending", 50, null, A)) === [a1, a2].join(),
+    `029's two-argument form beside 109's: a two-argument call ambiguous (${two.slice(0, 60)}), three and four resolving — the wording preflight's beside arm gives`);
+  await reapply("109");
+  assert((await functionsNamed("list_supersession_proposals")) === 1 && (await q(`SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('list_supersession_proposals(text, int)')`)).length === 0
+      && ids(await q<{ id: string }>(`SELECT id::text FROM list_supersession_proposals('pending', 3)`)) === [b1, b2, b3].join(),
+    "…and 109 again drops 029's leftover too: one form, a two-argument call resolving to it");
+
+  await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[97]%'`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

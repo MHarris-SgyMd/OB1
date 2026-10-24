@@ -1390,6 +1390,10 @@ console.log("\n[10] listSupersessionProposals reads migration 029's queue throug
   assert(pre094.length === 1 && pre094[0].id === pid && pre094[0].older.writer === null && pre094[0].newer.writer === null && (await store.listSupersessionProposals({}))[0]?.newer.writer !== null,
     "…without 094 the page still lists, no writer read; 094 applied, the writers read again");
   assert((await store.listSupersessionProposals({ status: "accepted" })).length === 0, "a status filter applies");
+  // 109 (SMD-3248): the judge key selects in the SQL — this pass's row under its key, none under another or a prefix.
+  assert((await store.listSupersessionProposals({ judgeKey: "consolidate:stub@p1" }))[0]?.id === pid && (await store.listSupersessionProposals({ judgeKey: "consolidate:stub@p2" })).length === 0
+      && (await store.listSupersessionProposals({ judgeKey: "consolidate:stub" })).length === 0,
+    "a judge key selects its pass's proposals, exactly: none under another pass's key or a prefix of this one");
   await admin5`SELECT review_supersession_proposal(${pid}::uuid, 'accept', 'confirmed', NULL, NULL)`;
   assert((await store.listSupersessionProposals({})).length === 0, "an accepted proposal leaves the pending list");
   const all = await store.listSupersessionProposals({ status: null });

@@ -2365,35 +2365,67 @@ else {
   assert(pre067.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre067.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql\./.test(fix(pre067.out, "lineage")),
          `063 re-applied over 067 is a warning on rebuild_derived, naming 067 as the remedy (${(pre067.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("067_") });
-  // 029 re-applied by hand over 070 (SMD-2313) — this ladder's own state
-  // since the queue section re-applied 029 alone: 029's two-argument listing
-  // stands BESIDE 070's, and a call short of three arguments is ambiguous
-  // (not unique) and fails, while the fork's callers pass three (measured on
-  // Postgres, run-it, first review pass: the arm had said the older body
-  // answered). The check counts the forms and warns naming 070, whose DROP
-  // takes the older form; then the body dropped by hand — a brain at 068
-  // under this server — is 029's alone, every listing fails, and the check
-  // warns the same way.
+  // 029 re-applied by hand over 109 (SMD-2313, SMD-3248) — this ladder's own
+  // state since the queue section re-applied 029 alone: 029's two-argument
+  // listing stands BESIDE 109's four-argument one, and a call both take —
+  // under three arguments — is ambiguous (not unique) and fails, while the
+  // fork's callers pass four (measured on Postgres, SMD-2313's run-it, first review pass:
+  // the arm had said the older body answered). The check counts the forms
+  // and warns naming 109, whose DROPs take the older forms.
+  const besideRe = /!  lineage\s+every derived row has its lineage row, but an older list_supersession_proposals stands beside the four-argument one \(029 or 070 re-applied by hand over 109\): a call both forms take — fewer than three arguments beside 029's, fewer than four beside 070's — is ambiguous \(not unique\) and fails, so a reader passing fewer than four may error on the queue, while the fork's callers pass four \(SMD-2313, SMD-3248\)/;
   const beside029 = await run(SQL_ENV);
-  assert(beside029.code === 0 && /!  lineage\s+every derived row has its lineage row, but 029's two-argument list_supersession_proposals stands beside 070's \(029 re-applied by hand over it\): a call passing fewer than three arguments is ambiguous \(not unique\) and fails, so every reader outside the fork's callers — which pass three — errors on the queue \(SMD-2313\)/.test(beside029.out) && /Apply db\/migrations\/070_listing_flags_lineage_pair\.sql\./.test(fix(beside029.out, "lineage")),
-         `029 re-applied over 070 leaves its two-argument listing beside 070's: a warning naming 070 (${lpLine(beside029.out).slice(0, 200)})`);
+  assert(beside029.code === 0 && besideRe.test(beside029.out) && /Apply db\/migrations\/109_listing_selects_a_pass\.sql\./.test(fix(beside029.out, "lineage")),
+         `029 re-applied over 109 leaves its two-argument listing beside 109's: a warning naming 109 (${lpLine(beside029.out).slice(0, 200)})`);
   // …and with a lineage pair standing in that state the census speaks first,
   // its fix line the file THEN the review — the combined remedy and the arm
-  // order, which no state of this ladder had exercised (run-it, first review
-  // pass: the arms swapped and the remedy flattened both passed).
+  // order, which no state of this ladder had exercised (SMD-2313's run-it,
+  // first review pass: the arms swapped and the remedy flattened both passed).
   const [{ id: lpBesideId }] = await claims`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[1]}::uuid, 'newer_supersedes_older', 0.8, 'stub reason', 0.9, 'consolidate:other-judge@p1', NULL) AS id`;
   await claims`UPDATE thoughts SET derived_from = jsonb_build_array(${ids[0]}::text) WHERE id = ${ids[1]}::uuid`;
   const lpBeside = await run(SQL_ENV);
-  assert(lpBeside.code === 0 && /!  lineage\s+every derived row has its lineage row, but 1 unreviewed proposal\(s\) stand on a lineage pair/.test(lpBeside.out) && /^\s*→ Apply db\/migrations\/070_listing_flags_lineage_pair\.sql\. Then review them: cd db && bun consolidate\.ts --url <url> --list lineage shows them/.test(fix(lpBeside.out, "lineage")),
-         `a lineage pair standing while the listing is older: the census speaks, and its fix line applies 070 before the review (${lpLine(lpBeside.out).slice(0, 120)} / ${fix(lpBeside.out, "lineage").trim().slice(0, 140)})`);
+  assert(lpBeside.code === 0 && /!  lineage\s+every derived row has its lineage row, but 1 unreviewed proposal\(s\) stand on a lineage pair/.test(lpBeside.out) && /^\s*→ Apply db\/migrations\/109_listing_selects_a_pass\.sql\. Then review them: cd db && bun consolidate\.ts --url <url> --list lineage shows them/.test(fix(lpBeside.out, "lineage")),
+         `a lineage pair standing while the listing is older: the census speaks, and its fix line applies 109 before the review (${lpLine(lpBeside.out).slice(0, 120)} / ${fix(lpBeside.out, "lineage").trim().slice(0, 140)})`);
   await claims`UPDATE thoughts SET derived_from = NULL WHERE id = ${ids[1]}::uuid`;
   await claims`DELETE FROM supersession_proposals WHERE id = ${lpBesideId}::uuid`; // 061's trigger takes the proposal's lineage row with it
+  // A brain at 108 under this server: 070's three-argument listing alone.
+  // Every fork caller passes 109's fourth argument, so every listing fails,
+  // naming the four-argument form; the check warns naming 109.
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("109_") });
+  await claims.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean, text)`);
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
-  await claims.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
-  const pre070 = await run(SQL_ENV);
-  assert(pre070.code === 0 && /!  lineage\s+every derived row has its lineage row, but list_supersession_proposals is from before 070 \(migration 070 not yet applied, or its form dropped by hand\): every listing fails — the CLI's --list, the stores and the MCP tool pass 070's third argument, which this form does not take — and no proposal standing on a lineage pair can be flagged \(SMD-2313\)/.test(pre070.out) && /Apply db\/migrations\/070_listing_flags_lineage_pair\.sql\./.test(fix(pre070.out, "lineage")),
-         `070's listing gone is a warning naming 070 and the failing readers (${lpLine(pre070.out).slice(0, 200)})`);
+  const pre109 = await run(SQL_ENV);
+  assert(pre109.code === 0 && /!  lineage\s+every derived row has its lineage row, but list_supersession_proposals is from before 109 \(migration 109 not yet applied, or its form dropped by hand\): every listing fails — the CLI's --list, the stores and the MCP tool pass 109's fourth argument, which this form does not take \(SMD-2313, SMD-3248\)/.test(pre109.out) && /Apply db\/migrations\/109_listing_selects_a_pass\.sql\./.test(fix(pre109.out, "lineage")),
+         `070's listing alone — a brain at 108 — is a warning naming 109 and the failing readers (${lpLine(pre109.out).slice(0, 200)})`);
+  // 070 re-applied by hand over 109: its three-argument form beside 109's,
+  // the same ambiguity as 029's, the same warning.
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("109_") });
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
+  const beside070 = await run(SQL_ENV);
+  assert(beside070.code === 0 && besideRe.test(beside070.out) && /Apply db\/migrations\/109_listing_selects_a_pass\.sql\./.test(fix(beside070.out, "lineage")),
+         `070 re-applied over 109 leaves its three-argument listing beside 109's: the same warning naming 109 (${lpLine(beside070.out).slice(0, 200)})`);
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("109_") });
+  // A four-argument body without either sentinel — hand-written, or a vendored one — is not 109's: the check reads
+  // both (review pass 1: dropping either LIKE survived every suite). 109's own body, re-made with one sentinel renamed.
+  const [{ def }] = await claims`SELECT pg_get_functiondef('list_supersession_proposals(text, int, boolean, text)'::regprocedure) AS def`;
+  for (const sentinel of ["ob1:listing-selects-a-pass", "ob1:listing-flags-the-lineage-pair"]) {
+    await claims.unsafe(String(def).split(sentinel).join("ob1:not-the-sentinel"));
+    const unmarked = await run(SQL_ENV);
+    assert(unmarked.code === 0 && /!  lineage\s+every derived row has its lineage row, but list_supersession_proposals' four-argument body is not 109's \(written by hand, or re-made without its sentinels\): the listings run, but nothing vouches that it flags a lineage pair or selects a pass as 109 does/.test(unmarked.out)
+             && /Apply db\/migrations\/109_listing_selects_a_pass\.sql\./.test(fix(unmarked.out, "lineage")),
+           `a four-argument body without ${sentinel} is named as not 109's — its listings run — with 109 the remedy (review pass 3: it had said every listing fails) (${lpLine(unmarked.out).slice(0, 160)})`);
+    // …and with 070's form beside that body, the leftover is what is named (review pass 4: the beside arm had called
+    // the body 109's), 109 again the remedy.
+    if (sentinel === "ob1:listing-selects-a-pass") {
+      await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
+      const both = await run(SQL_ENV);
+      assert(both.code === 0 && besideRe.test(both.out) && /Apply db\/migrations\/109_listing_selects_a_pass\.sql\./.test(fix(both.out, "lineage")),
+             `a body not 109's with 070's form beside it: the leftover named, 109 the remedy (${lpLine(both.out).slice(0, 160)})`);
+      await claims.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
+    }
+    await claims.unsafe(String(def));
+  }
+  const settled = await run(SQL_ENV);
+  assert(!/list_supersession_proposals/.test(lpLine(settled.out)), `109's own body back: the lineage check names no listing (${lpLine(settled.out).slice(0, 160)})`);
   // The older bodies this ladder ran by hand (056's and 060's extraction
   // writer) replaced mention rows without sweeping their lineage rows, and
   // 061's backfill recorded pairs that later passes replaced — lineage rows
@@ -3815,7 +3847,7 @@ else {
       // The log off: writes alone wake it, a warning with the switch.
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(400), to: await at(100) } }), 20);
       const offOut = await run(SQL_ENV);
-      assert(/!\s+sleep\s+.*; writes alone wake it — OB1_QUERY_LOG is off here, so this server logs no search$/.test(row(offOut.out, "sleep")) && /→ Set OB1_QUERY_LOG=on in deploy\/\.env for the server \(read here from this preflight.s environment\) and recreate it — podman compose -f deploy\/compose\.yaml up -d server api — so/.test(fix(offOut.out, "sleep")),
+      assert(/!\s+sleep\s+.*; writes alone wake it — OB1_QUERY_LOG is off here, so this server logs no search$/.test(row(offOut.out, "sleep")) && /→ Set OB1_QUERY_LOG=on in deploy\/\.env for the server \(read here from this preflight.s environment\) and recreate it — podman compose -f deploy\/compose\.yaml up -d api — so/.test(fix(offOut.out, "sleep")),
         `the log off warns that a search does not wake it, with the switch (${row(offOut.out, "sleep")} | ${fix(offOut.out, "sleep")})`);
 
       // The log on but this role cannot read it: the opt-in sleep group is the fix; granted it, a search wakes it.
@@ -4661,7 +4693,7 @@ console.log("\n[10] The typed-decision tier is dialled when configured — every
   const proxied = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: TIER, OB1_JEV_LOCAL: "1", HTTP_PROXY: "http://127.0.0.1:9", http_proxy: undefined, NO_PROXY: undefined, no_proxy: undefined });
   assert(/✗\s+jev tier\s+.*HTTP_PROXY is set, so this call goes through that proxy unless NO_PROXY names 127\.0\.0\.1/.test(proxied.out) && /→ Add 127\.0\.0\.1 to NO_PROXY/.test(proxied.out), "a proxy variable in the way is named, with NO_PROXY as the fix");
   const stopped = await run({ ...DB_DOWN, ...NO_KEYS, ...JEV, OB1_JEV_BASE_URL: "http://jev:8020", OB1_JEV_LOCAL: "1" });
-  assert(/→ The jev service is not running: bring the profile up — compose --profile jev up -d \(compose restart server does not start it\)/.test(stopped.out), "the stack's own service unresolved: not running, and restart server does not start it");
+  assert(/→ The jev service is not running: bring the profile up — compose --profile jev up -d \(compose restart api does not start it\)/.test(stopped.out), "the stack's own service unresolved: not running, and restart server does not start it");
   // A proxy that answers — with an error status — is an answer not from the
   // tier, and the row still names the proxy as the route.
   const badProxy = Bun.serve({ port: 0, fetch: () => new Response("bad gateway", { status: 502 }) });

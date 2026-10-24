@@ -77,6 +77,8 @@ export async function read<K extends CallableOperation>(event: RequestEvent, ses
 const REFUSAL_WORDS: Record<string, string> = {
 	// A browse link whose cursor the core does not read: altered, or made under the other order.
 	REFUSED_CURSOR: 'That page link is not one the brain reads. Start the list again from its first page.',
+	// A start the change feed or the query log cannot read (SMD-2280 PR 2b).
+	REFUSED_SINCE: 'That start is not a time the brain reads: give a time with its zone (2026-10-23T08:00:00Z), a date (2026-10-23), or for changes the cursor a page ended with.',
 	// The egress rules keep this key's query from the embedding provider (SMD-1903).
 	REFUSED_EGRESS: "The brain's egress rules keep this query from the embedding provider. Search by exact text instead.",
 };

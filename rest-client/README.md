@@ -90,8 +90,10 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
   strips those, and `Headers` strips a CR or LF there, so ` k ` or `\rk` would arrive
   as `k`, which is another key. The other control characters are refused too: Bun's
   server answers them with a bare 400. A key holding `é`, or a tab inside, is sent. A legacy raw
-  `MCP_ACCESS_KEY` past U+00FF, which `?key=` carries to server-portable today, cannot
-  reach the REST core at all. **`forwarderKey`** goes in `x-brain-forwarder` on every
+  `MCP_ACCESS_KEY` past U+00FF, which `?key=` carried to server-portable's `index.ts`
+  until SMD-2287 PR 6b retired it, cannot reach the REST core at all, so it reaches no
+  server now: its client needs a new key (`deploy/README.md`, "Upgrading a stack from
+  before SMD-2287 PR 6b"). **`forwarderKey`** goes in `x-brain-forwarder` on every
   call: it names who carried the request (`act`) and grants nothing. A refusal carried
   that way also holds itself whole as `refusal`, the words its facts leave out
   included, so the MCP server words it exactly as it always has.

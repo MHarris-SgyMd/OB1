@@ -1836,7 +1836,7 @@ export interface ThoughtStore {
    * the tool names the migration.
    */
   /** `lineage` true selects the proposals standing on a lineage pair, false the rest, absent every pair (migration 070, SMD-2313). */
-  listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean }): Promise<SupersessionProposal[]>;
+  listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean; judgeKey?: string }): Promise<SupersessionProposal[]>;
 
   /**
    * Migration 052's change feed (SMD-1296): one page of thought_audit, oldest

@@ -89,7 +89,7 @@ After running the migration:
 
 ## MCP Integration
 
-Once the schema is applied, add the `progress_task` tool to your MCP server (`server-portable/index.ts`). This allows AI assistants to manage task status conversationally:
+Once the schema is applied, a `progress_task` tool lets AI assistants manage task status conversationally. It was written to add to `server-portable/index.ts`, the brain's MCP server until SMD-2287 retired it (PR 6b); an operation added to the brain is now a plugin (`plugins/README.md`, SMD-2310), and this one waits on that port (SMD-3260):
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
