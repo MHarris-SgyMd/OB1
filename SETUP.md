@@ -571,8 +571,12 @@ does from a checkout, behind a key its allowlist bounds. Two kinds of template s
   `N8N_LINEAR_API_KEY` is set.
 - **The import template:** one instance per pipeline in
   `deploy/orchestration/pipelines.json`, run by the profile's import runner
-  over `deploy/imports/<pipeline>/`. The allowlist is empty until the
-  first import recipe is converted.
+  over `deploy/imports/<pipeline>/`. That file holds the four export importers
+  (`grok`, `instagram`, `blogger`, `x-twitter`; SMD-2493), each run weekly
+  and a no-op until an export is put in its folder. Classify the runner
+  before the first export goes in (`deploy/imports/README.md` gives the
+  command); the other
+  import recipes add theirs as they convert.
 
 Once, `--init` writes its secrets into `deploy/.env`. For the act tool, put a
 Linear key with write access in `deploy/.env` as `N8N_LINEAR_API_KEY` (a key

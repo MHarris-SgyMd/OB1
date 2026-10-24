@@ -23,7 +23,8 @@ services:
       EXECUTIONS_DATA_HARD_DELETE_BUFFER: "0"
 
   # The import runner as it ships (SMD-2212), given the kit's allowlist in
-  # place of the shipped one, which is empty until a recipe is converted.
+  # place of the shipped one (the four export importers, SMD-2493, whose
+  # exports the kit does not carry).
   # Four pipelines, each its own source (the I check,
   # evals/orchestration/n8n.ts):
   # - `fixture`: a Python emitter over a five-entry export;

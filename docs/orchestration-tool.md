@@ -502,8 +502,12 @@ runs outside n8n:
   container engine's socket inside n8n, which is root on the host.
 
 The runner is built with SMD-2212's generic import template. Its allowlist
-ships empty: each recipe's ticket adds its line, its emitter and the
-emitter's packages when it converts. The eval kit proves the path with a
+shipped empty: each recipe's ticket adds its line, its emitter and the
+emitter's packages when it converts. The first four lines are the export
+importers' (grok, instagram, blogger, x-twitter; SMD-2493). They are
+JavaScript with no packages, each runs weekly, and each passes
+`--if-present`, so a folder still waiting for its export is a run that
+writes nothing rather than a failure. The eval kit proves the path with a
 fixture emitter in Python. The runner publishes no port, where n8n
 publishes one on loopback. A live-API emitter connects only to the hosts its
 line names, through its proxy (SMD-2289), and only by TLS. The hosts are the
