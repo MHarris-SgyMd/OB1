@@ -50,7 +50,7 @@ import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
+import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import { sweepOrphans } from "./rebuild.ts";
 import type { PassStop } from "./lease.ts";
@@ -3684,9 +3684,10 @@ if (want("9")) {
 
     // The hard stop: the leases returned at once, the row in hand abandoned —
     // its vector not written, its claim not released by the worker — and run()
-    // 130 once the embedding in hand returns. The stub shifts every vector, so
-    // a write shows.
-    slowMs = 1500;
+    // 130 at once, the embedding in hand aborted (SMD-2679: it ran out first).
+    // Once: a third call returns the first's release, said once. The stub
+    // shifts every vector, so a write shows.
+    slowMs = 5000;
     shift = 1;
     const vecBefore = await vectors();
     let hardStop: PassStop | undefined;
@@ -3694,13 +3695,17 @@ if (want("9")) {
     const hardRun = reembedInProcess({ job: stopKey(2), env: STOP_ENV, workers: 1, batch: 1, onPass: (x) => { hardStop = x; } });
     await inHand(stopKey(2), hardFrom);
     hardStop?.();
-    await hardStop?.();
+    const hardAt = Date.now();
+    const firstHard = hardStop?.();
+    const againHard = hardStop?.();
+    await firstHard;
     const hard = await hardRun;
+    const hardMs = Date.now() - hardAt;
     const hardClaims = await keyClaims(stopKey(2));
     const moved = [...(await vectors())].filter(([id, e]) => vecBefore.get(id) !== e).length;
     shift = 0;
-    assert(hard.code === 130 && hard.stderr.includes("second signal — exiting now") && !hardClaims.claimed && !hardClaims.failed && moved === (hardClaims.succeeded ?? 0) && !/no longer this worker's/.test(hard.stderr) && hardStop?.() === null,
-      `the hard stop abandons reembed's row in hand: run() returns 130, every vector written is a succeeded row's, none released after the leases went, and the stop inert after (exit ${hard.code}, ${moved} written, claims ${JSON.stringify(hardClaims)})`);
+    assert(hard.code === 130 && hardMs < 1500 && againHard === firstHard && hard.stderr.split("second signal — exiting now").length === 2 && !hardClaims.claimed && !hardClaims.failed && moved === (hardClaims.succeeded ?? 0) && !/no longer this worker's/.test(hard.stderr) && hardStop?.() === null,
+      `the hard stop abandons reembed's row in hand: run() returns 130 at once, the embedding aborted, every vector written is a succeeded row's, none released after the leases went, a second hard call the first's, said once, and the stop inert after (exit ${hard.code} after ${hardMs} ms, ${moved} written, claims ${JSON.stringify(hardClaims)})`);
 
     // The CLI's signals: one SIGINT after the row in hand, two at once.
     const cliRun = (key: string) => Bun.spawn(["bun", "--no-env-file", join(HERE, "reembed.ts"), "--url", URL_!, "--job", key, "--workers", "1", "--batch", "1"], { env: STOP_ENV as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
@@ -3860,6 +3865,194 @@ if (want("9")) {
     assert(lockTaken && reStopped.code === 130 && embedCalls === callsAtStop && !(await keyClaims(stopKey(15))).claimed,
       `a hard stop while update_thought waits on an edit's lock: the re-read after its STALE_READ sends nothing more, and run() returns 130 (exit ${reStopped.code}, ${embedCalls - callsAtStop} call(s) after the stop)`);
     await sql`DELETE FROM thought_work_claims WHERE work_type LIKE ${`reembed:stub-embed@${DIM}:stop%`}`;
+  }
+
+  // A follower (SMD-2679 PR 4a-2a): --follow polls, pooling again at each
+  // poll — no trigger feeds this pool — under the model's own key; its own
+  // heartbeat row; the check; and a recorded model other than its own, at the
+  // start or under it, is the permanent `model-switch` refusal.
+  {
+    await sql`DELETE FROM thoughts`;
+    const OWN_KEY = `reembed:stub-embed@${DIM}`;
+    const ROW = `heartbeat:reembed:stub-embed@${DIM}`;
+    await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+    await sql`DELETE FROM ob1_config WHERE key = ${ROW}`;
+    const row = async () => {
+      const [r] = await sql`SELECT value FROM ob1_config WHERE key = ${ROW}`;
+      return r ? (JSON.parse(r.value) as { running?: boolean; outcome?: string | null; ended?: boolean; every_s?: number; refused?: string }) : null;
+    };
+    const newThought = async (text: string) => (await sql`INSERT INTO thoughts (content) VALUES (${text}) RETURNING id::text AS id`)[0].id as string;
+    const atModel = async (id: string) => (await sql`SELECT embedding_model FROM thoughts WHERE id = ${id}::uuid AND embedding IS NOT NULL`)[0]?.embedding_model === "stub-embed";
+    const ownClaims = async () => Number((await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${OWN_KEY}`)[0].n);
+    /** A follower run that should return of itself, bounded: past 15 s it is stopped and null, so a case fails rather than hangs (the check's mutant ran on). */
+    const bounded = async (opts: Omit<ReembedOptions, "writer" | "signal">) => {
+      const ac = new AbortController();
+      const running = reembedInProcess({ ...opts, signal: ac.signal });
+      const r = await Promise.race([running, Bun.sleep(15_000).then(() => null)]);
+      if (r === null) {
+        ac.abort();
+        await running;
+      }
+      return r;
+    };
+    // What the follower's own connections open with: the budget's settings (SMD-2679 PR 2), seen by a statement trigger on the claims.
+    await sql.unsafe(`CREATE TABLE zz_reembed_seen (setting text);
+      CREATE FUNCTION zz_reembed_seen() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        -- Only a statement that pooled re-embed claims: another connection's claims carry its own settings (review pass 1).
+        IF EXISTS (SELECT 1 FROM zz_new WHERE work_type LIKE 'reembed:%') THEN INSERT INTO zz_reembed_seen VALUES (current_setting('statement_timeout') || ' ' || current_setting('work_mem')); END IF;
+        RETURN NULL; END $$;
+      CREATE TRIGGER zz_reembed_seen AFTER INSERT ON thought_work_claims REFERENCING NEW TABLE AS zz_new FOR EACH STATEMENT EXECUTE FUNCTION zz_reembed_seen()`);
+    try {
+      // Through the start and idle; a thought captured meanwhile, with no
+      // vector, is pooled at the next poll and re-embedded; a stop exits 0.
+      const started: unknown[] = [];
+      const ac = new AbortController();
+      const followRun = reembedInProcess({ job: undefined, follow: 1, workers: 1, batch: 1, session: { statement_timeout: "7s", work_mem: "3MB" }, signal: ac.signal, onStart: (r) => started.push(r) });
+      const stamped = await pollUntil(async () => (await row())?.running === false, 15_000);
+      // Idle, it stamps at every poll: the row is as fresh as a poll (review pass 1: no case held it).
+      await Bun.sleep(3000);
+      const idleAge = Number((await sql`SELECT extract(epoch FROM now() - updated_at)::float AS age FROM ob1_config WHERE key = ${ROW}`)[0]?.age ?? 99);
+      const found = await newThought("a thought the follower finds at its next poll");
+      const embedded = await pollUntil(() => atModel(found), 15_000);
+      // The data rule at every poll: a thought written since by a server on another model goes back to the pool (review pass 1).
+      await sql`UPDATE thoughts SET embedding_model = 'old-model' WHERE id = ${found}::uuid`;
+      const movedBack = await pollUntil(() => atModel(found), 15_000);
+      ac.abort();
+      const followed = await followRun;
+      const ended = await row();
+      const seen = ((await sql`SELECT DISTINCT setting FROM zz_reembed_seen`) as { setting: string }[]).map((r) => r.setting);
+      assert(stamped && idleAge < 2.5 && embedded && movedBack && followed.code === 0 && JSON.stringify(started) === JSON.stringify([{ ok: true, provider: "up" }]) && ended?.ended === true && ended.outcome === "stopped" && ended.every_s === 60 && JSON.stringify(seen) === JSON.stringify(["7s 3MB"]),
+        `reembed --follow pools at each poll: idle, its row as fresh as a poll (${idleAge.toFixed(1)} s); a thought captured after its start, with no vector, is re-embedded, and moved to another model since, re-embedded again at the next poll; a stop exits 0, its own row ${ROW} ended stopped, and its connections carry the session's settings (exit ${followed.code}; started ${JSON.stringify(started)}; row ${JSON.stringify(ended)}; seen ${JSON.stringify(seen)})`);
+
+      // The check: the start alone, through, and nothing pooled.
+      const unpooled = await newThought("a thought the check leaves unpooled");
+      const checked: unknown[] = [];
+      const claimsBefore = await ownClaims();
+      const check = await bounded({ job: undefined, follow: 1, check: true, onStart: (r) => checked.push(r) });
+      assert(check?.code === 0 && JSON.stringify(checked) === JSON.stringify([{ ok: true, provider: "up" }]) && (await ownClaims()) === claimsBefore && !(await atModel(unpooled)),
+        `reembed's check is the follower's start alone: 0, the start through, nothing pooled and nothing embedded (exit ${check?.code ?? "none in 15 s"}; heard ${JSON.stringify(checked)})`);
+      await sql`DELETE FROM thoughts WHERE id = ${unpooled}::uuid`;
+
+      // A recorded model other than the follower's own: refused at the start, `model-switch`, its row ended so.
+      await sql`UPDATE ob1_config SET value = 'another-model' WHERE key = 'embedding_model'`;
+      const refusedHeard: unknown[] = [];
+      const switched = await bounded({ job: undefined, follow: 1, onStart: (r) => refusedHeard.push(r) });
+      const refusedRow = await row();
+      await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+      assert(switched?.code === 2 && /Refusing to follow: ob1_config records another-model and this follower is configured for stub-embed/.test(switched.stderr) && JSON.stringify(refusedHeard) === JSON.stringify([{ ok: false, refused: "model-switch" }])
+          && refusedRow?.ended === true && refusedRow.outcome === "failed" && refusedRow.refused === "model-switch",
+        `a follower whose model is not the one ob1_config records is refused at its start, kind model-switch, its row ended on it (exit ${switched?.code ?? "none in 15 s"}; heard ${JSON.stringify(refusedHeard)}; row ${JSON.stringify(refusedRow)})`);
+
+      // …and the record moving under a running follower ends it so.
+      const acMid = new AbortController();
+      const midRun = reembedInProcess({ job: undefined, follow: 1, signal: acMid.signal });
+      const midStamped = await pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 15_000);
+      await sql`UPDATE ob1_config SET value = 'another-model' WHERE key = 'embedding_model'`;
+      const mid = await Promise.race([midRun, Bun.sleep(15_000).then(() => null)]);
+      acMid.abort();
+      if (mid === null) await midRun;
+      const midRow = await row();
+      await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+      assert(midStamped && mid?.code === 2 && /ob1_config now records another-model: this follower is configured for stub-embed and never switches the model — it stops/.test(mid.stderr) && midRow?.ended === true && midRow.refused === "model-switch",
+        `the record moving under a running follower ends it at its next poll, kind model-switch on its row (exit ${mid?.code}; row ${JSON.stringify(midRow)})`);
+
+      // The CLI's --follow, stopped by SIGINT: 0.
+      const cli = Bun.spawn(["bun", "--no-env-file", join(HERE, "reembed.ts"), "--url", URL_!, "--follow", "1", "--workers", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+      const cliStamped = await pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 20_000);
+      const cliFound = await newThought("a thought the CLI's follower finds");
+      const cliEmbedded = await pollUntil(() => atModel(cliFound), 15_000);
+      cli.kill("SIGINT");
+      const cliCode = await Promise.race([cli.exited, Bun.sleep(15_000).then(() => null)]);
+      if (cliCode === null) cli.kill("SIGKILL");
+      assert(cliStamped && cliEmbedded && cliCode === 0 && (await row())?.outcome === "stopped",
+        `the CLI's --follow 1 re-embeds a thought captured while it polls, and a SIGINT ends it with 0, its row stopped (exit ${cliCode})`);
+
+      // A stop wakes the follower's sleep: a 15 s poll ends at once (review
+      // pass 1). Started with no model recorded, it records its own.
+      await sql`DELETE FROM ob1_config WHERE key = 'embedding_model'`;
+      const acLong = new AbortController();
+      const longRun = reembedInProcess({ job: undefined, follow: 15, signal: acLong.signal });
+      const longStamped = await pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 15_000);
+      const stopAt = Date.now();
+      acLong.abort();
+      const longStopped = await Promise.race([longRun, Bun.sleep(10_000).then(() => null)]);
+      const stopMs = Date.now() - stopAt;
+      if (longStopped === null) await longRun;
+      const [{ recorded: longRecorded }] = await sql`SELECT value AS recorded FROM ob1_config WHERE key = 'embedding_model'`;
+      assert(longStamped && longStopped?.code === 0 && stopMs < 3000 && longRecorded === "stub-embed", `a stop wakes a follower asleep between polls: a 15 s poll ends in ${stopMs} ms, exit ${longStopped?.code}; started with no model recorded, it recorded ${longRecorded}`);
+
+      // --retry-failed is the first pool's alone: under a backfill key, the
+      // model recorded (a run that records it skips the flag), a thought
+      // whose call always fails is tried at the first pool and never again
+      // (review pass 1: each poll would send it; the start-over's own rule
+      // holds by the record, which a follower's later polls always find).
+      const BF_KEY = `reembed:stub-embed@${DIM}:bf`;
+      poison = true;
+      await newThought("the hemlock note a follower meets");
+      const acBf = new AbortController();
+      const bfRun = reembedInProcess({ job: BF_KEY, follow: 1, workers: 1, retryFailed: true, signal: acBf.signal });
+      const bfSettled = await pollUntil(async () => {
+        const [c] = await sql`SELECT count(*) FILTER (WHERE status IN ('pending', 'claimed'))::int AS open, count(*) FILTER (WHERE status = 'failed')::int AS failed FROM thought_work_claims WHERE work_type = ${BF_KEY}`;
+        return Number(c.open) === 0 && Number(c.failed) === 1;
+      }, 20_000);
+      const callsSettled = embedCalls;
+      await Bun.sleep(3500);
+      const callsAfter = embedCalls;
+      acBf.abort();
+      const bf = await bfRun;
+      poison = false;
+      assert(bfSettled && callsAfter === callsSettled && bf.code === 0,
+        `--retry-failed runs at the first pool alone: three polls after the backfill settled send no call (${callsAfter - callsSettled} sent), the failed row not retried (exit ${bf.code})`);
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${BF_KEY}`;
+      // A permanent database error at a poll (a privilege, a function gone)
+      // ends the follower, its row ended failed, rather than costing every
+      // poll after it while the row goes stale (review pass 1).
+      const acPerm = new AbortController();
+      const permRun = runReembed({ url: URL_!, env, follow: 1, workers: 1, signal: acPerm.signal, writer: { out: () => {}, err: () => {} } }).then((c) => `exit ${c}`, (e: Error & { errno?: string }) => `threw ${e.errno ?? e.message}`);
+      const permStamped = await pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 15_000);
+      await sql.unsafe(`CREATE FUNCTION zz_reembed_denied() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'zz: permission denied' USING ERRCODE = '42501'; END $$;
+        CREATE TRIGGER zz_reembed_denied BEFORE INSERT ON thought_work_claims FOR EACH STATEMENT EXECUTE FUNCTION zz_reembed_denied()`);
+      let permOutcome: string | null = null;
+      try {
+        await newThought("a thought a denied pool meets");
+        permOutcome = await Promise.race([permRun, Bun.sleep(15_000).then(() => null)]);
+      } finally {
+        await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_denied ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_denied()`);
+        acPerm.abort();
+        if (permOutcome === null) await permRun;
+      }
+      const permRow = await row();
+      assert(permStamped && permOutcome === "threw 42501" && permRow?.ended === true && permRow.outcome === "failed",
+        `a permanent database error at a poll ends the follower, its row ended failed (${permOutcome ?? "still running after 15 s"}; row ${JSON.stringify(permRow)})`);
+
+      // …and at a worker's claim, the pool through: a row trigger refuses the
+      // claim's move to claimed alone (review pass 2: every poll drained, every
+      // worker stopped, the row read healthy).
+      const acClaim = new AbortController();
+      const claimRun = runReembed({ url: URL_!, env, follow: 1, workers: 1, signal: acClaim.signal, writer: { out: () => {}, err: () => {} } }).then((c) => `exit ${c}`, (e: Error & { errno?: string }) => `threw ${e.errno ?? e.message}`);
+      const claimStamped = await pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 15_000);
+      await sql.unsafe(`CREATE FUNCTION zz_reembed_claim_denied() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+          IF NEW.status = 'claimed' AND OLD.status IS DISTINCT FROM 'claimed' AND NEW.work_type LIKE 'reembed:%' THEN RAISE EXCEPTION 'zz: permission denied to claim' USING ERRCODE = '42501'; END IF;
+          RETURN NEW; END $$;
+        CREATE TRIGGER zz_reembed_claim_denied BEFORE UPDATE ON thought_work_claims FOR EACH ROW EXECUTE FUNCTION zz_reembed_claim_denied()`);
+      let claimOutcome: string | null = null;
+      try {
+        await newThought("a thought a denied claim meets");
+        claimOutcome = await Promise.race([claimRun, Bun.sleep(15_000).then(() => null)]);
+      } finally {
+        await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_claim_denied ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_claim_denied()`);
+        acClaim.abort();
+        if (claimOutcome === null) await claimRun;
+      }
+      const claimRow = await row();
+      assert(claimStamped && claimOutcome === "threw 42501" && claimRow?.ended === true && claimRow.outcome === "failed",
+        `a permanent database error at a worker's claim ends the follower too, its row ended failed (${claimOutcome ?? "still running after 15 s"}; row ${JSON.stringify(claimRow)})`);
+    } finally {
+      await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_seen ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_seen(); DROP TABLE IF EXISTS zz_reembed_seen`);
+      await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+      await sql`DELETE FROM ob1_config WHERE key = ${ROW}`;
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${OWN_KEY}`;
+    }
   }
 
   provider.stop(true);
@@ -6359,6 +6552,14 @@ if (want("16")) {
     `…while a batch whose k calls exceed the lease, refused until 031, is not: the heartbeat sizes the lease now, and --dry-run says which (exit ${bigBatch.code})`);
   const badList = await consolidate("--list", "maybe");
   assert(badList.code === 2 && /--list takes pending/.test(badList.out), "a status outside the four is refused");
+  // SMD-3248: --key is a listing's — beside anything else, or past the tool's 200 characters, refused before the client.
+  const keyAlone = await consolidate("--status", "--key", "consolidate:stub@p1");
+  const keyLong = await consolidate("--list", "--key", `consolidate:${"m".repeat(200)}@p1`);
+  const keySpace = await consolidate("--list", "--key", "consolidate:h2o-lightning-4b qwen3.8:27b@p4d3");
+  const keyShell = await consolidate("--list", "--key", "consolidate:m@p1$(id)");
+  assert(keyAlone.code === 2 && /--key goes with --list/.test(keyAlone.out) && keyLong.code === 2 && /--key takes a judge key of 1 to 200 characters/.test(keyLong.out)
+      && keySpace.code === 2 && /--key takes a judge key of letters, digits and \. _ : \/ @ \+ -/.test(keySpace.out) && keyShell.code === 2 && /--key takes a judge key of letters/.test(keyShell.out),
+    `--key without --list, one past 200 characters, and one with a space (review pass 1: it selected nothing without a word) are refused (${keyAlone.out.trim().slice(0, 60)} | ${keyLong.out.trim().slice(0, 60)} | ${keySpace.out.trim().slice(0, 60)})`);
 
   // The judge's own model (SMD-1901): unset, the key and the model line name
   // the metadata model and say the knob exists; set, OB1_JUDGE_MODEL moves the
@@ -6481,6 +6682,52 @@ if (want("16")) {
          "…with the thought ids and the accept command, asking for a direction where the judge gave none");
   const listC = await consolidateInProcess({ list: "pending" });
   assert(same(listC, list), `consolidate run() in-process lists the queue as the spawned --list does, byte for byte (exit ${listC.code})`);
+  // SMD-3248: --key lists one pass's alone, by the key each row names — this pass's two, said in the header; a key no
+  // pass has, none; in-process as spawned.
+  const passKey = /judged by (\S+) on /.exec(list.out)?.[1] ?? "";
+  const listKey = await consolidate("--list", "--key", passKey);
+  const listNobody = await consolidate("--list", "pending", "--key", "consolidate:nobody@p1");
+  const listKeyC = await consolidateInProcess({ list: "pending", key: passKey });
+  assert(passKey.startsWith("consolidate:") && listKey.code === 0 && new RegExp(`2 pending proposal\\(s\\) judged by ${passKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, most confident first`).test(listKey.out)
+      && listKey.out.includes(`--accept ${directed.id}`) && listKey.out.includes(`--accept ${undirected.id} --direction <newer|older>`)
+      && listNobody.code === 0 && /no pending proposals judged by consolidate:nobody@p1/.test(listNobody.out) && same(listKeyC, listKey),
+    `--list --key lists this pass's two, the key in the header; a key no pass has lists none; run() in-process the same (${listKey.out.split("\n").find((l) => /judged by/.test(l))?.trim().slice(0, 120)})`);
+  // …and --status counts the pending by pass, the keys --key takes (review pass 1: the total alone hid which passes it
+  // held). Two more passes planted raw (review pass 2: under one key alone, the count's status term and order had no
+  // teeth): one pending under a second key, one rejected under a third and one pending under a key --key cannot take,
+  // on two thoughts outside the pool; gone with them after.
+  const rawThought = async (text: string) => ((await sql`SELECT upsert_thought(${text}, ${{ metadata: { source: "test" } }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
+  const [rawA, rawB, rawC] = [await rawThought("[16] a raw pass's older side"), await rawThought("[16] a raw pass's newer side"), await rawThought("[16] a raw pass's third side")];
+  await sql`SELECT record_supersession_proposal(${rawA}::uuid, ${rawB}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:zz-second@p1', NULL)`;
+  const rejectedRaw = (await sql`SELECT record_supersession_proposal(${rawA}::uuid, ${rawC}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:zz-third@p1', NULL) AS id`)[0].id as string;
+  await sql`SELECT review_supersession_proposal(${rejectedRaw}::uuid, 'reject', 'raw', NULL, NULL)`;
+  await sql`SELECT record_supersession_proposal(${rawB}::uuid, ${rawC}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:a key with spaces@p1', NULL)`;
+  // Review pass 3: a key a shell reads is no key --key takes (one offered unmarked ran `$(…)` when pasted), and a key
+  // with spaces is quoted, so it cannot pass for the line's own words; past ten passes the rest are counted.
+  await sql`SELECT record_supersession_proposal(${rawC}::uuid, ${rawA}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:m@p1$(id)', NULL)`;
+  const extra = await Promise.all([1, 2, 3, 4, 5, 6, 7, 8].map((i) => rawThought(`[16] a raw pass's side ${i}`)));
+  for (const [i, t] of extra.entries()) await sql`SELECT record_supersession_proposal(${rawA}::uuid, ${t}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, ${`consolidate:zz-k${i}@p1`}, NULL)`;
+  const byPass = await consolidate("--status");
+  const byLine = byPass.out.split("\n").find((l) => /pending by pass/.test(l)) ?? "";
+  assert(byPass.code === 0 && byLine.startsWith(`  pending by pass: 2 judged by ${passKey}, 1 judged by "consolidate:a key with spaces@p1" (not a key --key takes; listed by --list alone), 1 judged by "consolidate:m@p1$(id)" (not a key --key takes; listed by --list alone), 1 judged by consolidate:zz-k0@p1,`)
+      && byLine.endsWith(`, and 2 more pass(es) with 2 pending — --list --key <key> lists one pass's`) && (byLine.match(/ judged by /g) ?? []).length === 10 && !byLine.includes("zz-third"),
+    `--status counts the pending by pass, most first, ten at most with the rest counted, a rejected row's pass not among them, a key --key cannot take quoted when it has spaces and said so (${byLine.trim().slice(0, 200)})`);
+  await sql`DELETE FROM thoughts WHERE id IN (${rawA}::uuid, ${rawB}::uuid, ${rawC}::uuid)`;
+  for (const t of extra) await sql`DELETE FROM thoughts WHERE id = ${t}::uuid`;
+  // The line's builder on rows a brain would need dozens of thoughts for (review pass 4: with one row in each overflow
+  // pass, the passes counted and their rows summed were the same number): twelve passes, the last two of 3 and 2 rows;
+  // a key with a leading - is no key --key takes (the CLI's parser reads it as a flag).
+  const synth = [...Array.from({ length: 10 }, (_, i) => ({ judge_key: `consolidate:k${i}@p1`, n: 9 - (i % 3) })), { judge_key: "-consolidate:x@p1", n: 3 }, { judge_key: "consolidate:last@p1", n: 2 }];
+  const built = pendingByPassLine(synth), builtFew = pendingByPassLine([{ judge_key: "-consolidate:x@p1", n: 4 }]);
+  assert(built.endsWith(", and 2 more pass(es) with 5 pending — --list --key <key> lists one pass's") && (built.match(/ judged by /g) ?? []).length === 10
+      && builtFew === `  pending by pass: 4 judged by "-consolidate:x@p1" (not a key --key takes; listed by --list alone) — --list --key <key> lists one pass's`,
+    `the by-pass line names ten, counts the rest's passes and rows apart, and marks a leading - (${built.slice(-80)} | ${builtFew})`);
+  // The capped page's note, every case (review pass 2: a capped --list all --key said to decide and list again, which
+  // never drains an all-status page; no suite reached a cap under --key).
+  assert(capNote("pending", false) === "--status counts them all" && capNote(undefined, false) === "--status counts them all"
+      && capNote("pending", true) === "decide these and list again for the rest; --status counts each pass's pending"
+      && ["accepted", "rejected", "stale", "lineage", undefined].every((st) => capNote(st, true) === "the rest are not listed (SMD-3249 pages)"),
+    "a capped page's note: --status's total unselected; under --key, pending drains as it is decided and every other selection waits for paging");
 
   // The review path, through the worker's flags, audited under the key's name.
   const needDir = await consolidate("--accept", undirected.id);
@@ -6634,24 +6881,27 @@ if (want("16")) {
     // …and the accept is refused without --force — a guard on the one accept
     // door, not a verdict: the row stays pending, nothing is written
     // (definitions probe, second review pass: the accept went through under
-    // the reject's own advice). A brain without 070's listing gets the file
-    // named on --list, not a driver stack: the form dropped and put back.
+    // the reject's own advice). A brain without the listing's current form
+    // (109's since SMD-3248, 070's before) gets the file named on --list, not
+    // a driver stack: the form dropped and put back.
     const acceptLineage = await consolidate("--accept", atlas!.id);
     assert(acceptLineage.code === 1 && /accept refused: one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it\./.test(acceptLineage.out) && acceptLineage.out.includes(`--reject ${atlas!.id} --note "lineage pair (066)" is the expected decision; pass --force (with --direction on an undirected verdict) if the pointer is what you mean`)
            && (await proposalRow(atlas!.id)).status === "pending" && (await sql`SELECT supersedes FROM thoughts WHERE id = ${atlasNew}::uuid`)[0].supersedes === null,
            `--accept on a lineage pair is refused naming the reject and --force, the row still pending and no pointer written (exit ${acceptLineage.code}: ${acceptLineage.out.trim().slice(0, 200)})`);
-    // R3 tooth (mutant 2): the catch names 070 for the one error it is for — an unrelated failure inside the listing is shown as itself.
-    await sql.unsafe(`CREATE OR REPLACE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20, p_lineage boolean DEFAULT NULL) RETURNS TABLE (id uuid, status text, verdict text, confidence numeric, reason text, similarity real, judge_key text, judged_at timestamptz, reviewed_at timestamptz, review_note text, superseding_id uuid, older_id uuid, older_content text, older_created_at timestamptz, newer_id uuid, newer_content text, newer_created_at timestamptz, older_edited boolean, newer_edited boolean, lineage boolean) LANGUAGE plpgsql STABLE AS $f$ BEGIN RAISE EXCEPTION 'boom: an unrelated failure inside the listing'; END $f$`);
+    // R3 tooth (mutant 2): the catch names the file for the one error it is for — an unrelated failure inside the listing is shown as itself.
+    await sql.unsafe(`CREATE OR REPLACE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20, p_lineage boolean DEFAULT NULL, p_judge_key text DEFAULT NULL) RETURNS TABLE (id uuid, status text, verdict text, confidence numeric, reason text, similarity real, judge_key text, judged_at timestamptz, reviewed_at timestamptz, review_note text, superseding_id uuid, older_id uuid, older_content text, older_created_at timestamptz, newer_id uuid, newer_content text, newer_created_at timestamptz, older_edited boolean, newer_edited boolean, lineage boolean) LANGUAGE plpgsql STABLE AS $f$ BEGIN RAISE EXCEPTION 'boom: an unrelated failure inside the listing'; END $f$`);
     const listBoom = await consolidate("--list", "lineage");
-    assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 070/.test(listBoom.out),
-           `an unrelated error inside --list is shown as itself, not as a missing 070 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
-    await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
-    assert(/1 unreviewed standing on a lineage pair \(apply migration 070 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
-           "--status still counts the row on a brain without 070 and says the listing needs the file before pointing at it");
-    const listPre070 = await consolidate("--list", "lineage");
-    assert(listPre070.code === 1 && /--list needs migration 070 \(db\/migrations\/070_listing_flags_lineage_pair\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre070.out) && !/PostgresError/.test(listPre070.out),
-           `on a brain without 070 --list names the file, not a driver error (exit ${listPre070.code}: ${listPre070.out.trim().slice(0, 160)})`);
+    assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 109/.test(listBoom.out),
+           `an unrelated error inside --list is shown as itself, not as a missing 109 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
+    // A brain at 108: 070's three-argument form alone, 109's gone.
+    await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean, text)`);
     await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
+    assert(/1 unreviewed standing on a lineage pair \(apply migration 109 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
+           "--status still counts the row on a brain without 109 and says the listing needs the file before pointing at it");
+    const listPre109 = await consolidate("--list", "lineage");
+    assert(listPre109.code === 1 && /--list needs migration 109 \(db\/migrations\/109_listing_selects_a_pass\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre109.out) && !/PostgresError/.test(listPre109.out),
+           `on a brain without 109 --list names the file, not a driver error (exit ${listPre109.code}: ${listPre109.out.trim().slice(0, 160)})`);
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("109_") });
     await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${atlasNew}::uuid`;
     // The edit resolves the conflict (the stub reads the new pair as unrelated); the rebuild sets the row stale.
     const atlasFp2 = await moveRaw(atlasNew, "Invoices for the atlas account follow the deploy calendar.");
@@ -7381,6 +7631,13 @@ if (want("16")) {
     const listed = await consolidate("--list", "relations");
     assert(listed.code === 0 && /relation\(s\), newest first/.test(listed.out) && listed.out.includes(rotaNew) && listed.out.includes(rotaOld) && /\] related/.test(listed.out) && !/EDITED SINCE JUDGED/.test(listed.out),
       `--list relations shows the edge with both thoughts, and nothing edited since it was judged (exit ${listed.code})`);
+    // SMD-3248: --key selects the relations of one pass, by the key each edge's facet names.
+    const relKey = /relation \S+\s+judged by (\S+) on /.exec(listed.out)?.[1] ?? "";
+    const relByKey = await consolidate("--list", "relations", "--key", relKey);
+    const relNobody = await consolidate("--list", "relations", "--key", "consolidate:nobody@p1");
+    assert(relKey.startsWith("consolidate:") && relByKey.code === 0 && relByKey.out.includes(rotaNew) && /relation\(s\) judged by \S+, newest first/.test(relByKey.out) && !/ANOTHER JUDGE KEY/.test(relByKey.out)
+        && relNobody.code === 0 && /no relations judged by consolidate:nobody@p1/.test(relNobody.out),
+      `--list relations --key lists that pass's edges, said in the header, and none under a key no pass has (${relByKey.out.split("\n").find((l) => /judged by/.test(l))?.trim().slice(0, 120)})`);
     // A side's text moved since the judgement: the edge is flagged (SMD-2726 closes it).
     await sql`UPDATE thoughts SET content = content || ' — on weekdays' WHERE id = ${rotaOld}::uuid`;
     const listedEdited = await consolidate("--list", "relations");
@@ -7643,6 +7900,14 @@ if (want("16")) {
     const apartA = await outside("A note on the boiler room, judged apart."), apartB = await outside("A note on the boiler's warranty, judged apart.");
     await sql`SELECT record_thought_relation(${apartB}::uuid, ${apartA}::uuid, 'distinct', 0.7, 'consolidate:other-model@p4', NULL, 'a', 'b', NULL)`;
     const marked = await consolidate("--list", "relations");
+    // Under --key that other pass's own (review pass 2: under this pass's key the mark never showed anyway): its row
+    // keeps OLDER SUPERSEDED and loses ANOTHER JUDGE KEY, the pass being chosen.
+    const markedLines = marked.out.split("\n");
+    const otherAt = markedLines.findIndex((l) => /\] related  .*ANOTHER JUDGE KEY/.test(l));
+    const otherKey = markedLines.slice(otherAt).map((l) => /relation \S+\s+judged by (\S+) on /.exec(l)?.[1]).find(Boolean) ?? "";
+    const markedKeyed = await consolidate("--list", "relations", "--key", otherKey);
+    assert(otherKey.startsWith("consolidate:") && /\] related  .*OLDER SUPERSEDED/.test(markedKeyed.out) && !/ANOTHER JUDGE KEY/.test(markedKeyed.out),
+      `--list relations --key <the other pass's key> keeps OLDER SUPERSEDED and drops ANOTHER JUDGE KEY (${otherKey}: ${markedKeyed.out.split("\n").find((l) => /\] related/.test(l))?.trim().slice(0, 120)})`);
     const statusOther = await consolidate("--status");
     assert(/\] related  .*OLDER SUPERSEDED.*ANOTHER JUDGE KEY/.test(marked.out) && /1 judged under another key, which this pass replaces only for the pairs it judges again/.test(statusOther.out),
       `--list relations marks a relation whose older side is superseded and one judged under another key, and --status counts the other key's — not the distinct's (${marked.out.split("\n").find((l) => /\] related/.test(l))?.trim()})`);
@@ -12792,8 +13057,10 @@ if (want("37b")) {
       `the guards: no key first (identity), then each setting not digits named (usage), empty passing, none asked none refused (${noKey?.line.slice(0, 50)} | ${two?.line})`);
     // The keys: the claim workers' under the job their configuration names, as a compose follower (no --job) stamps.
     assert(followerKey("sleep", {}) === "heartbeat:sleep" && followerKey("board-sync", {}) === "heartbeat:board-sync" && EXTRACT_KEY === `heartbeat:${extractionKey(resolveEmbedConfig({}).metadataModel)}`
-        && followerKey("extract", { OB1_METADATA_MODEL: "m:1b" }) === `heartbeat:${extractionKey("m:1b")}` && /^heartbeat:consolidate:/.test(followerKey("consolidate", {}) ?? ""),
-      `the row a supervisor ends is the one its follower stamps (${EXTRACT_KEY})`);
+        && followerKey("extract", { OB1_METADATA_MODEL: "m:1b" }) === `heartbeat:${extractionKey("m:1b")}` && /^heartbeat:consolidate:/.test(followerKey("consolidate", {}) ?? "")
+        // A re-embed follower's, under the model's own key (SMD-2679), not consolidate's.
+        && followerKey("reembed", { OB1_EMBEDDING_MODEL: "e:4b", OB1_EMBEDDING_DIM: "768" }) === "heartbeat:reembed:e:4b@768",
+      `the row a supervisor ends is the one its follower stamps (${EXTRACT_KEY}; reembed ${followerKey("reembed", { OB1_EMBEDDING_MODEL: "e:4b", OB1_EMBEDDING_DIM: "768" })})`);
 
     // endRow: the follower's last word since its start kept — the scheduler's
     // sleep and its refusal — its waits dropped, the row ended failed, the

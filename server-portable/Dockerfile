@@ -23,8 +23,9 @@ RUN bun install --frozen-lockfile --production
 # The operator GUI (SMD-2280), built here: SvelteKit's adapter-node writes a
 # server with every package bundled into dashboard/build/, so this stage's
 # install (all build tools) stays behind and the image carries the build
-# alone. It imports the REST client and the auth switch's rule from beside it,
-# as in a checkout, so both are copied in first; its type-only imports of
+# alone. It imports the REST client, the auth switch's rule and the moved-ticket
+# words (stated-status.ts, the search page) from beside it, as in a checkout, so
+# they are copied in first; its type-only imports of
 # server-portable/ are erased by the build. On the builder's own platform: the
 # stage runs JavaScript (svelte-kit sync, vite build), which crashed Bun under
 # QEMU when the release cross-builds the other architecture, and then hung
@@ -44,6 +45,7 @@ COPY dashboard/package.json dashboard/bun.lock ./
 RUN bun install --frozen-lockfile --ignore-scripts
 COPY rest-client/*.ts /app/rest-client/
 COPY server-portable/oauth-edge.ts server-portable/auth.ts server-portable/brain-info.ts /app/server-portable/
+COPY server-portable/stated-status.ts /app/server-portable/
 COPY server-portable/core/filter.ts /app/server-portable/core/
 COPY dashboard/svelte.config.js dashboard/vite.config.ts ./
 COPY dashboard/src ./src
@@ -145,14 +147,14 @@ USER bun
 # once its imports have loaded: a stop in that fraction of a second is still
 # the grace period's kill.
 #
-# The entry is the command: index.ts, the MCP server, unless a service names
-# another — the REST core's `command: ["api.ts"]` in deploy/compose.yaml
-# (SMD-2284): one image, one preflight, two servers. Two more run without
-# it, with `bun` as the entrypoint: ../mcp-server/index.ts (SMD-2287) and
-# the operator GUI's ../dashboard/serve.ts (SMD-2280), which read no store and
+# The entry is the command: api.ts, the REST core (SMD-2284), the one server
+# that reads the store; until SMD-2287 PR 6b it was index.ts, the MCP server
+# that read it itself. Two more run from this image without the preflight,
+# with `bun` as the entrypoint: ../mcp-server/index.ts (SMD-2287) and the
+# operator GUI's ../dashboard/serve.ts (SMD-2280), which read no store and
 # hold no key list — the REST core does both.
 ENTRYPOINT ["/bin/sh", "-c", "trap 'exit 143' TERM; trap 'exit 130' INT; bun preflight.ts & wait $! || exit $?; exec bun \"$@\"", "entry"]
-CMD ["index.ts"]
+CMD ["api.ts"]
 
 # Liveness only: a keyless GET of /health, which all three servers answer 200 with
 # no key, no store and nothing about the brain. Not a POST to the MCP

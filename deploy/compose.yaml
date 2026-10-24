@@ -57,8 +57,8 @@ x-logging: &logging
     max-size: "10m"
     max-file: "3"
 
-# The plugins' knobs (SMD-2310), merged by `server` and the REST core alone:
-# the workers merge the server's block, and none of them runs a plugin or
+# The plugins' knobs (SMD-2310), merged by the REST core alone: the workers
+# merge its environment block, and none of them runs a plugin or
 # needs the plugin login role's password. The migrator forwards its own, and
 # the MCP server at /mcp only OB1_PLUGINS, its tools' names (SMD-2287).
 x-plugin-env: &plugin-env
@@ -78,8 +78,7 @@ x-hook-env: &hook-env
   OB1_HOOK_SECRETS: ${OB1_HOOK_SECRETS:-}
 
 # The servers' OpenTelemetry settings (SMD-1849), merged by the MCP server and
-# the REST core alone: the workers send no telemetry, nor `server`, which is
-# off the mesh the collector is on (SMD-2287). Each is the SDK's own
+# the REST core alone: the workers send no telemetry (SMD-2287). Each is the SDK's own
 # variable, passed as deploy/.env gives it; unset, it is empty, which the
 # servers read as unset (measured: no line, no change), so nothing is sent until
 # OTEL_EXPORTER_OTLP_ENDPOINT names a collector — the observability profile's
@@ -205,10 +204,10 @@ x-otel-env: &otel-env
 #           alone (measured);
 #   api-off, not-served  noop@internal's 418 becomes the 404 a path nothing
 #           serves gets (measured on this pin).
-# Every backend is dialled by its mesh name, written rooted. Not `server`:
-# compose gives each container its service name as an alias on every network
-# it joins, so a container of another project on this mesh (a tier joined it
-# from SMD-2294 to SMD-2874) would answer to `server` beside this stack's.
+# Every backend is dialled by its mesh name, written rooted, never its service
+# name: compose gives each container its service name as an alias on every
+# network it joins, so a container of another project on this mesh (a tier
+# joined it from SMD-2294 to SMD-2874) would answer to it beside this stack's.
 # The table holds no comment of its own: Traefik renders it as a Go template
 # first, so a comment line there is not inert, and check 28
 # (scripts/check-fork-consistency.ts, PROXY_ROUTE_TABLE) holds it byte for
@@ -555,8 +554,8 @@ services:
   # Memory: 014 seeds hnsw.scan_mem_multiplier = 8 on the database, so a
   # filtered search that reaches the HNSW walk may use work_mem x 8 (32 MB at
   # the 4 MB default) per scan node, two per call, per connection — a ceiling
-  # across every pooled connection (server and api each hold OB1_PG_POOL, so
-  # twenty at the default), on top of shared_buffers. On SMD-1499's 64-dimension
+  # across every pooled connection (api holds OB1_PG_POOL, ten at the
+  # default; until SMD-2287 PR 6b `server` held as many again), on top of shared_buffers. On SMD-1499's 64-dimension
   # bench corpus 014's tuple cap bound first (ten broad filters grew 4-5 MiB in
   # the bench, 51 MiB with fresh connections; deploy/.env.example). Thin
   # filters never walk (they are answered exactly); lower the multiplier with
@@ -649,7 +648,7 @@ services:
   # of the checkout's db/ on a stock Bun image, so a release's compose overlay
   # pulls the migrator that wrote the schema_version its server checks, on a
   # machine with no checkout, and this stack and a pinned one run the same
-  # bytes. Root context, as server's: migrate.ts imports db/config.mjs, and the
+  # bytes. Root context, as the server image's (api's): migrate.ts imports db/config.mjs, and the
   # root .dockerignore keeps the context to what the two images need.
   migrate:
     # Named, so orchestration-runner-role finds it by one name under every
@@ -700,16 +699,30 @@ services:
     networks: [data]
     logging: *logging
 
-  # Replaces: the Supabase Edge Function, and `supabase functions deploy`.
-  server:
-    # Named, so the REST core below runs this image by name — one build, the
-    # two servers always on one code (review pass 1: an image of its own fell
-    # behind after `up --build server`, as orchestration-runner-role's did).
-    # Docker Compose v2 named the build this already; the Python podman-compose
-    # and --compatibility named it <project>_server, so their next `up` builds
-    # it once under this name. Never pulled, as migrate: `pull` skips it and a
-    # fresh `up` builds it (review pass 2). The release overlay pulls its
-    # pinned server instead.
+  # The REST core (SMD-2284): every operation the MCP tools expose, as JSON —
+  # the one server that reads the store, run as `bun api.ts` after the image's
+  # preflight. Replaces the Supabase Edge Function, and `supabase functions
+  # deploy`; until SMD-2287 PR 6b retired it, a `server` service ran the MCP
+  # server the image's index.ts was beside it. Internal by default: no port,
+  # reached on the mesh as api.ob1.internal (the MCP server and the GUI), and
+  # through the proxy at /api only where deploy/compose.api-public.yaml is
+  # named. On `data` and `egress` too, for Postgres and the model providers
+  # (SMD-2583), so every container on `egress` reaches it as `api:8000`, and
+  # needs a key for anything but /health and /openapi.json. Its writes record
+  # their door as open-brain-api (thought_audit.origin), and the jobs it starts
+  # are its own (migration 078); at start it marks lost those a prior process
+  # left running, the retired MCP server's (door open-brain) among them.
+  api:
+    # The server image, built here and named, so the MCP server and the GUI
+    # below run it by name — one build, the three servers always on one code
+    # (review pass 1 of SMD-2284: an image of its own fell behind after a
+    # partial `up --build`, as orchestration-runner-role's did). Docker Compose
+    # v2 names the build this already; the Python podman-compose and
+    # --compatibility named it <project>_server, so their next `up` builds it
+    # once under this name. Never pulled, as migrate: `pull` skips it and a
+    # fresh `up` builds it. The release overlay pulls its pinned server image
+    # instead. The name keeps `-server`: the image is the server image, whose
+    # default command is this service's.
     image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
     pull_policy: never
     build:
@@ -855,8 +868,7 @@ services:
       # service, which lists them itself) advertises OAuth at <origin>/mcp only
       # while COMPOSE_PROFILES names auth, the request's Host is the origin's,
       # and the authorization server answers its probe on the mesh (SMD-2382,
-      # oauth-edge.ts); `server`, off the mesh, advertises nothing. The REST core below takes this
-      # block too, and accepts the authorization server's tokens only while
+      # oauth-edge.ts). The REST core takes this block, and accepts the authorization server's tokens only while
       # both are set (SMD-2286, oauth-token.ts): drop them from it and it takes
       # keys alone. Its preflight prints the same `public origin` row, naming
       # the MCP server.
@@ -874,8 +886,8 @@ services:
       OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
       # Seconds between the vector mender's ticks, 1 to 86400, 0 or off for
       # none: the servers embed the thoughts saved without a vector once the
-      # provider answers (SMD-2889). Unset, 60. Both this server and the REST
-      # core read it; a leader lock lets one mend at a time.
+      # provider answers (SMD-2889). Unset, 60. The REST core reads it; a
+      # leader lock lets one mend at a time, where two run on one database.
       OB1_VECTOR_MEND_INTERVAL: ${OB1_VECTOR_MEND_INTERVAL:-}
       # Seconds between re-probes of a local embedding provider that does not
       # answer (GET /models; one embedding of "probe" where a call failed in a
@@ -884,22 +896,15 @@ services:
       # degraded when it answers (SMD-2890). Unset, 15.
       OB1_PROVIDER_REPROBE_INTERVAL: ${OB1_PROVIDER_REPROBE_INTERVAL:-}
       PORT: "8000"
+    command: ["api.ts"]
     environment:
-      <<: [*server-env, *plugin-env]
+      <<: [*server-env, *plugin-env, *hook-env, *otel-env]
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
-    # No `ports:`, and no route through the proxy since SMD-2532.
     depends_on:
       postgres:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-      # The typed-decision tier, when --profile jev runs it: the server waits
-      # for it to be healthy, so a first start that fetches the weights (~20 s)
-      # does not crashloop the server on preflight's `jev tier` row (first
-      # review pass). `required: false`: without the profile there is no jev
-      # service and this is ignored (compose 2.20+; measured on 5.5 — `config`
-      # lists postgres, migrate, server). A jev that never becomes healthy
-      # holds the server back, which is what OB1_JEV_BASE_URL asked for.
       jev:
         condition: service_healthy
         required: false
@@ -917,51 +922,6 @@ services:
     # (fourth review pass).
     extra_hosts: &host-alias
       - "host.docker.internal:host-gateway"
-    # `data`, where it reaches Postgres, and `egress`, where it reaches the
-    # model providers (the stack's Ollama and Jev by name, a host or hosted
-    # one outward). Not the mesh: nothing routes to it since SMD-2532 closed
-    # the root route, and /mcp is the `mcp` service's below (SMD-2287 PR 5b),
-    # on the mesh alone, as the ADR has it. Nothing in the stack calls it:
-    # n8n's brain calls and the orchestration eval's go to the REST core
-    # (SMD-2295). It retires in SMD-2287 PR 6. No dns_search here, unlike the
-    # proxy: an operator's model endpoint may be a short name their resolver
-    # completes.
-    networks:
-      data: {}
-      egress: {}
-    logging: *logging
-
-  # The REST core (SMD-2284): every operation the MCP tools expose, as JSON,
-  # over the same core — the server's image run as `bun api.ts`, with the
-  # server's environment and preflight. Internal by default: no port, reached
-  # on the mesh as api.ob1.internal (the GUI, when it comes), and through the
-  # proxy at /api only where deploy/compose.api-public.yaml is named. On
-  # `data` and `egress` too, as the server is, for Postgres and the model
-  # providers (SMD-2583), so every container on `egress` reaches it as
-  # `api:8000`, and needs a key for anything but /health and /openapi.json. Its
-  # writes record their door as open-brain-api (thought_audit.origin), and
-  # the jobs it starts are its own (migration 078).
-  api:
-    # The server's image, by the server's name, never pulled or built here:
-    # `up --build server` rebuilds it, and the proxy's dependency on this
-    # service brings it along whenever the proxy is named. The release
-    # overlay pins it to the release's server image.
-    image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
-    pull_policy: never
-    command: ["api.ts"]
-    environment:
-      <<: [*server-env, *plugin-env, *hook-env, *otel-env]
-    stop_grace_period: ${OB1_STOP_GRACE:-10}s
-    depends_on:
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-      jev:
-        condition: service_healthy
-        required: false
-    restart: unless-stopped
-    extra_hosts: *host-alias
     networks:
       data: {}
       egress: {}
@@ -993,8 +953,8 @@ services:
   # Not the plugins' login password (plugin-env): it runs no plugin SQL, only
   # their tools' schemas, which OB1_PLUGINS names.
   mcp:
-    # The server's image, by the server's name, never pulled or built here,
-    # as the REST core's; the release overlay pins it to the release's.
+    # The server image, by the name the REST core builds it under, never
+    # pulled or built here; the release overlay pins it to the release's.
     image: ${COMPOSE_PROJECT_NAME:-open-brain}-server
     pull_policy: never
     # Bun with auto-install off: the image's own packages are all it loads,
@@ -1200,14 +1160,13 @@ services:
       start_period: 10s
       start_interval: 1s
     # Started after the MCP server, the operator GUI and the REST core behind them, so `up proxy`
-    # brings the brain once its image is built (the `server` service builds
-    # it: name `server` with `--build`, as the commands below do), and
+    # brings the brain once its image is built (the `api` service builds
+    # it: name `api` with `--build`, as the commands below do), and
     # `up forwarder`, which waits on the proxy, its port too; not held for their health: while the MCP server is down the
     # proxy answers 502, and it answers again when the server does. So the
-    # documented `up -d --build server proxy forwarder` recreates both on the
-    # server's new image rather than leaving them on the old one (SMD-2284
-    # review pass 1; SMD-2287). Not after `server`, which nothing here
-    # routes to since SMD-2532.
+    # documented `up -d --build api proxy forwarder` recreates them on the
+    # server image's new build rather than leaving them on the old one (SMD-2284
+    # review pass 1; SMD-2287).
     depends_on:
       api:
         condition: service_started
@@ -1830,8 +1789,7 @@ services:
       start_period: 120s
       start_interval: 1s
     # The REST core, n8n's one way into the brain (SMD-2295): `up -d n8n`
-    # brings it along. It runs the image `server`'s service builds, so on a
-    # project that has not built it, bring the stack up first.
+    # brings it along, and `api`'s build with it.
     depends_on:
       api:
         condition: service_started
@@ -1873,8 +1831,8 @@ services:
   # starts.
   orchestration-runner-role:
     # migrate's image, by migrate's name, never pulled or built here: an image
-    # of its own kept an old config.mjs's grants after `up --build server`
-    # rebuilt migrate (review pass 5), and building it on every `up` made an
+    # of its own kept an old config.mjs's grants after an `up --build` of the
+    # server rebuilt migrate (review pass 5), and building it on every `up` made an
     # offline `up` wait ~16 min on the registry (pass 6). The release overlay
     # pins it to the release's migrator.
     image: ${COMPOSE_PROJECT_NAME:-open-brain}-migrate
@@ -2242,7 +2200,7 @@ services:
     # (docker/compose#11900, as with the proxy's table), so an upgrade that
     # changes the dashboard or a rule reaches Grafana on its `up -d`.
     labels:
-      ob1.grafana-dashboard: "sha256:1cdea2f74a57034dad33f48a94f4b2c2541535dbc28e6c1b555e7f94f3c0d3ee"
+      ob1.grafana-dashboard: "sha256:bcafd1cbf50f1c5343812ee49bd615746971fa6b9c117321e9fcb23bb145aa3c"
       ob1.grafana-alert-rules: "sha256:b49651cf40cccc8943b6525e8351df4254ff558a37609bb61453f5181b47ac95"
       ob1.grafana-dashboard-provider: "sha256:2a13b2862670670482aadbadfcf7a864e28fe4d3c9704faa9ac75ff66b9d021d"
     # `mesh` as lgtm.ob1.internal: the MCP server and the REST core send to it there, and
@@ -2408,7 +2366,7 @@ networks:
   #          project joins it: a canary is a brain of its own, on its own
   #          networks and port (SMD-2874; docs/one-brain-per-stack.md).
   #   data   internal: Postgres, and only what connects to it — the migrator,
-  #          `server` and the REST core, board-sync, the workers, the sleep scheduler, the import runner and
+  #          the REST core, board-sync, the workers, the sleep scheduler, the import runner and
   #          its role's one-shot. No other project joins it.
   #   egress outward: whatever calls a model provider or a vendor (the two
   #          servers, board-sync, the workers, the sleep scheduler, the import runner, n8n), and
@@ -2684,7 +2642,7 @@ configs:
             "type": "timeseries",
             "id": 9,
             "title": "Provider calls per second",
-            "description": "Embedding and chat calls the REST core made, by model; the workers' are not sent (SMD-2910), nor `server`'s.",
+            "description": "Embedding and chat calls the REST core made, by model; the workers' are not sent (SMD-2910).",
             "datasource": {"type": "prometheus", "uid": "prometheus"},
             "gridPos": {"x": 0, "y": 25, "w": 8, "h": 8},
             "targets": [

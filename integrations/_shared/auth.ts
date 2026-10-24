@@ -64,7 +64,7 @@
  * browser history and shell history — which is why scopes matter: give the
  * URL-embedded key read-only access wherever the client only needs to read.
  *
- * Consumers: server-portable/index.ts; the six vendored extensions under
+ * Consumers: the REST core (rest/app.ts) and mcp-server/; the six vendored extensions under
  * extensions/ (seven servers), which authenticated with `key !== expected` on a
  * URL query key and ran as the service role until they were made consumers of
  * this module (SMD-1252, FORK.md change 64); and the vendored recipes and

@@ -5599,8 +5599,8 @@ not) and
 their delimiters: the capture's metadata, the extractor's entities (the
 subject named), and the consolidation judge's verdict by one blunt rule — two
 texts under one subject whose digit runs differ conflict, the newer current,
-0.9; anything else agrees. The real `server-portable/index.ts` boots
-in-process against a throwaway Postgres with two write keys; each session's
+0.9; anything else agrees. The MCP server, with the REST core behind it,
+boots in-process (`server-portable/index.ts` did until SMD-2287 PR 6a) against a throwaway Postgres with two write keys; each session's
 rows are then dated one calendar day apart (029's candidate rule wants a day
 between a pair; the text is not touched, so 050's mark stays). One process per
 arm, because the server snapshots its environment and pools connections.

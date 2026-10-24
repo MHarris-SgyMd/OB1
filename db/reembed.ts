@@ -30,8 +30,32 @@
  *   bun db/reembed.ts --url … --accept-failed <thought-id…>   # a row the provider refuses permanently keeps its vector, and the row says so (see Saying "I know")
  *   bun db/reembed.ts --url … --accept-failed --all           # …every failed row under the job — said explicitly, since it hides an outage as well
  *   bun db/reembed.ts --url … --retire reembed:B@1024         # remove the record of a superseded pass (a switch abandoned or reverted)
+ *   bun db/reembed.ts --url … --follow [SECONDS]              # then poll every SECONDS (15 bare), pooling again at each, until a signal (exit 0) — see Following
  *   await run({ url, dryRun: true })                          # a dry run, in-process: import { run } from "./reembed.ts" (SMD-2304)
  *   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)   --batch N (8; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease when that is shorter; at least 1, and the lease must cover two)
+ *
+ * ── Following (SMD-2679) ────────────────────────────────────────────────────
+ * --follow polls after the pass, as extract-entities.ts's and consolidate.ts's
+ * do, so the sleep scheduler can run re-embed (PR 4b). Each poll pools again —
+ * no trigger feeds this pool, as 016's feeds extraction's: the data rule and
+ * the rows not at the target, or every thought under a backfill key (a
+ * follower may take one, and records a model where none is recorded, as a run
+ * does); the record, the start-over and the --retry-* flags are the first
+ * pool's. A follower never switches the model: --switch-model, --retire and
+ * --accept-failed are refused beside it, a configured model other than the one
+ * ob1_config records is the start's refusal of kind `model-switch` (permanent:
+ * a retry reads the same record), and the record moving under a running
+ * follower ends it so at its next poll, after the pass in hand drains, exit
+ * 2 — a pass in hand meanwhile may write its model's vectors over the new
+ * pass's, which the new model's data rule returns to its pool. A poll costs
+ * a scan of thoughts (the rows not at the target) and of the job's succeeded
+ * rows (the data rule), as consolidate.ts's poll costs its pool's scan. A
+ * permanent database error (a privilege, a function gone) at a poll or a
+ * claim ends the follower; any other costs the poll. Its own heartbeat row is
+ * `heartbeat:reembed:<model>@<dim>` (db/pass-stamp.ts), ended with the kind
+ * on a refusal. A signal stops it after the thought in hand, exit 0; the hard
+ * stop exits 130. run() takes the scheduler's options as the claim workers'
+ * do: `check`, `onStart`, `stamper`, `banner`, `summary` and `session`.
  *
  * The model, width and provider come from the same variables the server reads —
  * OB1_EMBEDDING_MODEL, OB1_EMBEDDING_DIM, OB1_EMBEDDING_DIMENSIONS,
@@ -411,12 +435,13 @@ import {
 } from "./config.mjs";
 import { createEmbedder, PROVIDER_ERROR_CHARS, ProviderError, resolveEmbedConfig, shownBase, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, mayLeaveBox, ROW_UNITS } from "../server-portable/egress.ts";
-import { blanketGate, egressDescription, egressRefusal } from "./worker-bootstrap.ts";
+import { blanketGate, databasePermanent, egressDescription, egressRefusal, modelMissing, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { actorPayload, UUID_RE } from "../server-portable/store.ts";
 import { chunkRecipe } from "../server-portable/lineage.ts";
-import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
+import { DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, numberIn, numberProblem, type Writer } from "./cli.ts";
-import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
+import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 
 /**
  * Every argument accounted for (db/cli.ts): an id after another flag, a flag
@@ -429,10 +454,11 @@ import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSq
  */
 const FLAGS = {
   url: "one", workers: "one", batch: "one", ttl: "one", heartbeat: "one", job: "one", retire: "one",
+  follow: "optional",
   "accept-failed": "many",
   status: "none", "dry-run": "none", "switch-model": "none", "retry-failed": "none", "retry-fallbacks": "none", all: "none",
 } as const;
-const HINTS = { url: "<postgres://…>", job: "<reembed:model@dim[:suffix]>", retire: "<reembed:model@dim[:suffix] — preflight prints it>", "accept-failed": "<thought-id …> (right after it, before any other flag)", all: "(with --accept-failed)" };
+const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", job: "<reembed:model@dim[:suffix]>", retire: "<reembed:model@dim[:suffix] — preflight prints it>", "accept-failed": "<thought-id …> (right after it, before any other flag)", all: "(with --accept-failed)" };
 
 /**
  * What one re-embed run is asked to do — the CLI's flags, typed (SMD-2304).
@@ -461,10 +487,12 @@ const HINTS = { url: "<postgres://…>", job: "<reembed:model@dim[:suffix]>", re
  * it. `onPass` is called once, as a run's workers start — where the CLI
  * installs its signal handlers (stopOnSignals) — with the pass's stop
  * (db/lease.ts's PassStop); --status, --dry-run, the maintenance modes and a
- * run with nothing to do have no pass. Its hard stop returns the leases at
- * once, and run() returns 130 once the call in hand does — an embedding
- * within OB1_LLM_TIMEOUT, a database statement with no bound (a row lock it
- * waits on) — writing and releasing nothing more for the thought in hand: a
+ * run with nothing to do have no pass — a follower's has, even idle, as its
+ * start goes through (`onStart`). Its hard stop returns the leases at
+ * once and aborts the embedding call in hand (SMD-2679), and run() returns
+ * 130 once that call has ended — at once — or the statement in hand has, a
+ * database statement having no bound (a row lock it waits on) — writing and
+ * releasing nothing more for the thought in hand: a
  * vector already sent to update_thought lands, the claim back in the pool
  * unmarked, and the next run re-embeds it. A call after run() has returned
  * does nothing.
@@ -489,6 +517,40 @@ export interface ReembedOptions {
   writer?: Writer;
   signal?: AbortSignal;
   onPass?: (stop: PassStop) => void;
+  /**
+   * --follow SECONDS (SMD-2679): after the pass, poll every SECONDS — each
+   * poll pools again (the data rule and the rows not at the target, or every
+   * thought under a backfill key; no trigger feeds this pool) and drains what
+   * it finds — until a signal, exiting 0 then; the hard stop exits 130.
+   * Refused beside --switch-model (a follower never switches the model),
+   * --retire and --accept-failed. A configured model other than the one
+   * ob1_config records is the start's refusal of kind `model-switch`, and the
+   * record moving under a running follower ends it so at its next poll, after
+   * the pass in hand drains; no record at all is recorded, as a run records it.
+   */
+  follow?: number;
+  /**
+   * A follower's heartbeat in place of its own `heartbeat:reembed:<job>` row
+   * (db/pass-stamp.ts): the sleep scheduler's (SMD-2679 PR 4b). Null stamps
+   * nothing. Unused by a one-shot run, which stamps nothing.
+   */
+  stamper?: PassStamper | null;
+  /**
+   * A follower's start alone, as extract-entities.ts's (SMD-2752): the
+   * banner, the egress gate, the tables, the recorded model and the
+   * provider's probe — then 0, before the pass's first write (the record, a
+   * --retry-*, the pool); or the start's refusal (2). Needs `follow`, and no
+   * `status` or `dryRun`.
+   */
+  check?: boolean;
+  /** False leaves out the start's banner — the job, embedding, egress and chunks lines, the recorded model's line, the unlabelled rows' warning — and the workers line, for a pass the sleep scheduler drives (extract-entities.ts's). A refusal still says what it refuses. */
+  banner?: boolean;
+  /** False leaves out the end-of-run summary — the counts, the duplicate groups, the fallbacks, the failures, the corpus by model — for a pass the sleep scheduler drives. */
+  summary?: boolean;
+  /** How the start went (worker-bootstrap.ts's StartResult): through, or refused and why — called once, as the pass begins or as the start refuses. */
+  onStart?: (r: StartResult) => void;
+  /** Postgres settings the run's own client opens every connection with (connect.ts's `session`): the sleep scheduler's budget. Refused beside `sql`. */
+  session?: SessionSettings;
 }
 
 /** What run() says when a caller's signal stopped --retire or --accept-failed before its write: neither has a pass. */
@@ -502,12 +564,15 @@ function readOption(flag: string, v: number | null | undefined, absent: number, 
 }
 
 /** The run's numbers read first, or the refusal of the first that breaks its flag's rule, in the CLI's order. */
-function numbers(opts: ReembedOptions): { workers: number; batch: number } | string {
+function numbers(opts: ReembedOptions): { workers: number; batch: number; follow: number } | string {
   const workers = readOption("--workers", opts.workers, 2, { min: 1, max: MAX_WORKERS });
   if (typeof workers === "string") return workers;
   const batch = readOption("--batch", opts.batch, 8, { min: 1, max: MAX_BATCH });
   if (typeof batch === "string") return batch;
-  return { workers, batch };
+  // 0 when absent: no following (extract-entities.ts's rule).
+  const follow = readOption("--follow", opts.follow, 0);
+  if (typeof follow === "string") return follow;
+  return { workers, batch, follow };
 }
 
 /**
@@ -532,7 +597,7 @@ function leaseNumbers(opts: ReembedOptions): { ttl: number; heartbeat: number } 
  * CLI's order and words, or null. Pure; the CLI and run() both refuse through
  * it (SMD-2304).
  */
-export function modeProblem(opts: Pick<ReembedOptions, "status" | "acceptFailed" | "retire" | "switchModel" | "retryFailed" | "retryFallbacks" | "all">): string | null {
+export function modeProblem(opts: Pick<ReembedOptions, "status" | "acceptFailed" | "retire" | "switchModel" | "retryFailed" | "retryFallbacks" | "all" | "follow">): string | null {
   const accepting = opts.acceptFailed != null;
   const retiring = opts.retire != null;
   const modes = [opts.status === true && "--status", accepting && "--accept-failed", retiring && "--retire"].filter(Boolean) as string[];
@@ -541,6 +606,12 @@ export function modeProblem(opts: Pick<ReembedOptions, "status" | "acceptFailed"
     return `  ${[...modes, ...runFlags].join(" and ")} do not combine — one thing at a time (--dry-run combines with any one of them).`;
   }
   if (opts.all === true && !accepting) return "  --all belongs to --accept-failed.";
+  // A follower re-embeds to the model ob1_config records, and polls; the
+  // maintenance modes write once (SMD-2679).
+  const unfollowed = [opts.switchModel === true && "--switch-model", accepting && "--accept-failed", retiring && "--retire"].filter(Boolean) as string[];
+  if (opts.follow != null && opts.follow !== 0 && unfollowed.length > 0) {
+    return `  --follow and ${unfollowed.join(" and ")} do not combine — a follower never switches the model (run --switch-model by hand), and --retire and --accept-failed write once.`;
+  }
   return null;
 }
 
@@ -554,40 +625,37 @@ export function modeProblem(opts: Pick<ReembedOptions, "status" | "acceptFailed"
  */
 export async function run(opts: ReembedOptions): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
+  /** A refusal of the options themselves: said, reported as the start's `usage`, 2 (extract-entities.ts's). */
+  const usage = (line: string): number => {
+    err(line);
+    opts.onStart?.({ ok: false, refused: "usage" });
+    return 2;
+  };
   // A blank value where the CLI's scanner refuses one — `--job ""` reaches no
   // run — first, in its words and with its flag list (review pass 1: run()
   // pooled under the key ''; db/cli.ts's blankProblem since SMD-2425).
   const blank = blankProblem(FLAGS, { job: opts.job, retire: opts.retire, "accept-failed": opts.acceptFailed });
-  if (blank !== null) {
-    err(`${blank}\n${flagList(FLAGS, HINTS)}`);
-    return 2;
-  }
+  if (blank !== null) return usage(`${blank}\n${flagList(FLAGS, HINTS)}`);
   // databaseUrl's two refusals without its exit, then the numbers and the
   // modes' rule. A URL beside a caller's client is held to the rule too.
   const noUrl = opts.url == null || opts.url.trim() === "";
   const urlProblem = noUrl ? (opts.sql == null ? NO_DATABASE_URL : null) : databaseUrlProblem(opts.url as string);
-  if (urlProblem !== null) {
-    err(urlProblem);
-    return 2;
-  }
+  if (urlProblem !== null) return usage(urlProblem);
   const settled = numbers(opts);
-  if (typeof settled === "string") {
-    err(settled);
-    return 2;
-  }
+  if (typeof settled === "string") return usage(settled);
   const mode = modeProblem(opts);
-  if (mode !== null) {
-    err(mode);
-    return 2;
-  }
+  if (mode !== null) return usage(mode);
+  // The check is a follower's start, its probe included; beside --status or
+  // --dry-run the probe is skipped, and a start reported through would be none.
+  if (opts.check && (!settled.follow || opts.status === true || opts.dryRun === true)) return usage("reembed.ts: check is a follower's start — pass follow beside it, and no --status or --dry-run.");
+  if (opts.sql != null && opts.session != null) return usage("reembed.ts applies session settings to a client of its own: pass url without sql, or no session.");
   if (opts.sql != null) {
     // A reserved connection or a transaction's handle reports its pool's max
     // but is one connection, and a transaction keeps the run's claims from the
     // other workers — and a rollback from the database.
     const handle = opts.sql as { release?: unknown; savepoint?: unknown };
     if (typeof handle.release === "function" || typeof handle.savepoint === "function") {
-      err("reembed.ts needs a pool, not a reserved connection or a transaction's handle: either is one connection whatever max it reports, and a transaction's claims are no other worker's until it commits. Pass the client itself, or a URL.");
-      return 2;
+      return usage("reembed.ts needs a pool, not a reserved connection or a transaction's handle: either is one connection whatever max it reports, and a transaction's claims are no other worker's until it commits. Pass the client itself, or a URL.");
     }
     // One connection per worker and one spare: the heartbeat (db/lease.ts)
     // beats through the pool, and a worker parked on a lock or a long statement
@@ -596,8 +664,7 @@ export async function run(opts: ReembedOptions): Promise<number> {
     // lapse 031 removed. Bun's default pool is ten.
     const max = Number((opts.sql as { options?: { max?: number } }).options?.max ?? 10);
     if (max < settled.workers + 1) {
-      err(`reembed.ts needs a client of at least ${settled.workers + 1} connections for ${settled.workers} worker(s): one each and a spare the heartbeat beats through (db/lease.ts). Pass a client opened with a larger max option, or a URL.`);
-      return 2;
+      return usage(`reembed.ts needs a client of at least ${settled.workers + 1} connections for ${settled.workers} worker(s): one each and a spare the heartbeat beats through (db/lease.ts). Pass a client opened with a larger max option, or a URL.`);
     }
   }
   // A signal aborted before the call: nothing opened, nothing written.
@@ -607,11 +674,23 @@ export async function run(opts: ReembedOptions): Promise<number> {
     err(opts.retire != null ? stoppedBefore("--retire") : opts.acceptFailed != null ? stoppedBefore("--accept-failed") : STOPPED_EARLY);
     return 130;
   }
-  const sql = opts.sql ?? openSql(opts.url as string, { max: settled.workers + 1 });
+  const sql = opts.sql ?? openSql(opts.url as string, { max: settled.workers + 1, session: opts.session ?? undefined });
   // Aborted when the run returns, taking its listener off the caller's signal.
   const detach = new AbortController();
+  // The start's refusal, as onStart hears it: a follower of its own ends its
+  // row on it, the kind named, so preflight gives the remedy and the compose
+  // service's supervisor holds it (extract-entities.ts's, SMD-3214). Not the
+  // check, nor a pass the sleep scheduler drives, whose row is the scheduler's.
+  let refusedAt: StartRefusal | null = null;
+  const heard: ReembedOptions = { ...opts, onStart: (r) => { if (!r.ok) refusedAt = r.refused; opts.onStart?.(r); } };
   try {
-    return await reembedWith(sql, opts, settled, out, err, detach.signal);
+    const code = await reembedWith(sql, heard, settled, out, err, detach.signal);
+    if (code === 2 && refusedAt !== null && settled.follow && opts.stamper === undefined && !opts.check && !opts.status && !opts.dryRun) {
+      const { model, dim } = embeddingContract(opts.env ?? process.env);
+      const job = opts.job ?? reembedKey(model, dim);
+      await endOnRefusal({ sql, worker: "reembed", job, intervalS: settled.follow, kind: refusedAt, onError: (e) => err(`  heartbeat ${stampKey("reembed", job)} not ended on the refusal: ${e.message.split("\n")[0]}`) });
+    }
+    return code;
   } finally {
     detach.abort();
     // A failing close must not mask the run's own error.
@@ -620,8 +699,20 @@ export async function run(opts: ReembedOptions): Promise<number> {
 }
 
 /** The run once its options are settled: the script's body as it was, printing through the Writer and returning where it exited. */
-async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: number; batch: number }, out: Writer["out"], err: Writer["err"], detach: AbortSignal): Promise<number> {
-  const { workers: WORKERS, batch: BATCH } = settled;
+async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: number; batch: number; follow: number }, out: Writer["out"], err: Writer["err"], detach: AbortSignal): Promise<number> {
+  const { workers: WORKERS, batch: BATCH, follow: FOLLOW } = settled;
+  /** The start alone, for the sleep scheduler's check: run() refused it without follow. */
+  const CHECK = opts.check === true;
+  /** The start's banner, which a pass the scheduler drives leaves to its check. */
+  const say: Writer["out"] = opts.banner === false ? () => {} : out;
+  /** The end-of-run summary's queries, which a pass the scheduler drives leaves out. */
+  const SUMMARY = opts.summary !== false;
+  /** A start refusal: said, reported to `onStart` as which it is, 2 (extract-entities.ts's). */
+  const refused = (kind: StartRefusal, line: string): number => {
+    err(line);
+    opts.onStart?.({ ok: false, refused: kind });
+    return 2;
+  };
   const env = opts.env ?? process.env;
   const STATUS_ONLY = opts.status === true;
   const DRY_RUN = opts.dryRun === true;
@@ -674,8 +765,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   const problems = validateEmbeddingConfig(EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_DIMENSIONS);
   if (problems.length > 0) {
     err("Embedding configuration is not usable:\n");
-    for (const p of problems) err(`  ✗ ${p}`);
-    return 2;
+    for (const p of problems.slice(0, -1)) err(`  ✗ ${p}`);
+    return refused("usage", `  ✗ ${problems[problems.length - 1]}`);
   }
   for (const w of embeddingConfigWarnings(EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_DIMENSIONS)) err(`  ⚠  ${w}`);
 
@@ -710,10 +801,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   // header — so it has to outlast a missed beat, not the batch; db/lease.ts
   // holds the rule the three consumers share (leaseNumbers, above).
   const lease = leaseNumbers(opts);
-  if (typeof lease === "string") {
-    err(lease);
-    return 2;
-  }
+  if (typeof lease === "string") return refused("usage", lease);
   const { ttl: TTL, heartbeat: HEARTBEAT } = lease;
   // Read-only modes never claim, so they answer whatever the lease; --dry-run
   // reports the refusal a run would make, alongside the 018 check below.
@@ -722,12 +810,12 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     return r === null ? null : ` ${r}`;
   })();
 
-  out(`  job:       ${JOB}`);
-  out(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddingDim} dimensions, via ${shownBase(embedConfig.embeddings)}, ${embedConfig.timeoutMs / 1000} s per call`);
+  say(`  job:       ${JOB}`);
+  say(`  embedding: ${embedConfig.embeddingModel} @ ${embedConfig.embeddingDim} dimensions, via ${shownBase(embedConfig.embeddings)}, ${embedConfig.timeoutMs / 1000} s per call`);
   // What may leave the box (SMD-1903): a row the gate refuses is a failed claim
   // naming the rule, retried by --retry-failed once the policy or the endpoint
   // changes; the text never went anywhere.
-  out(`  egress:    ${egressDescription(embedConfig.embeddings, embedConfig.egress, localKnob(embedConfig, "embeddings"))}${embedConfig.chunkContext ? `; blurbs: ${egressDescription(embedConfig.chat, embedConfig.egress, localKnob(embedConfig, "chat"))}` : ""}`);
+  say(`  egress:    ${egressDescription(embedConfig.embeddings, embedConfig.egress, localKnob(embedConfig, "embeddings"))}${embedConfig.chunkContext ? `; blurbs: ${egressDescription(embedConfig.chat, embedConfig.egress, localKnob(embedConfig, "chat"))}` : ""}`);
   {
     // A policy that refuses whatever the row (SMD-1903): stop before claiming,
     // rather than fail every row in the pool one at a time. A dry run and
@@ -737,38 +825,31 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     const blanket = blanketGate({ endpoint: embedConfig.embeddings, policy: embedConfig.egress, units: ROW_UNITS, verb: "re-embedded", localKnobKey: localKnob(embedConfig, "embeddings") });
     // --retire and --accept-failed write claim rows, not vectors, and dial
     // nothing: bookkeeping the gate has no say over (second review pass).
-    if (blanket && !STATUS_ONLY && !DRY_RUN && !RETIRE && !ACCEPT_FAILED) {
-      err(`\n  ${blanket}`);
-      return 2;
-    }
+    if (blanket && !STATUS_ONLY && !DRY_RUN && !RETIRE && !ACCEPT_FAILED) return refused("egress", `\n  ${blanket}`);
     // The blurbs are chat calls: refused, every long row's claim fails on them
     // (a bare window is a failure here, since no caller is told) and
     // --retry-failed would revisit each uselessly. Said before the pass.
     const blurbs = embedConfig.chunkContext ? egressRefusal(embedConfig.chat, embedConfig.egress, ROW_UNITS) : null;
     if (blurbs) err(`  ⚠  OB1_CHUNK_CONTEXT is on and every blurb call would be refused (${blurbs}) — every long row's claim will fail on its blurbs; turn the context off for this pass, or declare the chat endpoint local (${localKnob(embedConfig, "chat")}=1)`);
   }
-  out(`  chunks:    ${embedConfig.chunkTokens}-token windows above ${embedConfig.chunkThreshold} (${embedConfig.chunkTokensFrom === "window" ? `from ${embedConfig.embeddingModel}'s ${embedConfig.modelWindow}-token window` : embedConfig.chunkTokensFrom === "OB1_CHUNK_TOKENS" ? "OB1_CHUNK_TOKENS" : "the default, window unknown"}), overlap ${embedConfig.chunkOverlap}, context ${embedConfig.chunkContext ? `on (blurbs via ${shownBase(embedConfig.chat)})` : "off"}`);
+  say(`  chunks:    ${embedConfig.chunkTokens}-token windows above ${embedConfig.chunkThreshold} (${embedConfig.chunkTokensFrom === "window" ? `from ${embedConfig.embeddingModel}'s ${embedConfig.modelWindow}-token window` : embedConfig.chunkTokensFrom === "OB1_CHUNK_TOKENS" ? "OB1_CHUNK_TOKENS" : "the default, window unknown"}), overlap ${embedConfig.chunkOverlap}, context ${embedConfig.chunkContext ? `on (blurbs via ${shownBase(embedConfig.chat)})` : "off"}`);
 
   // ── The database's side of the contract ─────────────────────────────────────
 
   const [claims] = await sql`SELECT to_regclass('thought_work_claims') IS NOT NULL AS present`;
-  if (!claims.present) {
-    err("\n  thought_work_claims does not exist. Apply migration 015 first:\n    cd db && bun migrate.ts --url …");
-    return 2;
-  }
+  if (!claims.present) return refused("tables", "\n  thought_work_claims does not exist. Apply migration 015 first:\n    cd db && bun migrate.ts --url …");
 
   const [col] = await sql`
     SELECT atttypmod AS width FROM pg_attribute
     WHERE attrelid = 'thoughts'::regclass AND attname = 'embedding'`;
   if (Number(col?.width) !== embedConfig.embeddingDim) {
-    err(
+    return refused("usage",
       `\n  thoughts.embedding is vector(${col?.width}) but OB1_EMBEDDING_DIM=${embedConfig.embeddingDim}.\n` +
         `  This tool re-embeds at the column's width. A width change is a schema migration —\n` +
         `  the column, thought_chunks.embedding, both HNSW indexes and every function that\n` +
         `  names vector(${col?.width}) — and no migration for it exists yet. Set OB1_EMBEDDING_DIM=${col?.width}\n` +
         `  (with OB1_EMBEDDING_DIMENSIONS=on for a model that is wider natively) or stop here.`
     );
-    return 2;
   }
 
   const recorded = Object.fromEntries(
@@ -783,36 +864,42 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   // model change; --retry-fallbacks does not (since 021 the start-over returns
   // failed rows and expired leases, and a caveat row is neither — second review
   // pass), so it is honoured on every run.
-  const retryFailed = RETRY_FAILED && !recordModel;
+  // Settled again by a follower's first pool, which reads the record itself:
+  // one written since this read is not recorded over (review pass 2).
+  let retryFailed = RETRY_FAILED && !recordModel;
   const retryFallbacks = RETRY_FALLBACKS;
   if (recorded.embedding_model === undefined) {
-    out(`  ob1_config records no embedding model (migration 006 not applied?); the pass will record ${embedConfig.embeddingModel}`);
+    say(`  ob1_config records no embedding model (migration 006 not applied?); the pass will record ${embedConfig.embeddingModel}`);
   } else if (modelChange) {
-    out(`  model change: ob1_config records ${recorded.embedding_model}; this pass embeds with ${embedConfig.embeddingModel}`);
+    say(`  model change: ob1_config records ${recorded.embedding_model}; this pass embeds with ${embedConfig.embeddingModel}`);
   } else if (poolModelFor(JOB) === null) {
-    out(`  same model as ob1_config records — a backfill under ${JOB}: every thought without a row under it is pooled`);
+    say(`  same model as ob1_config records — a backfill under ${JOB}: every thought without a row under it is pooled`);
   } else if (parseReembedKey(JOB) !== null && parseReembedKey(JOB)!.model !== embedConfig.embeddingModel) {
     // --status for a key naming another model (a run is refused below): the
     // counts are the key's, not this shell's, and say so.
-    out(`  --job ${JOB} names ${parseReembedKey(JOB)!.model}: the counts below are judged against it, not this shell's ${embedConfig.embeddingModel}`);
+    say(`  --job ${JOB} names ${parseReembedKey(JOB)!.model}: the counts below are judged against it, not this shell's ${embedConfig.embeddingModel}`);
   } else {
-    out(`  same model as ob1_config records — this run pools the rows not at it; a same-model backfill over every row is --job ${JOB}:<suffix>`);
+    say(`  same model as ob1_config records — this run pools the rows not at it; a same-model backfill over every row is --job ${JOB}:<suffix>`);
   }
   // The --job refusal first: a key naming another model is refused before the
   // model-change refusal below can ask for --switch-model on its behalf.
-  if (refusalJob && !STATUS_ONLY && !DRY_RUN && !RETIRE && !ACCEPT_FAILED) {
-    err(`\n ${refusalJob}`);
-    return 2;
+  if (refusalJob && !STATUS_ONLY && !DRY_RUN && !RETIRE && !ACCEPT_FAILED) return refused("usage", `\n ${refusalJob}`);
+  // A follower never switches the model (SMD-2679): its own kind, permanent —
+  // a retry reads the same record.
+  if (modelChange && FOLLOW && !STATUS_ONLY && !DRY_RUN) {
+    return refused("model-switch",
+      `\n  Refusing to follow: ob1_config records ${recorded.embedding_model} and this follower is configured for ${embedConfig.embeddingModel}.\n` +
+        `  A follower never switches the model. To switch, run by hand: OB1_EMBEDDING_MODEL=${embedConfig.embeddingModel} bun db/reembed.ts --url … --switch-model\n` +
+        `  If OB1_EMBEDDING_MODEL is simply set wrong for this follower, fix it instead.`);
   }
   if (modelChange && !SWITCH_MODEL && !STATUS_ONLY && !DRY_RUN && !RETIRE && !ACCEPT_FAILED) {
-    err(
+    return refused("model-switch",
       `\n  Refusing to re-embed with a model other than the one ob1_config records without --switch-model.\n` +
         `  Every vector in the corpus would be replaced by ${embedConfig.embeddingModel}'s, and ob1_config\n` +
         `  would be updated so preflight accepts a server configured for it. If that is the intent:\n` +
         `    OB1_EMBEDDING_MODEL=${embedConfig.embeddingModel} bun db/reembed.ts --url … --switch-model\n` +
         `  If OB1_EMBEDDING_MODEL is simply set wrong in this shell, fix it instead.`
     );
-    return 2;
   }
 
   // The schema the pass writes to. The body the pass will CALL — the exact
@@ -1473,7 +1560,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       // Said as what a run WITH the flag would do when the flag is missing: the
       // run itself refuses, and this line must not read as its plan.
       out(
-        `\n  would: ${modelChange && !SWITCH_MODEL ? "refuse without --switch-model; with it: " : ""}` +
+        `\n  would: ${modelChange && !SWITCH_MODEL ? (FOLLOW ? "refuse — a follower never switches the model (model-switch); a run by hand with --switch-model would: " : "refuse without --switch-model; with it: ") : ""}` +
           `${recordModel ? `record ${embedConfig.embeddingModel} in ob1_config; ` : ""}` +
           `${restart ? `start this pass over (${restart} ${BACKFILL ? "terminal" : "failed"} row(s) or expired lease(s) from before the change return to the pool); ` : ""}` +
           `${notAt ? `return ${notAt} succeeded row(s) whose thought is not at ${embedConfig.embeddingModel} to the pool; ` : ""}` +
@@ -1489,10 +1576,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
 
   // ── The run ─────────────────────────────────────────────────────────────────
 
-  if (refusalForRun) {
-    err(`\n ${refusalForRun}`);
-    return 2;
-  }
+  if (refusalForRun) return refused(refusalJob || refusalTtl ? "usage" : "tables", `\n ${refusalForRun}`);
 
   // The provider first, so a wrong URL or a wrong width fails before any row is
   // touched — the width check inside getEmbedding names the model and both widths.
@@ -1541,20 +1625,44 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       await embedder.getEmbedding("reembed.ts provider probe", probeSubject);
       probed = true;
     } catch (e) {
-      err(`\n  The embedding provider is not usable: ${(e as Error).message}`);
-      return 2;
+      // The model not served is the start's `model` (worker-bootstrap.ts's
+      // probeRefusal); any other failure the provider's.
+      return refused(modelMissing(e) ? "model" : "provider", `\n  The embedding provider is not usable: ${(e as Error).message}`);
     }
+  }
+  // The start alone (the sleep scheduler's check): through, before the first write.
+  if (CHECK) {
+    opts.onStart?.({ ok: true, provider: "up" });
+    return 0;
   }
 
   // The record and the pool, in one transaction — see "Changing model" in the
   // header. Nothing below is printed until it has committed, so what the
-  // operator reads is what the database holds.
-  type Start = { restarted: number; movedSinceDone: number; retriedFailed: number; retriedFallbacks: number; added: number };
-  if (stoppedEarly()) return 130;
-  let start: Start;
-  try {
-    start = await sql.begin(async (tx: SQL) => {
-      if (recordModel) {
+  // operator reads is what the database holds. A follower pools again at every
+  // poll, since no trigger feeds this pool (SMD-2679): the data rule and the
+  // rows not at the target, or every thought under a backfill key; the record,
+  // the start-over and the --retry-* flags are the first pool's alone.
+  type Start = { restarted: number; movedSinceDone: number; retriedFailed: number; retriedFallbacks: number; added: number; claimable: number; recorded: boolean };
+  /** The model a later poll found ob1_config recording in place of this follower's: a hand-run --switch-model, say (SMD-2679). */
+  let switchedTo = null as string | null;
+  const pool = (first: boolean): Promise<Start | null> =>
+    sql.begin(async (tx: SQL) => {
+      // The record read in the pool's own transaction: a follower re-embeds to
+      // the model ob1_config records, and one that moved ends it (SMD-2679).
+      // The first pool too: a record written since the start's read — another
+      // run's, a hand switch's — is not overwritten (review pass 1).
+      let record = first && recordModel;
+      if (FOLLOW) {
+        const [r] = await tx`SELECT value FROM ob1_config WHERE key = 'embedding_model'`;
+        if (r && r.value !== embedConfig.embeddingModel) {
+          switchedTo = String(r.value);
+          return null;
+        }
+        if (r) record = false;
+      }
+      // The first pool's own word on the record: --retry-failed, which recording the model subsumes, and the lines below follow it (review pass 2).
+      if (first) retryFailed = RETRY_FAILED && !record;
+      if (record) {
         await tx`
           INSERT INTO ob1_config (key, value) VALUES ('embedding_model', ${embedConfig.embeddingModel})
           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
@@ -1563,11 +1671,11 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       // leases, whatever an earlier pass under the key recorded; --retry-failed
       // is subsumed. The succeeded rows are the data rule's, on every run: back
       // to the pool when their thought is not at the target, and only then.
-      const restarted = recordModel ? await requeue(tx, staleUnderThisJob()) : 0;
+      const restarted = record ? await requeue(tx, staleUnderThisJob()) : 0;
       const movedSinceDone = await requeue(tx, doneButNotAtTarget());
-      const retriedFailed = retryFailed ? await requeue(tx, sql`status = 'failed'`) : 0;
+      const retriedFailed = first && retryFailed ? await requeue(tx, sql`status = 'failed'`) : 0;
       // After the data rule, so a caveat row whose thought moved is counted once.
-      const retriedFallbacks = retryFallbacks ? await requeue(tx, withCaveat()) : 0;
+      const retriedFallbacks = first && retryFallbacks ? await requeue(tx, withCaveat()) : 0;
       // The pool (021): under the model's own key the rows not at the target — a
       // thought already at it with no row under the key needs nothing; under a
       // backfill key every thought, through 015's set-based branch, as before.
@@ -1578,8 +1686,20 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       // many into the pending index and would otherwise leave the statistics
       // describing the finished pass (migration 015, "Cost of a claim").
       if (restarted + movedSinceDone + retriedFailed + retriedFallbacks > 0 && Number(added) === 0) await tx`ANALYZE thought_work_claims`;
-      return { restarted, movedSinceDone, retriedFailed, retriedFallbacks, added: Number(added) };
+      // What a worker can claim now — pending, or a lease lapsed — read in the
+      // pool's own snapshot: a poll drains on it, and a lease another live
+      // worker holds is not this follower's work (review pass 1: a poll's
+      // count of the whole pool outside the poll's catch, every stranded lease
+      // an empty drain each poll).
+      const [{ claimable }] = await tx`
+        SELECT count(*)::int AS claimable FROM thought_work_claims
+         WHERE work_type = ${JOB} AND (status = 'pending' OR (status = 'claimed' AND ttl_expires_at < now()))`;
+      return { restarted, movedSinceDone, retriedFailed, retriedFallbacks, added: Number(added), claimable: Number(claimable), recorded: record };
     });
+  if (stoppedEarly()) return 130;
+  let start: Start | null;
+  try {
+    start = await pool(true);
   } catch (e) {
     // Rolled back whole: the record still names the previous model and the pool
     // is as it was. One cause worth naming — the start-over takes the expired
@@ -1593,7 +1713,9 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     );
     return 2;
   }
-  if (recordModel) {
+  // The record moved between the start's read and the pool's: a follower's own refusal.
+  if (start === null) return refused("model-switch", `\n  ob1_config now records ${switchedTo}: this follower is configured for ${embedConfig.embeddingModel} and never switches the model.`);
+  if (start.recorded) {
     out(`  ob1_config.embedding_model = ${embedConfig.embeddingModel} — a server configured for it now passes preflight; switch it.`);
   }
   if (start.restarted > 0) {
@@ -1602,24 +1724,29 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   if (start.movedSinceDone > 0) {
     out(`  ${start.movedSinceDone} succeeded row(s) whose thought is not at ${embedConfig.embeddingModel} returned to the pool — captured or edited since by a server on another model`);
   }
-  if (RETRY_FAILED) out(`  --retry-failed: ${recordModel ? "nothing to do separately — recording the model returned every failed row under this job to the pool" : `${start.retriedFailed} failed row(s) returned to the pool`}`);
+  if (RETRY_FAILED) out(`  --retry-failed: ${start.recorded ? "nothing to do separately — recording the model returned every failed row under this job to the pool" : `${start.retriedFailed} failed row(s) returned to the pool`}`);
   if (RETRY_FALLBACKS) out(`  --retry-fallbacks: ${start.retriedFallbacks} row(s) succeeded with a caveat returned to the pool`);
   const before = await counts();
-  out(`  pool: ${start.added} thought(s) added`);
-  printCounts(before, "before");
-  const corpusBefore = await printCorpusByModel();
-  {
+  // A follower's idle start prints no pool or counts lines, as extract-entities.ts's prints none.
+  if (!FOLLOW || start.added > 0 || before.pending + before.claimed > 0) {
+    out(`  pool: ${start.added} thought(s) added`);
+    printCounts(before, "before");
+  }
+  // The corpus by model is the summary's: a pass the sleep scheduler drives reads none of it.
+  const corpusBefore = SUMMARY ? await printCorpusByModel() : null;
+  if (opts.banner !== false) {
     const unlabelled = await unlabelledPooled(true);
     if (unlabelled > 0) err(`  ${unlabelled} of the rows to re-embed are unlabelled — nothing vouches for their model — and this pass is what labels them`);
   }
 
-  const total = before.pending + before.claimed;
-  if (total === 0) {
+  /** The rows this run has had to do: the first pool's, then each poll's (a follower's). */
+  let total = before.pending + before.claimed;
+  if (total === 0 && !FOLLOW) {
     out("\n  Nothing to do.");
     if (before.failed > 0) {
       err(`  ${before.failed} failed row(s) remain from an earlier run — pass --retry-failed to try them again:`);
       await printFailures();
-      printPreflightNote(before, corpusBefore, judgedAsPreflight(recordModel));
+      if (corpusBefore !== null) printPreflightNote(before, corpusBefore, judgedAsPreflight(recordModel));
       return 1;
     }
     return 0;
@@ -1637,6 +1764,15 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
    * again, and may already be another worker's.
    */
   let hardStopped = false;
+  /**
+   * Aborted by the hard stop: the embedding call in hand ends at once rather
+   * than running out OB1_LLM_TIMEOUT — a sleep's wake waited on it (SMD-2679).
+   */
+  const onHardStop = new AbortController();
+  /** The hard stop's release, once: a second hard call returns it rather than repeat the release and its line. */
+  let hardRelease: Promise<unknown> | null = null;
+  /** Aborted by any stop: wakes a follower's sleep between polls (extract-entities.ts's onStop). */
+  const onStop = new AbortController();
   let done = 0;
   let failed = 0;
   let vanished = 0;
@@ -1686,7 +1822,10 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       if (hardStopped) return { outcome: "abandoned" };
       // The row's own metadata is what the gate reads — source, type, topics —
       // and an egress refusal throws out of here as a failed claim (SMD-1903).
-      const embedded = await embedder.embedCapture(current.content, { kind: "re-embed", metadata: current.metadata ?? undefined, content: current.content });
+      // The hard stop aborts the call (onHardStop): its AbortError reaches the
+      // worker's catch, which returns before recording or releasing anything,
+      // the stop being set.
+      const embedded = await embedder.embedCapture(current.content, { kind: "re-embed", metadata: current.metadata ?? undefined, content: current.content }, onHardStop.signal);
       // The hard stop came while the provider answered: the leases are
       // returned, so the vector is not written.
       if (hardStopped) return { outcome: "abandoned" };
@@ -1826,6 +1965,11 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
             SELECT id, content, COALESCE(updated_at, created_at) AS updated_at, metadata FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`) as Row[];
           byId = new Map(rows.map((r) => [r.id, r]));
         } catch (e) {
+          // A follower's privilege or function gone ends the run, as the claim
+          // workers' do: else every poll would drain, every worker stop, and the
+          // row read healthy (review pass 2). The finally below still hands back
+          // what this worker holds.
+          if (FOLLOW && databasePermanent(e)) throw e;
           // A database error here is not about one thought. This worker stops;
           // the others carry on, and the finally below hands back what it holds.
           err(`  ${workerId}: ${(e as Error).message} — this worker stops`);
@@ -1952,22 +2096,27 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
 
   // The pass's stop (db/lease.ts's PassStop), handed to the caller here, where
   // the script installed its signal handlers — before this a signal ends the
-  // CLI at once. One while already stopping is the hard stop: a worker may be
-  // inside a call it cannot leave — a provider call has OB1_LLM_TIMEOUT to
-  // answer, but a database call has nothing — so it may not reach its own
-  // finally; the release of every worker's leases, from here, the CLI exiting
-  // 130 when it settles.
+  // CLI at once. One while already stopping is the hard stop: the embedding
+  // call in hand is aborted (onHardStop), but a database call has no bound, so
+  // a worker may not reach its own finally; the release of every worker's
+  // leases, from here, the CLI exiting 130 when it settles. Once: a second
+  // hard call returns the first's release (SMD-2679).
   const stop: PassStop = () => {
     // After the run has returned there is no pass to stop.
     if (detach.aborted) return null;
     if (stopping) {
+      if (hardRelease) return hardRelease;
       hardStopped = true;
+      onHardStop.abort();
+      onStop.abort();
       // Started before the line is written: a Writer that throws does not keep the leases.
       const release = Promise.all([...activeWorkers].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.catch(() => null)));
+      hardRelease = release;
       err(`\n  second signal — exiting now; leases not returned in time expire within ${TTL} s`);
       return release;
     }
     stopping = true;
+    onStop.abort();
     err("\n  stopping after the current thought; unfinished claims go back to the pool (again to exit now)");
     return null;
   };
@@ -1976,64 +2125,138 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   const abort = () => {
     if (stopping) return;
     stopping = true;
+    onStop.abort();
     errAside("\n  stopping after the current thought; unfinished claims go back to the pool");
   };
   if (stoppedEarly()) return 130;
   opts.signal?.addEventListener("abort", abort, { once: true, signal: detach });
+  // Through the start: the provider answered its probe (extract-entities.ts's).
+  opts.onStart?.({ ok: true, provider: "up" });
   opts.onPass?.(stop);
 
-  out(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s\n`);
-  // A worker that throws — a Writer that throws, in practice; each catches its
-  // own database errors — stops the rest after the thought in hand, and run()
-  // rejects with its error once they have stopped, not while they still hold
-  // rows and the client.
-  const ends = await Promise.allSettled(Array.from({ length: WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
-    stopping = true;
-    throw e;
-  })));
-  const thrown = ends.find((r): r is PromiseRejectedResult => r.status === "rejected");
-  if (thrown) throw thrown.reason;
-  progress(true);
+  say(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`);
+  /**
+   * One pass's workers, to the pool's end or a stop. A worker that throws — a
+   * Writer that throws, in practice; each catches its own database errors —
+   * stops the rest after the thought in hand, and the pass rejects with its
+   * error once they have stopped, not while they still hold rows and the client.
+   */
+  const drain = async (): Promise<void> => {
+    const ends = await Promise.allSettled(Array.from({ length: WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
+      stopping = true;
+      throw e;
+    })));
+    const thrown = ends.find((r): r is PromiseRejectedResult => r.status === "rejected");
+    if (thrown) throw thrown.reason;
+    progress(true);
+  };
+  // A follower's heartbeat (db/pass-stamp.ts): stamped after every poll and
+  // re-stamped while a pass runs; a one-shot run stamps nothing. A caller's
+  // stamper stands in for the row (the sleep scheduler's, PR 4b).
+  const stamper = opts.stamper !== undefined ? (FOLLOW ? opts.stamper : null) : FOLLOW
+    ? passStamper({
+        sql, worker: "reembed", job: JOB, intervalS: FOLLOW,
+        onError: (e) => err(`  heartbeat ${stampKey("reembed", JOB)} not written: ${e.message.split("\n")[0]} — a role needs the worker grant group (INSERT, UPDATE on ob1_config); the follower goes on`),
+      })
+    : null;
+  /** A pass under the follower's stamp: one that throws ends the run, its row saying so first (extract-entities.ts's). */
+  const stamped = async (pass: Promise<void>): Promise<void> => {
+    try {
+      await (stamper ? stamper.during(pass) : pass);
+    } catch (e) {
+      await stamper?.end("failed");
+      throw e;
+    }
+  };
+  if (total > 0) await stamped(drain());
+  if (FOLLOW) {
+    await stamper?.stamp(haltedByProvider ? "failed" : "ok");
+    /** A poll's pool that failed is said once, until one is read again: it costs the poll, not the follower. */
+    let saidPoolFailed = false;
+    while (!stopping && !haltedByProvider) {
+      await sleepUnless(FOLLOW * 1000, onStop.signal);
+      if (stopping) break;
+      let polled: Start | null;
+      try {
+        polled = await pool(false);
+        saidPoolFailed = false;
+      } catch (e) {
+        // A privilege or a function gone is no poll's: it ends the follower,
+        // its row saying so first, as extract-entities.ts's does (review pass 1).
+        if (databasePermanent(e)) {
+          await stamper?.end("failed");
+          throw e;
+        }
+        if (!saidPoolFailed) err(`  the pool could not be read this poll (${(e as Error).message.split("\n")[0]}) — the next poll tries again`);
+        saidPoolFailed = true;
+        continue;
+      }
+      if (polled === null) break;
+      const work = polled.claimable;
+      if (polled.added > 0) out(`  pool: ${polled.added} thought(s) added`);
+      if (polled.movedSinceDone > 0) out(`  ${polled.movedSinceDone} succeeded row(s) whose thought is not at ${embedConfig.embeddingModel} returned to the pool`);
+      if (work > 0 && !stopping) {
+        total += work;
+        await stamped(drain());
+      }
+      await stamper?.stamp(haltedByProvider ? "failed" : "ok");
+    }
+  }
+  // The record moved under the follower: it ends, refused — its row names the
+  // kind, and preflight gives the remedy (SMD-2679).
+  if (switchedTo !== null) {
+    if (opts.stamper === undefined) stamper?.refused?.("model-switch");
+    await stamper?.end("failed");
+    // Its start went through, so onStart is not told again: the row, ended here, names the kind (extract-entities.ts's mid-pass refusal).
+    err(`\n  ob1_config now records ${switchedTo}: this follower is configured for ${embedConfig.embeddingModel} and never switches the model — it stops. Start it again configured for ${switchedTo}, or switch back by hand.`);
+    return 2;
+  }
+  await stamper?.end(haltedByProvider ? "failed" : "stopped");
+  // A stopping pass the sleep scheduler drives reads no counts at its wake.
+  if (stopping && !SUMMARY) return FOLLOW && !hardStopped ? 0 : 130;
 
   const after = await counts();
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
   out(`\n  ${done} re-embedded, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}, in ${elapsed}s, ${beats} heartbeat(s)`);
-  printCounts(after, "after");
-  await printDuplicateGroups();
-  if (after.fellBack > 0) await printFallbacks(after.fellBack);
-  if (after.failed > 0) {
-    err(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}) — fix the cause and re-run with --retry-failed:`);
-    await printFailures();
+  if (SUMMARY) {
+    printCounts(after, "after");
+    await printDuplicateGroups();
+    if (after.fellBack > 0) await printFallbacks(after.fellBack);
+    if (after.failed > 0) {
+      err(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}) — fix the cause and re-run with --retry-failed:`);
+      await printFailures();
+    }
+    const corpusAfter = await printCorpusByModel();
+    if (after.unpooled > 0) {
+      // Under the model's own key: captured or edited while the pass ran, by a
+      // server on another model — the rows say so (021), and a re-run takes exactly
+      // them. Under a backfill key every capture made meanwhile is unpooled,
+      // whatever model it is at, and nothing about the server follows from it.
+      err(
+        BACKFILL
+          ? `\n  ${after.unpooled} thought(s) captured while the pass ran have no row under this job; re-run to pool them.`
+          : `\n  ${after.unpooled} thought(s) are not at ${TARGET} and have no row under this job — captured or edited while the pass ran\n` +
+              `  by a server on another model, by one older than 021 (no label), or through a fallback that stores no vector. Switch or upgrade the\n` +
+              `  server if that is what it was, then re-run: the pool takes exactly them.`
+      );
+    }
+    printPreflightNote(after, corpusAfter, judgedAsPreflight(recordModel));
+    if (after.claimed > 0) {
+      err(
+        `\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed.\n` +
+          `  They return to the pool when their leases expire (within ${TTL} s of the holder's last heartbeat); re-run then, or watch --status —\n` +
+          `  which names each holder; a holder that is dead can be returned at once: SELECT release_claims_for_worker(job, worker_id).`
+      );
+    }
+    if (after.pending > 0 && !stopping) {
+      // Every worker stopped before the pool was empty — a database error each
+      // (their messages are above), or the provider's first answer was a
+      // configuration-shaped failure — and handed its leases back. Not done.
+      err(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty${haltedByProvider ? " — the provider's first answer was a failure (above); fix it, then --retry-failed and re-run" : ". Re-run"}.`);
+    }
   }
-  const corpusAfter = await printCorpusByModel();
-  if (after.unpooled > 0) {
-    // Under the model's own key: captured or edited while the pass ran, by a
-    // server on another model — the rows say so (021), and a re-run takes exactly
-    // them. Under a backfill key every capture made meanwhile is unpooled,
-    // whatever model it is at, and nothing about the server follows from it.
-    err(
-      BACKFILL
-        ? `\n  ${after.unpooled} thought(s) captured while the pass ran have no row under this job; re-run to pool them.`
-        : `\n  ${after.unpooled} thought(s) are not at ${TARGET} and have no row under this job — captured or edited while the pass ran\n` +
-            `  by a server on another model, by one older than 021 (no label), or through a fallback that stores no vector. Switch or upgrade the\n` +
-            `  server if that is what it was, then re-run: the pool takes exactly them.`
-    );
-  }
-  printPreflightNote(after, corpusAfter, judgedAsPreflight(recordModel));
-  if (after.claimed > 0) {
-    err(
-      `\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed.\n` +
-        `  They return to the pool when their leases expire (within ${TTL} s of the holder's last heartbeat); re-run then, or watch --status —\n` +
-        `  which names each holder; a holder that is dead can be returned at once: SELECT release_claims_for_worker(job, worker_id).`
-    );
-  }
-  if (after.pending > 0 && !stopping) {
-    // Every worker stopped before the pool was empty — a database error each
-    // (their messages are above), or the provider's first answer was a
-    // configuration-shaped failure — and handed its leases back. Not done.
-    err(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty${haltedByProvider ? " — the provider's first answer was a failure (above); fix it, then --retry-failed and re-run" : ". Re-run"}.`);
-  }
-  return stopping ? 130 : after.failed > 0 || after.claimed > 0 || after.pending > 0 ? 1 : 0;
+  // A follower stopped exits 0, unless hard-stopped — a signal's 130 (extract-entities.ts's).
+  return stopping ? (FOLLOW && !hardStopped ? 0 : 130) : after.failed > 0 || after.claimed > 0 || after.pending > 0 ? 1 : 0;
 }
 
 if (import.meta.main) {
@@ -2042,6 +2265,8 @@ if (import.meta.main) {
   const workers = cli.int("workers", { absent: 2, min: 1, max: MAX_WORKERS });
   const batch = cli.int("batch", { absent: 8, min: 1, max: MAX_BATCH });
   const modes = {
+    // Bare, 15 s; absent, no following (extract-entities.ts's).
+    follow: cli.has("follow") ? cli.int("follow", { absent: 0, bare: 15, min: 1 }) : undefined,
     status: cli.has("status"),
     switchModel: cli.has("switch-model"),
     retryFailed: cli.has("retry-failed"),

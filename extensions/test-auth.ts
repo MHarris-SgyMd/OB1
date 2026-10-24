@@ -66,7 +66,7 @@ import { existsSync, readFileSync, readlinkSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
-import { abandonedRequestLine, mcpReply, vendoredStalledLine, withSseKeepalive } from "./_shared/sse.ts";
+import { abandonedRequestLine, mcpReply, SSE_KEEPALIVE_MS, vendoredStalledLine, withSseKeepalive } from "./_shared/sse.ts";
 import { askRaw, createAssert, leaveMidUpload, pendingSettled, SERVER_STACK, SERVER_V2_PINS, STACK } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
@@ -426,7 +426,7 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
   env(s, KEYS);
 }
 
-// ── A tool call that outlives the runtime's idle timeout ─────────────────────
+// ── A tool call's silence kept alive ─────────────────────────────────────────
 //
 // SMD-2001: the core server's SMD-1864 fix, on the vendored servers. @hono/mcp
 // answers a POST on an event stream it writes nothing to until the tool returns,
@@ -440,13 +440,15 @@ for (const s of SERVERS.filter((s) => s.kind === "mcp")) {
 // SMD-1931). The rest make queries alone, so the probe drives mcpReply as a
 // route hands it a call, served as `bun <file>` serves it — Bun.serve on the
 // runtime's defaults, idle timeout 10 s — with a transport stand-in whose
-// event stream is silent for SLOW_REPLY_MS: past the last sweep that can reset
-// it, so a reply that skipped the keepalive is reset on every run. Beside it, a
-// client that gives up at 1.5 s is logged once, by method and tool and never by
-// its query.
-console.log("\n[mcpReply: a call slower than the idle timeout is answered, and a client that leaves is logged (SMD-2001)]");
+// event stream is silent for SLOW_REPLY_MS: past one SSE_KEEPALIVE_MS, so a
+// reply that skipped the keepalive carries no frame. That the frames carry a
+// stream past the last sweep is sse.ts's, held by test-server.ts [17] on the
+// file this one is a byte-for-byte copy of (above); waiting the 13 s here too
+// measured it a second time (SMD-3201). Beside it, a client that gives up at
+// 1.5 s is logged once, by method and tool and never by its query.
+console.log("\n[mcpReply: a call silent past a keepalive interval is kept alive and answered, and a client that leaves is logged (SMD-2001)]");
 {
-  const SLOW_REPLY_MS = 13_000;
+  const SLOW_REPLY_MS = SSE_KEEPALIVE_MS + 600;
   const enc = new TextEncoder();
   let ran = 0;
   const server = Bun.serve({
@@ -491,7 +493,7 @@ console.log("\n[mcpReply: a call slower than the idle timeout is answered, and a
   let slow: Read, gone: Read;
   try {
     [slow, gone] = await Promise.all([
-      search(50, "a query whose call outlives the idle timeout"),
+      search(50, "a query whose call is silent past a keepalive interval"),
       search(51, "needle-the-line-must-not-carry", AbortSignal.timeout(1500)),
     ]);
     // The abandoned call's tool runs on behind it: held until it has finished too.
@@ -503,10 +505,10 @@ console.log("\n[mcpReply: a call slower than the idle timeout is answered, and a
   }
   const frames = (t: string) => t.split(": keepalive\n\n").length - 1;
   assert(slow.ok && slow.status === 200 && slow.ms >= SLOW_REPLY_MS,
-    `a call is answered after ${SLOW_REPLY_MS} ms of silence, past the last sweep (${slow.ok ? `${slow.status} in ${Math.round(slow.ms)} ms` : `${slow.error} at ${Math.round(slow.ms)} ms`})`);
+    `a call is answered after ${SLOW_REPLY_MS} ms of silence (${slow.ok ? `${slow.status} in ${Math.round(slow.ms)} ms` : `${slow.error} at ${Math.round(slow.ms)} ms`})`);
   const reply = await parse(new Response(slow.text));
   assert(reply.json?.jsonrpc === "2.0" && reply.json?.id === 50, `…with the call's JSON-RPC envelope (${slow.text.slice(0, 80).replace(/\n/g, "\\n")})`);
-  assert(frames(slow.text) >= 2, `…kept alive by comment frames the client never sees as events (${frames(slow.text)})`);
+  assert(frames(slow.text) >= 1, `…kept alive by comment frames the client never sees as events, one per ${SSE_KEEPALIVE_MS} ms (${frames(slow.text)})`);
   assert(!gone.ok, `a client that gives up at 1.5 s is gone (${gone.ok ? "answered" : gone.error})`);
   const lines = warned.filter((w) => /request abandoned/.test(w));
   const m = /after (\d+\.\d) s/.exec(lines[0] ?? "");
@@ -740,7 +742,7 @@ const LIVE: Live[] = [
     },
   })),
 ];
-/** Bun's entry shape as the servers spell it — the tail server-portable/index.ts has — held to the letter (SMD-1799). */
+/** Bun's entry shape as the servers spell it — the tail server-portable/index.ts had until SMD-2287 PR 6b — held to the letter (SMD-1799). */
 const ENTRY_SHAPE = /^export default \{\n  port: Number\(process\.env\.PORT \|\| 8000\),\n  fetch: (?:app\.fetch|handler),\n\};\n/m;
 {
   const inTree = [...new Bun.Glob("{extensions,recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
@@ -989,7 +991,7 @@ const builtPerRequest = (text: string) =>
  * and by no other way. @hono/mcp answers a POST on an event stream it writes
  * nothing to until the tool returns, and Bun closes a stream silent for 8–12 s
  * (SMD-1864); mcpReply keeps it alive and logs a client that leaves. The
- * probe above ("mcpReply: a call slower than the idle timeout") and its edges are
+ * probe above ("mcpReply: a call silent past a keepalive interval") and its edges are
  * the proof; this holds every server to the shape.
  */
 const KEPT_ALIVE = /mcpReply\(c, \(\) => transport\.handleRequest\(c\)\)/;

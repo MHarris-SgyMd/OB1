@@ -498,17 +498,21 @@ const MAX_TIMER = 2_147_483_647;
 /**
  * A whole number from an operator's variable: `fallback` where it is unset or
  * blank, or is no whole number of at least `min` (a note says so); held to
- * `max` (a note says that too).
+ * `max` (a note says that too). Neither note says the value: it may be a
+ * secret pasted into the wrong variable, and one of digits alone parses as a
+ * number too (SMD-3235 review pass 1). Nor the other value of a pair: where
+ * `max` is a value the operator set in `pair`, the notes name `pair`, as the
+ * bound and as a fallback equal to it (SMD-3235 review pass 2).
  */
-function wholeNumber(asked: string | undefined, name: string, fallback: number, notes: string[], { min = 1, max = Infinity } = {}): number {
+function wholeNumber(asked: string | undefined, name: string, fallback: number, notes: string[], { min = 1, max = Infinity, pair = "" } = {}): number {
   if (asked === undefined || asked.trim() === "") return fallback;
   const n = Number(asked);
   if (!Number.isInteger(n) || n < min) {
-    notes.push(`telemetry: ${name} ${JSON.stringify(asked.slice(0, 32))} is not a whole number of at least ${min}: ${fallback} is used (SMD-1849)`);
+    notes.push(`telemetry: ${name} (a value not shown) is not a whole number of at least ${min}: ${pair && fallback === max ? `the value of ${pair}` : fallback} is used (SMD-1849)`);
     return fallback;
   }
   if (n > max) {
-    notes.push(`telemetry: ${name} ${n} is held to ${max} (SMD-1849)`);
+    notes.push(`telemetry: ${name} (a value not shown) is held to ${pair ? `the value of ${pair}` : max} (SMD-1849)`);
     return max;
   }
   return n;
@@ -519,12 +523,14 @@ function wholeNumber(asked: string | undefined, name: string, fallback: number, 
  * OTEL_BSP for spans, OTEL_BLRP for log records): the queue 2,048 by default
  * and held to 65,536; the export size 512 by default and held to 1..the queue
  * — an export size of 0 sends either batch processor round a loop that never
- * ends (review pass 7). `notes` says each value held or ignored.
+ * ends (review pass 7). `notes` says each setting held or ignored.
  */
 export function batchSizes(queueAsked: string | undefined, batchAsked: string | undefined, prefix: "OTEL_BSP" | "OTEL_BLRP" = "OTEL_BSP"): { queue: number; batch: number; notes: string[] } {
   const notes: string[] = [];
   const queue = wholeNumber(queueAsked, `${prefix}_MAX_QUEUE_SIZE`, 2048, notes, { max: MAX_QUEUE });
-  const batch = wholeNumber(batchAsked, `${prefix}_MAX_EXPORT_BATCH_SIZE`, Math.min(512, queue), notes, { max: queue });
+  // The queue is the operator's own value where it was set and nothing was said of it: then it is named, not said.
+  const pair = queueAsked?.trim() && notes.length === 0 ? `${prefix}_MAX_QUEUE_SIZE` : "";
+  const batch = wholeNumber(batchAsked, `${prefix}_MAX_EXPORT_BATCH_SIZE`, Math.min(512, queue), notes, { max: queue, pair });
   return { queue, batch, notes };
 }
 
@@ -538,7 +544,9 @@ export function batchSizes(queueAsked: string | undefined, batchAsked: string | 
 export function metricTimes(intervalAsked: string | undefined, timeoutAsked: string | undefined): { interval: number; timeout: number; notes: string[] } {
   const notes: string[] = [];
   const interval = wholeNumber(intervalAsked, "OTEL_METRIC_EXPORT_INTERVAL", 60_000, notes, { min: 1000, max: MAX_TIMER });
-  const timeout = wholeNumber(timeoutAsked, "OTEL_METRIC_EXPORT_TIMEOUT", Math.min(30_000, interval), notes, { max: interval });
+  // As the queue for the export size (batchSizes): the operator's own interval is named, not said.
+  const pair = intervalAsked?.trim() && notes.length === 0 ? "OTEL_METRIC_EXPORT_INTERVAL" : "";
+  const timeout = wholeNumber(timeoutAsked, "OTEL_METRIC_EXPORT_TIMEOUT", Math.min(30_000, interval), notes, { max: interval, pair });
   return { interval, timeout, notes };
 }
 

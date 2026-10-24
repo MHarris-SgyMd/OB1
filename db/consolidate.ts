@@ -32,6 +32,7 @@
  *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # the queue, with both thoughts; lineage: the unreviewed rows standing on a lineage pair (070)
  *                                                                                         # each side's writer, and WRITER on a capture-only key's or lower-trust side to stand (094)
  *   bun db/consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate (a distinct, 102, is counted by --status, not listed)
+ *   bun db/consolidate.ts --url … --list [<status>|relations] --key <judge key>   # one pass's alone: its judge key exactly, as each row names it (109, SMD-3248)
  *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged, a stale row, a lineage pair (070), or a WRITER flag (094)
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90; at most 2000000, inside Postgres's timestamp range)
@@ -169,6 +170,7 @@ import {
 } from "../server-portable/consolidate.ts";
 import { actorPayload, isoDay, normaliseProposal, withWriters, WRITERS_MISSING, type ProposalSide, type ProposalWriter } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
+import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
@@ -186,12 +188,37 @@ import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSq
 const FLAGS = {
   url: "one", workers: "one", batch: "one", ttl: "one", heartbeat: "one", timeout: "one",
   k: "one", "min-sim": "one", "min-confidence": "one", limit: "one", follow: "optional", stale: "optional", dump: "one",
-  list: "optional", accept: "one", reject: "one", direction: "one", note: "one", force: "none",
+  list: "optional", key: "one", accept: "one", reject: "one", direction: "one", note: "one", force: "none",
   status: "none", "dry-run": "none", "retry-failed": "none",
 } as const;
-const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", stale: "[DAYS]", dump: "<verdicts.jsonl>", list: "[pending|accepted|rejected|stale|lineage|all|relations]", accept: "<proposal id>", reject: "<proposal id>", direction: "<newer|older>", note: "<text>", force: "(with --accept)" };
+const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", stale: "[DAYS]", dump: "<verdicts.jsonl>", list: "[pending|accepted|rejected|stale|lineage|all|relations]", key: "<judge key> (with --list)", accept: "<proposal id>", reject: "<proposal id>", direction: "<newer|older>", note: "<text>", force: "(with --accept)" };
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LIST_STATUSES = ["pending", "accepted", "rejected", "stale", "lineage", "all", "relations"];
+/**
+ * What a capped --list page says of the rows past it (SMD-3248). Unselected, --status counts them all. Under --key,
+ * --status counts the pending by pass, not this selection's rows, and only a pending page drains as it is decided —
+ * a decided row leaves `pending`, so listing again shows the next; an all-status, decided or stale page, and a
+ * lineage one (its stale half does not drain), shows the same rows again, so the rest wait for paging (SMD-3249).
+ * `status` is printList's: undefined for --list all.
+ */
+export function capNote(status: string | undefined, keyed: boolean): string {
+  if (!keyed) return "--status counts them all";
+  return status === "pending" ? "decide these and list again for the rest; --status counts each pass's pending" : "the rest are not listed (SMD-3249 pages)";
+}
+
+
+/**
+ * --status's pending-by-pass line (SMD-3248): ten passes at most, most first,
+ * the rest counted. A key is anyone's to record (029's door takes any non-empty
+ * text): one --key cannot take is shown escaped and said so, unfiltered --list
+ * its only listing (review passes 2–4).
+ */
+export function pendingByPassLine(byPass: { judge_key: string; n: number }[]): string {
+  const shown = byPass.slice(0, 10), rest = byPass.slice(10);
+  const one = (b: { judge_key: string; n: number }) => `${b.n} judged by ${judgeKeyText(b.judge_key)}${selectableKey(b.judge_key) ? "" : " (not a key --key takes; listed by --list alone)"}`;
+  return `  pending by pass: ${shown.map(one).join(", ")}${rest.length ? `, and ${rest.length} more pass(es) with ${rest.reduce((a, b) => a + b.n, 0)} pending` : ""} — --list --key <key> lists one pass's`;
+}
+
 /**
  * The longest --stale: stale_entities is given `make_interval(days => n)`
  * subtracted from now(), and a timestamp before 4714 BC is out of range — at
@@ -256,6 +283,8 @@ export interface ConsolidateOptions {
   /** --dump <file>: append every verdict as JSONL (below). */
   dump?: string;
   list?: string;
+  /** --key <judge key>, with --list: one pass's proposals or relations alone, by its judge key exactly (109, SMD-3248). */
+  key?: string;
   accept?: string;
   reject?: string;
   direction?: string;
@@ -360,9 +389,17 @@ function numbers(opts: ConsolidateOptions): Numbers | string {
  * --list or --stale they were dropped without a word (SMD-2405). --list and
  * --stale do combine with a decision: they only read, after it is written.
  */
-export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "accept" | "reject" | "direction" | "force" | "note" | "limit" | "stale" | "status" | "dryRun">): string | null {
+export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "key" | "accept" | "reject" | "direction" | "force" | "note" | "limit" | "stale" | "status" | "dryRun">): string | null {
   const { list, accept, reject, direction, note } = { list: opts.list ?? undefined, accept: opts.accept ?? undefined, reject: opts.reject ?? undefined, direction: opts.direction ?? undefined, note: opts.note ?? undefined };
   if (list !== undefined && !LIST_STATUSES.includes(list)) return "--list takes pending, accepted, rejected, stale, lineage, all or relations (or nothing, for pending).";
+  // SMD-3248: read only by a listing — beside anything else it would be dropped without a word (SMD-2015's kind). The
+  // tool's bounds (pass-key.ts's PASS_KEY_CHARS), so the two doors take the same keys.
+  const key = opts.key ?? undefined;
+  if (key !== undefined && list === undefined) return "--key goes with --list: it lists one pass's proposals or relations alone, by its judge key.";
+  if (key !== undefined && (key.length < 1 || key.length > 200)) return "--key takes a judge key of 1 to 200 characters, as each listed row names it (judged by consolidate:…).";
+  // A pass key's own characters (pass-key.ts; review passes 1 and 3): one outside them is a typo that would select
+  // nothing, or a key no selection takes, said instead.
+  if (key !== undefined && !selectableKey(key)) return "--key takes a judge key of letters, digits and . _ : / @ + -, starting with a letter or digit, as each listed row names it (judged by consolidate:…).";
   for (const [name, v] of [["accept", accept], ["reject", reject]] as const) {
     if (v !== undefined && !UUID_RE.test(v)) return `--${name} needs a proposal id (a UUID from --list or the list_supersession_proposals tool).`;
   }
@@ -379,8 +416,9 @@ export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "accept" |
   if (direction !== undefined && (!accept || !["newer", "older"].includes(direction))) return "--direction takes newer or older, and only with --accept.";
   if (opts.force === true && !accept) return "--force goes with --accept: it accepts a proposal whose thought was edited after it was judged, one gone stale, one standing on a lineage pair (070), or one flagged WRITER (094).";
   // The pass's thought cap: beside --list it would be dropped without a word (SMD-2015's kind) — the
-  // listing prints up to 50 of a status and --status counts them all (adversarial re-run, third review pass).
-  if (opts.limit != null && list !== undefined) return "--limit is the pass's thought cap and goes with a run; --list prints up to 50 of a status (--status counts them all).";
+  // listing prints up to 50 of a status and --status counts each status (adversarial re-run, third review pass), and,
+  // since SMD-3248, the pending by pass.
+  if (opts.limit != null && list !== undefined) return "--limit is the pass's thought cap and goes with a run; --list prints up to 50 of a status (--status counts each status, and the pending by pass).";
   // Read only by the decision: beside anything else it would be dropped without a word (SMD-2015's kind).
   if (note !== undefined && !accept && !reject) return "--note goes with --accept or --reject: it is recorded with the decision.";
   // 067: the marker is the pass's own — a person's note beginning with it would
@@ -490,6 +528,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const DRY_RUN = opts.dryRun === true;
   const RETRY_FAILED = opts.retryFailed === true;
   const LIST = opts.list ?? undefined;
+  const KEY = opts.key ?? undefined;
   const ACCEPT = opts.accept ?? undefined;
   const REJECT = opts.reject ?? undefined;
   const DIRECTION = opts.direction ?? undefined;
@@ -703,9 +742,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   /** 067: the stale rows' standings against the pools under THIS key, as --status prints them (server-portable/consolidate.ts holds the one read, the rank and the words; db/rebuild.ts reads the same, keyless). */
   const readStaleStandings = async () => staleStandings((await sql.unsafe(STALE_STANDING_ROWS_SQL)) as StaleStandingRow[], JOB);
-  /** 070: --status's clause for the unreviewed rows standing on a lineage pair — the listing named, or the file it needs first (its own SQL reads on a brain at 068). */
-  const lineageClause = (n: number, has070: boolean): string =>
-    `${n} unreviewed standing on a lineage pair (${has070 ? "--list lineage shows them" : "apply migration 070 first — cd db && bun migrate.ts --url <url> — then --list lineage shows them"}; the reviewer rejects each — the pass never replaces a pending one)`;
+  /** 070: --status's clause for the unreviewed rows standing on a lineage pair — the listing named, or the file it needs first (its own SQL reads on a brain at 068); the listing is 109's since SMD-3248. */
+  const lineageClause = (n: number, has109: boolean): string =>
+    `${n} unreviewed standing on a lineage pair (${has109 ? "--list lineage shows them" : "apply migration 109 first — cd db && bun migrate.ts --url <url> — then --list lineage shows them"}; the reviewer rejects each — the pass never replaces a pending one)`;
   const staleClause = (st: ReturnType<typeof staleStandings>): string =>
     `${st.total} stale (a text moved under the verdict: ${staleStandingsText(st, JOB)}; the pass replaces one it proposes again and settles one it does not)`;
 
@@ -813,12 +852,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   }
 
   async function printList(status: string | undefined, limit = 50): Promise<number> {
-    // 070's three-argument form, always: 029 re-applied by hand lands its
-    // two-argument form beside 070's, and a call short of three is then
-    // ambiguous (not unique) and fails; three resolve (preflight's lineage
-    // check names the leftover).
+    // 109's four-argument form, always: 029 or 070 re-applied by hand lands
+    // its form beside 109's, and a call both forms take (under three arguments
+    // beside 029's, under four beside 070's) is then ambiguous (not unique) and
+    // fails; four resolve (preflight's lineage check names the leftover).
+    // --key selects one pass in the SQL, before the cap (SMD-3248).
     const listed = async (st: string | null, lineage: boolean | null) =>
-      (await sql`SELECT * FROM list_supersession_proposals(${st}::text, ${limit}::int, ${lineage}::boolean)`) as Listed[];
+      (await sql`SELECT * FROM list_supersession_proposals(${st}::text, ${limit}::int, ${lineage}::boolean, ${KEY ?? null}::text)`) as Listed[];
     // --list lineage: the unreviewed rows standing on a lineage pair — the
     // reviewer's alone (a pending row holds its pair, 066 never re-finds it;
     // a stale one waits for the pass's settle, 067) — pending first, then
@@ -841,7 +881,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     }
     const writerIds = new Set(writers.map((w) => String(w.id)));
     const rows = read ? listedRows.filter((p) => writerIds.has(p.id)) : listedRows;
-    const what = lineageMode ? "unreviewed proposals standing on a lineage pair" : `${status ? `${status} ` : ""}proposals`;
+    // SMD-3248: the pass selected is said with the rest of the selection.
+    const what = (lineageMode ? "unreviewed proposals standing on a lineage pair" : `${status ? `${status} ` : ""}proposals`) + (KEY === undefined ? "" : ` judged by ${KEY}`);
     if (rows.length === 0) {
       out(`  no ${what}`);
       return 0;
@@ -852,7 +893,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // the queue ended (review pass 5).
     const hit = (st: string) => listedRows.filter((r) => r.status === st).length === limit;
     const capped = lineageMode ? hit("pending") || hit("stale") : listedRows.length === limit;
-    out(`  ${rows.length} ${what.replace("proposals", "proposal(s)")}${lineageMode ? " (pending, then stale)" : ""}, most confident first${capped ? ` — ${lineageMode ? `pending and stale capped at ${limit} each` : `the first ${limit}`}; --status counts them all` : ""}:\n`);
+    // Under --key, --status counts the pending by pass, not this status's rows; only a pending page drains as it is decided (review passes 1 and 2).
+    const more = capNote(status, KEY !== undefined);
+    out(`  ${rows.length} ${what.replace("proposals", "proposal(s)")}${lineageMode ? " (pending, then stale)" : ""}, most confident first${capped ? ` — ${lineageMode ? `pending and stale capped at ${limit} each` : `the first ${limit}`}; ${more}` : ""}:\n`);
     // 067: a stale row's standing against the pools, beside its status. (A
     // row the pass settled needs no tag: its note begins with the marker.)
     const standing = rows.some((p) => p.status === "stale") ? (await readStaleStandings()).byId : new Map<string, never>();
@@ -869,7 +912,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       if (reason) out(`     reason: ${reason}`);
       out(sideLines("newer", np.newer, p.newer_created_at));
       out(sideLines("older", np.older, p.older_created_at));
-      out(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${p.judge_key} on ${day(p.judged_at)}`);
+      // The key through the replies' cleaner: a recorded one holding a newline starts no line of its own (review pass 2).
+      out(`     proposal ${p.id}  cosine ${p.similarity === null ? "?" : Number(p.similarity).toFixed(3)}  judged by ${judgeKeyText(p.judge_key)} on ${day(p.judged_at)}`);
       // 070: a lineage pair — one side derived from the other — is never
       // proposed since 066; a row standing on one is said so, with the reject
       // while the row is the reviewer's.
@@ -1010,12 +1054,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         code = 1;
       } else await printRelations();
     } else if (LIST !== undefined) {
-      // 070 (SMD-2313): a brain at 068 under this tree has no three-argument
-      // listing — the one error every --list meets there, named with its file
-      // rather than a driver stack (definitions probe, second review pass).
+      // 070 (SMD-2313), then 109 (SMD-3248): a brain at 108 or before under
+      // this tree has no four-argument listing — the one error every --list
+      // meets there, named with its file rather than a driver stack
+      // (definitions probe, SMD-2313's second review pass).
       try { await printList(LIST === "all" ? undefined : LIST); } catch (e) {
-        if (!/list_supersession_proposals\(text, ?integer, ?boolean\) does not exist/.test((e as Error).message)) throw e;
-        err("  --list needs migration 070 (db/migrations/070_listing_flags_lineage_pair.sql), which this brain has not applied: cd db && bun migrate.ts --url <url>");
+        if (!/list_supersession_proposals\(text, ?integer, ?boolean, ?text\) does not exist/.test((e as Error).message)) throw e;
+        err("  --list needs migration 109 (db/migrations/109_listing_selects_a_pass.sql), which this brain has not applied: cd db && bun migrate.ts --url <url>");
         code = 1;
       }
     }
@@ -1054,23 +1099,25 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         LEFT JOIN derivations d ON d.artifact_kind = 'relation' AND d.artifact_id = f.id AND d.produced_by = f.payload->>'judge_key'
        -- A distinct (102) is a pair judged apart, not a relation to review: --status counts it (SMD-3117).
        WHERE f.kind = 'relation' AND f.valid_until IS NULL AND f.payload->>'relation' IS DISTINCT FROM 'distinct'
+         -- --key (SMD-3248): one pass's relations alone, by the key its facet names.
+         AND (${KEY ?? null}::text IS NULL OR f.payload->>'judge_key' = ${KEY ?? null}::text)
        ORDER BY f.created_at DESC, f.id
        LIMIT ${limit}`) as {
         id: string; relation: string; confidence: number | null; judge_key: string; created_at: Stamp;
         newer_id: string; newer_content: string; newer_created_at: Stamp; older_id: string; older_content: string; older_created_at: Stamp; edited: boolean;
         older_superseded: boolean; newer_superseded: boolean }[];
     if (rows.length === 0) {
-      out("  no relations");
+      out(`  no relations${KEY === undefined ? "" : ` judged by ${KEY}`}`);
       return 0;
     }
     const phrase: Record<string, string> = { related: "related", evolves: "the NEWER evolves from the older", duplicate: "duplicates" };
-    out(`  ${rows.length} relation(s), newest first${rows.length === limit ? ` — the first ${limit}; --status counts them all` : ""}:\n`);
+    out(`  ${rows.length} relation(s)${KEY === undefined ? "" : ` judged by ${KEY}`}, newest first${rows.length === limit ? ` — the first ${limit}; ${KEY === undefined ? "--status counts them all" : "the rest are not listed"}` : ""}:\n`);
     rows.forEach((r, i) => {
-      const marks = [r.edited && "EDITED SINCE JUDGED", r.older_superseded && "OLDER SUPERSEDED", r.newer_superseded && "NEWER SUPERSEDED", r.judge_key !== JOB && "ANOTHER JUDGE KEY"].filter(Boolean);
+      const marks = [r.edited && "EDITED SINCE JUDGED", r.older_superseded && "OLDER SUPERSEDED", r.newer_superseded && "NEWER SUPERSEDED", r.judge_key !== JOB && KEY === undefined && "ANOTHER JUDGE KEY"].filter(Boolean);
       out(`  ${i + 1}. [${r.confidence === null ? "—" : Number(r.confidence).toFixed(2)}] ${phrase[r.relation] ?? r.relation}${marks.length ? `  ${marks.join("  ")}` : ""}`);
       out(`     newer [${day(r.newer_created_at)}] ${snippet(r.newer_content)}\n        ID: ${r.newer_id}`);
       out(`     older [${day(r.older_created_at)}] ${snippet(r.older_content)}\n        ID: ${r.older_id}`);
-      out(`     relation ${r.id}  judged by ${r.judge_key} on ${day(r.created_at)}\n`);
+      out(`     relation ${r.id}  judged by ${judgeKeyText(r.judge_key)} on ${day(r.created_at)}\n`);
     });
     return rows.length;
   }
@@ -1115,12 +1162,17 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
              (SELECT count(*)::int FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id
                WHERE p.status IN ('pending', 'stale')
                  AND (COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false))) AS lineage,
-             -- The count above is this file's own SQL and reads on a brain at 068; the listing it points at is 070's, so its absence is
-             -- said here rather than one command later (operator walkthrough, fourth review pass).
-             to_regprocedure('list_supersession_proposals(text, int, boolean)') IS NOT NULL AS has_070
+             -- The count above is this file's own SQL and reads on a brain at 068; the listing it points at is 109's (070's before
+             -- SMD-3248), so its absence is said here rather than one command later (operator walkthrough, SMD-2313's fourth review pass).
+             to_regprocedure('list_supersession_proposals(text, int, boolean, text)') IS NOT NULL AS has_109
       FROM supersession_proposals`;
     const stale = await readStaleStandings();
-    out(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${stale.total ? `, ${staleClause(stale)}` : ""}${q.lineage ? `, ${lineageClause(q.lineage, q.has_070)}` : ""} — --list shows them; --accept / --reject decides one`);
+    // SMD-3248: the pending queue by the pass that judged it — the keys --list --key takes, most first. A reviewer grading
+    // one pass (SMD-3115's per-decide-version precision) learns which passes the total holds without reading a listing.
+    const byPass = (await sql`
+      SELECT judge_key, count(*)::int AS n FROM supersession_proposals WHERE status = 'pending' GROUP BY judge_key ORDER BY n DESC, judge_key`) as { judge_key: string; n: number }[];
+    out(`  queue: ${q.pending} pending (${q.undirected} without a direction), ${q.accepted} accepted, ${q.rejected} rejected${q.settled ? ` (${q.settled} by the pass)` : ""}${stale.total ? `, ${staleClause(stale)}` : ""}${q.lineage ? `, ${lineageClause(q.lineage, q.has_109)}` : ""} — --list shows them; --accept / --reject decides one`);
+    if (byPass.length) out(pendingByPassLine(byPass));
     // 084 (SMD-1873 PR 2): the relations the pass judged, standing.
     if (await has084()) {
       const [r] = (await sql`
@@ -2412,7 +2464,7 @@ if (import.meta.main) {
   // The review flags' rules before the client, where the script refused them:
   // a URL Bun's client rejects then still meets a bad --list word first, as on
   // main (review pass 3). run() refuses through the same function.
-  const review = reviewProblem({ list, accept: cli.value("accept"), reject: cli.value("reject"), direction: cli.value("direction"), force: cli.has("force"), note: cli.value("note"), limit, stale, status: cli.has("status"), dryRun: cli.has("dry-run") });
+  const review = reviewProblem({ list, key: cli.value("key"), accept: cli.value("accept"), reject: cli.value("reject"), direction: cli.value("direction"), force: cli.has("force"), note: cli.value("note"), limit, stale, status: cli.has("status"), dryRun: cli.has("dry-run") });
   if (review !== null) {
     console.error(review);
     process.exit(2);
@@ -2429,6 +2481,7 @@ if (import.meta.main) {
       sql, url, workers, batch, ttl, heartbeat, timeout, k, minSim, minConfidence, limit, follow, stale,
       dump: cli.value("dump"),
       list,
+      key: cli.value("key"),
       accept: cli.value("accept"),
       reject: cli.value("reject"),
       direction: cli.value("direction"),

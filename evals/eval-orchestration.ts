@@ -277,11 +277,9 @@ async function up(): Promise<void> {
   // forwarder's in front of the proxy (SMD-1846, SMD-2583), and nothing the
   // named services wait on starts either; the forwarder waits on the proxy,
   // so naming the proxy alone left 8012 closed. `api`, the REST core the
-  // candidates call (SMD-2295), is named for what it is; the proxy's
-  // depends_on starts it anyway. `server` is named because its service alone
-  // builds the image `api` and `mcp` run, until SMD-2287 PR 6 retires it, so
-  // its container starts too, though nothing calls it.
-  const r = compose(tool, ["up", "-d", "--build", "postgres", "migrate", "server", "api", "proxy", "forwarder", ...adapter.services, ...variantServices], { OB1_GIT_SHA: stamp });
+  // candidates call (SMD-2295), is named for what it is, and its service
+  // builds the image it and `mcp` run (SMD-2287 PR 6b; `server` did before).
+  const r = compose(tool, ["up", "-d", "--build", "postgres", "migrate", "api", "proxy", "forwarder", ...adapter.services, ...variantServices], { OB1_GIT_SHA: stamp });
   if (r.code !== 0) throw new Error(`compose up failed:\n${r.err.slice(-2000)}`);
   await waitFor("the brain's /health", brainHealthy);
   const reported = await fetch("http://127.0.0.1:8012/health", { headers: { "x-brain-key": env.ORCH_BRAIN_READ_KEY } }).then((h) => h.json()).then((j: any) => String(j.commit), () => "unreadable");

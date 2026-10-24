@@ -1137,7 +1137,7 @@ jobs:
       - name: The server sees what deploy/.env says
         working-directory: deploy
         run: |
-          LOG="$(docker compose -f compose.yaml logs --no-color server)"
+          LOG="$(docker compose -f compose.yaml logs --no-color api)"
           grep -E 'model provider +http://host\.docker\.internal:11434/v1\b.*\(local — no credential needed\)' <<<"$LOG"
           grep -E '✓ +provider endpoint +http://host\.docker\.internal:11434/v1 answers — HTTP 200 to GET /models' <<<"$LOG"
           grep -E 'embeddings egress +http://host\.docker\.internal:11434/v1 is declared local \(OB1_LLM_LOCAL\)' <<<"$LOG"
@@ -1164,7 +1164,7 @@ jobs:
       - name: A local endpoint that cannot answer refuses to start, one not up yet starts degraded
         working-directory: deploy
         run: |
-          pf() { local out=$1; shift; set +e; docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun "$@" server preflight.ts > "$out" 2>&1; CODE=$?; set -e; }
+          pf() { local out=$1; shift; set +e; docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun "$@" api preflight.ts > "$out" 2>&1; CODE=$?; set -e; }
           # The report is printed whole when a line is missing, so a runner
           # whose resolver answers differently is read, not guessed at (the
           # first run read the unknown name as the timeout kind; caught: CI, PR #138).
@@ -1182,7 +1182,7 @@ jobs:
           hold /tmp/notyet.out '! +provider endpoint +nothing answers at http://host.docker.internal:1/v1 yet — .*the server starts degraded'
           hold /tmp/notyet.out 'preflight OK'
           code /tmp/notyet.out 0
-          docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun server preflight.ts | grep -F 'preflight OK'
+          docker compose -f compose.yaml run --rm --no-deps -T --entrypoint bun api preflight.ts | grep -F 'preflight OK'
 
       # SMD-2424, SMD-3214: the workers profile's own command, run for real
       # against this stack (its database is up; --no-deps starts nothing
@@ -1327,7 +1327,7 @@ jobs:
           docker compose -f compose.yaml config --format json | jq -j .configs.forwarder.content | cmp - forwarder.ts \
             || { echo "compose.yaml's rendered forwarder script is not deploy/forwarder.ts" >&2; exit 1; }
           docker compose -f compose.yaml --profile local-models config --format json \
-            | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and (.services.forwarder.ports | length == 1) and (.services.proxy | has("ports") | not) and (.services.server | has("ports") | not) and (.services.api | has("ports") | not) and (.services.mcp | has("ports") | not) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.forwarder.image | test("@sha256:[0-9a-f]{64}$")) and (.services.proxy.labels["ob1.proxy-routes"] == .configs["proxy-routes"].content) and (.services.forwarder.labels["ob1.forwarder"] == .configs.forwarder.content) and ([.services[] | select(.network_mode != null)] | length == 0)'
+            | jq -e '([.services[].ports[]?] | length == 1 and all(.host_ip == "127.0.0.1") and (.[0].published == "8010")) and (.services.forwarder.ports | length == 1) and (.services.proxy | has("ports") | not) and (.services.api | has("ports") | not) and (.services.mcp | has("ports") | not) and (.services.proxy.image | test("@sha256:[0-9a-f]{64}$")) and (.services.forwarder.image | test("@sha256:[0-9a-f]{64}$")) and (.services.proxy.labels["ob1.proxy-routes"] == .configs["proxy-routes"].content) and (.services.forwarder.labels["ob1.forwarder"] == .configs.forwarder.content) and ([.services[] | select(.network_mode != null)] | length == 0)'
           # The REST core's public overlay (SMD-2284) publishes nothing either, and
           # its route file is its label, as the base one is; it dials the REST
           # core by its rooted mesh name (SMD-2294; the table is check 28's
@@ -1398,8 +1398,8 @@ jobs:
           members='def on($n): [.services | to_entries[] | select((.value.networks // {"default": null}) | has($n)) | .key] | sort;'
           docker compose -f compose.yaml "${all[@]}" config --format json \
             | jq -e "$members"' (on("default") == []) and ((.services.postgres.networks | keys) == ["data"]) and .networks.data.internal == true
-              and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "pg-exporter", "pg-monitor-role", "postgres", "server", "sleep"])
-              and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "server", "sleep"])
+              and (on("data") == ["api", "board-sync", "consolidate", "extract", "migrate", "orchestration-runner", "orchestration-runner-role", "pg-exporter", "pg-monitor-role", "postgres", "sleep"])
+              and (on("egress") == ["api", "board-sync", "consolidate", "extract", "jev", "n8n", "ollama", "ollama-pull", "orchestration-runner", "sleep"])
               and (on("auth-egress") == ["auth"]) and (on("edge") == ["forwarder"]) and (on("front") == ["forwarder", "proxy"]) and .networks.front.internal == true and (on("mesh") == ["api", "app", "auth", "lgtm", "mcp", "proxy"]) and (on("telemetry") == ["lgtm", "pg-exporter"]) and .networks.telemetry.internal == true
               and ([.services | to_entries[] | select((.value.environment // {}) | keys | any(startswith("OTEL_"))) | .key] == ["api", "mcp"])'
           docker compose -f compose.yaml -f compose.host-ports.yaml "${all[@]}" config --format json \
@@ -1434,15 +1434,15 @@ jobs:
           # setting is (SMD-3214).
           docker compose -f compose.yaml --profile sleep config --format json \
             | jq -e '([.services[].ports[]?] | length == 1) and (.services.sleep | (has("ports") | not) and .init == true and (.environment.MCP_ACCESS_KEYS | length > 0) and (.environment | has("OB1_WORKER_KEY") and has("OB1_SLEEP_QUIET") and has("OB1_SLEEP_POLL") and has("OB1_SLEEP_WORKERS") and has("OB1_SLEEP_BUDGET") and has("OB1_SLEEP_STATEMENT_TIMEOUT") and has("OB1_SLEEP_WORK_MEM") and has("OB1_SLEEP_MAINTENANCE_WORK_MEM") and has("OB1_SLEEP_DUMP_DIR")) and (.environment | has("OB1_PLUGINS") or has("OB1_PLUGIN_DB_PASSWORD") | not) and .environment.PORT == "" and (.volumes | length == 3) and ([.volumes[] | select(.type == "bind")] | length == 2 and all(.read_only == true)) and ([.volumes[] | select(.type == "volume") | "\(.source):\(.target)"] == ["sleep-dumps:/var/lib/ob1/sleep-dumps"]) and .restart == "unless-stopped" and ((.extra_hosts // []) | any(test("^host\\.docker\\.internal[:=]host-gateway$"))) and .depends_on.migrate.condition == "service_completed_successfully" and .stop_grace_period == "2m0s" and ((.networks // {}) | keys) == ["data", "egress"] and .command[:14] == ["bun", "db/supervise.ts", "--worker", "sleep", "--require-key", "--digits", "OB1_SLEEP_QUIET", "OB1_SLEEP_POLL", "OB1_SLEEP_WORKERS", "OB1_SLEEP_BUDGET", "OB1_SLEEP_STATEMENT_TIMEOUT", "OB1_SLEEP_WORK_MEM", "OB1_SLEEP_MAINTENANCE_WORK_MEM", "--run"] and (.command | length == 15) and (.command[14] | test("^exec bun db/sleep\\.ts --follow --quiet \"\\$+\\{OB1_SLEEP_QUIET:-300\\}\" --poll \"\\$+\\{OB1_SLEEP_POLL:-5\\}\" --workers \"\\$+\\{OB1_SLEEP_WORKERS:-1\\}\" --budget \"\\$+\\{OB1_SLEEP_BUDGET:-60\\}\" --statement-timeout \"\\$+\\{OB1_SLEEP_STATEMENT_TIMEOUT:-300\\}\" --work-mem \"\\$+\\{OB1_SLEEP_WORK_MEM:-4\\}\" --maintenance-work-mem \"\\$+\\{OB1_SLEEP_MAINTENANCE_WORK_MEM:-64\\}\" \\$+\\{OB1_SLEEP_DUMP_DIR:\\+--dump-dir \"\\$+\\{OB1_SLEEP_DUMP_DIR\\}\"\\}$")))'
-          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api app forwarder mcp migrate postgres proxy server " ]
+          [ "$(docker compose -f compose.yaml config --services | sort | tr '\n' ' ')" = "api app forwarder mcp migrate postgres proxy " ]
           docker compose -f compose.yaml config --format json \
-            | jq -e '.services.api.image == .services.server.image and (.services.api | has("build") | not) and .services.api.pull_policy == "never" and .services.server.pull_policy == "never" and (.services.proxy.depends_on | has("api"))'
+            | jq -e '.services.api as $api | $api.build.dockerfile == "server-portable/Dockerfile" and $api.pull_policy == "never" and all(.services.mcp, .services.app; .image == $api.image and (has("build") | not) and .pull_policy == "never") and (.services.proxy.depends_on | has("api"))'
           # SMD-2287: the MCP server built on the REST core runs the server's
           # image unbuilt, bun with auto-install off, holding none of the
           # server's secrets: no database URL, no key list, no provider key,
           # not the plugins' login password.
           docker compose -f compose.yaml config --format json \
-            | jq -e '.services.mcp.image == .services.server.image and (.services.mcp | has("build") | not) and .services.mcp.pull_policy == "never" and .services.mcp.entrypoint == ["bun", "--no-install"] and (.services.proxy.depends_on | has("mcp")) and (.services.mcp.environment | (has("OB1_FORWARDER_KEY") and (.OB1_FORWARDER_KEY | length > 0)) and ([has("DATABASE_URL"), has("MCP_ACCESS_KEYS"), has("OB1_PLUGIN_DB_PASSWORD"), has("OPENROUTER_API_KEY"), has("OB1_LLM_API_KEY"), has("OB1_CHAT_API_KEY"), has("OB1_HOOK_SECRETS")] | any | not))'
+            | jq -e '.services.mcp.image == .services.api.image and (.services.mcp | has("build") | not) and .services.mcp.pull_policy == "never" and .services.mcp.entrypoint == ["bun", "--no-install"] and (.services.proxy.depends_on | has("mcp")) and (.services.mcp.environment | (has("OB1_FORWARDER_KEY") and (.OB1_FORWARDER_KEY | length > 0)) and ([has("DATABASE_URL"), has("MCP_ACCESS_KEYS"), has("OB1_PLUGIN_DB_PASSWORD"), has("OPENROUTER_API_KEY"), has("OB1_LLM_API_KEY"), has("OB1_CHAT_API_KEY"), has("OB1_HOOK_SECRETS")] | any | not))'
 
       # SMD-2583, the network move's Verify, on the running stack: a
       # container on `egress` alone cannot open a connection to Postgres, by
@@ -1454,7 +1454,7 @@ jobs:
       - name: Postgres answers on the data network alone
         working-directory: deploy
         run: |
-          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
+          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.api.image)"
           ip=$(docker inspect -f '{{(index .NetworkSettings.Networks "open-brain_data").IPAddress}}' "$(docker compose -f compose.yaml ps -q postgres)")
           [ -n "$ip" ] || { echo "Postgres has no address on open-brain_data" >&2; exit 1; }
           # shellcheck disable=SC2016 # JavaScript's template strings, not the shell's
@@ -1479,7 +1479,7 @@ jobs:
           img="$(docker compose -f compose.yaml config --format json | jq -r .services.forwarder.image)"
           want="${img#*oven/bun:}"; want="${want%%[-@]*}"
           [[ "$want" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "the forwarder's image $img names no Bun version" >&2; exit 1; }
-          for s in forwarder server mcp app; do
+          for s in forwarder api mcp app; do
             got="$(docker compose -f compose.yaml exec -T "$s" bun --version)"
             echo "$s: Bun $got"
             [ "$got" = "$want" ] || { echo "$s runs Bun $got, not the pinned $want (the forwarder's $img)" >&2; exit 1; }
@@ -1498,7 +1498,7 @@ jobs:
         working-directory: deploy
         run: |
           PROXY_IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.proxy.image)"
-          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
+          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.api.image)"
           docker run --rm --network open-brain_edge --entrypoint getent "$PROXY_IMAGE" hosts example.com > /dev/null || { echo "getent in the proxy's image resolves no outside name from open-brain_edge, so the refusal below proves nothing" >&2; exit 1; }
           if docker compose -f compose.yaml exec -T proxy getent hosts example.com; then echo "the proxy resolved an outside name" >&2; exit 1; fi
           docker compose -f compose.yaml exec -T forwarder bun /forwarder.ts --self-check
@@ -1787,37 +1787,59 @@ jobs:
 
       # SMD-2280: the operator GUI as a browser uses it, through the stack's
       # proxy at /dashboard, on the stack configured for no authorization
-      # server (dashboard/smoke.ts). First one capture of its own over /mcp,
-      # ingested, since smoke.sh captures nothing: --require-thought fails
-      # the step rather than skip the thought page, and --require-ingested
-      # unless that page's ingested notice is driven. The smoke holds the
+      # server (dashboard/smoke.ts). First three captures of its own over /mcp,
+      # since smoke.sh captures nothing: two with no trust recorded (the smoke
+      # key is unclassified), then an ingested one, the newest, which the
+      # thought page drives. --require-thought fails
+      # the step rather than skip the thought page, --require-ingested unless
+      # that page's ingested notice is driven, and --require-pages unless
+      # browse walks three pages (the third's Previous and First page, a
+      # spent cut trail on the last), search pages past its first, and the
+      # trust filter leaves the untrusted captures out (PR 2a), and --require-rows
+      # unless the proposals and workers pages render rows, which the step
+      # plants through the brain's own producers (PR 2b). The smoke holds the
       # sign-in wall; a wrong and a capture-only key, a cookie the server never
       # issued and a cross-site or Origin-null sign-in refused; the cookie's
-      # and the pages' headers; the overview, the status and a thought rendered
-      # from the REST core under the write key, the overview and a 404 under
-      # the read key; the overview's data holding each thought's first line
-      # alone; the key in no page, header, script or cookie; and sign-out, a
+      # and the pages' headers; the overview, the status, browse, search, the
+      # change feed (walked a change at a time), the proposals, the workers, the
+      # query log (the smoke's own search in it) and a thought rendered from the
+      # REST core under the write key, all but the thought and a 404 under the
+      # read key; each list's data holding the fields it shows alone; the key
+      # in no page, header, script or cookie; and sign-out, a
       # second sign-in and the per-key cap each ending a session on the
       # server. Here, not after the next step: that one configures the
       # authorization server, and the GUI then offers no key sign-in (review
-      # pass 1). The smoke imports nothing, so nothing is installed.
+      # pass 1). The smoke imports only dashboard/src/lib/browse.ts and
+      # format.ts, which import nothing, so nothing is installed.
       - name: The operator GUI, driven through the proxy
         working-directory: dashboard
         run: |
+          for n in 1 2; do
+            curl -fsS --max-time 60 -X POST http://127.0.0.1:8010/mcp -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+              -H "x-brain-key: $OB1_SMOKE_KEY" -o /tmp/gui-capture-untrusted \
+              -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"capture_thought","arguments":{"content":"Thought '"$n"' with no trust for the operator GUI smoke, so browse and search page past their first (SMD-2280)."}}}'
+            grep -q 'Captured as' /tmp/gui-capture-untrusted || { echo "the GUI smoke's untrusted capture $n failed: $(head -c 400 /tmp/gui-capture-untrusted)" >&2; exit 1; }
+          done
           curl -fsS --max-time 60 -X POST http://127.0.0.1:8010/mcp -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
             -H "x-brain-key: $OB1_SMOKE_KEY" -o /tmp/gui-capture \
             -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"capture_thought","arguments":{"content":"The operator GUI smoke reads this thought on its own page, its ingested notice before it (SMD-2280).","trust":"ingested"}}}'
           grep -q 'Captured as' /tmp/gui-capture || { echo "the GUI smoke's capture failed: $(head -c 400 /tmp/gui-capture)" >&2; exit 1; }
-          bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY" --require-thought --require-ingested
+          # One proposal and one work pool, each through the brain's own producer — record_supersession_proposal writes
+          # the lineage row preflight asks of every proposal (SMD-1731), enqueue_thoughts the pool's pending claims — so
+          # the proposals and workers pages render rows here, not their empty words (PR 2b review pass 1).
+          (cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -qAtc \
+            "SELECT record_supersession_proposal((SELECT id FROM thoughts ORDER BY created_at, id LIMIT 1), (SELECT id FROM thoughts ORDER BY created_at DESC, id DESC LIMIT 1), 'newer_supersedes_older', 0.9, 'The operator GUI smoke''s proposal (SMD-2280).', 0.8, 'ci-gui-smoke', p_recipe => '{\"deterministic\": false, \"key\": \"ci-gui-smoke\"}'::jsonb); SELECT enqueue_thoughts('extract:gui-smoke@ci', ARRAY(SELECT id FROM thoughts));") > /dev/null
+          bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY" --require-thought --require-ingested --require-pages --require-rows
 
       # Where the authorization server's step ran when the full-stack checks
       # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):
       # deploy/.env configured for the authorization server
       # (.github/ci/auth-settings.sh) and the MCP server /mcp reaches recreated
-      # on it (SMD-2287), with `server` beside it — with no authorization
-      # server running. The REST core, the plugin webhook, the
-      # daemon restart and the SIGTERM stop after it meet the server they met
-      # then; the smoke just before holds a stack configured for none, which
+      # on it (SMD-2287), with the REST core beside it — with no authorization
+      # server running. The REST core, the plugin webhook, the daemon restart
+      # and the SIGTERM stop after it meet that stack: the REST core's token
+      # check on, which only a JWT-shaped bearer reaches (rest/app.ts), so the
+      # keys they send are read as before; the smoke just before holds a stack configured for none, which
       # no job held before (deploy-stack-brains' smoke holds this one). Every
       # compose call after it names its services. The operator GUI is
       # recreated on it too (SMD-2280), and holds ADR decision 16: configured,
@@ -1829,7 +1851,7 @@ jobs:
         working-directory: deploy
         run: |
           ../.github/ci/auth-settings.sh
-          docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps server mcp app
+          docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps api mcp app
           page=$(curl -fsS --max-time 15 http://127.0.0.1:8010/dashboard/signin)
           grep -q 'Key sign-in is off' <<<"$page" || { echo "the configured GUI's sign-in page does not say key sign-in is off" >&2; exit 1; }
           if grep -q 'name="key"' <<<"$page"; then echo "the configured GUI offers a key field" >&2; exit 1; fi
@@ -2019,12 +2041,12 @@ jobs:
       # same key would have written to stable) and with it `tier-off`, which
       # kept these paths off it.
       # A stand-in on stable's mesh under each tier's old name, and under
-      # `server` as a tier's container once was and `mcp`, the compose name of
-      # the service /mcp reaches since SMD-2287, is reached by none of those
-      # paths, and stable's /mcp still reaches stable beside them: from the
-      # mesh each name then names more than one container (`server` only the
-      # stand-ins' since stable's left the mesh, SMD-2287), the collision the
-      # route table's rooted mesh names avoid. Check 28's PROXY_ROUTE_TABLE
+      # `api` and `mcp`, the compose names of the REST core and the service
+      # /mcp reaches since SMD-2287 (until SMD-2287 PR 6b, `server`, as a
+      # tier's container once was), is reached by none of those paths, and
+      # stable's /mcp still reaches stable beside them: from the mesh each name
+      # then names more than one container, the collision the route table's
+      # and the MCP server's rooted mesh names avoid. Check 28's PROXY_ROUTE_TABLE
       # (scripts/check-fork-consistency.ts) holds the table.
       - name: Stable routes no tier, and nothing under a tier's prefix reaches stable
         working-directory: deploy
@@ -2046,9 +2068,9 @@ jobs:
           }
           offprefix ""
           trap 'docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null 2>&1 || true' EXIT
-          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
+          IMAGE="$(docker compose -f compose.yaml config --format json | jq -r .services.api.image)"
           for tier in canary working; do
-            docker run -d --name "ob1-ci-$tier-stand-in" --network open-brain_mesh --network-alias "mcp.$tier.ob1.internal" --network-alias server --network-alias mcp --entrypoint bun "$IMAGE" \
+            docker run -d --name "ob1-ci-$tier-stand-in" --network open-brain_mesh --network-alias "mcp.$tier.ob1.internal" --network-alias api --network-alias mcp --entrypoint bun "$IMAGE" \
               -e "Bun.serve({ port: 8000, fetch(r) { return new Response('$tier ' + new URL(r.url).pathname); } })" > /dev/null
           done
           # The stand-ins answer on the mesh, so a route to them would reach
@@ -2057,12 +2079,12 @@ jobs:
           docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e 'const last = {}; for (let i = 0; i < 40; i++) { const up = await Promise.all(["canary", "working"].map((t) => fetch(`http://mcp.${t}.ob1.internal:8000/x`, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok || ((last[t] = `HTTP ${r.status}`), false), (e) => ((last[t] = `${e?.name ?? "Error"} ${e?.code ?? e?.message ?? ""}`), false)))); if (up.every(Boolean)) process.exit(0); await Bun.sleep(500); } console.error(JSON.stringify(last)); process.exit(1)' > /dev/null \
             || { docker logs --tail 20 ob1-ci-canary-stand-in >&2; docker logs --tail 20 ob1-ci-working-stand-in >&2; echo "a stand-in never answered on the mesh (each one's last failure above), so this step proves nothing" >&2; exit 1; }
           offprefix " beside a stand-in under each tier's old mesh name"
-          for name in server mcp; do
+          for name in api mcp; do
             holders=$(docker run --rm --network open-brain_mesh --entrypoint bun "$IMAGE" -e "console.log(new Set((await Bun.dns.lookup('$name', { family: 4 })).map((a) => a.address)).size)")
             [ "$holders" -ge 2 ] || { echo "from the mesh, \`$name\` named $holders container(s) with two stand-ins claiming it: the collision this step stands for is not there" >&2; exit 1; }
           done
           c=$(code "$B/mcp/health") || c="no answer (curl exit $?)"
-          { [ "$c" = 200 ] && [ "$(cat /tmp/tier-body)" = ok ]; } || { echo "stable's /mcp/health beside the stand-ins answered $c '$(head -c 80 /tmp/tier-body)', not ok: the proxy reached a stand-in claiming \`server\` or \`mcp\`" >&2; exit 1; }
+          { [ "$c" = 200 ] && [ "$(cat /tmp/tier-body)" = ok ]; } || { echo "stable's /mcp/health beside the stand-ins answered $c '$(head -c 80 /tmp/tier-body)', not ok: the proxy reached a stand-in claiming \`api\` or \`mcp\`" >&2; exit 1; }
           docker rm -f ob1-ci-canary-stand-in ob1-ci-working-stand-in > /dev/null
           # A router whose rule does not compile is dropped, its paths to the
           # proxy's own 404, and a route file Traefik cannot read takes
@@ -2076,7 +2098,7 @@ jobs:
       - name: Confirm no Supabase CLI anywhere in the stack
         working-directory: deploy
         run: |
-          if docker compose -f compose.yaml exec -T server sh -c 'command -v supabase' 2>/dev/null; then
+          if docker compose -f compose.yaml exec -T api sh -c 'command -v supabase' 2>/dev/null; then
             echo "A supabase binary is present in the server image." >&2
             exit 1
           fi
@@ -2163,8 +2185,8 @@ jobs:
       # disabled, nothing came back: the dogfood stack stayed down 47
       # minutes). This is the Docker half of the ticket's Verify, on every
       # run: the daemon restarts, and with nothing started by hand Postgres,
-      # the server, the REST core, the proxy and the forwarder in front of it
-      # (SMD-2583) each come back on its policy,
+      # the REST core, the MCP server, the operator GUI, the proxy and the
+      # forwarder in front of it (SMD-2583) each come back on its policy,
       # started after the restart (so a daemon that kept them running proves
       # nothing) and healthy by its own healthcheck, not merely `Running`,
       # which Docker also reports for a container in restart backoff (review
@@ -2188,20 +2210,20 @@ jobs:
             if [ -z "$id" ]; then echo "absent none none 0001-01-01T00:00:00Z"; return; fi
             docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.HostConfig.RestartPolicy.Name}} {{.State.StartedAt}}' "$id" 2> /dev/null || echo "unreadable none none 0001-01-01T00:00:00Z"
           }
-          # Running and healthy: each of the seven declares a healthcheck (the
-          # server's is its image's, server-portable/Dockerfile; the MCP server
-          # built on the REST core names its own, SMD-2287, and so does the
-          # operator GUI, SMD-2280).
+          # Running and healthy: each of the six declares a healthcheck (the
+          # REST core names its own in compose.yaml, as the image's,
+          # server-portable/Dockerfile; so do the MCP server built on it,
+          # SMD-2287, and the operator GUI, SMD-2280).
           back() {
             local status health
             read -r status health _ <<<"$(state "$1")"
             [ "$status" = running ] && [ "$health" = healthy ]
           }
           while [ $(($(date -u +%s) - t0)) -lt 120 ]; do
-            if back postgres && back server && back api && back mcp && back app && back proxy && back forwarder; then break; fi
+            if back postgres && back api && back mcp && back app && back proxy && back forwarder; then break; fi
             sleep 2
           done
-          for s in postgres server api mcp app proxy forwarder; do
+          for s in postgres api mcp app proxy forwarder; do
             read -r status health policy started <<<"$(state "$s")"
             at=$(date -d "$started" +%s)
             echo "$s: $status, health $health, policy $policy, started $((at - t0)) s after the restart began"
@@ -2246,25 +2268,26 @@ jobs:
         run: |
           stop() {
             if [ -n "${3:-}" ]; then t=(-t "$3"); else t=(); fi
-            t0=$(date +%s%3N); docker compose -f compose.yaml stop "${t[@]}" server > /dev/null 2>&1; ms=$(($(date +%s%3N) - t0))
-            id=$(docker compose -f compose.yaml ps -aq server)
+            t0=$(date +%s%3N); docker compose -f compose.yaml stop "${t[@]}" api > /dev/null 2>&1; ms=$(($(date +%s%3N) - t0))
+            id=$(docker compose -f compose.yaml ps -aq api)
             code=$(docker inspect -f '{{.State.ExitCode}}' "$id")
             fin=$(date -d "$(docker inspect -f '{{.State.FinishedAt}}' "$id")" +%s%3N 2> /dev/null) || fin=""
             echo "$1: docker compose stop returned in ${ms} ms${fin:+, the container finished $((fin - t0)) ms after the stop}; exit $code"
-            if [ "$code" != "$2" ]; then docker compose -f compose.yaml logs --tail 20 server; echo "$1: expected exit $2 (137 is the kill at the end of the grace period: ${3:-10} s)" >&2; exit 1; fi
+            if [ "$code" != "$2" ]; then docker compose -f compose.yaml logs --tail 20 api; echo "$1: expected exit $2 (137 is the kill at the end of the grace period: ${3:-10} s)" >&2; exit 1; fi
           }
           # A keyed call first, so the pool this stop closes — open since the
-          # server's start (SMD-2284) — has served this step, whatever ran
-          # before it (review pass 2). From inside its container: no path of
-          # the proxy reaches `server` since SMD-2532 closed the root and /mcp
-          # became the `mcp` service's (SMD-2287), and its answer is read, so a
-          # call that never reached the database fails here, not silently.
-          KEY="$OB1_SMOKE_KEY" docker compose -f compose.yaml exec -T -e KEY server bun \
-            -e 'const r = await fetch("http://127.0.0.1:8000/", { method: "POST", signal: AbortSignal.timeout(15000), headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": process.env.KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "thought_stats", arguments: {} } }) }); const t = await r.text(); if (!r.ok || !t.includes("Total thoughts: ")) { console.error(`the server answered the keyed warm-up ${r.status}: ${t.slice(0, 160)}`); process.exit(1); }' \
-            || { echo "the keyed call before the stop did not reach the server's database (above)" >&2; exit 1; }
+          # REST core's start (SMD-2284) — has served this step, whatever ran
+          # before it (review pass 2). From inside its container, on its own
+          # route (`/v1/stats`, thought_stats' operation), and its answer is
+          # read, so a call that never reached the database fails here, not
+          # silently. (`server`, which this step stopped until SMD-2287 PR 6b,
+          # took an MCP tools/call at its root.)
+          KEY="$OB1_SMOKE_KEY" docker compose -f compose.yaml exec -T -e KEY api bun \
+            -e 'const r = await fetch("http://127.0.0.1:8000/v1/stats", { signal: AbortSignal.timeout(15000), headers: { "x-brain-key": process.env.KEY } }); const t = await r.text(); let total; try { total = JSON.parse(t).total; } catch {} if (!r.ok || typeof total !== "number") { console.error(`the REST core answered the keyed warm-up ${r.status}: ${t.slice(0, 160)}`); process.exit(1); }' \
+            || { echo "the keyed call before the stop did not reach the REST core's database (above)" >&2; exit 1; }
           # The daemon restart above (SMD-2760) left a line of its own: this
           # stop must add one.
-          stops() { docker compose -f compose.yaml logs --no-log-prefix server | grep -c '^SIGTERM: stopped' || true; }
+          stops() { docker compose -f compose.yaml logs --no-log-prefix api | grep -c '^SIGTERM: stopped' || true; }
           before=$(stops)
           stop serving 0
           after=$(stops)
@@ -2281,12 +2304,15 @@ jobs:
           if [ "$mcode" != 0 ] || ! [[ "$mlast" =~ ^SIGTERM:\ stopped\ in\ [0-9]+\.[0-9]\ s\;\ no\ database\ pool\ was\ opened\;\ exit\ 0$ ]]; then docker compose -f compose.yaml logs --tail 20 mcp; echo "the MCP server's stop did not exit 0 with its own stop line" >&2; exit 1; fi
           doc=$(curl -s --max-time 10 -o /tmp/doc-body -w '%{http_code}' http://127.0.0.1:8010/.well-known/oauth-protected-resource/mcp || true)
           if ! { [ "$doc" = 404 ] && [ ! -s /tmp/doc-body ]; }; then echo "the document with the MCP server stopped answered $doc '$(head -c 80 /tmp/doc-body)', not the proxy's bodiless 404" >&2; exit 1; fi
-          docker compose -f compose.yaml start mcp > /dev/null 2>&1
-          last=$(docker compose -f compose.yaml logs --no-log-prefix server | grep '^SIGTERM: stopped' | tail -1 || true)
+          # By its container, not `compose start mcp`: compose starts what a named
+          # service depends on too, and that would start `api` here, serving,
+          # before the in-preflight stop below (review pass 6b·2).
+          docker start "$(docker compose -f compose.yaml ps -aq mcp)" > /dev/null
+          last=$(docker compose -f compose.yaml logs --no-log-prefix api | grep '^SIGTERM: stopped' | tail -1 || true)
           echo "$last"
           if ! [[ "$last" =~ ^SIGTERM:\ stopped\ in\ ([0-9]+)\.[0-9]\ s\;\ database\ pool\ closed\;\ exit\ 0$ ]] || [ "${BASH_REMATCH[1]}" -ge 5 ]; then echo "the stop's line does not say it stopped in under 5 s, the pool closed and exit 0" >&2; exit 1; fi
           touch /tmp/provider-stub-slow
-          docker compose -f compose.yaml start server > /dev/null 2>&1
+          docker compose -f compose.yaml start api > /dev/null 2>&1
           sleep 0.5
           stop "in preflight" 143 1
           rm -f /tmp/provider-stub-slow
@@ -2491,7 +2517,7 @@ jobs:
       # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):
       # deploy/.env configured for the authorization server
       # (.github/ci/auth-settings.sh) and the MCP server /mcp reaches recreated
-      # on it (SMD-2287), with `server` beside it — with no authorization
+      # on it (SMD-2287), with the REST core beside it — with no authorization
       # server running. The steps after it meet the stack
       # they met then: smoke.sh takes its branch for a server configured but
       # not advertising, and canary.sh has OB1_AUTH_ lines to leave out of the
@@ -2500,7 +2526,7 @@ jobs:
         working-directory: deploy
         run: |
           ../.github/ci/auth-settings.sh
-          docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps server mcp
+          docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps api mcp
 
       # OB1_SMOKE_COMMIT: check 10 asserts the keyed /health body names the
       # commit the build arg above baked in, beside the version it asserts.
@@ -2945,7 +2971,7 @@ jobs:
           if login open-brain_data postgres "$PG_CANARY"; then echo "the canary's password opens stable's database" >&2; exit 1; fi
           # Read first, so a failed inspect fails here rather than reading as
           # "holds no password" (review pass 5).
-          canary_server_env="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose -p open-brain-canary -f compose.yaml ps -q server)")"
+          canary_server_env="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose -p open-brain-canary -f compose.yaml ps -q api)")"
           grep -q '^DATABASE_URL=' <<<"$canary_server_env" || { echo "could not read the canary server's environment" >&2; exit 1; }
           if grep -qFf <(printf '%s\n' "$PG_STABLE") <<<"$canary_server_env"; then echo "the canary's server holds stable's database password" >&2; exit 1; fi
           grep -F "returns it first: $LITERAL_ID at" /tmp/canary-up.out
@@ -2987,7 +3013,7 @@ jobs:
           [ "$rc" = 1 ] || { cat /tmp/canary-wrong.out >&2; echo "up passed its smoke under a provider serving another model (exit $rc)" >&2; exit 1; }
           grep -F "differs from stable's on OB1_QUERY_LOG_RETENTION_DAYS" /tmp/canary-wrong.out
           grep -F 'returned none of' /tmp/canary-wrong.out
-          grep -F 'canary server stopped for the refresh' /tmp/canary-wrong.out
+          grep -F 'canary REST core stopped for the refresh' /tmp/canary-wrong.out
           grep -F 'canary at http://127.0.0.1:8011/mcp' /tmp/canary-wrong.out
           [ "$(docker compose -p open-brain-canary -f compose.yaml port forwarder 8000)" = 127.0.0.1:8011 ] || { echo "the canary's own forwarder is not on loopback only" >&2; exit 1; }
           if grep -F "to the canary's env file" /tmp/canary-wrong.out; then echo "an up with no --port wrote to the canary's env file" >&2; exit 1; fi
@@ -3087,7 +3113,14 @@ jobs:
           sed -i '/^OB1_FORWARDER_KEY=/d; /^MCP_ACCESS_KEYS=/d' .env.canary.local
           printf 'MCP_ACCESS_KEYS=open-brain-canary:write:%s\n' "$(printf '%s' "$CANARY_KEY" | shasum -a 256 | cut -d' ' -f1)" >> .env.canary.local
           standin_id="$(standin)"
+          # The canary's `server`, retired in SMD-2287 PR 6b: a stand-in under
+          # its labels, as a canary stood up before then keeps the container,
+          # which compose.yaml no longer names. The up removes it, said.
+          docker run -d --init --name open-brain-canary-server-1 --label com.docker.compose.project=open-brain-canary --label com.docker.compose.service=server \
+            --label com.docker.compose.oneoff=False --label com.docker.compose.container-number=1 --entrypoint sleep docker.io/oven/bun:1.4.3-alpine 600 > /dev/null
           FAKE_URL='http://127.0.0.1:8013/mcp?key=x' ./canary.sh up --no-refresh --no-smoke | tee /tmp/canary-norefresh.out
+          grep -F "the canary's server container, retired in SMD-2287 PR 6b, removed" /tmp/canary-norefresh.out
+          if [ -n "$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=server)" ]; then echo "up --no-refresh left the canary's retired server container" >&2; exit 1; fi
           grep -F "minted the canary's own forward key, open-brain-canary-mcp-forwarder (its hash in MCP_ACCESS_KEYS, the raw key in OB1_FORWARDER_KEY)" /tmp/canary-norefresh.out
           if grep -F "minted the canary's own write key" /tmp/canary-norefresh.out; then echo "up --no-refresh minted a write key where the canary had its own" >&2; exit 1; fi
           FORWARD_3="$(canary_forward)"
@@ -3208,7 +3241,7 @@ jobs:
       - name: The server image runs the MCP server as a REST client
         working-directory: deploy
         run: |
-          IMG="$(docker compose -f compose.yaml config --format json | jq -r .services.server.image)"
+          IMG="$(docker compose -f compose.yaml config --format json | jq -r .services.api.image)"
           if out=$(docker run --rm --network none --entrypoint bun "$IMG" ../mcp-server/index.ts 2>&1); then code=0; else code=$?; fi
           echo "$out"
           if [ "$code" != 2 ] || ! grep -q '^OB1_FORWARDER_KEY is not set' <<< "$out"; then echo "expected exit 2 naming the missing forward key; exit $code" >&2; exit 1; fi
@@ -3349,8 +3382,8 @@ jobs:
           # answers, and the fallback sign-in paths are the proxy's 404. Each
           # helper's curl may fail without ending the step, so the check after
           # it says what came back. /mcp is the `mcp` service's since SMD-2287;
-          # `server`, which nothing here routes to, is recreated beside it.
-          auth up -d --wait --wait-timeout 120 --no-deps server mcp
+          # the REST core is recreated beside it.
+          auth up -d --wait --wait-timeout 120 --no-deps api mcp
           O=(-H 'Host: brain.example.test')
           # "<status> <WWW-Authenticate or ->" for an initialize POSTed to /mcp with these curl arguments.
           at_mcp() { { curl -s --max-time 10 -o /dev/null -D - -H 'content-type: application/json' "$@" -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' http://127.0.0.1:8010/mcp || true; } | tr -d '\r' | awk 'NR == 1 { c = $2 } tolower($0) ~ /^www-authenticate:/ { sub(/^[^:]*: */, ""); w = $0 } END { print c, (w == "" ? "-" : w) }'; }
@@ -3537,7 +3570,7 @@ jobs:
       # document at loopback's Host is the MCP server's own 404, and the
       # callback reaches the auth router with the authorization server gone.
       # /mcp and /health are the `mcp` service's since SMD-2287, so their lines
-      # are in its log, and nothing of the proxy's reaches `server`'s.
+      # are in its log, not the REST core's.
       # Its search_thoughts is a semantic search the query log keeps, in a
       # job whose stack no tier step replays.
       - name: The proxy answers discovery itself, logs no key and streams unbuffered
@@ -3592,7 +3625,7 @@ jobs:
           # probe's tool call above, by its tool, its key's name, how it ended
           # and its time — and the key it carried in ?key= nowhere in either
           # server's log.
-          SLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix server)"
+          SLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix api)"
           MLOG="$(docker compose -f compose.yaml logs --no-color --no-log-prefix mcp)"
           if grep -qF "$OB1_SMOKE_KEY" <<<"$SLOG$MLOG"; then echo "a server's log holds the smoke key" >&2; exit 1; fi
           stats_after=$(grep -cE "$STATS_LINE" <<<"$MLOG" || true)
@@ -3658,7 +3691,7 @@ jobs:
       # The stack the observability step met in deploy-stack, where it ran
       # until SMD-3170: deploy/.env configured for an authorization server
       # (.github/ci/auth-settings.sh) and the MCP server /mcp reaches recreated
-      # on it (SMD-2287), with `server` beside it — with none running. So
+      # on it (SMD-2287), with the REST core beside it — with none running. So
       # lgtm starts on an https public origin, Grafana's root URL under it and
       # its cookie secure (compose.yaml's lgtm command), which no other job
       # starts it on.
@@ -3666,7 +3699,7 @@ jobs:
         working-directory: deploy
         run: |
           ../.github/ci/auth-settings.sh
-          docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps server mcp
+          docker compose -f compose.yaml --profile auth up -d --wait --wait-timeout 120 --no-deps api mcp
 
       # SMD-1849 PR 3c: the observability profile on this job's stack, the one
       # place CI starts it. The servers send to its collector (the endpoint and
@@ -3741,7 +3774,7 @@ jobs:
           df -h "$root"
           [ "$used" -lt 90 ] || { echo "the runner's disk under Docker's root is ${used}% full: Loki refuses every record from 90% (lgtm-data is there), so the log query below could not pass" >&2; exit 1; }
           docker compose -f compose.yaml --profile observability up -d --wait --wait-timeout 300 lgtm pg-monitor-role pg-exporter
-          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 server api mcp
+          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 api mcp
           ./smoke.sh http://127.0.0.1:8010/mcp "$OB1_SMOKE_KEY" > /tmp/observability-smoke.log 2>&1 || { cat /tmp/observability-smoke.log; exit 1; }
           # Each call's tool, status and, where the tool refused, isError;
           # curl's own failure as status 000.
@@ -3907,7 +3940,7 @@ jobs:
           tel=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{$v.IPAddress}}{{"\n"}}{{end}}' "$exporter_id" | awk '$1 ~ /_telemetry$/ { print $2 }')
           [ -n "$tel" ] || said "pg-exporter has no address on telemetry"
           # shellcheck disable=SC2016 # Bun's template literal
-          docker compose -f compose.yaml exec -T server bun -e 'let n = 0; for (const u of process.argv.slice(1)) { try { const r = await fetch(u, { signal: AbortSignal.timeout(3000) }); console.log(`${u} answered ${r.status} from data`); n++; } catch {} } process.exit(n ? 1 : 0)' \
+          docker compose -f compose.yaml exec -T api bun -e 'let n = 0; for (const u of process.argv.slice(1)) { try { const r = await fetch(u, { signal: AbortSignal.timeout(3000) }); console.log(`${u} answered ${r.status} from data`); n++; } catch {} } process.exit(n ? 1 : 0)' \
             http://pg-exporter:9187/cgi-bin/metrics "http://$tel:9187/cgi-bin/metrics" http://pg-exporter:9188/metrics "http://$tel:9188/metrics" \
             || said "a container on data reached pg-exporter (above)"
           # Postgres's line for a sign-in a /probe caused can reach its log
@@ -3930,7 +3963,7 @@ jobs:
           echo "the Postgres rule pending after pg-exporter's stop"
           cp /tmp/env-before-observability .env
           docker compose -f compose.yaml --profile observability rm -sf lgtm pg-exporter pg-monitor-role
-          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 server api mcp
+          docker compose -f compose.yaml up -d --no-deps --wait --wait-timeout 120 api mcp
           for s in api mcp; do
             endpoint=$(docker compose -f compose.yaml exec -T "$s" printenv OTEL_EXPORTER_OTLP_ENDPOINT) || { echo "could not read $s's OTEL_EXPORTER_OTLP_ENDPOINT after the step" >&2; exit 1; }
             [ -z "$endpoint" ] || { echo "$s still sends to the collector after the step" >&2; exit 1; }

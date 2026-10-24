@@ -51,7 +51,7 @@ It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists f
    OB1_PLUGIN_DB_PASSWORD=<the generated password>
    ```
 
-2. Recreate the migrator and the servers so they read it: `docker compose up -d migrate server api` from `deploy/`. The migrator makes `ob1_plugins` (the first time), the plugin's role and schema, and applies `001_notes.sql` and `002_deliveries.sql`. The servers wait for it.
+2. Recreate the migrator and the servers so they read it: `docker compose up -d migrate api mcp` from `deploy/`. The migrator makes `ob1_plugins` (the first time), the plugin's role and schema, and applies `001_notes.sql` and `002_deliveries.sql`. The servers wait for it.
 3. Check it:
    - preflight's `plugins` row says `example — enabled`, and its `plugin tables` row says the role, schema and migrations are in place;
    - `GET /v1/whoami` lists `example_recent` and `example_list_notes` for a read key, and `example_add_note` too for a write key;
