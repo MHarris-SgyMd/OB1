@@ -1,6 +1,6 @@
 // What every operation runs against (SMD-2283): the store, the model provider's
 // settings and the embedder over them, and the opt-in query log. Built once by
-// a server's composition root — index.ts today, the REST core (SMD-2284) next —
+// a server's composition root — the REST core's, api.ts (index.ts's too until SMD-2287 PR 6b) —
 // from two readers it owns: the environment, read lazily because root.ts's
 // initEnv seeds it before the first read, and the store, built on first use.
 

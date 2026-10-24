@@ -8,15 +8,16 @@
  * Post/Redirect/Get shape for it: a tool call kicks off the work and returns a
  * handle at once (`startJob`), and the caller comes back for the result — an
  * MCP client through the `job_status` tool, a REST/curl client through the keyed
- * `GET /jobs/<id>` poll or the `GET /jobs/<id>/stream` SSE subscription, both in
- * index.ts. This module owns the registry, the detached runner and the SSE
- * fan-out; index.ts owns the transport (the routes, the auth gate, the
- * keepalive wrapper) and passes the work in.
+ * `GET /jobs/<id>` poll or the `GET /jobs/<id>/stream` SSE subscription, the
+ * MCP server's mirrors (mcp-server/) of the REST core's `/v1/jobs/<id>` and its
+ * stream (rest/app.ts). This module owns the registry, the detached runner and the SSE
+ * fan-out; the REST core owns the transport (the routes, the auth gate, the
+ * keepalive wrapper) and passes the work in (index.ts did until SMD-2287 PR 6b).
  *
  * The live registry is a single in-memory Map: it holds the running jobs, the
  * SSE subscribers and the detached runner, and it is authoritative while the
  * process is up. A job still running when the process stops is marked `lost`
- * (`markRunningLost`, from index.ts's SIGTERM drain) so an in-flight poll or
+ * (`markRunningLost`, from the REST core's SIGTERM drain, api.ts) so an in-flight poll or
  * stream sees a terminal answer rather than hanging.
  *
  * Durability is an optional write-through sink (SMD-2318, migration 069's `jobs`
@@ -33,7 +34,7 @@
 
 import { withSpan, type HistogramSpec, type WorkSpan } from "./spans.ts";
 
-/** Who owns a job — the fields index.ts's Principal carries that this module needs. */
+/** Who owns a job — the fields auth.ts's Principal carries that this module needs. */
 export interface JobPrincipal {
   /** The SHA-256 of the presented key: the ownership token (a job is visible only to the key that started it). */
   keyHash: string;
@@ -550,7 +551,7 @@ export async function subscribe(principal: Pick<JobPrincipal, "keyHash">, id: st
 
 /**
  * Mark every still-running job `lost` — the server's stop cut it off, and an
- * in-memory job does not resume. Called from index.ts's SIGTERM drain after it
+ * in-memory job does not resume. Called from api.ts's SIGTERM drain after it
  * has waited its bound, so a poll or stream in flight sees a terminal answer.
  * Returns how many were cut, for the stop's log line.
  */

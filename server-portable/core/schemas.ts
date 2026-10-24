@@ -9,6 +9,7 @@ import { z } from "zod";
 import type { ToolName } from "../tools.ts";
 import { SAID_BY, TRUST } from "./filter.ts";
 import { META_KEYS_MAX, TICKET_META_KEYS_TEXT } from "./refusal.ts";
+import { PASS_KEY_CHARS } from "../pass-key.ts";
 
 /** One tool's self-description: the fields an MCP `registerTool` config and an OpenAPI operation both draw on. */
 export type ToolSpec = {
@@ -205,7 +206,7 @@ export const SPECS = {
   list_supersession_proposals: {
     title: "List Supersession Proposals",
     description:
-      "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged one to OUTDATE the other — a later state of the same thing, a decision and its reversal, a value and its update — or to DUPLICATE it, with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all. A proposal standing on a LINEAGE PAIR — one side's `derived_from` names the other, a page and its evidence — is tagged: such a pair is never proposed since migration 066 and a standing one is a reviewer's to reject; `lineage: true` lists those alone (migration 070). Each side names who wrote it (`By:` with its trust, and whether its text is a capture-only key's), an ingested side carries the ingested notice before its text, and each names the thought superseding it and the capture-only pointers an accept making it stand would clear; a proposal whose side to stand is a capture-only key's text or of a recorded trust below the other's is flagged WRITER, and that accept takes --force — on an undirected verdict, the flagged direction's (migration 094).",
+      "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged one to OUTDATE the other — a later state of the same thing, a decision and its reversal, a value and its update — or to DUPLICATE it, with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all. A proposal standing on a LINEAGE PAIR — one side's `derived_from` names the other, a page and its evidence — is tagged: such a pair is never proposed since migration 066 and a standing one is a reviewer's to reject; `lineage: true` lists those alone (migration 070). Each proposal names the pass that judged it — its judge key, which carries the model (or the decider and the writer), the prompt version and the decide version — and `judge_key` lists one pass's alone (migration 109). Each side names who wrote it (`By:` with its trust, and whether its text is a capture-only key's), an ingested side carries the ingested notice before its text, and each names the thought superseding it and the capture-only pointers an accept making it stand would clear; a proposal whose side to stand is a capture-only key's text or of a recorded trust below the other's is flagged WRITER, and that accept takes --force — on an undirected verdict, the flagged direction's (migration 094).",
     annotations: {
       readOnlyHint: true,
     },
@@ -213,6 +214,11 @@ export const SPECS = {
       status: z.enum(["pending", "accepted", "rejected", "stale", "all"]).optional().default("pending"),
       limit: z.number().int().min(1).max(200).optional().default(10),
       lineage: z.boolean().optional().describe("true: only proposals standing on a lineage pair (one side's derived_from names the other); false: only the rest; absent: every pair (migration 070)"),
+      // SMD-3248: one pass's proposals — its judge_key exactly, selected before the cap (migration 109).
+      // pass-key.ts's one rule (review passes 1, 3 and 4): no space — a `+` a query string decoded to one selected nothing
+      // without a word — no newline, which reached the headline, none a shell reads, no leading `-`.
+      judge_key: z.string().regex(PASS_KEY_CHARS, "judge_key is a pass key: 1-200 letters, digits and . _ : / @ + -, starting with a letter or digit (in a URL's query, encode + as %2B)").optional()
+        .describe("Only the proposals of the pass with exactly this judge key (`consolidate:<model>@p<prompt>`, or under decide mode `consolidate:<decider>+<writer>@p<prompt>d<decide version>`; each proposal names its own, and `consolidate.ts --status` counts the pending by pass); 1–200 letters, digits and `. _ : / @ + -`, starting with a letter or digit — in a URL's query string, encode `+` as `%2B`; absent: every pass (migration 109)"),
     },
   },
   thought_stats: {
@@ -262,7 +268,7 @@ export const SPECS = {
       readOnlyHint: true,
     },
     inputSchema: {
-      since: z.string().optional().describe("An ISO-8601 time (searches logged after it); omit for the most recent"),
+      since: z.string().optional().describe("An ISO-8601 time with its zone (searches logged after it; a clock with no Z or offset is refused) or a date (UTC midnight); omit for the most recent"),
       limit: z.number().int().min(1).max(1000).optional().default(200).describe("Searches to return, 1–1000 (default 200), most recent first"),
     },
   },

@@ -31,8 +31,8 @@ const RAW_ENV = /** @type {Record<string, string|undefined>} */ (
  * `??` only catches undefined, so `OB1_EMBEDDING_DIM=` — trivially produced by a
  * blank line in a .env file or a compose `${VAR}` that resolves to nothing — gave
  * `Number("") === 0` and a config refused as "must be a positive integer, got 0".
- * server-portable/index.ts already treated empty as unset because it tests
- * truthiness, so the two disagreed about the same environment: the server would
+ * server-portable/index.ts (retired in SMD-2287 PR 6b) already treated empty as
+ * unset because it tested truthiness, so the two disagreed about the same environment: the server would
  * run at the default width while the migration runner refused to start.
  */
 /**

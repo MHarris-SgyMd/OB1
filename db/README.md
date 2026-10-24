@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `2992 assertions: 2992 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and eight (108) migrations applied, and
+`bun test-schema.ts` prints `3005 assertions: 3005 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and nine (109) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -1977,6 +1977,45 @@ refresh altering every reader), test-upgrade [20az] (onto a populated brain; a
 status write and a source-row write wait for it; a set change run by the recipe
 reaches a warmed session).
 
+Migration 109 has the listing select one pass's proposals (SMD-3248). Every
+proposal names the pass that judged it in `judge_key` (029), and the key
+carries the pass's whole version — the judge model, or under decide mode the
+decider and the writer, then the prompt version and the decide version
+(`consolidate:h2o-lightning-4b+qwen3.8:27b@p4d3`). 070's listing read the key
+but could not select on it, and it caps a page at 200 with no cursor, so a
+reader filtering afterwards lost every row past the cap; on the canary on
+2026-10-23 the 337 pending proposals were 242 under `@p4d1`, 94 under `@p4d3`
+and 1 under the 7B's `@p4`. The file redefines `list_supersession_proposals`
+on 070's body with a trailing `p_judge_key text DEFAULT NULL`: the proposals
+whose key equals it exactly, selected before the order and the cap; NULL every
+pass. 070's three-argument form is dropped first (another argument list is
+another function), and 029's two-argument one with it if a hand re-apply left
+it; a call of two or three arguments — a server or CLI from before the file —
+resolves to the new form through the default. The fork's callers pass four,
+always: 029 or 070 re-applied by hand lands its form beside 109's, and a call
+both forms take (under three arguments beside 029's, under four beside 070's)
+is then ambiguous and fails. An older server's preflight and an older CLI's
+`--status` read a brain at 109 as before 070 (they probe 070's signature):
+upgrade the server, never re-apply 070. The readers follow: the MCP tool and
+`GET /v1/proposals` take `judge_key` (1–200 of a pass key's own characters,
+`server-portable/pass-key.ts`: letters, digits and `. _ : / @ + -`, so a key
+offered for pasting runs nothing in a shell; `+` encoded as `%2B` in a query
+string), and each proposal's value carries `judgeKey`,
+held to the same rule; `consolidate.ts --status` counts the pending by
+pass, `consolidate.ts --list <status> --key <judge key>` lists one pass's
+proposals, and `--list relations --key` its relations (the key their facet
+names); preflight's `lineage` check reads the
+four-argument form and both sentinels, and names 109 where the listing is older
+or an older form stands beside it. Paging past 200 is SMD-3249. DDL alone; no
+row moves; no grant is carried (EXECUTE is PUBLIC). Refuses by name without
+016, 025 or 029; a re-apply is a no-op. test-schema [97] (the selection before
+the cap, exact match, beside status and lineage, 029 and 070 re-applied beside
+it), test-upgrade [20ba] (refused without each prerequisite; onto a populated
+brain: the rows listing the same through a three-argument call), test-live [16]
+(`--status`'s pending by pass, `--list --key`, `--list relations --key`, a
+brain at 108), `server-portable/test-preflight.ts`, the store, e2e and REST
+suites.
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -3400,6 +3439,7 @@ bun consolidate.ts --url … --dry-run               # what a run would do; writ
 bun consolidate.ts --url … --retry-failed          # failed rows back into the pool first
 bun consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # lineage: unreviewed rows standing on a lineage pair (070)
 bun consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate, with both thoughts (a distinct, 102, is counted by --status, not listed)
+bun consolidate.ts --url … --list [<status>|relations] --key <judge key>   # one pass's alone, by the key each row names (109); --status counts the pending by pass
 bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90; at most 2000000, inside Postgres's timestamp range)
@@ -4653,9 +4693,9 @@ verbs are the promotion pipeline:
 # snapshot stable into the canary (or a working copy) and migrate it forward
 bun tier.ts --refresh --from <stable-url> --to <canary-url> [--tier canary|working]
 # replay stable's logged searches on stable and the canary, over HTTP, and report the ranking
-bun tier.ts --replay  --from <stable> --to <canary> [--since <iso-ts>]
+bun tier.ts --replay  --from <stable> --to <canary> [--since <time with its zone, or a date>]
 # the same, as a gate: exit 1 if a ranking moved (or a step failed), 3 if nothing was compared
-bun tier.ts --diff    --from <stable> --to <canary> [--since <iso-ts>]
+bun tier.ts --diff    --from <stable> --to <canary> [--since <time with its zone, or a date>]
 # after a soak: stamp the canary's version onto stable
 bun tier.ts --promote --from <canary-url> --to <stable-url>
 ```
@@ -4745,8 +4785,8 @@ they reach the two brains over HTTP, never Postgres (SMD-2875). `--from` and
 `--to` are each brain's MCP URL or connector name, read with a key as
 `--compare` reads one (`--from-key`/`--to-key`, else a connector's own header or
 a URL's `?key=`, else `OB1_COMPARE_KEY`, which then goes to both brains).
-Stable's logged searches (`list_logged_searches`: the window `--since` names, else
-the most recent page) run on both brains, each on the arm that ran it and each
+Stable's logged searches (`list_logged_searches`: the window `--since` names — a
+time with its zone or a date, as the brain reads it — else the most recent page) run on both brains, each on the arm that ran it and each
 query and arm once, and the ids the two return are diffed: the measured per-PR
 **"what moved"**, in place of the hand-written control run. Each brain embeds its
 own query, so the hybrid and current arms need no model here. A search both
@@ -5289,9 +5329,9 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 2992 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1620 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 990 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+bun test-schema.ts                          # 3005 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1627 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 997 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 286 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 259 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)

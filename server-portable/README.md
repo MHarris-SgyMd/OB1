@@ -1,8 +1,11 @@
 # server-portable
 
-A runtime-neutral build of the Open Brain MCP server. Same tools, same wire
-behaviour as upstream's Edge Function build (`server/index.ts`, in this fork
-until SMD-1800), with no dependency on Deno or on Supabase's function host.
+The Open Brain REST core (`api.ts`) and the core every brain operation runs
+in, with no dependency on Deno or on Supabase's function host. It began as a
+runtime-neutral build of the MCP server, with the same tools and wire behaviour
+as upstream's Edge Function build (`server/index.ts`, in this fork until
+SMD-1800); that MCP server, this directory's `index.ts`, retired in SMD-2287
+PR 6b, and `/mcp` is `mcp-server/`, a client of this REST core.
 
 This exists so the runtime decision in the Supabase migration could be made
 last. It was: the brain runs on Bun, as the compose stack (`SETUP.md`). The
@@ -99,11 +102,11 @@ fails the search.
 
 The **vector mender** (`core/mend.ts`, SMD-2889) is what gives a thought with
 no vector its vector, by itself — one the provider did not answer for, one the
-gate refused, or one an import wrote bare. Both servers run one (`index.ts` and
-`api.ts`), every `OB1_VECTOR_MEND_INTERVAL` seconds (60 unless set, 1 to 86400;
+gate refused, or one an import wrote bare. The REST core runs one (`api.ts`;
+`index.ts` did too until SMD-2287 PR 6b), every `OB1_VECTOR_MEND_INTERVAL` seconds (60 unless set, 1 to 86400;
 `0` or `off` for none), and a tick acts only while it holds a Postgres advisory
 lock (`ob1:vector-mender`) taken on a connection of its own, never the pool's,
-so one tick acts at a time across the two and across replicas. Each server
+so one tick acts at a time across replicas. Each server
 keeps its own cursor, holds and log; the lock only takes turns, so a brain's
 two servers mend up to 8 rows a tick each (16 an interval), and a held row is
 tried by each on its own schedule. A session lock needs a session: behind a
@@ -483,10 +486,10 @@ in one file, bump it in both in the same commit.**
 
 ### 2. Run it
 
-The brain deploys as the compose stack (SMD-2282's decision 6): this server is
-its `server` service, built from `Dockerfile`, and [`SETUP.md`](../SETUP.md)
-and [`deploy/README.md`](../deploy/README.md) bring it up. `bun index.ts`
-serves the same app on `PORT` (default 8000), as this directory's tests do.
+The brain deploys as the compose stack (SMD-2282's decision 6): the REST core
+is its `api` service, built from `Dockerfile` (the image's default command), and
+[`SETUP.md`](../SETUP.md) and [`deploy/README.md`](../deploy/README.md) bring it
+up. `bun api.ts` serves it on `PORT` (default 8000).
 
 ### 3. Provide configuration
 
@@ -600,8 +603,9 @@ with no active Linear link between them now (079's `child_of`, `blocks`,
 `blocked_by`, `relates_to`, and a `duplicate_of` either way), so a link made
 after a verdict takes the pair out; not counted before 079 — and the stale
 ones; `none pending` when there is none.
-`consolidate.ts --list` and the `list_supersession_proposals` tool list them,
-and preflight's `proposals` row warns once the oldest has waited past
+`consolidate.ts --list` and the `list_supersession_proposals` tool list them —
+one pass's alone with `--key` or `judge_key`, the pass key each proposal names
+(109) — and preflight's `proposals` row warns once the oldest has waited past
 `OB1_PROPOSALS_WARN_DAYS` (7). `Relations` is the judged relations standing
 (084) by word, with their board pairs counted the same way; nothing waits on
 one, so nothing warns (`consolidate.ts --list relations` shows them); `none
@@ -830,10 +834,12 @@ MCP tools do rather than a copy of it:
   the provider settings and the one embedder, the query log, the door a write records.
 - **`render.ts`** — the words: each tool's reply rendered from that value, the text the
   tools have always said.
-- **`index.ts`** — the Hono app, authentication, and the registration that joins the
-  two: validate (the SDK runs the spec's schema), call the operation, render. It
+- **`api.ts`** and **`rest/`** — the REST core: the routes, authentication and the
+  JSON answer, which the MCP server (`mcp-server/`) renders with `render.ts`. It
   builds no store and makes no egress or embedding call: it hands root.ts's readers to
-  the core, says it serves (`serveHere()`) and closes the store at a stop.
+  the core, says it serves (`serveHere()`) and closes the store at a stop. Until
+  SMD-2287 PR 6b, `index.ts` joined the two for MCP the same way: validate (the SDK
+  ran the spec's schema), call the operation, render.
 - **`mcp-edge.ts`** — what the MCP endpoint answers around the SDK's transport:
   - the methods it serves and its CORS headers;
   - the JSON-RPC refusal envelopes, and a notification's bare 202 or 503 (SMD-2106);
@@ -845,13 +851,13 @@ MCP tools do rather than a copy of it:
 
   It is HTTP alone, with no store, no provider and no environment. It was moved out of
   `index.ts` as it was (SMD-2287 PR 2), so the MCP server as a REST client answers at
-  its edge as this one does.
+  its edge as that one did.
 - **`root.ts`** — the process root a serving entry builds on (SMD-2284): `type Env`,
   the one list of what the container's process reads; `initEnv()` and `env()`; the
   store's wiring — `db()` builds it and wires the job sink, `closeStore()` closes it at a
   stop; and the agent registry the keys are looked up through. `sse.ts` keeps an event
-  stream alive while a call runs (SMD-1864). Both are moved out of `index.ts` so the
-  REST core (SMD-2284) can build on them rather than on a copy.
+  stream alive while a call runs (SMD-1864). Both were moved out of `index.ts` so the
+  REST core (SMD-2284) could build on them rather than on a copy.
 - **`telemetry.ts`** — the one JSON line written per request, on every route of both
   servers but the keyless liveness probe (SMD-1849), from one per-request record
   each server's first middleware makes (notFound, for a path that middleware
@@ -877,7 +883,7 @@ MCP tools do rather than a copy of it:
   spans and log records batched, the AsyncLocalStorage context manager and the
   W3C propagator.
 
-`scripts/check-fork-consistency.ts` check 25 is a tripwire on `index.ts`, `mcp-edge.ts`
+`scripts/check-fork-consistency.ts` check 25 is a tripwire on `api.ts`, `rest/`, `mcp-edge.ts`
 and `root.ts` for what a move would leave behind: an import outside the file's list, a
 SQL call or `fetch`, the store named outside `root.ts`'s wiring.
 
@@ -1037,7 +1043,7 @@ stripped (`X-Forwarded-Prefix`).
   (SMD-2287). A dead keep-alive socket on the stack's internal network is held up to
   255 s.
 - **`GET /health`** is liveness with no key, for the container's healthcheck, and
-  writes no line. With a key it answers as `index.ts`'s `/health` does: the brain's
+  writes no line. With a key it answers as `index.ts`'s `/health` did: the brain's
   record on the health surface (statements capped, within `HEALTH_DEADLINE_MS`) for a
   key that may read `brain_info` and that the registry clears in time, and liveness
   for any other key, never a refusal. The MCP server as a REST client (`mcp-server/`,
@@ -1064,16 +1070,16 @@ word any refusal as this one does.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1191 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and a tool call past its client waited on by the MCP server's, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050), the stop's telemetry flush under a bound of its own and what it cut said by signal, an export past its deadline and a partial success counted (SMD-2902), a list cursor through structuredContent at its own field alone (SMD-2995), preflight's telemetry row judged by each line's kind (SMD-2909), through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
+bun test-server.ts        # 1198 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and a tool call past its client waited on by the MCP server's, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050), the stop's telemetry flush under a bound of its own and what it cut said by signal, an export past its deadline and a partial success counted (SMD-2902), a list cursor through structuredContent at its own field alone (SMD-2995), preflight's telemetry row judged by each line's kind (SMD-2909), through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
 bun test-auth.ts          # 191 — scoped, hashed, named keys, through the MCP server as a REST client (mcp-server/, SMD-2287)
-bun test-rest.ts          # 480 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, and `bun api.ts` stopped mid-request
+bun test-rest.ts          # 483 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, and `bun api.ts` stopped mid-request
 bun test-plugins.ts       # 282 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's, through the MCP server as a REST client (mcp-server/, SMD-2287)
 bun test-thoughts.ts      # 518 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 226 — fully local provider, no credential
 bun run test:sql          # 286 — store conformance, real Postgres in a container
-bun run test:e2e          # 673 — the whole server over MCP with no Supabase at all, OB1_STORE unset, through the MCP server as a REST client (mcp-server/, SMD-2287)
-../db/with-postgres.sh bun test-rest-sql.ts  # 257 — the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
+bun run test:e2e          # 674 — the whole server over MCP with no Supabase at all, OB1_STORE unset, through the MCP server as a REST client (mcp-server/, SMD-2287)
+../db/with-postgres.sh bun test-rest-sql.ts  # 263 — the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 107 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 ```
 
@@ -1158,7 +1164,7 @@ stored in the same write").
   (SMD-2250). On SIGTERM or SIGINT the server stops accepting, waits for the
   requests in flight (a tool call's stream included) and for the tool calls
   still running (one whose client has gone runs on, and a capture may still
-  land), closes the database pool and exits 0: `docker compose stop server`
+  land), closes the database pool and exits 0: `docker compose stop api`
   returns in about 0.1 s idle, or when the last call ends. The wait is
   `OB1_STOP_GRACE` less 2 s (at least 0.5 s): the platform's grace period in
   whole seconds from 1 to 3600, no unit, 10 unless set (Docker's, so 8 s of
@@ -1178,7 +1184,7 @@ stored in the same write").
   period and was killed (exit 137), cutting off any call in flight. Run with
   an init as PID 1 (`docker run --init`, compose's `init: true`, Fly), under
   systemd or in a terminal, Bun died at the signal at once; it now drains the
-  same way, and Ctrl-C exits 0. Only when `index.ts` is Bun's entry: a suite
+  same way, and Ctrl-C exits 0. Only when `api.ts` is Bun's entry: a suite
   that imports the module keeps its own. What the
   container's exit code says:
 
@@ -1187,11 +1193,11 @@ stored in the same write").
   | 0 | Stopped once everything in flight had ended (or nothing was) |
   | 1 | The stop cut calls off at the bound or on a second signal — or preflight refused the configuration, or the server failed; the last `SIGTERM: stopped` line tells which |
   | 143 / 130 | Stopped by SIGTERM / SIGINT during preflight, before it served (the Dockerfile's traps) |
-  | 137 | Killed: the stop outlasted the grace period, or the signal landed while `index.ts` was still loading |
+  | 137 | Killed: the stop outlasted the grace period, or the signal landed while the entry was still loading |
 
   Under podman, `podman restart` and `docker compose restart` without `-t`
   kill the server at once (exit 137, measured on podman 6.0.2) rather than
-  signal it; `compose stop server` then `compose start server`, or
+  signal it; `compose stop api` then `compose start api`, or
   `podman restart -t 10`, drains.
 
 ## Related

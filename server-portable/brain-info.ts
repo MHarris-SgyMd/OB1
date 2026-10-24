@@ -37,7 +37,7 @@ export type SqlClient = SqlTag & { begin<T>(fn: (tx: SqlTx) => Promise<T>): Prom
  * Local to the read's transaction (set_config's `true`), and a ceiling: a role
  * or database already stricter keeps its own. The defaults are preflight's
  * and the tool's; the health body passes tighter ones, so its reads fit its
- * deadline (index.ts).
+ * deadline (the REST core's keyed /health, rest/app.ts).
  */
 export const READ_STATEMENT_TIMEOUT_MS = 5_000;
 export const READ_LOCK_TIMEOUT_MS = 1_000;

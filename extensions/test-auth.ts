@@ -742,7 +742,7 @@ const LIVE: Live[] = [
     },
   })),
 ];
-/** Bun's entry shape as the servers spell it — the tail server-portable/index.ts has — held to the letter (SMD-1799). */
+/** Bun's entry shape as the servers spell it — the tail server-portable/index.ts had until SMD-2287 PR 6b — held to the letter (SMD-1799). */
 const ENTRY_SHAPE = /^export default \{\n  port: Number\(process\.env\.PORT \|\| 8000\),\n  fetch: (?:app\.fetch|handler),\n\};\n/m;
 {
   const inTree = [...new Bun.Glob("{extensions,recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
