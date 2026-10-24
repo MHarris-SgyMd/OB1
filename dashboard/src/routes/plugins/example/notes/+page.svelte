@@ -22,6 +22,11 @@
 		<div><button type="submit" class="button">Show its notes</button></div>
 	</form>
 
+	<!-- A refusal with no pin form to say it beside — a read key's post, or one naming no thought — is said here (review pass 1). -->
+	{#if form?.error && !(data.thought && data.canPin)}
+		<p class="text-sm text-amber-300" role="alert" data-testid="pin-error">{form.error}</p>
+	{/if}
+
 	{#if data.typed}
 		<p class="text-sm text-amber-300" role="alert" data-testid="bad-id">That is not a thought id: 36 characters of hex and hyphens, as a thought’s page shows it.</p>
 	{/if}

@@ -385,7 +385,7 @@
  *      a manifest's name is its directory's, and its migration files are
  *      named by the core's rule; each GUI page a manifest declares has its
  *      route at dashboard/src/routes/plugins/<name><path>/ (a +page.svelte
- *      and a +page.server.ts asking the registry for it, nothing else), and
+ *      and at most a +page.server.ts), the layout there gates them all, and
  *      no route there is undeclared (SMD-2280 PR 3); each held by in-memory
  *      probes
  *  32. every service deploy/compose.yaml defines has the restart policy
@@ -7626,10 +7626,10 @@ checkHostIpTemplates();
 //    named by the core's rule;
 //  - its GUI pages (SMD-2280 PR 3), which the GUI renders, since a plugin's
 //    directory holds no Svelte: each page its manifest declares has its route
-//    at dashboard/src/routes/plugins/<name><path>/, a +page.svelte and a
-//    +page.server.ts alone, whose load asks the registry for the page
-//    (pluginPage), so a disabled plugin's page is a 404; and no route there
-//    is a page no manifest declares.
+//    at dashboard/src/routes/plugins/<name><path>/, a +page.svelte and at most
+//    a +page.server.ts; the layout there gates every page (pluginPageAt), so
+//    a disabled plugin's page is a 404; and no route there is a page no
+//    manifest declares.
 
 /** The core's tables: every CREATE TABLE in db/migrations/, uncommented, and the two ledgers. */
 function coreTables(): Set<string> {
@@ -7852,53 +7852,54 @@ const PLUGIN_PROBES: [string, "sql" | "ts", boolean][] = [
 
 /** Where the GUI renders a plugin's pages (SMD-2280 PR 3): under this, one directory per page, `<name><path>/`. */
 const PLUGIN_ROUTES = "dashboard/src/routes/plugins";
-/** The files a plugin page's route holds: its markup, and the server load that asks the registry for it. */
+/** The layout whose load gates every page under PLUGIN_ROUTES: the page its route names, as the registry lists it, or a 404. */
+const PLUGIN_GATE = "+layout.server.ts";
+/** The files a plugin page's route may hold: its markup, and a server load. A `+server.ts` or a universal `+page.ts` would answer without the gate's load. */
 const PLUGIN_ROUTE_FILES = new Set(["+page.svelte", "+page.server.ts"]);
 
 /**
  * A plugin's GUI pages against the GUI's routes for them, each problem where it
  * is found. `declared`: each plugin's page paths, as its manifest's `gui.pages`
  * names them; `files`: every file under PLUGIN_ROUTES, by its path there, and
- * its text. Each declared page has its directory, `<name><path>/`, holding a
- * `+page.svelte` and a `+page.server.ts` and nothing else (a `+server.ts`, a
- * universal `+page.ts` or a layout would answer without the server load's
- * ask), and that load asks the registry for the page — `pluginPage(` with the
- * plugin's name and the path as literals — so a disabled plugin's page is a
- * 404; no directory holds a page no manifest declares. Pure.
+ * its text. The gate stands — PLUGIN_GATE at the top, its load calling
+ * pluginPageAt — so every page under it is a 404 while its plugin is off or to
+ * a key that may call none of it (review pass 1: a gate each page called for
+ * itself could be left out, or name another page, and pass). Each declared
+ * page has its directory, `<name><path>/`, with a `+page.svelte`; a directory
+ * holds PLUGIN_ROUTE_FILES alone, and none is a page no manifest declares. Pure.
  */
 function pluginPageProblems(declared: Record<string, string[]>, files: Record<string, string>): { where: string; what: string }[] {
   const problems: { where: string; what: string }[] = [];
   const pages = new Set(Object.entries(declared).flatMap(([name, paths]) => paths.map((path) => `${name}${path}`)));
-  for (const page of pages) {
-    for (const f of PLUGIN_ROUTE_FILES) if (!(`${page}/${f}` in files)) problems.push({ where: `${PLUGIN_ROUTES}/${page}`, what: `no ${f}: the plugin's manifest declares this page, and the GUI renders each declared page from its route here` });
-    const load = files[`${page}/+page.server.ts`];
-    if (load === undefined) continue;
-    const code = blanked(load, false);
-    const [name] = Object.entries(declared).find(([n, paths]) => paths.some((path) => `${n}${path}` === page))!;
-    const path = page.slice(name.length);
-    const literal = (v: string) => new RegExp(`["'\`]${v.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}["'\`]`).test(code);
-    if (!/\bpluginPage\s*\(/.test(code) || !literal(name) || !literal(path)) problems.push({ where: `${PLUGIN_ROUTES}/${page}/+page.server.ts`, what: `does not ask the registry for its page — pluginPage( with ${JSON.stringify(name)} and ${JSON.stringify(path)} — so the page would render with the plugin disabled, or for a key it lists none of the plugin to` });
+  if (Object.keys(files).length > 0 || pages.size > 0) {
+    const gate = files[PLUGIN_GATE];
+    if (gate === undefined || !/\bpluginPageAt\s*\(/.test(blanked(gate, false))) problems.push({ where: `${PLUGIN_ROUTES}/${PLUGIN_GATE}`, what: "does not gate the plugin pages: its load calls pluginPageAt, so every page under it is a 404 while its plugin is off or to a key that may call none of it" });
   }
+  for (const page of pages) if (!(`${page}/+page.svelte` in files)) problems.push({ where: `${PLUGIN_ROUTES}/${page}`, what: "no +page.svelte: the plugin's manifest declares this page, and the GUI renders each declared page from its route here" });
   for (const rel of Object.keys(files)) {
-    const dir = rel.slice(0, rel.lastIndexOf("/"));
+    if (rel === PLUGIN_GATE) continue;
+    const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
     const file = rel.slice(rel.lastIndexOf("/") + 1);
-    if (!pages.has(dir)) problems.push({ where: `${PLUGIN_ROUTES}/${rel}`, what: "is in no page a plugin's manifest declares (gui.pages): the nav would never name it, and its route answers only for the page it is" });
-    else if (!PLUGIN_ROUTE_FILES.has(file)) problems.push({ where: `${PLUGIN_ROUTES}/${rel}`, what: "a plugin page's route holds its +page.svelte and +page.server.ts alone: anything else answers without the load's ask of the registry" });
+    if (!pages.has(dir)) problems.push({ where: `${PLUGIN_ROUTES}/${rel}`, what: "is in no page a plugin's manifest declares (gui.pages): the nav would never name it, and the gate answers it 404" });
+    else if (!PLUGIN_ROUTE_FILES.has(file)) problems.push({ where: `${PLUGIN_ROUTES}/${rel}`, what: "a plugin page's route holds its +page.svelte and a +page.server.ts alone: a +server.ts, a universal +page.ts or a layout would answer without the gate's load" });
   }
   return problems;
 }
 
 /** pluginPageProblems' probes: each declared, files and how many problems. */
+const GATE_TEXT = "export const load = async (event) => { await pluginPageAt(event); return {}; };";
 const PLUGIN_PAGE_PROBES: [Record<string, string[]>, Record<string, string>, number][] = [
-  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "const p = await pluginPage(event, 'example', '/notes');" }, 0],
-  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "const PLUGIN = 'example';\nconst PAGE = \"/notes\";\nawait pluginPage(event, PLUGIN, PAGE);" }, 0],
-  [{ example: ["/notes"] }, {}, 2],
-  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "export const load = () => ({});" }, 1],
-  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "// pluginPage(event, 'example', '/notes')\nexport const load = () => ({});" }, 1],
-  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "await pluginPage(event, 'other', '/notes');" }, 1],
-  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "await pluginPage(event, 'example', '/notes');", "example/notes/+server.ts": "" }, 1],
-  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "await pluginPage(event, 'example', '/notes');", "example/other/+page.svelte": "" }, 1],
-  [{}, { "example/notes/+page.svelte": "" }, 1],
+  [{ example: ["/notes"] }, { [PLUGIN_GATE]: GATE_TEXT, "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "" }, 0],
+  [{ example: ["/notes"] }, { [PLUGIN_GATE]: GATE_TEXT, "example/notes/+page.svelte": "" }, 0],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "" }, 1],
+  [{ example: ["/notes"] }, { [PLUGIN_GATE]: "// pluginPageAt(event)\nexport const load = () => ({});", "example/notes/+page.svelte": "" }, 1],
+  [{ example: ["/notes"] }, { [PLUGIN_GATE]: GATE_TEXT }, 1],
+  [{ example: ["/notes"] }, { [PLUGIN_GATE]: GATE_TEXT, "example/notes/+page.svelte": "", "example/notes/+server.ts": "" }, 1],
+  [{ example: ["/notes"] }, { [PLUGIN_GATE]: GATE_TEXT, "example/notes/+page.svelte": "", "example/notes/+page.ts": "" }, 1],
+  [{ example: ["/notes"] }, { [PLUGIN_GATE]: GATE_TEXT, "example/notes/+page.svelte": "", "example/other/+page.svelte": "" }, 1],
+  [{ example: ["/notes"] }, { [PLUGIN_GATE]: GATE_TEXT, "example/notes/+page.svelte": "", "+server.ts": "" }, 1],
+  [{}, { "example/notes/+page.svelte": "" }, 2],
+  [{}, {}, 0],
 ];
 
 async function checkPlugins() {
@@ -7937,10 +7938,12 @@ async function checkPlugins() {
     else if (!listed.has(binding)) fail("plugins/registry.ts", `imports ./${d}/index.ts as ${binding} but PLUGINS does not list it`);
     const manifest = blanked(readFileSync(index, "utf8"), false);
     const name = manifest.match(/\bdefinePlugin\s*\(\s*\{[\s\S]*?\bname:\s*["']([^"']+)["']/)?.[1];
+    // The literal shape the example writes: a pages list held elsewhere, or a `]` inside a label, reads as no page — a
+    // loud false positive (its route then "declared by no manifest"), never a silent pass; the core's own check rules.
     declared[d] = [...(manifest.match(/\bgui\s*:\s*\{\s*pages\s*:\s*\[([\s\S]*?)\]/)?.[1] ?? "").matchAll(/\bpath\s*:\s*["']([^"']+)["']/g)].map((m) => m[1]);
     if (name !== d) fail(`${where}/index.ts`, `its manifest's name is ${JSON.stringify(name ?? null)}, not its directory's (${d}): OB1_PLUGINS, the migrator and the server name a plugin by one name`);
     // Every file in the directory: TypeScript, its migrations, a README and metadata.json — a .js file is code this check would not read.
-    const files = walk(join(base, d), [], /$/).filter((f) => !f.includes(`${sep}node_modules${sep}`));
+    const files = walk(join(base, d), [], /^[^.]/).filter((f) => !f.includes(`${sep}node_modules${sep}`));
     const migrationFiles: string[] = [];
     for (const f of files) {
       const rel = relative(join(base, d), f).split(sep).join("/");
@@ -7959,7 +7962,8 @@ async function checkPlugins() {
   // The GUI's routes for the pages: one directory each, asking the registry, and none undeclared (SMD-2280 PR 3).
   const routes = join(ROOT, ...PLUGIN_ROUTES.split("/"));
   const files: Record<string, string> = {};
-  if (existsSync(routes)) for (const f of walk(routes, [], /$/)) files[relative(routes, f).split(sep).join("/")] = readFileSync(f, "utf8");
+  // A dotfile (Finder's .DS_Store, an editor's swap file) is no route: skipped, as in the plugin directories (review pass 1).
+  if (existsSync(routes)) for (const f of walk(routes, [], /^[^.]/)) files[relative(routes, f).split(sep).join("/")] = readFileSync(f, "utf8");
   for (const h of pluginPageProblems(declared, files)) fail(h.where, `${h.what} (check 31, SMD-2280)`);
 }
 await checkPlugins();

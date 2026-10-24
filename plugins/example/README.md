@@ -51,7 +51,7 @@ It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists f
    OB1_PLUGIN_DB_PASSWORD=<the generated password>
    ```
 
-2. Recreate the migrator and the servers so they read it: `docker compose up -d migrate server api` from `deploy/`. The migrator makes `ob1_plugins` (the first time), the plugin's role and schema, and applies `001_notes.sql` and `002_deliveries.sql`. The servers wait for it.
+2. Recreate the migrator and the servers so they read it: `docker compose up -d migrate server api mcp` from `deploy/`, then `docker compose up -d --force-recreate app`, so the operator GUI reaches the recreated REST core at once. The migrator makes `ob1_plugins` (the first time), the plugin's role and schema, and applies `001_notes.sql` and `002_deliveries.sql`. The servers wait for it.
 3. Check it:
    - preflight's `plugins` row says `example — enabled`, and its `plugin tables` row says the role, schema and migrations are in place;
    - `GET /v1/whoami` lists `example_recent` and `example_list_notes` for a read key, and `example_add_note` too for a write key;
@@ -59,7 +59,7 @@ It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists f
    - an MCP client sees the same tools.
 4. For the webhook, add `OB1_HOOKS=example` and `OB1_HOOK_SECRETS=example=<openssl rand -hex 32>` to `deploy/.env`, recreate the REST core (`docker compose up -d api`), and name the overlay with the stack's other `-f` files: `docker compose -f compose.yaml -f compose.hooks-public.yaml up -d proxy forwarder`. The REST core's preflight `plugin webhooks` row then says `example` is served (the MCP server serves no webhook, and is not given the knobs).
 
-Remove the name from `OB1_PLUGINS` and recreate the servers to turn it off. Its tools, routes and OpenAPI entries are gone. Its table and notes stay, and come back when it is turned on again.
+Remove the name from `OB1_PLUGINS` and recreate the same services to turn it off. Its tools, routes and OpenAPI entries are gone. Its table and notes stay, and come back when it is turned on again.
 
 ## Start your own plugin
 

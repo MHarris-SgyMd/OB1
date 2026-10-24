@@ -5,9 +5,13 @@
 // src/routes/plugins/<name><path>/ — a plugin's directory holds no Svelte
 // (check 31) — so the nav names a page only where the registry lists it and
 // this build has its route, and the route answers 404 unless the registry
-// lists it for this key: a disabled plugin's page is no page at all.
+// lists it for this key: a disabled plugin's page is no page at all. That 404
+// is routes/plugins/+layout.server.ts's, for every page under it, so no page
+// can leave it out (review pass 1); an action, which runs before any load,
+// reaches the plugin's operations as the visitor, and the REST core refuses
+// a disabled plugin's route or an operation the key may not call.
 
-import { error, isRedirect, type RequestEvent } from '@sveltejs/kit';
+import { error, isHttpError, isRedirect, type RequestEvent } from '@sveltejs/kit';
 import { base } from '$app/paths';
 import { read } from './rest';
 
@@ -52,8 +56,17 @@ export async function pluginNav(event: RequestEvent): Promise<{ href: string; la
 		return (await pluginsFor(event)).flatMap((p) => p.pages.filter((g) => BUILT.has(`${p.name}${g.path}`)).map((g) => ({ href: `${base}/plugins/${p.name}${g.path}`, label: g.label })));
 	} catch (err) {
 		if (isRedirect(err)) throw err;
+		// A refusal or fault the read already logged; anything else is the GUI's own bug, said here (review pass 1).
+		if (!isHttpError(err)) console.error(`[dashboard] the plugin nav: ${err instanceof Error ? err.message : String(err)}`);
 		return [];
 	}
+}
+
+/** The gate for the plugin page a route id names, `/plugins/<name><path>`: routes/plugins/+layout.server.ts's load. */
+export function pluginPageAt(event: RequestEvent): Promise<ListedPlugin> {
+	const m = /^\/plugins\/([^/]+)(\/.+)$/.exec(event.route.id ?? '');
+	if (!m) throw error(404, 'Not Found');
+	return pluginPage(event, m[1], m[2]);
 }
 
 /** A plugin page's load starts here: the plugin as the registry lists it to this key, or the page's 404 — not enabled, a page it does not declare, or a key that may call none of it. */

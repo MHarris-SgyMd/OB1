@@ -41,13 +41,16 @@
  *     operator views, and a thought the brain does not hold is a 404;
  *   - the example plugin's Notes page (PR 3): with `--notes on`, the write and
  *     read keys' navs name it, it lists the newest thoughts and a thought's
- *     notes, the write key pins one (an empty note, a thought not held and an
- *     address naming no id refused in words), the read key sees it with no pin
- *     form and its pin is refused; with `--notes off`, no nav names it and its
- *     page and pin are 404s. `--notes-only` runs that arm alone.
+ *     notes, the write key pins one of 2,000 characters sent with CRLF breaks
+ *     (an empty note, one of 2,001, a NUL, a thought not held and an address
+ *     naming no id refused in words), the read key sees it with no pin form
+ *     and its pin is refused; with `--notes off`, no nav names it and its page
+ *     and pin are the GUI's 404; unset, a Notes page the nav names is read but
+ *     not pinned to. `--notes-only` runs that arm alone.
  *
  * Exit 0 when every assertion holds, 1 otherwise. Read-only against the
- * brain, but for the click-through each thought page's `fetch` logs.
+ * brain, but for the click-through each thought page's `fetch` logs and, with
+ * `--notes on` alone, the notes the arm pins to the example plugin's table.
  */
 
 import { pageLinks, readBrowse, TRAIL_MAX } from "./src/lib/browse.ts";
@@ -236,21 +239,30 @@ const pin = async (thought: string, note: string) => {
   return { status: r.status, location: r.headers.get("location") ?? "", html: await r.text() };
 };
 const notesListed = (html: string) => [...(/data-testid="notes"[\s\S]*?<\/ol>/.exec(html)?.[0] ?? "").matchAll(/<li[\s\S]*?<\/li>/g)].map((m) => m[0]);
+/** The GUI's own 404 — the gate's, words SvelteKit's error page gives a page it has no route for — never the core's refusal in words. */
+const guiNotFound = (r: { status: number; html: string }) => r.status === 404 && r.html.includes('data-testid="error">No page at this address.<');
+/** A refusal as the page shows it, beside the form or above it — not the words in the page's hydration data (review pass 1). */
+const shownRefusal = (html: string, words: string) => new RegExp(`data-testid="pin-error"[^>]*>[^<]*${words}`).test(html);
 async function notesArm() {
   const out = await get(NOTES_PATH);
   assert(toSignin(out), `signed out, the Notes page redirects to /signin (${out.status} → ${out.location})`);
-  await signIn(WRITE_KEY!);
+  const signedIn = await signIn(WRITE_KEY!);
   const home = await get("/");
+  assert(signedIn.status === 303 && home.status === 200, `the write key signs in for the Notes arm (${signedIn.status}, ${home.status})`);
   const on = NOTES === undefined ? namesNotes(home.html) : NOTES === "on";
-  if (NOTES === undefined) console.log(`  ·  no --notes: the nav ${on ? "names" : "does not name"} Notes, so the plugin is taken as ${on ? "on" : "off"}`);
+  // Only --notes on writes: unset, a plugin found on is read, never pinned to (review pass 1: a plain run wrote a note).
+  const writes = NOTES === "on";
+  if (NOTES === undefined) console.log(`  ·  no --notes: the nav ${on ? "names" : "does not name"} Notes, so the plugin is taken as ${on ? "on, and read without pinning" : "off"}`);
   if (!on) {
-    const [page, posted] = [await get(NOTES_PATH), await pin(NO_THOUGHT, "never pinned")];
-    assert(!namesNotes(home.html) && page.status === 404 && posted.status === 404, `the example plugin off: the write key's nav has no Notes, and its page and its pin are 404s (${page.status}, ${posted.status})`);
+    // A real thought, so the gate alone can answer 404: on a thought the brain does not hold, the core's own refusal is one too (review pass 1).
+    const held = /href="\/dashboard\/thoughts\/([0-9a-f-]{36})"/.exec(home.html)?.[1] ?? NO_THOUGHT;
+    const [page, posted] = [await get(NOTES_PATH), await pin(held, "never pinned")];
+    assert(!namesNotes(home.html) && guiNotFound(page) && guiNotFound(posted), `the example plugin off: the write key's nav has no Notes, and its page and its pin are the GUI's own 404 (${page.status}, ${posted.status})`);
     await signOut();
     if (READ_KEY) {
-      await signIn(READ_KEY);
+      const r = await signIn(READ_KEY);
       const [h, p] = [await get("/"), await get(NOTES_PATH)];
-      assert(h.status === 200 && !namesNotes(h.html) && p.status === 404, `…nor the read key's, its page a 404 (${p.status})`);
+      assert(r.status === 303 && h.status === 200 && !namesNotes(h.html) && guiNotFound(p), `…nor the read key's, its page the GUI's 404 (${r.status}, ${p.status})`);
       await signOut();
     }
     return;
@@ -263,29 +275,45 @@ async function notesArm() {
   const thought = recent[0] ?? NO_THOUGHT;
   const before = await get(`${NOTES_PATH}?thought=${thought}`);
   assert(before.status === 200 && before.html.includes('data-testid="pin"'), `…a thought's notes, with a pin form for the write key (${before.status})`);
-  const note = `Pinned by the GUI smoke <b>${Date.now()}</b> & kept as typed.`;
-  const pinned = await pin(thought, `  ${note}  `);
-  assert(pinned.status === 303 && pinned.location === `/dashboard${NOTES_PATH}?thought=${thought}`, `…the write key pins a note through example_add_note: 303 back to the thought's notes (${pinned.status} → ${pinned.location})`);
+  const badId = await get(`${NOTES_PATH}?thought=not-an-id`);
+  assert(badId.status === 200 && badId.html.includes('data-testid="bad-id"'), `…and an address naming no thought id says so (${badId.status})`);
+  const data = await get(`${NOTES_PATH}/__data.json?thought=${thought}`);
+  assert(listKeys(data.html, "recent") === "at,id,type" && (listKeys(data.html, "notes") === "at,by,id,note" || listKeys(data.html, "notes") === "no items listed"), `…its data lists each note and thought by its shown fields alone (${listKeys(data.html, "notes")}; ${listKeys(data.html, "recent")})`);
+  const { leaked } = await keyIn([page, before, data], WRITE_KEY!);
+  assert(!leaked, "…and neither the page, its data nor its scripts hold the key");
+  if (!writes) {
+    console.log("  ·  no --notes on: the pin arms skipped");
+    await signOut();
+    return;
+  }
+  // The note as a browser's textarea sends it: line breaks as CRLF, 2,000 characters once read as LF and trimmed, so the
+  // break's two characters and the spaces around it are counted as the field and add_note count them (review pass 1).
+  const stamp = String(Date.now());
+  const lines = [`Pinned by the GUI smoke <b>${stamp}</b> & kept as typed.`, "x".repeat(600), "y".repeat(600)];
+  lines.push("z".repeat(2000 - lines.join("\n").length - 1));
+  const note = lines.join("\n");
+  const pinned = await pin(thought, `  ${lines.join("\r\n")}  `);
+  assert(pinned.status === 303 && pinned.location === `/dashboard${NOTES_PATH}?thought=${thought}`, `…the write key pins a note of 2,000 characters sent with CRLF breaks and spaces around it: 303 back to the thought's notes (${pinned.status} → ${pinned.location})`);
   const after = await get(`${NOTES_PATH}?thought=${thought}`);
   const escaped = note.replaceAll("&", "&amp;").replaceAll("<", "&lt;");
   const mine = notesListed(after.html).filter((li) => li.includes(`>${escaped}<`));
-  assert(notesListed(after.html).length === notesListed(before.html).length + 1 && mine.length === 1 && who !== "" && mine[0].includes(who), `…and the thought's notes list it once, trimmed and escaped, by the key's name (${notesListed(before.html).length} → ${notesListed(after.html).length})`);
-  const [empty, nowhere, badId] = [await pin(thought, "   "), await pin(NO_THOUGHT, "a note on nothing"), await get(`${NOTES_PATH}?thought=not-an-id`)];
-  assert(empty.status === 400 && empty.html.includes("Write the note first"), `…an empty note is refused beside the form (${empty.status})`);
+  assert(notesListed(after.html).length === notesListed(before.html).length + 1 && mine.length === 1 && who !== "" && mine[0].includes(who), `…and the thought's notes list it once — trimmed, its breaks LF, escaped — by the key's name (${notesListed(before.html).length} → ${notesListed(after.html).length})`);
+  const long = "w".repeat(2001);
+  const [empty, tooLong, nul, nowhere] = [await pin(thought, "   "), await pin(thought, ` ${long} `), await pin(thought, "a\u0000b"), await pin(NO_THOUGHT, "a note on nothing")];
+  assert(empty.status === 400 && shownRefusal(empty.html, "Write the note first"), `…an empty note is refused beside the form (${empty.status})`);
+  assert(tooLong.status === 400 && shownRefusal(tooLong.html, "A note is at most 2,000 characters; this one is 2,001") && new RegExp(`<textarea[^>]*>\\s?${long}\\s?</textarea>`).test(tooLong.html), `…a note of 2,001 once trimmed is refused beside the form, the note kept in it (${tooLong.status})`);
+  assert(nul.status === 400 && shownRefusal(nul.html, "A note cannot hold a NUL"), `…a note holding a NUL is refused in words, not the core's 500 (${nul.status})`);
   assert(nowhere.status === 404 && nowhere.html.includes("holds no thought with that id"), `…a note on a thought the brain does not hold is refused in words (${nowhere.status})`);
-  assert(badId.status === 200 && badId.html.includes('data-testid="bad-id"'), `…and an address naming no thought id says so (${badId.status})`);
-  const data = await get(`${NOTES_PATH}/__data.json?thought=${thought}`);
-  assert(listKeys(data.html, "notes") === "at,by,id,note" && listKeys(data.html, "recent") === "at,id,type", `…its data lists each note and thought by its shown fields alone (${listKeys(data.html, "notes")}; ${listKeys(data.html, "recent")})`);
-  const { leaked } = await keyIn([page, after, data], WRITE_KEY!);
-  assert(!leaked, "…and neither the page, its data nor its scripts hold the key");
+  const unchanged = notesListed((await get(`${NOTES_PATH}?thought=${thought}`)).html).length;
+  assert(unchanged === notesListed(after.html).length, `…none of them pinned (${unchanged})`);
   await signOut();
   if (READ_KEY) {
-    await signIn(READ_KEY);
+    const r = await signIn(READ_KEY);
     const [h, p] = [await get("/"), await get(`${NOTES_PATH}?thought=${thought}`)];
-    assert(namesNotes(h.html) && p.status === 200 && notesListed(p.html).some((li) => li.includes(`>${escaped}<`)) && !p.html.includes('data-testid="pin"'), `the read key's nav names Notes, and its page lists the note with no pin form (${p.status})`);
+    assert(r.status === 303 && namesNotes(h.html) && p.status === 200 && notesListed(p.html).some((li) => li.includes(`>${escaped}<`)) && !p.html.includes('data-testid="pin"'), `the read key's nav names Notes, and its page lists the note with no pin form (${r.status}, ${p.status})`);
     const refused = await pin(thought, "a read key's note");
     const again = await get(`${NOTES_PATH}?thought=${thought}`);
-    assert(refused.status === 403 && refused.html.includes("This key cannot pin notes") && notesListed(again.html).length === notesListed(p.html).length, `…and its pin is refused by the core, in words, with nothing pinned (${refused.status})`);
+    assert(refused.status === 403 && shownRefusal(refused.html, "This key cannot pin notes") && notesListed(again.html).length === notesListed(p.html).length, `…and its pin is refused by the core, said on the page, with nothing pinned (${refused.status})`);
     await signOut();
   }
 }

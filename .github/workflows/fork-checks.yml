@@ -1838,13 +1838,16 @@ jobs:
       # no nav names the example's Notes, and its page and its pin are 404s.
       # Here the example plugin is on for the REST core alone (the migrator,
       # recreated with it, applies its tables) and the smoke's Notes arm drives
-      # the page: named in the write and read keys' navs (a capture-only key,
-      # refused at sign-in, has none), the newest thoughts and a thought's
-      # notes rendered from the plugin's own operations, a note the write key
-      # pins listed by the key's name, and the read key's pin refused by the
-      # core. Then off again, so the steps after meet the plugin-free stack
-      # they expect. Before the next one, which ends key sign-in. The plugin
-      # login keeps the password the migrator first made it with, so the
+      # the page: named in the write and read keys' navs (a capture-only key
+      # signs in to none: the step before holds its refusal), the newest
+      # thoughts and a thought's notes rendered from the plugin's own
+      # operations, a note the write key pins listed by the key's name, and
+      # the read key's pin refused by the core. The GUI is recreated after the
+      # REST core moves, so its first calls look the name up afresh rather than
+      # reach the old address (as the auth job's mcp is; review pass 1). Then
+      # off again, so the steps after meet the plugin-free stack they expect;
+      # the next step, which ends key sign-in, recreates the GUI itself. The
+      # plugin login keeps the password the migrator first made it with, so the
       # webhook step's run reads it from here.
       - name: The operator GUI renders a plugin's page while the plugin is on
         working-directory: deploy
@@ -1853,6 +1856,7 @@ jobs:
           OB1_PLUGIN_DB_PASSWORD=$(cat "$RUNNER_TEMP/plugin-pw")
           export OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD
           docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
+          docker compose -f compose.yaml up -d --wait --wait-timeout 120 --force-recreate --no-deps app
           (cd ../dashboard && bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --notes on --notes-only)
           unset OB1_PLUGINS OB1_PLUGIN_DB_PASSWORD
           docker compose -f compose.yaml up -d --wait --wait-timeout 240 api

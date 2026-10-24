@@ -1,7 +1,7 @@
-import { fail, redirect } from '@sveltejs/kit';
+import { fail, isHttpError, redirect } from '@sveltejs/kit';
 import { base } from '$app/paths';
 import type { Actions, PageServerLoad } from './$types';
-import { oneLine } from '$lib/format';
+import { firstLine, oneLine } from '$lib/format';
 import { pluginPage } from '$lib/server/plugins';
 import { callPlugin, codeOf, readPlugin } from '$lib/server/rest';
 
@@ -11,7 +11,7 @@ import { callPlugin, codeOf, readPlugin } from '$lib/server/rest';
 // key that may. Every read and write is the plugin's own REST operation under
 // the visitor's key, so the page reaches nothing that key cannot call, and a
 // key the registry lists none of the plugin to (or the plugin disabled) finds
-// no page here (pluginPage's 404).
+// no page here (the 404 of routes/plugins/+layout.server.ts, and pluginPage's).
 
 const PLUGIN = 'example';
 const PAGE = '/notes';
@@ -36,7 +36,8 @@ export const load: PageServerLoad = async (event) => {
 	]);
 	return {
 		plugin: { title: plugin.title, description: plugin.description },
-		typed: thought ? '' : typed.slice(0, 80),
+		// Cut whole: never half an emoji (review pass 1).
+		typed: thought ? '' : firstLine(typed, 80),
 		thought,
 		canList: may('list_notes'),
 		canPin: may('add_note'),
@@ -54,14 +55,23 @@ export const actions: Actions = {
 		await pluginPage(event, PLUGIN, PAGE);
 		const form = await event.request.formData();
 		const thought = String(form.get('thought_id') ?? '').trim();
-		const note = String(form.get('note') ?? '');
+		// A browser counts a textarea's line break as one character for its maxlength and sends it as two (CRLF): read
+		// as one, a note the field took is not refused as too long, and a note is stored with the breaks it was typed with (review pass 1).
+		const note = String(form.get('note') ?? '').replace(/\r\n?/g, '\n');
 		const kept = { note };
 		if (!THOUGHT_ID.test(thought)) return fail(400, { ...kept, error: 'That is not a thought id: 36 characters of hex and hyphens, as a thought’s page shows it.' });
 		if (!note.trim()) return fail(400, { ...kept, error: 'Write the note first.' });
 		if (note.trim().length > NOTE_MAX) return fail(400, { ...kept, error: `A note is at most ${NOTE_MAX.toLocaleString()} characters; this one is ${note.trim().length.toLocaleString()}.` });
 		// No Postgres text holds a NUL: the core's 500 (SMD-2534). Refused here, not stripped, since the note is the visitor's words.
 		if (note.includes('\0')) return fail(400, { ...kept, error: 'A note cannot hold a NUL character.' });
-		const answer = await callPlugin(event, event.locals.session!, `${PLUGIN}_add_note`, 'POST', `/v1/plugins/${PLUGIN}/notes`, { thought_id: thought, note });
+		let answer;
+		try {
+			answer = await callPlugin(event, event.locals.session!, `${PLUGIN}_add_note`, 'POST', `/v1/plugins/${PLUGIN}/notes`, { thought_id: thought, note });
+		} catch (err) {
+			// The core did not answer (callPlugin logged why): said beside the form, the note kept, not the error page (review pass 1).
+			if (isHttpError(err) && err.status >= 500) return fail(err.status, { ...kept, error: 'The brain did not answer, and the note may not be pinned. The dashboard log has the reason.' });
+			throw err;
+		}
 		if (answer.ok) throw redirect(303, `${HERE}?thought=${thought.toLowerCase()}`);
 		const code = codeOf(answer.body);
 		if (answer.status >= 500) console.error(`[dashboard] ${PLUGIN}_add_note: ${answer.status} ${code ?? ''}`.trimEnd());
