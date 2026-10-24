@@ -35,7 +35,7 @@ SIG=$(printf %s "$TS.$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's
 curl -X POST -H 'content-type: application/json' -H "x-example-timestamp: $TS" -H "x-example-signature: $SIG" -d "$BODY" http://127.0.0.1:8000/hooks/example/capture
 ```
 
-It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists for the operator GUI's nav while the plugin is on. Through the proxy, where `/api` is on, the routes are under `/api` (`/api/v1/plugins/example/…`). `add_note` looks the thought up through the core as the caller before it writes. A thought the caller cannot read, or one that is not there, is refused with `404 NO_SUCH_THOUGHT`. `written_by` is the name of the key that pinned the note.
+It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists for the operator GUI's nav while the plugin is on. The GUI renders it at `/dashboard/plugins/example/notes`: the newest thoughts through `example_recent`, a thought's notes through `example_list_notes`, and for a write key a form that pins one through `example_add_note`. Through the proxy, where `/api` is on, the routes are under `/api` (`/api/v1/plugins/example/…`). `add_note` looks the thought up through the core as the caller before it writes. A thought the caller cannot read, or one that is not there, is refused with `404 NO_SUCH_THOUGHT`. `written_by` is the name of the key that pinned the note.
 
 ## Prerequisites
 
@@ -55,7 +55,7 @@ It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists f
 3. Check it:
    - preflight's `plugins` row says `example — enabled`, and its `plugin tables` row says the role, schema and migrations are in place;
    - `GET /v1/whoami` lists `example_recent` and `example_list_notes` for a read key, and `example_add_note` too for a write key;
-   - `GET /v1/plugins` lists the plugin and its Notes page;
+   - `GET /v1/plugins` lists the plugin and its Notes page, and the operator GUI's nav names Notes to a read or write key;
    - an MCP client sees the same tools.
 4. For the webhook, add `OB1_HOOKS=example` and `OB1_HOOK_SECRETS=example=<openssl rand -hex 32>` to `deploy/.env`, recreate the REST core (`docker compose up -d api`), and name the overlay with the stack's other `-f` files: `docker compose -f compose.yaml -f compose.hooks-public.yaml up -d proxy forwarder`. The REST core's preflight `plugin webhooks` row then says `example` is served (the MCP server serves no webhook, and is not given the knobs).
 

@@ -38,7 +38,13 @@
  *     pages render, the query log holding the smoke's own search where
  *     query_log is on; each list's data its shown fields alone;
  *   - the read key signs in as a read key, browses, searches and reads the four
- *     operator views, and a thought the brain does not hold is a 404.
+ *     operator views, and a thought the brain does not hold is a 404;
+ *   - the example plugin's Notes page (PR 3): with `--notes on`, the write and
+ *     read keys' navs name it, it lists the newest thoughts and a thought's
+ *     notes, the write key pins one (an empty note, a thought not held and an
+ *     address naming no id refused in words), the read key sees it with no pin
+ *     form and its pin is refused; with `--notes off`, no nav names it and its
+ *     page and pin are 404s. `--notes-only` runs that arm alone.
  *
  * Exit 0 when every assertion holds, 1 otherwise. Read-only against the
  * brain, but for the click-through each thought page's `fetch` logs.
@@ -61,8 +67,12 @@ const REQUIRE_INGESTED = args.includes("--require-ingested");
 const REQUIRE_PAGES = args.includes("--require-pages");
 /** Fail unless the proposals and workers pages render rows, not their empty words: CI plants one proposal and one pool. */
 const REQUIRE_ROWS = args.includes("--require-rows");
-if (!BASE || !WRITE_KEY) {
-  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought] [--require-ingested] [--require-pages] [--require-rows]");
+/** The example plugin's Notes page (PR 3): `on` requires it in the nav and drives it, `off` requires it absent and its route a 404; unset, the nav decides which. */
+const NOTES = flag("notes");
+/** The Notes arm alone, after the pure checks: CI's plugin step, whose stack the full smoke has already driven. */
+const NOTES_ONLY = args.includes("--notes-only");
+if (!BASE || !WRITE_KEY || (NOTES !== undefined && NOTES !== "on" && NOTES !== "off")) {
+  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought] [--require-ingested] [--require-pages] [--require-rows] [--notes on|off] [--notes-only]");
   process.exit(2);
 }
 const ORIGIN = new URL(BASE).origin;
@@ -152,6 +162,23 @@ const linkOf = (html: string, testid: string) => {
   const m = new RegExp(`<a href="([^"]+)"[^>]*data-testid="${testid}"`).exec(html);
   return m ? m[1].replaceAll("&amp;", "&").replace(/^\/dashboard/, "") : "";
 };
+/** Whether `key` is in any of `pages` — its text or a header — or in any script module they load, followed import by import. */
+async function keyIn(pages: { html: string; headers: Headers }[], key: string) {
+  const queue = pages.flatMap((p) => [...p.html.matchAll(/["'](\/dashboard\/_app\/[^"']+\.js)["']/g)].map((m) => m[1]));
+  const scripts = new Set<string>();
+  let leaked = pages.some((p) => p.html.includes(key) || [...p.headers.values()].some((v) => v.includes(key)));
+  while (queue.length) {
+    const s = queue.pop()!;
+    if (scripts.has(s)) continue;
+    scripts.add(s);
+    const text = await (await fetch(`${ORIGIN}${s}`)).text();
+    if (text.includes(key)) leaked = true;
+    // A chunk names the others it imports relative to itself: "./x.js", "../chunks/y.js".
+    for (const m of text.matchAll(/["'](\.{1,2}\/[^"']+\.js)["']/g)) queue.push(new URL(m[1], `${ORIGIN}${s}`).pathname);
+  }
+  return { leaked, scripts };
+}
+
 /** Every page of a browse from `start`, by its Next links: each page's ids, and its address. At most 60 pages. */
 async function walkBrowse(start: string) {
   const pages: { path: string; ids: string[]; html: string }[] = [];
@@ -195,6 +222,80 @@ console.log(`▸ dashboard ${BASE}`);
 {
   const cutAt = [158, 159, 160].map((n) => firstLine(`${"a".repeat(n)}\u{1F600}\u{1F600}tail`));
   assert(cutAt.every((l) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(l) && l.endsWith("…")), "a list's first line, cut beside an emoji, holds no half of one");
+}
+
+// The example plugin's Notes page (PR 3): in the nav of a key the registry lists the plugin to, its route under
+// /plugins/example/notes rendered from the plugin's own operations — the newest thoughts, a thought's notes, and a
+// write key's pin — and with the plugin off, no nav entry and a 404 (SMD-2310's deferred Verify item).
+const NOTES_PATH = "/plugins/example/notes";
+const NO_THOUGHT = "00000000-0000-4000-8000-000000000000";
+const navOf = (html: string) => /<nav[^>]*aria-label="Views"[\s\S]*?<\/nav>/.exec(html)?.[0] ?? "";
+const namesNotes = (html: string) => new RegExp(`<a[^>]*href="/dashboard${NOTES_PATH}"[^>]*>Notes</a`).test(navOf(html));
+const pin = async (thought: string, note: string) => {
+  const r = await fetch(`${BASE}${NOTES_PATH}?thought=${thought}&/pin`, { method: "POST", redirect: "manual", headers: headers(FORM), body: new URLSearchParams({ thought_id: thought, note }).toString() });
+  return { status: r.status, location: r.headers.get("location") ?? "", html: await r.text() };
+};
+const notesListed = (html: string) => [...(/data-testid="notes"[\s\S]*?<\/ol>/.exec(html)?.[0] ?? "").matchAll(/<li[\s\S]*?<\/li>/g)].map((m) => m[0]);
+async function notesArm() {
+  const out = await get(NOTES_PATH);
+  assert(toSignin(out), `signed out, the Notes page redirects to /signin (${out.status} → ${out.location})`);
+  await signIn(WRITE_KEY!);
+  const home = await get("/");
+  const on = NOTES === undefined ? namesNotes(home.html) : NOTES === "on";
+  if (NOTES === undefined) console.log(`  ·  no --notes: the nav ${on ? "names" : "does not name"} Notes, so the plugin is taken as ${on ? "on" : "off"}`);
+  if (!on) {
+    const [page, posted] = [await get(NOTES_PATH), await pin(NO_THOUGHT, "never pinned")];
+    assert(!namesNotes(home.html) && page.status === 404 && posted.status === 404, `the example plugin off: the write key's nav has no Notes, and its page and its pin are 404s (${page.status}, ${posted.status})`);
+    await signOut();
+    if (READ_KEY) {
+      await signIn(READ_KEY);
+      const [h, p] = [await get("/"), await get(NOTES_PATH)];
+      assert(h.status === 200 && !namesNotes(h.html) && p.status === 404, `…nor the read key's, its page a 404 (${p.status})`);
+      await signOut();
+    }
+    return;
+  }
+  const who = /data-testid="who">([^<·]+)·/.exec(home.html)?.[1].trim() ?? "";
+  assert(namesNotes(home.html), "the example plugin on: the write key's nav names Notes");
+  const page = await get(NOTES_PATH);
+  const recent = [...(/data-testid="recent"[\s\S]*?<\/ul>/.exec(page.html)?.[0] ?? "").matchAll(/notes\?thought=([0-9a-f-]{36})"/g)].map((m) => m[1]);
+  assert(page.status === 200 && page.html.includes('data-testid="plugin"') && recent.length > 0, `…its page renders the plugin's newest thoughts through example_recent (${page.status}, ${recent.length} listed)`);
+  const thought = recent[0] ?? NO_THOUGHT;
+  const before = await get(`${NOTES_PATH}?thought=${thought}`);
+  assert(before.status === 200 && before.html.includes('data-testid="pin"'), `…a thought's notes, with a pin form for the write key (${before.status})`);
+  const note = `Pinned by the GUI smoke <b>${Date.now()}</b> & kept as typed.`;
+  const pinned = await pin(thought, `  ${note}  `);
+  assert(pinned.status === 303 && pinned.location === `/dashboard${NOTES_PATH}?thought=${thought}`, `…the write key pins a note through example_add_note: 303 back to the thought's notes (${pinned.status} → ${pinned.location})`);
+  const after = await get(`${NOTES_PATH}?thought=${thought}`);
+  const escaped = note.replaceAll("&", "&amp;").replaceAll("<", "&lt;");
+  const mine = notesListed(after.html).filter((li) => li.includes(`>${escaped}<`));
+  assert(notesListed(after.html).length === notesListed(before.html).length + 1 && mine.length === 1 && who !== "" && mine[0].includes(who), `…and the thought's notes list it once, trimmed and escaped, by the key's name (${notesListed(before.html).length} → ${notesListed(after.html).length})`);
+  const [empty, nowhere, badId] = [await pin(thought, "   "), await pin(NO_THOUGHT, "a note on nothing"), await get(`${NOTES_PATH}?thought=not-an-id`)];
+  assert(empty.status === 400 && empty.html.includes("Write the note first"), `…an empty note is refused beside the form (${empty.status})`);
+  assert(nowhere.status === 404 && nowhere.html.includes("holds no thought with that id"), `…a note on a thought the brain does not hold is refused in words (${nowhere.status})`);
+  assert(badId.status === 200 && badId.html.includes('data-testid="bad-id"'), `…and an address naming no thought id says so (${badId.status})`);
+  const data = await get(`${NOTES_PATH}/__data.json?thought=${thought}`);
+  assert(listKeys(data.html, "notes") === "at,by,id,note" && listKeys(data.html, "recent") === "at,id,type", `…its data lists each note and thought by its shown fields alone (${listKeys(data.html, "notes")}; ${listKeys(data.html, "recent")})`);
+  const { leaked } = await keyIn([page, after, data], WRITE_KEY!);
+  assert(!leaked, "…and neither the page, its data nor its scripts hold the key");
+  await signOut();
+  if (READ_KEY) {
+    await signIn(READ_KEY);
+    const [h, p] = [await get("/"), await get(`${NOTES_PATH}?thought=${thought}`)];
+    assert(namesNotes(h.html) && p.status === 200 && notesListed(p.html).some((li) => li.includes(`>${escaped}<`)) && !p.html.includes('data-testid="pin"'), `the read key's nav names Notes, and its page lists the note with no pin form (${p.status})`);
+    const refused = await pin(thought, "a read key's note");
+    const again = await get(`${NOTES_PATH}?thought=${thought}`);
+    assert(refused.status === 403 && refused.html.includes("This key cannot pin notes") && notesListed(again.html).length === notesListed(p.html).length, `…and its pin is refused by the core, in words, with nothing pinned (${refused.status})`);
+    await signOut();
+  }
+}
+const finish = () => {
+  console.log(`\n${pass} passed, ${fail} failed`);
+  process.exit(fail === 0 ? 0 : 1);
+};
+if (NOTES_ONLY) {
+  await notesArm();
+  finish();
 }
 
 // Signed out.
@@ -429,18 +530,7 @@ let searchWord = "";
   const pages = [home, status, await get("/__data.json"), await get("/status/__data.json"), await get("/thoughts/__data.json"), browse,
     await get(searchWord ? `/search/__data.json?q=${encodeURIComponent(searchWord)}&mode=text` : "/search/__data.json"), search,
     await get("/changes/__data.json"), changes, workers, proposals, queryLog];
-  const queue = pages.flatMap((p) => [...p.html.matchAll(/["'](\/dashboard\/_app\/[^"']+\.js)["']/g)].map((m) => m[1]));
-  const scripts = new Set<string>();
-  let leaked = pages.some((p) => p.html.includes(WRITE_KEY) || [...p.headers.values()].some((v) => v.includes(WRITE_KEY)));
-  while (queue.length) {
-    const s = queue.pop()!;
-    if (scripts.has(s)) continue;
-    scripts.add(s);
-    const text = await (await fetch(`${ORIGIN}${s}`)).text();
-    if (text.includes(WRITE_KEY)) leaked = true;
-    // A chunk names the others it imports relative to itself: "./x.js", "../chunks/y.js".
-    for (const m of text.matchAll(/["'](\.{1,2}\/[^"']+\.js)["']/g)) queue.push(new URL(m[1], `${ORIGIN}${s}`).pathname);
-  }
+  const { leaked, scripts } = await keyIn(pages, WRITE_KEY);
   assert([2, 3, 4, 6, 8].every((i) => pages[i].status === 200), `the pages' navigation data answers for the session (${[2, 3, 4, 6, 8].map((i) => pages[i].status).join(", ")})`);
   // The overview sends each thought's first line, not its content: ten large thoughts made it 18.8 MB (review pass 4).
   // Held by the data's structure — each listed thought's keys — not by a word, which a thought's own text can hold
@@ -513,5 +603,5 @@ if (READ_KEY) {
   console.log("  ·  no --read-key: the read-key arm skipped");
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail === 0 ? 0 : 1);
+await notesArm();
+finish();
