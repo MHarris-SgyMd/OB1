@@ -251,7 +251,7 @@ const entries = sources.filter((f) => {
   const dump = run("extract-entities.ts", "--dump");
   ok(dump.code === 2 && /^--dump needs a value/m.test(dump.err), `extract-entities.ts refuses a bare --dump, which read as no dump (exit ${dump.code})`);
   // The documented bare forms: --follow [SECONDS] and --stale [DAYS] take their value optionally.
-  for (const [script, ...argv] of [["extract-entities.ts", "--follow"], ["consolidate.ts", "--follow"], ["consolidate.ts", "--stale"], ["consolidate.ts", "--list"]]) {
+  for (const [script, ...argv] of [["extract-entities.ts", "--follow"], ["consolidate.ts", "--follow"], ["reembed.ts", "--follow"], ["consolidate.ts", "--stale"], ["consolidate.ts", "--list"]]) {
     const bare = run(script, ...argv);
     ok(bare.code === 2 && /No database URL/.test(bare.err), `${script} ${argv.join(" ")}, bare, passes the scanner to the script's own first check (exit ${bare.code}: ${bare.err.split("\n")[0]})`);
   }
