@@ -485,8 +485,8 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
   // taking turns under the leader lock, and the MCP server's entry in front
   // of the first for the tool calls (SMD-2287 PR 6a: index.ts was the second
   // mender, and served the calls itself).
-  // The provider's port refuses until the stub binds it: a quiet port, below the kernels' ranges for port 0, so neither
-  // REST core nor the MCP server's entry, each at PORT 0, can be handed it (SMD-3296 review pass 2).
+  // The provider's port refuses until the stub binds it: a quiet port, below the kernels' default ranges for port 0, so
+  // none of the two REST cores and the MCP server's entry, each at PORT 0, can be handed it (SMD-3296 review pass 2).
   const providerPort = quietPort();
   const childEnv = () => ({
     PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_STORE: "sql", DATABASE_URL: URL_,

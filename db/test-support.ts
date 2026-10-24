@@ -830,14 +830,16 @@ export async function startedPort(stdout: ReturnType<typeof watchStream>, ms: nu
 
 /**
  * A port that refuses, for a stub that must refuse until it binds or a database that refuses: free when picked, and
- * below every kernel's range for port 0 (Linux 32768–60999, macOS 49152–65535), so no server bound at port 0, a child
- * at PORT 0 included, can be handed it once it is freed (SMD-3296 review pass 2).
+ * below the kernels' default ranges for port 0 (Linux 32768–60999, macOS 49152–65535), so no server bound at port 0,
+ * a child at PORT 0 included, can be handed it once it is freed (SMD-3296 review pass 2). Free when bound on
+ * 127.0.0.1, which every child dials, on 0.0.0.0 and dual-stack: on macOS each of those binds alone sits beside
+ * another process's listener on one of the others, which would then answer for the port (review pass 3).
  */
 export function quietPort(): number {
   for (let tries = 0; tries < 100; tries++) {
     const port = 20_000 + Math.floor(Math.random() * 10_000);
     try {
-      Bun.serve({ port, fetch: () => new Response(null) }).stop(true);
+      for (const hostname of ["127.0.0.1", "0.0.0.0", undefined]) Bun.serve({ port, ...(hostname ? { hostname } : {}), fetch: () => new Response(null) }).stop(true);
       return port;
     } catch {}
   }

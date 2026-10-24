@@ -1626,7 +1626,9 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
     return { took, status: r instanceof Response ? r.status : r.name, body: r instanceof Response ? await r.text() : "" };
   };
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  const [quiet, refusing] = await Promise.all([child(`postgres://u:p@127.0.0.1:${silent.port}/db`), child(`postgres://u:p@127.0.0.1:${quietPort()}/db`)]);
+  // Picked before either child starts: a throw here leaves no child behind (review pass 3).
+  const refusingDb = quietPort();
+  const [quiet, refusing] = await Promise.all([child(`postgres://u:p@127.0.0.1:${silent.port}/db`), child(`postgres://u:p@127.0.0.1:${refusingDb}/db`)]);
   const silentPort = quiet.port, refusedPort = refusing.port;
   try {
     assert(await up(silentPort) && await up(refusedPort), "both child servers answer a keyless probe");
@@ -1715,8 +1717,10 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   // Its REST core's port known, the calling MCP server starts.
   const calling = await start({ OB1_REST_URL: `http://127.0.0.1:${callingCore.port}`, OB1_FORWARDER_KEY: stopForwarder }, "mcp");
   try {
-    const notUp: string[] = [];
-    for (const [name, kid] of Object.entries({ busy, idle, ctrlC, cutter, graced, leftBehind, callingCore, calling })) if (!(await up(kid))) notUp.push(`${name} on ${kid.port}`);
+    // All eight asked at once, each one not up named (SMD-3296 review passes 2, 3).
+    const kids = Object.entries({ busy, idle, ctrlC, cutter, graced, leftBehind, callingCore, calling });
+    const ups = await Promise.all(kids.map(([, kid]) => up(kid)));
+    const notUp = kids.filter((_, i) => !ups[i]).map(([name, kid]) => `${name} on ${kid.port}`);
     assert(notUp.length === 0, `eight child servers answer a keyless probe with their own body (the first request, which hands the handlers the server)${notUp.length ? `; not up: ${notUp.join(", ")}` : ""}`);
 
     const t0 = performance.now();
@@ -1756,9 +1760,9 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     assert(/OB1_STOP_GRACE="soon" is not a whole number of seconds from 1 to 3600, with no unit .*; the stop drains as for 10 s/.test(idleLog) && /waited on for up to 8 s/.test(idleLog),
       "…and a malformed OB1_STOP_GRACE is said at start-up and read as the default, 8 s of drain");
 
-    // A keyed request first, which would build a store if it had a connection string; it has none, so the stop has no
-    // pool to say. Its answer is the row's too: the child was serving when SIGINT landed (SMD-3296 review passes 1, 2).
-    const keyedCtrlC = await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY } }).then((r) => r.status, () => 0);
+    // A keyed request first, its answer the row's: the child was serving when SIGINT landed. With no connection string
+    // its start built no store, so the stop has no pool to say (SMD-3296 review passes 1–3).
+    const keyedCtrlC = await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY }, signal: AbortSignal.timeout(5_000) }).then((r) => r.status, () => 0);
     ctrlC.proc.kill("SIGINT");
     const intCode = await exited(ctrlC.proc, 3_000);
     const intLog = await ctrlC.out;
