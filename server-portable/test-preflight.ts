@@ -3724,6 +3724,18 @@ else {
     assert(/board-sync ended 20 s ago on its start's refusal \(board\): OB1_LINEAR_INITIATIVE \(unset: "Open Brain"\) must name exactly one Linear initiative/.test(boardFix),
       `board-sync's own refusal kind gives its remedy (${boardFix})`);
     await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
+    // A re-embed follower's own row (SMD-2679): the recorded model it never
+    // switches, `model-switch`, with its remedy and the checkout's command (no
+    // compose service runs one); and its `model`, the embedding model's.
+    await beat("heartbeat:reembed:stub-embed@1024", v({ every_s: 60, outcome: "failed", ended: true, refused: "model-switch" }), 30);
+    const switchFix = fix((await run(SQL_ENV)).out, "workers");
+    assert(/reembed:stub-embed@1024 ended 30 s ago on its start's refusal \(model-switch\): OB1_EMBEDDING_MODEL names a model other than the one ob1_config records, and a re-embed follower never switches it.*Then start it again — cd db && bun reembed\.ts --url \$DATABASE_URL --follow; started before that, it refuses again\./.test(switchFix),
+      `a re-embed follower ended on model-switch names the recorded model and the checkout's command (${switchFix})`);
+    await beat("heartbeat:reembed:stub-embed@1024", v({ every_s: 60, outcome: "failed", ended: true, refused: "model" }), 30);
+    const embedModelFix = fix((await run(SQL_ENV)).out, "workers");
+    assert(/reembed:stub-embed@1024 ended 30 s ago on its start's refusal \(model\): pull the embedding model its log names \(OB1_EMBEDDING_MODEL\)/.test(embedModelFix) && !/OB1_JUDGE_MODEL/.test(embedModelFix),
+      `…and on model, the embedding model's remedy, not the chat models' (${embedModelFix})`);
+    await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:reembed:%'`;
 
     // The sleep scheduler's own row (SMD-2678): its heartbeat leaves the
     // workers row; the row says asleep or awake with its last sleep, and what

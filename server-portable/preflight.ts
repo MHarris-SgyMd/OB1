@@ -270,7 +270,7 @@ const reclaim = (key: string) => `The next pass reclaims the expired claims (a r
 function heldFix(h: WorkerHeartbeat, name: string): string | null {
   const r = h.restart;
   if (!r) return null;
-  const remedy = h.refused ? startRefusalRemedy(h.refused) : r.code === 2 ? "a refusal — its log says which" : `it exited ${r.code} — its log says why`;
+  const remedy = h.refused ? startRefusalRemedy(h.refused, h.worker) : r.code === 2 ? "a refusal — its log says which" : `it exited ${r.code} — its log says why`;
   const recreate = restartCommand(h.worker, h.job);
   if (r.inS === null) return `${name} is held by its supervisor, never started: ${remedy}. That is deploy/.env's to mend, so recreate it then — ${recreate}.`;
   const left = r.inS - h.ageS;
@@ -4683,7 +4683,7 @@ if (configFailed) {
                 // Ended on its start's refusal, by its own word (SMD-3214): the
                 // cause first, as the sleep row's is — started as it was, it
                 // refuses again.
-                if (h.ended && h.outcome === "failed" && h.refused) return `${name} ended ${ago(h.ageS)} ago on its start's refusal (${h.refused}): ${startRefusalRemedy(h.refused)} — its log says more. Then start it again — ${restartCommand(h.worker, h.job)}${h.refused === "lookup" ? "" : "; started before that, it refuses again"}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
+                if (h.ended && h.outcome === "failed" && h.refused) return `${name} ended ${ago(h.ageS)} ago on its start's refusal (${h.refused}): ${startRefusalRemedy(h.refused, h.worker)} — its log says more. Then start it again — ${restartCommand(h.worker, h.job)}${h.refused === "lookup" ? "" : "; started before that, it refuses again"}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
                 if (h.stale || h.ended) return `${name} ${h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago${h.outcome === "failed" ? " — its log says why" : ""}` : `has not stamped for ${ago(h.ageS)}`}: start it again${checkModel} — ${restartCommand(h.worker, h.job)}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
                 if (h.malformed?.alarm) return `${name}'s model answered ${h.malformed.bad} of ${h.malformed.answers} malformed: check OB1_METADATA_MODEL, the endpoint and the prompt (extract-entities.ts's alarm, SMD-2266). The row carries the block until the follower judges its next block (48 answers or more). A restart clears it, so fix the model first: restarted on a broken model, the alarm comes back only after 48 new answers.`;
                 // Waiting mid-pass, by its own word: the provider stopped answering (SMD-2905).

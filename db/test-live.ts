@@ -3867,6 +3867,194 @@ if (want("9")) {
     await sql`DELETE FROM thought_work_claims WHERE work_type LIKE ${`reembed:stub-embed@${DIM}:stop%`}`;
   }
 
+  // A follower (SMD-2679 PR 4a-2a): --follow polls, pooling again at each
+  // poll — no trigger feeds this pool — under the model's own key; its own
+  // heartbeat row; the check; and a recorded model other than its own, at the
+  // start or under it, is the permanent `model-switch` refusal.
+  {
+    await sql`DELETE FROM thoughts`;
+    const OWN_KEY = `reembed:stub-embed@${DIM}`;
+    const ROW = `heartbeat:reembed:stub-embed@${DIM}`;
+    await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+    await sql`DELETE FROM ob1_config WHERE key = ${ROW}`;
+    const row = async () => {
+      const [r] = await sql`SELECT value FROM ob1_config WHERE key = ${ROW}`;
+      return r ? (JSON.parse(r.value) as { running?: boolean; outcome?: string | null; ended?: boolean; every_s?: number; refused?: string }) : null;
+    };
+    const newThought = async (text: string) => (await sql`INSERT INTO thoughts (content) VALUES (${text}) RETURNING id::text AS id`)[0].id as string;
+    const atModel = async (id: string) => (await sql`SELECT embedding_model FROM thoughts WHERE id = ${id}::uuid AND embedding IS NOT NULL`)[0]?.embedding_model === "stub-embed";
+    const ownClaims = async () => Number((await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${OWN_KEY}`)[0].n);
+    /** A follower run that should return of itself, bounded: past 15 s it is stopped and null, so a case fails rather than hangs (the check's mutant ran on). */
+    const bounded = async (opts: Omit<ReembedOptions, "writer" | "signal">) => {
+      const ac = new AbortController();
+      const running = reembedInProcess({ ...opts, signal: ac.signal });
+      const r = await Promise.race([running, Bun.sleep(15_000).then(() => null)]);
+      if (r === null) {
+        ac.abort();
+        await running;
+      }
+      return r;
+    };
+    // What the follower's own connections open with: the budget's settings (SMD-2679 PR 2), seen by a statement trigger on the claims.
+    await sql.unsafe(`CREATE TABLE zz_reembed_seen (setting text);
+      CREATE FUNCTION zz_reembed_seen() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        -- Only a statement that pooled re-embed claims: another connection's claims carry its own settings (review pass 1).
+        IF EXISTS (SELECT 1 FROM zz_new WHERE work_type LIKE 'reembed:%') THEN INSERT INTO zz_reembed_seen VALUES (current_setting('statement_timeout') || ' ' || current_setting('work_mem')); END IF;
+        RETURN NULL; END $$;
+      CREATE TRIGGER zz_reembed_seen AFTER INSERT ON thought_work_claims REFERENCING NEW TABLE AS zz_new FOR EACH STATEMENT EXECUTE FUNCTION zz_reembed_seen()`);
+    try {
+      // Through the start and idle; a thought captured meanwhile, with no
+      // vector, is pooled at the next poll and re-embedded; a stop exits 0.
+      const started: unknown[] = [];
+      const ac = new AbortController();
+      const followRun = reembedInProcess({ job: undefined, follow: 1, workers: 1, batch: 1, session: { statement_timeout: "7s", work_mem: "3MB" }, signal: ac.signal, onStart: (r) => started.push(r) });
+      const stamped = await pollUntil(async () => (await row())?.running === false, 15_000);
+      // Idle, it stamps at every poll: the row is as fresh as a poll (review pass 1: no case held it).
+      await Bun.sleep(3000);
+      const idleAge = Number((await sql`SELECT extract(epoch FROM now() - updated_at)::float AS age FROM ob1_config WHERE key = ${ROW}`)[0]?.age ?? 99);
+      const found = await newThought("a thought the follower finds at its next poll");
+      const embedded = await pollUntil(() => atModel(found), 15_000);
+      // The data rule at every poll: a thought written since by a server on another model goes back to the pool (review pass 1).
+      await sql`UPDATE thoughts SET embedding_model = 'old-model' WHERE id = ${found}::uuid`;
+      const movedBack = await pollUntil(() => atModel(found), 15_000);
+      ac.abort();
+      const followed = await followRun;
+      const ended = await row();
+      const seen = ((await sql`SELECT DISTINCT setting FROM zz_reembed_seen`) as { setting: string }[]).map((r) => r.setting);
+      assert(stamped && idleAge < 2.5 && embedded && movedBack && followed.code === 0 && JSON.stringify(started) === JSON.stringify([{ ok: true, provider: "up" }]) && ended?.ended === true && ended.outcome === "stopped" && ended.every_s === 60 && JSON.stringify(seen) === JSON.stringify(["7s 3MB"]),
+        `reembed --follow pools at each poll: idle, its row as fresh as a poll (${idleAge.toFixed(1)} s); a thought captured after its start, with no vector, is re-embedded, and moved to another model since, re-embedded again at the next poll; a stop exits 0, its own row ${ROW} ended stopped, and its connections carry the session's settings (exit ${followed.code}; started ${JSON.stringify(started)}; row ${JSON.stringify(ended)}; seen ${JSON.stringify(seen)})`);
+
+      // The check: the start alone, through, and nothing pooled.
+      const unpooled = await newThought("a thought the check leaves unpooled");
+      const checked: unknown[] = [];
+      const claimsBefore = await ownClaims();
+      const check = await bounded({ job: undefined, follow: 1, check: true, onStart: (r) => checked.push(r) });
+      assert(check?.code === 0 && JSON.stringify(checked) === JSON.stringify([{ ok: true, provider: "up" }]) && (await ownClaims()) === claimsBefore && !(await atModel(unpooled)),
+        `reembed's check is the follower's start alone: 0, the start through, nothing pooled and nothing embedded (exit ${check?.code ?? "none in 15 s"}; heard ${JSON.stringify(checked)})`);
+      await sql`DELETE FROM thoughts WHERE id = ${unpooled}::uuid`;
+
+      // A recorded model other than the follower's own: refused at the start, `model-switch`, its row ended so.
+      await sql`UPDATE ob1_config SET value = 'another-model' WHERE key = 'embedding_model'`;
+      const refusedHeard: unknown[] = [];
+      const switched = await bounded({ job: undefined, follow: 1, onStart: (r) => refusedHeard.push(r) });
+      const refusedRow = await row();
+      await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+      assert(switched?.code === 2 && /Refusing to follow: ob1_config records another-model and this follower is configured for stub-embed/.test(switched.stderr) && JSON.stringify(refusedHeard) === JSON.stringify([{ ok: false, refused: "model-switch" }])
+          && refusedRow?.ended === true && refusedRow.outcome === "failed" && refusedRow.refused === "model-switch",
+        `a follower whose model is not the one ob1_config records is refused at its start, kind model-switch, its row ended on it (exit ${switched?.code ?? "none in 15 s"}; heard ${JSON.stringify(refusedHeard)}; row ${JSON.stringify(refusedRow)})`);
+
+      // …and the record moving under a running follower ends it so.
+      const acMid = new AbortController();
+      const midRun = reembedInProcess({ job: undefined, follow: 1, signal: acMid.signal });
+      const midStamped = await pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 15_000);
+      await sql`UPDATE ob1_config SET value = 'another-model' WHERE key = 'embedding_model'`;
+      const mid = await Promise.race([midRun, Bun.sleep(15_000).then(() => null)]);
+      acMid.abort();
+      if (mid === null) await midRun;
+      const midRow = await row();
+      await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+      assert(midStamped && mid?.code === 2 && /ob1_config now records another-model: this follower is configured for stub-embed and never switches the model — it stops/.test(mid.stderr) && midRow?.ended === true && midRow.refused === "model-switch",
+        `the record moving under a running follower ends it at its next poll, kind model-switch on its row (exit ${mid?.code}; row ${JSON.stringify(midRow)})`);
+
+      // The CLI's --follow, stopped by SIGINT: 0.
+      const cli = Bun.spawn(["bun", "--no-env-file", join(HERE, "reembed.ts"), "--url", URL_!, "--follow", "1", "--workers", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+      const cliStamped = await pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 20_000);
+      const cliFound = await newThought("a thought the CLI's follower finds");
+      const cliEmbedded = await pollUntil(() => atModel(cliFound), 15_000);
+      cli.kill("SIGINT");
+      const cliCode = await Promise.race([cli.exited, Bun.sleep(15_000).then(() => null)]);
+      if (cliCode === null) cli.kill("SIGKILL");
+      assert(cliStamped && cliEmbedded && cliCode === 0 && (await row())?.outcome === "stopped",
+        `the CLI's --follow 1 re-embeds a thought captured while it polls, and a SIGINT ends it with 0, its row stopped (exit ${cliCode})`);
+
+      // A stop wakes the follower's sleep: a 15 s poll ends at once (review
+      // pass 1). Started with no model recorded, it records its own.
+      await sql`DELETE FROM ob1_config WHERE key = 'embedding_model'`;
+      const acLong = new AbortController();
+      const longRun = reembedInProcess({ job: undefined, follow: 15, signal: acLong.signal });
+      const longStamped = await pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 15_000);
+      const stopAt = Date.now();
+      acLong.abort();
+      const longStopped = await Promise.race([longRun, Bun.sleep(10_000).then(() => null)]);
+      const stopMs = Date.now() - stopAt;
+      if (longStopped === null) await longRun;
+      const [{ recorded: longRecorded }] = await sql`SELECT value AS recorded FROM ob1_config WHERE key = 'embedding_model'`;
+      assert(longStamped && longStopped?.code === 0 && stopMs < 3000 && longRecorded === "stub-embed", `a stop wakes a follower asleep between polls: a 15 s poll ends in ${stopMs} ms, exit ${longStopped?.code}; started with no model recorded, it recorded ${longRecorded}`);
+
+      // --retry-failed is the first pool's alone: under a backfill key, the
+      // model recorded (a run that records it skips the flag), a thought
+      // whose call always fails is tried at the first pool and never again
+      // (review pass 1: each poll would send it; the start-over's own rule
+      // holds by the record, which a follower's later polls always find).
+      const BF_KEY = `reembed:stub-embed@${DIM}:bf`;
+      poison = true;
+      await newThought("the hemlock note a follower meets");
+      const acBf = new AbortController();
+      const bfRun = reembedInProcess({ job: BF_KEY, follow: 1, workers: 1, retryFailed: true, signal: acBf.signal });
+      const bfSettled = await pollUntil(async () => {
+        const [c] = await sql`SELECT count(*) FILTER (WHERE status IN ('pending', 'claimed'))::int AS open, count(*) FILTER (WHERE status = 'failed')::int AS failed FROM thought_work_claims WHERE work_type = ${BF_KEY}`;
+        return Number(c.open) === 0 && Number(c.failed) === 1;
+      }, 20_000);
+      const callsSettled = embedCalls;
+      await Bun.sleep(3500);
+      const callsAfter = embedCalls;
+      acBf.abort();
+      const bf = await bfRun;
+      poison = false;
+      assert(bfSettled && callsAfter === callsSettled && bf.code === 0,
+        `--retry-failed runs at the first pool alone: three polls after the backfill settled send no call (${callsAfter - callsSettled} sent), the failed row not retried (exit ${bf.code})`);
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${BF_KEY}`;
+      // A permanent database error at a poll (a privilege, a function gone)
+      // ends the follower, its row ended failed, rather than costing every
+      // poll after it while the row goes stale (review pass 1).
+      const acPerm = new AbortController();
+      const permRun = runReembed({ url: URL_!, env, follow: 1, workers: 1, signal: acPerm.signal, writer: { out: () => {}, err: () => {} } }).then((c) => `exit ${c}`, (e: Error & { errno?: string }) => `threw ${e.errno ?? e.message}`);
+      const permStamped = await pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 15_000);
+      await sql.unsafe(`CREATE FUNCTION zz_reembed_denied() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'zz: permission denied' USING ERRCODE = '42501'; END $$;
+        CREATE TRIGGER zz_reembed_denied BEFORE INSERT ON thought_work_claims FOR EACH STATEMENT EXECUTE FUNCTION zz_reembed_denied()`);
+      let permOutcome: string | null = null;
+      try {
+        await newThought("a thought a denied pool meets");
+        permOutcome = await Promise.race([permRun, Bun.sleep(15_000).then(() => null)]);
+      } finally {
+        await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_denied ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_denied()`);
+        acPerm.abort();
+        if (permOutcome === null) await permRun;
+      }
+      const permRow = await row();
+      assert(permStamped && permOutcome === "threw 42501" && permRow?.ended === true && permRow.outcome === "failed",
+        `a permanent database error at a poll ends the follower, its row ended failed (${permOutcome ?? "still running after 15 s"}; row ${JSON.stringify(permRow)})`);
+
+      // …and at a worker's claim, the pool through: a row trigger refuses the
+      // claim's move to claimed alone (review pass 2: every poll drained, every
+      // worker stopped, the row read healthy).
+      const acClaim = new AbortController();
+      const claimRun = runReembed({ url: URL_!, env, follow: 1, workers: 1, signal: acClaim.signal, writer: { out: () => {}, err: () => {} } }).then((c) => `exit ${c}`, (e: Error & { errno?: string }) => `threw ${e.errno ?? e.message}`);
+      const claimStamped = await pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 15_000);
+      await sql.unsafe(`CREATE FUNCTION zz_reembed_claim_denied() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+          IF NEW.status = 'claimed' AND OLD.status IS DISTINCT FROM 'claimed' AND NEW.work_type LIKE 'reembed:%' THEN RAISE EXCEPTION 'zz: permission denied to claim' USING ERRCODE = '42501'; END IF;
+          RETURN NEW; END $$;
+        CREATE TRIGGER zz_reembed_claim_denied BEFORE UPDATE ON thought_work_claims FOR EACH ROW EXECUTE FUNCTION zz_reembed_claim_denied()`);
+      let claimOutcome: string | null = null;
+      try {
+        await newThought("a thought a denied claim meets");
+        claimOutcome = await Promise.race([claimRun, Bun.sleep(15_000).then(() => null)]);
+      } finally {
+        await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_claim_denied ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_claim_denied()`);
+        acClaim.abort();
+        if (claimOutcome === null) await claimRun;
+      }
+      const claimRow = await row();
+      assert(claimStamped && claimOutcome === "threw 42501" && claimRow?.ended === true && claimRow.outcome === "failed",
+        `a permanent database error at a worker's claim ends the follower too, its row ended failed (${claimOutcome ?? "still running after 15 s"}; row ${JSON.stringify(claimRow)})`);
+    } finally {
+      await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_seen ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_seen(); DROP TABLE IF EXISTS zz_reembed_seen`);
+      await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+      await sql`DELETE FROM ob1_config WHERE key = ${ROW}`;
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${OWN_KEY}`;
+    }
+  }
+
   provider.stop(true);
   await sql`UPDATE ob1_config SET value = ${recordedModel} WHERE key = 'embedding_model'`;
   await sql`DELETE FROM thoughts`;
@@ -12627,8 +12815,10 @@ if (want("37b")) {
       `the guards: no key first (identity), then each setting not digits named (usage), empty passing, none asked none refused (${noKey?.line.slice(0, 50)} | ${two?.line})`);
     // The keys: the claim workers' under the job their configuration names, as a compose follower (no --job) stamps.
     assert(followerKey("sleep", {}) === "heartbeat:sleep" && followerKey("board-sync", {}) === "heartbeat:board-sync" && EXTRACT_KEY === `heartbeat:${extractionKey(resolveEmbedConfig({}).metadataModel)}`
-        && followerKey("extract", { OB1_METADATA_MODEL: "m:1b" }) === `heartbeat:${extractionKey("m:1b")}` && /^heartbeat:consolidate:/.test(followerKey("consolidate", {}) ?? ""),
-      `the row a supervisor ends is the one its follower stamps (${EXTRACT_KEY})`);
+        && followerKey("extract", { OB1_METADATA_MODEL: "m:1b" }) === `heartbeat:${extractionKey("m:1b")}` && /^heartbeat:consolidate:/.test(followerKey("consolidate", {}) ?? "")
+        // A re-embed follower's, under the model's own key (SMD-2679), not consolidate's.
+        && followerKey("reembed", { OB1_EMBEDDING_MODEL: "e:4b", OB1_EMBEDDING_DIM: "768" }) === "heartbeat:reembed:e:4b@768",
+      `the row a supervisor ends is the one its follower stamps (${EXTRACT_KEY}; reembed ${followerKey("reembed", { OB1_EMBEDDING_MODEL: "e:4b", OB1_EMBEDDING_DIM: "768" })})`);
 
     // endRow: the follower's last word since its start kept — the scheduler's
     // sleep and its refusal — its waits dropped, the row ended failed, the

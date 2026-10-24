@@ -1221,7 +1221,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     { key: "heartbeat:extract:qwen2.5:7b@p2", value: JSON.stringify({ ...good, every_s: 60, outcome: null, running: true, malformed: { answers: 50, bad: 12, alarm: true } }), at, age_s: 181 },
     { key: "heartbeat:board-sync:extra", value: JSON.stringify(good), at, age_s: 1 },
     { key: "heartbeat:extract", value: JSON.stringify(good), at, age_s: 1 },
-    { key: "heartbeat:reembed:x", value: JSON.stringify(good), at, age_s: 1 },
+    // No such worker (since SMD-2679 a re-embed follower stamps: its row counts, below).
+    { key: "heartbeat:rewind:x", value: JSON.stringify(good), at, age_s: 1 },
     { key: "heartbeat:consolidate:a b", value: JSON.stringify(good), at, age_s: 1 },
     { key: "heartbeat:consolidate:x", value: "not json", at, age_s: 1 },
     { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, v: 2 }), at, age_s: 1 },
@@ -1248,14 +1249,16 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     // …and two that count: inside the slack, and a job as long as a key's suffix allows.
     { key: "heartbeat:consolidate:near", value: JSON.stringify({ ...good, ended: true, outcome: "failed" }), at, age_s: -59 },
     { key: `heartbeat:extract:${"j".repeat(117)}`, value: JSON.stringify({ ...good, job: `extract:${"j".repeat(117)}` }), at, age_s: 1 },
+    // A re-embed follower's, under the model's own key (SMD-2679).
+    { key: "heartbeat:reembed:qwen3-embedding:4b@1024", value: JSON.stringify(good), at, age_s: 1 },
   ]);
-  const [bs, ex, custom, near, long] = parsed.heartbeats;
+  const [bs, ex, custom, near, long, re] = parsed.heartbeats;
   assert(near?.job === "consolidate:near" && near.ended === true && near.ageS === 0 && long?.job === `extract:${"j".repeat(117)}` && bs.ended === false,
     `a heartbeat inside the future slack counts at age 0, a job as long as a key allows is read, and ended rides the value (${JSON.stringify(near)})`);
-  assert(parsed.heartbeats.length === 5 && parsed.ignored === 20 && bs.worker === "board-sync" && bs.job === null && bs.key === "heartbeat:board-sync" && bs.ageS === 900 && bs.stale === false
+  assert(parsed.heartbeats.length === 6 && parsed.ignored === 20 && re?.worker === "reembed" && re.job === "reembed:qwen3-embedding:4b@1024" && bs.worker === "board-sync" && bs.job === null && bs.key === "heartbeat:board-sync" && bs.ageS === 900 && bs.stale === false
       && ex.job === "extract:qwen2.5:7b@p2" && ex.stale === true && ex.running === true && ex.outcome === null && ex.malformed?.alarm === true
       && custom.job === "my-job" && custom.key === "heartbeat:extract:my-job",
-    `three rows in full count — board-sync at 899.6 s of 3 × 300 not stale, extract at 181 s of 3 × 60 stale, a custom job as given — and twenty not of the shape are counted only (${parsed.heartbeats.length}, ${parsed.ignored})`);
+    `four rows in full count — board-sync at 899.6 s of 3 × 300 not stale, extract at 181 s of 3 × 60 stale, a custom job as given, a re-embed follower's (SMD-2679) — and twenty not of the shape are counted only (${parsed.heartbeats.length}, ${parsed.ignored})`);
   // A malformed block not of the shape is left off and the heartbeat still counts (review pass 3).
   const blocks = parseHeartbeats([{ answers: 5, bad: 6, alarm: false }, { answers: 50, bad: 1, alarm: "yes" }, null, { answers: -1, bad: 0, alarm: true }, { answers: 1.5, bad: 1, alarm: false }, { answers: "x", bad: 1, alarm: true }, { answers: 1, bad: "x", alarm: true }]
     .map((malformed, i) => ({ key: `heartbeat:consolidate:b${i}`, value: JSON.stringify({ ...good, malformed }), at, age_s: 1 })));
