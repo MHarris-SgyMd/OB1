@@ -1610,9 +1610,11 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
     });
     return { proc, port: await startedPort(watchStream(proc.stdout), 20_000) };
   };
+  // Up when the REST core's own keyless body answers, not any 200: a server that took the child's port would pass a
+  // status alone (SMD-3296 review pass 1).
   const up = async (port: number) => {
     for (let i = 0; i < 100; i++) {
-      if (await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok, () => false)) return true;
+      if (await fetch(`http://127.0.0.1:${port}/health`).then(async (r) => r.ok && (await r.text()) === OK_BODY, () => false)) return true;
       await Bun.sleep(50);
     }
     return false;
@@ -1673,11 +1675,15 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
       stderr: "pipe",
     });
     const stdout = watchStream(proc.stdout), stderr = watchStream(proc.stderr);
-    return { port: await startedPort(stdout, 20_000), proc, out: stdout.rest().then(async (o) => o + (await stderr.rest())) };
+    // Its keyless /health body: the REST core's record, the MCP server's entry's plain `ok`.
+    const health = entry === "api" ? JSON.stringify({ status: "ok" }) : "ok";
+    return { port: await startedPort(stdout, 20_000), proc, health, out: stdout.rest().then(async (o) => o + (await stderr.rest())) };
   };
-  const up = async (port: number) => {
+  // Up when the child's own keyless body answers, not any 200: a server that took its port would pass a status alone
+  // (SMD-3296 review pass 1).
+  const up = async ({ port, health }: { port: number; health: string }) => {
     for (let i = 0; i < 200; i++) {
-      if (await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok, () => false)) return true;
+      if (await fetch(`http://127.0.0.1:${port}/health`).then(async (r) => r.ok && (await r.text()) === health, () => false)) return true;
       await Bun.sleep(50);
     }
     return false;
@@ -1709,8 +1715,8 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   // Its REST core's port known, the calling MCP server starts.
   const calling = await start({ OB1_REST_URL: `http://127.0.0.1:${callingCore.port}`, OB1_FORWARDER_KEY: stopForwarder }, "mcp");
   try {
-    assert(await up(busy.port) && await up(idle.port) && await up(ctrlC.port) && await up(cutter.port) && await up(graced.port) && await up(leftBehind.port)
-      && await up(callingCore.port) && await up(calling.port), "eight child servers answer a keyless probe (the first request, which hands the handlers the server)");
+    assert(await up(busy) && await up(idle) && await up(ctrlC) && await up(cutter) && await up(graced) && await up(leftBehind)
+      && await up(callingCore) && await up(calling), "eight child servers answer a keyless probe (the first request, which hands the handlers the server)");
 
     const t0 = performance.now();
     const inFlight = fetch(`http://127.0.0.1:${busy.port}/health`, { headers: { "x-brain-key": KEY } })
@@ -1749,7 +1755,9 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     assert(/OB1_STOP_GRACE="soon" is not a whole number of seconds from 1 to 3600, with no unit .*; the stop drains as for 10 s/.test(idleLog) && /waited on for up to 8 s/.test(idleLog),
       "…and a malformed OB1_STOP_GRACE is said at start-up and read as the default, 8 s of drain");
 
-    await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY } }); // builds its store
+    // A keyed request first, which would build a store if it had a connection string; it has none, so the stop has no
+    // pool to say. Caught: a dead child fails the row below, not the suite (SMD-3296 review pass 1).
+    await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY } }).catch(() => {});
     ctrlC.proc.kill("SIGINT");
     const intCode = await exited(ctrlC.proc, 3_000);
     const intLog = await ctrlC.out;
@@ -1762,11 +1770,16 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     // on), in a fraction of the 8 s. Holds the entry's flag, which picks the
     // cut line, on real Bun (review pass 2).
     const tc = performance.now();
+    // Each stalled call bounded, its timeout said as its own outcome: a call another process answered would otherwise
+    // hang the suite rather than fail the row (SMD-3296 review pass 1).
+    const outcome = (r: Response) => `answered ${r.status}`;
+    const failed = (e: Error) => (e.name === "TimeoutError" ? "no answer in 10 s" : "cut off");
     const stalled = fetch(`http://127.0.0.1:${cutter.port}/mcp`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-    }).then((r) => `answered ${r.status}`, () => "cut off");
+      signal: AbortSignal.timeout(10_000),
+    }).then(outcome, failed);
     await Bun.sleep(300);
     cutter.proc.kill("SIGTERM");
     await Bun.sleep(200);
@@ -1783,13 +1796,14 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-    }).then((r) => `answered ${r.status}`, () => "cut off");
+      signal: AbortSignal.timeout(10_000),
+    }).then(outcome, failed);
     // Beside it, a keyed mirror held at its whoami (the REST core never
     // answers, so no key is named on its line): only the stop's
     // cutOpenRequests can write its line — the MCP call above has its own
     // abort handler, this route none (review pass 4: no test held that call).
-    const mirrorStalled = fetch(`http://127.0.0.1:${graced.port}/mcp/worker-status`, { headers: { "x-brain-key": KEY } })
-      .then((r) => `answered ${r.status}`, () => "cut off");
+    const mirrorStalled = fetch(`http://127.0.0.1:${graced.port}/mcp/worker-status`, { headers: { "x-brain-key": KEY }, signal: AbortSignal.timeout(10_000) })
+      .then(outcome, failed);
     await Bun.sleep(300);
     graced.proc.kill("SIGTERM");
     const graceCode = await exited(graced.proc, 4_000);

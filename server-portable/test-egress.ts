@@ -485,9 +485,10 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
   // taking turns under the leader lock, and the MCP server's entry in front
   // of the first for the tool calls (SMD-2287 PR 6a: index.ts was the second
   // mender, and served the calls itself).
-  // The provider's port is picked and freed: it must refuse until the stub binds it, so nothing can hold it.
+  // The provider's port is picked and freed: it must refuse until the stub binds it, so nothing of the suite's holds it.
+  // A child binding PORT 0 could still be handed it; the first row says so (SMD-3296 review pass 1).
   const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const providerPort = free.port;
+  const providerPort = free.port!;
   free.stop(true);
   const childEnv = () => ({
     PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_STORE: "sql", DATABASE_URL: URL_,
@@ -519,7 +520,8 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
       up = (await Promise.all([at, `http://127.0.0.1:${serverPort}`, `http://127.0.0.1:${apiPort}`].map((u) => fetch(`${u}/health`, { signal: AbortSignal.timeout(2_000) }).then((r) => r.ok, () => false)))).every(Boolean);
       if (!up) await Bun.sleep(100);
     }
-    assert(up, "the MCP server's and both REST cores' own processes answer /health");
+    const tookProvider = [serverPort, apiPort, mcpPort].includes(providerPort);
+    assert(up && !tookProvider, `the MCP server's and both REST cores' own processes answer /health${tookProvider ? `, but a child was handed the provider's port ${providerPort}, which must refuse until the stub binds it` : ""}`);
     const content = "mend-verify-marker: a note captured while the provider is down, mended without a hand step";
     const cap = await rpc("capture_thought", { content });
     const id = /id ([0-9a-f-]{36})/.exec(cap.text)?.[1];
@@ -593,10 +595,11 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
 
 console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2890): started with its provider down, it serves degraded — a capture lands, a search answers by exact matches, keyed /health says unreachable since when while keyless /health stays `ok` — and leaves degraded by its re-probe alone within the interval once the provider answers, the same process throughout");
 {
-  // The provider's port is picked and freed: it must refuse until the stub binds it, so nothing can hold it. The REST
-  // core and the MCP server's entry bind PORT 0 and say theirs (SMD-3296).
+  // The provider's port is picked and freed: it must refuse until the stub binds it, so nothing of the suite's holds it.
+  // The REST core and the MCP server's entry bind PORT 0 and say theirs (SMD-3296); one handed the provider's port is
+  // said at the first row (review pass 1).
   const hold = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const providerPort = hold.port;
+  const providerPort = hold.port!;
   hold.stop(true);
   // The REST core, which holds the provider's state, and the MCP server's entry in front of it, as the stack runs
   // them (SMD-2287 PR 6a: index.ts did both). The mender off, so the only thing that can see the provider back is
@@ -640,7 +643,8 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
       up = (await Promise.all([at, `http://127.0.0.1:${serverPort}`].map((u) => fetch(`${u}/health`, { signal: AbortSignal.timeout(2_000) }).then((r) => r.ok, () => false)))).every(Boolean);
       if (!up) await Bun.sleep(100);
     }
-    assert(up, "the REST core's and the MCP server's own processes start with the provider down");
+    const tookProvider = [serverPort, mcpPort].includes(providerPort);
+    assert(up && !tookProvider, `the REST core's and the MCP server's own processes start with the provider down${tookProvider ? `, but a child was handed the provider's port ${providerPort}, which must refuse until the stub binds it` : ""}`);
     let p = await keyed();
     for (let deadline = Date.now() + 5_000; p?.status !== "unreachable" && Date.now() < deadline; ) { await Bun.sleep(100); p = await keyed(); }
     assert(p?.status === "unreachable" && /^\d{4}-\d\d-\d\dT/.test(p.since ?? "") && p.reason === "provider_unreachable" && p.reprobeS === 1,

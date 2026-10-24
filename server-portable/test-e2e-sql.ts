@@ -3377,8 +3377,10 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
     while (!answered && Date.now() < deadline) {
       // Keyless: liveness, which reads no store — the reconcile below is the
       // start-up's, not a request's (SMD-2284 PR 3 review pass 1).
+      // The REST core's own keyless body, not any 200: a server that took the child's port would pass a status alone
+      // (SMD-3296 review pass 1).
       answered = await realFetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) })
-        .then((r) => r.ok, () => false);
+        .then(async (r) => r.ok && (await r.text()) === JSON.stringify({ status: "ok" }), () => false);
       if (!answered) await Bun.sleep(100);
     }
     assert(answered, "the entry answers a keyless /health, which builds no store");

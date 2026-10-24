@@ -786,6 +786,9 @@ for (const live of LIVE) {
   }
   // Stop the child BEFORE reading its stderr: a server alive without a port would
   // otherwise hold stderr open and the read below would hang the test (pass 1).
+  // A child with no start line has usually just exited, its stdout ended a moment before its exit code is set: waited
+  // for, so it is said as an exit, not as alive (SMD-3296 review pass 1).
+  if (port === 0) await Promise.race([proc.exited, Bun.sleep(1_000)]);
   const alive = proc.exitCode === null;
   proc.kill();
   await proc.exited;
