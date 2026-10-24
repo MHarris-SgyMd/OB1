@@ -1,9 +1,10 @@
 // list_thoughts' cursor (SMD-2995), and list_supersession_proposals' (SMD-3249), on their own: the core makes and reads them,
 // and render.ts's structuredContent guard lets one through by the same rule
-// that reads it — a sort word, a timestamp's text and a uuid, so no sentence
+// that reads it — tokens, a pass key, a timestamp's text and a uuid, so no sentence
 // can ride it (review pass 1: the guard took any `cursor` for a uuid and
 // nulled this one, so a program reading structuredContent stopped at page one).
 
+import { PASS_KEY_CHARS } from "../pass-key.ts";
 import { UUID_RE, type ListSort } from "../store.ts";
 
 /**
@@ -60,21 +61,33 @@ function pgStamp(at: unknown): at is string {
 }
 
 /**
- * list_supersession_proposals' cursor (SMD-3249): the last listed row's values
- * on the listing's order — its confidence as numeric(3,2)'s text, judged_at as
- * Postgres's text (to the microsecond) and its id — as base64url of
- * `["proposals", confidence, judgedAt, id]`. The values, not the row: 063's
- * recorder replaces a stale row in place (the same id, judged_at now() and the
- * new verdict's confidence), so a cursor naming the row would read its new
- * place and jump the walk; the values keep the place the page ended at. The tag keeps it apart from list_thoughts' cursor, so one
- * listing's is refused by the other.
+ * What a list_supersession_proposals page selected (SMD-3249): its status word (`all` for every state), its lineage
+ * filter (null: every pair) and its judge key (null: every pass) — the tool's inputs and the CLI's --list/--key alike.
  */
-export function proposalCursor(confidence: string, judgedAt: string, id: string): string {
-  return Buffer.from(JSON.stringify(["proposals", confidence, judgedAt, id])).toString("base64url");
+export type ProposalSelection = { status: "pending" | "accepted" | "rejected" | "stale" | "all"; lineage: boolean | null; judgeKey: string | null };
+
+const PROPOSAL_STATUSES = ["pending", "accepted", "rejected", "stale", "all"];
+
+/**
+ * list_supersession_proposals' cursor (SMD-3249): the selection the page was
+ * listed under, then the last listed row's values on the listing's order — its
+ * confidence as numeric(3,2)'s text, judged_at as Postgres's text (to the
+ * microsecond) and its id — as base64url of `["proposals", status, lineage,
+ * judgeKey, confidence, judgedAt, id]`. The values, not the row: 063's recorder
+ * replaces a stale row in place (the same id, judged_at now() and the new
+ * verdict's confidence), so a cursor naming the row would read its new place
+ * and jump the walk; the values keep the place the page ended at. The
+ * selection, so a cursor passed with other filters is refused rather than
+ * starting that listing at a place in another (review pass 1: it listed from
+ * mid-selection without a word). The tag keeps it apart from list_thoughts'
+ * cursor, so one listing's is refused by the other.
+ */
+export function proposalCursor(sel: ProposalSelection, confidence: string, judgedAt: string, id: string): string {
+  return Buffer.from(JSON.stringify(["proposals", sel.status, sel.lineage, sel.judgeKey, confidence, judgedAt, id])).toString("base64url");
 }
 
 /** A list_supersession_proposals cursor read back, or null for anything that is not one. */
-export function parseProposalCursor(raw: string): { confidence: string; judgedAt: string; id: string } | null {
+export function parseProposalCursor(raw: string): { selection: ProposalSelection; confidence: string; judgedAt: string; id: string } | null {
   const text = raw.trim();
   if (!/^[A-Za-z0-9_-]{1,512}$/.test(text)) return null;
   let v: unknown;
@@ -83,14 +96,22 @@ export function parseProposalCursor(raw: string): { confidence: string; judgedAt
   } catch {
     return null;
   }
-  if (!Array.isArray(v) || v.length !== 4) return null;
-  const [tag, confidence, judgedAt, id] = v as unknown[];
+  if (!Array.isArray(v) || v.length !== 7) return null;
+  const [tag, status, lineage, judgeKey, confidence, judgedAt, id] = v as unknown[];
   if (tag !== "proposals") return null;
+  if (typeof status !== "string" || !PROPOSAL_STATUSES.includes(status)) return null;
+  if (lineage !== null && typeof lineage !== "boolean") return null;
+  // pass-key.ts's one rule, the tool's and --key's input rule, so a cursor carries no key either door refuses.
+  if (judgeKey !== null && (typeof judgeKey !== "string" || !PASS_KEY_CHARS.test(judgeKey))) return null;
   // numeric(3,2)'s text, 0 to 1 (029's CHECK): `0.73`, `1.00`.
   if (typeof confidence !== "string" || !/^(?:0\.\d{2}|1\.00)$/.test(confidence)) return null;
   if (typeof id !== "string" || !UUID_RE.test(id)) return null;
-  return pgStamp(judgedAt) ? { confidence, judgedAt, id: id.toLowerCase() } : null;
+  const selection = { status: status as ProposalSelection["status"], lineage, judgeKey };
+  return pgStamp(judgedAt) ? { selection, confidence, judgedAt, id: id.toLowerCase() } : null;
 }
+
+/** Whether two selections are the same listing — a cursor's and the call's it is passed with. */
+export const sameSelection = (a: ProposalSelection, b: ProposalSelection): boolean => a.status === b.status && a.lineage === b.lineage && a.judgeKey === b.judgeKey;
 
 /** Whether year `y` (BC when `bc`) is a leap year in Postgres's proleptic Gregorian calendar: 1 BC is year 0. */
 const leap = (y: number, bc: boolean) => {

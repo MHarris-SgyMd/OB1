@@ -319,6 +319,14 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     assert(p1.status === 200 && typeof p1.body.cursor === "string" && r2.status === 200 && out2.content[0].text === m2.text && same(out2.structuredContent, m2.sc)
         && badR.status === 400 && badR.body.code === "REFUSED_CURSOR" && badM.isError,
       `proposals' page two by page one's cursor, the same through REST and MCP; a cursor none of this listing's refused alike (${r2.status}, ${badR.status} ${String(badR.body.code)}, ${badM.isError})`);
+    // Review pass 1: a cursor passed with other filters — here pending, page one's being all — refused alike, the
+    // filters it was made under in REST's body and the tool's value.
+    const selR = await rest("GET", `/v1/proposals?limit=1&after=${encodeURIComponent(cur)}`);
+    const selM = await mcp("list_supersession_proposals", { limit: 1, after: cur });
+    const made = { status: "all", lineage: null, judgeKey: null };
+    assert(selR.status === 400 && selR.body.code === "REFUSED_CURSOR" && selR.body.reason === "filters" && same(selR.body.made, made)
+        && selM.isError && selM.sc?.reason === "filters" && same(selM.sc?.made, made) && selM.text.startsWith("Refused: that cursor was made with `status: all` and no other filter"),
+      `a cursor passed with other filters: REST's 400 REFUSED_CURSOR and the tool's refusal, each naming the filters it was made under (${selR.status} ${String(selR.body.reason)}, ${selM.text.slice(0, 80)})`);
   }
   // A limit is a whole number of thoughts, 1 to 1000: 0, -1, 1.5 and 1001 are the schema's refusal, not an empty page (review pass 1).
   // A `days` past a thousand years is the schema's refusal (review pass 2: a larger one put `since` past timestamptz's

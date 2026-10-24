@@ -32,7 +32,7 @@
  *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # the queue, with both thoughts; lineage: the unreviewed rows standing on a lineage pair (070)
  *                                                                                         # each side's writer, and WRITER on a capture-only key's or lower-trust side to stand (094)
  *   bun db/consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate (a distinct, 102, is counted by --status, not listed)
- *   bun db/consolidate.ts --url … --list <status> --after <cursor>   # the next page: the cursor a capped page printed (110, SMD-3249)
+ *   bun db/consolidate.ts --url … --list <status> [--key <judge key>] --after <cursor>   # the next page: the line a capped page printed, its --list and --key with its cursor (110, SMD-3249)
  *   bun db/consolidate.ts --url … --list [<status>|relations] --key <judge key>   # one pass's alone: its judge key exactly, as each row names it (109, SMD-3248)
  *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged, a stale row, a lineage pair (070), or a WRITER flag (094)
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
@@ -172,7 +172,7 @@ import {
 import { actorPayload, isoDay, normaliseProposal, withWriters, WRITERS_MISSING, type ProposalSide, type ProposalWriter } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
 import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
-import { parseProposalCursor, proposalCursor } from "../server-portable/core/list-cursor.ts";
+import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
 import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
@@ -196,6 +196,21 @@ const FLAGS = {
 const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", stale: "[DAYS]", dump: "<verdicts.jsonl>", list: "[pending|accepted|rejected|stale|lineage|all|relations]", key: "<judge key> (with --list)", after: "<cursor> (with --list)", accept: "<proposal id>", reject: "<proposal id>", direction: "<newer|older>", note: "<text>", force: "(with --accept)" };
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LIST_STATUSES = ["pending", "accepted", "rejected", "stale", "lineage", "all", "relations"];
+/** A --after cursor whose time Postgres cannot read (review pass 1): refused in --after's words, exit 2. */
+class CursorRefused extends Error {}
+
+/** A --list page's selection (SMD-3249): its status word (`all` for --list all), no lineage filter, its --key. */
+const cliSelection = (list: string, key: string | undefined): ProposalSelection =>
+  ({ status: list as ProposalSelection["status"], lineage: null, judgeKey: key ?? null });
+
+/**
+ * The flags that list a selection — what a next page line prints beside the cursor, and a refused --after names. A
+ * lineage filter is the tool's alone (its `lineage`), said in its words.
+ */
+export function selectionFlags(sel: ProposalSelection): string {
+  return `--list ${sel.status}${sel.judgeKey === null ? "" : ` --key ${sel.judgeKey}`}${sel.lineage === null ? "" : ` (the tool's lineage: ${sel.lineage})`}`;
+}
+
 /**
  * What a capped --list page says of the rows past it (SMD-3248, SMD-3249). Any one-status page goes on with --after
  * and the cursor printed below it (110). Unselected, --status counts them all. Under --key, --status counts the
@@ -205,7 +220,8 @@ const LIST_STATUSES = ["pending", "accepted", "rejected", "stale", "lineage", "a
  */
 export function capNote(status: string | undefined, keyed: boolean): string {
   // SMD-3249: any one-status page goes on with --after; under --key a pending page also drains as it is decided.
-  if (status === "lineage") return "the rest are not listed — --list pending or --list stale with --after pages either";
+  // Review pass 1: --list pending or stale pages every pair, not the lineage ones — the tool's `lineage: true` pages those.
+  if (status === "lineage") return "the rest are not listed — reject these and list again, or page them with the list_supersession_proposals tool (lineage: true, then after: its cursor)";
   if (!keyed) return "--after <the cursor below> lists the next page; --status counts them all";
   return status === "pending" ? "decide these and list again for the rest, or --after <the cursor below> for the next page; --status counts each pass's pending" : "--after <the cursor below> lists the next page";
 }
@@ -289,7 +305,7 @@ export interface ConsolidateOptions {
   list?: string;
   /** --key <judge key>, with --list: one pass's proposals or relations alone, by its judge key exactly (109, SMD-3248). */
   key?: string;
-  /** --after <cursor>, with --list <status>: the page after the one that printed the cursor (110, SMD-3249). */
+  /** --after <cursor>, with the --list <status> and --key that page had: the page after the one that printed the cursor (110, SMD-3249). */
   after?: string;
   accept?: string;
   reject?: string;
@@ -405,12 +421,16 @@ export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "key" | "a
   if (key !== undefined && (key.length < 1 || key.length > 200)) return "--key takes a judge key of 1 to 200 characters, as each listed row names it (judged by consolidate:…).";
   // A pass key's own characters (pass-key.ts; review passes 1 and 3): one outside them is a typo that would select
   // nothing, or a key no selection takes, said instead.
+  if (key !== undefined && !selectableKey(key)) return "--key takes a judge key of letters, digits and . _ : / @ + -, starting with a letter or digit, as each listed row names it (judged by consolidate:…).";
   // SMD-3249: --after is a proposal listing's — not relations' (another listing) nor lineage's (two listings, pending
   // then stale) — and one of its own cursors, refused here rather than read as a cast error.
   const after = opts.after ?? undefined;
   if (after !== undefined && (list === undefined || list === "relations" || list === "lineage")) return "--after goes with --list <pending|accepted|rejected|stale|all>: it lists the page after the one that printed the cursor.";
-  if (after !== undefined && parseProposalCursor(after) === null) return "--after takes the cursor a --list page printed (next page: --after <cursor>), as it was given.";
-  if (key !== undefined && !selectableKey(key)) return "--key takes a judge key of letters, digits and . _ : / @ + -, starting with a letter or digit, as each listed row names it (judged by consolidate:…).";
+  const cursor = after === undefined ? undefined : parseProposalCursor(after);
+  if (cursor === null) return "--after takes the cursor a --list page printed (next page: … --after <cursor>), as it was given.";
+  // Review pass 1: a cursor carries the selection it was made under, and another selection's is refused rather than
+  // listed from a place in the wrong one — rows above that place skipped without a word.
+  if (cursor && list !== undefined && !sameSelection(cursor.selection, cliSelection(list, key))) return `--after's cursor was made for ${selectionFlags(cursor.selection)}: pass those with it, as its next page line printed them, or leave out --after for the first page.`;
   for (const [name, v] of [["accept", accept], ["reject", reject]] as const) {
     if (v !== undefined && !UUID_RE.test(v)) return `--${name} needs a proposal id (a UUID from --list or the list_supersession_proposals tool).`;
   }
@@ -878,7 +898,17 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // a stale one waits for the pass's settle, 067) — pending first, then
     // stale, each most confident first.
     const lineageMode = status === "lineage";
-    const listedRows = lineageMode ? [...await listed("pending", true), ...await listed("stale", true)] : await listed(status ?? null, null);
+    let listedRows: Listed[];
+    try {
+      listedRows = lineageMode ? [...await listed("pending", true), ...await listed("stale", true)] : await listed(status ?? null, null);
+    } catch (e) {
+      // The tool's rule (store-sql.ts, review pass 1): a cursor time Postgres cannot read — a year 0, past its range —
+      // is the caller's, refused in --after's words; only a hand-made cursor reaches here. Anything else is thrown.
+      const cast = (x: unknown) => ["22007", "22008", "22009"].includes(String((x as { errno?: unknown }).errno ?? ""));
+      if (!AFTER || !cast(e)) throw e;
+      if (await sql`SELECT ${AFTER.judgedAt}::timestamptz`.then(() => true, (p: unknown) => (cast(p) ? false : Promise.reject(p)))) throw e;
+      throw new CursorRefused();
+    }
     // 094 (SMD-2707): each side's writer, its superseder, what an accept
     // would lapse, and whether one agent captured both, by the page's ids —
     // none on a brain short of 094, said once; a row the read did not return
@@ -896,21 +926,27 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const writerIds = new Set(writers.map((w) => String(w.id)));
     const rows = read ? listedRows.filter((p) => writerIds.has(p.id)) : listedRows;
     // SMD-3248: the pass selected is said with the rest of the selection.
-    const what = (lineageMode ? "unreviewed proposals standing on a lineage pair" : `${status ? `${status} ` : ""}proposals`) + (KEY === undefined ? "" : ` judged by ${KEY}`);
-    if (rows.length === 0) {
-      out(`  no ${what}`);
-      return 0;
-    }
+    // Review pass 1: a page after a cursor says so — its rows are not the selection's first.
+    const what = (lineageMode ? "unreviewed proposals standing on a lineage pair" : `${status ? `${status} ` : ""}proposals`) + (KEY === undefined ? "" : ` judged by ${KEY}`) + (AFTER ? " past the cursor" : "");
     // A list that hits its cap says so: --status counts every row (definitions
     // probe, second review pass: 61 rows, 50 printed, the header counted 50).
     // Read off the listing as it came back: a row dropped since is no sign
     // the queue ended (review pass 5).
     const hit = (st: string) => listedRows.filter((r) => r.status === st).length === limit;
     // 110 (SMD-3249): a one-status page knows whether more follow — the listing's remaining, counted before the cap,
-    // beyond the rows it gave — and where the next page starts, its last row's page_key.
+    // beyond the rows it gave — and where the next page starts, its last row's page_key: the selection's flags and the
+    // cursor, the line to run (review pass 1: the cursor alone, and a page listed with other flags started mid-way).
     const remaining = listedRows.length ? Number((listedRows[0] as unknown as { remaining: unknown }).remaining) : 0;
     const capped = lineageMode ? hit("pending") || hit("stale") : remaining > listedRows.length;
     const lastKey = !lineageMode && capped ? JSON.parse(String((listedRows[listedRows.length - 1] as unknown as { page_key: unknown }).page_key)) as string[] : null;
+    const sel = cliSelection(status ?? "all", KEY);
+    const nextPage = lastKey ? `  next page: ${selectionFlags(sel)} --after ${proposalCursor(sel, lastKey[0], lastKey[1], lastKey[2])}` : null;
+    if (rows.length === 0) {
+      // Review pass 1: past a cursor, none is the listing's end, not an empty queue; and a page whose rows all went
+      // before the writers' read still prints the line past them.
+      out(nextPage ? `  no ${what} on this page: the ones it listed went or changed before they were read\n${nextPage}` : AFTER ? `  no more ${what.replace(" past the cursor", "")} past this cursor — the listing ends here` : `  no ${what}`);
+      return 0;
+    }
     // Under --key, --status counts the pending by pass, not this status's rows; only a pending page drains as it is decided (review passes 1 and 2).
     const more = capNote(lineageMode ? "lineage" : status, KEY !== undefined);
     out(`  ${rows.length} ${what.replace("proposals", "proposal(s)")}${lineageMode ? " (pending, then stale)" : ""}, most confident first${capped ? ` — ${lineageMode ? `pending and stale capped at ${limit} each` : `the first ${listedRows.length} of ${remaining}`}; ${more}` : ""}:\n`);
@@ -956,7 +992,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       out("");
     });
     // SMD-3249: where the next page starts, the cursor the tool's reply carries too.
-    if (lastKey) out(`  next page: --after ${proposalCursor(lastKey[0], lastKey[1], lastKey[2])}`);
+    if (nextPage) out(nextPage);
     return rows.length;
   }
 
@@ -1079,6 +1115,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // meets there, named with its file rather than a driver stack
       // (definitions probe, SMD-2313's second review pass).
       try { await printList(LIST === "all" ? undefined : LIST); } catch (e) {
+        if (e instanceof CursorRefused) {
+          err("  --after takes the cursor a --list page printed (next page: … --after <cursor>), as it was given: this one's time is not one Postgres reads.");
+          return 2;
+        }
         if (!/list_supersession_proposals\(text, ?integer, ?boolean, ?text, ?numeric, ?timestamp with time zone, ?uuid\) does not exist/.test((e as Error).message)) throw e;
         err("  --list needs migration 110 (db/migrations/110_listing_pages.sql), which this brain has not applied: cd db && bun migrate.ts --url <url>");
         code = 1;

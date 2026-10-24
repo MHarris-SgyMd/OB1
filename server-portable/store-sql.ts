@@ -983,10 +983,10 @@ export class SqlStore implements ThoughtStore {
       throw e;
     }
     // 110: each row's page_key is its place for the next call; remaining counts the selection from this page's first
-    // on, so more follow when it exceeds the rows listed. Read off the listing as it came back, before a row the
-    // writers' read drops (a proposal gone in between).
-    const remaining = rows.length ? Number(rows[0].remaining) : 0;
-    const lastKey = rows.length && remaining > rows.length ? JSON.parse(String(rows[rows.length - 1].page_key)) as string[] : null;
+    // on, so what follows the page is that less the rows listed. Read off the listing as it came back, before a row
+    // the writers' read drops (a proposal gone in between): the cursor and the count are the listing's.
+    const remaining = rows.length ? Math.max(0, Number(rows[0].remaining) - rows.length) : 0;
+    const lastKey = remaining > 0 ? JSON.parse(String(rows[rows.length - 1].page_key)) as string[] : null;
     const next: ProposalPosition | null = lastKey ? { confidence: lastKey[0], judgedAt: lastKey[1], id: lastKey[2] } : null;
     // 094 (SMD-2707): each side's writer, by the page's ids. A brain short of
     // 094 has no such function: the page goes out without writers, and the

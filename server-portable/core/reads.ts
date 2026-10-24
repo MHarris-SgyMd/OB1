@@ -18,7 +18,7 @@ import type { Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
 import { FilterError, parseFilter, trustAtOrAbove, withActorFilter, type Trust } from "./filter.ts";
 import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
-import { listCursor, parseListCursor, parseProposalCursor, proposalCursor } from "./list-cursor.ts";
+import { listCursor, parseListCursor, parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "./list-cursor.ts";
 import { parseSince } from "./since.ts";
 import { SCAN_DEFAULT, SCAN_MAX, type Input } from "./schemas.ts";
 
@@ -487,25 +487,30 @@ export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, typ
 
 /**
  * A page of the queue (SMD-3249): `cursor` the next page's `after` while more follow, else null; `remaining` how many
- * the selection holds from this page's first on (110), so `remaining - proposals.length` more follow.
+ * follow this page; `after` whether this page followed a cursor, so an empty one is said as the walk's end, not an
+ * empty queue (review pass 1).
  */
-export type ProposalsResult = { status: Input<"list_supersession_proposals">["status"]; lineage?: boolean; judgeKey?: string; proposals: SupersessionProposal[]; cursor: string | null; remaining: number | null };
+export type ProposalsResult = { status: Input<"list_supersession_proposals">["status"]; lineage?: boolean; judgeKey?: string; proposals: SupersessionProposal[]; cursor: string | null; remaining: number; after: boolean };
 
 export async function listSupersessionProposals(ctx: Ctx, _principal: Principal, { status, limit, lineage, judge_key: judgeKey, after }: Input<"list_supersession_proposals">): Promise<Outcome<ProposalsResult>> {
   // SMD-3249: `after` is a cursor a page ended with — one of this listing's, read before the store sees it; list_thoughts'
-  // shape and refusal (SMD-2995).
+  // shape and refusal (SMD-2995). It carries the selection it was made under, and one passed with other filters is
+  // refused, as list_thoughts' made under the other sort is (review pass 1: it started this listing at a place in
+  // another, and the rows above that place were skipped without a word).
+  const selection: ProposalSelection = { status, lineage: lineage ?? null, judgeKey: judgeKey ?? null };
   const position = after === undefined ? undefined : parseProposalCursor(after);
   if (position === null) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after!, reason: "shape" });
+  if (position && !sameSelection(position.selection, selection)) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after!, reason: "filters", made: position.selection });
   let page;
   try {
     // SMD-3248: judge_key selects one pass, in the SQL (109), so the cap counts its rows alone.
-    page = await (await ctx.store()).listSupersessionProposals({ status: status === "all" ? null : status, limit, ...(lineage === undefined ? {} : { lineage }), ...(judgeKey === undefined ? {} : { judgeKey }), ...(position ? { after: position } : {}) });
+    page = await (await ctx.store()).listSupersessionProposals({ status: status === "all" ? null : status, limit, ...(lineage === undefined ? {} : { lineage }), ...(judgeKey === undefined ? {} : { judgeKey }), ...(position ? { after: { confidence: position.confidence, judgedAt: position.judgedAt, id: position.id } } : {}) });
   } catch (e) {
     if (e instanceof ListCursorRefused && after !== undefined) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after, reason: "shape" });
     throw e;
   }
-  const cursor = page.next ? proposalCursor(page.next.confidence, page.next.judgedAt, page.next.id) : null;
-  return ok({ status, ...(lineage === undefined ? {} : { lineage }), ...(judgeKey === undefined ? {} : { judgeKey }), proposals: page.proposals, cursor, remaining: page.remaining });
+  const cursor = page.next ? proposalCursor(selection, page.next.confidence, page.next.judgedAt, page.next.id) : null;
+  return ok({ status, ...(lineage === undefined ? {} : { lineage }), ...(judgeKey === undefined ? {} : { judgeKey }), proposals: page.proposals, cursor, remaining: page.remaining, after: position !== undefined });
 }
 
 // ── thought_stats and thought_changes ────────────────────────────────────────

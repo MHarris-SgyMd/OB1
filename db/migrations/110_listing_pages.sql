@@ -28,7 +28,10 @@
 --      place (ON CONFLICT DO UPDATE: the same id, judged_at now() and the new
 --      verdict's confidence), so a cursor that named the row would read its
 --      new place and jump the walk, skipping or repeating rows; the values
---      keep the place the page ended at. All three
+--      keep the place the page ended at. A walk so lists each row once while
+--      its place holds; a row decided during it leaves the selection, and one
+--      re-judged moves to its new place — listed again if that is past the
+--      cursor, missed if behind it (review pass 1). All three
 --      set or none: a partial cursor is refused by name (it would otherwise
 --      read as no cursor and list from the top, a silent restart).
 --      The columns: `page_key text`, the row's three values as text —

@@ -2026,7 +2026,10 @@ uuid` (all set or none, a partial set refused by name): the last listed row's
 values on the listing's order (`confidence DESC, judged_at, id`), so the page
 starts past that row, before the order and the cap. The values, not the row's
 id: 063's recorder re-judges a stale row in place (the same id, `judged_at`
-now(), the new confidence), so a cursor naming the row would jump the walk. Two
+now(), the new confidence), so a cursor naming the row would jump the walk; a
+walk lists each row once while its place holds — one decided during it leaves
+the selection, one re-judged moves to its new place, listed again past the
+cursor or missed behind it. Two
 trailing columns: `page_key`, each row's three values as text (confidence
 exactly, judged_at to the microsecond, the id) for the next call, and
 `remaining`, the selection's rows from this page's first on (`count(*) OVER
@@ -2036,11 +2039,13 @@ TABLE cannot gain a column), and 070's and 029's with it if a hand re-apply
 left them; a call of two, three or four arguments resolves through the
 defaults. The fork's callers pass seven. The readers follow: the MCP tool and
 `GET /v1/proposals` take `after` and answer `cursor` (null once no more follow)
-and `remaining`, list_thoughts' shape (SMD-2995), the cursor base64url of
-`["proposals", confidence, judged_at, id]` so one listing's is refused by the
-other (`REFUSED_CURSOR`); `consolidate.ts --list <status> --after <cursor>`
-lists the next page, a capped page printing its cursor (`--list lineage`, two
-listings, takes none); preflight's `lineage` check reads the seven-argument form
+and `remaining` (how many follow), list_thoughts' shape (SMD-2995), the cursor
+base64url of `["proposals", status, lineage, judge_key, confidence, judged_at,
+id]` so one listing's is refused by the other and one passed with other filters
+is refused naming its own (`REFUSED_CURSOR`, `reason: "filters"`);
+`consolidate.ts --list <status> --after <cursor>` lists the next page, a capped
+page printing the line to run, its `--list` and `--key` with the cursor
+(`--list lineage`, two listings, takes none); preflight's `lineage` check reads the seven-argument form
 and its three sentinels. An older server's preflight and an older CLI's
 `--status` read a brain at 110 as before 109: upgrade the server, never
 re-apply 109. DDL alone; no row moves; no grant is carried. Refuses by name
@@ -3473,7 +3478,7 @@ bun consolidate.ts --url … --retry-failed          # failed rows back into the
 bun consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # lineage: unreviewed rows standing on a lineage pair (070)
 bun consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate, with both thoughts (a distinct, 102, is counted by --status, not listed)
 bun consolidate.ts --url … --list [<status>|relations] --key <judge key>   # one pass's alone, by the key each row names (109); --status counts the pending by pass
-bun consolidate.ts --url … --list <status> --after <cursor>   # the next page: the cursor a capped page printed (110)
+bun consolidate.ts --url … --list <status> [--key <judge key>] --after <cursor>   # the next page: the line a capped page printed (110)
 bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90; at most 2000000, inside Postgres's timestamp range)
@@ -5362,8 +5367,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3015 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1620 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 999 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1622 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1001 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 259 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)

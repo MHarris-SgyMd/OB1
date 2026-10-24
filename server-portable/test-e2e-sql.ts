@@ -1035,14 +1035,30 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
       && /^No pending supersession proposals judged by consolidate:nobody@p1\./.test(await call("list_supersession_proposals", { judge_key: "consolidate:nobody@p1" })),
          `judge_key lists one pass's alone, before the cap (a page of one under the less confident key holds its row), said in the headline; a key no pass has, nothing (${stubOnly.split("\n")[0]})`);
   // SMD-3249: the two pending proposals a page of one at a time — the first page's cursor, through the tool, lists the
-  // second, whose cursor is null; a cursor of list_thoughts' is refused in this listing's words.
+  // second, whose cursor is null; a cursor of list_thoughts' is refused in this listing's words. Review pass 1: the
+  // second page says it is past the cursor, a page past the last row is the listing's end (not advice about the pass),
+  // a cursor passed with other filters is refused naming its own, and one whose time Postgres cannot read (a year 0,
+  // which the shape admits) is REFUSED_CURSOR at the door, not a fault.
   const pg1 = await result("list_supersession_proposals", { limit: 1 });
   const pg2 = await result("list_supersession_proposals", { limit: 1, after: String(pg1.sc?.cursor) });
   const wrongCur = await result("list_supersession_proposals", { after: String((await result("list_thoughts", { limit: 1 })).sc?.cursor) });
-  assert(!pg1.isError && pg1.text.includes(`proposal ${pid2} `) && typeof pg1.sc?.cursor === "string" && pg1.sc?.remaining === 2 && /1 more follow — pass after: /.test(pg1.text)
-      && !pg2.isError && pg2.text.includes(`proposal ${pid} `) && !pg2.text.includes(`proposal ${pid2} `) && pg2.sc?.cursor === null && pg2.sc?.remaining === 1
+  assert(!pg1.isError && pg1.text.includes(`proposal ${pid2} `) && typeof pg1.sc?.cursor === "string" && pg1.sc?.remaining === 1 && /\n\n1 more follow — pass after: /.test(pg1.text)
+      && !pg2.isError && pg2.text.includes(`proposal ${pid} `) && !pg2.text.includes(`proposal ${pid2} `) && pg2.sc?.cursor === null && pg2.sc?.remaining === 0 && pg2.sc?.after === true
+      && /^1 pending supersession proposal\(s\) past the cursor, most confident first\./.test(pg2.text)
       && wrongCur.isError && wrongCur.sc?.code === "REFUSED_CURSOR" && /is not a list_supersession_proposals cursor/.test(wrongCur.text),
     `pages of one through the tool: the more confident first with a cursor, the cursor listing the other with none after; list_thoughts' cursor refused (${pg1.text.split("\n")[0]} | ${pg2.text.split("\n")[0]})`);
+  const { parseProposalCursor, proposalCursor } = await import("./core/list-cursor.ts");
+  const at1 = parseProposalCursor(String(pg1.sc?.cursor))!;
+  const lastCur = proposalCursor(at1.selection, "0.01", "2000-01-01 00:00:00+00", at1.id);
+  const ended = await result("list_supersession_proposals", { after: lastCur });
+  const otherStatus = await result("list_supersession_proposals", { status: "all", after: String(pg1.sc?.cursor) });
+  const otherKey = await result("list_supersession_proposals", { judge_key: OTHER, after: String(pg1.sc?.cursor) });
+  const year0 = await result("list_supersession_proposals", { after: proposalCursor(at1.selection, at1.confidence, "0000-01-01 00:00:00+00", at1.id) });
+  assert(!ended.isError && ended.text === "No more pending supersession proposals past this cursor — the listing ends here." && ended.sc?.cursor === null
+      && [otherStatus, otherKey].every((r) => r.isError && r.sc?.code === "REFUSED_CURSOR" && r.sc?.reason === "filters" && (r.sc?.made as { status?: unknown })?.status === "pending")
+      && otherStatus.text.startsWith("Refused: that cursor was made with `status: pending` and no other filter")
+      && year0.isError && year0.sc?.code === "REFUSED_CURSOR" && year0.sc?.reason === "shape",
+    `past the last row, the listing's end; a cursor with another status or key refused naming its own; a year-0 time refused at the door (${ended.text} | ${otherKey.text.slice(0, 120)} | ${year0.text.slice(0, 80)})`);
   await sql`DELETE FROM supersession_proposals WHERE id = ${pid2}::uuid`;
   await sql`SELECT delete_thought(${third}::uuid, NULL::jsonb)`;
   // A brain at 109 under this server: 109's four-argument form alone, the

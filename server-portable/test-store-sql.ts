@@ -1396,15 +1396,15 @@ console.log("\n[10] listSupersessionProposals reads migration 029's queue throug
   assert((await listP({ judgeKey: "consolidate:stub@p1" }))[0]?.id === pid && (await listP({ judgeKey: "consolidate:stub@p2" })).length === 0
       && (await listP({ judgeKey: "consolidate:stub" })).length === 0,
     "a judge key selects its pass's proposals, exactly: none under another pass's key or a prefix of this one");
-  // 110 (SMD-3249): a page says where the next starts and how many the selection holds from it on. One proposal and
-  // a page of one: no next, remaining 1. A cursor past it: an empty page. A cursor whose time Postgres cannot read
+  // 110 (SMD-3249): a page says where the next starts and how many follow it (review pass 1: not the selection from
+  // the page on, which the replies read as a total). One proposal and a page of one: no next, remaining 0. A cursor past it: an empty page. A cursor whose time Postgres cannot read
   // (year 0, which the shape admits) is the caller's, refused as ListCursorRefused, not a fault.
   const one1 = await store.listSupersessionProposals({ limit: 1 });
   const past = await store.listSupersessionProposals({ after: { confidence: "0.85", judgedAt: "9999-01-01 00:00:00+00", id: "ffffffff-ffff-4fff-8fff-ffffffffffff" } });
   let refusedTime = "";
   try { await store.listSupersessionProposals({ after: { confidence: "0.85", judgedAt: "0000-01-01 00:00:00+00", id: pid } }); } catch (e) { refusedTime = (e as Error).name; }
-  assert(one1.proposals.length === 1 && one1.next === null && one1.remaining === 1 && past.proposals.length === 0 && past.next === null && refusedTime === "ListCursorRefused",
-    `a page of the one proposal: no next, remaining 1; past it, none; a cursor time Postgres cannot read, ListCursorRefused (${refusedTime})`);
+  assert(one1.proposals.length === 1 && one1.next === null && one1.remaining === 0 && past.proposals.length === 0 && past.next === null && refusedTime === "ListCursorRefused",
+    `a page of the one proposal: no next, none remaining; past it, none; a cursor time Postgres cannot read, ListCursorRefused (${refusedTime})`);
   // …and a walk in pages of two over three: the store's next is the page's LAST row, so the second page holds the third
   // alone and no next (a next built from the first row would repeat the second).
   const extraA = await store.captureThought({ content: "queue: a third thought for paging", payload: { metadata: {} }, embedding: unit(6) });
@@ -1412,8 +1412,8 @@ console.log("\n[10] listSupersessionProposals reads migration 029's queue throug
   const [{ id: pidC }] = await admin5`SELECT record_supersession_proposal(${older.id}::uuid, ${extraA.id}::uuid, 'newer_supersedes_older', 0.65, 'paging three', 0.9, 'consolidate:stub@p1', NULL) AS id`;
   const w1 = await store.listSupersessionProposals({ limit: 2 });
   const w2 = await store.listSupersessionProposals({ limit: 2, after: w1.next! });
-  assert(w1.proposals.map((p) => p.id).join() === [pid, pidB].join() && w1.remaining === 3 && w1.next?.id === pidB && w2.proposals.map((p) => p.id).join() === pidC && w2.next === null && w2.remaining === 1,
-    `pages of two over three: the first two with the second's place as next, then the third alone with none (${w1.proposals.length}, ${w2.proposals.length})`);
+  assert(w1.proposals.map((p) => p.id).join() === [pid, pidB].join() && w1.remaining === 1 && w1.next?.id === pidB && w2.proposals.map((p) => p.id).join() === pidC && w2.next === null && w2.remaining === 0,
+    `pages of two over three: the first two with the second's place as next and one to follow, then the third alone with none (${w1.proposals.length}, ${w2.proposals.length})`);
   await admin5`DELETE FROM supersession_proposals WHERE id IN (${pidB}::uuid, ${pidC}::uuid)`;
   await admin5`SELECT review_supersession_proposal(${pid}::uuid, 'accept', 'confirmed', NULL, NULL)`;
   assert((await listP({})).length === 0, "an accepted proposal leaves the pending list");

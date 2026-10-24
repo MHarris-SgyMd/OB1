@@ -329,8 +329,13 @@ export class ListCursorRefused extends Error {
  */
 export type ProposalPosition = { confidence: string; judgedAt: string; id: string };
 
-/** A page of list_supersession_proposals: the proposals, the last one's place when more follow (else null), and how many the selection holds from this page's first on (110's `remaining`; null on a brain before 110 — never reached, the store calls 110's form). */
-export type ProposalPage = { proposals: SupersessionProposal[]; next: ProposalPosition | null; remaining: number | null };
+/**
+ * A page of list_supersession_proposals: the proposals, the last listed row's place when more follow (else null), and
+ * how many follow this page — 110's `remaining` (the selection from this page's first on) less the rows the listing
+ * gave, before a row the writers' read drops (review pass 1: counted after the drop, a row gone in between was
+ * counted as one still to come).
+ */
+export type ProposalPage = { proposals: SupersessionProposal[]; next: ProposalPosition | null; remaining: number };
 
 /** A page of list_thoughts: the thoughts, and the last one's place when more follow (else null). */
 export type ThoughtListPage = { thoughts: ThoughtListItem[]; next: ListPosition | null };

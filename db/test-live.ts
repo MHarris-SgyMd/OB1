@@ -6527,9 +6527,11 @@ if (want("16")) {
   await sql`DELETE FROM thoughts WHERE id IN (${rawA}::uuid, ${rawB}::uuid, ${rawC}::uuid)`;
   for (const t of extra) await sql`DELETE FROM thoughts WHERE id = ${t}::uuid`;
   // SMD-3249: --after pages a capped listing. 51 proposals under one raw pass, over 9 thoughts outside the pool: a
-  // --list pending --key page of 50 says "the first 50 of 51" and ends with its cursor, which lists the one left with
-  // no cursor after it, and in-process as spawned. --after is refused alone, with lineage or relations, and when it is
-  // no cursor of the listing's.
+  // --list pending --key page of 50 says "the first 50 of 51" and ends with the line to run for the next — its --list,
+  // its --key and its cursor — which lists the one left, past the cursor, with no line after it, and in-process as
+  // spawned. --after is refused alone, with lineage or relations, and when it is no cursor of the listing's. Review
+  // pass 1: refused too with another --list or --key than its page's (it listed from mid-selection without a word), and
+  // with a time Postgres cannot read (a raw stack); a cursor past the last row is the listing's end, not an empty queue.
   const pt: string[] = [];
   for (let i = 0; i < 9; i++) pt.push(await rawThought(`[16] a paged pass's side ${i}`));
   let planted = 0;
@@ -6540,18 +6542,33 @@ if (want("16")) {
   }
   const pagedIds = (out: string) => [...out.matchAll(/proposal ([0-9a-f-]{36}) /g)].map((m) => m[1]);
   const pageA = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1");
-  const cursorA = /next page: --after (\S+)/.exec(pageA.out)?.[1] ?? "";
+  const cursorA = /\n  next page: --list pending --key consolidate:zz-paged@p1 --after (\S+)\n/.exec(pageA.out)?.[1] ?? "";
   const pageB = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1", "--after", cursorA);
   const pageBC = await consolidateInProcess({ list: "pending", key: "consolidate:zz-paged@p1", after: cursorA });
   assert(pageA.code === 0 && /50 pending proposal\(s\) judged by consolidate:zz-paged@p1, most confident first — the first 50 of 51; decide these and list again for the rest, or --after <the cursor below> for the next page/.test(pageA.out)
       && cursorA.length > 0 && pagedIds(pageA.out).length === 50 && pageB.code === 0 && pagedIds(pageB.out).length === 1 && !pagedIds(pageA.out).includes(pagedIds(pageB.out)[0])
-      && !/next page:/.test(pageB.out) && same(pageBC, pageB),
+      && /\n  1 pending proposal\(s\) judged by consolidate:zz-paged@p1 past the cursor, most confident first:\n/.test(pageB.out) && !/next page:/.test(pageB.out) && same(pageBC, pageB),
     `--list --after: a capped page of 50 of 51 ends with its cursor, which lists the one left and no cursor after it, in-process as spawned (${pageA.out.split("\n").find((l) => /the first 50/.test(l))?.trim().slice(0, 140)})`);
   const afterAlone = await consolidate("--status", "--after", cursorA), afterLineage = await consolidate("--list", "lineage", "--after", cursorA);
   const afterRelations = await consolidate("--list", "relations", "--after", cursorA), afterBad = await consolidate("--list", "--after", "not-a-cursor");
   assert([afterAlone, afterLineage, afterRelations].every((r) => r.code === 2 && /--after goes with --list <pending\|accepted\|rejected\|stale\|all>/.test(r.out))
       && afterBad.code === 2 && /--after takes the cursor a --list page printed/.test(afterBad.out),
     `--after refused alone, with lineage or relations, and when it is no cursor (${afterBad.out.trim().slice(0, 80)})`);
+  const { parseProposalCursor, proposalCursor } = await import("../server-portable/core/list-cursor.ts");
+  const atA = parseProposalCursor(cursorA)!;
+  const noKey = await consolidate("--list", "pending", "--after", cursorA), allKey = await consolidate("--list", "all", "--key", "consolidate:zz-paged@p1", "--after", cursorA);
+  const pastEnd = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1", "--after", proposalCursor(atA.selection, "0.00", atA.judgedAt, atA.id));
+  const year0 = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1", "--after", proposalCursor(atA.selection, atA.confidence, "0000-01-01 00:00:00+00", atA.id));
+  assert([noKey, allKey].every((r) => r.code === 2 && r.out.includes("--after's cursor was made for --list pending --key consolidate:zz-paged@p1: pass those with it"))
+      && pastEnd.code === 0 && pastEnd.out.includes("  no more pending proposals judged by consolidate:zz-paged@p1 past this cursor — the listing ends here")
+      && year0.code === 2 && year0.out.includes("this one's time is not one Postgres reads") && !/PostgresError|\n\s+at /.test(year0.out),
+    `--after with another --list or --key refused naming its page's; past the last row, the listing's end; a year-0 time refused in --after's words, no stack (${noKey.out.trim().slice(0, 100)} | ${year0.out.trim().slice(0, 100)})`);
+  // Run-it review, pass 1: a page holding exactly the cap is not capped — 110's remaining, not `rows === limit` (the
+  // rule before 110), which printed "the first 50 of 50" and a cursor to an empty page.
+  await sql`DELETE FROM supersession_proposals WHERE id = ${pagedIds(pageB.out)[0]}::uuid`;
+  const exact = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1");
+  assert(exact.code === 0 && pagedIds(exact.out).length === 50 && /\n  50 pending proposal\(s\) judged by consolidate:zz-paged@p1, most confident first:\n/.test(exact.out) && !/next page:|the first 50/.test(exact.out),
+    `a page of exactly 50 is the whole selection: no cap note, no next page line (${exact.out.split("\n").find((l) => /pending proposal/.test(l))?.trim().slice(0, 120)})`);
   for (const t of pt) await sql`DELETE FROM thoughts WHERE id = ${t}::uuid`;
   // The line's builder on rows a brain would need dozens of thoughts for (review pass 4: with one row in each overflow
   // pass, the passes counted and their rows summed were the same number): twelve passes, the last two of 3 and 2 rows;
@@ -6568,8 +6585,8 @@ if (want("16")) {
   assert(["pending", "accepted", undefined].every((st) => capNote(st, false) === `${NEXT}; --status counts them all`)
       && capNote("pending", true) === "decide these and list again for the rest, or --after <the cursor below> for the next page; --status counts each pass's pending"
       && ["accepted", "rejected", "stale", undefined].every((st) => capNote(st, true) === NEXT)
-      && [true, false].every((k) => capNote("lineage", k) === "the rest are not listed — --list pending or --list stale with --after pages either"),
-    "a capped page's note: --after for every one-status page; under --key, pending also drains as it is decided; lineage pages neither");
+      && [true, false].every((k) => capNote("lineage", k) === "the rest are not listed — reject these and list again, or page them with the list_supersession_proposals tool (lineage: true, then after: its cursor)"),
+    "a capped page's note: --after for every one-status page; under --key, pending also drains as it is decided; a lineage page drains as it is rejected, and the tool pages it");
 
   // The review path, through the worker's flags, audited under the key's name.
   const needDir = await consolidate("--accept", undirected.id);
