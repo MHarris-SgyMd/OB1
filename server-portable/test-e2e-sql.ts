@@ -1018,16 +1018,35 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
          "lineage: true selects it and false leaves it out, each said in the headline");
   await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${newer}::uuid`;
   assert(!/LINEAGE PAIR/.test(await call("list_supersession_proposals", {})), "…and cleared, no tag");
-  // A brain at 068 under this server: the three-argument form is missing and
-  // the hint names 070, not 029 (cold read, first review pass: it named 029
-  // for every error on the name). The form dropped by hand here; the file
-  // puts it back.
-  await sql`DROP FUNCTION list_supersession_proposals(text, int, boolean)`;
-  const pre070 = await call("list_supersession_proposals", {}).catch((e: Error) => e.message);
-  assert(/list_supersession_proposals\(text, integer, boolean\) does not exist/.test(pre070) && /the migrations through 070 are not applied \(029, db\/migrations\/029_supersession_proposals\.sql, creates the queue; 070, db\/migrations\/070_listing_flags_lineage_pair\.sql, its current listing\)/.test(pre070),
-         `on a brain without 070 the tool's error names the migrations through 070, 029's queue and 070's listing both (${pre070.replace(/\n/g, " ").slice(0, 200)})`);
+  // SMD-3248: judge_key selects one pass (109) — a second proposal under
+  // another pass's key, more confident, so a page of one shows the selection
+  // comes before the cap; the headline names the key, and a key no pass has
+  // selects nothing, said so.
+  const third = await seed("queue third: the plan is C", 1);
+  const OTHER = "consolidate:h2o-lightning-4b+qwen3.8:27b@p4d4";
+  const [{ id: pid2 }] = await sql`
+    SELECT record_supersession_proposal(${newer}::uuid, ${third}::uuid, 'newer_supersedes_older', 0.95, 'C over B', 0.9, ${OTHER}::text, NULL) AS id`;
+  const both = await call("list_supersession_proposals", {});
+  const stubOnly = await call("list_supersession_proposals", { judge_key: "consolidate:stub@p2", limit: 1 });
+  const otherOnly = await call("list_supersession_proposals", { judge_key: OTHER });
+  assert(/2 pending supersession proposal\(s\), most confident first/.test(both) && stubOnly.includes(`proposal ${pid} — judged by consolidate:stub@p2`) && !stubOnly.includes(pid2)
+      && /^1 pending supersession proposal\(s\) judged by consolidate:stub@p2, most confident first/.test(stubOnly)
+      && otherOnly.includes(`proposal ${pid2} — judged by ${OTHER}`) && !otherOnly.includes(`proposal ${pid} `)
+      && /^No pending supersession proposals judged by consolidate:nobody@p1\./.test(await call("list_supersession_proposals", { judge_key: "consolidate:nobody@p1" })),
+         `judge_key lists one pass's alone, before the cap (a page of one under the less confident key holds its row), said in the headline; a key no pass has, nothing (${stubOnly.split("\n")[0]})`);
+  await sql`DELETE FROM supersession_proposals WHERE id = ${pid2}::uuid`;
+  await sql`SELECT delete_thought(${third}::uuid, NULL::jsonb)`;
+  // A brain at 108 under this server: 070's three-argument form alone, the
+  // four-argument one missing, and the hint names 109, not 029 (SMD-2313's
+  // cold read, first review pass: it named 029 for every error on the name).
+  // The form dropped by hand and 070's put back here; 109 puts its own back.
+  await sql`DROP FUNCTION list_supersession_proposals(text, int, boolean, text)`;
   await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
-  assert(/1 pending supersession proposal/.test(await call("list_supersession_proposals", {})), "…and 070 applied, the queue lists again");
+  const pre109 = await call("list_supersession_proposals", {}).catch((e: Error) => e.message);
+  assert(/list_supersession_proposals\(text, integer, boolean, text\) does not exist/.test(pre109) && /the migrations through 109 are not applied \(029, db\/migrations\/029_supersession_proposals\.sql, creates the queue; 109, db\/migrations\/109_listing_selects_a_pass\.sql, its current listing\)/.test(pre109),
+         `on a brain without 109 the tool's error names the migrations through 109, 029's queue and 109's listing both (${pre109.replace(/\n/g, " ").slice(0, 200)})`);
+  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("109_") });
+  assert(/1 pending supersession proposal/.test(await call("list_supersession_proposals", {})), "…and 109 applied, the queue lists again");
   await sql`SELECT update_thought(${newer}::uuid, ${"queue newer: the plan is B, revised"}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`;
   const edited = await call("list_supersession_proposals", { status: "pending", limit: 5 });
   assert(/newer \[[^\]]+\] \(edited since judged\)/.test(edited) && edited.includes(`--accept ${pid} --direction <newer|older> --force`) && /verdict is about an earlier text/.test(edited),
@@ -3062,6 +3081,9 @@ const SHAPE = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|
 const wordless = (v: unknown, at = ""): string[] => {
   // list_thoughts' cursor (SMD-2995) is a token by construction: what it decodes to is a sort word, a time and a uuid, read by the core's own rule.
   if (typeof v === "string" && at === "cursor" && parseListCursor(v)) return [];
+  // A proposal's pass (SMD-3248) is one token by pass-key.ts's rule — 1–200 letters, digits and . _ : / @ + -, the first a
+  // letter or digit, no space — spelled here apart from the guard's, so a guard widened past it fails this rule.
+  if (typeof v === "string" && /(?:^|\.)judgeKey$/.test(at) && /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$/.test(v)) return [];
   if (typeof v === "string") return SHAPE.test(v) ? [] : [at || "(root)"];
   if (Array.isArray(v)) return v.flatMap((x, i) => wordless(x, `${at}[${i}]`));
   if (v && typeof v === "object") return Object.entries(v).flatMap(([k, x]) => (at === "" && k === "text" ? [] : wordless(x, at ? `${at}.${k}` : k)));

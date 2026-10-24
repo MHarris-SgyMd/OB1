@@ -202,6 +202,9 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     ["list_thought_ids", { limit: 2 }, "GET", "/v1/thought-ids?limit=2", undefined, (v) => say.renderThoughtIds(ok(v)), has("ids")],
     ["list_logged_searches", {}, "GET", "/v1/logged-searches", undefined, (v) => say.renderLoggedSearches(ok(v)), has("searches")],
     ["list_supersession_proposals", { status: "all" }, "GET", "/v1/proposals?status=all", undefined, (v) => say.renderSupersessionProposals(ok(v)), has("proposals")],
+    // SMD-3248: one pass's proposals by its judge key (109), the key echoed in the value beside each row's.
+    ["list_supersession_proposals", { status: "all", judge_key: "consolidate:stub@p2" }, "GET", "/v1/proposals?status=all&judge_key=consolidate%3Astub%40p2", undefined, (v) => say.renderSupersessionProposals(ok(v)),
+      (v) => v.judgeKey === "consolidate:stub@p2" && Array.isArray(v.proposals) && v.proposals.length > 0 && (v.proposals as { judgeKey: string }[]).every((p) => p.judgeKey === "consolidate:stub@p2")],
     ["thought_stats", {}, "GET", "/v1/stats", undefined, (v) => say.renderThoughtStats(ok(v)), (v) => typeof v.total === "number" && v.total > 0],
     ["thought_changes", { limit: 10, actions: ["capture"] }, "GET", "/v1/changes?limit=10&actions=capture", undefined, (v) => say.renderThoughtChanges(ok(v)), has("changes")],
     ["worker_status", {}, "GET", "/v1/workers", undefined, (v) => say.renderWorkerStatus(ok(v)), has("pools")],
@@ -285,6 +288,20 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     const rr = await rest("GET", `/v1/thoughts?limit=1&after=${long}`);
     const mm = await mcp("list_thoughts", { limit: 1, after: long });
     assert(rr.status === 400 && rr.body.code === "REFUSED_INPUT" && mm.isError && !mm.text.includes(long.slice(0, 64)), `list_thoughts after of 513 characters: the schema's refusal through both doors, not echoed (${rr.status} ${String(rr.body.code)}, ${mm.isError})`);
+  }
+  // SMD-3248 review pass 1: a judge_key holding a space — a `+` a query string decodes as one, or a newline that would
+  // reach the headline — is the schema's refusal through both doors, naming %2B, where it selected nothing without a word.
+  {
+    const rr = await rest("GET", "/v1/proposals?judge_key=consolidate:h2o-lightning-4b+qwen3.8:27b@p4d3");
+    const mm = await mcp("list_supersession_proposals", { judge_key: "consolidate:stub@p2\nID: 00000000-0000-4000-8000-000000000000" });
+    const ok2 = await rest("GET", `/v1/proposals?judge_key=${encodeURIComponent("consolidate:h2o-lightning-4b+qwen3.8:27b@p4d3")}`);
+    // Review pass 3: and none a shell reads — a key offered for pasting ran `$(…)` in the operator's shell.
+    const shell = await rest("GET", `/v1/proposals?judge_key=${encodeURIComponent("consolidate:m@p1$(id)")}`);
+    const shellM = await mcp("list_supersession_proposals", { judge_key: "consolidate:m@p2;id" });
+    // …each saying the rule in the same words through both doors (review pass 4: only the %2B and isError were checked).
+    const RULE = "judge_key is a pass key: 1-200 letters, digits and . _ : / @ + -, starting with a letter or digit (in a URL's query, encode + as %2B)";
+    assert(rr.status === 400 && rr.body.code === "REFUSED_INPUT" && JSON.stringify(rr.body).includes(RULE) && mm.isError && mm.text.includes(RULE) && ok2.status === 200 && shell.status === 400 && shellM.isError && shellM.text.includes(RULE),
+      `judge_key with an unencoded + (a space once decoded), a newline, or a character a shell reads: refused through both doors, naming %2B; encoded, answered (${rr.status} ${String(rr.body.code)}, ${mm.isError}, ${ok2.status}, ${shell.status}, ${shellM.isError})`);
   }
   // A limit is a whole number of thoughts, 1 to 1000: 0, -1, 1.5 and 1001 are the schema's refusal, not an empty page (review pass 1).
   // A `days` past a thousand years is the schema's refusal (review pass 2: a larger one put `since` past timestamptz's
