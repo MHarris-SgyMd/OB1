@@ -4795,7 +4795,9 @@ console.log("\n[11] --deep's provider probes are each a span and a point where a
       return new Response("overloaded", { status: 503 });
     },
   });
-  const OTEL_UNSET = Object.fromEntries(["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "OTEL_SDK_DISABLED", "OTEL_SERVICE_NAME", "OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_LOGS_EXPORTER"].map((k) => [k, undefined]));
+  const OTEL_UNSET = Object.fromEntries(["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "OTEL_SDK_DISABLED", "OTEL_SERVICE_NAME", "OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_LOGS_EXPORTER",
+    // The whole-number settings too, so a developer's own cannot put a note ahead of a row's (SMD-3235 review pass 2).
+    ...["OTEL_BSP", "OTEL_BLRP"].flatMap((p) => [`${p}_MAX_QUEUE_SIZE`, `${p}_MAX_EXPORT_BATCH_SIZE`, `${p}_SCHEDULE_DELAY`, `${p}_EXPORT_TIMEOUT`]), "OTEL_METRIC_EXPORT_INTERVAL", "OTEL_METRIC_EXPORT_TIMEOUT"].map((k) => [k, undefined]));
   const ENV = { ...DB_DOWN, ...NO_KEYS, ...OTEL_UNSET, OB1_LLM_BASE_URL: `http://user:s3cret-2d@127.0.0.1:${provider.port}/v1`, OB1_METADATA_MODEL: "meta-7b" };
   const COLLECTOR = `http://127.0.0.1:${collector.port}`;
 
@@ -4854,6 +4856,13 @@ console.log("\n[11] --deep's provider probes are each a span and a point where a
   const tracesOnly = await run({ ...ENV, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `${COLLECTOR}/v1/traces`, OTEL_BSP_SCHEDULE_DELAY: "0" }, "--deep");
   assert(/✓\s+telemetry\s+the provider probes' spans sent — /.test(tracesOnly.out) && posted.every((p) => p.path === "/v1/traces"),
     `a traces endpoint alone: the row says spans, not points, and only spans went (${row(tracesOnly.out, "telemetry").trim().slice(0, 160)})`);
+  // A secret pasted into a variable read as a whole number: the row names the variable and warns, and no four characters
+  // of the value are in any line (SMD-3235; review pass 1: a four-character leak passed a check for "sk-live").
+  const PASTED = "Zq9XwVk7Jp4RmT";
+  const pasted = await run({ ...ENV, OTEL_EXPORTER_OTLP_ENDPOINT: COLLECTOR, OTEL_BSP_SCHEDULE_DELAY: PASTED }, "--deep");
+  const pastedPieces = Array.from({ length: PASTED.length - 3 }, (_, i) => PASTED.slice(i, i + 4)).filter((piece) => pasted.out.includes(piece));
+  assert(/!\s+telemetry\s+the provider probes' spans and points sent — OTEL_BSP_SCHEDULE_DELAY \(a value not shown\) is not a whole number of at least 0: 5000 is used; /.test(pasted.out) && pastedPieces.length === 0,
+    `a secret in OTEL_BSP_SCHEDULE_DELAY: named in the row, no four characters of it in any line (${pastedPieces.join(", ") || "none said"}; ${row(pasted.out, "telemetry").trim().slice(0, 240)})`);
   const halfWrong = await run({ ...ENV, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "not a url", OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: `${COLLECTOR}/v1/metrics` }, "--deep");
   assert(/!\s+telemetry\s+the provider probes' points sent — .*OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http\(s\) URL/.test(halfWrong.out),
     `a traces endpoint that is no URL beside one for metrics: a warning that names it, points sent (${row(halfWrong.out, "telemetry").trim().slice(0, 200)})`);
