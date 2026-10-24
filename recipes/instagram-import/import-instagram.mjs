@@ -139,7 +139,8 @@ async function readJson(file) {
   try {
     return JSON.parse(text);
   } catch {
-    // As the other refusals: a parse error is said without the parser's words, which quote the export's text into the run report (review pass 5).
+    // As the other refusals: a parse error is said without the parser's words, which quote the export's
+    // text into the run report (review pass 5).
     fail(`${file}: not a JSON file of the export (it does not parse as JSON); re-download the export, or move the file out`);
   }
 }
@@ -439,10 +440,10 @@ async function main() {
   if (lines.length) process.stdout.write(`${lines.join("\n")}\n`);
   console.error(`Emitted ${emitted} item(s), skipped ${dropped} (of ${toProcess.length} thought(s) from ${records} record(s) read; skip=${skip}, limit=${limit === Infinity ? "all" : limit})`);
   // An export found but no record of this importer's kind parsed from it is refused, not reported as no export:
-  // another product's file of the name it reads, or a vendor shape it does not know, would otherwise be a green
-  // run that writes nothing, every week (review pass 4). Records parsed and all skipped by the importer's own
-  // filters (short, retweets) are a correct read, and exit 0 (review pass 5). Under --skip, --limit or --types the
-  // window is the request's.
+  // another product's file of the name it reads, or a vendor shape it does not know, would otherwise be a green run
+  // that writes nothing, every week (review pass 4). Records parsed and all skipped by the importer's own filters
+  // (short threads, comments and captions) are a correct read, and exit 0 (review pass 5). Under --skip, --limit or
+  // --types the window is the request's.
   if (!records && skip === 0 && limit === Infinity && types.length === TYPES.length) fail(`${activityDir}: read ${jsonRead} JSON file(s) and found no message, comment or post in them: a download with none, or a layout this importer does not read`);
   if (droppedDates.size) console.error(`${droppedDates.size} date(s) left out, not ones the brain accepts (it dates those thoughts when it writes them): ${[...droppedDates].slice(0, 5).map((d) => JSON.stringify(d.slice(0, 40))).join(", ")}`);
 }

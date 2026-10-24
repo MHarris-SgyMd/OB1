@@ -686,7 +686,7 @@ async function runPipeline(c: Config, p: Pipeline, proxy?: Proxy): Promise<Repor
 /** One run of one pipeline, start to report, within one deadline. */
 async function runSteps(c: Config, p: Pipeline, proxy: Proxy | undefined): Promise<Report> {
   const deadline = Date.now() + c.timeoutS * 1000;
-  const past = `ran past the run's ${c.timeoutS} s and was stopped`;
+  const past = pastDeadline(c.timeoutS);
   const input = join(c.importsDir, p.name);
   // An export the emitter's uid cannot read looked like no export at all: a
   // green run with nothing emitted (review pass 4: Python's glob answers an
@@ -884,6 +884,9 @@ function inputState(dir: string): "present" | "absent" | "blocked" | "dangling" 
   }
 }
 
+/** What a step past the run's deadline is said to have done: the emitter, the ingester and reembed alike. */
+const pastDeadline = (timeoutS: number) => `ran past the run's ${timeoutS} s and was stopped`;
+
 /**
  * Why an emitter's step failed. An exit of 137 the runner did not cause (no
  * deadline, no cap) is a SIGKILL from outside: the kernel's, when the
@@ -891,7 +894,7 @@ function inputState(dir: string): "present" | "absent" | "blocked" | "dangling" 
  * died as "the emitter exited 137", saying nothing of why).
  */
 function emitterWhy(e: Pick<Step, "code" | "timedOut" | "overflow">, timeoutS: number, maxBytes: number): string {
-  if (e.timedOut) return `the emitter ran past the run's ${timeoutS} s and was stopped`;
+  if (e.timedOut) return `the emitter ${pastDeadline(timeoutS)}`;
   if (e.overflow) return `the emitter printed more than ${maxBytes} bytes and was stopped`;
   if (e.code === 137) return "the emitter was killed (exit 137) without the runner stopping it: most likely the runner's container ran out of memory (its mem_limit in deploy/compose.yaml). Import an export this large from a checkout, as its recipe's README says";
   return `the emitter exited ${e.code}`;

@@ -270,7 +270,8 @@ async function main() {
     try {
       parsed = JSON.parse(text);
     } catch {
-      // As the other refusals: a parse error is said without the parser's words, which quote the export's text into the run report (review pass 5).
+      // As the other refusals: a parse error is said without the parser's words, which quote the export's
+      // text into the run report (review pass 5).
       fail(`${file}: not a JSON export (it does not parse as JSON)`);
     }
     // Grok exports can have conversations at top level or nested
@@ -334,10 +335,10 @@ async function main() {
   if (lines.length) process.stdout.write(`${lines.join("\n")}\n`);
   console.error(`Emitted ${emitted} item(s), skipped ${dropped}${malformed ? `, ${malformed} unreadable` : ""} (of ${windowed}; skip=${skip}, limit=${limit === Infinity ? "all" : limit})`);
   // An export found but no record of this importer's kind parsed from it is refused, not reported as no export:
-  // another product's file of the name it reads, or a vendor shape it does not know, would otherwise be a green
-  // run that writes nothing, every week (review pass 4). Records parsed and all skipped by the importer's own
-  // filters (short, retweets) are a correct read, and exit 0 (review pass 5). Under --skip or --limit the window
-  // is the request's.
+  // another product's file of the name it reads, or a vendor shape it does not know, would otherwise be a green run
+  // that writes nothing, every week (review pass 4). Records parsed and all skipped by the importer's own filters (a
+  // conversation under 100 characters) are a correct read, and exit 0 (review pass 5). Under --skip or --limit the
+  // window is the request's.
   if (!parsedConvs && files.length && skip === 0 && limit === Infinity) fail(`${path}: read ${files.length} JSON file(s) and found no conversation with a message in them (${conversations.length} entr${conversations.length === 1 ? "y" : "ies"}, ${malformed} unreadable): an export with none, or not a Grok export`);
   if (droppedDates.size) console.error(`${droppedDates.size} date(s) left out, not ones the brain accepts (it dates those thoughts when it writes them): ${[...droppedDates].slice(0, 5).map((d) => JSON.stringify(d.slice(0, 40))).join(", ")}`);
 }

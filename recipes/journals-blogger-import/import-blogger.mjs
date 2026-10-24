@@ -307,10 +307,10 @@ async function main() {
   if (lines.length) process.stdout.write(`${lines.join("\n")}\n`);
   console.error(`Emitted ${emitted} item(s), skipped ${dropped} (of ${toProcess.length} entr${toProcess.length === 1 ? "y" : "ies"} kept from ${recognised} post or comment entr${recognised === 1 ? "y" : "ies"} read; skip=${skip}, limit=${limit === Infinity ? "all" : limit})`);
   // An export found but no record of this importer's kind parsed from it is refused, not reported as no export:
-  // another product's file of the name it reads, or a vendor shape it does not know, would otherwise be a green
-  // run that writes nothing, every week (review pass 4). Records parsed and all skipped by the importer's own
-  // filters (short, retweets) are a correct read, and exit 0 (review pass 5). Under --skip or --limit the window
-  // is the request's.
+  // another product's file of the name it reads, or a vendor shape it does not know, would otherwise be a green run
+  // that writes nothing, every week (review pass 4). Records parsed and all skipped by the importer's own filters (an
+  // entry under 50 characters) are a correct read, and exit 0 (review pass 5). Under --skip or --limit the window is
+  // the request's.
   if (!recognised && atomFiles.length && skip === 0 && limit === Infinity) fail(`${path}: read ${atomFiles.length} .atom/.xml file(s) and found no post or comment entry in them: a blog with none, not a Blogger backup, or a backup format this importer does not read`);
   if (droppedDates.size) console.error(`${droppedDates.size} date(s) left out, not ones the brain accepts (it dates those thoughts when it writes them): ${[...droppedDates].slice(0, 5).map((d) => JSON.stringify(d.slice(0, 40))).join(", ")}`);
 }
