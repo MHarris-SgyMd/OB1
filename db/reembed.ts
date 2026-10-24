@@ -765,7 +765,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
   const problems = validateEmbeddingConfig(EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_DIMENSIONS);
   if (problems.length > 0) {
     err("Embedding configuration is not usable:\n");
-    return refused("usage", problems.map((p) => `  ✗ ${p}`).join("\n"));
+    for (const p of problems.slice(0, -1)) err(`  ✗ ${p}`);
+    return refused("usage", `  ✗ ${problems[problems.length - 1]}`);
   }
   for (const w of embeddingConfigWarnings(EMBEDDING_DIM, EMBEDDING_MODEL, EMBEDDING_DIMENSIONS)) err(`  ⚠  ${w}`);
 
@@ -1559,7 +1560,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       // Said as what a run WITH the flag would do when the flag is missing: the
       // run itself refuses, and this line must not read as its plan.
       out(
-        `\n  would: ${modelChange && !SWITCH_MODEL ? "refuse without --switch-model; with it: " : ""}` +
+        `\n  would: ${modelChange && !SWITCH_MODEL ? (FOLLOW ? "refuse — a follower never switches the model (model-switch); a run by hand with --switch-model would: " : "refuse without --switch-model; with it: ") : ""}` +
           `${recordModel ? `record ${embedConfig.embeddingModel} in ob1_config; ` : ""}` +
           `${restart ? `start this pass over (${restart} ${BACKFILL ? "terminal" : "failed"} row(s) or expired lease(s) from before the change return to the pool); ` : ""}` +
           `${notAt ? `return ${notAt} succeeded row(s) whose thought is not at ${embedConfig.embeddingModel} to the pool; ` : ""}` +
@@ -2194,7 +2195,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       const work = polled.claimable;
       if (polled.added > 0) out(`  pool: ${polled.added} thought(s) added`);
       if (polled.movedSinceDone > 0) out(`  ${polled.movedSinceDone} succeeded row(s) whose thought is not at ${embedConfig.embeddingModel} returned to the pool`);
-      if (work > 0) {
+      if (work > 0 && !stopping) {
         total += work;
         await stamped(drain());
       }
