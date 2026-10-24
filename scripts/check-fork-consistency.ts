@@ -7894,7 +7894,7 @@ function pluginPageProblems(declared: Record<string, string[]>, files: Record<st
     const code = blanked(load, false);
     const bare = blanked(load, true);
     const where = `${PLUGIN_ROUTES}/${page}/+page.server.ts`;
-    if (!/\bawait\s+pluginAccess\s*\(/.test(bare)) problems.push({ where, what: "does not await pluginAccess: a plugin page reaches its plugin through the access the gate hands back, so a disabled plugin's page is a 404 before any call" });
+    if (!/\bawait\s+pluginAccess\s*\(\s*[A-Za-z_$][\w$]*\s*\)/.test(bare)) problems.push({ where, what: "does not await pluginAccess(event) — the load's or action's own event, so the page gates on its own route: a plugin page reaches its plugin through the access the gate hands back, so a disabled plugin's page is a 404 before any call" });
     const imports = [...code.matchAll(/\b(?:import|export)\b[^;'"`]*?\bfrom\s*["']([^"']+)["']|\bimport\s*["']([^"']+)["']/g)].map((m) => m[1] ?? m[2]);
     for (const spec of imports) if (!PLUGIN_PAGE_IMPORT.test(spec) || (spec !== "./$types" && DOT_SEGMENT.test(spec))) problems.push({ where, what: `imports ${JSON.stringify(spec)}: a plugin page's load reaches the brain through pluginAccess alone ($lib/server/plugins), never rest.ts or the REST client` });
     const reach = PLUGIN_PAGE_REACH.exec(bare);
@@ -7915,8 +7915,8 @@ const PLUGIN_PAGE_PROBES: [Record<string, string[]>, Record<string, string>, num
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED }, 0],
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "" }, 1],
   [{ example: ["/notes"] }, {}, 2],
-  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "export const load = async (event) => { pluginAccess(event, 'example', '/notes'); return {}; };" }, 1],
-  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "// await pluginAccess(event, 'example', '/notes')\nexport const load = () => ({});" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "export const load = async (event) => { pluginAccess(event); return {}; };" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "// await pluginAccess(event)\nexport const load = () => ({});" }, 1],
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nimport { read } from '$lib/server/rest';" }, 1],
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nimport { createRestClient } from '../../../../../../rest-client/index.ts';" }, 1],
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nexport { read } from '$lib/server/rest';" }, 1],
@@ -7935,6 +7935,8 @@ const PLUGIN_PAGE_PROBES: [Record<string, string[]>, Record<string, string>, num
   [{}, { "example/notes/+page.svelte": "" }, 1],
   [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nimport { getRequestEvent } from '$app/server';" }, 1],
   [{ example: ["recent/"] }, {}, 1],
+  [{ example: [""] }, {}, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "export const load = async (event) => { await pluginAccess({ ...event, route: { id: '/plugins/other/x' } }); };" }, 1],
   [{ example: ["/notes", "Notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED }, 1],
 ];
 
@@ -7947,6 +7949,8 @@ async function checkPlugins() {
     if (hit && found.length === 0) fail(SELF, `check 31 no longer catches its probe: ${JSON.stringify(probe)}`);
     if (!hit && found.length > 0) fail(SELF, `check 31 catches a non-probe: ${JSON.stringify(probe)} — ${found.map((h) => h.what).join("; ")}`);
   }
+  const coreGuiPath = /\bconst GUI_PATH = \/(.+)\/;/.exec(readFileSync(join(ROOT, "server-portable", "core", "plugins.ts"), "utf8"))?.[1];
+  if (coreGuiPath !== GUI_PAGE_PATH.source) fail(SELF, `check 31's GUI_PAGE_PATH (${GUI_PAGE_PATH.source}) is not server-portable/core/plugins.ts's GUI_PATH (${coreGuiPath ?? "not found"}): the copy is held to the core's`);
   for (const [declared, files, n] of PLUGIN_PAGE_PROBES) {
     const found = pluginPageProblems(declared, files);
     if (found.length !== n) fail(SELF, `check 31's page rule finds ${found.length} problem(s), not ${n}, in its probe ${JSON.stringify(files)}: ${found.map((h) => h.what).join("; ")}`);
@@ -7976,11 +7980,12 @@ async function checkPlugins() {
     const name = manifest.match(/\bdefinePlugin\s*\(\s*\{[\s\S]*?\bname:\s*["']([^"']+)["']/)?.[1];
     // The literal shape the example writes: a pages list held elsewhere, or a `]` inside a label, reads as no page — a
     // loud false positive (its route then "declared by no manifest"), never a silent pass; the core's own check rules.
-    declared[d] = [...(manifest.match(/\bgui\s*:\s*\{\s*pages\s*:\s*\[([\s\S]*?)\]/)?.[1] ?? "").matchAll(/\bpath\s*:\s*["']([^"']+)["']/g)].map((m) => m[1]);
+    declared[d] = [...(manifest.match(/\bgui\s*:\s*\{\s*pages\s*:\s*\[([\s\S]*?)\]/)?.[1] ?? "").matchAll(/\bpath\s*:\s*["']([^"']*)["']/g)].map((m) => m[1]);
     if (name !== d) fail(`${where}/index.ts`, `its manifest's name is ${JSON.stringify(name ?? null)}, not its directory's (${d}): OB1_PLUGINS, the migrator and the server name a plugin by one name`);
     // Every file in the directory: TypeScript, its migrations, a README and metadata.json — a .js file is code this check would not read.
     // Every file, dotfiles included: Bun imports `./.helper.ts`, so a dotfile is code this check must refuse (review pass 4).
-    const files = walk(join(base, d), [], /$/).filter((f) => !f.includes(`${sep}node_modules${sep}`));
+    // Finder's .DS_Store alone is passed over: no runtime imports it as code (review pass 5).
+    const files = walk(join(base, d), [], /^(?!\.DS_Store$)/).filter((f) => !f.includes(`${sep}node_modules${sep}`));
     const migrationFiles: string[] = [];
     for (const f of files) {
       const rel = relative(join(base, d), f).split(sep).join("/");
@@ -7999,7 +8004,7 @@ async function checkPlugins() {
   // The GUI's routes for the pages: one directory each, asking the registry, and none undeclared (SMD-2280 PR 3).
   const routes = join(ROOT, ...PLUGIN_ROUTES.split("/"));
   const files: Record<string, string> = {};
-  // A dotfile (Finder's .DS_Store, an editor's swap file) is no route: skipped, as in the plugin directories (review pass 1).
+  // A dotfile (Finder's .DS_Store, an editor's swap file) is no route: skipped here, where the import rule refuses relative imports; the plugin walk reads them.
   if (existsSync(routes)) for (const f of walk(routes, [], /^[^.]/)) files[relative(routes, f).split(sep).join("/")] = readFileSync(f, "utf8");
   for (const h of pluginPageProblems(declared, files)) fail(h.where, `${h.what} (check 31, SMD-2280)`);
 }

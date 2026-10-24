@@ -51,15 +51,17 @@ export const actions: Actions = {
 		// as one, a note the field took is not refused as too long, and a note is stored with the breaks it was typed with (review pass 1).
 		const note = String(form.get('note') ?? '').replace(/\r\n?/g, '\n');
 		const kept = { note };
+		// The gate before anything the post says, as the load's: an action runs before any load, so a plugin turned off,
+		// or a key that may call none of it, is the page's 404 here, whatever was posted (review pass 5: a malformed post
+		// was answered first). A key that may not pin is told so without a call the core would only refuse.
+		const ex = await pluginAccess(event);
+		if (!ex.may('add_note')) return fail(403, { ...kept, error: 'This key cannot pin notes: pinning is a write key’s.' });
 		if (!THOUGHT_ID.test(thought)) return fail(400, { ...kept, error: 'That is not a thought id: 36 characters of hex and hyphens, as a thought’s page shows it.' });
 		if (!note.trim()) return fail(400, { ...kept, error: 'Write the note first.' });
 		// Grouped as English groups it, whatever the server's locale (review pass 2).
 		if (note.trim().length > NOTE_MAX) return fail(400, { ...kept, error: `A note is at most ${NOTE_MAX.toLocaleString('en-US')} characters; this one is ${note.trim().length.toLocaleString('en-US')}.` });
 		// No Postgres text holds a NUL: the core's 500 (SMD-2534). Refused here, not stripped, since the note is the visitor's words.
 		if (note.includes('\0')) return fail(400, { ...kept, error: 'A note cannot hold a NUL character.' });
-		// The gate first, as the load's: an action runs before any load, so a plugin turned off, or a key that may call
-		// none of it, is the page's 404 here too, before any call.
-		const ex = await pluginAccess(event);
 		const answer = await ex.call('add_note', 'POST', '/notes', { thought_id: thought, note });
 		// Back at the form, the new note just above it, not at the top of a long list (review pass 2).
 		if (answer.ok) throw redirect(303, `${event.url.pathname}?thought=${thought.toLowerCase()}#pin`);

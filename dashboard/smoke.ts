@@ -237,7 +237,7 @@ const navOf = (html: string) => /<nav[^>]*aria-label="Views"[\s\S]*?<\/nav>/.exe
 const namesNotes = (html: string) => new RegExp(`<a[^>]*href="/dashboard${NOTES_PATH}"[^>]*>Notes</a`).test(navOf(html));
 const pin = async (thought: string, note: string) => {
   const r = await fetch(`${BASE}${NOTES_PATH}?thought=${thought}&/pin`, { method: "POST", redirect: "manual", headers: headers(FORM), body: new URLSearchParams({ thought_id: thought, note }).toString() });
-  return { status: r.status, location: r.headers.get("location") ?? "", html: await r.text() };
+  return { status: r.status, location: r.headers.get("location") ?? "", html: await r.text(), headers: r.headers };
 };
 /** The pin form as the page renders it: its action, unescaped, and its hidden fields — what a browser posts (review pass 4: the smoke built its own post, so a broken form passed). */
 const pinFormOf = (html: string) => {
@@ -276,6 +276,16 @@ async function notesArm() {
       const held = /href="\/dashboard\/thoughts\/([0-9a-f-]{36})"/.exec(home.html)?.[1] ?? NO_THOUGHT;
       const posted = await pin(held, "never pinned");
       assert(guiNotFound(posted), `…and its pin, on a thought the brain holds, is the GUI's 404 too (${posted.status})`);
+      // The gate before anything the post says (review pass 5: a malformed post was answered 400 first), and the page's
+      // data a 404 too — SvelteKit's error node, the request itself 200.
+      const malformed = await pin("not-an-id", "");
+      // As a script's own post asks (x-sveltekit-action): the action's answer alone, no load after it to 404 the page.
+      const asJson = await fetch(`${BASE}${NOTES_PATH}?/pin`, { method: "POST", redirect: "manual", headers: headers({ ...FORM, accept: "application/json", "x-sveltekit-action": "true" }), body: new URLSearchParams({ thought_id: "not-an-id", note: "" }).toString() });
+      const asJsonBody = await asJson.text();
+      const offData = await get(`${NOTES_PATH}/__data.json`);
+      let dataStatus = 0;
+      try { dataStatus = ((JSON.parse(offData.html) as { nodes?: ({ type?: string; status?: number } | null)[] }).nodes ?? []).find((n) => n?.type === "error")?.status ?? 0; } catch { /* asserted below */ }
+      assert(guiNotFound(malformed) && asJson.status === 404 && /"type":"error"/.test(asJsonBody) && dataStatus === 404, `…a malformed pin is the GUI's 404 as well, a script's own post of it the action's 404 error, and the page's data an error of 404 (${malformed.status}, ${asJson.status} ${asJsonBody.slice(0, 60)}, ${dataStatus})`);
     }
     await signOut();
     if (READ_KEY) {
@@ -317,7 +327,7 @@ async function notesArm() {
   const form = pinFormOf(before.html);
   assert(form.fields.thought_id === thought && form.action.startsWith(`/dashboard${NOTES_PATH}?thought=${thought}&/pin`), `…its pin form carries the thought and posts to its own action (${form.action})`);
   const posted = await fetch(`${ORIGIN}${form.action}`, { method: "POST", redirect: "manual", headers: headers(FORM), body: new URLSearchParams({ ...form.fields, note: `  ${lines.join("\r\n")}  ` }).toString() });
-  const pinned = { status: posted.status, location: posted.headers.get("location") ?? "" };
+  const pinned = { status: posted.status, location: posted.headers.get("location") ?? "", html: "", headers: posted.headers };
   await posted.text();
   assert(pinned.status === 303 && pinned.location === `/dashboard${NOTES_PATH}?thought=${thought}#pin`, `…the write key pins a note of 2,000 characters sent with CRLF breaks and spaces around it: 303 back to the thought's notes (${pinned.status} → ${pinned.location})`);
   const after = await get(`${NOTES_PATH}?thought=${thought}`);
@@ -336,6 +346,8 @@ async function notesArm() {
   assert(nowhere.status === 404 && nowhere.html.includes("holds no thought with that id"), `…a note on a thought the brain does not hold is refused in words (${nowhere.status})`);
   const unchanged = notesListed((await get(`${NOTES_PATH}?thought=${thought}`)).html).length;
   assert(unchanged === notesListed(after.html).length, `…none of them pinned (${unchanged})`);
+  // The write's answers too: the pin's redirect, the refusals' pages, the notes after it and their data (review pass 5).
+  assert(!(await keyIn([pinned, after, withNote, empty, tooLong, nul, nowhere], WRITE_KEY!)).leaked, "…and no answer of the pin's, its refusals' or the notes after it holds the key");
   await signOut();
   if (READ_KEY) {
     const r = await signIn(READ_KEY);
@@ -343,7 +355,8 @@ async function notesArm() {
     assert(r.status === 303 && namesNotes(h.html) && p.status === 200 && notesListed(p.html).some((li) => li.includes(`>${escaped}<`)) && !p.html.includes('data-testid="pin"'), `the read key's nav names Notes, and its page lists the note with no pin form (${r.status}, ${p.status})`);
     const refused = await pin(thought, "a read key's note");
     const again = await get(`${NOTES_PATH}?thought=${thought}`);
-    assert(refused.status === 403 && shownRefusal(refused.html, "This key cannot pin notes") && notesListed(again.html).length === notesListed(p.html).length, `…and its pin is refused by the core, said on the page, with nothing pinned (${refused.status})`);
+    assert(refused.status === 403 && shownRefusal(refused.html, "This key cannot pin notes") && notesListed(again.html).length === notesListed(p.html).length, `…and its pin is refused, said on the page, with nothing pinned (${refused.status})`);
+    assert(!(await keyIn([h, p, refused, again], READ_KEY)).leaked, "…and none of the read key's pages or answers holds its key");
     await signOut();
   }
 }
