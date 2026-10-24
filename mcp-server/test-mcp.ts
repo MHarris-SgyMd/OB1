@@ -20,7 +20,7 @@
  *   bun test-mcp.ts
  */
 
-import { createAssert, watchStream } from "../db/test-support.ts";
+import { createAssert, startedPort, watchStream } from "../db/test-support.ts";
 import { hashKey, type Principal } from "../server-portable/auth.ts";
 import type { Core } from "../server-portable/core/index.ts";
 import { ok, refuse, type Refusal } from "../server-portable/core/refusal.ts";
@@ -616,10 +616,9 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
     plugins: () => loadPlugins("example"),
   });
   const restServer = Bun.serve({ port: 0, fetch: (req) => exampleRest.fetch(req) });
-  const portHolder = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const entryPort = portHolder.port;
-  portHolder.stop(true);
-  const entry = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, PORT: String(entryPort), OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_PLUGINS: "example" }, stdout: "ignore", stderr: "pipe" });
+  // PORT 0: the entry binds a port no one holds and says which (SMD-3296).
+  const entry = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, PORT: "0", OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_PLUGINS: "example" }, stdout: "pipe", stderr: "pipe" });
+  const entryPort = await startedPort(watchStream(entry.stdout), 20_000);
   let entryTools: string[] = [];
   try {
     for (let i = 0; i < 100 && entryTools.length === 0; i++) {
@@ -790,10 +789,10 @@ console.log("\n[8f] The entry's stop: it waits for a tool call past its client's
     log: () => {},
   });
   const restServer = Bun.serve({ port: 0, fetch: (req) => hangingRest.fetch(req) });
-  const holder = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const port = holder.port;
-  holder.stop(true);
-  const entry = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, PORT: String(port), OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "" }, stdout: "pipe", stderr: "pipe" });
+  // PORT 0: the entry binds a port no one holds and says which (SMD-3296).
+  const entry = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, PORT: "0", OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "" }, stdout: "pipe", stderr: "pipe" });
+  const entryOut = watchStream(entry.stdout);
+  const port = await startedPort(entryOut, 20_000);
   let up = false;
   for (let i = 0; i < 100 && !up; i++) {
     up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false);
@@ -807,7 +806,7 @@ console.log("\n[8f] The entry's stop: it waits for a tool call past its client's
   clearTimeout(hung);
   await pending;
   restServer.stop(true);
-  const out = await new Response(entry.stdout).text();
+  const out = await entryOut.rest();
   const err = await new Response(entry.stderr).text();
   const lines = out.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as Record<string, unknown>);
   const cut = lines.filter((l) => l.door === "mcp" && l.tool === "thought_stats");
@@ -836,15 +835,15 @@ console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a colle
     plugins: () => loadPlugins("example"),
   });
   const restServer = Bun.serve({ port: 0, fetch: (req) => tracedRest.fetch(req) });
-  const holder = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const port = holder.port;
-  holder.stop(true);
+  // PORT 0: the entry binds a port no one holds and says which (SMD-3296).
   const entry = Bun.spawn(["bun", "index.ts"], {
     cwd: import.meta.dir,
-    env: { ...process.env, PORT: String(port), OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "example", OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collector.port}` },
+    env: { ...process.env, PORT: "0", OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "example", OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collector.port}` },
     stdout: "pipe",
     stderr: "pipe",
   });
+  const entryOut = watchStream(entry.stdout);
+  const port = await startedPort(entryOut, 20_000);
   let up = false;
   for (let i = 0; i < 100 && !up; i++) {
     up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false);
@@ -862,7 +861,7 @@ console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a colle
     const hung = setTimeout(() => entry.kill("SIGKILL"), 10_000);
     await entry.exited;
     clearTimeout(hung);
-    out = await new Response(entry.stdout).text();
+    out = await entryOut.rest();
     await tracing.flush();
   } finally {
     entry.kill();

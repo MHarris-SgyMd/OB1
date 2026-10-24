@@ -819,6 +819,16 @@ export function watchStream(stream: ReadableStream<Uint8Array>): { until: (patte
 const BUN_START_LINE = /^Started (?:development )?server: \S+:(\d+)\/?\r?\n/m;
 
 /**
+ * The port a child started at PORT 0 bound, as Bun's start line on its stdout says, waited for at most `ms`; 0 if
+ * the line never comes or the stream ends first. A port picked by binding 0 and freeing it for the child can be
+ * taken by another server in between, whose answers then read as the child's (SMD-3263, SMD-3296): a child given
+ * PORT 0 binds a port no one else holds.
+ */
+export async function startedPort(stdout: ReturnType<typeof watchStream>, ms: number): Promise<number> {
+  return (await stdout.until(BUN_START_LINE, ms)) ? Number(BUN_START_LINE.exec(stdout.sofar())![1]) : 0;
+}
+
+/**
  * A server entry run as the image runs it (`bun --no-env-file <entry>`), on a
  * port of its own, with `env` beside PATH, HOME and PORT and no other: `up`
  * once its /health answers (30 s at most, each poll 1 s, none once it has
@@ -846,7 +856,7 @@ export async function serveChild(cwd: string, entry: string, env: Record<string,
   const err = watchStream(child.stderr);
   const deadline = Date.now() + 30_000;
   // 0 until the start line comes; never, for a child that exits first.
-  const port = (await out.until(BUN_START_LINE, deadline - Date.now())) ? Number(BUN_START_LINE.exec(out.sofar())![1]) : 0;
+  const port = await startedPort(out, deadline - Date.now());
   let up = false;
   while (port > 0 && Date.now() < deadline && child.exitCode === null && child.signalCode === null && !(up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false))) await Bun.sleep(100);
   const sdk = waitForSdk ? await err.until(/ go to \S+ over OTLP\/HTTP/, 20_000) : false;

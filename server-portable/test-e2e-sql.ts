@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { applyMigrations, createAssert, plantLegacyRow, resetSchema, runScript } from "../db/test-support.ts";
+import { applyMigrations, createAssert, plantLegacyRow, resetSchema, runScript, startedPort, watchStream } from "../db/test-support.ts";
 import { readdirSync } from "node:fs";
 import { FORK_VERSION } from "../db/version.mjs";
 import { join, dirname } from "node:path";
@@ -3363,14 +3363,13 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at) VALUES (${jobId}::uuid, 'scan_thoughts', ${hashKey("e2e-key")}, 'e2e', 'running', now())`;
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${apiJob}::uuid, 'scan_thoughts', ${hashKey("e2e-key")}, 'e2e', 'running', now(), 'open-brain-api')`;
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${otherJob}::uuid, 'scan_thoughts', ${hashKey("e2e-key")}, 'e2e', 'running', now(), 'open-brain-elsewhere')`;
-  const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const port = free.port;
-  free.stop(true);
+  // PORT 0: the child binds a port no one holds and says which (SMD-3296).
   const child = Bun.spawn([process.execPath, "api.ts"], {
     cwd: dirname(fileURLToPath(import.meta.url)),
-    env: { ...process.env, PORT: String(port), MCP_ACCESS_KEYS: "", MCP_ACCESS_KEY: "e2e-key" },
-    stdout: "ignore", stderr: "pipe",
+    env: { ...process.env, PORT: "0", MCP_ACCESS_KEYS: "", MCP_ACCESS_KEY: "e2e-key" },
+    stdout: "pipe", stderr: "pipe",
   });
+  const port = await startedPort(watchStream(child.stdout), 20_000);
   let status = "running";
   try {
     const deadline = Date.now() + 15_000;

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { askRaw, createAssert, leaveMidUpload, pendingSettled, requestHead, RuntimeUrl, serveChild } from "../db/test-support.ts";
+import { askRaw, createAssert, leaveMidUpload, pendingSettled, requestHead, RuntimeUrl, serveChild, startedPort, watchStream } from "../db/test-support.ts";
 import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES, UNLOCKS, type ToolScope } from "./tools.ts";
 import { openApiDocument } from "./rest/openapi.ts";
@@ -1598,13 +1598,18 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
   const { HEALTH_DEADLINE_MS } = await import("./core/reads.ts");
   // The REST core's keyed /health (SMD-2287 PR 6a: index.ts's answered `ok` as text; the MCP server's comes from here).
   const OK_BODY = JSON.stringify({ status: "ok" });
+  // A port nothing listens on, for the database that refuses: bound for a moment and freed. Each child binds PORT 0
+  // and says its port, so neither can be handed one another server takes in between (SMD-3296).
   const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
-  const child = (port: number, databaseUrl: string) => Bun.spawn(["bun", "--no-env-file", "api.ts"], {
-    cwd: import.meta.dir,
-    env: { ...process.env, PORT: String(port), DATABASE_URL: databaseUrl, MCP_ACCESS_KEY: KEY, OB1_GIT_SHA: "c0ffee1" },
-    stdout: "ignore",
-    stderr: "ignore",
-  });
+  const child = async (databaseUrl: string) => {
+    const proc = Bun.spawn(["bun", "--no-env-file", "api.ts"], {
+      cwd: import.meta.dir,
+      env: { ...process.env, PORT: "0", DATABASE_URL: databaseUrl, MCP_ACCESS_KEY: KEY, OB1_GIT_SHA: "c0ffee1" },
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    return { proc, port: await startedPort(watchStream(proc.stdout), 20_000) };
+  };
   const up = async (port: number) => {
     for (let i = 0; i < 100; i++) {
       if (await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok, () => false)) return true;
@@ -1619,10 +1624,8 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
     return { took, status: r instanceof Response ? r.status : r.name, body: r instanceof Response ? await r.text() : "" };
   };
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  const silentPort = freePort();
-  const quiet = child(silentPort, `postgres://u:p@127.0.0.1:${silent.port}/db`);
-  const refusedPort = freePort();
-  const refusing = child(refusedPort, `postgres://u:p@127.0.0.1:${freePort()}/db`);
+  const [quiet, refusing] = await Promise.all([child(`postgres://u:p@127.0.0.1:${silent.port}/db`), child(`postgres://u:p@127.0.0.1:${freePort()}/db`)]);
+  const silentPort = quiet.port, refusedPort = refusing.port;
   try {
     assert(await up(silentPort) && await up(refusedPort), "both child servers answer a keyless probe");
     const get = await keyed(silentPort, "GET");
@@ -1637,8 +1640,8 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
       `keyed GET /health, the database refusing → the record with the database's error in ${Math.round(refused.took)} ms (${info.database?.error})`);
     assert(info.version === FORK_VERSION && info.commit === "c0ffee1", `…carrying the server's own facts — the commit OB1_GIT_SHA names (${info.commit})`);
   } finally {
-    quiet.kill();
-    refusing.kill();
+    quiet.proc.kill();
+    refusing.proc.kill();
     silent.stop(true);
   }
 }
@@ -1655,22 +1658,22 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   // these rows fail on. Then the bounds against a stand-in server, the call
   // count, the grace period's parse and where compose and preflight read it.
   const { HEALTH_DEADLINE_MS } = await import("./core/reads.ts");
-  const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
   // stdout and stderr both read: the per-request lines are warnings. A child is the REST core, on the database that
   // never replies, or the MCP server's entry (SMD-2287 PR 6a), its REST core a listener that never answers, so a
-  // keyed call stalls at its whoami as one stalls at the registry lookup.
-  const start = (env: Record<string, string> = {}, entry: "api" | "mcp" = "api") => {
-    const port = freePort();
+  // keyed call stalls at its whoami as one stalls at the registry lookup. Each binds PORT 0 and says its port: eight
+  // start at once, and a port picked here and freed could go to another child first, whose answers and stop would
+  // then read as this one's (SMD-3296).
+  const start = async (env: Record<string, string> = {}, entry: "api" | "mcp" = "api") => {
     const proc = Bun.spawn(["bun", "--no-env-file", entry === "api" ? "api.ts" : "index.ts"], {
       cwd: entry === "api" ? import.meta.dir : `${import.meta.dir}/../mcp-server`,
-      env: { ...process.env, PORT: String(port), DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, MCP_ACCESS_KEY: KEY,
+      env: { ...process.env, PORT: "0", DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, MCP_ACCESS_KEY: KEY,
         ...(entry === "mcp" ? { OB1_REST_URL: `http://127.0.0.1:${silent.port}`, OB1_FORWARDER_KEY: "f".repeat(64), OB1_PLUGINS: "" } : {}), ...env },
       stdout: "pipe",
       stderr: "pipe",
     });
-    const err = new Response(proc.stderr).text();
-    return { port, proc, out: new Response(proc.stdout).text().then(async (o) => o + (await err)) };
+    const stdout = watchStream(proc.stdout), stderr = watchStream(proc.stderr);
+    return { port: await startedPort(stdout, 20_000), proc, out: stdout.rest().then(async (o) => o + (await stderr.rest())) };
   };
   const up = async (port: number) => {
     for (let i = 0; i < 200; i++) {
@@ -1686,22 +1689,25 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     return code;
   };
 
-  const busy = start();
-  // A malformed grace period: said, and read as the default (8 s of drain).
-  const idle = start({ OB1_STOP_GRACE: "soon" });
-  // With no connection string its store never builds, so it holds no pool: its stop must not say it closed one
-  // (review pass 2; this child ran the PostgREST store, which held none, until SMD-3152 retired it).
-  const ctrlC = start({ DATABASE_URL: "" });
-  const cutter = start({}, "mcp");
-  // OB1_STOP_GRACE=3: the drain's bound is 1 s, so the real bound cuts on real Bun in a second.
-  const graced = start({ OB1_STOP_GRACE: "3" }, "mcp");
-  // A drained stop with a record still open (SMD-1849 PR 2c review pass 3).
-  const leftBehind = start({ OB1_STOP_GRACE: "10" }, "mcp");
   // A tool call running past its client at the stop (SMD-2250 review pass 3, SMD-3201): the MCP server's entry over a
   // REST core of its own, with no store, so the call runs to its embedding, which this suite's provider stub holds.
   const stopForwarder = "e".repeat(64);
-  const callingCore = start({ DATABASE_URL: "", MCP_ACCESS_KEYS: [process.env.MCP_ACCESS_KEYS, `stop-forwarder:forward:${hashKey(stopForwarder)}`].filter(Boolean).join(",") });
-  const calling = start({ OB1_REST_URL: `http://127.0.0.1:${callingCore.port}`, OB1_FORWARDER_KEY: stopForwarder }, "mcp");
+  const [busy, idle, ctrlC, cutter, graced, leftBehind, callingCore] = await Promise.all([
+    start(),
+    // A malformed grace period: said, and read as the default (8 s of drain).
+    start({ OB1_STOP_GRACE: "soon" }),
+    // With no connection string its store never builds, so it holds no pool: its stop must not say it closed one
+    // (review pass 2; this child ran the PostgREST store, which held none, until SMD-3152 retired it).
+    start({ DATABASE_URL: "" }),
+    start({}, "mcp"),
+    // OB1_STOP_GRACE=3: the drain's bound is 1 s, so the real bound cuts on real Bun in a second.
+    start({ OB1_STOP_GRACE: "3" }, "mcp"),
+    // A drained stop with a record still open (SMD-1849 PR 2c review pass 3).
+    start({ OB1_STOP_GRACE: "10" }, "mcp"),
+    start({ DATABASE_URL: "", MCP_ACCESS_KEYS: [process.env.MCP_ACCESS_KEYS, `stop-forwarder:forward:${hashKey(stopForwarder)}`].filter(Boolean).join(",") }),
+  ]);
+  // Its REST core's port known, the calling MCP server starts.
+  const calling = await start({ OB1_REST_URL: `http://127.0.0.1:${callingCore.port}`, OB1_FORWARDER_KEY: stopForwarder }, "mcp");
   try {
     assert(await up(busy.port) && await up(idle.port) && await up(ctrlC.port) && await up(cutter.port) && await up(graced.port) && await up(leftBehind.port)
       && await up(callingCore.port) && await up(calling.port), "eight child servers answer a keyless probe (the first request, which hands the handlers the server)");
