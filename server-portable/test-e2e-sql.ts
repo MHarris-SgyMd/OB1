@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { applyMigrations, createAssert, plantLegacyRow, resetSchema, runScript, startedPort, watchStream } from "../db/test-support.ts";
+import { answersHealth, applyMigrations, createAssert, plantLegacyRow, resetSchema, REST_HEALTH_BODY, runScript, startedPort, watchStream } from "../db/test-support.ts";
 import { readdirSync } from "node:fs";
 import { FORK_VERSION } from "../db/version.mjs";
 import { join, dirname } from "node:path";
@@ -3377,10 +3377,8 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
     while (!answered && Date.now() < deadline) {
       // Keyless: liveness, which reads no store — the reconcile below is the
       // start-up's, not a request's (SMD-2284 PR 3 review pass 1).
-      // The REST core's own keyless body, not any 200: a server that took the child's port would pass a status alone
-      // (SMD-3296 review pass 1).
-      answered = await realFetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) })
-        .then((r) => r.text().then((t) => r.ok && t === JSON.stringify({ status: "ok" }))).catch(() => false);
+      // The REST core's own keyless body (SMD-3296), through the fetch this suite does not stub.
+      answered = await answersHealth(port, REST_HEALTH_BODY, { signal: AbortSignal.timeout(2_000) }, realFetch);
       if (!answered) await Bun.sleep(100);
     }
     assert(answered, "the entry answers a keyless /health, which builds no store");

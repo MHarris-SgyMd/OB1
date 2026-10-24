@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { askRaw, createAssert, leaveMidUpload, pendingSettled, quietPort, requestHead, RuntimeUrl, serveChild, startedPort, watchStream } from "../db/test-support.ts";
+import { answersHealth, askRaw, createAssert, leaveMidUpload, MCP_HEALTH_BODY, pendingSettled, quietPort, requestHead, REST_HEALTH_BODY, RuntimeUrl, serveChild, startedPort, watchStream } from "../db/test-support.ts";
 import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES, UNLOCKS, type ToolScope } from "./tools.ts";
 import { openApiDocument } from "./rest/openapi.ts";
@@ -1609,12 +1609,10 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
     });
     return { proc, port: await startedPort(watchStream(proc.stdout), 20_000) };
   };
-  // Up when the REST core's own keyless body answers, not any 200: a server that took the child's port would pass a
-  // status alone (SMD-3296 review pass 1).
+  // Up when the REST core's own keyless body answers (SMD-3296).
   const up = async (port: number) => {
     for (let i = 0; i < 100; i++) {
-      // The body read inside the catch too: one cut while it arrives is a retry, not a throw (review pass 2).
-      if (await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.text().then((t) => r.ok && t === OK_BODY)).catch(() => false)) return true;
+      if (await answersHealth(port, REST_HEALTH_BODY)) return true;
       await Bun.sleep(50);
     }
     return false;
@@ -1665,9 +1663,9 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
   // stdout and stderr both read: the per-request lines are warnings. A child is the REST core, on the database that
   // never replies, or the MCP server's entry (SMD-2287 PR 6a), its REST core a listener that never answers, so a
-  // keyed call stalls at its whoami as one stalls at the registry lookup. Each binds PORT 0 and says its port: eight
-  // start at once, and a port picked here and freed could go to another child first, whose answers and stop would
-  // then read as this one's (SMD-3296).
+  // keyed call stalls at its whoami as one stalls at the registry lookup. Each binds PORT 0 and says its port: seven
+  // start at once, then the MCP server in front of their REST core, and a port picked here and freed could go to
+  // another child first, whose answers and stop would then read as this one's (SMD-3296).
   const start = async (env: Record<string, string> = {}, entry: "api" | "mcp" = "api") => {
     const proc = Bun.spawn(["bun", "--no-env-file", entry === "api" ? "api.ts" : "index.ts"], {
       cwd: entry === "api" ? import.meta.dir : `${import.meta.dir}/../mcp-server`,
@@ -1678,14 +1676,13 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     });
     const stdout = watchStream(proc.stdout), stderr = watchStream(proc.stderr);
     // Its keyless /health body: the REST core's record, the MCP server's entry's plain `ok`.
-    const health = entry === "api" ? JSON.stringify({ status: "ok" }) : "ok";
+    const health = entry === "api" ? REST_HEALTH_BODY : MCP_HEALTH_BODY;
     return { port: await startedPort(stdout, 20_000), proc, health, out: stdout.rest().then(async (o) => o + (await stderr.rest())) };
   };
-  // Up when the child's own keyless body answers, not any 200: a server that took its port would pass a status alone
-  // (SMD-3296 review pass 1).
+  // Up when the child's own keyless body answers (SMD-3296).
   const up = async ({ port, health }: { port: number; health: string }) => {
     for (let i = 0; i < 200; i++) {
-      if (await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.text().then((t) => r.ok && t === health)).catch(() => false)) return true;
+      if (await answersHealth(port, health)) return true;
       await Bun.sleep(50);
     }
     return false;
@@ -1762,7 +1759,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
 
     // A keyed request first, its answer the row's: the child was serving when SIGINT landed. With no connection string
     // its start built no store, so the stop has no pool to say (SMD-3296 review passes 1–3).
-    const keyedCtrlC = await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY }, signal: AbortSignal.timeout(5_000) }).then((r) => r.status, () => 0);
+    const keyedCtrlC = await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY }, signal: AbortSignal.timeout(5_000) }).then((r) => r.status, (e: Error) => e.name);
     ctrlC.proc.kill("SIGINT");
     const intCode = await exited(ctrlC.proc, 3_000);
     const intLog = await ctrlC.out;
@@ -1775,8 +1772,8 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     // on), in a fraction of the 8 s. Holds the entry's flag, which picks the
     // cut line, on real Bun (review pass 2).
     const tc = performance.now();
-    // Each stalled call bounded, its timeout said as its own outcome: a call another process answered would otherwise
-    // hang the suite rather than fail the row (SMD-3296 review pass 1).
+    // Each stalled call bounded, its timeout said as its own outcome: a call no child cuts would otherwise hang the
+    // suite rather than fail the row (SMD-3296).
     const outcome = (r: Response) => `answered ${r.status}`;
     const failed = (e: Error) => (e.name === "TimeoutError" ? "no answer in 10 s" : "cut off");
     const stalled = fetch(`http://127.0.0.1:${cutter.port}/mcp`, {

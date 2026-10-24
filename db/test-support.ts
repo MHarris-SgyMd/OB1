@@ -828,18 +828,32 @@ export async function startedPort(stdout: ReturnType<typeof watchStream>, ms: nu
   return (await stdout.until(BUN_START_LINE, ms)) ? Number(BUN_START_LINE.exec(stdout.sofar())![1]) : 0;
 }
 
+/** The REST core's keyless /health body, and the MCP server's entry's. */
+export const REST_HEALTH_BODY = JSON.stringify({ status: "ok" });
+export const MCP_HEALTH_BODY = "ok";
+
+/**
+ * Whether a server at 127.0.0.1:`port` answers its keyless /health 200 with `body`: its own body, not any 200, which
+ * on macOS another process's 127.0.0.1 listener beside the child's dual-stack port could give. A read cut short is a
+ * no, never a throw. `fetcher` for a suite that stubs the global fetch (SMD-3296).
+ */
+export function answersHealth(port: number, body: string, init: RequestInit = {}, fetcher: typeof fetch = fetch): Promise<boolean> {
+  return fetcher(`http://127.0.0.1:${port}/health`, init).then((r) => r.text().then((t) => r.ok && t === body)).catch(() => false);
+}
+
 /**
  * A port that refuses, for a stub that must refuse until it binds or a database that refuses: free when picked, and
  * below the kernels' default ranges for port 0 (Linux 32768–60999, macOS 49152–65535), so no server bound at port 0,
- * a child at PORT 0 included, can be handed it once it is freed (SMD-3296 review pass 2). Free when bound on
- * 127.0.0.1, which every child dials, on 0.0.0.0 and dual-stack: on macOS each of those binds alone sits beside
- * another process's listener on one of the others, which would then answer for the port (review pass 3).
+ * a child at PORT 0 included, can be handed it once it is freed (SMD-3296). Free when bound on 127.0.0.1, which
+ * every child dials, and on 0.0.0.0: on macOS a 127.0.0.1 bind sits beside another process's 0.0.0.0 or :: listener,
+ * and a 0.0.0.0 bind beside a 127.0.0.1 one, either of which would then answer for the port. On Linux either bind
+ * alone sees all three.
  */
 export function quietPort(): number {
   for (let tries = 0; tries < 100; tries++) {
     const port = 20_000 + Math.floor(Math.random() * 10_000);
     try {
-      for (const hostname of ["127.0.0.1", "0.0.0.0", undefined]) Bun.serve({ port, ...(hostname ? { hostname } : {}), fetch: () => new Response(null) }).stop(true);
+      for (const hostname of ["127.0.0.1", "0.0.0.0"]) Bun.serve({ port, hostname, fetch: () => new Response(null) }).stop(true);
       return port;
     } catch {}
   }
