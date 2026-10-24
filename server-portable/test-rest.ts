@@ -1442,32 +1442,38 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   // pass 2, SMD-2902). A collector that answers in 1.5 s gets everything; one that never answers is cut at the bound,
   // and what each signal held is said by count before the stop's line, not read as sent because the batch was empty.
   // The batch's delay at 200 ms (OTEL_BSP_SCHEDULE_DELAY), so its export is on its way well before the stop.
-  const stopWith = async (answer: (req: Request) => Response | Promise<Response>, env: Record<string, string> = {}, more = 0, waitFor: (RegExp | (() => Promise<unknown>))[] = []) => {
-    const collector = Bun.serve({ port: 0, idleTimeout: 0, fetch: answer });
-    // Read before the stop: a stopped server's port is not its port.
-    const port = collector.port;
-    const child = await serveChild(import.meta.dir, "api.ts", { ...STUB, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${port}`, OTEL_BSP_SCHEDULE_DELAY: "200", OB1_STOP_GRACE: "4", ...env }, { waitForSdk: true });
+  const stopWith = async (name: string, answer: (req: Request) => Response | Promise<Response>, env: Record<string, string> = {}, more = 0, waitFor: (RegExp | (() => Promise<unknown>))[] = []) => {
+    let collector: ReturnType<typeof Bun.serve> | undefined;
+    let child: Awaited<ReturnType<typeof serveChild>> | undefined;
+    let port = 0;
     let out = "";
     // The waits that ran out, named in a failing row's message (review pass 1).
     const missed: string[] = [];
     try {
-      const hit = () => fetch(`http://127.0.0.1:${child.port}/v1/whoami`).then((r) => r.text());
+      collector = Bun.serve({ port: 0, idleTimeout: 0, fetch: answer });
+      // Read before the stop: a stopped server's port is not its port.
+      port = collector.port!;
+      const started = await serveChild(import.meta.dir, "api.ts", { ...STUB, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${port}`, OTEL_BSP_SCHEDULE_DELAY: "200", OB1_STOP_GRACE: "4", ...env }, { waitForSdk: true });
+      child = started;
+      const hit = () => fetch(`http://127.0.0.1:${started.port}/v1/whoami`).then((r) => r.text());
       await hit();
       await Bun.sleep(700); // past the batch's delay: its export is on its way, the batch empty
       // Then what the case waits on, each up to 10 s: a deadline's line comes when it comes, not at a guessed sleep.
-      for (const wait of waitFor) if (wait instanceof RegExp && !(await child.until(wait, 10_000))) missed.push(`no ${wait.source} within 10 s`); else if (!(wait instanceof RegExp)) await wait();
+      for (const wait of waitFor) if (wait instanceof RegExp && !(await started.until(wait, 10_000))) missed.push(`no ${wait.source} within 10 s`); else if (!(wait instanceof RegExp)) await wait();
       await Promise.all(Array.from({ length: more }, hit)); // then more, at once, behind it
-      out = await child.stop();
+      out = await started.stop();
     } catch (e) {
-      // Said, never thrown: a case that threw would leave the others' children running (SMD-3263). Its rows fail on its
-      // empty output, and those that name what was missed name this.
-      missed.push(`threw: ${e instanceof Error ? e.message : e}`);
-      console.log(`  a stop case threw: ${e instanceof Error ? e.message : e}`);
+      // Said, never thrown: thrown inside [12]'s Promise.all, a case would end the suite with the others' children
+      // running (SMD-3263). The child's own output is kept, so its rows fail saying why.
+      const why = `threw: ${e instanceof Error ? e.message : e}`;
+      missed.push(why);
+      console.log(`  the ${name} stop case ${why}`);
+      out = (await child?.stop().catch(() => "")) ?? "";
     } finally {
-      child.kill();
-      collector.stop(true);
+      child?.kill();
+      collector?.stop(true);
     }
-    return { up: child.up && child.sdk, out, port, missed: missed.join("; "), line: out.split("\n").find((l) => l.startsWith("SIGTERM: stopped")) ?? "" };
+    return { name, up: !!child?.up && !!child?.sdk, out, port, missed: missed.join("; "), line: out.split("\n").find((l) => l.startsWith("SIGTERM: stopped")) ?? "" };
   };
   // Three of the collectors the cases answer with — one that trickles, one that rejects in part, one that pushes back —
   // each told at its case's rows below.
@@ -1489,25 +1495,28 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     return Response.json({});
   };
   // The nine cases start at once and are awaited together, so [12] takes its longest case, not their sum: each has its
-  // own collector and child, and shares nothing but the tally (SMD-3263). Their rows follow, in this order.
-  const [slow, hung, crowded, trickled, rejected, perSignal, noSpans, hungFirst, pushedBack] = await Promise.all([
-    stopWith(async () => { await Bun.sleep(1_500); return Response.json({}); }),
-    stopWith(() => new Promise<Response>(() => {})),
-    stopWith(() => new Promise<Response>(() => {}), {
+  // own collector and child, and shares nothing but the tally: each child binds a port of its own, which serveChild reads
+  // from it, so no case's port is picked while another's is free (SMD-3263). Their rows follow, in this order, each
+  // case's result read by its name, not its place in the list (review pass 1: two places swapped passed slow's and
+  // pushedBack's rows).
+  const { slow, hung, crowded, trickled, rejected, perSignal, noSpans, hungFirst, pushedBack } = Object.fromEntries((await Promise.all([
+    stopWith("slow", async () => { await Bun.sleep(1_500); return Response.json({}); }),
+    stopWith("hung", () => new Promise<Response>(() => {})),
+    stopWith("crowded", () => new Promise<Response>(() => {}), {
       OTEL_BLRP_SCHEDULE_DELAY: "200", OTEL_BSP_MAX_QUEUE_SIZE: "1", OTEL_BSP_MAX_EXPORT_BATCH_SIZE: "1", OTEL_BLRP_MAX_QUEUE_SIZE: "1", OTEL_BLRP_MAX_EXPORT_BATCH_SIZE: "1",
     }, 4),
-    stopWith(trickle, { OTEL_EXPORTER_OTLP_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200" }, 0, [/telemetry: 1 span not sent to \S+ \(no answer in time\)/, /telemetry: 1 log record not sent to \S+ \(no answer in time\)/]),
-    stopWith(partial, { OTEL_BLRP_SCHEDULE_DELAY: "200" }),
-    stopWith(trickle, { OTEL_EXPORTER_OTLP_TRACES_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200" }, 0, [/telemetry: 1 span not sent to \S+ \(no answer in time\)/]),
-    stopWith(partial, { OTEL_BLRP_SCHEDULE_DELAY: "200", OTEL_TRACES_EXPORTER: "none" }),
-    stopWith(() => new Promise<Response>(() => {}), { OTEL_EXPORTER_OTLP_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200" }, 0,
+    stopWith("trickled", trickle, { OTEL_EXPORTER_OTLP_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200" }, 0, [/telemetry: 1 span not sent to \S+ \(no answer in time\)/, /telemetry: 1 log record not sent to \S+ \(no answer in time\)/]),
+    stopWith("rejected", partial, { OTEL_BLRP_SCHEDULE_DELAY: "200" }),
+    stopWith("perSignal", trickle, { OTEL_EXPORTER_OTLP_TRACES_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200" }, 0, [/telemetry: 1 span not sent to \S+ \(no answer in time\)/]),
+    stopWith("noSpans", partial, { OTEL_BLRP_SCHEDULE_DELAY: "200", OTEL_TRACES_EXPORTER: "none" }),
+    stopWith("hungFirst", () => new Promise<Response>(() => {}), { OTEL_EXPORTER_OTLP_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200" }, 0,
       [/telemetry: 1 span not sent to \S+ \(timed out\)/, /telemetry: 1 log record not sent to \S+ \(timed out\)/]),
-    stopWith(pushback, { OTEL_EXPORTER_OTLP_TIMEOUT: "5000", OTEL_BLRP_SCHEDULE_DELAY: "200", OB1_STOP_GRACE: "4" }, 0, [async () => {
+    stopWith("pushedBack", pushback, { OTEL_EXPORTER_OTLP_TIMEOUT: "5000", OTEL_BLRP_SCHEDULE_DELAY: "200", OB1_STOP_GRACE: "4" }, 0, [async () => {
       const until = Date.now() + 15_000;
       while (answeredLate < 2 && Date.now() < until) await Bun.sleep(100);
       await Bun.sleep(300); // the SDK's callback, a tick after the answer
     }]),
-  ]);
+  ])).map((c) => [c.name, c]));
   const within = Number(/telemetry not all sent within (\d+) ms; exit 0$/.exec(hung.line)?.[1] ?? NaN);
   const stoppedIn = Number(/stopped in ([\d.]+) s/.exec(hung.line)?.[1] ?? NaN);
   const cutLines = hung.out.split("\n").filter((l) => l.includes(`not sent to http://127.0.0.1:${hung.port} (on its way or batched when the flush's ${within} ms ran out)`));
@@ -1566,13 +1575,14 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   // A collector that hangs from its first attempt fails at the exporter's own timeout, as timed out, before the
   // watcher's deadline (twice that, plus 2 s) could call it no answer in time.
   assert(hungFirst.up && /telemetry: 1 span not sent to \S+ \(timed out\)/.test(hungFirst.out) && /telemetry: 1 log record not sent to \S+ \(timed out\)/.test(hungFirst.out) && !hungFirst.out.includes("(no answer in time)"),
-    `a collector that hangs: timed out at the exporter's timeout, never no answer in time (${hungFirst.out.split("\n").filter((l) => l.includes("not sent")).join(" / ")}${hungFirst.missed ? `; ${hungFirst.missed}` : ""})`);
+    `a collector that hangs: timed out at the exporter's timeout, never no answer in time (${hungFirst.out.split("\n").filter((l) => l.includes("not sent")).join(" / ") || "no line said"}; ${hungFirst.up ? "up" : "not up"}; ${hungFirst.line}${hungFirst.missed ? `; ${hungFirst.missed}` : ""})`);
   // A collector that pushes back — 503 with Retry-After: 4, then an answer 4 s on — at a 5 s timeout: the SDK retries
   // when the wait fits what is left, and that attempt ends past the timeout plus 2 s (about 8 s), inside twice it plus
   // 2 s (12 s). Answered at all, it is sent: no line, and the stop has nothing left (review pass 1: a deadline of the
-  // timeout plus 2 s counted such an export as not sent).
-  assert(pushedBack.up && answeredLate === 2 && !pushedBack.out.includes("not sent") && /; telemetry sent; exit 0$/.test(pushedBack.line),
-    `a collector that answers after a Retry-After, past the timeout plus 2 s: sent, nothing said (${answeredLate} answered late; ${pushedBack.out.split("\n").filter((l) => l.includes("not sent")).join(" / ") || "none"}; ${pushedBack.line})`);
+  // timeout plus 2 s counted such an export as not sent). Each signal's two attempts are counted, so a collector that
+  // never pushed back cannot pass it (SMD-3263 review pass 1).
+  assert(pushedBack.up && answeredLate === 2 && seen["/v1/traces"] === 2 && seen["/v1/logs"] === 2 && !pushedBack.out.includes("not sent") && /; telemetry sent; exit 0$/.test(pushedBack.line),
+    `a collector that answers after a Retry-After, past the timeout plus 2 s: sent, nothing said (${answeredLate} answered late, attempts ${JSON.stringify(seen)}; ${pushedBack.out.split("\n").filter((l) => l.includes("not sent")).join(" / ") || "none"}; ${pushedBack.line})`);
 }
 
 console.log("\n[16] The served idle timeout is Bun's ceiling: its 10 s default cuts a GET whose handler has not answered (SMD-2287 PR 3a review pass 3)");
