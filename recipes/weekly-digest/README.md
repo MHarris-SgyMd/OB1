@@ -35,8 +35,9 @@ TELEGRAM_BOT_TOKEN=… TELEGRAM_CHAT_ID=… \
 
 The verb keeps the recipe's behaviour — a `--window` of days, importance ranking
 (from `metadata.importance`, widening when a quiet week clears too few), the
-`restricted`/`personal` sensitivity exclusion (fail-closed when the column is
-absent, unless `--no-sensitivity-filter`), and `--output telegram|stdout|file` —
+`restricted`/`personal` sensitivity exclusion, by the column or by a row's
+`metadata.sensitivity_tier` (fail-closed when the column is absent, unless
+`--no-sensitivity-filter`), and `--output telegram|stdout|file` —
 and adds the gate: both the LLM synthesis and the Telegram send are decided by
 the egress policy, so brain content leaves only when an operator opts the digest
 in (`OB1_EGRESS_ALLOW=type:digest`, or `source:weekly-digest`, or `actor:<key>`).

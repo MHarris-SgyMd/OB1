@@ -4230,6 +4230,24 @@ function typecheckSurfaceProblems({ packages, tsconfigs, tscSteps }: TypecheckSu
   for (const d of tscSteps) if (!TYPECHECKED_DIRS.includes(d)) problems.push([WORKFLOW, `runs \`bunx tsc --noEmit\` under ${d}, which TYPECHECKED_DIRS in ${SELF} does not name — add it there, with its pins and tsconfig, or take it out of the step that type-checks it (SMD-1932)`]);
   return problems;
 }
+/**
+ * A SvelteKit directory's typecheck as CI writes it: `bun run check` (svelte-kit
+ * sync, then svelte-check) in a step's working-directory, the whole command
+ * (SMD-2280 PR 2b). Not a tsc step for check 18 — the directory's tsconfig
+ * extends the one `svelte-kit sync` generates, and its pins are SvelteKit's —
+ * but check 35's typecheck all the same, which ci-parity.sh's `typecheck DIR`
+ * runs the same way for a directory holding svelte.config.js.
+ */
+const SVELTE_CHECK_STEP = /^\s*bun run check\s*$/;
+function svelteCheckStepsIn(doc: WorkflowDoc): string[] {
+  const out: string[] = [];
+  for (const job of Object.values(doc?.jobs ?? {})) {
+    for (const step of job?.steps ?? []) {
+      if (typeof step?.run === "string" && SVELTE_CHECK_STEP.test(step.run)) out.push(posix.normalize(step["working-directory"] ?? "."));
+    }
+  }
+  return out;
+}
 /** Each directory a parsed workflow type-checks, in order: a `bunx tsc --noEmit` step's working-directory, and each directory a TSC_SCRIPT step names. */
 function tscStepsIn(doc: WorkflowDoc) {
   const out: string[] = [];
@@ -8582,6 +8600,9 @@ function checkCiParity() {
     const got = scriptRunsIn("probe.yml", Bun.YAML.parse(yaml)).map((r) => `${r.dirs[r.dirs.length - 1]}|${r.script}|${r.args}|${JSON.stringify(Object.fromEntries(Object.entries(r.env).sort(([a], [b]) => a.localeCompare(b))))}`).sort();
     if (JSON.stringify(got) !== JSON.stringify(expected)) fail(SELF, `check 35 no longer reads exactly ${JSON.stringify(expected)} for its probe "${what}" (read ${JSON.stringify(got)})`);
   }
+  // SMD-2280 PR 2b: `bun run check` alone in a step is a typecheck of its working-directory; one in a chain is not read.
+  const svelteRead = svelteCheckStepsIn({ jobs: { a: { steps: [{ "working-directory": "dashboard", run: "bun run check" }, { "working-directory": "x", run: "bun run check && bun run build" }, { run: "bun run checks" }] } } } as unknown as WorkflowDoc);
+  if (JSON.stringify(svelteRead) !== JSON.stringify(["dashboard"])) fail(SELF, `check 35 no longer reads a lone \`bun run check\` step as its directory's typecheck, and nothing else (read ${JSON.stringify(svelteRead)})`);
   const probeLines = parityLinesIn(PARITY_PROBE_TEXT);
   if (probeLines.runs.length !== 4 || probeLines.typechecks.length !== 2 || probeLines.runs[1].env.OB1_FIXTURE_RESET !== "1") fail(SELF, `check 35 no longer reads its probe ci-parity text as four runs (one with OB1_FIXTURE_RESET) and two typechecks (read ${JSON.stringify(probeLines)})`);
   for (const [what, text, ci, tsc, expected] of PARITY_PROBES) {
@@ -8592,7 +8613,8 @@ function checkCiParity() {
   let doc: unknown;
   try { doc = Bun.YAML.parse(readFileSync(join(ROOT, SUITE_WORKFLOW), "utf8")); } catch (e) { fail(SUITE_WORKFLOW, `does not parse, so check 35 cannot read what its steps run: ${(e as Error).message}`); return; }
   const ci = scriptRunsIn(SUITE_WORKFLOW, doc);
-  const ciTsc = tscStepsIn(doc as WorkflowDoc);
+  // CI's tsc steps and its SvelteKit checks (`bun run check`, SMD-2280 PR 2b), each a `typecheck DIR` in ci-parity.sh.
+  const ciTsc = [...tscStepsIn(doc as WorkflowDoc), ...svelteCheckStepsIn(doc as WorkflowDoc)];
   const ciJobs = isMapping(doc) && isMapping(doc.jobs) ? Object.keys(doc.jobs) : [];
   const parity = parityLinesIn(readFileSync(join(ROOT, PARITY_SCRIPT), "utf8"));
   // FORK.md says to run it as ./db/ci-parity.sh, which a lost executable bit

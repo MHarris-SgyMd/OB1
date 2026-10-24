@@ -98,8 +98,8 @@ exactly one disposition.
   `schemas/smart-ingest` → SMD-1253.
 - **SMD-1798 portability (runtime supabase-js), kept:** `agent-memory-api`, ~~`enhanced-mcp`~~,
   ~~`open-brain-rest`~~, ~~`rest-api`~~ (the three retired, SMD-1931), ~~`ob-graph`~~, ~~`repo-learning-coach`~~, `schema-aware-routing`,
-  ~~`work-operating-model-activation`~~ (the three retired, SMD-2920 and SMD-2923), `x-twitter-import` (`local-brain-no-mcp`, also listed
-  here, was retired by SMD-1800 instead).
+  ~~`work-operating-model-activation`~~ (the three retired, SMD-2920 and SMD-2923), ~~`x-twitter-import`~~ (holds no client since
+  SMD-2493; `local-brain-no-mcp`, also listed here, was retired by SMD-1800 instead).
 - **adjacent follow-up filed:** SMD-1929 (purge inherited NBJ brand/funnel assets under
   `dashboards/` + `docs/`, outside this triage's four directories).
 
@@ -429,10 +429,10 @@ remaining drafts are unreferenced markdown working-notes.
 | `fingerprint-dedup-backfill` | keep + audited → **SMD-2126**: `delete-duplicates.mjs` onto the shim, `backfill-fingerprints.mjs` removed (SMD-2145) | Client-side fingerprint backfill **+ duplicate cleanup**. Migration 023 backfills server-side, but the recipe's `delete-duplicates.mjs` removes pre-existing dupes (a migration doesn't), and it's cited as the cleanup step by `lint-sweep` / `edge-function-cost-optimization` / `content-fingerprint-dedup`. Complements core, not superseded. **SMD-2126:** migration 023 backfills the fingerprint server-side, so `backfill-fingerprints.mjs` has no work left here and goes (SMD-2145); the duplicate cleanup stays and moves onto the shim, its deletes through `delete_thought`. |
 | `gmail-smart-pull` | keep + audited → SMD-1867 candidate | Gmail → ingest-pack with sensitivity routing + atomization + contact tiers; own SQL (`merge_thought_metadata`, `entities_canonical_email`, no core clobber). SMD-1867 candidate. |
 | `google-activity-import` | keep + audited → SMD-1867 candidate → **SMD-2126**: port onto the ingestion contract (SMD-2150, after SMD-2136) | Google Takeout (Search/Gmail/Maps/YouTube/Chrome/Gemini) import. SMD-1867 candidate. |
-| `grok-export-import` | keep + audited → SMD-1867 candidate | xAI Grok conversation-export import. SMD-1867 candidate. |
+| `grok-export-import` | keep + audited → SMD-1867 candidate → **ported onto the ingestion contract (SMD-2493)** | xAI Grok conversation-export import; an emitter of ingestion-contract items for `db/ingest-records.ts --source items` since SMD-2493: no database client, no embedding call. |
 | `infographic-generator` | keep + audited | Output generator (thoughts/research → infographic images via Gemini); not an import. |
-| `instagram-import` | keep + audited → SMD-1867 candidate | Instagram export (DMs/comments/captions) import. SMD-1867 candidate. |
-| `journals-blogger-import` | keep + audited → SMD-1867 candidate | Blogger Atom-XML import. SMD-1867 candidate. |
+| `instagram-import` | keep + audited → SMD-1867 candidate → **ported onto the ingestion contract (SMD-2493)** | Instagram export (DMs/comments/captions) import; an emitter of ingestion-contract items for `db/ingest-records.ts --source items` since SMD-2493: no database client, no embedding call. |
+| `journals-blogger-import` | keep + audited → SMD-1867 candidate → **ported onto the ingestion contract (SMD-2493)** | Blogger Atom-XML import; an emitter of ingestion-contract items for `db/ingest-records.ts --source items` since SMD-2493: no database client, no embedding call. |
 | `life-engine` | keep + audited | Background `/loop` personal-assistant recipe; own `schema.sql` (no core clobber). |
 | `life-engine-video` | keep + audited | Remotion + ElevenLabs video-briefing add-on for `life-engine`. |
 | `lint-sweep` | keep + audited → **on the shim (SMD-2144)** | Read-only three-tier quality audit (`views.sql` + `lint-sweep.js`); never mutates thoughts. Tier 1 needs `schemas/enhanced-thoughts`' columns. |
@@ -460,4 +460,4 @@ remaining drafts are unreferenced markdown working-notes.
 | `wiki-synthesis` | keep + audited → **SMD-2126** → **SMD-3216**: a REST-core client (SMD-2143) | Topic/email-thread wiki synthesis from atomic thoughts via any OpenAI-compatible LLM. |
 | `work-operating-model-activation` | ~~keep + audited + SMD-1798~~ → **retired (SMD-2920)** *(no-parity posture)* | Was the operating-model elicitation server (own `schema.sql`, its own key list), unused on stable; retired with `skills/work-operating-model` and `bring-your-own-context`, which depend on it. A plugin port is the path back. |
 | `world-model-diagnostic-activation` | keep + audited | World-Model Readiness Diagnostic activation; own tables (`world_model_assessments` / `world_model_boundary_flows`), no core clobber. |
-| `x-twitter-import` | keep + audited → SMD-1867 candidate | X/Twitter export (tweets/DMs/Grok) import. SMD-1867 candidate; `import-x-twitter.mjs` uses supabase-js → SMD-1798. |
+| `x-twitter-import` | keep + audited → SMD-1867 candidate → **ported onto the ingestion contract (SMD-2493)** | X/Twitter export (tweets/DMs/Grok) import; an emitter of ingestion-contract items for `db/ingest-records.ts --source items` since SMD-2493: no database client, no embedding call. Its Grok chats are the `x` system's: one import, one source. |

@@ -546,8 +546,11 @@ new thought's id, which is what the other two take.
 http://127.0.0.1:8000/dashboard
 ```
 
-Sign in with a read or write key: the brain's counts and newest thoughts, its
-status (version, migrations, sizes, the workers' heartbeats) and any thought.
+Sign in with a read or write key: the brain's counts and newest thoughts, every
+thought a page at a time by its filters, search by meaning or by exact text,
+what changed and who changed it, supersession proposals, the worker queue, the
+query log, its status (version, migrations, sizes, the workers' heartbeats) and
+any thought.
 A capture-only key is refused there, since it reads nothing. Behind a TLS proxy
 or tunnel, set `OB1_PUBLIC_ORIGIN` in `deploy/.env` to the https origin first,
 or the sign-in form is refused as cross-site; once it is set, sign in there and

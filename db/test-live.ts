@@ -50,7 +50,7 @@ import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
-import { MAX_STALE_DAYS, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
+import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import { sweepOrphans } from "./rebuild.ts";
 import type { PassStop } from "./lease.ts";
@@ -66,6 +66,7 @@ import { ACTOR_NAME as SYNC_ACTOR, groupTicketRows, loopPasses, readTicketRows, 
 import { endOnRefusal, passStamper, stampKey } from "./pass-stamp.ts";
 import { endRow, followerKey, guardRefusal, restartWait, supervise } from "./supervise.ts";
 import { passDumpFile, run as runSleep } from "./sleep.ts";
+import { readThoughts } from "./weekly-digest.ts";
 import { assertDistinctBackends, closedLoop } from "./bench-load.ts";
 import { findingGate, findingsSchemaProblem, findingsStep, groupFindings, outcomes, postFindings, selectFindings, summaryLine, type FindingsReport } from "./board-findings.ts";
 import { linearClient } from "./linear-api.ts";
@@ -3683,9 +3684,10 @@ if (want("9")) {
 
     // The hard stop: the leases returned at once, the row in hand abandoned —
     // its vector not written, its claim not released by the worker — and run()
-    // 130 once the embedding in hand returns. The stub shifts every vector, so
-    // a write shows.
-    slowMs = 1500;
+    // 130 at once, the embedding in hand aborted (SMD-2679: it ran out first).
+    // Once: a third call returns the first's release, said once. The stub
+    // shifts every vector, so a write shows.
+    slowMs = 5000;
     shift = 1;
     const vecBefore = await vectors();
     let hardStop: PassStop | undefined;
@@ -3693,13 +3695,17 @@ if (want("9")) {
     const hardRun = reembedInProcess({ job: stopKey(2), env: STOP_ENV, workers: 1, batch: 1, onPass: (x) => { hardStop = x; } });
     await inHand(stopKey(2), hardFrom);
     hardStop?.();
-    await hardStop?.();
+    const hardAt = Date.now();
+    const firstHard = hardStop?.();
+    const againHard = hardStop?.();
+    await firstHard;
     const hard = await hardRun;
+    const hardMs = Date.now() - hardAt;
     const hardClaims = await keyClaims(stopKey(2));
     const moved = [...(await vectors())].filter(([id, e]) => vecBefore.get(id) !== e).length;
     shift = 0;
-    assert(hard.code === 130 && hard.stderr.includes("second signal — exiting now") && !hardClaims.claimed && !hardClaims.failed && moved === (hardClaims.succeeded ?? 0) && !/no longer this worker's/.test(hard.stderr) && hardStop?.() === null,
-      `the hard stop abandons reembed's row in hand: run() returns 130, every vector written is a succeeded row's, none released after the leases went, and the stop inert after (exit ${hard.code}, ${moved} written, claims ${JSON.stringify(hardClaims)})`);
+    assert(hard.code === 130 && hardMs < 1500 && againHard === firstHard && hard.stderr.split("second signal — exiting now").length === 2 && !hardClaims.claimed && !hardClaims.failed && moved === (hardClaims.succeeded ?? 0) && !/no longer this worker's/.test(hard.stderr) && hardStop?.() === null,
+      `the hard stop abandons reembed's row in hand: run() returns 130 at once, the embedding aborted, every vector written is a succeeded row's, none released after the leases went, a second hard call the first's, said once, and the stop inert after (exit ${hard.code} after ${hardMs} ms, ${moved} written, claims ${JSON.stringify(hardClaims)})`);
 
     // The CLI's signals: one SIGINT after the row in hand, two at once.
     const cliRun = (key: string) => Bun.spawn(["bun", "--no-env-file", join(HERE, "reembed.ts"), "--url", URL_!, "--job", key, "--workers", "1", "--batch", "1"], { env: STOP_ENV as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
@@ -6358,6 +6364,14 @@ if (want("16")) {
     `…while a batch whose k calls exceed the lease, refused until 031, is not: the heartbeat sizes the lease now, and --dry-run says which (exit ${bigBatch.code})`);
   const badList = await consolidate("--list", "maybe");
   assert(badList.code === 2 && /--list takes pending/.test(badList.out), "a status outside the four is refused");
+  // SMD-3248: --key is a listing's — beside anything else, or past the tool's 200 characters, refused before the client.
+  const keyAlone = await consolidate("--status", "--key", "consolidate:stub@p1");
+  const keyLong = await consolidate("--list", "--key", `consolidate:${"m".repeat(200)}@p1`);
+  const keySpace = await consolidate("--list", "--key", "consolidate:h2o-lightning-4b qwen3.8:27b@p4d3");
+  const keyShell = await consolidate("--list", "--key", "consolidate:m@p1$(id)");
+  assert(keyAlone.code === 2 && /--key goes with --list/.test(keyAlone.out) && keyLong.code === 2 && /--key takes a judge key of 1 to 200 characters/.test(keyLong.out)
+      && keySpace.code === 2 && /--key takes a judge key of letters, digits and \. _ : \/ @ \+ -/.test(keySpace.out) && keyShell.code === 2 && /--key takes a judge key of letters/.test(keyShell.out),
+    `--key without --list, one past 200 characters, and one with a space (review pass 1: it selected nothing without a word) are refused (${keyAlone.out.trim().slice(0, 60)} | ${keyLong.out.trim().slice(0, 60)} | ${keySpace.out.trim().slice(0, 60)})`);
 
   // The judge's own model (SMD-1901): unset, the key and the model line name
   // the metadata model and say the knob exists; set, OB1_JUDGE_MODEL moves the
@@ -6480,6 +6494,52 @@ if (want("16")) {
          "…with the thought ids and the accept command, asking for a direction where the judge gave none");
   const listC = await consolidateInProcess({ list: "pending" });
   assert(same(listC, list), `consolidate run() in-process lists the queue as the spawned --list does, byte for byte (exit ${listC.code})`);
+  // SMD-3248: --key lists one pass's alone, by the key each row names — this pass's two, said in the header; a key no
+  // pass has, none; in-process as spawned.
+  const passKey = /judged by (\S+) on /.exec(list.out)?.[1] ?? "";
+  const listKey = await consolidate("--list", "--key", passKey);
+  const listNobody = await consolidate("--list", "pending", "--key", "consolidate:nobody@p1");
+  const listKeyC = await consolidateInProcess({ list: "pending", key: passKey });
+  assert(passKey.startsWith("consolidate:") && listKey.code === 0 && new RegExp(`2 pending proposal\\(s\\) judged by ${passKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, most confident first`).test(listKey.out)
+      && listKey.out.includes(`--accept ${directed.id}`) && listKey.out.includes(`--accept ${undirected.id} --direction <newer|older>`)
+      && listNobody.code === 0 && /no pending proposals judged by consolidate:nobody@p1/.test(listNobody.out) && same(listKeyC, listKey),
+    `--list --key lists this pass's two, the key in the header; a key no pass has lists none; run() in-process the same (${listKey.out.split("\n").find((l) => /judged by/.test(l))?.trim().slice(0, 120)})`);
+  // …and --status counts the pending by pass, the keys --key takes (review pass 1: the total alone hid which passes it
+  // held). Two more passes planted raw (review pass 2: under one key alone, the count's status term and order had no
+  // teeth): one pending under a second key, one rejected under a third and one pending under a key --key cannot take,
+  // on two thoughts outside the pool; gone with them after.
+  const rawThought = async (text: string) => ((await sql`SELECT upsert_thought(${text}, ${{ metadata: { source: "test" } }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
+  const [rawA, rawB, rawC] = [await rawThought("[16] a raw pass's older side"), await rawThought("[16] a raw pass's newer side"), await rawThought("[16] a raw pass's third side")];
+  await sql`SELECT record_supersession_proposal(${rawA}::uuid, ${rawB}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:zz-second@p1', NULL)`;
+  const rejectedRaw = (await sql`SELECT record_supersession_proposal(${rawA}::uuid, ${rawC}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:zz-third@p1', NULL) AS id`)[0].id as string;
+  await sql`SELECT review_supersession_proposal(${rejectedRaw}::uuid, 'reject', 'raw', NULL, NULL)`;
+  await sql`SELECT record_supersession_proposal(${rawB}::uuid, ${rawC}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:a key with spaces@p1', NULL)`;
+  // Review pass 3: a key a shell reads is no key --key takes (one offered unmarked ran `$(…)` when pasted), and a key
+  // with spaces is quoted, so it cannot pass for the line's own words; past ten passes the rest are counted.
+  await sql`SELECT record_supersession_proposal(${rawC}::uuid, ${rawA}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, 'consolidate:m@p1$(id)', NULL)`;
+  const extra = await Promise.all([1, 2, 3, 4, 5, 6, 7, 8].map((i) => rawThought(`[16] a raw pass's side ${i}`)));
+  for (const [i, t] of extra.entries()) await sql`SELECT record_supersession_proposal(${rawA}::uuid, ${t}::uuid, 'newer_supersedes_older', 0.5, 'raw', 0.9, ${`consolidate:zz-k${i}@p1`}, NULL)`;
+  const byPass = await consolidate("--status");
+  const byLine = byPass.out.split("\n").find((l) => /pending by pass/.test(l)) ?? "";
+  assert(byPass.code === 0 && byLine.startsWith(`  pending by pass: 2 judged by ${passKey}, 1 judged by "consolidate:a key with spaces@p1" (not a key --key takes; listed by --list alone), 1 judged by "consolidate:m@p1$(id)" (not a key --key takes; listed by --list alone), 1 judged by consolidate:zz-k0@p1,`)
+      && byLine.endsWith(`, and 2 more pass(es) with 2 pending — --list --key <key> lists one pass's`) && (byLine.match(/ judged by /g) ?? []).length === 10 && !byLine.includes("zz-third"),
+    `--status counts the pending by pass, most first, ten at most with the rest counted, a rejected row's pass not among them, a key --key cannot take quoted when it has spaces and said so (${byLine.trim().slice(0, 200)})`);
+  await sql`DELETE FROM thoughts WHERE id IN (${rawA}::uuid, ${rawB}::uuid, ${rawC}::uuid)`;
+  for (const t of extra) await sql`DELETE FROM thoughts WHERE id = ${t}::uuid`;
+  // The line's builder on rows a brain would need dozens of thoughts for (review pass 4: with one row in each overflow
+  // pass, the passes counted and their rows summed were the same number): twelve passes, the last two of 3 and 2 rows;
+  // a key with a leading - is no key --key takes (the CLI's parser reads it as a flag).
+  const synth = [...Array.from({ length: 10 }, (_, i) => ({ judge_key: `consolidate:k${i}@p1`, n: 9 - (i % 3) })), { judge_key: "-consolidate:x@p1", n: 3 }, { judge_key: "consolidate:last@p1", n: 2 }];
+  const built = pendingByPassLine(synth), builtFew = pendingByPassLine([{ judge_key: "-consolidate:x@p1", n: 4 }]);
+  assert(built.endsWith(", and 2 more pass(es) with 5 pending — --list --key <key> lists one pass's") && (built.match(/ judged by /g) ?? []).length === 10
+      && builtFew === `  pending by pass: 4 judged by "-consolidate:x@p1" (not a key --key takes; listed by --list alone) — --list --key <key> lists one pass's`,
+    `the by-pass line names ten, counts the rest's passes and rows apart, and marks a leading - (${built.slice(-80)} | ${builtFew})`);
+  // The capped page's note, every case (review pass 2: a capped --list all --key said to decide and list again, which
+  // never drains an all-status page; no suite reached a cap under --key).
+  assert(capNote("pending", false) === "--status counts them all" && capNote(undefined, false) === "--status counts them all"
+      && capNote("pending", true) === "decide these and list again for the rest; --status counts each pass's pending"
+      && ["accepted", "rejected", "stale", "lineage", undefined].every((st) => capNote(st, true) === "the rest are not listed (SMD-3249 pages)"),
+    "a capped page's note: --status's total unselected; under --key, pending drains as it is decided and every other selection waits for paging");
 
   // The review path, through the worker's flags, audited under the key's name.
   const needDir = await consolidate("--accept", undirected.id);
@@ -6633,24 +6693,27 @@ if (want("16")) {
     // …and the accept is refused without --force — a guard on the one accept
     // door, not a verdict: the row stays pending, nothing is written
     // (definitions probe, second review pass: the accept went through under
-    // the reject's own advice). A brain without 070's listing gets the file
-    // named on --list, not a driver stack: the form dropped and put back.
+    // the reject's own advice). A brain without the listing's current form
+    // (109's since SMD-3248, 070's before) gets the file named on --list, not
+    // a driver stack: the form dropped and put back.
     const acceptLineage = await consolidate("--accept", atlas!.id);
     assert(acceptLineage.code === 1 && /accept refused: one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it\./.test(acceptLineage.out) && acceptLineage.out.includes(`--reject ${atlas!.id} --note "lineage pair (066)" is the expected decision; pass --force (with --direction on an undirected verdict) if the pointer is what you mean`)
            && (await proposalRow(atlas!.id)).status === "pending" && (await sql`SELECT supersedes FROM thoughts WHERE id = ${atlasNew}::uuid`)[0].supersedes === null,
            `--accept on a lineage pair is refused naming the reject and --force, the row still pending and no pointer written (exit ${acceptLineage.code}: ${acceptLineage.out.trim().slice(0, 200)})`);
-    // R3 tooth (mutant 2): the catch names 070 for the one error it is for — an unrelated failure inside the listing is shown as itself.
-    await sql.unsafe(`CREATE OR REPLACE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20, p_lineage boolean DEFAULT NULL) RETURNS TABLE (id uuid, status text, verdict text, confidence numeric, reason text, similarity real, judge_key text, judged_at timestamptz, reviewed_at timestamptz, review_note text, superseding_id uuid, older_id uuid, older_content text, older_created_at timestamptz, newer_id uuid, newer_content text, newer_created_at timestamptz, older_edited boolean, newer_edited boolean, lineage boolean) LANGUAGE plpgsql STABLE AS $f$ BEGIN RAISE EXCEPTION 'boom: an unrelated failure inside the listing'; END $f$`);
+    // R3 tooth (mutant 2): the catch names the file for the one error it is for — an unrelated failure inside the listing is shown as itself.
+    await sql.unsafe(`CREATE OR REPLACE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20, p_lineage boolean DEFAULT NULL, p_judge_key text DEFAULT NULL) RETURNS TABLE (id uuid, status text, verdict text, confidence numeric, reason text, similarity real, judge_key text, judged_at timestamptz, reviewed_at timestamptz, review_note text, superseding_id uuid, older_id uuid, older_content text, older_created_at timestamptz, newer_id uuid, newer_content text, newer_created_at timestamptz, older_edited boolean, newer_edited boolean, lineage boolean) LANGUAGE plpgsql STABLE AS $f$ BEGIN RAISE EXCEPTION 'boom: an unrelated failure inside the listing'; END $f$`);
     const listBoom = await consolidate("--list", "lineage");
-    assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 070/.test(listBoom.out),
-           `an unrelated error inside --list is shown as itself, not as a missing 070 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
-    await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean)`);
-    assert(/1 unreviewed standing on a lineage pair \(apply migration 070 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
-           "--status still counts the row on a brain without 070 and says the listing needs the file before pointing at it");
-    const listPre070 = await consolidate("--list", "lineage");
-    assert(listPre070.code === 1 && /--list needs migration 070 \(db\/migrations\/070_listing_flags_lineage_pair\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre070.out) && !/PostgresError/.test(listPre070.out),
-           `on a brain without 070 --list names the file, not a driver error (exit ${listPre070.code}: ${listPre070.out.trim().slice(0, 160)})`);
+    assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 109/.test(listBoom.out),
+           `an unrelated error inside --list is shown as itself, not as a missing 109 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
+    // A brain at 108: 070's three-argument form alone, 109's gone.
+    await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean, text)`);
     await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
+    assert(/1 unreviewed standing on a lineage pair \(apply migration 109 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
+           "--status still counts the row on a brain without 109 and says the listing needs the file before pointing at it");
+    const listPre109 = await consolidate("--list", "lineage");
+    assert(listPre109.code === 1 && /--list needs migration 109 \(db\/migrations\/109_listing_selects_a_pass\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre109.out) && !/PostgresError/.test(listPre109.out),
+           `on a brain without 109 --list names the file, not a driver error (exit ${listPre109.code}: ${listPre109.out.trim().slice(0, 160)})`);
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("109_") });
     await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${atlasNew}::uuid`;
     // The edit resolves the conflict (the stub reads the new pair as unrelated); the rebuild sets the row stale.
     const atlasFp2 = await moveRaw(atlasNew, "Invoices for the atlas account follow the deploy calendar.");
@@ -7380,6 +7443,13 @@ if (want("16")) {
     const listed = await consolidate("--list", "relations");
     assert(listed.code === 0 && /relation\(s\), newest first/.test(listed.out) && listed.out.includes(rotaNew) && listed.out.includes(rotaOld) && /\] related/.test(listed.out) && !/EDITED SINCE JUDGED/.test(listed.out),
       `--list relations shows the edge with both thoughts, and nothing edited since it was judged (exit ${listed.code})`);
+    // SMD-3248: --key selects the relations of one pass, by the key each edge's facet names.
+    const relKey = /relation \S+\s+judged by (\S+) on /.exec(listed.out)?.[1] ?? "";
+    const relByKey = await consolidate("--list", "relations", "--key", relKey);
+    const relNobody = await consolidate("--list", "relations", "--key", "consolidate:nobody@p1");
+    assert(relKey.startsWith("consolidate:") && relByKey.code === 0 && relByKey.out.includes(rotaNew) && /relation\(s\) judged by \S+, newest first/.test(relByKey.out) && !/ANOTHER JUDGE KEY/.test(relByKey.out)
+        && relNobody.code === 0 && /no relations judged by consolidate:nobody@p1/.test(relNobody.out),
+      `--list relations --key lists that pass's edges, said in the header, and none under a key no pass has (${relByKey.out.split("\n").find((l) => /judged by/.test(l))?.trim().slice(0, 120)})`);
     // A side's text moved since the judgement: the edge is flagged (SMD-2726 closes it).
     await sql`UPDATE thoughts SET content = content || ' — on weekdays' WHERE id = ${rotaOld}::uuid`;
     const listedEdited = await consolidate("--list", "relations");
@@ -7642,6 +7712,14 @@ if (want("16")) {
     const apartA = await outside("A note on the boiler room, judged apart."), apartB = await outside("A note on the boiler's warranty, judged apart.");
     await sql`SELECT record_thought_relation(${apartB}::uuid, ${apartA}::uuid, 'distinct', 0.7, 'consolidate:other-model@p4', NULL, 'a', 'b', NULL)`;
     const marked = await consolidate("--list", "relations");
+    // Under --key that other pass's own (review pass 2: under this pass's key the mark never showed anyway): its row
+    // keeps OLDER SUPERSEDED and loses ANOTHER JUDGE KEY, the pass being chosen.
+    const markedLines = marked.out.split("\n");
+    const otherAt = markedLines.findIndex((l) => /\] related  .*ANOTHER JUDGE KEY/.test(l));
+    const otherKey = markedLines.slice(otherAt).map((l) => /relation \S+\s+judged by (\S+) on /.exec(l)?.[1]).find(Boolean) ?? "";
+    const markedKeyed = await consolidate("--list", "relations", "--key", otherKey);
+    assert(otherKey.startsWith("consolidate:") && /\] related  .*OLDER SUPERSEDED/.test(markedKeyed.out) && !/ANOTHER JUDGE KEY/.test(markedKeyed.out),
+      `--list relations --key <the other pass's key> keeps OLDER SUPERSEDED and drops ANOTHER JUDGE KEY (${otherKey}: ${markedKeyed.out.split("\n").find((l) => /\] related/.test(l))?.trim().slice(0, 120)})`);
     const statusOther = await consolidate("--status");
     assert(/\] related  .*OLDER SUPERSEDED.*ANOTHER JUDGE KEY/.test(marked.out) && /1 judged under another key, which this pass replaces only for the pairs it judges again/.test(statusOther.out),
       `--list relations marks a relation whose older side is superseded and one judged under another key, and --status counts the other key's — not the distinct's (${marked.out.split("\n").find((l) => /\] related/.test(l))?.trim()})`);
@@ -8670,6 +8748,357 @@ if (want("19")) {
   assert(cfg.tier === "stable" && /^\d{4}-\d\d-\d\dT/.test(cfg.last_ingest ?? ""), "ob1_config records tier=stable and a last_ingest timestamp");
 
   for (const id of ids) await sql`DELETE FROM thoughts WHERE id = ${id}::uuid`; // per-id: Bun binds a JS array as a comma string, not a {…} literal
+}
+
+/**
+ * Fixture exports for [19b], two records of each kind each importer reads,
+ * every date before 2025 so a row dated by the run stands out, and the shapes
+ * a real export brings: grok.com's nested conversation, a conversation two
+ * export files both hold, one the parser cannot read, members listed newest
+ * first, a group past the 100,000-character bound in each importer that
+ * splits, a Blogger category in single quotes and an entry in two `.atom`
+ * files. What each importer should emit: one item per thought, each item's
+ * kind, and for each key the export's own date and the source record as
+ * exported ("part" and null where a group's parts are checked on their own).
+ */
+function writeExportFixtures(root: string) {
+  const grok = join(root, "grok");
+  mkdirSync(grok, { recursive: true });
+  const conv1 = { id: "conv-1", title: "Sourdough starters", create_time: { $date: { $numberLong: String(Date.parse("2024-03-05T09:30:00Z")) } }, conversation: [
+    { sender: "user", message: "How do I keep a sourdough starter alive through a week away from home?\u0000" },
+    { sender: "assistant", message: "Feed it, refrigerate it, and refresh it twice when you return before baking." }] };
+  // A date with no offset, read as UTC whatever the machine's zone ([19b] emits under America/Los_Angeles).
+  const conv2 = { conversation: { id: "conv-2", title: "Bike gearing", create_time: "2024-04-10 18:00:00" }, responses: [
+    { response: { sender: "human", message: "What gear ratio suits a hilly forty kilometre commute on a steel frame?" } },
+    { response: { sender: "assistant", message: "A compact double with an eleven to thirty-four cassette covers most climbs comfortably." } }] };
+  // A date the pipeline would refuse (the whole file with it): left out, and the brain dates the row.
+  const conv3 = { id: "conv-3", title: "Tide tables", create_time: "2999-01-01T00:00:00Z", conversation: [
+    { sender: "user", message: "Where can I find tide tables for the estuary this coming weekend, by the hour?" }] };
+  // Past the bound (40 turns of 3,000 characters): two parts, the first keyed as the conversation.
+  const conv4 = { id: "conv-4", title: "Long chat", create_time: "2024-05-05T05:05:05Z", conversation: Array.from({ length: 40 }, (_, k) => ({ sender: k % 2 ? "assistant" : "user", message: `Turn ${k + 1}: ${"the long conversation goes on ".repeat(100)}` })) };
+  // One message past the bound alone: cut, saying so.
+  const conv5 = { id: "conv-5", title: "Pasted log", create_time: "2024-06-06T06:06:06Z", conversation: [{ sender: "user", message: `Here is the whole log: ${"0123456789".repeat(12_000)}` }] };
+  writeFileSync(join(grok, "grok-export.json"), JSON.stringify({ conversations: [conv1, conv2, conv4, conv5] }));
+  writeFileSync(join(grok, "grok-export-2.json"), JSON.stringify({ conversations: [conv1, null, conv3] }));
+  const ig = join(root, "instagram", "your_instagram_activity");
+  const dms: Record<string, unknown> = {};
+  // dave_888's thread passes the bound (300 messages of ~400 characters): two parts.
+  for (const [dir, who, t0, n] of [["alice_123", "Alice", 1700000000000, 205], ["bob_456", "Bob", 1700500000000, 3], ["dave_888", "Dave", 1701000000000, 300]] as const) {
+    mkdirSync(join(ig, "messages", "inbox", dir), { recursive: true });
+    const pad = dir === "dave_888" ? ` ${"and the talk went on ".repeat(18)}` : "";
+    const messages = Array.from({ length: n }, (_, k) => ({ sender_name: k % 2 ? "Me" : who, timestamp_ms: t0 + k * 60000, content: `Message ${k + 1} from ${k % 2 ? "me" : who} about meeting at the gallery${pad}` }));
+    // An emoji the export holds whole: the Meta repair is for latin1 mojibake only.
+    if (dir === "bob_456") messages.push({ sender_name: who, timestamp_ms: t0 + n * 60000, content: "See you there \u{1F600}" });
+    const file = { participants: [{ name: who }], messages };
+    dms[dir] = file;
+    writeFileSync(join(ig, "messages", "inbox", dir, "message_1.json"), JSON.stringify(file));
+  }
+  // Newest first, as the exports list them: the importer sorts before it groups.
+  // Two on one day (2023-07-22, 04:26 and 07:13 UTC), the later first.
+  const comments = [
+    { string_map_data: { Comment: { value: "This recipe worked perfectly the second time" }, Time: { timestamp: 1690010000 } } },
+    { string_map_data: { Comment: { value: "What a lovely view of the harbour at dusk" }, Time: { timestamp: 1690000000 } } },
+    { string_map_data: { Comment: { value: "A comment dated in the year three thousand" }, Time: { timestamp: 32503680000 } } }];
+  mkdirSync(join(ig, "comments"), { recursive: true });
+  writeFileSync(join(ig, "comments", "post_comments_1.json"), JSON.stringify({ comments_media_comments: comments }));
+  const posts = [
+    { title: "Homemade pasta, take three, finally the right thickness", creation_timestamp: 1680010000 },
+    { title: "First light over the ridge after a cold night camping", creation_timestamp: 1680000000 }];
+  mkdirSync(join(ig, "content"), { recursive: true });
+  writeFileSync(join(ig, "content", "posts_1.json"), JSON.stringify(posts));
+  // A download cut short: the importer refuses it rather than import a conversation with messages missing.
+  const igBad = join(root, "instagram-bad", "your_instagram_activity", "messages", "inbox", "carol_789");
+  mkdirSync(igBad, { recursive: true });
+  writeFileSync(join(igBad, "message_1.json"), `{"participants": [{"name": "Carol"}], "messages": [{"sender_name": "Carol", "content": "cut sh`);
+  const blogger = join(root, "blogger");
+  mkdirSync(blogger, { recursive: true });
+  const entry = (id: string, kind: string, title: string, published: string, body: string, q = '"') =>
+    `<entry><id>tag:blogger.com,1999:blog-1.${id}</id><published>${published}</published><category scheme="http://schemas.google.com/g/2005#kind" term=${q}http://schemas.google.com/blogger/2008/kind#${kind}${q}/><title type="text">${title}</title><content type="html">${body}</content></entry>`;
+  const entries = {
+    "post-1": entry("post-1", "post", "Winter garden notes", "2015-01-12T08:00:00.000-08:00", "&lt;p&gt;The kale survived the frost &amp;amp; the garlic is already showing green tips.&lt;/p&gt;"),
+    "post-2": entry("post-2", "post", "Moving day", "2016-06-01T12:00:00.000Z", "Boxes everywhere, but the new kitchen gets the morning sun all year.", "'"),
+    "post-1.comment-1": entry("post-1.comment-1", "comment", "", "2015-01-13T10:00:00.000Z", "Lovely to hear the kale made it, ours did not survive this year at all."),
+    // February the 30th: a day the calendar lacks, left out rather than rolled into March.
+    "post-2.comment-2": entry("post-2.comment-2", "comment", "", "2016-02-30T10:00:00.000Z", "Congratulations on the move, the morning light sounds wonderful indeed."),
+  };
+  writeFileSync(join(blogger, "feed.atom"), `<?xml version="1.0"?><feed>`
+    + `<entry><id>tag:blogger.com,1999:blog-1.settings.X</id><category term="http://schemas.google.com/blogger/2008/kind#settings"/><content>a setting the importer skips</content></entry>`
+    + Object.values(entries).join("") + `</feed>`);
+  writeFileSync(join(blogger, "backup.atom"), `<?xml version="1.0"?><feed>${entries["post-2"]}</feed>`);
+  const x = join(root, "x", "data");
+  mkdirSync(x, { recursive: true });
+  // Newest first, as the archive lists them; the year 2999 is a date the pipeline would refuse, so that tweet is `undated`.
+  const tweets = [
+    { tweet: { id_str: "1700000000000000009", created_at: "Wed Jan 01 00:00:00 +0000 2999", full_text: "A tweet whose date the archive mangled into the far future." } },
+    { tweet: { id_str: "1700000000000000004", created_at: "Mon Apr 01 08:00:00 +0000 2019", full_text: "Spring at last: the first swifts are back over the old church tower." } },
+    { tweet: { id_str: "1700000000000000003", created_at: "Thu Mar 07 11:00:00 +0000 2019", full_text: "RT @someone: a retweet, which the importer skips entirely" } },
+    { tweet: { id_str: "1700000000000000002", created_at: "Tue Mar 05 15:00:00 +0000 2019", full_text: "Coffee experiments: a coarser grind made the pour-over far less bitter." } },
+    { tweet: { id_str: "1700000000000000001", created_at: "Tue Mar 05 10:00:00 +0000 2019", full_text: "Finally finished the long trail across the national park this weekend." } }];
+  // A busy day past the bound (400 tweets of ~320 characters on 5 May 2019): two parts, listed newest first as the archive lists them.
+  for (let k = 399; k >= 0; k--) tweets.push({ tweet: { id_str: `17100000000000${String(k).padStart(5, "0")}`, created_at: new Date(Date.UTC(2019, 4, 5) + k * 120_000).toUTCString(), full_text: `Busy day tweet ${k + 1}: ${"a long thread of thoughts about the match ".repeat(7)}` } });
+  writeFileSync(join(x, "tweets.js"), `window.YTD.tweets.part0 = ${JSON.stringify(tweets)}`);
+  // The second id carries a trailing space, which a key may not: the key is the id trimmed.
+  const conversations = [1, 2].map((n) => ({ conversationId: n === 2 ? "111-222 " : "111-221", messages: [
+    { messageCreate: { senderId: "111", text: `Message one of conversation ${n} about the book club`, createdAt: `2020-0${n}-01T09:00:00.000Z` } },
+    { messageCreate: { senderId: `22${n}`, text: "Reply about the chapter\u0000 we read", createdAt: `2020-0${n}-01T09:05:00.000Z` } },
+    { messageCreate: { senderId: "111", text: "Agreed, see you Thursday", createdAt: `2020-0${n}-01T09:10:00.000Z` } }] }));
+  // A thread past the bound (300 messages of ~400 characters): two parts. And one whose id holds a `#`, escaped so it cannot read as that thread's part 2.
+  const longDm = { conversationId: "777", messages: Array.from({ length: 300 }, (_, k) => ({ messageCreate: { senderId: String(k % 2 ? 777 : 1), text: `Long thread message ${k + 1}: ${"we kept talking about the plan ".repeat(12)}`, createdAt: new Date(Date.UTC(2021, 2, 1) + k * 3_600_000).toISOString() } })) };
+  const hashDm = { conversationId: "777#2", messages: [1, 2, 3].map((k) => ({ messageCreate: { senderId: "5", text: `A short thread whose id holds a hash, message ${k}`, createdAt: `2021-04-0${k}T10:00:00.000Z` } })) };
+  writeFileSync(join(x, "direct-messages.js"), `window.YTD.direct_messages.part0 = ${JSON.stringify([...conversations, longDm, hashDm].map((c) => ({ dmConversation: c })))}`);
+  const chats = [
+    { chatId: "c1", sender: "USER", message: "Summarise the causes of the tides in two sentences please", createdAt: "2024-05-01T08:00:00.000Z" },
+    { chatId: "c1", sender: "ASSISTANT", message: "The moon's gravity pulls the oceans; the sun adds a smaller pull.", createdAt: "2024-05-01T08:00:05.000Z" },
+    { chatId: "c2", sender: "USER", message: "Suggest a name for a grey kitten with white paws", createdAt: "2024-06-01T08:00:00.000Z" },
+    { chatId: "c2", sender: "ASSISTANT", message: "Perhaps Mittens, Smoke, or Socks would suit the kitten well.", createdAt: "2024-06-01T08:00:05.000Z" }];
+  writeFileSync(join(x, "grok-conversations.js"), `window.YTD.grok.part0 = ${JSON.stringify(chats)}`);
+  // createdAt undefined: a date the pipeline would refuse, left out, so the brain dates the row.
+  // canonical null: a part of a thread past the bound, checked against the conversation below.
+  const at = (createdAt: string | undefined, canonical: string | null) => ({ createdAt, canonical });
+  const tw = (id: string) => tweets.find((t) => t.tweet.id_str === id)!.tweet;
+  const imports = [
+    { system: "grok", script: "grok-export-import/import-grok.mjs", input: grok, kinds: [undefined, undefined, undefined, undefined, undefined, undefined], type: "reference", source_type: "grok_import", sensitivity_tier: "standard", expect: {
+      "conv-1": at("2024-03-05T09:30:00.000Z", JSON.stringify(conv1)),
+      "conv-2": at("2024-04-10T18:00:00.000Z", JSON.stringify(conv2)),
+      "conv-3": at(undefined, JSON.stringify(conv3)),
+      "conv-4": at("part", null),
+      "conv-4#2": at("part", null),
+      "conv-5": at("2024-06-06T06:06:06.000Z", JSON.stringify(conv5)) } },
+    { system: "instagram", script: "instagram-import/import-instagram.mjs", input: join(root, "instagram"), kinds: ["dm", "dm", "dm", "dm", "comments", "comments", "captions"], type: "reference", source_type: "instagram_import", sensitivity_tier: "personal", expect: {
+      "dm:123": at("2023-11-14T22:13:20.000Z", JSON.stringify([dms.alice_123])),
+      "dm:456": at("2023-11-20T17:06:40.000Z", JSON.stringify([dms.bob_456])),
+      "dm:888": at("part", null),
+      "dm:888#2": at("part", null),
+      "comments:2023-07-22": at("2023-07-22T04:26:40.000Z", JSON.stringify([comments[1], comments[0]])),
+      "comments:undated": at(undefined, JSON.stringify([comments[2]])),
+      "captions:2023-03-28": at("2023-03-28T10:40:00.000Z", JSON.stringify([posts[1], posts[0]])) } },
+    { system: "blogger", script: "journals-blogger-import/import-blogger.mjs", input: blogger, kinds: ["post", "post", "comment", "comment"], type: "journal", source_type: "blogger_import", sensitivity_tier: "standard", expect: {
+      "tag:blogger.com,1999:blog-1.post-1": at("2015-01-12T16:00:00.000Z", entries["post-1"]),
+      "tag:blogger.com,1999:blog-1.post-2": at("2016-06-01T12:00:00.000Z", entries["post-2"]),
+      "tag:blogger.com,1999:blog-1.post-1.comment-1": at("2015-01-13T10:00:00.000Z", entries["post-1.comment-1"]),
+      "tag:blogger.com,1999:blog-1.post-2.comment-2": at(undefined, entries["post-2.comment-2"]) } },
+    { system: "x", script: "x-twitter-import/import-x-twitter.mjs", input: join(root, "x"), kinds: ["tweets", "tweets", "tweets", "tweets", "tweets", "dm", "dm", "dm", "dm", "dm", "grok", "grok"], type: "reference", source_type: "x_twitter_import", sensitivity_tier: "standard", expect: {
+      "tweets:2019-03-05": at("2019-03-05T10:00:00.000Z", JSON.stringify([tw("1700000000000000001"), tw("1700000000000000002")])),
+      "tweets:2019-04-01": at("2019-04-01T08:00:00.000Z", JSON.stringify([tw("1700000000000000004")])),
+      "tweets:2019-05-05": at("part", null),
+      "tweets:2019-05-05#2": at("part", null),
+      "dm:777": at("part", null),
+      "dm:777#2": at("part", null),
+      "dm:777%232": at("2021-04-01T10:00:00.000Z", JSON.stringify(hashDm)),
+      "tweets:undated": at(undefined, JSON.stringify([tw("1700000000000000009")])),
+      "dm:111-221": at("2020-01-01T09:00:00.000Z", JSON.stringify(conversations[0])),
+      "dm:111-222": at("2020-02-01T09:00:00.000Z", JSON.stringify(conversations[1])),
+      "grok:c1": at("2024-05-01T08:00:00.000Z", JSON.stringify(chats.slice(0, 2))),
+      "grok:c2": at("2024-06-01T08:00:00.000Z", JSON.stringify(chats.slice(2))) } },
+  ] as const;
+  const iso = (v: string | number) => new Date(v).toISOString();
+  return {
+    imports,
+    /** Each group past the bound: its key, its members in order as exported (its parts' source records join to them), and a member's date (a part's createdAt is its first member's; Grok's is the conversation's). */
+    splits: [
+      { system: "grok", key: "conv-4", members: conv4.conversation as unknown[], dateOf: () => "2024-05-05T05:05:05.000Z", label: "Conversation title: Long chat" },
+      { system: "x", key: "dm:777", members: longDm.messages.map((m) => m.messageCreate) as unknown[], dateOf: (m: any) => iso(m.createdAt), label: "X/Twitter DM conversation" },
+      { system: "x", key: "tweets:2019-05-05", members: tweets.filter((t) => t.tweet.id_str.startsWith("17100000000000")).map((t) => t.tweet).reverse() as unknown[], dateOf: (m: any) => iso(m.created_at), label: "X/Twitter tweets on 2019-05-05" },
+      { system: "instagram", key: "dm:888", members: (dms.dave_888 as { messages: unknown[] }).messages, dateOf: (m: any) => iso(m.timestamp_ms), label: "Instagram DM conversation with dave" },
+    ],
+    instagramBad: join(root, "instagram-bad"),
+    /** A later archive: the tweets given, written over tweets.js. */
+    reexportTweets: (list: typeof tweets) => writeFileSync(join(x, "tweets.js"), `window.YTD.tweets.part0 = ${JSON.stringify(list)}`),
+    tweets,
+  };
+}
+
+if (want("19b")) {
+  console.log("\n[19b] the four export importers emit ingestion-contract items: each fixture export becomes one row per thought (a day of tweets or comments, a conversation, a part of one past 100,000 characters) through ingest-records.ts and reembed.ts, dated by the export, its vector the stub's under the model's label, its enhanced fields as facets, trust ingested, and a second run writes nothing (SMD-2493)");
+  // A database of its own, migrated forward: reembed.ts pools every row with
+  // no vector, and the suite's database holds other sections' bare rows.
+  const db = "ob1_importers";
+  const dbUrl = (() => { const u = new URL(URL_!); u.pathname = `/${db}`; return u.toString(); })();
+  const dir = join(tmpdir(), `ob1-importers-${process.pid}`);
+  const DIM = EMBEDDING_DIM;
+  const axisFor = (text: string) => {
+    let h = 0;
+    for (const ch of text) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    return 1 + (h % (DIM - 1));
+  };
+  const provider = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      if (req.method === "GET") return Response.json({ object: "list", data: [] });
+      const body = (await req.json()) as { input?: string };
+      const v = new Array(DIM).fill(0);
+      v[axisFor(String(body.input ?? ""))] = 1;
+      return Response.json({ data: [{ embedding: v }] });
+    },
+  });
+  let side: SQL | null = null;
+  try {
+    await sql.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
+    await sql.unsafe(`CREATE DATABASE ${db}`);
+    assert((await runMigrator(dbUrl, undefined)).code === 0, "a database of the importers' own migrates forward with this tree");
+    side = new SQL({ url: dbUrl, max: 2 });
+    // Classified before any write: 073 stamps the trust of the writer's kind at the write.
+    await side`SELECT set_agent_kind('ingest-records', 'ingested')`;
+    rmSync(dir, { recursive: true, force: true });
+    const { imports, splits, instagramBad, reexportTweets, tweets } = writeExportFixtures(join(dir, "exports"));
+    const oneLine = (s: string) => s.trim().split("\n").join(" | ");
+    const ingest = (...extra: string[]) => {
+      const p = Bun.spawnSync(["bun", join(HERE, "ingest-records.ts"), "--url", dbUrl, "--source", "items", ...extra], { cwd: HERE, env: { ...process.env, OB1_INGEST_ALLOW: "" }, stdout: "pipe", stderr: "pipe" });
+      return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString() };
+    };
+    const rowsOf = async (system: string) => (await side!`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'source' = ${system}`)[0].c as number;
+    type Item = { identity: { key: string }; canonical: { form: string }; text: string; createdAt?: string };
+    const emitted = new Map<string, { file: string; items: Item[]; err: string }>();
+    // A zone that is not UTC, so a date with no offset read as local time shows (CI runs in UTC).
+    const emit = (im: { script: string; input: string }) =>
+      Bun.spawnSync(["bun", join(HERE, "..", "recipes", im.script), im.input], { cwd: tmpdir(), env: { PATH: process.env.PATH ?? "", TZ: "America/Los_Angeles" }, stdout: "pipe", stderr: "pipe" });
+    for (const im of imports) {
+      const scope = `${im.system}:export`;
+      const file = join(dir, `${im.system}.jsonl`);
+      const e = emit(im);
+      writeFileSync(file, e.stdout);
+      const lines = e.stdout.toString().split("\n").filter(Boolean);
+      const items = lines.map((l) => JSON.parse(l));
+      emitted.set(im.system, { file, items, err: e.stderr.toString() });
+      const expect = im.expect as Record<string, { createdAt: string | undefined; canonical: string }>;
+      assert(e.exitCode === 0 && lines.length === im.kinds.length && items.every((it) => it.identity.system === im.system && it.scope === scope),
+        `${im.script} emits ${im.kinds.length} items, one per thought, each ${im.system}'s under ${scope}, from an environment holding no database URL or key (exit ${e.exitCode}, ${lines.length} lines: ${oneLine(e.stderr.toString()).slice(0, 160)})`);
+      assert(JSON.stringify(items.map((it) => it.identity.key).sort()) === JSON.stringify(Object.keys(expect).sort()),
+        `…each keyed by the export's own id, or by its day (or part) where the importer groups (${items.map((it) => it.identity.key).join(", ")})`);
+      assert(items.every((it) => expect[it.identity.key]?.canonical === null || it.canonical.form === expect[it.identity.key]?.canonical),
+        `…each item's canonical the source records as exported (${items.filter((it) => it.canonical.form !== expect[it.identity.key]?.canonical).map((it) => it.identity.key).join(", ") || "all"})`);
+      assert(JSON.stringify(items.map((it) => it.facets.kind)) === JSON.stringify(im.kinds) && items.every((it) => it.facets.type === im.type && it.facets.source_type === im.source_type && it.facets.sensitivity_tier === im.sensitivity_tier && typeof it.facets.importance === "number" && typeof it.facets.quality_score === "number"),
+        `…each item's kind, and the enhanced fields the import set as columns, carried as facets (${JSON.stringify(items.map((it) => it.facets))})`);
+      assert(items.every((it) => expect[it.identity.key]?.createdAt === "part" || it.createdAt === expect[it.identity.key]?.createdAt), `…each dated by the export, not the run, and a date the pipeline would refuse left out (${items.map((it) => it.createdAt).join(", ")})`);
+      const twice = emit(im);
+      assert(twice.exitCode === 0 && Buffer.compare(twice.stdout, e.stdout) === 0, `…and a second run over the same export prints the same bytes: the keys hold across runs (exit ${twice.exitCode})`);
+      const dry = ingest("--items", file, "--allow", scope, "--dry-run");
+      assert(dry.code === 0 && new RegExp(`items: ${lines.length} record\\(s\\) \\(${im.system} ${lines.length}\\)`).test(dry.out) && (await rowsOf(im.system)) === 0,
+        `ingest-records.ts --dry-run counts the ${im.system} file and writes nothing (exit ${dry.code}: ${oneLine(dry.out).slice(0, 160)} ${oneLine(dry.err).slice(0, 160)})`);
+      const live = ingest("--items", file, "--allow", scope);
+      assert(live.code === 0 && new RegExp(`inserted ${lines.length} `).test(live.out) && (await rowsOf(im.system)) === lines.length,
+        `…and the live ingest writes its ${lines.length} rows (exit ${live.code}: ${oneLine(live.out).slice(0, 160)} ${oneLine(live.err).slice(0, 160)})`);
+    }
+    // The shapes one importer each meets: the record the parser cannot read, the
+    // one two files hold and the date left out are named on stderr; a NUL is
+    // out of the text (the dry runs above would have refused the file); the DM
+    // past the cap keeps 200 messages in its text and all 205 in its source
+    // record; an emoji the export holds whole stays whole; an escaped post
+    // loses its tags and its entities; a file cut short is refused.
+    const grokErr = emitted.get("grok")!.err;
+    assert(/conversation 2: cannot be read/.test(grokErr) && /conversation conv-1 appears twice; emitted once/.test(grokErr) && /1 date\(s\) left out/.test(grokErr),
+      `grok names the conversation it cannot read, the one two export files hold and the date it left out, and emits the rest (${oneLine(grokErr).slice(0, 240)})`);
+    assert([...emitted.values()].every(({ items }) => items.every((it) => !it.text.includes("\u0000"))), "no item's text holds the NUL its export did");
+    const alice = emitted.get("instagram")!.items.find((it) => it.identity.key === "dm:123");
+    assert(alice?.text.split("\n").length === 207 && (JSON.parse(alice.canonical.form)[0].messages as unknown[]).length === 205,
+      `an Instagram DM of 205 messages holds every one in its text and its source record (${alice?.text.split("\n").length} text lines)`);
+    // Each group past the bound, in each importer that splits: two parts in
+    // order, each body (the text after its header's blank line) within
+    // 100,000 characters, the first keyed as the group and unlabelled, the
+    // second `#2` and "(part 2)" in its header and title, each dated by its
+    // own first member (a Grok part by its conversation), and their source
+    // records joining to the group's members as exported.
+    const asList = (it: Item) => { const v = JSON.parse(it.canonical.form); return Array.isArray(v) ? v : [v]; };
+    const bodyOf = (it: Item) => it.text.slice(it.text.indexOf("\n\n") + 2);
+    for (const s of splits) {
+      const [p1, p2] = [s.key, `${s.key}#2`].map((k) => emitted.get(s.system)!.items.find((it) => it.identity.key === k) as (Item & { facets: { title: string } }) | undefined);
+      const m1 = p1 ? asList(p1) : [], m2 = p2 ? asList(p2) : [];
+      const head1 = p1?.text.slice(0, s.label.length + 1);
+      assert(p1 !== undefined && p2 !== undefined && !emitted.get(s.system)!.items.some((it) => it.identity.key === `${s.key}#3`)
+        && bodyOf(p1).length <= 100_000 && bodyOf(p2).length <= 100_000 && (head1 === `${s.label}:` || head1 === `${s.label}\n`),
+        `${s.system} ${s.key}: two parts, each body within the bound, the first unlabelled (${p1 && bodyOf(p1).length} + ${p2 && bodyOf(p2).length} characters)`);
+      assert(p2 !== undefined && p2.text.startsWith(`${s.label} (part 2)`) && /\(part 2\)$/.test(p2.facets.title) && p1 !== undefined && !/\(part/.test(p1.facets.title)
+        && (!s.key.startsWith("dm:") || (p1.facets.title.includes(`(${m1.length} messages)`) && p2.facets.title.includes(`(${m2.length} messages)`))),
+        `…the second labelled "(part 2)" in its header and title, the first in neither; a DM part's title counts its own messages, so growth leaves earlier parts' titles alone (${JSON.stringify(p1?.facets.title)}, ${JSON.stringify(p2?.facets.title)})`);
+      assert(p1?.createdAt === s.dateOf(m1[0]) && p2?.createdAt === s.dateOf(m2[0]),
+        `…each dated by its own first member (${p1?.createdAt}, ${p2?.createdAt})`);
+      assert(JSON.stringify([...m1, ...m2]) === JSON.stringify(s.members),
+        `…their source records joining to the group's ${s.members.length} members as exported, in order (${m1.length} + ${m2.length})`);
+    }
+    const cutLog = emitted.get("grok")!.items.find((it) => it.identity.key === "conv-5");
+    assert(cutLog !== undefined && bodyOf(cutLog).length <= 100_000 && cutLog.text.endsWith("[… cut here; the source record holds it whole]") && cutLog.canonical.form.includes("0123456789".repeat(12_000)),
+      `one message past the bound alone is cut, saying so, and its source record keeps it whole (${cutLog && bodyOf(cutLog).length} characters)`);
+    const bob = emitted.get("instagram")!.items.find((it) => it.identity.key === "dm:456");
+    assert(bob?.text.endsWith("Bob: See you there \u{1F600}") === true, `an emoji the export holds whole is not put through the Meta repair (${JSON.stringify(bob?.text.slice(-30))})`);
+    const cut = emit({ script: "instagram-import/import-instagram.mjs", input: instagramBad });
+    assert(cut.exitCode === 2 && cut.stdout.length === 0 && /message_1\.json: not a JSON file of the export/.test(cut.stderr.toString()),
+      `an Instagram export with a file cut short is refused, naming it, and nothing is emitted (exit ${cut.exitCode}: ${oneLine(cut.stderr.toString()).slice(0, 160)})`);
+    const post1 = emitted.get("blogger")!.items.find((it) => it.identity.key === "tag:blogger.com,1999:blog-1.post-1");
+    assert(post1?.text.endsWith("\n\nThe kale survived the frost & the garlic is already showing green tips.") === true && !/<p|&amp;/.test(post1.text),
+      `a Blogger post's escaped HTML reaches the text without its tags or entities (${JSON.stringify(post1?.text.slice(-80))})`);
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      DATABASE_URL: dbUrl,
+      OB1_LLM_BASE_URL: `http://127.0.0.1:${provider.port}/v1`,
+      OB1_LLM_LOCAL: "1",
+      OB1_EMBEDDING_MODEL: "stub-embed",
+      OB1_EMBEDDING_DIM: String(DIM),
+    };
+    delete env.OB1_EMBEDDING_DIMENSIONS;
+    delete env.OB1_CHUNK_CONTEXT;
+    delete env.OB1_LLM_API_KEY;
+    const total = imports.reduce((a, im) => a + im.kinds.length, 0);
+    const re = await runScript(["bun", join(HERE, "reembed.ts"), "--url", dbUrl, "--switch-model"], { env: env as Record<string, string>, cwd: HERE });
+    assert(re.code === 0 && new RegExp(`${total} re-embedded, 0 failed`).test(re.out), `reembed.ts embeds the ${total} rows against the stub (exit ${re.code}: ${re.out.split("\n").find((l) => /re-embedded/.test(l))?.trim()})`);
+    for (const im of imports) {
+      const { items } = emitted.get(im.system)!;
+      const rows = await side`SELECT t.content, t.metadata, t.created_at, t.embedding_model AS m, t.embedding::text AS e, s.identity, s.canonical FROM thoughts t JOIN thought_sources s ON s.thought_id = t.id WHERE s.system = ${im.system}`;
+      type Row = { content: string; metadata: Record<string, unknown>; created_at: Date; m: string | null; e: string; identity: string; canonical: string };
+      const byKey = new Map((rows as Row[]).map((r) => [r.identity, r]));
+      const pairs = items.map((it) => [it, byKey.get(it.identity.key)] as const);
+      assert(rows.length === items.length && pairs.every(([it, r]) => r && r.content === it.text && r.canonical === it.canonical.form && r.metadata.source === im.system),
+        `every ${im.system} item is one row: its text, its source record under thought_sources.system ${im.system} byte for byte, labelled ${im.system} (${rows.length} rows)`);
+      assert(pairs.every(([it, r]) => r && (it.createdAt ? new Date(r.created_at).toISOString() === it.createdAt : Math.abs(Date.now() - new Date(r.created_at).getTime()) < 86_400_000)),
+        `…each row dated by the export, not the run, or by the brain where the emitter left the date out (${pairs.map(([, r]) => r && new Date(r.created_at).toISOString()).join(", ")})`);
+      assert(pairs.every(([it, r]) => r && r.m === "stub-embed" && JSON.parse(r.e).indexOf(1) === axisFor(it.text)),
+        `…each with the stub's vector for its own text, under the model's label (${pairs.map(([, r]) => r?.m).join(", ")})`);
+      assert(pairs.every(([, r]) => r && r.metadata.type === im.type && r.metadata.source_type === im.source_type && r.metadata.sensitivity_tier === im.sensitivity_tier && typeof r.metadata.importance === "number" && r.metadata.trust === "ingested"),
+        `…its enhanced fields as facets, and trust ingested from the classified ingester (${JSON.stringify(rows.map((r: { metadata: Record<string, unknown> }) => ({ type: r.metadata.type, trust: r.metadata.trust })))})`);
+      const again = ingest("--items", emitted.get(im.system)!.file, "--allow", `${im.system}:export`);
+      assert(again.code === 0 && new RegExp(`inserted 0 {2}updated 0 {2}patched 0 {2}unchanged ${items.length}`).test(again.out) && (await rowsOf(im.system)) === items.length,
+        `…and the same ${im.system} file again writes nothing (${oneLine(again.out).slice(0, 160)})`);
+    }
+    // A later archive: one tweet of 5 March deleted (its other tweet stays),
+    // one added on 1 April. Grouped by day, only those two days' thoughts move,
+    // each updated in place; no row is added and no tweet lands in two rows
+    // (batches of a fixed size shifted at the deletion and duplicated every
+    // batch after it).
+    const xItems = emitted.get("x")!.items.length;
+    reexportTweets([
+      { tweet: { id_str: "1700000000000000005", created_at: "Mon Apr 01 09:30:00 +0000 2019", full_text: "Two weeks of swifts now, and the house martins have joined them." } },
+      ...tweets.filter((t) => t.tweet.id_str !== "1700000000000000001"),
+    ]);
+    const later = emit(imports.find((im) => im.system === "x")!);
+    const laterFile = join(dir, "x-later.jsonl");
+    writeFileSync(laterFile, later.stdout);
+    const laterItems = later.stdout.toString().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Item);
+    const firstKeys = emitted.get("x")!.items.map((it) => it.identity.key).sort();
+    assert(later.exitCode === 0 && JSON.stringify(laterItems.map((it) => it.identity.key).sort()) === JSON.stringify(firstKeys),
+      `a later X archive with one tweet deleted and one added emits the same keys (${laterItems.map((it) => it.identity.key).join(", ")})`);
+    const regrouped = ingest("--items", laterFile, "--allow", "x:export");
+    const [{ n: tweetRows }] = await side`SELECT count(*)::int AS n FROM thoughts WHERE metadata->>'source' = 'x' AND content LIKE ${"%Finally finished the long trail%"}`;
+    assert(regrouped.code === 0 && new RegExp(`inserted 0 {2}updated 2 {2}patched 0 {2}unchanged ${xItems - 2}`).test(regrouped.out) && (await rowsOf("x")) === xItems && tweetRows === 0,
+      `…and ingests as two days updated in place, no row added, the deleted tweet in no row (${oneLine(regrouped.out).slice(0, 160)}; ${tweetRows} row(s) with it)`);
+    // The weekly digest's privacy filter reads the facet too: with
+    // schemas/enhanced-thoughts' column at its default 'standard', the
+    // Instagram rows' `personal` facet still keeps them out unless
+    // --include-personal says otherwise.
+    await side`ALTER TABLE thoughts ADD COLUMN IF NOT EXISTS sensitivity_tier text DEFAULT 'standard'`;
+    const digestRows = async (includePersonal: boolean) => {
+      const r = await readThoughts(side!, { windowDays: 100000, includePersonal, noSensitivityFilter: false });
+      return r.failClosed ? null : r.rows.map((t) => String((t.metadata as Record<string, unknown>)?.source));
+    };
+    const filtered = await digestRows(false);
+    const withPersonal = await digestRows(true);
+    const igRows = emitted.get("instagram")!.items.length;
+    assert(filtered !== null && filtered.length === total - igRows && !filtered.includes("instagram") && withPersonal?.filter((s) => s === "instagram").length === igRows,
+      `weekly-digest's read leaves out the rows whose metadata says personal under a column left at 'standard', and keeps them with --include-personal (${filtered?.length} of ${total}; ${withPersonal?.filter((s) => s === "instagram").length} Instagram with it)`);
+  } finally {
+    provider.stop(true);
+    await side?.close();
+    rmSync(dir, { recursive: true, force: true });
+    await sql.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
+  }
 }
 
 if (want("20")) {

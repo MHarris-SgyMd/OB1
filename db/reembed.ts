@@ -462,9 +462,10 @@ const HINTS = { url: "<postgres://…>", job: "<reembed:model@dim[:suffix]>", re
  * installs its signal handlers (stopOnSignals) — with the pass's stop
  * (db/lease.ts's PassStop); --status, --dry-run, the maintenance modes and a
  * run with nothing to do have no pass. Its hard stop returns the leases at
- * once, and run() returns 130 once the call in hand does — an embedding
- * within OB1_LLM_TIMEOUT, a database statement with no bound (a row lock it
- * waits on) — writing and releasing nothing more for the thought in hand: a
+ * once and aborts the embedding call in hand (SMD-2679), and run() returns
+ * 130 once that call has ended — at once — or the statement in hand has, a
+ * database statement having no bound (a row lock it waits on) — writing and
+ * releasing nothing more for the thought in hand: a
  * vector already sent to update_thought lands, the claim back in the pool
  * unmarked, and the next run re-embeds it. A call after run() has returned
  * does nothing.
@@ -1637,6 +1638,13 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
    * again, and may already be another worker's.
    */
   let hardStopped = false;
+  /**
+   * Aborted by the hard stop: the embedding call in hand ends at once rather
+   * than running out OB1_LLM_TIMEOUT — a sleep's wake waited on it (SMD-2679).
+   */
+  const onHardStop = new AbortController();
+  /** The hard stop's release, once: a second hard call returns it rather than repeat the release and its line. */
+  let hardRelease: Promise<unknown> | null = null;
   let done = 0;
   let failed = 0;
   let vanished = 0;
@@ -1686,7 +1694,10 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       if (hardStopped) return { outcome: "abandoned" };
       // The row's own metadata is what the gate reads — source, type, topics —
       // and an egress refusal throws out of here as a failed claim (SMD-1903).
-      const embedded = await embedder.embedCapture(current.content, { kind: "re-embed", metadata: current.metadata ?? undefined, content: current.content });
+      // The hard stop aborts the call (onHardStop): its AbortError reaches the
+      // worker's catch, which returns before recording or releasing anything,
+      // the stop being set.
+      const embedded = await embedder.embedCapture(current.content, { kind: "re-embed", metadata: current.metadata ?? undefined, content: current.content }, onHardStop.signal);
       // The hard stop came while the provider answered: the leases are
       // returned, so the vector is not written.
       if (hardStopped) return { outcome: "abandoned" };
@@ -1952,18 +1963,21 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
 
   // The pass's stop (db/lease.ts's PassStop), handed to the caller here, where
   // the script installed its signal handlers — before this a signal ends the
-  // CLI at once. One while already stopping is the hard stop: a worker may be
-  // inside a call it cannot leave — a provider call has OB1_LLM_TIMEOUT to
-  // answer, but a database call has nothing — so it may not reach its own
-  // finally; the release of every worker's leases, from here, the CLI exiting
-  // 130 when it settles.
+  // CLI at once. One while already stopping is the hard stop: the embedding
+  // call in hand is aborted (onHardStop), but a database call has no bound, so
+  // a worker may not reach its own finally; the release of every worker's
+  // leases, from here, the CLI exiting 130 when it settles. Once: a second
+  // hard call returns the first's release (SMD-2679).
   const stop: PassStop = () => {
     // After the run has returned there is no pass to stop.
     if (detach.aborted) return null;
     if (stopping) {
+      if (hardRelease) return hardRelease;
       hardStopped = true;
+      onHardStop.abort();
       // Started before the line is written: a Writer that throws does not keep the leases.
       const release = Promise.all([...activeWorkers].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.catch(() => null)));
+      hardRelease = release;
       err(`\n  second signal — exiting now; leases not returned in time expire within ${TTL} s`);
       return release;
     }

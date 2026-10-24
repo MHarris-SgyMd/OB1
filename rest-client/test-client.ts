@@ -98,7 +98,7 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     list_thoughts: { limit: 5, days: 1e-7, type: "idea", topic: "a topic with spaces & symbols?" },
     list_thought_ids: { limit: 2, after: ID },
     list_logged_searches: { since: "2026-10-01T00:00:00+02:00", limit: 3 },
-    list_supersession_proposals: { status: "all", lineage: false, limit: 2 },
+    list_supersession_proposals: { status: "all", lineage: false, limit: 2, judge_key: "consolidate:h2o-lightning-4b+qwen3.8:27b@p4d3" },
     thought_stats: {},
     thought_changes: { actions: ["capture", "delete"], others_only: true, limit: 4 },
     worker_status: {},
