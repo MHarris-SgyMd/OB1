@@ -1043,7 +1043,7 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
   const pg2 = await result("list_supersession_proposals", { limit: 1, after: String(pg1.sc?.cursor) });
   const wrongCur = await result("list_supersession_proposals", { after: String((await result("list_thoughts", { limit: 1 })).sc?.cursor) });
   assert(!pg1.isError && pg1.text.includes(`proposal ${pid2} `) && typeof pg1.sc?.cursor === "string" && pg1.sc?.remaining === 1 && /\n\n1 more follow — pass after: /.test(pg1.text)
-      && !pg2.isError && pg2.text.includes(`proposal ${pid} `) && !pg2.text.includes(`proposal ${pid2} `) && pg2.sc?.cursor === null && pg2.sc?.remaining === 0 && pg2.sc?.after === true
+      && !pg2.isError && pg2.text.includes(`proposal ${pid} `) && !pg2.text.includes(`proposal ${pid2} `) && pg2.sc?.cursor === null && pg2.sc?.remaining === 0 && pg2.sc?.pastCursor === true
       && /^1 pending supersession proposal\(s\) past the cursor, most confident first\./.test(pg2.text)
       && wrongCur.isError && wrongCur.sc?.code === "REFUSED_CURSOR" && /is not a list_supersession_proposals cursor/.test(wrongCur.text),
     `pages of one through the tool: the more confident first with a cursor, the cursor listing the other with none after; list_thoughts' cursor refused (${pg1.text.split("\n")[0]} | ${pg2.text.split("\n")[0]})`);
@@ -1054,11 +1054,18 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
   const otherStatus = await result("list_supersession_proposals", { status: "all", after: String(pg1.sc?.cursor) });
   const otherKey = await result("list_supersession_proposals", { judge_key: OTHER, after: String(pg1.sc?.cursor) });
   const year0 = await result("list_supersession_proposals", { after: proposalCursor(at1.selection, at1.confidence, "0000-01-01 00:00:00+00", at1.id) });
+  // Review pass 2: the lineage filter is the selection's too — a page under lineage: false, its cursor refused without
+  // it, and page one's (no lineage) refused with lineage: true.
+  const notLineage = await result("list_supersession_proposals", { lineage: false, limit: 1 });
+  const dropLineage = await result("list_supersession_proposals", { limit: 1, after: String(notLineage.sc?.cursor) });
+  const addLineage = await result("list_supersession_proposals", { lineage: true, after: String(pg1.sc?.cursor) });
   assert(!ended.isError && ended.text === "No more pending supersession proposals past this cursor — the listing ends here." && ended.sc?.cursor === null
       && [otherStatus, otherKey].every((r) => r.isError && r.sc?.code === "REFUSED_CURSOR" && r.sc?.reason === "filters" && (r.sc?.made as { status?: unknown })?.status === "pending")
       && otherStatus.text.startsWith("Refused: that cursor was made with `status: pending` and no other filter")
-      && year0.isError && year0.sc?.code === "REFUSED_CURSOR" && year0.sc?.reason === "shape",
-    `past the last row, the listing's end; a cursor with another status or key refused naming its own; a year-0 time refused at the door (${ended.text} | ${otherKey.text.slice(0, 120)} | ${year0.text.slice(0, 80)})`);
+      && year0.isError && year0.sc?.code === "REFUSED_CURSOR" && year0.sc?.reason === "shape"
+      && typeof notLineage.sc?.cursor === "string" && dropLineage.isError && dropLineage.sc?.reason === "filters" && (dropLineage.sc?.made as { lineage?: unknown })?.lineage === false
+      && addLineage.isError && addLineage.sc?.reason === "filters" && (addLineage.sc?.made as { lineage?: unknown })?.lineage === null,
+    `past the last row, the listing's end; a cursor with another status or key refused naming its own; a year-0 time refused at the door; a cursor with lineage dropped or added refused (${ended.text} | ${otherKey.text.slice(0, 120)} | ${year0.text.slice(0, 80)})`);
   await sql`DELETE FROM supersession_proposals WHERE id = ${pid2}::uuid`;
   await sql`SELECT delete_thought(${third}::uuid, NULL::jsonb)`;
   // A brain at 109 under this server: 109's four-argument form alone, the

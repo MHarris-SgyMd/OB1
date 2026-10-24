@@ -2027,9 +2027,10 @@ values on the listing's order (`confidence DESC, judged_at, id`), so the page
 starts past that row, before the order and the cap. The values, not the row's
 id: 063's recorder re-judges a stale row in place (the same id, `judged_at`
 now(), the new confidence), so a cursor naming the row would jump the walk; a
-walk lists each row once while its place holds — one decided during it leaves
-the selection, one re-judged moves to its new place, listed again past the
-cursor or missed behind it. Two
+walk lists each row once while its status, judge key, confidence and judged_at
+hold — a row that joins the selection or moves in it during the walk (a new
+proposal, a decision, a stale mark, a re-judge) is listed past the cursor and
+missed behind it, and one that leaves it is not listed after. Two
 trailing columns: `page_key`, each row's three values as text (confidence
 exactly, judged_at to the microsecond, the id) for the next call, and
 `remaining`, the selection's rows from this page's first on (`count(*) OVER
@@ -5367,8 +5368,8 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3015 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1622 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1001 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1623 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1002 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 259 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)

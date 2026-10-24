@@ -487,10 +487,10 @@ export async function listThoughts(ctx: Ctx, _principal: Principal, { limit, typ
 
 /**
  * A page of the queue (SMD-3249): `cursor` the next page's `after` while more follow, else null; `remaining` how many
- * follow this page; `after` whether this page followed a cursor, so an empty one is said as the walk's end, not an
- * empty queue (review pass 1).
+ * follow this page; `pastCursor` whether this page followed a cursor, so an empty one is said as the walk's end, not
+ * an empty queue (review pass 1; review pass 2: named apart from the input's `after`, the cursor itself).
  */
-export type ProposalsResult = { status: Input<"list_supersession_proposals">["status"]; lineage?: boolean; judgeKey?: string; proposals: SupersessionProposal[]; cursor: string | null; remaining: number; after: boolean };
+export type ProposalsResult = { status: Input<"list_supersession_proposals">["status"]; lineage?: boolean; judgeKey?: string; proposals: SupersessionProposal[]; cursor: string | null; remaining: number; pastCursor: boolean };
 
 export async function listSupersessionProposals(ctx: Ctx, _principal: Principal, { status, limit, lineage, judge_key: judgeKey, after }: Input<"list_supersession_proposals">): Promise<Outcome<ProposalsResult>> {
   // SMD-3249: `after` is a cursor a page ended with — one of this listing's, read before the store sees it; list_thoughts'
@@ -510,7 +510,7 @@ export async function listSupersessionProposals(ctx: Ctx, _principal: Principal,
     throw e;
   }
   const cursor = page.next ? proposalCursor(selection, page.next.confidence, page.next.judgedAt, page.next.id) : null;
-  return ok({ status, ...(lineage === undefined ? {} : { lineage }), ...(judgeKey === undefined ? {} : { judgeKey }), proposals: page.proposals, cursor, remaining: page.remaining, after: position !== undefined });
+  return ok({ status, ...(lineage === undefined ? {} : { lineage }), ...(judgeKey === undefined ? {} : { judgeKey }), proposals: page.proposals, cursor, remaining: page.remaining, pastCursor: position !== undefined });
 }
 
 // ── thought_stats and thought_changes ────────────────────────────────────────

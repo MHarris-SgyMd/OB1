@@ -1414,6 +1414,21 @@ console.log("\n[10] listSupersessionProposals reads migration 029's queue throug
   const w2 = await store.listSupersessionProposals({ limit: 2, after: w1.next! });
   assert(w1.proposals.map((p) => p.id).join() === [pid, pidB].join() && w1.remaining === 1 && w1.next?.id === pidB && w2.proposals.map((p) => p.id).join() === pidC && w2.next === null && w2.remaining === 0,
     `pages of two over three: the first two with the second's place as next and one to follow, then the third alone with none (${w1.proposals.length}, ${w2.proposals.length})`);
+  // Review pass 2: what follows is counted off the listing, before the writers' read drops a row gone in between —
+  // here list_proposal_writers wrapped to lose the second row, as a delete between the two reads would: the page holds
+  // one, one more still follows, and the cursor is past the dropped row.
+  await admin5.unsafe(`DO $$ DECLARE r text := pg_get_function_result('list_proposal_writers(uuid[])'::regprocedure); BEGIN
+    ALTER FUNCTION list_proposal_writers(uuid[]) RENAME TO list_proposal_writers_kept;
+    EXECUTE format('CREATE FUNCTION list_proposal_writers(p_ids uuid[]) RETURNS %s LANGUAGE sql AS $f$ SELECT * FROM list_proposal_writers_kept(array(SELECT x FROM unnest(p_ids) x WHERE x <> %L::uuid)) $f$', r, '${pidB}');
+  END $$`);
+  let dropped: Awaited<ReturnType<typeof store.listSupersessionProposals>>;
+  try {
+    dropped = await store.listSupersessionProposals({ limit: 2 });
+  } finally {
+    await admin5.unsafe(`DROP FUNCTION list_proposal_writers(uuid[]); ALTER FUNCTION list_proposal_writers_kept(uuid[]) RENAME TO list_proposal_writers`);
+  }
+  assert(dropped.proposals.map((p) => p.id).join() === pid && dropped.remaining === 1 && dropped.next?.id === pidB,
+    `a row the writers' read drops is not counted as one to come: the page holds the first, one follows, the cursor past the dropped second (${dropped.proposals.length}, ${dropped.remaining}, ${dropped.next?.id === pidB})`);
   await admin5`DELETE FROM supersession_proposals WHERE id IN (${pidB}::uuid, ${pidC}::uuid)`;
   await admin5`SELECT review_supersession_proposal(${pid}::uuid, 'accept', 'confirmed', NULL, NULL)`;
   assert((await listP({})).length === 0, "an accepted proposal leaves the pending list");

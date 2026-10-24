@@ -6558,11 +6558,40 @@ if (want("16")) {
   const atA = parseProposalCursor(cursorA)!;
   const noKey = await consolidate("--list", "pending", "--after", cursorA), allKey = await consolidate("--list", "all", "--key", "consolidate:zz-paged@p1", "--after", cursorA);
   const pastEnd = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1", "--after", proposalCursor(atA.selection, "0.00", atA.judgedAt, atA.id));
-  const year0 = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1", "--after", proposalCursor(atA.selection, atA.confidence, "0000-01-01 00:00:00+00", atA.id));
+  const year0Cur = proposalCursor(atA.selection, atA.confidence, "0000-01-01 00:00:00+00", atA.id);
+  const year0 = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1", "--after", year0Cur);
+  // Review pass 2: refused before anything is written — a --reject beside it is not made — in-process as spawned; and a
+  // cursor the tool made under a lineage filter is refused as the tool's to page, not as flags --list could pass.
+  const victim = pagedIds(pageA.out)[0];
+  const year0Reject = await consolidate("--reject", victim, "--list", "pending", "--key", "consolidate:zz-paged@p1", "--after", year0Cur);
+  // A throw is read as the case's failure, not the suite's end (review pass 2: unrefused, the in-process run threw).
+  const year0C = await consolidateInProcess({ list: "pending", key: "consolidate:zz-paged@p1", after: year0Cur }).catch((e: Error) => ({ code: -1, stdout: "", stderr: e.message }));
+  const [{ status: victimStatus }] = await sql`SELECT status FROM supersession_proposals WHERE id = ${victim}::uuid`;
+  const lineageCur = await consolidate("--list", "pending", "--after", proposalCursor({ ...atA.selection, judgeKey: null, lineage: true }, atA.confidence, atA.judgedAt, atA.id));
   assert([noKey, allKey].every((r) => r.code === 2 && r.out.includes("--after's cursor was made for --list pending --key consolidate:zz-paged@p1: pass those with it"))
       && pastEnd.code === 0 && pastEnd.out.includes("  no more pending proposals judged by consolidate:zz-paged@p1 past this cursor — the listing ends here")
-      && year0.code === 2 && year0.out.includes("this one's time is not one Postgres reads") && !/PostgresError|\n\s+at /.test(year0.out),
-    `--after with another --list or --key refused naming its page's; past the last row, the listing's end; a year-0 time refused in --after's words, no stack (${noKey.out.trim().slice(0, 100)} | ${year0.out.trim().slice(0, 100)})`);
+      && year0.code === 2 && year0.out.includes("this one's time is not one Postgres reads") && !/PostgresError|\n\s+at /.test(year0.out)
+      && year0Reject.code === 2 && !/rejected /.test(year0Reject.out) && victimStatus === "pending" && same(year0C, year0)
+      && lineageCur.code === 2 && lineageCur.out.includes("--after's cursor was made by the list_supersession_proposals tool under lineage: true, which --list does not select: page it there"),
+    `--after with another --list or --key refused naming its page's; past the last row, the listing's end; a year-0 time refused in --after's words, no stack, before a --reject beside it writes, in-process as spawned; a tool's lineage cursor the tool's to page (${noKey.out.trim().slice(0, 100)} | ${year0.out.trim().slice(0, 100)} | ${lineageCur.out.trim().slice(0, 100)})`);
+  // Review pass 2: --list all pages under its own selection — the next page line says --list all, not pending (printList
+  // reads all as no status) — and a page whose rows all went before the writers' read (list_proposal_writers wrapped
+  // to return none, as deletes between the two reads would) still prints the line past them.
+  const allKeyed = await consolidate("--list", "all", "--key", "consolidate:zz-paged@p1");
+  await sql.unsafe(`DO $$ DECLARE r text := pg_get_function_result('list_proposal_writers(uuid[])'::regprocedure); BEGIN
+    ALTER FUNCTION list_proposal_writers(uuid[]) RENAME TO list_proposal_writers_kept;
+    EXECUTE format('CREATE FUNCTION list_proposal_writers(p_ids uuid[]) RETURNS %s LANGUAGE sql AS $f$ SELECT * FROM list_proposal_writers_kept(ARRAY[]::uuid[]) $f$', r);
+  END $$`);
+  let allGone: Awaited<ReturnType<typeof consolidate>>;
+  try {
+    allGone = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1");
+  } finally {
+    await sql.unsafe(`DROP FUNCTION list_proposal_writers(uuid[]); ALTER FUNCTION list_proposal_writers_kept(uuid[]) RENAME TO list_proposal_writers`);
+  }
+  assert(allKeyed.code === 0 && /\n  next page: --list all --key consolidate:zz-paged@p1 --after \S+\n/.test(allKeyed.out)
+      && allGone.code === 0 && allGone.out.includes("  no pending proposals judged by consolidate:zz-paged@p1 on this page: the ones it listed went before they were read\n  next page: --list pending --key consolidate:zz-paged@p1 --after ")
+      && pagedIds(allGone.out).length === 0,
+    `--list all's next page line keeps --list all; a page whose rows all went still prints the line past them (${allKeyed.out.split("\n").find((l) => /next page/.test(l))?.trim().slice(0, 70)} | ${allGone.out.trim().slice(0, 140)})`);
   // Run-it review, pass 1: a page holding exactly the cap is not capped — 110's remaining, not `rows === limit` (the
   // rule before 110), which printed "the first 50 of 50" and a cursor to an empty page.
   await sql`DELETE FROM supersession_proposals WHERE id = ${pagedIds(pageB.out)[0]}::uuid`;
@@ -6585,7 +6614,7 @@ if (want("16")) {
   assert(["pending", "accepted", undefined].every((st) => capNote(st, false) === `${NEXT}; --status counts them all`)
       && capNote("pending", true) === "decide these and list again for the rest, or --after <the cursor below> for the next page; --status counts each pass's pending"
       && ["accepted", "rejected", "stale", undefined].every((st) => capNote(st, true) === NEXT)
-      && [true, false].every((k) => capNote("lineage", k) === "the rest are not listed — reject these and list again, or page them with the list_supersession_proposals tool (lineage: true, then after: its cursor)"),
+      && [true, false].every((k) => capNote("lineage", k) === "the rest are not listed — reject these and list again, or page them with the list_supersession_proposals tool (status: pending, then stale, each with lineage: true and after: its cursor)"),
     "a capped page's note: --after for every one-status page; under --key, pending also drains as it is decided; a lineage page drains as it is rejected, and the tool pages it");
 
   // The review path, through the worker's flags, audited under the key's name.

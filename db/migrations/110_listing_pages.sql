@@ -29,9 +29,11 @@
 --      verdict's confidence), so a cursor that named the row would read its
 --      new place and jump the walk, skipping or repeating rows; the values
 --      keep the place the page ended at. A walk so lists each row once while
---      its place holds; a row decided during it leaves the selection, and one
---      re-judged moves to its new place — listed again if that is past the
---      cursor, missed if behind it (review pass 1). All three
+--      its status, judge key, confidence and judged_at hold; a row that joins
+--      the selection or moves in it during the walk — a new proposal, a
+--      decision, a stale mark, a re-judge — is listed if its place is past
+--      the cursor and missed if behind it, and one that leaves it is not
+--      listed after (review passes 1 and 2). All three
 --      set or none: a partial cursor is refused by name (it would otherwise
 --      read as no cursor and list from the top, a silent restart).
 --      The columns: `page_key text`, the row's three values as text —

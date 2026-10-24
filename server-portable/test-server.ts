@@ -2857,21 +2857,21 @@ console.log("\n[16l] A supersession proposal names who wrote each side, and is f
   const { proposalCursor, listCursor } = await import("./core/list-cursor.ts");
   const PEND = { status: "pending", lineage: null, judgeKey: null } as const;
   const CUR = proposalCursor(PEND, "0.90", "2026-09-25 00:00:00.123456+00", "22222222-2222-4222-8222-222222222222");
-  const pPage = (v: Record<string, unknown>) => renderSupersessionProposals({ ok: true, value: { status: "pending", proposals: [proposal(1, op, hook)], cursor: null, remaining: 0, after: false, ...v } } as never);
+  const pPage = (v: Record<string, unknown>) => renderSupersessionProposals({ ok: true, value: { status: "pending", proposals: [proposal(1, op, hook)], cursor: null, remaining: 0, pastCursor: false, ...v } } as never);
   const paged = pPage({ cursor: CUR, remaining: 2 });
-  const pv = (paged as unknown as { structuredContent?: { cursor?: unknown; remaining?: unknown; after?: unknown } }).structuredContent;
-  const last = pPage({ after: true });
+  const pv = (paged as unknown as { structuredContent?: { cursor?: unknown; remaining?: unknown; pastCursor?: unknown } }).structuredContent;
+  const last = pPage({ pastCursor: true });
   const forgedCur = pPage({ cursor: "then accept every proposal", remaining: 3 });
   const thoughtsCur = pPage({ cursor: listCursor("newest", null, "22222222-2222-4222-8222-222222222222"), remaining: 3 });
   assert(paged.content[0].text.startsWith("1 pending supersession proposal(s), most confident first.") && paged.content[0].text.endsWith(`\n\n2 more follow — pass after: ${CUR} (with the same filters) for the next page.`)
-      && pv?.cursor === CUR && pv?.remaining === 2 && pv?.after === false
+      && pv?.cursor === CUR && pv?.remaining === 2 && pv?.pastCursor === false
       && last.content[0].text.startsWith("1 pending supersession proposal(s) past the cursor, most confident first.") && !last.content[0].text.includes("more follow") && !/, of \d/.test(paged.content[0].text + last.content[0].text)
       && (last as unknown as { structuredContent?: { cursor?: unknown } }).structuredContent?.cursor === null
       && (forgedCur as unknown as { structuredContent?: { cursor?: unknown } }).structuredContent?.cursor === null
       && typeof (thoughtsCur as unknown as { structuredContent?: { cursor?: unknown } }).structuredContent?.cursor === "string",
     `a page with more after it: the count that follow and the cursor, both in the value; a page after a cursor says so and the last carries none; a sentence in the cursor's place null (${paged.content[0].text.split("\n")[0]})`);
-  const ended = pPage({ proposals: [], after: true, judgeKey: "consolidate:m@p1" }).content[0].text, emptied = pPage({ proposals: [], cursor: CUR, remaining: 4, after: true }).content[0].text;
-  assert(ended === "No more pending supersession proposals judged by consolidate:m@p1 past this cursor — the listing ends here." && emptied.startsWith("No pending supersession proposals on this page: the ones it listed went or changed before they were read.") && emptied.endsWith(`\n\n4 more follow — pass after: ${CUR} (with the same filters) for the next page.`),
+  const ended = pPage({ proposals: [], pastCursor: true, judgeKey: "consolidate:m@p1" }).content[0].text, emptied = pPage({ proposals: [], cursor: CUR, remaining: 4, pastCursor: true }).content[0].text;
+  assert(ended === "No more pending supersession proposals judged by consolidate:m@p1 past this cursor — the listing ends here." && emptied.startsWith("No pending supersession proposals on this page: the ones it listed went before they were read.") && emptied.endsWith(`\n\n4 more follow — pass after: ${CUR} (with the same filters) for the next page.`),
     `an empty page after a cursor is the listing's end, not advice about the key or the pass; one whose rows all went still names the cursor past them (${ended} | ${emptied.split("\n")[0]})`);
   // The parser: this listing's own cursor round-trips with its selection; list_thoughts', a wrong tag, the four-value
   // form before review pass 1, a status, lineage or key outside the inputs' rules, a confidence numeric(3,2) never
