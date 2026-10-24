@@ -312,7 +312,8 @@
  *      root.ts or a transport file, is a hit. A value passed on (the agent
  *      registry's lookups) and a global's alias are not followed;
  *      transportLeaksIn is a pure function its probes run on in-memory text;
- *      no exceptions
+ *      and every server-portable module that calls serveHere(), an entry that
+ *      serves the store, is one of TRANSPORT_FILES; no exceptions
  *  26. every vendored capture path names the trust of what it writes
  *      (SMD-1724): a code file under the seven category directories that
  *      captures through the function — an `upsert_thought` RPC by any client,
@@ -6487,6 +6488,14 @@ function checkTransportOnly() {
     const as = role === ROOT_ROLE ? " as root.ts" : "";
     if (hit && n === 0) fail(SELF, `check 25 no longer catches its probe${as}: ${JSON.stringify(probe)} (its own probe)`);
     if (!hit && n > 0) fail(SELF, `check 25 catches a non-probe${as}: ${JSON.stringify(probe)} — ${transportLeaksIn(probe, role).map((h) => h.what).join("; ")} (its own probe)`);
+  }
+  // Every entry that serves the store — a server-portable module calling serveHere(), root.ts's own definition aside —
+  // is one of TRANSPORT_FILES: the REST core is the one since SMD-2287 PR 6b retired index.ts, and an entry the list
+  // lost would be held by nothing (review pass 6b·6: dropping api.ts passed).
+  const spDir = join(ROOT, "server-portable");
+  for (const f of readdirSync(spDir).filter((n) => n.endsWith(".ts") && !n.startsWith("test-") && n !== "root.ts").sort()) {
+    if (/\bserveHere\(/.test(blanked(readFileSync(join(spDir, f), "utf8"), true)) && !TRANSPORT_FILES.has(`server-portable/${f}`))
+      fail(`server-portable/${f}`, "calls serveHere() — it serves the store — and is not one of check 25's TRANSPORT_FILES: add it with its role, so its imports are held as the REST core's are (SMD-2283, SMD-2287)");
   }
   for (const [file, role] of TRANSPORT_FILES) {
     const path = join(ROOT, file);

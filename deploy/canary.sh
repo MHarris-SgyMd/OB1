@@ -1313,12 +1313,16 @@ WRITERS_STOPPED=1
 # compose.yaml no longer names, so compose would leave it running beside the
 # stack, an orphan holding connections to the canary's database. Found by its
 # project's and service's labels, running or stopped; stopped first, within the
-# grace compose gave the container from the canary's own file (the runtime's
-# stop with no -t reads it), so a call in flight drains and its stop writes its
-# own jobs lost (review passes 6b·4 and 6b·5), then removed.
+# canary's own grace (OB1_STOP_GRACE in its env file, 10 unless set; passed
+# explicitly, as the sleep worker's is below, rather than trusted to the
+# runtime's reading of compose's StopTimeout, which podman's is not measured
+# here), so a call in flight drains and its stop writes its own jobs lost
+# (review passes 6b·4 to 6b·6), then removed.
 retired="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=server")"
 if [ -n "$retired" ]; then
-  printf '%s\n' "$retired" | xargs "$RUNTIME" stop >/dev/null 2>&1 || true
+  grace="$(env_file value "$CANARY_ENV" OB1_STOP_GRACE 2>/dev/null || true)"
+  [[ "$grace" =~ ^[0-9]+$ ]] || grace=10
+  printf '%s\n' "$retired" | xargs "$RUNTIME" stop -t "$grace" >/dev/null 2>&1 || true
   printf '%s\n' "$retired" | xargs "$RUNTIME" rm -f >/dev/null
   say "the canary's server container, retired in SMD-2287 PR 6b, removed"
 fi
