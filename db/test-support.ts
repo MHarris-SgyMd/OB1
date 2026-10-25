@@ -352,6 +352,12 @@ const FUNCTIONS = [
   "ob1_lapse_tree(uuid, uuid)",
   // 107 (SMD-3036): whether a side's walks fit the listing's cap.
   "ob1_listing_walk_fits(uuid, uuid)",
+  // 111 (SMD-3306): a thought's own subject — its key's shape, its write and
+  // the lineage drop's trigger function; the trigger and the indexes go with
+  // thought_facets.
+  "subject_key_valid(text)",
+  "record_thought_subject(uuid, text, text, text, uuid, text, jsonb)",
+  "ob1_drop_subject_derivation()",
 ];
 
 /**
