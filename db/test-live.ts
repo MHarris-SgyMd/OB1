@@ -50,6 +50,8 @@ import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { run as runMigrate, type MigrateOptions } from "./migrate.ts";
 import { abortedNote, run as runExtract, type ExtractOptions } from "./extract-entities.ts";
+import { sweepSubjects, type SubjectSweepOptions } from "./subject-sweep.ts";
+import { subjectPrompt } from "../server-portable/subject.ts";
 import { capNote, MAX_STALE_DAYS, pendingByPassLine, run as runConsolidate, type ConsolidateOptions } from "./consolidate.ts";
 import { run as runReembed, type ReembedOptions } from "./reembed.ts";
 import { sweepOrphans } from "./rebuild.ts";
@@ -104,7 +106,7 @@ if (!URL_) {
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["38"],
   long: ["9", "10g", "38b"],
-  extract: ["10", "10e", "10f", "17", "37", "37b", "39", "41", "43"],
+  extract: ["10", "10e", "10f", "10h", "17", "37", "37b", "39", "41", "43"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -6021,6 +6023,246 @@ if (want("10g")) {
   atlasModel.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   await sql`DELETE FROM thoughts`;
+}
+
+if (want("10h")) {
+  console.log("\n[10h] db/extract-entities.ts: a thought's own subject — the rules' recorded with its entities, no model asked, again at an edited text, and a first line's UTF-8 no ticket; --subjects the sweep for the rest, the judge model asked of the thought alone, an unread answer counted, a moved text kept; a dry run, the rules alone, a limit, a stop, the egress gate, the provider's refusal and outage, a brain without 110's door and a role without its grants, as the pass meets each (migration 110, SMD-3306)");
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  /** The judge's answer by words in the thought; any other thought, an empty subject. */
+  const owns: [string, string][] = [["release notes", '{"subject":"OB1 release 2.0.0","deliverables":[]}'], ["merged pull", '{"subject":"PR 727","deliverables":["db/x.ts"]}'], ["garbled", "not json"]];
+  let extractCalls = 0, ownCalls = 0;
+  let judgeMode: "answer" | "refuse" | "503" = "answer";
+  /** Called as each own question arrives, with the thought asked about: the stop case aborts there, so a thought is in hand. */
+  let onOwn: ((thought: string) => void) | null = null;
+  const stub = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      if (req.method === "GET") return Response.json({ object: "list", data: [{ id: "stub-meta" }, { id: "stub-judge" }] });
+      const body = (await req.json()) as { model?: string; messages?: { role: string; content: string }[] };
+      if (body.messages?.[0]?.content === PROBE_PROMPT) return Response.json({ choices: [{ message: { content: "OK" } }] });
+      const user = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      if (!user.startsWith("Each item is one stored thought.")) {
+        extractCalls++;
+        return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [], relationships: [] }) } }] });
+      }
+      ownCalls++;
+      // The thought alone, not the rules quoted before it.
+      const thought = user.slice(user.indexOf("<thought_a>"));
+      onOwn?.(thought);
+      if (body.model !== "stub-judge") return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found` } }), { status: 404 });
+      if (judgeMode === "refuse") return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
+      if (judgeMode === "503") return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+      const hit = owns.find(([w]) => thought.includes(w));
+      return Response.json({ choices: [{ message: { content: hit ? hit[1] : '{"subject":"","deliverables":[]}' } }] });
+    },
+  });
+  const seed = async (content: string, metadata: Record<string, unknown> = {}) =>
+    ((await sql`SELECT upsert_thought(${content}, ${{ metadata }}::jsonb) AS r`)[0].r as { id: string }).id;
+  const filed = await seed("The ticket row's own text, its id in its metadata alone.", { issue: "SMD-7" });
+  const session = await seed("SMD-8 session summary\n\nThe work done in it.");
+  const release = await seed("OB1 release notes: what shipped this week.");
+  const pr = await seed("Reviewed and merged pull work for the dashboard.");
+  const none = await seed("A passing remark, nothing here to name.");
+  const garbled = await seed("A garbled answer comes back for this one.");
+  // Ticket-shaped words on a first line under no prefix the brain files tickets under (SMD, from the issue above):
+  // UTF on the denied list, JIRA on none, so neither is a ticket here.
+  const utf = await seed("UTF-8 handling for the JIRA-5 export, nothing filed.");
+  const rawKey = "c".repeat(64);
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    DATABASE_URL: URL_,
+    OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`,
+    OB1_LLM_LOCAL: "1",
+    OB1_METADATA_MODEL: "stub-meta",
+    OB1_JUDGE_MODEL: "stub-judge",
+    OB1_WORKER_KEY: rawKey,
+    MCP_ACCESS_KEYS: `subject-worker:write:${hashKey(rawKey)}`,
+  };
+  /** A run's lines per stream, a newline after each, as a child's are. */
+  const caught = async (run: (writer: { out: (l: string) => void; err: (l: string) => void }) => Promise<number>) => {
+    const outs: string[] = [], errs: string[] = [];
+    const code = await run({ out: (l) => outs.push(l), err: (l) => errs.push(l) });
+    const lines = (ls: string[]) => ls.map((l) => `${l}\n`).join("");
+    return { code, stdout: lines(outs), stderr: lines(errs) };
+  };
+  const extractRun = (opts: Omit<ExtractOptions, "writer"> = {}, url = URL_!, e = env) => caught((writer) => runExtract({ url, env: e, workers: 1, ...opts, writer }));
+  const sweep = (opts: Omit<SubjectSweepOptions, "writer"> = {}, e = env, url = URL_!) => caught((writer) => sweepSubjects({ url, env: e, ...opts, writer }));
+  /** The summary line's counts, after "N thought(s) in …:" — what the sweep did with each thought it took. */
+  const tally = (r: { stdout: string }) => /^ {2}\d+ thought\(s\) in [^:]*: (.*)$/m.exec(r.stdout)?.[1] ?? "";
+  type Subject = { id: string; thought: string; key: string; by: string; judge: string; standing: boolean; fp: string | null; current: string; produced_by: string | null; recipe: Record<string, unknown> | null; agent: string | null };
+  const subjects = async () => (await sql`
+    SELECT f.id::text AS id, f.thought_id::text AS thought, f.payload->>'key' AS key, f.payload->>'by' AS by, f.payload->>'judge_key' AS judge, f.valid_until IS NULL AS standing,
+           d.input_fingerprints[1] AS fp, t.content_fingerprint AS current, d.produced_by, d.recipe, d.canonical_agent_id::text AS agent
+      FROM thought_facets f JOIN thoughts t ON t.id = f.thought_id
+      LEFT JOIN derivations d ON d.artifact_kind = 'subject' AND d.artifact_id = f.id
+     WHERE f.kind = 'subject' ORDER BY f.created_at, f.id`) as Subject[];
+  const standingOf = async (id: string) => (await subjects()).find((s) => s.thought === id && s.standing);
+  try {
+    // The pass: the rules' subject with the entities, and no own question asked.
+    const first = await extractRun();
+    let s = await subjects();
+    const [agent] = (await sql`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = 'subject-worker'`) as { id: string }[];
+    assert(first.code === 0 && /7 extracted, 0 failed/.test(first.stdout) && /; recorded 2 thought\(s\)' own subject by its ticket\n/.test(first.stdout) && ownCalls === 0 && extractCalls === 7,
+      `the pass extracts the seven and records the two subjects a rule finds, asking no own question (exit ${first.code}, ${ownCalls} own question(s): ${first.stdout.split("\n").find((l) => /wrote /.test(l))?.trim()})`);
+    const byFiled = s.find((x) => x.thought === filed), bySession = s.find((x) => x.thought === session);
+    assert(s.length === 2 && byFiled?.key === "ticket:SMD-7" && byFiled.by === "metadata" && bySession?.key === "ticket:SMD-8" && bySession.by === "first_line" && s.every((x) => x.standing && x.judge === "subject:rules@r1"),
+      `the ticket filed under, and the first line's: standing, under the rules' key (${JSON.stringify(s.map((x) => [x.key, x.by]))})`);
+    assert(!s.some((x) => x.thought === utf), "a first line's UTF-8 and JIRA-5, under no prefix the brain files tickets under, are no ticket: the thought is left to the model");
+    assert(agent !== undefined && s.every((x) => x.fp === x.current && x.produced_by === "subject:rules@r1" && x.recipe?.deterministic === true && x.recipe?.rule === x.by && x.recipe?.rules_version === 1 && x.agent === agent.id),
+      "…each with its lineage row: the text read, the rules' key and recipe, the worker's agent");
+
+    // An edit: 016's trigger re-queues it, and the next pass finds its subject again at the new text.
+    await sql`SELECT update_thought(${session}::uuid, ${"SMD-9 session summary, retitled\n\nThe work done in it."})`;
+    const second = await extractRun();
+    s = await subjects();
+    const now = s.find((x) => x.thought === session && x.standing), was = s.find((x) => x.thought === session && !x.standing);
+    assert(second.code === 0 && /1 extracted, 0 failed/.test(second.stdout) && now?.key === "ticket:SMD-9" && now.fp === now.current && was?.key === "ticket:SMD-8" && s.filter((x) => x.standing).length === 2,
+      `an edited text is extracted again, and its subject found again there: the old one closed, as history (exit ${second.code}, ${now?.key}, was ${was?.key})`);
+
+    // The sweep: a dry run, then the rules alone, ask no model and write nothing.
+    let asked = ownCalls;
+    const dry = await sweep({ dryRun: true });
+    assert(dry.code === 0 && /^ {2}5 thought\(s\) with no subject at their text$/m.test(dry.stdout) && /would: of 5 thought\(s\), record none by the rules; ask stub-judge about 5\. Nothing was written or asked\./.test(dry.stdout) && ownCalls === asked && (await subjects()).length === 3,
+      `--subjects --dry-run counts the five no rule keys, asks nothing and writes nothing (exit ${dry.code}: ${dry.stdout.trim().split("\n").slice(-1)[0]})`);
+    // A dry run reads on: a signal aborted before it changes nothing (review pass 1: it read none and exited 0).
+    const dryStopped = await sweep({ dryRun: true, signal: AbortSignal.abort() });
+    assert(dryStopped.code === 0 && /would: of 5 thought\(s\)/.test(dryStopped.stdout), `…and reads on under an aborted signal, as the pass's dry run does (exit ${dryStopped.code})`);
+    const rulesAlone = await sweep({ model: false });
+    assert(rulesAlone.code === 0 && tally(rulesAlone) === "0 subject(s) recorded; 5 left for the judge model (--subjects rules)" && ownCalls === asked && !/egress:/.test(rulesAlone.stdout),
+      `--subjects rules asks no model and leaves the five, exit 0 (exit ${rulesAlone.code}: ${tally(rulesAlone)})`);
+
+    // A stop with an own question in hand: that thought is finished, its answer recorded, never dropped or left
+    // unanswered (review pass 1), and nothing after it is asked, 130. In hand: the first in id order of the two the
+    // model names, so the other is always after it; the thoughts before it are asked first, one question each.
+    const inHand = release < pr ? release : pr;
+    const before = [release, pr, none, garbled, utf].filter((id) => id < inHand).length;
+    const stop = new AbortController();
+    onOwn = (t) => { if (t.includes(inHand === release ? "release notes" : "merged pull")) stop.abort(); };
+    const stopped = await sweep({ signal: stop.signal }).finally(() => { onOwn = null; });
+    assert(stopped.code === 130 && new RegExp(`stopped after ${before + 1} thought\\(s\\): the next sweep takes up the rest`).test(stopped.stderr) && ownCalls === asked + before + 1
+      && /^1 subject\(s\) recorded \(1 by stub-judge\)/.test(tally(stopped)) && !/unanswered/.test(tally(stopped)) && (await standingOf(inHand))?.by === "model",
+      `a stop: the thought in hand finished and recorded, none after it asked, exit 130 (exit ${stopped.code}, ${ownCalls - asked} asked of ${before + 1}: ${tally(stopped)})`);
+    asked = ownCalls;
+    const limited = await sweep({ limit: 1 });
+    assert(limited.code === (/answered not as JSON/.test(tally(limited)) ? 1 : 0) && /^ {2}1 thought\(s\) in /m.test(limited.stdout) && ownCalls === asked + 1, `--limit 1: one thought, one question (exit ${limited.code}: ${tally(limited)})`);
+
+    // The rest: the model's subjects recorded under its key; an empty answer records nothing, and one that is not
+    // JSON records nothing, is said and exits 1, as the pass fails a malformed answer (review pass 1: it exited 0).
+    const full = await sweep();
+    s = await subjects();
+    const rel = s.find((x) => x.thought === release && x.standing), pull = s.find((x) => x.thought === pr && x.standing);
+    assert(full.code === 1 && rel?.key === "version:v2.0.0" && pull?.key === "pr:727" && [rel, pull].every((x) => x?.by === "model" && x.judge === "subject:stub-judge@p1" && x.produced_by === "subject:stub-judge@p1" && x.fp === x.current && x.agent === agent.id),
+      `the sweep records the model's subjects, read into their keys, under the model's pass key (exit ${full.code}: ${rel?.key}, ${pull?.key})`);
+    assert(rel?.recipe?.deterministic === false && rel.recipe.model === "stub-judge" && rel.recipe.answer === "OB1 release 2.0.0" && pull?.recipe?.answer === "PR 727" && rel.recipe.prompt_hash === promptHash(subjectPrompt()),
+      "…its recipe the model, the question's hash and the subject it answered");
+    assert(!s.some((x) => x.thought === none || x.thought === garbled || x.thought === utf) && /answered not as JSON of the expected shape/.test(tally(full)) && /stub-judge's answer was not JSON of the expected shape; the next sweep asks again/.test(full.stderr),
+      `an empty subject records nothing, and an answer that is not JSON records nothing, said, exit 1 (${tally(full)})`);
+    asked = ownCalls;
+    const again = await sweep();
+    assert(again.code === 1 && ownCalls === asked + 3 && tally(again) === "0 subject(s) recorded; 2 the model named nothing for, 1 answered not as JSON of the expected shape",
+      `a second sweep asks only the three with no subject (exit ${again.code}, ${ownCalls - asked} asked: ${tally(again)})`);
+
+    // A moved text the model names the same: the facet kept, its lineage moved to the text read now.
+    const relBefore = (await standingOf(release))!;
+    await sql`SELECT update_thought(${release}::uuid, ${"OB1 release notes: what shipped this week, and one fix."})`;
+    const moved = await sweep();
+    const relAfter = (await standingOf(release))!;
+    assert(/^0 subject\(s\) recorded; 1 kept, at the text read now/.test(tally(moved)) && relAfter.id === relBefore.id && relAfter.fp === relAfter.current && relAfter.fp !== relBefore.fp,
+      `a moved text named the same: the facet kept, its lineage at the new text (exit ${moved.code}: ${tally(moved)})`);
+
+    // The spawned CLI prints what run() in this process does (masked seconds).
+    const spawned = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--subjects", "rules"], { env: env as Record<string, string>, cwd: HERE });
+    const inProcess = await sweep({ model: false });
+    assert(same(untimed(spawned), untimed(inProcess)), `the CLI's --subjects rules prints what the sweep in this process does, stream by stream (exit ${spawned.code}: ${spawned.stdout.trim().split("\n").slice(-1)[0]})`);
+
+    // The egress gate, the provider's refusal and its outage, as the pass meets each.
+    asked = ownCalls;
+    const gatedEnv = { ...env, OB1_LLM_LOCAL: "", OB1_CHAT_LOCAL: "", OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "" };
+    const gated = await sweep({}, gatedEnv);
+    assert(gated.code === 2 && /Nothing would be asked for its subject: .* Or run --subjects rules, which asks no model\./.test(gated.stderr) && ownCalls === asked,
+      `a policy that refuses every row: refused before any question, exit 2 (exit ${gated.code})`);
+    const gatedRules = await sweep({ model: false }, gatedEnv);
+    assert(gatedRules.code === 0, `…and --subjects rules, which sends nothing, runs under it (exit ${gatedRules.code})`);
+    // A policy that lets one row out: the others refused before their question and counted, exit 1, as the pass fails a refused row.
+    const perRow = await sweep({}, { ...gatedEnv, OB1_EGRESS_ALLOW: "marker:garbled" });
+    assert(perRow.code === 1 && ownCalls === asked + 1 && tally(perRow) === "0 subject(s) recorded; 1 answered not as JSON of the expected shape, 2 refused by the egress gate" && /refused by the egress gate: /.test(perRow.stderr),
+      `rows the policy keeps in are refused before their question and counted, the row it lets out asked, exit 1 (exit ${perRow.code}: ${tally(perRow)})`);
+    asked = ownCalls;
+    judgeMode = "refuse";
+    const refusedRun = await sweep().finally(() => { judgeMode = "answer"; });
+    assert(refusedRun.code === 2 && /The provider refused the request itself: .*401/.test(refusedRun.stderr) && ownCalls === asked + 1,
+      `the provider's refusal ends the sweep at the first question, exit 2 (exit ${refusedRun.code})`);
+    asked = ownCalls;
+    const restore = shortenPauses();
+    judgeMode = "503";
+    const down = await sweep().finally(() => { restore(); judgeMode = "answer"; });
+    assert(down.code === 1 && /The provider is not answering after 3 pauses/.test(down.stderr) && ownCalls === asked + 4,
+      `a server error is paused for three times, then ends the sweep, exit 1 (exit ${down.code}, ${ownCalls - asked} call(s))`);
+
+    // A brain without 110's door: the sweep refuses by name; the pass extracts, and says once that it records no subject.
+    await sql`ALTER FUNCTION record_thought_subject(uuid, text, text, text, uuid, text, jsonb) RENAME TO record_thought_subject_away`;
+    try {
+      const noDoor = await sweep();
+      assert(noDoor.code === 2 && /record_thought_subject is missing: a thought's own subject is migration 110's/.test(noDoor.stderr), `--subjects without 110's door refuses, naming the migration (exit ${noDoor.code})`);
+      await sql`SELECT update_thought(${filed}::uuid, ${"The ticket row's own text, edited."})`;
+      await sql`SELECT update_thought(${session}::uuid, ${"SMD-9 session summary, edited again."})`;
+      const noDoorPass = await extractRun();
+      const said = noDoorPass.stderr.split("\n").filter((l) => /could not record a thought's own subject/.test(l));
+      // Three: the two just edited, two subjects for a rule, and the release note, edited above.
+      assert(noDoorPass.code === 0 && /3 extracted, 0 failed/.test(noDoorPass.stdout) && said.length === 1 && /needs migration 110/.test(said[0]) && !/own subject by its ticket/.test(noDoorPass.stdout),
+        `the pass without it extracts the three edited, their entities standing, and says once that it records no subject (exit ${noDoorPass.code}, ${said.length} line(s): ${noDoorPass.stdout.split("\n").find((l) => /extracted,/.test(l))?.trim().slice(0, 60)})`);
+    } finally {
+      await sql`ALTER FUNCTION record_thought_subject_away(uuid, text, text, text, uuid, text, jsonb) RENAME TO record_thought_subject`;
+    }
+
+    // A role without the door's grants (review pass 1: the sweep crashed on its first write, a question spent). Granted
+    // the extraction role's groups but not structure, the sweep is refused before any question, exit 2, and the pass
+    // under it extracts and says once that it records no subject. With structure too, but the door's EXECUTE revoked,
+    // the sweep's first write is refused and ends it, exit 2, rather than escaping it.
+    const SROLE = "ob1_live_subjects";
+    const sUrl = URL_!.replace(/\/\/[^@]*@/, `//${SROLE}:ob1subjects@`);
+    const [{ mayCreate: mayCreateS }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
+    if (sUrl === URL_ || !mayCreateS) {
+      skip("a role without the door's grants: the sweep refused before any question, the pass saying once that it records none, a write refused ending the sweep", sUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
+    } else {
+      const dropS = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${SROLE}') THEN EXECUTE 'DROP OWNED BY ${SROLE}'; EXECUTE 'DROP ROLE ${SROLE}'; END IF; END $$`);
+      await dropS();
+      const sEnv = { ...env, DATABASE_URL: sUrl };
+      try {
+        await sql.unsafe(`CREATE ROLE ${SROLE} LOGIN PASSWORD 'ob1subjects'`);
+        const granted = await migrateInProcess({ grant: SROLE, groups: "capture,server,worker,extraction" });
+        assert(granted.code === 0, `the role is granted capture, server, worker and extraction (exit ${granted.code}: ${granted.stderr.trim().slice(0, 200)})`);
+        asked = ownCalls;
+        const roleSweep = await sweep({}, sEnv, sUrl);
+        assert(roleSweep.code === 2 && /This role cannot write a thought's subject: record_thought_subject needs INSERT and UPDATE on thought_facets/.test(roleSweep.stderr) && ownCalls === asked,
+          `a role without the structure group: the sweep refused before any question, exit 2 (exit ${roleSweep.code}, ${ownCalls - asked} asked: ${roleSweep.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
+        // A new ticket on its first line, so the door inserts a facet: the same subject kept would write no facet.
+        await sql`SELECT update_thought(${session}::uuid, ${"SMD-10 session summary, as the role reads it."})`;
+        const rolePass = await extractRun({}, sUrl, sEnv);
+        const saidRole = rolePass.stderr.split("\n").filter((l) => /could not record a thought's own subject/.test(l));
+        assert(rolePass.code === 0 && /1 extracted, 0 failed/.test(rolePass.stdout) && saidRole.length === 1 && /permission denied/.test(saidRole[0]),
+          `…and the pass under it extracts, its entities standing, and says once that it records no subject (exit ${rolePass.code}, ${saidRole.length} line(s))`);
+        const structure = await migrateInProcess({ grant: SROLE, groups: "structure" });
+        assert(structure.code === 0, `the role is granted structure too (exit ${structure.code})`);
+        await sql.unsafe("REVOKE EXECUTE ON FUNCTION record_thought_subject(uuid, text, text, text, uuid, text, jsonb) FROM PUBLIC");
+        try {
+          // A rejection read as the run's result, so an error escaping the sweep fails this case rather than the suite.
+          const refusedWrite = await sweep({ model: false }, sEnv, sUrl).catch((e: Error) => ({ code: -1, stdout: "", stderr: `rejected: ${e.message}` }));
+          assert(refusedWrite.code === 2 && /This role cannot write a thought's subject \(permission denied for function record_thought_subject\)/.test(refusedWrite.stderr),
+            `a write the role is refused ends the sweep, exit 2, naming the grants (exit ${refusedWrite.code}: ${refusedWrite.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
+        } finally {
+          await sql.unsafe("GRANT EXECUTE ON FUNCTION record_thought_subject(uuid, text, text, text, uuid, text, jsonb) TO PUBLIC");
+        }
+      } finally {
+        await dropS();
+      }
+    }
+  } finally {
+    stub.stop(true);
+    await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+    await sql`DELETE FROM thoughts`;
+  }
 }
 
 if (want("11")) {

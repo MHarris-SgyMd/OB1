@@ -19,6 +19,8 @@
  *     sent and what was cut — the `--dump` record's fields, in the table;
  *   - proposal: the judge's model, prompt version and hash, the candidate
  *     parameters the pair was found under;
+ *   - subject (110): the rule that read a thought's own subject, or the
+ *     judge model's question and the subject it answered;
  *   - a structured pass (`source:<system>`): deterministic, the system.
  *
  * `deterministic` is what rebuild_derived (migration 063, SMD-1732) reads: a
@@ -38,6 +40,7 @@ import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, type Extraction } from
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, CONTENT_LIMIT_CHARS } from "./consolidate.ts";
 import { DECIDE_PROMPT, DECIDE_VERSION } from "./consolidate-decide.ts";
 import { METADATA_PROMPT, METADATA_PROMPT_VERSION, TAG_KEYS } from "./metadata.ts";
+import { SUBJECT_PROMPT_VERSION, SUBJECT_RULES_VERSION, subjectPrompt } from "./subject.ts";
 
 /** A recipe as `derivations.recipe` holds it: `deterministic` required, the rest the producer's. */
 export type Recipe = { deterministic: boolean } & Record<string, unknown>;
@@ -130,6 +133,18 @@ export function entityRecipe(cfg: Pick<EmbedConfig, "metadataModel">, extraction
     ...(extraction.abortedMs !== undefined ? { aborted_ms: extraction.abortedMs } : {}),
     ...(extraction.parts ? { parts: extraction.parts.length } : {}),
   };
+}
+
+/**
+ * A thought's own subject's recipe (110, SMD-3306): a rule's, deterministic,
+ * naming the rule and the rules' version; or the judge model's, naming the
+ * model, the question's version and hash, the temperature and the subject it
+ * answered, which the key was read from (subject.ts's subjectKey), so a
+ * changed reading can be checked against what the model said.
+ */
+export function subjectRecipe(found: { by: "metadata" | "first_line" } | { by: "model"; model: string; temperature: number; answer: string }): Recipe {
+  if (found.by !== "model") return { deterministic: true, rule: found.by, rules_version: SUBJECT_RULES_VERSION };
+  return { deterministic: false, model: found.model, prompt_version: SUBJECT_PROMPT_VERSION, prompt_hash: promptHash(subjectPrompt()), temperature: found.temperature, answer: found.answer };
 }
 
 /** A structured pass's recipe (053): the source's own structure parsed, no model — deterministic. */
