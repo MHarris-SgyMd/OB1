@@ -20,7 +20,7 @@
  *   bun test-mcp.ts
  */
 
-import { createAssert, startedPort, watchStream } from "../db/test-support.ts";
+import { childPort, createAssert, watchStream } from "../db/test-support.ts";
 import { hashKey, type Principal } from "../server-portable/auth.ts";
 import type { Core } from "../server-portable/core/index.ts";
 import { ok, refuse, type Refusal } from "../server-portable/core/refusal.ts";
@@ -618,7 +618,7 @@ console.log("\n[8e] An enabled plugin's operation: a tool where whoami names it,
   const restServer = Bun.serve({ port: 0, fetch: (req) => exampleRest.fetch(req) });
   // PORT 0: the entry binds a port no one holds and says which (SMD-3296).
   const entry = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, PORT: "0", OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_PLUGINS: "example" }, stdout: "pipe", stderr: "pipe" });
-  const entryPort = await startedPort(watchStream(entry.stdout), 20_000);
+  const { port: entryPort } = await childPort(entry, 20_000);
   let entryTools: string[] = [];
   try {
     for (let i = 0; i < 100 && entryTools.length === 0; i++) {
@@ -791,8 +791,7 @@ console.log("\n[8f] The entry's stop: it waits for a tool call past its client's
   const restServer = Bun.serve({ port: 0, fetch: (req) => hangingRest.fetch(req) });
   // PORT 0: the entry binds a port no one holds and says which (SMD-3296).
   const entry = Bun.spawn(["bun", "index.ts"], { cwd: import.meta.dir, env: { ...process.env, PORT: "0", OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "" }, stdout: "pipe", stderr: "pipe" });
-  const entryOut = watchStream(entry.stdout);
-  const port = await startedPort(entryOut, 20_000);
+  const { port, stdout: entryOut } = await childPort(entry, 20_000);
   let up = false;
   for (let i = 0; i < 100 && !up; i++) {
     up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false);
@@ -842,8 +841,7 @@ console.log("\n[8g] The entry's telemetry (SMD-2287 PR 4c): its spans to a colle
     stdout: "pipe",
     stderr: "pipe",
   });
-  const entryOut = watchStream(entry.stdout);
-  const port = await startedPort(entryOut, 20_000);
+  const { port, stdout: entryOut } = await childPort(entry, 20_000);
   let up = false;
   for (let i = 0; i < 100 && !up; i++) {
     up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false);

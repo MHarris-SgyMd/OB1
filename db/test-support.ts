@@ -819,13 +819,15 @@ export function watchStream(stream: ReadableStream<Uint8Array>): { until: (patte
 const BUN_START_LINE = /^Started (?:development )?server: \S+:(\d+)\/?\r?\n/m;
 
 /**
- * The port a child started at PORT 0 bound, as Bun's start line on its stdout says, waited for at most `ms`; 0 if
- * the line never comes or the stream ends first. A port picked by binding 0 and freeing it for the child can be
- * taken by another server in between, whose answers then read as the child's (SMD-3263, SMD-3296): a child given
- * PORT 0 binds a port no one else holds.
+ * A child started at PORT 0: its stdout, drained and watched, and the port it bound, as Bun's start line there says,
+ * waited for at most `ms`; 0 if the line never comes or the stream ends first. A port picked by binding 0 and freeing
+ * it for the child can be taken by another server in between, whose answers then read as the child's (SMD-3263,
+ * SMD-3296): a child given PORT 0 binds a port no one else holds.
  */
-export async function startedPort(stdout: ReturnType<typeof watchStream>, ms: number): Promise<number> {
-  return (await stdout.until(BUN_START_LINE, ms)) ? Number(BUN_START_LINE.exec(stdout.sofar())![1]) : 0;
+export async function childPort(proc: { stdout: unknown }, ms: number): Promise<{ port: number; stdout: ReturnType<typeof watchStream> }> {
+  const stdout = watchStream(proc.stdout as ReadableStream<Uint8Array>);
+  const port = (await stdout.until(BUN_START_LINE, ms)) ? Number(BUN_START_LINE.exec(stdout.sofar())![1]) : 0;
+  return { port, stdout };
 }
 
 /** The REST core's keyless /health body, and the MCP server's entry's. */
@@ -884,11 +886,10 @@ export async function serveChild(cwd: string, entry: string, env: Record<string,
     stdout: "pipe",
     stderr: "pipe",
   });
-  const out = watchStream(child.stdout);
   const err = watchStream(child.stderr);
   const deadline = Date.now() + 30_000;
   // 0 until the start line comes; never, for a child that exits first.
-  const port = await startedPort(out, deadline - Date.now());
+  const { port, stdout: out } = await childPort(child, deadline - Date.now());
   let up = false;
   while (port > 0 && Date.now() < deadline && child.exitCode === null && child.signalCode === null && !(up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false))) await Bun.sleep(100);
   const sdk = waitForSdk ? await err.until(/ go to \S+ over OTLP\/HTTP/, 20_000) : false;

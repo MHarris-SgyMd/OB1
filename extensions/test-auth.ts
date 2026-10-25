@@ -67,7 +67,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
 import { abandonedRequestLine, mcpReply, SSE_KEEPALIVE_MS, vendoredStalledLine, withSseKeepalive } from "./_shared/sse.ts";
-import { askRaw, createAssert, leaveMidUpload, pendingSettled, SERVER_STACK, SERVER_V2_PINS, STACK, startedPort, watchStream } from "../db/test-support.ts";
+import { askRaw, createAssert, leaveMidUpload, pendingSettled, SERVER_STACK, SERVER_V2_PINS, STACK, childPort } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -765,7 +765,7 @@ for (const live of LIVE) {
   // does not resolve fails the start, where Bun would otherwise fetch the latest from npm into its cache (SMD-1991).
   const proc = Bun.spawn([process.execPath, "--no-install", join(ROOT, live.file)], { env, cwd: ROOT, stdout: "pipe", stderr: "pipe" });
   const deadline = Date.now() + DEADLINE_MS;
-  const port = await startedPort(watchStream(proc.stdout), DEADLINE_MS);
+  const { port } = await childPort(proc, DEADLINE_MS);
   // Up when the port answers — any status: Bun serves the file's default export on PORT, so a refused
   // connection is "not yet" — or the child exited (`exitCode` is set only when `exited` settles, and a
   // loop that polled it spun for the whole deadline; change 74's pass 1), or the deadline passed.
@@ -787,8 +787,8 @@ for (const live of LIVE) {
   // Stop the child BEFORE reading its stderr: a server alive without a port would
   // otherwise hold stderr open and the read below would hang the test (pass 1).
   // A child with no start line has usually just exited, its stdout ended a moment before its exit code is set: waited
-  // for, so it is said as an exit, not as alive (SMD-3296 review pass 1).
-  if (port === 0) await Promise.race([proc.exited, Bun.sleep(1_000)]);
+  // for, so it is said as an exit, not as alive (SMD-3296).
+  if (port === 0) await Promise.race([exited, Bun.sleep(1_000)]);
   const alive = proc.exitCode === null;
   proc.kill();
   await proc.exited;

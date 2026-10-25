@@ -27,7 +27,7 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, quietPort, resetSchema, startedPort, watchStream } from "../db/test-support.ts";
+import { childPort, createAssert, quietPort, resetSchema } from "../db/test-support.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { hashKey } from "./auth.ts";
 import {
@@ -470,12 +470,6 @@ const mcpEntry = (restPort: number) => Bun.spawn(["bun", "--no-env-file", "index
   stdout: "pipe",
   stderr: "pipe",
 });
-// A child started at PORT 0 binds a port no one holds and says which: a port picked here and freed for it could go to
-// another server first (SMD-3296). Its stdout is read through the watcher, the start line and all.
-const served = async (proc: ReturnType<typeof Bun.spawn>) => {
-  const stdout = watchStream(proc.stdout as ReadableStream<Uint8Array>);
-  return { port: await startedPort(stdout, 20_000), stdout };
-};
 
 console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD-2889): a capture saved while the provider is down gets its vector once the provider answers, with no hand step — embedded once, though two REST cores each run a mender; semantic search finds it, and keyed /health counts none waiting");
 {
@@ -486,7 +480,7 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
   // of the first for the tool calls (SMD-2287 PR 6a: index.ts was the second
   // mender, and served the calls itself).
   // The provider's port refuses until the stub binds it: a quiet port, below the kernels' default ranges for port 0, so
-  // none of the two REST cores and the MCP server's entry, each at PORT 0, can be handed it (SMD-3296 review pass 2).
+  // none of the two REST cores and the MCP server's entry, each at PORT 0, can be handed it (SMD-3296).
   const providerPort = quietPort();
   const childEnv = () => ({
     PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_STORE: "sql", DATABASE_URL: URL_,
@@ -499,10 +493,10 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
   // The second REST core: a mender of its own, the two taking turns under the leader lock.
   const child = Bun.spawn(["bun", "--no-env-file", "api.ts"], { cwd: import.meta.dir, env: childEnv(), stdout: "pipe", stderr: "pipe" });
   const api = Bun.spawn(["bun", "--no-env-file", "api.ts"], { cwd: import.meta.dir, env: childEnv(), stdout: "pipe", stderr: "pipe" });
-  const [childServed, apiServed] = await Promise.all([served(child), served(api)]);
+  const [childServed, apiServed] = await Promise.all([childPort(child, 20_000), childPort(api, 20_000)]);
   const serverPort = childServed.port, apiPort = apiServed.port;
   const mcp = mcpEntry(apiPort);
-  const mcpPort = (await served(mcp)).port;
+  const mcpPort = (await childPort(mcp, 20_000)).port;
   const at = `http://127.0.0.1:${mcpPort}`;
   const rpc = async (name: string, args: Record<string, unknown>) => {
     const r = await fetch(`${at}/mcp`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }) });
@@ -608,10 +602,10 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
     stdout: "pipe",
     stderr: "pipe",
   });
-  const childServed = await served(child);
+  const childServed = await childPort(child, 20_000);
   const serverPort = childServed.port;
   const mcp = mcpEntry(serverPort);
-  const mcpPort = (await served(mcp)).port;
+  const mcpPort = (await childPort(mcp, 20_000)).port;
   const at = `http://127.0.0.1:${mcpPort}`;
   const rpc = async (name: string, args: Record<string, unknown>) => {
     const r = await fetch(`${at}/mcp`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }) });

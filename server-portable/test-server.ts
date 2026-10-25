@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { answersHealth, askRaw, createAssert, leaveMidUpload, MCP_HEALTH_BODY, pendingSettled, quietPort, requestHead, REST_HEALTH_BODY, RuntimeUrl, serveChild, startedPort, watchStream } from "../db/test-support.ts";
+import { answersHealth, askRaw, childPort, createAssert, leaveMidUpload, MCP_HEALTH_BODY, pendingSettled, quietPort, requestHead, REST_HEALTH_BODY, RuntimeUrl, serveChild, watchStream } from "../db/test-support.ts";
 import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES, UNLOCKS, type ToolScope } from "./tools.ts";
 import { openApiDocument } from "./rest/openapi.ts";
@@ -1599,7 +1599,7 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
   // The REST core's keyed /health (SMD-2287 PR 6a: index.ts's answered `ok` as text; the MCP server's comes from here).
   const OK_BODY = JSON.stringify({ status: "ok" });
   // Each child binds PORT 0 and says its port; the database that refuses is a quiet port, below the kernels' ranges for
-  // port 0, so neither child can be handed it (SMD-3296 review pass 2).
+  // port 0, so neither child can be handed it (SMD-3296).
   const child = async (databaseUrl: string) => {
     const proc = Bun.spawn(["bun", "--no-env-file", "api.ts"], {
       cwd: import.meta.dir,
@@ -1607,7 +1607,7 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
       stdout: "pipe",
       stderr: "ignore",
     });
-    return { proc, port: await startedPort(watchStream(proc.stdout), 20_000) };
+    return { proc, port: (await childPort(proc, 20_000)).port };
   };
   // Up when the REST core's own keyless body answers (SMD-3296).
   const up = async (port: number) => {
@@ -1624,7 +1624,7 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
     return { took, status: r instanceof Response ? r.status : r.name, body: r instanceof Response ? await r.text() : "" };
   };
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  // Picked before either child starts: a throw here leaves no child behind (review pass 3).
+  // Picked before either child starts: a throw here leaves no child behind (SMD-3296).
   const refusingDb = quietPort();
   const [quiet, refusing] = await Promise.all([child(`postgres://u:p@127.0.0.1:${silent.port}/db`), child(`postgres://u:p@127.0.0.1:${refusingDb}/db`)]);
   const silentPort = quiet.port, refusedPort = refusing.port;
@@ -1674,10 +1674,11 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
       stdout: "pipe",
       stderr: "pipe",
     });
-    const stdout = watchStream(proc.stdout), stderr = watchStream(proc.stderr);
+    const stderr = watchStream(proc.stderr);
+    const { port, stdout } = await childPort(proc, 20_000);
     // Its keyless /health body: the REST core's record, the MCP server's entry's plain `ok`.
     const health = entry === "api" ? REST_HEALTH_BODY : MCP_HEALTH_BODY;
-    return { port: await startedPort(stdout, 20_000), proc, health, out: stdout.rest().then(async (o) => o + (await stderr.rest())) };
+    return { port, proc, health, out: stdout.rest().then(async (o) => o + (await stderr.rest())) };
   };
   // Up when the child's own keyless body answers (SMD-3296).
   const up = async ({ port, health }: { port: number; health: string }) => {
@@ -1714,7 +1715,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   // Its REST core's port known, the calling MCP server starts.
   const calling = await start({ OB1_REST_URL: `http://127.0.0.1:${callingCore.port}`, OB1_FORWARDER_KEY: stopForwarder }, "mcp");
   try {
-    // All eight asked at once, each one not up named (SMD-3296 review passes 2, 3).
+    // All eight asked at once, each one not up named (SMD-3296).
     const kids = Object.entries({ busy, idle, ctrlC, cutter, graced, leftBehind, callingCore, calling });
     const ups = await Promise.all(kids.map(([, kid]) => up(kid)));
     const notUp = kids.filter((_, i) => !ups[i]).map(([name, kid]) => `${name} on ${kid.port}`);
@@ -1758,7 +1759,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
       "…and a malformed OB1_STOP_GRACE is said at start-up and read as the default, 8 s of drain");
 
     // A keyed request first, its answer the row's: the child was serving when SIGINT landed. With no connection string
-    // its start built no store, so the stop has no pool to say (SMD-3296 review passes 1–3).
+    // its start built no store, so the stop has no pool to say (SMD-3296).
     const keyedCtrlC = await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY }, signal: AbortSignal.timeout(5_000) }).then((r) => r.status, (e: Error) => e.name);
     ctrlC.proc.kill("SIGINT");
     const intCode = await exited(ctrlC.proc, 3_000);

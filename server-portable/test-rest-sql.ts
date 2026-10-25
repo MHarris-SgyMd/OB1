@@ -21,7 +21,7 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, resetSchema, startedPort, watchStream } from "../db/test-support.ts";
+import { childPort, createAssert, resetSchema } from "../db/test-support.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { authenticate, CLIENT_SCOPES, hashKey } from "./auth.ts";
 import { z } from "zod";
@@ -741,7 +741,7 @@ console.log("\n[9] `bun api.ts` as the entry wires the durable job store for the
     env: { ...process.env, PORT: "0" },
     stdout: "pipe", stderr: "pipe",
   });
-  const port = await startedPort(watchStream(child.stdout), 20_000);
+  const { port } = await childPort(child, 20_000);
   const status = async (id: string) => String((await sql`SELECT status FROM jobs WHERE id = ${id}::uuid`)[0]?.status);
   let mineStatus = "running";
   try {

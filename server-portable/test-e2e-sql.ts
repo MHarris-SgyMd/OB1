@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { answersHealth, applyMigrations, createAssert, plantLegacyRow, resetSchema, REST_HEALTH_BODY, runScript, startedPort, watchStream } from "../db/test-support.ts";
+import { answersHealth, applyMigrations, childPort, createAssert, plantLegacyRow, resetSchema, REST_HEALTH_BODY, runScript } from "../db/test-support.ts";
 import { readdirSync } from "node:fs";
 import { FORK_VERSION } from "../db/version.mjs";
 import { join, dirname } from "node:path";
@@ -3369,7 +3369,7 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
     env: { ...process.env, PORT: "0", MCP_ACCESS_KEYS: "", MCP_ACCESS_KEY: "e2e-key" },
     stdout: "pipe", stderr: "pipe",
   });
-  const port = await startedPort(watchStream(child.stdout), 20_000);
+  const { port } = await childPort(child, 20_000);
   let status = "running";
   try {
     const deadline = Date.now() + 15_000;
