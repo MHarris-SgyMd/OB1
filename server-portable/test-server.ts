@@ -3070,11 +3070,11 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   // has been silent for its default idle timeout (10 s) at the next of its
   // 4-second sweeps — between 8 and 12 s of silence, by phase — while a POST
   // whose handler has not returned yet is left alone (a GET's is not, on 1.4.3:
-  // sse.ts, SMD-2931). So the case is the transport's
-  // shape, an SSE stream opened at once and written to when the tool returns,
-  // and the silence is 13 s: past the last sweep that can catch it, so the
-  // control is reset every run and not by the luck of the phase (11.5 s slipped
-  // under it once). Four requests run at once; the section costs the longest.
+  // sse.ts, SMD-2931). So the case is the transport's shape, an SSE stream
+  // opened at once and written to when the tool returns, and the silence is
+  // 13 s: past the last sweep that can catch it, so the control is reset every
+  // run and not by the luck of the phase (11.5 s slipped under it once). Four
+  // requests run at once; the section costs the longest.
   const SILENT_MS = 13_000;
   const SLOW_EMBED_MS = 13_000;
   const silentSse = (silentMs = SILENT_MS): Response => {

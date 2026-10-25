@@ -4,10 +4,12 @@
 // its streams alive with the same frame and the same ceiling. The vendored MCP
 // servers answer on the same kind of stream (@hono/mcp's transport, which pings
 // only a GET's stream), so a byte-for-byte copy of this file sits in
-// extensions/_shared/ beside auth.ts's (recipes/_shared/'s went with ob-graph and work-operating-model-activation, SMD-2920), and each of those servers sends its reply through mcpReply below
-// (SMD-2001). `bun run sync-sse` in extensions/ rewrites the copies from this
-// file; extensions/test-auth.ts fails if one differs or a server skips it. It
-// imports nothing, and everything here runs as it is on Bun, Node, Deno and Workers.
+// extensions/_shared/ beside auth.ts's (recipes/_shared/'s went with ob-graph
+// and work-operating-model-activation, SMD-2920), and each of those servers
+// sends its reply through mcpReply below (SMD-2001). `bun run sync-sse` in
+// extensions/ rewrites the copy from this file; extensions/test-auth.ts fails
+// if it differs or a server skips it. It imports nothing, and everything here
+// runs as it is on Bun, Node, Deno and Workers.
 //
 // The transport answers a POST with an SSE stream at once and writes the tool's
 // result to it when the tool returns; until then the stream carries nothing
@@ -52,7 +54,7 @@ export const SSE_KEEPALIVE_MS = 5_000;
  * stuck, not slow. (Review pass 1.) The MCP server's streams are never that
  * silent, its SDK transport writing its own frame every 15 s, so they end with
  * the call, whose request to the REST core ends at this same bound
- * (mcp-server/app.ts's REST_TIMEOUT_MS).
+ * (mcp-server/app.ts's REST_TIMEOUT_MS; SMD-2931).
  */
 export const SSE_KEEPALIVE_MAX_MS = 10 * 60_000;
 
