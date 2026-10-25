@@ -11974,17 +11974,18 @@ if (want("33")) {
   // rows read are counted too — of the projection's tables as well, which a
   // hash join over every superseded thought scanned per write (third review
   // pass). Each filler's id is derived from its number, so the pointer write
-  // names its target with no join. A self-join on metadata->>'n', planned on
-  // the statistics of a table of some sixty rows, was a nested loop of a
-  // hundred million jsonb reads whenever autoanalyze hadn't caught up with
-  // the filler: 30 s of [33]'s 36 on CI (SMD-3196).
+  // names its target with no join. A self-join on metadata->>'n' was planned
+  // on estimates of tens of rows against 20,000 and 5,000 — the last ANALYZE
+  // saw some sixty rows, and the jsonb predicates have no statistics at all —
+  // and in some runs became a nested loop of a hundred million jsonb reads:
+  // 30 s of [33]'s 36 on CI (SMD-3196). Don't put a join back here.
   await db`INSERT INTO thoughts (id, content, metadata) SELECT md5('[33] filler ' || g)::uuid, '[33] filler ' || g, jsonb_build_object('kind', 'race2256', 'n', g) FROM generate_series(1, 20000) g`;
   await db`UPDATE thoughts SET supersedes = md5('[33] filler ' || ((metadata->>'n')::int + 10000))::uuid
             WHERE metadata->>'kind' = 'race2256' AND (metadata->>'n')::int <= 5000`;
-  // Counted, so an UPDATE whose WHERE no longer matches the filler fails here, not passes on no pointers (a target id
-  // that matches no filler is the foreign key's to refuse).
-  const [{ pointers }] = await db`SELECT count(*)::int AS pointers FROM thoughts t JOIN thoughts s ON s.id = t.supersedes
-                                   WHERE t.content LIKE '[33] filler %' AND s.content LIKE '[33] filler %'`;
+  // Counted, with no join either, so an UPDATE whose WHERE no longer matches
+  // the filler fails the assertion below, not passes on no pointers (a target
+  // id that matches no thought is the foreign key's to refuse).
+  const [{ pointers }] = await db`SELECT count(*)::int AS pointers FROM thoughts WHERE content LIKE '[33] filler %' AND supersedes IS NOT NULL`;
   await db`ANALYZE thoughts`;
   const reads = async () => {
     await db`SELECT pg_stat_force_next_flush()`;

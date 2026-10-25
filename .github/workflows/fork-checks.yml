@@ -727,9 +727,10 @@ jobs:
         run: bun install --frozen-lockfile
 
       # The service carries no health check, so the runner starts these steps
-      # as soon as its container does, not at its first healthy read of
-      # Docker's 5 s probe, about 6 s later, and the checkout and install
-      # overlap Postgres's start (SMD-3196). This waits for it before the
+      # as soon as its container does — with the 5 s pg_isready check it
+      # carried before, it held them until the check first passed, about 6 s
+      # later — and the checkout and install overlap Postgres's start
+      # (SMD-3196). This waits for it before the
       # first suite, as db/with-postgres.sh does: over TCP inside the
       # container, since over the socket the entrypoint's initialising server,
       # which listens on no TCP address, reads as ready for a moment before the
