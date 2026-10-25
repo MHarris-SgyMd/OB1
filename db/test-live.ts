@@ -11973,11 +11973,16 @@ if (want("33")) {
   // sequential scan (mutation testing: a scan count alone let it pass), so the
   // rows read are counted too — of the projection's tables as well, which a
   // hash join over every superseded thought scanned per write (third review
-  // pass).
-  await db`INSERT INTO thoughts (content, metadata) SELECT '[33] filler ' || g, jsonb_build_object('kind', 'race2256', 'n', g) FROM generate_series(1, 20000) g`;
-  await db`UPDATE thoughts t SET supersedes = s.id FROM thoughts s
-            WHERE t.metadata->>'kind' = 'race2256' AND s.metadata->>'kind' = 'race2256'
-              AND (t.metadata->>'n')::int <= 5000 AND (s.metadata->>'n')::int = (t.metadata->>'n')::int + 10000`;
+  // pass). Each filler's id is derived from its number, so the pointer write
+  // names its target with no join: a self-join on metadata->>'n' was priced
+  // within a tenth of a hash join as a nested loop, a hundred million jsonb
+  // reads, which CI's planner chose — 30 s of [33]'s 36 (SMD-3196).
+  await db`INSERT INTO thoughts (id, content, metadata) SELECT md5('[33] filler ' || g)::uuid, '[33] filler ' || g, jsonb_build_object('kind', 'race2256', 'n', g) FROM generate_series(1, 20000) g`;
+  await db`UPDATE thoughts SET supersedes = md5('[33] filler ' || ((metadata->>'n')::int + 10000))::uuid
+            WHERE metadata->>'kind' = 'race2256' AND (metadata->>'n')::int <= 5000`;
+  // Counted, so a setup that pointed nothing (a target id that no longer matches) fails here, not passes on an empty brain.
+  const [{ pointers }] = await db`SELECT count(*)::int AS pointers FROM thoughts t JOIN thoughts s ON s.id = t.supersedes
+                                   WHERE t.content LIKE '[33] filler %' AND s.content LIKE '[33] filler %'`;
   await db`ANALYZE thoughts`;
   const reads = async () => {
     await db`SELECT pg_stat_force_next_flush()`;
@@ -11994,8 +11999,8 @@ if (want("33")) {
   const [th, sb, hd] = [delta("thoughts"), delta("ob1_superseded_by"), delta("ob1_ticket_head")];
   // The heads table holds a dozen rows here, which the planner rightly scans;
   // the superseders hold five thousand, which a hash join used to scan whole.
-  assert(th.scans === 0 && th.rows < 100 && sb.scans === 0 && sb.rows < 100 && hd.rows < 100 && (await drift()) === 0,
-    `a ticket's status write and a pointer write on twenty thousand thoughts, five thousand of them pointers, scan neither thoughts nor the five thousand superseders and read a handful of rows (thoughts ${th.rows}, superseders ${sb.rows}, heads ${hd.rows}; scans ${th.scans}/${sb.scans}/${hd.scans}), and no drift`);
+  assert(pointers === 5000 && th.scans === 0 && th.rows < 100 && sb.scans === 0 && sb.rows < 100 && hd.rows < 100 && (await drift()) === 0,
+    `a ticket's status write and a pointer write on twenty thousand thoughts, five thousand of them pointers (${pointers}), scan neither thoughts nor the five thousand superseders and read a handful of rows (thoughts ${th.rows}, superseders ${sb.rows}, heads ${hd.rows}; scans ${th.scans}/${sb.scans}/${hd.scans}), and no drift`);
 
   await db`DELETE FROM thoughts WHERE metadata->>'kind' = 'race2256'`;
   const [left] = await db`SELECT (SELECT count(*)::int FROM ob1_node_projection_drift()) AS drift, (SELECT count(*)::int FROM ob1_ticket_head WHERE issue IN ('R-1', 'A-1', 'D-1', 'M-1', 'M-2') OR issue LIKE 'G-%') AS heads`;
