@@ -1304,18 +1304,25 @@ exporter allows each signal at once, so under a trickle that never ends every
 export after 30 of them is `too many exports at once` until they end. What a
 collector answers 200 but rejects (an OTLP partial success) is `rejected by
 the collector`, by the count it gives — a metric export partly rejected as
-one, `partly rejected by the collector` — and counts that export as failed,
-so a stop whose own flush meets one says `not all sent`; the collector's own
-message is never said. A throw while the SDK loads leaves the server serving, said
-by the error's name alone. The stop sends what is still batched and the
-metrics' last reading, and waits for what is on its way, beside closing its
-pool, and says which on its own: `; telemetry sent`,
-`; telemetry not all sent` (an export of some signal failed), `; no telemetry
-left to send`, or `; telemetry not all sent within N ms` (or `: a second
-signal`) — never as the pool's. Under cumulative temporality, the default,
-the metrics' reading is sent whole at every flush, so with a metrics endpoint a
-stop after any request is `sent`, or `not all sent` where an export failed,
-never `no telemetry left to send`; under delta it can be.
+one, `partly rejected by the collector` — and counts that export as failed, so
+a stop that meets one since its signal says `not all sent`; the collector's
+own message is never said. A throw while the SDK loads leaves the server
+serving, said by the error's name alone. The stop sends what is still batched
+and the metrics' last reading, and waits for what is on its way, beside
+closing its pool, and says which on its own: `; telemetry sent`,
+`; telemetry not all sent` (an export of some signal failed since the signal),
+`; no telemetry left to send` (nothing exported, or on its way, since the
+signal), or `; telemetry not all sent within N ms` (or `: a second signal`) —
+never as the pool's. The word is the stop's own, counted from its signal: an
+export lost while the stop drains its requests, or in its flush, makes it
+`not all sent`; one lost before the signal, such as `no answer in time`, is
+said on its own line — at once, when its minute ends, or at the stop with what
+is still unsaid — and never in the word, so a stop after one can still say
+`sent` (SMD-3297). A span or log record a full queue drops is said as
+`queue full`, never in the word, and a stop while the SDK is still loading
+counts from its flush. With a metrics endpoint a stop is never
+`no telemetry left to send`: the uptime gauge (SMD-3050) is read at every
+flush, under either temporality.
 The flush has a bound of its own (SMD-2902): 5 s at most, inside what
 `OB1_STOP_GRACE` leaves less a second before the kill, and never less than the
 pool's (a second, a quarter of one after a cut); a second signal during the
