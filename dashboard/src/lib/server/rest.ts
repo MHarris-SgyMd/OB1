@@ -10,7 +10,7 @@
 import { env } from '$env/dynamic/private';
 import { error, redirect, type RequestEvent } from '@sveltejs/kit';
 import { base } from '$app/paths';
-import { createRestClient, DEFAULT_REST_URL, type Answer, type CallableOperation, type InputOf, type RestClient } from '../../../../rest-client/index.ts';
+import { createRestClient, DEFAULT_REST_URL, type Answer, type CallableOperation, type InputOf, type Method, type RestClient } from '../../../../rest-client/index.ts';
 import { closeSession, cookieOptions, SESSION_COOKIE, type Session } from './session';
 
 /** The longest one call may take: a page waits on it, so well under a minute. */
@@ -40,9 +40,28 @@ export function codeOf(body: unknown): string | undefined {
  * whoever holds the cookie, and the words are the operator's, in the log.
  */
 export async function read<K extends CallableOperation>(event: RequestEvent, session: Session, name: K, input: InputOf<K>): Promise<unknown> {
+	return bodyOf(name, await answered(event, name, () => rest().call(name, input, { key: session.key, signal: event.request.signal })));
+}
+
+/**
+ * A plugin operation's read (SMD-2280 PR 3), by its tool and its route as its
+ * manifest names them (`GET /v1/plugins/<name>/…`), under the visitor's key:
+ * read's answer, read's refusals.
+ */
+export async function readPlugin(event: RequestEvent, session: Session, tool: string, method: Method, path: string, input: Record<string, unknown>): Promise<unknown> {
+	return bodyOf(tool, await callPlugin(event, session, tool, method, path, input));
+}
+
+/** A plugin operation under the visitor's key, its answer for the caller to read: a form action says a refusal beside the form, not as the page's error. */
+export function callPlugin(event: RequestEvent, session: Session, tool: string, method: Method, path: string, input: Record<string, unknown>): Promise<Answer> {
+	return answered(event, tool, () => rest().callPath(method, path, input, { key: session.key, signal: event.request.signal }));
+}
+
+/** A call's answer: the page's 502 (or a slow search's 504) when the core did not answer, and /signin when it no longer takes the key. */
+async function answered(event: RequestEvent, name: string, call: () => Promise<Answer>): Promise<Answer> {
 	let answer: Answer;
 	try {
-		answer = await rest().call(name, input, { key: session.key, signal: event.request.signal });
+		answer = await call();
 	} catch (err) {
 		// A visitor who left aborted the call: nothing went wrong, and nobody reads the answer (review pass 4).
 		if (!event.request.signal.aborted) console.error(`[dashboard] ${name}: the REST core did not answer: ${err instanceof Error ? err.message : String(err)}`);
@@ -53,12 +72,17 @@ export async function read<K extends CallableOperation>(event: RequestEvent, ses
 			throw error(504, `The brain did not answer within ${REST_TIMEOUT_MS / 1000} s. A search by meaning waits on the embedding provider, which may be slow or not answering; search by exact text, which needs none.`);
 		throw error(502, 'The brain did not answer. The dashboard log has the reason.');
 	}
-	if (answer.ok) return answer.body;
 	if (answer.status === 401) {
 		closeSession(event.cookies.get(SESSION_COOKIE));
 		event.cookies.delete(SESSION_COOKIE, cookieOptions(event.url));
 		throw redirect(303, `${base}/signin`);
 	}
+	return answer;
+}
+
+/** A success's body, or the page's error for a refusal: in words where they are known, the core's code otherwise. */
+function bodyOf(name: string, answer: Answer): unknown {
+	if (answer.ok) return answer.body;
 	const code = codeOf(answer.body);
 	if (answer.status >= 500) console.error(`[dashboard] ${name}: ${answer.status} ${code ?? ''}`.trimEnd());
 	// In words where they are known; the core's code otherwise, for the operator's log (review pass 6).
