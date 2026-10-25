@@ -27,8 +27,8 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, resetSchema } from "../db/test-support.ts";
-import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
+import { childPort, createAssert, resetSchema } from "../db/test-support.ts";
+import { mcpUnderTest, quietPort, servedByMcpServer } from "./test-support.ts";
 import { hashKey } from "./auth.ts";
 import {
   DEFAULT_EGRESS_MODE, decideCalls, describeEgress, flagOn, localKnob, mayLeaveBox, parseEgressTerms, refusesEverything, resolveEgressPolicy, termMatches,
@@ -464,9 +464,9 @@ console.log("\n[9] The provider away, a capture the gate allows is saved without
 // holding the forward key that core's MCP_ACCESS_KEYS lists (FORWARD_ENTRY).
 const FORWARD_KEY = "f0".repeat(32);
 const FORWARD_ENTRY = `mcp-forwarder:forward:${hashKey(FORWARD_KEY)}`;
-const mcpEntry = (port: number | undefined, restPort: number | undefined) => Bun.spawn(["bun", "--no-env-file", "index.ts"], {
+const mcpEntry = (restPort: number) => Bun.spawn(["bun", "--no-env-file", "index.ts"], {
   cwd: `${import.meta.dir}/../mcp-server`,
-  env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: String(port), OB1_REST_URL: `http://127.0.0.1:${restPort}`, OB1_FORWARDER_KEY: FORWARD_KEY, OB1_PLUGINS: "" },
+  env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_REST_URL: `http://127.0.0.1:${restPort}`, OB1_FORWARDER_KEY: FORWARD_KEY, OB1_PLUGINS: "" },
   stdout: "pipe",
   stderr: "pipe",
 });
@@ -479,20 +479,11 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
   // taking turns under the leader lock, and the MCP server's entry in front
   // of the first for the tool calls (SMD-2287 PR 6a: index.ts was the second
   // mender, and served the calls itself).
-  const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const providerPort = free.port;
-  free.stop(true);
-  const free2 = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const serverPort = free2.port;
-  free2.stop(true);
-  const free3 = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const apiPort = free3.port;
-  free3.stop(true);
-  const free4 = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const mcpPort = free4.port;
-  free4.stop(true);
-  const childEnv = (port: number | undefined) => ({
-    PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: String(port), OB1_STORE: "sql", DATABASE_URL: URL_,
+  // The provider's port refuses until the stub binds it: a quiet port, below the kernels' default ranges for port 0, so
+  // none of the two REST cores and the MCP server's entry, each at PORT 0, can be handed it (SMD-3296).
+  const providerPort = quietPort();
+  const childEnv = () => ({
+    PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_STORE: "sql", DATABASE_URL: URL_,
     OB1_LLM_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM), OB1_METADATA_MODEL: META_MODEL,
     MCP_ACCESS_KEYS: `open:write:${hashKey(OPEN_KEY)},${FORWARD_ENTRY}`, OB1_VECTOR_MEND_INTERVAL: "1",
     // A pool of one: the leader lock holds a connection of its own, so the tick's reads and writes
@@ -500,9 +491,12 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
     OB1_PG_POOL: "1",
   });
   // The second REST core: a mender of its own, the two taking turns under the leader lock.
-  const child = Bun.spawn(["bun", "--no-env-file", "api.ts"], { cwd: import.meta.dir, env: childEnv(serverPort), stdout: "pipe", stderr: "pipe" });
-  const api = Bun.spawn(["bun", "--no-env-file", "api.ts"], { cwd: import.meta.dir, env: childEnv(apiPort), stdout: "pipe", stderr: "pipe" });
-  const mcp = mcpEntry(mcpPort, apiPort);
+  const child = Bun.spawn(["bun", "--no-env-file", "api.ts"], { cwd: import.meta.dir, env: childEnv(), stdout: "pipe", stderr: "pipe" });
+  const api = Bun.spawn(["bun", "--no-env-file", "api.ts"], { cwd: import.meta.dir, env: childEnv(), stdout: "pipe", stderr: "pipe" });
+  const [childServed, apiServed] = await Promise.all([childPort(child, 20_000), childPort(api, 20_000)]);
+  const serverPort = childServed.port, apiPort = apiServed.port;
+  const mcp = mcpEntry(apiPort);
+  const mcpPort = (await childPort(mcp, 20_000)).port;
   const at = `http://127.0.0.1:${mcpPort}`;
   const rpc = async (name: string, args: Record<string, unknown>) => {
     const r = await fetch(`${at}/mcp`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }) });
@@ -580,7 +574,7 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
     const codes = await Promise.all([child.exited, api.exited, mcp.exited]);
     clearTimeout(hung);
     provider?.stop(true);
-    const said = (await new Response(child.stdout).text()) + (await new Response(child.stderr).text()) + (await new Response(api.stdout).text()) + (await new Response(api.stderr).text());
+    const said = (await childServed.stdout.rest()) + (await new Response(child.stderr).text()) + (await apiServed.stdout.rest()) + (await new Response(api.stderr).text());
     const menderLines = said.split("\n").filter((l) => /vector mender/.test(l));
     // Down for 11 s at a 1 s interval, about six ticks, and two menders: the outage said once by each at most, not per tick.
     const downLines = menderLines.filter((l) => /the embedding provider is unavailable/.test(l)).length;
@@ -592,24 +586,26 @@ console.log("\n[10] The ticket's Verify, through the servers' own processes (SMD
 
 console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2890): started with its provider down, it serves degraded — a capture lands, a search answers by exact matches, keyed /health says unreachable since when while keyless /health stays `ok` — and leaves degraded by its re-probe alone within the interval once the provider answers, the same process throughout");
 {
-  // The ports held at once, then let go, so no two can be the same one (review pass 1).
-  const holds = [0, 1, 2].map(() => Bun.serve({ port: 0, fetch: () => new Response(null) }));
-  const [providerPort, serverPort, mcpPort] = holds.map((h) => h.port);
-  for (const h of holds) h.stop(true);
+  // The provider's port refuses until the stub binds it: a quiet port, below the kernels' ranges for port 0. The REST
+  // core and the MCP server's entry bind PORT 0 and say theirs, and neither can be handed it (SMD-3296).
+  const providerPort = quietPort();
   // The REST core, which holds the provider's state, and the MCP server's entry in front of it, as the stack runs
   // them (SMD-2287 PR 6a: index.ts did both). The mender off, so the only thing that can see the provider back is
   // the re-probe.
   const child = Bun.spawn(["bun", "--no-env-file", "api.ts"], {
     cwd: import.meta.dir,
     env: {
-      PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: String(serverPort), OB1_STORE: "sql", DATABASE_URL: URL_,
+      PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_STORE: "sql", DATABASE_URL: URL_,
       OB1_LLM_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM), OB1_METADATA_MODEL: META_MODEL,
       MCP_ACCESS_KEYS: `open:write:${hashKey(OPEN_KEY)},${FORWARD_ENTRY}`, OB1_VECTOR_MEND_INTERVAL: "off", OB1_PROVIDER_REPROBE_INTERVAL: "1",
     },
     stdout: "pipe",
     stderr: "pipe",
   });
-  const mcp = mcpEntry(mcpPort, serverPort);
+  const childServed = await childPort(child, 20_000);
+  const serverPort = childServed.port;
+  const mcp = mcpEntry(serverPort);
+  const mcpPort = (await childPort(mcp, 20_000)).port;
   const at = `http://127.0.0.1:${mcpPort}`;
   const rpc = async (name: string, args: Record<string, unknown>) => {
     const r = await fetch(`${at}/mcp`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", "x-brain-key": OPEN_KEY }, body: JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "tools/call", params: { name, arguments: args } }) });
@@ -705,7 +701,7 @@ console.log("\n[11] The ticket's Verify, through the server's own process (SMD-2
     const [code] = await Promise.all([child.exited, mcp.exited]);
     clearTimeout(hung);
     provider?.stop(true);
-    const said = (await new Response(child.stdout).text()) + (await new Response(child.stderr).text());
+    const said = (await childServed.stdout.rest()) + (await new Response(child.stderr).text());
     const lines = said.split("\n").filter((l) => /^provider: /.test(l));
     assert(lines.length === 4 && /does not answer \(the connection was refused\) — serving degraded/.test(lines[0]) && /answers again — no longer degraded/.test(lines[1]) && /fails its calls \(it answered 503\)/.test(lines[2]) && /answers again/.test(lines[3]),
       `the server said each change once — degraded, back, degraded on the 503, back — though captured, searched and probed meanwhile (${lines.join(" / ")})`);

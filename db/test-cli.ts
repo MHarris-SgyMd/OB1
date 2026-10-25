@@ -243,7 +243,7 @@ const entries = sources.filter((f) => {
   const noteAlone = run("consolidate.ts", "--url", DEAD, "--list", "--note", "why");
   ok(noteAlone.code === 2 && /--note goes with --accept or --reject/.test(noteAlone.err), `consolidate.ts refuses --note without a decision (exit ${noteAlone.code})`);
   const limitList = run("consolidate.ts", "--url", DEAD, "--list", "--limit", "5");
-  ok(limitList.code === 2 && /--limit is the pass's thought cap and goes with a run; --list prints up to 50 of a status/.test(limitList.err), `consolidate.ts refuses --limit beside --list rather than dropping it (exit ${limitList.code})`);
+  ok(limitList.code === 2 && /--limit is the pass's thought cap and goes with a run; --list prints up to 50 of a status \(--status counts each status, and the pending by pass\)\./.test(limitList.err), `consolidate.ts refuses --limit beside --list rather than dropping it (exit ${limitList.code})`);
   const listWord = run("consolidate.ts", "--url", DEAD, "--list", "postgres://u:s3cret@h/db");
   ok(listWord.code === 2 && /--list takes pending, accepted, rejected, stale, lineage, all or relations/.test(listWord.err) && !listWord.err.includes("s3cret"), `consolidate.ts refuses a --list value by the words it takes, not repeating it (exit ${listWord.code})`);
   const hex = run("extract-entities.ts", "--url", DEAD, "--workers", "0x10");
@@ -251,7 +251,7 @@ const entries = sources.filter((f) => {
   const dump = run("extract-entities.ts", "--dump");
   ok(dump.code === 2 && /^--dump needs a value/m.test(dump.err), `extract-entities.ts refuses a bare --dump, which read as no dump (exit ${dump.code})`);
   // The documented bare forms: --follow [SECONDS] and --stale [DAYS] take their value optionally.
-  for (const [script, ...argv] of [["extract-entities.ts", "--follow"], ["consolidate.ts", "--follow"], ["consolidate.ts", "--stale"], ["consolidate.ts", "--list"]]) {
+  for (const [script, ...argv] of [["extract-entities.ts", "--follow"], ["consolidate.ts", "--follow"], ["reembed.ts", "--follow"], ["consolidate.ts", "--stale"], ["consolidate.ts", "--list"]]) {
     const bare = run(script, ...argv);
     ok(bare.code === 2 && /No database URL/.test(bare.err), `${script} ${argv.join(" ")}, bare, passes the scanner to the script's own first check (exit ${bare.code}: ${bare.err.split("\n")[0]})`);
   }

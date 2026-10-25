@@ -67,7 +67,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashKey } from "./_shared/auth.ts";
 import { abandonedRequestLine, mcpReply, SSE_KEEPALIVE_MS, vendoredStalledLine, withSseKeepalive } from "./_shared/sse.ts";
-import { askRaw, createAssert, leaveMidUpload, pendingSettled, SERVER_STACK, SERVER_V2_PINS, STACK } from "../db/test-support.ts";
+import { askRaw, createAssert, leaveMidUpload, pendingSettled, SERVER_STACK, SERVER_V2_PINS, STACK, childPort } from "../db/test-support.ts";
 
 const { assert, report } = createAssert();
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -742,7 +742,7 @@ const LIVE: Live[] = [
     },
   })),
 ];
-/** Bun's entry shape as the servers spell it — the tail server-portable/index.ts has — held to the letter (SMD-1799). */
+/** Bun's entry shape as the servers spell it — the tail server-portable/index.ts had until SMD-2287 PR 6b — held to the letter (SMD-1799). */
 const ENTRY_SHAPE = /^export default \{\n  port: Number\(process\.env\.PORT \|\| 8000\),\n  fetch: (?:app\.fetch|handler),\n\};\n/m;
 {
   const inTree = [...new Bun.Glob("{extensions,recipes,integrations}/**/*.ts").scanSync({ cwd: ROOT })]
@@ -750,38 +750,29 @@ const ENTRY_SHAPE = /^export default \{\n  port: Number\(process\.env\.PORT \|\|
   assert(inTree.join() === LIVE.map((l) => l.file).sort().join(), `every file that imports the shim and exports Bun's entry shape is started here (${inTree.length}: ${inTree.join(", ")})`);
 }
 const DEADLINE_MS = 30_000;
-/**
- * A port nothing holds: bound for a moment and released, then handed to the child as PORT. Another process
- * may take it in between (a container publishing a port on the same host did, once, while the suite ran);
- * the child then fails to bind — Bun refuses a held port, exit 1 — or a stranger answers the poll and the
- * probe's assertions name the file. A counted failure either way, within the deadline; rerun.
- */
-function freePort(): number {
-  const held = Bun.serve({ port: 0, fetch: () => new Response() });
-  const port = held.port!;
-  held.stop(true);
-  return port;
-}
 for (const live of LIVE) {
-  const port = freePort();
-  const env: Record<string, string | undefined> = { ...process.env, PORT: String(port), ...live.env };
+  // PORT 0: the child binds a port no one holds and says which in Bun's start line. A port bound here for a moment
+  // and freed for it could be taken in between (a container publishing a port on the same host did, once, while the
+  // suite ran), and a stranger would answer the poll (SMD-3296).
+  const env: Record<string, string | undefined> = { ...process.env, PORT: "0", ...live.env };
   // The READMEs say the Supabase key variables may be left unset with the shim (the credentials are in the
   // URL); the process above set them, so they are removed here and the claim is what the start proves.
   // A NODE_PATH from the shell goes too: a recipe's or integration's packages resolve through the committed links or not at all (SMD-1991).
   for (const name of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "EMBEDDING_API_KEY", "CHAT_API_KEY", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_HOUSEHOLD_KEY", "SMART_INGEST_URL", "ENTITY_EXTRACTION_WORKER_URL", "NODE_PATH"]) delete env[name];
   Object.assign(env, live.env);
-  // Bun's own start line (`Started development server:`, or `Started server:` in production) goes unread: the port is known, so stdout is dropped and the
-  // child is up when the port answers at all (SMD-1799). `--no-install`: a package that does not resolve
-  // fails the start, where Bun would otherwise fetch the latest from npm into its cache (SMD-1991).
-  const proc = Bun.spawn([process.execPath, "--no-install", join(ROOT, live.file)], { env, cwd: ROOT, stdout: "ignore", stderr: "pipe" });
+  // Bun's own start line (`Started development server:`, or `Started server:` in production) gives the port, 0 if
+  // the child exits first; the child is up when that port answers at all (SMD-1799). `--no-install`: a package that
+  // does not resolve fails the start, where Bun would otherwise fetch the latest from npm into its cache (SMD-1991).
+  const proc = Bun.spawn([process.execPath, "--no-install", join(ROOT, live.file)], { env, cwd: ROOT, stdout: "pipe", stderr: "pipe" });
+  const deadline = Date.now() + DEADLINE_MS;
+  const { port } = await childPort(proc, DEADLINE_MS);
   // Up when the port answers — any status: Bun serves the file's default export on PORT, so a refused
   // connection is "not yet" — or the child exited (`exitCode` is set only when `exited` settles, and a
   // loop that polled it spun for the whole deadline; change 74's pass 1), or the deadline passed.
   const base = `http://127.0.0.1:${port}`;
   const exited = proc.exited.then(() => "exited" as const);
-  const deadline = Date.now() + DEADLINE_MS;
   let up = false;
-  while (!up && Date.now() < deadline) {
+  while (port > 0 && !up && Date.now() < deadline) {
     const r = await Promise.race([exited, fetch(base, { signal: AbortSignal.timeout(2000) }).then(() => "up" as const, () => "down" as const)]);
     if (r === "exited") break;
     if (r === "up") { up = true; break; }
@@ -795,6 +786,9 @@ for (const live of LIVE) {
   }
   // Stop the child BEFORE reading its stderr: a server alive without a port would
   // otherwise hold stderr open and the read below would hang the test (pass 1).
+  // A child with no start line has usually just exited, its stdout ended a moment before its exit code is set: waited
+  // for, so it is said as an exit, not as alive (SMD-3296).
+  if (port === 0) await Promise.race([exited, Bun.sleep(1_000)]);
   const alive = proc.exitCode === null;
   proc.kill();
   await proc.exited;
@@ -802,7 +796,7 @@ for (const live of LIVE) {
     // The error line — `error: …`, `TypeError: …` — not the code frame Bun prints above it (`throw new Error(` is a frame line).
     const lines = (await new Response(proc.stderr).text()).trim().split("\n");
     const stderr = (lines.filter((l) => /^\s*(?:\w*Error|error)\b\s*:/.test(l)).slice(0, 2).concat(lines.slice(0, 2))).slice(0, 3).join(" | ");
-    assert(false, `${live.file}: \`bun ${live.file}\` starts and listens on PORT (${alive ? `alive after ${DEADLINE_MS / 1000} s, port ${port} never answered` : `exit ${proc.exitCode}`}: ${stderr || "no stderr"})`);
+    assert(false, `${live.file}: \`bun ${live.file}\` starts and listens on PORT (${alive ? `alive after ${DEADLINE_MS / 1000} s, ${port ? `port ${port} never answered` : "no start line"}` : `exit ${proc.exitCode}`}: ${stderr || "no stderr"})`);
   } else {
     assert(true, `${live.file}: \`bun ${live.file}\` starts and listens on PORT`);
   }

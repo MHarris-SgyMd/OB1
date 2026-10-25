@@ -37,7 +37,7 @@ export type SqlClient = SqlTag & { begin<T>(fn: (tx: SqlTx) => Promise<T>): Prom
  * Local to the read's transaction (set_config's `true`), and a ceiling: a role
  * or database already stricter keeps its own. The defaults are preflight's
  * and the tool's; the health body passes tighter ones, so its reads fit its
- * deadline (index.ts).
+ * deadline (the REST core's keyed /health, rest/app.ts).
  */
 export const READ_STATEMENT_TIMEOUT_MS = 5_000;
 export const READ_LOCK_TIMEOUT_MS = 1_000;
@@ -171,8 +171,8 @@ export interface DatabaseFacts {
 export interface WorkerHeartbeat {
   /** The ob1_config row's key — what retiring the worker deletes. */
   key: string;
-  worker: "board-sync" | "extract" | "consolidate" | "sleep";
-  /** The claim job it works (extract:qwen2.5:7b@p2, or a custom --job as given); null for board-sync. */
+  worker: "board-sync" | "extract" | "consolidate" | "sleep" | "reembed";
+  /** The claim job it works (extract:qwen2.5:7b@p2, reembed:qwen3-embedding:4b@1024, or a custom --job as given); null for board-sync. */
   job: string | null;
   /** When it last stamped, a UTC instant, and how long ago by the database's clock. */
   at: string;
@@ -314,13 +314,13 @@ function parseHeld(h: unknown): SleepHeld | undefined {
  * db/supervise.ts's guard: kept here, as server-portable reads no db/
  * module, and held equal to it by test-live [38].
  */
-export const SLEEP_REFUSALS = ["usage", "egress", "tables", "model", "provider", "identity", "key", "lookup", "linear-key", "board"] as const;
+export const SLEEP_REFUSALS = ["usage", "egress", "tables", "model", "provider", "identity", "key", "lookup", "linear-key", "board", "model-switch"] as const;
 export type SleepRefusal = (typeof SLEEP_REFUSALS)[number];
 
 /** A heartbeat older than this many of its own intervals is stale. */
 export const STALE_AFTER_INTERVALS = 3;
 
-const HEARTBEAT_KEY = /^heartbeat:(board-sync|extract|consolidate|sleep)(?::([A-Za-z0-9._:@/+-]{1,120}))?$/;
+const HEARTBEAT_KEY = /^heartbeat:(board-sync|extract|consolidate|sleep|reembed)(?::([A-Za-z0-9._:@/+-]{1,120}))?$/;
 // As long as a key's suffix with the worker's prefix on it, so every key
 // stampKey writes is one the reader takes (review pass 2: 121–128 were not).
 const JOB_TOKEN = /^[A-Za-z0-9._:@/+-]{1,132}$/;

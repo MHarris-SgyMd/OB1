@@ -54,7 +54,7 @@
 import { SQL } from "bun";
 import { timingSafeEqual, createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { accessSync, chmodSync, constants, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { BlockList, connect as tcpConnect, createServer, isIP } from "node:net";
 import { tmpdir } from "node:os";
 import { connect as tlsConnect } from "node:tls";
@@ -65,7 +65,7 @@ import { RESERVED_SYSTEMS, scopeProblem } from "../../db/ingest-items.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..", "..");
-/** The allowlist. Compose mounts the checkout's copy read-only, so provisioning and the runner read the same file. Empty until an import recipe is converted (SMD-2147–2150, SMD-2021). */
+/** The allowlist. Compose mounts the checkout's copy read-only, so provisioning and the runner read the same file. It holds the four export importers (SMD-2493); the other import recipes add their lines as they convert (SMD-2147–2150, SMD-2021). */
 export const PIPELINES_FILE = join(HERE, "pipelines.json");
 /** The actor every row the runner writes carries (ingest-records.ts --actor). */
 export const RUNNER_ACTOR = "orchestration-runner";
@@ -686,7 +686,7 @@ async function runPipeline(c: Config, p: Pipeline, proxy?: Proxy): Promise<Repor
 /** One run of one pipeline, start to report, within one deadline. */
 async function runSteps(c: Config, p: Pipeline, proxy: Proxy | undefined): Promise<Report> {
   const deadline = Date.now() + c.timeoutS * 1000;
-  const past = `ran past the run's ${c.timeoutS} s and was stopped`;
+  const past = pastDeadline(c.timeoutS);
   const input = join(c.importsDir, p.name);
   // An export the emitter's uid cannot read looked like no export at all: a
   // green run with nothing emitted (review pass 4: Python's glob answers an
@@ -695,6 +695,7 @@ async function runSteps(c: Config, p: Pipeline, proxy: Proxy | undefined): Promi
   // an imports root the runner cannot search is refused, naming the root
   // (review pass 5: it read as absent and skipped the probe).
   const where = inputState(input);
+  if (where === "dangling") return { pipeline: p.name, ok: false, stage: "emitter", exit: null, why: `${input} is a symlink whose target is not in the runner's container: put the export itself in the pipeline's folder, not a link to a folder outside the mount — deploy/imports/README.md`, emitted: 0 };
   if (where === "blocked") return { pipeline: p.name, ok: false, stage: "emitter", exit: null, why: `the runner cannot search ${c.importsDir} to reach ${input}: the imports directory must be searchable (mode o+x) — deploy/imports/README.md`, emitted: 0 };
   if (typeof where === "object") return { pipeline: p.name, ok: false, stage: "emitter", exit: null, why: `${input} cannot be read as a directory (${where.code}): is IMPORTS_DIR a directory? — deploy/imports/README.md`, emitted: 0 };
   if (where === "present") {
@@ -708,8 +709,7 @@ async function runSteps(c: Config, p: Pipeline, proxy: Proxy | undefined): Promi
   const sweep = c.sweep(p);
   if (sweep) await step(sweep, { cwd: c.cwd, env: EMITTER_ENV(c.env), deadline: Date.now() + 5000, timings: c.timings });
   if (e.timedOut || e.overflow || e.code !== 0) {
-    const why = e.timedOut ? `the emitter ${past}` : e.overflow ? `the emitter printed more than ${c.maxBytes} bytes and was stopped` : `the emitter exited ${e.code}`;
-    return { pipeline: p.name, ok: false, stage: "emitter", exit: e.timedOut || e.overflow ? null : e.code, why, emitted: 0, notes: shownTail(e.err) };
+    return { pipeline: p.name, ok: false, stage: "emitter", exit: e.timedOut || e.overflow ? null : e.code, why: emitterWhy(e, c.timeoutS, c.maxBytes), emitted: 0, notes: shownTail(e.err) };
   }
   const emitted = lines(e.out).length;
   const stray = strayLines(e.bytes, p);
@@ -757,7 +757,7 @@ async function runSteps(c: Config, p: Pipeline, proxy: Proxy | undefined): Promi
     return {
       ...base, ok: false, stage: "reembed", exit: 2, reembed,
       why: configuration
-        ? `the rows are written, and reembed refused to run: ${sentence(reason)} So ${rowsLack(unembedded, p.system)} no vector, and no run embeds ${unembedded === 1 ? "it" : "them"} until that is fixed. The runner takes the server's model and egress settings when it is created: after changing them, recreate all three (compose --profile orchestration up -d --force-recreate server api orchestration-runner)`
+        ? `the rows are written, and reembed refused to run: ${sentence(reason)} So ${rowsLack(unembedded, p.system)} no vector, and no run embeds ${unembedded === 1 ? "it" : "them"} until that is fixed. The runner takes the server's model and egress settings when it is created: after changing them, recreate both (compose --profile orchestration up -d --force-recreate api orchestration-runner)`
         : `the rows are written, and reembed could not run this time: ${sentence(reason)} ${rowsLack(unembedded, p.system)} no vector yet; the next run tries again`,
     };
   }
@@ -873,12 +873,31 @@ const sentence = (t: string) => (/[.!?)]$/.test(t) ? t : `${t}.`);
 /** "1 of s's rows has" / "3 of s's rows have". */
 const rowsLack = (n: number, system: string) => `${n} of ${system}'s rows ${n === 1 ? "has" : "have"}`;
 
-/** Where a pipeline's imports directory stands, as the runner sees it: there, not there, behind a directory the runner cannot search, or something else that is not a directory it can reach (a file where the directory should be, a loop). */
-function inputState(dir: string): "present" | "absent" | "blocked" | { code: string } {
+/** Where a pipeline's imports directory stands, as the runner sees it: there, not there, behind a directory the runner cannot search, a symlink whose target is not in the container, or something else that is not a directory it can reach (a file where the directory should be, a loop). */
+function inputState(dir: string): "present" | "absent" | "blocked" | "dangling" | { code: string } {
   try { statSync(dir); return "present"; } catch (e) {
     const code = (e as NodeJS.ErrnoException).code ?? "unknown";
-    return code === "ENOENT" ? "absent" : code === "EACCES" || code === "EPERM" ? "blocked" : { code };
+    // A link to a host folder outside the mount points nowhere in here: read as absent, it was a green run every
+    // week that read nothing (review pass 4).
+    if (code === "ENOENT") { try { lstatSync(dir); return "dangling"; } catch { return "absent"; } }
+    return code === "EACCES" || code === "EPERM" ? "blocked" : { code };
   }
+}
+
+/** What a step past the run's deadline is said to have done: the emitter, the ingester and reembed alike. */
+const pastDeadline = (timeoutS: number) => `ran past the run's ${timeoutS} s and was stopped`;
+
+/**
+ * Why an emitter's step failed. An exit of 137 the runner did not cause (no
+ * deadline, no cap) is a SIGKILL from outside: the kernel's, when the
+ * container's memory ran out (review pass 4, run-it: a 200,000-tweet archive
+ * died as "the emitter exited 137", saying nothing of why).
+ */
+function emitterWhy(e: Pick<Step, "code" | "timedOut" | "overflow">, timeoutS: number, maxBytes: number): string {
+  if (e.timedOut) return `the emitter ${pastDeadline(timeoutS)}`;
+  if (e.overflow) return `the emitter printed more than ${maxBytes} bytes and was stopped`;
+  if (e.code === 137) return "the emitter was killed (exit 137) without the runner stopping it: most likely the runner's container ran out of memory (its mem_limit in deploy/compose.yaml). Import an export this large from a checkout, as its recipe's README says";
+  return `the emitter exited ${e.code}`;
 }
 
 /** Whether this process can list a directory: the runner's own access, where emitters share its uid. */
@@ -1084,6 +1103,21 @@ async function selfCheck(): Promise<number> {
     chmodSync(blockedRoot, 0o700);
     rmSync(blockedRoot, { recursive: true, force: true });
   }
+  const danglingRoot = join(tmpdir(), `ob1-runner-dangling.${process.pid}`);
+  mkdirSync(danglingRoot, { recursive: true });
+  try {
+    symlinkSync(join(danglingRoot, "gone"), join(danglingRoot, "p"));
+    mkdirSync(join(danglingRoot, "there"));
+    symlinkSync(join(danglingRoot, "there"), join(danglingRoot, "q"));
+    expect("a symlink whose target is not there is 'dangling', not 'absent'; one to a folder is 'present'", inputState(join(danglingRoot, "p")) === "dangling" && inputState(join(danglingRoot, "q")) === "present");
+  } finally {
+    rmSync(danglingRoot, { recursive: true, force: true });
+  }
+  expect("an exit of 137 the runner did not cause is said to be the container's memory; one it caused by the deadline or the cap is said as that; any other exit is its code",
+    /out of memory/.test(emitterWhy({ code: 137, timedOut: false, overflow: false }, 60, 10))
+    && /ran past the run's 60 s/.test(emitterWhy({ code: 137, timedOut: true, overflow: false }, 60, 10))
+    && /more than 10 bytes/.test(emitterWhy({ code: 137, timedOut: false, overflow: true }, 60, 10))
+    && emitterWhy({ code: 2, timedOut: false, overflow: false }, 60, 10) === "the emitter exited 2");
   expect("a missing emitter is told to go into the image by runner.Dockerfile and .dockerignore, not only to rebuild", /runner\.Dockerfile/.test(missingEmitterHelp(["x: y.py"])) && /\.dockerignore/.test(missingEmitterHelp(["x: y.py"])));
   expect("the ingester and reembed get the database, not the runner's own key", shipped.env.OB1_RUNNER_KEY === undefined && shipped.env.DATABASE_URL === "postgres://x" && shipped.asEmitter(parsePipelines(one({}))[0]).length === 0 && shipped.sweep(parsePipelines(one({}))[0]) === null);
   expect("an emitter script the image lacks is named, after a flag, after `bun run`, or bare; an inline one, a module, a present one and a URL argument are not", JSON.stringify(missingEmitters(each([

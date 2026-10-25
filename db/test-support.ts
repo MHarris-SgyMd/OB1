@@ -170,6 +170,8 @@ const FUNCTIONS = [
   "list_supersession_proposals(text, int)",
   // 070 (SMD-2313): 029's listing under a third parameter; the two-argument form above stands on a schema stopped before 070.
   "list_supersession_proposals(text, int, boolean)",
+  // 109 (SMD-3248): 070's listing under a fourth parameter; the forms above stand on a schema stopped before 109.
+  "list_supersession_proposals(text, int, boolean, text)",
   "thought_changes(timestamptz, uuid, text, text, text[], int)",
   // 053 (SMD-1867); its table is listed above, its two indexes drop with thought_facets,
   // and record_thought_entities / thought_facets_validate are 016's and 042's names.
@@ -771,14 +773,15 @@ export function requestHead(method: string, target: string, host: string | null)
 }
 
 /**
- * A child's output stream (serveChild's stderr), drained as it arrives — so
+ * A child's output stream (serveChild's stdout and stderr), drained as it arrives — so
  * a child that writes a lot there is never blocked on a full pipe (review
  * pass 4) — with `until`, which
  * waits for a pattern (or `ms`, or the stream's end) and says whether it came,
  * and `rest`, all of it once the stream ends (SMD-1849 PR 2b: a child's suite
- * waits for its start line, "… go to <origin> over OTLP/HTTP", not a fixed sleep).
+ * waits for the SDK's line, "… go to <origin> over OTLP/HTTP", not a fixed sleep),
+ * and `sofar`, what has come yet.
  */
-export function watchStream(stream: ReadableStream<Uint8Array>): { until: (pattern: RegExp, ms: number) => Promise<boolean>; rest: () => Promise<string> } {
+export function watchStream(stream: ReadableStream<Uint8Array>): { until: (pattern: RegExp, ms: number) => Promise<boolean>; rest: () => Promise<string>; sofar: () => string } {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let got = "";
@@ -804,33 +807,73 @@ export function watchStream(stream: ReadableStream<Uint8Array>): { until: (patte
       await ended;
       return got;
     },
+    sofar: () => got,
   };
 }
 
 /**
+ * Bun's start line for a file's default export, on stdout: `Started development server: http://localhost:<port>`
+ * (`Started server:` in production), its newline asked for, so a line read in two pieces is never half a port. It is
+ * Bun's own debug line, not an API: a Bun that changes or drops it leaves every child not up, which every row says.
+ */
+const BUN_START_LINE = /^Started (?:development )?server: \S+:(\d+)\/?\r?\n/m;
+
+/**
+ * A child started at PORT 0: its stdout, drained and watched, and the port it bound, as Bun's start line there says,
+ * waited for at most `ms`; 0 if the line never comes or the stream ends first. A port picked by binding 0 and freeing
+ * it for the child can be taken by another server in between, whose answers then read as the child's (SMD-3263,
+ * SMD-3296): a child given PORT 0 binds a port no one else holds.
+ */
+export async function childPort(proc: { stdout: unknown }, ms: number): Promise<{ port: number; stdout: ReturnType<typeof watchStream> }> {
+  const stdout = watchStream(proc.stdout as ReadableStream<Uint8Array>);
+  const port = (await stdout.until(BUN_START_LINE, ms)) ? Number(BUN_START_LINE.exec(stdout.sofar())![1]) : 0;
+  return { port, stdout };
+}
+
+/** The REST core's keyless /health body, and the MCP server's entry's. */
+export const REST_HEALTH_BODY = JSON.stringify({ status: "ok" });
+export const MCP_HEALTH_BODY = "ok";
+
+/**
+ * Whether a server at 127.0.0.1:`port` answers its keyless /health 200 with `body`: its own body, not any 200, which
+ * on macOS another process's 127.0.0.1 listener beside the child's dual-stack port could give. A read cut short is a
+ * no, never a throw. `fetcher` for a suite that stubs the global fetch (SMD-3296).
+ */
+export function answersHealth(port: number, body: string, init: RequestInit = {}, fetcher: typeof fetch = fetch): Promise<boolean> {
+  return fetcher(`http://127.0.0.1:${port}/health`, init).then((r) => r.text().then((t) => r.ok && t === body)).catch(() => false);
+}
+
+/**
  * A server entry run as the image runs it (`bun --no-env-file <entry>`), on a
- * free port, with `env` beside PATH, HOME and PORT and no other: `up` once its
- * /health answers (15 s at most, each poll 1 s, none once it has exited or a
- * signal killed it), `sdk`
- * once it says where its spans go (with `waitForSdk`, 10 s at most — its SDK
+ * port of its own, with `env` beside PATH, HOME and PORT and no other: `up`
+ * once its /health answers (30 s at most, each poll 1 s, none once it has
+ * exited or a signal killed it), `sdk`
+ * once it says where its spans go (with `waitForSdk`, 20 s at most — its SDK
  * loaded, not a fixed wait), `stop` its SIGTERM (SIGKILL past 8 s) and then
- * its stdout and stderr together, `kill` for a `finally`.
+ * its stdout and stderr together, `kill` for a `finally`. Its port is the one
+ * it bound, at PORT 0, as Bun's start line says: a port picked here and freed
+ * for it could be taken by another server in between, and a /health answered
+ * by that server would read as this child's (SMD-3263, test-rest [12] starts
+ * nine at once). The waits are deadlines, not sleeps: nine starts at once on a
+ * busy runner are slower than one, and a deadline costs a quick child nothing.
+ * The entry must be served by its `export default` and read PORT, as api.ts and
+ * mcp-server/index.ts are: one that calls Bun.serve itself prints no start line,
+ * and is never up.
  */
 export async function serveChild(cwd: string, entry: string, env: Record<string, string>, { waitForSdk = false } = {}): Promise<{ port: number; up: boolean; sdk: boolean; until: (pattern: RegExp, ms: number) => Promise<boolean>; stop: () => Promise<string>; kill: () => void }> {
-  const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const port = free.port!;
-  free.stop(true);
   const child = Bun.spawn([process.execPath, "--no-env-file", entry], {
     cwd,
-    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: String(port), ...env },
+    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", ...env },
     stdout: "pipe",
     stderr: "pipe",
   });
   const err = watchStream(child.stderr);
+  const deadline = Date.now() + 30_000;
+  // 0 until the start line comes; never, for a child that exits first.
+  const { port, stdout: out } = await childPort(child, deadline - Date.now());
   let up = false;
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline && child.exitCode === null && child.signalCode === null && !(up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false))) await Bun.sleep(100);
-  const sdk = waitForSdk ? await err.until(/ go to \S+ over OTLP\/HTTP/, 10_000) : false;
+  while (port > 0 && Date.now() < deadline && child.exitCode === null && child.signalCode === null && !(up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false))) await Bun.sleep(100);
+  const sdk = waitForSdk ? await err.until(/ go to \S+ over OTLP\/HTTP/, 20_000) : false;
   let stopped: Promise<string> | undefined;
   return {
     port,
@@ -843,7 +886,7 @@ export async function serveChild(cwd: string, entry: string, env: Record<string,
       const killer = setTimeout(() => child.kill("SIGKILL"), 8_000);
       await child.exited;
       clearTimeout(killer);
-      return await new Response(child.stdout).text() + await err.rest();
+      return await out.rest() + await err.rest();
     })()),
     kill: () => child.kill("SIGKILL"),
   };

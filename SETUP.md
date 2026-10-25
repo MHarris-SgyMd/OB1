@@ -483,11 +483,11 @@ bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile loca
   podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
-Eight services in order (ten with `local-models`): Postgres with pgvector, a migration job that applies the
-schema and exits, then `server` (nothing in the stack calls it; it retires in SMD-2287 PR 6), the REST core (internal unless
+Seven services in order (nine with `local-models`): Postgres with pgvector, a migration job that applies the
+schema and exits, then the REST core, which builds the server image (internal unless
 `deploy/compose.api-public.yaml` is named), the MCP server at `/mcp`, which hands every tool call to the REST
 core, the operator GUI at `/dashboard`, which reads the brain through the REST core too, and the proxy in front of
-them with the forwarder that publishes its port. The server runs `preflight.ts` before it
+them with the forwarder that publishes its port. The REST core runs `preflight.ts` before it
 serves, so a misconfiguration crashloops rather than starting and failing on your
 first capture. To run a *release* rather than a checkout build — the published
 `ob1-server` and `ob1-migrate` images, Ollama pinned by digest — see
@@ -571,8 +571,12 @@ does from a checkout, behind a key its allowlist bounds. Two kinds of template s
   `N8N_LINEAR_API_KEY` is set.
 - **The import template:** one instance per pipeline in
   `deploy/orchestration/pipelines.json`, run by the profile's import runner
-  over `deploy/imports/<pipeline>/`. The allowlist is empty until the
-  first import recipe is converted.
+  over `deploy/imports/<pipeline>/`. That file holds the four export importers
+  (`grok`, `instagram`, `blogger`, `x-twitter`; SMD-2493), each run weekly
+  and a no-op until an export is put in its folder. Classify the runner
+  before the first export goes in (`deploy/imports/README.md` gives the
+  command); the other
+  import recipes add theirs as they convert.
 
 Once, `--init` writes its secrets into `deploy/.env`. For the act tool, put a
 Linear key with write access in `deploy/.env` as `N8N_LINEAR_API_KEY` (a key
@@ -607,7 +611,7 @@ competes with it is outside OB1's.
 
 ## Expected outcome
 
-`migrate` exits 0 having applied every migration under `db/migrations/`. `server`
+`migrate` exits 0 having applied every migration under `db/migrations/`. `api`
 logs `preflight OK` and `Started server`. `smoke.sh` reports every check passed
 (`deploy/README.md` has the count, and the liveness-probe target for a platform
 that can only GET). A client shows twelve tools for a write key, nine for a read

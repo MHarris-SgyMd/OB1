@@ -21,6 +21,8 @@ import { cutOpenRequests, cutTelemetry, flushTelemetry, startTelemetry } from ".
  * reads as the REST core's, beside the MCP server's `open-brain`.
  */
 export const API_DOOR = "open-brain-api";
+/** The door of the MCP server server-portable/index.ts was (SMD-2287 PR 6b retired it): its writes' origin, and its jobs' door, which this server's start-up reconciles. */
+export const RETIRED_MCP_DOOR = "open-brain";
 
 const core = createCore({ env, store: db, door: API_DOOR });
 
@@ -71,9 +73,10 @@ const SERVES_ON_BUN = typeof Bun !== "undefined" && import.meta.main === true;
 let bunServer: Stoppable | undefined;
 if (SERVES_ON_BUN) {
   // The store's first build wires the durable job store for this server: its
-  // jobs carry its door and its start-up reconcile touches only those, so the
-  // MCP server's live jobs on the same database are left alone (migration 078).
-  serveHere(API_DOOR);
+  // jobs carry its door, and its start-up reconcile marks lost those a prior
+  // process left live, and those of `open-brain`, the MCP server index.ts was
+  // until SMD-2287 PR 6b retired it (migration 078).
+  serveHere(API_DOOR, [RETIRED_MCP_DOOR]);
   // Spans to a collector, where one is named (OTEL_EXPORTER_OTLP_ENDPOINT, SMD-1849 PR 2b).
   void startTelemetry(API_DOOR);
   const grace = drainBoundFrom(process.env.OB1_STOP_GRACE);

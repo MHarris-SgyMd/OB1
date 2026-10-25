@@ -16,12 +16,12 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 const SYSTEM = "blogger";
 const SCOPE = "blogger:export";
-const USAGE = "Usage: bun import-blogger.mjs /path/to/blogger-exports [--skip N] [--limit N] > items.jsonl";
+const USAGE = "Usage: bun import-blogger.mjs /path/to/blogger-exports [--skip N] [--limit N] [--if-present] > items.jsonl";
 
 function parseArgs(argv) {
   const out = { path: undefined, skip: 0, limit: Infinity };
@@ -31,6 +31,8 @@ function parseArgs(argv) {
       const n = Number(argv[++i]);
       if (!Number.isInteger(n) || n < 0) fail(`${a} takes a whole number`);
       out[a.slice(2)] = n;
+    } else if (a === "--if-present") {
+      ifPresent = true;
     } else if (a === "--dry-run") {
       fail("the emitter writes nothing; count what it emits with the pipeline's own --dry-run (bun db/ingest-records.ts --source items --items items.jsonl --allow blogger:export --dry-run)");
     } else if (a.startsWith("--")) {
@@ -43,6 +45,31 @@ function parseArgs(argv) {
   }
   if (out.path === undefined) fail(USAGE);
   return out;
+}
+
+/** A name every walk passes over: a dot-file or dot-folder, __MACOSX and the `._*` AppleDouble files a zip made on a Mac carries. */
+const skipped = (name) => name.startsWith(".") || name === "__MACOSX";
+
+/**
+ * `--if-present`: a path that is not there is no export yet, not a mistake, so
+ * nothing is emitted and the run succeeds. The import runner passes it, since
+ * a pipeline's folder need not exist until an export is put in it (SMD-2493 PR 2).
+ */
+let ifPresent = false;
+
+/**
+ * The export's path, checked before anything reads it. One that is not there
+ * is "no export yet" under --if-present (nothing emitted, exit 0) and a
+ * mistake otherwise. One there but unreadable is refused, naming why: a green
+ * run that read nothing would hide it.
+ */
+async function exportRoot(path) {
+  try {
+    return await stat(path);
+  } catch (e) {
+    if (e.code === "ENOENT" && ifPresent) { console.error(`${path}: no export there yet; nothing emitted`); process.exit(0); }
+    fail(e.code === "ENOENT" ? `${path}: no such file or folder` : `${path}: cannot be read (${e.code ?? e.message})`);
+  }
 }
 
 function fail(why) {
@@ -130,6 +157,9 @@ function stripHtml(html) {
     .trim();
 }
 
+/** Entries of a kind this importer reads (posts, comments), before its length filter: what the end rule counts. */
+let recognised = 0;
+
 function parseAtomFile(xml) {
   const entries = [];
   const entryBlocks = xml.split(/<entry>/);
@@ -144,6 +174,7 @@ function parseAtomFile(xml) {
     const categoryMatch = entry.match(/term=["']http:\/\/schemas\.google\.com\/blogger\/2008\/kind#(\w+)["']/);
     const kind = categoryMatch ? categoryMatch[1] : "";
     if (kind !== "post" && kind !== "comment") continue;
+    recognised++;
 
     // Extract fields
     const titleMatch = entry.match(/<title[^>]*>([^<]*)<\/title>/);
@@ -172,27 +203,43 @@ function parseAtomFile(xml) {
   return entries;
 }
 
+/**
+ * The backup files under the folder: `.atom`, and `.xml`, which the
+ * dashboard's "Back up content" writes, within six levels, so a Google
+ * Takeout's Takeout/Blogger/Blogs/<blog>/feed.atom is reached as unzipped.
+ * A folder that holds something but no backup is refused, naming what it
+ * holds, rather than read as no export.
+ */
 async function findAtomFiles(dir) {
   const results = [];
+  let other = 0;
 
+  const s = await exportRoot(dir);
+  if (!s.isDirectory()) return [dir];
   async function walk(d, depth) {
-    if (depth > 3) return;
-    const entries = (await readdir(d, { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    if (depth > 6) return;
+    let entries;
+    try {
+      entries = (await readdir(d, { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    } catch (e) {
+      // A folder it cannot read is refused, not passed over: an export may be in it.
+      fail(`${d}: cannot be read (${e.code ?? e.message})`);
+    }
     for (const e of entries) {
       const fullPath = join(d, e.name);
-      if (e.isFile() && (e.name.endsWith(".atom") || e.name === "feed.atom")) {
+      if (skipped(e.name)) continue;
+      if (e.isFile() && /\.(atom|xml)$/i.test(e.name)) {
         results.push(fullPath);
-      } else if (e.isDirectory() && !e.name.startsWith(".")) {
+      } else if (e.isDirectory()) {
         await walk(fullPath, depth + 1);
+      } else {
+        other++;
       }
     }
   }
 
-  try {
-    await walk(dir, 0);
-  } catch {
-    fail(`${dir}: no such folder`);
-  }
+  await walk(dir, 0);
+  if (!results.length && other) fail(`${dir} holds no Blogger backup (.atom or .xml): a .zip to extract first, or a Takeout nested more than six folders down`);
   return results;
 }
 
@@ -203,25 +250,41 @@ async function main() {
   console.error(`Found ${atomFiles.length} Atom files`);
 
   const allPosts = [];
+  const fileOf = new Map();
   for (const file of atomFiles) {
-    const xml = await readFile(file, "utf-8");
+    let xml;
+    try {
+      xml = await readFile(file, "utf-8");
+    } catch (e) {
+      fail(`${file}: cannot be read (${e.code ?? e.message})`);
+    }
     const entries = parseAtomFile(xml);
     console.error(`  ${file}: ${entries.length} entries`);
+    for (const entry of entries) {
+      // One entry in two files is one blog backed up twice: read as one, the older copy would win wherever its
+      // file sorts first, so it is refused, naming both. One file holding it twice is emitted once, below.
+      const first = fileOf.get(entry.key);
+      if (first !== undefined && first !== file) fail(`entry ${entry.key} is in two backups (${first}, ${file}): keep one, the newest`);
+      fileOf.set(entry.key, file);
+    }
     allPosts.push(...entries);
   }
 
   const toProcess = allPosts.slice(skip, skip + limit);
   const seen = new Set();
-  let emitted = 0, skipped = 0;
+  let emitted = 0, dropped = 0;
+  // Printed once, at the end: a refusal mid-run (a record in two files) prints nothing, so a pipe into the
+  // pipeline never ingests half an export.
+  const lines = [];
 
   for (const post of toProcess) {
     const thoughtContent = post.title
       ? `Blog post: ${post.title}\nPublished: ${post.published}\n\n${post.content}`
       : post.content;
 
-    if (thoughtContent.trim().length < 50) { skipped++; continue; }
+    if (thoughtContent.trim().length < 50) { dropped++; continue; }
     // Two lines of one identity refuse the whole file, so an entry two export files both hold is emitted once.
-    if (seen.has(post.key)) { console.error(`entry ${post.key} appears twice; emitted once`); skipped++; continue; }
+    if (seen.has(post.key)) { console.error(`entry ${post.key} appears twice; emitted once`); dropped++; continue; }
     seen.add(post.key);
 
     const createdAt = instant(post.published);
@@ -237,12 +300,20 @@ async function main() {
       facets: { title, kind: post.kind, type: "journal", source_type: "blogger_import", importance: 3, quality_score: 60, sensitivity_tier: "standard" },
     };
     if (createdAt) item.createdAt = createdAt;
-    process.stdout.write(`${JSON.stringify(item)}\n`);
+    lines.push(JSON.stringify(item));
     emitted++;
   }
 
-  console.error(`Emitted ${emitted} item(s), skipped ${skipped} (of ${toProcess.length}; skip=${skip}, limit=${limit === Infinity ? "all" : limit})`);
+  if (lines.length) process.stdout.write(`${lines.join("\n")}\n`);
+  console.error(`Emitted ${emitted} item(s), skipped ${dropped} (of ${toProcess.length} entr${toProcess.length === 1 ? "y" : "ies"} kept from ${recognised} post or comment entr${recognised === 1 ? "y" : "ies"} read; skip=${skip}, limit=${limit === Infinity ? "all" : limit})`);
+  // An export found but no record of this importer's kind parsed from it is refused, not reported as no export:
+  // another product's file of the name it reads, or a vendor shape it does not know, would otherwise be a green run
+  // that writes nothing, every week (review pass 4). Records parsed and all skipped by the importer's own filters (an
+  // entry under 50 characters) are a correct read, and exit 0 (review pass 5). Under --skip or --limit the window is
+  // the request's.
+  if (!recognised && atomFiles.length && skip === 0 && limit === Infinity) fail(`${path}: read ${atomFiles.length} .atom/.xml file(s) and found no post or comment entry in them: a blog with none, not a Blogger backup, or a backup format this importer does not read`);
   if (droppedDates.size) console.error(`${droppedDates.size} date(s) left out, not ones the brain accepts (it dates those thoughts when it writes them): ${[...droppedDates].slice(0, 5).map((d) => JSON.stringify(d.slice(0, 40))).join(", ")}`);
 }
 
-await main();
+// A failure no check foresaw (a file unreadable mid-run) is named, not left a stack trace in the runner's report.
+await main().catch((e) => fail(e instanceof Error ? e.message : String(e)));

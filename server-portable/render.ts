@@ -26,6 +26,7 @@ import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
 import { parseListCursor } from "./core/list-cursor.ts";
+import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ChangesResult, FetchedThought, KeywordResult, ListThoughtsResult, ProposalsResult, QueryVectorFailed, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
@@ -73,6 +74,9 @@ const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|sup
 function guard(v: unknown, key = ""): unknown {
   // list_thoughts' cursor (SMD-2995): not a uuid, but held to its own shape, which carries no sentence.
   if (typeof v === "string" && key === "cursor" && v === v.trim() && parseListCursor(v)) return v;
+  // A proposal's pass (SMD-3248): held to pass-key.ts's one rule — one token, no space, so no sentence — the rule the
+  // input took it by (review pass 4: a full-shape guard nulled keys the input admitted).
+  if (typeof v === "string" && key === "judgeKey") return PASS_KEY_CHARS.test(v) ? v : null;
   if (typeof v === "string") return (TIME_KEY.test(key) ? TIME : ID_KEY.test(key) ? UUID : TOKEN).test(v) ? v : null;
   if (Array.isArray(v)) return v.map((x) => guard(x, key));
   if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, guard(x, k)]));
@@ -169,11 +173,17 @@ const safeList: Safe<ListThoughtsResult> = (v) => ({
   sort: v.sort,
   cursor: v.cursor,
 });
-/** list_supersession_proposals: per proposal its ids, verdict, numbers and dates — the sides, the reason and the judge are in the text. */
+/**
+ * list_supersession_proposals: per proposal its ids, verdict, numbers, dates and the pass that judged it — the sides and the
+ * reason are in the text. The top-level `judgeKey` is the selection: absent when every pass was listed, the key when one
+ * was — always one the guard keeps, since the input took it by the same rule (pass-key.ts's PASS_KEY_CHARS).
+ */
 const safeProposals: Safe<ProposalsResult> = (v) => ({
-  status: v.status, ...(v.lineage === undefined ? {} : { lineage: v.lineage }),
+  status: v.status, ...(v.lineage === undefined ? {} : { lineage: v.lineage }), ...(v.judgeKey === undefined ? {} : { judgeKey: v.judgeKey }),
   proposals: v.proposals.map((p) => ({
     id: p.id, status: p.status, verdict: p.verdict, confidence: p.confidence, similarity: p.similarity,
+    // SMD-3248: the judge key names a pass and its models — no writer, so SMD-2707's rule (writers' names in the text) does not hold it back.
+    judgeKey: p.judgeKey,
     judgedAt: p.judgedAt, reviewedAt: p.reviewedAt, supersedingId: p.supersedingId, lineage: p.lineage,
     older: safeSide(p.older), newer: safeSide(p.newer),
     // SMD-2707: the flags are words and booleans; the writers' names are in the text.
@@ -800,11 +810,16 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
 }
 
 export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply {
-  return render(o, ({ status, lineage, proposals: data }) => {
-    const onLineage = lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "";
+  return render(o, ({ status, lineage, judgeKey, proposals: data }) => {
+    // SMD-3248: the pass selected (109) is said with the rest of the selection.
+    const onLineage = (lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "") + (judgeKey === undefined ? "" : ` judged by ${judgeKeyText(judgeKey)}`);
     if (!data.length) {
       // A lineage pair is never proposed since 066, so an empty lineage
       // selection is not the pass's to fill (maintainer read, third pass).
+      // SMD-3248 review pass 1: under judge_key, no row is no pass of exactly that key in this status — a typo, or an older
+      // pass's key, which no run will fill — so the advice is the key's, not the pass's.
+      // Review pass 2: the key may be right and the status or lineage filter what emptied it.
+      if (judgeKey !== undefined) return `No ${status === "all" ? "" : status + " "}supersession proposals${onLineage}. Either that pass has none in this selection, or no pass has exactly this key: the match is exact, each proposal names the key that judged it (judged by consolidate:…), and \`cd db && bun consolidate.ts --url $DATABASE_URL --status\` counts the pending by pass.`;
       return `No ${status === "all" ? "" : status + " "}supersession proposals${onLineage}.${lineage === true ? "" : " The consolidation pass proposes them: cd db && bun consolidate.ts --url $DATABASE_URL (after db/extract-entities.ts, which it pairs thoughts by)."}`;
     }
     // SMD-1803: through displayDate, never new Date() on a raw column — an
@@ -868,7 +883,9 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
         : "";
       return `${i + 1}. [confidence ${p.confidence.toFixed(2)}] ${phrase(p.verdict)}${p.lineage ? "  LINEAGE PAIR" : ""}${flags.length ? "  WRITER" : ""}${reason ? `\n   Reason: ${reason}` : ""}${lineageLine}${writerLine}` +
         side("newer", p.newer) + side("older", p.older) +
-        `\n   proposal ${p.id} — judged by ${p.judgeKey} on ${day(p.judgedAt)}\n${review}`;
+        // A recorded key whole when it is a pass key, else quoted and escaped (pass-key.ts: a newline forged an `ID:` line
+        // in review pass 2, spaces passed for the line's own words in 3, stripped look-alikes for the real key in 4).
+        `\n   proposal ${p.id} — judged by ${judgeKeyText(p.judgeKey)} on ${day(p.judgedAt)}\n${review}`;
     });
     const unread = data.some((p) => !p.older.writer || !p.newer.writer) ? ` ${WRITERS_UNREAD}` : "";
     return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.${unread}\n\n${results.join("\n\n")}`;
@@ -876,15 +893,16 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
 }
 
 /**
- * The hint a listing error carries. 070 (SMD-2313): the store calls the
- * three-argument form, so a brain short of 070 — or of 029, whose queue the
- * listing reads — fails naming that form (`p_lineage` was PostgREST's word for
- * it, before SMD-3152); the driver's message is the same either way, so one
- * hint names both files (cold read, first and fourth review passes).
+ * The hint a listing error carries. 070 (SMD-2313), then 109 (SMD-3248): the
+ * store calls the four-argument form, so a brain short of 109 — or of 029,
+ * whose queue the listing reads — fails naming that form (`p_lineage` was
+ * PostgREST's word for it, before SMD-3152); the driver's message is the same
+ * either way, so one hint names both files (cold read, first and fourth review
+ * passes).
  */
 export const proposalsHint = (msg: string): string =>
   /list_supersession_proposals|supersession_proposals|p_lineage/.test(msg)
-    ? " — the migrations through 070 are not applied (029, db/migrations/029_supersession_proposals.sql, creates the queue; 070, db/migrations/070_listing_flags_lineage_pair.sql, its current listing)"
+    ? " — the migrations through 109 are not applied (029, db/migrations/029_supersession_proposals.sql, creates the queue; 109, db/migrations/109_listing_selects_a_pass.sql, its current listing)"
     : "";
 
 export function renderThoughtStats(o: Outcome<ThoughtStats>): Reply {

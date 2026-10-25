@@ -31,8 +31,8 @@ const RAW_ENV = /** @type {Record<string, string|undefined>} */ (
  * `??` only catches undefined, so `OB1_EMBEDDING_DIM=` — trivially produced by a
  * blank line in a .env file or a compose `${VAR}` that resolves to nothing — gave
  * `Number("") === 0` and a config refused as "must be a positive integer, got 0".
- * server-portable/index.ts already treated empty as unset because it tests
- * truthiness, so the two disagreed about the same environment: the server would
+ * server-portable/index.ts (retired in SMD-2287 PR 6b) already treated empty as
+ * unset because it tested truthiness, so the two disagreed about the same environment: the server would
  * run at the default width while the migration runner refused to start.
  */
 /**
@@ -499,6 +499,11 @@ export function restartCommand(worker, job) {
   if (worker === "sleep") return "podman compose -f deploy/compose.yaml --profile sleep up -d --no-deps sleep, with the -f files and -p the stack was started with (docker compose alike; its settings are OB1_SLEEP_QUIET, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_BUDGET, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM in deploy/.env); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag";
   if (worker === "board-sync") return "podman compose -f deploy/compose.yaml --profile board-sync up -d --no-deps board-sync, with the -f files and -p the stack was started with (docker compose alike; from a checkout, cd db && bun sync-linear.ts --url $DATABASE_URL --loop)";
   const service = `podman compose -f deploy/compose.yaml --profile workers up -d --no-deps ${worker}, with the -f files and -p the stack was started with (docker compose alike); from a checkout, `;
+  // No compose service runs a re-embed follower: the sleep scheduler will (SMD-2679 PR 4b).
+  // The model's own key is what a follower without --job takes, and pinning it
+  // would be refused once the model is switched (review pass 1); a backfill
+  // key is given as it was.
+  if (worker === "reembed") return `cd db && bun reembed.ts --url $DATABASE_URL --follow${job && poolModelFor(job) === null ? ` --job ${job}` : ""}`;
   if (worker === "extract") return `${service}cd db && bun extract-entities.ts --url $DATABASE_URL --follow${job ? ` --job ${job} (drop --job when OB1_METADATA_MODEL or the prompt version has changed since)` : ""}`;
   return `${service}cd db && bun consolidate.ts --url $DATABASE_URL --follow${job ? ` (its job, ${job}, follows OB1_JUDGE_MODEL, else OB1_METADATA_MODEL)` : ""}`;
 }
@@ -510,9 +515,13 @@ export function restartCommand(worker, job) {
  * scheduler's own line adds it where a pass's words mislead — the key's name
  * a --switch-key sleep.ts does not take, a revoked key's no way back — and
  * preflight's `sleep` row gives it for every kind, where "start it again"
- * would only refuse again (SMD-2752).
+ * would only refuse again (SMD-2752). `worker`, the follower's, where a
+ * kind's remedy is another for it: a re-embed follower's model and provider
+ * are the embedding endpoint's (SMD-2679).
  */
-export function startRefusalRemedy(kind) {
+export function startRefusalRemedy(kind, worker) {
+  if (worker === "reembed" && kind === "model") return "pull the embedding model its log names (OB1_EMBEDDING_MODEL), or set OB1_EMBEDDING_MODEL to one the provider serves — the model ob1_config records, since a follower never switches it";
+  if (worker === "reembed" && kind === "provider") return "the provider refused the embedding probe: check the embedding endpoint's key and base URL (OB1_LLM_API_KEY and OB1_LLM_BASE_URL), and the account's credit where it answered 402";
   switch (kind) {
     case "key": return "the extraction key is extract-entities.ts's to switch (bun db/extract-entities.ts --switch-key, deploy/README.md's \"Changing the model\"), or, where only the model differs and not the prompt version, set OB1_METADATA_MODEL back to the recorded key's model";
     case "identity": return "an unset OB1_WORKER_KEY needs a key minted (cd server-portable && bun keygen.ts --name workers --scope capture): its line in MCP_ACCESS_KEYS, the raw key in OB1_WORKER_KEY, then recreate the service; OB1_WORKER_KEY set without MCP_ACCESS_KEYS needs both, as the server has them; a revoked, unlisted or forward-scope worker key needs a new one (cd server-portable && bun keygen.ts --name <worker> --scope capture): its hash in MCP_ACCESS_KEYS, the raw key in OB1_WORKER_KEY, then recreate the service";
@@ -523,6 +532,7 @@ export function startRefusalRemedy(kind) {
     case "lookup": return "the worker key's lookup did not name the key, and the egress policy admits that actor alone: its log says why the lookup failed (too many connections, a lock)";
     case "usage": return "a setting its log names is not one the service takes — decimal digits, in its range (db/supervise.ts's guard, board-sync's interval or findings cap) — so set it in deploy/.env, then recreate the service; or a pass refused the options the scheduler gave it, which no setting mends: report that, with the log";
     case "linear-key": return "LINEAR_API_KEY is not set: create a personal API key at https://linear.app/settings/api (read-only use), set it in deploy/.env, then recreate the service";
+    case "model-switch": return "OB1_EMBEDDING_MODEL names a model other than the one ob1_config records, and a re-embed follower never switches it: set OB1_EMBEDDING_MODEL back to the recorded model, or switch by hand (OB1_EMBEDDING_MODEL=<model> bun db/reembed.ts --url … --switch-model) and start the follower configured for the new one";
     case "board": return "OB1_LINEAR_INITIATIVE (unset: \"Open Brain\") must name exactly one Linear initiative, with between 1 and 50 projects — its log says which it found; set it in deploy/.env, then recreate the service";
     default: return "";
   }

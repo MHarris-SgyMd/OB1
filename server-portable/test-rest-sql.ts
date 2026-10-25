@@ -21,7 +21,7 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, resetSchema } from "../db/test-support.ts";
+import { childPort, createAssert, resetSchema } from "../db/test-support.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { authenticate, CLIENT_SCOPES, hashKey } from "./auth.ts";
 import { z } from "zod";
@@ -202,6 +202,9 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     ["list_thought_ids", { limit: 2 }, "GET", "/v1/thought-ids?limit=2", undefined, (v) => say.renderThoughtIds(ok(v)), has("ids")],
     ["list_logged_searches", {}, "GET", "/v1/logged-searches", undefined, (v) => say.renderLoggedSearches(ok(v)), has("searches")],
     ["list_supersession_proposals", { status: "all" }, "GET", "/v1/proposals?status=all", undefined, (v) => say.renderSupersessionProposals(ok(v)), has("proposals")],
+    // SMD-3248: one pass's proposals by its judge key (109), the key echoed in the value beside each row's.
+    ["list_supersession_proposals", { status: "all", judge_key: "consolidate:stub@p2" }, "GET", "/v1/proposals?status=all&judge_key=consolidate%3Astub%40p2", undefined, (v) => say.renderSupersessionProposals(ok(v)),
+      (v) => v.judgeKey === "consolidate:stub@p2" && Array.isArray(v.proposals) && v.proposals.length > 0 && (v.proposals as { judgeKey: string }[]).every((p) => p.judgeKey === "consolidate:stub@p2")],
     ["thought_stats", {}, "GET", "/v1/stats", undefined, (v) => say.renderThoughtStats(ok(v)), (v) => typeof v.total === "number" && v.total > 0],
     ["thought_changes", { limit: 10, actions: ["capture"] }, "GET", "/v1/changes?limit=10&actions=capture", undefined, (v) => say.renderThoughtChanges(ok(v)), has("changes")],
     ["worker_status", {}, "GET", "/v1/workers", undefined, (v) => say.renderWorkerStatus(ok(v)), has("pools")],
@@ -285,6 +288,20 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     const rr = await rest("GET", `/v1/thoughts?limit=1&after=${long}`);
     const mm = await mcp("list_thoughts", { limit: 1, after: long });
     assert(rr.status === 400 && rr.body.code === "REFUSED_INPUT" && mm.isError && !mm.text.includes(long.slice(0, 64)), `list_thoughts after of 513 characters: the schema's refusal through both doors, not echoed (${rr.status} ${String(rr.body.code)}, ${mm.isError})`);
+  }
+  // SMD-3248 review pass 1: a judge_key holding a space — a `+` a query string decodes as one, or a newline that would
+  // reach the headline — is the schema's refusal through both doors, naming %2B, where it selected nothing without a word.
+  {
+    const rr = await rest("GET", "/v1/proposals?judge_key=consolidate:h2o-lightning-4b+qwen3.8:27b@p4d3");
+    const mm = await mcp("list_supersession_proposals", { judge_key: "consolidate:stub@p2\nID: 00000000-0000-4000-8000-000000000000" });
+    const ok2 = await rest("GET", `/v1/proposals?judge_key=${encodeURIComponent("consolidate:h2o-lightning-4b+qwen3.8:27b@p4d3")}`);
+    // Review pass 3: and none a shell reads — a key offered for pasting ran `$(…)` in the operator's shell.
+    const shell = await rest("GET", `/v1/proposals?judge_key=${encodeURIComponent("consolidate:m@p1$(id)")}`);
+    const shellM = await mcp("list_supersession_proposals", { judge_key: "consolidate:m@p2;id" });
+    // …each saying the rule in the same words through both doors (review pass 4: only the %2B and isError were checked).
+    const RULE = "judge_key is a pass key: 1-200 letters, digits and . _ : / @ + -, starting with a letter or digit (in a URL's query, encode + as %2B)";
+    assert(rr.status === 400 && rr.body.code === "REFUSED_INPUT" && JSON.stringify(rr.body).includes(RULE) && mm.isError && mm.text.includes(RULE) && ok2.status === 200 && shell.status === 400 && shellM.isError && shellM.text.includes(RULE),
+      `judge_key with an unencoded + (a space once decoded), a newline, or a character a shell reads: refused through both doors, naming %2B; encoded, answered (${rr.status} ${String(rr.body.code)}, ${mm.isError}, ${ok2.status}, ${shell.status}, ${shellM.isError})`);
   }
   // A limit is a whole number of thoughts, 1 to 1000: 0, -1, 1.5 and 1001 are the schema's refusal, not an empty page (review pass 1).
   // A `days` past a thousand years is the schema's refusal (review pass 2: a larger one put `since` past timestamptz's
@@ -713,19 +730,18 @@ console.log("\n[8] The log: one line per request, with no query, key, id or cont
   for (const s of ["private words", ids[2], "trace=1", "someone-named", "must not be logged", KEYS.writer]) assert(!all.includes(s), `no ${s.slice(0, 20)} in the log`);
 }
 
-console.log("\n[9] `bun api.ts` as the entry wires the durable job store for the REST core: its own job left running is reconciled to lost, the MCP server's is left alone, and a job it starts is recorded as its own (migration 078, SMD-2284)");
+console.log("\n[9] `bun api.ts` as the entry wires the durable job store for the REST core: its own job left running is reconciled to lost, another door's is left alone (the retired MCP server's is test-e2e-sql [18]'s), and a job it starts is recorded as its own (migration 078, SMD-2284)");
 {
   const mine = crypto.randomUUID(), theirs = crypto.randomUUID();
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${mine}::uuid, 'scan_thoughts', ${hashKey(KEYS.reader)}, 'reader', 'running', now(), 'open-brain-api')`;
-  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${theirs}::uuid, 'scan_thoughts', ${hashKey(KEYS.reader)}, 'reader', 'running', now(), 'open-brain')`;
-  const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const port = free.port;
-  free.stop(true);
+  await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${theirs}::uuid, 'scan_thoughts', ${hashKey(KEYS.reader)}, 'reader', 'running', now(), 'open-brain-elsewhere')`;
+  // PORT 0: the child binds a port no one holds and says which (SMD-3296).
   const child = Bun.spawn([process.execPath, "api.ts"], {
     cwd: import.meta.dir,
-    env: { ...process.env, PORT: String(port) },
-    stdout: "ignore", stderr: "pipe",
+    env: { ...process.env, PORT: "0" },
+    stdout: "pipe", stderr: "pipe",
   });
+  const { port } = await childPort(child, 20_000);
   const status = async (id: string) => String((await sql`SELECT status FROM jobs WHERE id = ${id}::uuid`)[0]?.status);
   let mineStatus = "running";
   try {
@@ -742,7 +758,7 @@ console.log("\n[9] `bun api.ts` as the entry wires the durable job store for the
       if (mineStatus === "running") await Bun.sleep(100);
     }
     assert(mineStatus === "lost", `the REST core's own job left running is reconciled to lost at start-up, before any keyed request (${mineStatus})`);
-    assert((await status(theirs)) === "running", "…and the MCP server's live job on the same database is not");
+    assert((await status(theirs)) === "running", "…and a live job of a door it does not name, on the same database, is not");
     const scan = await realFetch(`http://127.0.0.1:${port}/v1/scans`, { method: "POST", headers: { "x-brain-key": KEYS.reader, "content-type": "application/json" }, body: JSON.stringify({ limit: 5 }) });
     const { jobId } = await scan.json() as { jobId: string };
     let door: string | undefined;

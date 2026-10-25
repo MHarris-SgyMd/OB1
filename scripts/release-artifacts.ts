@@ -264,10 +264,7 @@ export function renderComposeOverlay(o: OverlayInput): string {
     `x-ollama-image: &ollama-image ${ollamaRef}  # ${o.ollamaImage} at release time`,
     "",
     "services:",
-    "  server:",
-    `    image: ${pinned(o.images.server.ref, o.images.server.digest)}`,
-    "    pull_policy: missing",
-    "  # The REST core runs the server's image (deploy/compose.yaml, SMD-2284).",
+    "  # The REST core, which builds the server image in deploy/compose.yaml (SMD-2284; `server` did until SMD-2287 PR 6b).",
     "  api:",
     `    image: ${pinned(o.images.server.ref, o.images.server.digest)}`,
     "    pull_policy: missing",
@@ -462,26 +459,26 @@ function selfCheck(): number {
 
   const overlay = renderComposeOverlay({ version: release.version, tag: "v1.0.0", rendered: "2026-09-30", images: { server: { ref: "ghcr.io/x/ob1-server:1.0.0", digest: "sha256:aa" }, migrate: { ref: "ghcr.io/x/ob1-migrate:1.0.0", digest: "sha256:bb" } }, ollamaImage: "ollama/ollama:0.34.3", ollamaDigest: "sha256:cc" });
   const parsed = Bun.YAML.parse(overlay) as { services: Record<string, { image: string; pull_policy?: string }> };
-  ok(parsed.services.server.image === "ghcr.io/x/ob1-server:1.0.0@sha256:aa" && parsed.services.migrate.image === "ghcr.io/x/ob1-migrate:1.0.0@sha256:bb", "the overlay pins the two images by tag and digest");
+  ok(parsed.services.api.image === "ghcr.io/x/ob1-server:1.0.0@sha256:aa" && parsed.services.migrate.image === "ghcr.io/x/ob1-migrate:1.0.0@sha256:bb", "the overlay pins the two images by tag and digest");
   ok(parsed.services.migrate.pull_policy === "missing", "the overlay pulls the pinned migrator: compose.yaml's migrate is never pulled (SMD-2289 review pass 8)");
-  ok(parsed.services.server.pull_policy === "missing", "the overlay pulls the pinned server: compose.yaml's server is never pulled (SMD-2284 review pass 2)");
+  ok(parsed.services.api.pull_policy === "missing" && !("server" in parsed.services), "the overlay pulls the pinned server image: compose.yaml's REST core, which builds it, never pulls it (SMD-2284 review pass 2), and there is no `server` service to pin (SMD-2287 PR 6b: an overlay naming one would add it)");
   ok(parsed.services["orchestration-runner-role"].image === parsed.services.migrate.image, "the orchestration role step runs the release's migrator, not a checkout's build (SMD-2289 review pass 7)");
   // Every service compose.yaml runs the server's or the migrator's checkout build in, read from the file, so the next one-shot on the migrator's image is not missed (SMD-1849 PR 3b review pass 1: pg-monitor-role was).
   const built = Object.entries((Bun.YAML.parse(readFileSync(join(ROOT, "deploy", "compose.yaml"), "utf8")) as { services: Record<string, { image?: string }> }).services).flatMap(([name, svc]) => {
     const kind = /^\$\{COMPOSE_PROJECT_NAME:-open-brain\}-(server|migrate)$/.exec(svc.image ?? "")?.[1] as "server" | "migrate" | undefined;
     return kind ? [[name, kind] as const] : [];
   });
-  const unpinned = built.filter(([name, kind]) => parsed.services[name]?.image !== parsed.services[kind].image || parsed.services[name]?.pull_policy !== "missing").map(([name]) => name);
+  const unpinned = built.filter(([name, kind]) => parsed.services[name]?.image !== parsed.services[kind === "server" ? "api" : kind].image || parsed.services[name]?.pull_policy !== "missing").map(([name]) => name);
   ok(built.length >= 5 && unpinned.length === 0, `every service compose.yaml runs the server's or the migrator's checkout build in (${built.map(([n]) => n).join(", ")}) runs the release's image, pullable: ${unpinned.join(", ") || "none unpinned"}`);
-  ok(parsed.services.api?.image === parsed.services.server.image && parsed.services.api?.pull_policy === "missing", "the REST core runs the release's server image, pullable — a release install has no checkout to build it from (SMD-2284 review pass 1)");
-  ok(parsed.services.mcp?.image === parsed.services.server.image && parsed.services.mcp?.pull_policy === "missing", "the MCP server built on the REST core runs the release's server image, pullable (SMD-2287)");
+  ok(parsed.services.api?.image === "ghcr.io/x/ob1-server:1.0.0@sha256:aa" && parsed.services.api?.pull_policy === "missing", "the REST core runs the release's server image, pullable — a release install has no checkout to build it from (SMD-2284 review pass 1)");
+  ok(parsed.services.mcp?.image === parsed.services.api.image && parsed.services.mcp?.pull_policy === "missing", "the MCP server built on the REST core runs the release's server image, pullable (SMD-2287)");
   ok(parsed.services.ollama.image === "ollama/ollama@sha256:cc" && parsed.services["ollama-pull"].image === "ollama/ollama@sha256:cc" && overlay.includes("ollama/ollama:0.34.3 at release time"), "Ollama is pinned by digest for both services, the tag it came from beside it");
   ok(overlay.startsWith("# Open Brain — release 1.0.0+upstream.9543c29 (tag v1.0.0)"), "the overlay's header names the release");
   // What the overlay sets beside the images and their pull policy, on any service but the proxy and its forwarder (SMD-2583), which carry every client's bytes: nothing. The workflows hold the same of a render, each on its own terms (SMD-2685), so a list here cannot widen them.
   const strays = (text: string) => { const d = Bun.YAML.parse(text) as Record<string, unknown> & { services: Record<string, Record<string, unknown>> }; return [...Object.keys(d).filter((k) => !k.startsWith("x-") && k !== "services"), ...Object.entries(d.services).flatMap(([s, v]) => Object.keys(v).filter((k) => s === "proxy" || s === "forwarder" || !["image", "pull_policy"].includes(k)).map((k) => `${s}.${k}`))]; };
 
   const dry = renderComposeOverlay({ version: "0.0.0+upstream.x", tag: REHEARSAL_TAG, rendered: "d", images: { server: { ref: "s:rehearsal" }, migrate: { ref: "m:rehearsal" } }, ollamaImage: "ollama/ollama:1", ollamaDigest: "sha256:cc" });
-  ok((Bun.YAML.parse(dry) as { services: Record<string, { image: string }> }).services.server.image === "s:rehearsal" && dry.includes("REHEARSAL"), "a rehearsal overlay names the images by tag alone and says so");
+  ok((Bun.YAML.parse(dry) as { services: Record<string, { image: string }> }).services.api.image === "s:rehearsal" && dry.includes("REHEARSAL"), "a rehearsal overlay names the images by tag alone and says so");
   ok(strays(overlay).length === 0 && strays(dry).length === 0, `the overlay, a tag's and a rehearsal's, sets only images and their pull policy, and nothing on the proxy or its forwarder (SMD-2685, SMD-2583): ${[...strays(overlay), ...strays(dry)].join(", ")}`);
 
   const cl = "# Changelog\n\n## [Unreleased]\n\n_x_\n\n## [1.0.0] - 2026-09-30\n\n### Added\n- a thing (SMD-1)\n\n## [0.9.0] - 2026-09-01\n\n### Fixed\n- b\n\n[Unreleased]: u\n";

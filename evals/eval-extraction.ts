@@ -44,7 +44,7 @@ const HEADERS: Record<string, string> = {
   ...(KEY ? { Authorization: `Bearer ${KEY}` } : {}),
 };
 
-/** Verbatim from server-portable/index.ts, so this scores the real prompt. */
+/** Verbatim from server-portable/metadata.ts's METADATA_PROMPT (index.ts's when this was written), so this scores the real prompt. */
 const SYSTEM = `Extract metadata from the user's captured thought. Return JSON with:
 - "people": array of people mentioned (empty if none)
 - "action_items": array of implied to-dos (empty if none)

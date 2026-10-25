@@ -56,7 +56,7 @@ The script is an emitter of the brain's ingestion contract (SMD-2493). It prints
    bun recipes/x-twitter-import/import-x-twitter.mjs /path/to/twitter-export > "$F"
    ```
 
-   `--types tweets` or `--types dms,grok` takes some types only; `--skip N` and `--limit N` take a slice.
+   `--types tweets` or `--types dms,grok` takes some types only; `--skip N` and `--limit N` take a slice. An archive extracted into a folder of its own one level down is found. Two archives, or an archive's files loose beside one, are refused, naming them, and so is a folder holding no archive (a `.zip` still to extract). An export with no tweet, DM or Grok chat in it exits 2, naming it, unless `--skip`, `--limit` or `--types` narrowed the run; one whose records the script's filters all skip (short, retweets) emits nothing and exits 0.
 
 5. **Count them** with the pipeline's dry run. It checks every line and writes nothing; a malformed line refuses the whole file, naming the line and the field:
 
@@ -76,6 +76,36 @@ The script is an emitter of the brain's ingestion contract (SMD-2493). It prints
 
 `db/README.md`, "Items from a file", has the whole contract.
 
+## With the orchestration profile
+
+On a brain running the `orchestration` profile (`docs/orchestration-tool.md`), the import runner runs this import as its `x-twitter` pipeline, so there is no checkout to run from. In this order, from the repository root:
+1. **Classify the runner, once, before the first export goes in.** Its rows carry its own name, not `ingest-records`, and the kind is stamped when a row is written:
+
+   ```bash
+   docker compose -f deploy/compose.yaml exec -T postgres psql -U postgres -d openbrain -c "SELECT set_agent_kind('orchestration-runner', 'ingested')"
+   ```
+
+   Rows a run wrote before that keep no trust until the same command with `SELECT backfill_thought_actors()` restamps them.
+2. **On a brain that ran the profile before this import was added**, rebuild the runner and provision again. The old image lacks the emitter, so the runner refuses to start once it reads the new `pipelines.json`, and n8n has no workflow for the pipeline until provisioning makes one:
+
+   ```bash
+   docker compose -f deploy/compose.yaml --profile orchestration up -d --build orchestration-runner
+   bun deploy/orchestration/provision.ts
+   ```
+3. **Put the extracted X archive (the folder holding `data/`) in `deploy/imports/x-twitter/`**, one archive at a time. It must be readable by the pipeline's own uid (`deploy/imports/README.md`).
+4. **It runs weekly**, and writes and embeds the rows itself. To run it at once, POST to the import's on-demand workflow with the run key, `N8N_WEBHOOK_KEY` in `deploy/.env` (`deploy/README.md`, "On demand"; 5678 is `N8N_PORT`'s default):
+
+   ```bash
+   N8N_WEBHOOK_KEY=$(sed -n 's/^N8N_WEBHOOK_KEY=//p' deploy/.env)
+   curl -sS --fail-with-body -X POST -H "x-n8n-run-key: $N8N_WEBHOOK_KEY" http://127.0.0.1:5678/webhook/ob1-import-x-twitter
+   ```
+
+   It answers with the run's report; a failed run answers 409, 422 or 500 with its reason in `why`. While curl runs, the key shows in the host's process list.
+
+   An empty folder writes nothing and succeeds. A folder holding only a zip, an export nested too deep, or an export with no tweet, DM or Grok chat in it fails the run, naming the cause. An export whose records the importer's filters all skip writes nothing and succeeds.
+
+The runner's container holds 2 GB of memory. An export that emits more than about 100 MiB of items can run it out (an X archive of 200,000 tweets did): the run fails, saying the emitter was killed, most likely for memory. Import one that large from a checkout, as above, where `wc -c "$F"` shows the size.
+
 ## Expected Outcome
 
 After the import:
@@ -84,10 +114,10 @@ After the import:
 - A thought's text holds about 100,000 characters at most, plus its short header, since a search hit returns its thought whole. A longer conversation (or a day of hundreds of tweets) continues in parts, keyed `<key>#2` and on, titled "(part 2)" onward, each dated by its own first message
 - Each thought is labelled `metadata.source: x`, with its source record (the archive's own JSON) in `thought_sources` under the system `x`, and `metadata.kind` saying which it is: `tweets`, `dm` or `grok`. The Grok chats are `x`'s too: they come from the X archive, and one import is one source
 - Each thought is dated by its first tweet or message, not when the import ran. A date the brain would refuse (in the future, or a day the calendar lacks) is left out, the run names how many on stderr, and the brain dates that thought when it writes it
-- The fields the import used to set as columns ride as metadata: `type: reference`, `source_type: x_twitter_import`, `importance`, `quality_score` and `sensitivity_tier`
+- The enhanced fields ride as metadata: `type: reference`, `source_type: x_twitter_import`, `importance`, `quality_score` and `sensitivity_tier`
 - Retweets are automatically excluded
 - Short DM conversations (<3 messages) are filtered out
-- Running the import again on the same archive writes nothing new
+- Running the import again on the same archive writes nothing new. Never put an older export in place of a newer one: its records would overwrite the newer ones.
 
 A DM conversation is identified by its conversation id, a Grok chat by its chat id, and a day of tweets by its day. So a later archive that grew, or that lost tweets you deleted, updates only the thoughts whose day or conversation changed, in place, and a deleted tweet leaves its day's thought. The pipeline adds and updates; it does not remove. So a thought the archive no longer feeds keeps its last text:
 - a day whose every tweet you deleted;
