@@ -727,19 +727,22 @@ jobs:
         run: bun install --frozen-lockfile
 
       # The service carries no health check, so the runner starts these steps
-      # as soon as its container does, not at Docker's first probe some 5 s
-      # later, and the checkout and install overlap Postgres's start (SMD-3196).
-      # This waits for it before the first suite, over TCP inside the
-      # container, as db/with-postgres.sh does: over the socket, the
-      # entrypoint's initialising server, which listens on no TCP address,
-      # reads as ready for a moment before the real one is up.
+      # as soon as its container does, not at its first healthy read of
+      # Docker's 5 s probe, about 6 s later, and the checkout and install
+      # overlap Postgres's start (SMD-3196). This waits for it before the
+      # first suite, as db/with-postgres.sh does: over TCP inside the
+      # container, since over the socket the entrypoint's initialising server,
+      # which listens on no TCP address, reads as ready for a moment before the
+      # real one is up; and a container that has exited ends the wait at once.
       - name: Wait for the service Postgres
         run: |
           ready() {
             deadline=$((SECONDS + 60))
-            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q; do
-              [ "$SECONDS" -lt "$deadline" ] || { echo "the service Postgres in container $1 did not accept a TCP connection within 60 s" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1; }
-              sleep 0.2
+            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
+              if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
+              elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
+              else sleep 0.2; continue; fi
+              echo "the service Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
             done
           }
           ready "$PG"
@@ -809,9 +812,11 @@ jobs:
         run: |
           ready() {
             deadline=$((SECONDS + 60))
-            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q; do
-              [ "$SECONDS" -lt "$deadline" ] || { echo "the service Postgres in container $1 did not accept a TCP connection within 60 s" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1; }
-              sleep 0.2
+            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
+              if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
+              elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
+              else sleep 0.2; continue; fi
+              echo "the service Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
             done
           }
           ready "$PG"; ready "$PAIR_PG"
@@ -4146,9 +4151,11 @@ jobs:
         run: |
           ready() {
             deadline=$((SECONDS + 60))
-            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q; do
-              [ "$SECONDS" -lt "$deadline" ] || { echo "the service Postgres in container $1 did not accept a TCP connection within 60 s" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1; }
-              sleep 0.2
+            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
+              if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
+              elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
+              else sleep 0.2; continue; fi
+              echo "the service Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
             done
           }
           ready "$PG"

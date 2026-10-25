@@ -11974,9 +11974,10 @@ if (want("33")) {
   // rows read are counted too — of the projection's tables as well, which a
   // hash join over every superseded thought scanned per write (third review
   // pass). Each filler's id is derived from its number, so the pointer write
-  // names its target with no join: a self-join on metadata->>'n' was priced
-  // within a tenth of a hash join as a nested loop, a hundred million jsonb
-  // reads, which CI's planner chose — 30 s of [33]'s 36 (SMD-3196).
+  // names its target with no join. A self-join on metadata->>'n', planned on
+  // the statistics of a table of some sixty rows, was a nested loop of a
+  // hundred million jsonb reads whenever autoanalyze hadn't caught up with
+  // the filler: 30 s of [33]'s 36 on CI (SMD-3196).
   await db`INSERT INTO thoughts (id, content, metadata) SELECT md5('[33] filler ' || g)::uuid, '[33] filler ' || g, jsonb_build_object('kind', 'race2256', 'n', g) FROM generate_series(1, 20000) g`;
   await db`UPDATE thoughts SET supersedes = md5('[33] filler ' || ((metadata->>'n')::int + 10000))::uuid
             WHERE metadata->>'kind' = 'race2256' AND (metadata->>'n')::int <= 5000`;
