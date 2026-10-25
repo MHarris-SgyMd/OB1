@@ -16,9 +16,10 @@ sign-in through the authorization server, then the old dashboards' retirement).
 | `serve.ts` | The entry, `bun serve.ts`: the SvelteKit server `bun run build` writes to `build/`, on PORT (8000), with the origin set (below) |
 | `src/hooks.server.ts` | Every request: the session, the sign-in wall, and the headers that keep a page out of caches and frames |
 | `src/lib/server/session.ts` | The sessions, held in the server's memory |
-| `src/lib/server/rest.ts` | The REST core's client, and a read under the visitor's key |
+| `src/lib/server/rest.ts` | The REST core's client, and a read under the visitor's key (a core operation's or a plugin's) |
+| `src/lib/server/plugins.ts` | The plugin registry (`GET /v1/plugins`), read once a request: the nav's plugin pages, and a plugin page's 404 |
 | `src/lib/server/signin.ts` | Whether key sign-in is offered, and whoami's answer |
-| `src/routes/` | The pages: the overview, browse, search, the change feed, the proposals, the workers, the query log, the status, a thought, sign-in and sign-out, `/health` |
+| `src/routes/` | The pages: the overview, browse, search, the change feed, the proposals, the workers, the query log, the status, a thought, sign-in and sign-out, `/health`, and the plugins' pages under `plugins/` |
 | `src/lib/browse.ts`, `src/lib/search.ts`, `src/lib/params.ts` | The views' addresses: what a page's query means, as the core takes it, and the links between pages |
 | `src/lib/tidy.ts` | A GET form's address holding what is set alone |
 | `smoke.ts` | The smoke: drives the GUI as a browser would, through the stack's proxy |
@@ -110,9 +111,23 @@ https. So the server must know the origin a browser sees:
 | `/dashboard/thoughts/<id>` | `fetch`: a thought's text and metadata, with the ingested notice before an ingested thought's text, rendered on the server with no script (the core logs the open as a click-through, as it does any `fetch`: SMD-3212) |
 | `/dashboard/signin`, `/dashboard/signout` | Sign-in and sign-out |
 | `/dashboard/health` | Liveness: `ok`, asking the REST core nothing |
+| `/dashboard/plugins/example/notes` | The example plugin's Notes page, while `OB1_PLUGINS` names it: the newest thoughts (`example_recent`), a thought's notes (`example_list_notes`, each with the key that pinned it), and for a key that may, a form pinning one (`example_add_note`; a refusal said beside the form, the note kept) |
 
-Plugin pages are SMD-2280's third PR. No list's links are preloaded on hover: a thought's page is a
-logged `fetch`, and a search page a logged search.
+No list's links are preloaded on hover: a thought's page is a logged `fetch`, and a search page a logged search.
+
+**Plugin pages** (SMD-2310's GUI half). A plugin's directory holds no Svelte (check 31), so
+its pages are routes here, `src/routes/plugins/<name><path>/`: a `+page.svelte` and a
+`+page.server.ts`. The nav names a page where `GET /v1/plugins` lists it to that key — an
+enabled plugin of which the key may call an operation, so never to a capture-only key — and
+this build has its route. The load and any action start with `pluginAccess` (in
+`src/lib/server/plugins.ts`): the page's 404 unless the registry lists it to the key, a
+disabled plugin's included, and then the plugin's own operations under the visitor's key,
+which is the only way the page reaches them. Check 31 holds the routes here to the
+manifests and to that rule ([plugins/README.md](../plugins/README.md), "The rules a plugin is
+held to"). The nav reads the registry again at every
+navigation — one read a page, waiting 2 s at most before it renders without the plugins'
+pages — so a plugin turned on or off with the GUI left running shows at the next page;
+recreating `app`, as the example's README does, signs everyone out instead.
 
 Every page is rendered on the server: the browser calls no API, so there is no proxy
 in the GUI to the REST core, and a page reads only the operations its own load names.
@@ -134,7 +149,9 @@ Then open `http://127.0.0.1:5174/dashboard`. `OB1_REST_URL` there is a REST core
 can reach: the stack's `/api` with `deploy/compose.api-public.yaml`, as above, or one
 run from a checkout. Not port 8000, the stack's own: on macOS a listener on every
 address beside the stack's loopback one starts without an error, and the browser keeps
-reaching the stack.
+reaching the stack. A plugin page reads the registry of the REST core it is pointed at, so a
+page new in the checkout needs a REST core built from the same tree, with `OB1_PLUGINS`
+naming its plugin: the stack's lists only its own build's pages, and the new one is a 404.
 
 ## Smoke
 
@@ -159,8 +176,14 @@ when the overview lists none, and `--require-ingested` unless the overview's new
 thought — the one it drives — is an ingested one, so its notice is driven, and
 `--require-pages` unless the brain holds three thoughts, so browse walks three pages and
 search pages, and the trust filter leaves the untrusted ones out; `--require-rows` unless
-the proposals and workers pages render rows. CI captures three just before the smoke (two
+the proposals and workers pages render rows. `--notes on` drives the example plugin's Notes page
+(in the write and read keys' navs, a note pinned by the write key and refused to the read
+key): it writes one 2,000-character note a run, which the plugin has no operation to delete,
+so point it at a scratch brain. `--notes off` holds the page absent and its route the GUI's
+404 (pinning to a held thought, which the gate refuses); unset, a Notes page the nav names
+is read and never written to. `--notes-only` runs that arm alone. CI captures three just before the smoke (two
 with no trust, then an ingested one), records a proposal and queues a pool through their
 producers, and runs it in the full-stack job,
-before that job configures the authorization server; after it, the job holds key
-sign-in off.
+before that job configures the authorization server, with `--notes off`; the next step turns
+the example plugin on and runs `--notes on --notes-only`, then turns it off. After them,
+the job holds key sign-in off.

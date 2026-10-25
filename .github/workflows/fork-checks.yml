@@ -1803,7 +1803,9 @@ jobs:
       # spent cut trail on the last), search pages past its first, and the
       # trust filter leaves the untrusted captures out (PR 2a), and --require-rows
       # unless the proposals and workers pages render rows, which the step
-      # plants through the brain's own producers (PR 2b). The smoke holds the
+      # plants through the brain's own producers (PR 2b), and --notes off
+      # unless no nav names the example plugin's Notes page and its route is a
+      # 404, the plugin off (PR 3). The smoke holds the
       # sign-in wall; a wrong and a capture-only key, a cookie the server never
       # issued and a cross-site or Origin-null sign-in refused; the cookie's
       # and the pages' headers; the overview, the status, browse, search, the
@@ -1835,7 +1837,35 @@ jobs:
           # the proposals and workers pages render rows here, not their empty words (PR 2b review pass 1).
           (cd ../deploy && docker compose -f compose.yaml exec -T postgres psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -qAtc \
             "SELECT record_supersession_proposal((SELECT id FROM thoughts ORDER BY created_at, id LIMIT 1), (SELECT id FROM thoughts ORDER BY created_at DESC, id DESC LIMIT 1), 'newer_supersedes_older', 0.9, 'The operator GUI smoke''s proposal (SMD-2280).', 0.8, 'ci-gui-smoke', p_recipe => '{\"deterministic\": false, \"key\": \"ci-gui-smoke\"}'::jsonb); SELECT enqueue_thoughts('extract:gui-smoke@ci', ARRAY(SELECT id FROM thoughts));") > /dev/null
-          bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY" --require-thought --require-ingested --require-pages --require-rows
+          bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --capture-key "$OB1_SMOKE_CAPTURE_KEY" --require-thought --require-ingested --require-pages --require-rows --notes off
+
+      # SMD-2280 PR 3, SMD-2310's deferred Verify item: a plugin's page in the
+      # operator GUI. The step before held the plugin-free stack (--notes off):
+      # no nav names the example's Notes, and its page and its pin are 404s.
+      # Here the example plugin is on for the REST core alone (the migrator,
+      # recreated with it, applies its tables) and the smoke's Notes arm drives
+      # the page: named in the write and read keys' navs (a capture-only key
+      # signs in to none: the step before holds its refusal), the newest
+      # thoughts and a thought's notes rendered from the plugin's own
+      # operations, a note the write key pins listed by the key's name, and
+      # the read key's pin refused by the core. The GUI is recreated after the
+      # REST core moves, so its first calls look the name up afresh rather than
+      # reach the old address (as the auth job's mcp is; review pass 1). Then
+      # off again, so the steps after meet the plugin-free stack they expect;
+      # the next step, which ends key sign-in, recreates the GUI itself. The
+      # plugin login keeps the password the migrator first made it with, so the
+      # webhook step's run reads it from here.
+      - name: The operator GUI renders a plugin's page while the plugin is on
+        working-directory: deploy
+        run: |
+          (umask 077; openssl rand -hex 16 > "$RUNNER_TEMP/plugin-pw")
+          OB1_PLUGIN_DB_PASSWORD=$(cat "$RUNNER_TEMP/plugin-pw")
+          export OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD
+          docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
+          docker compose -f compose.yaml up -d --wait --wait-timeout 120 --force-recreate --no-deps app
+          (cd ../dashboard && bun smoke.ts --url http://127.0.0.1:8010/dashboard --key "$OB1_SMOKE_KEY" --read-key "$OB1_SMOKE_READ_KEY" --notes on --notes-only)
+          unset OB1_PLUGINS OB1_PLUGIN_DB_PASSWORD
+          docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
 
       # Where the authorization server's step ran when the full-stack checks
       # were one job, what it left behind (SMD-3051 gave it deploy-stack-auth):
@@ -1908,7 +1938,8 @@ jobs:
 
       # SMD-2310: a plugin's webhook reaches the REST core only through the
       # /hooks overlay, and only for a plugin OB1_HOOKS names. The example
-      # plugin is turned on for this step alone — the migrator, recreated with
+      # plugin is turned on for this step (and the operator GUI's plugin step,
+      # whose password for the plugin login it reads) — the migrator, recreated with
       # the REST core, applies its table as ob1_plugins, and the REST core's
       # preflight finds it in place; the proxy is recreated with --no-deps, so
       # the MCP server, whose environment the knobs change too, is left as it
@@ -1927,7 +1958,8 @@ jobs:
           B=http://127.0.0.1:8010
           code() { curl -s -o /tmp/hook-body -w '%{http_code}' --max-time 15 "$@"; }
           SECRET=$(openssl rand -hex 16)
-          PLUGIN_PW=$(openssl rand -hex 16)
+          # The plugin login's password, made by the operator GUI's plugin step: the migrator keeps the first one.
+          PLUGIN_PW=$(cat "$RUNNER_TEMP/plugin-pw")
           export OB1_PLUGINS=example OB1_PLUGIN_DB_PASSWORD="$PLUGIN_PW" OB1_HOOKS=example OB1_HOOK_SECRETS="example=$SECRET"
           docker compose -f compose.yaml up -d --wait --wait-timeout 240 api
           docker compose -f compose.yaml logs --no-color api | grep -E 'plugin tables +example — each plugin' >/dev/null || { echo "the REST core's preflight did not find the example's tables in place:" >&2; docker compose -f compose.yaml logs --no-color migrate api | tail -40 >&2; exit 1; }

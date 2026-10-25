@@ -38,10 +38,20 @@
  *     pages render, the query log holding the smoke's own search where
  *     query_log is on; each list's data its shown fields alone;
  *   - the read key signs in as a read key, browses, searches and reads the four
- *     operator views, and a thought the brain does not hold is a 404.
+ *     operator views, and a thought the brain does not hold is a 404;
+ *   - the example plugin's Notes page (PR 3): with `--notes on`, the write and
+ *     read keys' navs name it, it lists the newest thoughts and a thought's
+ *     notes, the write key pins one of 2,000 characters sent with CRLF breaks
+ *     (an empty note, one of 2,001, a NUL and a thought not held refused in
+ *     words; an address naming no id says so), the read key sees it with no
+ *     pin form and its pin is refused; with `--notes off`, no nav names it and its page
+ *     and pin are the GUI's 404 (pinning to a held thought only once the page
+ *     is); unset, a Notes page the nav names is read but not pinned to.
+ *     `--notes-only` runs that arm alone.
  *
  * Exit 0 when every assertion holds, 1 otherwise. Read-only against the
- * brain, but for the click-through each thought page's `fetch` logs.
+ * brain, but for the click-through each thought page's `fetch` logs and, with
+ * `--notes on` alone, the notes the arm pins to the example plugin's table.
  */
 
 import { pageLinks, readBrowse, TRAIL_MAX } from "./src/lib/browse.ts";
@@ -61,8 +71,12 @@ const REQUIRE_INGESTED = args.includes("--require-ingested");
 const REQUIRE_PAGES = args.includes("--require-pages");
 /** Fail unless the proposals and workers pages render rows, not their empty words: CI plants one proposal and one pool. */
 const REQUIRE_ROWS = args.includes("--require-rows");
-if (!BASE || !WRITE_KEY) {
-  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought] [--require-ingested] [--require-pages] [--require-rows]");
+/** The example plugin's Notes page (PR 3): `on` requires it in the nav and drives it, `off` requires it absent and its route a 404; unset, the nav decides which. */
+const NOTES = flag("notes");
+/** The Notes arm alone, after the pure checks: CI's plugin step, whose stack the full smoke has already driven. */
+const NOTES_ONLY = args.includes("--notes-only");
+if (!BASE || !WRITE_KEY || (NOTES !== undefined && NOTES !== "on" && NOTES !== "off")) {
+  console.error("usage: bun smoke.ts --url <origin>/dashboard --key <write-key> [--read-key <read-key>] [--capture-key <capture-key>] [--require-thought] [--require-ingested] [--require-pages] [--require-rows] [--notes on|off] [--notes-only]");
   process.exit(2);
 }
 const ORIGIN = new URL(BASE).origin;
@@ -152,6 +166,23 @@ const linkOf = (html: string, testid: string) => {
   const m = new RegExp(`<a href="([^"]+)"[^>]*data-testid="${testid}"`).exec(html);
   return m ? m[1].replaceAll("&amp;", "&").replace(/^\/dashboard/, "") : "";
 };
+/** Whether `key` is in any of `pages` — its text or a header — or in any script module they load, followed import by import. */
+async function keyIn(pages: { html: string; headers: Headers }[], key: string) {
+  const queue = pages.flatMap((p) => [...p.html.matchAll(/["'](\/dashboard\/_app\/[^"']+\.js)["']/g)].map((m) => m[1]));
+  const scripts = new Set<string>();
+  let leaked = pages.some((p) => p.html.includes(key) || [...p.headers.values()].some((v) => v.includes(key)));
+  while (queue.length) {
+    const s = queue.pop()!;
+    if (scripts.has(s)) continue;
+    scripts.add(s);
+    const text = await (await fetch(`${ORIGIN}${s}`)).text();
+    if (text.includes(key)) leaked = true;
+    // A chunk names the others it imports relative to itself: "./x.js", "../chunks/y.js".
+    for (const m of text.matchAll(/["'](\.{1,2}\/[^"']+\.js)["']/g)) queue.push(new URL(m[1], `${ORIGIN}${s}`).pathname);
+  }
+  return { leaked, scripts };
+}
+
 /** Every page of a browse from `start`, by its Next links: each page's ids, and its address. At most 60 pages. */
 async function walkBrowse(start: string) {
   const pages: { path: string; ids: string[]; html: string }[] = [];
@@ -195,6 +226,147 @@ console.log(`▸ dashboard ${BASE}`);
 {
   const cutAt = [158, 159, 160].map((n) => firstLine(`${"a".repeat(n)}\u{1F600}\u{1F600}tail`));
   assert(cutAt.every((l) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(l) && l.endsWith("…")), "a list's first line, cut beside an emoji, holds no half of one");
+}
+
+// The example plugin's Notes page (PR 3): in the nav of a key the registry lists the plugin to, its route under
+// /plugins/example/notes rendered from the plugin's own operations — the newest thoughts, a thought's notes, and a
+// write key's pin — and with the plugin off, no nav entry and a 404 (SMD-2310's deferred Verify item).
+const NOTES_PATH = "/plugins/example/notes";
+const NO_THOUGHT = "00000000-0000-4000-8000-000000000000";
+const navOf = (html: string) => /<nav[^>]*aria-label="Views"[\s\S]*?<\/nav>/.exec(html)?.[0] ?? "";
+const namesNotes = (html: string) => new RegExp(`<a[^>]*href="/dashboard${NOTES_PATH}"[^>]*>Notes</a`).test(navOf(html));
+const pin = async (thought: string, note: string) => {
+  const r = await fetch(`${BASE}${NOTES_PATH}?thought=${thought}&/pin`, { method: "POST", redirect: "manual", headers: headers(FORM), body: new URLSearchParams({ thought_id: thought, note }).toString() });
+  return { status: r.status, location: r.headers.get("location") ?? "", html: await r.text(), headers: r.headers };
+};
+/** The pin form as the page renders it: its action, unescaped, and its hidden fields — what a browser posts (review pass 4: the smoke built its own post, so a broken form passed). */
+const pinFormOf = (html: string) => {
+  const form = /<form[^>]*data-testid="pin"[^>]*>[\s\S]*?<\/form>/.exec(html)?.[0] ?? "";
+  const action = (/action="([^"]*)"/.exec(form)?.[1] ?? "").replaceAll("&amp;", "&");
+  const fields = Object.fromEntries([...form.matchAll(/<input[^>]*type="hidden"[^>]*>/g)].map((m) => [/name="([^"]*)"/.exec(m[0])?.[1] ?? "", /value="([^"]*)"/.exec(m[0])?.[1] ?? ""]));
+  return { action, fields };
+};
+const notesListed = (html: string) => [...(/data-testid="notes"[\s\S]*?<\/ol>/.exec(html)?.[0] ?? "").matchAll(/<li[\s\S]*?<\/li>/g)].map((m) => m[0]);
+/** The GUI's own 404 — the gate's, words SvelteKit's error page gives a page it has no route for — never the core's refusal in words. */
+const guiNotFound = (r: { status: number; html: string }) => r.status === 404 && r.html.includes('data-testid="error">No page at this address.<');
+/** A refusal as the page shows it, beside the form or above it — not the words in the page's hydration data (review pass 1). */
+const shownRefusal = (html: string, words: string) => new RegExp(`data-testid="pin-error"[^>]*>[^<]*${words}`).test(html);
+async function notesArm() {
+  const out = await get(NOTES_PATH);
+  assert(toSignin(out), `signed out, the Notes page redirects to /signin (${out.status} → ${out.location})`);
+  const signedIn = await signIn(WRITE_KEY!);
+  const home = await get("/");
+  assert(signedIn.status === 303 && home.status === 200, `the write key signs in for the Notes arm (${signedIn.status}, ${home.status})`);
+  // The root layout reads the address, so SvelteKit runs it again at every navigation and the nav follows the registry (review pass 2; pass 4: only a browser run held it).
+  const rootData = await get("/__data.json");
+  let rereads = false;
+  try { rereads = (JSON.parse(rootData.html) as { nodes?: ({ uses?: { url?: number } } | null)[] }).nodes?.[0]?.uses?.url === 1; } catch { /* asserted below */ }
+  assert(rereads, `the root layout's data says it reads the address, so it runs again at every navigation (${rootData.status})`);
+  const on = NOTES === undefined ? namesNotes(home.html) : NOTES === "on";
+  // Only --notes on writes: unset, a plugin found on is read, never pinned to (review pass 1: a plain run wrote a note).
+  const writes = NOTES === "on";
+  if (NOTES === undefined) console.log(`  ·  no --notes: the nav ${on ? "names" : "does not name"} Notes, so the plugin is taken as ${on ? "on, and read without pinning" : "off"}`);
+  if (!on) {
+    const page = await get(NOTES_PATH);
+    assert(!namesNotes(home.html) && guiNotFound(page), `the example plugin off: the write key's nav has no Notes, and its page is the GUI's own 404 (${page.status})`);
+    // The pin to a real thought, so the gate alone can answer 404 (on a thought the brain does not hold the core's own
+    // refusal is one too: review pass 1) — and only under --notes off and once the page is a 404, so no run that took
+    // the plugin for off by a nav it could not read writes (review pass 2).
+    if (NOTES === "off" && guiNotFound(page)) {
+      const held = /href="\/dashboard\/thoughts\/([0-9a-f-]{36})"/.exec(home.html)?.[1] ?? NO_THOUGHT;
+      const posted = await pin(held, "never pinned");
+      assert(guiNotFound(posted), `…and its pin, on a thought the brain holds, is the GUI's 404 too (${posted.status})`);
+      // The gate before anything the post says (review pass 5: a malformed post was answered 400 first), and the page's
+      // data a 404 too — SvelteKit's error node, the request itself 200.
+      const malformed = await pin("not-an-id", "");
+      // As a script's own post asks (x-sveltekit-action): the action's answer alone, no load after it to 404 the page.
+      const asJson = await fetch(`${BASE}${NOTES_PATH}?/pin`, { method: "POST", redirect: "manual", headers: headers({ ...FORM, accept: "application/json", "x-sveltekit-action": "true" }), body: new URLSearchParams({ thought_id: "not-an-id", note: "" }).toString() });
+      const asJsonBody = await asJson.text();
+      const offData = await get(`${NOTES_PATH}/__data.json`);
+      let dataStatus = 0;
+      try { dataStatus = ((JSON.parse(offData.html) as { nodes?: ({ type?: string; status?: number } | null)[] }).nodes ?? []).find((n) => n?.type === "error")?.status ?? 0; } catch { /* asserted below */ }
+      assert(guiNotFound(malformed) && asJson.status === 404 && /"type":"error"/.test(asJsonBody) && dataStatus === 404, `…a malformed pin is the GUI's 404 as well, a script's own post of it the action's 404 error, and the page's data an error of 404 (${malformed.status}, ${asJson.status} ${asJsonBody.slice(0, 60)}, ${dataStatus})`);
+    }
+    await signOut();
+    if (READ_KEY) {
+      const r = await signIn(READ_KEY);
+      const [h, p] = [await get("/"), await get(NOTES_PATH)];
+      assert(r.status === 303 && h.status === 200 && !namesNotes(h.html) && guiNotFound(p), `…nor the read key's, its page the GUI's 404 (${r.status}, ${p.status})`);
+      await signOut();
+    }
+    return;
+  }
+  const who = /data-testid="who">([^<·]+)·/.exec(home.html)?.[1].trim() ?? "";
+  assert(namesNotes(home.html), "the example plugin on: the write key's nav names Notes");
+  const page = await get(NOTES_PATH);
+  const recent = [...(/data-testid="recent"[\s\S]*?<\/ul>/.exec(page.html)?.[0] ?? "").matchAll(/notes\?thought=([0-9a-f-]{36})"/g)].map((m) => m[1]);
+  assert(page.status === 200 && page.html.includes('data-testid="plugin"') && recent.length > 0, `…its page renders the plugin's newest thoughts through example_recent (${page.status}, ${recent.length} listed)`);
+  const thought = recent[0] ?? NO_THOUGHT;
+  const before = await get(`${NOTES_PATH}?thought=${thought}`);
+  assert(before.status === 200 && before.html.includes('data-testid="pin"'), `…a thought's notes, with a pin form for the write key (${before.status})`);
+  const upper = await get(`${NOTES_PATH}?thought=${thought.toUpperCase()}`);
+  assert(upper.status === 200 && pinFormOf(upper.html).fields.thought_id === thought, `…an id in capitals reads as the same thought, written back in lower case (${upper.status})`);
+  const badId = await get(`${NOTES_PATH}?thought=not-an-id`);
+  assert(badId.status === 200 && badId.html.includes('data-testid="bad-id"'), `…and an address naming no thought id says so (${badId.status})`);
+  const data = await get(`${NOTES_PATH}/__data.json?thought=${thought}`);
+  assert(listKeys(data.html, "recent") === "at,id,type", `…its data lists each thought by its shown fields alone (${listKeys(data.html, "recent")})`);
+  const { leaked } = await keyIn([page, before, data], WRITE_KEY!);
+  assert(!leaked, "…and neither the page, its data nor its scripts hold the key");
+  if (!writes) {
+    console.log("  ·  no --notes on: the pin arms skipped");
+    await signOut();
+    return;
+  }
+  // The note as a browser's textarea sends it: line breaks as CRLF, 2,000 characters once read as LF and trimmed, so the
+  // break's two characters and the spaces around it are counted as the field and add_note count them (review pass 1).
+  const stamp = String(Date.now());
+  const lines = [`Pinned by the GUI smoke <b>${stamp}</b> & kept as typed.`, "x".repeat(600), "y".repeat(600)];
+  lines.push("z".repeat(2000 - lines.join("\n").length - 1));
+  const note = lines.join("\n");
+  // Posted as the page's own form, its hidden thought id and its action as rendered.
+  const form = pinFormOf(before.html);
+  assert(form.fields.thought_id === thought && form.action.startsWith(`/dashboard${NOTES_PATH}?thought=${thought}&/pin`), `…its pin form carries the thought and posts to its own action (${form.action})`);
+  const posted = await fetch(`${ORIGIN}${form.action}`, { method: "POST", redirect: "manual", headers: headers(FORM), body: new URLSearchParams({ ...form.fields, note: `  ${lines.join("\r\n")}  ` }).toString() });
+  const pinned = { status: posted.status, location: posted.headers.get("location") ?? "", html: "", headers: posted.headers };
+  await posted.text();
+  assert(pinned.status === 303 && pinned.location === `/dashboard${NOTES_PATH}?thought=${thought}#pin`, `…the write key pins a note of 2,000 characters sent with CRLF breaks and spaces around it: 303 back to the thought's notes (${pinned.status} → ${pinned.location})`);
+  const after = await get(`${NOTES_PATH}?thought=${thought}`);
+  const escaped = note.replaceAll("&", "&amp;").replaceAll("<", "&lt;");
+  const mine = notesListed(after.html).filter((li) => li.includes(`>${escaped}<`));
+  // The key's name as the by-line starts, not anywhere in the item: a short name is in many a class (review pass 2).
+  assert(notesListed(after.html).length === notesListed(before.html).length + 1 && mine.length === 1 && who !== "" && mine[0].includes(`>${who} · `), `…and the thought's notes list it once — trimmed, its breaks LF, escaped — by the key's name (${notesListed(before.html).length} → ${notesListed(after.html).length})`);
+  // The data after the pin, so a brain with no note before still holds the notes' shape (review pass 2: CI's never did).
+  const withNote = await get(`${NOTES_PATH}/__data.json?thought=${thought}`);
+  assert(listKeys(withNote.html, "notes") === "at,by,id,note", `…its data lists each note by its shown fields alone (${listKeys(withNote.html, "notes")})`);
+  const long = "w".repeat(2001);
+  const [empty, tooLong, nul, nowhere] = [await pin(thought, "   "), await pin(thought, ` ${long} `), await pin(thought, "a\u0000b"), await pin(NO_THOUGHT, "a note on nothing")];
+  assert(empty.status === 400 && shownRefusal(empty.html, "Write the note first"), `…an empty note is refused beside the form (${empty.status})`);
+  assert(tooLong.status === 400 && shownRefusal(tooLong.html, "A note is at most 2,000 characters; this one is 2,001") && new RegExp(`<textarea[^>]*>\\s?${long}\\s?</textarea>`).test(tooLong.html), `…a note of 2,001 once trimmed is refused beside the form, the note kept in it (${tooLong.status})`);
+  assert(nul.status === 400 && shownRefusal(nul.html, "A note cannot hold a NUL"), `…a note holding a NUL is refused in words, not the core's 500 (${nul.status})`);
+  assert(nowhere.status === 404 && nowhere.html.includes("holds no thought with that id"), `…a note on a thought the brain does not hold is refused in words (${nowhere.status})`);
+  const unchanged = notesListed((await get(`${NOTES_PATH}?thought=${thought}`)).html).length;
+  assert(unchanged === notesListed(after.html).length, `…none of them pinned (${unchanged})`);
+  // The write's answers too: the pin's redirect, the refusals' pages, the notes after it and their data (review pass 5).
+  assert(!(await keyIn([pinned, after, withNote, empty, tooLong, nul, nowhere], WRITE_KEY!)).leaked, "…and no answer of the pin's, its refusals' or the notes after it holds the key");
+  await signOut();
+  if (READ_KEY) {
+    const r = await signIn(READ_KEY);
+    const [h, p] = [await get("/"), await get(`${NOTES_PATH}?thought=${thought}`)];
+    assert(r.status === 303 && namesNotes(h.html) && p.status === 200 && notesListed(p.html).some((li) => li.includes(`>${escaped}<`)) && !p.html.includes('data-testid="pin"'), `the read key's nav names Notes, and its page lists the note with no pin form (${r.status}, ${p.status})`);
+    const refused = await pin(thought, "a read key's note");
+    const again = await get(`${NOTES_PATH}?thought=${thought}`);
+    assert(refused.status === 403 && shownRefusal(refused.html, "This key cannot pin notes") && notesListed(again.html).length === notesListed(p.html).length, `…and its pin is refused, said on the page, with nothing pinned (${refused.status})`);
+    assert(!(await keyIn([h, p, refused, again], READ_KEY)).leaked, "…and none of the read key's pages or answers holds its key");
+    await signOut();
+  }
+}
+const finish = () => {
+  console.log(`\n${pass} passed, ${fail} failed`);
+  process.exit(fail === 0 ? 0 : 1);
+};
+if (NOTES_ONLY) {
+  await notesArm();
+  finish();
 }
 
 // Signed out.
@@ -429,18 +601,7 @@ let searchWord = "";
   const pages = [home, status, await get("/__data.json"), await get("/status/__data.json"), await get("/thoughts/__data.json"), browse,
     await get(searchWord ? `/search/__data.json?q=${encodeURIComponent(searchWord)}&mode=text` : "/search/__data.json"), search,
     await get("/changes/__data.json"), changes, workers, proposals, queryLog];
-  const queue = pages.flatMap((p) => [...p.html.matchAll(/["'](\/dashboard\/_app\/[^"']+\.js)["']/g)].map((m) => m[1]));
-  const scripts = new Set<string>();
-  let leaked = pages.some((p) => p.html.includes(WRITE_KEY) || [...p.headers.values()].some((v) => v.includes(WRITE_KEY)));
-  while (queue.length) {
-    const s = queue.pop()!;
-    if (scripts.has(s)) continue;
-    scripts.add(s);
-    const text = await (await fetch(`${ORIGIN}${s}`)).text();
-    if (text.includes(WRITE_KEY)) leaked = true;
-    // A chunk names the others it imports relative to itself: "./x.js", "../chunks/y.js".
-    for (const m of text.matchAll(/["'](\.{1,2}\/[^"']+\.js)["']/g)) queue.push(new URL(m[1], `${ORIGIN}${s}`).pathname);
-  }
+  const { leaked, scripts } = await keyIn(pages, WRITE_KEY);
   assert([2, 3, 4, 6, 8].every((i) => pages[i].status === 200), `the pages' navigation data answers for the session (${[2, 3, 4, 6, 8].map((i) => pages[i].status).join(", ")})`);
   // The overview sends each thought's first line, not its content: ten large thoughts made it 18.8 MB (review pass 4).
   // Held by the data's structure — each listed thought's keys — not by a word, which a thought's own text can hold
@@ -513,5 +674,5 @@ if (READ_KEY) {
   console.log("  ·  no --read-key: the read-key arm skipped");
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail === 0 ? 0 : 1);
+await notesArm();
+finish();

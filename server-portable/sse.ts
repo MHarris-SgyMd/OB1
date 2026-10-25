@@ -4,35 +4,42 @@
 // its streams alive with the same frame and the same ceiling. The vendored MCP
 // servers answer on the same kind of stream (@hono/mcp's transport, which pings
 // only a GET's stream), so a byte-for-byte copy of this file sits in
-// extensions/_shared/ beside auth.ts's (recipes/_shared/'s went with ob-graph and work-operating-model-activation, SMD-2920), and each of those servers sends its reply through mcpReply below
-// (SMD-2001). `bun run sync-sse` in extensions/ rewrites the copies from this
-// file; extensions/test-auth.ts fails if one differs or a server skips it. It
-// imports nothing, and everything here runs as it is on Bun, Node, Deno and Workers.
+// extensions/_shared/ beside auth.ts's (recipes/_shared/'s went with ob-graph
+// and work-operating-model-activation, SMD-2920), and each of those servers
+// sends its reply through mcpReply below (SMD-2001). `bun run sync-sse` in
+// extensions/ rewrites the copy from this file; extensions/test-auth.ts fails
+// if it differs or a server skips it. It imports nothing, and everything here
+// runs as it is on Bun, Node, Deno and Workers.
 //
 // The transport answers a POST with an SSE stream at once and writes the tool's
 // result to it when the tool returns; until then the stream carries nothing
-// (the core's SDK v2 transport adds its own keepalive comment every 15 s,
-// longer than the silence Bun allows; the vendored servers' none).
+// (the MCP server's SDK v2 transport adds its own keepalive comment every 15 s,
+// longer than the silence Bun's default allows; the vendored servers' none).
 // Bun closes a connection that has been silent for `idleTimeout` seconds — 10
-// by default — a streaming response included, at the next of its 4-second
-// sweeps, so between 8 and 12 s of silence by phase; it never reaches into a
-// handler that has not yet returned a response. Measured on 1.4.0, macOS and
-// the Alpine image alike: a handler still pending at 12 s answers normally,
-// body read or not, on a fresh or a reused socket; a streamed response silent
-// for 13 s is closed at the sweep, the client sees ECONNRESET, and the handler
-// runs on to write into a closed stream; a comment frame every 5 s keeps it
-// open. A capture whose embedding and metadata calls ran past ten seconds was
-// that second case (9.76 s, deterministically, on the dogfood brain), with no
-// line in the server's log. So every SSE response leaves through
-// withSseKeepalive: a `: keepalive` comment — a line SSE parsers discard by
-// specification, so no client sees an event — every SSE_KEEPALIVE_MS for the
-// life of the stream, until the transport closes it or the client goes, when
-// the timer stops itself. The idle timeout itself stays at the runtime's
-// default: its job is reaping dead keep-alive sockets, and raising it to the
-// ceiling of 255 s would move the cliff a long capture falls off rather than
-// remove it, and let a dead socket linger 25× longer. Half the default, so a
-// stream is never silent for a whole sweep; a proxy's read timeout in front of
-// the server (SMD-1846) is kept the same way.
+// by default — at the next of its 4-second sweeps, so between 8 and 12 s of
+// silence by phase. What it closes, measured on 1.4.3 (SMD-2931), each case
+// silent for 14 s at the default: a streamed response, at 12 s — the client
+// sees ECONNRESET, and the handler runs on to write into a closed stream; a
+// GET whose handler has not answered yet, the same; but not a POST whose
+// handler has not answered, which runs to its end. At 255 all three answer. A
+// comment frame every 5 s keeps a stream open. A capture whose embedding and
+// metadata calls ran past ten seconds was the stream's case (9.76 s,
+// deterministically, on the dogfood brain, SMD-1864), with no line in the
+// server's log. So every SSE response leaves through withSseKeepalive: a
+// `: keepalive` comment — a line SSE parsers discard by specification, so no
+// client sees an event — every SSE_KEEPALIVE_MS for the life of the stream,
+// until the transport closes it or the client goes, when the timer stops
+// itself. Half the default, so a stream is never silent for a whole sweep; a
+// proxy's read timeout in front of the server (SMD-1846) is kept the same way.
+//
+// The brain's own servers serve with Bun's ceiling, 255 s (IDLE_TIMEOUT_S in
+// server-portable/api.ts and mcp-server/index.ts), for the GET the keepalive
+// cannot reach: the MCP server's job polls and mirrors are GETs that a locked
+// table can hold past 10 s (SMD-2287); test-rest [16] measures the cut on
+// every run. Their streams keep the keepalive, for the proxy and for a call
+// past 255 s. The vendored MCP servers stay on the runtime's default, its
+// reaper for dead keep-alive sockets: a tool call of theirs is a POST answered
+// with a stream at once, so the keepalive is what holds it.
 export const SSE_KEEPALIVE_MS = 5_000;
 
 /**
@@ -42,8 +49,12 @@ export const SSE_KEEPALIVE_MS = 5_000;
  * fingerprint lock (033) would hold every concurrent capture of that thought,
  * and with an unbounded keepalive each would hold a stream and a timer for
  * hours with no line anywhere. Past this the timer stops, one line says so,
- * and the runtime's idle timeout takes over: a call this long is stuck, not
- * slow. (Review pass 1.)
+ * and the runtime's idle timeout takes over (on Bun, 255 s of silence on the
+ * REST core's streams, 10 on the vendored servers'): a call this long is
+ * stuck, not slow. (Review pass 1.) The MCP server's streams are never that
+ * silent, its SDK transport writing its own frame every 15 s, so they end with
+ * the call, whose request to the REST core ends at this same bound
+ * (mcp-server/app.ts's REST_TIMEOUT_MS; SMD-2931).
  */
 export const SSE_KEEPALIVE_MAX_MS = 10 * 60_000;
 
