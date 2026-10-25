@@ -444,7 +444,7 @@ const APPLY_061 = "Apply db/migrations/061_derivations.sql.";
 const APPLY_063 = "Apply db/migrations/063_rebuild_derived.sql.";
 const APPLY_066 = "Apply db/migrations/066_lineage_excludes_candidates.sql.";
 const APPLY_067 = "Apply db/migrations/067_pass_settles_stale.sql.";
-const APPLY_109 = "Apply db/migrations/109_listing_selects_a_pass.sql.";
+const APPLY_110 = "Apply db/migrations/110_listing_pages.sql.";
 const APPLY_073 = "Apply db/migrations/073_thought_trust_on_the_row.sql.";
 const APPLY_079 = "Apply db/migrations/079_linked_tickets_not_paired.sql.";
 /**
@@ -2392,21 +2392,23 @@ if (configFailed) {
                      (SELECT w.prosrc LIKE '%ob1:lineage-excludes-the-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_lineage,
                      -- 079 (SMD-2448): the candidate body leaves out two tickets Linear links (its sentinel); 063 or 066 re-applied by hand puts one back that does not.
                      (SELECT w.prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_tickets,
-                     -- 070 (SMD-2313), then 109 (SMD-3248): the listing flags a lineage pair and selects a pass (both sentinels, in 109's
-                     -- four-argument form) and stands in one form — 029 or 070 re-applied by hand lands its form BESIDE 109's, and a call
-                     -- both take (under three arguments beside 029's, under four beside 070's) is then ambiguous (42725, not unique) and fails.
-                     (SELECT w.prosrc LIKE '%ob1:listing-flags-the-lineage-pair%' AND w.prosrc LIKE '%ob1:listing-selects-a-pass%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.list_supersession_proposals(text, int, boolean, text)')) AS lists_pass,
-                     -- …and whether a four-argument form stands at all: one without the sentinels is not 109's, but its listings work (review pass 3).
-                     to_regprocedure('public.list_supersession_proposals(text, int, boolean, text)') IS NOT NULL AS has_four,
+                     -- 070 (SMD-2313), 109 (SMD-3248), then 110 (SMD-3249): the listing flags a lineage pair, selects a pass and pages
+                     -- (three sentinels, in 110's seven-argument form) and stands in one form — 029, 070 or 109 re-applied by hand lands its
+                     -- form BESIDE 110's, and a call both take (under three arguments beside 029's, four beside 070's, five beside 109's)
+                     -- is then ambiguous (42725, not unique) and fails.
+                     (SELECT w.prosrc LIKE '%ob1:listing-flags-the-lineage-pair%' AND w.prosrc LIKE '%ob1:listing-selects-a-pass%' AND w.prosrc LIKE '%ob1:listing-pages%'
+                        FROM pg_proc w WHERE w.oid = to_regprocedure('public.list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid)')) AS lists_current,
+                     -- …and whether a seven-argument form stands at all: one without the sentinels is not 110's, but its listings work (SMD-3248 review pass 3).
+                     to_regprocedure('public.list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid)') IS NOT NULL AS has_current_form,
                      (SELECT count(*)::int FROM pg_proc w JOIN pg_namespace wn ON wn.oid = w.pronamespace WHERE wn.nspname = 'public' AND w.proname = 'list_supersession_proposals') AS listing_forms
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_pass: boolean | null; has_four: boolean; listing_forms: number }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_current: boolean | null; has_current_form: boolean; listing_forms: number }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
-            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; relations: number; relation_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; lineage_pairs: number; lineage_pair_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number; lp_read: number; re_read: number };
+            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; relations: number; relation_ids: string[] | null; subjects: number; subject_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; lineage_pairs: number; lineage_pair_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number; lp_read: number; re_read: number; sj_read: number };
             // 064's sections join the census where the store is applied; a brain at
             // 062 has no page_sections, so the CTE is written only then (the text is
             // built here — BOUND is a constant — and run as one statement).
@@ -2436,6 +2438,11 @@ if (configFailed) {
                    re_s AS (SELECT id FROM public.thought_facets WHERE kind = 'relation' AND valid_until IS NULL LIMIT ${BOUND}),
                    re AS (SELECT s.id FROM re_s s
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'relation' AND d.artifact_id = s.id)),
+                   -- 111 (SMD-3306): a standing own subject and its lineage row, as a relation's. A brain before 111 holds no
+                   -- subject facet, so the CTE reads nothing there.
+                   sj_s AS (SELECT id FROM public.thought_facets WHERE kind = 'subject' AND valid_until IS NULL LIMIT ${BOUND}),
+                   sj AS (SELECT s.id FROM sj_s s
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'subject' AND d.artifact_id = s.id)),
                    md_s AS (SELECT t.id FROM public.thoughts t
                              WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND t.metadata->>'metadata_extraction_failed' IS NULL LIMIT ${BOUND}),
                    md AS (SELECT s.id FROM md_s s
@@ -2457,7 +2464,9 @@ if (configFailed) {
                    st AS (SELECT d.id FROM al d JOIN public.thoughts t ON t.id = d.input_ids[1]
                            -- 084: a relation, like a proposal, is the consolidation pass's to judge again, not rebuild_derived's
                            -- (SMD-2726 adds its arm); a closed one's row stays as history (SMD-1873 PR 2 review pass 1).
-                           WHERE d.artifact_kind NOT IN ('proposal', 'relation')
+                           -- 111: a subject off its text is the subject pass's to find again — its pool reads the fingerprint —
+                           -- until rebuild_derived gains its arm (SMD-3306).
+                           WHERE d.artifact_kind NOT IN ('proposal', 'relation', 'subject')
                              AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content))),
                    orph AS (SELECT d.id, d.artifact_kind FROM al d
                              WHERE (d.artifact_kind = 'chunks'   AND NOT EXISTS (SELECT 1 FROM public.thought_chunks c WHERE c.thought_id = d.artifact_id))
@@ -2471,6 +2480,7 @@ if (configFailed) {
                      (SELECT count(*)::int FROM pr) AS proposals, (SELECT array_agg(id::text) FROM (SELECT id FROM pr LIMIT 3) s) AS proposal_ids,
                      (SELECT count(*)::int FROM se) AS sections,  (SELECT array_agg(id::text) FROM (SELECT id FROM se LIMIT 3) s) AS section_ids,
                      (SELECT count(*)::int FROM re) AS relations, (SELECT array_agg(id::text) FROM (SELECT id FROM re LIMIT 3) s) AS relation_ids,
+                     (SELECT count(*)::int FROM sj) AS subjects,  (SELECT array_agg(id::text) FROM (SELECT id FROM sj LIMIT 3) s) AS subject_ids,
                      (SELECT count(*)::int FROM pg) AS stale_pages, (SELECT array_agg(id::text) FROM (SELECT id FROM pg LIMIT 3) s) AS stale_page_ids,
                      (SELECT count(*)::int FROM lp) AS lineage_pairs, (SELECT array_agg(id::text) FROM (SELECT id FROM lp LIMIT 3) s) AS lineage_pair_ids,
                      (SELECT count(*)::int FROM md) AS untagged,
@@ -2483,7 +2493,8 @@ if (configFailed) {
                      (SELECT count(*)::int FROM ch_s) AS ch_read, (SELECT count(*)::int FROM vc_s) AS vc_read, (SELECT count(*)::int FROM en_s) AS en_read,
                      (SELECT count(*)::int FROM pr_s) AS pr_read, (SELECT count(*)::int FROM md_s) AS md_read,
                      (SELECT count(*)::int FROM se_s) AS se_read, (SELECT count(*)::int FROM pg_s) AS pg_read,
-                     (SELECT count(*)::int FROM lp_s) AS lp_read, (SELECT count(*)::int FROM re_s) AS re_read`)) as Census[];
+                     (SELECT count(*)::int FROM lp_s) AS lp_read, (SELECT count(*)::int FROM re_s) AS re_read,
+                     (SELECT count(*)::int FROM sj_s) AS sj_read`)) as Census[];
             const n = (x: number) => (Number(x) > BOUND - 1 ? "more than 10,000" : String(x));
             // Two bounds, two facts: an ARTIFACT source that reached the bound
             // was sampled, so a missing row past it is not seen — the headline
@@ -2493,7 +2504,7 @@ if (configFailed) {
             // any artifact table, and its verdict is exact (cold read, third
             // review pass: one flag said "the rest not read" of tables read
             // whole; run-it: the capped line said the disclosure twice).
-            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read, c.pg_read, c.re_read].some((r) => Number(r) >= BOUND);
+            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read, c.pg_read, c.re_read, c.sj_read].some((r) => Number(r) >= BOUND);
             const missing: string[] = [];
             if (Number(c.chunks)) missing.push(`${n(c.chunks)} chunk set(s) (thought ${(c.chunk_ids ?? []).join(", ")})`);
             if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
@@ -2501,13 +2512,16 @@ if (configFailed) {
             if (Number(c.proposals)) missing.push(`${n(c.proposals)} proposal(s) (${(c.proposal_ids ?? []).join(", ")})`);
             if (Number(c.sections)) missing.push(`${n(c.sections)} page section(s) carrying a recipe (${(c.section_ids ?? []).join(", ")})`);
             if (Number(c.relations)) missing.push(`${n(c.relations)} judged relation(s) (${(c.relation_ids ?? []).join(", ")})`);
+            if (Number(c.subjects)) missing.push(`${n(c.subjects)} own subject(s) (${(c.subject_ids ?? []).join(", ")})`);
             // 064's kind has its own writer and no backfill: the remedy for a
             // section is that writer, said beside the general one (cold read,
             // first review pass: the general remedy named 061's backfill, which
             // knows no section).
             const sectionRemedy = (Number(c.sections) ? " A page section's row is written by 064's write_page_section (or accept_page_section): regenerate the section through it, or record the row yourself through ob1_record_derivation with kind 'section'." : "")
               // 084 (SMD-1873): a relation's row is its own writer's too, and 061's backfill knows no relation.
-              + (Number(c.relations) ? " A judged relation's row is written by 084's record_thought_relation: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<relation id>') and let the consolidation pass judge the pair again: clear the newer thought's claim under the judge's key (DELETE FROM thought_work_claims WHERE thought_id = '<newer thought id>' AND work_type = '<judge key>') and run bun db/consolidate.ts." : "");
+              + (Number(c.relations) ? " A judged relation's row is written by 084's record_thought_relation: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<relation id>') and let the consolidation pass judge the pair again: clear the newer thought's claim under the judge's key (DELETE FROM thought_work_claims WHERE thought_id = '<newer thought id>' AND work_type = '<judge key>') and run bun db/consolidate.ts." : "")
+              // 111 (SMD-3306): a subject's row is its own writer's too, and 061's backfill knows no subject.
+              + (Number(c.subjects) ? " An own subject's row is written by 111's record_thought_subject: close the facet (UPDATE thought_facets SET valid_until = now() WHERE id = '<subject id>') and record the thought's subject again through record_thought_subject." : "");
             const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass, or a pool that does not exist — the tags'); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
@@ -2565,27 +2579,28 @@ if (configFailed) {
               const review = `cd db && bun consolidate.ts --url <url> --list lineage shows them with both texts; reject each: bun consolidate.ts --url <url> --reject <id> --note "lineage pair (066)".`;
               add("lineage", "warn",
                   `every derived row has its lineage row, but ${n(c.lineage_pairs)} unreviewed proposal(s) stand on a lineage pair (${(c.lineage_pair_ids ?? []).join(", ")})${Number(c.lp_read) >= BOUND ? ` — of the ${BOUND.toLocaleString("en-US")} unreviewed rows read` : ""}: one side's derived_from names the other, so the pair would never be proposed today (066), and an accept would archive a derivation's input while the derivation still names it; the pass never replaces a pending one (SMD-2313). ${coverage}`,
-                  bodies.lists_pass === true && Number(bodies.listing_forms) === 1 ? `Review them: ${review}` : `${ledgerRemedy("109", APPLY_109)} Then review them: ${review}`);
-            } else if (bodies.has_063 && (bodies.lists_pass !== true || Number(bodies.listing_forms) !== 1)) {
-              // 109's listing gone — a brain at 108 or before under this
-              // server — or an older form beside it (029 or 070 re-applied by
-              // hand). Neither is "listed as any other row": the CLI, the
-              // stores and the MCP tool pass 109's fourth argument, so on an
+                  bodies.lists_current === true && Number(bodies.listing_forms) === 1 ? `Review them: ${review}` : `${ledgerRemedy("110", APPLY_110)} Then review them: ${review}`);
+            } else if (bodies.has_063 && (bodies.lists_current !== true || Number(bodies.listing_forms) !== 1)) {
+              // 110's listing gone — a brain at 109 or before under this
+              // server — or an older form beside it (029, 070 or 109 re-applied
+              // by hand). Neither is "listed as any other row": the CLI, the
+              // stores and the MCP tool pass 110's seven arguments, so on an
               // older form alone every listing fails naming it; with two forms
               // standing a call both take is ambiguous (42725, not unique) and
-              // fails — under three arguments beside 029's, under four beside
-              // 070's (review pass 1, measured) — while the fork's callers resolve
-              // (SMD-2313's run-it, first review pass: the arm said the older
-              // body answered). 109 drops the older forms. Gated on 063 like the arms above:
+              // fails — under three arguments beside 029's, four beside 070's
+              // (SMD-3248 review pass 1, measured), five beside 109's (test-schema
+              // [98], SMD-3249, measured) — while the
+              // fork's callers resolve (SMD-2313's run-it, first review pass: the
+              // arm said the older body answered). 110 drops the older forms. Gated on 063 like the arms above:
               // a brain before 063 is the older-bodies arm's, and one at
               // 029..062 the ledger check's (LATEST_MIGRATION), read first.
               add("lineage", "warn",
-                  `every derived row has its lineage row, but ${bodies.lists_pass !== true && bodies.has_four === true && Number(bodies.listing_forms) === 1
-                    ? "list_supersession_proposals' four-argument body is not 109's (written by hand, or re-made without its sentinels): the listings run, but nothing vouches that it flags a lineage pair or selects a pass as 109 does"
-                    : bodies.lists_pass !== true && bodies.has_four !== true
-                    ? "list_supersession_proposals is from before 109 (migration 109 not yet applied, or its form dropped by hand): every listing fails — the CLI's --list, the stores and the MCP tool pass 109's fourth argument, which this form does not take"
-                    : "an older list_supersession_proposals stands beside the four-argument one (029 or 070 re-applied by hand over 109): a call both forms take — fewer than three arguments beside 029's, fewer than four beside 070's — is ambiguous (not unique) and fails, so a reader passing fewer than four may error on the queue, while the fork's callers pass four"} (SMD-2313, SMD-3248). ${coverage}`,
-                  ledgerRemedy("109", APPLY_109));
+                  `every derived row has its lineage row, but ${bodies.lists_current !== true && bodies.has_current_form === true && Number(bodies.listing_forms) === 1
+                    ? "list_supersession_proposals' seven-argument body is not 110's (written by hand, or re-made without its sentinels): the listings run, but nothing vouches that it flags a lineage pair, selects a pass or pages as 110 does"
+                    : bodies.lists_current !== true && bodies.has_current_form !== true
+                    ? "list_supersession_proposals is from before 110 (migration 110 not yet applied, or its form dropped by hand): every listing fails — the CLI's --list, the stores and the MCP tool pass 110's seven arguments, which this form does not take"
+                    : "an older list_supersession_proposals stands beside the seven-argument one (029, 070 or 109 re-applied by hand over 110): a call both forms take — under three arguments beside 029's, under four beside 070's, under five beside 109's — is ambiguous (not unique) and fails, so a reader passing fewer than five may error on the queue, while the fork's callers pass seven"} (SMD-2313, SMD-3248, SMD-3249). ${coverage}`,
+                  ledgerRemedy("110", APPLY_110));
             } else if (Number(c.orphans)) {
               // The other direction (063): a row whose artifact is gone while
               // its thought stands — nothing it describes exists, and the

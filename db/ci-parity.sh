@@ -175,6 +175,8 @@ main() {
   nodb .                 deploy/forwarder.ts --self-check
   nodb .                 deploy/instance.ts --self-check
   nodb .                 deploy/edge/edge.ts --self-check
+  nodb .                 scripts/ci-step-times.ts --self-check
+  nodb .                 scripts/suite-sections.ts --self-check
   nodb .                 deploy/test-tier-sh.ts
   nodb server-portable    test-server.ts
   nodb server-portable    test-auth.ts

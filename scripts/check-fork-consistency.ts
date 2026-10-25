@@ -361,6 +361,12 @@
  *      each file's networks, and who joins them under which names, exactly as
  *      held; each rule is the only catch of one of its probes (what the files
  *      make together, CI's "The proxy loads only the held route tables")
+ *  28b. deploy/README.md's path table says what check 28's route tables
+ *      route (SMD-2296): every path a router's rule names has a row, and a
+ *      path in a row with no router is answered by the proxy's own 404; the
+ *      row naming a router's first path names its backend (the first label
+ *      of the service URL), says 404 for noop@internal, and names the
+ *      overlay file for an overlay's router
  *  29. every service deploy/compose.yaml defines has its x-logging bound —
  *      the json-file driver with a max-size and a max-file — as its
  *      `logging:`, value for value (the file writes `logging: *logging`), so
@@ -6287,9 +6293,9 @@ const API_ROLE: TransportRole = {
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
     // The authorization server's token check, built from the environment (SMD-2286): authorization, as auth.ts is, no store.
     ["./oauth-token.ts", new Set(["remoteChecker", "tokenSettings", "TokenCheck"])],
-    // The stop's lines for what it cuts, and the spans' start and flush (SMD-1849), and what a cut flush held (SMD-2902):
-    // request records and telemetry, no store.
-    ["./telemetry.ts", new Set(["cutOpenRequests", "cutTelemetry", "flushTelemetry", "startTelemetry"])],
+    // The stop's lines for what it cuts, and the spans' start and flush (SMD-1849), what a cut flush held (SMD-2902)
+    // and the mark its word counts from (SMD-3297): request records and telemetry, no store.
+    ["./telemetry.ts", new Set(["cutOpenRequests", "cutTelemetry", "flushTelemetry", "markTelemetry", "startTelemetry"])],
   ]),
   wiring: false,
   mustImport: "./core/index.ts",
@@ -7513,6 +7519,92 @@ function checkRouteTables() {
   if (clean) for (const rule of ROUTE_RULES) if (!soleCatch.has(rule)) fail(SELF, `check 28's rule "${rule}" is the only catch of none of its probes — add a probe that it alone catches, or remove the rule if another already holds what it does`);
 }
 checkRouteTables();
+
+// ── 28b: deploy/README.md's path table says what the route tables route (SMD-2296) ──
+//
+// Check 28 holds each route table byte for byte, so a route changed on purpose
+// is changed there too. deploy/README.md's "The paths today" table is the
+// operator's reading of the same tables, and nothing held it: /hooks, /grafana
+// and /dashboard were each added to it by hand. This holds, for compose.yaml's
+// table and each overlay's in ROUTE_FILES:
+//   paths  every path a router's rule names (a `Path` or `PathPrefix`, the
+//       prefix's trailing slash dropped) is named in backticks in a row's
+//       first cell — `OPTIONS /health` names /health — and every path a row
+//       names there is a router's, or the row answers with a 404 (/canary,
+//       /working, the rest of /.well-known: the proxy's own);
+//   backend  the row naming a router's first path names, in backticks, the
+//       service compose runs behind it (its URL's first label: `mcp`, `auth`,
+//       `app`, `api`, `lgtm`), or says 404 for a router to noop@internal; an
+//       overlay's router's row names the overlay's file too.
+// What each row says beyond that — a path kept or stripped, a 502 — is prose
+// this check does not read.
+type PathRow = { paths: string[]; answer: string };
+/** The rows of the README's `| Path | Answered by |` table: each first cell's paths (a `/…` inside backticks) and the answer cell; a string when the table is not there. */
+function readmePathRows(readme: string): PathRow[] | string {
+  const lines = readme.split("\n");
+  const head = lines.findIndex((l) => l.trim() === "| Path | Answered by |");
+  if (head < 0 || lines[head + 1]?.trim() !== "| --- | --- |") return 'has no "| Path | Answered by |" table under "The paths today"';
+  const rows: PathRow[] = [];
+  for (let i = head + 2; i < lines.length && lines[i].startsWith("| "); i++) {
+    const inner = lines[i].trim().replace(/^\|\s*/, "").replace(/\s*\|$/, "");
+    const cut = inner.indexOf(" | ");
+    if (cut < 0) return `row ${i + 1} has no answer cell`;
+    const spans = [...inner.slice(0, cut).matchAll(/`([^`]*)`/g)].map((m) => m[1]);
+    rows.push({ paths: spans.flatMap((s) => [...s.matchAll(/\/[^\s`]*/g)].map((m) => m[0])), answer: inner.slice(cut + 3) });
+  }
+  return rows;
+}
+/** A router's paths, as its rule names them: each `Path(…)` and `PathPrefix(…)` literal, a trailing slash dropped, once each. */
+const rulePaths = (rule: string) => [...new Set([...rule.matchAll(/Path(?:Prefix)?\(`([^`]+)`\)/g)].map((m) => m[1].length > 1 ? m[1].replace(/\/$/, "") : m[1]))];
+/** Where deploy/README.md's path table and the route tables disagree, one line each (empty when they agree). */
+function pathTableProblems(readme: string, tables: readonly (readonly [file: string, table: string])[]): string[] {
+  const rows = readmePathRows(readme);
+  if (typeof rows === "string") return [rows];
+  const out: string[] = [];
+  const routed = new Set<string>();
+  for (const [file, table] of tables) {
+    const http = (Bun.YAML.parse(table) as { http: { routers: Record<string, { rule: string; service: string }>; services?: Record<string, { loadBalancer: { servers: { url: string }[] } }> } }).http;
+    for (const [name, router] of Object.entries(http.routers)) {
+      const paths = rulePaths(router.rule);
+      for (const p of paths) {
+        routed.add(p);
+        if (!rows.some((r) => r.paths.includes(p))) out.push(`names no row for \`${p}\`, which ${file}'s router ${name} routes`);
+      }
+      const row = rows.find((r) => r.paths.includes(paths[0]));
+      if (!row) continue;
+      const url = http.services?.[router.service]?.loadBalancer.servers[0]?.url;
+      const backend = router.service === "noop@internal" ? null : url ? new URL(url).hostname.split(".")[0] : undefined;
+      if (backend === undefined) out.push(`cannot read the backend of ${file}'s router ${name} (service ${router.service})`);
+      else if (backend === null ? !/\b404\b/.test(row.answer) : !row.answer.includes(`\`${backend}\``)) out.push(`\`${paths[0]}\`'s row ${backend === null ? "does not say 404" : `does not name \`${backend}\``}, where ${file}'s router ${name} sends it ${backend === null ? "to noop@internal" : `to ${backend}`}`);
+      if (file !== "compose.yaml" && !row.answer.includes(`\`${file}\``)) out.push(`\`${paths[0]}\`'s row does not name \`${file}\`, whose router ${name} serves it`);
+    }
+  }
+  for (const r of rows) for (const p of r.paths) if (!routed.has(p) && !/\b404\b/.test(r.answer)) out.push(`\`${p}\`'s row names an answer other than a 404, but no route table routes \`${p}\``);
+  return out;
+}
+/** [what, the README's text replaced, its replacement, the problem it must raise] — each a drift 28b must catch, on the README as it is, by the rule meant for it. */
+const PATH_TABLE_PROBES: [string, string, string, string][] = [
+  ["a routed path's row dropped", "| `/dashboard` and everything under it |", "| the GUI |", "names no row for `/dashboard`"],
+  ["a row naming another backend", "| `/mcp` and everything under it | `mcp` —", "| `/mcp` and everything under it | `app` —", "does not name `mcp`"],
+  ["a row for a path no router routes, answered by a service", "| anything else |", "| `/canary/mcp` | `mcp`, the canary's MCP server |\n| anything else |", "`/canary/mcp`'s row names an answer other than a 404"],
+  ["an overlay's row not naming its file", "With `compose.hooks-public.yaml` named", "With the hooks overlay named", "does not name `compose.hooks-public.yaml`"],
+  ["a noop@internal router's row not saying 404", "| `/register`, `/authorize`, `/token` | the proxy's bodiless 404:", "| `/register`, `/authorize`, `/token` | the proxy, refused:", "`/register`'s row does not say 404"],
+  ["the table's header renamed", "| Path | Answered by |", "| Route | Answered by |", 'has no "| Path | Answered by |" table'],
+];
+function checkPathTable() {
+  const rel = "deploy/README.md";
+  const readme = readFileSync(join(ROOT, rel), "utf8");
+  const tables = ROUTE_FILES.map(([file, , , , , table]) => [file, table] as const);
+  for (const p of pathTableProblems(readme, tables)) fail(rel, `${p} — the path table is the operator's reading of check 28's route tables, so a route changed there is changed here too (SMD-2296)`);
+  for (const [what, from, to, want] of PATH_TABLE_PROBES) {
+    if (readme.split(from).length !== 2) { fail(SELF, `check 28b's probe "${what}" finds its anchor ${readme.split(from).length - 1} times in ${rel}, not once — re-anchor it`); continue; }
+    if (!pathTableProblems(readme.replace(from, to), tables).some((p) => p.includes(want))) fail(SELF, `check 28b no longer catches ${what} (its own probe, which expects "${want}")`);
+  }
+  // A router the README has never heard of, added to compose.yaml's table.
+  const added = tables.map(([file, table]) => [file, file === "compose.yaml" ? table.replace("  routers:\n", `  routers:\n${routeRouter("probe", "PathPrefix(\`/probe/\`)", 30, "", "mcp")}`) : table] as const);
+  if (!pathTableProblems(readme, added).some((p) => p.includes("`/probe`"))) fail(SELF, "check 28b no longer catches a router added to compose.yaml's table with no row (its own probe)");
+}
+checkPathTable();
 
 // ── 29. Every service's log is bounded (SMD-1849) ───────────────────────────
 //
