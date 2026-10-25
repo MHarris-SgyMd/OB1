@@ -2641,9 +2641,10 @@ setting, each with the value compose read, quoted afresh, but for these:
 - **the database password**, which is a fresh one of the canary's;
 - **the secrets of the profiles the canary never runs**: the authorization
   server's `OB1_AUTH_*`, n8n's `N8N_*`, the import runner's `OB1_RUNNER_*`,
-  the workers' `OB1_WORKER_KEY`, and board-sync's Linear keys, every
-  `LINEAR_*` (`LINEAR_API_KEY`, and `LINEAR_COMMENT_API_KEY`, which can
-  comment; SMD-2882);
+  the workers' `OB1_WORKER_KEY`, and every Linear key but board-sync's read
+  key: `LINEAR_COMMENT_API_KEY`, which can comment (SMD-2882), and any other
+  `LINEAR_*`. `LINEAR_API_KEY` is carried, since the canary runs its own
+  board-sync (step 6, SMD-3312);
 - **stable's keys and the secrets that go with them** (SMD-2874, SMD-3032):
   its `MCP_ACCESS_KEYS` (and the legacy `MCP_ACCESS_KEY`), the forwarder's
   `OB1_FORWARDER_KEY`, the plugins' webhook secrets `OB1_HOOK_SECRETS`, and
@@ -2887,8 +2888,22 @@ stable is redeployed:
    canary's project, `open-brain-canary` beside the default stable (`--name`
    names another), at user scope, under the canary's own key; a new
    session sees its tools. The URL is the canary's: `/mcp` on its port.
+6. It (re)starts the canary's board-sync on the new build whenever the
+   canary's env file holds a `LINEAR_API_KEY` (SMD-3312). A canary upgraded
+   in place (`--no-refresh`) is never refreshed, and a refresh was what
+   brought it stable's ticket rows, so without its own board-sync its copy of
+   the board stays as it was at its last refresh. A running board-sync stops
+   with the other writers before the canary's Postgres is touched (3), as the
+   sleep worker does. The key is stable's, carried when the file is made, or
+   a read-only key of the canary's own put there instead, which the drift
+   note does not name. The canary never posts a finding to the board: the
+   file never gets `LINEAR_COMMENT_API_KEY`, and canary.sh holds it empty
+   for every compose call, whatever the file says. With no `LINEAR_API_KEY`
+   the run says board-sync is off; one stopped for this run whose key has
+   since gone from the file is left stopped, said.
 
-`down` removes the canary's containers and its own networks. It
+`down` removes the canary's containers, its sleep worker and board-sync
+among them, and its own networks. It
 deregisters the connector only when `claude` has it at user scope and at a
 URL of the canary's: one of its ports on loopback (`127.0.0.1`,
 `localhost`), with any path and any `?key=`. A connector at stable's own
