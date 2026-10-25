@@ -1,8 +1,9 @@
 // list_thoughts' cursor (SMD-2995), and list_supersession_proposals' (SMD-3249),
 // on their own: the core makes and reads them, and render.ts's structuredContent
 // guard lets one through by the same rule that reads it — tokens, a pass key, a
-// timestamp's text and a uuid, so no sentence can ride it (review pass 1: the guard took any `cursor` for a uuid and
-// nulled this one, so a program reading structuredContent stopped at page one).
+// timestamp's text and a uuid, so no sentence can ride it (review pass 1: the
+// guard took any `cursor` for a uuid and nulled this one, so a program reading
+// structuredContent stopped at page one).
 
 import { PASS_KEY_CHARS } from "../pass-key.ts";
 import { UUID_RE, type ListSort } from "../store.ts";
@@ -64,9 +65,10 @@ function pgStamp(at: unknown): at is string {
  * What a list_supersession_proposals page selected (SMD-3249): its status word (`all` for every state), its lineage
  * filter (null: every pair) and its judge key (null: every pass) — the tool's inputs and the CLI's --list/--key alike.
  */
-export type ProposalSelection = { status: "pending" | "accepted" | "rejected" | "stale" | "all"; lineage: boolean | null; judgeKey: string | null };
+export type ProposalSelection = { status: (typeof PROPOSAL_STATUSES)[number]; lineage: boolean | null; judgeKey: string | null };
 
-const PROPOSAL_STATUSES = ["pending", "accepted", "rejected", "stale", "all"];
+const PROPOSAL_STATUSES = ["pending", "accepted", "rejected", "stale", "all"] as const;
+const isProposalStatus = (v: unknown): v is ProposalSelection["status"] => (PROPOSAL_STATUSES as readonly unknown[]).includes(v);
 
 /**
  * list_supersession_proposals' cursor (SMD-3249): the selection the page was
@@ -99,14 +101,14 @@ export function parseProposalCursor(raw: string): { selection: ProposalSelection
   if (!Array.isArray(v) || v.length !== 7) return null;
   const [tag, status, lineage, judgeKey, confidence, judgedAt, id] = v as unknown[];
   if (tag !== "proposals") return null;
-  if (typeof status !== "string" || !PROPOSAL_STATUSES.includes(status)) return null;
+  if (!isProposalStatus(status)) return null;
   if (lineage !== null && typeof lineage !== "boolean") return null;
   // pass-key.ts's one rule, the tool's and --key's input rule, so a cursor carries no key either door refuses.
   if (judgeKey !== null && (typeof judgeKey !== "string" || !PASS_KEY_CHARS.test(judgeKey))) return null;
   // numeric(3,2)'s text, 0 to 1 (029's CHECK): `0.73`, `1.00`.
   if (typeof confidence !== "string" || !/^(?:0\.\d{2}|1\.00)$/.test(confidence)) return null;
   if (typeof id !== "string" || !UUID_RE.test(id)) return null;
-  const selection = { status: status as ProposalSelection["status"], lineage, judgeKey };
+  const selection = { status, lineage, judgeKey };
   return pgStamp(judgedAt) ? { selection, confidence, judgedAt, id: id.toLowerCase() } : null;
 }
 
