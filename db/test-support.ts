@@ -819,6 +819,31 @@ export function watchStream(stream: ReadableStream<Uint8Array>): { until: (patte
 const BUN_START_LINE = /^Started (?:development )?server: \S+:(\d+)\/?\r?\n/m;
 
 /**
+ * A child started at PORT 0: its stdout, drained and watched, and the port it bound, as Bun's start line there says,
+ * waited for at most `ms`; 0 if the line never comes or the stream ends first. A port picked by binding 0 and freeing
+ * it for the child can be taken by another server in between, whose answers then read as the child's (SMD-3263,
+ * SMD-3296): a child given PORT 0 binds a port no one else holds.
+ */
+export async function childPort(proc: { stdout: unknown }, ms: number): Promise<{ port: number; stdout: ReturnType<typeof watchStream> }> {
+  const stdout = watchStream(proc.stdout as ReadableStream<Uint8Array>);
+  const port = (await stdout.until(BUN_START_LINE, ms)) ? Number(BUN_START_LINE.exec(stdout.sofar())![1]) : 0;
+  return { port, stdout };
+}
+
+/** The REST core's keyless /health body, and the MCP server's entry's. */
+export const REST_HEALTH_BODY = JSON.stringify({ status: "ok" });
+export const MCP_HEALTH_BODY = "ok";
+
+/**
+ * Whether a server at 127.0.0.1:`port` answers its keyless /health 200 with `body`: its own body, not any 200, which
+ * on macOS another process's 127.0.0.1 listener beside the child's dual-stack port could give. A read cut short is a
+ * no, never a throw. `fetcher` for a suite that stubs the global fetch (SMD-3296).
+ */
+export function answersHealth(port: number, body: string, init: RequestInit = {}, fetcher: typeof fetch = fetch): Promise<boolean> {
+  return fetcher(`http://127.0.0.1:${port}/health`, init).then((r) => r.text().then((t) => r.ok && t === body)).catch(() => false);
+}
+
+/**
  * A server entry run as the image runs it (`bun --no-env-file <entry>`), on a
  * port of its own, with `env` beside PATH, HOME and PORT and no other: `up`
  * once its /health answers (30 s at most, each poll 1 s, none once it has
@@ -842,11 +867,10 @@ export async function serveChild(cwd: string, entry: string, env: Record<string,
     stdout: "pipe",
     stderr: "pipe",
   });
-  const out = watchStream(child.stdout);
   const err = watchStream(child.stderr);
   const deadline = Date.now() + 30_000;
   // 0 until the start line comes; never, for a child that exits first.
-  const port = (await out.until(BUN_START_LINE, deadline - Date.now())) ? Number(BUN_START_LINE.exec(out.sofar())![1]) : 0;
+  const { port, stdout: out } = await childPort(child, deadline - Date.now());
   let up = false;
   while (port > 0 && Date.now() < deadline && child.exitCode === null && child.signalCode === null && !(up = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.ok, () => false))) await Bun.sleep(100);
   const sdk = waitForSdk ? await err.until(/ go to \S+ over OTLP\/HTTP/, 20_000) : false;

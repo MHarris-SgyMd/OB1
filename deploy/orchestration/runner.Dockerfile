@@ -21,7 +21,7 @@ WORKDIR /app
 # The pipeline's import graph, as the checkout has it, so `bun db/ingest-records.ts`
 # and `bun db/reembed.ts` run here exactly as from a checkout. Not bundled: a
 # bundle runs scripts/fork-index.ts's main block, which rewrites FORK.md.
-COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts db/cli.ts db/connect.ts db/worker-bootstrap.ts db/ingest-*.ts db/reembed.ts db/weekly-digest.ts db/lease.ts /app/db/
+COPY db/config.mjs db/config.d.mts db/version.mjs db/version.d.mts db/cli.ts db/connect.ts db/worker-bootstrap.ts db/ingest-*.ts db/reembed.ts db/weekly-digest.ts db/lease.ts db/pass-stamp.ts /app/db/
 COPY server-portable/*.ts /app/server-portable/
 COPY scripts/fragments.ts scripts/fork-index.ts /app/scripts/
 COPY evals/linear-corpus.ts /app/evals/
@@ -35,6 +35,12 @@ COPY evals/linear-corpus.ts /app/evals/
 # An emitter shares /tmp with every other pipeline's (each file its own, mode
 # 600): it writes scratch only through tempfile (mkstemp, mkdtemp), never to
 # a fixed path another emitter could plant first.
+# The four export importers (SMD-2493): JavaScript on node's built-ins alone,
+# so no packages.
+COPY recipes/grok-export-import/import-grok.mjs /app/recipes/grok-export-import/
+COPY recipes/instagram-import/import-instagram.mjs /app/recipes/instagram-import/
+COPY recipes/journals-blogger-import/import-blogger.mjs /app/recipes/journals-blogger-import/
+COPY recipes/x-twitter-import/import-x-twitter.mjs /app/recipes/x-twitter-import/
 COPY deploy/orchestration/runner.ts /app/deploy/orchestration/
 # A module the graph gained and this file does not copy, or an npm package (the
 # image installs none), fails the build here, not the first run: every import

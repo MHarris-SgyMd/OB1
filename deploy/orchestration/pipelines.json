@@ -1,1 +1,6 @@
-[]
+[
+  { "name": "grok", "system": "grok", "scope": "grok:export", "emitter": ["bun", "recipes/grok-export-import/import-grok.mjs", "{input}", "--if-present"], "everyHours": 168 },
+  { "name": "instagram", "system": "instagram", "scope": "instagram:export", "emitter": ["bun", "recipes/instagram-import/import-instagram.mjs", "{input}", "--if-present"], "everyHours": 168 },
+  { "name": "blogger", "system": "blogger", "scope": "blogger:export", "emitter": ["bun", "recipes/journals-blogger-import/import-blogger.mjs", "{input}", "--if-present"], "everyHours": 168 },
+  { "name": "x-twitter", "system": "x", "scope": "x:export", "emitter": ["bun", "recipes/x-twitter-import/import-x-twitter.mjs", "{input}", "--if-present"], "everyHours": 168 }
+]

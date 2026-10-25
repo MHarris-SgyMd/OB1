@@ -58,7 +58,7 @@ The script is an emitter of the brain's ingestion contract (SMD-2493). It prints
    bun recipes/instagram-import/import-instagram.mjs /path/to/instagram-export > "$F"
    ```
 
-   `--types messages` or `--types comments,posts` takes some types only; `--skip N` and `--limit N` take a slice. A file of the export that is not valid JSON stops the run, naming it: re-download the export rather than import a conversation with messages missing.
+   `--types messages` or `--types comments,posts` takes some types only; `--skip N` and `--limit N` take a slice. A file of the export that is not valid JSON stops the run, naming it: re-download the export rather than import a conversation with messages missing. Two downloads in one folder are refused, naming them, and so is a download in HTML format (download your information again, choosing JSON). An export with no message, comment or post in it exits 2, naming it, unless `--skip`, `--limit` or `--types` narrowed the run; one whose records the script's filters all skip (short) emits nothing and exits 0.
 
 5. **Count them** with the pipeline's dry run. It checks every line and writes nothing; a malformed line refuses the whole file, naming the line and the field:
 
@@ -78,6 +78,36 @@ The script is an emitter of the brain's ingestion contract (SMD-2493). It prints
 
 `db/README.md`, "Items from a file", has the whole contract.
 
+## With the orchestration profile
+
+On a brain running the `orchestration` profile (`docs/orchestration-tool.md`), the import runner runs this import as its `instagram` pipeline, so there is no checkout to run from. In this order, from the repository root:
+1. **Classify the runner, once, before the first export goes in.** Its rows carry its own name, not `ingest-records`, and the kind is stamped when a row is written:
+
+   ```bash
+   docker compose -f deploy/compose.yaml exec -T postgres psql -U postgres -d openbrain -c "SELECT set_agent_kind('orchestration-runner', 'ingested')"
+   ```
+
+   Rows a run wrote before that keep no trust until the same command with `SELECT backfill_thought_actors()` restamps them.
+2. **On a brain that ran the profile before this import was added**, rebuild the runner and provision again. The old image lacks the emitter, so the runner refuses to start once it reads the new `pipelines.json`, and n8n has no workflow for the pipeline until provisioning makes one:
+
+   ```bash
+   docker compose -f deploy/compose.yaml --profile orchestration up -d --build orchestration-runner
+   bun deploy/orchestration/provision.ts
+   ```
+3. **Put the extracted Instagram download (the folder holding `your_instagram_activity/`) in `deploy/imports/instagram/`**, one download at a time. It must be readable by the pipeline's own uid (`deploy/imports/README.md`).
+4. **It runs weekly**, and writes and embeds the rows itself. To run it at once, POST to the import's on-demand workflow with the run key, `N8N_WEBHOOK_KEY` in `deploy/.env` (`deploy/README.md`, "On demand"; 5678 is `N8N_PORT`'s default):
+
+   ```bash
+   N8N_WEBHOOK_KEY=$(sed -n 's/^N8N_WEBHOOK_KEY=//p' deploy/.env)
+   curl -sS --fail-with-body -X POST -H "x-n8n-run-key: $N8N_WEBHOOK_KEY" http://127.0.0.1:5678/webhook/ob1-import-instagram
+   ```
+
+   It answers with the run's report; a failed run answers 409, 422 or 500 with its reason in `why`. While curl runs, the key shows in the host's process list.
+
+   An empty folder writes nothing and succeeds. A folder holding only a zip, an export nested too deep, or an export with no message, comment or post in it fails the run, naming the cause. An export whose records the importer's filters all skip writes nothing and succeeds.
+
+The runner's container holds 2 GB of memory. An export that emits more than about 100 MiB of items can run it out (an X archive of 200,000 tweets did): the run fails, saying the emitter was killed, most likely for memory. Import one that large from a checkout, as above, where `wc -c "$F"` shows the size.
+
 ## Expected Outcome
 
 After the import:
@@ -85,8 +115,8 @@ After the import:
 - Every message of a conversation is in its text. A thought's text holds about 100,000 characters at most, plus its short header, since a search hit returns its thought whole. A longer conversation continues in parts (`dm:1234567#2` and on, titled "(part 2)" onward), each dated by its own first message. (Earlier versions kept the first 200 messages and nothing after.)
 - Comments and captions are grouped by day, each day one thought (`comments:2023-07-22`); those with no usable date are one more (`comments:undated`), dated by the brain when it writes it. Days are UTC: a comment at 8 pm in California is on the next day's thought
 - Each thought is dated by its first message, comment or caption, not when the import ran. A date the brain would refuse (in the future, say) is left out, the run names how many on stderr, and the brain dates that thought when it writes it
-- The fields the import used to set as columns ride as metadata: `type: reference`, `source_type: instagram_import`, `importance`, `quality_score` and `sensitivity_tier: personal`. The weekly digest (`db/weekly-digest.ts`) leaves a row out by that metadata as it does by the column, unless it is run with `--include-personal`
-- Running the import again on the same export writes nothing new
+- The enhanced fields ride as metadata: `type: reference`, `source_type: instagram_import`, `importance`, `quality_score` and `sensitivity_tier: personal`. The weekly digest (`db/weekly-digest.ts`) leaves a row out by that metadata as it does by the column, unless it is run with `--include-personal`
+- Running the import again on the same export writes nothing new. Never put an older export in place of a newer one: its records would overwrite the newer ones.
 - Running `search_thoughts { query: "that restaurant recommendation" }` finds relevant DMs once `reembed.ts` has run
 
 A DM conversation is identified by the thread id its inbox folder ends in (`alice_1234567` is `dm:1234567`), which a rename of the other person does not move; a folder without one is identified by its name. A day of comments or captions is identified by its day. So a later export that grew, or that lost a comment you deleted, updates only the thoughts whose day or conversation changed, in place. The pipeline adds and updates; it does not remove. So a thought the export no longer feeds keeps its last text:
@@ -100,8 +130,8 @@ A conversation that grows only extends its last part or adds one, so the earlier
 
 ## Troubleshooting
 
-**Issue: "No 'your_instagram_activity' folder … nothing emitted"**
-The export structure varies by download method. Look inside your extracted archive for a folder named `your_instagram_activity`. If it's nested deeper, point the script at the parent folder.
+**Issue: "holds no Instagram download"**
+The script looks for `your_instagram_activity/` up to three folders down. Point it at the folder that holds it, or at `your_instagram_activity/` itself. "No 'your_instagram_activity' folder … nothing emitted" means the folder is empty.
 
 **Issue: Garbled text (wrong characters)**
 Meta exports encode text as latin1-interpreted UTF-8. The script fixes this automatically with `fixMetaEncoding()`, and leaves text alone that is already well-formed (an emoji or an accent the export did not mangle). If text still looks wrong, the file may use a different encoding.

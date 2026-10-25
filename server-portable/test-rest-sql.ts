@@ -21,7 +21,7 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, resetSchema } from "../db/test-support.ts";
+import { childPort, createAssert, resetSchema } from "../db/test-support.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { authenticate, CLIENT_SCOPES, hashKey } from "./auth.ts";
 import { z } from "zod";
@@ -735,14 +735,13 @@ console.log("\n[9] `bun api.ts` as the entry wires the durable job store for the
   const mine = crypto.randomUUID(), theirs = crypto.randomUUID();
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${mine}::uuid, 'scan_thoughts', ${hashKey(KEYS.reader)}, 'reader', 'running', now(), 'open-brain-api')`;
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${theirs}::uuid, 'scan_thoughts', ${hashKey(KEYS.reader)}, 'reader', 'running', now(), 'open-brain-elsewhere')`;
-  const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const port = free.port;
-  free.stop(true);
+  // PORT 0: the child binds a port no one holds and says which (SMD-3296).
   const child = Bun.spawn([process.execPath, "api.ts"], {
     cwd: import.meta.dir,
-    env: { ...process.env, PORT: String(port) },
-    stdout: "ignore", stderr: "pipe",
+    env: { ...process.env, PORT: "0" },
+    stdout: "pipe", stderr: "pipe",
   });
+  const { port } = await childPort(child, 20_000);
   const status = async (id: string) => String((await sql`SELECT status FROM jobs WHERE id = ${id}::uuid`)[0]?.status);
   let mineStatus = "running";
   try {

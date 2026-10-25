@@ -17,6 +17,8 @@
 		{ href: `${base}/query-log`, label: 'Query log' },
 		{ href: `${base}/status`, label: 'Status' },
 	];
+	// After the brain's own views: the enabled plugins' pages (SMD-2280 PR 3), as the registry labels them.
+	const views = $derived([...nav, ...data.pluginPages]);
 </script>
 
 <div class="min-h-screen flex flex-col">
@@ -29,7 +31,7 @@
 			{#if data.signedIn}
 				<!-- It wraps: eight views pushed it 218 px past a phone's width, and every page scrolled sideways (PR 2b review pass 1). -->
 				<nav class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm" aria-label="Views">
-					{#each nav as item (item.href)}
+					{#each views as item (item.href)}
 						<a
 							href={item.href}
 							class={page.url.pathname === item.href ? 'text-text' : 'text-text-muted hover:text-text'}

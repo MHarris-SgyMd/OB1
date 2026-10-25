@@ -61,7 +61,7 @@ The script is an emitter of the brain's ingestion contract (SMD-2493). It prints
    bun recipes/journals-blogger-import/import-blogger.mjs /path/to/blogger-exports > "$F"
    ```
 
-   `--skip N` and `--limit N` take a slice of the entries.
+   `--skip N` and `--limit N` take a slice of the entries. The path may be one backup file, or a folder holding `.atom` files, the dashboard's `.xml` backups, or an extracted Google Takeout (backups are found within six folders). One blog backed up twice (an entry in two files) is refused, naming both: keep the newest. An export with no post or comment entry in it exits 2, naming it, unless `--skip` or `--limit` narrowed the run; one whose records the script's filters all skip (short) emits nothing and exits 0.
 
 6. **Count them** with the pipeline's dry run. It checks every line and writes nothing; a malformed line refuses the whole file, naming the line and the field:
 
@@ -81,6 +81,36 @@ The script is an emitter of the brain's ingestion contract (SMD-2493). It prints
 
 `db/README.md`, "Items from a file", has the whole contract.
 
+## With the orchestration profile
+
+On a brain running the `orchestration` profile (`docs/orchestration-tool.md`), the import runner runs this import as its `blogger` pipeline, so there is no checkout to run from. In this order, from the repository root:
+1. **Classify the runner, once, before the first export goes in.** Its rows carry its own name, not `ingest-records`, and the kind is stamped when a row is written:
+
+   ```bash
+   docker compose -f deploy/compose.yaml exec -T postgres psql -U postgres -d openbrain -c "SELECT set_agent_kind('orchestration-runner', 'ingested')"
+   ```
+
+   Rows a run wrote before that keep no trust until the same command with `SELECT backfill_thought_actors()` restamps them.
+2. **On a brain that ran the profile before this import was added**, rebuild the runner and provision again. The old image lacks the emitter, so the runner refuses to start once it reads the new `pipelines.json`, and n8n has no workflow for the pipeline until provisioning makes one:
+
+   ```bash
+   docker compose -f deploy/compose.yaml --profile orchestration up -d --build orchestration-runner
+   bun deploy/orchestration/provision.ts
+   ```
+3. **Put the backup in `deploy/imports/blogger/`**: the `.atom` files, the dashboard's `.xml`, or a Google Takeout as extracted. One backup per blog: several blogs side by side are one import, but one blog backed up twice fails the run, naming both files. It must be readable by the pipeline's own uid (`deploy/imports/README.md`).
+4. **It runs weekly**, and writes and embeds the rows itself. To run it at once, POST to the import's on-demand workflow with the run key, `N8N_WEBHOOK_KEY` in `deploy/.env` (`deploy/README.md`, "On demand"; 5678 is `N8N_PORT`'s default):
+
+   ```bash
+   N8N_WEBHOOK_KEY=$(sed -n 's/^N8N_WEBHOOK_KEY=//p' deploy/.env)
+   curl -sS --fail-with-body -X POST -H "x-n8n-run-key: $N8N_WEBHOOK_KEY" http://127.0.0.1:5678/webhook/ob1-import-blogger
+   ```
+
+   It answers with the run's report; a failed run answers 409, 422 or 500 with its reason in `why`. While curl runs, the key shows in the host's process list.
+
+   An empty folder writes nothing and succeeds. A folder holding only a zip, an export nested too deep, or an export with no post or comment entry in it fails the run, naming the cause. An export whose records the importer's filters all skip writes nothing and succeeds.
+
+The runner's container holds 2 GB of memory. An export that emits more than about 100 MiB of items can run it out (an X archive of 200,000 tweets did): the run fails, saying the emitter was killed, most likely for memory. Import one that large from a checkout, as above, where `wc -c "$F"` shows the size.
+
 ## Expected Outcome
 
 After the import:
@@ -89,8 +119,8 @@ After the import:
 - HTML content is stripped to plain text (line breaks preserved): the export's escaping is undone before the tags are removed, so no `<p>` survives into the text
 - Blog comments are thoughts of their own (`metadata.kind: comment`)
 - Settings and template entries are automatically filtered out
-- The fields the import used to set as columns ride as metadata: `type: journal`, `source_type: blogger_import`, `importance`, `quality_score` and `sensitivity_tier`
-- Running the import again writes nothing new. An entry is identified by its Atom `<id>`, so an edited post updates its thought in place, and an entry two export files both hold is emitted once, from the first file in name order (so an older backup beside a newer one can win: keep one export of each blog in the folder)
+- The enhanced fields ride as metadata: `type: journal`, `source_type: blogger_import`, `importance`, `quality_score` and `sensitivity_tier`
+- Running the import again writes nothing new. An entry is identified by its Atom `<id>`, so an edited post updates its thought in place. An entry two backup files both hold is one blog backed up twice, and the run is refused, naming both files: keep the newest. An import removes nothing, so a record deleted from a newer export keeps its thought. Never put an older export in place of a newer one: its records would overwrite the newer ones.
 
 A thought's text holds about 100,000 characters at most, since a search hit returns its thought whole (earlier versions cut at 30,000). A post longer than that is cut, and says so; its `<entry>` in the source record keeps it whole.
 
