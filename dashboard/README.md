@@ -69,9 +69,12 @@ cross-site ("The origin", below).
   asks for the password every time and a sign-out of the GUI is one); the AS sends the
   browser back to `/dashboard/auth/callback`, where the code is traded on the mesh for
   an access token (600 s) and a refresh token, held in the session like a key and never
-  sent to the browser. The callback takes them only if the ID token's `auth_time` is
-  no earlier than the sign-in's start: a URL can drop `prompt=login`, and the AS's own
-  session (a day, which the GUI's sign-out leaves) would then skip the password. A
+  sent to the browser. A URL can drop `prompt=login`, and the AS's own session (a day,
+  which the GUI's sign-out leaves) would then skip the password, so the AS asks the
+  `gui` client the password on every authorization whatever its request says, and the
+  callback takes the tokens only if the ID token's `auth_time` is no earlier than the
+  sign-in's start. Each sign-in is a grant of its own at the AS, so revoking one
+  session's refresh token, which ends its grant, ends no other. A
   sign-in in flight holds nothing on the server: its state and PKCE verifier are
   derived from a binding in its cookie that no URL carries, so a callback URL seen
   elsewhere completes no sign-in this browser started (one the operator completed for

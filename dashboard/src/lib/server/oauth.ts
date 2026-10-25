@@ -318,7 +318,7 @@ export function createRevoker(deps: { revoke: (refresh: string) => Promise<Revok
 			due.push({ refresh: t.refresh, since: now() });
 			return pass ? pass.then(run) : run();
 		},
-		/** Until the passes under way, and one an `add` queued behind them, are done: sign-out waits on it while the AS answers. */
+		/** Until the passes under way, and one an `add` queued behind them, are done (the suite's). */
 		async flush(): Promise<void> {
 			while (pass) await pass;
 		},

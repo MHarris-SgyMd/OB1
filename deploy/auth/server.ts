@@ -97,7 +97,7 @@
  */
 // Types alone: the server is made by target.ts's serve, guarded.
 import type http from "node:http";
-import Provider, { errors, type ClientMetadata, type KoaContextWithOIDC, type ResourceServer } from "oidc-provider";
+import Provider, { errors, interactionPolicy, type ClientMetadata, type KoaContextWithOIDC, type ResourceServer } from "oidc-provider";
 import { createLocalJWKSet, jwtVerify, type JWK } from "jose";
 import { guardedFetch } from "./fetch-guard.ts";
 import { consentPage, esc, loginPage, PAGE_HEADERS, pageHtml, type Asking } from "./pages.ts";
@@ -149,11 +149,30 @@ const clients = Object.entries(L.clients).map(([client_id, p]): ClientMetadata =
   // The GUI renews its session with a refresh token (SMD-3307): it asks for
   // offline_access with prompt=login consent, and holds the token server-side,
   // rotating under the same policy as a third-party client's (refreshTtl,
-  // chainRotates).
-  if (p.kind === "gui") return { ...base, grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], redirect_uris: [p.redirect] };
+  // chainRotates). Its ID token always says when the password was typed
+  // (auth_time), which the GUI holds against its sign-in's start.
+  if (p.kind === "gui") return { ...base, grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], redirect_uris: [p.redirect], require_auth_time: true };
   if (p.kind === "service") return { ...base, grant_types: ["client_credentials"], response_types: [], redirect_uris: [], scope: p.scope };
   return { ...base, grant_types: [TOKEN_EXCHANGE], response_types: [], redirect_uris: [] };
 });
+
+/** The clients the operator GUI signs in as (layout.ts's `gui` kind). */
+const GUI_CLIENTS = new Set(Object.entries(L.clients).flatMap(([id, p]) => (p.kind === "gui" ? [id] : [])));
+
+/**
+ * The library's prompts, with one check more on its sign-in: a GUI client is
+ * asked the password on every authorization, whatever its request says.
+ * `prompt=login` rides a URL the browser can change, and the AS's own session
+ * (a day, which the GUI's sign-out leaves) would otherwise let a later visitor
+ * of that browser through with a click (SMD-3307 review pass 4). `result.login`
+ * is set only on this interaction's own resume after the password.
+ */
+const policy = interactionPolicy.base();
+policy.get("login")!.checks.add(
+  new interactionPolicy.Check("gui_password_every_time", "a GUI client is asked the password every time", (ctx) =>
+    GUI_CLIENTS.has(ctx.oidc.client?.clientId ?? "") && !ctx.oidc.result?.login ? interactionPolicy.Check.REQUEST_PROMPT : interactionPolicy.Check.NO_NEED_TO_PROMPT,
+  ),
+);
 
 /** POC ONLY (see the header): the library's internal reason for a refusal, which it never sends itself. */
 const POC_ERROR_DETAIL = C.pocErrorDetail;
@@ -230,7 +249,7 @@ const provider = new Provider(L.issuer, {
     },
   },
   routes: { authorization: "/authorize" },
-  interactions: { url: (_ctx, interaction) => `/auth/interaction/${interaction.uid}` },
+  interactions: { policy, url: (_ctx, interaction) => `/auth/interaction/${interaction.uid}` },
   features: {
     devInteractions: { enabled: false },
     clientCredentials: { enabled: true },
@@ -449,8 +468,20 @@ async function interaction(req: http.IncomingMessage, res: http.ServerResponse, 
   }
   if (action === "confirm") {
     if (prompt.name !== "consent") return page(res, 400, "none", "not a consent step");
-    const grant = details.grantId ? await provider.Grant.find(details.grantId) : new provider.Grant({ accountId: session!.accountId, clientId: String(params.client_id) });
-    if (!grant) return page(res, 400, "none", "grant not found");
+    const clientId = String(params.client_id);
+    const held = details.grantId ? await provider.Grant.find(details.grantId) : undefined;
+    if (details.grantId && !held) return page(res, 400, "none", "grant not found");
+    // A GUI sign-in is a grant of its own, holding what the last one held: a
+    // revocation of a session it replaced — which ends that session's whole
+    // grant — must not end this one (SMD-3307 review pass 4). A third-party
+    // client's consent adds to the grant it has.
+    let grant = held ?? new provider.Grant({ accountId: session!.accountId, clientId });
+    if (held && GUI_CLIENTS.has(clientId)) {
+      grant = new provider.Grant({ accountId: session!.accountId, clientId });
+      grant.addOIDCScope(held.getOIDCScope());
+      grant.addOIDCClaims(held.getOIDCClaims());
+      for (const indicator of Object.keys(held.resources ?? {})) grant.addResourceScope(indicator, held.getResourceScope(indicator));
+    }
     const d = prompt.details as { missingOIDCScope?: string[]; missingOIDCClaims?: string[]; missingResourceScopes?: Record<string, string[]> };
     if (d.missingOIDCScope) grant.addOIDCScope(d.missingOIDCScope.join(" "));
     if (d.missingOIDCClaims) grant.addOIDCClaims(d.missingOIDCClaims);

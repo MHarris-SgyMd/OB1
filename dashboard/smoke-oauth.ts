@@ -34,10 +34,10 @@
  *     another origin, even with no body, is refused;
  *   - sign-out ends the session, and signing in again in that browser asks for
  *     the password (prompt=login: the AS's own session does not sign the next
- *     visitor in), and one that drops prompt=login from the URL, the AS
- *     skipping the password, is refused (the ID token's auth_time precedes
- *     its start); a consent denied at the AS comes back in words and opens
- *     nothing; a refusal word the page does not know (`constructor`) is none.
+ *     visitor in), and so does one whose URL drops prompt=login and asks a
+ *     day's max_age (the AS asks gui every time, whatever the request says);
+ *     a consent denied at the AS comes back in words and opens nothing; a
+ *     refusal word the page does not know (`constructor`) is none.
  *
  * With `--renewal`, before signing out it waits past the session's access
  * token's expiry (620 s) and loads pages again: they render only if the GUI
@@ -201,6 +201,10 @@ if (RENEWAL) {
   const [a, b] = await Promise.all([go(jar, `${BASE}/status`), go(jar, `${BASE}/thoughts`)]);
   const again = await go(jar, `${BASE}/`);
   assert(a.status === 200 && b.status === 200 && again.status === 200 && /oauth:operator/.test(again.html) && jar.has(COOKIE), `past the token's renewal, two pages at once and the overview still render, the session renewed unseen (${a.status}, ${b.status}, ${again.status})`);
+  // Past the AS's 10 s grace for a reused refresh token: a renewer that renewed twice from one token forked the chain, which the AS ends here (review pass 4).
+  await Bun.sleep(15_000);
+  const later = await go(jar, `${BASE}/status`);
+  assert(later.status === 200 && jar.has(COOKIE), `…and 15 s on, past the AS's grace for a reused refresh token, still (${later.status})`);
 }
 
 // The callback replayed, and one with a state this browser was never given.
@@ -237,14 +241,15 @@ const againPrompts: string[] = [];
 const startNext = await go(jar, `${BASE}/auth/start`, { form: {} });
 await atTheAs(jar, startNext.location, `${ORIGIN}/dashboard/auth/callback`, "abort", againPrompts);
 assert(againPrompts[0] === "login" && againPrompts.includes("consent"), `signing in again after sign-out asks for the password first (${againPrompts.join(" → ")})`);
-// …and the next visitor who drops prompt=login from the URL, so the AS's own session (a day) skips the password, is refused: the ID token's auth_time precedes the sign-in's start.
+// …and so does one whose URL drops prompt=login and asks a day's max_age, as the next visitor could edit it: the AS asks gui the password every time, whatever the request says (review pass 4).
 const skipPrompts: string[] = [];
 const startSkip = await go(jar, `${BASE}/auth/start`, { form: {} });
 const skipUrl = startSkip.location ? new URL(startSkip.location, ORIGIN) : null;
 skipUrl?.searchParams.set("prompt", "consent");
-const skipped = skipUrl ? await atTheAs(jar, skipUrl.href, `${ORIGIN}/dashboard/auth/callback`, "confirm", skipPrompts) : "no start";
+skipUrl?.searchParams.set("max_age", "86400");
+const skipped = skipUrl ? await atTheAs(jar, skipUrl.href, `${ORIGIN}/dashboard/auth/callback`, "abort", skipPrompts) : "no start";
 const skippedAt = skipped.startsWith(ORIGIN) ? await go(jar, skipped) : { status: 0, location: skipped, html: "", headers: new Headers() };
-assert(!skipPrompts.includes("login") && skippedAt.status === 303 && skippedAt.location === "/dashboard/signin?refused=login" && !jar.has(COOKIE), `…and one that drops prompt=login, the AS asking no password (${skipPrompts.join(" → ")}), is refused: its password came before the sign-in (${skippedAt.status} → ${skippedAt.location})`);
+assert(skipPrompts[0] === "login" && !jar.has(COOKIE), `…and so does one whose URL drops prompt=login and asks max_age=86400 (${skipPrompts.join(" → ")}; ${skippedAt.status} → ${skippedAt.location})`);
 const unknownWord = await go(newJar(), `${BASE}/signin?refused=constructor`);
 assert(unknownWord.status === 200 && !unknownWord.html.includes('data-testid="refused"'), `a refusal word the page does not know (constructor) says nothing, and no 500 (${unknownWord.status})`);
 

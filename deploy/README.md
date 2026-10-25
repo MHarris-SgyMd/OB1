@@ -3709,7 +3709,9 @@ and the client secrets; a kept password would be hashed again as it was),
 run `--init` for new ones, hand each client its new secret, and drop the store
 (`compose rm -sf auth`, then `podman volume rm <project>_auth-data`, or
 `docker volume rm`; `open-brain_auth-data` for the stack of step 1) before
-`compose up -d --wait auth`: every client signs in again. Both shapes were measured:
+`compose up -d --wait auth mcp app`, which hands the MCP server and the GUI
+their new secrets (without them every GUI sign-in is refused, the GUI's log
+saying `invalid_client`): every client signs in again. Both shapes were measured:
 the backup above restored into a fresh volume brings a registered client back
 with its registration token, and the fresh volume alone does not.
 
