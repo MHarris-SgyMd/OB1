@@ -2575,8 +2575,9 @@ if (configFailed) {
               // stores and the MCP tool pass 110's seven arguments, so on an
               // older form alone every listing fails naming it; with two forms
               // standing a call both take is ambiguous (42725, not unique) and
-              // fails — under three arguments beside 029's, four beside 070's,
-              // five beside 109's (SMD-3248 review pass 1, measured) — while the
+              // fails — under three arguments beside 029's, four beside 070's
+              // (SMD-3248 review pass 1, measured), five beside 109's (test-schema
+              // [98], SMD-3249, measured) — while the
               // fork's callers resolve (SMD-2313's run-it, first review pass: the
               // arm said the older body answered). 110 drops the older forms. Gated on 063 like the arms above:
               // a brain before 063 is the older-bodies arm's, and one at

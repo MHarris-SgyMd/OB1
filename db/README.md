@@ -2048,8 +2048,9 @@ is refused naming its own (`REFUSED_CURSOR`, `reason: "filters"`);
 page printing the line to run, its `--list` and `--key` with the cursor
 (`--list lineage`, two listings, takes none); preflight's `lineage` check reads the seven-argument form
 and its three sentinels. An older server's preflight and an older CLI's
-`--status` read a brain at 110 as before 109: upgrade the server, never run
-the `--reapply` the older preflight prints. A server left running across
+`--status` probe an older form by its signature and read a brain at 110 as
+before that migration (070 from v1.9.0): upgrade the server, never run the
+`--reapply` the older preflight prints. A server left running across
 the migration fails each listing on a connection that had already listed
 ("cached plan must not change result type", the result type changed) until
 it restarts. DDL alone; no row moves; no grant is carried. Refuses by name

@@ -210,7 +210,7 @@ function selectionFlags(sel: ProposalSelection): string {
  * and the cursor printed below it (110). Unselected, --status counts them all. Under --key, --status counts the
  * pending by pass, not this selection's rows, and a pending page also drains as it is decided — a decided row leaves
  * `pending`, so listing again shows the next. A lineage page is two listings (pending, then stale) and takes no
- * cursor. `status` is printList's: undefined for --list all.
+ * cursor. `status` is printList's: undefined for --list all; `key` is --key's, named in a lineage page's tool hint.
  */
 export function capNote(status: string | undefined, key: string | undefined): string {
   // SMD-3249: any one-status page goes on with --after; under --key a pending page also drains as it is decided.

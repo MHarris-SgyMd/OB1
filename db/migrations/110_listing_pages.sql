@@ -76,14 +76,18 @@
 --   running across a hand-run migrate.ts failed every listing; 109 kept
 --   070's columns and so never met it). The release's `up` recreates the
 --   servers after the migration; a server left running is restarted. An
---   older server's preflight and an older CLI's --status probe the
---   four-argument form by its signature, which this file drops, so on a
---   brain at 110 they read the listing as from before 109 — preflight says
---   every listing fails and prints `migrate.ts --reapply`, --status says
---   "apply migration 109 first": the fix is this tree's server and CLI, never
---   that remedy — the older tree's --reapply stands 109's form beside this
---   one, and its four-argument calls are then not unique. Nothing runs at apply time but the DDL; no row moves;
---   no table is touched. The keyset term and the window count read the
+--   older server's preflight and an older CLI's --status probe an older form
+--   by its signature, which this file drops — 070's three arguments from
+--   v1.9.0, 109's four from a build after SMD-3248 — so on a brain at 110
+--   they read the listing as from before that migration. Preflight says
+--   every listing fails, or, with a lineage pair standing, asks for the
+--   review, and either way prints `migrate.ts --reapply`; --status, where
+--   unreviewed lineage pairs stand, says to apply that migration first; the
+--   ledger row says the ledger is ahead and to deploy the server built from
+--   the tree that migrated it, which is the fix: this tree's server and CLI,
+--   never the --reapply — the older tree's re-run stands its form beside
+--   this one, and its calls are then not unique (review pass 4). Nothing
+--   runs at apply time but the DDL; no row moves; no table is touched. The keyset term and the window count read the
 --   rows of the selection the listing already sorts; no index
 --   (supersession_proposals holds hundreds of rows on the dogfood brains).
 --   MINOR under FORK.md's version rules, on 070's and 109's precedent: the
