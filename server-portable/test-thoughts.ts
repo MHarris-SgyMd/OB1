@@ -2653,17 +2653,15 @@ console.log("\n[17] A thought's own subject (SMD-3306): the rules read the ticke
     && JSON.stringify(ruleSubject({ content: "SMD-2 x", metadata: { issue: "none" } })) === JSON.stringify({ key: "ticket:SMD-2", by: "first_line" })
     && ruleSubject({ content: "no ticket", metadata: null }) === null, "the metadata's ticket before the first line's; neither, the model's to find");
 
-  // Which ticket-shaped words are tickets (review pass 1): under the prefixes the brain files its tickets under, when
-  // it has any; with none, any but an encoding, hash, cipher, protocol, standard or licence.
-  const smd = new Set(["SMD"]);
-  assert(firstLineTicket("UTF-8 notes, then SMD-3") === "SMD-3" && firstLineTicket("JIRA-5 the login bug") === "JIRA-5" && firstLineTicket("JIRA-5 the login bug", smd) === null && firstLineTicket("JIRA-5, then SMD-6", smd) === "SMD-6",
-    "a first line's ticket: past an encoding; any prefix but the denied ones when the brain files none; only the brain's own when it files some");
-  assert(isTicket("SMD-1") && !isTicket("SHA-256") && !isTicket("UTF-8") && isTicket("SHA-256", new Set(["SHA"])) && !isTicket(`SMD-${"1".repeat(250)}`) && !isTicket("smd-1"),
-    "isTicket: a brain's own prefix even where the denylist names it; never a key too long for 110, nor lower case");
-  assert(subjectKey("JIRA-7 login", smd) === "phrase:jira-7 login" && subjectKey("SMD-7 login", smd) === "ticket:SMD-7" && subjectKey("JIRA-7 login") === "ticket:JIRA-7",
-    "the model's answer read under the same rule");
-  assert(metadataTicket({ ticket: `SMD-${"1".repeat(250)}`, issue: "SMD-2" }) === "SMD-2" && ruleSubject({ content: "JIRA-5 x" }, smd) === null,
-    "a filed ticket too long for 110's key is passed over; a first line under another prefix leaves the thought to the model");
+  // Which ticket-shaped words are tickets: any whose prefix is no encoding, hash, cipher, protocol, standard, licence,
+  // model name or dated period — a fixed list, so a key is the same on every brain and run (review passes 1 and 2).
+  assert(firstLineTicket("UTF-8 notes, then SMD-3") === "SMD-3" && firstLineTicket("JIRA-5 the login bug") === "JIRA-5" && firstLineTicket("GPT-4 evaluation for the Q3-2026 plan") === null,
+    "a first line's ticket: past an encoding to the ticket after it; any team's prefix; none in a model name or a quarter");
+  assert(isTicket("SMD-1") && isTicket("ENG-42") && !isTicket("SHA-256") && !isTicket("UTF-8") && !isTicket("GPT-4") && !isTicket("Q3-2026") && !isTicket(`SMD-${"1".repeat(250)}`) && !isTicket("smd-1"),
+    "isTicket: a team's id; never a denied prefix, a key too long for 110, nor lower case");
+  assert(subjectKey("JIRA-7 login") === "ticket:JIRA-7" && subjectKey("GPT-4 evaluation") === "phrase:gpt-4 evaluation", "the model's answer read under the same rule");
+  assert(metadataTicket({ ticket: `SMD-${"1".repeat(250)}`, issue: "SMD-2" }) === "SMD-2" && metadataTicket({ issue: "SHA-1" }) === "SHA-1" && ruleSubject({ content: "GPT-4 x" }) === null,
+    "a filed ticket too long for 110's key is passed over; a filed one is the brain's own, denied prefix or not; a first line naming no ticket leaves the thought to the model");
 
   // The question: round 4's own question (SMD-3299's eval at OB1 PR 506's head, 24f1ab30, version 2 of the test), by
   // hash over three thoughts: a ticket's, one with no date or writer and a delimiter in its text, and one past
@@ -2688,6 +2686,7 @@ console.log("\n[17] A thought's own subject (SMD-3306): the rules read the ticke
     "the subject, one line; an empty one; a fenced answer");
   assert(ownSubjectOf("no json") === null && ownSubjectOf('{"subject":5}') === null && ownSubjectOf('{"deliverables":[]}') === null && [...(ownSubjectOf(JSON.stringify({ subject: "é".repeat(300) })) ?? "")].length === 200,
     "…none from an answer without a subject string; a long one cut at 200 code points");
+  assert(ownSubjectOf('{"subject":null,"deliverables":[]}') === "", "a null subject is the model naming none, as \"\" is, not an answer of another shape (review pass 2)");
 
   // The pass keys and the lineage recipes.
   assert(SUBJECT_RULES_KEY === "subject:rules@r1" && subjectModelKey("qwen3.8:27b") === "subject:qwen3.8:27b@p1", "the rules' key and the model's, beside extract's `extract:<model>@p<n>`");
@@ -2713,7 +2712,7 @@ console.log("\n[17] A thought's own subject (SMD-3306): the rules read the ticke
     const bad = await askOwnSubject(cfg, sides[1], subject);
     assert(bad.answer === null && bad.key === null && bad.raw === "not json", "an answer that is not JSON: none, its raw text kept");
     // Review pass 1: the key was read from the subject cut at 200 code points, so a ticket across the cut read as SMD-12.
-    const long = await askOwnSubject(cfg, sides[1], subject, undefined, new Set(["SMD"]));
+    const long = await askOwnSubject(cfg, sides[1], subject);
     assert(long.key === "ticket:SMD-12345" && long.answer !== null && [...long.answer].length === 200,
       `a ticket past the 200th code point is read whole; the answer a recipe keeps is cut (${long.key}, ${long.answer?.length})`);
     const gated = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_EGRESS_POLICY: "deny" });

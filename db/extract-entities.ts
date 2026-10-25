@@ -189,7 +189,7 @@ import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egr
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe, subjectRecipe } from "../server-portable/lineage.ts";
 import { ruleSubject, SUBJECT_RULES_KEY } from "../server-portable/subject.ts";
-import { recordSubject, sweepSubjects, ticketPrefixes } from "./subject-sweep.ts";
+import { recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
@@ -1235,11 +1235,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   let subjecting = true;
   const subjects = { recorded: 0, kept: 0 };
   const saidSubject = { passing: false };
-  /** The prefixes the brain files its tickets under, read once, at the first rule step: a first line's `UTF-8` is no ticket. */
-  let prefixes: Promise<Set<string>> | null = null;
   async function recordRuleSubject(row: Row): Promise<void> {
     if (!subjecting || hardStopped || row.fingerprint === null) return;
-    const found = ruleSubject(row, await (prefixes ??= ticketPrefixes(sql)));
+    const found = ruleSubject(row);
     if (!found) return;
     try {
       const w = await recordSubject(sql, { id: row.id, fingerprint: row.fingerprint }, found.key, found.by, SUBJECT_RULES_KEY, subjectRecipe(found), agentId);

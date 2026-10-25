@@ -6033,6 +6033,8 @@ if (want("10h")) {
   const owns: [string, string][] = [["release notes", '{"subject":"OB1 release 2.0.0","deliverables":[]}'], ["merged pull", '{"subject":"PR 727","deliverables":["db/x.ts"]}'], ["garbled", "not json"]];
   let extractCalls = 0, ownCalls = 0;
   let judgeMode: "answer" | "refuse" | "503" = "answer";
+  /** While false, the garbled thought's answer is an empty subject of the expected shape instead. */
+  let garbledAnswers = true;
   /** Called as each own question arrives, with the thought asked about: the stop case aborts there, so a thought is in hand. */
   let onOwn: ((thought: string) => void) | null = null;
   const stub = Bun.serve({
@@ -6053,7 +6055,7 @@ if (want("10h")) {
       if (body.model !== "stub-judge") return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found` } }), { status: 404 });
       if (judgeMode === "refuse") return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
       if (judgeMode === "503") return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
-      const hit = owns.find(([w]) => thought.includes(w));
+      const hit = owns.find(([w]) => thought.includes(w) && (garbledAnswers || w !== "garbled"));
       return Response.json({ choices: [{ message: { content: hit ? hit[1] : '{"subject":"","deliverables":[]}' } }] });
     },
   });
@@ -6065,9 +6067,8 @@ if (want("10h")) {
   const pr = await seed("Reviewed and merged pull work for the dashboard.");
   const none = await seed("A passing remark, nothing here to name.");
   const garbled = await seed("A garbled answer comes back for this one.");
-  // Ticket-shaped words on a first line under no prefix the brain files tickets under (SMD, from the issue above):
-  // UTF on the denied list, JIRA on none, so neither is a ticket here.
-  const utf = await seed("UTF-8 handling for the JIRA-5 export, nothing filed.");
+  // Ticket-shaped words on a first line whose prefixes are denied (an encoding, a model name): no ticket.
+  const utf = await seed("UTF-8 handling for the GPT-4 export, nothing filed.");
   const rawKey = "c".repeat(64);
   const env: Record<string, string | undefined> = {
     ...process.env,
@@ -6108,7 +6109,7 @@ if (want("10h")) {
     const byFiled = s.find((x) => x.thought === filed), bySession = s.find((x) => x.thought === session);
     assert(s.length === 2 && byFiled?.key === "ticket:SMD-7" && byFiled.by === "metadata" && bySession?.key === "ticket:SMD-8" && bySession.by === "first_line" && s.every((x) => x.standing && x.judge === "subject:rules@r1"),
       `the ticket filed under, and the first line's: standing, under the rules' key (${JSON.stringify(s.map((x) => [x.key, x.by]))})`);
-    assert(!s.some((x) => x.thought === utf), "a first line's UTF-8 and JIRA-5, under no prefix the brain files tickets under, are no ticket: the thought is left to the model");
+    assert(!s.some((x) => x.thought === utf), "a first line's UTF-8 and GPT-4, denied prefixes, are no ticket: the thought is left to the model");
     assert(agent !== undefined && s.every((x) => x.fp === x.current && x.produced_by === "subject:rules@r1" && x.recipe?.deterministic === true && x.recipe?.rule === x.by && x.recipe?.rules_version === 1 && x.agent === agent.id),
       "…each with its lineage row: the text read, the rules' key and recipe, the worker's agent");
 
@@ -6162,6 +6163,11 @@ if (want("10h")) {
     const again = await sweep();
     assert(again.code === 1 && ownCalls === asked + 3 && tally(again) === "0 subject(s) recorded; 2 the model named nothing for, 1 answered not as JSON of the expected shape",
       `a second sweep asks only the three with no subject (exit ${again.code}, ${ownCalls - asked} asked: ${tally(again)})`);
+    // Named nothing, every one: exit 0 — the unread answer's 1 is that answer's, not a model's none (review pass 2).
+    garbledAnswers = false;
+    const allNamed = await sweep().finally(() => { garbledAnswers = true; });
+    assert(allNamed.code === 0 && tally(allNamed) === "0 subject(s) recorded; 3 the model named nothing for",
+      `a sweep whose every answer names nothing exits 0 (exit ${allNamed.code}: ${tally(allNamed)})`);
 
     // A moved text the model names the same: the facet kept, its lineage moved to the text read now.
     const relBefore = (await standingOf(release))!;
@@ -6184,6 +6190,9 @@ if (want("10h")) {
       `a policy that refuses every row: refused before any question, exit 2 (exit ${gated.code})`);
     const gatedRules = await sweep({ model: false }, gatedEnv);
     assert(gatedRules.code === 0, `…and --subjects rules, which sends nothing, runs under it (exit ${gatedRules.code})`);
+    const gatedDry = await sweep({ dryRun: true }, gatedEnv);
+    assert(gatedDry.code === 0 && /Nothing was written or asked\. A run would be refused: the egress gate refuses every row/.test(gatedDry.stdout) && ownCalls === asked,
+      `…and a dry run under it counts, and says a run would be refused (review pass 2) (exit ${gatedDry.code})`);
     // A policy that lets one row out: the others refused before their question and counted, exit 1, as the pass fails a refused row.
     const perRow = await sweep({}, { ...gatedEnv, OB1_EGRESS_ALLOW: "marker:garbled" });
     assert(perRow.code === 1 && ownCalls === asked + 1 && tally(perRow) === "0 subject(s) recorded; 1 answered not as JSON of the expected shape, 2 refused by the egress gate" && /refused by the egress gate: /.test(perRow.stderr),
@@ -6191,8 +6200,8 @@ if (want("10h")) {
     asked = ownCalls;
     judgeMode = "refuse";
     const refusedRun = await sweep().finally(() => { judgeMode = "answer"; });
-    assert(refusedRun.code === 2 && /The provider refused the request itself: .*401/.test(refusedRun.stderr) && ownCalls === asked + 1,
-      `the provider's refusal ends the sweep at the first question, exit 2 (exit ${refusedRun.code})`);
+    assert(refusedRun.code === 2 && /The provider refused the request itself: .*401/.test(refusedRun.stderr) && ownCalls === asked + 1 && /^ {2}0 thought\(s\) in /m.test(refusedRun.stdout),
+      `the provider's refusal ends the sweep at the first question, exit 2, the thought it ended at counted in no bucket nor among those finished (exit ${refusedRun.code}: ${refusedRun.stdout.trim().split("\n").slice(-1)[0]})`);
     asked = ownCalls;
     const restore = shortenPauses();
     judgeMode = "503";
@@ -6215,6 +6224,10 @@ if (want("10h")) {
     } finally {
       await sql`ALTER FUNCTION record_thought_subject_away(uuid, text, text, text, uuid, text, jsonb) RENAME TO record_thought_subject`;
     }
+    // A dry run counts as a run would: the two whose text moved under the same ticket are kept, not recorded (review pass 2).
+    const keepDry = await sweep({ dryRun: true });
+    assert(keepDry.code === 0 && /would: of 5 thought\(s\), record none by the rules, keep 2 found the same way at the text read now; ask stub-judge about 3\./.test(keepDry.stdout),
+      `a dry run counts a subject the door would keep as kept (exit ${keepDry.code}: ${keepDry.stdout.trim().split("\n").slice(-1)[0]})`);
 
     // A role without the door's grants (review pass 1: the sweep crashed on its first write, a question spent). Granted
     // the extraction role's groups but not structure, the sweep is refused before any question, exit 2, and the pass
@@ -6237,6 +6250,9 @@ if (want("10h")) {
         const roleSweep = await sweep({}, sEnv, sUrl);
         assert(roleSweep.code === 2 && /This role cannot write a thought's subject: record_thought_subject needs INSERT and UPDATE on thought_facets/.test(roleSweep.stderr) && ownCalls === asked,
           `a role without the structure group: the sweep refused before any question, exit 2 (exit ${roleSweep.code}, ${ownCalls - asked} asked: ${roleSweep.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
+        const roleDry = await sweep({ dryRun: true }, sEnv, sUrl);
+        assert(roleDry.code === 0 && /A run would be refused: this role cannot write a thought's subject\./.test(roleDry.stdout),
+          `…and a dry run under it counts, and says a run would be refused (exit ${roleDry.code})`);
         // A new ticket on its first line, so the door inserts a facet: the same subject kept would write no facet.
         await sql`SELECT update_thought(${session}::uuid, ${"SMD-10 session summary, as the role reads it."})`;
         const rolePass = await extractRun({}, sUrl, sEnv);

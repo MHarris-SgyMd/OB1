@@ -3027,10 +3027,10 @@ will do before it claims anything.
 records its own subject when a rule finds it: the ticket it is filed under
 (`metadata.ticket`, else `metadata.issue`, the fields node_state reads), else
 the first ticket on its first non-blank line. A ticket-shaped word there counts
-only under a prefix the brain files its tickets under (068's
-`ob1_ticket_head`), so `UTF-8` or `SHA-256` leaves the thought to the model;
-a brain that files none counts any word but a short list of encodings, hashes,
-protocols, standards and licences. It goes through migration 110's
+unless its prefix is on a fixed list of encodings, hashes, protocols,
+standards, licences, model names and dated periods, so `UTF-8`, `SHA-256` or
+`GPT-4` leaves the thought to the model, and a key is the same on every brain
+and every run. It goes through migration 110's
 `record_thought_subject` at the text the claim read, under the rules' key
 `subject:rules@r1`, and the pass asks no model for it. `--subjects` is the sweep
 for the rest (`db/subject-sweep.ts`): each thought with no standing subject at
@@ -5446,11 +5446,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3048 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1673 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1677 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1015 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 286 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 287 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 291 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database

@@ -19,19 +19,18 @@
  * pass, write each text's subject once, and a later write keeps or replaces an earlier one. `--subjects rules`
  * stops at the rules, for a brain whose judge model has not been measured on the question.
  *
- * A ticket-shaped word counts as a ticket under a prefix the brain files its tickets under (ticketPrefixes, read once
- * a run), so `UTF-8` on a first line leaves the thought to the model. A model answer naming nothing records nothing,
- * so the next sweep asks again; so do an answer that is not JSON with a subject, a timeout or the provider refusing
- * the thought's length, and a row the egress gate refuses, each counted. A rate limit, a server error or a lost
- * connection is paused for and retried (TRANSIENT_PAUSES_MS), then ends the sweep; any other refusal of the request
- * ends it, exit 2, as it ends the pass. A dry run reads on through a signal, as the pass's does: it writes nothing.
+ * A model answer naming nothing records nothing, so the next sweep asks again; so do an answer that is not JSON with
+ * a subject, a timeout or the provider refusing the thought's length, and a row the egress gate refuses, each
+ * counted. A rate limit, a server error or a lost connection is paused for and retried (TRANSIENT_PAUSES_MS), then
+ * ends the sweep; any other refusal of the request ends it, exit 2, as it ends the pass. A dry run writes and asks
+ * nothing, reads on through a signal as the pass's does, and names the refusals a run would meet.
  */
 
 import type { SQL } from "bun";
 import { ProviderError, resolveEmbedConfig, type EmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { actorKindOf } from "../server-portable/consolidate.ts";
-import { askOwnSubject, ruleSubject, SUBJECT_RULES_KEY, subjectModelKey, type SubjectBy, type TicketPrefixes } from "../server-portable/subject.ts";
+import { askOwnSubject, ruleSubject, SUBJECT_RULES_KEY, subjectModelKey, type SubjectBy } from "../server-portable/subject.ts";
 import { subjectRecipe, type Recipe } from "../server-portable/lineage.ts";
 import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, regateMessage, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { sleepUnless, STOPPED_EARLY, type PassStop } from "./lease.ts";
@@ -53,25 +52,14 @@ export async function recordSubject(sql: SQL, row: { id: string; fingerprint: st
   return r.r as SubjectWrite;
 }
 
-/**
- * The prefixes the brain files its tickets under: every issue key 068's ob1_ticket_head holds, by its letters
- * (subject.ts's TicketPrefixes). Empty when the brain files none, or the table cannot be read: a ticket-shaped word
- * then counts as a ticket unless it is one of NOT_TICKET_PREFIXES.
- */
-export async function ticketPrefixes(sql: SQL): Promise<Set<string>> {
-  try {
-    const rows = (await sql`SELECT DISTINCT substring(issue from '^([A-Z][A-Z0-9]+)-[0-9]+$') AS p FROM ob1_ticket_head WHERE issue ~ '^[A-Z][A-Z0-9]+-[0-9]+$'`) as { p: string }[];
-    return new Set(rows.map((r) => r.p));
-  } catch {
-    return new Set();
-  }
-}
-
 /** A database error's SQLSTATE. */
 const sqlState = (e: unknown): string | undefined => {
   const { errno, code } = (e ?? {}) as { errno?: unknown; code?: unknown };
   return typeof errno === "string" ? errno : typeof code === "string" ? code : undefined;
 };
+
+/** The line a database that stopped answering ends the sweep with. */
+const databaseDown = (e: unknown) => `\n  The database stopped answering (${String((e as Error)?.message ?? e).slice(0, 300)}): the sweep stops here; run it again.`;
 
 /**
  * What one sweep is asked: `model` false for the rules alone; `limit` 0 for no limit; `timeout` in seconds, per model
@@ -96,7 +84,11 @@ export interface SubjectSweepOptions {
 /** The thoughts with no standing subject at their current text, a page at a time in id order. */
 const PAGE = 100;
 
-type Candidate = { id: string; content: string; created_at: string | Date | null; metadata: Record<string, unknown> | null; fingerprint: string };
+/** A thought the sweep takes, with its standing subject's key, way and pass when it has one (at another text). */
+type Candidate = {
+  id: string; content: string; created_at: string | Date | null; metadata: Record<string, unknown> | null; fingerprint: string;
+  standing_key: string | null; standing_by: string | null; standing_judge: string | null;
+};
 
 /** The sweep, callable: the code the CLI exits with (the header's list). */
 export async function sweepSubjects(opts: SubjectSweepOptions): Promise<number> {
@@ -132,6 +124,11 @@ export async function sweepSubjects(opts: SubjectSweepOptions): Promise<number> 
   const sql = opts.sql ?? openSql(opts.url as string, { max: 2 });
   try {
     return await sweep(sql, cfg, { MODEL, DRY_RUN, LIMIT, env, url: opts.url ?? "", signal: opts.signal, onPass: opts.onPass, out, err });
+  } catch (e) {
+    // A database that stops answering before the pages, or between them, ends the sweep in words, not a trace (review pass 2).
+    if (!databaseUnavailable(e)) throw e;
+    err(databaseDown(e));
+    return 1;
   } finally {
     if (opts.sql == null) await sql.close().catch(() => {});
   }
@@ -144,6 +141,8 @@ async function sweep(
 ): Promise<number> {
   const { MODEL, DRY_RUN, LIMIT, env, out, err } = o;
   const judgeKey = subjectModelKey(cfg.judgeModel);
+  /** What a run would be refused, said by a dry run, which goes on to count (review pass 2). */
+  const wouldRefuse: string[] = [];
   out(`  subjects: the rules (${SUBJECT_RULES_KEY})${MODEL ? `, then ${cfg.judgeModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature} (${judgeKey})` : ", no model (--subjects rules)"}`);
   if (MODEL) {
     out(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
@@ -153,24 +152,24 @@ async function sweep(
       err(`\n  ${blanket} Or run --subjects rules, which asks no model.`);
       return 2;
     }
+    if (blanket) wouldRefuse.push("the egress gate refuses every row (the egress line above)");
   }
   const [{ door }] = (await sql`SELECT to_regprocedure(${DOOR}) IS NOT NULL AS door`) as { door: boolean }[];
   if (!door) {
     err("\n  record_thought_subject is missing: a thought's own subject is migration 110's. Apply it first:\n    cd db && bun migrate.ts --url …");
     return 2;
   }
-  if (!DRY_RUN) {
-    // The door's grants, asked before any model call: a role that cannot write a subject is refused here, not at its
-    // first write with a question already spent (review pass 1).
-    const [{ can }] = (await sql`
-      SELECT has_any_column_privilege('thought_facets', 'INSERT') AND has_any_column_privilege('thought_facets', 'UPDATE')
-         AND has_any_column_privilege('thoughts', 'UPDATE')
-         AND has_any_column_privilege('derivations', 'INSERT') AND has_any_column_privilege('derivations', 'UPDATE') AS can`) as { can: boolean }[];
-    if (!can) {
-      err(`\n  This role cannot write a thought's subject: record_thought_subject needs ${DOOR_GRANTS}. Grant them, or run the sweep as a role that holds them.`);
-      return 2;
-    }
+  // The door's grants, asked before any model call: a role that cannot write a subject is refused here, not at its
+  // first write with a question already spent (review pass 1). A dry run says it instead.
+  const [{ can }] = (await sql`
+    SELECT has_any_column_privilege('thought_facets', 'INSERT') AND has_any_column_privilege('thought_facets', 'UPDATE')
+       AND has_any_column_privilege('thoughts', 'UPDATE')
+       AND has_any_column_privilege('derivations', 'INSERT') AND has_any_column_privilege('derivations', 'UPDATE') AS can`) as { can: boolean }[];
+  if (!can && !DRY_RUN) {
+    err(`\n  This role cannot write a thought's subject: record_thought_subject needs ${DOOR_GRANTS}. Grant them, or run the sweep as a role that holds them.`);
+    return 2;
   }
+  if (!can) wouldRefuse.push("this role cannot write a thought's subject");
 
   let agentId: string | null = null;
   let actor: string | undefined;
@@ -210,9 +209,13 @@ async function sweep(
   }
   const todo = LIMIT ? Math.min(LIMIT, total) : total;
   out(`  ${total} thought(s) with no subject at their text${LIMIT ? `; this run takes at most ${LIMIT}` : ""}`);
-  const known: TicketPrefixes = await ticketPrefixes(sql);
 
+  /**
+   * `seen`: the thoughts finished, each in one of the buckets after it, so the summary's counts add up to it (review
+   * pass 2: a thought the sweep ended at was counted and in none). `taken`, for --limit, counts that one too.
+   */
   const n = { seen: 0, metadata: 0, first_line: 0, model: 0, kept: 0, named: 0, unread: 0, unanswered: 0, left: 0, stale: 0, gone: 0, refusedKey: 0, egress: 0 };
+  let taken = 0;
   let llmMs = 0;
   let calls = 0;
   /**
@@ -249,7 +252,7 @@ async function sweep(
       /** Whether a request was made (providerCall's gate refuses before any), and when its answer or error came: a pause after it is not the model's time. */
       let made = true, came = 0;
       try {
-        const a = await askOwnSubject(cfg, side, subject, hardStop.signal, known);
+        const a = await askOwnSubject(cfg, side, subject, hardStop.signal);
         came = Date.now();
         return { key: a.key, answer: a.answer };
       } catch (e) {
@@ -282,12 +285,14 @@ async function sweep(
     said[kind] = true;
   }
 
-  /** One thought: the rules, else the model; what the door answered, counted. False ends the sweep. */
+  /** One thought: the rules, else the model; what the door answered, counted. False ends the sweep, the thought unfinished. */
   async function one(row: Candidate): Promise<boolean> {
-    const found = ruleSubject(row, known);
+    const found = ruleSubject(row);
     let key: string, by: SubjectBy, judge: string, recipe: Recipe;
     if (found && DRY_RUN) {
-      n[found.by]++;
+      // The door keeps a subject found the same way by the same pass at a moved text: counted as a run would count it.
+      if (row.standing_key === found.key && row.standing_by === found.by && row.standing_judge === SUBJECT_RULES_KEY) n.kept++;
+      else n[found.by]++;
       return true;
     }
     if (found) {
@@ -351,7 +356,7 @@ async function sweep(
         return false;
       }
       if (databaseUnavailable(e)) {
-        endedBy = { code: 1, line: `\n  The database stopped answering (${(e as Error).message.slice(0, 300)}): the sweep stops here; run it again.` };
+        endedBy = { code: 1, line: databaseDown(e) };
         return false;
       }
       throw e;
@@ -374,18 +379,28 @@ async function sweep(
   let after = "00000000-0000-0000-0000-000000000000";
   try {
     pages: for (;;) {
-      const rows = (await sql`
-        SELECT t.id, t.content, t.created_at, t.metadata, COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)) AS fingerprint
-          FROM thoughts t
-         WHERE t.id > ${after}::uuid AND ${NO_SUBJECT_AT_TEXT}
-         ORDER BY t.id LIMIT ${PAGE}`) as Candidate[];
+      let rows: Candidate[];
+      try {
+        rows = (await sql`
+          SELECT t.id, t.content, t.created_at, t.metadata, COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)) AS fingerprint,
+                 s.payload->>'key' AS standing_key, s.payload->>'by' AS standing_by, s.payload->>'judge_key' AS standing_judge
+            FROM thoughts t
+            LEFT JOIN thought_facets s ON s.thought_id = t.id AND s.kind = 'subject' AND s.valid_until IS NULL
+           WHERE t.id > ${after}::uuid AND ${NO_SUBJECT_AT_TEXT}
+           ORDER BY t.id LIMIT ${PAGE}`) as Candidate[];
+      } catch (e) {
+        if (!databaseUnavailable(e)) throw e;
+        endedBy = { code: 1, line: databaseDown(e) };
+        break;
+      }
       if (rows.length === 0) break;
       for (const row of rows) {
         after = row.id;
-        if (stop.signal.aborted || (LIMIT && n.seen >= LIMIT)) break pages;
-        n.seen++;
+        if (stop.signal.aborted || (LIMIT && taken >= LIMIT)) break pages;
+        taken++;
         if (!(await one(row))) break pages;
-        if (Date.now() - reported >= 10_000) {
+        n.seen++;
+        if (!DRY_RUN && Date.now() - reported >= 10_000) {
           reported = Date.now();
           out(`  ${n.seen}/${todo}  ${n.metadata + n.first_line + n.model} recorded, ${n.named} named nothing${n.unanswered + n.unread ? `, ${n.unanswered + n.unread} unanswered or unread` : ""}`);
         }
@@ -399,8 +414,15 @@ async function sweep(
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
   const clauses = (parts: [number, string][]) => parts.filter(([k]) => k > 0).map(([k, s]) => `${k} ${s}`).join(", ");
   if (DRY_RUN) {
-    out(`\n  would: of ${n.seen} thought(s), record ${clauses([[n.metadata, "by the ticket each is filed under"], [n.first_line, "by the ticket on its first line"]]) || "none by the rules"}; ` +
-      (MODEL ? `ask ${cfg.judgeModel} about ${n.left}` : `leave ${n.left} for the judge model (--subjects without rules)`) + ". Nothing was written or asked.");
+    // Ended early (the database, at a page), it counted part of the thoughts: say why, not a would-line of a part.
+    if (endedBy) {
+      err(endedBy.line);
+      return endedBy.code;
+    }
+    out(`\n  would: of ${n.seen} thought(s), record ${clauses([[n.metadata, "by the ticket each is filed under"], [n.first_line, "by the ticket on its first line"]]) || "none by the rules"}` +
+      (n.kept ? `, keep ${n.kept} found the same way at the text read now` : "") + "; " +
+      (MODEL ? `ask ${cfg.judgeModel} about ${n.left}` : `leave ${n.left} for the judge model (--subjects without rules)`) + ". Nothing was written or asked." +
+      (wouldRefuse.length ? ` A run would be refused: ${wouldRefuse.join("; ")}.` : ""));
     return 0;
   }
   const recorded = n.metadata + n.first_line + n.model;

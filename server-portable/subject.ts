@@ -4,10 +4,10 @@
  *
  * A work thread is one subject's thoughts in capture order, and SMD-3116 defines evolves as a later segment of the
  * same work: a property of each thought's own subject, not of a pair (SMD-3299). The subject is found in this order:
- *   1. `metadata`: the ticket the thought is filed under, `metadata.ticket` else `metadata.issue` (node_state's
- *      ticket rule, 068), when it is a ticket id;
- *   2. `first_line`: the first ticket on the thought's first non-blank line, a ticket-shaped word under a prefix the
- *      brain files its tickets under (isTicket: `UTF-8` and `SHA-256` are none);
+ *   1. `metadata`: the ticket the thought is filed under, `metadata.ticket` else `metadata.issue` (the fields
+ *      node_state reads, 068), when it is a ticket id;
+ *   2. `first_line`: the first ticket on the thought's first non-blank line: a ticket-shaped word whose prefix is no
+ *      encoding, hash, standard, licence or the like (isTicket: `UTF-8` and `SHA-256` are none);
  *   3. `model`: the judge model, asked step 1 of the mediated-pair test about the thought alone (SMD-3299's round 4
  *      own question, version 2 of the test), its answer read into a key (subjectKey).
  * On SMD-3299's 275 canary thoughts, two blind raters agree on a ticket for 245. The two rules named one for 232 of
@@ -50,42 +50,39 @@ export function subjectKeyValid(key: string): boolean {
 }
 
 /**
- * Ticket-shaped words that are not tickets: encodings, hashes, ciphers, protocols, standards and licences, and `PR`,
- * which PR_NUMBER reads. Used when the brain files no tickets of its own; one that does names its prefixes instead.
+ * Ticket-shaped words that are not tickets, by their prefix: encodings, hashes, ciphers, protocols, standards,
+ * licences, model names and dated periods, and `PR`, which PR_NUMBER reads. A fixed list, so a thought's key is the
+ * same on every brain and every run: review pass 2 replaced pass 1's reading of the prefixes a brain files, which
+ * depended on what the brain held when the rule ran and left a team not yet synced split between ticket and phrase.
+ * On SMD-3299's canary thoughts every other prefix in a text was SMD (UTF 11, FSL 6, AGPL 3, RFC 1, README 1).
  */
-export const NOT_TICKET_PREFIXES: ReadonlySet<string> = new Set(["UTF", "SHA", "AES", "RSA", "TLS", "SSL", "HTTP", "ISO", "RFC", "IEEE", "CVE", "CWE", "GPL", "LGPL", "AGPL", "FSL", "BSD", "MPL", "CC", "ES", "PR", "README"]);
+export const NOT_TICKET_PREFIXES: ReadonlySet<string> = new Set([
+  "UTF", "SHA", "AES", "RSA", "TLS", "SSL", "HTTP", "ISO", "RFC", "IEEE", "CVE", "CWE", "WCAG",
+  "GPL", "LGPL", "AGPL", "FSL", "BSD", "MPL", "CC", "ES", "GPT", "COVID", "Q1", "Q2", "Q3", "Q4", "H1", "H2", "FY", "PR", "README",
+]);
 
-/**
- * Which ticket-shaped words are tickets: the prefixes the brain files its tickets under (068's ob1_ticket_head, read
- * by db/subject-sweep.ts's ticketPrefixes), when it has any. With none, or none read, any word but the
- * NOT_TICKET_PREFIXES: `UTF-8` or `SHA-256` on a first line is no ticket, and the model is asked instead.
- */
-export type TicketPrefixes = ReadonlySet<string>;
-
-/** Whether a ticket-shaped word is a ticket under `known`, and short enough for 110's key. */
-export function isTicket(id: string, known?: TicketPrefixes): boolean {
-  if (!TICKET_ID.test(id) || !subjectKeyValid(`ticket:${id}`)) return false;
-  const prefix = id.slice(0, id.indexOf("-"));
-  return known !== undefined && known.size > 0 ? known.has(prefix) : !NOT_TICKET_PREFIXES.has(prefix);
+/** Whether a ticket-shaped word is a ticket: its prefix not among NOT_TICKET_PREFIXES, and short enough for 110's key. */
+export function isTicket(id: string): boolean {
+  return TICKET_ID.test(id) && subjectKeyValid(`ticket:${id}`) && !NOT_TICKET_PREFIXES.has(id.slice(0, id.indexOf("-")));
 }
 
-/** The first ticket-shaped word in a text that is a ticket under `known`, or null. */
-function ticketIn(text: string, known?: TicketPrefixes): string | null {
-  for (const m of text.matchAll(TICKETS_IN_TEXT)) if (isTicket(m[1], known)) return m[1];
+/** The first ticket-shaped word in a text that is a ticket (isTicket), or null. */
+function ticketIn(text: string): string | null {
+  for (const m of text.matchAll(TICKETS_IN_TEXT)) if (isTicket(m[1])) return m[1];
   return null;
 }
 
 /**
- * A model's answer as a key, or null when it names nothing: the first ticket in it (isTicket under `known`), else a
- * pull request's number, else a release's version, else the answer as a phrase. A ticket comes first because a
- * thread is the ticket's: a PR named beside its ticket is one step of that ticket's work. A phrase is the answer
- * lower-cased, every run of space, control or format characters one space, an upper-case letter lower-casing leaves
- * dropped, and at most 200 code points, cut at a word. Read whole: the answer kept on a recipe is cut, not this.
+ * A model's answer as a key, or null when it names nothing: the first ticket in it (isTicket), else a pull request's
+ * number, else a release's version, else the answer as a phrase. A ticket comes first because a thread is the
+ * ticket's: a PR named beside its ticket is one step of that ticket's work. A phrase is the answer lower-cased, every
+ * run of space, control or format characters one space, an upper-case letter lower-casing leaves dropped, and at most
+ * 200 code points, cut at a word. Read whole: the answer kept on a recipe is cut, not this.
  */
-export function subjectKey(answer: string, known?: TicketPrefixes): string | null {
+export function subjectKey(answer: string): string | null {
   const text = oneLine(answer);
   if (!text) return null;
-  const ticket = ticketIn(text, known);
+  const ticket = ticketIn(text);
   if (ticket) return `ticket:${ticket}`;
   const pr = PR_NUMBER.exec(text);
   if (pr) return `pr:${String(Number(pr[1]))}`;
@@ -106,7 +103,7 @@ export function subjectKey(answer: string, known?: TicketPrefixes): string | nul
 /**
  * The ticket a thought is filed under: `metadata.ticket`, else `metadata.issue`, the first that is a ticket id short
  * enough for 110's key. node_state reads the same two fields (068), though its coalesce takes `ticket` whatever it
- * holds. A filed ticket is the brain's own, so no prefix rule applies.
+ * holds. A filed ticket is the brain's own, so the denied prefixes do not apply.
  */
 export function metadataTicket(metadata: Record<string, unknown> | null | undefined): string | null {
   for (const k of ["ticket", "issue"]) {
@@ -116,17 +113,17 @@ export function metadataTicket(metadata: Record<string, unknown> | null | undefi
   return null;
 }
 
-/** The first ticket on a thought's first non-blank line (isTicket under `known`), or null. */
-export function firstLineTicket(content: string, known?: TicketPrefixes): string | null {
+/** The first ticket on a thought's first non-blank line (isTicket), or null. */
+export function firstLineTicket(content: string): string | null {
   const line = content.split(LINE_BREAK).find((l) => l.trim() !== "");
-  return line === undefined ? null : ticketIn(line, known);
+  return line === undefined ? null : ticketIn(line);
 }
 
 /** The subject the two rules find, in their order, or null for the model to find. */
-export function ruleSubject(row: { content: string; metadata?: Record<string, unknown> | null }, known?: TicketPrefixes): { key: string; by: Exclude<SubjectBy, "model"> } | null {
+export function ruleSubject(row: { content: string; metadata?: Record<string, unknown> | null }): { key: string; by: Exclude<SubjectBy, "model"> } | null {
   const filed = metadataTicket(row.metadata);
   if (filed) return { key: `ticket:${filed}`, by: "metadata" };
-  const first = firstLineTicket(row.content, known);
+  const first = firstLineTicket(row.content);
   return first ? { key: `ticket:${first}`, by: "first_line" } : null;
 }
 
@@ -180,6 +177,8 @@ export const subjectPrompt = (): string => [OWN_LEAD, ownRules(), OWN_HEAD, OWN_
 /** The answer's subject, one line and at most `max` code points (round 4's 200); "" for none, null when the answer gives no subject string. */
 export function ownSubjectOf(raw: string, max = 200): string | null {
   const o = jsonObject(raw);
+  // A null subject is the model naming none, as "" is (review pass 2): an answer of the expected shape.
+  if (o && o.subject === null) return "";
   if (!o || typeof o.subject !== "string") return null;
   return cutByCodePoint(oneLine(o.subject), max);
 }
@@ -189,7 +188,11 @@ const SUBJECT_READ_MAX = 2000;
 
 // ── The pass ──────────────────────────────────────────────────────────────────
 
-/** Bumped when the model's question or the reading of its answer changes: a new pass key, so the sweep can tell. */
+/**
+ * Bumped when the model's question or the reading of its answer changes: a new pass key, which a subject's facet and
+ * lineage name. The sweep takes only thoughts with no standing subject at their text, so a bump re-asks no standing
+ * subject: re-deriving those under a new key is rebuild_derived's arm (SMD-3306 PR 3).
+ */
 export const SUBJECT_PROMPT_VERSION = 1;
 /** Bumped when a rule changes. */
 export const SUBJECT_RULES_VERSION = 1;
@@ -203,14 +206,14 @@ export const subjectModelKey = (model: string): string => `${SUBJECT_KEY_PREFIX}
  * The judge model's own subject for one thought: one call at the chat endpoint, as decide mode's writer is asked,
  * through providerCall, which refuses before the request when the egress gate says the row may not leave (kind
  * `egress`) and bounds it by `cfg.timeoutMs`. `answer` is the subject at most 200 code points, for a recipe, null when
- * the answer gave no subject string; `key` is read from the subject whole (subjectKey under `known`), null when it
- * named nothing a key holds.
+ * the answer gave no subject string; `key` is read from the subject whole (subjectKey), null when it named nothing a
+ * key holds.
  */
-export async function askOwnSubject(cfg: EmbedConfig, side: PairSide, subject: EgressSubject, signal?: AbortSignal, known?: TicketPrefixes): Promise<{ raw: string; answer: string | null; key: string | null }> {
+export async function askOwnSubject(cfg: EmbedConfig, side: PairSide, subject: EgressSubject, signal?: AbortSignal): Promise<{ raw: string; answer: string | null; key: string | null }> {
   const d = await providerCall<{ choices?: { message?: { content?: string } }[] }>(cfg, "/chat/completions", {
     model: cfg.judgeModel, response_format: { type: "json_object" }, temperature: cfg.metadataTemperature, ...cfg.metadataReasoning, messages: ownSubjectMessages(side),
   }, subject, signal);
   const raw = d?.choices?.[0]?.message?.content ?? "";
   const whole = ownSubjectOf(raw, SUBJECT_READ_MAX);
-  return { raw, answer: whole === null ? null : cutByCodePoint(whole, 200), key: whole === null ? null : subjectKey(whole, known) };
+  return { raw, answer: whole === null ? null : cutByCodePoint(whole, 200), key: whole === null ? null : subjectKey(whole) };
 }
