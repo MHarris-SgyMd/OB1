@@ -2157,7 +2157,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                 const sendBack = (why: string, suspect: boolean): "outage" | "thought" => {
                   if (outage.begin(why, suspect ? b.thought_id : undefined) === "thought") return "thought";
                   outageSubject ??= rowSubject;
-                  err(`  ${workerId}: the embedding provider is not answering (${why.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
+                  const state = verdict === "backpressure" ? "is holding calls back" : "is not answering";
+                  err(`  ${workerId}: the embedding provider ${state} (${why.slice(0, 160)}) — ${b.thought_id} goes back to the pool unrecorded, and the follower waits for the provider`);
                   return "outage";
                 };
                 if (verdict === "db-end") throw e;
@@ -2372,13 +2373,13 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       throw e;
     }
   };
+  /** The database or the provider answered after a wait: the next poll runs at once, not after an interval. */
+  let pollNow = false;
   /**
    * After a pass a worker halted on the provider's outage: the row says so —
    * failed, then waiting mid-pass — and the follower probes until the provider
    * answers, a stop ending the wait (extract-entities.ts's waitForProvider).
    */
-  /** The database or the provider answered after a wait: the next poll runs at once, not after an interval. */
-  let pollNow = false;
   const waitForProvider = async (): Promise<void> => {
     if (!FOLLOW || outage.reason === null || stopping || configError !== null) return;
     await stamper?.stamp("failed");

@@ -4175,7 +4175,13 @@ if (want("9f")) {
         ac.abort();
         return await Promise.race([done, Bun.sleep(15_000).then(() => "still running")]);
       };
-      return { lines, done, saw, stop, idle };
+      /** Its end, when it ends of itself within `ms`; else stopped, and null. */
+      const ended = async (ms = 15_000) => {
+        const end = await Promise.race([done, Bun.sleep(ms).then(() => null)]);
+        if (end === null) await stop();
+        return end;
+      };
+      return { lines, done, saw, stop, idle, ended };
     };
     /** The probe's schedule as each wait's line says it: the first wait, in seconds. */
     const waitsOf = (lines: string[]) => lines.map((l) => /the follower calls stub-embed at .* after ([\d.]+) s and then twice as long/.exec(l)?.[1]).filter((w): w is string => w !== undefined).map(Number);
@@ -4248,9 +4254,8 @@ if (want("9f")) {
     await keyed.idle();
     keyRefused401 = true;
     const keyThought = await newThought("a thought the refused key leaves pending");
-    const keyEnd = await Promise.race([keyed.done, Bun.sleep(15_000).then(() => null)]);
+    const keyEnd = await keyed.ended();
     keyRefused401 = false;
-    if (keyEnd === null) await keyed.stop();
     const keyRow = await row();
     const keyClaim = await claimOf(keyThought);
     assert(keyEnd === "exit 2" && keyRow?.ended === true && keyRow.refused === "provider" && keyClaim?.status === "pending" && keyed.lines.some((l) => /The embedding provider refused the request itself: Embeddings request .* 401/.test(l)),
@@ -4381,7 +4386,7 @@ if (want("9f")) {
     try {
       await timedWrite.idle();
       writeTimeout = await newThought("a zz-write-timeout thought whose write runs past the timeout");
-      timedWriteEnd = await Promise.race([timedWrite.done, Bun.sleep(15_000).then(() => null)]);
+      timedWriteEnd = await timedWrite.ended();
     } finally {
       await dropWriteError();
       if (timedWriteEnd === null) await timedWrite.stop();
@@ -4400,9 +4405,8 @@ if (want("9f")) {
     const revokedWaiting = await revoked.saw(/goes back to the pool unrecorded, and the follower waits for the provider/);
     keyRefused401 = true;
     providerDown503 = false;
-    const revokedEnd = await Promise.race([revoked.done, Bun.sleep(15_000).then(() => null)]);
+    const revokedEnd = await revoked.ended();
     keyRefused401 = false;
-    if (revokedEnd === null) await revoked.stop();
     const revokedRow = await row();
     const revokedSaid = revoked.lines.some((l) => /answers now, refusing the request itself/.test(l));
     const revokedResumed = revoked.lines.some((l) => /answers again after/.test(l));
@@ -4438,7 +4442,7 @@ if (want("9f")) {
           IF EXISTS (SELECT 1 FROM zz_pooled WHERE work_type LIKE 'reembed:%') THEN PERFORM pg_sleep(3); END IF; RETURN NULL; END $$;
         CREATE TRIGGER zz_reembed_slow_pool AFTER INSERT ON thought_work_claims REFERENCING NEW TABLE AS zz_pooled FOR EACH STATEMENT EXECUTE FUNCTION zz_reembed_slow_pool()`);
       await newThought("a thought a slow pool meets");
-      timedEnd = await Promise.race([timed.done, Bun.sleep(15_000).then(() => null)]);
+      timedEnd = await timed.ended();
     } finally {
       await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_slow_pool ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_slow_pool()`);
       if (timedEnd === null) await timed.stop();
