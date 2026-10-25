@@ -269,6 +269,58 @@ Each round's candidates, prompts and bar were fixed on SMD-3203 before any model
   - Row 2's distinct waits for a state step that meets its bar.
 - **The cost, measured:** the writer's link step alone takes a median 14.3 s a pair. Decide version 4 adds it to each pair it checks.
 
+### Version 4's cap on the canary (2026-10-24)
+
+PR 3 re-judged the canary under `@p4d4` and sampled the link step's answers for two blind raters, against bars fixed on SMD-3203 before the window opened (comment 0b2520e3, corrected in place before any run).
+
+- **The window:** 2026-10-23 18:27Z to 2026-10-24 02:54Z (8 h 27 min), over the pool's 1,900 thoughts. Sleep wrote every verdict to its dump: 5,232 pairs.
+- **The mechanics held.**
+  - No capped pair holds a pending proposal or names one.
+  - No capped pair holds a standing evolves or duplicate.
+  - Every outdates at the floor was asked the link first, and every stored evolves has a D or N link.
+- **The link step:** 1,183 calls (104 first, 1,079 after), answering D 417, F 588, H 61 and N 117. It capped 649: 54.9% of the pairs it was asked about, 12.4% of all judged. At its median 14.3 s a call, that is about 4.7 h of the 27B in the window.
+- **What stands:** under `@p4d4`, 2,410 distinct, 1,562 related, 461 evolves and 1 duplicate, with 3 proposals pending. Under `@p4d3` it was 2,383, 923, 1,050 and 1, with 94 pending. The candidate rule never re-judges a pair holding a pending proposal, so those 94 stand as `@p4d3` left them; SMD-3284 compares the two keys.
+- **The sample:** 40 capped and 40 uncapped pairs, each 10 asked first and 30 after, weighted by their groups' populations (capped: 30 first, 619 after; uncapped: 74 first, 460 after). Two blind raters applied the test's version 2.
+
+| Bar | Measured | |
+|---|---|---|
+| Q0: the raters agree on mediated or not, κ ≥ 0.6 | κ 0.92, 77 of 80 | met |
+| Q1: the cap's precision ≥ 0.7 | 0.686 (first 4 of 10, after 21 of 30) | missed |
+| Q2: the miss rate ≤ 0.3 | 0.297 (first 0 of 8, after 10 of 29) | met |
+
+- **The errors have two shapes** (SMD-3299's analysis; the pairs' text stays local).
+  - **15 capped pairs both raters call direct.** 12 were linked F: in 9 the shared thing is one thought's own deliverable (a script, a file, a migration, a PR) that the other builds on, changes or retires, the test's first rung; in 3 the other thought's own subject was taken for a third. The other 3 were linked H: a follow-up that changes the other's work, read as a passing mention.
+  - **10 uncapped pairs both raters call mediated.** 7 were linked N: in 5 both thoughts name the same ticket, component or endpoint, and the answer called it a general area; in 2, one names the other's subject in passing. The other 3 were linked D on a passing mention.
+  - The 3 pairs the raters split on, all linked N, turn on whether running or applying the other's deliverable is D. That is the test's wording, not the link step's.
+  - Not truncation: each side is cut to 6,000 characters, and in 6 of the 7 N misses the shared subject lies inside the cut on both sides.
+- **The maintainer's choice (2026-10-24): refine the link step** (SMD-3299). Version 4 keeps running on the canary, stable stays on v1.9.0, and a version 5 is re-measured on a fresh sample.
+
+### The link step asked another way (2026-10-24)
+
+Round 3 asks the same test's link step two other ways, the test's text unchanged, and scores the cap alone: an H or F link caps a pair, as does an answer read as none. Candidates, prompts and bars were fixed on SMD-3203 before any pair was asked (comment be3a4672):
+
+- **control:** version 4's own question, asked again;
+- **walk:** one call whose answer walks the test in order: each thought's own subject and deliverable, the names both share and whose each is, then D, H and F as yes or no. The link is the first yes;
+- **names:** the walk, with up to ten names both texts contain listed by a plain match, each where it first appears.
+
+Two sets. Set 1 is item 3's 79 agreed pairs, held out from the error analysis. Set 2 is PR 3's 77, weighted to the canary's population by version 4's strata; it is the analysis's source, so a pass there is necessary, not sufficient. A candidate qualifies if, on set 1, κ ≥ 0.6 and at least the control's, precision ≥ 0.7 and miss ≤ 0.3; and, on set 2, precision ≥ 0.7 and miss ≤ 0.3.
+
+| Ask | Set 1: κ | precision | miss | Set 2: precision | miss | Median per pair (sets 1, 2) | |
+|---|---|---|---|---|---|---|---|
+| control | 0.666 | 0.826 | 0.152 | 0.686 | 0.297 | 11.6 s, 11.4 s | the floor |
+| walk | 0.523 | 0.712 | 0.050 | **0.720** | **0.000** | 18.7 s, 17.6 s | misses set 1 |
+| names | 0.582 | 0.755 | 0.115 | 0.697 | 0.063 | 18.0 s, 18.4 s | misses both |
+
+- **Neither candidate qualifies,** so version 5 is not built (comment 2a0e090a).
+- **The link step is deterministic.** Asked again, the control gives the canary's recorded link on all 77 of set 2's pairs, so every difference here is the prompt's.
+- **Both candidates trade wrong caps for misses** (post hoc, pair by pair against the control). The misses they fix are mostly N turned F: listing the shared names finds real third subjects. But they call D less often, the opposite of their aim. On set 1 the walk fixed none of the control's 8 wrong caps, and made 9 new ones from pairs the control rightly called D.
+- **The walk's own answers show why.** Of the 12 wrong caps it kept on set 2, 6 name the shared file, table or script as one thought's deliverable, or say one thought made it and the other reads or changes it, and still call it a third subject. In 1 more, the reason says the later thought works on the other's deliverable, and the answer is H. Asking D first does not change the answer: the failure is consistency, not reading.
+- **The maintainer's choice (2026-10-24): narrower questions,** as round 4 (SMD-3299).
+  1. Each thought is asked alone for its own subject and deliverables.
+  2. A deterministic check finds whether either thought names the other's.
+  3. On a hit, one narrow question: does the thought work on what it names (D), or only name it (H)?
+  4. With no hit, F or N.
+
 ### What each subject has today (main, 2026-10-22)
 
 | Subject | Identity | State at a past time | Where |
@@ -292,7 +344,8 @@ Each round's candidates, prompts and bar were fixed on SMD-3203 before any model
    - **Done:** its first step. Two raters applying the bars' words had agreed little better than chance on which pairs are mediated, so item 3 first fixed the mediated-pair test and measured how well raters agree on it, against a bar fixed before they labelled. The bar was met (κ 0.97), and the maintainer mapped rows 2 and 3 onto the test (amended 2026-10-22).
    - **Done, too:** how the pass could ask the test, measured against the raters' labels in two rounds (amended 2026-10-22, PR 2a). The writer's link step finds mediated pairs; no state step meets the bars for F-state.
    - **Done, then:** decide version 4 builds the cap on the writer's link step, as the maintainer chose (amended 2026-10-22, PR 2b).
-   - **Next:** a canary re-judge under `@p4d4`.
+   - **Done:** the canary re-judge under `@p4d4`. The cap's precision missed its bar, 0.686 against 0.7, and two link prompts measured offline did not qualify either (amended 2026-10-24, SMD-3299).
+   - **Next:** round 4, the link step as narrower questions, then decide version 5 and a canary re-judge if it qualifies (SMD-3299).
    - **SMD-3203's last Verify item** also waits on a subject with a timeline beyond tickets (steps 3 and 4). In it, a planted thought reads as stale once a non-ticket subject's state moves, and no pair whose thoughts share only that subject's state is joined.
 3. **SMD-3207, the spike:**
    - read the code artifacts a note names;
