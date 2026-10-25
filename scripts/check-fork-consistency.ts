@@ -7873,14 +7873,14 @@ const PLUGIN_PAGE_REACH = /\b(?:fetch|process|require|globalThis|Bun|locals)\b|\
  * A plugin's GUI pages against the GUI's routes for them, each problem where it
  * is found. `declared`: each plugin's page paths, as its manifest's `gui.pages`
  * names them; `files`: every file under PLUGIN_ROUTES, by its path there, and
- * its text. Each declared page has its directory, `<name><path>/`, holding a
- * `+page.svelte` and a `+page.server.ts` and nothing else, and none is a page
- * no manifest declares. The load awaits pluginAccess — the page's 404 unless
- * the registry lists it to the key, then the plugin's operations — and imports
- * nothing else that reaches the brain, so no load or action calls the plugin
- * ungated (review pass 2: a layout's gate is skipped on a __data.json request
- * that does not ask for it; pass 1: a page's own gate, read as text, could be
- * left out). Pure.
+ * its text. Each declared path is a page path (said as such first); each
+ * declared page has its directory, `<name><path>/`, holding a `+page.svelte`
+ * and a `+page.server.ts` and nothing else, and none is a page no manifest
+ * declares. The server file awaits pluginAccess(event) — the page's 404
+ * unless the registry lists its route's page to the key, then the plugin's
+ * operations — and reaches the brain by nothing else, so no load or action
+ * calls the plugin ungated. Per page, not a layout: a layout's load is skipped
+ * on a __data.json request that does not ask for it. Pure.
  */
 function pluginPageProblems(declared: Record<string, string[]>, files: Record<string, string>): { where: string; what: string }[] {
   const problems: { where: string; what: string }[] = [];

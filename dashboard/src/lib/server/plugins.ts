@@ -7,10 +7,11 @@
 // this build has its route. A page reaches its plugin through pluginAccess
 // alone, which answers 404 unless the registry lists the page to this key — a
 // disabled plugin's page is no page at all — and only then hands back the
-// plugin's operations, so a load or an action cannot call one ungated (review
-// pass 2: a layout's gate is skipped on a __data.json request that does not
-// ask for it, and loads run side by side). Check 31 holds a plugin page's
-// server file to awaiting it and to nothing else that reaches the brain.
+// plugin's operations, so a load or an action cannot call one ungated. The
+// gate is each page's own, not a layout's: a layout's load is skipped on a
+// __data.json request that does not ask for it, and loads run side by side.
+// Check 31 holds a plugin page's server file to awaiting it and to nothing
+// else that reaches the brain.
 
 import { error, isHttpError, isRedirect, type RequestEvent } from '@sveltejs/kit';
 import { base } from '$app/paths';
@@ -43,7 +44,7 @@ function listed(body: unknown): ListedPlugin[] {
 		(p): p is ListedPlugin =>
 			typeof p === 'object' && p !== null && text(p.name) && text(p.title) && text(p.description) &&
 			Array.isArray(p.operations) && p.operations.every(text) &&
-			Array.isArray(p.pages) && p.pages.every((g: unknown) => typeof g === 'object' && g !== null && text((g as ListedPlugin['pages'][number]).path) && text((g as ListedPlugin['pages'][number]).label)),
+			Array.isArray(p.pages) && p.pages.every((g: { path?: unknown; label?: unknown } | null) => g !== null && typeof g === 'object' && text(g.path) && text(g.label)),
 	);
 }
 
@@ -52,10 +53,10 @@ const NAV_WAIT_MS = 2000;
 
 /**
  * The nav's plugin entries: each page the registry lists that this build
- * renders. The nav is no page's to fail or to hold up, so a registry the core
- * will not read, or has not read within NAV_WAIT_MS, leaves it without them
- * (review pass 3: a stalled read held every page, a 404 included, for the
- * client's 30 s); a key the core no longer takes still goes to /signin.
+ * renders. The nav is no page's to fail or to hold up — a 404 included, which
+ * reads nothing else — so a registry the core will not read, or has not read
+ * within NAV_WAIT_MS, leaves it without them; a key the core no longer takes
+ * still goes to /signin.
  */
 export async function pluginNav(event: RequestEvent): Promise<{ href: string; label: string }[]> {
 	let timer: ReturnType<typeof setTimeout> | undefined;

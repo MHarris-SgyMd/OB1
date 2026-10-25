@@ -122,10 +122,9 @@ enabled plugin of which the key may call an operation, so never to a capture-onl
 this build has its route. The load and any action start with `pluginAccess` (in
 `src/lib/server/plugins.ts`): the page's 404 unless the registry lists it to the key, a
 disabled plugin's included, and then the plugin's own operations under the visitor's key,
-which is the only way the page reaches them. Check 31 holds each page a manifest declares
-to its route here, each route here to a declared page, and each page's server file to
-awaiting `pluginAccess`, with nothing else that reaches the brain (no other server module,
-`fetch`, `locals`, `import.meta` or `import()`). The nav reads the registry again at every
+which is the only way the page reaches them. Check 31 holds the routes here to the
+manifests and to that rule ([plugins/README.md](../plugins/README.md), "The rules a plugin is
+held to"). The nav reads the registry again at every
 navigation — one read a page, waiting 2 s at most before it renders without the plugins'
 pages — so a plugin turned on or off with the GUI left running shows at the next page;
 recreating `app`, as the example's README does, signs everyone out instead.

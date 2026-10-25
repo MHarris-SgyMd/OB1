@@ -44,8 +44,8 @@ export async function read<K extends CallableOperation>(event: RequestEvent, ses
 }
 
 /**
- * A plugin operation's read (SMD-2280 PR 3), by its tool and its route as the
- * registry names them (`GET /v1/plugins/<name>/…`), under the visitor's key:
+ * A plugin operation's read (SMD-2280 PR 3), by its tool and its route as its
+ * manifest names them (`GET /v1/plugins/<name>/…`), under the visitor's key:
  * read's answer, read's refusals.
  */
 export async function readPlugin(event: RequestEvent, session: Session, tool: string, method: Method, path: string, input: Record<string, unknown>): Promise<unknown> {
