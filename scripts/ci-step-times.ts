@@ -15,17 +15,19 @@
  *
  * Options:
  *   --job <name>          the job, by its exact name (required unless --self-check)
- *   --step <regex>        steps whose name matches, case-insensitive; default every step that took a second or more in
- *                         some run (chosen by name across the runs, so each reads every run it ran in)
+ *   --step <regex>        steps whose name matches, case-insensitive; default every step of a second or more in
+ *                         some run (chosen by name across the runs, so each reads every run it ran in; a step's name
+ *                         is taken to be unique in its job, as GitHub's are today)
  *   --workflow <name>     default "Fork Checks"
  *   --branch <name>       default main
- *   --days <n>            runs created in the last n × 24 hours, default 7
- *   --runs <id,id,…>      these runs instead of a window (with --branch, --days or --workflow refused: they would be ignored)
+ *   --days <n>            runs created in the last n × 24 hours, default 7, at most 400 (GitHub keeps a run 400 days)
+ *   --runs <id,id,…>      these runs instead of a window (with --branch, --days or --workflow refused: they would
+ *                         be ignored)
  *   --repo <owner/name>   default gh's own (the repository of the current directory)
  *
- * Exits 0 with the report; 1 when `gh` cannot list the runs, no run can be read, or no run read has the job (the job
- * names the runs do have are listed); 2 for a refused option. A re-run shows its latest attempt, marked. Needs `gh`
- * signed in. Reads only; writes nothing.
+ * Exits 0 with the report; 1 when `gh` is missing or cannot list the runs, there are none, none can be read, or no
+ * run read has the job (the job names the runs do have are listed); 2 for a refused option. A re-run shows its latest
+ * attempt, marked. Needs `gh` signed in. Reads only; writes nothing.
  */
 
 const KNOWN: Record<string, "value" | "flag"> = {
@@ -55,9 +57,10 @@ export function parseArgs(argv: string[]): Opts {
 }
 
 type Step = { name: string; startedAt?: string | null; completedAt?: string | null; conclusion?: string | null };
+type Job = { name: string; conclusion?: string | null; startedAt?: string | null; completedAt?: string | null; steps?: Step[] };
+
 /** The most runs one `gh run list` returns here; a window that fills it is said to be cut short. */
 const LIST_LIMIT = 500;
-type Job = { name: string; conclusion?: string | null; startedAt?: string | null; completedAt?: string | null; steps?: Step[] };
 
 /** Seconds from one ISO time to another, or null when either is missing or the order is wrong (a step never run). */
 export function seconds(from?: string | null, to?: string | null): number | null {
@@ -84,6 +87,23 @@ export function pickSteps(rows: { steps: { name: string; s: number }[] }[], step
   const longest = new Map<string, number>();
   for (const row of rows) for (const st of row.steps) longest.set(st.name, Math.max(longest.get(st.name) ?? 0, st.s));
   return new Set([...longest].filter(([name, s]) => (step ? step.test(name) : s >= 1)).map(([name]) => name));
+}
+
+/**
+ * The figures' inputs from the runs read: the steps chosen (from every run with the job, failed ones included, so a
+ * failed run shows its steps) and the job's and each chosen step's seconds over the runs where the job succeeded.
+ */
+export function figures(runs: { job?: Job }[], step?: RegExp): { names: Set<string>; jobTimes: number[]; stepTimes: Map<string, number[]> } {
+  const rows = runs.filter((r) => r.job).map((r) => ({ conclusion: r.job!.conclusion, row: jobRow(r.job!) }));
+  const names = pickSteps(rows.map((r) => r.row), step);
+  const jobTimes: number[] = [];
+  const stepTimes = new Map<string, number[]>([...names].map((n) => [n, []]));
+  for (const { conclusion, row } of rows) {
+    if (conclusion !== "success") continue;
+    if (row.job !== null) jobTimes.push(row.job);
+    for (const st of row.steps) stepTimes.get(st.name)?.push(st.s);
+  }
+  return { names, jobTimes, stepTimes };
 }
 
 /** The count, median, p90 (nearest rank), min and max of a list of seconds; null for an empty one. */
@@ -115,7 +135,7 @@ async function gh(args: string[]): Promise<{ ok: true; json: unknown } | { ok: f
     try {
       proc = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe" });
     } catch (e) {
-      refuse(`cannot run gh: ${(e as Error).message}`);
+      fail(`cannot run gh: ${(e as Error).message}`);
     }
     const [out, err, code] = await Promise.all([new Response(proc.stdout as ReadableStream).text(), new Response(proc.stderr as ReadableStream).text(), proc.exited]);
     if (code === 0) {
@@ -169,6 +189,11 @@ function selfCheck(): number {
   const picked = pickSteps(rows);
   ok(picked.has("Set up job") && picked.has("Exactly a second") && !picked.has("Sometimes"), "no pattern: steps of a second or more in some run, chosen by name — so a step under a second in one run still reads that run");
   ok([...pickSteps(rows, /rest core/i)].join() === "The REST core's routes and authorization", "a pattern picks its steps by name, case-insensitive");
+  const failedRun: Job = { name: "j", conclusion: "failure", startedAt: at(0), completedAt: at(30), steps: [{ name: "The step that failed", startedAt: at(0), completedAt: at(4) }] };
+  const goodRun: Job = { name: "j", conclusion: "success", startedAt: at(0), completedAt: at(20), steps: [{ name: "Build", startedAt: at(0), completedAt: at(5) }] };
+  const f = figures([{ job: failedRun }, { job: goodRun }, {}]);
+  ok(f.names.has("The step that failed") && f.stepTimes.get("The step that failed")!.length === 0 && f.jobTimes.join() === "20" && f.stepTimes.get("Build")!.join() === "5",
+    "a failed run's step is chosen, so the run shows it, and counted in no figure; the job's time over the successful run alone");
   const odd = stats([43, 16, 44]), even = stats([16, 17, 18, 44]);
   ok(odd?.median === 43 && odd.min === 16 && odd.max === 44 && even?.median === 17.5, "the median of an odd and an even list");
   const ten = stats(Array.from({ length: 10 }, (_, i) => i + 1)), eleven = stats(Array.from({ length: 11 }, (_, i) => i + 1));
@@ -184,7 +209,7 @@ if (import.meta.main) {
   const jobName = opts["--job"];
   if (typeof jobName !== "string") refuse("--job <name> is required (the job's exact name, e.g. \"Portable server\")");
   const days = Number(opts["--days"] ?? 7);
-  if (!Number.isInteger(days) || days < 1) refuse(`--days takes a whole number of at least 1, got ${opts["--days"]}`);
+  if (!Number.isInteger(days) || days < 1 || days > 400) refuse(`--days takes a whole number from 1 to 400 (GitHub keeps a run 400 days), got ${opts["--days"]}`);
   let step: RegExp | undefined;
   try {
     step = typeof opts["--step"] === "string" ? new RegExp(opts["--step"], "i") : undefined;
@@ -197,7 +222,7 @@ if (import.meta.main) {
   let ids: string[];
   if (typeof opts["--runs"] === "string") {
     ids = opts["--runs"].split(",").map((s) => s.trim()).filter(Boolean);
-    if (!ids.every((id) => /^\d+$/.test(id))) refuse(`--runs takes run ids, comma-separated, got ${opts["--runs"]}`);
+    if (ids.length === 0 || !ids.every((id) => /^\d+$/.test(id))) refuse(`--runs takes run ids, comma-separated, got ${JSON.stringify(opts["--runs"])}`);
     console.log(`${ids.length} runs named`);
   } else {
     // gh's --created takes a day; the window is the last n × 24 hours, so a day early is asked and createdAt cut.
@@ -211,6 +236,7 @@ if (import.meta.main) {
     if (runs.length >= LIST_LIMIT && oldest >= cutoff) console.log(`  gh returned its limit of ${LIST_LIMIT} runs, all inside the window: it is cut short; give fewer --days`);
     ids = runs.filter((r) => r.status === "completed" && Date.parse(r.createdAt) >= cutoff).map((r) => String(r.databaseId)).reverse();
     console.log(`${workflow} on ${branch} since ${new Date(cutoff).toISOString().slice(0, 16)}Z: ${ids.length} completed runs`);
+    if (ids.length === 0) fail(`no completed ${workflow} run on ${branch} in the last ${days} days: is the branch or workflow named right?`);
   }
   // Six runs read at once: one `gh run view` a run takes about 2 s.
   const viewed = await pooled(ids, 6, async (id) => ({ id, got: await gh(["run", "view", id, ...repo, "--json", "jobs,headSha,createdAt,attempt"]) }));
@@ -234,14 +260,12 @@ if (import.meta.main) {
     console.error(`no run read has a job named "${jobName}"; its jobs are named: ${[...seen].sort().join("; ")}`);
     process.exit(1);
   }
-  const names = pickSteps(read.filter((r) => r.row).map((r) => r.row!), step);
+  const { names, jobTimes, stepTimes } = figures(read, step);
   if (step && names.size === 0) {
     // Say it, not nothing: a misspelt pattern and a step that is skipped in every run read the same otherwise.
     const skippedOnly = new Set(read.flatMap((r) => (r.job?.steps ?? []).filter((st) => st.conclusion === "skipped" && step!.test(st.name)).map((st) => st.name)));
     console.log(`no step matching ${step} ran in any run read${skippedOnly.size ? `; skipped every time: ${[...skippedOnly].join("; ")}` : ""}`);
   }
-  const jobTimes: number[] = [];
-  const stepTimes = new Map<string, number[]>([...names].map((n) => [n, []]));
   for (const { id, run, job, row } of read) {
     const head = `${id} ${run.headSha.slice(0, 8)} ${run.createdAt.slice(0, 10)}${(run.attempt ?? 1) > 1 ? ` (attempt ${run.attempt})` : ""}`;
     if (!job || !row) {
@@ -251,15 +275,12 @@ if (import.meta.main) {
     const counted = job.conclusion === "success";
     console.log(`${head}  ${jobName}: ${row.job ?? "?"} s${counted ? "" : `  (${job.conclusion}, not counted)`}`);
     for (const st of row.steps) if (names.has(st.name)) console.log(`    ${String(st.s).padStart(5)} s  ${st.name}`);
-    if (!counted) continue;
-    if (row.job !== null) jobTimes.push(row.job);
-    for (const st of row.steps) stepTimes.get(st.name)?.push(st.s);
   }
-  const line = (label: string, xs: number[]) => {
+  const line = (label: string, xs: number[], none: string) => {
     const f = stats(xs);
-    console.log(f ? `  ${label}: median ${f.median} s, p90 ${f.p90} s, min ${f.min} s, max ${f.max} s over ${f.n} runs` : `  ${label}: no successful run`);
+    console.log(f ? `  ${label}: median ${f.median} s, p90 ${f.p90} s, min ${f.min} s, max ${f.max} s over ${f.n} runs` : `  ${label}: ${none}`);
   };
   console.log(`\nOver the runs where the job succeeded${unread ? ` (${unread} run${unread === 1 ? "" : "s"} not read)` : ""}:`);
-  line(jobName, jobTimes);
-  for (const [name, xs] of stepTimes) line(name, xs);
+  line(jobName, jobTimes, "no successful run");
+  for (const [name, xs] of stepTimes) line(name, xs, jobTimes.length ? `ran in none of the ${jobTimes.length} successful runs` : "no successful run");
 }

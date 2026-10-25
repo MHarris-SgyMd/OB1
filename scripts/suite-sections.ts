@@ -3,9 +3,9 @@
  * suite-sections.ts — a suite's bracketed sections by wall time, slowest first (SMD-3305).
  *
  * The fork's suites print each section's header as a line that starts with a bracketed number or name ("[12] The
- * REST core's spans …", "[8e2] …", "[file]", "[where the key may travel]"); a suite that prints none (db/test-cli.ts)
- * reads as one "(start)" span, which the output says. This runs a suite, stamps each stdout line as it
- * arrives, and gives each section the time from its header to the next one's; the time from the launch to the first
+ * REST core's spans …", "[8e2] …", "[file]", "[where the key may travel]"); a suite that prints none
+ * (db/test-cli.ts) reads as one "(start)" span, which the output says. This runs a suite, stamps each stdout line as
+ * it arrives, and gives each section the time from its header to the next one's; the time from the launch to the first
  * header is "(start)". It prints the suite's tally line, then the sections slowest first, then the total. What to cut
  * in a suite starts here: SMD-3263 found test-rest's [12] at 38 of its 44 s this way. The times are only as good as
  * the child's flushing: Bun flushes each line, but a child that buffers its stdout (python3 writing to a pipe) hands
@@ -16,7 +16,7 @@
  *   bun scripts/suite-sections.ts --top 3 --cwd server-portable -- ../db/with-postgres.sh bun test-egress.ts
  *   bun scripts/suite-sections.ts --self-check        # the section reading, on fixtures
  *
- * Options, first:
+ * Options (before the command):
  *   --top <n>     how many sections to print, default 8 (0: all)
  *   --cwd <dir>   where the command runs, default the current directory
  * The command follows, after `--` or from the first word that is not an option (Bun drops a `--` that comes first,
@@ -68,7 +68,25 @@ const HEADER = /^\[[^\]\s][^\]]*\](?=\s|$)/;
 /** The suites' tally line ("480 assertions: 480 passed, 0 failed", or "test-cli: 452 passed, 0 failed"). */
 const TALLY = /\d+ assertions:|\d+ passed, \d+ failed/;
 
-/** Each section's seconds, from its header's arrival to the next header's or the end; "(start)" from the launch (0) to the first. */
+/**
+ * A stream's lines, each stamped with the arrival of the chunk it began in, the last one too when no newline ends it.
+ * `chunks` is what arrived, decoded, with its time since the launch.
+ */
+export function toLines(chunks: { at: number; text: string }[]): { at: number; text: string }[] {
+  const lines: { at: number; text: string }[] = [];
+  let rest = "", restAt = 0;
+  for (const c of chunks) {
+    if (rest === "") restAt = c.at;
+    const parts = (rest + c.text).split("\n");
+    rest = parts.pop() ?? "";
+    for (const [i, text] of parts.entries()) lines.push({ at: i === 0 ? restAt : c.at, text });
+    if (parts.length) restAt = c.at;
+  }
+  if (rest) lines.push({ at: restAt, text: rest });
+  return lines;
+}
+
+/** Each section's seconds, from its header's arrival to the next header's or the end; "(start)" from the launch to the first. */
 export function sections(lines: { at: number; text: string }[], end: number): { name: string; s: number }[] {
   const out: { name: string; s: number }[] = [];
   let name = "(start)";
@@ -80,7 +98,8 @@ export function sections(lines: { at: number; text: string }[], end: number): { 
     from = l.at;
   }
   out.push({ name, s: (end - from) / 1000 });
-  return out.filter((sec) => sec.name !== "(start)" || sec.s > 0);
+  // A (start) under 50 ms is the spawn itself, not a span worth a row.
+  return out.filter((sec) => sec.name !== "(start)" || sec.s >= 0.05);
 }
 
 function refuse(msg: string): never {
@@ -113,6 +132,8 @@ function selfCheck(): number {
   ok(HEADER.test(`[${"a Host the URL parser refuses, ".repeat(5)}(SMD-2595)]`), "a name of any length (test-auth's run past 120 characters)");
   ok(!HEADER.test("  [12] indented") && !HEADER.test("[12 unclosed") && !HEADER.test("[] empty") && !HEADER.test("[ spaced]") && !HEADER.test("[1,2]x"), "not an indented, unclosed, empty or space-led bracket, nor one run into the next word");
   ok(TALLY.test("480 assertions: 480 passed, 0 failed") && TALLY.test("test-cli: 452 passed, 0 failed"), "both tally forms read");
+  const joined = toLines([{ at: 0, text: "[1] a\n[2" }, { at: 800, text: "] b\n" }, { at: 1_600, text: "[3] c" }]);
+  ok(joined.map((l) => `${l.text}@${l.at}`).join(" ") === "[1] a@0 [2] b@0 [3] c@1600", "a line split across chunks takes the time it began; a last line with no newline, its own");
   console.log(failed ? `${failed} failed` : "all passed");
   return failed ? 1 : 0;
 }
@@ -131,16 +152,11 @@ if (import.meta.main) {
   } catch (e) {
     refuse(`cannot run ${opts.command[0]}${typeof opts["--cwd"] === "string" ? ` in ${opts["--cwd"]}` : ""}: ${(e as Error).message}`);
   }
-  const lines: { at: number; text: string }[] = [];
+  const chunks: { at: number; text: string }[] = [];
   const decoder = new TextDecoder();
-  let rest = "";
-  for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) {
-    const at = performance.now() - t0;
-    const parts = (rest + decoder.decode(chunk, { stream: true })).split("\n");
-    rest = parts.pop() ?? "";
-    for (const text of parts) lines.push({ at, text });
-  }
-  if (rest) lines.push({ at: performance.now() - t0, text: rest });
+  for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) chunks.push({ at: performance.now() - t0, text: decoder.decode(chunk, { stream: true }) });
+  chunks.push({ at: performance.now() - t0, text: decoder.decode() });
+  const lines = toLines(chunks);
   const code = await proc.exited;
   const end = performance.now() - t0;
   for (const l of lines) if (TALLY.test(l.text)) console.log(l.text.trim());
