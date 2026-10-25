@@ -1136,8 +1136,9 @@ stored in the same write").
   a header or a `?key=` query parameter. Moving runtimes does not improve that; see
   [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
 - **A tool call may run longer than the runtime's idle timeout.** Bun closes a
-  connection that has been silent for its idle timeout — 10 s by default — a streaming response included, at
-  the next of its 4-second sweeps, so after 8 to 12 s of silence — and the MCP
+  connection that has been silent for its idle timeout — a streaming response
+  included, at the next of its 4-second sweeps, so after 8 to 12 s of silence
+  at the 10 s default — and the MCP
   transport opens a tool call's SSE stream at once and writes to it only when
   the tool returns. A capture whose model calls took ten seconds was closed under
   the client with nothing in the server's log (SMD-1864). Every event stream now
@@ -1150,9 +1151,9 @@ stored in the same write").
   call is bounded by `OB1_LLM_TIMEOUT`, so a call that long is stuck in the
   database. The brain's servers serve with Bun's ceiling, 255 s, for their GETs
   (the idle timeout, above), and keep the keepalive for the proxy in front and
-  a call past 255 s; the vendored servers stay on the default (`sse.ts` says
-  why, SMD-2931). The two intervals are constants, not
-  knobs: 5 s is inside any proxy read timeout worth running (SMD-1846). A
+  a call past 255 s; the vendored MCP servers stay on the default (`sse.ts`
+  says why, SMD-2931). The two intervals are constants, not knobs: 5 s is
+  inside any proxy read timeout worth running (SMD-1846). A
   client that closes the connection before the response is complete is logged
   in words beside the request's JSON line (`telemetry.ts`, SMD-1849) —
   `request abandoned by the client after 9.8 s: tools/call capture_thought …` —
