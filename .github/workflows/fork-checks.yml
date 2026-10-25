@@ -3180,12 +3180,14 @@ jobs:
             && grep -qF 'canary board-sync off, its container removed' /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with stable's LINEAR_API_KEY did not clear it, stop board-sync and remove it, said" >&2; exit 1; }
           if grep -qF ci-dummy-linear-key .env.canary.local; then echo "the canary's env file still holds stable's read key" >&2; exit 1; fi
           if [ -n "$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)" ]; then echo "up --no-refresh left a board-sync container with no key of the canary's own" >&2; exit 1; fi
-          board_before="$(docker ps -aq --no-trunc --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)"
           { [ "$rc" = 1 ] && grep -qF 'canary sleep worker LEFT STOPPED' /tmp/canary-nokey.out && grep -qF 'migrated in place (its own rows kept)' /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with a worker and no OB1_WORKER_KEY exited $rc, not 1 with the worker left stopped" >&2; exit 1; }
           if [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=sleep)" ]; then echo "up --no-refresh started a worker with no OB1_WORKER_KEY" >&2; exit 1; fi
           printf 'OB1_WORKER_KEY=ci-canary-worker-key-not-stables\n' >> .env.canary.local
           # SMD-3312: the canary's own read key back, so board-sync comes back.
-          sed -i '/^LINEAR_API_KEY=/d' .env.canary.local
+          # Below the empty LINEAR_API_KEY= line the clearing left, as an
+          # operator adding the key after it would: an empty line is no second
+          # key (review pass 3).
+          grep -qx 'LINEAR_API_KEY=' .env.canary.local || { echo "the clearing left no empty LINEAR_API_KEY= line" >&2; exit 1; }
           printf 'LINEAR_API_KEY=ci-canary-own-linear-key\n' >> .env.canary.local
           # The file as a canary mended by SMD-2874 PR 2 holds it, the dogfood
           # canary's next upgrade: its write key alone, no forward key. The up
@@ -3213,8 +3215,7 @@ jobs:
           grep -F 'canary sleep worker stopped for the migration' /tmp/canary-norefresh.out
           grep -F 'canary sleep worker, on the new build' /tmp/canary-norefresh.out
           grep -F 'canary board-sync, on the new build' /tmp/canary-norefresh.out
-          board_after="$(docker ps -aq --no-trunc --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)"
-          { [ -n "$board_after" ] && [ "$board_after" != "$board_before" ]; } || { echo "up --no-refresh did not bring board-sync back as a new container (${board_after:-none})" >&2; exit 1; }
+          [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)" ] || { echo "up --no-refresh did not bring board-sync back running" >&2; exit 1; }
           board_env | grep -qx 'LINEAR_API_KEY=ci-canary-own-linear-key' || { echo "up --no-refresh did not bring board-sync back on the canary's own read key" >&2; exit 1; }
           board_env | grep -qx 'LINEAR_COMMENT_API_KEY=' || { echo "the canary's board-sync holds a comment key" >&2; exit 1; }
           grep -F 'migrated in place (its own rows kept)' /tmp/canary-norefresh.out
