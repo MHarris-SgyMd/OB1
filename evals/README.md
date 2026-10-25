@@ -7224,16 +7224,18 @@ on embeddings), not the seal: the re-run above has the host quiet.
 
 Since SMD-2212, `--up n8n` also loads the profile's own templates as they
 ship (`deploy/orchestration/templates/`), and starts the import runner
-(`orchestration-runner`) beside n8n. The runner's shipped allowlist is empty
-until an import recipe is converted. So `compose.n8n.yaml` mounts the kit's
-`orchestration/runner/pipelines.json` over it, with three pipelines:
+(`orchestration-runner`) beside n8n. The runner's shipped allowlist holds the
+four export importers (SMD-2493), whose exports the kit does not carry. So
+`compose.n8n.yaml` mounts the kit's `orchestration/runner/pipelines.json`
+over it, with four pipelines:
 - **`fixture`:** a Python emitter (`runner/emit-fixture.py`, standard
   library) over a five-entry export in `runner/imports/fixture/`;
 - **`stray`:** the same emitter, with its third line claiming another
   source;
 - **`snoop`:** an emitter an export has taken over. It reads
   `/proc/<pid>/environ` for the runner and its parent, and fails if either
-  holds `DATABASE_URL` or `OB1_RUNNER_KEY`.
+  holds `DATABASE_URL` or `OB1_RUNNER_KEY`;
+- **`vendor`:** a live-API stand-in whose line names `api:8000` (below).
 
 The act tool's Linear key is the kit's one Linear key. Two checks join K, P
 and E:

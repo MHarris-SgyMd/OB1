@@ -88,3 +88,23 @@ export function mcpClient(base: string, key: string): McpClient {
 
   return { call, rpc, base };
 }
+
+/**
+ * A port that refuses, for a stub that must refuse until it binds or a database that refuses: free when picked, and
+ * below the kernels' default ranges for port 0 (Linux 32768–60999, macOS 49152–65535), so no server bound at port 0,
+ * a child at PORT 0 included, can be handed it once it is freed (SMD-3296). Free when bound on 127.0.0.1, which
+ * every child dials, and on 0.0.0.0: on macOS a 127.0.0.1 bind sits beside another process's 0.0.0.0 or :: listener,
+ * and a 0.0.0.0 bind beside a 127.0.0.1 one, either of which would then answer for the port. On Linux either bind
+ * alone sees all three. Here, not in db/test-support.ts: db/'s TypeScript spells no loopback host of its own but
+ * connect.ts's (test-connect), and these are bind addresses for the suites' own servers.
+ */
+export function quietPort(): number {
+  for (let tries = 0; tries < 100; tries++) {
+    const port = 20_000 + Math.floor(Math.random() * 10_000);
+    try {
+      for (const hostname of ["127.0.0.1", "0.0.0.0"]) Bun.serve({ port, hostname, fetch: () => new Response(null) }).stop(true);
+      return port;
+    } catch {}
+  }
+  throw new Error("no free port between 20000 and 30000 in 100 tries");
+}

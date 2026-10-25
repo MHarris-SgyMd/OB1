@@ -23,7 +23,7 @@
  */
 
 import { SQL } from "bun";
-import { applyMigrations, createAssert, plantLegacyRow, resetSchema, runScript } from "../db/test-support.ts";
+import { answersHealth, applyMigrations, childPort, createAssert, plantLegacyRow, resetSchema, REST_HEALTH_BODY, runScript } from "../db/test-support.ts";
 import { readdirSync } from "node:fs";
 import { FORK_VERSION } from "../db/version.mjs";
 import { join, dirname } from "node:path";
@@ -3395,14 +3395,13 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at) VALUES (${jobId}::uuid, 'scan_thoughts', ${hashKey("e2e-key")}, 'e2e', 'running', now())`;
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${apiJob}::uuid, 'scan_thoughts', ${hashKey("e2e-key")}, 'e2e', 'running', now(), 'open-brain-api')`;
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${otherJob}::uuid, 'scan_thoughts', ${hashKey("e2e-key")}, 'e2e', 'running', now(), 'open-brain-elsewhere')`;
-  const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const port = free.port;
-  free.stop(true);
+  // PORT 0: the child binds a port no one holds and says which (SMD-3296).
   const child = Bun.spawn([process.execPath, "api.ts"], {
     cwd: dirname(fileURLToPath(import.meta.url)),
-    env: { ...process.env, PORT: String(port), MCP_ACCESS_KEYS: "", MCP_ACCESS_KEY: "e2e-key" },
-    stdout: "ignore", stderr: "pipe",
+    env: { ...process.env, PORT: "0", MCP_ACCESS_KEYS: "", MCP_ACCESS_KEY: "e2e-key" },
+    stdout: "pipe", stderr: "pipe",
   });
+  const { port } = await childPort(child, 20_000);
   let status = "running";
   try {
     const deadline = Date.now() + 15_000;
@@ -3410,8 +3409,8 @@ console.log("\n[18] The serving entry wires the durable job store when it first 
     while (!answered && Date.now() < deadline) {
       // Keyless: liveness, which reads no store — the reconcile below is the
       // start-up's, not a request's (SMD-2284 PR 3 review pass 1).
-      answered = await realFetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) })
-        .then((r) => r.ok, () => false);
+      // The REST core's own keyless body (SMD-3296), through the fetch this suite does not stub.
+      answered = await answersHealth(port, REST_HEALTH_BODY, { signal: AbortSignal.timeout(2_000) }, realFetch);
       if (!answered) await Bun.sleep(100);
     }
     assert(answered, "the entry answers a keyless /health, which builds no store");

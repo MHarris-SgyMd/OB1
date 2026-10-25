@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import { askRaw, createAssert, leaveMidUpload, pendingSettled, requestHead, RuntimeUrl, serveChild } from "../db/test-support.ts";
+import { answersHealth, askRaw, childPort, createAssert, leaveMidUpload, MCP_HEALTH_BODY, pendingSettled, requestHead, REST_HEALTH_BODY, RuntimeUrl, serveChild, watchStream } from "../db/test-support.ts";
 import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES, UNLOCKS, type ToolScope } from "./tools.ts";
 import { openApiDocument } from "./rest/openapi.ts";
 import { pathFields, readsQuery, ROUTES, type Method } from "./rest/routes.ts";
 import { FORK_VERSION } from "../db/version.mjs";
-import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
+import { mcpUnderTest, quietPort, servedByMcpServer } from "./test-support.ts";
 import { hashKey } from "./auth.ts";
 /**
  * test-server.ts
@@ -1219,7 +1219,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     { key: "heartbeat:extract:qwen2.5:7b@p2", value: JSON.stringify({ ...good, every_s: 60, outcome: null, running: true, malformed: { answers: 50, bad: 12, alarm: true } }), at, age_s: 181 },
     { key: "heartbeat:board-sync:extra", value: JSON.stringify(good), at, age_s: 1 },
     { key: "heartbeat:extract", value: JSON.stringify(good), at, age_s: 1 },
-    { key: "heartbeat:reembed:x", value: JSON.stringify(good), at, age_s: 1 },
+    // No such worker (since SMD-2679 a re-embed follower stamps: its row counts, below).
+    { key: "heartbeat:rewind:x", value: JSON.stringify(good), at, age_s: 1 },
     { key: "heartbeat:consolidate:a b", value: JSON.stringify(good), at, age_s: 1 },
     { key: "heartbeat:consolidate:x", value: "not json", at, age_s: 1 },
     { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, v: 2 }), at, age_s: 1 },
@@ -1246,14 +1247,16 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     // …and two that count: inside the slack, and a job as long as a key's suffix allows.
     { key: "heartbeat:consolidate:near", value: JSON.stringify({ ...good, ended: true, outcome: "failed" }), at, age_s: -59 },
     { key: `heartbeat:extract:${"j".repeat(117)}`, value: JSON.stringify({ ...good, job: `extract:${"j".repeat(117)}` }), at, age_s: 1 },
+    // A re-embed follower's, under the model's own key (SMD-2679).
+    { key: "heartbeat:reembed:qwen3-embedding:4b@1024", value: JSON.stringify(good), at, age_s: 1 },
   ]);
-  const [bs, ex, custom, near, long] = parsed.heartbeats;
+  const [bs, ex, custom, near, long, re] = parsed.heartbeats;
   assert(near?.job === "consolidate:near" && near.ended === true && near.ageS === 0 && long?.job === `extract:${"j".repeat(117)}` && bs.ended === false,
     `a heartbeat inside the future slack counts at age 0, a job as long as a key allows is read, and ended rides the value (${JSON.stringify(near)})`);
-  assert(parsed.heartbeats.length === 5 && parsed.ignored === 20 && bs.worker === "board-sync" && bs.job === null && bs.key === "heartbeat:board-sync" && bs.ageS === 900 && bs.stale === false
+  assert(parsed.heartbeats.length === 6 && parsed.ignored === 20 && re?.worker === "reembed" && re.job === "reembed:qwen3-embedding:4b@1024" && bs.worker === "board-sync" && bs.job === null && bs.key === "heartbeat:board-sync" && bs.ageS === 900 && bs.stale === false
       && ex.job === "extract:qwen2.5:7b@p2" && ex.stale === true && ex.running === true && ex.outcome === null && ex.malformed?.alarm === true
       && custom.job === "my-job" && custom.key === "heartbeat:extract:my-job",
-    `three rows in full count — board-sync at 899.6 s of 3 × 300 not stale, extract at 181 s of 3 × 60 stale, a custom job as given — and twenty not of the shape are counted only (${parsed.heartbeats.length}, ${parsed.ignored})`);
+    `four rows in full count — board-sync at 899.6 s of 3 × 300 not stale, extract at 181 s of 3 × 60 stale, a custom job as given, a re-embed follower's (SMD-2679) — and twenty not of the shape are counted only (${parsed.heartbeats.length}, ${parsed.ignored})`);
   // A malformed block not of the shape is left off and the heartbeat still counts (review pass 3).
   const blocks = parseHeartbeats([{ answers: 5, bad: 6, alarm: false }, { answers: 50, bad: 1, alarm: "yes" }, null, { answers: -1, bad: 0, alarm: true }, { answers: 1.5, bad: 1, alarm: false }, { answers: "x", bad: 1, alarm: true }, { answers: 1, bad: "x", alarm: true }]
     .map((malformed, i) => ({ key: `heartbeat:consolidate:b${i}`, value: JSON.stringify({ ...good, malformed }), at, age_s: 1 })));
@@ -1598,16 +1601,21 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
   const { HEALTH_DEADLINE_MS } = await import("./core/reads.ts");
   // The REST core's keyed /health (SMD-2287 PR 6a: index.ts's answered `ok` as text; the MCP server's comes from here).
   const OK_BODY = JSON.stringify({ status: "ok" });
-  const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
-  const child = (port: number, databaseUrl: string) => Bun.spawn(["bun", "--no-env-file", "api.ts"], {
-    cwd: import.meta.dir,
-    env: { ...process.env, PORT: String(port), DATABASE_URL: databaseUrl, MCP_ACCESS_KEY: KEY, OB1_GIT_SHA: "c0ffee1" },
-    stdout: "ignore",
-    stderr: "ignore",
-  });
+  // Each child binds PORT 0 and says its port; the database that refuses is a quiet port, below the kernels' ranges for
+  // port 0, so neither child can be handed it (SMD-3296).
+  const child = async (databaseUrl: string) => {
+    const proc = Bun.spawn(["bun", "--no-env-file", "api.ts"], {
+      cwd: import.meta.dir,
+      env: { ...process.env, PORT: "0", DATABASE_URL: databaseUrl, MCP_ACCESS_KEY: KEY, OB1_GIT_SHA: "c0ffee1" },
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    return { proc, port: (await childPort(proc, 20_000)).port };
+  };
+  // Up when the REST core's own keyless body answers (SMD-3296).
   const up = async (port: number) => {
     for (let i = 0; i < 100; i++) {
-      if (await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok, () => false)) return true;
+      if (await answersHealth(port, REST_HEALTH_BODY)) return true;
       await Bun.sleep(50);
     }
     return false;
@@ -1619,10 +1627,10 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
     return { took, status: r instanceof Response ? r.status : r.name, body: r instanceof Response ? await r.text() : "" };
   };
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
-  const silentPort = freePort();
-  const quiet = child(silentPort, `postgres://u:p@127.0.0.1:${silent.port}/db`);
-  const refusedPort = freePort();
-  const refusing = child(refusedPort, `postgres://u:p@127.0.0.1:${freePort()}/db`);
+  // Picked before either child starts: a throw here leaves no child behind (SMD-3296).
+  const refusingDb = quietPort();
+  const [quiet, refusing] = await Promise.all([child(`postgres://u:p@127.0.0.1:${silent.port}/db`), child(`postgres://u:p@127.0.0.1:${refusingDb}/db`)]);
+  const silentPort = quiet.port, refusedPort = refusing.port;
   try {
     assert(await up(silentPort) && await up(refusedPort), "both child servers answer a keyless probe");
     const get = await keyed(silentPort, "GET");
@@ -1637,8 +1645,8 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
       `keyed GET /health, the database refusing → the record with the database's error in ${Math.round(refused.took)} ms (${info.database?.error})`);
     assert(info.version === FORK_VERSION && info.commit === "c0ffee1", `…carrying the server's own facts — the commit OB1_GIT_SHA names (${info.commit})`);
   } finally {
-    quiet.kill();
-    refusing.kill();
+    quiet.proc.kill();
+    refusing.proc.kill();
     silent.stop(true);
   }
 }
@@ -1655,26 +1663,30 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   // these rows fail on. Then the bounds against a stand-in server, the call
   // count, the grace period's parse and where compose and preflight read it.
   const { HEALTH_DEADLINE_MS } = await import("./core/reads.ts");
-  const freePort = () => { const p = Bun.serve({ port: 0, fetch: () => new Response() }); const n = p.port!; p.stop(true); return n; };
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
   // stdout and stderr both read: the per-request lines are warnings. A child is the REST core, on the database that
   // never replies, or the MCP server's entry (SMD-2287 PR 6a), its REST core a listener that never answers, so a
-  // keyed call stalls at its whoami as one stalls at the registry lookup.
-  const start = (env: Record<string, string> = {}, entry: "api" | "mcp" = "api") => {
-    const port = freePort();
+  // keyed call stalls at its whoami as one stalls at the registry lookup. Each binds PORT 0 and says its port: seven
+  // start at once, then the MCP server in front of their REST core, and a port picked here and freed could go to
+  // another child first, whose answers and stop would then read as this one's (SMD-3296).
+  const start = async (env: Record<string, string> = {}, entry: "api" | "mcp" = "api") => {
     const proc = Bun.spawn(["bun", "--no-env-file", entry === "api" ? "api.ts" : "index.ts"], {
       cwd: entry === "api" ? import.meta.dir : `${import.meta.dir}/../mcp-server`,
-      env: { ...process.env, PORT: String(port), DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, MCP_ACCESS_KEY: KEY,
+      env: { ...process.env, PORT: "0", DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, MCP_ACCESS_KEY: KEY,
         ...(entry === "mcp" ? { OB1_REST_URL: `http://127.0.0.1:${silent.port}`, OB1_FORWARDER_KEY: "f".repeat(64), OB1_PLUGINS: "" } : {}), ...env },
       stdout: "pipe",
       stderr: "pipe",
     });
-    const err = new Response(proc.stderr).text();
-    return { port, proc, out: new Response(proc.stdout).text().then(async (o) => o + (await err)) };
+    const stderr = watchStream(proc.stderr);
+    const { port, stdout } = await childPort(proc, 20_000);
+    // Its keyless /health body: the REST core's record, the MCP server's entry's plain `ok`.
+    const health = entry === "api" ? REST_HEALTH_BODY : MCP_HEALTH_BODY;
+    return { port, proc, health, out: stdout.rest().then(async (o) => o + (await stderr.rest())) };
   };
-  const up = async (port: number) => {
+  // Up when the child's own keyless body answers (SMD-3296).
+  const up = async ({ port, health }: { port: number; health: string }) => {
     for (let i = 0; i < 200; i++) {
-      if (await fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok, () => false)) return true;
+      if (await answersHealth(port, health)) return true;
       await Bun.sleep(50);
     }
     return false;
@@ -1686,25 +1698,31 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     return code;
   };
 
-  const busy = start();
-  // A malformed grace period: said, and read as the default (8 s of drain).
-  const idle = start({ OB1_STOP_GRACE: "soon" });
-  // With no connection string its store never builds, so it holds no pool: its stop must not say it closed one
-  // (review pass 2; this child ran the PostgREST store, which held none, until SMD-3152 retired it).
-  const ctrlC = start({ DATABASE_URL: "" });
-  const cutter = start({}, "mcp");
-  // OB1_STOP_GRACE=3: the drain's bound is 1 s, so the real bound cuts on real Bun in a second.
-  const graced = start({ OB1_STOP_GRACE: "3" }, "mcp");
-  // A drained stop with a record still open (SMD-1849 PR 2c review pass 3).
-  const leftBehind = start({ OB1_STOP_GRACE: "10" }, "mcp");
   // A tool call running past its client at the stop (SMD-2250 review pass 3, SMD-3201): the MCP server's entry over a
   // REST core of its own, with no store, so the call runs to its embedding, which this suite's provider stub holds.
   const stopForwarder = "e".repeat(64);
-  const callingCore = start({ DATABASE_URL: "", MCP_ACCESS_KEYS: [process.env.MCP_ACCESS_KEYS, `stop-forwarder:forward:${hashKey(stopForwarder)}`].filter(Boolean).join(",") });
-  const calling = start({ OB1_REST_URL: `http://127.0.0.1:${callingCore.port}`, OB1_FORWARDER_KEY: stopForwarder }, "mcp");
+  const [busy, idle, ctrlC, cutter, graced, leftBehind, callingCore] = await Promise.all([
+    start(),
+    // A malformed grace period: said, and read as the default (8 s of drain).
+    start({ OB1_STOP_GRACE: "soon" }),
+    // With no connection string its store never builds, so it holds no pool: its stop must not say it closed one
+    // (review pass 2; this child ran the PostgREST store, which held none, until SMD-3152 retired it).
+    start({ DATABASE_URL: "" }),
+    start({}, "mcp"),
+    // OB1_STOP_GRACE=3: the drain's bound is 1 s, so the real bound cuts on real Bun in a second.
+    start({ OB1_STOP_GRACE: "3" }, "mcp"),
+    // A drained stop with a record still open (SMD-1849 PR 2c review pass 3).
+    start({ OB1_STOP_GRACE: "10" }, "mcp"),
+    start({ DATABASE_URL: "", MCP_ACCESS_KEYS: [process.env.MCP_ACCESS_KEYS, `stop-forwarder:forward:${hashKey(stopForwarder)}`].filter(Boolean).join(",") }),
+  ]);
+  // Its REST core's port known, the calling MCP server starts.
+  const calling = await start({ OB1_REST_URL: `http://127.0.0.1:${callingCore.port}`, OB1_FORWARDER_KEY: stopForwarder }, "mcp");
   try {
-    assert(await up(busy.port) && await up(idle.port) && await up(ctrlC.port) && await up(cutter.port) && await up(graced.port) && await up(leftBehind.port)
-      && await up(callingCore.port) && await up(calling.port), "eight child servers answer a keyless probe (the first request, which hands the handlers the server)");
+    // All eight asked at once, each one not up named (SMD-3296).
+    const kids = Object.entries({ busy, idle, ctrlC, cutter, graced, leftBehind, callingCore, calling });
+    const ups = await Promise.all(kids.map(([, kid]) => up(kid)));
+    const notUp = kids.filter((_, i) => !ups[i]).map(([name, kid]) => `${name} on ${kid.port}`);
+    assert(notUp.length === 0, `eight child servers answer a keyless probe with their own body (the first request, which hands the handlers the server)${notUp.length ? `; not up: ${notUp.join(", ")}` : ""}`);
 
     const t0 = performance.now();
     const inFlight = fetch(`http://127.0.0.1:${busy.port}/health`, { headers: { "x-brain-key": KEY } })
@@ -1743,12 +1761,14 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     assert(/OB1_STOP_GRACE="soon" is not a whole number of seconds from 1 to 3600, with no unit .*; the stop drains as for 10 s/.test(idleLog) && /waited on for up to 8 s/.test(idleLog),
       "…and a malformed OB1_STOP_GRACE is said at start-up and read as the default, 8 s of drain");
 
-    await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY } }); // builds its store
+    // A keyed request first, its answer the row's: the child was serving when SIGINT landed. With no connection string
+    // its start built no store, so the stop has no pool to say (SMD-3296).
+    const keyedCtrlC = await fetch(`http://127.0.0.1:${ctrlC.port}/health`, { headers: { "x-brain-key": KEY }, signal: AbortSignal.timeout(5_000) }).then((r) => r.status, (e: Error) => e.name);
     ctrlC.proc.kill("SIGINT");
     const intCode = await exited(ctrlC.proc, 3_000);
     const intLog = await ctrlC.out;
-    assert(intCode === 0 && /SIGINT: stopped in [\d.]+ s; no database pool was opened; exit 0/.test(intLog),
-      `SIGINT stops it the same way, and a store that never built is not said to have a pool closed (${intCode}: ${intLog.split("\n").filter((l) => l.startsWith("SIGINT: stopped")).join("")})`);
+    assert(keyedCtrlC === 200 && intCode === 0 && /SIGINT: stopped in [\d.]+ s; no database pool was opened; exit 0/.test(intLog),
+      `SIGINT stops it the same way, and a store that never built is not said to have a pool closed (keyed /health ${keyedCtrlC}; ${intCode}: ${intLog.split("\n").filter((l) => l.startsWith("SIGINT: stopped")).join("")})`);
 
     // A keyed call that stalls before its response — its whoami, on the REST
     // core that never answers — and two SIGTERMs: the second cuts the drain
@@ -1756,11 +1776,16 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     // on), in a fraction of the 8 s. Holds the entry's flag, which picks the
     // cut line, on real Bun (review pass 2).
     const tc = performance.now();
+    // Each stalled call bounded, its timeout said as its own outcome: a call no child cuts would otherwise hang the
+    // suite rather than fail the row (SMD-3296).
+    const outcome = (r: Response) => `answered ${r.status}`;
+    const failed = (e: Error) => (e.name === "TimeoutError" ? "no answer in 10 s" : "cut off");
     const stalled = fetch(`http://127.0.0.1:${cutter.port}/mcp`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-    }).then((r) => `answered ${r.status}`, () => "cut off");
+      signal: AbortSignal.timeout(10_000),
+    }).then(outcome, failed);
     await Bun.sleep(300);
     cutter.proc.kill("SIGTERM");
     await Bun.sleep(200);
@@ -1770,20 +1795,22 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     const cutLines = cutLog.split("\n").filter((l) => /^request (cut off|abandoned)/.test(l));
     assert(cutCode === 1 && await stalled === "cut off" && performance.now() - tc < 2_500
       && cutLines.length === 1 && cutLines[0].startsWith("request cut off by the server's stop after 0.") && /SIGTERM: stopped in [\d.]+ s; no database pool was opened; exit 1/.test(cutLog),
-      `a call stalled before its response, cut by a second signal: the cut line and not the client's, exit 1, no pool to close (${cutCode} in ${Math.round(performance.now() - tc)} ms: ${cutLines.join(" | ").slice(0, 90)})`);
+      `a call stalled before its response, cut by a second signal: the cut line and not the client's, exit 1, no pool to close (${cutCode} in ${Math.round(performance.now() - tc)} ms, the call ${await stalled}: ${cutLines.join(" | ").slice(0, 90)})`);
     // One SIGTERM, and the bound OB1_STOP_GRACE sets does the cutting.
     const tg = performance.now();
     const graceStalled = fetch(`http://127.0.0.1:${graced.port}/mcp`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": KEY },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-    }).then((r) => `answered ${r.status}`, () => "cut off");
+      signal: AbortSignal.timeout(10_000),
+    }).then(outcome, failed);
     // Beside it, a keyed mirror held at its whoami (the REST core never
     // answers, so no key is named on its line): only the stop's
     // cutOpenRequests can write its line — the MCP call above has its own
     // abort handler, this route none (review pass 4: no test held that call).
-    const mirrorStalled = fetch(`http://127.0.0.1:${graced.port}/mcp/worker-status`, { headers: { "x-brain-key": KEY } })
-      .then((r) => `answered ${r.status}`, () => "cut off");
+    // Its outcome is read from the log, not here: the timeout only bounds it.
+    const mirrorStalled = fetch(`http://127.0.0.1:${graced.port}/mcp/worker-status`, { headers: { "x-brain-key": KEY }, signal: AbortSignal.timeout(10_000) })
+      .then(() => {}, () => {});
     await Bun.sleep(300);
     graced.proc.kill("SIGTERM");
     const graceCode = await exited(graced.proc, 4_000);
@@ -1794,7 +1821,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     assert(graceCode === 1 && await graceStalled === "cut off" && graceTook > 1_200 && graceTook < 3_000
       && /waited on for up to 1 s/.test(graceLog) && /still in flight.* after 1\.\d s, closed unfinished/.test(graceLog) && /^request cut off by the server's stop/m.test(graceLog)
       && graceLines.filter((l) => l.outcome === "cut" && l.route === undefined && l.agent === undefined).length === 1,
-      `OB1_STOP_GRACE=3 bounds the drain at 1 s: one SIGTERM, the stalled call cut at the bound with its line and its one JSON line, \`cut\`, exit 1 (${graceCode} in ${Math.round(graceTook)} ms)`);
+      `OB1_STOP_GRACE=3 bounds the drain at 1 s: one SIGTERM, the stalled call cut at the bound with its line and its one JSON line, \`cut\`, exit 1 (${graceCode} in ${Math.round(graceTook)} ms, the call ${await graceStalled})`);
     const mirrorCut = graceLines.filter((l) => l.route === "/worker-status");
     assert(mirrorCut.length === 1 && mirrorCut[0]?.outcome === "cut" && mirrorCut[0].tool === "worker_status" && mirrorCut[0].agent === undefined && mirrorCut[0].status === 0,
       `a keyed mirror held at its whoami when the stop cuts it: one \`cut\` line, by its route, from the stop's cutOpenRequests (${JSON.stringify(mirrorCut)})`);
@@ -3095,12 +3122,13 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   };
   // The premise is measured, not assumed: Bun closes a streaming response that
   // has been silent for its default idle timeout (10 s) at the next of its
-  // 4-second sweeps — between 8 and 12 s of silence, by phase — while a handler
-  // that has not returned yet is left alone. So the case is the transport's
-  // shape, an SSE stream opened at once and written to when the tool returns,
-  // and the silence is 13 s: past the last sweep that can catch it, so the
-  // control is reset every run and not by the luck of the phase (11.5 s slipped
-  // under it once). Four requests run at once; the section costs the longest.
+  // 4-second sweeps — between 8 and 12 s of silence, by phase — while a POST
+  // whose handler has not returned yet is left alone (a GET's is not, on 1.4.3:
+  // sse.ts, SMD-2931). So the case is the transport's shape, an SSE stream
+  // opened at once and written to when the tool returns, and the silence is
+  // 13 s: past the last sweep that can catch it, so the control is reset every
+  // run and not by the luck of the phase (11.5 s slipped under it once). Four
+  // requests run at once; the section costs the longest.
   const SILENT_MS = 13_000;
   const SLOW_EMBED_MS = 13_000;
   const silentSse = (silentMs = SILENT_MS): Response => {

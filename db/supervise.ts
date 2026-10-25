@@ -68,6 +68,7 @@ import type { SQL } from "bun";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractionKey } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
+import { embeddingContract, reembedKey } from "./config.mjs";
 import { sleepUnless } from "./lease.ts";
 import { MIN_STAMP_EVERY_S, stampKey, STAMPING_WORKERS, type StampingWorker } from "./pass-stamp.ts";
 import { commandLine, consoleWriter, type Writer } from "./cli.ts";
@@ -120,7 +121,13 @@ export function followerKey(worker: StampingWorker, env: Record<string, string |
   if (worker === "sleep" || worker === "board-sync") return stampKey(worker);
   try {
     const cfg = resolveEmbedConfig(env as EmbedEnv);
-    return worker === "extract" ? stampKey("extract", extractionKey(cfg.metadataModel)) : stampKey("consolidate", consolidatePassKey(cfg));
+    if (worker === "extract") return stampKey("extract", extractionKey(cfg.metadataModel));
+    // The model's own key, as a re-embed follower without --job pools under (SMD-2679).
+    if (worker === "reembed") {
+      const { model, dim } = embeddingContract(env);
+      return stampKey("reembed", reembedKey(model, dim));
+    }
+    return stampKey("consolidate", consolidatePassKey(cfg));
   } catch {
     return null;
   }

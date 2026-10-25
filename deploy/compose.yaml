@@ -1893,8 +1893,11 @@ services:
     init: true
     # Bounds on what one emitter an export has taken over can take from the
     # host: processes and memory (review pass 7: neither was set, and Docker
-    # sets no process limit). An emitter's output is held up to 256 MB and read
-    # a few times over, so 2 GB leaves room for that and for reembed.
+    # sets no process limit). The runner holds an emitter's output several
+    # times over (about 9x, measured), and the emitter holds its own, so memory
+    # binds before the 256 MB output cap: past about 100 MiB of items a run can
+    # be killed, which the runner reports as the container's memory
+    # (SMD-2493 PR 2, review pass 4: a 200,000-tweet X archive was; SMD-3293).
     pids_limit: 512
     mem_limit: 2g
     cap_drop: [ALL]
