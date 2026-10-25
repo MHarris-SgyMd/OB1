@@ -312,7 +312,8 @@ export type ListPosition = { at: string | null; id: string };
  * The store's refusal of a list_thoughts cursor whose time Postgres's cast
  * cannot read (SQLSTATE 22007, 22008, 22009: a year 0, past timestamptz's
  * range, an offset past ±15:59:59), which the core says as REFUSED_CURSOR rather
- * than a fault quoting the value (SMD-2995 review pass 1).
+ * than a fault quoting the value (SMD-2995 review pass 1). Also a
+ * list_supersession_proposals cursor's (SMD-3249): its time read alone the same way.
  */
 export class ListCursorRefused extends Error {
   constructor() {
@@ -320,6 +321,28 @@ export class ListCursorRefused extends Error {
     this.name = "ListCursorRefused";
   }
 }
+
+/**
+ * Whether an error is a time cast that failed (SQLSTATE 22007, 22008, 22009) — the one test a cursor's time is read
+ * by before it is refused as ListCursorRefused, list_thoughts' and list_supersession_proposals' alike, and the CLI's
+ * --after (SMD-3249 review pass 3: the list was written out three times).
+ */
+export const timeCastFailed = (e: unknown): boolean => ["22007", "22008", "22009"].includes(String((e as { errno?: unknown }).errno ?? ""));
+
+/**
+ * Where a list_supersession_proposals page ended (SMD-3249, migration 110): the
+ * last row's values on the listing's order, as Postgres's text — confidence
+ * (numeric(3,2)), judged_at to the microsecond — and its id.
+ */
+export type ProposalPosition = { confidence: string; judgedAt: string; id: string };
+
+/**
+ * A page of list_supersession_proposals: the proposals, the last listed row's place when more follow (else null), and
+ * how many follow this page — 110's `remaining` (the selection from this page's first on) less the rows the listing
+ * gave, before a row the writers' read drops (review pass 1: counted after the drop, a row gone in between was
+ * counted as one still to come).
+ */
+export type ProposalPage = { proposals: SupersessionProposal[]; next: ProposalPosition | null; remaining: number };
 
 /** A page of list_thoughts: the thoughts, and the last one's place when more follow (else null). */
 export type ThoughtListPage = { thoughts: ThoughtListItem[]; next: ListPosition | null };
@@ -1836,7 +1859,7 @@ export interface ThoughtStore {
    * the tool names the migration.
    */
   /** `lineage` true selects the proposals standing on a lineage pair, false the rest, absent every pair (migration 070, SMD-2313). */
-  listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean; judgeKey?: string }): Promise<SupersessionProposal[]>;
+  listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean; judgeKey?: string; after?: ProposalPosition }): Promise<ProposalPage>;
 
   /**
    * Migration 052's change feed (SMD-1296): one page of thought_audit, oldest

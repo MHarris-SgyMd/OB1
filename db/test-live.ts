@@ -6714,6 +6714,79 @@ if (want("16")) {
     `--status counts the pending by pass, most first, ten at most with the rest counted, a rejected row's pass not among them, a key --key cannot take quoted when it has spaces and said so (${byLine.trim().slice(0, 200)})`);
   await sql`DELETE FROM thoughts WHERE id IN (${rawA}::uuid, ${rawB}::uuid, ${rawC}::uuid)`;
   for (const t of extra) await sql`DELETE FROM thoughts WHERE id = ${t}::uuid`;
+  // SMD-3249: --after pages a capped listing. 51 proposals under one raw pass, over 9 thoughts outside the pool: a
+  // --list pending --key page of 50 says "the first 50 of 51" and ends with the line to run for the next — its --list,
+  // its --key and its cursor — which lists the one left, past the cursor, with no line after it, and in-process as
+  // spawned. --after is refused alone, with lineage or relations, and when it is no cursor of the listing's. Review
+  // pass 1: refused too with another --list or --key than its page's (it listed from mid-selection without a word), and
+  // with a time Postgres cannot read (a raw stack); a cursor past the last row is the listing's end, not an empty queue.
+  const pt: string[] = [];
+  for (let i = 0; i < 9; i++) pt.push(await rawThought(`[16] a paged pass's side ${i}`));
+  let planted = 0;
+  for (let i = 0; i < 9 && planted < 51; i++) for (let j = 0; j < 9 && planted < 51; j++) {
+    if (i === j) continue;
+    await sql`SELECT record_supersession_proposal(${pt[i]}::uuid, ${pt[j]}::uuid, 'newer_supersedes_older', ${0.5 + (planted % 5) / 10}::numeric, 'raw', 0.9, 'consolidate:zz-paged@p1', NULL)`;
+    planted++;
+  }
+  const pagedIds = (out: string) => [...out.matchAll(/proposal ([0-9a-f-]{36}) /g)].map((m) => m[1]);
+  const pageA = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1");
+  const cursorA = /\n  next page: --list pending --key consolidate:zz-paged@p1 --after (\S+)\n/.exec(pageA.out)?.[1] ?? "";
+  const pageB = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1", "--after", cursorA);
+  const pageBC = await consolidateInProcess({ list: "pending", key: "consolidate:zz-paged@p1", after: cursorA });
+  assert(pageA.code === 0 && /50 pending proposal\(s\) judged by consolidate:zz-paged@p1, most confident first — the first 50 of 51; decide these and list again for the rest, or --after <the cursor below> for the next page/.test(pageA.out)
+      && cursorA.length > 0 && pagedIds(pageA.out).length === 50 && pageB.code === 0 && pagedIds(pageB.out).length === 1 && !pagedIds(pageA.out).includes(pagedIds(pageB.out)[0])
+      && /\n  1 pending proposal\(s\) judged by consolidate:zz-paged@p1 past the cursor, most confident first:\n/.test(pageB.out) && !/next page:/.test(pageB.out) && same(pageBC, pageB),
+    `--list --after: a capped page of 50 of 51 ends with its cursor, which lists the one left and no cursor after it, in-process as spawned (${pageA.out.split("\n").find((l) => /the first 50/.test(l))?.trim().slice(0, 140)})`);
+  const afterAlone = await consolidate("--status", "--after", cursorA), afterLineage = await consolidate("--list", "lineage", "--after", cursorA);
+  const afterRelations = await consolidate("--list", "relations", "--after", cursorA), afterBad = await consolidate("--list", "--after", "not-a-cursor");
+  assert([afterAlone, afterLineage, afterRelations].every((r) => r.code === 2 && /--after goes with --list <pending\|accepted\|rejected\|stale\|all>/.test(r.out))
+      && afterBad.code === 2 && /--after takes the cursor a --list page printed/.test(afterBad.out),
+    `--after refused alone, with lineage or relations, and when it is no cursor (${afterBad.out.trim().slice(0, 80)})`);
+  const { parseProposalCursor, proposalCursor } = await import("../server-portable/core/list-cursor.ts");
+  const atA = parseProposalCursor(cursorA)!;
+  const noKey = await consolidate("--list", "pending", "--after", cursorA), allKey = await consolidate("--list", "all", "--key", "consolidate:zz-paged@p1", "--after", cursorA);
+  const pastEnd = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1", "--after", proposalCursor(atA.selection, "0.00", atA.judgedAt, atA.id));
+  const year0Cur = proposalCursor(atA.selection, atA.confidence, "0000-01-01 00:00:00+00", atA.id);
+  const year0 = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1", "--after", year0Cur);
+  // Review pass 2: refused before anything is written — a --reject beside it is not made — in-process as spawned; and a
+  // cursor the tool made under a lineage filter is refused as the tool's to page, not as flags --list could pass.
+  const victim = pagedIds(pageA.out)[0];
+  const year0Reject = await consolidate("--reject", victim, "--list", "pending", "--key", "consolidate:zz-paged@p1", "--after", year0Cur);
+  // A throw is read as the case's failure, not the suite's end (review pass 2: unrefused, the in-process run threw).
+  const year0C = await consolidateInProcess({ list: "pending", key: "consolidate:zz-paged@p1", after: year0Cur }).catch((e: Error) => ({ code: -1, stdout: "", stderr: e.message }));
+  const [{ status: victimStatus }] = await sql`SELECT status FROM supersession_proposals WHERE id = ${victim}::uuid`;
+  const lineageCur = await consolidate("--list", "pending", "--after", proposalCursor({ ...atA.selection, judgeKey: null, lineage: true }, atA.confidence, atA.judgedAt, atA.id));
+  assert([noKey, allKey].every((r) => r.code === 2 && r.out.includes("--after's cursor was made for --list pending --key consolidate:zz-paged@p1: pass those with it"))
+      && pastEnd.code === 0 && pastEnd.out.includes("  no more pending proposals judged by consolidate:zz-paged@p1 past this cursor — the listing ends here")
+      && year0.code === 2 && year0.out.includes("this one's time is not one Postgres reads") && !/PostgresError|\n\s+at /.test(year0.out)
+      && year0Reject.code === 2 && !/rejected /.test(year0Reject.out) && victimStatus === "pending" && same(year0C, year0)
+      && lineageCur.code === 2 && lineageCur.out.includes("--after's cursor was made by the list_supersession_proposals tool under lineage: true, which --list does not select: page it there"),
+    `--after with another --list or --key refused naming its page's; past the last row, the listing's end; a year-0 time refused in --after's words, no stack, before a --reject beside it writes, in-process as spawned; a tool's lineage cursor the tool's to page (${noKey.out.trim().slice(0, 100)} | ${year0.out.trim().slice(0, 100)} | ${lineageCur.out.trim().slice(0, 100)})`);
+  // Review pass 2: --list all pages under its own selection — the next page line says --list all, not pending (printList
+  // reads all as no status) — and a page whose rows all went before the writers' read (list_proposal_writers wrapped
+  // to return none, as deletes between the two reads would) still prints the line past them.
+  const allKeyed = await consolidate("--list", "all", "--key", "consolidate:zz-paged@p1");
+  await sql.unsafe(`DO $$ DECLARE r text := pg_get_function_result('list_proposal_writers(uuid[])'::regprocedure); BEGIN
+    ALTER FUNCTION list_proposal_writers(uuid[]) RENAME TO list_proposal_writers_kept;
+    EXECUTE format('CREATE FUNCTION list_proposal_writers(p_ids uuid[]) RETURNS %s LANGUAGE sql AS $f$ SELECT * FROM list_proposal_writers_kept(ARRAY[]::uuid[]) $f$', r);
+  END $$`);
+  let allGone: Awaited<ReturnType<typeof consolidate>>;
+  try {
+    allGone = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1");
+  } finally {
+    await sql.unsafe(`DROP FUNCTION list_proposal_writers(uuid[]); ALTER FUNCTION list_proposal_writers_kept(uuid[]) RENAME TO list_proposal_writers`);
+  }
+  assert(allKeyed.code === 0 && /\n  next page: --list all --key consolidate:zz-paged@p1 --after \S+\n/.test(allKeyed.out)
+      && allGone.code === 0 && allGone.out.includes("  no pending proposals judged by consolidate:zz-paged@p1 on this page: the ones it listed went before they were read\n  next page: --list pending --key consolidate:zz-paged@p1 --after ")
+      && pagedIds(allGone.out).length === 0,
+    `--list all's next page line keeps --list all; a page whose rows all went still prints the line past them (${allKeyed.out.split("\n").find((l) => /next page/.test(l))?.trim().slice(0, 70)} | ${allGone.out.trim().slice(0, 140)})`);
+  // Run-it review, pass 1: a page holding exactly the cap is not capped — 110's remaining, not `rows === limit` (the
+  // rule before 110), which printed "the first 50 of 50" and a cursor to an empty page.
+  await sql`DELETE FROM supersession_proposals WHERE id = ${pagedIds(pageB.out)[0]}::uuid`;
+  const exact = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1");
+  assert(exact.code === 0 && pagedIds(exact.out).length === 50 && /\n  50 pending proposal\(s\) judged by consolidate:zz-paged@p1, most confident first:\n/.test(exact.out) && !/next page:|the first 50/.test(exact.out),
+    `a page of exactly 50 is the whole selection: no cap note, no next page line (${exact.out.split("\n").find((l) => /pending proposal/.test(l))?.trim().slice(0, 120)})`);
+  for (const t of pt) await sql`DELETE FROM thoughts WHERE id = ${t}::uuid`;
   // The line's builder on rows a brain would need dozens of thoughts for (review pass 4: with one row in each overflow
   // pass, the passes counted and their rows summed were the same number): twelve passes, the last two of 3 and 2 rows;
   // a key with a leading - is no key --key takes (the CLI's parser reads it as a flag).
@@ -6724,10 +6797,15 @@ if (want("16")) {
     `the by-pass line names ten, counts the rest's passes and rows apart, and marks a leading - (${built.slice(-80)} | ${builtFew})`);
   // The capped page's note, every case (review pass 2: a capped --list all --key said to decide and list again, which
   // never drains an all-status page; no suite reached a cap under --key).
-  assert(capNote("pending", false) === "--status counts them all" && capNote(undefined, false) === "--status counts them all"
-      && capNote("pending", true) === "decide these and list again for the rest; --status counts each pass's pending"
-      && ["accepted", "rejected", "stale", "lineage", undefined].every((st) => capNote(st, true) === "the rest are not listed (SMD-3249 pages)"),
-    "a capped page's note: --status's total unselected; under --key, pending drains as it is decided and every other selection waits for paging");
+  // SMD-3249: every one-status page goes on with --after; a lineage page (two listings) cannot.
+  const NEXT = "--after <the cursor below> lists the next page";
+  const K16 = "consolidate:k@p1";
+  assert(["pending", "accepted", undefined].every((st) => capNote(st, undefined) === `${NEXT}; --status counts them all`)
+      && capNote("pending", K16) === "decide these and list again for the rest, or --after <the cursor below> for the next page; --status counts each pass's pending"
+      && ["accepted", "rejected", "stale", undefined].every((st) => capNote(st, K16) === NEXT)
+      && capNote("lineage", undefined) === "the rest are not listed — reject these and list again, or page them with the list_supersession_proposals tool (status: pending, then stale, each with lineage: true and after: its cursor)"
+      && capNote("lineage", K16) === `the rest are not listed — reject these and list again, or page them with the list_supersession_proposals tool (status: pending, then stale, each with lineage: true, judge_key: ${K16} and after: its cursor)`,
+    "a capped page's note: --after for every one-status page; under --key, pending also drains as it is decided; a lineage page drains as it is rejected, and the tool pages it, under --key that pass's alone");
 
   // The review path, through the worker's flags, audited under the key's name.
   const needDir = await consolidate("--accept", undirected.id);
@@ -6882,26 +6960,26 @@ if (want("16")) {
     // door, not a verdict: the row stays pending, nothing is written
     // (definitions probe, second review pass: the accept went through under
     // the reject's own advice). A brain without the listing's current form
-    // (109's since SMD-3248, 070's before) gets the file named on --list, not
+    // (110's since SMD-3249, 109's and 070's before) gets the file named on --list, not
     // a driver stack: the form dropped and put back.
     const acceptLineage = await consolidate("--accept", atlas!.id);
     assert(acceptLineage.code === 1 && /accept refused: one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it\./.test(acceptLineage.out) && acceptLineage.out.includes(`--reject ${atlas!.id} --note "lineage pair (066)" is the expected decision; pass --force (with --direction on an undirected verdict) if the pointer is what you mean`)
            && (await proposalRow(atlas!.id)).status === "pending" && (await sql`SELECT supersedes FROM thoughts WHERE id = ${atlasNew}::uuid`)[0].supersedes === null,
            `--accept on a lineage pair is refused naming the reject and --force, the row still pending and no pointer written (exit ${acceptLineage.code}: ${acceptLineage.out.trim().slice(0, 200)})`);
     // R3 tooth (mutant 2): the catch names the file for the one error it is for — an unrelated failure inside the listing is shown as itself.
-    await sql.unsafe(`CREATE OR REPLACE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20, p_lineage boolean DEFAULT NULL, p_judge_key text DEFAULT NULL) RETURNS TABLE (id uuid, status text, verdict text, confidence numeric, reason text, similarity real, judge_key text, judged_at timestamptz, reviewed_at timestamptz, review_note text, superseding_id uuid, older_id uuid, older_content text, older_created_at timestamptz, newer_id uuid, newer_content text, newer_created_at timestamptz, older_edited boolean, newer_edited boolean, lineage boolean) LANGUAGE plpgsql STABLE AS $f$ BEGIN RAISE EXCEPTION 'boom: an unrelated failure inside the listing'; END $f$`);
+    await sql.unsafe(`CREATE OR REPLACE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20, p_lineage boolean DEFAULT NULL, p_judge_key text DEFAULT NULL, p_after_confidence numeric DEFAULT NULL, p_after_judged_at timestamptz DEFAULT NULL, p_after_id uuid DEFAULT NULL) RETURNS TABLE (id uuid, status text, verdict text, confidence numeric, reason text, similarity real, judge_key text, judged_at timestamptz, reviewed_at timestamptz, review_note text, superseding_id uuid, older_id uuid, older_content text, older_created_at timestamptz, newer_id uuid, newer_content text, newer_created_at timestamptz, older_edited boolean, newer_edited boolean, lineage boolean, page_key text, remaining bigint) LANGUAGE plpgsql STABLE AS $f$ BEGIN RAISE EXCEPTION 'boom: an unrelated failure inside the listing'; END $f$`);
     const listBoom = await consolidate("--list", "lineage");
-    assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 109/.test(listBoom.out),
-           `an unrelated error inside --list is shown as itself, not as a missing 109 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
-    // A brain at 108: 070's three-argument form alone, 109's gone.
-    await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean, text)`);
-    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
-    assert(/1 unreviewed standing on a lineage pair \(apply migration 109 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
-           "--status still counts the row on a brain without 109 and says the listing needs the file before pointing at it");
-    const listPre109 = await consolidate("--list", "lineage");
-    assert(listPre109.code === 1 && /--list needs migration 109 \(db\/migrations\/109_listing_selects_a_pass\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre109.out) && !/PostgresError/.test(listPre109.out),
-           `on a brain without 109 --list names the file, not a driver error (exit ${listPre109.code}: ${listPre109.out.trim().slice(0, 160)})`);
+    assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 110/.test(listBoom.out),
+           `an unrelated error inside --list is shown as itself, not as a missing 110 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
+    // A brain at 109: 109's four-argument form alone, 110's gone.
+    await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid)`);
     await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("109_") });
+    assert(/1 unreviewed standing on a lineage pair \(apply migration 110 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
+           "--status still counts the row on a brain without 110 and says the listing needs the file before pointing at it");
+    const listPre110 = await consolidate("--list", "lineage");
+    assert(listPre110.code === 1 && /--list needs migration 110 \(db\/migrations\/110_listing_pages\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre110.out) && !/PostgresError/.test(listPre110.out),
+           `on a brain without 110 --list names the file, not a driver error (exit ${listPre110.code}: ${listPre110.out.trim().slice(0, 160)})`);
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("110_") });
     await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${atlasNew}::uuid`;
     // The edit resolves the conflict (the stub reads the new pair as unrelated); the rebuild sets the row stale.
     const atlasFp2 = await moveRaw(atlasNew, "Invoices for the atlas account follow the deploy calendar.");
