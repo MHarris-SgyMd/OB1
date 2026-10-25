@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 110: a thought's own subject is recorded — a `subject` facet,
+-- Migration 111: a thought's own subject is recorded — a `subject` facet,
 --                one standing per thought, with its lineage at the text's
 --                fingerprint, so the thoughts about one subject read as one
 --                thread in capture order (SMD-3306)
@@ -12,8 +12,9 @@
 --   another way did not meet their bars (SMD-3299). SMD-3116 defines evolves
 --   as a later segment of the same work, which is a property of each
 --   thought's own subject, not of the pair: asked of one thought alone, the
---   27B names the ticket blind raters agree on for 98.8% of the thoughts whose
---   own subject is a ticket (SMD-3299, comment ac4f9321). A work thread is one
+--   27B names the ticket blind raters agree on for 241 to 242 of the 245
+--   thoughts whose own subject is a ticket, under the test's versions 2 and 3
+--   (SMD-3299, comment ac4f9321). A work thread is one
 --   subject's thoughts in time order (SMD-3306). This file records the subject;
 --   the pass that finds it, the threads and the pass's use of them follow.
 --
@@ -52,10 +53,11 @@
 --   SENTINELS, not prose (the 014 convention).
 --
 -- NOT HERE
---   * The pass that finds a subject (db/subjects.ts, SMD-3306 PR 2), its place
---     in sleep and rebuild_derived's arm for an edited text (PR 3): until
---     then a subject whose text moved stands at its old fingerprint, and the
---     pass's pool finds it by that.
+--   * The pass that finds a subject (SMD-3306 PR 2: the extraction worker's
+--     rules, and its --subjects sweep for the rest), its place in sleep and
+--     rebuild_derived's arm for an edited text (PR 3): until then a subject
+--     whose text moved stands at its old fingerprint, and the sweep finds it
+--     by that.
 --   * Threads, their read, and the consolidation pass's use of them.
 --
 -- SAFETY
@@ -85,7 +87,7 @@ BEGIN
   END;
   IF v_missing IS NOT NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = format('migration 110 needs %s; this schema lacks it', v_missing),
+      MESSAGE = format('migration 111 needs %s; this schema lacks it', v_missing),
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -109,7 +111,7 @@ AS $$
 $$;
 
 COMMENT ON FUNCTION subject_key_valid(text) IS
-  'Whether a text is a thought subject''s key (110, SMD-3306): ticket:<ID> (a ticket id, upper case, as SMD-123), pr:<number>, version:v<n>.<n>[.<n>[.<n>]], or phrase:<words> — lower case, one space between words, none at either end, on one line — at most 207 characters in all. The facet validator and record_thought_subject both read it. Migration 110 / SMD-3306.';
+  'Whether a text is a thought subject''s key (111, SMD-3306): ticket:<ID> (a ticket id, upper case, as SMD-123), pr:<number>, version:v<n>.<n>[.<n>[.<n>]], or phrase:<words> — lower case, one space between words, none at either end, on one line — at most 207 characters in all. The facet validator and record_thought_subject both read it. Migration 111 / SMD-3306.';
 
 -- ---------------------------------------------------------------------------
 -- 2. The `subject` facet kind — thought_facets_validate extended
@@ -150,11 +152,11 @@ BEGIN
      AND NEW.kind IS DISTINCT FROM 'subject' THEN
     RAISE EXCEPTION USING ERRCODE = 'check_violation',
       MESSAGE = format('thought_facets.kind %L is not a registered facet kind', NEW.kind),
-      HINT = 'The registered kinds are: citation (migration 042), link (migration 053), relation (migration 084), subject (migration 110). A new kind is registered by a migration that extends thought_facets_validate.';
+      HINT = 'The registered kinds are: citation (migration 042), link (migration 053), relation (migration 084), subject (migration 111). A new kind is registered by a migration that extends thought_facets_validate.';
   END IF;
 
   IF NEW.kind = 'subject' THEN
-    -- ob1:subject-facet (110)
+    -- ob1:subject-facet (111)
     -- A thought's own subject (SMD-3306), written once and only ever closed,
     -- as a relation is: the one UPDATE is the close — record_thought_subject
     -- setting valid_until with every other column as it was. A rewrite would
@@ -385,7 +387,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION thought_facets_validate() IS
-  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind. For a citation (042): a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, locks the source row FOR KEY SHARE; source_id may be null only in the detached shape, which keeps what it lost and is not re-pointed. For a link (053): relation one of references | child_of | blocks | blocked_by | relates_to | duplicate_of, system one lower-case word, target a non-empty identity within it, never the thought''s own (thought_sources); writes origin = structured. For a relation (084): written standing (no valid_until, no superseded_by), relation one of related | evolves | duplicate | distinct (distinct since 102), target an existing thought (locked FOR KEY SHARE) that is not the thought itself, stored lower-case, judge_key a non-empty string of at most 200 characters, confidence a number in 0..1 or absent; writes origin = judged; afterwards only its close (valid_until set, not in the future, every other column as it was) is admitted — no rewrite, re-open or move. For a subject (110): written standing, key a subject key (subject_key_valid), by one of metadata | first_line | model, judge_key a non-empty string of at most 200 characters; writes origin = derived; afterwards only its close, as a relation''s. Since 084 no facet changes its kind on UPDATE. A pure close of a link passes unjudged. Migrations 042, 053, 084, 102, 110.';
+  'BEFORE INSERT OR UPDATE on thought_facets: refuses an unregistered kind. For a citation (042): a missing text, a stance outside stated | retrieved | inferred, a source_id that is not an existing thought or is the citing thought itself — all as check_violation — stores source_id lower-case, locks the source row FOR KEY SHARE; source_id may be null only in the detached shape, which keeps what it lost and is not re-pointed. For a link (053): relation one of references | child_of | blocks | blocked_by | relates_to | duplicate_of, system one lower-case word, target a non-empty identity within it, never the thought''s own (thought_sources); writes origin = structured. For a relation (084): written standing (no valid_until, no superseded_by), relation one of related | evolves | duplicate | distinct (distinct since 102), target an existing thought (locked FOR KEY SHARE) that is not the thought itself, stored lower-case, judge_key a non-empty string of at most 200 characters, confidence a number in 0..1 or absent; writes origin = judged; afterwards only its close (valid_until set, not in the future, every other column as it was) is admitted — no rewrite, re-open or move. For a subject (111): written standing, key a subject key (subject_key_valid), by one of metadata | first_line | model, judge_key a non-empty string of at most 200 characters; writes origin = derived; afterwards only its close, as a relation''s. Since 084 no facet changes its kind on UPDATE. A pure close of a link passes unjudged. Migrations 042, 053, 084, 102, 111.';
 
 -- One standing subject per thought: the rule is the index's, not a writer's
 -- discipline. Closed rows are history.
@@ -484,7 +486,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid) IS
-  'Records one derived artifact''s lineage in `derivations`, upserting on (artifact_kind, artifact_id, produced_by) and moving produced_at: the inputs and their fingerprints (parallel, no NULL), the pass, the recipe (a JSON object with a boolean `deterministic`), the agent. Refuses a bad shape with a RAISE — a producer that cannot record its lineage must not commit its artifact either. Eight kinds since 110: chunks, entities, proposal, vector, metadata (061), section (064, a page section a machine wrote), relation (084, a judged relation between two thoughts) and subject (110, a thought''s own subject); the upsert clears 063''s mark (ob1:rerun-clears-the-mark). Migrations 061, 063, 064, 084, 110 / SMD-1731, SMD-1732, SMD-1812, SMD-1873, SMD-3306.';
+  'Records one derived artifact''s lineage in `derivations`, upserting on (artifact_kind, artifact_id, produced_by) and moving produced_at: the inputs and their fingerprints (parallel, no NULL), the pass, the recipe (a JSON object with a boolean `deterministic`), the agent. Refuses a bad shape with a RAISE — a producer that cannot record its lineage must not commit its artifact either. Eight kinds since 111: chunks, entities, proposal, vector, metadata (061), section (064, a page section a machine wrote), relation (084, a judged relation between two thoughts) and subject (111, a thought''s own subject); the upsert clears 063''s mark (ob1:rerun-clears-the-mark). Migrations 061, 063, 064, 084, 111 / SMD-1731, SMD-1732, SMD-1812, SMD-1873, SMD-3306.';
 
 -- ---------------------------------------------------------------------------
 -- 4. record_thought_subject — the pass's one write
@@ -585,7 +587,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_thought_subject(uuid, text, text, text, uuid, text, jsonb) IS
-  'The subject pass''s write of one thought''s own subject (SMD-3306): a `subject` facet on the thought, one standing, under an advisory lock on the thought, the thought locked FOR KEY SHARE first. Refused (action none, stale) when the thought''s fingerprint is not the one the pass read — the subject was found in a text that is gone. The same key, found the same way by the same pass, is kept (its lineage row moved to the fingerprint read now); anything else replaces it (the old facet closed with valid_until, a new one inserted — a subject is never edited); a NULL key closes the standing subject, or answers none; a thought gone answers none. Each new facet''s lineage row (artifact_kind subject, its thought at the fingerprint read, produced_by the pass''s key; the recipe the caller''s, else deterministic unless the model found it) is written in the same transaction (ob1:subject-lineage-with-its-artifact). Returns {ok, action: added | kept | replaced | closed | none, id, stale?, gone?}. SECURITY INVOKER: the caller needs INSERT on thought_facets (the structure group), UPDATE on it and on thoughts (the row locks) and the writes on derivations (the capture group). Migration 110 / SMD-3306.';
+  'The subject pass''s write of one thought''s own subject (SMD-3306): a `subject` facet on the thought, one standing, under an advisory lock on the thought, the thought locked FOR KEY SHARE first. Refused (action none, stale) when the thought''s fingerprint is not the one the pass read — the subject was found in a text that is gone. The same key, found the same way by the same pass, is kept (its lineage row moved to the fingerprint read now); anything else replaces it (the old facet closed with valid_until, a new one inserted — a subject is never edited); a NULL key closes the standing subject, or answers none; a thought gone answers none. Each new facet''s lineage row (artifact_kind subject, its thought at the fingerprint read, produced_by the pass''s key; the recipe the caller''s, else deterministic unless the model found it) is written in the same transaction (ob1:subject-lineage-with-its-artifact). Returns {ok, action: added | kept | replaced | closed | none, id, stale?, gone?}. SECURITY INVOKER: the caller needs INSERT on thought_facets (the structure group), UPDATE on it and on thoughts (the row locks) and the writes on derivations (the capture group). Migration 111 / SMD-3306.';
 
 -- ---------------------------------------------------------------------------
 -- 5. The facet's own thought deleted: its lineage row goes with it
@@ -601,7 +603,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_drop_subject_derivation() IS
-  'AFTER DELETE on thought_facets for a subject (thought_facets_drop_subject_derivation, 110): drops the `derivations` row the subject keyed. A subject goes with its thought''s cascade, and this fires under it, as 084''s does for a relation. Migration 110 / SMD-3306.';
+  'AFTER DELETE on thought_facets for a subject (thought_facets_drop_subject_derivation, 111): drops the `derivations` row the subject keyed. A subject goes with its thought''s cascade, and this fires under it, as 084''s does for a relation. Migration 111 / SMD-3306.';
 
 DROP TRIGGER IF EXISTS thought_facets_drop_subject_derivation ON thought_facets;
 CREATE TRIGGER thought_facets_drop_subject_derivation
@@ -612,10 +614,10 @@ CREATE TRIGGER thought_facets_drop_subject_derivation
 -- 6. The catalog's copy of the vocabulary
 -- ---------------------------------------------------------------------------
 COMMENT ON COLUMN thought_facets.payload IS
-  'Shaped by kind. citation: text (non-empty), stance (stated | retrieved | inferred), source_id (an existing thought, not thought_id itself, stored lower-case); after the source is deleted, source_id null with source_deleted_id and source_deleted_at set by the guard — a shape a restore may insert whole, and that is never re-pointed at a new source. link (053): relation, system, target (an identity in the system), origin structured. relation (084): relation (related | evolves | duplicate | distinct — distinct since 102), target (the older thought''s id), judge_key, confidence, origin judged; inserted standing only, so a restore re-inserts a closed relation as standing or not at all. subject (110): key (ticket:<ID> | pr:<number> | version:<v> | phrase:<words>), by (metadata | first_line | model), judge_key, origin derived; inserted standing only, as a relation.';
+  'Shaped by kind. citation: text (non-empty), stance (stated | retrieved | inferred), source_id (an existing thought, not thought_id itself, stored lower-case); after the source is deleted, source_id null with source_deleted_id and source_deleted_at set by the guard — a shape a restore may insert whole, and that is never re-pointed at a new source. link (053): relation, system, target (an identity in the system), origin structured. relation (084): relation (related | evolves | duplicate | distinct — distinct since 102), target (the older thought''s id), judge_key, confidence, origin judged; inserted standing only, so a restore re-inserts a closed relation as standing or not at all. subject (111): key (ticket:<ID> | pr:<number> | version:<v> | phrase:<words>), by (metadata | first_line | model), judge_key, origin derived; inserted standing only, as a relation.';
 COMMENT ON COLUMN thought_facets.kind IS
-  'The registered kind: citation (042), link (053), relation (084) or subject (110). A later migration registers another by extending thought_facets_validate, not by a registry table.';
+  'The registered kind: citation (042), link (053), relation (084) or subject (111). A later migration registers another by extending thought_facets_validate, not by a registry table.';
 COMMENT ON TABLE thought_facets IS
-  'Typed rows on a thought, four kinds registered: citation (042), payload {text, stance, source_id} — a statement in thought_id that rests on thought source_id; link (053), payload {relation, system, target, origin} — a source system''s structured link from the thought to another identity in it; relation (084), payload {relation, target, judge_key, confidence, origin} — the consolidation judge''s related, evolves or duplicate verdict on the thought (the newer) and the target thought (the older), or since 102 its distinct (the pair it called unrelated: two near neighbours about different subjects, kept apart), written once — by record_thought_relation, the consolidation pass''s door, though origin `judged` marks the kind and any role holding INSERT on the table (the structure group) can write one — and only ever closed; subject (110), payload {key, by, judge_key, origin} — the thought''s own subject, one standing per thought, written by record_thought_subject and only ever closed. Validated by kind in thought_facets_validate (check_violation for an unregistered kind or a malformed payload). Active while valid_until is NULL or future and no facet that still exists supersedes it (thought_facet_active); only active citations make thoughts_guard_citation_sources refuse a delete of their source. Migrations 042, 053, 084, 102, 110 / SMD-1712, SMD-1867, SMD-1873, SMD-3117, SMD-3306.';
+  'Typed rows on a thought, four kinds registered: citation (042), payload {text, stance, source_id} — a statement in thought_id that rests on thought source_id; link (053), payload {relation, system, target, origin} — a source system''s structured link from the thought to another identity in it; relation (084), payload {relation, target, judge_key, confidence, origin} — the consolidation judge''s related, evolves or duplicate verdict on the thought (the newer) and the target thought (the older), or since 102 its distinct (the pair it called unrelated: two near neighbours about different subjects, kept apart), written once — by record_thought_relation, the consolidation pass''s door, though origin `judged` marks the kind and any role holding INSERT on the table (the structure group) can write one — and only ever closed; subject (111), payload {key, by, judge_key, origin} — the thought''s own subject, one standing per thought, written by record_thought_subject and only ever closed. Validated by kind in thought_facets_validate (check_violation for an unregistered kind or a malformed payload). Active while valid_until is NULL or future and no facet that still exists supersedes it (thought_facet_active); only active citations make thoughts_guard_citation_sources refuse a delete of their source. Migrations 042, 053, 084, 102, 111 / SMD-1712, SMD-1867, SMD-1873, SMD-3117, SMD-3306.';
 COMMENT ON TABLE derivations IS
-  'Lineage for every derived artifact (SMD-1731, Phase 1b of SMD-1729): one row per artifact per producing pass, written in the transaction that writes the artifact. artifact_kind names the tier — chunks (a thought''s window set), entities (a thought''s extraction under one extraction_key), proposal (one supersession proposal), vector (a thought''s embedding), metadata (a thought''s capture-time tags), since 064 section (a page section a machine wrote — SMD-1812), since 084 relation (a judged relation between two thoughts, a `relation` facet — SMD-1873), and since 110 subject (a thought''s own subject, a `subject` facet — SMD-3306); artifact_id is the thought''s id for the four keyed by a thought, the proposal''s id for a proposal, the section''s id for a section, the facet''s id for a relation or a subject. input_ids and input_fingerprints are parallel arrays naming what the artifact was computed from and the text it was computed from — a row whose fingerprints no longer match its inputs'' is stale, which is a read (preflight counts them), not a trigger. produced_by is the pass; recipe is a JSON object carrying a boolean `deterministic` (what rebuild_derived reads, migration 063: a re-derivation the database owns against a re-run a worker owns) and the producer''s own record — model, prompt_version, prompt_hash, window parameters; `legacy: true` on a row 061 backfilled, `declared: false` where a caller sent no recipe. stale_since and stale_reason (063) carry a rebuild''s request for a re-run until the producer writes the row again. No foreign key: thoughts_drop_derivations, supersession_proposals_drop_derivation, page_sections_drop_derivations, thought_facets_drop_relation_derivation and thought_facets_drop_subject_derivation drop the rows a deleted thought, proposal, section, relation or subject keyed; rebuild_derived deletes a row whose artifact is gone while its thought stands. Migrations 061, 063, 064, 084, 110 / SMD-1731, SMD-1732, SMD-1812, SMD-1873, SMD-3306.';
+  'Lineage for every derived artifact (SMD-1731, Phase 1b of SMD-1729): one row per artifact per producing pass, written in the transaction that writes the artifact. artifact_kind names the tier — chunks (a thought''s window set), entities (a thought''s extraction under one extraction_key), proposal (one supersession proposal), vector (a thought''s embedding), metadata (a thought''s capture-time tags), since 064 section (a page section a machine wrote — SMD-1812), since 084 relation (a judged relation between two thoughts, a `relation` facet — SMD-1873), and since 111 subject (a thought''s own subject, a `subject` facet — SMD-3306); artifact_id is the thought''s id for the four keyed by a thought, the proposal''s id for a proposal, the section''s id for a section, the facet''s id for a relation or a subject. input_ids and input_fingerprints are parallel arrays naming what the artifact was computed from and the text it was computed from — a row whose fingerprints no longer match its inputs'' is stale, which is a read (preflight counts them), not a trigger. produced_by is the pass; recipe is a JSON object carrying a boolean `deterministic` (what rebuild_derived reads, migration 063: a re-derivation the database owns against a re-run a worker owns) and the producer''s own record — model, prompt_version, prompt_hash, window parameters; `legacy: true` on a row 061 backfilled, `declared: false` where a caller sent no recipe. stale_since and stale_reason (063) carry a rebuild''s request for a re-run until the producer writes the row again. No foreign key: thoughts_drop_derivations, supersession_proposals_drop_derivation, page_sections_drop_derivations, thought_facets_drop_relation_derivation and thought_facets_drop_subject_derivation drop the rows a deleted thought, proposal, section, relation or subject keyed; rebuild_derived deletes a row whose artifact is gone while its thought stands. Migrations 061, 063, 064, 084, 111 / SMD-1731, SMD-1732, SMD-1812, SMD-1873, SMD-3306.';

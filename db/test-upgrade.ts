@@ -550,8 +550,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // settled, SMD-2935), 106 (the query log's literal arm, SMD-2891),
   // 107 (the listing caps the walks it runs, SMD-3036), 108 (a keyed
   // rebuild of 071's mirror for a status-set change, SMD-3160), 109
-  // (the listing selects one pass's proposals, SMD-3248) and 110 (a
-  // thought's own subject recorded, SMD-3306)
+  // (the listing selects one pass's proposals, SMD-3248), 110 (the
+  // listing pages, SMD-3249) and 111 (a thought's own subject
+  // recorded, SMD-3306)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -692,16 +693,18 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // name without 094 ([20ay]); 108 adds the mirror's keyed rebuild,
   // refusing by name without 071 ([20az]); 109 redefines 070's listing
   // under a fourth argument, refusing by name without 016, 025 or 029
-  // ([20ba]); 110 adds the subject facet kind, its key's shape, its write,
-  // two indexes, a drop trigger and the lineage kind, and redefines 102's
-  // validator and 084's lineage writer on their own bodies, refusing by
-  // name without 016, 042, 061, 084 or 102 ([20bb]) — all
+  // ([20ba]); 110 redefines it under the after-cursor's three, refusing
+  // by name without the same ([20bb]); 111 adds the subject facet kind, its
+  // key's shape, its write, two indexes, a drop trigger and the lineage
+  // kind, and redefines 102's validator and 084's lineage writer on their
+  // own bodies, refusing by name without 016, 042, 061, 084 or 102
+  // ([20bc]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 81, `030 is among the last eighty-one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 82, `030 is among the last eighty-two migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -3078,7 +3081,7 @@ console.log("\n[20v] Migration 070 onto a populated brain at 068 — the listing
     SELECT to_regprocedure(${SIG2}) IS NOT NULL AS two, to_regprocedure(${SIG3}) IS NOT NULL AS three,
            (SELECT count(*)::int FROM pg_proc WHERE proname = 'list_supersession_proposals') AS n,
            (SELECT prosrc LIKE '%ob1:listing-flags-the-lineage-pair%' FROM pg_proc
-             WHERE oid = COALESCE(to_regprocedure('list_supersession_proposals(text, int, boolean, text)'), to_regprocedure(${SIG3}))) AS flags`)[0] as { two: boolean; three: boolean; n: number; flags: boolean | null };
+             WHERE oid = COALESCE(to_regprocedure('list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid)'), to_regprocedure('list_supersession_proposals(text, int, boolean, text)'), to_regprocedure(${SIG3}))) AS flags`)[0] as { two: boolean; three: boolean; n: number; flags: boolean | null };
   const proposals = async () => JSON.stringify(await sql`SELECT id, older_id, newer_id, status, verdict, judge_key, judged_at::text AS j, reviewed_at::text AS r, review_note FROM supersession_proposals ORDER BY id`);
   const stamps = async () => JSON.stringify(await sql`SELECT id, content, content_fingerprint, metadata, embedding::text AS e, embedding_model, derived_from, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
   const lineage = async () => JSON.stringify(await sql`SELECT artifact_kind, artifact_id, produced_by, produced_at::text AS at, recipe FROM derivations ORDER BY 1, 2, 3`);
@@ -3143,8 +3146,8 @@ console.log("\n[20v] Migration 070 onto a populated brain at 068 — the listing
   }
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "029" });
   const sql3 = new SQL({ url: URL_, max: 1 });
-  // Every file from 029 on, 109 among them: the flag in 109's body, 070's under a fourth argument (SMD-3248).
-  const [present] = await sql3`SELECT prosrc LIKE '%ob1:listing-flags-the-lineage-pair%' AS x FROM pg_proc WHERE oid = COALESCE(to_regprocedure('list_supersession_proposals(text, int, boolean, text)'), to_regprocedure(${SIG3}))`;
+  // Every file from 029 on, 110 among them: the flag in 110's body — 109's plus the cursor, 109's being 070's under a fourth argument (SMD-3248, SMD-3249).
+  const [present] = await sql3`SELECT prosrc LIKE '%ob1:listing-flags-the-lineage-pair%' AS x FROM pg_proc WHERE oid = COALESCE(to_regprocedure('list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid)'), to_regprocedure('list_supersession_proposals(text, int, boolean, text)'), to_regprocedure(${SIG3}))`;
   assert(present?.x === true, "…and applied once every prerequisite is there: the body carries the flag");
   await sql3.close();
 }
@@ -4859,16 +4862,13 @@ console.log("\n[20ba] Migration 109: refused by name without 016, 025 or 029; on
   await sql.close();
 }
 
-console.log("\n[20bb] Migration 110: refused by name without 016, 042, 061, 084 or 102; onto a populated brain at the file before it — a relation, a citation and their lineage planted before it standing as they were, a subject refused as an unregistered kind before and written by record_thought_subject after, with its lineage; no thought or audit row moved; a re-apply a no-op (SMD-3306)");
+console.log("\n[20bb] Migration 110: refused by name without 016, 025 or 029; onto a populated brain at the file before it — 109's four-argument listing replaced by one form of seven, the proposals planted before it listing the same through a four-argument call after it (110's two columns beside), walked page by page with the cursor; no proposal, thought or audit row moved; a re-apply a no-op (SMD-3249)");
 {
-  const the110 = MIGRATIONS.find((f) => f.endsWith("_thought_subject.sql"))!;  // by name: renumbered when main takes its number
-  // Each prerequisite in turn, the first missing named.
+  const the110 = MIGRATIONS.find((f) => f.endsWith("_listing_pages.sql"))!;  // by name: renumbered when main takes its number
   for (const [stop, needs] of [
     ["016", "migration 110 needs 016 (content_fingerprint_of); this schema lacks it"],
-    ["042", "migration 110 needs 042 (thought_facets); this schema lacks it"],
-    ["061", "migration 110 needs 061 (ob1_record_derivation); this schema lacks it"],
-    ["084", "migration 110 needs 084 (record_thought_relation); this schema lacks it"],
-    ["102", "migration 110 needs 102 (record_thought_relation taking distinct); this schema lacks it"],
+    ["025", "migration 110 needs 025 (thoughts.derived_from); this schema lacks it"],
+    ["029", "migration 110 needs 029 (supersession_proposals); this schema lacks it"],
   ] as const) {
     await dropSchema(URL_);
     await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
@@ -4883,10 +4883,83 @@ console.log("\n[20bb] Migration 110: refused by name without 016, 042, 061, 084 
   await sql`SELECT set_agent_kind('laptop', 'operator')`;
   const actor = { name: "laptop", via: "open-brain" };
   const t: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    t.push(((await sql`SELECT upsert_thought(${`upgrade 110: thought ${i}`}::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id);
+  }
+  // Five proposals over distinct pairs, two of one confidence, under one pass.
+  let n = 0;
+  for (let i = 0; i < 4 && n < 5; i++) for (let j = 0; j < 4 && n < 5; j++) {
+    if (i === j) continue;
+    await sql`SELECT record_supersession_proposal(${t[i]}::uuid, ${t[j]}::uuid, 'newer_supersedes_older', ${[0.9, 0.8, 0.8, 0.7, 0.6][n]}::numeric, 'stub', 0.9, 'consolidate:stub@p110')`;
+    n++;
+  }
+  const SIG4 = "list_supersession_proposals(text, int, boolean, text)", SIG7 = "list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid)";
+  const forms = async () => (await sql`
+    SELECT to_regprocedure(${SIG4}) IS NOT NULL AS four, to_regprocedure(${SIG7}) IS NOT NULL AS seven,
+           (SELECT count(*)::int FROM pg_proc WHERE proname = 'list_supersession_proposals') AS n,
+           (SELECT prosrc LIKE '%ob1:listing-pages%' AND prosrc LIKE '%ob1:listing-selects-a-pass%' AND prosrc LIKE '%ob1:listing-flags-the-lineage-pair%' FROM pg_proc WHERE oid = to_regprocedure(${SIG7})) AS sentinels`)[0] as { four: boolean; seven: boolean; n: number; sentinels: boolean | null };
+  // The listing as a caller from before 110 reads it — four arguments — each row's 109 columns, by name.
+  const COLS = "id, status, verdict, confidence, reason, similarity, judge_key, judged_at, reviewed_at, review_note, superseding_id, older_id, older_content, older_created_at, newer_id, newer_content, newer_created_at, older_edited, newer_edited, lineage";
+  const listing = async () => String((await sql.unsafe(`SELECT jsonb_agg(l ORDER BY l.id)::text AS j FROM (SELECT ${COLS} FROM list_supersession_proposals(NULL::text, 200, NULL::boolean, NULL::text)) l`))[0].j);
+  const proposals = async () => JSON.stringify(await sql`SELECT id, older_id, newer_id, status, verdict, confidence::text AS c, judge_key, judged_at::text AS j FROM supersession_proposals ORDER BY id`);
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const pre = await forms();
+  const listedBefore = await listing(), proposalsBefore = await proposals(), before = await rows(), auditBefore = await audits();
+  assert(pre.four === true && pre.seven === false && Number(pre.n) === 1, "before 110 the listing is 109's four-argument form alone");
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the110 });
+
+  const post = await forms();
+  assert(post.four === false && post.seven === true && Number(post.n) === 1 && post.sentinels === true,
+    "…and after: the seven-argument form alone, carrying the three sentinels, the four-argument one gone");
+  assert((await listing()) === listedBefore, "the proposals planted before the file list the same after it through a four-argument call — every one of 109's columns, every row");
+  // A walk in pages of two with the cursor, as the store reads it: each row once, in the listing's order.
+  const order = ((await sql`SELECT id::text FROM supersession_proposals ORDER BY confidence DESC, judged_at, id`) as { id: string }[]).map((r) => r.id);
+  const seen: string[] = [];
+  let after: string[] | null = null;
+  for (let k = 0; k < 10; k++) {
+    const page = (await sql`SELECT id::text, page_key, remaining FROM list_supersession_proposals('pending'::text, 2, NULL::boolean, NULL::text, ${after?.[0] ?? null}::numeric, ${after?.[1] ?? null}::timestamptz, ${after?.[2] ?? null}::uuid)`) as { id: string; page_key: string; remaining: string }[];
+    seen.push(...page.map((r) => r.id));
+    if (!page.length || Number(page[0].remaining) <= page.length) break;
+    after = JSON.parse(page[page.length - 1].page_key) as string[];
+  }
+  assert(seen.join() === order.join() && order.length === 5, `walked in pages of two with the cursor: each of the five once, in the listing's order (${seen.length})`);
+  assert((await proposals()) === proposalsBefore && (await rows()) === before && (await audits()) === auditBefore, "the file is DDL alone: no proposal, thought or audit row moved");
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the110 });
+  const again = await forms();
+  assert(Number(again.n) === 1 && again.sentinels === true && (await listing()) === listedBefore, "a re-apply is a no-op: one form, the same rows");
+  await sql.close();
+}
+
+console.log("\n[20bc] Migration 111: refused by name without 016, 042, 061, 084 or 102; onto a populated brain at the file before it — a relation, a citation and their lineage planted before it standing as they were, a subject refused as an unregistered kind before and written by record_thought_subject after, with its lineage; no thought or audit row moved; a re-apply a no-op (SMD-3306)");
+{
+  const the111 = MIGRATIONS.find((f) => f.endsWith("_thought_subject.sql"))!;  // by name: renumbered when main takes its number
+  // Each prerequisite in turn, the first missing named.
+  for (const [stop, needs] of [
+    ["016", "migration 111 needs 016 (content_fingerprint_of); this schema lacks it"],
+    ["042", "migration 111 needs 042 (thought_facets); this schema lacks it"],
+    ["061", "migration 111 needs 061 (ob1_record_derivation); this schema lacks it"],
+    ["084", "migration 111 needs 084 (record_thought_relation); this schema lacks it"],
+    ["102", "migration 111 needs 102 (record_thought_relation taking distinct); this schema lacks it"],
+  ] as const) {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
+    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the111 }).then(() => "applied", (e: Error) => e.message);
+    assert(refused === needs, `111 on a schema stopped before ${stop} is refused up front, naming what it needs (${refused})`);
+  }
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the111 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  await sql`SELECT set_agent_kind('laptop', 'operator')`;
+  const actor = { name: "laptop", via: "open-brain" };
+  const t: string[] = [];
   for (let i = 0; i < 3; i++)
-    t.push(((await sql`SELECT upsert_thought(${`upgrade 110: Session summary — SMD-${3300 + i} — thought ${i}`}::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id);
+    t.push(((await sql`SELECT upsert_thought(${`upgrade 111: Session summary — SMD-${3300 + i} — thought ${i}`}::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id);
   const fpOf = async (id: string) => String((await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
-  // A brain before 110 holds relations, with their lineage, and citations: planted here as the pass and a writer leave them.
+  // A brain before 111 holds relations, with their lineage, and citations: planted here as the pass and a writer leave them.
   await sql`SELECT record_thought_relation(${t[1]}::uuid, ${t[0]}::uuid, 'evolves', 0.8, 'consolidate:h2o-lightning-4b+qwen3.8:27b@p4d4', NULL::uuid, ${await fpOf(t[0])}::text, ${await fpOf(t[1])}::text, NULL::jsonb)`;
   await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${t[2]}::uuid, 'citation', ${{ text: "rests on thought 0", stance: "stated", source_id: t[0] }}::jsonb)`;
   const facets = async () => JSON.stringify(await sql`SELECT id, thought_id, kind, payload, valid_until::text AS v FROM thought_facets ORDER BY id`);
@@ -4895,9 +4968,9 @@ console.log("\n[20bb] Migration 110: refused by name without 016, 042, 061, 084 
   const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   const facetsBefore = await facets(), lineageBefore = await lineage(), before = await rows(), auditBefore = await audits();
   const unregistered = await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${t[0]}::uuid, 'subject', ${{ key: "ticket:SMD-3300", by: "first_line", judge_key: "subject:x@p1" }}::jsonb)`.then(() => "admitted", (e: Error) => e.message);
-  assert(/is not a registered facet kind/.test(unregistered) && JSON.parse(facetsBefore).length === 2, `before 110 a subject is not a registered kind (${unregistered.slice(0, 80)})`);
+  assert(/is not a registered facet kind/.test(unregistered) && JSON.parse(facetsBefore).length === 2, `before 111 a subject is not a registered kind (${unregistered.slice(0, 80)})`);
 
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the110 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the111 });
 
   assert((await facets()) === facetsBefore && (await lineage()) === lineageBefore && (await rows()) === before && (await audits()) === auditBefore,
     "the file moves nothing it finds: the relation and the citation, their lineage, every thought and audit row stand as they were");
@@ -4905,7 +4978,7 @@ console.log("\n[20bb] Migration 110: refused by name without 016, 042, 061, 084 
   const [row] = (await sql`SELECT artifact_kind AS k, input_ids::text[] AS i FROM derivations WHERE artifact_kind = 'subject' AND artifact_id = ${w.id}::uuid`) as { k: string; i: string[] }[];
   assert(w.action === "added" && row?.k === "subject" && row?.i.join() === t[0], `after it, record_thought_subject writes a subject with its lineage row (${JSON.stringify(w)})`);
   const facetsAfter = await facets(), lineageAfter = await lineage();
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the110 });
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the111 });
   assert((await facets()) === facetsAfter && (await lineage()) === lineageAfter && (await rows()) === before,
     "a re-apply is a no-op: every facet, lineage row and thought as it was");
   await sql.close();
