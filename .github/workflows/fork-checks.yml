@@ -702,7 +702,7 @@ jobs:
         shard: [rest, sleep, long, extract]
 
     # A service container, not with-postgres.sh — the runner provides the
-    # database, and "Wait for the service Postgres" below its readiness. The
+    # database, and "Wait for the service Postgres" below waits for it. The
     # local script exists for developers, who mostly run podman.
     services:
       postgres:
