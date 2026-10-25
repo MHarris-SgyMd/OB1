@@ -163,6 +163,31 @@ for (const engine of ENGINES) {
   const lostCalls = [...engineText.matchAll(/\breportLost\(([^()]*)\)/g)];
   ok(lostCalls.every((c) => /,\s*err\s*$/.test(c[1])), `${engine}'s every reportLost call passes the Writer's err (${lostCalls.length} call(s))`);
 }
+// An engine's own library, which its CLI and an in-process caller both call
+// (subject-sweep.ts: extract-entities.ts --subjects, SMD-3306): no CLI block,
+// and held to the census over the whole file; its import does nothing, and
+// its entry refuses a missing URL in the CLI's words before connecting.
+for (const [lib, entry] of [["subject-sweep.ts", "sweepSubjects"]] as const) {
+  const text = code(readFileSync(join(HERE, lib), "utf8"));
+  ok(!text.includes("import.meta.main"), `${lib} is a library: no CLI block of its own`);
+  for (const [re, what] of FORBIDDEN) {
+    const hit = text.match(re);
+    ok(hit === null, `${lib}'s code holds no ${what}${hit ? ` — found ${JSON.stringify(hit[0])}` : ""}`);
+  }
+  const noImports = text.replace(/^import\s[\s\S]*?\sfrom\s*["'][^"']+["'];?$/gm, "");
+  const named = (noImports.match(/\bconsoleWriter\b/g) ?? []).length, asDefault = (noImports.match(/\?\?\s*consoleWriter\b/g) ?? []).length;
+  ok(named === asDefault && asDefault >= 1, `${lib} names consoleWriter only as the default writer (${named} use(s), ${asDefault} as the default)`);
+  const quiet = await counted(["-e", `const m = await import("./${lib}"); console.log(typeof m.${entry});`], { DATABASE_URL: AT });
+  ok(quiet.code === 0 && quiet.out === "function\n" && quiet.err === "" && quiet.seen === 0, `${lib} imports with no side effect, nothing printed and no connection opened with DATABASE_URL set (exit ${quiet.code}, ${quiet.seen} connection(s))`);
+  const control = await counted(["-e", `const m = await import("./${lib}"); await m.${entry}({ url: ${JSON.stringify(AT)}, dryRun: true });`], {}, true);
+  ok(control.seen > 0, `…the control: ${entry}() on that URL does connect (${control.seen} connection(s))`);
+  const before = listenerCounts();
+  const m = (await import(`./${lib}`)) as Record<string, (o: object) => Promise<number>>;
+  ok(listenerCounts() === before, `${lib} installs no process listener when imported in-process (${before} → ${listenerCounts()})`);
+  const w = capture();
+  const code2 = await m[entry]({ writer: w });
+  ok(code2 === 2 && w.errs.join("\n") === NO_DATABASE_URL && w.outs.length === 0, `${entry}() with no URL refuses in the CLI's words, exit 2, before connecting (${code2}: ${JSON.stringify(w.errs.join(" | ").slice(0, 80))})`);
+}
 // The census has teeth: the shapes a regression would write are seen, and the
 // shapes PRs 2-4's engines will need are not.
 const censusSees = (s: string) => FORBIDDEN.some(([re]) => re.test(s));
