@@ -23,6 +23,7 @@
  *   OB1_METADATA_MODEL=<larger> bun db/extract-entities.ts --url … --job <the recorded key> --retry-left-out --limit N   # a larger model over those N rows, the key and trigger left as they are (--status prints it)
  *   bun db/extract-entities.ts --url … --dump answers.jsonl   # also append every model answer, for evals/eval-entities.ts --replay
  *   bun db/extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config
+ *   bun db/extract-entities.ts --url … --subjects [rules]     # each thought's own subject, where none stands at its text (db/subject-sweep.ts)
  *   await run({ url, dryRun: true })                          # a dry run, in-process: import { run } from "./extract-entities.ts" (SMD-2304)
  *   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)   --batch N (1; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (300, per model call — per window of a long thought; at most 9007199254740, a call signal's range)
  *   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
@@ -165,6 +166,17 @@
  * model needs --switch-model: record_thought_entities replaces a thought's rows
  * whatever key wrote them, so a partial run under a second model leaves a
  * per-thought mixture that nothing repairs.
+ *
+ * ── A thought's own subject (SMD-3306) ──────────────────────────────────────
+ * With its entities, each thought's own subject is recorded when a rule finds
+ * it: the ticket it is filed under, else the first ticket on its first line
+ * (server-portable/subject.ts), through migration 111's
+ * record_thought_subject at the text the claim read. No model is asked for
+ * it here. `--subjects` is the sweep for the rest (db/subject-sweep.ts):
+ * thoughts extracted before 111, those no rule keys, which it asks the judge
+ * model about, and those whose text moved. A brain before 111, or a role
+ * without the grants 111's door needs, records no subject and says so once;
+ * the entities stand either way.
  */
 
 import type { SQL } from "bun";
@@ -175,7 +187,9 @@ import { PROVIDER_ERROR_CHARS, resolveEmbedConfig, type EmbedEnv } from "../serv
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeUntil, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
-import { entityRecipe } from "../server-portable/lineage.ts";
+import { entityRecipe, subjectRecipe } from "../server-portable/lineage.ts";
+import { ruleSubject, SUBJECT_RULES_KEY } from "../server-portable/subject.ts";
+import { recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
@@ -197,8 +211,11 @@ const FLAGS = {
   url: "one", workers: "one", batch: "one", ttl: "one", heartbeat: "one", timeout: "one", limit: "one",
   follow: "optional", dump: "one", job: "one",
   status: "none", "dry-run": "none", "switch-key": "none", "retry-failed": "none", "retry-partial": "none", "retry-left-out": "none", decide: "none",
+  subjects: "optional",
 } as const;
-const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.jsonl>", job: "<the recorded key>" };
+const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", dump: "<answers.jsonl>", job: "<the recorded key>", subjects: "[rules] (the subject sweep: with --url, --limit, --timeout, --dry-run)" };
+/** The flags the subject sweep reads (db/subject-sweep.ts): any other beside --subjects is the pass's, refused rather than dropped. */
+const SUBJECT_FLAGS: ReadonlySet<string> = new Set(["subjects", "url", "limit", "timeout", "dry-run"]);
 
 /**
  * What one extraction run is asked to do — the CLI's flags, typed (SMD-2304).
@@ -1206,6 +1223,41 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     }
   }
 
+  /**
+   * The thought's own subject by the rules (SMD-3306), recorded once its
+   * entities are: the ticket it is filed under, else the first ticket on its
+   * first line, at the text the claim read; record_thought_subject refuses a
+   * text that moved since. No model is asked here: a thought no rule keys is
+   * --subjects' (db/subject-sweep.ts). A courtesy, as the kept windows are: a
+   * brain before 111, or a role without its door's grants, records none and
+   * says so once; another error is said once, and the thought's entities stand.
+   */
+  let subjecting = true;
+  const subjects = { recorded: 0, kept: 0 };
+  const saidSubject = { passing: false };
+  async function recordRuleSubject(row: Row): Promise<void> {
+    if (!subjecting || hardStopped || row.fingerprint === null) return;
+    const found = ruleSubject(row);
+    if (!found) return;
+    try {
+      const w = await recordSubject(sql, { id: row.id, fingerprint: row.fingerprint }, found.key, found.by, SUBJECT_RULES_KEY, subjectRecipe(found), agentId);
+      if (w.action === "added" || w.action === "replaced") subjects.recorded++;
+      else if (w.action === "kept") subjects.kept++;
+    } catch (e) {
+      const code = (e as { errno?: string; code?: string }).errno ?? (e as { code?: string }).code;
+      if (code === "42883" || code === "42501" || code === "42P01") {
+        // Read after the call: every worker in hand may try at once.
+        if (!subjecting) return;
+        subjecting = false;
+        errAside(`  could not record a thought's own subject (${(e as Error).message}) — no subject is recorded with this run's entities: that needs migration 111, and for a role of its own INSERT on thought_facets and the writes on derivations; a running follower takes it up once restarted`);
+        return;
+      }
+      if (saidSubject.passing) return;
+      saidSubject.passing = true;
+      errAside(`  could not record a thought's own subject (${(e as Error).message}) — the thought's entities stand, and --subjects records its subject later`);
+    }
+  }
+
   async function processRow(row: Row, workerId: string): Promise<Outcome> {
     const t0 = Date.now();
     let extraction: Extraction;
@@ -1288,6 +1340,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       if (res.refused_entities !== undefined) totals.gated = true;
       totals.refused += res.refused_entities ?? 0;
       totals.retyped += res.retyped_entities ?? 0;
+      await recordRuleSubject(row);
       // A prefix's rows stand, and the claim says they are a prefix (SMD-2240);
       // so do the parsed windows' rows, the claim naming those left out (SMD-2260).
       const c = extraction.coverage;
@@ -1903,7 +1956,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   out(
     `  wrote ${totals.mentions} mentions of ${totals.newEntities} new entities, ${totals.edges} edges; ` +
       `dropped ${totals.dropped} relation(s) naming an unlisted entity; ${totals.ambiguous} attached to a name listed under two types` +
-      (totals.gated ? `; the name gate (056) refused ${totals.refused} entity name(s) and retyped ${totals.retyped}` : "")
+      (totals.gated ? `; the name gate (056) refused ${totals.refused} entity name(s) and retyped ${totals.retyped}` : "") +
+      // SMD-3306: said when a rule found any, so a brain whose thoughts name no ticket reads as before.
+      (subjects.recorded || subjects.kept ? `; recorded ${subjects.recorded} thought(s)' own subject by its ticket${subjects.kept ? `, ${subjects.kept} kept at the text read now` : ""}` : "")
   );
   // Thoughts none of whose windows parsed; a window left out beside parsed ones
   // is in the summary's partial clause instead (SMD-2260, review pass 2).
@@ -1970,6 +2025,23 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 if (import.meta.main) {
   const cli = commandLine("extract-entities.ts", FLAGS, { hints: HINTS });
   const url = databaseUrl(cli.value("url"));
+  if (cli.has("subjects")) {
+    // The subject sweep (db/subject-sweep.ts, SMD-3306) takes its own flags: a
+    // pass's beside it would be read as asked and do nothing (SMD-2015's kind).
+    const value = cli.value("subjects");
+    const others = Object.keys(FLAGS).filter((f) => !SUBJECT_FLAGS.has(f) && cli.has(f as keyof typeof FLAGS));
+    if ((value !== undefined && value !== "rules") || others.length > 0) {
+      console.error(`extract-entities.ts: --subjects takes "rules" or no value, and goes with --url, --limit, --timeout and --dry-run alone${others.length ? `, not ${others.map((f) => `--${f}`).join(", ")}` : ""}.\n${flagList(FLAGS, HINTS)}`);
+      process.exit(2);
+    }
+    const limit = cli.has("limit") ? cli.int("limit", { absent: 0, min: 1 }) : undefined;
+    const timeout = cli.int("timeout", { absent: 300, min: 1, max: MAX_CALL_TIMEOUT_S });
+    const sql = openSql(url, { max: 2 });
+    let uninstall = () => {};
+    await closeThenExit(sql, async () => {
+      return sweepSubjects({ sql, url, model: value !== "rules", limit, timeout, dryRun: cli.has("dry-run"), onPass: (stop) => { uninstall = stopOnSignals(stop); } }).finally(() => uninstall());
+    });
+  }
   // The numbers by the scanner's rules, in run()'s order — the lease pair
   // between them, as run() checks it — so a command breaking two rules is
   // refused for the same one it always was.
