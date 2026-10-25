@@ -321,6 +321,53 @@ Two sets. Set 1 is item 3's 79 agreed pairs, held out from the error analysis. S
   3. On a hit, one narrow question: does the thought work on what it names (D), or only name it (H)?
   4. With no hit, F or N.
 
+### The link step as narrower questions (2026-10-24)
+
+Round 4 splits the link step as the maintainer chose. Each question quotes only the test's own lines for its choice. Candidates, prompts and bars were fixed on SMD-3203 before any pair was asked (comment b3eed1b6), on round 3's sets and bars.
+
+| Ask | Set 1: κ | precision | miss | Set 2: precision | miss | Median per pair (sets 1, 2) | |
+|---|---|---|---|---|---|---|---|
+| control | 0.666 | 0.826 | 0.152 | 0.686 | 0.297 | 14.6 s, 11.4 s | the floor |
+| narrow | 0.478 | 0.717 | 0.192 | 0.662 | 0.259 | 23.9 s, 27.8 s | misses both |
+
+- **Narrow does not qualify** (comment a8fd376a). The control, asked again on set 1, gave the same link on all 80 pairs.
+- **The hit finds the link; the D or H question undoes it** (post hoc).
+  - One thought named the other's own subject or deliverable in 28 of set 1's 36 direct pairs, in 39 of set 2's 42, and in 14 of PR 3's 15 wrong caps.
+  - But the D or H question answered "only names it" on 14 of set 1's 28 and 16 of set 2's 39, 13 of PR 3's 15 among them.
+  - So the 27B draws D's line stricter than the raters, for whom building on, using or changing the other's deliverable is D. PR 3's 3 split pairs sit on the same line. That is the test's wording, not the asking.
+- **The maintainer's choice (2026-10-24): say where D ends,** in the test's version 3.
+
+### The test's version 3 (proposed, 2026-10-24)
+
+Version 3 is version 2 with three edits, in the maintainer's wording (SMD-3299). The pass asks version 2 until a version 5 qualifies.
+
+1. **Step 1's last sentence** becomes: "Such a thing counts as a third subject under step 2 when both thoughts name it and neither one's own work produced it. A thing one thought's own work produced is that thought's deliverable (rule 6)."
+2. **F-name's example** becomes: "or a component or file that both thoughts' work touches and neither one's work produced."
+3. **A new rule,** under the heading "Version 3's rule":
+
+   6. **The other thought's deliverable.** A thought whose own work changes, extends, fixes, tests, hardens or retires it, or builds new work on top of it, is about it: D. A thought that only runs, applies or cites it, unchanged, while its own work is about something else, names it in passing: H.
+
+On PR 3's errors, the 9 pairs where a deliverable was read as a third subject become D. The 3 split pairs, which run or apply the other's deliverable, become H.
+
+### The link step asked with version 3 (2026-10-24)
+
+Two fresh blind raters per set re-labelled both sets under version 3, against a bar fixed first (comment 2fb7b75e). Both sets met it: κ 0.949 and 0.826 on mediated or not. The gold barely moved: 3 pairs on set 1 and 2 on set 2. Round 5 measured two candidates against that gold, on round 3's bars (comment c8033c53):
+
+- **link3:** version 4's question around version 3's text;
+- **narrow3:** round 4's narrow questions over version 3's lines.
+
+| Ask | Set 1: κ | precision | miss | Set 2: precision | miss | Median per pair (sets 1, 2) | |
+|---|---|---|---|---|---|---|---|
+| control | 0.739 | 0.886 | 0.147 | 0.710 | 0.314 | 11.4 s, 11.3 s | the floor |
+| link3 | 0.768 | 0.927 | 0.162 | 0.733 | 0.329 | 15.3 s, 13.6 s | misses set 2's miss |
+| narrow3 | 0.415 | 0.720 | 0.286 | 0.674 | 0.337 | 22.2 s, 23.2 s | misses both |
+
+- **No candidate qualifies.**
+  - link3 adds no wrong cap and fixes five (post hoc), but fixes almost none of version 4's N misses. Version 3 moves the line between D and F; the misses sit between N and F.
+  - Under this gold, version 4 itself meets set 2's precision bar and misses its miss bar: it sits on both lines.
+- **What evolves means is a property of each thought** (post hoc, SMD-3299). SMD-3116 defines it as a later segment of the same work, so it turns on each thought's own subject. Asked of one thought alone, the 27B names the ticket blind raters agree on for 98.8% of the thoughts whose own subject is a ticket, about as often as the raters agree with each other (98.1%).
+- **The maintainer's decision (2026-10-25): stop, and keep version 4.** Version 4 keeps running as built. Evolves moves to work threads built from each thought's own subject (SMD-3306). There the link step's cap would remain only where a pair is proposed as outdates. Version 3 stays proposed: the pass asks version 2.
+
 ### What each subject has today (main, 2026-10-22)
 
 | Subject | Identity | State at a past time | Where |
@@ -344,8 +391,9 @@ Two sets. Set 1 is item 3's 79 agreed pairs, held out from the error analysis. S
    - **Done:** its first step. Two raters applying the bars' words had agreed little better than chance on which pairs are mediated, so item 3 first fixed the mediated-pair test and measured how well raters agree on it, against a bar fixed before they labelled. The bar was met (κ 0.97), and the maintainer mapped rows 2 and 3 onto the test (amended 2026-10-22).
    - **Done, too:** how the pass could ask the test, measured against the raters' labels in two rounds (amended 2026-10-22, PR 2a). The writer's link step finds mediated pairs; no state step meets the bars for F-state.
    - **Done, then:** decide version 4 builds the cap on the writer's link step, as the maintainer chose (amended 2026-10-22, PR 2b).
-   - **Done:** the canary re-judge under `@p4d4`. The cap's precision missed its bar, 0.686 against 0.7, and two link prompts measured offline did not qualify either (amended 2026-10-24, SMD-3299).
-   - **Next:** round 4, the link step as narrower questions, then decide version 5 and a canary re-judge if it qualifies (SMD-3299).
+   - **Done:** the canary re-judge under `@p4d4`. The cap's precision missed its bar, 0.686 against 0.7, and three rounds of asking the link step another way did not qualify either, the test's version 3 among them (amended 2026-10-25, SMD-3299).
+   - **Decided:** version 4 stays (the maintainer, 2026-10-25).
+   - **Next:** evolves as work threads, built from each thought's own subject (SMD-3306).
    - **SMD-3203's last Verify item** also waits on a subject with a timeline beyond tickets (steps 3 and 4). In it, a planted thought reads as stale once a non-ticket subject's state moves, and no pair whose thoughts share only that subject's state is joined.
 3. **SMD-3207, the spike:**
    - read the code artifacts a note names;
