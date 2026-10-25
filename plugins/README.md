@@ -18,7 +18,7 @@ A directory, `plugins/<name>/`, with:
   - **The name** is the directory's: lower-case words joined by hyphens.
   - **Each operation** declares a title, a description and the scope a key needs (`read`, `capture` or `write`). It also declares its REST method and path under the plugin's, an input and an output as zod shapes, and a handler.
   - **The handler** returns `ok(value)` or `refuse(status, CODE, facts)`. A value is held to the output schema; one that does not fit is the plugin's fault, answered as `FAILED`.
-  - **GUI pages** (optional), `gui: { pages: [{ path, label }] }`: each a path under the plugin's and the label its nav entry shows. The REST core lists an enabled plugin's pages at `GET /v1/plugins`, the registry the operator GUI's nav reads (SMD-2280 renders the pages).
+  - **GUI pages** (optional), `gui: { pages: [{ path, label }] }`: each a path under the plugin's and the label its nav entry shows. The REST core lists an enabled plugin's pages at `GET /v1/plugins`, the registry the operator GUI's nav reads. The GUI renders each at `/dashboard/plugins/<name><path>` from its route in `dashboard/src/routes/plugins/<name><path>/`, since a plugin's directory holds no Svelte: the page's load and actions reach the plugin's operations only through `pluginAccess`, which answers the page's 404 while the plugin is off or to a key that may call none of it, and otherwise calls them under the visitor's key ([dashboard/README.md](../dashboard/README.md), "Plugin pages"). A plugin with pages adds, in the same change, their routes there, a row each in the GUI README's pages table and an arm in its smoke, and runs `bun test-plugins.ts` in `server-portable/` (it pins the example's pages). The GUI and the REST core run one image, so a page and its manifest ship together: against a REST core of another build, a page its registry does not list is a 404.
 - **Webhooks** (optional), `hooks: { <name>: { description, handler } }`: a capture source's inbound endpoints. See "A plugin's webhooks" below.
 - `migrations/` (optional): the plugin's tables, as `NNN_name.sql` files. See below.
 - `README.md` and `metadata.json` (`"category": "plugins"`), as every contribution has.
@@ -56,6 +56,7 @@ The example's `capture` hook is the template ([example/README.md](example/README
 Checked when the server starts, so a malformed manifest stops it:
 
 - No two operations share a tool name, and none takes a core tool's name.
+- A GUI page's path is segments of lower-case words and hyphens (`/notes`, `/notes/all`; no `{field}`), once per plugin, and its label one line of at most 40 characters.
 - A hook's name is one path segment of lower-case words and hyphens, with a description and a handler.
 - No two operations of a plugin have routes that one request could match (`/items/{id}` beside `/items/latest`).
 - A path field is a string field. A URL cannot carry `""`, `.` or `..` there, so the REST core and the MCP server that calls it refuse those before the operation runs; a schema that needs them is a body field's.
@@ -76,6 +77,7 @@ Held by check 31 of `scripts/check-fork-consistency.ts`, on every push. It is an
   - It takes no session advisory lock, holds no cursor `WITH HOLD`, and runs no `LISTEN` or `DISCARD`.
   - Outside a plpgsql body, it runs no `BEGIN`, `END`, `ABORT`, `COMMIT`, `ROLLBACK` (`ROLLBACK TO` aside), `START TRANSACTION`, `PREPARE` or `EXECUTE` as a statement. Inside one, it runs no `EXECUTE` (dynamic SQL this check cannot read), `COMMIT` or `ROLLBACK`.
 - **The registry and the directories agree.** `plugins/registry.ts` imports and lists exactly the plugin directories, and a manifest's name is its directory's.
+- **Its GUI pages have their routes.** Each page a manifest declares has its directory in `dashboard/src/routes/plugins/<name><path>/`, holding a `+page.svelte` and a `+page.server.ts` alone (no `+server.ts`, `+page.ts` or layout, which would answer without the gate), which awaits `pluginAccess` and reaches the brain by nothing else (no other server module, `fetch`, `locals`, `import.meta` or `import()`); no directory there is a page no manifest declares.
 
 Held by the maintainer's review:
 
