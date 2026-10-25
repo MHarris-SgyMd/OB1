@@ -1146,7 +1146,9 @@ stored in the same write").
   `sse.ts`), a line SSE parsers discard by specification, for as long as the
   tool runs — up to ten minutes (`SSE_KEEPALIVE_MAX_MS`), past which the frames
   stop, one line says `request still running after N s: …` and, on Bun, the
-  idle timeout reaps the stream (not logged again as a client leaving); on Node
+  idle timeout reaps the stream (not logged again as a client leaving) — the
+  MCP server's stream excepted, which its SDK transport's own 15 s frame keeps
+  open until the call ends, at the same ten minutes (`REST_TIMEOUT_MS`); on Node
   it stays open until the client or a proxy gives up. A provider
   call is bounded by `OB1_LLM_TIMEOUT`, so a call that long is stuck in the
   database. The brain's servers serve with Bun's ceiling, 255 s, for their GETs
