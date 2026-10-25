@@ -504,6 +504,11 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     ["a blank --accept-failed id", { url: AT, acceptFailed: ["", ID] }, ["--url", AT, "--accept-failed", "", ID], {}],
     // …under a model named in the environment run() is given: its key and banner name it, as the CLI's do.
     ["the gate's refusal under OB1_EMBEDDING_MODEL from env", { url: AT }, ["--url", AT], { OB1_EMBEDDING_MODEL: "  env-model ", OB1_EMBEDDING_DIM: "768" }],
+    // --follow (SMD-2679): its number, and the modes a follower does not combine with.
+    ["--follow 0", { url: AT, follow: 0 }, ["--url", AT, "--follow", "0"], {}],
+    ["--follow with --switch-model", { url: AT, follow: 5, switchModel: true }, ["--url", AT, "--follow", "5", "--switch-model"], {}],
+    ["a bare --follow with --retire", { url: AT, follow: 15, retire: "reembed:x@1024" }, ["--url", AT, "--follow", "--retire", "reembed:x@1024"], {}],
+    ["--follow with --accept-failed", { url: AT, follow: 5, acceptFailed: [ID] }, ["--url", AT, "--follow", "5", "--accept-failed", ID], {}],
   ];
   // Every bound case is checked for its refusal words: counted, so one renamed past BOUND_WORDS' patterns is seen (review pass 2).
   const boundCases = cases.filter(([w]) => boundWords(w) !== undefined).length;
@@ -522,6 +527,16 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
      "reembed's modeProblem admits what the CLI admits, null as absent");
   ok(modeProblem({ status: true, retryFallbacks: true }) === null && modeProblem({ acceptFailed: [ID], retryFallbacks: true })?.includes("--accept-failed and --retry-fallbacks do not combine") === true,
      "…--status beside a run flag (the script admitted it), not --accept-failed beside one");
+  ok(modeProblem({ follow: 5 }) === null && modeProblem({ follow: 5, retryFailed: true, status: true }) === null && modeProblem({ follow: 0, switchModel: true }) === null
+      && modeProblem({ follow: 5, switchModel: true })?.includes("--follow and --switch-model do not combine — a follower never switches the model") === true,
+     "…--follow beside a run's own flags and --status, never beside --switch-model (SMD-2679); a --follow of 0 is no follower");
+  // The follower's own options, which the CLI does not take (SMD-2679): the
+  // check needs follow and no read-only mode; session needs a client of its own.
+  const heardStart: unknown[] = [];
+  const checkAlone = await inProcess({ url: AT, check: true, onStart: (r: unknown) => heardStart.push(r) });
+  const checkStatus = await inProcess({ url: AT, check: true, follow: 5, status: true });
+  ok(checkAlone.code === 2 && checkStatus.code === 2 && /check is a follower's start — pass follow beside it, and no --status or --dry-run/.test(checkAlone.err + checkStatus.err) && JSON.stringify(heardStart) === JSON.stringify([{ ok: false, refused: "usage" }]) && checkAlone.seen + checkStatus.seen === 0,
+     `reembed run() refuses check without follow, or beside --status, as the start's usage, before connecting (exit ${checkAlone.code}, ${checkStatus.code}; heard ${JSON.stringify(heardStart)})`);
   // A caller's client: the narrow one and the handles refused; never closed.
   let closed = false;
   const stub = (extra: Record<string, unknown> = {}) => Object.assign(() => { throw new Error("stub queried"); }, { options: { max: 3 }, close: async () => { closed = true; }, unsafe: () => { throw new Error("stub queried"); } }, extra);
@@ -530,6 +545,8 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
   const reserved = await inProcess({ sql: stub({ release: () => {} }) });
   const tx = await inProcess({ sql: stub({ savepoint: async () => {} }) });
   ok([reserved, tx].every((r) => r.code === 2 && /needs a pool, not a reserved connection or a transaction's handle/.test(r.err)), "…refuses a reserved connection and a transaction's handle");
+  const sessionBeside = await inProcess({ sql: stub(), session: { statement_timeout: "7s" } });
+  ok(sessionBeside.code === 2 && /applies session settings to a client of its own: pass url without sql, or no session/.test(sessionBeside.err), `…refuses session beside a caller's client, which it would not reach (exit ${sessionBeside.code})`);
   const beside = await inProcess({ sql: stub(), url: "mysql://h/x" });
   ok(beside.code === 2 && beside.err === `${UNPARSEABLE_DATABASE_URL}\n`, `…and a bad URL beside a caller's client (exit ${beside.code})`);
   // Nothing needs a URL beside the client: reembed resolves no worker key.

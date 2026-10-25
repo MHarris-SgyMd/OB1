@@ -40,7 +40,7 @@
  * timer says the process is alive, as lease renewal does (lease.ts); a model
  * call hung inside a live process is not what it catches. Only the
  * long-running modes stamp — sync-linear.ts --loop, the --follow of
- * extract-entities.ts and consolidate.ts, and sleep.ts --follow, through whose
+ * extract-entities.ts, consolidate.ts and reembed.ts (SMD-2679), and sleep.ts --follow, through whose
  * row its followers stamp (SMD-1794) — so a one-shot run never leaves a row
  * that goes stale behind it.
  *
@@ -53,7 +53,7 @@ import { MAX_TIMER_MS } from "./lease.ts";
 import type { BudgetStop, SleepBudget, SleepHeld } from "../server-portable/brain-info.ts";
 
 /** The workers that stamp, as the key and preflight's row name them. */
-export const STAMPING_WORKERS = ["board-sync", "extract", "consolidate", "sleep"] as const;
+export const STAMPING_WORKERS = ["board-sync", "extract", "consolidate", "sleep", "reembed"] as const;
 export type StampingWorker = (typeof STAMPING_WORKERS)[number];
 
 /** The shortest gap a worker promises between stamps: a 15-second follower stamps every pass, and is judged against a minute. */

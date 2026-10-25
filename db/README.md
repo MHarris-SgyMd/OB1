@@ -2401,6 +2401,7 @@ bun reembed.ts --url … --dry-run             # what a run would do; writes not
 bun reembed.ts --url … --job reembed:x@1024:ctx   # a backfill under the same model (keep the reembed: prefix — preflight reports by it)
 bun reembed.ts --url … --retry-failed        # failed rows back into the pool first
 bun reembed.ts --url … --retry-fallbacks     # …and the rows stored with a head window (below)
+bun reembed.ts --url … --follow [SECONDS]    # then poll every SECONDS (15 bare), pooling again at each, until a signal (SMD-2679)
 #   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)   --batch N (8; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease when that is shorter; at least 1, and the lease must cover two)
 ```
 
@@ -4865,14 +4866,16 @@ its container had gone, and preflight's `tier` row printed the last ingest as
 passing. The board-sync watermark cannot be the alarm — a quiet board stops it
 too — so each long-running worker stamps a **heartbeat** after every pass,
 whether or not the pass found work (`db/pass-stamp.ts`): `sync-linear.ts --loop`
-and the `--follow` of `extract-entities.ts` and `consolidate.ts` — and
+and the `--follow` of `extract-entities.ts`, `consolidate.ts` and `reembed.ts`
+(SMD-2679) — and
 `sleep.ts --follow`, as `heartbeat:sleep`, at least every minute whether
 asleep or awake, its followers stamping through it (SMD-1794). A one-shot run
 stamps nothing, so it leaves no row to go stale, and neither does a dry run or
 an audit.
 
 One `ob1_config` row per worker and job — `heartbeat:board-sync`,
-`heartbeat:extract:qwen2.5:7b@p2`, `heartbeat:consolidate:qwen2.5:7b@p3` — whose
+`heartbeat:extract:qwen2.5:7b@p2`, `heartbeat:consolidate:qwen2.5:7b@p3`,
+`heartbeat:reembed:qwen3-embedding:4b@1024` — whose
 value names the `job` (a claim worker's, as given — the restart works that
 pool), `every_s` (the worker's interval, at least a minute), whether a pass is
 `running`, the last pass's `outcome`, whether the worker has `ended`, and, for
@@ -5327,10 +5330,10 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3005 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1618 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 997 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+./with-postgres.sh bun test-live.ts         # 1640 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1010 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell
-OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 277 assertions
+OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 286 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 259 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
@@ -5448,7 +5451,15 @@ takes an AbortSignal, so the hard stop also aborts the call in hand: run()
 returns at once in-process, as extract's does.
 `reembed.ts` is the fourth (SMD-2304 PR 4): `run({ url, sql, env, workers,
 batch, ttl, heartbeat, job, retire, acceptFailed, all, status, dryRun,
-switchModel, retryFailed, retryFallbacks, writer, signal, onPass })`, with
+switchModel, retryFailed, retryFallbacks, writer, signal, onPass, follow,
+check, onStart, stamper, banner, summary, session })` — the last seven a
+follower's, as the claim workers' are (SMD-2679): each poll pools again, since
+no trigger feeds this pool; `--switch-model`, `--retire` and
+`--accept-failed` are refused beside `follow`; a configured model other than
+the one ob1_config records is the start's permanent `model-switch` refusal,
+and the record moving under a running follower ends it so at its next poll,
+after the pass in hand drains, its own
+`heartbeat:reembed:<model>@<dim>` row naming the kind — with
 `acceptFailed` the ids (`[]` for the flag alone). The numbers are held where
 the CLI holds them — `--workers` and `--batch` first, `--ttl` and
 `--heartbeat` after the embedding configuration, the CLI handing run() the

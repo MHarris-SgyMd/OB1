@@ -1248,6 +1248,12 @@ traces, which would refuse the rest and have their losses said every minute.
 | `OTEL_RESOURCE_ATTRIBUTES` | more of the resource (`deployment.environment.name=home` on a plain brain; a `service.namespace` would make Prometheus's `job` `<namespace>/<name>`); a key it names wins, `service.version` included — but not over a pipeline tier's `deployment.environment.name`, which a canary's env file would otherwise take from stable's |
 | `OTEL_TRACES_SAMPLER` | the SDK's sampler; by default `parentbased_always_on`. A request's own trace is a root, so a caller decides nothing — unless its `traceparent` is trusted, when the `parentbased_` samplers follow its sampled flag and `traceidratio` reads its trace id; the REST core trusts its forwarder's, so it samples the MCP server's tool calls as the MCP server does. Under `always_off` a line names a trace no span was exported for |
 
+A batch or metric setting above that is ignored or held is said at start,
+and in `preflight --deep`'s telemetry row, by its name and the value used,
+never the value set: it may be a secret pasted into the wrong variable, even
+one of digits alone, which parses as a number. Where the value used is a
+queue or interval the operator set, that variable is named instead (SMD-3235).
+
 In `deploy/`'s compose stacks the MCP server at `/mcp` and the REST core take
 `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`,
 `OTEL_RESOURCE_ATTRIBUTES`, the three `OTEL_*_EXPORTER` switches,
@@ -3131,9 +3137,21 @@ the next run if it was.
 `import-on-demand.per-pipeline.json`, the runner `orchestration/runner.ts`).
 An import recipe converted to an emitter of ingestion-contract items
 (SMD-2147–2150, SMD-2021) runs as one instance of the import template, one
-per line of `orchestration/pipelines.json`. That file is empty until the
-first recipe is converted. Each pipeline owns one source (its `system`): two
-lines naming the same one are refused.
+per line of `orchestration/pipelines.json`. That file holds the four export
+importers (SMD-2493): `grok`, `instagram`, `blogger` and `x-twitter`, each
+reading `imports/<name>/` weekly. Until an export is put in its folder, a run
+writes nothing and succeeds: an absent folder through the emitter's
+`--if-present`, an empty one by having nothing to read. What goes in each
+folder, and what fails a run, is in `deploy/imports/README.md`. An emitter
+killed by something other than the runner (exit 137: the container's
+`mem_limit`, 2 GB, run out) fails the run saying so; an export that large is
+imported from a checkout.
+Each pipeline owns one source (its `system`): two lines naming the same one
+are refused. Rows the runner writes carry its own name,
+`orchestration-runner`. Classify it once, as `postgres`, before the first
+export goes in (`SELECT set_agent_kind('orchestration-runner', 'ingested');`),
+so they read `trust: ingested`. Rows written before that keep no trust until
+`SELECT backfill_thought_actors();` restamps them.
 - **The schedule.** Each instance runs on a schedule of the pipeline's own,
   `everyHours`: 1 to 23 hours, or whole days (24, 48, … 168), since n8n
   counts an hourly schedule within one day. An hourly 24 ran once and never
@@ -3266,11 +3284,15 @@ lines naming the same one are refused.
 
 The run's answer is the ingester's count line and the items it named
 (skipped, stale, held). A URL's password in anything a step printed is
-masked. Drop an export into the pipeline's directory and the next run
-ingests it, and a rerun writes nothing. The export never passes through
+masked. With the runner classified (above), drop an export into the
+pipeline's directory and the next run ingests it, and a rerun writes
+nothing. The export never passes through
 n8n. The request names the pipeline and nothing else, so n8n's run history
 holds the report, not the export. The report does name items by identity,
-and a refusal can quote the value it refused.
+and a refusal can quote the value it refused. A failed run's notes are the
+end of the emitter's stderr, which names the export's files and folders (an
+Instagram thread's folder is named after the other person); the four
+importers never quote a record's text there.
 
 The runner's key is a write capability bounded by the allowlist (the ADR's
 decision 4, amended), and not a brain key. To change it, edit
@@ -3318,8 +3340,9 @@ recipe, its conversion ships the pieces (SMD-2147–2150, SMD-2021):
    which otherwise keeps `recipes/` out of every image;
 4. its line in `pipelines.json`.
 
-Then rebuild the runner (`compose up -d --build orchestration-runner`), put
-the export in `imports/<pipeline>/`, and provision. A line whose emitter the
+Then rebuild the runner (`compose up -d --build orchestration-runner`),
+classify the runner if it is not yet (above), provision, and put the
+export in `imports/<pipeline>/`. A line whose emitter the
 image lacks fails that build, naming the two files. An image started with
 such a line refuses to start, which stops every pipeline, not just that
 one: every door answers 502 until it is fixed.

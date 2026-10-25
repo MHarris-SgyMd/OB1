@@ -1219,7 +1219,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     { key: "heartbeat:extract:qwen2.5:7b@p2", value: JSON.stringify({ ...good, every_s: 60, outcome: null, running: true, malformed: { answers: 50, bad: 12, alarm: true } }), at, age_s: 181 },
     { key: "heartbeat:board-sync:extra", value: JSON.stringify(good), at, age_s: 1 },
     { key: "heartbeat:extract", value: JSON.stringify(good), at, age_s: 1 },
-    { key: "heartbeat:reembed:x", value: JSON.stringify(good), at, age_s: 1 },
+    // No such worker (since SMD-2679 a re-embed follower stamps: its row counts, below).
+    { key: "heartbeat:rewind:x", value: JSON.stringify(good), at, age_s: 1 },
     { key: "heartbeat:consolidate:a b", value: JSON.stringify(good), at, age_s: 1 },
     { key: "heartbeat:consolidate:x", value: "not json", at, age_s: 1 },
     { key: "heartbeat:consolidate:x", value: JSON.stringify({ ...good, v: 2 }), at, age_s: 1 },
@@ -1246,14 +1247,16 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     // …and two that count: inside the slack, and a job as long as a key's suffix allows.
     { key: "heartbeat:consolidate:near", value: JSON.stringify({ ...good, ended: true, outcome: "failed" }), at, age_s: -59 },
     { key: `heartbeat:extract:${"j".repeat(117)}`, value: JSON.stringify({ ...good, job: `extract:${"j".repeat(117)}` }), at, age_s: 1 },
+    // A re-embed follower's, under the model's own key (SMD-2679).
+    { key: "heartbeat:reembed:qwen3-embedding:4b@1024", value: JSON.stringify(good), at, age_s: 1 },
   ]);
-  const [bs, ex, custom, near, long] = parsed.heartbeats;
+  const [bs, ex, custom, near, long, re] = parsed.heartbeats;
   assert(near?.job === "consolidate:near" && near.ended === true && near.ageS === 0 && long?.job === `extract:${"j".repeat(117)}` && bs.ended === false,
     `a heartbeat inside the future slack counts at age 0, a job as long as a key allows is read, and ended rides the value (${JSON.stringify(near)})`);
-  assert(parsed.heartbeats.length === 5 && parsed.ignored === 20 && bs.worker === "board-sync" && bs.job === null && bs.key === "heartbeat:board-sync" && bs.ageS === 900 && bs.stale === false
+  assert(parsed.heartbeats.length === 6 && parsed.ignored === 20 && re?.worker === "reembed" && re.job === "reembed:qwen3-embedding:4b@1024" && bs.worker === "board-sync" && bs.job === null && bs.key === "heartbeat:board-sync" && bs.ageS === 900 && bs.stale === false
       && ex.job === "extract:qwen2.5:7b@p2" && ex.stale === true && ex.running === true && ex.outcome === null && ex.malformed?.alarm === true
       && custom.job === "my-job" && custom.key === "heartbeat:extract:my-job",
-    `three rows in full count — board-sync at 899.6 s of 3 × 300 not stale, extract at 181 s of 3 × 60 stale, a custom job as given — and twenty not of the shape are counted only (${parsed.heartbeats.length}, ${parsed.ignored})`);
+    `four rows in full count — board-sync at 899.6 s of 3 × 300 not stale, extract at 181 s of 3 × 60 stale, a custom job as given, a re-embed follower's (SMD-2679) — and twenty not of the shape are counted only (${parsed.heartbeats.length}, ${parsed.ignored})`);
   // A malformed block not of the shape is left off and the heartbeat still counts (review pass 3).
   const blocks = parseHeartbeats([{ answers: 5, bad: 6, alarm: false }, { answers: 50, bad: 1, alarm: "yes" }, null, { answers: -1, bad: 0, alarm: true }, { answers: 1.5, bad: 1, alarm: false }, { answers: "x", bad: 1, alarm: true }, { answers: 1, bad: "x", alarm: true }]
     .map((malformed, i) => ({ key: `heartbeat:consolidate:b${i}`, value: JSON.stringify({ ...good, malformed }), at, age_s: 1 })));
@@ -4106,15 +4109,15 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   } finally {
     await real.shutdown();
   }
-  assert(clamped === "telemetry: OTEL_BSP_MAX_QUEUE_SIZE 1000000 is held to 65536 (SMD-1849)", `a queue past 65,536 is held there, and said (${clamped})`);
+  assert(clamped === "telemetry: OTEL_BSP_MAX_QUEUE_SIZE (a value not shown) is held to 65536 (SMD-1849)", `a queue past 65,536 is held there, and said (${clamped})`);
   assert(drops.length === 1 && drops[0] === "telemetry: 7 spans not sent to http://collector:4318 (queue full) (SMD-1849)",
     `the batch's dropped spans are said as not sent; no other diag text is (${drops.join(" / ")})`);
   // The export size is held to 1..the queue, a value that is no whole number ignored, each said (review pass 7: 0 hung the stop).
   const { batchSizes } = await import("./otel-setup.ts");
   const sizes = [batchSizes(undefined, undefined), batchSizes("100", undefined), batchSizes("100", "500"), batchSizes(undefined, "0"), batchSizes("-3", "1.5"), batchSizes(" ", "64")];
   assert(JSON.stringify(sizes.map(({ queue, batch }) => [queue, batch])) === JSON.stringify([[2048, 512], [100, 100], [100, 100], [2048, 512], [2048, 512], [2048, 64]])
-    && sizes[2].notes[0] === "telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE 500 is held to 100 (SMD-1849)"
-    && sizes[3].notes[0] === `telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE "0" is not a whole number of at least 1: 512 is used (SMD-1849)`
+    && sizes[2].notes[0] === "telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE (a value not shown) is held to the value of OTEL_BSP_MAX_QUEUE_SIZE (SMD-1849)"
+    && sizes[3].notes[0] === `telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE (a value not shown) is not a whole number of at least 1: 512 is used (SMD-1849)`
     && sizes[4].notes.length === 2 && sizes[0].notes.length + sizes[1].notes.length + sizes[5].notes.length === 0,
     `the batch's sizes: queue 2,048 and export 512 by default, the export held to the queue, 0 and fractions ignored, each said (${JSON.stringify(sizes)})`);
   // OTEL_BSP_MAX_EXPORT_BATCH_SIZE=0 against a collector that refuses: the stop returns, and its last export's
@@ -4137,7 +4140,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     refusing.stop(true);
   }
   assert(zeroStopped === "stopped" && zeroSaid.join(" / ") === [
-    `telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE "0" is not a whole number of at least 1: 512 is used (SMD-1849)`,
+    `telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE (a value not shown) is not a whole number of at least 1: 512 is used (SMD-1849)`,
     `telemetry: 1 span not sent to ${refusingAt} (queue full) (SMD-1849)`,
     `telemetry: 1 span not sent to ${refusingAt} (HTTP 400) (SMD-1849)`,
   ].join(" / "), `an export size of 0: the stop returns, and the shutdown's failed export is said inside the window (${zeroStopped}; ${zeroSaid.join(" / ")})`);
@@ -4699,8 +4702,37 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
     else process.env.OTEL_METRIC_EXPORT_INTERVAL = intervalSaved;
     noteTaker.stop(true);
   }
-  assert(notes.some((l) => /OTEL_METRIC_EXPORT_INTERVAL "500" is not a whole number of at least 1000/.test(l)) && !losses.some((l) => /OTEL_METRIC_EXPORT_INTERVAL/.test(l)),
+  assert(notes.some((l) => /OTEL_METRIC_EXPORT_INTERVAL \(a value not shown\) is not a whole number of at least 1000/.test(l)) && !losses.some((l) => /OTEL_METRIC_EXPORT_INTERVAL/.test(l)),
     `a setting read as its default goes to the note sink, not the losses' (${notes.join(" / ")} | ${losses.join(" / ")})`);
+  // A secret pasted into any variable read as a whole number is said nowhere (SMD-3235): planted in all ten, through a
+  // real setup with every signal on, so each batch and the metric reader read their own. Text is no whole number and
+  // digits alone are held to the bound; each note is held to its whole shape and holds no four characters of the secret
+  // (SMD-3235 review pass 1: a four-character leak passed a check for the secret's words).
+  for (const [SECRET, why] of [["sk-live-S3CRET-I-abcdefghijklmnopqrstuvwxyz", "is not a whole number"], ["4111111111111111", "is held to"]] as const) {
+    const numeric = ["OTEL_BSP", "OTEL_BLRP"].flatMap((p) => [`${p}_MAX_QUEUE_SIZE`, `${p}_MAX_EXPORT_BATCH_SIZE`, `${p}_SCHEDULE_DELAY`, `${p}_EXPORT_TIMEOUT`]).concat("OTEL_METRIC_EXPORT_INTERVAL", "OTEL_METRIC_EXPORT_TIMEOUT");
+    const saved = Object.fromEntries(numeric.map((k) => [k, process.env[k]]));
+    const plantNotes: string[] = [];
+    const plantLosses: string[] = [];
+    const taker = Bun.serve({ port: 0, fetch: () => Response.json({}) });
+    try {
+      for (const k of numeric) process.env[k] = SECRET;
+      const at = `http://127.0.0.1:${taker.port}`;
+      const planted = setUpTelemetry("open-brain-test", { report: { warn: (l) => plantLosses.push(l), note: (l) => plantNotes.push(l) }, urls: { traces: `${at}/v1/traces`, metrics: `${at}/v1/metrics`, logs: `${at}/v1/logs` } });
+      await planted.shutdown();
+    } finally {
+      for (const k of numeric) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+      taker.stop(true);
+    }
+    const shape = /^telemetry: (OTEL_[A-Z_]+) \(a value not shown\) (is not a whole number of at least \d+: \d+ is used|is held to \d+) \(SMD-1849\)$/;
+    const named = plantNotes.map((l) => shape.exec(l)).map((m) => (m && m[2].startsWith(why) ? m[1] : null));
+    const plantSaid = [...plantNotes, ...plantLosses].join("\n");
+    const pieces = Array.from({ length: SECRET.length - 3 }, (_, i) => SECRET.slice(i, i + 4)).filter((piece) => plantSaid.includes(piece));
+    assert(JSON.stringify([...named].sort()) === JSON.stringify([...numeric].sort()) && plantLosses.length === 0 && pieces.length === 0,
+      `a secret in each of the ${numeric.length} whole-number variables (${why}): each named once in a note of its whole shape, no four characters of it said (${pieces.join(", ") || "none said"}; ${plantSaid.slice(0, 300)})`);
+  }
   // The start passes each line with its kind (SMD-2909), from a real setUpTelemetry: where the signals go (goes), a
   // setting read as its default (note), and a full span queue's drop (not-sent) — the kinds preflight's row reads.
   {
@@ -4725,7 +4757,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
       taker.stop(true);
     }
     const kindOf = (pattern: RegExp) => kindsSaid.find(({ line }) => pattern.test(line))?.kind;
-    assert(kindOf(/ go to http:\/\/127\.0\.0\.1:/) === "goes" && kindOf(/OTEL_METRIC_EXPORT_INTERVAL "500"/) === "note" && kindOf(/spans? not sent to .*\(queue full\)/) === "not-sent",
+    assert(kindOf(/ go to http:\/\/127\.0\.0\.1:/) === "goes" && kindOf(/OTEL_METRIC_EXPORT_INTERVAL \(a value not shown\) is not/) === "note" && kindOf(/spans? not sent to .*\(queue full\)/) === "not-sent",
       `the start's kinds from a real setup: where signals go, goes; a setting read as its default, note; a full queue's drop, not-sent (${kindsSaid.map(({ line, kind }) => `${kind}: ${line.slice(0, 60)}`).join(" / ")})`);
   }
 
@@ -4844,7 +4876,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
     else process.env.OTEL_BSP_SCHEDULE_DELAY = spanDelay;
     spanCollector.stop(true);
   }
-  assert(sentBeforeFlush === 0 && heldSaid.includes("telemetry: OTEL_BSP_SCHEDULE_DELAY 3000000000 is held to 2147483647 (SMD-1849)"),
+  assert(sentBeforeFlush === 0 && heldSaid.includes("telemetry: OTEL_BSP_SCHEDULE_DELAY (a value not shown) is held to 2147483647 (SMD-1849)"),
     `a span batch delay past a timer's longest is held and said, and the span waits (${sentBeforeFlush} sent before the flush; ${heldSaid.join(" / ")})`);
 
   // planTelemetry's other cases (review passes 1–2): a trailing space, read trimmed; a query string on the shared
@@ -5026,9 +5058,9 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   // The sizes and times read here, as the SDK reads none of them for log records and metrics.
   const times = [metricTimes(undefined, undefined), metricTimes("5000", undefined), metricTimes("500", "100"), metricTimes("10000", "20000"), metricTimes("3000000000", undefined)];
   assert(JSON.stringify(times.map(({ interval, timeout }) => [interval, timeout])) === JSON.stringify([[60_000, 30_000], [5_000, 5_000], [60_000, 100], [10_000, 10_000], [2_147_483_647, 30_000]])
-    && times[2].notes[0] === `telemetry: OTEL_METRIC_EXPORT_INTERVAL "500" is not a whole number of at least 1000: 60000 is used (SMD-1849)`
-    && times[3].notes[0] === "telemetry: OTEL_METRIC_EXPORT_TIMEOUT 20000 is held to 10000 (SMD-1849)" && times[0].notes.length + times[1].notes.length === 0
-    && times[4].notes[0] === "telemetry: OTEL_METRIC_EXPORT_INTERVAL 3000000000 is held to 2147483647 (SMD-1849)",
+    && times[2].notes[0] === `telemetry: OTEL_METRIC_EXPORT_INTERVAL (a value not shown) is not a whole number of at least 1000: 60000 is used (SMD-1849)`
+    && times[3].notes[0] === "telemetry: OTEL_METRIC_EXPORT_TIMEOUT (a value not shown) is held to the value of OTEL_METRIC_EXPORT_INTERVAL (SMD-1849)" && times[0].notes.length + times[1].notes.length === 0
+    && times[4].notes[0] === "telemetry: OTEL_METRIC_EXPORT_INTERVAL (a value not shown) is held to 2147483647 (SMD-1849)",
     `the metric reader's interval at least a second and at most a timer's longest, its timeout held to it, each said (${JSON.stringify(times)})`);
   const batches = [
     batchOptions({}, "OTEL_BLRP"),
@@ -5038,12 +5070,37 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
     batchOptions({ OTEL_BSP_EXPORT_TIMEOUT: "3000000000", OTEL_BLRP_EXPORT_TIMEOUT: "5" }, "OTEL_BSP"),
   ];
   assert(JSON.stringify(batches.map(({ queue, batch, delay, timeout }) => [queue, batch, delay, timeout])) === JSON.stringify([[2048, 512, 1000, 30_000], [10, 10, 0, 5000], [2048, 512, 2_147_483_647, 30_000], [2048, 512, 5000, 30_000], [2048, 512, 5000, 2_147_483_647]])
-    && batches[0].notes.length === 0 && batches[1].notes.join() === "telemetry: OTEL_BLRP_MAX_EXPORT_BATCH_SIZE 20 is held to 10 (SMD-1849)"
-    && batches[2].notes.join(" / ") === `telemetry: OTEL_BLRP_SCHEDULE_DELAY 3000000000 is held to 2147483647 (SMD-1849) / telemetry: OTEL_BLRP_EXPORT_TIMEOUT "-1" is not a whole number of at least 1: 30000 is used (SMD-1849)`
-    && batches[3].notes.length === 0 && batches[4].notes.join() === "telemetry: OTEL_BSP_EXPORT_TIMEOUT 3000000000 is held to 2147483647 (SMD-1849)",
-    `each batch's options under its own names: its sizes, a delay of 0 kept, each timer at most a timer's longest, each held value said (${JSON.stringify(batches)})`);
-  assert(batchSizes(undefined, "0", "OTEL_BLRP").notes[0] === `telemetry: OTEL_BLRP_MAX_EXPORT_BATCH_SIZE "0" is not a whole number of at least 1: 512 is used (SMD-1849)`
+    && batches[0].notes.length === 0 && batches[1].notes.join() === "telemetry: OTEL_BLRP_MAX_EXPORT_BATCH_SIZE (a value not shown) is held to the value of OTEL_BLRP_MAX_QUEUE_SIZE (SMD-1849)"
+    && batches[2].notes.join(" / ") === `telemetry: OTEL_BLRP_SCHEDULE_DELAY (a value not shown) is held to 2147483647 (SMD-1849) / telemetry: OTEL_BLRP_EXPORT_TIMEOUT (a value not shown) is not a whole number of at least 1: 30000 is used (SMD-1849)`
+    && batches[3].notes.length === 0 && batches[4].notes.join() === "telemetry: OTEL_BSP_EXPORT_TIMEOUT (a value not shown) is held to 2147483647 (SMD-1849)",
+    `each batch's options under its own names: its sizes, a delay of 0 kept, each timer at most a timer's longest, each held setting said (${JSON.stringify(batches)})`);
+  assert(batchSizes(undefined, "0", "OTEL_BLRP").notes[0] === `telemetry: OTEL_BLRP_MAX_EXPORT_BATCH_SIZE (a value not shown) is not a whole number of at least 1: 512 is used (SMD-1849)`
     && batchSizes("100000", undefined, "OTEL_BLRP").queue === 65_536, "the log batch's sizes held as the span batch's, under their own names");
+  // No value is said, in either note: text may be a secret pasted into the wrong variable, and so may digits alone,
+  // which parse as a number (SMD-3235 review pass 1).
+  const unshown = [metricTimes("sk-live-abc123", "1.5").notes, batchSizes("4111111111111111", "-4111111111111111").notes, batchSizes("Infinity", undefined).notes].map((n) => n.join(" / "));
+  assert(unshown[0] === "telemetry: OTEL_METRIC_EXPORT_INTERVAL (a value not shown) is not a whole number of at least 1000: 60000 is used (SMD-1849) / telemetry: OTEL_METRIC_EXPORT_TIMEOUT (a value not shown) is not a whole number of at least 1: 30000 is used (SMD-1849)"
+    && unshown[1] === "telemetry: OTEL_BSP_MAX_QUEUE_SIZE (a value not shown) is held to 65536 (SMD-1849) / telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE (a value not shown) is not a whole number of at least 1: 512 is used (SMD-1849)"
+    && unshown[2] === "telemetry: OTEL_BSP_MAX_QUEUE_SIZE (a value not shown) is not a whole number of at least 1: 2048 is used (SMD-1849)",
+    `no value said: not text, a fraction, digits held to the bound or below the least, nor an infinity (${unshown.join(" | ")})`);
+  // Nor the value of the other in a pair, where the operator set it: the export size's bound and fallback are the
+  // queue's, the metric timeout's the interval's, so they are named (SMD-3235 review pass 2). A default is no one's secret.
+  const paired = [batchSizes("4321", "99999").notes, batchSizes("377", "oops").notes, metricTimes("7654", "oops").notes, metricTimes("1234567890", "1234567891").notes, batchSizes("9876", "x").notes, metricTimes(undefined, "99999999").notes,
+    batchSizes(undefined, "99999").notes, batchSizes(" ", "99999").notes, metricTimes(" ", "99999999").notes, batchSizes("1000000", "99999999").notes, metricTimes("3000000000", "4000000000").notes].map((n) => n.join(" / "));
+  const pairLeaks = ["4321", "377", "7654", "1234567890", "9876"].filter((v) => paired.join("\n").includes(v));
+  assert(paired[0] === "telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE (a value not shown) is held to the value of OTEL_BSP_MAX_QUEUE_SIZE (SMD-1849)"
+    && paired[1] === "telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE (a value not shown) is not a whole number of at least 1: the value of OTEL_BSP_MAX_QUEUE_SIZE is used (SMD-1849)"
+    && paired[2] === "telemetry: OTEL_METRIC_EXPORT_TIMEOUT (a value not shown) is not a whole number of at least 1: the value of OTEL_METRIC_EXPORT_INTERVAL is used (SMD-1849)"
+    && paired[3] === "telemetry: OTEL_METRIC_EXPORT_TIMEOUT (a value not shown) is held to the value of OTEL_METRIC_EXPORT_INTERVAL (SMD-1849)"
+    && paired[4] === "telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE (a value not shown) is not a whole number of at least 1: 512 is used (SMD-1849)"
+    && paired[5] === "telemetry: OTEL_METRIC_EXPORT_TIMEOUT (a value not shown) is held to 60000 (SMD-1849)"
+    // A queue or interval unset, blank or itself held is no one's value: its number is said, its name not (SMD-3235 review pass 3).
+    && paired[6] === "telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE (a value not shown) is held to 2048 (SMD-1849)" && paired[7] === paired[6]
+    && paired[8] === "telemetry: OTEL_METRIC_EXPORT_TIMEOUT (a value not shown) is held to 60000 (SMD-1849)"
+    && paired[9] === "telemetry: OTEL_BSP_MAX_QUEUE_SIZE (a value not shown) is held to 65536 (SMD-1849) / telemetry: OTEL_BSP_MAX_EXPORT_BATCH_SIZE (a value not shown) is held to 65536 (SMD-1849)"
+    && paired[10] === "telemetry: OTEL_METRIC_EXPORT_INTERVAL (a value not shown) is held to 2147483647 (SMD-1849) / telemetry: OTEL_METRIC_EXPORT_TIMEOUT (a value not shown) is held to 2147483647 (SMD-1849)"
+    && pairLeaks.length === 0,
+    `a pair's value the operator set is named, never said; a default's number is (${pairLeaks.join(", ") || "none said"}; ${paired.join(" | ")})`);
   const results = [[], ["none", "sent"], ["sent", "failed", "none"], ["none", "none"]].map((r) => flushesResult(r as never));
   assert(results.join() === "none,sent,failed,none", `several flushes as one: failed if any failed, else sent if any sent (${results.join()})`);
   const counted: number[] = [];

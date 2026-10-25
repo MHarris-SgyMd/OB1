@@ -3756,6 +3756,18 @@ else {
     assert(/board-sync ended 20 s ago on its start's refusal \(board\): OB1_LINEAR_INITIATIVE \(unset: "Open Brain"\) must name exactly one Linear initiative/.test(boardFix),
       `board-sync's own refusal kind gives its remedy (${boardFix})`);
     await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:board-sync'`;
+    // A re-embed follower's own row (SMD-2679): the recorded model it never
+    // switches, `model-switch`, with its remedy and the checkout's command (no
+    // compose service runs one); and its `model`, the embedding model's.
+    await beat("heartbeat:reembed:stub-embed@1024", v({ every_s: 60, outcome: "failed", ended: true, refused: "model-switch" }), 30);
+    const switchFix = fix((await run(SQL_ENV)).out, "workers");
+    assert(/reembed:stub-embed@1024 ended 30 s ago on its start's refusal \(model-switch\): OB1_EMBEDDING_MODEL names a model other than the one ob1_config records, and a re-embed follower never switches it.*Then start it again — cd db && bun reembed\.ts --url \$DATABASE_URL --follow; started before that, it refuses again\./.test(switchFix),
+      `a re-embed follower ended on model-switch names the recorded model and the checkout's command (${switchFix})`);
+    await beat("heartbeat:reembed:stub-embed@1024", v({ every_s: 60, outcome: "failed", ended: true, refused: "model" }), 30);
+    const embedModelFix = fix((await run(SQL_ENV)).out, "workers");
+    assert(/reembed:stub-embed@1024 ended 30 s ago on its start's refusal \(model\): pull the embedding model its log names \(OB1_EMBEDDING_MODEL\)/.test(embedModelFix) && !/OB1_JUDGE_MODEL/.test(embedModelFix),
+      `…and on model, the embedding model's remedy, not the chat models' (${embedModelFix})`);
+    await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:reembed:%'`;
 
     // The sleep scheduler's own row (SMD-2678): its heartbeat leaves the
     // workers row; the row says asleep or awake with its last sleep, and what
@@ -4795,7 +4807,9 @@ console.log("\n[11] --deep's provider probes are each a span and a point where a
       return new Response("overloaded", { status: 503 });
     },
   });
-  const OTEL_UNSET = Object.fromEntries(["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "OTEL_SDK_DISABLED", "OTEL_SERVICE_NAME", "OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_LOGS_EXPORTER"].map((k) => [k, undefined]));
+  const OTEL_UNSET = Object.fromEntries(["OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "OTEL_SDK_DISABLED", "OTEL_SERVICE_NAME", "OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_LOGS_EXPORTER",
+    // The whole-number settings too, so a developer's own cannot put a note ahead of a row's (SMD-3235 review pass 2).
+    ...["OTEL_BSP", "OTEL_BLRP"].flatMap((p) => [`${p}_MAX_QUEUE_SIZE`, `${p}_MAX_EXPORT_BATCH_SIZE`, `${p}_SCHEDULE_DELAY`, `${p}_EXPORT_TIMEOUT`]), "OTEL_METRIC_EXPORT_INTERVAL", "OTEL_METRIC_EXPORT_TIMEOUT"].map((k) => [k, undefined]));
   const ENV = { ...DB_DOWN, ...NO_KEYS, ...OTEL_UNSET, OB1_LLM_BASE_URL: `http://user:s3cret-2d@127.0.0.1:${provider.port}/v1`, OB1_METADATA_MODEL: "meta-7b" };
   const COLLECTOR = `http://127.0.0.1:${collector.port}`;
 
@@ -4854,6 +4868,13 @@ console.log("\n[11] --deep's provider probes are each a span and a point where a
   const tracesOnly = await run({ ...ENV, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `${COLLECTOR}/v1/traces`, OTEL_BSP_SCHEDULE_DELAY: "0" }, "--deep");
   assert(/✓\s+telemetry\s+the provider probes' spans sent — /.test(tracesOnly.out) && posted.every((p) => p.path === "/v1/traces"),
     `a traces endpoint alone: the row says spans, not points, and only spans went (${row(tracesOnly.out, "telemetry").trim().slice(0, 160)})`);
+  // A secret pasted into a variable read as a whole number: the row names the variable and warns, and no four characters
+  // of the value are in any line (SMD-3235; review pass 1: a four-character leak passed a check for "sk-live").
+  const PASTED = "Zq9XwVk7Jp4RmT";
+  const pasted = await run({ ...ENV, OTEL_EXPORTER_OTLP_ENDPOINT: COLLECTOR, OTEL_BSP_SCHEDULE_DELAY: PASTED }, "--deep");
+  const pastedPieces = Array.from({ length: PASTED.length - 3 }, (_, i) => PASTED.slice(i, i + 4)).filter((piece) => pasted.out.includes(piece));
+  assert(/!\s+telemetry\s+the provider probes' spans and points sent — OTEL_BSP_SCHEDULE_DELAY \(a value not shown\) is not a whole number of at least 0: 5000 is used; /.test(pasted.out) && pastedPieces.length === 0,
+    `a secret in OTEL_BSP_SCHEDULE_DELAY: named in the row, no four characters of it in any line (${pastedPieces.join(", ") || "none said"}; ${row(pasted.out, "telemetry").trim().slice(0, 240)})`);
   const halfWrong = await run({ ...ENV, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "not a url", OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: `${COLLECTOR}/v1/metrics` }, "--deep");
   assert(/!\s+telemetry\s+the provider probes' points sent — .*OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is not an http\(s\) URL/.test(halfWrong.out),
     `a traces endpoint that is no URL beside one for metrics: a warning that names it, points sent (${row(halfWrong.out, "telemetry").trim().slice(0, 200)})`);

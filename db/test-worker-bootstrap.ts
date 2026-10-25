@@ -202,9 +202,9 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   // The start refusals the sleep scheduler ends on, and those it retries once
   // a pass got through its start (SMD-2752): a lookup that did not name the
   // key may name it next time, so it is retried, not ended on (review pass 1).
-  ok([...PERMANENT_REFUSALS].sort().join(",") === "egress,identity,key,tables,usage" && !PERMANENT_REFUSALS.has("lookup") && !PERMANENT_REFUSALS.has("model") && !PERMANENT_REFUSALS.has("provider")
+  ok([...PERMANENT_REFUSALS].sort().join(",") === "egress,identity,key,model-switch,tables,usage" && !PERMANENT_REFUSALS.has("lookup") && !PERMANENT_REFUSALS.has("model") && !PERMANENT_REFUSALS.has("provider")
     && probeRefusal({ state: "missing", why: "" }) === "model" && probeRefusal({ state: "refused", why: "" }) === "provider",
-    `the permanent start refusals are usage, egress, tables, identity and key — not model, provider or lookup; a probe's missing model is "model", its refusal "provider" (${[...PERMANENT_REFUSALS].join(",")})`);
+    `the permanent start refusals are usage, egress, tables, identity, key and model-switch (a re-embed follower never switches the model, SMD-2679) — not model, provider or lookup; a probe's missing model is "model", its refusal "provider" (${[...PERMANENT_REFUSALS].join(",")})`);
 
   // The lookup's predicate: an outage but too many connections, which the
   // lookup's own connection meets while the pass's pool answers (review pass 2).
