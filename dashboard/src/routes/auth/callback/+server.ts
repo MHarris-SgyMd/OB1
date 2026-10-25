@@ -3,8 +3,8 @@ import { env } from '$env/dynamic/private';
 import { base } from '$app/paths';
 import type { RequestHandler } from './$types';
 import { HOME } from '$lib/paths';
-import { exchangeCode, oauthSettings, revokeEnded, signInFrom } from '$lib/server/oauth';
-import { rest } from '$lib/server/rest';
+import { exchangeCode, oauthSettings, signedInSince, signInFrom } from '$lib/server/oauth';
+import { revocations, rest } from '$lib/server/rest';
 import { closeSession, cookieOptions, openSession, SESSION_COOKIE, SESSION_MAX_AGE, SIGNIN_COOKIE, signInCookieOptions, spendSignIn } from '$lib/server/session';
 import { FIRST_READ, whoAmI } from '$lib/server/signin';
 
@@ -12,9 +12,10 @@ import { FIRST_READ, whoAmI } from '$lib/server/signin';
 // registers for the `gui` client. The answer is taken only from the browser
 // that started it — the state derived from the binding in its cookie, which no
 // URL carries — and once; the verifier is derived from the same binding
-// (oauth.ts signInFrom), so a code and state seen elsewhere complete nothing
-// (review pass 2); the code is traded for tokens
-// on the mesh with the client's secret, and the REST core's whoami, under the
+// (oauth.ts signInFrom), so a code and state seen elsewhere complete no
+// sign-in this browser started (review pass 2); the code is traded for tokens
+// on the mesh with the client's secret, and taken only if the password was
+// typed for this sign-in (review pass 3); the REST core's whoami, under the
 // new access token, says whose they are and what they may call — as a key's
 // sign-in does. Every way it can fail goes back to /signin with a word for
 // why, never the AS's own text.
@@ -31,13 +32,12 @@ export const GET: RequestHandler = async ({ cookies, url, request }) => {
 	if (!state || !held || state !== held.state) back('stale');
 	cookies.delete(SIGNIN_COOKIE, signInCookieOptions(url));
 	if (!spendSignIn(state!)) back('stale');
-	const verifier = held!.verifier;
 	const error = url.searchParams.get('error');
 	if (error) back(error === 'access_denied' ? 'denied' : 'refused');
 	const code = url.searchParams.get('code');
 	if (!code) back('refused');
 
-	const answer = await exchangeCode(s!, code!, verifier!);
+	const answer = await exchangeCode(s!, code!, held!.verifier);
 	if (!answer.ok) {
 		if ('unreachable' in answer) back('unreachable');
 		else {
@@ -45,28 +45,34 @@ export const GET: RequestHandler = async ({ cookies, url, request }) => {
 			back('refused');
 		}
 	}
-	const { tokens } = answer as Extract<typeof answer, { ok: true }>;
+	const { tokens, signedInAt } = answer as Extract<typeof answer, { ok: true }>;
+	// From here a failure leaves tokens no session will hold: revoked, not left live (review pass 1).
+	// The password typed for this sign-in, not before it: `prompt=login` rides a URL the browser can change, and
+	// the AS's own session — a day, which the GUI's sign-out leaves — would then sign the next visitor of that
+	// browser in with a click (review pass 3). The ID token's auth_time says when the AS last asked.
+	if (!signedInSince(signedInAt, held!.began)) {
+		void revocations.add(tokens);
+		back('login');
+	}
 	let whoAnswer;
 	try {
 		whoAnswer = await rest().call('whoami', {}, { token: tokens.access, signal: request.signal });
 	} catch (err) {
 		console.error(`[dashboard] whoami: the REST core did not answer: ${err instanceof Error ? err.message : String(err)}`);
 	}
-	// From here a failure leaves tokens no session will hold: revoked, not left live (review pass 1).
 	if (!whoAnswer) {
-		void revokeEnded(s, [tokens]);
+		void revocations.add(tokens);
 		back('unreachable');
 	}
 	if (!whoAnswer!.ok) console.error(`[dashboard] whoami refused a new sign-in's token: ${whoAnswer!.status}`);
 	const who = whoAnswer!.ok ? whoAmI(whoAnswer!.body) : null;
 	if (!who || !who.operations.includes(FIRST_READ)) {
-		void revokeEnded(s, [tokens]);
+		void revocations.add(tokens);
 		back(who ? 'cannot_read' : 'token');
 	}
-	// A sign-in over a live session replaces it, as a key's does; what it, or room for this one, ended is revoked.
-	const replaced = closeSession(cookies.get(SESSION_COOKIE));
-	const opened = openSession({ credential: { tokens }, name: who!.name, scope: who!.scope, canCapture: who!.operations.includes('capture_thought') });
-	void revokeEnded(s, [replaced && 'tokens' in replaced ? replaced.tokens : null, ...opened.ended]);
-	cookies.set(SESSION_COOKIE, opened.id, { ...cookieOptions(url), maxAge: SESSION_MAX_AGE });
+	// A sign-in over a live session replaces it, as a key's does; it, and any the store ends for room, have their tokens revoked (session.ts onTokensEnded).
+	closeSession(cookies.get(SESSION_COOKIE));
+	const id = openSession({ credential: { tokens }, name: who!.name, scope: who!.scope, canCapture: who!.operations.includes('capture_thought') });
+	cookies.set(SESSION_COOKIE, id, { ...cookieOptions(url), maxAge: SESSION_MAX_AGE });
 	throw redirect(303, HOME);
 };

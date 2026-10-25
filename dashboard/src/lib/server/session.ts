@@ -72,23 +72,34 @@ function newId(): string {
 	return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-/** The AS's tokens a session held, if it held any: what a session ended without a sign-out leaves to revoke. */
+/** The AS's tokens a session held, if it held any. */
 const tokensOf = (held: Held | undefined) => (held && 'tokens' in held.credential ? held.credential.tokens : null);
 
+let tokensEnded: (t: Tokens) => void = () => {};
 /**
- * A new session, its id the cookie's value, and the tokens of every session it
- * ended to make room or found expired — for the caller to revoke at the AS
- * (oauth.ts revokeEnded), since no one holds them now (review pass 1).
+ * What is done with tokens no session holds any more: revoked at the AS
+ * (hooks.server.ts hands in oauth.ts createRevoker's add). Every way a token
+ * session leaves the store goes through `drop` — signed out, evicted, found
+ * expired, ended by a refusal — and a renewal stored after its session ended
+ * comes here too, so no ending is a call site's to remember (review pass 3,
+ * after passes 1 and 2 each found endings that left a grant live).
  */
-export function openSession(session: Omit<Session, 'id'>): { id: string; ended: Tokens[] } {
+export function onTokensEnded(fn: (t: Tokens) => void) {
+	tokensEnded = fn;
+}
+
+function drop(id: string): Held | undefined {
+	const held = sessions.get(id);
+	sessions.delete(id);
+	const t = tokensOf(held);
+	if (t) tokensEnded(t);
+	return held;
+}
+
+/** A new session, its id the cookie's value; the sessions it ends to make room, or finds expired, go through `drop`. */
+export function openSession(session: Omit<Session, 'id'>): string {
 	const now = Date.now();
 	const own: string[] = [];
-	const ended: Tokens[] = [];
-	const drop = (id: string) => {
-		const t = tokensOf(sessions.get(id));
-		if (t) ended.push(t);
-		sessions.delete(id);
-	};
 	const holder = holderOf(session);
 	for (const [id, held] of sessions) {
 		if (held.exp <= now) drop(id);
@@ -98,7 +109,7 @@ export function openSession(session: Omit<Session, 'id'>): { id: string; ended: 
 	while (sessions.size >= MAX_SESSIONS) drop(sessions.keys().next().value!);
 	const id = newId();
 	sessions.set(id, { ...session, exp: now + SESSION_MAX_AGE * 1000 });
-	return { id, ended };
+	return id;
 }
 
 /** A session's tokens as they are now — renewed, or the session ended (null) — for the renewer, which must never act on a copy (oauth.ts createRenewer). */
@@ -112,25 +123,26 @@ export function readSession(id: string | undefined): Session | null {
 	if (!id) return null;
 	const held = sessions.get(id);
 	if (!held) return null;
-	// An expired session is left for the caller to close, which hands back its tokens to revoke (hooks.server.ts, review pass 2).
+	// An expired session is left for the caller to close (hooks.server.ts), which revokes its tokens (review pass 2).
 	if (held.exp <= Date.now()) return null;
 	return { id, credential: held.credential, name: held.name, scope: held.scope, canCapture: held.canCapture };
 }
 
-/** A renewal's new tokens, written back to the session that holds them; false when the session has ended meanwhile. */
+/** A renewal's new tokens, written back to the session that holds them; false, and the tokens revoked, when the session has ended meanwhile. */
 export function storeTokens(id: string, tokens: Tokens): boolean {
 	const held = sessions.get(id);
-	if (!held || !('tokens' in held.credential)) return false;
+	if (!held || !('tokens' in held.credential)) {
+		tokensEnded(tokens);
+		return false;
+	}
 	held.credential = { tokens };
 	return true;
 }
 
-/** Ends a session — sign-out, or a credential the REST core or the AS no longer takes — and hands back what it held, for sign-out to revoke. */
+/** Ends a session — sign-out, or a credential the REST core or the AS no longer takes — and says what it held; its tokens, if any, are revoked (`drop`). */
 export function closeSession(id: string | undefined): Credential | null {
 	if (!id) return null;
-	const held = sessions.get(id);
-	sessions.delete(id);
-	return held?.credential ?? null;
+	return drop(id)?.credential ?? null;
 }
 
 // --- sign-ins through the authorization server, between the redirect and the callback ---

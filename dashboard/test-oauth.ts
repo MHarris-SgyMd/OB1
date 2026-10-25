@@ -3,17 +3,24 @@
  * test-oauth.ts — the GUI's sign-in through the authorization server, offline
  * (SMD-3307): src/lib/server/oauth.ts against a fake token endpoint. What
  * settings it reads, the authorization request it builds, the PKCE pair, the
- * code's exchange, a refresh and a revocation as the `gui` client, every way
- * the AS can answer, and the renewal of a session's tokens (one refresh per
- * session at a time, a refused one ending the session, an unanswered one
- * leaving it). CI's portable-server job runs it; the real AS is driven end to
- * end by deploy-stack-auth's GUI step.
+ * code's exchange (and when its password was typed, from the ID token), a
+ * refresh and a revocation as the `gui` client, every way the AS can answer,
+ * the renewal of a session's tokens (one refresh per session at a time, a
+ * refused one ending the session, an unanswered one leaving it), the revoker
+ * (one at a time, an unanswered one tried again, its bounds), and the session
+ * store's one door for tokens no session holds (session.ts onTokensEnded).
+ * CI's portable-server job runs it; the real AS is driven end to end by
+ * deploy-stack-auth's GUI step.
  *
  *   bun test-oauth.ts
  */
 
 import { createHash } from 'node:crypto';
-import { authorizeUrl, createRenewer, exchangeCode, needsRenewal, newSignIn, oauthSettings, refreshTokens, RenewalFailed, revokeEnded, revokeRefresh, SIGNIN_MS, signInFrom, type TokenAnswer, type Tokens } from './src/lib/server/oauth.ts';
+import { authorizeUrl, createRenewer, createRevoker, exchangeCode, MAX_REVOKE_PENDING, needsRenewal, newSignIn, oauthSettings, refreshTokens, RenewalFailed, REVOKE_KEEP_MS, REVOKE_RETRY_MS, revokeRefresh, type Revoked, signedInSince, SIGNIN_MS, signInFrom, type TokenAnswer, type Tokens } from './src/lib/server/oauth.ts';
+
+// session.ts reads SvelteKit's `$app/paths` (its cookies' path): a stand-in, so the store loads here.
+Bun.plugin({ name: 'app-paths', setup: (build) => void build.module('$app/paths', () => ({ exports: { base: '/dashboard' }, loader: 'object' })) });
+const session = await import('./src/lib/server/session.ts');
 
 let pass = 0;
 let fail = 0;
@@ -49,6 +56,9 @@ console.log('▸ the authorization request');
 	const st = newSignIn(t0);
 	assert(signInFrom(st.binding, t0 + 1)?.state === st.state && signInFrom(st.binding, t0 + SIGNIN_MS)?.state === st.state, 'the state and verifier come back from the binding alone, within the sign-in window: a start holds nothing on the server');
 	assert(signInFrom(st.binding, t0 + SIGNIN_MS + 1) === null && signInFrom(st.binding, t0 - 1) === null, '…and not past the window, nor before its start');
+	assert(signInFrom(st.binding, t0 + 1)?.began === t0, '…and when it began, which the password must not precede');
+	const second = t0 + 750 - (t0 % 1000);
+	assert(signedInSince(second - 750 + 1000, second) && signedInSince(second - 750, second) && !signedInSince(second - 750 - 1000, second) && !signedInSince(null, second) && !signedInSince(undefined, second), "a password typed in the sign-in's own second or after is this sign-in's (auth_time is in whole seconds); one a second before, or none said, is not (review pass 3)");
 	const tampered = st.binding.slice(0, -1) + (st.binding.endsWith('A') ? 'B' : 'A');
 	assert(signInFrom(tampered, t0 + 1)?.state !== st.state && signInFrom('no-dot', t0) === null && signInFrom(undefined, t0) === null, '…another binding another state, and a malformed or missing one none');
 	const u = new URL(authorizeUrl(s, state, challenge));
@@ -83,6 +93,15 @@ console.log('▸ the code exchange, a refresh and a revocation');
 	assert(c.form.get('grant_type') === 'authorization_code' && c.form.get('code') === 'the-code' && c.form.get('code_verifier') === 'the-verifier' && c.form.get('redirect_uri') === s.redirect && c.form.get('resource') === s.resource, '…with the code, the verifier, the redirect and the resource');
 	assert(got.ok && got.tokens.access === 'acc-1' && got.tokens.refresh === 'ref-1' && got.tokens.expiresAt === NOW + 600_000, '…and reads the pair and its expiry');
 	assert(c.bounded, '…under a timeout of its own: an AS that never answers is no answer, not a page held forever');
+	const idToken = (claims: Record<string, unknown>) => `eyJhbGciOiJFUzI1NiJ9.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.sig`;
+	const signedIn = async (claims: Record<string, unknown> | null) => {
+		const f = fakeAs(() => json(200, { access_token: 'a', refresh_token: 'r', expires_in: 600, ...(claims ? { id_token: idToken(claims) } : {}) }));
+		const got = await exchangeCode(s, 'c', 'v', f.fetchFn);
+		return got.ok ? got.signedInAt : 'not ok';
+	};
+	const claims = { iss: `${ORIGIN}/auth`, aud: 'gui', sub: 'operator', auth_time: 1_800_000_123 };
+	assert((await signedIn(claims)) === 1_800_000_123_000 && (await signedIn({ ...claims, aud: ['gui', 'x'] })) === 1_800_000_123_000, "…and when the password was typed: the ID token's auth_time, in ms");
+	assert((await signedIn({ ...claims, aud: 'other' })) === null && (await signedIn({ ...claims, iss: 'https://elsewhere/auth' })) === null && (await signedIn({ ...claims, auth_time: undefined })) === null && (await signedIn(null)) === null, "…and none from another client's or issuer's token, one without auth_time, or no ID token");
 	const ref = fakeAs(() => json(200, { access_token: 'acc-2', refresh_token: 'ref-2', expires_in: 600 }));
 	const r = await refreshTokens(s, 'ref-1', ref.fetchFn, () => NOW);
 	assert(ref.calls[0].form.get('grant_type') === 'refresh_token' && ref.calls[0].form.get('refresh_token') === 'ref-1' && ref.calls[0].form.get('resource') === s.resource && r.ok && r.tokens.refresh === 'ref-2', 'a refresh spends the old token for a new pair, for the same resource');
@@ -90,25 +109,107 @@ console.log('▸ the code exchange, a refresh and a revocation');
 		['a 400 invalid_grant', json(400, { error: 'invalid_grant' }), (a) => !a.ok && 'refused' in a && a.refused === 'invalid_grant'],
 		['a 401 with no body it reads', new Response('nope', { status: 401 }), (a) => !a.ok && 'unreachable' in a],
 		['a 503', json(503, { error: 'temporarily_unavailable' }), (a) => !a.ok && 'unreachable' in a],
+		['a 500 server_error', json(500, { error: 'server_error' }), (a) => !a.ok && 'unreachable' in a],
 		['a 429 (the AS: too many, later)', json(429, { error: 'temporarily_unavailable' }), (a) => !a.ok && 'unreachable' in a],
+		['a 429 that names no OAuth error', json(429, { message: 'slow down' }), (a) => !a.ok && 'unreachable' in a],
 		['no refresh token in a 200', json(200, { access_token: 'a', expires_in: 600 }), (a) => !a.ok && 'refused' in a && a.refused === 'incomplete_token_answer'],
 		['no lifetime in a 200', json(200, { access_token: 'a', refresh_token: 'r' }), (a) => !a.ok && 'refused' in a],
+		['a lifetime of 0 in a 200', json(200, { access_token: 'a', refresh_token: 'r', expires_in: 0 }), (a) => !a.ok && 'refused' in a],
 		['a fetch that throws', () => { throw new TypeError('connection refused'); }, (a) => !a.ok && 'unreachable' in a],
 	];
 	for (const [what, reply, holds] of refusals) {
 		const f = fakeAs(() => (typeof reply === 'function' ? reply() : reply));
-		assert(holds(await refreshTokens(s, 'r', f.fetchFn)), `${what}: ${what.includes('throws') || what.includes('503') || what.includes('429') || what.includes('reads') ? 'no answer, never a refusal that ends a session' : 'refused'}`);
+		assert(holds(await refreshTokens(s, 'r', f.fetchFn)), `${what}: ${/throws|50\d|429|reads/.test(what) ? 'no answer, never a refusal that ends a session' : 'refused'}`);
 	}
 	const rev = fakeAs(() => new Response(null, { status: 200 }));
 	const revoked = await revokeRefresh(s, 'ref-2', rev.fetchFn);
-	assert(revoked && rev.calls[0].url === s.revocation && rev.calls[0].form.get('token') === 'ref-2' && rev.calls[0].form.get('token_type_hint') === 'refresh_token' && rev.calls[0].auth.startsWith('Basic '), "sign-out revokes the refresh token at the mesh revocation endpoint, as gui");
-	const down = fakeAs(() => { throw new TypeError('down'); });
-	assert((await revokeRefresh(s, 'x', down.fetchFn)) === false, '…and says false, never throws, when the AS does not answer');
+	assert(revoked === 'revoked' && rev.calls[0].url === s.revocation && rev.calls[0].form.get('token') === 'ref-2' && rev.calls[0].form.get('token_type_hint') === 'refresh_token' && rev.calls[0].auth.startsWith('Basic ') && rev.calls[0].bounded, 'a revocation posts the refresh token to the mesh revocation endpoint, as gui, under a timeout of its own (sign-out waits on it)');
+	const outcome = async (reply: () => Response) => revokeRefresh(s, 'x', fakeAs(reply).fetchFn);
+	assert((await outcome(() => { throw new TypeError('down'); })) === 'unreachable' && (await outcome(() => json(503, {}))) === 'unreachable' && (await outcome(() => json(429, {}))) === 'unreachable' && (await outcome(() => json(401, { error: 'invalid_client' }))) === 'refused', '…no answer (a fetch that throws, a 5xx, a 429) to try again, a 4xx a refusal not to');
+}
+
+console.log('▸ the revoker');
+{
+	const tok = (refresh: string): Tokens => ({ access: 'a', refresh, expiresAt: 0 });
+	/** A revoker over a fake AS that answers each token with `answer`, its retries run by hand, its clock set by hand. */
+	const over = (answer: (refresh: string) => Revoked | Promise<Revoked>) => {
+		const tried: string[] = [];
+		const retries: (() => void)[] = [];
+		const clock = { now: NOW };
+		const r = createRevoker({ revoke: async (t) => { tried.push(t); return answer(t); }, now: () => clock.now, schedule: (fn, ms) => void (ms === REVOKE_RETRY_MS && retries.push(fn)) });
+		return { r, tried, retries, clock };
+	};
 	let open = 0;
 	let most = 0;
-	const ended = fakeAs(async () => { open++; most = Math.max(most, open); await Bun.sleep(5); open--; return new Response(null, { status: 200 }); });
-	await revokeEnded(s, [{ access: 'a', refresh: 'gone-1', expiresAt: 0 }, null, { access: 'b', refresh: 'gone-2', expiresAt: 0 }, { access: 'c', refresh: 'gone-3', expiresAt: 0 }], ended.fetchFn);
-	assert(ended.calls.map((c) => c.form.get('token')).join() === 'gone-1,gone-2,gone-3' && most === 1, `sessions ended without a sign-out have their refresh tokens revoked, each, one at a time (${most} at once)`);
+	const seq = over(async () => { open++; most = Math.max(most, open); await Bun.sleep(5); open--; return 'revoked'; });
+	await Promise.all([seq.r.add(tok('gone-1')), seq.r.add(tok('gone-2')), seq.r.add(tok('gone-3'))]);
+	assert(seq.tried.join() === 'gone-1,gone-2,gone-3' && most === 1 && seq.r.pending() === 0 && seq.retries.length === 0, `every token due is revoked, each once, one at a time (${most} at once), and nothing waits after`);
+	let up = false;
+	const down = over(() => (up ? 'revoked' : 'unreachable'));
+	await down.r.add(tok('t1'));
+	assert(down.r.pending() === 1 && down.retries.length === 1, 'one the AS does not answer waits, a retry scheduled (review pass 3: a sign-out with the AS down revoked nothing)');
+	up = true;
+	down.retries.shift()?.();
+	await down.r.flush();
+	assert(down.tried.join() === 't1,t1' && down.r.pending() === 0 && down.retries.length === 0, '…and is revoked once the AS answers, nothing left waiting');
+	const refused = over(() => 'refused');
+	await refused.r.add(tok('t2'));
+	assert(refused.r.pending() === 0 && refused.retries.length === 0, 'one the AS refuses is not tried again');
+	const lapsed = over(() => 'unreachable');
+	await lapsed.r.add(tok('t3'));
+	lapsed.clock.now += REVOKE_KEEP_MS;
+	lapsed.retries.shift()?.();
+	await lapsed.r.flush();
+	assert(lapsed.r.pending() === 0 && lapsed.retries.length === 0, "…nor one past the refresh token's idle life, which the AS has let lapse");
+	let gate!: () => void;
+	const held = new Promise<void>((g) => (gate = g));
+	const full = over(async () => { await held; return 'unreachable'; });
+	const first = full.r.add(tok('first'));
+	for (let i = 0; i < MAX_REVOKE_PENDING + 1; i++) void full.r.add(tok(`t${i}`));
+	assert(full.r.pending() === MAX_REVOKE_PENDING, `at most ${MAX_REVOKE_PENDING} wait at once (${full.r.pending()}): the oldest is given up`);
+	gate();
+	await first;
+	let flushed = false;
+	const slow = over(async () => { await Bun.sleep(5); return 'revoked'; });
+	void slow.r.add(tok('a'));
+	void slow.r.add(tok('b'));
+	await slow.r.flush().then(() => (flushed = slow.tried.length === 2));
+	assert(flushed, '…and a flush waits until every token added before it was tried');
+}
+
+console.log('▸ the session store: every ending of a token session revokes');
+{
+	const ended: string[] = [];
+	session.onTokensEnded((t) => void ended.push(t.refresh));
+	const tokenSession = (refresh: string, name = 'oauth:operator') => session.openSession({ credential: { tokens: tok(refresh) }, name, scope: 'write', canCapture: true });
+	function tok(refresh: string): Tokens {
+		return { access: 'a', refresh, expiresAt: NOW };
+	}
+	const s1 = tokenSession('closed');
+	assert(session.closeSession(s1) !== null && ended.join() === 'closed', 'a token session closed (sign-out, a refusal) has its refresh token revoked');
+	const k = session.openSession({ credential: { key: 'k' }, name: 'k', scope: 'read', canCapture: false });
+	session.closeSession(k);
+	assert(ended.join() === 'closed', '…a key session nothing');
+	ended.length = 0;
+	const own = Array.from({ length: session.MAX_PER_KEY }, (_, i) => tokenSession(`own-${i}`, 'oauth:crowded'));
+	tokenSession('one-more', 'oauth:crowded');
+	assert(ended.join() === 'own-0' && session.readSession(own[0]) === null, 'one evicted past MAX_PER_KEY, its holder\'s oldest: revoked');
+	ended.length = 0;
+	const s2 = tokenSession('renewed-late');
+	session.closeSession(s2);
+	ended.length = 0;
+	assert(!session.storeTokens(s2, tok('landed-after')) && ended.join() === 'landed-after', 'a renewal landing after its session ended: the new token, which no one holds, revoked');
+	ended.length = 0;
+	const s3 = tokenSession('expired');
+	const realNow = Date.now;
+	Date.now = () => realNow() + session.SESSION_MAX_AGE * 1000 + 1;
+	try {
+		assert(session.readSession(s3) === null && ended.length === 0, 'an expired session reads as none, left for the request to close…');
+		tokenSession('later');
+		assert(ended.includes('expired'), '…and swept when the next sign-in opens one, revoked');
+	} finally {
+		Date.now = realNow;
+	}
 }
 
 console.log('▸ renewal');

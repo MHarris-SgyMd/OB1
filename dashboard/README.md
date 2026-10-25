@@ -69,19 +69,27 @@ cross-site ("The origin", below).
   asks for the password every time and a sign-out of the GUI is one); the AS sends the
   browser back to `/dashboard/auth/callback`, where the code is traded on the mesh for
   an access token (600 s) and a refresh token, held in the session like a key and never
-  sent to the browser. A sign-in in flight holds nothing on the server: its state and
-  PKCE verifier are derived from a binding in its cookie that no URL carries, so a
-  callback URL seen elsewhere completes nothing. Every page calls the REST core with the access
+  sent to the browser. The callback takes them only if the ID token's `auth_time` is
+  no earlier than the sign-in's start: a URL can drop `prompt=login`, and the AS's own
+  session (a day, which the GUI's sign-out leaves) would then skip the password. A
+  sign-in in flight holds nothing on the server: its state and PKCE verifier are
+  derived from a binding in its cookie that no URL carries, so a callback URL seen
+  elsewhere completes no sign-in this browser started (one the operator completed for
+  a sign-in someone else started is that person's, OAuth's own residual). Start and
+  sign-out refuse a post from another origin. Every page calls the REST core with the access
   token, renewed with the refresh token a minute before it lapses, from the session as
   it is now (one renewal per session at a time); a renewal the AS refuses ends the
   session, and one it does not answer, or an AS its probe finds down, is the page's 503
   — for up to 30 s after the AS is back, while the probe's answer is kept — (should the
   AS have spent the token before its answer was lost, the next try is a reuse it
-  refuses, which ends the session). Sign-out revokes the refresh token at the AS (in the
-  background while the AS is down), and a session that ends any other way while the GUI
-  runs — evicted, replaced, found expired, refused by the REST core, a sign-in that
-  failed after its exchange — has its revoked in the background; a restart forgets its
-  sessions before it could. With the
+  refuses, which ends the session). Sign-out revokes the refresh token at the AS, and a
+  session that ends any other way while the GUI runs — evicted, replaced, found
+  expired, refused by the REST core, a sign-in that failed after its exchange, a
+  renewal that landed after its session ended — has its revoked too; one the AS does
+  not answer is tried again every 30 s until it does (for the token's 14 days, a
+  thousand at most). A restart forgets its sessions, and what is still due, before it
+  could. The access token itself stays good at the REST core until it lapses (600 s at
+  most), as the core checks it without asking the AS; it never left the GUI. With the
   AS not answering, the page says sign-in is unavailable; break-glass key sign-in on a
   loopback-only port is SMD-3307's second PR. With no secret or no sound origin, it
   says so, and signs no one in.

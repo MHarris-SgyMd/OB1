@@ -30,9 +30,13 @@
  *     another browser, one without the sign-in cookie (no login CSRF), or one
  *     whose cookie is set to the answer's state, as a thief of the URL could
  *     set it (the verifier comes only from the binding the real cookie holds);
+ *   - signed in, a start starts nothing; a start or a sign-out posted from
+ *     another origin, even with no body, is refused;
  *   - sign-out ends the session, and signing in again in that browser asks for
  *     the password (prompt=login: the AS's own session does not sign the next
- *     visitor in); a consent denied at the AS comes back in words and opens
+ *     visitor in), and one that drops prompt=login from the URL, the AS
+ *     skipping the password, is refused (the ID token's auth_time precedes
+ *     its start); a consent denied at the AS comes back in words and opens
  *     nothing; a refusal word the page does not know (`constructor`) is none.
  *
  * With `--renewal`, before signing out it waits past the session's access
@@ -160,6 +164,12 @@ const session = jar.get(COOKIE);
 assert(landed.status === 303 && landed.location === "/dashboard/" && session !== undefined && session.path === "/dashboard" && /HttpOnly/i.test(session.line) && /SameSite=Lax/i.test(session.line), `the callback opens a session — a cookie on /dashboard, HttpOnly, Lax — and sends the browser home (${landed.status} → ${landed.location})`);
 assert(!jar.has("ob1_dashboard_signin"), "…and drops the sign-in cookie");
 
+// Signed in, a start starts nothing; and neither a start nor a sign-out is taken from another origin, even with no body (SvelteKit checks a form's).
+const startSignedIn = await go(jar, `${BASE}/auth/start`, { form: {} });
+assert(startSignedIn.status === 303 && startSignedIn.location === "/dashboard/signin" && !jar.has("ob1_dashboard_signin"), `signed in, the start starts nothing (${startSignedIn.status} → ${startSignedIn.location})`);
+const fromElsewhere = await Promise.all(["auth/start", "signout"].map((p) => fetch(`${BASE}/${p}`, { method: "POST", redirect: "manual", headers: { origin: "https://elsewhere.example", cookie: cookieFor(jar, `/dashboard/${p}`) } }).then((r) => r.status)));
+assert(fromElsewhere.every((c) => c === 403) && jar.has(COOKIE), `a start or a sign-out posted with no body from another origin is refused, the session kept (${fromElsewhere.join(", ")})`);
+
 // Under the token session.
 const home = await go(jar, `${BASE}/`);
 const who = /data-testid="who">([^<]*)</.exec(home.html)?.[1] ?? "";
@@ -227,6 +237,14 @@ const againPrompts: string[] = [];
 const startNext = await go(jar, `${BASE}/auth/start`, { form: {} });
 await atTheAs(jar, startNext.location, `${ORIGIN}/dashboard/auth/callback`, "abort", againPrompts);
 assert(againPrompts[0] === "login" && againPrompts.includes("consent"), `signing in again after sign-out asks for the password first (${againPrompts.join(" → ")})`);
+// …and the next visitor who drops prompt=login from the URL, so the AS's own session (a day) skips the password, is refused: the ID token's auth_time precedes the sign-in's start.
+const skipPrompts: string[] = [];
+const startSkip = await go(jar, `${BASE}/auth/start`, { form: {} });
+const skipUrl = startSkip.location ? new URL(startSkip.location, ORIGIN) : null;
+skipUrl?.searchParams.set("prompt", "consent");
+const skipped = skipUrl ? await atTheAs(jar, skipUrl.href, `${ORIGIN}/dashboard/auth/callback`, "confirm", skipPrompts) : "no start";
+const skippedAt = skipped.startsWith(ORIGIN) ? await go(jar, skipped) : { status: 0, location: skipped, html: "", headers: new Headers() };
+assert(!skipPrompts.includes("login") && skippedAt.status === 303 && skippedAt.location === "/dashboard/signin?refused=login" && !jar.has(COOKIE), `…and one that drops prompt=login, the AS asking no password (${skipPrompts.join(" → ")}), is refused: its password came before the sign-in (${skippedAt.status} → ${skippedAt.location})`);
 const unknownWord = await go(newJar(), `${BASE}/signin?refused=constructor`);
 assert(unknownWord.status === 200 && !unknownWord.html.includes('data-testid="refused"'), `a refusal word the page does not know (constructor) says nothing, and no 500 (${unknownWord.status})`);
 

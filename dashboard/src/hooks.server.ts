@@ -1,8 +1,10 @@
 import { redirect, type Handle } from '@sveltejs/kit';
 import { base } from '$app/paths';
-import { env } from '$env/dynamic/private';
-import { oauthSettings, revokeEnded } from '$lib/server/oauth';
-import { closeSession, cookieOptions, readSession, SESSION_COOKIE } from '$lib/server/session';
+import { revocations } from '$lib/server/rest';
+import { closeSession, cookieOptions, onTokensEnded, readSession, SESSION_COOKIE } from '$lib/server/session';
+
+// Tokens no session holds any more, however it ended, are revoked at the AS (SMD-3307; review pass 3).
+onTokensEnded((t) => void revocations.add(t));
 
 /** The paths a visitor reaches signed out: the sign-in page, a sign-in through the authorization server (its start and its answer, SMD-3307), and the liveness probe. */
 const OPEN = new Set([`${base}/signin`, `${base}/auth/start`, `${base}/auth/callback`, `${base}/health`]);
@@ -16,8 +18,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 	const session = readSession(id);
 	event.locals.session = session;
 	if (id && !session) {
-		const ended = closeSession(id);
-		if (ended && 'tokens' in ended) void revokeEnded(oauthSettings(env), [ended.tokens]);
+		closeSession(id);
 		event.cookies.delete(SESSION_COOKIE, cookieOptions(event.url));
 	}
 	if (!session && !OPEN.has(event.url.pathname)) throw redirect(303, `${base}/signin`);

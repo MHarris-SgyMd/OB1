@@ -40,6 +40,7 @@ export const FIRST_READ = 'thought_stats';
 export const REFUSED_WORDS: Record<string, string> = {
 	denied: 'The sign-in was cancelled at the authorization server.',
 	stale: 'That sign-in had expired, or was not started in this browser. Start again.',
+	login: 'The authorization server did not ask the password for that sign-in. Start again.',
 	refused: 'The authorization server refused the sign-in. The dashboard log has its reason.',
 	unreachable: 'The authorization server or the brain did not answer the sign-in. Try again in a moment.',
 	token: 'The brain refused the token the sign-in gave. The dashboard log has its answer.',

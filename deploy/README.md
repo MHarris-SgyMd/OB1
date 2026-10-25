@@ -3731,7 +3731,7 @@ in today, so leave the profile off where others' claude.ai connectors must
 keep working; turning it off again makes the document a 404, and they
 proceed on the key.
 Not yet: passkey sign-in, which needs the public origin (SMD-2382,
-SMD-2286), and the GUI as this server's client (SMD-2280). The release overlay does not pin an image for it yet,
+SMD-2286), and the GUI's break-glass key sign-in and page of grants (SMD-3307's second and third PRs). The release overlay does not pin an image for it yet,
 so the profile builds from a checkout.
 
 ## What this does not cover

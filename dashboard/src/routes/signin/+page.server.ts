@@ -5,7 +5,7 @@ import type { Actions, PageServerLoad } from './$types';
 import { codeOf, rest } from '$lib/server/rest';
 import { closeSession, cookieOptions, openSession, SESSION_COOKIE, SESSION_MAX_AGE } from '$lib/server/session';
 import { FIRST_READ, keySignInOffered, REFUSED_WORDS, whoAmI } from '$lib/server/signin';
-import { oauthSettings, revokeEnded } from '$lib/server/oauth';
+import { oauthSettings } from '$lib/server/oauth';
 import { authReachability } from '../../../../server-portable/oauth-edge.ts';
 
 /**
@@ -55,9 +55,8 @@ export const actions: Actions = {
 			return fail(403, { error: 'This key cannot read: the dashboard needs a read- or write-scoped key. A capture-only key may add thoughts and nothing else.' });
 		}
 		// A sign-in over a live session replaces it: the old id would otherwise hold its key until it expired, out of sign-out's reach.
-		const replaced = closeSession(cookies.get(SESSION_COOKIE));
-		const { id, ended } = openSession({ credential: { key }, name: who.name, scope: who.scope, canCapture: who.operations.includes('capture_thought') });
-		void revokeEnded(oauthSettings(env), [replaced && 'tokens' in replaced ? replaced.tokens : null, ...ended]);
+		closeSession(cookies.get(SESSION_COOKIE));
+		const id = openSession({ credential: { key }, name: who.name, scope: who.scope, canCapture: who.operations.includes('capture_thought') });
 		cookies.set(SESSION_COOKIE, id, { ...cookieOptions(url), maxAge: SESSION_MAX_AGE });
 		throw redirect(303, HOME);
 	},

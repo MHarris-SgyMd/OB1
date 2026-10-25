@@ -12,7 +12,7 @@ import { env } from '$env/dynamic/private';
 import { error, redirect, type RequestEvent } from '@sveltejs/kit';
 import { base } from '$app/paths';
 import { createRestClient, DEFAULT_REST_URL, type Answer, type CallableOperation, type InputOf, type Method, type RestClient } from '../../../../rest-client/index.ts';
-import { createRenewer, oauthSettings, refreshTokens, RenewalFailed, revokeEnded } from './oauth';
+import { createRenewer, createRevoker, oauthSettings, refreshTokens, RenewalFailed, revokeRefresh } from './oauth';
 import { closeSession, cookieOptions, liveTokens, SESSION_COOKIE, storeTokens, type Session } from './session';
 import { authReachability } from '../../../../server-portable/oauth-edge.ts';
 
@@ -80,6 +80,14 @@ const accessFor = createRenewer({
 	close: (id) => void closeSession(id),
 });
 
+/** The revocations of tokens no session holds (oauth.ts createRevoker), on the mesh as the `gui` client; hooks.server.ts hands its `add` to the session store. */
+export const revocations = createRevoker({
+	revoke: (refresh) => {
+		const s = oauthSettings(env);
+		return s ? revokeRefresh(s, refresh) : Promise.resolve('refused');
+	},
+});
+
 /**
  * What a call carries for the session: its key, or a token good for the next
  * minute at least — renewed with the refresh token first when it is not. A
@@ -100,9 +108,8 @@ export async function credentialOf(event: RequestEvent, session: Session): Promi
 
 /** Ends this request's session and sends the visitor to /signin. */
 function signOutHere(event: RequestEvent): never {
-	// Its tokens revoked as it ends: a 401 from the REST core leaves a refresh token no session holds (review pass 2).
-	const ended = closeSession(event.cookies.get(SESSION_COOKIE));
-	if (ended && 'tokens' in ended) void revokeEnded(oauthSettings(env), [ended.tokens]);
+	// Its tokens are revoked as it ends (session.ts onTokensEnded): a 401 from the REST core leaves a refresh token no session holds (review pass 2).
+	closeSession(event.cookies.get(SESSION_COOKIE));
 	event.cookies.delete(SESSION_COOKIE, cookieOptions(event.url));
 	throw redirect(303, `${base}/signin`);
 }
