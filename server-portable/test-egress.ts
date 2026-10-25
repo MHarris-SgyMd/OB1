@@ -27,8 +27,8 @@
  */
 
 import { SQL } from "bun";
-import { childPort, createAssert, quietPort, resetSchema } from "../db/test-support.ts";
-import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
+import { childPort, createAssert, resetSchema } from "../db/test-support.ts";
+import { mcpUnderTest, quietPort, servedByMcpServer } from "./test-support.ts";
 import { hashKey } from "./auth.ts";
 import {
   DEFAULT_EGRESS_MODE, decideCalls, describeEgress, flagOn, localKnob, mayLeaveBox, parseEgressTerms, refusesEverything, resolveEgressPolicy, termMatches,

@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import { answersHealth, askRaw, childPort, createAssert, leaveMidUpload, MCP_HEALTH_BODY, pendingSettled, quietPort, requestHead, REST_HEALTH_BODY, RuntimeUrl, serveChild, watchStream } from "../db/test-support.ts";
+import { answersHealth, askRaw, childPort, createAssert, leaveMidUpload, MCP_HEALTH_BODY, pendingSettled, requestHead, REST_HEALTH_BODY, RuntimeUrl, serveChild, watchStream } from "../db/test-support.ts";
 import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES, UNLOCKS, type ToolScope } from "./tools.ts";
 import { openApiDocument } from "./rest/openapi.ts";
 import { pathFields, readsQuery, ROUTES, type Method } from "./rest/routes.ts";
 import { FORK_VERSION } from "../db/version.mjs";
-import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
+import { mcpUnderTest, quietPort, servedByMcpServer } from "./test-support.ts";
 import { hashKey } from "./auth.ts";
 /**
  * test-server.ts
