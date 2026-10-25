@@ -3591,34 +3591,6 @@ jobs:
           [ "$(cut -d' ' -f2 <<<"$got")" = 30 ] || { echo "the 503 for a token with no keys read says Retry-After \"$(cut -d' ' -f2 <<<"$got")\", not 30"; exit 1; }
           auth rm -sfv auth
 
-      # SMD-1846. What the proxy itself owes, beside the smoke:
-      # - /.well-known, bare and under it, is answered by the proxy, not the
-      #   server — Traefik's 404 body, where the server's would be "Not
-      #   Found" — so a claude.ai connector's discovery at the root gets its
-      #   404 whatever the server does;
-      # - the origin root is retired (SMD-2532): `POST /?key=`, the connector
-      #   form clients held before the proxy, `GET /`, /worker-status and
-      #   /jobs at the root are the proxy's own 404 with no Deprecation header
-      #   (smoke.sh check 11 holds the POST's too); no /mcp, /health or
-      #   OPTIONS /health answer carries one;
-      # - the access log never holds a query string or userinfo: after calls
-      #   carrying the smoke key as `?key=`, `code=`, `state=` and as the user
-      #   part of an absolute-form target, no log line carries it, and the
-      #   callback's own line is there with its bare path, so the log is on
-      #   (the callback reaches the auth router, the authorization server
-      #   gone by then: its 404, logged at the entrypoint all the same);
-      # - an SSE stream passes through as it is written: with the stub's
-      #   embedding held 6 s, the server's 5 s keepalive frame must arrive a
-      #   good second before the result. A buffering proxy delivers both
-      #   together.
-      # After the authorization server's step, in its job (SMD-3051): the MCP
-      # server that step recreated serves the configured origin, so the
-      # document at loopback's Host is the MCP server's own 404, and the
-      # callback reaches the auth router with the authorization server gone.
-      # /mcp and /health are the `mcp` service's since SMD-2287, so their lines
-      # are in its log, not the REST core's.
-      # Its search_thoughts is a semantic search the query log keeps, in a
-      # job whose stack no tier step replays.
       # SMD-3307: the operator GUI signs the operator in through the
       # authorization server. The AS's side first: the `gui` client signed in
       # as the GUI does (restart-check.ts --gui-refresh) gets a refresh token,
@@ -3650,6 +3622,34 @@ jobs:
           # Gone again, as the steps above leave it: the next step meets no authorization server.
           auth rm -sfv auth
 
+      # SMD-1846. What the proxy itself owes, beside the smoke:
+      # - /.well-known, bare and under it, is answered by the proxy, not the
+      #   server — Traefik's 404 body, where the server's would be "Not
+      #   Found" — so a claude.ai connector's discovery at the root gets its
+      #   404 whatever the server does;
+      # - the origin root is retired (SMD-2532): `POST /?key=`, the connector
+      #   form clients held before the proxy, `GET /`, /worker-status and
+      #   /jobs at the root are the proxy's own 404 with no Deprecation header
+      #   (smoke.sh check 11 holds the POST's too); no /mcp, /health or
+      #   OPTIONS /health answer carries one;
+      # - the access log never holds a query string or userinfo: after calls
+      #   carrying the smoke key as `?key=`, `code=`, `state=` and as the user
+      #   part of an absolute-form target, no log line carries it, and the
+      #   callback's own line is there with its bare path, so the log is on
+      #   (the callback reaches the auth router, the authorization server
+      #   gone by then: its 404, logged at the entrypoint all the same);
+      # - an SSE stream passes through as it is written: with the stub's
+      #   embedding held 6 s, the server's 5 s keepalive frame must arrive a
+      #   good second before the result. A buffering proxy delivers both
+      #   together.
+      # After the authorization server's step, in its job (SMD-3051): the MCP
+      # server that step recreated serves the configured origin, so the
+      # document at loopback's Host is the MCP server's own 404, and the
+      # callback reaches the auth router with the authorization server gone.
+      # /mcp and /health are the `mcp` service's since SMD-2287, so their lines
+      # are in its log, not the REST core's.
+      # Its search_thoughts is a semantic search the query log keeps, in a
+      # job whose stack no tier step replays.
       - name: The proxy answers discovery itself, logs no key and streams unbuffered
         working-directory: deploy
         run: |

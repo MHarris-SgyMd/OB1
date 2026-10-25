@@ -1,5 +1,7 @@
 import { redirect, type Handle } from '@sveltejs/kit';
 import { base } from '$app/paths';
+import { env } from '$env/dynamic/private';
+import { oauthSettings, revokeEnded } from '$lib/server/oauth';
 import { closeSession, cookieOptions, readSession, SESSION_COOKIE } from '$lib/server/session';
 
 /** The paths a visitor reaches signed out: the sign-in page, a sign-in through the authorization server (its start and its answer, SMD-3307), and the liveness probe. */
@@ -7,14 +9,15 @@ const OPEN = new Set([`${base}/signin`, `${base}/auth/start`, `${base}/auth/call
 
 // Every request: the session the cookie names, if any, becomes locals.session.
 // A cookie that names none (ended, expired, or from before a restart) is
-// dropped. Signed out, every path but OPEN redirects to /signin — here, not in
+// dropped, and an expired session's tokens revoked at the AS (SMD-3307). Signed out, every path but OPEN redirects to /signin — here, not in
 // a layout's load, so a form action or an endpoint is behind it too.
 export const handle: Handle = async ({ event, resolve }) => {
 	const id = event.cookies.get(SESSION_COOKIE);
 	const session = readSession(id);
 	event.locals.session = session;
 	if (id && !session) {
-		closeSession(id);
+		const ended = closeSession(id);
+		if (ended && 'tokens' in ended) void revokeEnded(oauthSettings(env), [ended.tokens]);
 		event.cookies.delete(SESSION_COOKIE, cookieOptions(event.url));
 	}
 	if (!session && !OPEN.has(event.url.pathname)) throw redirect(303, `${base}/signin`);

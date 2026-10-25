@@ -27,7 +27,9 @@
  *     session's alone (the Verify line: the browser holds no token);
  *   - the callback replayed, or answered with a state this browser was never
  *     given, signs no one in and says why; so does a real answer opened in
- *     another browser, one without the sign-in cookie (no login CSRF);
+ *     another browser, one without the sign-in cookie (no login CSRF), or one
+ *     whose cookie is set to the answer's state, as a thief of the URL could
+ *     set it (the verifier comes only from the binding the real cookie holds);
  *   - sign-out ends the session, and signing in again in that browser asks for
  *     the password (prompt=login: the AS's own session does not sign the next
  *     visitor in); a consent denied at the AS comes back in words and opens
@@ -206,6 +208,11 @@ const startC = await go(newJarC, `${BASE}/auth/start`, { form: {} });
 const answerC = await atTheAs(newJarC, startC.location, `${ORIGIN}/dashboard/auth/callback`, "confirm");
 const elsewhere = newJar();
 const openedElsewhere = answerC.startsWith(ORIGIN) ? await go(elsewhere, answerC) : { status: 0, location: answerC, html: "", headers: new Headers() };
+const thief = newJar();
+const stolenState = answerC.startsWith(ORIGIN) ? new URL(answerC).searchParams.get("state") ?? "" : "";
+thief.set("ob1_dashboard_signin", { value: stolenState, path: "/dashboard/auth", line: "" });
+const openedByThief = answerC.startsWith(ORIGIN) ? await go(thief, answerC) : { status: 0, location: answerC, html: "", headers: new Headers() };
+assert(openedByThief.status === 303 && openedByThief.location === "/dashboard/signin?refused=stale" && !thief.has(COOKIE), `…nor that answer opened with a cookie set to its state, as a thief of the URL could: the verifier comes from the real cookie's binding alone (${openedByThief.status} → ${openedByThief.location})`);
 assert(new URL(answerC.startsWith(ORIGIN) ? answerC : `${ORIGIN}/x`).searchParams.has("code") && openedElsewhere.status === 303 && openedElsewhere.location === "/dashboard/signin?refused=stale" && !elsewhere.has(COOKIE), `…nor a real answer opened in another browser, one without the sign-in cookie (${openedElsewhere.status} → ${openedElsewhere.location})`);
 const said = await go(newJar(), `${BASE}/signin?refused=stale`);
 assert(said.html.includes('data-testid="refused"') && said.html.includes("expired, or was not started in this browser"), "…and the sign-in page says why in its own words");

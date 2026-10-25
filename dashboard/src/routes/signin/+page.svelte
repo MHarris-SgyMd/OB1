@@ -71,7 +71,7 @@
 			</form>
 		{:else if data.mode === 'unavailable'}
 			<p class="text-sm text-text-muted" role="alert" data-testid="unavailable">
-				Sign-in is unavailable: the authorization server is not answering. Key sign-in is off on this public address whatever the authorization server's state, so that stopping it opens no weaker door. On the brain's own machine, the loopback-only break-glass sign-in takes a key (SMD-3307).
+				Sign-in is unavailable: the authorization server is not answering. Key sign-in is off on this public address whatever the authorization server's state, so that stopping it opens no weaker door. Start it again on the brain's machine (<code>compose up -d --wait auth</code>, with the stack's other files); a loopback-only break-glass sign-in that takes a key while it is down is to come (SMD-3307's second part).
 			</p>
 		{:else}
 			<p class="text-sm text-text-muted" role="alert" data-testid="misconfigured">

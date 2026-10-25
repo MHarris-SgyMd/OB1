@@ -5,7 +5,9 @@ GUI: a SvelteKit server of its own that reads and writes the brain only through 
 REST core (`server-portable/api.ts`), the brain's contract. This directory is that GUI
 (SMD-2280). Every page is a call on the REST core through
 [`../rest-client`](../rest-client/README.md), the client the MCP server uses, under the
-signed-in visitor's own key. It holds no store, no key list and no key of its own.
+signed-in visitor's own key, or the authorization server's token for them (SMD-3307). It
+holds no store, no key list and no brain key of its own; its one secret is the AS's `gui`
+client's.
 
 It replaces the three dashboards under `dashboards/`, which retire as this one takes
 over what each did (SMD-2280's plan: read views first, then plugin pages, then
@@ -15,7 +17,7 @@ sign-in through the authorization server, then the old dashboards' retirement).
 |---|---|
 | `serve.ts` | The entry, `bun serve.ts`: the SvelteKit server `bun run build` writes to `build/`, on PORT (8000), with the origin set (below) |
 | `src/hooks.server.ts` | Every request: the session, the sign-in wall, and the headers that keep a page out of caches and frames |
-| `src/lib/server/session.ts` | The sessions, held in the server's memory (a key or the authorization server's tokens), and sign-ins through the AS in flight |
+| `src/lib/server/session.ts` | The sessions, held in the server's memory (a key or the authorization server's tokens), and the sign-in answers already taken |
 | `src/lib/server/oauth.ts` | Sign-in through the authorization server as its `gui` client: the authorization request, the code's exchange, a refresh, a revocation, a session's renewal |
 | `src/lib/server/rest.ts` | The REST core's client, and a read under the visitor's key (a core operation's or a plugin's) |
 | `src/lib/server/plugins.ts` | The plugin registry (`GET /v1/plugins`), read once a request: the nav's plugin pages, and a plugin page's 404 |
@@ -67,15 +69,19 @@ cross-site ("The origin", below).
   asks for the password every time and a sign-out of the GUI is one); the AS sends the
   browser back to `/dashboard/auth/callback`, where the code is traded on the mesh for
   an access token (600 s) and a refresh token, held in the session like a key and never
-  sent to the browser. A sign-in in flight holds nothing on the server: its PKCE
-  verifier is derived from its state. Every page calls the REST core with the access
+  sent to the browser. A sign-in in flight holds nothing on the server: its state and
+  PKCE verifier are derived from a binding in its cookie that no URL carries, so a
+  callback URL seen elsewhere completes nothing. Every page calls the REST core with the access
   token, renewed with the refresh token a minute before it lapses, from the session as
   it is now (one renewal per session at a time); a renewal the AS refuses ends the
   session, and one it does not answer, or an AS its probe finds down, is the page's 503
-  (should the AS have spent the token before its answer was lost, the next try is a
-  reuse it refuses, which ends the session). Sign-out revokes the refresh token at the
-  AS, and a session ended any other way while the GUI runs (evicted, replaced, a
-  sign-in that failed after its exchange) has its revoked in the background. With the
+  — for up to 30 s after the AS is back, while the probe's answer is kept — (should the
+  AS have spent the token before its answer was lost, the next try is a reuse it
+  refuses, which ends the session). Sign-out revokes the refresh token at the AS (in the
+  background while the AS is down), and a session that ends any other way while the GUI
+  runs — evicted, replaced, found expired, refused by the REST core, a sign-in that
+  failed after its exchange — has its revoked in the background; a restart forgets its
+  sessions before it could. With the
   AS not answering, the page says sign-in is unavailable; break-glass key sign-in on a
   loopback-only port is SMD-3307's second PR. With no secret or no sound origin, it
   says so, and signs no one in.

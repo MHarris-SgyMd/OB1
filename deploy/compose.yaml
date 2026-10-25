@@ -1984,7 +1984,7 @@ services:
   # (x-proxy-routes, the auth router; SMD-1846). It joins two networks and
   # shares neither with Postgres, Ollama, Jev, n8n or the workers: `mesh`,
   # internal, where the proxy meets it, the MCP server probes it (SMD-2382)
-  # and the GUI will; and `auth-egress`, which nothing else joins, for the
+  # and the GUI signs in through it (SMD-3307); and `auth-egress`, which nothing else joins, for the
   # client metadata documents it fetches (each through its fetch guard, which
   # refuses private and *.ob1.internal targets). Not `egress`: the stack's
   # provider callers and model services meet there, and the one server here

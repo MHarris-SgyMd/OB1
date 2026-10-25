@@ -13,7 +13,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { authorizeUrl, createRenewer, exchangeCode, needsRenewal, newSignIn, oauthSettings, refreshTokens, RenewalFailed, revokeEnded, revokeRefresh, SIGNIN_MS, verifierFor, type TokenAnswer, type Tokens } from './src/lib/server/oauth.ts';
+import { authorizeUrl, createRenewer, exchangeCode, needsRenewal, newSignIn, oauthSettings, refreshTokens, RenewalFailed, revokeEnded, revokeRefresh, SIGNIN_MS, signInFrom, type TokenAnswer, type Tokens } from './src/lib/server/oauth.ts';
 
 let pass = 0;
 let fail = 0;
@@ -40,15 +40,17 @@ console.log('▸ settings');
 console.log('▸ the authorization request');
 {
 	const s = oauthSettings(env)!;
-	const { state, verifier, challenge } = newSignIn();
+	const { binding, state, challenge } = newSignIn();
 	const again = newSignIn();
-	assert(challenge === createHash('sha256').update(verifier).digest('base64url') && verifier.length >= 43 && state !== again.state && verifier !== again.verifier, 'a fresh S256 pair and state each sign-in');
+	const derived = signInFrom(binding)!;
+	assert(challenge === createHash('sha256').update(derived.verifier).digest('base64url') && derived.verifier.length >= 43 && derived.state === state && state !== again.state && binding !== again.binding, 'a fresh binding each sign-in, its state and S256 challenge derived from it');
+	assert(!state.includes(binding.split('.')[1]) && signInFrom(state) === null, '…the state carries nothing of the binding, and is no binding itself: a callback URL alone yields no verifier');
 	const t0 = 1_800_000_000_000;
 	const st = newSignIn(t0);
-	assert(verifierFor(st.state, t0 + 1) === st.verifier && verifierFor(st.state, t0 + SIGNIN_MS) === st.verifier, 'the verifier comes back from the state alone, within the sign-in window: a start holds nothing on the server');
-	assert(verifierFor(st.state, t0 + SIGNIN_MS + 1) === null && verifierFor(st.state, t0 - 1) === null, '…and not past the window, nor before its start');
-	const tampered = st.state.slice(0, -1) + (st.state.endsWith('A') ? 'B' : 'A');
-	assert(verifierFor(tampered, t0 + 1) !== st.verifier && verifierFor('no-dot', t0) === null && verifierFor(`${t0.toString(36)}.short`, t0) === null, '…another state another verifier, and a malformed one none');
+	assert(signInFrom(st.binding, t0 + 1)?.state === st.state && signInFrom(st.binding, t0 + SIGNIN_MS)?.state === st.state, 'the state and verifier come back from the binding alone, within the sign-in window: a start holds nothing on the server');
+	assert(signInFrom(st.binding, t0 + SIGNIN_MS + 1) === null && signInFrom(st.binding, t0 - 1) === null, '…and not past the window, nor before its start');
+	const tampered = st.binding.slice(0, -1) + (st.binding.endsWith('A') ? 'B' : 'A');
+	assert(signInFrom(tampered, t0 + 1)?.state !== st.state && signInFrom('no-dot', t0) === null && signInFrom(undefined, t0) === null, '…another binding another state, and a malformed or missing one none');
 	const u = new URL(authorizeUrl(s, state, challenge));
 	const q = u.searchParams;
 	assert(u.origin + u.pathname === `${ORIGIN}/auth/authorize`, 'sent to the public authorize endpoint');
@@ -102,10 +104,11 @@ console.log('▸ the code exchange, a refresh and a revocation');
 	assert(revoked && rev.calls[0].url === s.revocation && rev.calls[0].form.get('token') === 'ref-2' && rev.calls[0].form.get('token_type_hint') === 'refresh_token' && rev.calls[0].auth.startsWith('Basic '), "sign-out revokes the refresh token at the mesh revocation endpoint, as gui");
 	const down = fakeAs(() => { throw new TypeError('down'); });
 	assert((await revokeRefresh(s, 'x', down.fetchFn)) === false, '…and says false, never throws, when the AS does not answer');
-	const ended = fakeAs(() => new Response(null, { status: 200 }));
-	revokeEnded(s, [{ access: 'a', refresh: 'gone-1', expiresAt: 0 }, null, { access: 'b', refresh: 'gone-2', expiresAt: 0 }], ended.fetchFn);
-	await Bun.sleep(10);
-	assert(ended.calls.map((c) => c.form.get('token')).join() === 'gone-1,gone-2', "sessions ended without a sign-out have their refresh tokens revoked, each, in the background");
+	let open = 0;
+	let most = 0;
+	const ended = fakeAs(async () => { open++; most = Math.max(most, open); await Bun.sleep(5); open--; return new Response(null, { status: 200 }); });
+	await revokeEnded(s, [{ access: 'a', refresh: 'gone-1', expiresAt: 0 }, null, { access: 'b', refresh: 'gone-2', expiresAt: 0 }, { access: 'c', refresh: 'gone-3', expiresAt: 0 }], ended.fetchFn);
+	assert(ended.calls.map((c) => c.form.get('token')).join() === 'gone-1,gone-2,gone-3' && most === 1, `sessions ended without a sign-out have their refresh tokens revoked, each, one at a time (${most} at once)`);
 }
 
 console.log('▸ renewal');

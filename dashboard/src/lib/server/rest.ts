@@ -12,7 +12,7 @@ import { env } from '$env/dynamic/private';
 import { error, redirect, type RequestEvent } from '@sveltejs/kit';
 import { base } from '$app/paths';
 import { createRestClient, DEFAULT_REST_URL, type Answer, type CallableOperation, type InputOf, type Method, type RestClient } from '../../../../rest-client/index.ts';
-import { createRenewer, oauthSettings, refreshTokens, RenewalFailed } from './oauth';
+import { createRenewer, oauthSettings, refreshTokens, RenewalFailed, revokeEnded } from './oauth';
 import { closeSession, cookieOptions, liveTokens, SESSION_COOKIE, storeTokens, type Session } from './session';
 import { authReachability } from '../../../../server-portable/oauth-edge.ts';
 
@@ -100,7 +100,9 @@ export async function credentialOf(event: RequestEvent, session: Session): Promi
 
 /** Ends this request's session and sends the visitor to /signin. */
 function signOutHere(event: RequestEvent): never {
-	closeSession(event.cookies.get(SESSION_COOKIE));
+	// Its tokens revoked as it ends: a 401 from the REST core leaves a refresh token no session holds (review pass 2).
+	const ended = closeSession(event.cookies.get(SESSION_COOKIE));
+	if (ended && 'tokens' in ended) void revokeEnded(oauthSettings(env), [ended.tokens]);
 	event.cookies.delete(SESSION_COOKIE, cookieOptions(event.url));
 	throw redirect(303, `${base}/signin`);
 }

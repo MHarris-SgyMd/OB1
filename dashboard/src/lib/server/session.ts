@@ -112,10 +112,8 @@ export function readSession(id: string | undefined): Session | null {
 	if (!id) return null;
 	const held = sessions.get(id);
 	if (!held) return null;
-	if (held.exp <= Date.now()) {
-		sessions.delete(id);
-		return null;
-	}
+	// An expired session is left for the caller to close, which hands back its tokens to revoke (hooks.server.ts, review pass 2).
+	if (held.exp <= Date.now()) return null;
 	return { id, credential: held.credential, name: held.name, scope: held.scope, canCapture: held.canCapture };
 }
 
@@ -148,10 +146,12 @@ const spent = new Map<string, number>();
 
 /**
  * Whether a sign-in's answer is taken for the first time: true once per state,
- * false after — a callback replayed, even with its cookie put back, is turned
- * away before the AS is asked. The verifier itself is derived from the state
- * (oauth.ts verifierFor), so a start holds nothing here, and a flood of starts
- * crowds nothing out (review pass 1).
+ * false after — a callback replayed from its own browser, its cookie put back,
+ * is turned away before the AS is asked, while the state is among the last
+ * MAX_SPENT taken. Past that bound the AS's own single-use code refuses it
+ * (and revokes what the code granted); only the browser holding the sign-in's
+ * binding can present it at all (oauth.ts signInFrom, review pass 2). A start
+ * holds nothing here, so a flood of starts crowds nothing out (review pass 1).
  */
 export function spendSignIn(state: string): boolean {
 	const now = Date.now();

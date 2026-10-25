@@ -9,7 +9,8 @@
 // The browser is sent to the public `<origin>/auth/authorize`; every call this
 // server makes itself (the code's exchange, a refresh, a revocation) goes to
 // the AS on the mesh, as the REST core reads its keys there. Pure but for the
-// fetch, which a suite hands in (test-oauth.ts).
+// fetch, which a suite hands in (test-oauth.ts), the process's sign-in key,
+// and the renewer's record of renewals in flight.
 
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { edgeSettings } from '../../../../server-portable/oauth-edge.ts';
@@ -47,28 +48,38 @@ export type Tokens = { access: string; expiresAt: number; refresh: string };
 /** How long a sign-in may take from its start to its answer: as long as the AS keeps one open (deploy/auth/server.ts, ttl.Interaction). */
 export const SIGNIN_MS = 600_000;
 /**
- * The key a sign-in's PKCE verifier is derived from, this process's own: a
- * sign-in in flight holds nothing on the server, so a flood of starts — open
- * to anyone, the only way in on a configured stack — evicts no operator's
- * (review pass 1). A restart forgets it, and a sign-in begun before one starts
- * again.
+ * The key a sign-in's state and PKCE verifier are derived from, this process's
+ * own, so a sign-in in flight holds nothing on the server: a flood of starts —
+ * open to anyone, the only way in on a configured stack — evicts no operator's
+ * (review pass 1). A restart forgets it: a sign-in begun before one is
+ * refused, and starts again.
  */
 const SIGNIN_KEY = randomBytes(32);
+const mac = (label: string, value: string) => createHmac('sha256', SIGNIN_KEY).update(`${label}|${value}`).digest('base64url');
 
-/** A sign-in's verifier, from its state (which carries when it began): null once it is older than SIGNIN_MS, or not one this process began. */
-export function verifierFor(state: string, now: number = Date.now()): string | null {
-	const m = /^([0-9a-z]{1,12})\.[A-Za-z0-9_-]{32}$/.exec(state);
+/**
+ * A sign-in, from the binding its browser holds in its httpOnly cookie —
+ * `<when it began, base36>.<24 random bytes>`, which never travels in a URL —
+ * its state (what rides the authorization request and comes back on the
+ * callback) and its PKCE verifier, both derived from the binding; null once
+ * the binding is older than SIGNIN_MS, from the future, or malformed. A
+ * callback URL alone, its code and state seen in a log or over a shoulder,
+ * completes nothing: the verifier comes only from the binding (review pass 2;
+ * RFC 9700 §4.5, the verifier bound to the browser's session).
+ */
+export function signInFrom(binding: string | undefined, now: number = Date.now()): { state: string; verifier: string } | null {
+	const m = /^([0-9a-z]{1,12})\.[A-Za-z0-9_-]{32}$/.exec(binding ?? '');
 	if (!m) return null;
 	const age = now - parseInt(m[1], 36);
 	if (!(age >= 0 && age <= SIGNIN_MS)) return null;
-	return createHmac('sha256', SIGNIN_KEY).update(state).digest('base64url');
+	return { state: mac('state', binding!), verifier: mac('verifier', binding!) };
 }
 
-/** A fresh sign-in: its state (when it began, and 24 random bytes), the PKCE verifier derived from it, and the verifier's S256 challenge. */
-export function newSignIn(now: number = Date.now()): { state: string; verifier: string; challenge: string } {
-	const state = `${now.toString(36)}.${randomBytes(24).toString('base64url')}`;
-	const verifier = verifierFor(state, now)!;
-	return { state, verifier, challenge: createHash('sha256').update(verifier).digest('base64url') };
+/** A fresh sign-in: the binding for its cookie, the state for the request, and the S256 challenge of the verifier derived beside it. */
+export function newSignIn(now: number = Date.now()): { binding: string; state: string; challenge: string } {
+	const binding = `${now.toString(36)}.${randomBytes(24).toString('base64url')}`;
+	const { state, verifier } = signInFrom(binding, now)!;
+	return { binding, state, challenge: createHash('sha256').update(verifier).digest('base64url') };
 }
 
 /**
@@ -213,8 +224,17 @@ export function createRenewer(deps: {
 	};
 }
 
-/** The refresh tokens of sessions that ended without a sign-out (evicted, replaced, a sign-in that failed after its exchange), revoked in the background: a grant no one holds is closed, not left live for its 14 days (review pass 1). */
-export function revokeEnded(s: OAuthSettings | null, ended: (Tokens | null | undefined)[], fetchFn: typeof fetch = fetch): void {
-	if (!s) return;
-	for (const t of ended) if (t) void revokeRefresh(s, t.refresh, fetchFn);
+/**
+ * The refresh tokens of sessions that ended without a sign-out's own
+ * revocation — evicted, replaced, expired, refused by the REST core, a sign-in
+ * that failed after its exchange — revoked in the background, one at a time
+ * (an expiry sweep can end a thousand at once: review pass 2): a grant no one
+ * holds is closed, not left live for its 14 days (review pass 1).
+ */
+export function revokeEnded(s: OAuthSettings | null, ended: (Tokens | null | undefined)[], fetchFn: typeof fetch = fetch): Promise<void> {
+	const due = ended.filter((t): t is Tokens => Boolean(t));
+	if (!s || due.length === 0) return Promise.resolve();
+	return (async () => {
+		for (const t of due) await revokeRefresh(s, t.refresh, fetchFn);
+	})();
 }
