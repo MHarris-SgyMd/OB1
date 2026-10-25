@@ -2085,11 +2085,14 @@ body and the lineage writer 084's, each with the new kind added. Refuses by name
 without 016, 042, 061, 084 or 102 (102 read by its door's sentinel); a re-apply
 is a no-op. No grant moves: the writer needs what 084's does — INSERT on
 `thought_facets` (the structure group), UPDATE on it and on `thoughts`, the
-derivations writes (the capture group). The pass that finds subjects, its place
-in sleep, the threads and their read follow (SMD-3306). test-schema [99] (the
-key's shape, every refusal, each action of the door, the lineage and the
-delete), test-upgrade [20bc] (refused without each prerequisite; onto a
-populated brain at 110, nothing moved), `server-portable/test-preflight.ts`.
+derivations writes (the capture group). The extraction pass records the rules'
+subject with each thought's entities, and `extract-entities.ts --subjects` finds
+the rest ("A thought's own subject", under `extract-entities.ts` below); the
+sweep's place in sleep, the threads and their read follow (SMD-3306).
+test-schema [99] (the key's shape, every refusal, each action of the door, the
+lineage and the delete), test-upgrade [20bc] (refused without each
+prerequisite; onto a populated brain at 110, nothing moved), test-live [10h]
+(the pass and the sweep), `server-portable/test-preflight.ts`.
 
 ## What changed relative to the guide
 
@@ -2790,6 +2793,10 @@ OB1_METADATA_MODEL=<larger> bun extract-entities.ts --url … --job <the recorde
 #   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)  --batch N (1; at most 2147483647, claim_thoughts' int)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought; at most 9007199254740, a call signal's range)
 bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
 #   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
+bun extract-entities.ts --url … --subjects              # each thought's own subject where none stands at its text: the rules, then the judge model for the rest (SMD-3306)
+bun extract-entities.ts --url … --subjects rules        # …the rules alone, asking no model
+bun extract-entities.ts --url … --subjects --dry-run    # how many each would find; writes and asks nothing
+#   with --limit N and --timeout SECONDS (300, per model call) alone · exits 0 clean · 1 thoughts unanswered, unread or refused, or the provider or the database stopped answering · 2 usage, configuration, a role without the door's grants or the provider's refusal · 130 a signal
 ```
 
 **Long thoughts go in windows (SMD-1879).** A thought over the extraction
@@ -3015,6 +3022,39 @@ before the call; a row it refuses to send to a chat endpoint not declared local
 (`OB1_CHAT_LOCAL`, or `OB1_LLM_LOCAL` when chat is the embeddings endpoint) is a
 failed claim naming the rule, and the banner's `egress:` line says what the run
 will do before it claims anything.
+
+**A thought's own subject (SMD-3306).** With each thought's entities the pass
+records its own subject when a rule finds it: the ticket it is filed under
+(`metadata.ticket`, else `metadata.issue`, the fields node_state reads), else
+the first ticket on its first non-blank line. A ticket-shaped word there counts
+unless its prefix is on a fixed list of encodings, hashes, protocols,
+standards, licences, model names and dated periods, so `UTF-8`, `SHA-256` or
+`GPT-4` leaves the thought to the model, and a key is the same on every brain
+and every run. It goes through migration 111's
+`record_thought_subject` at the text the claim read, under the rules' key
+`subject:rules@r1`, and the pass asks no model for it. `--subjects` is the sweep
+for the rest (`db/subject-sweep.ts`): each thought with no standing subject at
+its current text, extracted before 111, keyed by no rule or edited since, gets
+the rules' subject, else the judge model's (`OB1_JUDGE_MODEL`). The model is
+asked step 1 of the mediated-pair test about the thought alone, SMD-3299's
+round 4 own question word for word (`server-portable/subject.ts`), and its
+answer is read into a key: the first ticket id in it, else a PR's number, else a
+release's version, else the answer as a lower-case phrase. On SMD-3299's 275
+canary thoughts, blind raters agree on a ticket for 245; the rules named one for
+232 and were right on 230, and with the 27B asked about the other 13, 243 were
+right (99.2%), where the raters agree with each other on 98.1%. The sweep takes
+one thought at a time without a lease, the door's lock and fingerprint check
+making a sweep beside the pass safe. An answer naming nothing records nothing,
+so the next sweep asks again; one that is not JSON with a subject records
+nothing either, is said, and exits 1, as the pass fails a malformed answer.
+`--subjects rules` stops at the rules, for a brain whose judge model has not
+been measured on the question (the stable brain's, today). The egress gate
+reads each row before its question, and a policy that refuses every row
+refuses the sweep before any; the rules alone send nothing. On a brain before
+111, or under a role without the door's grants, the pass records no subject and
+says so once, its entities standing; the sweep refuses either by name before
+any question, exit 2. A dry run reads on through a signal, as the pass's does.
+Sleep does not run the sweep yet (SMD-3306).
 
 **The cost, stated up front.** One call to the metadata model per thought,
 recurring: every new capture is extracted too. On the default — Ollama,
@@ -5406,11 +5446,11 @@ third covers the one thing the test image cannot reproduce.
 
 ```bash
 bun test-schema.ts                          # 3048 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1671 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # 1703 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1015 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 286 assertions
-OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 285 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
+OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 317 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
