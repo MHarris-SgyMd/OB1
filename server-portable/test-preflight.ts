@@ -3767,6 +3767,11 @@ else {
     const embedModelFix = fix((await run(SQL_ENV)).out, "workers");
     assert(/reembed:stub-embed@1024 ended 30 s ago on its start's refusal \(model\): pull the embedding model its log names \(OB1_EMBEDDING_MODEL\)/.test(embedModelFix) && !/OB1_JUDGE_MODEL/.test(embedModelFix),
       `…and on model, the embedding model's remedy, not the chat models' (${embedModelFix})`);
+    // Its own row waiting mid-pass for the provider (SMD-2679 PR 4a-2b): said as the provider's, not a pass running.
+    await beat("heartbeat:reembed:stub-embed@1024", v({ every_s: 60, outcome: "failed", running: true, waitingMidPass: ["reembed"] }), 5);
+    const reembedWaitFix = fix((await run(SQL_ENV)).out, "workers");
+    assert(/reembed:stub-embed@1024 waits for the provider mid-pass — it stopped answering: check it, and the embedding provider row here \(--deep calls it\)/.test(reembedWaitFix),
+      `a re-embed follower's own row waiting mid-pass is said as the provider's (${reembedWaitFix})`);
     await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:reembed:%'`;
 
     // The sleep scheduler's own row (SMD-2678): its heartbeat leaves the

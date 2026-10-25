@@ -206,7 +206,7 @@ export interface WorkerHeartbeat {
    * (SMD-2905): the sleep scheduler's by name, a follower its own; absent
    * while none is, and for board-sync.
    */
-  waitingMidPass?: ("extract" | "consolidate")[];
+  waitingMidPass?: ("extract" | "consolidate" | "reembed")[];
   /**
    * The start refusal that ended the row, one of db/worker-bootstrap.ts's
    * START_REFUSALS: the sleep scheduler's at a pass's start (SMD-2752), or
@@ -395,11 +395,12 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ? (w as ("extract" | "consolidate")[])
       : undefined;
     // Its passes waiting mid-pass (SMD-2905), left off when not of the shape:
-    // the scheduler's by name, each once; a follower's its own name alone.
-    const mid = worker === "sleep" || worker === "extract" || worker === "consolidate" ? v!.waitingMidPass : undefined;
+    // the scheduler's by name, each once; a follower's its own name alone
+    // (reembed a follower's alone until sleep runs it, SMD-2679 PR 4b).
+    const mid = worker === "sleep" || worker === "extract" || worker === "consolidate" || worker === "reembed" ? v!.waitingMidPass : undefined;
     const waitingMidPass = Array.isArray(mid) && mid.length > 0 && new Set(mid).size === mid.length
-        && mid.every((p) => p === "extract" || p === "consolidate") && (worker === "sleep" || (mid.length === 1 && mid[0] === worker))
-      ? (mid as ("extract" | "consolidate")[])
+        && mid.every((p) => p === "extract" || p === "consolidate" || (p === "reembed" && worker === "reembed")) && (worker === "sleep" || (mid.length === 1 && mid[0] === worker))
+      ? (mid as ("extract" | "consolidate" | "reembed")[])
       : undefined;
     const refused = typeof v!.refused === "string" && (SLEEP_REFUSALS as readonly string[]).includes(v!.refused) ? (v!.refused as SleepRefusal) : undefined;
     // The supervisor's next try (SMD-3214), on an ended row alone and left off when not of the shape.
