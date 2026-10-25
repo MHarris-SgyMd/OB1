@@ -86,7 +86,7 @@ export function toLines(chunks: { at: number; text: string }[]): { at: number; t
   return lines;
 }
 
-/** Each section's seconds, from its header's arrival to the next header's or the end; "(start)" from the launch to the first. */
+/** Each section's seconds, from its header's arrival to the next header's or the end; "(start)" from the launch on. */
 export function sections(lines: { at: number; text: string }[], end: number): { name: string; s: number }[] {
   const out: { name: string; s: number }[] = [];
   let name = "(start)";
