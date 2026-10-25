@@ -149,10 +149,12 @@ const clients = Object.entries(L.clients).map(([client_id, p]): ClientMetadata =
   // The GUI renews its session with a refresh token (SMD-3307): it asks for
   // offline_access with prompt=login consent, and holds the token server-side,
   // rotating under the same policy as a third-party client's (refreshTtl,
-  // chainRotates). Its ID token always carries auth_time, when the password
-  // was typed (the login result's ts), which the GUI holds against its
-  // sign-in's start.
-  if (p.kind === "gui") return { ...base, grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], redirect_uris: [p.redirect], require_auth_time: true };
+  // chainRotates). Its prompt=login puts auth_time in its ID token, when the
+  // password was typed (the login result's ts), which the GUI holds against
+  // its sign-in's start; a request that drops it gets none, and the GUI
+  // refuses that. Not require_auth_time: the library then refuses every gui
+  // request without openid, which the evals' POC sends.
+  if (p.kind === "gui") return { ...base, grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], redirect_uris: [p.redirect] };
   if (p.kind === "service") return { ...base, grant_types: ["client_credentials"], response_types: [], redirect_uris: [], scope: p.scope };
   return { ...base, grant_types: [TOKEN_EXCHANGE], response_types: [], redirect_uris: [] };
 });
