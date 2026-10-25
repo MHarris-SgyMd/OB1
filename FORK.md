@@ -526,6 +526,8 @@ db/migrations/                   # fix 9   (moved here from server/ in fix 9)
 .github/dependabot.yml           # SMD-2093 (new file — moves the workflows' SHA-pinned actions)
 scripts/check-fork-consistency.ts # fix 7 (new file)
 scripts/mechanism-yield.ts       # SMD-1711 (new file — review-pass yield report, not a gate); window and attribution fixed SMD-1728
+scripts/ci-step-times.ts         # SMD-3305 (new file — a CI job's and its steps' times over a window of runs, with medians; not a gate)
+scripts/suite-sections.ts        # SMD-3305 (new file — a suite's numbered sections by wall time; not a gate)
 scripts/connector-registry.ts    # SMD-1933 (new file — the connector registry's rules and the spec's table renderer)
 scripts/contributions.ts         # SMD-1933 (new file — the one walk of the contribution directories)
 docs/connector-registry.json     # SMD-1933 (new file — the connector taxonomy's one source)
