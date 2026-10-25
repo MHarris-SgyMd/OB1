@@ -149,8 +149,9 @@ const clients = Object.entries(L.clients).map(([client_id, p]): ClientMetadata =
   // The GUI renews its session with a refresh token (SMD-3307): it asks for
   // offline_access with prompt=login consent, and holds the token server-side,
   // rotating under the same policy as a third-party client's (refreshTtl,
-  // chainRotates). Its ID token always says when the password was typed
-  // (auth_time), which the GUI holds against its sign-in's start.
+  // chainRotates). Its ID token always carries auth_time, when the password
+  // was typed (the login result's ts), which the GUI holds against its
+  // sign-in's start.
   if (p.kind === "gui") return { ...base, grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], redirect_uris: [p.redirect], require_auth_time: true };
   if (p.kind === "service") return { ...base, grant_types: ["client_credentials"], response_types: [], redirect_uris: [], scope: p.scope };
   return { ...base, grant_types: [TOKEN_EXCHANGE], response_types: [], redirect_uris: [] };
@@ -169,7 +170,8 @@ const GUI_CLIENTS = new Set(Object.entries(L.clients).flatMap(([id, p]) => (p.ki
  */
 const policy = interactionPolicy.base();
 policy.get("login")!.checks.add(
-  new interactionPolicy.Check("gui_password_every_time", "a GUI client is asked the password every time", (ctx) =>
+  // Its error named, as the prompt's own checks have it: prompt=none is answered login_required (review pass 5).
+  new interactionPolicy.Check("gui_password_every_time", "a GUI client is asked the password every time", "login_required", (ctx) =>
     GUI_CLIENTS.has(ctx.oidc.client?.clientId ?? "") && !ctx.oidc.result?.login ? interactionPolicy.Check.REQUEST_PROMPT : interactionPolicy.Check.NO_NEED_TO_PROMPT,
   ),
 );
@@ -464,28 +466,37 @@ async function interaction(req: http.IncomingMessage, res: http.ServerResponse, 
     verifies.giveBack();
     flowTries.clear(uid);
     if (address !== undefined) signIns.succeeded(address);
-    return provider.interactionFinished(req, res, { login: { accountId: OPERATOR, amr: ["pwd"] } }, { mergeWithLastSubmission: false });
+    // ts: when the password was typed, which auth_time then says — not when the consent after it was pressed (review pass 5).
+    return provider.interactionFinished(req, res, { login: { accountId: OPERATOR, amr: ["pwd"], ts: Math.floor(Date.now() / 1000) } }, { mergeWithLastSubmission: false });
   }
   if (action === "confirm") {
     if (prompt.name !== "consent") return page(res, 400, "none", "not a consent step");
     const clientId = String(params.client_id);
-    const held = details.grantId ? await provider.Grant.find(details.grantId) : undefined;
-    if (details.grantId && !held) return page(res, 400, "none", "grant not found");
-    // A GUI sign-in is a grant of its own, holding what the last one held: a
-    // revocation of a session it replaced — which ends that session's whole
-    // grant — must not end this one (SMD-3307 review pass 4). A third-party
-    // client's consent adds to the grant it has.
-    let grant = held ?? new provider.Grant({ accountId: session!.accountId, clientId });
-    if (held && GUI_CLIENTS.has(clientId)) {
+    let grant: InstanceType<typeof provider.Grant>;
+    if (GUI_CLIENTS.has(clientId)) {
+      // A GUI sign-in is a grant of its own, made from its request alone (the
+      // library validated its scope and resource before this page): a
+      // revocation of a session it replaced — which ends that session's whole
+      // grant — must not end this one, nor, landing while this page is open,
+      // leave it nothing to build on (SMD-3307 review passes 4 and 5).
+      // The brain's scopes count twice: among the provider's scopes (the
+      // `scopes` setting, which the library checks a grant's OIDC scope
+      // against) and as the REST core's resource scopes.
+      const asked = asking.scope.split(" ").filter(Boolean);
+      const brain = asked.filter((s) => (SCOPES as readonly string[]).includes(s));
       grant = new provider.Grant({ accountId: session!.accountId, clientId });
-      grant.addOIDCScope(held.getOIDCScope());
-      grant.addOIDCClaims(held.getOIDCClaims());
-      for (const indicator of Object.keys(held.resources ?? {})) grant.addResourceScope(indicator, held.getResourceScope(indicator));
+      grant.addOIDCScope(asked.filter((s) => s === "openid" || s === "offline_access" || brain.includes(s)).join(" "));
+      if (brain.length) for (const indicator of asking.resources) grant.addResourceScope(indicator, brain.join(" "));
+    } else {
+      // A third-party client's consent adds what it still lacks to the grant it has.
+      const held = details.grantId ? await provider.Grant.find(details.grantId) : undefined;
+      if (details.grantId && !held) return page(res, 400, "none", "grant not found");
+      grant = held ?? new provider.Grant({ accountId: session!.accountId, clientId });
+      const d = prompt.details as { missingOIDCScope?: string[]; missingOIDCClaims?: string[]; missingResourceScopes?: Record<string, string[]> };
+      if (d.missingOIDCScope) grant.addOIDCScope(d.missingOIDCScope.join(" "));
+      if (d.missingOIDCClaims) grant.addOIDCClaims(d.missingOIDCClaims);
+      for (const [indicator, scopes] of Object.entries(d.missingResourceScopes ?? {})) grant.addResourceScope(indicator, scopes.join(" "));
     }
-    const d = prompt.details as { missingOIDCScope?: string[]; missingOIDCClaims?: string[]; missingResourceScopes?: Record<string, string[]> };
-    if (d.missingOIDCScope) grant.addOIDCScope(d.missingOIDCScope.join(" "));
-    if (d.missingOIDCClaims) grant.addOIDCClaims(d.missingOIDCClaims);
-    for (const [indicator, scopes] of Object.entries(d.missingResourceScopes ?? {})) grant.addResourceScope(indicator, scopes.join(" "));
     const grantId = await grant.save();
     return provider.interactionFinished(req, res, { consent: { grantId } }, { mergeWithLastSubmission: true });
   }

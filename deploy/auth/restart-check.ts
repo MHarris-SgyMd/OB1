@@ -41,8 +41,9 @@
  * as the GUI's sign-out revokes it is refused at the next refresh; a second
  * sign-in in the same browser, prompt=login dropped and a day's max_age asked,
  * is asked the password all the same, and is on a grant of its own, which the
- * first one's revocation leaves (review pass 4). It prints one line saying so,
- * or why not, and no token.
+ * first one's revocation — sent while its consent page is up — leaves; and
+ * with the AS's session live, prompt=none is answered login_required (review
+ * passes 4 and 5). It prints one line saying so, or why not, and no token.
  */
 import { createHash, randomBytes } from "node:crypto";
 
@@ -216,8 +217,8 @@ if (process.argv.includes("--register")) {
   const local = (href: string) => new URL(href.startsWith(origin) ? `http://127.0.0.1:3000${href.slice(origin.length)}` : href, BASE);
   // One browser: the AS's session cookie is kept between the two sign-ins below.
   const jar = new Map<string, string>();
-  /** A sign-in as the GUI's, with `extra` in its request: the code, its verifier, and the pages the AS showed on the way. */
-  const signIn = async (extra: Record<string, string>) => {
+  /** A sign-in as the GUI's, with `extra` in its request, `atConsent` run once its consent page is up: the code, its verifier, and the pages the AS showed on the way. */
+  const signIn = async (extra: Record<string, string>, atConsent?: () => Promise<void>) => {
     const verifier = randomBytes(32).toString("base64url");
     const query = new URLSearchParams({
       client_id: "gui",
@@ -254,6 +255,7 @@ if (process.argv.includes("--register")) {
       const action = /<form method="post" action="([^"]+)"/.exec(page)?.[1];
       if (r.status !== 200 || (prompt !== "login" && prompt !== "consent") || !action) fail(`the sign-in stopped at ${url.pathname}: HTTP ${r.status} ${page.slice(0, 200).replace(/\s+/g, " ")}`);
       prompts.push(prompt!);
+      if (prompt === "consent" && atConsent) await atConsent();
       url = local(action!.replace(/&#(\d+);/g, (_, c) => String.fromCharCode(Number(c))));
       init = { method: "POST", body: new URLSearchParams(prompt === "login" ? { password } : {}), headers: { origin, "content-type": "application/x-www-form-urlencoded" } };
     }
@@ -275,10 +277,17 @@ if (process.argv.includes("--register")) {
   if (second.status !== 200 || !second.body.access_token || !second.body.refresh_token) fail(`the refresh answered ${second.status} ${second.body.error ?? ""}`);
   if (second.body.refresh_token === first.refresh_token || second.body.access_token === first.access_token) fail("the refresh handed back the same tokens: it did not rotate");
   // The same browser again, prompt=login dropped from the request and a day's max_age asked: the AS asks gui the password all the same (review pass 4).
-  const again = await signIn({ prompt: "consent", max_age: "86400" });
+  // The first sign-in is revoked while this one's consent page is up, as the GUI's revoker may after an outage: this one is made all the same (review pass 5).
+  const again = await signIn({ prompt: "consent", max_age: "86400" }, () => revoke(second.body.refresh_token));
   if (again.prompts[0] !== "login") fail(`a sign-in as gui without prompt=login was let through on the AS's session, no password asked (${again.prompts.join(" → ") || "no page"})`);
+  // One consent: the grant made at it holds what the request asks, or the AS asks again (review pass 5).
+  if (again.prompts.join(" → ") !== "login → consent") fail(`the sign-in's pages were ${again.prompts.join(" → ")}, not the password then one consent: the grant made at the consent fell short of the request`);
   const next = await exchange(again);
-  await revoke(second.body.refresh_token);
+  // With the AS's session live, prompt=none is answered login_required, as OpenID Connect has it, not let through (review pass 5).
+  const silentQuery = new URLSearchParams({ client_id: "gui", response_type: "code", redirect_uri: redirect, scope: "openid offline_access brain:write", state: "gui-refresh-check", code_challenge: createHash("sha256").update(randomBytes(32).toString("base64url")).digest("base64url"), code_challenge_method: "S256", resource, prompt: "none" });
+  const silent = await fetch(`${BASE}/authorize?${silentQuery}`, { redirect: "manual", headers: { cookie: [...jar].map(([n, v]) => `${n}=${v}`).join("; ") } });
+  const silentAt = silent.headers.get("location") ?? "";
+  if (!silentAt.startsWith(redirect) || new URL(silentAt).searchParams.get("error") !== "login_required") fail(`a gui authorization with prompt=none answered ${silent.status} ${silentAt.startsWith(redirect) ? `error=${new URL(silentAt).searchParams.get("error")}` : "elsewhere"}, not login_required`);
   const after = await asGui("/token", { grant_type: "refresh_token", refresh_token: second.body.refresh_token, resource });
   if (after.status !== 400 || after.body.error !== "invalid_grant") fail(`a refresh with the revoked token answered ${after.status} ${after.body.error ?? ""}, not 400 invalid_grant`);
   // Each sign-in on a grant of its own: revoking the first ended its grant, not the next one's (review pass 4).

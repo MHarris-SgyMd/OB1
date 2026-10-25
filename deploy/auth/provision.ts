@@ -574,7 +574,7 @@ if (import.meta.main) {
     const env = parseEnv(readFileSync(envFile, "utf8"));
     if (!env.OB1_PUBLIC_ORIGIN) console.log("still to set: OB1_PUBLIC_ORIGIN, the brain's public origin (https://…), which the server will not start without");
     if (!configuredIn(env)) console.log("still to set: COMPOSE_PROFILES=auth (beside any other profiles, comma-separated), which the server will not start without: it is the stack's configured state, and --profile auth on the command line alone is refused");
-    console.log("back up OB1_AUTH_JWKS, OB1_AUTH_COOKIE_KEYS, OB1_AUTH_OPERATOR_PASSWORD and every OB1_AUTH_SECRET_* with POSTGRES_PASSWORD; if the server was running, recreate it and the services holding its secrets (compose up -d --wait auth mcp app, with compose as in deploy/README.md, Authorization server; not `compose restart`, which keeps the old values)");
+    console.log("back up OB1_AUTH_JWKS, OB1_AUTH_COOKIE_KEYS, OB1_AUTH_OPERATOR_PASSWORD and every OB1_AUTH_SECRET_* with POSTGRES_PASSWORD; if the server was running, recreate it and the services holding its secrets or keys (compose up -d --wait auth api mcp app, with compose as in deploy/README.md, Authorization server; not `compose restart`, which keeps the old values)");
     process.exit(0);
   }
   const { problems, notes } = await checkEnvFile(envFile);
