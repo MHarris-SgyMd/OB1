@@ -193,6 +193,8 @@ export function useRequestLog(next: (line: string) => void): (line: string) => v
 
 /** The SDK, once startTelemetry has set it up; `starting` while it loads, so a second call waits on the first; `generation`, so a stop during a start wins. */
 let sdk: import("./otel-setup.ts").Telemetry | undefined;
+/** Where each signal's exports stood at the stop's signal (markTelemetry), which its flush counts from (SMD-3297). */
+let stopMark: import("./otel-setup.ts").TelemetryMark | undefined;
 let starting: Promise<boolean> | undefined;
 let generation = 0;
 let stopping: Promise<void> | undefined;
@@ -765,6 +767,7 @@ export async function stopTelemetry(): Promise<void> {
     sayUnsent();
     await sdk?.shutdown();
     sdk = undefined;
+    stopMark = undefined;
   })();
   stopping = stop;
   try {
@@ -775,16 +778,28 @@ export async function stopTelemetry(): Promise<void> {
 }
 
 /**
+ * Where each signal's exports stand, kept for the flush: a server's stop takes
+ * it at its signal, so the stop's word counts an export lost while it drains
+ * as well as in its flush, and never one lost before the signal, which was
+ * said on its own line then (SMD-3297). Nothing with no collector set, or one
+ * still loading at the signal: that stop counts from its flush's start.
+ */
+export function markTelemetry(): void {
+  stopMark = sdk?.mark();
+}
+
+/**
  * Sends what each signal still holds — the spans and log records batched, the
- * metrics' last reading — and waits for what is on its way: how that ended,
- * or undefined with no collector set. A server's stop runs it beside closing
- * its pool, under a bound of its own (SMD-2902), and says which (shutdown.ts);
+ * metrics' last reading — and waits for what is on its way: how that ended
+ * since markTelemetry where the stop took one, else since the flush began, or
+ * undefined with no collector set. A server's stop runs it beside closing its
+ * pool, under a bound of its own (SMD-2902), and says which (shutdown.ts);
  * first it says what the anonymous budget held back, since a server's stop
  * never shuts the SDK down (review pass 3).
  */
 export async function flushTelemetry(): Promise<FlushResult | undefined> {
   sayUnsent();
-  return sdk?.flush();
+  return sdk?.flush(stopMark);
 }
 
 /**

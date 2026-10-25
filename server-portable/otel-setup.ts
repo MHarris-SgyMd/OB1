@@ -59,11 +59,22 @@ export interface RequestLog {
   at: number;
 }
 
+/** Where a watched exporter's exports stand: started, failed and on their way. */
+export type ExportMark = { started: number; failed: number; pending: number };
+
+/** Each signal's ExportMark, in setUpTelemetry's order; undefined for a signal no watcher counts. */
+export type TelemetryMark = readonly (ExportMark | undefined)[];
+
 export interface Telemetry {
   /** The service the signals go out as: the resource's `service.name`, after OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES. */
   readonly serviceName: string;
-  /** Sends what is batched and waits for what is on its way, every signal at once: how that ended (shutdown.ts FlushResult; the stop bounds it). */
-  flush(): Promise<FlushResult>;
+  /** Where each signal's exports stand: the stop takes it at its signal, so its word counts what the drain loses too (SMD-3297). */
+  mark(): TelemetryMark;
+  /**
+   * Sends what is batched and waits for what is on its way, every signal at once: how that ended (shutdown.ts
+   * FlushResult; the stop bounds it), counted `since` a mark where given, else from the flush's own start.
+   */
+  flush(since?: TelemetryMark): Promise<FlushResult>;
   /** The stop's flush cut short (SMD-2902): says, by signal, what was on its way or still batched as not sent, for `kind`. */
   cut(kind: string): void;
   /** Unregisters the providers, so later spans and points are no-ops again (a suite's). */
@@ -213,8 +224,8 @@ export interface WatchedExporter<T = ReadableSpan[]> extends Exporter<T> {
   close(): void;
   /** How many items were handed to an export, so far. */
   readonly handed: number;
-  /** Where things stand, to compare after a flush. */
-  mark(): { started: number; failed: number; pending: number };
+  /** Where things stand, to compare after a flush: at its start, or at the stop's signal (SMD-3297). */
+  mark(): ExportMark;
   /** Waits for every export on its way. */
   idle(): Promise<void>;
   forceFlush(): Promise<void>;
@@ -348,8 +359,13 @@ export function watchExporter<T = ReadableSpan[]>(inner: Exporter<T>, { origin, 
   };
 }
 
-/** How a flush ended, from where things stood before it and after: none, sent, or failed. */
-export function flushResult(before: { started: number; failed: number; pending: number }, after: { started: number; failed: number }): FlushResult {
+/**
+ * How a flush ended, from where things stood at `before` and after it: none,
+ * sent, or failed, by the exports since `before` alone — the stop's mark at
+ * its signal, or the flush's own start. One that failed before it was said on
+ * its own line when it failed, and is not this flush's (SMD-3297).
+ */
+export function flushResult(before: ExportMark, after: { started: number; failed: number }): FlushResult {
   if (before.pending + (after.started - before.started) === 0) return "none";
   return after.failed > before.failed ? "failed" : "sent";
 }
@@ -442,10 +458,11 @@ export function dropCount(say: (count: number) => void): { fromDiag(count: numbe
  * what was queued and never handed is what the full queue dropped. That and
  * whatever else is unsaid is said before the wait, in case the stop's bound
  * cuts it, and again after, for the flush's own exports that failed (review
- * pass 4); then how it ended.
+ * pass 4); then how it ended, since `since` where the stop gives its mark
+ * (SMD-3297).
  */
-export async function flushBatch(provider: { forceFlush(): Promise<void> }, counted: { readonly queued: number }, watched: WatchedExporter, drops: { exactly(total: number): void }): Promise<FlushResult> {
-  const before = watched.mark();
+export async function flushBatch(provider: { forceFlush(): Promise<void> }, counted: { readonly queued: number }, watched: WatchedExporter, drops: { exactly(total: number): void }, since?: ExportMark): Promise<FlushResult> {
+  const before = since ?? watched.mark();
   const flushing = provider.forceFlush().catch(() => {});
   drops.exactly(counted.queued - watched.handed);
   watched.sayRest();
@@ -457,12 +474,13 @@ export async function flushBatch(provider: { forceFlush(): Promise<void> }, coun
 
 /**
  * A metric reader's or a log batch's flush, as the stop runs it: what is
- * unsaid is said before the wait and after it, and how it ended. Neither needs
- * the spans' count of drops — the log batch says each as it drops it
- * (logDrops), and a metric reader holds no queue.
+ * unsaid is said before the wait and after it, and how it ended, since `since`
+ * where the stop gives its mark (SMD-3297). Neither needs the spans' count of
+ * drops — the log batch says each as it drops it (logDrops), and a metric
+ * reader holds no queue.
  */
-export async function flushSignal<T>(provider: { forceFlush(): Promise<void> }, watched: WatchedExporter<T>): Promise<FlushResult> {
-  const before = watched.mark();
+export async function flushSignal<T>(provider: { forceFlush(): Promise<void> }, watched: WatchedExporter<T>, since?: ExportMark): Promise<FlushResult> {
+  const before = since ?? watched.mark();
   const flushing = provider.forceFlush().catch(() => {});
   watched.sayRest();
   await flushing;
@@ -624,7 +642,8 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
   // The span batch's drops, read from the diag line where spans are sent.
   let spanDropsFromDiag: ((count: number) => void) | undefined;
   const notes: string[] = [];
-  const flushes: (() => Promise<FlushResult>)[] = [];
+  /** Each signal's flush, with where its watcher stands for a mark (none for a suite's exporter, which no watcher counts). */
+  const flushes: { mark?: () => ExportMark; flush: (since?: ExportMark) => Promise<FlushResult> }[] = [];
   /** Each watched signal's word when the stop cuts its flush short (SMD-2902). */
   const cuts: ((kind: string) => void)[] = [];
   const closes: (() => void)[] = [];
@@ -639,10 +658,10 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
     if (memory) {
       tracerProvider = new BasicTracerProvider({ resource, spanProcessors: [new SimpleSpanProcessor(memory.exporter)] });
       const provider = tracerProvider;
-      flushes.push(async () => {
+      flushes.push({ flush: async () => {
         await provider.forceFlush().catch(() => {});
         return "sent";
-      });
+      } });
     } else if (collector?.urls.traces) {
       const watched = watchExporter(new OTLPTraceExporter({ url: collector.urls.traces }), reportFor(collector.urls.traces, ["span", "spans"], "traces"));
       const options = batchOptions(process.env, "OTEL_BSP");
@@ -657,7 +676,7 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
       const provider = tracerProvider;
       const drops = dropCount((count) => watched.dropped(count));
       spanDropsFromDiag = (count) => drops.fromDiag(count);
-      flushes.push(() => flushBatch(provider, counted, watched, drops));
+      flushes.push({ mark: () => watched.mark(), flush: (since) => flushBatch(provider, counted, watched, drops, since) });
       // What the batch was handed and never handed on, less its drops (already said), with what is on its way.
       cuts.push((kind) => watched.cut(kind, counted.queued - watched.handed - drops.known));
       // The watcher closed first: the batch's shutdown flush may fail, and never reach the exporter's own shutdown (review pass 7).
@@ -690,10 +709,10 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
       if (!collector?.oneShot) provider.getMeter("ob1").createObservableGauge("process.uptime", { unit: "s", description: "How long the server's process has run" }).addCallback((reading) => reading.observe(process.uptime()));
       shutdowns.push(() => provider.shutdown().catch(() => {}));
       registers.push(() => metrics.setGlobalMeterProvider(provider));
-      flushes.push(watched ? () => flushSignal(provider, watched) : async () => {
+      flushes.push(watched ? { mark: () => watched.mark(), flush: (since) => flushSignal(provider, watched, since) } : { flush: async () => {
         await provider.forceFlush().catch(() => {});
         return "sent";
-      });
+      } });
       if (watched) {
         closes.push(() => watched.close());
         // A metric reader holds no queue: what was on its way.
@@ -721,17 +740,17 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
       }));
       loggerProvider = new LoggerProvider({ resource, processors: [counted] });
       const provider = loggerProvider;
-      flushes.push(() => flushSignal(provider, watched));
+      flushes.push({ mark: () => watched.mark(), flush: (since) => flushSignal(provider, watched, since) });
       // The records the batch still held behind an export on its way, less its drops (already said), with what is on its way.
       cuts.push((kind) => watched.cut(kind, counted.queued - watched.handed - logsDropped));
       closes.push(() => watched.close());
     } else if (memory?.logs) {
       loggerProvider = new LoggerProvider({ resource, processors: [new SimpleLogRecordProcessor({ exporter: memory.logs })] });
       const provider = loggerProvider;
-      flushes.push(async () => {
+      flushes.push({ flush: async () => {
         await provider.forceFlush().catch(() => {});
         return "sent";
-      });
+      } });
     }
     if (loggerProvider) {
       const provider = loggerProvider;
@@ -765,7 +784,8 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
   propagation.setGlobalPropagator(new W3CTraceContextPropagator());
   return {
     serviceName: String(resource.attributes["service.name"] ?? serviceName),
-    flush: async () => flushesResult(await Promise.all(flushes.map((flush) => flush()))),
+    mark: () => flushes.map(({ mark }) => mark?.()),
+    flush: async (since) => flushesResult(await Promise.all(flushes.map(({ flush }, i) => flush(since?.[i])))),
     cut: (kind) => {
       for (const cut of cuts) cut(kind);
     },
