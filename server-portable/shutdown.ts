@@ -139,12 +139,12 @@ export function createCallCount(): CallCount & { track<T>(run: () => T | Promise
 
 /**
  * How the telemetry's flush ended (SMD-1849 PR 2b; PR 2c's metrics and log
- * records with the spans): everything still batched or already on its way went
- * (`sent`); an export of some signal failed (`failed`); there was none to send
- * (`none`); or it outlasted its time (`timeout`). Under cumulative
- * temporality, the default, metrics are a reading sent whole at every flush, so
- * once a request has been recorded a stop with a metrics endpoint is never
- * `none` (review passes 1–2); under delta it can be.
+ * records with the spans), counted from the stop's mark at its signal
+ * (SMD-3297): everything exported since went (`sent`); an export of some signal
+ * failed since (`failed`); nothing was exported, or on its way, since (`none`);
+ * or it outlasted its time (`timeout`). With a metrics endpoint a stop is never
+ * `none`: the uptime gauge (SMD-3050) is read at every flush, under either
+ * temporality.
  */
 export type FlushResult = "sent" | "failed" | "none" | "timeout";
 
@@ -161,6 +161,12 @@ export interface DrainOptions {
    * the grace period leaves less FLUSH_MARGIN_MS, never less than the close's.
    */
   flush?: () => Promise<FlushResult | undefined>;
+  /**
+   * Told first, as the signal comes: where each signal's exports stand, which
+   * the flush counts from, so the stop's word says what the drain lost as well
+   * as what its flush sent (SMD-3297).
+   */
+  mark?: () => void;
   /**
    * Told when the flush is cut — at its bound, or by a second signal — before
    * the stop's line: says what each signal still held as not sent, for `kind`
@@ -212,6 +218,10 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
 
   const stop = async (signal: string) => {
     const t0 = performance.now();
+    // Guarded, as the cut's sink is: a mark that throws must not take the stop with it.
+    try {
+      opts.mark?.();
+    } catch {}
     const server = opts.server();
     const calls = opts.calls;
     const running = () => (calls ? `, ${toolCalls(calls.running)} running` : "");
@@ -253,7 +263,10 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
     try {
       opts.endOpen?.();
     } catch {}
-    // The telemetry's flush beside the pool's close, each said on its own.
+    // The telemetry's flush beside the pool's close, each said on its own. The word is the stop's own, from its
+    // signal's mark: what the flush sent of what was batched and the metrics' last reading, and every export lost
+    // since the signal, in the drain or the flush. One lost before the signal was said on its own line when it was
+    // lost, so a stop after one can say sent (SMD-3297).
     const said: Record<FlushResult, string> = { sent: "; telemetry sent", failed: "; telemetry not all sent", none: "; no telemetry left to send", timeout: `; telemetry not all sent within ${flushMs} ms` };
     let flushTimer: ReturnType<typeof setTimeout> | undefined;
     let flushCut = () => {};
