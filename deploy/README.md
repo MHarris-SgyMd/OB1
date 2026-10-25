@@ -3439,7 +3439,9 @@ the three discovery paths outside it to it while it answers, and answers them
 its tokens (SMD-2286, "Tokens at the REST core" below). `mcp-server/` is
 its client: it trades each OAuth token sent to `/mcp` for the REST core's,
 as the `mcp` client (SMD-2286), and serves `/mcp` as the `mcp` service
-since SMD-2287 PR 5b; the GUI becomes one with SMD-2280. The
+since SMD-2287 PR 5b; the operator GUI signs the operator in through it as
+the confidential `gui` client, code and PKCE with a refresh token, with
+`OB1_AUTH_SECRET_GUI` (SMD-3307, `dashboard/README.md`). The
 MCP server sends clients to it (SMD-2382): at the public origin, while
 this server answers its probe on the mesh, it serves the protected-resource
 document and answers a keyless `/mcp` with the 401 challenge naming it.
@@ -3561,9 +3563,10 @@ refused there; it reaches the REST core only exchanged by the MCP server.
   JOIN ob1_agents a USING (canonical_agent_id) WHERE a.label = 'oauth:<id>'`.
   For a leaked token, act at this server instead. An access token dies
   within ten minutes on its own. A client can revoke its own refresh token
-  (RFC 7009, `<origin>/auth/token/revocation`), which revokes its grant. The
-  operator's page of grants is SMD-2280's; until then, the compromise steps
-  under "Custody and backups" below end every grant.
+  (RFC 7009, `<origin>/auth/token/revocation`), which revokes its grant, as
+  the GUI's sign-out does its own. The operator's page of grants is SMD-3307's
+  third PR; until then, the compromise steps under "Custody and backups" below
+  end every grant.
 - **The keys:** it reads this server's signing keys on the mesh and keeps
   them ten minutes, the tokens' lifetime, reading again after that or for a
   key it lacks, at most once in 30 s. Once the keys are stale and reads fail,

@@ -24,7 +24,7 @@
 // It holds no key and no secret of its own: each visitor's key is the call's.
 
 import { createRestClient, DEFAULT_REST_URL } from "../rest-client/index.ts";
-import { originProblem } from "../server-portable/oauth-edge.ts";
+import { configuredIn, originProblem } from "../server-portable/oauth-edge.ts";
 import { drainBoundFrom } from "../server-portable/shutdown.ts";
 
 const env = process.env;
@@ -86,6 +86,13 @@ if (publicOrigin && !problem) {
   // the dashboard still serves the address it is reached by.
   if (problem) console.warn(`dashboard: ${problem}; signing in at the address each request names instead.`);
   env.PROTOCOL_HEADER = "x-forwarded-proto";
+}
+// Configured for the authorization server, the GUI signs in only through it (SMD-3307), as its `gui` client:
+// without the client's secret, or a sound origin to redirect through, it offers no sign-in at all. Said at the
+// start, as the MCP server says its own (the sign-in page says it too).
+if (configuredIn(env.COMPOSE_PROFILES)) {
+  if (!env.OB1_AUTH_SECRET_GUI?.trim()) console.warn("dashboard: COMPOSE_PROFILES names auth but OB1_AUTH_SECRET_GUI is not set, so no sign-in is offered: set it in deploy/.env (provision.ts --init writes it) and recreate app.");
+  else if (!publicOrigin || problem) console.warn("dashboard: COMPOSE_PROFILES names auth but OB1_PUBLIC_ORIGIN is not a sound origin, so no sign-in through the authorization server is offered.");
 }
 env.PORT ||= "8000";
 env.HOST ||= "0.0.0.0";

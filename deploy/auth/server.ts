@@ -146,7 +146,11 @@ const THIRD_PARTY_GRANTS = new Set(["authorization_code", "refresh_token"]);
 
 const clients = Object.entries(L.clients).map(([client_id, p]): ClientMetadata => {
   const base = { client_id, client_secret: C.secrets[client_id], token_endpoint_auth_method: "client_secret_basic" as const };
-  if (p.kind === "gui") return { ...base, grant_types: ["authorization_code"], response_types: ["code"], redirect_uris: [p.redirect] };
+  // The GUI renews its session with a refresh token (SMD-3307): it asks for
+  // offline_access with prompt=consent, and holds the token server-side,
+  // rotating under the same policy as a third-party client's (refreshTtl,
+  // chainRotates).
+  if (p.kind === "gui") return { ...base, grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], redirect_uris: [p.redirect] };
   if (p.kind === "service") return { ...base, grant_types: ["client_credentials"], response_types: [], redirect_uris: [], scope: p.scope };
   return { ...base, grant_types: [TOKEN_EXCHANGE], response_types: [], redirect_uris: [] };
 });
@@ -186,7 +190,7 @@ const provider = new Provider(L.issuer, {
   // The brain's scopes are resource scopes, but a client's registered `scope` is checked against this list too.
   scopes: ["openid", "offline_access", ...SCOPES],
   // Access tokens take their resource's accessTokenTTL, which the library's default ttl functions read; a number here would override it.
-  // A refresh token (a third-party client's, with offline_access) lasts 14 days unused, within its grant's 30 (layout.ts refreshTtl, SMD-2286).
+  // A refresh token (a third-party client's or the GUI's, with offline_access) lasts 14 days unused, within its grant's 30 (layout.ts refreshTtl, SMD-2286).
   ttl: {
     Interaction: 600,
     Session: 86_400,

@@ -556,7 +556,8 @@ or tunnel, set `OB1_PUBLIC_ORIGIN` in `deploy/.env` to the https origin first,
 or the sign-in form is refused as cross-site; once it is set, sign in there and
 not at `127.0.0.1`, where the form is refused the same way. A stack configured
 with the authorization server (`COMPOSE_PROFILES` naming `auth`) offers no key
-sign-in yet: its sign-in is still to come (`dashboard/README.md`).
+sign-in: it signs the operator in through the authorization server, with the
+password `provision.ts --init` wrote (`dashboard/README.md`).
 
 ### 6. Optional: workflows beside the brain (n8n)
 

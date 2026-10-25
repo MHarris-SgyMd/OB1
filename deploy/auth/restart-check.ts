@@ -30,6 +30,16 @@
  * and exchanges it as the MCP service (`mcp`, its secret from the container's
  * environment) for a REST-core token, as the MCP server does at the hop. It
  * prints both as JSON `{ mcp, api }`, for CI to present to the REST core.
+ *
+ *   compose exec -T -e OB1_AUTH_OPERATOR_PASSWORD auth bun restart-check.ts --gui-refresh
+ *
+ * `--gui-refresh` (SMD-3307) signs the operator in as the operator GUI does —
+ * the confidential `gui` client (its secret from the container's environment),
+ * S256, `offline_access` with `prompt=consent`, for the REST core — and checks
+ * what the GUI's session leans on: the code gives a refresh token, a refresh
+ * gives a new pair (the refresh token rotated), and the refresh token revoked
+ * as the GUI's sign-out revokes it is refused at the next refresh. It prints
+ * one line saying so, or why not, and no token.
  */
 import { createHash, randomBytes } from "node:crypto";
 
@@ -186,7 +196,75 @@ if (process.argv.includes("--register")) {
   );
   if (api.status !== 200 || !api.body.access_token) fail(`the exchange answered ${api.status} ${api.body.error ?? ""}`);
   console.log(JSON.stringify({ mcp: mcp.body.access_token, api: api.body.access_token }));
+} else if (process.argv.includes("--gui-refresh")) {
+  const password = process.env.OB1_AUTH_OPERATOR_PASSWORD ?? "";
+  const origin = process.env.OB1_PUBLIC_ORIGIN ?? "";
+  const guiSecret = process.env.OB1_AUTH_SECRET_GUI ?? "";
+  if (!password || !origin || !guiSecret) {
+    console.error("--gui-refresh needs OB1_AUTH_OPERATOR_PASSWORD (exec -e), and OB1_PUBLIC_ORIGIN and OB1_AUTH_SECRET_GUI in its environment");
+    process.exit(2);
+  }
+  const fail = (why: string): never => {
+    console.error(why);
+    process.exit(1);
+  };
+  const redirect = `${origin}/dashboard/auth/callback`;
+  const resource = `${origin}/api`;
+  const verifier = randomBytes(32).toString("base64url");
+  const query = new URLSearchParams({
+    client_id: "gui",
+    response_type: "code",
+    redirect_uri: redirect,
+    scope: "openid offline_access brain:write",
+    state: "gui-refresh-check",
+    code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+    code_challenge_method: "S256",
+    resource,
+    prompt: "consent",
+  });
+  const local = (href: string) => new URL(href.startsWith(origin) ? `http://127.0.0.1:3000${href.slice(origin.length)}` : href, BASE);
+  const jar = new Map<string, string>();
+  let url = new URL(`${BASE}/authorize?${query}`);
+  let init: RequestInit = {};
+  let code = "";
+  for (let step = 0; step < 16 && !code; step++) {
+    const r = await fetch(url, { ...init, redirect: "manual", headers: { ...(init.headers as Record<string, string>), cookie: [...jar].map(([n, v]) => `${n}=${v}`).join("; ") } });
+    for (const line of r.headers.getSetCookie()) {
+      const pair = line.split(";")[0].trim();
+      jar.set(pair.slice(0, pair.indexOf("=")), pair.slice(pair.indexOf("=") + 1));
+    }
+    if (r.status >= 300 && r.status < 400) {
+      const location = r.headers.get("location") ?? "";
+      if (location.startsWith(redirect)) {
+        const back = new URL(location).searchParams;
+        code = back.get("code") ?? fail(`the authorization request came back with no code: ${back.get("error")} ${back.get("error_description")}`);
+        break;
+      }
+      url = local(location);
+      init = {};
+      continue;
+    }
+    const page = await r.text();
+    const prompt = /data-prompt="([a-z]+)"/.exec(page)?.[1];
+    const action = /<form method="post" action="([^"]+)"/.exec(page)?.[1];
+    if (r.status !== 200 || (prompt !== "login" && prompt !== "consent") || !action) fail(`the sign-in stopped at ${url.pathname}: HTTP ${r.status} ${page.slice(0, 200).replace(/\s+/g, " ")}`);
+    url = local(action!.replace(/&#(\d+);/g, (_, c) => String.fromCharCode(Number(c))));
+    init = { method: "POST", body: new URLSearchParams(prompt === "login" ? { password } : {}), headers: { origin, "content-type": "application/x-www-form-urlencoded" } };
+  }
+  if (!code) fail("the sign-in and consent gave no code in 16 steps");
+  const asGui = (path: string, body: Record<string, string>) =>
+    fetch(`${BASE}${path}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: `Basic ${btoa(`gui:${guiSecret}`)}` }, body: new URLSearchParams(body) }).then(async (r) => ({ status: r.status, body: ((await r.json().catch(() => ({}))) ?? {}) as Record<string, string> }));
+  const first = await asGui("/token", { grant_type: "authorization_code", code, redirect_uri: redirect, code_verifier: verifier, resource });
+  if (first.status !== 200 || !first.body.access_token || !first.body.refresh_token) fail(`the code answered ${first.status} ${first.body.error ?? ""}, ${first.body.refresh_token ? "with" : "without"} a refresh token`);
+  const second = await asGui("/token", { grant_type: "refresh_token", refresh_token: first.body.refresh_token, resource });
+  if (second.status !== 200 || !second.body.access_token || !second.body.refresh_token) fail(`the refresh answered ${second.status} ${second.body.error ?? ""}`);
+  if (second.body.refresh_token === first.body.refresh_token || second.body.access_token === first.body.access_token) fail("the refresh handed back the same tokens: it did not rotate");
+  const revoked = await fetch(`${BASE}/token/revocation`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: `Basic ${btoa(`gui:${guiSecret}`)}` }, body: new URLSearchParams({ token: second.body.refresh_token, token_type_hint: "refresh_token" }) });
+  if (revoked.status !== 200) fail(`the revocation answered ${revoked.status}`);
+  const after = await asGui("/token", { grant_type: "refresh_token", refresh_token: second.body.refresh_token, resource });
+  if (after.status !== 400 || after.body.error !== "invalid_grant") fail(`a refresh with the revoked token answered ${after.status} ${after.body.error ?? ""}, not 400 invalid_grant`);
+  console.log("gui: the code gave a refresh token, the refresh rotated it, and once revoked it is refused");
 } else {
-  console.error("usage: bun restart-check.ts --register | --read | --session-cookie | --tokens <scope>");
+  console.error("usage: bun restart-check.ts --register | --read | --session-cookie | --tokens <scope> | --gui-refresh");
   process.exit(2);
 }

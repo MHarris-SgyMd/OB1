@@ -998,11 +998,13 @@ services:
   # `/dashboard` through the proxy, which reaches it as app.ob1.internal on
   # the mesh. The server's image run as `bun ../dashboard/serve.ts`, without
   # the image's preflight, as the MCP server is: it reads no store and holds
-  # no key. A visitor signs in with an access key, which the REST core's whoami
-  # checks, and every page is a read on the REST core at api.ob1.internal
-  # under that key, held in the service's memory and never in the browser; a
-  # restart signs everyone out. Key sign-in is off while COMPOSE_PROFILES
-  # names auth (ADR decision 16). OB1_PUBLIC_ORIGIN is the origin its forms
+  # no brain key of its own. A visitor signs in with an access key, which the
+  # REST core's whoami checks, or — while COMPOSE_PROFILES names auth, when key
+  # sign-in is off (ADR decision 16) — through the authorization server, as
+  # its confidential `gui` client with OB1_AUTH_SECRET_GUI (SMD-3307); every
+  # page is a read on the REST core at api.ob1.internal under that key or
+  # token, held in the service's memory and never in the browser; a restart
+  # signs everyone out. OB1_PUBLIC_ORIGIN is the origin its forms
   # and cookie are judged by behind TLS (dashboard/serve.ts); unset, each
   # request's own, over plain HTTP. A stop drains within OB1_STOP_GRACE, as
   # the servers' does. On the mesh alone: nothing outward, no Postgres. Its
@@ -1016,6 +1018,7 @@ services:
       OB1_PUBLIC_ORIGIN: ${OB1_PUBLIC_ORIGIN:-}
       COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
       OB1_STOP_GRACE: ${OB1_STOP_GRACE:-}
+      OB1_AUTH_SECRET_GUI: ${OB1_AUTH_SECRET_GUI:-}
     stop_grace_period: ${OB1_STOP_GRACE:-10}s
     # After the REST core, so `up app` brings it; not held for its health:
     # while it is down a page is the GUI's own 502.
