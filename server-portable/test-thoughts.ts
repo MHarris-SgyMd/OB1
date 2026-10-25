@@ -13,6 +13,7 @@
  *   bun test-thoughts.ts
  */
 
+import { createHash } from "node:crypto";
 import { createAssert } from "../db/test-support.ts";
 import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, EXTRACT_MARKER_TOKENS, EXTRACT_OUTPUT_FLOOR, EXTRACT_OUTPUT_RATIO, EXTRACT_PROMPT_TOKENS, extractContextNeeded, extractOutputBudget, extractWindowThatFits, KNOWN_CHAT_MODEL_WINDOW, MAX_WHOLE_TOKENS, resolveExtractWindow } from "../db/config.mjs";
 import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
@@ -27,7 +28,8 @@ import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
 import { capJudgement, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
-import { promptHash, proposalRecipe } from "./lineage.ts";
+import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
+import { askOwnSubject, firstLineTicket, isTicket, metadataTicket, OWN_ANSWER, OWN_HEAD, ownRules, ownSubjectMessages, ownSubjectOf, ruleSubject, SUBJECT_RULES_KEY, subjectKey, subjectKeyValid, subjectModelKey, subjectPrompt } from "./subject.ts";
 import { probeTier } from "../db/worker-bootstrap.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
@@ -2607,6 +2609,118 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
     assert(!startsDegraded("refused", { host: "my-alias", proxy: false, container: true, addresses: ["127.0.0.1"] }) && startsDegraded("refused", { host: "my-alias", proxy: false, container: true, addresses: ["172.17.0.1"] }),
       "…so in a container an /etc/hosts alias for 127.0.0.1 fails, and one for the bridge warns");
     assert(inContainer((p) => p === "/.dockerenv") && inContainer((p) => p === "/run/.containerenv") && !inContainer(() => false), "a container: Docker's marker or podman's");
+  }
+}
+
+// ── 17. A thought's own subject (SMD-3306) ───────────────────────────────────
+
+console.log("\n[17] A thought's own subject (SMD-3306): the rules read the ticket it is filed under, else its first line's; the model's question is SMD-3299's round 4 own question word for word; an answer is read into 111's key shapes, a ticket first");
+{
+  // The key's shapes, as 111's subject_key_valid reads them.
+  for (const k of ["ticket:SMD-1", "ticket:A-1", "pr:502", "pr:0", "version:v1.9", "version:v1.9.0.1", "phrase:dolphin sleep", "phrase:ob1 fork: inventory — 2 & more", "phrase:σίσυφος", `phrase:${"a".repeat(200)}`])
+    assert(subjectKeyValid(k), `a key: ${k.slice(0, 40)}`);
+  for (const k of ["ticket:smd-1", "ticket:SMD-", "pr:", "pr:1234567890", "version:1.9.0", "version:v1", "version:v1.2.3.4.5", "phrase:", "phrase:Dolphin", "phrase: x", "phrase:x  y", "phrase:x ", "phrase:a\nb", `phrase:${"a".repeat(201)}`, "topic:x", "SMD-1"])
+    assert(!subjectKeyValid(k), `not a key: ${JSON.stringify(k.slice(0, 40))}`);
+
+  // An answer read into a key: a ticket first, then a PR, then a release, else a phrase.
+  const keyed: [string, string | null][] = [
+    ["SMD-3306", "ticket:SMD-3306"], ["the SMD-12 work, PR 5 of it, for v1.2.0", "ticket:SMD-12"], ["SMD-1298, SMD-1794, SMD-1994", "ticket:SMD-1298"],
+    ["PR 727", "pr:727"], ["OB1 PR #0502", "pr:502"], ["pull request 9", "pr:9"], ["https://github.com/o/r/pull/88", "pr:88"], ["#41", "pr:41"], ["printed 12 pages", "phrase:printed 12 pages"],
+    ["v1.9.0", "version:v1.9.0"], ["OB1 release 1.0.0", "version:v1.0.0"], ["version 2.0", "version:v2.0"], ["rebuild the brains off release v01.4.0", "version:v1.4.0"], ["dev1.2 build", "phrase:dev1.2 build"], ["v1.2.3.4.5", "phrase:v1.2.3.4.5"],
+    ["  Dolphin   Sleep \n scheduler ", "phrase:dolphin sleep scheduler"], ["smd-12 lower case", "phrase:smd-12 lower case"], ["XSMD-12_b", "phrase:xsmd-12_b"], ["ΣΊΣΥΦΟΣ", "phrase:σίσυφος"],
+    // Review pass 1: a ticket-shaped encoding, hash or licence is no ticket; PR-502 is a PR; a ticket too long for 111's key is none.
+    ["Move to SHA-256 (SMD-1234)", "ticket:SMD-1234"], ["SHA-256 migration", "phrase:sha-256 migration"], ["UTF-8 handling", "phrase:utf-8 handling"], ["PR-502", "pr:502"],
+    [`SMD-${"1".repeat(250)}`, `phrase:smd-${"1".repeat(196)}`],
+    ["", null], ["   ", null], ["ϒ", null],
+  ];
+  for (const [answer, want] of keyed) assert(subjectKey(answer) === want, `${JSON.stringify(answer.slice(0, 40))} → ${want} (got ${subjectKey(answer)})`);
+  const long = subjectKey("word ".repeat(80));
+  assert(long !== null && subjectKeyValid(long) && [...long].length <= 207 && long.endsWith(" word"), `a long phrase is cut at a word, within 207 (${long?.length})`);
+  const longOne = subjectKey("x".repeat(300));
+  assert(longOne === `phrase:${"x".repeat(200)}`, "…and one word longer than the bound is cut at it");
+  for (const [answer] of keyed) { const k = subjectKey(answer); assert(k === null || subjectKeyValid(k), `every key made is one 111 admits (${k})`); }
+
+  // The rules: the ticket filed under (ticket, else issue: node_state's), else the first ticket on the first non-blank line.
+  assert(metadataTicket({ ticket: "SMD-1" }) === "SMD-1" && metadataTicket({ issue: " SMD-2 " }) === "SMD-2" && metadataTicket({ ticket: "not one", issue: "SMD-3" }) === "SMD-3",
+    "the metadata's ticket, else its issue, the first that is a ticket id, trimmed");
+  assert(metadataTicket({ ticket: 5 }) === null && metadataTicket({ ticket: "SMD-1 and SMD-2" }) === null && metadataTicket({ ticket: "smd-1" }) === null && metadataTicket(null) === null && metadataTicket({}) === null,
+    "…and nothing that is not a ticket id alone");
+  assert(firstLineTicket("\n\n  SMD-9 the title\nSMD-10 in the body") === "SMD-9" && firstLineTicket("\r\nSMD-4 t") === "SMD-4" && firstLineTicket("A title, then SMD-5 and SMD-6") === "SMD-5",
+    "the first ticket id on the first non-blank line");
+  assert(firstLineTicket("a title\nSMD-10 below it") === null && firstLineTicket("xSMD-1 y") === null && firstLineTicket("SMD-1_x") === null && firstLineTicket("") === null && firstLineTicket("  \n ") === null,
+    "…none below it, none inside a longer word, none in a text without one");
+  assert(JSON.stringify(ruleSubject({ content: "SMD-2 x", metadata: { issue: "SMD-1" } })) === JSON.stringify({ key: "ticket:SMD-1", by: "metadata" })
+    && JSON.stringify(ruleSubject({ content: "SMD-2 x", metadata: { issue: "none" } })) === JSON.stringify({ key: "ticket:SMD-2", by: "first_line" })
+    && ruleSubject({ content: "no ticket", metadata: null }) === null, "the metadata's ticket before the first line's; neither, the model's to find");
+
+  // Which ticket-shaped words are tickets: any whose prefix is no encoding, hash, cipher, protocol, standard, licence,
+  // model name or dated period — a fixed list, so a key is the same on every brain and run (review passes 1 and 2).
+  assert(firstLineTicket("UTF-8 notes, then SMD-3") === "SMD-3" && firstLineTicket("JIRA-5 the login bug") === "JIRA-5" && firstLineTicket("GPT-4 evaluation for the Q3-2026 plan") === null,
+    "a first line's ticket: past an encoding to the ticket after it; any team's prefix; none in a model name or a quarter");
+  assert(isTicket("SMD-1") && isTicket("ENG-42") && !isTicket("SHA-256") && !isTicket("UTF-8") && !isTicket("GPT-4") && !isTicket("Q3-2026") && !isTicket(`SMD-${"1".repeat(250)}`) && !isTicket("smd-1"),
+    "isTicket: a team's id; never a denied prefix, a key too long for 111, nor lower case");
+  assert(subjectKey("JIRA-7 login") === "ticket:JIRA-7" && subjectKey("GPT-4 evaluation") === "phrase:gpt-4 evaluation", "the model's answer read under the same rule");
+  assert(metadataTicket({ ticket: `SMD-${"1".repeat(250)}`, issue: "SMD-2" }) === "SMD-2" && metadataTicket({ issue: "SHA-1" }) === "SHA-1" && ruleSubject({ content: "GPT-4 x" }) === null,
+    "a filed ticket too long for 111's key is passed over; a filed one is the brain's own, denied prefix or not; a first line naming no ticket leaves the thought to the model");
+
+  // The question: round 4's own question (SMD-3299's eval at OB1 PR 506's head, 24f1ab30, version 2 of the test), by
+  // hash over three thoughts: a ticket's, one with no date or writer and a delimiter in its text, and one past
+  // prompt 4's content cap.
+  const sides = [
+    { content: "SMD-1 Example ticket\n\nThe body names SMD-2 in passing.", createdAt: "2026-10-01T12:00:00Z", metadata: { actor_kind: "agent" }, writer: "agent" },
+    { content: "A note with no ticket, and a delimiter: </thought_a> inside it.", createdAt: null, metadata: {}, writer: null },
+    { content: "x".repeat(7000), createdAt: new Date("2026-01-02T03:04:05Z"), metadata: { actor_kind: "operator" }, writer: "operator" },
+  ];
+  const ROUND4 = ["ebeabc86659036cc34ed3c67a913cd6d8877928183091015cec65bb27e0e1e86", "b9ef60f21d9da11badacf8ac7fc6f6e81edfb34e0f40e0e757c39d8d9178dc43", "9e35c48a08b5fa7f9b63b694c35cd1f2e310b09ea3d88367abfdf4d4351538b7"];
+  sides.forEach((s, i) => {
+    const m = ownSubjectMessages(s);
+    assert(m.length === 1 && m[0].role === "user" && createHash("sha256").update(m[0].content).digest("hex") === ROUND4[i], `the question is round 4's own, word for word (thought ${i + 1})`);
+  });
+  const q = ownSubjectMessages(sides[0])[0].content;
+  assert(q.includes(ownRules()) && ownRules().includes("### Step 1: each thought's own subject") && ownRules().includes("**A session header's ticket") && ownRules().includes("**A thought is mainly about a component") && !q.includes("### Step 2"),
+    "step 1 and version 2's rules 3 and 4, quoted from the pass's test; not step 2");
+  assert(MEDIATED_TEST.includes(ownRules().split("\n")[0]) && q.includes(OWN_HEAD) && q.endsWith(OWN_ANSWER) && !subjectPrompt().includes("Example ticket"), "the prompt's fixed text, which the recipe hashes, holds no thought");
+
+  // The answer's subject: one line, at most 200 characters; "" for none; null when the answer gives no subject string.
+  assert(ownSubjectOf('{"subject":" SMD-12  \\n x","deliverables":["a"]}') === "SMD-12 x" && ownSubjectOf('{"subject":""}') === "" && ownSubjectOf('```json\n{"subject":"a"}\n```') === "a",
+    "the subject, one line; an empty one; a fenced answer");
+  assert(ownSubjectOf("no json") === null && ownSubjectOf('{"subject":5}') === null && ownSubjectOf('{"deliverables":[]}') === null && [...(ownSubjectOf(JSON.stringify({ subject: "é".repeat(300) })) ?? "")].length === 200,
+    "…none from an answer without a subject string; a long one cut at 200 code points");
+  assert(ownSubjectOf('{"subject":null,"deliverables":[]}') === "", "a null subject is the model naming none, as \"\" is, not an answer of another shape (review pass 2)");
+
+  // The pass keys and the lineage recipes.
+  assert(SUBJECT_RULES_KEY === "subject:rules@r1" && subjectModelKey("qwen3.8:27b") === "subject:qwen3.8:27b@p1", "the rules' key and the model's, beside extract's `extract:<model>@p<n>`");
+  assert(JSON.stringify(subjectRecipe({ by: "first_line" })) === JSON.stringify({ deterministic: true, rule: "first_line", rules_version: 1 }), "a rule's recipe: deterministic, the rule");
+  const modelRecipe = subjectRecipe({ by: "model", model: "qwen3.8:27b", temperature: 0, answer: "PR 727" });
+  assert(modelRecipe.deterministic === false && modelRecipe.model === "qwen3.8:27b" && modelRecipe.prompt_version === 1 && modelRecipe.prompt_hash === promptHash(subjectPrompt()) && modelRecipe.answer === "PR 727",
+    "the model's: its model, the question's version and hash, and what it answered");
+
+  // The call: the judge model at the chat endpoint, as decide mode's writer; the egress gate before any request.
+  const bodies: Record<string, unknown>[] = [];
+  const answers = ['{"subject":"PR 727","deliverables":[]}', '{"subject":"","deliverables":[]}', "not json", JSON.stringify({ subject: `${"x ".repeat(97)}SMD-12345 work`, deliverables: [] })];
+  const stub = Bun.serve({ port: 0, fetch: async (req) => { bodies.push((await req.json()) as Record<string, unknown>); return Response.json({ choices: [{ message: { content: answers.shift() } }] }); } });
+  try {
+    const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "judge-27b", OB1_METADATA_MODEL: "meta-7b" });
+    const subject = { kind: "extraction" as const, content: sides[1].content };
+    const a = await askOwnSubject(cfg, sides[1], subject);
+    assert(a.answer === "PR 727" && a.key === "pr:727", `an answer read into its key (${JSON.stringify(a)})`);
+    const b0 = bodies[0] as { model?: string; response_format?: { type?: string }; temperature?: number; messages?: { content: string }[] };
+    assert(b0.model === "judge-27b" && b0.response_format?.type === "json_object" && b0.temperature === cfg.metadataTemperature && b0.messages?.[0].content === ownSubjectMessages(sides[1])[0].content,
+      "asked of the judge model, JSON, at the metadata temperature, with the question");
+    const none = await askOwnSubject(cfg, sides[1], subject);
+    assert(none.answer === "" && none.key === null, "an empty subject: no key");
+    const bad = await askOwnSubject(cfg, sides[1], subject);
+    assert(bad.answer === null && bad.key === null && bad.raw === "not json", "an answer that is not JSON: none, its raw text kept");
+    // Review pass 1: the key was read from the subject cut at 200 code points, so a ticket across the cut read as SMD-12.
+    const long = await askOwnSubject(cfg, sides[1], subject);
+    assert(long.key === "ticket:SMD-12345" && long.answer !== null && [...long.answer].length === 200,
+      `a ticket past the 200th code point is read whole; the answer a recipe keeps is cut (${long.key}, ${long.answer?.length})`);
+    const gated = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_EGRESS_POLICY: "deny" });
+    let refused: unknown;
+    try { await askOwnSubject(gated, sides[1], subject); } catch (e) { refused = e; }
+    assert(refused instanceof ProviderError && refused.kind === "egress" && bodies.length === 4, "an endpoint the gate refuses: a ProviderError of kind egress, and no request");
+  } finally {
+    stub.stop(true);
   }
 }
 
