@@ -36,7 +36,7 @@
 --      listed after (review passes 1 and 2). All three
 --      set or none: a partial cursor is refused by name (it would otherwise
 --      read as no cursor and list from the top, a silent restart).
---      The columns: `page_key text`, the row's three values as text —
+--      The columns: `page_key text`, a JSON array of the row's three values as text —
 --      confidence::text exactly (numeric(3,2)), judged_at::text to the
 --      microsecond (the form the thoughts cursor carries created_at in),
 --      the id — which a reader passes back as the next call's three
@@ -66,15 +66,23 @@
 -- SAFETY
 --   One function dropped and created under a new arity and a new RETURNS
 --   TABLE, and one COMMENT. A caller passing two, three or four arguments —
---   a server or CLI from before this file, during an upgrade — resolves to
---   the new form through the defaults and lists as before; a reader keying
---   the rows by name (the store's mapper, the CLI's row type, PostgREST's
---   JSON, SELECT *) gains two columns and loses none. An older server's
---   preflight and an older CLI's --status probe the four-argument form by
---   its signature, which this file drops, so on a brain at 110 they read the
---   listing as from before 109 and name 109's file: the fix is this tree's
---   server and CLI, never that remedy — 109 re-applied would stand its form
---   beside this one. Nothing runs at apply time but the DDL; no row moves;
+--   a server or CLI from before this file — resolves to the new form through
+--   the defaults on a connection opened after it; a reader keying the rows
+--   by name (the store's mapper, the CLI's row type, PostgREST's JSON) gains
+--   two columns and loses none. But a connection that had already listed
+--   holds a prepared `SELECT *` whose result type this file changes: each
+--   later call on it fails, "cached plan must not change result type"
+--   (0A000), until the process restarts (review pass 3: an older server left
+--   running across a hand-run migrate.ts failed every listing; 109 kept
+--   070's columns and so never met it). The release's `up` recreates the
+--   servers after the migration; a server left running is restarted. An
+--   older server's preflight and an older CLI's --status probe the
+--   four-argument form by its signature, which this file drops, so on a
+--   brain at 110 they read the listing as from before 109 — preflight says
+--   every listing fails and prints `migrate.ts --reapply`, --status says
+--   "apply migration 109 first": the fix is this tree's server and CLI, never
+--   that remedy — the older tree's --reapply stands 109's form beside this
+--   one, and its four-argument calls are then not unique. Nothing runs at apply time but the DDL; no row moves;
 --   no table is touched. The keyset term and the window count read the
 --   rows of the selection the listing already sorts; no index
 --   (supersession_proposals holds hundreds of rows on the dogfood brains).
@@ -226,4 +234,4 @@ END
 $$;
 
 COMMENT ON FUNCTION list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid) IS
-  'The proposals in one status (NULL for all), most confident first, each with both thoughts'' content and capture time as they are NOW, whether either text has changed since the pair was judged, whether the pair is a lineage pair (070: one side''s derived_from names the other, so the pair would never be proposed today, 066, and a reviewer rejects it), and the pass that judged it. p_lineage NULL lists every pair, true the lineage pairs alone, false the rest; p_judge_key NULL every pass, or the proposals of the pass with exactly that judge_key (109). The after-cursor (110) — p_after_confidence, p_after_judged_at, p_after_id, all set or none — starts past that row on the listing''s order; each row''s page_key holds its three values as text for the next call, and remaining counts the selection''s rows from this page''s first on, so remaining > the rows returned means more follow. Every selector applies before the cap. At most 200. Migrations 029, 070, 109, 110.';
+  'The proposals in one status (NULL for all), most confident first, each with both thoughts'' content and capture time as they are NOW, whether either text has changed since the pair was judged, whether the pair is a lineage pair (070: one side''s derived_from names the other, so the pair would never be proposed today, 066, and a reviewer rejects it), and the pass that judged it. p_lineage NULL lists every pair, true the lineage pairs alone, false the rest; p_judge_key NULL every pass, or the proposals of the pass with exactly that judge_key (109). The after-cursor (110) — p_after_confidence, p_after_judged_at, p_after_id, all set or none — starts past that row on the listing''s order; each row''s page_key holds a JSON array of its three values as text for the next call, and remaining counts the selection''s rows from this page''s first on, so remaining > the rows returned means more follow. Every selector applies before the cap. At most 200. Migrations 029, 070, 109, 110.';

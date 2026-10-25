@@ -25,7 +25,7 @@ import { readDatabaseFacts, type DatabaseFacts, type ReadOptions, type ReadProgr
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { PLUGIN_LOGIN_ROLE, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
-import { ListCursorRefused, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE } from "./store.ts";
+import { ListCursorRefused, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -399,9 +399,8 @@ export class SqlStore implements ThoughtStore {
       // the right shape Postgres cannot read, refused. Alone, so a cast error of anything else — `days` read back as
       // a time — is never taken for the cursor's (review pass 2), and only after a failure, so a good page pays no
       // round trip before it (review pass 3).
-      const cast = (x: unknown) => ["22007", "22008", "22009"].includes(String((x as { errno?: unknown }).errno ?? ""));
-      if (!after?.at || !cast(e)) throw e;
-      const unread = await this.sql`SELECT ${after.at}::timestamptz`.then(() => false, (p: unknown) => (cast(p) ? true : Promise.reject(p)));
+      if (!after?.at || !timeCastFailed(e)) throw e;
+      const unread = await this.sql`SELECT ${after.at}::timestamptz`.then(() => false, (p: unknown) => (timeCastFailed(p) ? true : Promise.reject(p)));
       if (unread) throw new ListCursorRefused();
       throw e;
     }
@@ -976,9 +975,8 @@ export class SqlStore implements ThoughtStore {
     } catch (e) {
       // list_thoughts' rule (SMD-2995): a time cast that failed is read alone, and only a cursor time Postgres cannot
       // read is the caller's, refused; anything else is the store's fault.
-      const cast = (x: unknown) => ["22007", "22008", "22009"].includes(String((x as { errno?: unknown }).errno ?? ""));
-      if (!a || !cast(e)) throw e;
-      const unread = await this.sql`SELECT ${a.judgedAt}::timestamptz`.then(() => false, (p: unknown) => (cast(p) ? true : Promise.reject(p)));
+      if (!a || !timeCastFailed(e)) throw e;
+      const unread = await this.sql`SELECT ${a.judgedAt}::timestamptz`.then(() => false, (p: unknown) => (timeCastFailed(p) ? true : Promise.reject(p)));
       if (unread) throw new ListCursorRefused();
       throw e;
     }

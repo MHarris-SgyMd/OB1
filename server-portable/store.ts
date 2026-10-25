@@ -312,15 +312,22 @@ export type ListPosition = { at: string | null; id: string };
  * The store's refusal of a list_thoughts cursor whose time Postgres's cast
  * cannot read (SQLSTATE 22007, 22008, 22009: a year 0, past timestamptz's
  * range, an offset past ±15:59:59), which the core says as REFUSED_CURSOR rather
- * than a fault quoting the value (SMD-2995 review pass 1).
+ * than a fault quoting the value (SMD-2995 review pass 1). Also a
+ * list_supersession_proposals cursor's (SMD-3249): its time read alone the same way.
  */
-/** Also a list_supersession_proposals cursor's (SMD-3249): its time read alone the same way. */
 export class ListCursorRefused extends Error {
   constructor() {
     super("the cursor's time is not one Postgres reads");
     this.name = "ListCursorRefused";
   }
 }
+
+/**
+ * Whether an error is a time cast that failed (SQLSTATE 22007, 22008, 22009) — the one test a cursor's time is read
+ * by before it is refused as ListCursorRefused, list_thoughts' and list_supersession_proposals' alike, and the CLI's
+ * --after (SMD-3249 review pass 3: the list was written out three times).
+ */
+export const timeCastFailed = (e: unknown): boolean => ["22007", "22008", "22009"].includes(String((e as { errno?: unknown }).errno ?? ""));
 
 /**
  * Where a list_supersession_proposals page ended (SMD-3249, migration 110): the

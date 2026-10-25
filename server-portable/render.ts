@@ -818,7 +818,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
     // SMD-3248: the pass selected (109) is said with the rest of the selection.
     const onLineage = (lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "") + (judgeKey === undefined ? "" : ` judged by ${judgeKeyText(judgeKey)}`);
     // SMD-3249: how many more follow, and the cursor that lists them.
-    const next = cursor ? `\n\n${remaining} more follow — pass after: ${cursor} (with the same filters) for the next page.` : "";
+    const next = cursor ? `\n\n${remaining} more follow${remaining === 1 ? "s" : ""} — pass after: ${cursor} (with the same filters) for the next page.` : "";
     if (!data.length) {
       // Review pass 1: a page whose rows all went between the listing and the writers' read still carries
       // the cursor past them; and an empty page after a cursor is the walk's end, not an empty queue — a pass to run

@@ -32,8 +32,8 @@
  *   bun db/consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # the queue, with both thoughts; lineage: the unreviewed rows standing on a lineage pair (070)
  *                                                                                         # each side's writer, and WRITER on a capture-only key's or lower-trust side to stand (094)
  *   bun db/consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate (a distinct, 102, is counted by --status, not listed)
- *   bun db/consolidate.ts --url … --list <status> [--key <judge key>] --after <cursor>   # the next page: the line a capped page printed, its --list and --key with its cursor (110, SMD-3249)
  *   bun db/consolidate.ts --url … --list [<status>|relations] --key <judge key>   # one pass's alone: its judge key exactly, as each row names it (109, SMD-3248)
+ *   bun db/consolidate.ts --url … --list <status> [--key <judge key>] --after <cursor>   # the next page: the line a capped page printed, its --list and --key with its cursor (110, SMD-3249)
  *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged, a stale row, a lineage pair (070), or a WRITER flag (094)
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90; at most 2000000, inside Postgres's timestamp range)
@@ -169,7 +169,7 @@ import {
   DEFAULT_CANDIDATES, DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_SIMILARITY, PASS_SETTLED_PREFIX, STALE_STANDING_ROWS_SQL,
   type Judgement, type StaleStandingRow,
 } from "../server-portable/consolidate.ts";
-import { actorPayload, isoDay, normaliseProposal, withWriters, WRITERS_MISSING, type ProposalSide, type ProposalWriter } from "../server-portable/store.ts";
+import { actorPayload, isoDay, normaliseProposal, timeCastFailed, withWriters, WRITERS_MISSING, type ProposalSide, type ProposalWriter } from "../server-portable/store.ts";
 import { proposalRecipe } from "../server-portable/lineage.ts";
 import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
 import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
@@ -201,7 +201,7 @@ const cliSelection = (list: string, key: string | undefined): ProposalSelection 
   ({ status: list as ProposalSelection["status"], lineage: null, judgeKey: key ?? null });
 
 /** The flags that list a selection — what a next page line prints beside the cursor, and a refused --after names. */
-export function selectionFlags(sel: ProposalSelection): string {
+function selectionFlags(sel: ProposalSelection): string {
   return `--list ${sel.status}${sel.judgeKey === null ? "" : ` --key ${sel.judgeKey}`}`;
 }
 
@@ -212,11 +212,12 @@ export function selectionFlags(sel: ProposalSelection): string {
  * `pending`, so listing again shows the next. A lineage page is two listings (pending, then stale) and takes no
  * cursor. `status` is printList's: undefined for --list all.
  */
-export function capNote(status: string | undefined, keyed: boolean): string {
+export function capNote(status: string | undefined, key: string | undefined): string {
   // SMD-3249: any one-status page goes on with --after; under --key a pending page also drains as it is decided.
-  // Review pass 1: --list pending or stale pages every pair, not the lineage ones — the tool's `lineage: true` pages those.
-  if (status === "lineage") return "the rest are not listed — reject these and list again, or page them with the list_supersession_proposals tool (status: pending, then stale, each with lineage: true and after: its cursor)";
-  if (!keyed) return "--after <the cursor below> lists the next page; --status counts them all";
+  // Review pass 1: --list pending or stale pages every pair, not the lineage ones — the tool's `lineage: true` pages
+  // those; review pass 3: under --key, that pass's alone.
+  if (status === "lineage") return `the rest are not listed — reject these and list again, or page them with the list_supersession_proposals tool (status: pending, then stale, each with lineage: true${key === undefined ? "" : `, judge_key: ${key}`} and after: its cursor)`;
+  if (key === undefined) return "--after <the cursor below> lists the next page; --status counts them all";
   return status === "pending" ? "decide these and list again for the rest, or --after <the cursor below> for the next page; --status counts each pass's pending" : "--after <the cursor below> lists the next page";
 }
 
@@ -769,7 +770,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
 
   /** 067: the stale rows' standings against the pools under THIS key, as --status prints them (server-portable/consolidate.ts holds the one read, the rank and the words; db/rebuild.ts reads the same, keyless). */
   const readStaleStandings = async () => staleStandings((await sql.unsafe(STALE_STANDING_ROWS_SQL)) as StaleStandingRow[], JOB);
-  /** 070: --status's clause for the unreviewed rows standing on a lineage pair — the listing named, or the file it needs first (its own SQL reads on a brain at 068); the listing is 109's since SMD-3248. */
+  /** 070: --status's clause for the unreviewed rows standing on a lineage pair — the listing named, or the file it needs first (its own SQL reads on a brain at 068); the listing is 110's since SMD-3249 (109's, 070's before). */
   const lineageClause = (n: number, has110: boolean): string =>
     `${n} unreviewed standing on a lineage pair (${has110 ? "--list lineage shows them" : "apply migration 110 first — cd db && bun migrate.ts --url <url> — then --list lineage shows them"}; the reviewer rejects each — the pass never replaces a pending one)`;
   const staleClause = (st: ReturnType<typeof staleStandings>): string =>
@@ -925,8 +926,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const remaining = listedRows.length ? Number((listedRows[0] as unknown as { remaining: unknown }).remaining) : 0;
     const capped = lineageMode ? hit("pending") || hit("stale") : remaining > listedRows.length;
     const lastKey = !lineageMode && capped ? JSON.parse(String((listedRows[listedRows.length - 1] as unknown as { page_key: unknown }).page_key)) as string[] : null;
-    const sel = cliSelection(status ?? "all", KEY);
-    const nextPage = lastKey ? `  next page: ${selectionFlags(sel)} --after ${proposalCursor(sel, lastKey[0], lastKey[1], lastKey[2])}` : null;
+    const sel = lastKey ? cliSelection(status ?? "all", KEY) : null;
+    const nextPage = lastKey && sel ? `  next page: ${selectionFlags(sel)} --after ${proposalCursor(sel, lastKey[0], lastKey[1], lastKey[2])}` : null;
     if (rows.length === 0) {
       // Review pass 1: past a cursor, none is the listing's end, not an empty queue; and a page whose rows all went
       // before the writers' read still prints the line past them.
@@ -934,7 +935,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       return 0;
     }
     // Under --key, --status counts the pending by pass, not this status's rows; only a pending page drains as it is decided (review passes 1 and 2).
-    const more = capNote(lineageMode ? "lineage" : status, KEY !== undefined);
+    const more = capNote(status, KEY);
     out(`  ${rows.length} ${what.replace("proposals", "proposal(s)")}${lineageMode ? " (pending, then stale)" : ""}, most confident first${capped ? ` — ${lineageMode ? `pending and stale capped at ${limit} each` : `the first ${listedRows.length} of ${remaining}`}; ${more}` : ""}:\n`);
     // 067: a stale row's standing against the pools, beside its status. (A
     // row the pass settled needs no tag: its note begins with the marker.)
@@ -1003,8 +1004,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // refused in --after's words before anything is written (review pass 2: refused at the listing, it came after a
     // --reject beside it had written, and its exit 2 replaced the decision's). Only a hand-made cursor reaches here.
     if (AFTER) {
-      const cast = (x: unknown) => ["22007", "22008", "22009"].includes(String((x as { errno?: unknown }).errno ?? ""));
-      if (!(await sql`SELECT ${AFTER.judgedAt}::timestamptz`.then(() => true, (e: unknown) => (cast(e) ? false : Promise.reject(e))))) {
+      if (!(await sql`SELECT ${AFTER.judgedAt}::timestamptz`.then(() => true, (e: unknown) => (timeCastFailed(e) ? false : Promise.reject(e))))) {
         err("--after takes the cursor a --list page printed (next page: … --after <cursor>), as it was given: this one's time is not one Postgres reads.");
         return 2;
       }
@@ -1106,8 +1106,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         code = 1;
       } else await printRelations();
     } else if (LIST !== undefined) {
-      // 070 (SMD-2313), then 109 (SMD-3248): a brain at 108 or before under
-      // this tree has no four-argument listing — the one error every --list
+      // 070 (SMD-2313), 109 (SMD-3248), then 110 (SMD-3249): a brain at 109 or
+      // before under this tree has no seven-argument listing — the one error every --list
       // meets there, named with its file rather than a driver stack
       // (definitions probe, SMD-2313's second review pass).
       try { await printList(LIST === "all" ? undefined : LIST); } catch (e) {
@@ -1214,8 +1214,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
              (SELECT count(*)::int FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id
                WHERE p.status IN ('pending', 'stale')
                  AND (COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false) OR COALESCE(o.derived_from @> jsonb_build_array(n.id::text), false))) AS lineage,
-             -- The count above is this file's own SQL and reads on a brain at 068; the listing it points at is 109's (070's before
-             -- SMD-3248), so its absence is said here rather than one command later (operator walkthrough, SMD-2313's fourth review pass).
+             -- The count above is this file's own SQL and reads on a brain at 068; the listing it points at is 110's (109's, 070's
+             -- before SMD-3249), so its absence is said here rather than one command later (operator walkthrough, SMD-2313's fourth review pass).
              to_regprocedure('list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid)') IS NOT NULL AS has_110
       FROM supersession_proposals`;
     const stale = await readStaleStandings();

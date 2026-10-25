@@ -1,7 +1,7 @@
-// list_thoughts' cursor (SMD-2995), and list_supersession_proposals' (SMD-3249), on their own: the core makes and reads them,
-// and render.ts's structuredContent guard lets one through by the same rule
-// that reads it — tokens, a pass key, a timestamp's text and a uuid, so no sentence
-// can ride it (review pass 1: the guard took any `cursor` for a uuid and
+// list_thoughts' cursor (SMD-2995), and list_supersession_proposals' (SMD-3249),
+// on their own: the core makes and reads them, and render.ts's structuredContent
+// guard lets one through by the same rule that reads it — tokens, a pass key, a
+// timestamp's text and a uuid, so no sentence can ride it (review pass 1: the guard took any `cursor` for a uuid and
 // nulled this one, so a program reading structuredContent stopped at page one).
 
 import { PASS_KEY_CHARS } from "../pass-key.ts";

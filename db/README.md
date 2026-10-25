@@ -2031,7 +2031,7 @@ walk lists each row once while its status, judge key, confidence and judged_at
 hold — a row that joins the selection or moves in it during the walk (a new
 proposal, a decision, a stale mark, a re-judge) is listed past the cursor and
 missed behind it, and one that leaves it is not listed after. Two
-trailing columns: `page_key`, each row's three values as text (confidence
+trailing columns: `page_key`, a JSON array of each row's three values as text (confidence
 exactly, judged_at to the microsecond, the id) for the next call, and
 `remaining`, the selection's rows from this page's first on (`count(*) OVER
 ()`, before the LIMIT), so a reader knows whether more follow. LANGUAGE
@@ -2048,8 +2048,11 @@ is refused naming its own (`REFUSED_CURSOR`, `reason: "filters"`);
 page printing the line to run, its `--list` and `--key` with the cursor
 (`--list lineage`, two listings, takes none); preflight's `lineage` check reads the seven-argument form
 and its three sentinels. An older server's preflight and an older CLI's
-`--status` read a brain at 110 as before 109: upgrade the server, never
-re-apply 109. DDL alone; no row moves; no grant is carried. Refuses by name
+`--status` read a brain at 110 as before 109: upgrade the server, never run
+the `--reapply` the older preflight prints. A server left running across
+the migration fails each listing on a connection that had already listed
+("cached plan must not change result type", the result type changed) until
+it restarts. DDL alone; no row moves; no grant is carried. Refuses by name
 without 016, 025 or 029; a re-apply is a no-op. test-schema [98] (230 rows
 walked in pages of 200 and of 7, ties across page edges, a stale row re-judged
 under the cursor, the partial cursor, 109 re-applied beside it), test-upgrade

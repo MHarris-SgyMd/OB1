@@ -6611,11 +6611,13 @@ if (want("16")) {
   // never drains an all-status page; no suite reached a cap under --key).
   // SMD-3249: every one-status page goes on with --after; a lineage page (two listings) cannot.
   const NEXT = "--after <the cursor below> lists the next page";
-  assert(["pending", "accepted", undefined].every((st) => capNote(st, false) === `${NEXT}; --status counts them all`)
-      && capNote("pending", true) === "decide these and list again for the rest, or --after <the cursor below> for the next page; --status counts each pass's pending"
-      && ["accepted", "rejected", "stale", undefined].every((st) => capNote(st, true) === NEXT)
-      && [true, false].every((k) => capNote("lineage", k) === "the rest are not listed — reject these and list again, or page them with the list_supersession_proposals tool (status: pending, then stale, each with lineage: true and after: its cursor)"),
-    "a capped page's note: --after for every one-status page; under --key, pending also drains as it is decided; a lineage page drains as it is rejected, and the tool pages it");
+  const K16 = "consolidate:k@p1";
+  assert(["pending", "accepted", undefined].every((st) => capNote(st, undefined) === `${NEXT}; --status counts them all`)
+      && capNote("pending", K16) === "decide these and list again for the rest, or --after <the cursor below> for the next page; --status counts each pass's pending"
+      && ["accepted", "rejected", "stale", undefined].every((st) => capNote(st, K16) === NEXT)
+      && capNote("lineage", undefined) === "the rest are not listed — reject these and list again, or page them with the list_supersession_proposals tool (status: pending, then stale, each with lineage: true and after: its cursor)"
+      && capNote("lineage", K16) === `the rest are not listed — reject these and list again, or page them with the list_supersession_proposals tool (status: pending, then stale, each with lineage: true, judge_key: ${K16} and after: its cursor)`,
+    "a capped page's note: --after for every one-status page; under --key, pending also drains as it is decided; a lineage page drains as it is rejected, and the tool pages it, under --key that pass's alone");
 
   // The review path, through the worker's flags, audited under the key's name.
   const needDir = await consolidate("--accept", undirected.id);

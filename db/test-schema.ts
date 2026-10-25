@@ -15651,7 +15651,7 @@ console.log("\n[98] Migration 110: the listing pages — list_supersession_propo
     `one list_supersession_proposals, 110's: the three sentinels, page_key and remaining after 109's columns, the comment naming 110, the cursor and remaining (${cols.slice(-40)})`);
 
   // The corpus: 22 thoughts and 230 proposals over distinct ordered pairs (029 holds one per pair), the confidence
-  // cycling over five values and judged_at over three, so ties on both fall inside pages and across their edges.
+  // cycling over four values and judged_at over three, so ties on both fall inside pages and across their edges.
   const t: string[] = [];
   for (let i = 0; i < 22; i++) {
     t.push((await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [`[98] thought ${i}`, JSON.stringify({ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: EMBEDDING_MODEL }), unit(i)])).r.id);

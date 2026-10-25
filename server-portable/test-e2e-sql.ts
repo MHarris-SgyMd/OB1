@@ -1042,7 +1042,7 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
   const pg1 = await result("list_supersession_proposals", { limit: 1 });
   const pg2 = await result("list_supersession_proposals", { limit: 1, after: String(pg1.sc?.cursor) });
   const wrongCur = await result("list_supersession_proposals", { after: String((await result("list_thoughts", { limit: 1 })).sc?.cursor) });
-  assert(!pg1.isError && pg1.text.includes(`proposal ${pid2} `) && typeof pg1.sc?.cursor === "string" && pg1.sc?.remaining === 1 && /\n\n1 more follow — pass after: /.test(pg1.text)
+  assert(!pg1.isError && pg1.text.includes(`proposal ${pid2} `) && typeof pg1.sc?.cursor === "string" && pg1.sc?.remaining === 1 && /\n\n1 more follows — pass after: /.test(pg1.text)
       && !pg2.isError && pg2.text.includes(`proposal ${pid} `) && !pg2.text.includes(`proposal ${pid2} `) && pg2.sc?.cursor === null && pg2.sc?.remaining === 0 && pg2.sc?.pastCursor === true
       && /^1 pending supersession proposal\(s\) past the cursor, most confident first\./.test(pg2.text)
       && wrongCur.isError && wrongCur.sc?.code === "REFUSED_CURSOR" && /is not a list_supersession_proposals cursor/.test(wrongCur.text),

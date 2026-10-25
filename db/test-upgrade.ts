@@ -3141,7 +3141,7 @@ console.log("\n[20v] Migration 070 onto a populated brain at 068 — the listing
   }
   await applyMigrations(URL_, { ...OPTS, only: (f) => f >= "029" });
   const sql3 = new SQL({ url: URL_, max: 1 });
-  // Every file from 029 on, 109 among them: the flag in 109's body, 070's under a fourth argument (SMD-3248).
+  // Every file from 029 on, 110 among them: the flag in 110's body (109's under four arguments, 070's under a fourth before it; SMD-3248, SMD-3249).
   const [present] = await sql3`SELECT prosrc LIKE '%ob1:listing-flags-the-lineage-pair%' AS x FROM pg_proc WHERE oid = COALESCE(to_regprocedure('list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid)'), to_regprocedure('list_supersession_proposals(text, int, boolean, text)'), to_regprocedure(${SIG3}))`;
   assert(present?.x === true, "…and applied once every prerequisite is there: the body carries the flag");
   await sql3.close();
