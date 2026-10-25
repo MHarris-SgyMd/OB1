@@ -483,6 +483,12 @@ bun --no-env-file deploy/instance.ts check -f deploy/compose.yaml --profile loca
   podman compose -f deploy/compose.yaml --profile local-models up --build
 ```
 
+The check refuses an `up` that would act on another brain. Every stack is the
+compose project `open-brain` unless its env file names another, so a second
+brain on the same machine (a test stack beside the one you use, say) needs a
+`COMPOSE_PROJECT_NAME` of its own in its `deploy/.env`, and a `SERVER_PORT` of
+its own while the first holds 8000. The check names whichever is missing.
+
 Seven services in order (nine with `local-models`): Postgres with pgvector, a migration job that applies the
 schema and exits, then the REST core, which builds the server image (internal unless
 `deploy/compose.api-public.yaml` is named), the MCP server at `/mcp`, which hands every tool call to the REST
@@ -614,8 +620,10 @@ competes with it is outside OB1's.
 `migrate` exits 0 having applied every migration under `db/migrations/`. `api`
 logs `preflight OK` and `Started server`. `smoke.sh` reports every check passed
 (`deploy/README.md` has the count, and the liveness-probe target for a platform
-that can only GET). A client shows twelve tools for a write key, nine for a read
-key.
+that can only GET). A client shows every tool in `server-portable/tools.json`
+for a write key, the ones whose scope is `read` for a read key, and
+`capture_thought` alone for a capture key; smoke.sh's "tool surface matches the
+manifest" holds a write key's list to that file.
 
 ## Where to run it for real
 
