@@ -549,8 +549,9 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // SMD-3046), 105 (Linear's duplicate status type known and
   // settled, SMD-2935), 106 (the query log's literal arm, SMD-2891),
   // 107 (the listing caps the walks it runs, SMD-3036), 108 (a keyed
-  // rebuild of 071's mirror for a status-set change, SMD-3160) and 109
-  // (the listing selects one pass's proposals, SMD-3248)
+  // rebuild of 071's mirror for a status-set change, SMD-3160), 109
+  // (the listing selects one pass's proposals, SMD-3248) and 110 (a
+  // thought's own subject recorded, SMD-3306)
   // stay recorded and
   // are never tried. 030 is the right one to make pending because its
   // prerequisites — 015 and 021's
@@ -691,13 +692,16 @@ console.log("\n[7] --reapply onto a --baseline'd 020 — every migration in one 
   // name without 094 ([20ay]); 108 adds the mirror's keyed rebuild,
   // refusing by name without 071 ([20az]); 109 redefines 070's listing
   // under a fourth argument, refusing by name without 016, 025 or 029
-  // ([20ba]) — all
+  // ([20ba]); 110 adds the subject facet kind, its key's shape, its write,
+  // two indexes, a drop trigger and the lineage kind, and redefines 102's
+  // validator and 084's lineage writer on their own bodies, refusing by
+  // name without 016, 042, 061, 084 or 102 ([20bb]) — all
   // recorded by the
   // baseline with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 80, `030 is among the last eighty migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 81, `030 is among the last eighty-one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -4852,6 +4856,58 @@ console.log("\n[20ba] Migration 109: refused by name without 016, 025 or 029; on
   const again = await forms();
   assert(Number(again.n) === 1 && again.sentinels === true && (await listing()) === listedBefore && (await byKey(A)) === [a1, a2].join(),
     "a re-apply is a no-op: one form, the same rows, the same selection");
+  await sql.close();
+}
+
+console.log("\n[20bb] Migration 110: refused by name without 016, 042, 061, 084 or 102; onto a populated brain at the file before it — a relation, a citation and their lineage planted before it standing as they were, a subject refused as an unregistered kind before and written by record_thought_subject after, with its lineage; no thought or audit row moved; a re-apply a no-op (SMD-3306)");
+{
+  const the110 = MIGRATIONS.find((f) => f.endsWith("_thought_subject.sql"))!;  // by name: renumbered when main takes its number
+  // Each prerequisite in turn, the first missing named.
+  for (const [stop, needs] of [
+    ["016", "migration 110 needs 016 (content_fingerprint_of); this schema lacks it"],
+    ["042", "migration 110 needs 042 (thought_facets); this schema lacks it"],
+    ["061", "migration 110 needs 061 (ob1_record_derivation); this schema lacks it"],
+    ["084", "migration 110 needs 084 (record_thought_relation); this schema lacks it"],
+    ["102", "migration 110 needs 102 (record_thought_relation taking distinct); this schema lacks it"],
+  ] as const) {
+    await dropSchema(URL_);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f < stop });
+    const refused = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the110 }).then(() => "applied", (e: Error) => e.message);
+    assert(refused === needs, `110 on a schema stopped before ${stop} is refused up front, naming what it needs (${refused})`);
+  }
+
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the110 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = (axis: number) => `[${Array.from({ length: OPTS.dim }, (_, i) => (i === axis ? 1 : 0)).join(",")}]`;
+  await sql`SELECT set_agent_kind('laptop', 'operator')`;
+  const actor = { name: "laptop", via: "open-brain" };
+  const t: string[] = [];
+  for (let i = 0; i < 3; i++)
+    t.push(((await sql`SELECT upsert_thought(${`upgrade 110: Session summary — SMD-${3300 + i} — thought ${i}`}::text, ${{ metadata: { source: "mcp" }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(i)}::vector) AS r`)[0].r as { id: string }).id);
+  const fpOf = async (id: string) => String((await sql`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+  // A brain before 110 holds relations, with their lineage, and citations: planted here as the pass and a writer leave them.
+  await sql`SELECT record_thought_relation(${t[1]}::uuid, ${t[0]}::uuid, 'evolves', 0.8, 'consolidate:h2o-lightning-4b+qwen3.8:27b@p4d4', NULL::uuid, ${await fpOf(t[0])}::text, ${await fpOf(t[1])}::text, NULL::jsonb)`;
+  await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${t[2]}::uuid, 'citation', ${{ text: "rests on thought 0", stance: "stated", source_id: t[0] }}::jsonb)`;
+  const facets = async () => JSON.stringify(await sql`SELECT id, thought_id, kind, payload, valid_until::text AS v FROM thought_facets ORDER BY id`);
+  const lineage = async () => JSON.stringify(await sql`SELECT artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe FROM derivations ORDER BY id`);
+  const rows = async () => JSON.stringify(await sql`SELECT id, content, metadata, created_at::text AS c, updated_at::text AS u FROM thoughts ORDER BY id`);
+  const audits = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
+  const facetsBefore = await facets(), lineageBefore = await lineage(), before = await rows(), auditBefore = await audits();
+  const unregistered = await sql`INSERT INTO thought_facets (thought_id, kind, payload) VALUES (${t[0]}::uuid, 'subject', ${{ key: "ticket:SMD-3300", by: "first_line", judge_key: "subject:x@p1" }}::jsonb)`.then(() => "admitted", (e: Error) => e.message);
+  assert(/is not a registered facet kind/.test(unregistered) && JSON.parse(facetsBefore).length === 2, `before 110 a subject is not a registered kind (${unregistered.slice(0, 80)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the110 });
+
+  assert((await facets()) === facetsBefore && (await lineage()) === lineageBefore && (await rows()) === before && (await audits()) === auditBefore,
+    "the file moves nothing it finds: the relation and the citation, their lineage, every thought and audit row stand as they were");
+  const w = (await sql`SELECT record_thought_subject(${t[0]}::uuid, 'ticket:SMD-3300', 'first_line', 'subject:qwen3.8:27b@p1', NULL::uuid, ${await fpOf(t[0])}::text, NULL::jsonb) AS r`)[0].r as { action: string; id: string };
+  const [row] = (await sql`SELECT artifact_kind AS k, input_ids::text[] AS i FROM derivations WHERE artifact_kind = 'subject' AND artifact_id = ${w.id}::uuid`) as { k: string; i: string[] }[];
+  assert(w.action === "added" && row?.k === "subject" && row?.i.join() === t[0], `after it, record_thought_subject writes a subject with its lineage row (${JSON.stringify(w)})`);
+  const facetsAfter = await facets(), lineageAfter = await lineage();
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the110 });
+  assert((await facets()) === facetsAfter && (await lineage()) === lineageAfter && (await rows()) === before,
+    "a re-apply is a no-op: every facet, lineage row and thought as it was");
   await sql.close();
 }
 

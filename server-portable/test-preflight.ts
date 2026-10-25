@@ -1324,6 +1324,23 @@ else {
   assert(/✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out), "…and following the remedy — the edge closed — the check is ok again: a closed relation is history");
   await ctx.unsafe(`SELECT delete_thought('${relB}'::uuid)`);
   await ctx.unsafe(`SELECT delete_thought('${relA}'::uuid)`);
+  // 110's kind (SMD-3306): a standing own subject without its lineage row is
+  // refused the same way, the subject named, and the remedy is the subject's
+  // own: close it and record it again through record_thought_subject. The
+  // thought is removed after, so the counts below are as they were.
+  const subA = ((await ctx.unsafe(`SELECT upsert_thought('preflight-110 Session summary — SMD-3306', '{}'::jsonb) AS r`))[0].r as { id: string }).id;
+  const subFp = String((await ctx.unsafe(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = '${subA}'::uuid`))[0].f);
+  const recordSubject = async () => (await ctx.unsafe(`SELECT record_thought_subject('${subA}'::uuid, 'ticket:SMD-3306', 'first_line', 'subject:t@p1', NULL, '${subFp}', NULL) AS r`))[0].r as { action: string; id: string };
+  const sub110 = await recordSubject();
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'subject' AND artifact_id = '${sub110.id}'::uuid`);
+  const noSubject = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(noSubject.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 own subject\\(s\\) \\(${sub110.id}\\)`).test(noSubject.out) && /An own subject's row is written by 110's record_thought_subject: close the facet/.test(noSubject.out),
+         `an own subject without its lineage row does not start, the subject named, and the remedy is the subject's own (exit ${noSubject.code}: ${noSubject.out.split("\n").find((l) => /lineage/.test(l))?.trim().slice(0, 160)})`);
+  await ctx.unsafe(`UPDATE thought_facets SET valid_until = now() WHERE id = '${sub110.id}'::uuid`);
+  const reRecorded = await recordSubject();
+  assert(reRecorded.action === "added" && /✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out),
+         "…and following the remedy — the facet closed, the subject recorded again — the check is ok again");
+  await ctx.unsafe(`SELECT delete_thought('${subA}'::uuid)`);
   // The second fail branch — a producer body from before 061 beside a section
   // missing its row — names the section's remedy too (run-it, third review
   // pass: pass 1 put it in the first branch alone). The vector trigger
