@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3015 assertions: 3015 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and ten (110) migrations applied, and
+`bun test-schema.ts` prints `3048 assertions: 3048 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and eleven (111) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -2060,6 +2060,37 @@ under the cursor, the partial cursor, 109 re-applied beside it), test-upgrade
 [20bb], test-live [16] (`--after` over 51 rows), `server-portable/test-preflight.ts`,
 the store, e2e and REST suites.
 
+Migration 111 records a thought's own subject (SMD-3306). The consolidation pass
+decides "evolves" pair by pair, and three rounds of asking its link step another
+way did not meet their bars (SMD-3299); SMD-3116 defines evolves as a later
+segment of the same work, which is a property of each thought's own subject, and
+asked of one thought alone the judge model names the ticket blind raters agree
+on for 241 to 242 of the 245 thoughts whose subject is a ticket (versions 2 and
+3 of the test's step 1). A `subject` facet holds
+it, one standing per thought (a partial unique index), with a probe on its key
+for the thoughts about one subject. Its payload is the key — `ticket:<ID>`,
+`pr:<number>`, `version:v<n>.<n>[…]` or `phrase:<lower-case words>`, one shape
+for the validator and the writer (`subject_key_valid`) — how it was found
+(`metadata`, `first_line` or `model`), the pass's key and `origin: derived`.
+It is written standing and only ever closed, as a relation is (084), through
+`record_thought_subject(thought, key, by, judge_key, agent, fingerprint,
+recipe)`: refused, answering `stale`, when the thought's text moved since the
+pass read it; the same key, way and pass kept, its lineage moved; anything else
+replacing it; a NULL key closing it. Its lineage row (artifact kind `subject`,
+the thought at the fingerprint read) is written in the same transaction and
+dropped with the facet; preflight's lineage check fails a standing subject
+without one, and counts no subject as stale (the subject pass reads the
+fingerprint itself until `rebuild_derived` gains an arm). The validator is 102's
+body and the lineage writer 084's, each with the new kind added. Refuses by name
+without 016, 042, 061, 084 or 102 (102 read by its door's sentinel); a re-apply
+is a no-op. No grant moves: the writer needs what 084's does — INSERT on
+`thought_facets` (the structure group), UPDATE on it and on `thoughts`, the
+derivations writes (the capture group). The pass that finds subjects, its place
+in sleep, the threads and their read follow (SMD-3306). test-schema [99] (the
+key's shape, every refusal, each action of the door, the lineage and the
+delete), test-upgrade [20bc] (refused without each prerequisite; onto a
+populated brain at 110, nothing moved), `server-portable/test-preflight.ts`.
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -2171,7 +2202,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `ob1_entity_edges` (016) | `SELECT, INSERT, UPDATE, DELETE` — `UPDATE` for the same upsert, since 053 |
 | | `extraction_progress` (093) | `SELECT, INSERT, UPDATE, DELETE` — a long thought's answered windows, kept across a claim that does not finish: read at each claim, upserted per window and per hard stop by 093's functions, deleted at a succeeded release (SMD-2694). Without it the worker keeps no window across a stop and says so once; nothing else is refused |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
-| | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873). Postgres grants INSERT per table, so this group writes any facet kind — links, citations and relations alike; capture's `SELECT, UPDATE` cover the reads and the closing |
+| | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873), and since 111 `record_thought_subject` adds `subject` facets (SMD-3306). Postgres grants INSERT per table, so this group writes any facet kind — links, citations, relations and subjects alike; capture's `SELECT, UPDATE` cover the reads and the closing |
 | | `board_findings_posted` (087) | `SELECT, INSERT` — board-sync's findings step (`board-findings.ts`, SMD-2681) reads it for the daily cap and to post nothing twice, and inserts a row per ticket pair and word after Linear answers |
 | | `supersession_proposals` (029) | `SELECT` — the proposal queue the findings step posts from (the server group holds it too, but with it UPDATE on `ob1_agent_keys`) |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
@@ -5374,7 +5405,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 3015 assertions, PGlite, no container
+bun test-schema.ts                          # 3048 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1645 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1015 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell
