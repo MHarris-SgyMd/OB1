@@ -2614,9 +2614,9 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
 
 // ── 17. A thought's own subject (SMD-3306) ───────────────────────────────────
 
-console.log("\n[17] A thought's own subject (SMD-3306): the rules read the ticket it is filed under, else its first line's; the model's question is SMD-3299's round 4 own question word for word; an answer is read into 110's key shapes, a ticket first");
+console.log("\n[17] A thought's own subject (SMD-3306): the rules read the ticket it is filed under, else its first line's; the model's question is SMD-3299's round 4 own question word for word; an answer is read into 111's key shapes, a ticket first");
 {
-  // The key's shapes, as 110's subject_key_valid reads them.
+  // The key's shapes, as 111's subject_key_valid reads them.
   for (const k of ["ticket:SMD-1", "ticket:A-1", "pr:502", "pr:0", "version:v1.9", "version:v1.9.0.1", "phrase:dolphin sleep", "phrase:ob1 fork: inventory — 2 & more", "phrase:σίσυφος", `phrase:${"a".repeat(200)}`])
     assert(subjectKeyValid(k), `a key: ${k.slice(0, 40)}`);
   for (const k of ["ticket:smd-1", "ticket:SMD-", "pr:", "pr:1234567890", "version:1.9.0", "version:v1", "version:v1.2.3.4.5", "phrase:", "phrase:Dolphin", "phrase: x", "phrase:x  y", "phrase:x ", "phrase:a\nb", `phrase:${"a".repeat(201)}`, "topic:x", "SMD-1"])
@@ -2628,7 +2628,7 @@ console.log("\n[17] A thought's own subject (SMD-3306): the rules read the ticke
     ["PR 727", "pr:727"], ["OB1 PR #0502", "pr:502"], ["pull request 9", "pr:9"], ["https://github.com/o/r/pull/88", "pr:88"], ["#41", "pr:41"], ["printed 12 pages", "phrase:printed 12 pages"],
     ["v1.9.0", "version:v1.9.0"], ["OB1 release 1.0.0", "version:v1.0.0"], ["version 2.0", "version:v2.0"], ["rebuild the brains off release v01.4.0", "version:v1.4.0"], ["dev1.2 build", "phrase:dev1.2 build"], ["v1.2.3.4.5", "phrase:v1.2.3.4.5"],
     ["  Dolphin   Sleep \n scheduler ", "phrase:dolphin sleep scheduler"], ["smd-12 lower case", "phrase:smd-12 lower case"], ["XSMD-12_b", "phrase:xsmd-12_b"], ["ΣΊΣΥΦΟΣ", "phrase:σίσυφος"],
-    // Review pass 1: a ticket-shaped encoding, hash or licence is no ticket; PR-502 is a PR; a ticket too long for 110's key is none.
+    // Review pass 1: a ticket-shaped encoding, hash or licence is no ticket; PR-502 is a PR; a ticket too long for 111's key is none.
     ["Move to SHA-256 (SMD-1234)", "ticket:SMD-1234"], ["SHA-256 migration", "phrase:sha-256 migration"], ["UTF-8 handling", "phrase:utf-8 handling"], ["PR-502", "pr:502"],
     [`SMD-${"1".repeat(250)}`, `phrase:smd-${"1".repeat(196)}`],
     ["", null], ["   ", null], ["ϒ", null],
@@ -2638,7 +2638,7 @@ console.log("\n[17] A thought's own subject (SMD-3306): the rules read the ticke
   assert(long !== null && subjectKeyValid(long) && [...long].length <= 207 && long.endsWith(" word"), `a long phrase is cut at a word, within 207 (${long?.length})`);
   const longOne = subjectKey("x".repeat(300));
   assert(longOne === `phrase:${"x".repeat(200)}`, "…and one word longer than the bound is cut at it");
-  for (const [answer] of keyed) { const k = subjectKey(answer); assert(k === null || subjectKeyValid(k), `every key made is one 110 admits (${k})`); }
+  for (const [answer] of keyed) { const k = subjectKey(answer); assert(k === null || subjectKeyValid(k), `every key made is one 111 admits (${k})`); }
 
   // The rules: the ticket filed under (ticket, else issue: node_state's), else the first ticket on the first non-blank line.
   assert(metadataTicket({ ticket: "SMD-1" }) === "SMD-1" && metadataTicket({ issue: " SMD-2 " }) === "SMD-2" && metadataTicket({ ticket: "not one", issue: "SMD-3" }) === "SMD-3",
@@ -2658,10 +2658,10 @@ console.log("\n[17] A thought's own subject (SMD-3306): the rules read the ticke
   assert(firstLineTicket("UTF-8 notes, then SMD-3") === "SMD-3" && firstLineTicket("JIRA-5 the login bug") === "JIRA-5" && firstLineTicket("GPT-4 evaluation for the Q3-2026 plan") === null,
     "a first line's ticket: past an encoding to the ticket after it; any team's prefix; none in a model name or a quarter");
   assert(isTicket("SMD-1") && isTicket("ENG-42") && !isTicket("SHA-256") && !isTicket("UTF-8") && !isTicket("GPT-4") && !isTicket("Q3-2026") && !isTicket(`SMD-${"1".repeat(250)}`) && !isTicket("smd-1"),
-    "isTicket: a team's id; never a denied prefix, a key too long for 110, nor lower case");
+    "isTicket: a team's id; never a denied prefix, a key too long for 111, nor lower case");
   assert(subjectKey("JIRA-7 login") === "ticket:JIRA-7" && subjectKey("GPT-4 evaluation") === "phrase:gpt-4 evaluation", "the model's answer read under the same rule");
   assert(metadataTicket({ ticket: `SMD-${"1".repeat(250)}`, issue: "SMD-2" }) === "SMD-2" && metadataTicket({ issue: "SHA-1" }) === "SHA-1" && ruleSubject({ content: "GPT-4 x" }) === null,
-    "a filed ticket too long for 110's key is passed over; a filed one is the brain's own, denied prefix or not; a first line naming no ticket leaves the thought to the model");
+    "a filed ticket too long for 111's key is passed over; a filed one is the brain's own, denied prefix or not; a first line naming no ticket leaves the thought to the model");
 
   // The question: round 4's own question (SMD-3299's eval at OB1 PR 506's head, 24f1ab30, version 2 of the test), by
   // hash over three thoughts: a ticket's, one with no date or writer and a delimiter in its text, and one past

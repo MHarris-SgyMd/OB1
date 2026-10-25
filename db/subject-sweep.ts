@@ -1,7 +1,7 @@
 /**
  * subject-sweep.ts — the extraction worker's `--subjects` sweep (SMD-3306): each thought with no standing subject at
  * its current text is given its own subject, the rules' or, for the rest, the judge model's
- * (server-portable/subject.ts), through migration 110's record_thought_subject.
+ * (server-portable/subject.ts), through migration 111's record_thought_subject.
  *
  *   bun db/extract-entities.ts --url … --subjects                # the rules, then the judge model for the rest
  *   bun db/extract-entities.ts --url … --subjects rules          # the rules alone: no model call
@@ -13,7 +13,7 @@
  *
  * The extraction pass records the rules' subject with each thought's entities (extract-entities.ts's processRow), so
  * a thought filed under a ticket, or naming one on its first line, has its subject once it is extracted. This sweep
- * is the rest: thoughts extracted before 110, those the rules leave to the model, and those whose text moved since
+ * is the rest: thoughts extracted before 111, those the rules leave to the model, and those whose text moved since
  * their subject was found. It is also the one-time backfill. It takes one thought at a time, without a lease:
  * record_thought_subject locks the thought and checks the text's fingerprint, so two sweeps, or a sweep beside the
  * pass, write each text's subject once, and a later write keeps or replaces an earlier one. `--subjects rules`
@@ -37,16 +37,16 @@ import { sleepUnless, STOPPED_EARLY, type PassStop } from "./lease.ts";
 import { consoleWriter, numberProblem, type Writer } from "./cli.ts";
 import { databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 
-/** 110's door, by its signature: the sweep's one write. */
+/** 111's door, by its signature: the sweep's one write. */
 const DOOR = "record_thought_subject(uuid, text, text, text, uuid, text, jsonb)";
 
-/** What the door needs of the role that calls it (110's comment), and where each grant comes from. */
+/** What the door needs of the role that calls it (111's comment), and where each grant comes from. */
 const DOOR_GRANTS = "INSERT and UPDATE on thought_facets (INSERT is the structure group's), UPDATE on thoughts (its row lock), and INSERT and UPDATE on derivations (the capture group's)";
 
 /** What record_thought_subject answers. */
 export type SubjectWrite = { ok: boolean; action: "added" | "kept" | "replaced" | "closed" | "none"; id?: string; stale?: boolean; gone?: boolean };
 
-/** One thought's subject through 110's door, at the fingerprint of the text it was found in. */
+/** One thought's subject through 111's door, at the fingerprint of the text it was found in. */
 export async function recordSubject(sql: SQL, row: { id: string; fingerprint: string }, key: string, by: SubjectBy, judgeKey: string, recipe: Recipe, agentId: string | null): Promise<SubjectWrite> {
   const [r] = await sql`SELECT record_thought_subject(${row.id}::uuid, ${key}, ${by}, ${judgeKey}, ${agentId}::uuid, ${row.fingerprint}, ${recipe}::jsonb) AS r`;
   return r.r as SubjectWrite;
@@ -156,7 +156,7 @@ async function sweep(
   }
   const [{ door }] = (await sql`SELECT to_regprocedure(${DOOR}) IS NOT NULL AS door`) as { door: boolean }[];
   if (!door) {
-    err("\n  record_thought_subject is missing: a thought's own subject is migration 110's. Apply it first:\n    cd db && bun migrate.ts --url …");
+    err("\n  record_thought_subject is missing: a thought's own subject is migration 111's. Apply it first:\n    cd db && bun migrate.ts --url …");
     return 2;
   }
   // The door's grants, asked before any model call: a role that cannot write a subject is refused here, not at its

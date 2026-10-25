@@ -1,6 +1,6 @@
 /**
  * subject.ts — a thought's own subject (SMD-3306): the rules that read it from the thought's ticket, the question the
- * judge model is asked of the thought alone, and the key migration 110's `subject` facet holds.
+ * judge model is asked of the thought alone, and the key migration 111's `subject` facet holds.
  *
  * A work thread is one subject's thoughts in capture order, and SMD-3116 defines evolves as a later segment of the
  * same work: a property of each thought's own subject, not of a pair (SMD-3299). The subject is found in this order:
@@ -16,7 +16,7 @@
  *
  * The extraction worker records the rules' subject with each thought's entities, and its `--subjects` sweep asks the
  * model for the rest (db/extract-entities.ts). A key is `ticket:<ID>`, `pr:<number>`, `version:v<n>.<n>[…]` or
- * `phrase:<lower-case words>` (110's subject_key_valid, mirrored here by subjectKeyValid).
+ * `phrase:<lower-case words>` (111's subject_key_valid, mirrored here by subjectKeyValid).
  */
 
 import { MEDIATED_TEST, pairContext, jsonObject } from "./consolidate-decide.ts";
@@ -26,7 +26,7 @@ import type { EgressSubject } from "./egress.ts";
 
 // ── The key ───────────────────────────────────────────────────────────────────
 
-/** How a subject was found: 110's `by`. */
+/** How a subject was found: 111's `by`. */
 export type SubjectBy = "metadata" | "first_line" | "model";
 
 /** A ticket-shaped word where it stands in a text: 077's rule, a key such as SMD-123 that is not part of a longer word. */
@@ -37,10 +37,10 @@ const TICKET_ID = /^[A-Z][A-Z0-9]+-[0-9]+$/;
 const PR_NUMBER = /(?:\bPR\s*[#-]?\s*|\bpull request\s*#?\s*|\/pull\/|(?<![\w&#])#)([0-9]{1,9})(?![0-9])/i;
 /** A release's version: `v1.9.0`, or `release 1.9` / `version 1.9.0` without the v. */
 const VERSION = /(?:\bv|\b(?:release|version)\s+v?)([0-9]{1,9}(?:\.[0-9]{1,9}){1,3})(?![0-9.]*[0-9])/i;
-/** The most code points a phrase keeps: 110's 207 less `phrase:`. */
+/** The most code points a phrase keeps: 111's 207 less `phrase:`. */
 const PHRASE_MAX = 200;
 
-/** 110's subject_key_valid, for the shapes this module writes: a key it refuses is never sent. */
+/** 111's subject_key_valid, for the shapes this module writes: a key it refuses is never sent. */
 export function subjectKeyValid(key: string): boolean {
   return [...key].length <= 207 && (
     /^ticket:[A-Z][A-Z0-9]*-[0-9]+$/.test(key) ||
@@ -61,7 +61,7 @@ export const NOT_TICKET_PREFIXES: ReadonlySet<string> = new Set([
   "GPL", "LGPL", "AGPL", "FSL", "BSD", "MPL", "CC", "ES", "GPT", "COVID", "Q1", "Q2", "Q3", "Q4", "H1", "H2", "FY", "PR", "README",
 ]);
 
-/** Whether a ticket-shaped word is a ticket: its prefix not among NOT_TICKET_PREFIXES, and short enough for 110's key. */
+/** Whether a ticket-shaped word is a ticket: its prefix not among NOT_TICKET_PREFIXES, and short enough for 111's key. */
 export function isTicket(id: string): boolean {
   return TICKET_ID.test(id) && subjectKeyValid(`ticket:${id}`) && !NOT_TICKET_PREFIXES.has(id.slice(0, id.indexOf("-")));
 }
@@ -102,7 +102,7 @@ export function subjectKey(answer: string): string | null {
 
 /**
  * The ticket a thought is filed under: `metadata.ticket`, else `metadata.issue`, the first that is a ticket id short
- * enough for 110's key. node_state reads the same two fields (068), though its coalesce takes `ticket` whatever it
+ * enough for 111's key. node_state reads the same two fields (068), though its coalesce takes `ticket` whatever it
  * holds. A filed ticket is the brain's own, so the denied prefixes do not apply.
  */
 export function metadataTicket(metadata: Record<string, unknown> | null | undefined): string | null {
@@ -197,7 +197,7 @@ export const SUBJECT_PROMPT_VERSION = 1;
 /** Bumped when a rule changes. */
 export const SUBJECT_RULES_VERSION = 1;
 export const SUBJECT_KEY_PREFIX = "subject:";
-/** The pass key of a subject the rules found: 110's judge_key. */
+/** The pass key of a subject the rules found: 111's judge_key. */
 export const SUBJECT_RULES_KEY = `${SUBJECT_KEY_PREFIX}rules@r${SUBJECT_RULES_VERSION}`;
 /** The pass key of a subject the judge model found, beside extraction's `extract:<model>@p<n>`. */
 export const subjectModelKey = (model: string): string => `${SUBJECT_KEY_PREFIX}${model}@p${SUBJECT_PROMPT_VERSION}`;

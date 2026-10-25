@@ -3030,11 +3030,11 @@ the first ticket on its first non-blank line. A ticket-shaped word there counts
 unless its prefix is on a fixed list of encodings, hashes, protocols,
 standards, licences, model names and dated periods, so `UTF-8`, `SHA-256` or
 `GPT-4` leaves the thought to the model, and a key is the same on every brain
-and every run. It goes through migration 110's
+and every run. It goes through migration 111's
 `record_thought_subject` at the text the claim read, under the rules' key
 `subject:rules@r1`, and the pass asks no model for it. `--subjects` is the sweep
 for the rest (`db/subject-sweep.ts`): each thought with no standing subject at
-its current text, extracted before 110, keyed by no rule or edited since, gets
+its current text, extracted before 111, keyed by no rule or edited since, gets
 the rules' subject, else the judge model's (`OB1_JUDGE_MODEL`). The model is
 asked step 1 of the mediated-pair test about the thought alone, SMD-3299's
 round 4 own question word for word (`server-portable/subject.ts`), and its
@@ -3051,7 +3051,7 @@ nothing either, is said, and exits 1, as the pass fails a malformed answer.
 been measured on the question (the stable brain's, today). The egress gate
 reads each row before its question, and a policy that refuses every row
 refuses the sweep before any; the rules alone send nothing. On a brain before
-110, or under a role without the door's grants, the pass records no subject and
+111, or under a role without the door's grants, the pass records no subject and
 says so once, its entities standing; the sweep refuses either by name before
 any question, exit 2. A dry run reads on through a signal, as the pass's does.
 Sleep does not run the sweep yet (SMD-3306).

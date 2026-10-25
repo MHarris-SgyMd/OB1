@@ -19,7 +19,7 @@
  *     sent and what was cut — the `--dump` record's fields, in the table;
  *   - proposal: the judge's model, prompt version and hash, the candidate
  *     parameters the pair was found under;
- *   - subject (110): the rule that read a thought's own subject, or the
+ *   - subject (111): the rule that read a thought's own subject, or the
  *     judge model's question and the subject it answered;
  *   - a structured pass (`source:<system>`): deterministic, the system.
  *
@@ -136,7 +136,7 @@ export function entityRecipe(cfg: Pick<EmbedConfig, "metadataModel">, extraction
 }
 
 /**
- * A thought's own subject's recipe (110, SMD-3306): a rule's, deterministic,
+ * A thought's own subject's recipe (111, SMD-3306): a rule's, deterministic,
  * naming the rule and the rules' version; or the judge model's, naming the
  * model, the question's version and hash, the temperature and the subject it
  * answered, which the key was read from (subject.ts's subjectKey), so a

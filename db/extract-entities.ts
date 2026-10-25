@@ -170,12 +170,12 @@
  * ── A thought's own subject (SMD-3306) ──────────────────────────────────────
  * With its entities, each thought's own subject is recorded when a rule finds
  * it: the ticket it is filed under, else the first ticket on its first line
- * (server-portable/subject.ts), through migration 110's
+ * (server-portable/subject.ts), through migration 111's
  * record_thought_subject at the text the claim read. No model is asked for
  * it here. `--subjects` is the sweep for the rest (db/subject-sweep.ts):
- * thoughts extracted before 110, those no rule keys, which it asks the judge
- * model about, and those whose text moved. A brain before 110, or a role
- * without the grants 110's door needs, records no subject and says so once;
+ * thoughts extracted before 111, those no rule keys, which it asks the judge
+ * model about, and those whose text moved. A brain before 111, or a role
+ * without the grants 111's door needs, records no subject and says so once;
  * the entities stand either way.
  */
 
@@ -1229,7 +1229,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * first line, at the text the claim read; record_thought_subject refuses a
    * text that moved since. No model is asked here: a thought no rule keys is
    * --subjects' (db/subject-sweep.ts). A courtesy, as the kept windows are: a
-   * brain before 110, or a role without its door's grants, records none and
+   * brain before 111, or a role without its door's grants, records none and
    * says so once; another error is said once, and the thought's entities stand.
    */
   let subjecting = true;
@@ -1249,7 +1249,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         // Read after the call: every worker in hand may try at once.
         if (!subjecting) return;
         subjecting = false;
-        errAside(`  could not record a thought's own subject (${(e as Error).message}) — no subject is recorded with this run's entities: that needs migration 110, and for a role of its own INSERT on thought_facets and the writes on derivations; a running follower takes it up once restarted`);
+        errAside(`  could not record a thought's own subject (${(e as Error).message}) — no subject is recorded with this run's entities: that needs migration 111, and for a role of its own INSERT on thought_facets and the writes on derivations; a running follower takes it up once restarted`);
         return;
       }
       if (saidSubject.passing) return;

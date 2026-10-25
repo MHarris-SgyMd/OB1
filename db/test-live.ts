@@ -6026,7 +6026,7 @@ if (want("10g")) {
 }
 
 if (want("10h")) {
-  console.log("\n[10h] db/extract-entities.ts: a thought's own subject — the rules' recorded with its entities, no model asked, again at an edited text, and a first line's UTF-8 no ticket; --subjects the sweep for the rest, the judge model asked of the thought alone, an unread answer counted, a moved text kept; a dry run, the rules alone, a limit, a stop, the egress gate, the provider's refusal and outage, a brain without 110's door and a role without its grants, as the pass meets each (migration 110, SMD-3306)");
+  console.log("\n[10h] db/extract-entities.ts: a thought's own subject — the rules' recorded with its entities, no model asked, again at an edited text, and a first line's UTF-8 no ticket; --subjects the sweep for the rest, the judge model asked of the thought alone, an unread answer counted, a moved text kept; a dry run, the rules alone, a limit, a stop, the egress gate, the provider's refusal and outage, a brain without 111's door and a role without its grants, as the pass meets each (migration 111, SMD-3306)");
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   /** The judge's answer by words in the thought; any other thought, an empty subject. */
@@ -6209,17 +6209,17 @@ if (want("10h")) {
     assert(down.code === 1 && /The provider is not answering after 3 pauses/.test(down.stderr) && ownCalls === asked + 4,
       `a server error is paused for three times, then ends the sweep, exit 1 (exit ${down.code}, ${ownCalls - asked} call(s))`);
 
-    // A brain without 110's door: the sweep refuses by name; the pass extracts, and says once that it records no subject.
+    // A brain without 111's door: the sweep refuses by name; the pass extracts, and says once that it records no subject.
     await sql`ALTER FUNCTION record_thought_subject(uuid, text, text, text, uuid, text, jsonb) RENAME TO record_thought_subject_away`;
     try {
       const noDoor = await sweep();
-      assert(noDoor.code === 2 && /record_thought_subject is missing: a thought's own subject is migration 110's/.test(noDoor.stderr), `--subjects without 110's door refuses, naming the migration (exit ${noDoor.code})`);
+      assert(noDoor.code === 2 && /record_thought_subject is missing: a thought's own subject is migration 111's/.test(noDoor.stderr), `--subjects without 111's door refuses, naming the migration (exit ${noDoor.code})`);
       await sql`SELECT update_thought(${filed}::uuid, ${"The ticket row's own text, edited."})`;
       await sql`SELECT update_thought(${session}::uuid, ${"SMD-9 session summary, edited again."})`;
       const noDoorPass = await extractRun();
       const said = noDoorPass.stderr.split("\n").filter((l) => /could not record a thought's own subject/.test(l));
       // Three: the two just edited, two subjects for a rule, and the release note, edited above.
-      assert(noDoorPass.code === 0 && /3 extracted, 0 failed/.test(noDoorPass.stdout) && said.length === 1 && /needs migration 110/.test(said[0]) && !/own subject by its ticket/.test(noDoorPass.stdout),
+      assert(noDoorPass.code === 0 && /3 extracted, 0 failed/.test(noDoorPass.stdout) && said.length === 1 && /needs migration 111/.test(said[0]) && !/own subject by its ticket/.test(noDoorPass.stdout),
         `the pass without it extracts the three edited, their entities standing, and says once that it records no subject (exit ${noDoorPass.code}, ${said.length} line(s): ${noDoorPass.stdout.split("\n").find((l) => /extracted,/.test(l))?.trim().slice(0, 60)})`);
     } finally {
       await sql`ALTER FUNCTION record_thought_subject_away(uuid, text, text, text, uuid, text, jsonb) RENAME TO record_thought_subject`;
