@@ -23,8 +23,9 @@
  *   --runs <id,id,…>      these runs instead of a window (with --branch, --days or --workflow refused: they would be ignored)
  *   --repo <owner/name>   default gh's own (the repository of the current directory)
  *
- * A job name that no run read has is refused (exit 1), with the job names the runs do have. A re-run shows its
- * latest attempt, marked. Needs `gh` signed in. Reads only; writes nothing.
+ * Exits 0 with the report; 1 when `gh` cannot list the runs, no run can be read, or no run read has the job (the job
+ * names the runs do have are listed); 2 for a refused option. A re-run shows its latest attempt, marked. Needs `gh`
+ * signed in. Reads only; writes nothing.
  */
 
 const KNOWN: Record<string, "value" | "flag"> = {
@@ -75,8 +76,9 @@ export function jobRow(job: Job): { job: number | null; steps: { name: string; s
 }
 
 /**
- * The steps to report, chosen by name across every run, so each one's figures read every run it ran in: those the
- * pattern matches, or with no pattern those that took a second or more in some run.
+ * The steps to report, chosen by name across every run read, failed ones included (a failed run shows the step that
+ * failed), so each one's figures read every successful run it ran in: those the pattern matches, or with no pattern
+ * those that took a second or more in some run.
  */
 export function pickSteps(rows: { steps: { name: string; s: number }[] }[], step?: RegExp): Set<string> {
   const longest = new Map<string, number>();
@@ -99,6 +101,12 @@ function refuse(msg: string): never {
   process.exit(2);
 }
 
+/** A failure that is not the caller's: gh could not list or read the runs. */
+function fail(msg: string): never {
+  console.error(msg);
+  process.exit(1);
+}
+
 /** One `gh` call's JSON, tried twice; the error's text when both fail. A missing `gh` is refused. */
 async function gh(args: string[]): Promise<{ ok: true; json: unknown } | { ok: false; error: string }> {
   let error = "";
@@ -110,7 +118,14 @@ async function gh(args: string[]): Promise<{ ok: true; json: unknown } | { ok: f
       refuse(`cannot run gh: ${(e as Error).message}`);
     }
     const [out, err, code] = await Promise.all([new Response(proc.stdout as ReadableStream).text(), new Response(proc.stderr as ReadableStream).text(), proc.exited]);
-    if (code === 0) return { ok: true, json: JSON.parse(out) };
+    if (code === 0) {
+      try {
+        return { ok: true, json: JSON.parse(out) };
+      } catch (e) {
+        error = `gh's answer is not JSON: ${(e as Error).message}`;
+        continue;
+      }
+    }
     error = err.trim();
   }
   return { ok: false, error };
@@ -189,9 +204,11 @@ if (import.meta.main) {
     const cutoff = Date.now() - days * 86_400_000;
     const day = new Date(cutoff - 86_400_000).toISOString().slice(0, 10);
     const listed = await gh(["run", "list", ...repo, "--workflow", workflow, "--branch", branch, "--created", `>=${day}`, "--limit", String(LIST_LIMIT), "--json", "databaseId,status,createdAt"]);
-    if (!listed.ok) refuse(`gh run list failed: ${listed.error}`);
+    if (!listed.ok) fail(`gh run list failed: ${listed.error}`);
     const runs = listed.json as { databaseId: number; status: string; createdAt: string }[];
-    if (runs.length >= LIST_LIMIT) console.log(`  gh returned its limit of ${LIST_LIMIT} runs: the window is cut short; give fewer --days`);
+    // Cut short only if the oldest run listed is already inside the window: the extra day asked for may fill the limit.
+    const oldest = Math.min(...runs.map((r) => Date.parse(r.createdAt)));
+    if (runs.length >= LIST_LIMIT && oldest >= cutoff) console.log(`  gh returned its limit of ${LIST_LIMIT} runs, all inside the window: it is cut short; give fewer --days`);
     ids = runs.filter((r) => r.status === "completed" && Date.parse(r.createdAt) >= cutoff).map((r) => String(r.databaseId)).reverse();
     console.log(`${workflow} on ${branch} since ${new Date(cutoff).toISOString().slice(0, 16)}Z: ${ids.length} completed runs`);
   }
@@ -212,11 +229,17 @@ if (import.meta.main) {
     const job = run.jobs.find((j) => j.name === jobName);
     read.push({ id, run, job, row: job ? jobRow(job) : undefined });
   }
+  if (ids.length > 0 && read.length === 0) fail(`none of the ${ids.length} runs could be read`);
   if (read.length > 0 && read.every((r) => !r.job)) {
-    console.error(`no run read has a job named "${jobName}"; its jobs are named: ${[...seen].sort().join(", ")}`);
+    console.error(`no run read has a job named "${jobName}"; its jobs are named: ${[...seen].sort().join("; ")}`);
     process.exit(1);
   }
-  const names = pickSteps(read.filter((r) => r.job?.conclusion === "success").map((r) => r.row!), step);
+  const names = pickSteps(read.filter((r) => r.row).map((r) => r.row!), step);
+  if (step && names.size === 0) {
+    // Say it, not nothing: a misspelt pattern and a step that is skipped in every run read the same otherwise.
+    const skippedOnly = new Set(read.flatMap((r) => (r.job?.steps ?? []).filter((st) => st.conclusion === "skipped" && step!.test(st.name)).map((st) => st.name)));
+    console.log(`no step matching ${step} ran in any run read${skippedOnly.size ? `; skipped every time: ${[...skippedOnly].join("; ")}` : ""}`);
+  }
   const jobTimes: number[] = [];
   const stepTimes = new Map<string, number[]>([...names].map((n) => [n, []]));
   for (const { id, run, job, row } of read) {

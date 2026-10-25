@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * suite-sections.ts — a suite's numbered sections by wall time, slowest first (SMD-3305).
+ * suite-sections.ts — a suite's bracketed sections by wall time, slowest first (SMD-3305).
  *
  * The fork's suites print each section's header as a line that starts with a bracketed number or name ("[12] The
  * REST core's spans …", "[8e2] …", "[file]", "[where the key may travel]"); a suite that prints none (db/test-cli.ts)
@@ -9,7 +9,8 @@
  * header is "(start)". It prints the suite's tally line, then the sections slowest first, then the total. What to cut
  * in a suite starts here: SMD-3263 found test-rest's [12] at 38 of its 44 s this way. The times are only as good as
  * the child's flushing: Bun flushes each line, but a child that buffers its stdout (python3 writing to a pipe) hands
- * every line over at once, and every section reads 0 s.
+ * every line over at its end, so all the time reads as (start) and every section as 0 s. Work a suite runs across
+ * sections (test-rest's [16] probes start at import) counts toward whichever sections are printing while it runs.
  *
  *   bun scripts/suite-sections.ts --cwd server-portable -- bun test-rest.ts
  *   bun scripts/suite-sections.ts --top 3 --cwd server-portable -- ../db/with-postgres.sh bun test-egress.ts
@@ -58,8 +59,12 @@ export function parseArgs(argv: string[]): Opts {
   return out;
 }
 
-/** A section header: a line that starts with a bracketed number or name, "[12]", "[8e2]", "[file]"; not one indented, unclosed or empty. */
-const HEADER = /^\[[^\]\s][^\]]{0,79}\]/;
+/**
+ * A section header: a line that starts with a bracketed number or name, "[12]", "[8e2]", "[file]", however long, its
+ * closing bracket followed by a space or the line's end; not one indented, unclosed, empty or space-led (`[ 1, 2 ]`,
+ * an array printed raw).
+ */
+const HEADER = /^\[[^\]\s][^\]]*\](?=\s|$)/;
 /** The suites' tally line ("480 assertions: 480 passed, 0 failed", or "test-cli: 452 passed, 0 failed"). */
 const TALLY = /\d+ assertions:|\d+ passed, \d+ failed/;
 
@@ -105,7 +110,8 @@ function selfCheck(): number {
   const early = sections([{ at: 1_000, text: "preamble" }, { at: 3_000, text: "[1] first" }], 4_000);
   ok(early[0].name === "(start)" && early[0].s === 3 && early[1].s === 1, "the launch to the first header is (start), the time before any output included");
   ok(HEADER.test("[13d] a lettered section") && HEADER.test("[8e2] two levels") && HEADER.test("[where the key may travel]"), "a bracketed number, a lettered one or a name heads a section");
-  ok(!HEADER.test("  [12] indented") && !HEADER.test("[12 unclosed") && !HEADER.test("[] empty") && !HEADER.test("[ spaced]"), "not an indented, unclosed, empty or space-led bracket");
+  ok(HEADER.test(`[${"a Host the URL parser refuses, ".repeat(5)}(SMD-2595)]`), "a name of any length (test-auth's run past 120 characters)");
+  ok(!HEADER.test("  [12] indented") && !HEADER.test("[12 unclosed") && !HEADER.test("[] empty") && !HEADER.test("[ spaced]") && !HEADER.test("[1,2]x"), "not an indented, unclosed, empty or space-led bracket, nor one run into the next word");
   ok(TALLY.test("480 assertions: 480 passed, 0 failed") && TALLY.test("test-cli: 452 passed, 0 failed"), "both tally forms read");
   console.log(failed ? `${failed} failed` : "all passed");
   return failed ? 1 : 0;
