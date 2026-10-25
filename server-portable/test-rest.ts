@@ -1452,7 +1452,7 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   // pass 2, SMD-2902). A collector that answers in 1.5 s gets everything; one that never answers is cut at the bound,
   // and what each signal held is said by count before the stop's line, not read as sent because the batch was empty.
   // The batch's delay at 200 ms (OTEL_BSP_SCHEDULE_DELAY), so its export is on its way well before the stop.
-  const stopWith = async (name: string, answer: (req: Request) => Response | Promise<Response>, env: Record<string, string> = {}, more = 0, waitFor: (RegExp | (() => Promise<unknown>))[] = []) => {
+  const stopWith = async (name: string, answer: (req: Request) => Response | Promise<Response>, env: Record<string, string> = {}, more = 0, waitFor: (RegExp | ((port: number) => Promise<unknown>))[] = []) => {
     let collector: ReturnType<typeof Bun.serve> | undefined;
     let child: Awaited<ReturnType<typeof serveChild>> | undefined;
     let port = 0;
@@ -1469,7 +1469,7 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
       await hit();
       await Bun.sleep(700); // past the batch's delay: its export is on its way, the batch empty
       // Then what the case waits on, each up to 10 s: a deadline's line comes when it comes, not at a guessed sleep.
-      for (const wait of waitFor) if (wait instanceof RegExp && !(await started.until(wait, 10_000))) missed.push(`no ${wait.source} within 10 s`); else if (!(wait instanceof RegExp)) await wait();
+      for (const wait of waitFor) if (wait instanceof RegExp && !(await started.until(wait, 10_000))) missed.push(`no ${wait.source} within 10 s`); else if (!(wait instanceof RegExp)) await wait(started.port);
       await Promise.all(Array.from({ length: more }, hit)); // then more, at once, behind it
       out = await started.stop();
     } catch (e) {
@@ -1485,9 +1485,40 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     }
     return { name, up: !!child?.up && !!child?.sdk, out, port, missed: missed.join("; "), line: out.split("\n").find((l) => l.startsWith("SIGTERM: stopped")) ?? "" };
   };
-  // The collectors the cases answer with — one that trickles, one that rejects in part, one that pushes back, one that
-  // answers in 1.5 s — each told at its case's rows below.
+  // The collectors the cases answer with — one that trickles, one that trickles all but the metrics, one that rejects in
+  // part, one that pushes back, one that answers in 1.5 s — each told at its case's rows below.
   const trickle = () => new Response(new ReadableStream({ async start(c) { for (let i = 0; i < 120; i++) { c.enqueue(new TextEncoder().encode(" ")); await Bun.sleep(250); } c.close(); } }), { headers: { "content-type": "application/json" } });
+  // The stop's flush is the metrics' last reading alone, answered at once, and its word counts from its signal: the span
+  // and log record lost at their deadline before it are said on their own lines, not in it (SMD-3297).
+  const trickleButMetrics = (req: Request) => (new URL(req.url).pathname.endsWith("/metrics") ? Response.json({}) : trickle());
+  // The first span and log export trickled, every later one and the metrics answered at once — a set of its own per
+  // case, so a second case is not answered at once on the first's paths — and a provider that holds a search 5.5 s, so
+  // the stop drains it past the first exports' deadline (about 3.2 s after the signal) and ends its line well inside
+  // serveChild's kill 8 s after it: what the drain loses is the stop's, though its flush is answered (SMD-3297 review
+  // passes 1–2). The search waits on the provider: one answered without it (SMD-2891's keyword path) would end the drain
+  // at once, and the row would fail every run, not now and then.
+  const trickleFirst = () => {
+    const trickled = new Set<string>();
+    return (req: Request) => {
+      const path = new URL(req.url).pathname;
+      if (path.endsWith("/metrics") || trickled.has(path)) return Response.json({});
+      trickled.add(path);
+      return trickle();
+    };
+  };
+  // The stop comes once the provider has the search, not after a guessed sleep: under load the search could reach it
+  // after the signal, and the drain would wait on nothing (SMD-3297 review pass 4).
+  let searchArrived = () => {};
+  const arrived = new Promise<void>((resolve) => { searchArrived = resolve; });
+  const heldProvider = Bun.serve({ port: 0, fetch: async (req) => {
+    if ((await req.text()).includes("a search the drain waits on")) searchArrived();
+    await Bun.sleep(5_500);
+    return Response.json({ data: [{ embedding: [0] }] });
+  } });
+  const searchHeld = async (port: number) => {
+    void fetch(`http://127.0.0.1:${port}/v1/search`, { method: "POST", headers: { "x-brain-key": "write-raw", "content-type": "application/json" }, body: JSON.stringify({ query: "a search the drain waits on" }) }).catch(() => {});
+    if (!(await Promise.race([arrived.then(() => true), Bun.sleep(10_000).then(() => false)]))) throw new Error("the search never reached the provider within 10 s");
+  };
   const partial = (req: Request) => {
     const path = new URL(req.url).pathname;
     const field = path.endsWith("/traces") ? "rejectedSpans" : path.endsWith("/logs") ? "rejectedLogRecords" : "rejectedDataPoints";
@@ -1530,7 +1561,7 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
     stopWith("crowded", () => new Promise<Response>(() => {}), {
       OTEL_BLRP_SCHEDULE_DELAY: "200", OTEL_BSP_MAX_QUEUE_SIZE: "1", OTEL_BSP_MAX_EXPORT_BATCH_SIZE: "1", OTEL_BLRP_MAX_QUEUE_SIZE: "1", OTEL_BLRP_MAX_EXPORT_BATCH_SIZE: "1",
     }, 4),
-    stopWith("trickled", trickle, { OTEL_EXPORTER_OTLP_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200" }, 0, [/telemetry: 1 span not sent to \S+ \(no answer in time\)/, /telemetry: 1 log record not sent to \S+ \(no answer in time\)/]),
+    stopWith("trickled", trickleButMetrics, { OTEL_EXPORTER_OTLP_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200" }, 0, [/telemetry: 1 span not sent to \S+ \(no answer in time\)/, /telemetry: 1 log record not sent to \S+ \(no answer in time\)/]),
     stopWith("rejected", partial, { OTEL_BLRP_SCHEDULE_DELAY: "200" }),
     stopWith("perSignal", trickle, { OTEL_EXPORTER_OTLP_TRACES_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200" }, 0, [/telemetry: 1 span not sent to \S+ \(no answer in time\)/]),
     stopWith("noSpans", partial, { OTEL_BLRP_SCHEDULE_DELAY: "200", OTEL_TRACES_EXPORTER: "none" }),
@@ -1541,8 +1572,10 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
       while (answeredLate < 2 && Date.now() < until) await Bun.sleep(100);
       await Bun.sleep(300); // the SDK's callback, a tick after the answer
     }]),
+    stopWith("drained", trickleFirst(), { OTEL_EXPORTER_OTLP_TIMEOUT: "1000", OTEL_BLRP_SCHEDULE_DELAY: "200", OB1_STOP_GRACE: "20", OB1_LLM_BASE_URL: `http://127.0.0.1:${heldProvider.port}/v1`, OB1_LLM_LOCAL: "1" }, 0, [searchHeld]),
   ])).map((c) => [c.name, c]));
-  const { slow, hung, crowded, trickled, rejected, perSignal, noSpans, hungFirst, pushedBack } = cases;
+  heldProvider.stop(true);
+  const { slow, hung, crowded, trickled, rejected, perSignal, noSpans, hungFirst, pushedBack, drained } = cases;
   // A case that threw, or whose wait ran out, is said here whatever its rows read: its output is kept, and a row could
   // pass on it (SMD-3263 review pass 2).
   const misses = Object.values(cases).filter((c) => c.missed).map((c) => `${c.name}: ${c.missed}`);
@@ -1576,22 +1609,32 @@ console.log("\n[12] The REST core's spans (SMD-1849 PR 2b): the request's, named
   const spansSaid = tally("span"), logsSaid = tally("log record");
   const total = (by: Record<string, number>) => Object.values(by).reduce((a, b) => a + b, 0);
   assert(crowded.up && total(spansSaid) === 5 && total(logsSaid) === 5 && (spansSaid["queue full"] ?? 0) >= 1 && (logsSaid["queue full"] ?? 0) >= 1 && (spansSaid.cut ?? 0) >= 1 && (logsSaid.cut ?? 0) >= 1,
-    `with full queues and batches still holding, each of five requests' span and log record is said once, dropped or cut (spans ${JSON.stringify(spansSaid)}, log records ${JSON.stringify(logsSaid)})`);
+    `with full queues and batches still holding, each of five requests' span and log record is said once, dropped or cut (spans ${JSON.stringify(spansSaid)}, log records ${JSON.stringify(logsSaid)}${total(spansSaid) + total(logsSaid) === 0 ? `; up ${crowded.up}, ${crowded.line || "no stop line"}${crowded.missed ? `, ${crowded.missed}` : ""}` : ""})`);
 
   // SMD-2902 PR 2: a collector that trickles its answer, a byte every 250 ms. The exporter's own timeout, 1 s here,
   // is an idle one that the bytes never let fire (a byte a second raced it, review of the first run), so each export
-  // is counted at its deadline (twice that 1 s, plus 2 s) as no answer in time, before the stop, which says not all
-  // was sent. The case waits on those lines, not a fixed sleep (review pass 1).
+  // is counted at its deadline (twice that 1 s, plus 2 s) as no answer in time, on its own line, before the signal. The
+  // stop's word counts from its signal, and the metrics are answered at once, so it says sent (SMD-3297). The case
+  // waits on those lines, not a fixed sleep (review pass 1).
   const lateLines = trickled.out.split("\n").filter((l) => l.includes(`not sent to http://127.0.0.1:${trickled.port} (no answer in time)`));
-  assert(trickled.up && lateLines.some((l) => l.startsWith("telemetry: 1 span not sent")) && lateLines.some((l) => l.startsWith("telemetry: 1 log record not sent")) && /; telemetry not all sent.*; exit 0$/.test(trickled.line),
-    `a collector that trickles its answer: each export past its deadline is said as no answer in time, and the stop says not all was sent (${lateLines.join(" / ") || trickled.out.split("\n").filter((l) => l.includes("not sent")).join(" / ")}; ${trickled.line}${trickled.missed ? `; ${trickled.missed}` : ""})`);
+  assert(trickled.up && lateLines.some((l) => l.startsWith("telemetry: 1 span not sent")) && lateLines.some((l) => l.startsWith("telemetry: 1 log record not sent")) && /; telemetry sent; exit 0$/.test(trickled.line),
+    `a collector that trickles its answer: each export past its deadline is said as no answer in time, on its own line; the stop's word counts from its signal, the metrics answered at once, so sent (SMD-3297) (${trickled.out.split("\n").filter((l) => l.includes("not sent")).join(" / ") || "none lost"}; ${trickled.line}${trickled.missed ? `; ${trickled.missed}` : ""})`);
   // A partial success: the collector answers 200 and rejects one item of each export. That one is said as rejected by the
-  // collector and the stop says not all was sent; the collector's own message is never said.
+  // collector, and the stop says not all was sent for the metric export its own flush made, partly rejected — the span
+  // and log record went before the signal (SMD-3297); the collector's own message is never said.
   const rejectedLines = rejected.out.split("\n").filter((l) => l.includes(`not sent to http://127.0.0.1:${rejected.port} (rejected by the collector)`));
   const partlyLines = rejected.out.split("\n").filter((l) => l.includes(`not sent to http://127.0.0.1:${rejected.port} (partly rejected by the collector)`));
   assert(rejected.up && ["1 span", "1 log record"].every((n) => rejectedLines.some((l) => l.startsWith(`telemetry: ${n} not sent`))) && partlyLines.some((l) => l.startsWith("telemetry: 1 metric export not sent"))
     && /; telemetry not all sent; exit 0$/.test(rejected.line) && !rejected.out.includes("PLANTED-over-quota"),
     `a partial success: the rejected span and log record said as rejected by the collector, the metric export as partly rejected, the stop not all sent, the collector's message never said (${[...rejectedLines, ...partlyLines].join(" / ") || rejected.out.split("\n").filter((l) => l.includes("not sent")).join(" / ")}; ${rejected.line})`);
+  // A loss while the stop drains is the stop's (SMD-3297 review pass 1): the first span and log record trickle from just
+  // before the signal, a search the provider holds 5.5 s keeps the drain open past their deadline (about 3 s after the
+  // signal), and the
+  // flush's own exports and the metrics are answered — so the word is not all sent, where the flush's alone said sent.
+  const drainLost = drained.out.split("\n").filter((l) => l.includes(`not sent to http://127.0.0.1:${drained.port} (no answer in time)`));
+  const drainedIn = Number(/stopped in ([\d.]+) s/.exec(drained.line)?.[1] ?? NaN);
+  assert(drained.up && ["1 span", "1 log record"].every((n) => drainLost.some((l) => l.startsWith(`telemetry: ${n} not sent`))) && drainedIn >= 3.5 && /; telemetry not all sent; exit 0$/.test(drained.line),
+    `exports lost while the stop drains: said as no answer in time, and the stop, past their deadline, says not all sent though its flush was answered (${drainLost.join(" / ") || "none lost"}; ${drained.line || "no stop line: killed 8 s after the signal?"})`);
   // Each signal's own deadline: only spans' timeout set (OTEL_EXPORTER_OTLP_TRACES_TIMEOUT=1000), so the span is no
   // answer in time at about 4 s while the log record, on the default 22 s, is still on its way when the stop cuts it
   // (review pass 1's mutants: every signal given the spans' timeout survived).

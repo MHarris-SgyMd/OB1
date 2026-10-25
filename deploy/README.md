@@ -488,7 +488,7 @@ paths today:
 | `/api` and everything under it | the proxy's bodiless 404 by default. With `compose.api-public.yaml` named (below), `api` — the REST core, as `api.ob1.internal` on the `mesh` network — with `/api` stripped: `/api/v1/stats` reaches it as `/v1/stats`, and the links it answers carry `/api` back |
 | `/hooks` and everything under it | the proxy's bodiless 404 by default. With `compose.hooks-public.yaml` named ("Plugins' webhooks" below), `api` — the REST core — path kept: `/hooks/<plugin>/<name>` is a plugin's inbound webhook, served only for a plugin `OB1_HOOKS` names (SMD-2310) |
 | `/mcp` and everything under it | `mcp` — the MCP server built on the REST core (SMD-2287), as `mcp.ob1.internal` on the `mesh` network: the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is its 405. Every tool is a call on the REST core, the caller's key beside this server's own forward key |
-| `/dashboard` and everything under it | `app` — the operator GUI (SMD-2280), as `app.ob1.internal` on the `mesh` network, path kept: sign in with a read or write access key, then the brain's counts and newest thoughts, every thought a page at a time by its filters, search by meaning or by exact text, what changed, supersession proposals, the worker queue and the query log, its status (`brain_info`) and any thought, each read from the REST core under that key. Key sign-in is off while `COMPOSE_PROFILES` names `auth` (`dashboard/README.md`). While `app` is stopped or starting, the proxy's own 502 |
+| `/dashboard` and everything under it | `app` — the operator GUI (SMD-2280), as `app.ob1.internal` on the `mesh` network, path kept: sign in with a read or write access key, then the brain's counts and newest thoughts, every thought a page at a time by its filters, search by meaning or by exact text, what changed, supersession proposals, the worker queue and the query log, its status (`brain_info`), any thought and an enabled plugin's pages, each read from the REST core under that key. Key sign-in is off while `COMPOSE_PROFILES` names `auth` (`dashboard/README.md`). While `app` is stopped or starting, the proxy's own 502 |
 | `/grafana` and everything under it | the proxy's bodiless 404 by default. With `compose.grafana-public.yaml` named ("The observability profile" below), `lgtm` (`--profile observability`), as `lgtm.ob1.internal` on the `mesh` network — its Grafana, serving from `/grafana`, path kept, behind its own sign-in. With the profile off, or the container stopped or still starting, the proxy's bodiless 404 too, and so is a 502 of Grafana's own (a data source it cannot reach) |
 | every path starting with `/canary` or `/working`, in any letter case | the proxy's own 404 (SMD-2874: a canary or a working tier is a brain of its own on its own port, and this stack routes none; from SMD-2294 to v2.0.0 a tier answered at `/canary/mcp` here, deprecated by SMD-3057 for a release before it went). No router matches them, so a client still given a tier's URL here reaches nothing; until v2.0.0 `tier-off` kept them off the legacy route, and went with it (SMD-2532) |
 | `GET`/`HEAD`/`OPTIONS /health` | `mcp` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key; OPTIONS for a browser's CORS preflight |
@@ -772,7 +772,11 @@ for a plugin named in `OB1_HOOKS`, which must also be enabled in
 # deploy/.env: OB1_PLUGINS=example, OB1_PLUGIN_DB_PASSWORD=…, OB1_HOOKS=example,
 #              OB1_HOOK_SECRETS=example=<openssl rand -hex 32>
 docker compose -f compose.yaml -f compose.hooks-public.yaml up -d
+docker compose -f compose.yaml -f compose.hooks-public.yaml up -d --force-recreate --no-deps app
 ```
+
+The second line gives the GUI the recreated REST core's address at once
+(signing everyone out of it: its sessions live in its memory).
 
 Keep every other `-f` the stack already runs with on the same command —
 `compose.release.yaml`, `compose.api-public.yaml` — or the proxy is recreated
@@ -1300,18 +1304,25 @@ exporter allows each signal at once, so under a trickle that never ends every
 export after 30 of them is `too many exports at once` until they end. What a
 collector answers 200 but rejects (an OTLP partial success) is `rejected by
 the collector`, by the count it gives — a metric export partly rejected as
-one, `partly rejected by the collector` — and counts that export as failed,
-so a stop whose own flush meets one says `not all sent`; the collector's own
-message is never said. A throw while the SDK loads leaves the server serving, said
-by the error's name alone. The stop sends what is still batched and the
-metrics' last reading, and waits for what is on its way, beside closing its
-pool, and says which on its own: `; telemetry sent`,
-`; telemetry not all sent` (an export of some signal failed), `; no telemetry
-left to send`, or `; telemetry not all sent within N ms` (or `: a second
-signal`) — never as the pool's. Under cumulative temporality, the default,
-the metrics' reading is sent whole at every flush, so with a metrics endpoint a
-stop after any request is `sent`, or `not all sent` where an export failed,
-never `no telemetry left to send`; under delta it can be.
+one, `partly rejected by the collector` — and counts that export as failed, so
+a stop that meets one since its signal says `not all sent`; the collector's
+own message is never said. A throw while the SDK loads leaves the server
+serving, said by the error's name alone. The stop sends what is still batched
+and the metrics' last reading, and waits for what is on its way, beside
+closing its pool, and says which on its own: `; telemetry sent`,
+`; telemetry not all sent` (an export of some signal failed since the signal),
+`; no telemetry left to send` (nothing exported, or on its way, since the
+signal), or `; telemetry not all sent within N ms` (or `: a second signal`) —
+never as the pool's. The word is the stop's own, counted from its signal: an
+export lost while the stop drains its requests, or in its flush, makes it
+`not all sent`; one lost before the signal, such as `no answer in time`, is
+said on its own line — at once, when its minute ends, or at the stop with what
+is still unsaid — and never in the word, so a stop after one can still say
+`sent` (SMD-3297). A span or log record a full queue drops is said as
+`queue full`, never in the word, and a stop while the SDK is still loading
+counts from its flush. With a metrics endpoint a stop is never
+`no telemetry left to send`: the uptime gauge (SMD-3050) is read at every
+flush, under either temporality.
 The flush has a bound of its own (SMD-2902): 5 s at most, inside what
 `OB1_STOP_GRACE` leaves less a second before the kill, and never less than the
 pool's (a second, a quarter of one after a cut); a second signal during the
@@ -2597,12 +2608,13 @@ database, and recreates the servers, its proxy and forwarder on its own
 networks. It is refused on a canary with no database to keep: no volume
 (changing nothing), or one whose database holds no relations. Either form
 builds its images while the canary serves, then stops its writers before its
-Postgres is touched, its servers and a running `sleep` worker, and brings the
-worker back on the new build once the smoke has passed, unless its env file
-holds no `OB1_WORKER_KEY` (then it stays stopped, `up` says how to start it,
-and exits 1). A run that fails after the stop says what it left stopped and
-how to go on. A running writer of another profile (the workers, board-sync,
-the import runner) is refused before anything changes: stop it first. A plain `up` still refreshes a canary holding rows of its own; SMD-3155
+Postgres is touched, its servers, a running `sleep` worker and a running
+board-sync, and brings the worker back on the new build once the smoke has
+passed, unless its env file holds no `OB1_WORKER_KEY` (then it stays stopped,
+`up` says how to start it, and exits 1), and board-sync as step 5 below says.
+A run that fails after the stop says what it left stopped and how to go on.
+A running writer of another profile (the workers, the import runner) is
+refused before anything changes: stop it first. A plain `up` still refreshes a canary holding rows of its own; SMD-3155
 is the guard.
 
 The canary is `compose.yaml` again under the project `<stable>-canary` (SMD-2873):
@@ -2637,9 +2649,10 @@ setting, each with the value compose read, quoted afresh, but for these:
 - **the database password**, which is a fresh one of the canary's;
 - **the secrets of the profiles the canary never runs**: the authorization
   server's `OB1_AUTH_*`, n8n's `N8N_*`, the import runner's `OB1_RUNNER_*`,
-  the workers' `OB1_WORKER_KEY`, and board-sync's Linear keys, every
-  `LINEAR_*` (`LINEAR_API_KEY`, and `LINEAR_COMMENT_API_KEY`, which can
-  comment; SMD-2882);
+  the workers' `OB1_WORKER_KEY`, and every Linear key, `LINEAR_*` in any
+  letter case (`LINEAR_COMMENT_API_KEY` can comment; SMD-2882). The canary's
+  own board-sync reads with a `LINEAR_API_KEY` of its own, never stable's
+  (step 5, SMD-3312);
 - **stable's keys and the secrets that go with them** (SMD-2874, SMD-3032):
   its `MCP_ACCESS_KEYS` (and the legacy `MCP_ACCESS_KEY`), the forwarder's
   `OB1_FORWARDER_KEY`, the plugins' webhook secrets `OB1_HOOK_SECRETS`, and
@@ -2879,12 +2892,59 @@ stable is redeployed:
      model changed without a reembed, and the smoke fails.
 
    `--no-smoke` skips the smoke.
-5. With `--connect` it registers the Claude Code connector named for the
+5. It (re)starts the canary's board-sync on the new build whenever the
+   canary's env file holds a `LINEAR_API_KEY` of its own (SMD-3312). A canary
+   upgraded in place (`--no-refresh`) is never refreshed, and a refresh was
+   what brought it stable's ticket rows, so without its own board-sync its
+   copy of the board stays as it was at its last refresh. A running
+   board-sync stops with the other writers before the canary's Postgres is
+   touched (3), as the sleep worker does.
+   - **The key is the canary's alone:** a Linear personal API key made for it
+     with Read access alone, one line in its env file (`.env.canary.local`
+     beside stable's for open-brain-canary):
+
+     ```bash
+     LINEAR_API_KEY=lin_api_…   # the canary's own, Read access alone
+     ```
+
+     Never stable's: a personal key can write unless it was made read-only,
+     and board-sync runs the checkout's `db/` (an unreleased build's, on the
+     canary; keep the tree `up` ran from while the canary runs it, as the
+     sleep worker's). **Making the key read-only is what keeps the canary off
+     the board's writes**; canary.sh cannot tell a key's access, and what it
+     checks guards against accidents, not against a write key it has never
+     seen:
+     - the file never gets stable's;
+     - every `up` clears from it a `LINEAR_API_KEY` that is one of stable's
+       Linear keys (its comment key included, stable's file read with and
+       without the shell's variables, and any exported in canary.sh's own
+       shell), said;
+     - it refuses a key set on two lines with a value each (compose reads only
+       the last), and one that reads otherwise with the shell's variables
+       (`${X:-…}`);
+     - canary.sh unsets every Linear key from its own shell, so a shell
+       exporting stable's does not reach the canary.
+   - **It never posts a finding to the board.** Every `up` clears any other
+     Linear key from the file (`LINEAR_COMMENT_API_KEY` pasted in, say), and
+     canary.sh holds `LINEAR_COMMENT_API_KEY` empty for every compose call it
+     makes besides.
+   - **Turning it on** in a canary that holds rows of its own: set the file's
+     `LINEAR_API_KEY` line (one line; a clearing leaves it as
+     `LINEAR_API_KEY=`, to fill in), then `up --no-refresh` (a plain `up`
+     refreshes from stable, replacing those rows). **Checking it syncs:** the
+     canary's `brain_info` shows a `heartbeat:board-sync` alive and a
+     board-sync watermark that keeps up with stable's.
+   - **Turning it off:** empty the line (or take it out) and re-run
+     `up --no-refresh`: every board-sync container of the canary's is removed,
+     said. With no key and none standing, the run says the canary runs no
+     board-sync.
+6. With `--connect` it registers the Claude Code connector named for the
    canary's project, `open-brain-canary` beside the default stable (`--name`
    names another), at user scope, under the canary's own key; a new
    session sees its tools. The URL is the canary's: `/mcp` on its port.
 
-`down` removes the canary's containers and its own networks. It
+`down` removes the canary's containers, its sleep worker and board-sync
+among them, and its own networks. It
 deregisters the connector only when `claude` has it at user scope and at a
 URL of the canary's: one of its ports on loopback (`127.0.0.1`,
 `localhost`), with any path and any `?key=`. A connector at stable's own
@@ -3137,9 +3197,21 @@ the next run if it was.
 `import-on-demand.per-pipeline.json`, the runner `orchestration/runner.ts`).
 An import recipe converted to an emitter of ingestion-contract items
 (SMD-2147–2150, SMD-2021) runs as one instance of the import template, one
-per line of `orchestration/pipelines.json`. That file is empty until the
-first recipe is converted. Each pipeline owns one source (its `system`): two
-lines naming the same one are refused.
+per line of `orchestration/pipelines.json`. That file holds the four export
+importers (SMD-2493): `grok`, `instagram`, `blogger` and `x-twitter`, each
+reading `imports/<name>/` weekly. Until an export is put in its folder, a run
+writes nothing and succeeds: an absent folder through the emitter's
+`--if-present`, an empty one by having nothing to read. What goes in each
+folder, and what fails a run, is in `deploy/imports/README.md`. An emitter
+killed by something other than the runner (exit 137: the container's
+`mem_limit`, 2 GB, run out) fails the run saying so; an export that large is
+imported from a checkout.
+Each pipeline owns one source (its `system`): two lines naming the same one
+are refused. Rows the runner writes carry its own name,
+`orchestration-runner`. Classify it once, as `postgres`, before the first
+export goes in (`SELECT set_agent_kind('orchestration-runner', 'ingested');`),
+so they read `trust: ingested`. Rows written before that keep no trust until
+`SELECT backfill_thought_actors();` restamps them.
 - **The schedule.** Each instance runs on a schedule of the pipeline's own,
   `everyHours`: 1 to 23 hours, or whole days (24, 48, … 168), since n8n
   counts an hourly schedule within one day. An hourly 24 ran once and never
@@ -3272,11 +3344,15 @@ lines naming the same one are refused.
 
 The run's answer is the ingester's count line and the items it named
 (skipped, stale, held). A URL's password in anything a step printed is
-masked. Drop an export into the pipeline's directory and the next run
-ingests it, and a rerun writes nothing. The export never passes through
+masked. With the runner classified (above), drop an export into the
+pipeline's directory and the next run ingests it, and a rerun writes
+nothing. The export never passes through
 n8n. The request names the pipeline and nothing else, so n8n's run history
 holds the report, not the export. The report does name items by identity,
-and a refusal can quote the value it refused.
+and a refusal can quote the value it refused. A failed run's notes are the
+end of the emitter's stderr, which names the export's files and folders (an
+Instagram thread's folder is named after the other person); the four
+importers never quote a record's text there.
 
 The runner's key is a write capability bounded by the allowlist (the ADR's
 decision 4, amended), and not a brain key. To change it, edit
@@ -3324,8 +3400,9 @@ recipe, its conversion ships the pieces (SMD-2147–2150, SMD-2021):
    which otherwise keeps `recipes/` out of every image;
 4. its line in `pipelines.json`.
 
-Then rebuild the runner (`compose up -d --build orchestration-runner`), put
-the export in `imports/<pipeline>/`, and provision. A line whose emitter the
+Then rebuild the runner (`compose up -d --build orchestration-runner`),
+classify the runner if it is not yet (above), provision, and put the
+export in `imports/<pipeline>/`. A line whose emitter the
 image lacks fails that build, naming the two files. An image started with
 such a line refuses to start, which stops every pipeline, not just that
 one: every door answers 502 until it is fixed.

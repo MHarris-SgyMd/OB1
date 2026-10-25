@@ -21,7 +21,7 @@
  */
 
 import { SQL } from "bun";
-import { createAssert, resetSchema } from "../db/test-support.ts";
+import { childPort, createAssert, resetSchema } from "../db/test-support.ts";
 import { mcpUnderTest, servedByMcpServer } from "./test-support.ts";
 import { authenticate, CLIENT_SCOPES, hashKey } from "./auth.ts";
 import { z } from "zod";
@@ -153,6 +153,8 @@ const ids: string[] = [];
               VALUES ('search', 'search_thoughts', ${q}, 10, 0, 0, '{}'::jsonb, ARRAY[${ids[0]}::uuid], ARRAY[0.9::real], 'hybrid')`;
   }
   await sql`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[1]}::uuid, 'conflict_undirected', 0.7, 'a seeded reason', 0.9, 'consolidate:stub@p2', NULL)`;
+  // SMD-3249: a second, under another pass, so a page of one has a next page to list.
+  await sql`SELECT record_supersession_proposal(${ids[1]}::uuid, ${ids[2]}::uuid, 'newer_supersedes_older', 0.6, 'a second seeded reason', 0.9, 'consolidate:stub@p3', NULL)`;
   // Judged ahead of every read, so brain_info's oldest pending age is 0 s at
   // both doors: each door rounds its own read's age, and two reads either side
   // of a half second answered 0 and 1 (SMD-3195 review pass 2, under load).
@@ -302,6 +304,29 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     const RULE = "judge_key is a pass key: 1-200 letters, digits and . _ : / @ + -, starting with a letter or digit (in a URL's query, encode + as %2B)";
     assert(rr.status === 400 && rr.body.code === "REFUSED_INPUT" && JSON.stringify(rr.body).includes(RULE) && mm.isError && mm.text.includes(RULE) && ok2.status === 200 && shell.status === 400 && shellM.isError && shellM.text.includes(RULE),
       `judge_key with an unencoded + (a space once decoded), a newline, or a character a shell reads: refused through both doors, naming %2B; encoded, answered (${rr.status} ${String(rr.body.code)}, ${mm.isError}, ${ok2.status}, ${shell.status}, ${shellM.isError})`);
+  }
+  // SMD-3249: the proposals cursor through both doors — page one's cursor lists page two the same way through REST and
+  // MCP (text and structuredContent), and one that is none of this listing's is refused alike: REST's 400
+  // REFUSED_CURSOR, the tool's refusal.
+  {
+    const p1 = await rest("GET", "/v1/proposals?status=all&limit=1");
+    const cur = String(p1.body.cursor);
+    const r2 = await rest("GET", `/v1/proposals?status=all&limit=1&after=${encodeURIComponent(cur)}`);
+    const m2 = await mcp("list_supersession_proposals", { status: "all", limit: 1, after: cur });
+    const out2 = rendered((v) => say.renderSupersessionProposals(ok(v as never)), r2.body);
+    const badR = await rest("GET", "/v1/proposals?after=not-a-cursor");
+    const badM = await mcp("list_supersession_proposals", { after: "not-a-cursor" });
+    assert(p1.status === 200 && typeof p1.body.cursor === "string" && r2.status === 200 && out2.content[0].text === m2.text && same(out2.structuredContent, m2.sc)
+        && badR.status === 400 && badR.body.code === "REFUSED_CURSOR" && badM.isError,
+      `proposals' page two by page one's cursor, the same through REST and MCP; a cursor none of this listing's refused alike (${r2.status}, ${badR.status} ${String(badR.body.code)}, ${badM.isError})`);
+    // Review pass 1: a cursor passed with other filters — here pending, page one's being all — refused alike, the
+    // filters it was made under in REST's body and the tool's value.
+    const selR = await rest("GET", `/v1/proposals?limit=1&after=${encodeURIComponent(cur)}`);
+    const selM = await mcp("list_supersession_proposals", { limit: 1, after: cur });
+    const made = { status: "all", lineage: null, judgeKey: null };
+    assert(selR.status === 400 && selR.body.code === "REFUSED_CURSOR" && selR.body.reason === "filters" && same(selR.body.made, made)
+        && selM.isError && selM.sc?.reason === "filters" && same(selM.sc?.made, made) && selM.text.startsWith("Refused: that cursor was made with `status: all` and no other filter"),
+      `a cursor passed with other filters: REST's 400 REFUSED_CURSOR and the tool's refusal, each naming the filters it was made under (${selR.status} ${String(selR.body.reason)}, ${selM.text.slice(0, 80)})`);
   }
   // A limit is a whole number of thoughts, 1 to 1000: 0, -1, 1.5 and 1001 are the schema's refusal, not an empty page (review pass 1).
   // A `days` past a thousand years is the schema's refusal (review pass 2: a larger one put `since` past timestamptz's
@@ -735,14 +760,13 @@ console.log("\n[9] `bun api.ts` as the entry wires the durable job store for the
   const mine = crypto.randomUUID(), theirs = crypto.randomUUID();
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${mine}::uuid, 'scan_thoughts', ${hashKey(KEYS.reader)}, 'reader', 'running', now(), 'open-brain-api')`;
   await sql`INSERT INTO jobs (id, kind, owner_key_hash, actor, status, started_at, door) VALUES (${theirs}::uuid, 'scan_thoughts', ${hashKey(KEYS.reader)}, 'reader', 'running', now(), 'open-brain-elsewhere')`;
-  const free = Bun.serve({ port: 0, fetch: () => new Response(null) });
-  const port = free.port;
-  free.stop(true);
+  // PORT 0: the child binds a port no one holds and says which (SMD-3296).
   const child = Bun.spawn([process.execPath, "api.ts"], {
     cwd: import.meta.dir,
-    env: { ...process.env, PORT: String(port) },
-    stdout: "ignore", stderr: "pipe",
+    env: { ...process.env, PORT: "0" },
+    stdout: "pipe", stderr: "pipe",
   });
+  const { port } = await childPort(child, 20_000);
   const status = async (id: string) => String((await sql`SELECT status FROM jobs WHERE id = ${id}::uuid`)[0]?.status);
   let mineStatus = "running";
   try {

@@ -74,7 +74,8 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
     }, deadlineMs).unref();
   });
 }
-// The only body the GUI takes is the sign-in form's key: 64 kB, not adapter-node's 512 kB.
+// The only bodies the GUI takes are the sign-in form's key and a plugin page's form (the example's note, 2,000
+// characters at most): 64 kB, not adapter-node's 512 kB.
 env.BODY_SIZE_LIMIT = "64K";
 const publicOrigin = env.OB1_PUBLIC_ORIGIN?.trim();
 const problem = publicOrigin ? originProblem(publicOrigin) : null;

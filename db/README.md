@@ -258,8 +258,8 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3005 assertions: 3005 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and nine (109) migrations applied, and
+`bun test-schema.ts` prints `3015 assertions: 3015 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and ten (110) migrations applied, and
 `\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
 the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -2016,6 +2016,50 @@ brain: the rows listing the same through a three-argument call), test-live [16]
 brain at 108), `server-portable/test-preflight.ts`, the store, e2e and REST
 suites.
 
+Migration 110 has the listing page (SMD-3249). 070's cap of 200 with no cursor,
+kept by 109, left every listing but a pending one — which drains as it is
+reviewed — readable only in part: accepted, rejected, stale, all, and any look
+back at one pass's verdicts. The file redefines `list_supersession_proposals`
+on 109's body with an after-cursor of three trailing parameters,
+`p_after_confidence numeric`, `p_after_judged_at timestamptz` and `p_after_id
+uuid` (all set or none, a partial set refused by name): the last listed row's
+values on the listing's order (`confidence DESC, judged_at, id`), so the page
+starts past that row, before the order and the cap. The values, not the row's
+id: 063's recorder re-judges a stale row in place (the same id, `judged_at`
+now(), the new confidence), so a cursor naming the row would jump the walk; a
+walk lists each row once while its status, judge key, confidence and judged_at
+hold — a row that joins the selection or moves in it during the walk (a new
+proposal, a decision, a stale mark, a re-judge) is listed past the cursor and
+missed behind it, and one that leaves it is not listed after. Two
+trailing columns: `page_key`, a JSON array of each row's three values as text (confidence
+exactly, judged_at to the microsecond, the id) for the next call, and
+`remaining`, the selection's rows from this page's first on (`count(*) OVER
+()`, before the LIMIT), so a reader knows whether more follow. LANGUAGE
+plpgsql, for the refusal. 109's four-argument form is dropped first (a RETURNS
+TABLE cannot gain a column), and 070's and 029's with it if a hand re-apply
+left them; a call of two, three or four arguments resolves through the
+defaults. The fork's callers pass seven. The readers follow: the MCP tool and
+`GET /v1/proposals` take `after` and answer `cursor` (null once no more follow)
+and `remaining` (how many follow), list_thoughts' shape (SMD-2995), the cursor
+base64url of `["proposals", status, lineage, judge_key, confidence, judged_at,
+id]` so one listing's is refused by the other and one passed with other filters
+is refused naming its own (`REFUSED_CURSOR`, `reason: "filters"`);
+`consolidate.ts --list <status> --after <cursor>` lists the next page, a capped
+page printing the line to run, its `--list` and `--key` with the cursor
+(`--list lineage`, two listings, takes none); preflight's `lineage` check reads the seven-argument form
+and its three sentinels. An older server's preflight and an older CLI's
+`--status` probe an older form by its signature and read a brain at 110 as
+before that migration (070 from v1.9.0): upgrade the server, never run the
+`--reapply` the older preflight prints. A server left running across
+the migration fails each listing on a connection that had already listed
+("cached plan must not change result type", the result type changed) until
+it restarts. DDL alone; no row moves; no grant is carried. Refuses by name
+without 016, 025 or 029; a re-apply is a no-op. test-schema [98] (230 rows
+walked in pages of 200 and of 7, ties across page edges, a stale row re-judged
+under the cursor, the partial cursor, 109 re-applied beside it), test-upgrade
+[20bb], test-live [16] (`--after` over 51 rows), `server-portable/test-preflight.ts`,
+the store, e2e and REST suites.
+
 ## What changed relative to the guide
 
 Four deliberate differences. Each is a portability fix, not a behaviour change.
@@ -3440,6 +3484,7 @@ bun consolidate.ts --url … --retry-failed          # failed rows back into the
 bun consolidate.ts --url … --list [pending|accepted|rejected|stale|lineage|all]   # lineage: unreviewed rows standing on a lineage pair (070)
 bun consolidate.ts --url … --list relations   # the judged relations standing (084): related, evolves, duplicate, with both thoughts (a distinct, 102, is counted by --status, not listed)
 bun consolidate.ts --url … --list [<status>|relations] --key <judge key>   # one pass's alone, by the key each row names (109); --status counts the pending by pass
+bun consolidate.ts --url … --list <status> [--key <judge key>] --after <cursor>   # the next page: the line a capped page printed (110)
 bun consolidate.ts --url … --accept <id> [--direction newer|older] [--note "…"]
 bun consolidate.ts --url … --reject <id> [--note "…"]
 bun consolidate.ts --url … --stale [DAYS]          # entities quiet for DAYS (90; at most 2000000, inside Postgres's timestamp range)
@@ -5329,9 +5374,9 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 3005 assertions, PGlite, no container
-./with-postgres.sh bun test-live.ts         # 1653 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
-OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 997 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
+bun test-schema.ts                          # 3015 assertions, PGlite, no container
+./with-postgres.sh bun test-live.ts         # 1671 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1015 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts     # 286 assertions
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # 285 assertions; the four add up to the full run's, [end] counted once, which [doc] checks on every run; from one checkout run them one at a time ([2] edits a migration file while it runs)

@@ -605,7 +605,9 @@ after a verdict takes the pair out; not counted before 079 — and the stale
 ones; `none pending` when there is none.
 `consolidate.ts --list` and the `list_supersession_proposals` tool list them —
 one pass's alone with `--key` or `judge_key`, the pass key each proposal names
-(109) — and preflight's `proposals` row warns once the oldest has waited past
+(109), a page at a time with `--after` (pages of 50) or `after` (up to 200), the
+cursor the page before ended with, under the filters it was made with (110) —
+and preflight's `proposals` row warns once the oldest has waited past
 `OB1_PROPOSALS_WARN_DAYS` (7). `Relations` is the judged relations standing
 (084) by word, with their board pairs counted the same way; nothing waits on
 one, so nothing warns (`consolidate.ts --list relations` shows them); `none
@@ -1070,16 +1072,16 @@ word any refusal as this one does.
 ## Expected outcome
 
 ```bash
-bun test-server.ts        # 1202 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and a tool call past its client waited on by the MCP server's, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050), the stop's telemetry flush under a bound of its own and what it cut said by signal, an export past its deadline and a partial success counted (SMD-2902), a list cursor through structuredContent at its own field alone (SMD-2995), preflight's telemetry row judged by each line's kind (SMD-2909), a whole-number setting ignored or held said without its value (SMD-3235), through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
+bun test-server.ts        # 1212 — transport, auth, tool surface, OAuth discovery and the public origin's challenge, the method guard, /health, the store default, the tool-call keepalive, the stop on SIGTERM and a tool call past its client waited on by the MCP server's, the replies' fenced text and one-line metadata, the legacy route's marker read no more, a proposal's one-line reason and note, the board-sync watermark's shape, the heartbeats' parsing, the proposal queue's and the relations' counts and rows, what became of the findings posted and its row (SMD-2682), one lock wait per table, a `Host` the URL parser refuses, or none, the request line's allow-list and its one line per request, the spans, the request-duration histogram and the log record, a provider call's and a store operation's spans and points, a job's and a webhook's deferred work's traces, the budget for requests no key was accepted for (SMD-1849), a monitor's keyed HEADs outside it, a tool call one trace, the uptime gauge (SMD-3050), the stop's telemetry flush under a bound of its own and what it cut said by signal, an export past its deadline and a partial success counted (SMD-2902), a list cursor through structuredContent at its own field alone (SMD-2995), preflight's telemetry row judged by each line's kind (SMD-2909), a whole-number setting ignored or held said without its value (SMD-3235), the stop's telemetry mark taken at its signal (SMD-3297), through the MCP server as a REST client and its own entry (mcp-server/, SMD-2287)
 bun test-auth.ts          # 191 — scoped, hashed, named keys, through the MCP server as a REST client (mcp-server/, SMD-2287)
-bun test-rest.ts          # 483 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, and `bun api.ts` stopped mid-request
+bun test-rest.ts          # 485 — the REST core's routes, OpenAPI, authorization ladder, its JSON request line and its spans, a forwarder's traceparent continued, over a stub core, and `bun api.ts` stopped mid-request
 bun test-plugins.ts       # 282 — plugins in the contract: manifests, OB1_PLUGINS, an operation through REST, OpenAPI, whoami and MCP behind the scope gate, ctx.call, the plugin login URL, the GUI's registry at GET /v1/plugins, and webhooks: verifyTimestamped, onceById, ctx.defer and the example's replay refusals, a plugin operation's span, a webhook fault's and its deferred work's, through the MCP server as a REST client (mcp-server/, SMD-2287)
-bun test-thoughts.ts      # 518 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
+bun test-thoughts.ts      # 633 — the pure rules, no database or provider: the type aliases, titles and URLs, the embed and chunk-context prompts, the extraction window and its parsing, the consolidate judge's verdicts, chunking, the entity gate and genre
 bun test-jobs.ts          # 45 — the async job registry in memory: the lifecycle, ownership, the SSE frames, retention, the cap and the durable sink through a fake (SMD-2273, SMD-2318)
 bun run test:local        # 226 — fully local provider, no credential
-bun run test:sql          # 286 — store conformance, real Postgres in a container
-bun run test:e2e          # 674 — the whole server over MCP with no Supabase at all, OB1_STORE unset, through the MCP server as a REST client (mcp-server/, SMD-2287)
-../db/with-postgres.sh bun test-rest-sql.ts  # 263 — the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
+bun run test:sql          # 290 — store conformance, real Postgres in a container
+bun run test:e2e          # 677 — the whole server over MCP with no Supabase at all, OB1_STORE unset, through the MCP server as a REST client (mcp-server/, SMD-2287)
+../db/with-postgres.sh bun test-rest-sql.ts  # 265 — the REST core beside the MCP server on one database: every operation through both, each read held to a core of the suite's own in process, value for value, and capture, update and delete its rendering and its whole shape, a forwarded capture's too, every refusal's words from the forwarded answer
 ../db/with-postgres.sh bun test-plugins-sql.ts  # 107 — a plugin's tables: the migrator's plugin ledger, the plugin role's and the login role's boundary, the example's operations through both servers, its webhook's delivery ids, preflight's row
 ```
 
@@ -1136,21 +1138,26 @@ stored in the same write").
   a header or a `?key=` query parameter. Moving runtimes does not improve that; see
   [issue #216](https://github.com/NateBJones-Projects/OB1/issues/216).
 - **A tool call may run longer than the runtime's idle timeout.** Bun closes a
-  connection that has been silent for 10 s — a streaming response included, at
-  the next of its 4-second sweeps, so after 8 to 12 s of silence — and the MCP
-  transport opens a tool call's SSE stream at once and writes to it only when
-  the tool returns. A capture whose model calls took ten seconds was closed under
-  the client with nothing in the server's log (SMD-1864). Every event stream now
-  carries a `: keepalive` comment frame every 5 s (`SSE_KEEPALIVE_MS` in
-  `sse.ts`), a line SSE parsers discard by specification, for as long as the
-  tool runs — up to ten minutes (`SSE_KEEPALIVE_MAX_MS`), past which the frames
-  stop, one line says `request still running after N s: …` and, on Bun, the
-  idle timeout reaps the stream (not logged again as a client leaving); on Node
-  it stays open until the client or a proxy gives up. A provider
-  call is bounded by `OB1_LLM_TIMEOUT`, so a call that long is stuck in the
-  database. The idle timeout itself stays at the runtime's default, which is
-  the right reaper for a dead socket, and the two intervals are constants, not
-  knobs: 5 s is inside any proxy read timeout worth running (SMD-1846). A
+  connection that has been silent for its idle timeout — a streaming response
+  included, at the next of its 4-second sweeps, so after 8 to 12 s of silence
+  at the 10 s default — and the MCP transport opens a tool call's SSE stream at
+  once and writes to it only when the tool returns. A capture whose model calls
+  took ten seconds was closed under the client with nothing in the server's log
+  (SMD-1864). Every event stream now carries a `: keepalive` comment frame
+  every 5 s (`SSE_KEEPALIVE_MS` in `sse.ts`), a line SSE parsers discard by
+  specification, for as long as the tool runs — up to ten minutes
+  (`SSE_KEEPALIVE_MAX_MS`), past which the frames stop, one line says
+  `request still running after N s: …` and, on Bun, the idle timeout reaps the
+  stream (not logged again as a client leaving) — the MCP server's stream
+  excepted, which its SDK transport's own 15 s frame keeps open until the call
+  ends, at the same ten minutes (`REST_TIMEOUT_MS`); on Node it stays open
+  until the client or a proxy gives up. A provider call is bounded by
+  `OB1_LLM_TIMEOUT`, so a call that long is stuck in the database. The brain's
+  servers serve with Bun's ceiling, 255 s, for their GETs (the idle timeout,
+  above), and keep the keepalive for the proxy in front and a call past 255 s;
+  the vendored MCP servers stay on the default (`sse.ts` says why, SMD-2931).
+  The two intervals are constants, not knobs: 5 s is inside any proxy read
+  timeout worth running (SMD-1846). A
   client that closes the connection before the response is complete is logged
   in words beside the request's JSON line (`telemetry.ts`, SMD-1849) —
   `request abandoned by the client after 9.8 s: tools/call capture_thought …` —
