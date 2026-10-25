@@ -11,8 +11,9 @@ const OPEN = new Set([`${base}/signin`, `${base}/auth/start`, `${base}/auth/call
 
 // Every request: the session the cookie names, if any, becomes locals.session.
 // A cookie that names none (ended, expired, or from before a restart) is
-// dropped, and an expired session's tokens revoked at the AS (SMD-3307). Signed out, every path but OPEN redirects to /signin — here, not in
-// a layout's load, so a form action or an endpoint is behind it too.
+// dropped, and an expired session's tokens revoked at the AS (SMD-3307).
+// Signed out, every path but OPEN redirects to /signin — here, not in a
+// layout's load, so a form action or an endpoint is behind it too.
 export const handle: Handle = async ({ event, resolve }) => {
 	const id = event.cookies.get(SESSION_COOKIE);
 	const session = readSession(id);

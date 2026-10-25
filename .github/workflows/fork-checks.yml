@@ -3595,17 +3595,21 @@ jobs:
       # authorization server. The AS's side first: the `gui` client signed in
       # as the GUI does (restart-check.ts --gui-refresh) gets a refresh token,
       # a refresh rotates it, and once revoked, as the GUI's sign-out revokes
-      # it, it is refused. Then the GUI itself, recreated on the configured
+      # it, it is refused; a second sign-in in that browser without
+      # prompt=login is asked the password all the same, on a grant of its
+      # own that the first one's revocation leaves, and prompt=none is
+      # login_required. Then the GUI itself, recreated on the configured
       # .env (its OB1_AUTH_SECRET_GUI, the origin) beside a REST core that
       # takes the AS's tokens, driven through the proxy as a browser would
       # (dashboard/smoke-oauth.ts): the start, the password and consent at
       # the AS, the callback opening a session, the views under the token, no
       # token in any page, header, navigation data, script or cookie (the
-      # Verify line), a replayed, forged or other browser's callback refused,
-      # sign-out, and a denied consent. Every sign-in the step makes ends
-      # revoked, so the AS's store holds no refresh token of the `gui` client
-      # after it: sign-out revoked the GUI's. The password goes by name, never
-      # on a command line.
+      # Verify line), a replayed, forged, stolen or other browser's callback
+      # refused, a post from another origin refused, sign-out, the next
+      # visitor asked the password, and a denied consent. Every sign-in the
+      # step makes ends revoked, so the AS's store holds no refresh token of
+      # the `gui` client after it: sign-out revoked the GUI's. The password
+      # goes by name, never on a command line.
       - name: The operator GUI signs in through the authorization server
         working-directory: deploy
         run: |

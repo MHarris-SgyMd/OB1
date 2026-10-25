@@ -123,7 +123,7 @@ console.log('▸ the code exchange, a refresh and a revocation');
 	}
 	const rev = fakeAs(() => new Response(null, { status: 200 }));
 	const revoked = await revokeRefresh(s, 'ref-2', rev.fetchFn);
-	assert(revoked === 'revoked' && rev.calls[0].url === s.revocation && rev.calls[0].form.get('token') === 'ref-2' && rev.calls[0].form.get('token_type_hint') === 'refresh_token' && rev.calls[0].auth.startsWith('Basic ') && rev.calls[0].bounded, 'a revocation posts the refresh token to the mesh revocation endpoint, as gui, under a timeout of its own (sign-out waits on it)');
+	assert(revoked === 'revoked' && rev.calls[0].url === s.revocation && rev.calls[0].form.get('token') === 'ref-2' && rev.calls[0].form.get('token_type_hint') === 'refresh_token' && rev.calls[0].auth.startsWith('Basic ') && rev.calls[0].bounded, 'a revocation posts the refresh token to the mesh revocation endpoint, as gui, under a timeout of its own (a hung AS holds the revoker no longer)');
 	const outcome = async (reply: () => Response) => revokeRefresh(s, 'x', fakeAs(reply).fetchFn);
 	assert((await outcome(() => { throw new TypeError('down'); })) === 'unreachable' && (await outcome(() => json(503, {}))) === 'unreachable' && (await outcome(() => json(429, {}))) === 'unreachable' && (await outcome(() => json(401, { error: 'invalid_client' }))) === 'refused', '…no answer (a fetch that throws, a 5xx, a 429) to try again, a 4xx a refusal not to');
 }
