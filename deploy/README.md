@@ -2893,16 +2893,33 @@ stable is redeployed:
    board-sync stops with the other writers before the canary's Postgres is
    touched (3), as the sleep worker does.
    - **The key is the canary's alone:** a Linear personal API key made for it
-     with Read access alone, put in its env file. Never stable's: a personal key can write
-     unless it was made read-only, and board-sync runs the checkout's `db/`,
-     an unreleased build's on the canary. The file never gets stable's, and
-     every `up` clears stable's, said, where the file holds it.
+     with Read access alone, one line in its env file (`.env.canary.local`
+     beside stable's for open-brain-canary):
+
+     ```bash
+     LINEAR_API_KEY=lin_api_…   # the canary's own, Read access alone
+     ```
+
+     Never stable's: a personal key can write unless it was made read-only,
+     and board-sync runs the checkout's `db/` (an unreleased build's, on the
+     canary; keep the tree `up` ran from while the canary runs it, as the
+     sleep worker's). The file never gets stable's. Every `up` clears from it
+     a `LINEAR_API_KEY` that is one of stable's Linear keys, the comment key
+     included, said, and refuses one set on two lines, since compose reads
+     only the last. canary.sh unsets every Linear key from its own shell, so a
+     shell exporting stable's does not reach the canary.
    - **It never posts a finding to the board.** Every `up` clears any other
      Linear key from the file (`LINEAR_COMMENT_API_KEY` pasted in, say), and
      canary.sh holds `LINEAR_COMMENT_API_KEY` empty for every compose call it
      makes besides.
-   - With no key of its own the run says board-sync is off; one stopped for
-     this run with no key since is left stopped, said.
+   - **Turning it on** in a canary that holds rows of its own: add the line,
+     then `up --no-refresh` (a plain `up` refreshes from stable, replacing
+     those rows). **Checking it syncs:** the canary's `brain_info` shows a
+     `heartbeat:board-sync` alive and a board-sync watermark that keeps up
+     with stable's.
+   - **Turning it off:** take the line out and re-run `up --no-refresh`:
+     board-sync is stopped and its container removed, said. With no key the
+     run says the canary runs no board-sync.
 6. With `--connect` it registers the Claude Code connector named for the
    canary's project, `open-brain-canary` beside the default stable (`--name`
    names another), at user scope, under the canary's own key; a new

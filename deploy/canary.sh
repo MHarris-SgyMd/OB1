@@ -91,7 +91,10 @@
 #   2. makes the canary's env file if there is none (before stable's stamp,
 #      so a file that cannot be made is a refusal like those above), or
 #      writes to it the canary's own port, address, tier and profiles where
-#      it holds others (a --port that differs, a file from before SMD-2874), and
+#      it holds others (a --port that differs, a file from before SMD-2874), its
+#      own keys where it holds stable's, and clears from it a LINEAR_API_KEY
+#      that is one of stable's Linear keys and every other Linear key (SMD-3312;
+#      LINEAR_API_KEY set on two lines is refused), each said; and
 #      starts the canary's Postgres; once its standing servers are stopped
 #      (4), sets its database's password to that file's, which a canary from
 #      before SMD-2583 had as stable's;
@@ -306,8 +309,12 @@ unset POSTGRES_PASSWORD
 # …and so are its keys and the secrets that go with them (SMD-2874 PR 2): a
 # shell holding stable's settings (`set -a; . deploy/.env`) would otherwise
 # hand the canary's servers stable's MCP_ACCESS_KEYS over the canary's own
-# (review pass 1).
-unset MCP_ACCESS_KEYS MCP_ACCESS_KEY OB1_FORWARDER_KEY OB1_HOOK_SECRETS OB1_PLUGIN_DB_PASSWORD OB1_CANARY_KEY
+# (review pass 1). The sleep worker's key too, and every Linear key, in any
+# letter case (SMD-3312 review pass 2): compose reads ${LINEAR_API_KEY} from the
+# shell over the canary's file, so a shell exporting stable's would run the
+# canary's board-sync on it, while step 6, reading the file, said the canary's.
+unset MCP_ACCESS_KEYS MCP_ACCESS_KEY OB1_FORWARDER_KEY OB1_HOOK_SECRETS OB1_PLUGIN_DB_PASSWORD OB1_CANARY_KEY OB1_WORKER_KEY
+while IFS= read -r name; do unset "$name"; done < <(compgen -e | grep -iE '^LINEAR_' || true)
 
 if [ -z "$RUNTIME" ]; then
   if command -v docker >/dev/null 2>&1; then RUNTIME=docker
@@ -721,10 +728,23 @@ if mode == "own-fix":
     # comments, so any other Linear key (the comment key, pasted in) goes too,
     # beside canary_compose holding it empty, so a board-sync started by hand
     # from this file cannot post either. The exact name alone is a read key:
-    # compose reads ${LINEAR_API_KEY} by its case.
+    # compose reads ${LINEAR_API_KEY} by its case. Stable'"'"'s is any of stable'"'"'s
+    # Linear keys, its comment key among them, by value, spaces aside (review
+    # pass 2: its comment key pasted as the canary'"'"'s read key passed).
     if linear:
+        # Compose reads a name set on two lines from the last, so a value on an
+        # earlier one is neither read nor compared, and a clearing removes
+        # every line of it, the canary'"'"'s own key with stable'"'"'s: refused,
+        # named, before anything is written (review pass 2).
+        # (Any other Linear name is cleared whatever its lines hold, every one.)
+        if "LINEAR_API_KEY" in linear and sum(1 for line in file_lines if re.match(r"\s*(?:export\s+)?LINEAR_API_KEY\s*=", line)) > 1:
+            sys.exit("LINEAR_API_KEY is set on more than one line in %s, and compose reads only the last: keep one line, with the canary'"'"'s own key (or none)" % (os.environ.get("SHOWN") or out))
         lv = values(out, linear)
-        stable_read = (values(stable, ["LINEAR_API_KEY"])["LINEAR_API_KEY"] or "").strip()
+        stable_linear = [n for n in file_names(stable) if re.fullmatch(r"LINEAR_[A-Z0-9_]*", n, re.I)]
+        stable_by_value = {}
+        for n, v in (values(stable, stable_linear) if stable_linear else {}).items():
+            if (v or "").strip():
+                stable_by_value.setdefault(v.strip(), n)
         for n in linear:
             v = (lv[n] or "").strip()
             if not v:
@@ -732,9 +752,9 @@ if mode == "own-fix":
             if n != "LINEAR_API_KEY":
                 fix[n] = ""
                 said.append("cleared %s (a Linear key the canary never holds: its board-sync reads the board with a LINEAR_API_KEY of its own and never comments)" % n)
-            elif stable_read and v == stable_read:
+            elif v in stable_by_value:
                 fix[n] = ""
-                said.append("cleared LINEAR_API_KEY (stable'"'"'s): the canary'"'"'s board-sync reads with a key of its own, a Linear personal API key made with Read access alone")
+                said.append("cleared LINEAR_API_KEY (stable'"'"'s %s): the canary'"'"'s board-sync reads with a key of its own, a Linear personal API key made with Read access alone" % stable_by_value[v])
     # plugin=secret pairs separated by spaces, the first = the separator, as
     # server-portable/core/plugins.ts hookSecrets reads them: any secret of
     # stable'"'"'s, under any plugin'"'"'s name (review pass 1: split on commas, it
@@ -758,7 +778,11 @@ if mode == "own-fix":
     # needs nothing is left as it is (code review).
     blocked = [n for n in spans if n in fix]
     if blocked:
-        sys.exit("%s in %s spans lines: write it on one line, its entries separated by commas" % (", ".join(blocked), os.environ.get("SHOWN") or out))
+        # A Linear key is cleared, not rewritten: its lines go (review pass 2).
+        lin = [n for n in blocked if n in linear]
+        other = [n for n in blocked if n not in linear]
+        sys.exit("; ".join(([("%s in %s spans lines: write it on one line, its entries separated by commas" % (", ".join(other), os.environ.get("SHOWN") or out))] if other else [])
+                           + ([("%s in %s spans lines, and the canary never holds it: delete its lines" % (", ".join(lin), os.environ.get("SHOWN") or out))] if lin else [])))
     print(json.dumps({"values": fix, "said": said}))
     sys.exit(0)
 if mode == "write":
@@ -881,7 +905,10 @@ set_canary_own() {
   if ! apply_own "$CANARY_TMP"; then
     rm -f "$CANARY_TMP"
     CANARY_TMP=""
-    echo "could not give the canary's env file, $CANARY_ENV, its own keys and settings: $(head -c 300 <<<"$OWN_WHY") — set them there yourself (its own SERVER_PORT, SERVER_BIND, OB1_TIER, COMPOSE_PROFILES, and an MCP_ACCESS_KEYS holding none of stable's keys), and re-run ${RERUN:-up}." >&2
+    # A Linear line's refusal says its own fix; the general advice is for the rest.
+    local advice="set them there yourself (its own SERVER_PORT, SERVER_BIND, OB1_TIER, COMPOSE_PROFILES, and an MCP_ACCESS_KEYS holding none of stable's keys)"
+    case "$OWN_WHY" in *LINEAR_*|*linear_*) advice="fix that line there" ;; esac
+    echo "could not give the canary's env file, $CANARY_ENV, its own keys and settings: $(head -c 300 <<<"$OWN_WHY") — $advice, and re-run ${RERUN:-up}." >&2
     exit 2
   fi
   if [ -z "$OWN_SAID" ]; then rm -f "$CANARY_TMP"; CANARY_TMP=""; return 0; fi
@@ -1406,14 +1433,32 @@ SLEEP_SAID=""
 # worker does, by name, within its service's 60 s grace, and step 6 brings it
 # back on the new build once the smoke has passed (SMD-3312). A failed run
 # leaves it stopped, said: by BOARD_SAID in the messages that advise (and so
-# silence the EXIT trap), by the trap otherwise. The next run starts it.
+# silence the EXIT trap), by the trap otherwise.
+#
+# Whether the canary has a key of its own is read here, once, its file being
+# final by now (step 2 has cleared stable's): as compose reads the file,
+# spaces aside, so a key of only spaces starts nothing that can only fail
+# (review pass 2). A read that fails stops the run, never reads as no key.
+BOARD_ADD="add a LINEAR_API_KEY of the canary's own to $CANARY_ENV — a Linear personal API key made with Read access alone, never stable's — and re-run $RERUN"
+BOARD_KEY=""
+board_value=""
+if ! board_value="$(env_file value "$CANARY_ENV" LINEAR_API_KEY)"; then
+  echo "could not read LINEAR_API_KEY from $CANARY_ENV through compose: fix the file, then re-run $RERUN." >&2
+  exit 1
+fi
+[ -z "$(printf '%s' "$board_value" | tr -d '[:space:]')" ] || BOARD_KEY=1
+board_value=""
 BOARD_CT="$(container_of "$CANARY" board-sync)"
 BOARD_SAID=""
 if [ -n "$BOARD_CT" ]; then
   say "canary board-sync stopped for $FOR"
   "$RUNTIME" stop -t 60 "$BOARD_CT" >/dev/null
   BOARD_PENDING=1
-  BOARD_SAID=" Board-sync is stopped too: the next run that passes starts it again."
+  if [ -n "$BOARD_KEY" ]; then
+    BOARD_SAID=" Board-sync is stopped too: the next run that passes starts it again."
+  else
+    BOARD_SAID=" Board-sync is stopped too, and the canary has no key of its own to run it on: $BOARD_ADD."
+  fi
 fi
 
 say "canary Postgres"
@@ -1651,30 +1696,33 @@ elif [ -n "$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANAR
 fi
 
 # Step 6: board-sync on the new build, after the smoke, as the sleep worker
-# (SMD-3312). Started whenever the canary's env file holds a LINEAR_API_KEY
-# (its own: step 2 cleared stable's), running before this run or not, since a
-# canary upgraded in place has no other way to keep its board current;
-# recreated so it runs this checkout's db/ (it bind-mounts it) with the file as
-# it is now. canary_compose holds LINEAR_COMMENT_API_KEY empty, so it never
-# posts. A board-sync container this compose file did not make (one by hand)
-# is removed first, as the sleep worker's is; a start that then fails says
-# so itself, since an earlier advice (the sleep worker's) silences the trap.
-BOARD_ADD="add a LINEAR_API_KEY of the canary's own to $CANARY_ENV — a Linear personal API key made with Read access alone, never stable's — and re-run $RERUN"
-if [ -n "$(env_file value "$CANARY_ENV" LINEAR_API_KEY)" ]; then
-  say "canary board-sync, on the new build (its own copy of the board; it reads Linear with the canary's key and never comments)"
-  stale="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=board-sync")"
-  [ -z "$stale" ] || printf '%s\n' "$stale" | xargs "$RUNTIME" rm -f >/dev/null
+# (SMD-3312). Started whenever the canary has a key of its own (BOARD_KEY,
+# read above, after step 2 cleared stable's), running before this run or not,
+# since a canary upgraded in place has no other way to keep its board current;
+# recreated so it runs this checkout's db/ (it bind-mounts it, as the sleep
+# worker does) with the file as it is now. canary_compose holds
+# LINEAR_COMMENT_API_KEY empty, so it never posts. Every board-sync container of
+# the canary's project goes first (one compose did not make, by hand, would
+# collide with the name); a start that then fails says so itself, since an
+# earlier advice (the sleep worker's) silences the trap. With no key, one this
+# run stopped is removed, so a canary turned off stays off past a reboot
+# (review pass 2).
+board_cts="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=board-sync")"
+if [ -n "$BOARD_KEY" ]; then
+  say "canary board-sync, on the new build (its own copy of the board; it reads Linear with the canary's key and never comments; it runs $REPO/db, so keep that tree while the canary runs it)"
+  [ -z "$board_cts" ] || printf '%s\n' "$board_cts" | xargs "$RUNTIME" rm -f >/dev/null
   if ! canary_compose --profile board-sync up -d --no-deps --force-recreate board-sync; then
     ADVISED=1
-    echo "the canary's board-sync did not start (above)${stale:+, and its old container is removed}: fix the cause and re-run $RERUN." >&2
+    echo "the canary's board-sync did not start (above)${board_cts:+, and its old container is removed}: fix the cause and re-run $RERUN." >&2
     exit 1
   fi
   BOARD_PENDING=""
 elif [ -n "$BOARD_PENDING" ]; then
-  # Stopped above and no key of the canary's own since (step 2 cleared
-  # stable's, or it was taken out): left stopped, said.
+  # Stopped above, and the canary has no key of its own (step 2 cleared
+  # stable's, or it was taken out): removed, said.
+  [ -z "$board_cts" ] || printf '%s\n' "$board_cts" | xargs "$RUNTIME" rm -f >/dev/null
   BOARD_PENDING=""
-  say "canary board-sync LEFT STOPPED: $CANARY_ENV holds no LINEAR_API_KEY of the canary's own — $BOARD_ADD"
+  say "canary board-sync off, its container removed: $CANARY_ENV holds no LINEAR_API_KEY of the canary's own — $BOARD_ADD to run it again"
 else
   say "note: the canary runs no board-sync, so its copy of the board stays as of its last refresh or sync — $BOARD_ADD to keep it current (SMD-3312)"
 fi
