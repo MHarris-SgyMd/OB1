@@ -3457,7 +3457,7 @@ started with. It assumes the stack of step 1: compose reads the whole of
 #              COMPOSE_PROFILES=auth   (with any other profiles, comma-separated)
 bun deploy/auth/provision.ts --init   # once: the profile's secrets into deploy/.env (it keeps every value it finds)
 bun deploy/auth/provision.ts          # what the server would refuse, read from deploy/.env
-compose up -d --wait --wait-timeout 60 auth mcp server proxy   # builds and starts it, recreates the MCP servers on the new .env (they advertise OAuth only when configured), and waits
+compose up -d --wait --wait-timeout 60 auth api mcp app proxy   # builds and starts it, recreates the REST core, the MCP server and the GUI on the new .env (each reads the switch; the GUI signs in through it, and its sessions start again), and waits
 ```
 
 `COMPOSE_PROFILES=auth` in `deploy/.env` is the switch (ADR decision 16): the

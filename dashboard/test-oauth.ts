@@ -13,7 +13,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { authorizeUrl, createRenewer, exchangeCode, needsRenewal, newSignIn, oauthSettings, RENEW_BEFORE_MS, refreshTokens, RenewalFailed, revokeRefresh, type TokenAnswer, type Tokens } from './src/lib/server/oauth.ts';
+import { authorizeUrl, createRenewer, exchangeCode, needsRenewal, newSignIn, oauthSettings, refreshTokens, RenewalFailed, revokeEnded, revokeRefresh, SIGNIN_MS, verifierFor, type TokenAnswer, type Tokens } from './src/lib/server/oauth.ts';
 
 let pass = 0;
 let fail = 0;
@@ -43,20 +43,26 @@ console.log('▸ the authorization request');
 	const { state, verifier, challenge } = newSignIn();
 	const again = newSignIn();
 	assert(challenge === createHash('sha256').update(verifier).digest('base64url') && verifier.length >= 43 && state !== again.state && verifier !== again.verifier, 'a fresh S256 pair and state each sign-in');
+	const t0 = 1_800_000_000_000;
+	const st = newSignIn(t0);
+	assert(verifierFor(st.state, t0 + 1) === st.verifier && verifierFor(st.state, t0 + SIGNIN_MS) === st.verifier, 'the verifier comes back from the state alone, within the sign-in window: a start holds nothing on the server');
+	assert(verifierFor(st.state, t0 + SIGNIN_MS + 1) === null && verifierFor(st.state, t0 - 1) === null, '…and not past the window, nor before its start');
+	const tampered = st.state.slice(0, -1) + (st.state.endsWith('A') ? 'B' : 'A');
+	assert(verifierFor(tampered, t0 + 1) !== st.verifier && verifierFor('no-dot', t0) === null && verifierFor(`${t0.toString(36)}.short`, t0) === null, '…another state another verifier, and a malformed one none');
 	const u = new URL(authorizeUrl(s, state, challenge));
 	const q = u.searchParams;
 	assert(u.origin + u.pathname === `${ORIGIN}/auth/authorize`, 'sent to the public authorize endpoint');
 	assert(q.get('client_id') === 'gui' && q.get('response_type') === 'code' && q.get('redirect_uri') === s.redirect && q.get('state') === state, '…as the gui client, for a code, to the registered redirect, with the state');
 	assert(q.get('code_challenge') === challenge && q.get('code_challenge_method') === 'S256' && !q.has('code_verifier'), '…with the S256 challenge, never the verifier');
-	assert(q.get('resource') === s.resource && q.get('scope')!.split(' ').includes('offline_access') && q.get('scope')!.split(' ').includes('brain:write') && q.get('prompt') === 'consent', '…for the REST core, write scope and offline_access, with prompt=consent (the AS grants offline_access only with it)');
+	assert(q.get('resource') === s.resource && q.get('scope')!.split(' ').includes('offline_access') && q.get('scope')!.split(' ').includes('brain:write') && q.get('prompt') === 'login consent', '…for the REST core, write scope and offline_access, with prompt=login consent (the password every time, and the consent the AS grants offline_access with)');
 }
 
 /** A fake token endpoint: each call recorded, answered by `reply`. */
 function fakeAs(reply: (form: URLSearchParams) => Response | Promise<Response>) {
-	const calls: { url: string; auth: string; form: URLSearchParams }[] = [];
+	const calls: { url: string; auth: string; form: URLSearchParams; bounded: boolean }[] = [];
 	const fetchFn = (async (url: string | URL | Request, init?: RequestInit) => {
 		const form = new URLSearchParams(String(init?.body ?? ''));
-		calls.push({ url: String(url), auth: new Headers(init?.headers).get('authorization') ?? '', form });
+		calls.push({ url: String(url), auth: new Headers(init?.headers).get('authorization') ?? '', form, bounded: init?.signal instanceof AbortSignal });
 		return reply(form);
 	}) as typeof fetch;
 	return { calls, fetchFn };
@@ -74,6 +80,7 @@ console.log('▸ the code exchange, a refresh and a revocation');
 	assert(c.url === s.token && id === 'gui' && secret === SECRET, 'the exchange posts to the mesh token endpoint as gui, its secret in Basic form-encoded (a + and a % survive)');
 	assert(c.form.get('grant_type') === 'authorization_code' && c.form.get('code') === 'the-code' && c.form.get('code_verifier') === 'the-verifier' && c.form.get('redirect_uri') === s.redirect && c.form.get('resource') === s.resource, '…with the code, the verifier, the redirect and the resource');
 	assert(got.ok && got.tokens.access === 'acc-1' && got.tokens.refresh === 'ref-1' && got.tokens.expiresAt === NOW + 600_000, '…and reads the pair and its expiry');
+	assert(c.bounded, '…under a timeout of its own: an AS that never answers is no answer, not a page held forever');
 	const ref = fakeAs(() => json(200, { access_token: 'acc-2', refresh_token: 'ref-2', expires_in: 600 }));
 	const r = await refreshTokens(s, 'ref-1', ref.fetchFn, () => NOW);
 	assert(ref.calls[0].form.get('grant_type') === 'refresh_token' && ref.calls[0].form.get('refresh_token') === 'ref-1' && ref.calls[0].form.get('resource') === s.resource && r.ok && r.tokens.refresh === 'ref-2', 'a refresh spends the old token for a new pair, for the same resource');
@@ -81,58 +88,64 @@ console.log('▸ the code exchange, a refresh and a revocation');
 		['a 400 invalid_grant', json(400, { error: 'invalid_grant' }), (a) => !a.ok && 'refused' in a && a.refused === 'invalid_grant'],
 		['a 401 with no body it reads', new Response('nope', { status: 401 }), (a) => !a.ok && 'unreachable' in a],
 		['a 503', json(503, { error: 'temporarily_unavailable' }), (a) => !a.ok && 'unreachable' in a],
+		['a 429 (the AS: too many, later)', json(429, { error: 'temporarily_unavailable' }), (a) => !a.ok && 'unreachable' in a],
 		['no refresh token in a 200', json(200, { access_token: 'a', expires_in: 600 }), (a) => !a.ok && 'refused' in a && a.refused === 'incomplete_token_answer'],
 		['no lifetime in a 200', json(200, { access_token: 'a', refresh_token: 'r' }), (a) => !a.ok && 'refused' in a],
 		['a fetch that throws', () => { throw new TypeError('connection refused'); }, (a) => !a.ok && 'unreachable' in a],
 	];
 	for (const [what, reply, holds] of refusals) {
 		const f = fakeAs(() => (typeof reply === 'function' ? reply() : reply));
-		assert(holds(await refreshTokens(s, 'r', f.fetchFn)), `${what}: ${what.includes('throws') || what.includes('503') || what.includes('reads') ? 'no answer' : 'refused'}`);
+		assert(holds(await refreshTokens(s, 'r', f.fetchFn)), `${what}: ${what.includes('throws') || what.includes('503') || what.includes('429') || what.includes('reads') ? 'no answer, never a refusal that ends a session' : 'refused'}`);
 	}
 	const rev = fakeAs(() => new Response(null, { status: 200 }));
 	const revoked = await revokeRefresh(s, 'ref-2', rev.fetchFn);
 	assert(revoked && rev.calls[0].url === s.revocation && rev.calls[0].form.get('token') === 'ref-2' && rev.calls[0].form.get('token_type_hint') === 'refresh_token' && rev.calls[0].auth.startsWith('Basic '), "sign-out revokes the refresh token at the mesh revocation endpoint, as gui");
 	const down = fakeAs(() => { throw new TypeError('down'); });
 	assert((await revokeRefresh(s, 'x', down.fetchFn)) === false, '…and says false, never throws, when the AS does not answer');
+	const ended = fakeAs(() => new Response(null, { status: 200 }));
+	revokeEnded(s, [{ access: 'a', refresh: 'gone-1', expiresAt: 0 }, null, { access: 'b', refresh: 'gone-2', expiresAt: 0 }], ended.fetchFn);
+	await Bun.sleep(10);
+	assert(ended.calls.map((c) => c.form.get('token')).join() === 'gone-1,gone-2', "sessions ended without a sign-out have their refresh tokens revoked, each, in the background");
 }
 
 console.log('▸ renewal');
 {
-	const fresh: Tokens = { access: 'a-old', refresh: 'r-old', expiresAt: NOW + RENEW_BEFORE_MS + 1 };
-	const due: Tokens = { ...fresh, expiresAt: NOW + RENEW_BEFORE_MS };
-	assert(!needsRenewal(fresh, NOW) && needsRenewal(due, NOW), `renewed at ${RENEW_BEFORE_MS / 1000} s before expiry, not sooner`);
+	const fresh: Tokens = { access: 'a-old', refresh: 'r-old', expiresAt: NOW + 60_001 };
+	const due: Tokens = { ...fresh, expiresAt: NOW + 60_000 };
+	assert(!needsRenewal(fresh, NOW) && needsRenewal(due, NOW), 'renewed from a minute before expiry, not sooner');
+	/** A renewer over a store of sessions, as rest.ts wires it to session.ts: current reads the store, store writes it. */
+	const over = (refresh: (t: string) => Promise<TokenAnswer>, held: Record<string, Tokens>) => {
+		const sessions = new Map(Object.entries(held));
+		const closed: string[] = [];
+		const accessFor = createRenewer({ refresh, current: (id) => sessions.get(id) ?? null, store: (id, t) => void sessions.set(id, t), close: (id) => { closed.push(id); sessions.delete(id); }, now: () => NOW });
+		return { accessFor, sessions, closed };
+	};
 	let refreshes = 0;
 	let release!: () => void;
 	const gate = new Promise<void>((r) => (release = r));
-	const stored = new Map<string, Tokens>();
-	const closed: string[] = [];
-	const accessFor = createRenewer({
-		refresh: async (t) => {
-			refreshes++;
-			await gate;
-			return { ok: true, tokens: { access: `a-new(${t})`, refresh: 'r-new', expiresAt: NOW + 600_000 } };
-		},
-		store: (id, t) => void stored.set(id, t),
-		close: (id) => void closed.push(id),
-		now: () => NOW,
-	});
-	assert((await accessFor('s1', fresh)) === 'a-old' && refreshes === 0, 'a token good for longer is sent as it is, no refresh');
-	const both = Promise.all([accessFor('s1', due), accessFor('s1', due)]);
+	const newPair = (t: string): TokenAnswer => ({ ok: true, tokens: { access: `a-new(${t})`, refresh: `r-new(${t})`, expiresAt: NOW + 600_000 } });
+	const a = over(async (t) => { refreshes++; await gate; return newPair(t); }, { s1: fresh, s2: due });
+	assert((await a.accessFor('s1')) === 'a-old' && refreshes === 0, 'a token good for longer is sent as it is, no refresh');
+	const both = Promise.all([a.accessFor('s2'), a.accessFor('s2')]);
 	release();
 	const [x, y] = await both;
-	assert(refreshes === 1 && x === 'a-new(r-old)' && y === x && stored.get('s1')?.refresh === 'r-new', 'two calls at once on a due session refresh once, both get the new token, and the pair is written back');
-	const other = createRenewer({ refresh: async () => ({ ok: false, refused: 'invalid_grant' }), store: () => {}, close: (id) => void closed.push(id), now: () => NOW });
+	assert(refreshes === 1 && x === 'a-new(r-old)' && y === x && a.sessions.get('s2')?.refresh === 'r-new(r-old)', 'two calls at once on a due session refresh once, both get the new token, and the pair is written back');
+	assert((await a.accessFor('s2')) === x && refreshes === 1, '…and a call after, in the same request, reads the session as it is now: no second refresh with the spent token (review pass 1)');
+	const b = over(async () => ({ ok: false, refused: 'invalid_grant' }), { s3: due });
 	let thrown: unknown;
-	try { await other('s2', due); } catch (e) { thrown = e; }
-	assert(thrown instanceof RenewalFailed && thrown.refused && closed.includes('s2'), 'a refused refresh ends the session and says refused');
-	const silent = createRenewer({ refresh: async () => ({ ok: false, unreachable: true }), store: () => {}, close: (id) => void closed.push(id), now: () => NOW });
+	try { await b.accessFor('s3'); } catch (e) { thrown = e; }
+	assert(thrown instanceof RenewalFailed && thrown.refused && b.closed.includes('s3'), 'a refused refresh ends the session and says refused');
 	thrown = undefined;
-	try { await silent('s3', due); } catch (e) { thrown = e; }
-	assert(thrown instanceof RenewalFailed && !thrown.refused && !closed.includes('s3'), 'an unanswered refresh leaves the session and says so');
+	try { await b.accessFor('s3'); } catch (e) { thrown = e; }
+	assert(thrown instanceof RenewalFailed && thrown.refused, '…and a session that is gone is refused, never renewed');
+	const c = over(async () => ({ ok: false, unreachable: true }), { s4: due });
+	thrown = undefined;
+	try { await c.accessFor('s4'); } catch (e) { thrown = e; }
+	assert(thrown instanceof RenewalFailed && !thrown.refused && c.closed.length === 0 && c.sessions.has('s4'), 'an unanswered refresh leaves the session and says so');
 	let after = 0;
-	const retry = createRenewer({ refresh: async () => (after++ === 0 ? { ok: false, unreachable: true } : { ok: true, tokens: { access: 'a2', refresh: 'r2', expiresAt: NOW + 600_000 } }), store: () => {}, close: () => {}, now: () => NOW });
-	try { await retry('s4', due); } catch { /* the first fails */ }
-	assert((await retry('s4', due)) === 'a2', '…and the next call tries again: a failed renewal is not held');
+	const d = over(async (t) => (after++ === 0 ? { ok: false, unreachable: true } : newPair(t)), { s5: due });
+	try { await d.accessFor('s5'); } catch { /* the first fails */ }
+	assert((await d.accessFor('s5')) === 'a-new(r-old)', '…and the next call tries again: a failed renewal is not held');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

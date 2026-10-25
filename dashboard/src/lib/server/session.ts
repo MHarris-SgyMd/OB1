@@ -72,20 +72,39 @@ function newId(): string {
 	return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-/** A new session, its id the cookie's value. */
-export function openSession(session: Omit<Session, 'id'>): string {
+/** The AS's tokens a session held, if it held any: what a session ended without a sign-out leaves to revoke. */
+const tokensOf = (held: Held | undefined) => (held && 'tokens' in held.credential ? held.credential.tokens : null);
+
+/**
+ * A new session, its id the cookie's value, and the tokens of every session it
+ * ended to make room or found expired — for the caller to revoke at the AS
+ * (oauth.ts revokeEnded), since no one holds them now (review pass 1).
+ */
+export function openSession(session: Omit<Session, 'id'>): { id: string; ended: Tokens[] } {
 	const now = Date.now();
 	const own: string[] = [];
+	const ended: Tokens[] = [];
+	const drop = (id: string) => {
+		const t = tokensOf(sessions.get(id));
+		if (t) ended.push(t);
+		sessions.delete(id);
+	};
 	const holder = holderOf(session);
 	for (const [id, held] of sessions) {
-		if (held.exp <= now) sessions.delete(id);
+		if (held.exp <= now) drop(id);
 		else if (holderOf(held) === holder) own.push(id);
 	}
-	while (own.length >= MAX_PER_KEY) sessions.delete(own.shift()!);
-	while (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value!);
+	while (own.length >= MAX_PER_KEY) drop(own.shift()!);
+	while (sessions.size >= MAX_SESSIONS) drop(sessions.keys().next().value!);
 	const id = newId();
 	sessions.set(id, { ...session, exp: now + SESSION_MAX_AGE * 1000 });
-	return id;
+	return { id, ended };
+}
+
+/** A session's tokens as they are now — renewed, or the session ended (null) — for the renewer, which must never act on a copy (oauth.ts createRenewer). */
+export function liveTokens(id: string): Tokens | null {
+	const held = sessions.get(id);
+	return held && held.exp > Date.now() ? tokensOf(held) : null;
 }
 
 /** The session an id names, or null for one it does not: unknown, ended or expired. */
@@ -120,27 +139,27 @@ export function closeSession(id: string | undefined): Credential | null {
 
 /** The cookie binding a sign-in in flight to the browser that started it: the callback takes the AS's answer only with it (no login CSRF). */
 export const SIGNIN_COOKIE = 'ob1_dashboard_signin';
-/** As long as the AS keeps a sign-in open (deploy/auth/server.ts, ttl.Interaction). */
+/** As long as the AS keeps a sign-in open (deploy/auth/server.ts, ttl.Interaction; oauth.ts SIGNIN_MS). */
 export const SIGNIN_MAX_AGE = 600;
-/** Sign-ins in flight held at once: the oldest goes past it, so a flood of starts holds this many verifiers at most. */
-export const MAX_SIGNINS = 1000;
+/** Answers taken, remembered so each is taken once: the oldest forgotten past it. Only a callback that carries its own browser's state adds one. */
+export const MAX_SPENT = 1000;
 
-const signins = new Map<string, { verifier: string; exp: number }>();
+const spent = new Map<string, number>();
 
-/** A sign-in started: its state and the PKCE verifier its challenge came from. */
-export function holdSignIn(state: string, verifier: string): void {
+/**
+ * Whether a sign-in's answer is taken for the first time: true once per state,
+ * false after — a callback replayed, even with its cookie put back, is turned
+ * away before the AS is asked. The verifier itself is derived from the state
+ * (oauth.ts verifierFor), so a start holds nothing here, and a flood of starts
+ * crowds nothing out (review pass 1).
+ */
+export function spendSignIn(state: string): boolean {
 	const now = Date.now();
-	for (const [s, held] of signins) if (held.exp <= now) signins.delete(s);
-	while (signins.size >= MAX_SIGNINS) signins.delete(signins.keys().next().value!);
-	signins.set(state, { verifier, exp: now + SIGNIN_MAX_AGE * 1000 });
-}
-
-/** The verifier for a state, once: a second answer with the same state finds nothing. */
-export function takeSignIn(state: string | null | undefined): string | null {
-	if (!state) return null;
-	const held = signins.get(state);
-	signins.delete(state);
-	return held && held.exp > Date.now() ? held.verifier : null;
+	for (const [st, exp] of spent) if (exp <= now) spent.delete(st);
+	if (spent.has(state)) return false;
+	while (spent.size >= MAX_SPENT) spent.delete(spent.keys().next().value!);
+	spent.set(state, now + SIGNIN_MAX_AGE * 1000);
+	return true;
 }
 
 /** The sign-in cookie's attributes: the GUI's auth paths alone, so it rides nothing else. */

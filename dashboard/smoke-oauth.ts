@@ -14,8 +14,9 @@
  * would. It asserts:
  *   - the sign-in page offers the AS and no key field; the start is a POST
  *     whose answer sends the browser to the AS's authorize endpoint as `gui`,
- *     S256, prompt=consent, offline_access, for the REST core, and sets a
- *     sign-in cookie on the GUI's auth paths alone;
+ *     S256, prompt=login consent, offline_access, for the REST core, and sets a
+ *     sign-in cookie on the GUI's auth paths alone, which a stray callback
+ *     mid-sign-in leaves in place;
  *   - the password and the consent at the AS bring the browser back to the
  *     callback, which opens a session (a cookie scoped to /dashboard) and
  *     sends it home, where the who line names oauth:operator with write;
@@ -27,8 +28,10 @@
  *   - the callback replayed, or answered with a state this browser was never
  *     given, signs no one in and says why; so does a real answer opened in
  *     another browser, one without the sign-in cookie (no login CSRF);
- *   - sign-out ends the session; a consent denied at the AS comes back in
- *     words and opens nothing.
+ *   - sign-out ends the session, and signing in again in that browser asks for
+ *     the password (prompt=login: the AS's own session does not sign the next
+ *     visitor in); a consent denied at the AS comes back in words and opens
+ *     nothing; a refusal word the page does not know (`constructor`) is none.
  *
  * With `--renewal`, before signing out it waits past the session's access
  * token's expiry (620 s) and loads pages again: they render only if the GUI
@@ -90,7 +93,7 @@ async function go(jar: Jar, href: string, init: { method?: string; form?: Record
  * back to `back`: the sign-in page's password, then the consent page's
  * confirm (or its abort). Returns the redirect to `back`, or why it stopped.
  */
-async function atTheAs(jar: Jar, authorize: string, back: string, choice: "confirm" | "abort"): Promise<string> {
+async function atTheAs(jar: Jar, authorize: string, back: string, choice: "confirm" | "abort", prompts: string[] = []): Promise<string> {
   let next = authorize;
   let form: Record<string, string> | undefined;
   for (let step = 0; step < 12; step++) {
@@ -102,6 +105,7 @@ async function atTheAs(jar: Jar, authorize: string, back: string, choice: "confi
       continue;
     }
     const prompt = /data-prompt="([a-z]+)"/.exec(r.html)?.[1];
+    if (prompt) prompts.push(prompt);
     const actions = [...r.html.matchAll(/<form method="post" action="([^"]+)"/g)].map((m) => m[1].replace(/&amp;/g, "&").replace(/&#(\d+);/g, (_, c) => String.fromCharCode(Number(c))));
     if (r.status === 200 && prompt === "login" && actions[0]) {
       next = actions[0];
@@ -135,11 +139,14 @@ const start = await go(jar, `${BASE}/auth/start`, { form: {} });
 const authz = start.location ? new URL(start.location, ORIGIN) : null;
 const q = authz?.searchParams;
 assert(start.status === 303 && authz !== null && `${authz.origin}${authz.pathname}` === `${ORIGIN}/auth/authorize`, `the start answers 303 to the AS's authorize endpoint (${start.status} → ${authz ? authz.origin + authz.pathname : "-"})`);
-assert(q?.get("client_id") === "gui" && q.get("code_challenge_method") === "S256" && Boolean(q.get("code_challenge")) && !q.has("code_verifier") && q.get("prompt") === "consent" && q.get("resource") === `${ORIGIN}/api` && (q.get("scope") ?? "").split(" ").includes("offline_access") && q.get("redirect_uri") === `${ORIGIN}/dashboard/auth/callback`, "…as gui, an S256 challenge and no verifier, prompt=consent, offline_access, for the REST core, back to the registered callback");
+assert(q?.get("client_id") === "gui" && q.get("code_challenge_method") === "S256" && Boolean(q.get("code_challenge")) && !q.has("code_verifier") && q.get("prompt") === "login consent" && q.get("resource") === `${ORIGIN}/api` && (q.get("scope") ?? "").split(" ").includes("offline_access") && q.get("redirect_uri") === `${ORIGIN}/dashboard/auth/callback`, "…as gui, an S256 challenge and no verifier, prompt=login consent, offline_access, for the REST core, back to the registered callback");
 const signinCookie = jar.get("ob1_dashboard_signin");
 /** The sign-in cookie as the start set it, kept to put back for the replay below. */
 const keptSignin = signinCookie ? { ...signinCookie } : undefined;
 assert(signinCookie !== undefined && signinCookie.path === "/dashboard/auth" && /HttpOnly/i.test(signinCookie.line) && /;\s*Secure/i.test(signinCookie.line) === ORIGIN.startsWith("https:"), `…and a sign-in cookie on the GUI's auth paths alone, HttpOnly, Secure on an https origin (${signinCookie ? signinCookie.line.replace(/=[^;]*/, "=…") : "none"})`);
+// A stray callback mid-sign-in (an old link, another tab's answer) is refused and leaves this sign-in's cookie alone.
+const stray = await go(jar, `${BASE}/auth/callback?state=stray&code=x`);
+assert(stray.status === 303 && stray.location === "/dashboard/signin?refused=stale" && jar.get("ob1_dashboard_signin")?.value === signinCookie?.value, `a stray callback mid-sign-in is refused and leaves the sign-in's cookie in place (${stray.status} → ${stray.location})`);
 const getStart = await go(jar, `${BASE}/auth/start`);
 assert(getStart.status === 405 || getStart.status === 404, `a GET of the start starts nothing (${getStart.status})`);
 
@@ -207,6 +214,14 @@ assert(said.html.includes('data-testid="refused"') && said.html.includes("expire
 const out = await go(jar, `${BASE}/signout`, { form: {} });
 const after = await go(jar, `${BASE}/`);
 assert(out.status === 303 && !jar.has(COOKIE) && after.status === 303 && after.location === "/dashboard/signin", `sign-out ends the session (${out.status}; then / → ${after.status} ${after.location})`);
+
+// Signing in again in the same browser asks for the password: the AS's session outlived the GUI's, prompt=login does not let it sign anyone in.
+const againPrompts: string[] = [];
+const startNext = await go(jar, `${BASE}/auth/start`, { form: {} });
+await atTheAs(jar, startNext.location, `${ORIGIN}/dashboard/auth/callback`, "abort", againPrompts);
+assert(againPrompts[0] === "login" && againPrompts.includes("consent"), `signing in again after sign-out asks for the password first (${againPrompts.join(" → ")})`);
+const unknownWord = await go(newJar(), `${BASE}/signin?refused=constructor`);
+assert(unknownWord.status === 200 && !unknownWord.html.includes('data-testid="refused"'), `a refusal word the page does not know (constructor) says nothing, and no 500 (${unknownWord.status})`);
 
 // A consent denied at the AS.
 const denyJar = newJar();

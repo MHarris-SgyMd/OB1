@@ -3,18 +3,20 @@ import { env } from '$env/dynamic/private';
 import { base } from '$app/paths';
 import type { RequestHandler } from './$types';
 import { authorizeUrl, newSignIn, oauthSettings } from '$lib/server/oauth';
-import { holdSignIn, SIGNIN_COOKIE, SIGNIN_MAX_AGE, signInCookieOptions } from '$lib/server/session';
+import { SIGNIN_COOKIE, SIGNIN_MAX_AGE, signInCookieOptions } from '$lib/server/session';
+import { authReachability } from '../../../../../server-portable/oauth-edge.ts';
 
 // A sign-in through the authorization server starts here (SMD-3307): a state
-// and a PKCE verifier held on this server, the state in a cookie on the GUI's
-// auth paths alone, and the browser sent to the AS's authorization endpoint.
+// (when it began, and random bytes) in a cookie on the GUI's auth paths alone,
+// the PKCE verifier derived from it (oauth.ts verifierFor, so a start holds
+// nothing here), and the browser sent to the AS's authorization endpoint — or,
+// the AS down, back to the sign-in page, which says so (review pass 1).
 // POST, from the sign-in page's button: a link would be started by a hover's
 // preload, and a page elsewhere could plant one.
 export const POST: RequestHandler = async ({ cookies, url, locals }) => {
 	const s = oauthSettings(env);
-	if (!s || locals.session) throw redirect(303, `${base}/signin`);
-	const { state, verifier, challenge } = newSignIn();
-	holdSignIn(state, verifier);
+	if (!s || locals.session || !(await authReachability().reachable())) throw redirect(303, `${base}/signin`);
+	const { state, challenge } = newSignIn();
 	cookies.set(SIGNIN_COOKIE, state, { ...signInCookieOptions(url), maxAge: SIGNIN_MAX_AGE });
 	throw redirect(303, authorizeUrl(s, state, challenge));
 };

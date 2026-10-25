@@ -5,7 +5,7 @@ import type { Actions, PageServerLoad } from './$types';
 import { codeOf, rest } from '$lib/server/rest';
 import { closeSession, cookieOptions, openSession, SESSION_COOKIE, SESSION_MAX_AGE } from '$lib/server/session';
 import { FIRST_READ, keySignInOffered, REFUSED_WORDS, whoAmI } from '$lib/server/signin';
-import { oauthSettings } from '$lib/server/oauth';
+import { oauthSettings, revokeEnded } from '$lib/server/oauth';
 import { authReachability } from '../../../../server-portable/oauth-edge.ts';
 
 /**
@@ -19,7 +19,9 @@ export const load: PageServerLoad = async ({ locals, request, url }) => {
 	// Signed in, a visit goes home; a post's own answer stands, so a refused key
 	// sent from a tab still signed in says why (review pass 2).
 	if (locals.session && request.method === 'GET') throw redirect(303, HOME);
-	const refused = REFUSED_WORDS[url.searchParams.get('refused') ?? ''] ?? null;
+	// Its own words alone: `constructor` or `__proto__` in the address is no word of it (review pass 1: an inherited key was a 500).
+	const word = url.searchParams.get('refused') ?? '';
+	const refused = Object.hasOwn(REFUSED_WORDS, word) ? REFUSED_WORDS[word] : null;
 	if (keySignInOffered()) return { mode: 'key' as const, refused };
 	if (!oauthSettings(env)) return { mode: 'misconfigured' as const, refused };
 	return { mode: (await authReachability().reachable()) ? ('oauth' as const) : ('unavailable' as const), refused };
@@ -54,7 +56,8 @@ export const actions: Actions = {
 		}
 		// A sign-in over a live session replaces it: the old id would otherwise hold its key until it expired, out of sign-out's reach.
 		closeSession(cookies.get(SESSION_COOKIE));
-		const id = openSession({ credential: { key }, name: who.name, scope: who.scope, canCapture: who.operations.includes('capture_thought') });
+		const { id, ended } = openSession({ credential: { key }, name: who.name, scope: who.scope, canCapture: who.operations.includes('capture_thought') });
+		revokeEnded(oauthSettings(env), ended);
 		cookies.set(SESSION_COOKIE, id, { ...cookieOptions(url), maxAge: SESSION_MAX_AGE });
 		throw redirect(303, HOME);
 	},

@@ -35,7 +35,7 @@
  *
  * `--gui-refresh` (SMD-3307) signs the operator in as the operator GUI does —
  * the confidential `gui` client (its secret from the container's environment),
- * S256, `offline_access` with `prompt=consent`, for the REST core — and checks
+ * S256, `offline_access` with `prompt=login consent`, for the REST core — and checks
  * what the GUI's session leans on: the code gives a refresh token, a refresh
  * gives a new pair (the refresh token rotated), and the refresh token revoked
  * as the GUI's sign-out revokes it is refused at the next refresh. It prints
@@ -220,7 +220,7 @@ if (process.argv.includes("--register")) {
     code_challenge: createHash("sha256").update(verifier).digest("base64url"),
     code_challenge_method: "S256",
     resource,
-    prompt: "consent",
+    prompt: "login consent",
   });
   const local = (href: string) => new URL(href.startsWith(origin) ? `http://127.0.0.1:3000${href.slice(origin.length)}` : href, BASE);
   const jar = new Map<string, string>();

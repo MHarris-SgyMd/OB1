@@ -147,7 +147,7 @@ const THIRD_PARTY_GRANTS = new Set(["authorization_code", "refresh_token"]);
 const clients = Object.entries(L.clients).map(([client_id, p]): ClientMetadata => {
   const base = { client_id, client_secret: C.secrets[client_id], token_endpoint_auth_method: "client_secret_basic" as const };
   // The GUI renews its session with a refresh token (SMD-3307): it asks for
-  // offline_access with prompt=consent, and holds the token server-side,
+  // offline_access with prompt=login consent, and holds the token server-side,
   // rotating under the same policy as a third-party client's (refreshTtl,
   // chainRotates).
   if (p.kind === "gui") return { ...base, grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], redirect_uris: [p.redirect] };

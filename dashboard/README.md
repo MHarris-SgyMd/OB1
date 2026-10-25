@@ -38,7 +38,8 @@ nothing for it. A release's compose overlay runs the release's server image here
 
 Open `http://127.0.0.1:8000/dashboard` (the stack's published port), or
 `https://<host>/dashboard` through the TLS proxy or tunnel in front of it once
-`OB1_PUBLIC_ORIGIN` names that origin, and sign in with an access key. One or the
+`OB1_PUBLIC_ORIGIN` names that origin, and sign in with an access key — or, on a stack
+configured with the authorization server, through it ("Signing in", below). One or the
 other: with `OB1_PUBLIC_ORIGIN` set, a sign-in at the loopback address is refused as
 cross-site ("The origin", below).
 
@@ -59,18 +60,25 @@ cross-site ("The origin", below).
   names `auth`, ADR decision 16), key sign-in is off on the public origin, whether or
   not the authorization server answers: knocking it over must not open a weaker door.
   The GUI signs the operator in through it instead (SMD-3307), as its confidential
-  `gui` client, with `OB1_AUTH_SECRET_GUI` from `deploy/.env`: the sign-in page's
-  button starts a code-and-PKCE request for the REST core (`resource=<origin>/api`,
-  `offline_access` with `prompt=consent`); the AS asks for the password and the
-  consent and sends the browser back to `/dashboard/auth/callback`, where the code is
-  traded on the mesh for an access token (600 s) and a refresh token, held in the
-  session like a key and never sent to the browser. Every page calls the REST core with
-  the access token, renewed with the refresh token a minute before it lapses (one
-  renewal per session at a time); a renewal the AS refuses ends the session, and one it
-  does not answer is the page's 503. Sign-out revokes the refresh token at the AS. With
-  the AS not answering, the page says sign-in is unavailable; break-glass key sign-in
-  on a loopback-only port is SMD-3307's second PR. With no secret or no sound origin,
-  it says so, and signs no one in.
+  `gui` client, with `OB1_AUTH_SECRET_GUI` from `deploy/.env` (recreate `app` after
+  turning the profile on, as `deploy/README.md`'s "Authorization server" does): the
+  sign-in page's button starts a code-and-PKCE request for the REST core
+  (`resource=<origin>/api`, `offline_access` with `prompt=login consent`, so the AS
+  asks for the password every time and a sign-out of the GUI is one); the AS sends the
+  browser back to `/dashboard/auth/callback`, where the code is traded on the mesh for
+  an access token (600 s) and a refresh token, held in the session like a key and never
+  sent to the browser. A sign-in in flight holds nothing on the server: its PKCE
+  verifier is derived from its state. Every page calls the REST core with the access
+  token, renewed with the refresh token a minute before it lapses, from the session as
+  it is now (one renewal per session at a time); a renewal the AS refuses ends the
+  session, and one it does not answer, or an AS its probe finds down, is the page's 503
+  (should the AS have spent the token before its answer was lost, the next try is a
+  reuse it refuses, which ends the session). Sign-out revokes the refresh token at the
+  AS, and a session ended any other way while the GUI runs (evicted, replaced, a
+  sign-in that failed after its exchange) has its revoked in the background. With the
+  AS not answering, the page says sign-in is unavailable; break-glass key sign-in on a
+  loopback-only port is SMD-3307's second PR. With no secret or no sound origin, it
+  says so, and signs no one in.
 - **One key holds at most 20 sessions**, and a sign-in past that ends that key's oldest;
   the server holds 1,000 in all. A sign-in over a live session ends the old one.
 - **The origin is shared.** The cookie rides `/dashboard` alone, but any page served

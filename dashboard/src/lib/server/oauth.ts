@@ -11,7 +11,7 @@
 // the AS on the mesh, as the REST core reads its keys there. Pure but for the
 // fetch, which a suite hands in (test-oauth.ts).
 
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { edgeSettings } from '../../../../server-portable/oauth-edge.ts';
 
 /** The AS on the mesh, under its issuer's path (`/auth`): the REST core reads its keys from the same host (oauth-token.ts). */
@@ -44,17 +44,40 @@ export function oauthSettings(env: Record<string, string | undefined>): OAuthSet
 /** The tokens one sign-in holds: the access token, when it stops being good (ms since the epoch), and the refresh token. */
 export type Tokens = { access: string; expiresAt: number; refresh: string };
 
-/** A fresh PKCE verifier and its S256 challenge, and a state to bind the answer to this sign-in. */
-export function newSignIn(): { state: string; verifier: string; challenge: string } {
-	const verifier = randomBytes(32).toString('base64url');
-	return { state: randomBytes(24).toString('base64url'), verifier, challenge: createHash('sha256').update(verifier).digest('base64url') };
+/** How long a sign-in may take from its start to its answer: as long as the AS keeps one open (deploy/auth/server.ts, ttl.Interaction). */
+export const SIGNIN_MS = 600_000;
+/**
+ * The key a sign-in's PKCE verifier is derived from, this process's own: a
+ * sign-in in flight holds nothing on the server, so a flood of starts — open
+ * to anyone, the only way in on a configured stack — evicts no operator's
+ * (review pass 1). A restart forgets it, and a sign-in begun before one starts
+ * again.
+ */
+const SIGNIN_KEY = randomBytes(32);
+
+/** A sign-in's verifier, from its state (which carries when it began): null once it is older than SIGNIN_MS, or not one this process began. */
+export function verifierFor(state: string, now: number = Date.now()): string | null {
+	const m = /^([0-9a-z]{1,12})\.[A-Za-z0-9_-]{32}$/.exec(state);
+	if (!m) return null;
+	const age = now - parseInt(m[1], 36);
+	if (!(age >= 0 && age <= SIGNIN_MS)) return null;
+	return createHmac('sha256', SIGNIN_KEY).update(state).digest('base64url');
+}
+
+/** A fresh sign-in: its state (when it began, and 24 random bytes), the PKCE verifier derived from it, and the verifier's S256 challenge. */
+export function newSignIn(now: number = Date.now()): { state: string; verifier: string; challenge: string } {
+	const state = `${now.toString(36)}.${randomBytes(24).toString('base64url')}`;
+	const verifier = verifierFor(state, now)!;
+	return { state, verifier, challenge: createHash('sha256').update(verifier).digest('base64url') };
 }
 
 /**
- * The authorization request the browser is sent to. `prompt=consent`: the AS
- * grants `offline_access`, and so a refresh token, only to a request that asks
- * for consent (oidc-provider, as OpenID Connect Core §11 has it), and it asks
- * every client for consent anyway.
+ * The authorization request the browser is sent to. `prompt=login consent`:
+ * the password every time, so a sign-out of the GUI is one — the AS's own
+ * session (a day) would otherwise sign the next visitor of that browser in with
+ * a click (review pass 1) — and the consent, without which the AS grants no
+ * `offline_access`, and so no refresh token (oidc-provider, as OpenID Connect
+ * Core §11 has it).
  */
 export function authorizeUrl(s: OAuthSettings, state: string, challenge: string): string {
 	const q = new URLSearchParams({
@@ -66,7 +89,7 @@ export function authorizeUrl(s: OAuthSettings, state: string, challenge: string)
 		code_challenge: challenge,
 		code_challenge_method: 'S256',
 		resource: s.resource,
-		prompt: 'consent',
+		prompt: 'login consent',
 	});
 	return `${s.authorize}?${q}`;
 }
@@ -89,7 +112,8 @@ async function tokenCall(s: OAuthSettings, form: Record<string, string>, fetchFn
 		return { ok: false, unreachable: true };
 	}
 	const body = (await r.json().catch(() => null)) as { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown; error?: unknown } | null;
-	if (r.status >= 500 || body === null) return { ok: false, unreachable: true };
+	// A fault, a body that is no answer, or the AS's own "too many, later" (429): no answer, to try again — not a refusal that ends a session (review pass 1).
+	if (r.status >= 500 || r.status === 429 || body === null || body.error === 'temporarily_unavailable') return { ok: false, unreachable: true };
 	if (!r.ok) return { ok: false, refused: typeof body.error === 'string' ? body.error : `HTTP ${r.status}` };
 	const { access_token, refresh_token, expires_in } = body;
 	// A token set this client cannot keep — no refresh token, no lifetime — is the AS misconfigured, said as a refusal.
@@ -145,33 +169,52 @@ export class RenewalFailed extends Error {
 
 /**
  * The access token to send for a session, renewed first when it is within
- * RENEW_BEFORE_MS of expiry: one renewal per session at a time, so two pages
- * loading at once spend the refresh token once (the second waits on the
- * first); the new pair written back through `store`. A renewal the AS refuses
- * ends the session through `close` and throws RenewalFailed(true); one it does
- * not answer throws RenewalFailed(false) and leaves the session as it was.
+ * RENEW_BEFORE_MS of expiry. It reads the session's tokens as they are now
+ * (`current`), never a copy taken when the request began: a second call in
+ * the same request, after the first renewed, would otherwise renew again with
+ * the spent refresh token, forking the chain within the AS's 10 s grace and
+ * revoking the grant past it (review pass 1). One renewal per session at a
+ * time: two calls at once wait on one. The new pair is written back through
+ * `store`. A renewal the AS refuses ends the session through `close` and
+ * throws RenewalFailed(true); one it does not answer throws
+ * RenewalFailed(false) and leaves the session — though if the AS spent the
+ * refresh token and its answer was lost, the next try is a reuse it refuses,
+ * which ends the session then (rotation's price).
  */
-export function createRenewer(deps: { refresh: (refreshToken: string) => Promise<TokenAnswer>; store: (id: string, t: Tokens) => void; close: (id: string) => void; now?: () => number }) {
+export function createRenewer(deps: {
+	refresh: (refreshToken: string) => Promise<TokenAnswer>;
+	current: (id: string) => Tokens | null;
+	store: (id: string, t: Tokens) => void;
+	close: (id: string) => void;
+	now?: () => number;
+}) {
 	const inFlight = new Map<string, Promise<Tokens>>();
 	const now = deps.now ?? Date.now;
-	return async function accessFor(id: string, held: Tokens): Promise<string> {
+	return async function accessFor(id: string): Promise<string> {
+		const pending = inFlight.get(id);
+		if (pending) return (await pending).access;
+		const held = deps.current(id);
+		if (!held) throw new RenewalFailed(true, 'ended');
 		if (!needsRenewal(held, now())) return held.access;
-		let pending = inFlight.get(id);
-		if (!pending) {
-			pending = (async () => {
-				const answer = await deps.refresh(held.refresh);
-				if (answer.ok) {
-					deps.store(id, answer.tokens);
-					return answer.tokens;
-				}
-				if ('refused' in answer) {
-					deps.close(id);
-					throw new RenewalFailed(true, answer.refused);
-				}
-				throw new RenewalFailed(false, 'unreachable');
-			})().finally(() => inFlight.delete(id));
-			inFlight.set(id, pending);
-		}
-		return (await pending).access;
+		const renewal = (async () => {
+			const answer = await deps.refresh(held.refresh);
+			if (answer.ok) {
+				deps.store(id, answer.tokens);
+				return answer.tokens;
+			}
+			if ('refused' in answer) {
+				deps.close(id);
+				throw new RenewalFailed(true, answer.refused);
+			}
+			throw new RenewalFailed(false, 'unreachable');
+		})().finally(() => inFlight.delete(id));
+		inFlight.set(id, renewal);
+		return (await renewal).access;
 	};
+}
+
+/** The refresh tokens of sessions that ended without a sign-out (evicted, replaced, a sign-in that failed after its exchange), revoked in the background: a grant no one holds is closed, not left live for its 14 days (review pass 1). */
+export function revokeEnded(s: OAuthSettings | null, ended: (Tokens | null | undefined)[], fetchFn: typeof fetch = fetch): void {
+	if (!s) return;
+	for (const t of ended) if (t) void revokeRefresh(s, t.refresh, fetchFn);
 }

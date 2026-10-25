@@ -3647,6 +3647,8 @@ jobs:
           (cd ../dashboard && bun smoke-oauth.ts --url http://127.0.0.1:8010/dashboard --origin https://brain.example.test)
           left=$(auth exec -T auth bun -e 'import { Database } from "bun:sqlite"; const db = new Database("/data/auth.sqlite", { readonly: true }); console.log(db.query("SELECT count(*) AS n FROM oidc WHERE model = ? AND json_extract(payload, ?) = ?").get("RefreshToken", "$.clientId", "gui").n)')
           [ "$left" = 0 ] || { echo "the authorization server still holds $left refresh token(s) of the gui client after every sign-in signed out: sign-out did not revoke" >&2; exit 1; }
+          # Gone again, as the steps above leave it: the next step meets no authorization server.
+          auth rm -sfv auth
 
       - name: The proxy answers discovery itself, logs no key and streams unbuffered
         working-directory: deploy

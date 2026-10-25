@@ -13,7 +13,8 @@ import { error, redirect, type RequestEvent } from '@sveltejs/kit';
 import { base } from '$app/paths';
 import { createRestClient, DEFAULT_REST_URL, type Answer, type CallableOperation, type InputOf, type Method, type RestClient } from '../../../../rest-client/index.ts';
 import { createRenewer, oauthSettings, refreshTokens, RenewalFailed } from './oauth';
-import { closeSession, cookieOptions, SESSION_COOKIE, storeTokens, type Session } from './session';
+import { closeSession, cookieOptions, liveTokens, SESSION_COOKIE, storeTokens, type Session } from './session';
+import { authReachability } from '../../../../server-portable/oauth-edge.ts';
 
 /** The longest one call may take: a page waits on it, so well under a minute. */
 export const REST_TIMEOUT_MS = 30_000;
@@ -61,12 +62,20 @@ export async function callPlugin(event: RequestEvent, session: Session, tool: st
 	return answered(event, tool, () => rest().callPath(method, path, input, { ...credential, signal: event.request.signal }));
 }
 
-/** The sessions' token renewals (oauth.ts createRenewer): refreshed on the mesh as the `gui` client, written back to the session. */
+/**
+ * The sessions' token renewals (oauth.ts createRenewer): refreshed on the mesh
+ * as the `gui` client, read from and written back to the session itself. An
+ * AS its health probe found down (cached 30 s, 2 s at most) is no answer at
+ * once, not a wait of the token call's 10 s on every page (review pass 1).
+ */
 const accessFor = createRenewer({
 	refresh: async (refreshToken) => {
 		const s = oauthSettings(env);
-		return s ? refreshTokens(s, refreshToken) : { ok: false, refused: 'not_configured' };
+		if (!s) return { ok: false, refused: 'not_configured' };
+		if (!(await authReachability().reachable())) return { ok: false, unreachable: true };
+		return refreshTokens(s, refreshToken);
 	},
+	current: liveTokens,
 	store: (id, tokens) => void storeTokens(id, tokens),
 	close: (id) => void closeSession(id),
 });
@@ -80,7 +89,7 @@ const accessFor = createRenewer({
 export async function credentialOf(event: RequestEvent, session: Session): Promise<{ key: string } | { token: string }> {
 	if ('key' in session.credential) return { key: session.credential.key };
 	try {
-		return { token: await accessFor(session.id, session.credential.tokens) };
+		return { token: await accessFor(session.id) };
 	} catch (err) {
 		if (!(err instanceof RenewalFailed)) throw err;
 		console.error(`[dashboard] a session's renewal ${err.refused ? `was refused (${err.message}); it is ended` : 'got no answer from the authorization server'}`);

@@ -21,7 +21,9 @@
 // OB1_STOP_GRACE (the stop's grace, as the servers read it), COMPOSE_PROFILES
 // (key sign-in is off while it names auth) and GRAFANA_LINK or GRAFANA_ROUTE
 // (the Grafana link, set by the overlays that reach Grafana).
-// It holds no key and no secret of its own: each visitor's key is the call's.
+// It holds no brain key of its own: each visitor's key or token is the call's. Its one
+// secret is OB1_AUTH_SECRET_GUI, its credential as the authorization server's `gui`
+// client, which signs the operator in through it while the stack is configured (SMD-3307).
 
 import { createRestClient, DEFAULT_REST_URL } from "../rest-client/index.ts";
 import { configuredIn, originProblem } from "../server-portable/oauth-edge.ts";
