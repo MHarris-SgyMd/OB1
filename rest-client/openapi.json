@@ -1908,7 +1908,7 @@
       "get": {
         "operationId": "list_supersession_proposals",
         "summary": "List Supersession Proposals",
-        "description": "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged one to OUTDATE the other — a later state of the same thing, a decision and its reversal, a value and its update — or to DUPLICATE it, with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all. A proposal standing on a LINEAGE PAIR — one side's `derived_from` names the other, a page and its evidence — is tagged: such a pair is never proposed since migration 066 and a standing one is a reviewer's to reject; `lineage: true` lists those alone (migration 070). Each proposal names the pass that judged it — its judge key, which carries the model (or the decider and the writer), the prompt version and the decide version — and `judge_key` lists one pass's alone (migration 109). Each side names who wrote it (`By:` with its trust, and whether its text is a capture-only key's), an ingested side carries the ingested notice before its text, and each names the thought superseding it and the capture-only pointers an accept making it stand would clear; a proposal whose side to stand is a capture-only key's text or of a recorded trust below the other's is flagged WRITER, and that accept takes --force — on an undirected verdict, the flagged direction's (migration 094).",
+        "description": "List the pairs of thoughts the consolidation pass (db/consolidate.ts) judged one to OUTDATE the other — a later state of the same thing, a decision and its reversal, a value and its update — or to DUPLICATE it, with its verdict on which is current. Nothing is applied until a reviewer accepts a proposal (`cd db && bun consolidate.ts --url $DATABASE_URL --accept <proposal id>`), which sets `supersedes` on the current thought so search labels the other as superseded. Pending by default; `status` lists accepted, rejected or stale ones (stale: a text moved under a pending verdict, and the next pass re-judges the pair — migration 063), or all. A proposal standing on a LINEAGE PAIR — one side's `derived_from` names the other, a page and its evidence — is tagged: such a pair is never proposed since migration 066 and a standing one is a reviewer's to reject; `lineage: true` lists those alone (migration 070). Each proposal names the pass that judged it — its judge key, which carries the model (or the decider and the writer), the prompt version and the decide version — and `judge_key` lists one pass's alone (migration 109). Most confident first; the reply says how many follow (`remaining`) and, while more do, carries a cursor: pass it as `after`, with the same filters (one made under others is refused, naming its own), for the next page, until no cursor is given (null) (migration 110). A walk lists each row once while its status, judge key, confidence and judged_at hold; a row that joins the selection or moves in it during the walk — a new proposal, a decision, a stale mark, a re-judge (063) — is listed if its place is past the cursor and missed if behind it, and one that leaves it is not listed after. Each side names who wrote it (`By:` with its trust, and whether its text is a capture-only key's), an ingested side carries the ingested notice before its text, and each names the thought superseding it and the capture-only pointers an accept making it stand would clear; a proposal whose side to stand is a capture-only key's text or of a recorded trust below the other's is flagged WRITER, and that accept takes --force — on an undirected verdict, the flagged direction's (migration 094).",
         "x-ob1-scope": "read",
         "parameters": [
           {
@@ -1956,11 +1956,21 @@
               "type": "string",
               "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$"
             }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "description": "Keyset cursor — the previous page's `cursor`, given with the same filters (a cursor carries the ones it was made under, and is refused with others); omit for the first page",
+              "type": "string",
+              "maxLength": 512
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "The operation's value.",
+            "description": "A page (SMD-3249): `proposals`, most confident first; `cursor` — pass it as the `after` query parameter, with the same status, lineage and judge_key, for the next page; null when no more follow; `remaining`, how many follow this page; and `pastCursor`, whether this page followed a cursor. A cursor that is none of this operation's, an empty one, or one whose time Postgres cannot read is refused REFUSED_CURSOR (400) with `reason: \"shape\"`; one made under other filters with `reason: \"filters\"` and `made`, the `status`, `lineage` and `judgeKey` it was made under.",
             "content": {
               "application/json": {
                 "schema": {

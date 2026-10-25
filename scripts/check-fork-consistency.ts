@@ -361,6 +361,12 @@
  *      each file's networks, and who joins them under which names, exactly as
  *      held; each rule is the only catch of one of its probes (what the files
  *      make together, CI's "The proxy loads only the held route tables")
+ *  28b. deploy/README.md's path table says what check 28's route tables
+ *      route (SMD-2296): every path a router's rule names has a row, and a
+ *      path in a row with no router is answered by the proxy's own 404; the
+ *      row naming a router's first path names its backend (the first label
+ *      of the service URL), says 404 for noop@internal, and names the
+ *      overlay file for an overlay's router
  *  29. every service deploy/compose.yaml defines has its x-logging bound —
  *      the json-file driver with a max-size and a max-file — as its
  *      `logging:`, value for value (the file writes `logging: *logging`), so
@@ -385,7 +391,11 @@
  *      migrations/*.sql, a README and metadata.json alone;
  *      plugins/registry.ts imports and lists exactly the plugin directories,
  *      a manifest's name is its directory's, and its migration files are
- *      named by the core's rule; each held by in-memory probes
+ *      named by the core's rule; each GUI page a manifest declares has its
+ *      route at dashboard/src/routes/plugins/<name><path>/ (a +page.svelte
+ *      and a +page.server.ts whose load reaches the plugin through
+ *      pluginAccess alone), and no route there is undeclared (SMD-2280 PR 3);
+ *      each held by in-memory probes
  *  32. every service deploy/compose.yaml defines has the restart policy
  *      RESTART_POLICIES holds for it, value for value — what serves
  *      `unless-stopped`, so it comes back after a reboot with what it reads;
@@ -6283,9 +6293,9 @@ const API_ROLE: TransportRole = {
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
     // The authorization server's token check, built from the environment (SMD-2286): authorization, as auth.ts is, no store.
     ["./oauth-token.ts", new Set(["remoteChecker", "tokenSettings", "TokenCheck"])],
-    // The stop's lines for what it cuts, and the spans' start and flush (SMD-1849), and what a cut flush held (SMD-2902):
-    // request records and telemetry, no store.
-    ["./telemetry.ts", new Set(["cutOpenRequests", "cutTelemetry", "flushTelemetry", "startTelemetry"])],
+    // The stop's lines for what it cuts, and the spans' start and flush (SMD-1849), what a cut flush held (SMD-2902)
+    // and the mark its word counts from (SMD-3297): request records and telemetry, no store.
+    ["./telemetry.ts", new Set(["cutOpenRequests", "cutTelemetry", "flushTelemetry", "markTelemetry", "startTelemetry"])],
   ]),
   wiring: false,
   mustImport: "./core/index.ts",
@@ -7508,6 +7518,92 @@ function checkRouteTables() {
 }
 checkRouteTables();
 
+// ── 28b: deploy/README.md's path table says what the route tables route (SMD-2296) ──
+//
+// Check 28 holds each route table byte for byte, so a route changed on purpose
+// is changed there too. deploy/README.md's "The paths today" table is the
+// operator's reading of the same tables, and nothing held it: /hooks, /grafana
+// and /dashboard were each added to it by hand. This holds, for compose.yaml's
+// table and each overlay's in ROUTE_FILES:
+//   paths  every path a router's rule names (a `Path` or `PathPrefix`, the
+//       prefix's trailing slash dropped) is named in backticks in a row's
+//       first cell — `OPTIONS /health` names /health — and every path a row
+//       names there is a router's, or the row answers with a 404 (/canary,
+//       /working, the rest of /.well-known: the proxy's own);
+//   backend  the row naming a router's first path names, in backticks, the
+//       service compose runs behind it (its URL's first label: `mcp`, `auth`,
+//       `app`, `api`, `lgtm`), or says 404 for a router to noop@internal; an
+//       overlay's router's row names the overlay's file too.
+// What each row says beyond that — a path kept or stripped, a 502 — is prose
+// this check does not read.
+type PathRow = { paths: string[]; answer: string };
+/** The rows of the README's `| Path | Answered by |` table: each first cell's paths (a `/…` inside backticks) and the answer cell; a string when the table is not there. */
+function readmePathRows(readme: string): PathRow[] | string {
+  const lines = readme.split("\n");
+  const head = lines.findIndex((l) => l.trim() === "| Path | Answered by |");
+  if (head < 0 || lines[head + 1]?.trim() !== "| --- | --- |") return 'has no "| Path | Answered by |" table under "The paths today"';
+  const rows: PathRow[] = [];
+  for (let i = head + 2; i < lines.length && lines[i].startsWith("| "); i++) {
+    const inner = lines[i].trim().replace(/^\|\s*/, "").replace(/\s*\|$/, "");
+    const cut = inner.indexOf(" | ");
+    if (cut < 0) return `row ${i + 1} has no answer cell`;
+    const spans = [...inner.slice(0, cut).matchAll(/`([^`]*)`/g)].map((m) => m[1]);
+    rows.push({ paths: spans.flatMap((s) => [...s.matchAll(/\/[^\s`]*/g)].map((m) => m[0])), answer: inner.slice(cut + 3) });
+  }
+  return rows;
+}
+/** A router's paths, as its rule names them: each `Path(…)` and `PathPrefix(…)` literal, a trailing slash dropped, once each. */
+const rulePaths = (rule: string) => [...new Set([...rule.matchAll(/Path(?:Prefix)?\(`([^`]+)`\)/g)].map((m) => m[1].length > 1 ? m[1].replace(/\/$/, "") : m[1]))];
+/** Where deploy/README.md's path table and the route tables disagree, one line each (empty when they agree). */
+function pathTableProblems(readme: string, tables: readonly (readonly [file: string, table: string])[]): string[] {
+  const rows = readmePathRows(readme);
+  if (typeof rows === "string") return [rows];
+  const out: string[] = [];
+  const routed = new Set<string>();
+  for (const [file, table] of tables) {
+    const http = (Bun.YAML.parse(table) as { http: { routers: Record<string, { rule: string; service: string }>; services?: Record<string, { loadBalancer: { servers: { url: string }[] } }> } }).http;
+    for (const [name, router] of Object.entries(http.routers)) {
+      const paths = rulePaths(router.rule);
+      for (const p of paths) {
+        routed.add(p);
+        if (!rows.some((r) => r.paths.includes(p))) out.push(`names no row for \`${p}\`, which ${file}'s router ${name} routes`);
+      }
+      const row = rows.find((r) => r.paths.includes(paths[0]));
+      if (!row) continue;
+      const url = http.services?.[router.service]?.loadBalancer.servers[0]?.url;
+      const backend = router.service === "noop@internal" ? null : url ? new URL(url).hostname.split(".")[0] : undefined;
+      if (backend === undefined) out.push(`cannot read the backend of ${file}'s router ${name} (service ${router.service})`);
+      else if (backend === null ? !/\b404\b/.test(row.answer) : !row.answer.includes(`\`${backend}\``)) out.push(`\`${paths[0]}\`'s row ${backend === null ? "does not say 404" : `does not name \`${backend}\``}, where ${file}'s router ${name} sends it ${backend === null ? "to noop@internal" : `to ${backend}`}`);
+      if (file !== "compose.yaml" && !row.answer.includes(`\`${file}\``)) out.push(`\`${paths[0]}\`'s row does not name \`${file}\`, whose router ${name} serves it`);
+    }
+  }
+  for (const r of rows) for (const p of r.paths) if (!routed.has(p) && !/\b404\b/.test(r.answer)) out.push(`\`${p}\`'s row names an answer other than a 404, but no route table routes \`${p}\``);
+  return out;
+}
+/** [what, the README's text replaced, its replacement, the problem it must raise] — each a drift 28b must catch, on the README as it is, by the rule meant for it. */
+const PATH_TABLE_PROBES: [string, string, string, string][] = [
+  ["a routed path's row dropped", "| `/dashboard` and everything under it |", "| the GUI |", "names no row for `/dashboard`"],
+  ["a row naming another backend", "| `/mcp` and everything under it | `mcp` —", "| `/mcp` and everything under it | `app` —", "does not name `mcp`"],
+  ["a row for a path no router routes, answered by a service", "| anything else |", "| `/canary/mcp` | `mcp`, the canary's MCP server |\n| anything else |", "`/canary/mcp`'s row names an answer other than a 404"],
+  ["an overlay's row not naming its file", "With `compose.hooks-public.yaml` named", "With the hooks overlay named", "does not name `compose.hooks-public.yaml`"],
+  ["a noop@internal router's row not saying 404", "| `/register`, `/authorize`, `/token` | the proxy's bodiless 404:", "| `/register`, `/authorize`, `/token` | the proxy, refused:", "`/register`'s row does not say 404"],
+  ["the table's header renamed", "| Path | Answered by |", "| Route | Answered by |", 'has no "| Path | Answered by |" table'],
+];
+function checkPathTable() {
+  const rel = "deploy/README.md";
+  const readme = readFileSync(join(ROOT, rel), "utf8");
+  const tables = ROUTE_FILES.map(([file, , , , , table]) => [file, table] as const);
+  for (const p of pathTableProblems(readme, tables)) fail(rel, `${p} — the path table is the operator's reading of check 28's route tables, so a route changed there is changed here too (SMD-2296)`);
+  for (const [what, from, to, want] of PATH_TABLE_PROBES) {
+    if (readme.split(from).length !== 2) { fail(SELF, `check 28b's probe "${what}" finds its anchor ${readme.split(from).length - 1} times in ${rel}, not once — re-anchor it`); continue; }
+    if (!pathTableProblems(readme.replace(from, to), tables).some((p) => p.includes(want))) fail(SELF, `check 28b no longer catches ${what} (its own probe, which expects "${want}")`);
+  }
+  // A router the README has never heard of, added to compose.yaml's table.
+  const added = tables.map(([file, table]) => [file, file === "compose.yaml" ? table.replace("  routers:\n", `  routers:\n${routeRouter("probe", "PathPrefix(\`/probe/\`)", 30, "", "mcp")}`) : table] as const);
+  if (!pathTableProblems(readme, added).some((p) => p.includes("`/probe`"))) fail(SELF, "check 28b no longer catches a router added to compose.yaml's table with no row (its own probe)");
+}
+checkPathTable();
+
 // ── 29. Every service's log is bounded (SMD-1849) ───────────────────────────
 //
 // Docker's default json-file log is one file per container that grows until
@@ -7642,7 +7738,14 @@ checkHostIpTemplates();
 //  - its directory: TypeScript, its migrations, a README and metadata.json,
 //    nothing else; plugins/registry.ts imports and lists exactly the plugin
 //    directories; a manifest's name is its directory's; migration files are
-//    named by the core's rule.
+//    named by the core's rule;
+//  - its GUI pages (SMD-2280 PR 3), which the GUI renders, since a plugin's
+//    directory holds no Svelte: each page its manifest declares has its route
+//    at dashboard/src/routes/plugins/<name><path>/, a +page.svelte and a
+//    +page.server.ts alone, which awaits pluginAccess and reaches the brain by
+//    nothing else (no other server module, fetch, process, locals,
+//    import.meta or import()), so a disabled plugin's page is a 404 before any
+//    call; and no route there is a page no manifest declares.
 
 /** The core's tables: every CREATE TABLE in db/migrations/, uncommented, and the two ledgers. */
 function coreTables(): Set<string> {
@@ -7863,6 +7966,95 @@ const PLUGIN_PROBES: [string, "sql" | "ts", boolean][] = [
   ["RESET \"role\";", "sql", true],
 ];
 
+/** Where the GUI renders a plugin's pages (SMD-2280 PR 3): under this, one directory per page, `<name><path>/`. */
+const PLUGIN_ROUTES = "dashboard/src/routes/plugins";
+/** The files a plugin page's route holds: its markup, and the server load that reaches the plugin through pluginAccess. A `+server.ts`, a `+page.ts` or a layout would answer without it. */
+const PLUGIN_ROUTE_FILES = new Set(["+page.svelte", "+page.server.ts"]);
+/**
+ * What a plugin page's server load may import: SvelteKit's, the GUI's own
+ * modules but the server ones, and of those pluginAccess's alone — so it reaches
+ * the brain only through the access the gate hands back, never rest.ts or the
+ * REST client.
+ */
+const PLUGIN_PAGE_IMPORT = /^(?:@sveltejs\/kit|\$app\/(?:paths|navigation|environment|forms|state)|\.\/\$types|\$lib\/server\/plugins|\$lib\/(?!server\/)[\w/.-]+)$/;
+/** A page's path as the core holds it (core/plugins.ts's GUI_PATH): checked first, so a malformed one is said as such, not as a route to make. */
+const GUI_PAGE_PATH = /^(?:\/[a-z0-9]+(?:-[a-z0-9]+)*)+$/;
+/** A `.` or `..` segment, which would spell a server module another way (`$lib/./server/rest`): refused in any import (review pass 3). */
+const DOT_SEGMENT = /(?:^|\/)\.{1,2}(?:\/|$)/;
+/** What reaches past pluginAccess with no import: a global or a module's own reach (review pass 3: a bare fetch with the session's key needed none). */
+const PLUGIN_PAGE_REACH = /\b(?:fetch|process|require|globalThis|Bun|locals)\b|\bimport\s*\.\s*meta\b|\bimport\s*\(/;
+
+/**
+ * A plugin's GUI pages against the GUI's routes for them, each problem where it
+ * is found. `declared`: each plugin's page paths, as its manifest's `gui.pages`
+ * names them; `files`: every file under PLUGIN_ROUTES, by its path there, and
+ * its text. Each declared path is a page path (said as such first); each
+ * declared page has its directory, `<name><path>/`, holding a `+page.svelte`
+ * and a `+page.server.ts` and nothing else, and none is a page no manifest
+ * declares. The server file awaits pluginAccess(event) — the page's 404
+ * unless the registry lists its route's page to the key, then the plugin's
+ * operations — and reaches the brain by nothing else, so no load or action
+ * calls the plugin ungated. Per page, not a layout: a layout's load is skipped
+ * on a __data.json request that does not ask for it. Pure.
+ */
+function pluginPageProblems(declared: Record<string, string[]>, files: Record<string, string>): { where: string; what: string }[] {
+  const problems: { where: string; what: string }[] = [];
+  for (const [name, paths] of Object.entries(declared)) for (const path of paths) if (!GUI_PAGE_PATH.test(path)) problems.push({ where: `plugins/${name}/index.ts`, what: `declares the page ${JSON.stringify(path)}, which is no page path: segments of lower-case words and hyphens, each after a slash ("/notes", "/notes/all"), as the server holds them (bun test-plugins.ts in server-portable/ says the same)` });
+  const pages = new Set(Object.entries(declared).flatMap(([name, paths]) => paths.filter((path) => GUI_PAGE_PATH.test(path)).map((path) => `${name}${path}`)));
+  for (const page of pages) {
+    for (const f of PLUGIN_ROUTE_FILES) if (!(`${page}/${f}` in files)) problems.push({ where: `${PLUGIN_ROUTES}/${page}`, what: `no ${f}: the plugin's manifest declares this page, and the GUI renders each declared page from its route here, its load reaching the plugin through pluginAccess` });
+    const load = files[`${page}/+page.server.ts`];
+    if (load === undefined) continue;
+    // Strings kept to read the imports' specifiers; blanked too, so a string spelling a call or a name is neither.
+    const code = blanked(load, false);
+    const bare = blanked(load, true);
+    const where = `${PLUGIN_ROUTES}/${page}/+page.server.ts`;
+    if (!/\bawait\s+pluginAccess\s*\(\s*[A-Za-z_$][\w$]*\s*\)/.test(bare)) problems.push({ where, what: "does not await pluginAccess(event) — the load's or action's own event, so the page gates on its own route: a plugin page reaches its plugin through the access the gate hands back, so a disabled plugin's page is a 404 before any call" });
+    const imports = [...code.matchAll(/\b(?:import|export)\b[^;'"`]*?\bfrom\s*["']([^"']+)["']|\bimport\s*["']([^"']+)["']/g)].map((m) => m[1] ?? m[2]);
+    for (const spec of imports) if (!PLUGIN_PAGE_IMPORT.test(spec) || (spec !== "./$types" && DOT_SEGMENT.test(spec))) problems.push({ where, what: `imports ${JSON.stringify(spec)}: a plugin page's load reaches the brain through pluginAccess alone ($lib/server/plugins), never rest.ts or the REST client` });
+    const reach = PLUGIN_PAGE_REACH.exec(bare);
+    if (reach) problems.push({ where, what: `names ${JSON.stringify(reach[0].replace(/\s+/g, ""))}: a plugin page's load reaches the brain through pluginAccess alone — no fetch, process, require, globalThis, Bun, locals, import.meta or import() — so this check reads all it reaches` });
+  }
+  for (const rel of Object.keys(files)) {
+    const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+    const file = rel.slice(rel.lastIndexOf("/") + 1);
+    if (!pages.has(dir)) problems.push({ where: `${PLUGIN_ROUTES}/${rel}`, what: "is in no page a plugin's manifest declares (gui.pages): the nav would never name it, and a plugin page holds its +page.svelte and +page.server.ts alone" });
+    else if (!PLUGIN_ROUTE_FILES.has(file)) problems.push({ where: `${PLUGIN_ROUTES}/${rel}`, what: "a plugin page's route holds its +page.svelte and +page.server.ts alone: a +server.ts, a +page.ts or a layout would answer without pluginAccess" });
+  }
+  return problems;
+}
+
+/** pluginPageProblems' probes: each declared, files and how many problems. */
+const GATED = "import { fail } from '@sveltejs/kit';\nimport { base } from '$app/paths';\nimport type { PageServerLoad } from './$types';\nimport { oneLine } from '$lib/format';\nimport { pluginAccess } from '$lib/server/plugins';\nexport const load = async (event) => { const ex = await pluginAccess(event); return {}; };";
+const PLUGIN_PAGE_PROBES: [Record<string, string[]>, Record<string, string>, number][] = [
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED }, 0],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "" }, 1],
+  [{ example: ["/notes"] }, {}, 2],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "export const load = async (event) => { pluginAccess(event); return {}; };" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "// await pluginAccess(event)\nexport const load = () => ({});" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nimport { read } from '$lib/server/rest';" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nimport { createRestClient } from '../../../../../../rest-client/index.ts';" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nexport { read } from '$lib/server/rest';" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nconst m = await import('$lib/server/rest');" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nimport { read } from '$lib/./server/rest';" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nimport { read } from '$lib/../lib/server/rest';" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nconst m = import.meta.glob('/src/lib/server/rest.ts', { eager: true });" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nconst r = await fetch('http://api/v1/plugins/example/notes');" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nconst k = event.locals.session;" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "const s = 'await pluginAccess(';\nexport const load = () => ({});" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nconst words = 'a fetch of the notes';" }, 0],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED, "example/notes/+server.ts": "" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED, "example/notes/+page.ts": "" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED, "example/other/+page.svelte": "" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED, "+layout.server.ts": "" }, 1],
+  [{}, { "example/notes/+page.svelte": "" }, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED + "\nimport { getRequestEvent } from '$app/server';" }, 1],
+  [{ example: ["recent/"] }, {}, 1],
+  [{ example: [""] }, {}, 1],
+  [{ example: ["/notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": "export const load = async (event) => { await pluginAccess({ ...event, route: { id: '/plugins/other/x' } }); };" }, 1],
+  [{ example: ["/notes", "Notes"] }, { "example/notes/+page.svelte": "", "example/notes/+page.server.ts": GATED }, 1],
+];
+
 async function checkPlugins() {
   const { migrationNameProblem } = await import("../db/config.mjs");
   const core = coreTables();
@@ -7872,9 +8064,17 @@ async function checkPlugins() {
     if (hit && found.length === 0) fail(SELF, `check 31 no longer catches its probe: ${JSON.stringify(probe)}`);
     if (!hit && found.length > 0) fail(SELF, `check 31 catches a non-probe: ${JSON.stringify(probe)} — ${found.map((h) => h.what).join("; ")}`);
   }
+  const coreGuiPath = /\bconst GUI_PATH = \/(.+)\/;/.exec(readFileSync(join(ROOT, "server-portable", "core", "plugins.ts"), "utf8"))?.[1];
+  if (coreGuiPath !== GUI_PAGE_PATH.source) fail(SELF, `check 31's GUI_PAGE_PATH (${GUI_PAGE_PATH.source}) is not server-portable/core/plugins.ts's GUI_PATH (${coreGuiPath ?? "not found"}): the copy is held to the core's`);
+  for (const [declared, files, n] of PLUGIN_PAGE_PROBES) {
+    const found = pluginPageProblems(declared, files);
+    if (found.length !== n) fail(SELF, `check 31's page rule finds ${found.length} problem(s), not ${n}, in its probe ${JSON.stringify(files)}: ${found.map((h) => h.what).join("; ")}`);
+  }
   const base = join(ROOT, "plugins");
   if (!existsSync(base)) return;
   const dirs = readdirSync(base).filter((d) => statSync(join(base, d)).isDirectory() && !d.startsWith(".") && d !== "node_modules");
+  /** Each plugin's GUI page paths, read from its manifest (`gui: { pages: [{ path: "…", … }] }`). */
+  const declared: Record<string, string[]> = {};
   // The registry: exactly the directories, each by its index.ts, each in PLUGINS; held to the plugin rules itself.
   const registryPath = join(base, "registry.ts");
   const registry = existsSync(registryPath) ? readFileSync(registryPath, "utf8") : "";
@@ -7891,10 +8091,16 @@ async function checkPlugins() {
     const binding = imported.get(d);
     if (!binding) fail("plugins/registry.ts", `does not import ./${d}/index.ts: a plugin the registry does not import is one no server runs`);
     else if (!listed.has(binding)) fail("plugins/registry.ts", `imports ./${d}/index.ts as ${binding} but PLUGINS does not list it`);
-    const name = blanked(readFileSync(index, "utf8"), false).match(/\bdefinePlugin\s*\(\s*\{[\s\S]*?\bname:\s*["']([^"']+)["']/)?.[1];
+    const manifest = blanked(readFileSync(index, "utf8"), false);
+    const name = manifest.match(/\bdefinePlugin\s*\(\s*\{[\s\S]*?\bname:\s*["']([^"']+)["']/)?.[1];
+    // The literal shape the example writes: a pages list held elsewhere, or a `]` inside a label, reads as no page — a
+    // loud false positive (its route then "declared by no manifest"), never a silent pass; the core's own check rules.
+    declared[d] = [...(manifest.match(/\bgui\s*:\s*\{\s*pages\s*:\s*\[([\s\S]*?)\]/)?.[1] ?? "").matchAll(/\bpath\s*:\s*["']([^"']*)["']/g)].map((m) => m[1]);
     if (name !== d) fail(`${where}/index.ts`, `its manifest's name is ${JSON.stringify(name ?? null)}, not its directory's (${d}): OB1_PLUGINS, the migrator and the server name a plugin by one name`);
     // Every file in the directory: TypeScript, its migrations, a README and metadata.json — a .js file is code this check would not read.
-    const files = walk(join(base, d), [], /$/).filter((f) => !f.includes(`${sep}node_modules${sep}`));
+    // Every file, dotfiles included: Bun imports `./.helper.ts`, so a dotfile is code this check must refuse (review pass 4).
+    // Finder's .DS_Store alone is passed over: no runtime imports it as code (review pass 5).
+    const files = walk(join(base, d), [], /^(?!\.DS_Store$)/).filter((f) => !f.includes(`${sep}node_modules${sep}`));
     const migrationFiles: string[] = [];
     for (const f of files) {
       const rel = relative(join(base, d), f).split(sep).join("/");
@@ -7910,6 +8116,12 @@ async function checkPlugins() {
     }
   }
   for (const d of imported.keys()) if (!dirs.includes(d)) fail("plugins/registry.ts", `imports ./${d}/index.ts, which is no plugin directory`);
+  // The GUI's routes for the pages: one directory each, asking the registry, and none undeclared (SMD-2280 PR 3).
+  const routes = join(ROOT, ...PLUGIN_ROUTES.split("/"));
+  const files: Record<string, string> = {};
+  // A dotfile (Finder's .DS_Store, an editor's swap file) is no route: skipped here, where the import rule refuses relative imports; the plugin walk reads them.
+  if (existsSync(routes)) for (const f of walk(routes, [], /^[^.]/)) files[relative(routes, f).split(sep).join("/")] = readFileSync(f, "utf8");
+  for (const h of pluginPageProblems(declared, files)) fail(h.where, `${h.what} (check 31, SMD-2280)`);
 }
 await checkPlugins();
 
