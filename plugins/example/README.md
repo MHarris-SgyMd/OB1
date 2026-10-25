@@ -35,7 +35,7 @@ SIG=$(printf %s "$TS.$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's
 curl -X POST -H 'content-type: application/json' -H "x-example-timestamp: $TS" -H "x-example-signature: $SIG" -d "$BODY" http://127.0.0.1:8000/hooks/example/capture
 ```
 
-It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists for the operator GUI's nav while the plugin is on. Through the proxy, where `/api` is on, the routes are under `/api` (`/api/v1/plugins/example/…`). `add_note` looks the thought up through the core as the caller before it writes. A thought the caller cannot read, or one that is not there, is refused with `404 NO_SUCH_THOUGHT`. `written_by` is the name of the key that pinned the note.
+It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists for the operator GUI's nav while the plugin is on. The GUI renders it at `/dashboard/plugins/example/notes`: the newest thoughts through `example_recent`, a thought's notes through `example_list_notes`, and for a write key a form that pins one through `example_add_note`. Through the proxy, where `/api` is on, the routes are under `/api` (`/api/v1/plugins/example/…`). `add_note` looks the thought up through the core as the caller before it writes. A thought the caller cannot read, or one that is not there, is refused with `404 NO_SUCH_THOUGHT`. `written_by` is the name of the key that pinned the note.
 
 ## Prerequisites
 
@@ -51,15 +51,15 @@ It declares one GUI page, **Notes** at `/notes`, which `GET /v1/plugins` lists f
    OB1_PLUGIN_DB_PASSWORD=<the generated password>
    ```
 
-2. Recreate the migrator and the servers so they read it: `docker compose up -d migrate api mcp` from `deploy/`. The migrator makes `ob1_plugins` (the first time), the plugin's role and schema, and applies `001_notes.sql` and `002_deliveries.sql`. The servers wait for it.
+2. Recreate the migrator and the servers so they read it: `docker compose up -d migrate api mcp` from `deploy/`, then `docker compose up -d --force-recreate --no-deps app`, so the operator GUI reaches the recreated REST core at once, not its old address. Name the stack's other `-f` files in both (`-f compose.yaml -f compose.release.yaml …`), so an overlay's settings on these services (a release's image, Grafana's link) stay. Recreating `app` signs everyone out of the GUI: its sessions live in its memory. The migrator makes `ob1_plugins` (the first time), the plugin's role and schema, and applies `001_notes.sql` and `002_deliveries.sql`. The servers wait for it.
 3. Check it:
    - preflight's `plugins` row says `example — enabled`, and its `plugin tables` row says the role, schema and migrations are in place;
    - `GET /v1/whoami` lists `example_recent` and `example_list_notes` for a read key, and `example_add_note` too for a write key;
-   - `GET /v1/plugins` lists the plugin and its Notes page;
+   - `GET /v1/plugins` lists the plugin and its Notes page, and the operator GUI's nav names Notes to a read or write key, once signed in again;
    - an MCP client sees the same tools.
-4. For the webhook, add `OB1_HOOKS=example` and `OB1_HOOK_SECRETS=example=<openssl rand -hex 32>` to `deploy/.env`, recreate the REST core (`docker compose up -d api`), and name the overlay with the stack's other `-f` files: `docker compose -f compose.yaml -f compose.hooks-public.yaml up -d proxy forwarder`. The REST core's preflight `plugin webhooks` row then says `example` is served (the MCP server serves no webhook, and is not given the knobs).
+4. For the webhook, add `OB1_HOOKS=example` and `OB1_HOOK_SECRETS=example=<openssl rand -hex 32>` to `deploy/.env`, recreate the REST core and then the GUI (`docker compose up -d api`, then `docker compose up -d --force-recreate --no-deps app`, each with the stack's other `-f` files), and name the overlay with them too: `docker compose -f compose.yaml -f compose.hooks-public.yaml up -d proxy forwarder`. The REST core's preflight `plugin webhooks` row then says `example` is served (the MCP server serves no webhook, and is not given the knobs).
 
-Remove the name from `OB1_PLUGINS` and recreate the servers to turn it off. Its tools, routes and OpenAPI entries are gone. Its table and notes stay, and come back when it is turned on again.
+Remove the name from `OB1_PLUGINS` and recreate the same services to turn it off. Its tools, routes and OpenAPI entries are gone. Its table and notes stay, and come back when it is turned on again.
 
 ## Start your own plugin
 

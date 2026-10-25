@@ -35,7 +35,7 @@
  */
 
 import { SQL } from "bun";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBEDDING_DIM, EMBEDDING_MODEL, HNSW_BOUNDS, MATCH_COUNT_CEILING, MATCH_THOUGHTS_SIGNATURE, ROUTE_ESTIMATE_MIN_PAGES, ROUTE_SAMPLE_PAGES, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, grantedFunctions, grantedSequences, grantedTables, grantedViews, parseSetConfig, versionAtLeast } from "./config.mjs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -3867,6 +3867,194 @@ if (want("9")) {
     await sql`DELETE FROM thought_work_claims WHERE work_type LIKE ${`reembed:stub-embed@${DIM}:stop%`}`;
   }
 
+  // A follower (SMD-2679 PR 4a-2a): --follow polls, pooling again at each
+  // poll — no trigger feeds this pool — under the model's own key; its own
+  // heartbeat row; the check; and a recorded model other than its own, at the
+  // start or under it, is the permanent `model-switch` refusal.
+  {
+    await sql`DELETE FROM thoughts`;
+    const OWN_KEY = `reembed:stub-embed@${DIM}`;
+    const ROW = `heartbeat:reembed:stub-embed@${DIM}`;
+    await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+    await sql`DELETE FROM ob1_config WHERE key = ${ROW}`;
+    const row = async () => {
+      const [r] = await sql`SELECT value FROM ob1_config WHERE key = ${ROW}`;
+      return r ? (JSON.parse(r.value) as { running?: boolean; outcome?: string | null; ended?: boolean; every_s?: number; refused?: string }) : null;
+    };
+    const newThought = async (text: string) => (await sql`INSERT INTO thoughts (content) VALUES (${text}) RETURNING id::text AS id`)[0].id as string;
+    const atModel = async (id: string) => (await sql`SELECT embedding_model FROM thoughts WHERE id = ${id}::uuid AND embedding IS NOT NULL`)[0]?.embedding_model === "stub-embed";
+    const ownClaims = async () => Number((await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${OWN_KEY}`)[0].n);
+    /** A follower run that should return of itself, bounded: past 15 s it is stopped and null, so a case fails rather than hangs (the check's mutant ran on). */
+    const bounded = async (opts: Omit<ReembedOptions, "writer" | "signal">) => {
+      const ac = new AbortController();
+      const running = reembedInProcess({ ...opts, signal: ac.signal });
+      const r = await Promise.race([running, Bun.sleep(15_000).then(() => null)]);
+      if (r === null) {
+        ac.abort();
+        await running;
+      }
+      return r;
+    };
+    // What the follower's own connections open with: the budget's settings (SMD-2679 PR 2), seen by a statement trigger on the claims.
+    await sql.unsafe(`CREATE TABLE zz_reembed_seen (setting text);
+      CREATE FUNCTION zz_reembed_seen() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        -- Only a statement that pooled re-embed claims: another connection's claims carry its own settings (review pass 1).
+        IF EXISTS (SELECT 1 FROM zz_new WHERE work_type LIKE 'reembed:%') THEN INSERT INTO zz_reembed_seen VALUES (current_setting('statement_timeout') || ' ' || current_setting('work_mem')); END IF;
+        RETURN NULL; END $$;
+      CREATE TRIGGER zz_reembed_seen AFTER INSERT ON thought_work_claims REFERENCING NEW TABLE AS zz_new FOR EACH STATEMENT EXECUTE FUNCTION zz_reembed_seen()`);
+    try {
+      // Through the start and idle; a thought captured meanwhile, with no
+      // vector, is pooled at the next poll and re-embedded; a stop exits 0.
+      const started: unknown[] = [];
+      const ac = new AbortController();
+      const followRun = reembedInProcess({ job: undefined, follow: 1, workers: 1, batch: 1, session: { statement_timeout: "7s", work_mem: "3MB" }, signal: ac.signal, onStart: (r) => started.push(r) });
+      const stamped = await pollUntil(async () => (await row())?.running === false, 15_000);
+      // Idle, it stamps at every poll: the row is as fresh as a poll (review pass 1: no case held it).
+      await Bun.sleep(3000);
+      const idleAge = Number((await sql`SELECT extract(epoch FROM now() - updated_at)::float AS age FROM ob1_config WHERE key = ${ROW}`)[0]?.age ?? 99);
+      const found = await newThought("a thought the follower finds at its next poll");
+      const embedded = await pollUntil(() => atModel(found), 15_000);
+      // The data rule at every poll: a thought written since by a server on another model goes back to the pool (review pass 1).
+      await sql`UPDATE thoughts SET embedding_model = 'old-model' WHERE id = ${found}::uuid`;
+      const movedBack = await pollUntil(() => atModel(found), 15_000);
+      ac.abort();
+      const followed = await followRun;
+      const ended = await row();
+      const seen = ((await sql`SELECT DISTINCT setting FROM zz_reembed_seen`) as { setting: string }[]).map((r) => r.setting);
+      assert(stamped && idleAge < 2.5 && embedded && movedBack && followed.code === 0 && JSON.stringify(started) === JSON.stringify([{ ok: true, provider: "up" }]) && ended?.ended === true && ended.outcome === "stopped" && ended.every_s === 60 && JSON.stringify(seen) === JSON.stringify(["7s 3MB"]),
+        `reembed --follow pools at each poll: idle, its row as fresh as a poll (${idleAge.toFixed(1)} s); a thought captured after its start, with no vector, is re-embedded, and moved to another model since, re-embedded again at the next poll; a stop exits 0, its own row ${ROW} ended stopped, and its connections carry the session's settings (exit ${followed.code}; started ${JSON.stringify(started)}; row ${JSON.stringify(ended)}; seen ${JSON.stringify(seen)})`);
+
+      // The check: the start alone, through, and nothing pooled.
+      const unpooled = await newThought("a thought the check leaves unpooled");
+      const checked: unknown[] = [];
+      const claimsBefore = await ownClaims();
+      const check = await bounded({ job: undefined, follow: 1, check: true, onStart: (r) => checked.push(r) });
+      assert(check?.code === 0 && JSON.stringify(checked) === JSON.stringify([{ ok: true, provider: "up" }]) && (await ownClaims()) === claimsBefore && !(await atModel(unpooled)),
+        `reembed's check is the follower's start alone: 0, the start through, nothing pooled and nothing embedded (exit ${check?.code ?? "none in 15 s"}; heard ${JSON.stringify(checked)})`);
+      await sql`DELETE FROM thoughts WHERE id = ${unpooled}::uuid`;
+
+      // A recorded model other than the follower's own: refused at the start, `model-switch`, its row ended so.
+      await sql`UPDATE ob1_config SET value = 'another-model' WHERE key = 'embedding_model'`;
+      const refusedHeard: unknown[] = [];
+      const switched = await bounded({ job: undefined, follow: 1, onStart: (r) => refusedHeard.push(r) });
+      const refusedRow = await row();
+      await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+      assert(switched?.code === 2 && /Refusing to follow: ob1_config records another-model and this follower is configured for stub-embed/.test(switched.stderr) && JSON.stringify(refusedHeard) === JSON.stringify([{ ok: false, refused: "model-switch" }])
+          && refusedRow?.ended === true && refusedRow.outcome === "failed" && refusedRow.refused === "model-switch",
+        `a follower whose model is not the one ob1_config records is refused at its start, kind model-switch, its row ended on it (exit ${switched?.code ?? "none in 15 s"}; heard ${JSON.stringify(refusedHeard)}; row ${JSON.stringify(refusedRow)})`);
+
+      // …and the record moving under a running follower ends it so.
+      const acMid = new AbortController();
+      const midRun = reembedInProcess({ job: undefined, follow: 1, signal: acMid.signal });
+      const midStamped = await pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 15_000);
+      await sql`UPDATE ob1_config SET value = 'another-model' WHERE key = 'embedding_model'`;
+      const mid = await Promise.race([midRun, Bun.sleep(15_000).then(() => null)]);
+      acMid.abort();
+      if (mid === null) await midRun;
+      const midRow = await row();
+      await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+      assert(midStamped && mid?.code === 2 && /ob1_config now records another-model: this follower is configured for stub-embed and never switches the model — it stops/.test(mid.stderr) && midRow?.ended === true && midRow.refused === "model-switch",
+        `the record moving under a running follower ends it at its next poll, kind model-switch on its row (exit ${mid?.code}; row ${JSON.stringify(midRow)})`);
+
+      // The CLI's --follow, stopped by SIGINT: 0.
+      const cli = Bun.spawn(["bun", "--no-env-file", join(HERE, "reembed.ts"), "--url", URL_!, "--follow", "1", "--workers", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+      const cliStamped = await pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 20_000);
+      const cliFound = await newThought("a thought the CLI's follower finds");
+      const cliEmbedded = await pollUntil(() => atModel(cliFound), 15_000);
+      cli.kill("SIGINT");
+      const cliCode = await Promise.race([cli.exited, Bun.sleep(15_000).then(() => null)]);
+      if (cliCode === null) cli.kill("SIGKILL");
+      assert(cliStamped && cliEmbedded && cliCode === 0 && (await row())?.outcome === "stopped",
+        `the CLI's --follow 1 re-embeds a thought captured while it polls, and a SIGINT ends it with 0, its row stopped (exit ${cliCode})`);
+
+      // A stop wakes the follower's sleep: a 15 s poll ends at once (review
+      // pass 1). Started with no model recorded, it records its own.
+      await sql`DELETE FROM ob1_config WHERE key = 'embedding_model'`;
+      const acLong = new AbortController();
+      const longRun = reembedInProcess({ job: undefined, follow: 15, signal: acLong.signal });
+      const longStamped = await pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 15_000);
+      const stopAt = Date.now();
+      acLong.abort();
+      const longStopped = await Promise.race([longRun, Bun.sleep(10_000).then(() => null)]);
+      const stopMs = Date.now() - stopAt;
+      if (longStopped === null) await longRun;
+      const [{ recorded: longRecorded }] = await sql`SELECT value AS recorded FROM ob1_config WHERE key = 'embedding_model'`;
+      assert(longStamped && longStopped?.code === 0 && stopMs < 3000 && longRecorded === "stub-embed", `a stop wakes a follower asleep between polls: a 15 s poll ends in ${stopMs} ms, exit ${longStopped?.code}; started with no model recorded, it recorded ${longRecorded}`);
+
+      // --retry-failed is the first pool's alone: under a backfill key, the
+      // model recorded (a run that records it skips the flag), a thought
+      // whose call always fails is tried at the first pool and never again
+      // (review pass 1: each poll would send it; the start-over's own rule
+      // holds by the record, which a follower's later polls always find).
+      const BF_KEY = `reembed:stub-embed@${DIM}:bf`;
+      poison = true;
+      await newThought("the hemlock note a follower meets");
+      const acBf = new AbortController();
+      const bfRun = reembedInProcess({ job: BF_KEY, follow: 1, workers: 1, retryFailed: true, signal: acBf.signal });
+      const bfSettled = await pollUntil(async () => {
+        const [c] = await sql`SELECT count(*) FILTER (WHERE status IN ('pending', 'claimed'))::int AS open, count(*) FILTER (WHERE status = 'failed')::int AS failed FROM thought_work_claims WHERE work_type = ${BF_KEY}`;
+        return Number(c.open) === 0 && Number(c.failed) === 1;
+      }, 20_000);
+      const callsSettled = embedCalls;
+      await Bun.sleep(3500);
+      const callsAfter = embedCalls;
+      acBf.abort();
+      const bf = await bfRun;
+      poison = false;
+      assert(bfSettled && callsAfter === callsSettled && bf.code === 0,
+        `--retry-failed runs at the first pool alone: three polls after the backfill settled send no call (${callsAfter - callsSettled} sent), the failed row not retried (exit ${bf.code})`);
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${BF_KEY}`;
+      // A permanent database error at a poll (a privilege, a function gone)
+      // ends the follower, its row ended failed, rather than costing every
+      // poll after it while the row goes stale (review pass 1).
+      const acPerm = new AbortController();
+      const permRun = runReembed({ url: URL_!, env, follow: 1, workers: 1, signal: acPerm.signal, writer: { out: () => {}, err: () => {} } }).then((c) => `exit ${c}`, (e: Error & { errno?: string }) => `threw ${e.errno ?? e.message}`);
+      const permStamped = await pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 15_000);
+      await sql.unsafe(`CREATE FUNCTION zz_reembed_denied() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'zz: permission denied' USING ERRCODE = '42501'; END $$;
+        CREATE TRIGGER zz_reembed_denied BEFORE INSERT ON thought_work_claims FOR EACH STATEMENT EXECUTE FUNCTION zz_reembed_denied()`);
+      let permOutcome: string | null = null;
+      try {
+        await newThought("a thought a denied pool meets");
+        permOutcome = await Promise.race([permRun, Bun.sleep(15_000).then(() => null)]);
+      } finally {
+        await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_denied ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_denied()`);
+        acPerm.abort();
+        if (permOutcome === null) await permRun;
+      }
+      const permRow = await row();
+      assert(permStamped && permOutcome === "threw 42501" && permRow?.ended === true && permRow.outcome === "failed",
+        `a permanent database error at a poll ends the follower, its row ended failed (${permOutcome ?? "still running after 15 s"}; row ${JSON.stringify(permRow)})`);
+
+      // …and at a worker's claim, the pool through: a row trigger refuses the
+      // claim's move to claimed alone (review pass 2: every poll drained, every
+      // worker stopped, the row read healthy).
+      const acClaim = new AbortController();
+      const claimRun = runReembed({ url: URL_!, env, follow: 1, workers: 1, signal: acClaim.signal, writer: { out: () => {}, err: () => {} } }).then((c) => `exit ${c}`, (e: Error & { errno?: string }) => `threw ${e.errno ?? e.message}`);
+      const claimStamped = await pollUntil(async () => { const r = await row(); return r?.running === false && r.ended !== true; }, 15_000);
+      await sql.unsafe(`CREATE FUNCTION zz_reembed_claim_denied() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+          IF NEW.status = 'claimed' AND OLD.status IS DISTINCT FROM 'claimed' AND NEW.work_type LIKE 'reembed:%' THEN RAISE EXCEPTION 'zz: permission denied to claim' USING ERRCODE = '42501'; END IF;
+          RETURN NEW; END $$;
+        CREATE TRIGGER zz_reembed_claim_denied BEFORE UPDATE ON thought_work_claims FOR EACH ROW EXECUTE FUNCTION zz_reembed_claim_denied()`);
+      let claimOutcome: string | null = null;
+      try {
+        await newThought("a thought a denied claim meets");
+        claimOutcome = await Promise.race([claimRun, Bun.sleep(15_000).then(() => null)]);
+      } finally {
+        await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_claim_denied ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_claim_denied()`);
+        acClaim.abort();
+        if (claimOutcome === null) await claimRun;
+      }
+      const claimRow = await row();
+      assert(claimStamped && claimOutcome === "threw 42501" && claimRow?.ended === true && claimRow.outcome === "failed",
+        `a permanent database error at a worker's claim ends the follower too, its row ended failed (${claimOutcome ?? "still running after 15 s"}; row ${JSON.stringify(claimRow)})`);
+    } finally {
+      await sql.unsafe(`DROP TRIGGER IF EXISTS zz_reembed_seen ON thought_work_claims; DROP FUNCTION IF EXISTS zz_reembed_seen(); DROP TABLE IF EXISTS zz_reembed_seen`);
+      await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+      await sql`DELETE FROM ob1_config WHERE key = ${ROW}`;
+      await sql`DELETE FROM thought_work_claims WHERE work_type = ${OWN_KEY}`;
+    }
+  }
+
   provider.stop(true);
   await sql`UPDATE ob1_config SET value = ${recordedModel} WHERE key = 'embedding_model'`;
   await sql`DELETE FROM thoughts`;
@@ -6526,6 +6714,79 @@ if (want("16")) {
     `--status counts the pending by pass, most first, ten at most with the rest counted, a rejected row's pass not among them, a key --key cannot take quoted when it has spaces and said so (${byLine.trim().slice(0, 200)})`);
   await sql`DELETE FROM thoughts WHERE id IN (${rawA}::uuid, ${rawB}::uuid, ${rawC}::uuid)`;
   for (const t of extra) await sql`DELETE FROM thoughts WHERE id = ${t}::uuid`;
+  // SMD-3249: --after pages a capped listing. 51 proposals under one raw pass, over 9 thoughts outside the pool: a
+  // --list pending --key page of 50 says "the first 50 of 51" and ends with the line to run for the next — its --list,
+  // its --key and its cursor — which lists the one left, past the cursor, with no line after it, and in-process as
+  // spawned. --after is refused alone, with lineage or relations, and when it is no cursor of the listing's. Review
+  // pass 1: refused too with another --list or --key than its page's (it listed from mid-selection without a word), and
+  // with a time Postgres cannot read (a raw stack); a cursor past the last row is the listing's end, not an empty queue.
+  const pt: string[] = [];
+  for (let i = 0; i < 9; i++) pt.push(await rawThought(`[16] a paged pass's side ${i}`));
+  let planted = 0;
+  for (let i = 0; i < 9 && planted < 51; i++) for (let j = 0; j < 9 && planted < 51; j++) {
+    if (i === j) continue;
+    await sql`SELECT record_supersession_proposal(${pt[i]}::uuid, ${pt[j]}::uuid, 'newer_supersedes_older', ${0.5 + (planted % 5) / 10}::numeric, 'raw', 0.9, 'consolidate:zz-paged@p1', NULL)`;
+    planted++;
+  }
+  const pagedIds = (out: string) => [...out.matchAll(/proposal ([0-9a-f-]{36}) /g)].map((m) => m[1]);
+  const pageA = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1");
+  const cursorA = /\n  next page: --list pending --key consolidate:zz-paged@p1 --after (\S+)\n/.exec(pageA.out)?.[1] ?? "";
+  const pageB = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1", "--after", cursorA);
+  const pageBC = await consolidateInProcess({ list: "pending", key: "consolidate:zz-paged@p1", after: cursorA });
+  assert(pageA.code === 0 && /50 pending proposal\(s\) judged by consolidate:zz-paged@p1, most confident first — the first 50 of 51; decide these and list again for the rest, or --after <the cursor below> for the next page/.test(pageA.out)
+      && cursorA.length > 0 && pagedIds(pageA.out).length === 50 && pageB.code === 0 && pagedIds(pageB.out).length === 1 && !pagedIds(pageA.out).includes(pagedIds(pageB.out)[0])
+      && /\n  1 pending proposal\(s\) judged by consolidate:zz-paged@p1 past the cursor, most confident first:\n/.test(pageB.out) && !/next page:/.test(pageB.out) && same(pageBC, pageB),
+    `--list --after: a capped page of 50 of 51 ends with its cursor, which lists the one left and no cursor after it, in-process as spawned (${pageA.out.split("\n").find((l) => /the first 50/.test(l))?.trim().slice(0, 140)})`);
+  const afterAlone = await consolidate("--status", "--after", cursorA), afterLineage = await consolidate("--list", "lineage", "--after", cursorA);
+  const afterRelations = await consolidate("--list", "relations", "--after", cursorA), afterBad = await consolidate("--list", "--after", "not-a-cursor");
+  assert([afterAlone, afterLineage, afterRelations].every((r) => r.code === 2 && /--after goes with --list <pending\|accepted\|rejected\|stale\|all>/.test(r.out))
+      && afterBad.code === 2 && /--after takes the cursor a --list page printed/.test(afterBad.out),
+    `--after refused alone, with lineage or relations, and when it is no cursor (${afterBad.out.trim().slice(0, 80)})`);
+  const { parseProposalCursor, proposalCursor } = await import("../server-portable/core/list-cursor.ts");
+  const atA = parseProposalCursor(cursorA)!;
+  const noKey = await consolidate("--list", "pending", "--after", cursorA), allKey = await consolidate("--list", "all", "--key", "consolidate:zz-paged@p1", "--after", cursorA);
+  const pastEnd = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1", "--after", proposalCursor(atA.selection, "0.00", atA.judgedAt, atA.id));
+  const year0Cur = proposalCursor(atA.selection, atA.confidence, "0000-01-01 00:00:00+00", atA.id);
+  const year0 = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1", "--after", year0Cur);
+  // Review pass 2: refused before anything is written — a --reject beside it is not made — in-process as spawned; and a
+  // cursor the tool made under a lineage filter is refused as the tool's to page, not as flags --list could pass.
+  const victim = pagedIds(pageA.out)[0];
+  const year0Reject = await consolidate("--reject", victim, "--list", "pending", "--key", "consolidate:zz-paged@p1", "--after", year0Cur);
+  // A throw is read as the case's failure, not the suite's end (review pass 2: unrefused, the in-process run threw).
+  const year0C = await consolidateInProcess({ list: "pending", key: "consolidate:zz-paged@p1", after: year0Cur }).catch((e: Error) => ({ code: -1, stdout: "", stderr: e.message }));
+  const [{ status: victimStatus }] = await sql`SELECT status FROM supersession_proposals WHERE id = ${victim}::uuid`;
+  const lineageCur = await consolidate("--list", "pending", "--after", proposalCursor({ ...atA.selection, judgeKey: null, lineage: true }, atA.confidence, atA.judgedAt, atA.id));
+  assert([noKey, allKey].every((r) => r.code === 2 && r.out.includes("--after's cursor was made for --list pending --key consolidate:zz-paged@p1: pass those with it"))
+      && pastEnd.code === 0 && pastEnd.out.includes("  no more pending proposals judged by consolidate:zz-paged@p1 past this cursor — the listing ends here")
+      && year0.code === 2 && year0.out.includes("this one's time is not one Postgres reads") && !/PostgresError|\n\s+at /.test(year0.out)
+      && year0Reject.code === 2 && !/rejected /.test(year0Reject.out) && victimStatus === "pending" && same(year0C, year0)
+      && lineageCur.code === 2 && lineageCur.out.includes("--after's cursor was made by the list_supersession_proposals tool under lineage: true, which --list does not select: page it there"),
+    `--after with another --list or --key refused naming its page's; past the last row, the listing's end; a year-0 time refused in --after's words, no stack, before a --reject beside it writes, in-process as spawned; a tool's lineage cursor the tool's to page (${noKey.out.trim().slice(0, 100)} | ${year0.out.trim().slice(0, 100)} | ${lineageCur.out.trim().slice(0, 100)})`);
+  // Review pass 2: --list all pages under its own selection — the next page line says --list all, not pending (printList
+  // reads all as no status) — and a page whose rows all went before the writers' read (list_proposal_writers wrapped
+  // to return none, as deletes between the two reads would) still prints the line past them.
+  const allKeyed = await consolidate("--list", "all", "--key", "consolidate:zz-paged@p1");
+  await sql.unsafe(`DO $$ DECLARE r text := pg_get_function_result('list_proposal_writers(uuid[])'::regprocedure); BEGIN
+    ALTER FUNCTION list_proposal_writers(uuid[]) RENAME TO list_proposal_writers_kept;
+    EXECUTE format('CREATE FUNCTION list_proposal_writers(p_ids uuid[]) RETURNS %s LANGUAGE sql AS $f$ SELECT * FROM list_proposal_writers_kept(ARRAY[]::uuid[]) $f$', r);
+  END $$`);
+  let allGone: Awaited<ReturnType<typeof consolidate>>;
+  try {
+    allGone = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1");
+  } finally {
+    await sql.unsafe(`DROP FUNCTION list_proposal_writers(uuid[]); ALTER FUNCTION list_proposal_writers_kept(uuid[]) RENAME TO list_proposal_writers`);
+  }
+  assert(allKeyed.code === 0 && /\n  next page: --list all --key consolidate:zz-paged@p1 --after \S+\n/.test(allKeyed.out)
+      && allGone.code === 0 && allGone.out.includes("  no pending proposals judged by consolidate:zz-paged@p1 on this page: the ones it listed went before they were read\n  next page: --list pending --key consolidate:zz-paged@p1 --after ")
+      && pagedIds(allGone.out).length === 0,
+    `--list all's next page line keeps --list all; a page whose rows all went still prints the line past them (${allKeyed.out.split("\n").find((l) => /next page/.test(l))?.trim().slice(0, 70)} | ${allGone.out.trim().slice(0, 140)})`);
+  // Run-it review, pass 1: a page holding exactly the cap is not capped — 110's remaining, not `rows === limit` (the
+  // rule before 110), which printed "the first 50 of 50" and a cursor to an empty page.
+  await sql`DELETE FROM supersession_proposals WHERE id = ${pagedIds(pageB.out)[0]}::uuid`;
+  const exact = await consolidate("--list", "pending", "--key", "consolidate:zz-paged@p1");
+  assert(exact.code === 0 && pagedIds(exact.out).length === 50 && /\n  50 pending proposal\(s\) judged by consolidate:zz-paged@p1, most confident first:\n/.test(exact.out) && !/next page:|the first 50/.test(exact.out),
+    `a page of exactly 50 is the whole selection: no cap note, no next page line (${exact.out.split("\n").find((l) => /pending proposal/.test(l))?.trim().slice(0, 120)})`);
+  for (const t of pt) await sql`DELETE FROM thoughts WHERE id = ${t}::uuid`;
   // The line's builder on rows a brain would need dozens of thoughts for (review pass 4: with one row in each overflow
   // pass, the passes counted and their rows summed were the same number): twelve passes, the last two of 3 and 2 rows;
   // a key with a leading - is no key --key takes (the CLI's parser reads it as a flag).
@@ -6536,10 +6797,15 @@ if (want("16")) {
     `the by-pass line names ten, counts the rest's passes and rows apart, and marks a leading - (${built.slice(-80)} | ${builtFew})`);
   // The capped page's note, every case (review pass 2: a capped --list all --key said to decide and list again, which
   // never drains an all-status page; no suite reached a cap under --key).
-  assert(capNote("pending", false) === "--status counts them all" && capNote(undefined, false) === "--status counts them all"
-      && capNote("pending", true) === "decide these and list again for the rest; --status counts each pass's pending"
-      && ["accepted", "rejected", "stale", "lineage", undefined].every((st) => capNote(st, true) === "the rest are not listed (SMD-3249 pages)"),
-    "a capped page's note: --status's total unselected; under --key, pending drains as it is decided and every other selection waits for paging");
+  // SMD-3249: every one-status page goes on with --after; a lineage page (two listings) cannot.
+  const NEXT = "--after <the cursor below> lists the next page";
+  const K16 = "consolidate:k@p1";
+  assert(["pending", "accepted", undefined].every((st) => capNote(st, undefined) === `${NEXT}; --status counts them all`)
+      && capNote("pending", K16) === "decide these and list again for the rest, or --after <the cursor below> for the next page; --status counts each pass's pending"
+      && ["accepted", "rejected", "stale", undefined].every((st) => capNote(st, K16) === NEXT)
+      && capNote("lineage", undefined) === "the rest are not listed — reject these and list again, or page them with the list_supersession_proposals tool (status: pending, then stale, each with lineage: true and after: its cursor)"
+      && capNote("lineage", K16) === `the rest are not listed — reject these and list again, or page them with the list_supersession_proposals tool (status: pending, then stale, each with lineage: true, judge_key: ${K16} and after: its cursor)`,
+    "a capped page's note: --after for every one-status page; under --key, pending also drains as it is decided; a lineage page drains as it is rejected, and the tool pages it, under --key that pass's alone");
 
   // The review path, through the worker's flags, audited under the key's name.
   const needDir = await consolidate("--accept", undirected.id);
@@ -6694,26 +6960,26 @@ if (want("16")) {
     // door, not a verdict: the row stays pending, nothing is written
     // (definitions probe, second review pass: the accept went through under
     // the reject's own advice). A brain without the listing's current form
-    // (109's since SMD-3248, 070's before) gets the file named on --list, not
+    // (110's since SMD-3249, 109's and 070's before) gets the file named on --list, not
     // a driver stack: the form dropped and put back.
     const acceptLineage = await consolidate("--accept", atlas!.id);
     assert(acceptLineage.code === 1 && /accept refused: one side's derived_from names the other — a derivation and its input, a pair the pass never proposes since 066; accepting archives the input while the derivation still names it\./.test(acceptLineage.out) && acceptLineage.out.includes(`--reject ${atlas!.id} --note "lineage pair (066)" is the expected decision; pass --force (with --direction on an undirected verdict) if the pointer is what you mean`)
            && (await proposalRow(atlas!.id)).status === "pending" && (await sql`SELECT supersedes FROM thoughts WHERE id = ${atlasNew}::uuid`)[0].supersedes === null,
            `--accept on a lineage pair is refused naming the reject and --force, the row still pending and no pointer written (exit ${acceptLineage.code}: ${acceptLineage.out.trim().slice(0, 200)})`);
     // R3 tooth (mutant 2): the catch names the file for the one error it is for — an unrelated failure inside the listing is shown as itself.
-    await sql.unsafe(`CREATE OR REPLACE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20, p_lineage boolean DEFAULT NULL, p_judge_key text DEFAULT NULL) RETURNS TABLE (id uuid, status text, verdict text, confidence numeric, reason text, similarity real, judge_key text, judged_at timestamptz, reviewed_at timestamptz, review_note text, superseding_id uuid, older_id uuid, older_content text, older_created_at timestamptz, newer_id uuid, newer_content text, newer_created_at timestamptz, older_edited boolean, newer_edited boolean, lineage boolean) LANGUAGE plpgsql STABLE AS $f$ BEGIN RAISE EXCEPTION 'boom: an unrelated failure inside the listing'; END $f$`);
+    await sql.unsafe(`CREATE OR REPLACE FUNCTION list_supersession_proposals(p_status text DEFAULT 'pending', p_limit int DEFAULT 20, p_lineage boolean DEFAULT NULL, p_judge_key text DEFAULT NULL, p_after_confidence numeric DEFAULT NULL, p_after_judged_at timestamptz DEFAULT NULL, p_after_id uuid DEFAULT NULL) RETURNS TABLE (id uuid, status text, verdict text, confidence numeric, reason text, similarity real, judge_key text, judged_at timestamptz, reviewed_at timestamptz, review_note text, superseding_id uuid, older_id uuid, older_content text, older_created_at timestamptz, newer_id uuid, newer_content text, newer_created_at timestamptz, older_edited boolean, newer_edited boolean, lineage boolean, page_key text, remaining bigint) LANGUAGE plpgsql STABLE AS $f$ BEGIN RAISE EXCEPTION 'boom: an unrelated failure inside the listing'; END $f$`);
     const listBoom = await consolidate("--list", "lineage");
-    assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 109/.test(listBoom.out),
-           `an unrelated error inside --list is shown as itself, not as a missing 109 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
-    // A brain at 108: 070's three-argument form alone, 109's gone.
-    await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean, text)`);
-    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("070_") });
-    assert(/1 unreviewed standing on a lineage pair \(apply migration 109 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
-           "--status still counts the row on a brain without 109 and says the listing needs the file before pointing at it");
-    const listPre109 = await consolidate("--list", "lineage");
-    assert(listPre109.code === 1 && /--list needs migration 109 \(db\/migrations\/109_listing_selects_a_pass\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre109.out) && !/PostgresError/.test(listPre109.out),
-           `on a brain without 109 --list names the file, not a driver error (exit ${listPre109.code}: ${listPre109.out.trim().slice(0, 160)})`);
+    assert(listBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(listBoom.out) && !/needs migration 110/.test(listBoom.out),
+           `an unrelated error inside --list is shown as itself, not as a missing 110 (exit ${listBoom.code}: ${listBoom.out.trim().slice(0, 160)})`);
+    // A brain at 109: 109's four-argument form alone, 110's gone.
+    await sql.unsafe(`DROP FUNCTION list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid)`);
     await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("109_") });
+    assert(/1 unreviewed standing on a lineage pair \(apply migration 110 first — cd db && bun migrate\.ts --url <url> — then --list lineage shows them; the reviewer rejects each/.test((await consolidate("--status")).out),
+           "--status still counts the row on a brain without 110 and says the listing needs the file before pointing at it");
+    const listPre110 = await consolidate("--list", "lineage");
+    assert(listPre110.code === 1 && /--list needs migration 110 \(db\/migrations\/110_listing_pages\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(listPre110.out) && !/PostgresError/.test(listPre110.out),
+           `on a brain without 110 --list names the file, not a driver error (exit ${listPre110.code}: ${listPre110.out.trim().slice(0, 160)})`);
+    await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("110_") });
     await sql`UPDATE thoughts SET derived_from = NULL WHERE id = ${atlasNew}::uuid`;
     // The edit resolves the conflict (the stub reads the new pair as unrelated); the rebuild sets the row stale.
     const atlasFp2 = await moveRaw(atlasNew, "Invoices for the atlas account follow the deploy calendar.");
@@ -8753,11 +9019,10 @@ if (want("19")) {
 /**
  * Fixture exports for [19b], two records of each kind each importer reads,
  * every date before 2025 so a row dated by the run stands out, and the shapes
- * a real export brings: grok.com's nested conversation, a conversation two
- * export files both hold, one the parser cannot read, members listed newest
+ * a real export brings: grok.com's nested conversation, a conversation one
+ * export file lists twice, one the parser cannot read, members listed newest
  * first, a group past the 100,000-character bound in each importer that
- * splits, a Blogger category in single quotes and an entry in two `.atom`
- * files. What each importer should emit: one item per thought, each item's
+ * splits, a Blogger category in single quotes and a Blogger entry its backup lists twice. What each importer should emit: one item per thought, each item's
  * kind, and for each key the export's own date and the source record as
  * exported ("part" and null where a group's parts are checked on their own).
  */
@@ -8779,7 +9044,7 @@ function writeExportFixtures(root: string) {
   // One message past the bound alone: cut, saying so.
   const conv5 = { id: "conv-5", title: "Pasted log", create_time: "2024-06-06T06:06:06Z", conversation: [{ sender: "user", message: `Here is the whole log: ${"0123456789".repeat(12_000)}` }] };
   writeFileSync(join(grok, "grok-export.json"), JSON.stringify({ conversations: [conv1, conv2, conv4, conv5] }));
-  writeFileSync(join(grok, "grok-export-2.json"), JSON.stringify({ conversations: [conv1, null, conv3] }));
+  writeFileSync(join(grok, "grok-export-2.json"), JSON.stringify({ conversations: [conv3, null, conv3] }));
   const ig = join(root, "instagram", "your_instagram_activity");
   const dms: Record<string, unknown> = {};
   // dave_888's thread passes the bound (300 messages of ~400 characters): two parts.
@@ -8823,8 +9088,8 @@ function writeExportFixtures(root: string) {
   };
   writeFileSync(join(blogger, "feed.atom"), `<?xml version="1.0"?><feed>`
     + `<entry><id>tag:blogger.com,1999:blog-1.settings.X</id><category term="http://schemas.google.com/blogger/2008/kind#settings"/><content>a setting the importer skips</content></entry>`
-    + Object.values(entries).join("") + `</feed>`);
-  writeFileSync(join(blogger, "backup.atom"), `<?xml version="1.0"?><feed>${entries["post-2"]}</feed>`);
+    // post-1 listed twice in the one backup: emitted once.
+    + Object.values(entries).join("") + entries["post-1"] + `</feed>`);
   const x = join(root, "x", "data");
   mkdirSync(x, { recursive: true });
   // Newest first, as the archive lists them; the year 2999 is a date the pipeline would refuse, so that tweet is `undated`.
@@ -8986,8 +9251,8 @@ if (want("19b")) {
     // record; an emoji the export holds whole stays whole; an escaped post
     // loses its tags and its entities; a file cut short is refused.
     const grokErr = emitted.get("grok")!.err;
-    assert(/conversation 2: cannot be read/.test(grokErr) && /conversation conv-1 appears twice; emitted once/.test(grokErr) && /1 date\(s\) left out/.test(grokErr),
-      `grok names the conversation it cannot read, the one two export files hold and the date it left out, and emits the rest (${oneLine(grokErr).slice(0, 240)})`);
+    assert(/conversation 2: cannot be read/.test(grokErr) && /conversation conv-3 appears twice; emitted once/.test(grokErr) && /1 date\(s\) left out/.test(grokErr),
+      `grok names the conversation it cannot read, the one an export file lists twice and the date it left out, and emits the rest (${oneLine(grokErr).slice(0, 240)})`);
     assert([...emitted.values()].every(({ items }) => items.every((it) => !it.text.includes("\u0000"))), "no item's text holds the NUL its export did");
     const alice = emitted.get("instagram")!.items.find((it) => it.identity.key === "dm:123");
     assert(alice?.text.split("\n").length === 207 && (JSON.parse(alice.canonical.form)[0].messages as unknown[]).length === 205,
@@ -9023,6 +9288,177 @@ if (want("19b")) {
     const cut = emit({ script: "instagram-import/import-instagram.mjs", input: instagramBad });
     assert(cut.exitCode === 2 && cut.stdout.length === 0 && /message_1\.json: not a JSON file of the export/.test(cut.stderr.toString()),
       `an Instagram export with a file cut short is refused, naming it, and nothing is emitted (exit ${cut.exitCode}: ${oneLine(cut.stderr.toString()).slice(0, 160)})`);
+    // The import runner's calls (SMD-2493 PR 2): its pipelines pass
+    // `--if-present`, so a folder with no export yet is a run that writes
+    // nothing; at a prompt the same path with no flag is still a mistake.
+    const absent = join(dir, "no-export-yet");
+    const runs = imports.map((im) => {
+      const viaRunner = Bun.spawnSync(["bun", join(HERE, "..", "recipes", im.script), absent, "--if-present"], { cwd: tmpdir(), env: { PATH: process.env.PATH ?? "" }, stdout: "pipe", stderr: "pipe" });
+      const atPrompt = Bun.spawnSync(["bun", join(HERE, "..", "recipes", im.script), absent], { cwd: tmpdir(), env: { PATH: process.env.PATH ?? "" }, stdout: "pipe", stderr: "pipe" });
+      return { system: im.system, ok: viaRunner.exitCode === 0 && viaRunner.stdout.length === 0 && atPrompt.exitCode === 2, codes: `${viaRunner.exitCode}/${atPrompt.exitCode}` };
+    });
+    assert(runs.every((r) => r.ok), `with --if-present a path with no export emits nothing and exits 0; without it, exit 2 (${runs.map((r) => `${r.system} ${r.codes}`).join(", ")})`);
+    // An export unzipped into the runner's folder, one level down: X finds the
+    // archive's data/ and refuses two archives, naming them; Grok finds its JSON.
+    const xIn = imports.find((im) => im.system === "x")!, gIn = imports.find((im) => im.system === "grok")!;
+    const oneDown = join(dir, "one-down");
+    cpSync(xIn.input, join(oneDown, "x1", "twitter-2024-01-01"), { recursive: true });
+    cpSync(xIn.input, join(oneDown, "x2", "twitter-2023"), { recursive: true });
+    cpSync(xIn.input, join(oneDown, "x2", "twitter-2024"), { recursive: true });
+    cpSync(gIn.input, join(oneDown, "g", "grok-export-2024"), { recursive: true });
+    const xOne = emit({ script: xIn.script, input: join(oneDown, "x1") }), xTwo = emit({ script: xIn.script, input: join(oneDown, "x2") });
+    const gOne = emit({ script: gIn.script, input: join(oneDown, "g") });
+    assert(Buffer.compare(xOne.stdout, emit(xIn).stdout) === 0 && xTwo.exitCode === 2 && /holds 2 archives/.test(xTwo.stderr.toString()) && Buffer.compare(gOne.stdout, emit(gIn).stdout) === 0,
+      `an X archive or a Grok export one folder down emits what it does at the top, and two X archives are refused, naming them (x exit ${xOne.exitCode}, two archives exit ${xTwo.exitCode}, grok exit ${gOne.exitCode})`);
+    // What the runner must never read as "no export yet": a folder or file
+    // the emitter cannot read (with --if-present, as the runner calls it), and
+    // two exports side by side. Each is refused, exit 2, naming it. File modes
+    // bind only a non-root reader, so as root the unreadable half is skipped.
+    const viaRunner = (script: string, input: string) => Bun.spawnSync(["bun", join(HERE, "..", "recipes", script), input, "--if-present"], { cwd: tmpdir(), env: { PATH: process.env.PATH ?? "" }, stdout: "pipe", stderr: "pipe" });
+    const refused = (r: ReturnType<typeof viaRunner>, why: RegExp) => r.exitCode === 2 && r.stdout.length === 0 && why.test(r.stderr.toString());
+    const igIn = imports.find((im) => im.system === "instagram")!, blogIn = imports.find((im) => im.system === "blogger")!;
+    cpSync(gIn.input, join(oneDown, "g2", "export-2025-06"), { recursive: true });
+    cpSync(gIn.input, join(oneDown, "g2", "export-2025-09"), { recursive: true });
+    cpSync(xIn.input, join(oneDown, "x3"), { recursive: true });
+    cpSync(xIn.input, join(oneDown, "x3", "twitter-2025"), { recursive: true });
+    cpSync(igIn.input, join(oneDown, "ig2", "instagram-me-2023"), { recursive: true });
+    cpSync(igIn.input, join(oneDown, "ig2", "instagram-me-2024"), { recursive: true });
+    // One blog backed up twice, and one Grok conversation in two files: the same record in two files is two exports.
+    cpSync(blogIn.input, join(oneDown, "blog3", "2025"), { recursive: true });
+    cpSync(blogIn.input, join(oneDown, "blog3", "2026"), { recursive: true });
+    mkdirSync(join(oneDown, "g5"), { recursive: true });
+    writeFileSync(join(oneDown, "g5", "export-a.json"), readFileSync(join(gIn.input, "grok-export.json")));
+    writeFileSync(join(oneDown, "g5", "export-b.json"), readFileSync(join(gIn.input, "grok-export.json")));
+    const twoExports = [
+      refused(viaRunner(gIn.script, join(oneDown, "g2")), /holds 2 exports/),
+      refused(viaRunner(xIn.script, join(oneDown, "x3")), /holds 2 archives/),
+      refused(viaRunner(igIn.script, join(oneDown, "ig2")), /holds 2 downloads/),
+      refused(viaRunner(blogIn.script, join(oneDown, "blog3")), /is in two backups/),
+      refused(viaRunner(gIn.script, join(oneDown, "g5")), /is in two files/),
+      (() => {
+        // An X archive's files loose at the top, beside an archive one folder down.
+        cpSync(join(xIn.input, "data"), join(oneDown, "x5"), { recursive: true });
+        cpSync(xIn.input, join(oneDown, "x5", "twitter-2025"), { recursive: true });
+        return refused(viaRunner(xIn.script, join(oneDown, "x5")), /holds 2 archives/);
+      })(),
+    ];
+    // Something there, nothing this importer reads: refused, naming the likely cause, never "no export yet". An
+    // Instagram download in Meta's HTML format, and a zip left unextracted, in each importer.
+    const htmlIg = join(oneDown, "ig-html", "your_instagram_activity", "messages", "inbox", "carol_789");
+    mkdirSync(htmlIg, { recursive: true });
+    writeFileSync(join(htmlIg, "message_1.html"), "<html><body>Hello</body></html>");
+    const zipped = (name: string) => { const d = join(oneDown, `zip-${name}`); mkdirSync(d, { recursive: true }); writeFileSync(join(d, `${name}-export.zip`), "PK\u0003\u0004"); return d; };
+    const nothingRead = [
+      refused(viaRunner(igIn.script, join(oneDown, "ig-html")), /holds none of the JSON files this importer reads [^\n]*an HTML download/),
+      refused(viaRunner(igIn.script, zipped("instagram")), /holds no Instagram download/),
+      refused(viaRunner(gIn.script, zipped("grok")), /holds no JSON export/),
+      refused(viaRunner(blogIn.script, zipped("blogger")), /holds no Blogger backup/),
+      refused(viaRunner(xIn.script, zipped("x")), /holds no X archive/),
+    ];
+    assert(nothingRead.every(Boolean), `a folder holding something but nothing the importer reads is refused, naming the likely cause (${nothingRead.join("/")})`);
+    // An export found but no record of the importer's kind parsed from it: another product's file of the name an
+    // importer reads, or a vendor shape it does not know. Refused, not a green run that writes nothing every week
+    // (review pass 4).
+    const readToNothing = (name: string, files: Record<string, string>) => {
+      mkdirSync(join(oneDown, name), { recursive: true });
+      for (const [f, body] of Object.entries(files)) { mkdirSync(join(oneDown, name, f, ".."), { recursive: true }); writeFileSync(join(oneDown, name, f), body); }
+      return join(oneDown, name);
+    };
+    const foundNothing = [
+      refused(viaRunner(gIn.script, readToNothing("g-other", { "other.json": '{"hello":"world"}' })), /found no conversation with a message in them/),
+      refused(viaRunner(blogIn.script, readToNothing("blog-sitemap", { "sitemap.xml": '<?xml version="1.0"?><urlset></urlset>' })), /found no post or comment entry in them/),
+      refused(viaRunner(xIn.script, readToNothing("x-account", { "data/account.js": "window.YTD.account.part0 = []" })), /found an archive's data folder but no tweet, DM or Grok chat in it/),
+      refused(viaRunner(igIn.script, readToNothing("ig-empty", { "your_instagram_activity/comments/post_comments_1.json": "[]" })), /found no message, comment or post in them/),
+      // Elements of no record's kind count none (review pass 6: array elements of any shape were counted as read).
+      refused(viaRunner(xIn.script, readToNothing("x-vendor", { "data/tweets.js": 'window.YTD.tweets.part0 = [{"tweet":{"legacy":{"full_text":"a tweet in a shape this importer does not read"}}}]' })), /found an archive's data folder but no tweet, DM or Grok chat in it/),
+      refused(viaRunner(igIn.script, readToNothing("ig-numbers", { "your_instagram_activity/content/posts_1.json": "[1,2]" })), /found no message, comment or post in them/),
+      refused(viaRunner(igIn.script, readToNothing("ig-nulls", { "your_instagram_activity/messages/inbox/dan_1/message_1.json": '{"messages":[null,null,null]}' })), /found no message, comment or post in them/),
+      refused(viaRunner(blogIn.script, readToNothing("blog-settings", { "feed.atom": '<?xml version="1.0"?><feed><entry><id>s</id><category term="http://schemas.google.com/blogger/2008/kind#settings"/><content>a setting the importer skips</content></entry></feed>' })), /found no post or comment entry in them/),
+    ];
+    assert(foundNothing.every(Boolean), `an export found with no record of the importer's kind in it is refused in each importer, never a green run that writes nothing (${foundNothing.join("/")})`);
+    // The rule's other side: records parsed and every one skipped by the importer's own filters (a retweet, a short
+    // conversation, note, comment) are a correct read, and exit 0 with nothing emitted (review pass 5).
+    const greenEmpty = (r: ReturnType<typeof viaRunner>) => r.exitCode === 0 && r.stdout.length === 0;
+    const allFiltered = [
+      greenEmpty(viaRunner(xIn.script, readToNothing("x-retweets", { "data/tweets.js": 'window.YTD.tweets.part0 = [{"tweet":{"id_str":"1","created_at":"Tue Mar 05 10:00:00 +0000 2019","full_text":"RT @someone: a retweet, which the importer skips entirely"}}]' }))),
+      greenEmpty(viaRunner(gIn.script, readToNothing("g-short", { "export.json": '[{"id":"c9","title":"t","conversation":[{"sender":"user","message":"hi"}]}]' }))),
+      greenEmpty(viaRunner(blogIn.script, readToNothing("blog-short", { "feed.atom": '<?xml version="1.0"?><feed><entry><id>tag:blogger.com,1999:blog-1.post-9</id><category term="http://schemas.google.com/blogger/2008/kind#post"/><title>a</title><content>short</content></entry></feed>' }))),
+      greenEmpty(viaRunner(igIn.script, readToNothing("ig-short", { "your_instagram_activity/comments/post_comments_1.json": '[{"string_map_data":{"Comment":{"value":"ok"},"Time":{"timestamp":1500000000}}}]' }))),
+      // A DM conversation and an Instagram thread under three messages: read, and skipped by the importers' filters.
+      greenEmpty(viaRunner(xIn.script, readToNothing("x-short-dm", { "data/direct-messages.js": 'window.YTD.direct_messages.part0 = [{"dmConversation":{"conversationId":"1-2","messages":[{"messageCreate":{"senderId":"1","text":"see you at the trailhead tomorrow morning","createdAt":"2019-03-05T10:00:00.000Z"}}]}}]' }))),
+      greenEmpty(viaRunner(igIn.script, readToNothing("ig-short-thread", { "your_instagram_activity/messages/inbox/erin_2/message_1.json": '{"messages":[{"sender_name":"Erin","content":"see you at the trailhead tomorrow","timestamp_ms":1500000000000}]}' }))),
+    ];
+    assert(allFiltered.every(Boolean), `an export whose records the importer's filters all skip exits 0 with nothing emitted, in each importer (${allFiltered.join("/")})`);
+    // A pipeline's folder that exists with no export in it (or only a Mac's .DS_Store) is no export, in each
+    // importer (review pass 5: X refused it, every week).
+    const emptyFolder = [gIn, igIn, blogIn, xIn].map((im) => greenEmpty(viaRunner(im.script, readToNothing(`empty-${im.system}`, { ".DS_Store": "\u0000Mac" }))));
+    assert(emptyFolder.every(Boolean), `a folder that exists with no export in it is a run that writes nothing, in each importer (${emptyFolder.join("/")})`);
+    // A file that does not parse is refused without the parser's words, which quote the export's own text into the
+    // runner's report (review pass 5).
+    const unparsed = [
+      viaRunner(gIn.script, readToNothing("g-unparsed", { "export.json": '{"a": PrivateWordFromAChat}' })),
+      viaRunner(xIn.script, readToNothing("x-unparsed", { "data/tweets.js": "window.YTD.tweets.part0 = [PrivateWordFromAChat]" })),
+      viaRunner(igIn.script, readToNothing("ig-unparsed", { "your_instagram_activity/comments/post_comments_1.json": "[PrivateWordFromAChat]" })),
+      // A tweets.js cut short before its array: refused as not parsing, not read as empty (review pass 6).
+      viaRunner(xIn.script, readToNothing("x-cut", { "data/tweets.js": "window.YTD.tweets.part0 = PrivateWordFromAChat" })),
+    ];
+    assert(unparsed.every((r) => r.exitCode === 2 && /does not parse/.test(r.stderr.toString()) && !r.stderr.toString().includes("PrivateWordFromAChat")),
+      `a file that does not parse is refused without quoting it (${unparsed.map((r) => r.exitCode).join("/")})`);
+    // Grok's two-files check reads every conversation, whatever --skip and --limit emit (review pass 4): --limit 1
+    // holds export-a's first copy alone, --skip 4 export-b's four alone (review pass 5: --skip 1 held both files').
+    const windows = [["--limit", "1"], ["--skip", "4"]].map((flags) => Bun.spawnSync(["bun", join(HERE, "..", "recipes", gIn.script), join(oneDown, "g5"), ...flags], { cwd: tmpdir(), env: { PATH: process.env.PATH ?? "" }, stdout: "pipe", stderr: "pipe" }));
+    assert(windows.every((r) => r.exitCode === 2 && r.stdout.length === 0 && /is in two files/.test(r.stderr.toString())),
+      `a Grok conversation in two files is refused under --limit 1 and --skip 4 too (${windows.map((r) => r.exitCode).join("/")})`);
+    // --types narrows the request, so an archive without the asked-for type is the request's (exit 0); a repeated
+    // entry counts once, so naming every type with one repeated is every type, and the rule holds (review pass 6).
+    const typed = (flags: string[]) => Bun.spawnSync(["bun", join(HERE, "..", "recipes", xIn.script), join(oneDown, "x-account"), ...flags], { cwd: tmpdir(), env: { PATH: process.env.PATH ?? "" }, stdout: "pipe", stderr: "pipe" });
+    const subset = typed(["--types", "tweets"]), repeated = typed(["--types", "tweets,dms,grok,tweets"]);
+    assert(subset.exitCode === 0 && subset.stdout.length === 0 && repeated.exitCode === 2 && /no tweet, DM or Grok chat/.test(repeated.stderr.toString()),
+      `X's --types: a subset is exempt from the rule, and every type named with one repeated is not (${subset.exitCode}/${repeated.exitCode})`);
+    // Pointed at the download's your_instagram_activity folder itself, Instagram reads it as from the download's root.
+    assert(Buffer.compare(emit({ script: igIn.script, input: join(igIn.input, "your_instagram_activity") }).stdout, emit(igIn).stdout) === 0,
+      "Instagram given its your_instagram_activity folder emits what it emits from the download's root");
+    // A Google Takeout as unzipped (Takeout/Blogger/Blogs/<blog>/, four levels down) and a dashboard `.xml` backup are read.
+    const takeout = join(oneDown, "takeout", "Takeout", "Blogger", "Blogs", "my-blog");
+    cpSync(blogIn.input, takeout, { recursive: true });
+    const xmlBackup = join(oneDown, "xml");
+    mkdirSync(xmlBackup, { recursive: true });
+    writeFileSync(join(xmlBackup, "blog-06-01-2016.xml"), readFileSync(join(blogIn.input, "feed.atom")));
+    assert(Buffer.compare(emit({ script: blogIn.script, input: join(oneDown, "takeout") }).stdout, emit(blogIn).stdout) === 0 && Buffer.compare(emit({ script: blogIn.script, input: xmlBackup }).stdout, emit(blogIn).stdout) === 0,
+      "a Blogger Takeout four folders down, and a .xml backup, are read as the .atom at the top is");
+    const asRoot = process.getuid?.() === 0;
+    let unreadable = [true, true, true, true, true, true];
+    if (!asRoot) {
+      cpSync(igIn.input, join(oneDown, "ig"), { recursive: true });
+      cpSync(blogIn.input, join(oneDown, "blog"), { recursive: true });
+      cpSync(blogIn.input, join(oneDown, "blog2"), { recursive: true });
+      cpSync(xIn.input, join(oneDown, "x4"), { recursive: true });
+      cpSync(gIn.input, join(oneDown, "g4"), { recursive: true });
+      const locked = [join(oneDown, "ig", "aaa-locked"), join(oneDown, "blog", "old-blog"), join(oneDown, "g4", "zzz-locked"),
+        join(oneDown, "x1", "twitter-2024-01-01"), join(oneDown, "x4", "data", "tweets.js"), join(oneDown, "blog2", "feed.atom")];
+      for (const p of locked.slice(0, 3)) mkdirSync(p, { recursive: true });
+      for (const p of locked) chmodSync(p, 0o000);
+      try {
+        unreadable = [
+          refused(viaRunner(igIn.script, join(oneDown, "ig")), /aaa-locked: cannot be read \(EACCES\)/),
+          refused(viaRunner(blogIn.script, join(oneDown, "blog")), /old-blog: cannot be read \(EACCES\)/),
+          refused(viaRunner(gIn.script, join(oneDown, "g4")), /zzz-locked: cannot be read \(EACCES\)/),
+          refused(viaRunner(xIn.script, join(oneDown, "x1")), /twitter-2024-01-01\/data: cannot be read \(EACCES\)/),
+          refused(viaRunner(xIn.script, join(oneDown, "x4")), /tweets\.js: cannot be read \(EACCES\)/),
+          // An unreadable export file reads as the folders do: one named line, no stack.
+          refused(viaRunner(blogIn.script, join(oneDown, "blog2")), /^import-blogger: [^\n]*feed\.atom: cannot be read \(EACCES\)\s*$/m) && !/\n\s+at /.test(viaRunner(blogIn.script, join(oneDown, "blog2")).stderr.toString()),
+        ];
+      } finally {
+        for (const p of locked) chmodSync(p, 0o755);
+      }
+    }
+    assert([...twoExports, ...unreadable].every(Boolean),
+      `a folder or file the emitter cannot read, or two exports side by side, is refused, exit 2, named in one line, never "no export yet" (two exports: ${twoExports.join("/")}; unreadable: ${asRoot ? "skipped as root, which file modes do not bind" : unreadable.join("/")})`);
+    // What a zip made on a Mac leaves (__MACOSX/, `._*` files) is passed over:
+    // each importer emits exactly what it does without it.
+    const macOf = (input: string, name: string) => { const d = join(dir, "mac", name); cpSync(input, d, { recursive: true }); mkdirSync(join(d, "__MACOSX", "data"), { recursive: true }); mkdirSync(join(d, "__MACOSX", "your_instagram_activity"), { recursive: true }); writeFileSync(join(d, "__MACOSX", "._export.json"), "\u0000\u0005\u0016\u0007Mac OS X"); writeFileSync(join(d, "._export.json"), "\u0000\u0005\u0016\u0007Mac OS X"); writeFileSync(join(d, "._feed.atom"), "\u0000Mac"); return d; };
+    const macSame = imports.map((im) => Buffer.compare(emit({ script: im.script, input: macOf(im.input, im.system) }).stdout, emit(im).stdout) === 0);
+    assert(macSame.every(Boolean), `__MACOSX/ and the ._* files a Mac's zip leaves change no importer's output (${imports.map((im, i) => `${im.system} ${macSame[i]}`).join(", ")})`);
     const post1 = emitted.get("blogger")!.items.find((it) => it.identity.key === "tag:blogger.com,1999:blog-1.post-1");
     assert(post1?.text.endsWith("\n\nThe kale survived the frost & the garlic is already showing green tips.") === true && !/<p|&amp;/.test(post1.text),
       `a Blogger post's escaped HTML reaches the text without its tags or entities (${JSON.stringify(post1?.text.slice(-80))})`);
@@ -12699,8 +13135,10 @@ if (want("37b")) {
       `the guards: no key first (identity), then each setting not digits named (usage), empty passing, none asked none refused (${noKey?.line.slice(0, 50)} | ${two?.line})`);
     // The keys: the claim workers' under the job their configuration names, as a compose follower (no --job) stamps.
     assert(followerKey("sleep", {}) === "heartbeat:sleep" && followerKey("board-sync", {}) === "heartbeat:board-sync" && EXTRACT_KEY === `heartbeat:${extractionKey(resolveEmbedConfig({}).metadataModel)}`
-        && followerKey("extract", { OB1_METADATA_MODEL: "m:1b" }) === `heartbeat:${extractionKey("m:1b")}` && /^heartbeat:consolidate:/.test(followerKey("consolidate", {}) ?? ""),
-      `the row a supervisor ends is the one its follower stamps (${EXTRACT_KEY})`);
+        && followerKey("extract", { OB1_METADATA_MODEL: "m:1b" }) === `heartbeat:${extractionKey("m:1b")}` && /^heartbeat:consolidate:/.test(followerKey("consolidate", {}) ?? "")
+        // A re-embed follower's, under the model's own key (SMD-2679), not consolidate's.
+        && followerKey("reembed", { OB1_EMBEDDING_MODEL: "e:4b", OB1_EMBEDDING_DIM: "768" }) === "heartbeat:reembed:e:4b@768",
+      `the row a supervisor ends is the one its follower stamps (${EXTRACT_KEY}; reembed ${followerKey("reembed", { OB1_EMBEDDING_MODEL: "e:4b", OB1_EMBEDDING_DIM: "768" })})`);
 
     // endRow: the follower's last word since its start kept — the scheduler's
     // sleep and its refusal — its waits dropped, the row ended failed, the

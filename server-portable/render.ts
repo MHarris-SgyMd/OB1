@@ -25,7 +25,7 @@ import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo } from "./brain-info.ts";
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
-import { parseListCursor } from "./core/list-cursor.ts";
+import { parseListCursor, parseProposalCursor } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
@@ -73,7 +73,9 @@ const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|sup
  */
 function guard(v: unknown, key = ""): unknown {
   // list_thoughts' cursor (SMD-2995): not a uuid, but held to its own shape, which carries no sentence.
-  if (typeof v === "string" && key === "cursor" && v === v.trim() && parseListCursor(v)) return v;
+  // list_supersession_proposals' (SMD-3249) likewise: a tag, its selection's tokens and pass key, a confidence, a
+  // timestamp's text and a uuid.
+  if (typeof v === "string" && key === "cursor" && v === v.trim() && (parseListCursor(v) || parseProposalCursor(v))) return v;
   // A proposal's pass (SMD-3248): held to pass-key.ts's one rule — one token, no space, so no sentence — the rule the
   // input took it by (review pass 4: a full-shape guard nulled keys the input admitted).
   if (typeof v === "string" && key === "judgeKey") return PASS_KEY_CHARS.test(v) ? v : null;
@@ -180,6 +182,8 @@ const safeList: Safe<ListThoughtsResult> = (v) => ({
  */
 const safeProposals: Safe<ProposalsResult> = (v) => ({
   status: v.status, ...(v.lineage === undefined ? {} : { lineage: v.lineage }), ...(v.judgeKey === undefined ? {} : { judgeKey: v.judgeKey }),
+  // SMD-3249: the next page's `after` (null once no more follow), how many follow this page, and whether it followed a cursor.
+  cursor: v.cursor, remaining: v.remaining, pastCursor: v.pastCursor,
   proposals: v.proposals.map((p) => ({
     id: p.id, status: p.status, verdict: p.verdict, confidence: p.confidence, similarity: p.similarity,
     // SMD-3248: the judge key names a pass and its models — no writer, so SMD-2707's rule (writers' names in the text) does not hold it back.
@@ -810,10 +814,17 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
 }
 
 export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply {
-  return render(o, ({ status, lineage, judgeKey, proposals: data }) => {
+  return render(o, ({ status, lineage, judgeKey, proposals: data, cursor, remaining, pastCursor }) => {
     // SMD-3248: the pass selected (109) is said with the rest of the selection.
     const onLineage = (lineage === true ? " on a lineage pair" : lineage === false ? " not on a lineage pair" : "") + (judgeKey === undefined ? "" : ` judged by ${judgeKeyText(judgeKey)}`);
+    // SMD-3249: how many more follow, and the cursor that lists them.
+    const next = cursor ? `\n\n${remaining} more follow${remaining === 1 ? "s" : ""} — pass after: ${cursor} (with the same filters) for the next page.` : "";
     if (!data.length) {
+      // Review pass 1: a page whose rows all went between the listing and the writers' read still carries
+      // the cursor past them; and an empty page after a cursor is the walk's end, not an empty queue — a pass to run
+      // or a key to check was the wrong advice there.
+      if (cursor) return `No ${status === "all" ? "" : status + " "}supersession proposals${onLineage} on this page: the ones it listed went before they were read.${next}`;
+      if (pastCursor) return `No more ${status === "all" ? "" : status + " "}supersession proposals${onLineage} past this cursor — the listing ends here.`;
       // A lineage pair is never proposed since 066, so an empty lineage
       // selection is not the pass's to fill (maintainer read, third pass).
       // SMD-3248 review pass 1: under judge_key, no row is no pass of exactly that key in this status — a typo, or an older
@@ -888,13 +899,19 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
         `\n   proposal ${p.id} — judged by ${judgeKeyText(p.judgeKey)} on ${day(p.judgedAt)}\n${review}`;
     });
     const unread = data.some((p) => !p.older.writer || !p.newer.writer) ? ` ${WRITERS_UNREAD}` : "";
-    return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.${unread}\n\n${results.join("\n\n")}`;
-  }, unknownRefusal, safeProposals);
+    // Review pass 1: a page after a cursor says so — its rows are not the selection's first.
+    return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}${pastCursor ? " past the cursor" : ""}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted.${unread}\n\n${results.join("\n\n")}${next}`;
+  }, (r) => r.code === "REFUSED_CURSOR"
+    ? r.reason === "filters" && r.made
+      // Review pass 1: the filters it was made under, so the caller passes them again (a status and lineage token, a pass key).
+      ? `Refused: that cursor was made with \`status: ${r.made.status}\`${r.made.lineage === null ? "" : `, \`lineage: ${r.made.lineage}\``}${r.made.judgeKey === null ? "" : `, \`judge_key: ${judgeKeyText(r.made.judgeKey)}\``}${r.made.lineage === null && r.made.judgeKey === null ? " and no other filter" : ""} — pass the same filters with it, or leave out \`after\` to start the list again.`
+      : "Refused: `after` is not a list_supersession_proposals cursor — pass the `cursor` a previous page ended with, as it was given, with the same filters, or leave it out for the first page."
+    : unknownRefusal(r), safeProposals);
 }
 
 /**
- * The hint a listing error carries. 070 (SMD-2313), then 109 (SMD-3248): the
- * store calls the four-argument form, so a brain short of 109 — or of 029,
+ * The hint a listing error carries. 070 (SMD-2313), 109 (SMD-3248), then 110
+ * (SMD-3249): the store calls the seven-argument form, so a brain short of 110 — or of 029,
  * whose queue the listing reads — fails naming that form (`p_lineage` was
  * PostgREST's word for it, before SMD-3152); the driver's message is the same
  * either way, so one hint names both files (cold read, first and fourth review
@@ -902,7 +919,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
  */
 export const proposalsHint = (msg: string): string =>
   /list_supersession_proposals|supersession_proposals|p_lineage/.test(msg)
-    ? " — the migrations through 109 are not applied (029, db/migrations/029_supersession_proposals.sql, creates the queue; 109, db/migrations/109_listing_selects_a_pass.sql, its current listing)"
+    ? " — the migrations through 110 are not applied (029, db/migrations/029_supersession_proposals.sql, creates the queue; 110, db/migrations/110_listing_pages.sql, its current listing)"
     : "";
 
 export function renderThoughtStats(o: Outcome<ThoughtStats>): Reply {

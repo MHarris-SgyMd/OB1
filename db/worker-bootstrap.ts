@@ -258,21 +258,22 @@ export function databaseUnavailable(e: unknown): boolean {
  * (`key`), or the egress gate asked again without the worker key as its
  * actor because the key's lookup did not name it — too many connections, an
  * answer of another shape — under a policy that admits that actor alone
- * (`lookup`). The sleep scheduler ends on the ones no retry mends, and
+ * (`lookup`), or the embedding model ob1_config records, which a re-embed
+ * follower never switches (`model-switch`, SMD-2679). The sleep scheduler ends on the ones no retry mends, and
  * retries `model`, `provider` and `lookup`, which a re-pull, a top-up or a
  * quieter database can (review pass 1). board-sync's two of its own end its
  * row too (SMD-3214): no LINEAR_API_KEY (`linear-key`), and an initiative
  * that is not one board (`board`); its bad interval or findings cap is
  * `usage`, its endpoint refused wholesale `egress`.
  */
-export const START_REFUSALS = ["usage", "egress", "tables", "model", "provider", "identity", "key", "lookup", "linear-key", "board"] as const;
+export const START_REFUSALS = ["usage", "egress", "tables", "model", "provider", "identity", "key", "lookup", "linear-key", "board", "model-switch"] as const;
 export type StartRefusal = (typeof START_REFUSALS)[number];
 
 /** A pass's start, as its run reports it to `onStart`: through, with the provider answering at its probe or not yet; or refused, and why. */
 export type StartResult = { ok: true; provider: "up" | "out" } | { ok: false; refused: StartRefusal };
 
 /** The start refusals a retry cannot mend: the scheduler reads its environment once, and the database's tables, keys and registry do not change under it by waiting. */
-export const PERMANENT_REFUSALS: ReadonlySet<StartRefusal> = new Set(["usage", "egress", "tables", "identity", "key"]);
+export const PERMANENT_REFUSALS: ReadonlySet<StartRefusal> = new Set(["usage", "egress", "tables", "identity", "key", "model-switch"]);
 
 /** The refusal a start probe's answer is: the model not served, or the provider refusing the call. */
 export function probeRefusal(p: Probe): StartRefusal {
