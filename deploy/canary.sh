@@ -13,7 +13,8 @@
 # setting, each value as compose read it, but the database password, which is
 # a fresh one of the canary's, the secrets of the profiles the canary
 # never runs (the authorization server's, n8n's, the import runner's, the
-# workers' key, Linear's), stable's keys and the secrets that go with them,
+# workers' key), every Linear key (the canary's board-sync reads with a key of
+# its own, step 6), stable's keys and the secrets that go with them,
 # and the settings that make it the canary: its port, loopback as its
 # address, its tier and its profiles (none), which compose is also handed in
 # the shell; its own access keys, minted, and its own plugin role password
@@ -110,7 +111,7 @@
 #      Postgres is touched: its servers, a running sleep worker, which
 #      comes back on the new build once the servers answer, unless its env
 #      file holds no OB1_WORKER_KEY (then it is left stopped and `up` exits
-#      1, said), and a running board-sync (step 7). A running service of
+#      1, said), and a running board-sync (step 6). A running service of
 #      another profile (the workers) is refused before anything changes:
 #      stop it first;
 #   4. builds the server image from this checkout (as `api`) and (re)creates
@@ -125,19 +126,21 @@
 #      return that thought first at 50% or more, for one of up to five
 #      candidates. A canary with no thought to probe is not checked, unless
 #      stable had one: then its vectors were emptied, and the smoke fails;
-#   6. with --connect, registers the Claude Code connector (user scope) under
+#   6. (re)starts board-sync on the new build when the canary's env file holds
+#      a LINEAR_API_KEY of its own, so the canary keeps its own copy of the
+#      board: it is upgraded in place and no longer refreshed, and a refresh
+#      was what brought stable's ticket rows (SMD-3312). The key is the
+#      canary's alone, a Linear personal API key made with Read access: the
+#      file never gets stable's, and step 2 clears stable's, and every other
+#      Linear key, where the file holds one. canary_compose holds
+#      LINEAR_COMMENT_API_KEY empty besides, so a canary never posts a finding
+#      to the board. Without a key of its own, board-sync is left off and the
+#      run says so;
+#   7. with --connect, registers the Claude Code connector (user scope) under
 #      its own key, OB1_CANARY_KEY, at http://127.0.0.1:<port>/mcp; without it, names a
 #      connector left at another of the canary's ports, at its port's root
 #      (the proxy's 404 since v2.0.0, SMD-2532), or at /canary/mcp on
-#      stable's origin;
-#   7. (re)starts board-sync on the new build when the canary's env file holds
-#      a LINEAR_API_KEY, so the canary keeps its own copy of the board: it is
-#      upgraded in place and no longer refreshed, and a refresh was what
-#      brought stable's ticket rows (SMD-3312). The key is read-only use; the
-#      comment key is never the canary's (CANARY_DROPPED), and canary_compose
-#      holds LINEAR_COMMENT_API_KEY empty besides, so a canary never posts a
-#      finding to the board. Without the key, board-sync is left off and the
-#      run says so.
+#      stable's origin.
 #
 # `down` removes the canary's containers and its own networks. It deregisters
 # the connector when `claude` has it at user scope and at a URL of the
@@ -222,7 +225,12 @@ cleanup() {
   [ -z "$CANARY_TMP" ] || rm -f "$CANARY_TMP".*.tmp
   if [ "$rc" != 0 ] && [ -z "$ADVISED" ]; then
     if [ -n "$WRITERS_STOPPED" ]; then
-      echo "up stopped (exit $rc) with the canary's servers${SLEEP_PENDING:+, sleep worker}${BOARD_PENDING:+, board-sync} stopped: fix the cause above and re-run ${RERUN:-up}." >&2
+      local which="servers"
+      if [ -n "$SLEEP_PENDING" ] && [ -n "$BOARD_PENDING" ]; then which="servers, sleep worker and board-sync"
+      elif [ -n "$SLEEP_PENDING" ]; then which="servers and sleep worker"
+      elif [ -n "$BOARD_PENDING" ]; then which="servers and board-sync"
+      fi
+      echo "up stopped (exit $rc) with the canary's $which stopped: fix the cause above and re-run ${RERUN:-up}." >&2
     elif [ -n "$SLEEP_PENDING$BOARD_PENDING" ]; then
       echo "up stopped (exit $rc) with the canary's${SLEEP_PENDING:+ sleep worker}${SLEEP_PENDING:+${BOARD_PENDING:+ and}}${BOARD_PENDING:+ board-sync} stopped: fix the cause above and re-run ${RERUN:-up}${SLEEP_PENDING:+, or start the sleep worker with ${SLEEP_START:-its compose --profile sleep up -d sleep}}." >&2
     fi
@@ -382,9 +390,9 @@ say() { printf '▸ %s\n' "$*"; }
 OWN_KEYS=""
 # LINEAR_COMMENT_API_KEY is held empty in the shell too, which compose reads
 # over the env file: board-sync posts a finding only with it (db/board-findings.ts,
-# SMD-2681), and a canary's board-sync never does, whatever its file says — the
-# file never gets the key (CANARY_DROPPED), but an operator could paste it in
-# (SMD-3312).
+# SMD-2681), and a canary's board-sync never does: the file never gets the key
+# (CANARY_DROPPED), every `up` clears one pasted in (env_file own-fix), and
+# this holds it empty for every compose call canary.sh makes besides (SMD-3312).
 canary_compose() {
   local env="$ENV_FILE" fwd=()
   [ ! -f "$CANARY_ENV" ] || env="$CANARY_ENV"
@@ -398,12 +406,13 @@ canary_compose() {
 # which is its own, and the secrets of the profiles the canary never runs
 # (the authorization server's, n8n's, the import runner's, the workers' key,
 # the observability profile's Grafana password and its database monitor's),
-# in any letter case — and every Linear key but LINEAR_API_KEY, by prefix:
-# an exact LINEAR_API_KEY here once let SMD-2681's LINEAR_COMMENT_API_KEY, a
-# key that can comment, through to the canary's file (SMD-2882), so a Linear
-# key added later is left out too. LINEAR_API_KEY, board-sync's read key, is
-# carried: the canary runs its own board-sync (step 7, SMD-3312), and a key of
-# the canary's own in its file is no drift (env_file drift). Stable's
+# in any letter case — and every Linear key, by prefix: an exact
+# LINEAR_API_KEY here once let SMD-2681's LINEAR_COMMENT_API_KEY, a key that
+# can comment, through to the canary's file (SMD-2882). The canary's board-sync
+# (step 6, SMD-3312) reads with a LINEAR_API_KEY of its own, a read-only key
+# the operator puts in its file, never stable's, which may be able to write
+# and would be held by the canary's unreleased db/ code; env_file own-fix
+# clears stable's, and any other Linear key, from the canary's file. Stable's
 # COMPOSE_PROJECT_NAME never reads as a setting here, since every read is under
 # the canary's -p, which compose reports as the name; the file names the
 # canary's own project instead (SMD-2873, env_file write).
@@ -413,7 +422,7 @@ canary_compose() {
 # the forwarder's key, the plugins' webhook secrets and their role's database
 # password. The canary's own are written in their place (env_file own-fix),
 # so they are no drift either.
-CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_[A-Z0-9_]*|OB1_WORKER_KEY|LINEAR_(?!API_KEY\Z)[A-Z0-9_]*|GRAFANA_[A-Z0-9_]*|OB1_MONITOR_[A-Z0-9_]*|MCP_ACCESS_KEYS|MCP_ACCESS_KEY|OB1_FORWARDER_KEY|OB1_HOOK_SECRETS|OB1_PLUGIN_DB_PASSWORD|OB1_CANARY_KEY'
+CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_[A-Z0-9_]*|OB1_WORKER_KEY|LINEAR_[A-Z0-9_]*|GRAFANA_[A-Z0-9_]*|OB1_MONITOR_[A-Z0-9_]*|MCP_ACCESS_KEYS|MCP_ACCESS_KEY|OB1_FORWARDER_KEY|OB1_HOOK_SECRETS|OB1_PLUGIN_DB_PASSWORD|OB1_CANARY_KEY'
 # What canary_compose sets in the shell for the canary, whatever the file says,
 # so a difference there is no drift. The file is written with the canary's own
 # values of these (env_file write), OB1_GIT_SHA aside, a build's, and
@@ -484,7 +493,9 @@ CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_PUBLIC_ORIGIN|
 #                               OB1_FORWARDER_KEY; SMD-2287), no raw key or
 #                               webhook secret of STABLE's, and a plugin role
 #                               password of its own when STABLE sets one
-#                               (SMD-2874, SMD-3032). Empty values when OUT
+#                               (SMD-2874, SMD-3032); no LINEAR_API_KEY that
+#                               is STABLE's and no other Linear key, each
+#                               cleared (SMD-3312). Empty values when OUT
 #                               already is
 #   env_file project OUT        the project OUT names (COMPOSE_PROJECT_NAME, read
 #                               without -p), or nothing
@@ -632,7 +643,9 @@ if mode == "own-fix":
             else:
                 return True
         return False
-    spans = [n for n in list(OWN) + ["MCP_ACCESS_KEYS", "MCP_ACCESS_KEY", "OB1_CANARY_KEY", "OB1_HOOK_SECRETS", "OB1_PLUGIN_DB_PASSWORD", "OB1_WORKER_KEY", "OB1_FORWARDER_KEY"] if spans_lines(n)]
+    # The Linear names the canary'"'"'s file sets, in any letter case (SMD-3312).
+    linear = [n for n in file_names(out) if re.fullmatch(r"LINEAR_[A-Z0-9_]*", n, re.I)]
+    spans = [n for n in list(OWN) + ["MCP_ACCESS_KEYS", "MCP_ACCESS_KEY", "OB1_CANARY_KEY", "OB1_HOOK_SECRETS", "OB1_PLUGIN_DB_PASSWORD", "OB1_WORKER_KEY", "OB1_FORWARDER_KEY"] + linear if spans_lines(n)]
     # Stable'"'"'s keys: its MCP_ACCESS_KEYS entries, its legacy key, and its
     # MCP server'"'"'s forward key, listed there or not (SMD-2287 review pass 3).
     stable_fwd = (s["OB1_FORWARDER_KEY"] or "").strip()
@@ -702,6 +715,26 @@ if mode == "own-fix":
         if c[n] and (sha(c[n]) in stable_digests or c[n] == s.get(n)):
             fix[n] = ""
             said.append("cleared %s (a key of stable'"'"'s)%s" % (n, "; a canary worker needs one of its own: bun server-portable/keygen.ts --name canary-workers --scope capture, its line in MCP_ACCESS_KEYS and its key here" if n == "OB1_WORKER_KEY" else ""))
+    # Linear (SMD-3312): the canary'"'"'s board-sync reads the board with a
+    # LINEAR_API_KEY of its own, never stable'"'"'s, which may be able to write
+    # and which the canary'"'"'s unreleased db/ code would hold; and it never
+    # comments, so any other Linear key (the comment key, pasted in) goes too,
+    # beside canary_compose holding it empty, so a board-sync started by hand
+    # from this file cannot post either. The exact name alone is a read key:
+    # compose reads ${LINEAR_API_KEY} by its case.
+    if linear:
+        lv = values(out, linear)
+        stable_read = (values(stable, ["LINEAR_API_KEY"])["LINEAR_API_KEY"] or "").strip()
+        for n in linear:
+            v = (lv[n] or "").strip()
+            if not v:
+                continue
+            if n != "LINEAR_API_KEY":
+                fix[n] = ""
+                said.append("cleared %s (a Linear key the canary never holds: its board-sync reads the board with a LINEAR_API_KEY of its own and never comments)" % n)
+            elif stable_read and v == stable_read:
+                fix[n] = ""
+                said.append("cleared LINEAR_API_KEY (stable'"'"'s): the canary'"'"'s board-sync reads with a key of its own, a Linear personal API key made with Read access alone")
     # plugin=secret pairs separated by spaces, the first = the separator, as
     # server-portable/core/plugins.ts hookSecrets reads them: any secret of
     # stable'"'"'s, under any plugin'"'"'s name (review pass 1: split on commas, it
@@ -754,9 +787,7 @@ if mode == "guard":
 cand = sorted(set(file_names(stable)) | set(file_names(out)))
 s, c = values(stable, cand), values(out, cand)
 if mode == "drift":
-    # A LINEAR_API_KEY of the canary'"'"'s own, a read key revoked apart from
-    # stable'"'"'s, is no drift; one it lacks is, so the note names it (SMD-3312).
-    print(" ".join(n for n in cand if not dropped.fullmatch(n) and not set_by_canary.fullmatch(n) and s[n] != c[n] and not (n == "LINEAR_API_KEY" and c[n])))
+    print(" ".join(n for n in cand if not dropped.fullmatch(n) and not set_by_canary.fullmatch(n) and s[n] != c[n]))
     sys.exit(0)
 problems = []
 if c.get("POSTGRES_PASSWORD") != os.environ["CANARY_PW"]:
@@ -1372,14 +1403,17 @@ SLEEP_START="$RUNTIME compose -p $CANARY --env-file $CANARY_ENV -f $HERE/compose
 SLEEP_SAID=""
 [ -z "$STOPPED_SLEEP" ] || SLEEP_SAID=" The sleep worker is stopped too: start it with $SLEEP_START, or re-run $RERUN."
 # Board-sync writes ticket rows as it runs, so it stops too, as the sleep
-# worker does, by name, within its service's 60 s grace, and step 7 brings it
+# worker does, by name, within its service's 60 s grace, and step 6 brings it
 # back on the new build once the smoke has passed (SMD-3312). A failed run
-# leaves it stopped, said by the EXIT trap; the next run starts it.
+# leaves it stopped, said: by BOARD_SAID in the messages that advise (and so
+# silence the EXIT trap), by the trap otherwise. The next run starts it.
 BOARD_CT="$(container_of "$CANARY" board-sync)"
+BOARD_SAID=""
 if [ -n "$BOARD_CT" ]; then
   say "canary board-sync stopped for $FOR"
   "$RUNTIME" stop -t 60 "$BOARD_CT" >/dev/null
   BOARD_PENDING=1
+  BOARD_SAID=" Board-sync is stopped too: the next run that passes starts it again."
 fi
 
 say "canary Postgres"
@@ -1389,7 +1423,7 @@ CANARY_PG="$(container_of "$CANARY" postgres)"
 # restore, a hand-run postgres) is no canary to keep (SMD-3154).
 if [ $REFRESH = 0 ] && [ "$(relations_in "$CANARY_PG")" = 0 ]; then
   ADVISED=1
-  echo "--no-refresh keeps the canary's database, and $CANARY_PG holds no relations — run up without it, which refreshes one from stable.$SLEEP_SAID" >&2
+  echo "--no-refresh keeps the canary's database, and $CANARY_PG holds no relations — run up without it, which refreshes one from stable.$SLEEP_SAID$BOARD_SAID" >&2
   exit 1
 fi
 # With its servers stopped, the canary's database takes its env file's
@@ -1417,7 +1451,7 @@ if [ $REFRESH = 1 ]; then
     # before anything changed" — stable may be stamped by now, a server stopped.
     ADVISED=1
     [ -z "$STOPPED_API" ] || echo "the canary's servers are stopped (for the refresh), so a connector registered for it answers nothing until \`up\` succeeds." >&2
-    echo "the refresh failed (tier.sh exit $refresh_rc). Re-run up once that is fixed: the canary carries the refresh mark, so the retry resets it.$SLEEP_SAID" >&2
+    echo "the refresh failed (tier.sh exit $refresh_rc). Re-run up once that is fixed: the canary carries the refresh mark, so the retry resets it.$SLEEP_SAID$BOARD_SAID" >&2
     exit 1
   fi
 else
@@ -1430,7 +1464,7 @@ else
     ADVISED=1
     left=""
     [ -z "$STOPPED_SLEEP" ] || left=" The sleep worker is stopped too: leave it so until a run succeeds, since this checkout's worker expects the new schema."
-    echo "the canary's migration failed (exit $migrate_rc), and its servers are stopped: fix the cause above and re-run $RERUN.$left" >&2
+    echo "the canary's migration failed (exit $migrate_rc), and its servers are stopped: fix the cause above and re-run $RERUN.$left$BOARD_SAID" >&2
     exit 1
   fi
 fi
@@ -1471,7 +1505,7 @@ if ! ready; then
   # of times a minute under podman), and a registered connector points at them.
   canary_compose stop api mcp app >/dev/null 2>&1 || true
   ADVISED=1
-  echo "the canary's REST core, MCP server and operator GUI are stopped; fix the cause above and re-run $RERUN.$SLEEP_SAID" >&2
+  echo "the canary's REST core, MCP server and operator GUI are stopped; fix the cause above and re-run $RERUN.$SLEEP_SAID$BOARD_SAID" >&2
   exit 1
 fi
 
@@ -1616,26 +1650,33 @@ elif [ -n "$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANAR
   say "note: the canary's sleep worker is stopped — start it with $SLEEP_START"
 fi
 
-# Step 7: board-sync on the new build, after the smoke, as the sleep worker
-# (SMD-3312). Started whenever the canary's env file holds a LINEAR_API_KEY,
-# running before this run or not, since a canary upgraded in place has no other
-# way to keep its board current; recreated so it runs this checkout's db/
-# (it bind-mounts it) with the file as it is now. canary_compose holds
-# LINEAR_COMMENT_API_KEY empty, so it never posts. A board-sync container this
-# compose file did not make (one by hand) is removed first, as the sleep
-# worker's is.
+# Step 6: board-sync on the new build, after the smoke, as the sleep worker
+# (SMD-3312). Started whenever the canary's env file holds a LINEAR_API_KEY
+# (its own: step 2 cleared stable's), running before this run or not, since a
+# canary upgraded in place has no other way to keep its board current;
+# recreated so it runs this checkout's db/ (it bind-mounts it) with the file as
+# it is now. canary_compose holds LINEAR_COMMENT_API_KEY empty, so it never
+# posts. A board-sync container this compose file did not make (one by hand)
+# is removed first, as the sleep worker's is; a start that then fails says
+# so itself, since an earlier advice (the sleep worker's) silences the trap.
+BOARD_ADD="add a LINEAR_API_KEY of the canary's own to $CANARY_ENV — a Linear personal API key made with Read access alone, never stable's — and re-run $RERUN"
 if [ -n "$(env_file value "$CANARY_ENV" LINEAR_API_KEY)" ]; then
-  say "canary board-sync, on the new build (its own copy of the board; it reads Linear and never comments)"
+  say "canary board-sync, on the new build (its own copy of the board; it reads Linear with the canary's key and never comments)"
   stale="$("$RUNTIME" ps -aq --filter "label=com.docker.compose.project=$CANARY" --filter "label=com.docker.compose.service=board-sync")"
   [ -z "$stale" ] || printf '%s\n' "$stale" | xargs "$RUNTIME" rm -f >/dev/null
-  canary_compose --profile board-sync up -d --no-deps --force-recreate board-sync
+  if ! canary_compose --profile board-sync up -d --no-deps --force-recreate board-sync; then
+    ADVISED=1
+    echo "the canary's board-sync did not start (above)${stale:+, and its old container is removed}: fix the cause and re-run $RERUN." >&2
+    exit 1
+  fi
   BOARD_PENDING=""
 elif [ -n "$BOARD_PENDING" ]; then
-  # Stopped above and its key gone from the file since: left stopped, said.
+  # Stopped above and no key of the canary's own since (step 2 cleared
+  # stable's, or it was taken out): left stopped, said.
   BOARD_PENDING=""
-  say "canary board-sync LEFT STOPPED: $CANARY_ENV no longer holds a LINEAR_API_KEY — add a read key (stable's, or one of the canary's own) and re-run $RERUN"
+  say "canary board-sync LEFT STOPPED: $CANARY_ENV holds no LINEAR_API_KEY of the canary's own — $BOARD_ADD"
 else
-  say "note: the canary runs no board-sync — $CANARY_ENV holds no LINEAR_API_KEY, so its copy of the board stays as of its last refresh or sync; add a read key there (stable's LINEAR_API_KEY, or one of the canary's own) and re-run $RERUN to keep it current (SMD-3312)"
+  say "note: the canary runs no board-sync, so its copy of the board stays as of its last refresh or sync — $BOARD_ADD to keep it current (SMD-3312)"
 fi
 
 if [ $CONNECT = 1 ]; then

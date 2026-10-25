@@ -2866,12 +2866,11 @@ jobs:
           # SMD-2882: both of board-sync's Linear keys in stable's file, as
           # dummies, so the check below has a Linear secret to catch: an exact
           # LINEAR_API_KEY in canary.sh let SMD-2681's LINEAR_COMMENT_API_KEY
-          # through to the canary's file. SMD-3312: the read key is carried
-          # (the canary runs its own board-sync), the comment key and any other
-          # Linear key (LINEAR_OTHER_KEY) still left out. The canary's
-          # board-sync gets the dummy read key, which Linear refuses: its
-          # supervisor holds it running (SMD-3214), and nothing here reads its
-          # rows.
+          # through to the canary's file. SMD-3312: none is carried, the read
+          # key included (LINEAR_OTHER_KEY too): the canary's board-sync reads
+          # with a key of its own, given below. Its dummy key Linear refuses,
+          # and its supervisor holds it running (SMD-3214); nothing here reads
+          # its rows.
           # SMD-1849 PR 3a and 3b: the observability profile's Grafana and
           # database-monitor passwords too, dummies (nothing here runs the
           # profile).
@@ -2943,14 +2942,12 @@ jobs:
           grep -q '^GRAFANA_ADMIN_PASSWORD=' .env || { echo "no GRAFANA_ADMIN_PASSWORD line in .env to leave out" >&2; exit 1; }
           grep -q '^OB1_MONITOR_DB_PASSWORD=' .env || { echo "no OB1_MONITOR_DB_PASSWORD line in .env to leave out" >&2; exit 1; }
           grep -q '^LINEAR_OTHER_KEY=' .env || { echo "no LINEAR_OTHER_KEY line in .env to leave out" >&2; exit 1; }
-          if grep -vE '^LINEAR_API_KEY=' .env.canary.local | grep -qE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_|OB1_MONITOR_)'; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
-          # SMD-3312: board-sync's read key carried, and the canary's board-sync
-          # started on it once the smoke passed, its comment key held empty.
-          grep -qxF 'LINEAR_API_KEY="ci-dummy-linear-key"' .env.canary.local || { echo "the canary's env file does not carry stable's LINEAR_API_KEY" >&2; exit 1; }
-          grep -F 'canary board-sync, on the new build' /tmp/canary-up.out
+          if grep -qiE '^(OB1_AUTH_|N8N_|OB1_RUNNER_|OB1_WORKER_KEY|LINEAR_|GRAFANA_|OB1_MONITOR_)' .env.canary.local; then echo "the canary's env file carries another profile's secret" >&2; exit 1; fi
+          # SMD-3312: with no Linear key of its own the canary runs no
+          # board-sync, said.
+          grep -F 'note: the canary runs no board-sync' /tmp/canary-up.out
+          if [ -n "$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)" ]; then echo "the canary started a board-sync with no key of its own" >&2; exit 1; fi
           board_env() { docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker ps -aq --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync | head -n 1)"; }
-          board_env | grep -qx 'LINEAR_API_KEY=ci-dummy-linear-key' || { echo "the canary's board-sync does not run on the read key" >&2; exit 1; }
-          board_env | grep -qx 'LINEAR_COMMENT_API_KEY=' || { echo "the canary's board-sync holds a comment key" >&2; exit 1; }
           # SMD-2874 PR 2: the canary's own write key, minted, and (SMD-2287)
           # its own forward key for the MCP server, their hashes alone in
           # MCP_ACCESS_KEYS; no key hash of stable's anywhere in the file; a
@@ -3068,7 +3065,20 @@ jobs:
           # longer answers: the legacy route that handed a POST there to the
           # canary went with v2.0.0, and the root is the proxy's own 404
           # (SMD-2532).
+          # SMD-3312: a read key of the canary's own, and two Linear keys an
+          # operator pasted in (the comment key, and one in lower case): the up
+          # clears the two, said, and starts board-sync on the canary's key with
+          # the comment key empty.
+          printf 'LINEAR_API_KEY=ci-canary-own-linear-key\nLINEAR_COMMENT_API_KEY=ci-pasted-comment-key\nlinear_other_key=ci-pasted-other-key\n' >> .env.canary.local
           FAKE_URL='http://127.0.0.1:8011/?key=x' ./canary.sh up --no-smoke | tee /tmp/canary-root.out
+          grep -F 'cleared LINEAR_COMMENT_API_KEY (a Linear key the canary never holds' /tmp/canary-root.out
+          grep -F 'cleared linear_other_key (a Linear key the canary never holds' /tmp/canary-root.out
+          if grep -F 'cleared LINEAR_API_KEY' /tmp/canary-root.out; then echo "the up cleared the canary's own read key" >&2; exit 1; fi
+          if grep -qE '^(LINEAR_COMMENT_API_KEY|linear_other_key)=.' .env.canary.local || grep -qF ci-pasted- .env.canary.local; then echo "the canary's env file still holds a pasted Linear key" >&2; exit 1; fi
+          grep -qxF 'LINEAR_API_KEY=ci-canary-own-linear-key' .env.canary.local || { echo "the canary's env file lost its own read key" >&2; exit 1; }
+          grep -F 'canary board-sync, on the new build' /tmp/canary-root.out
+          board_env | grep -qx 'LINEAR_API_KEY=ci-canary-own-linear-key' || { echo "the canary's board-sync does not run on the canary's own read key" >&2; exit 1; }
+          board_env | grep -qx 'LINEAR_COMMENT_API_KEY=' || { echo "the canary's board-sync holds a comment key" >&2; exit 1; }
           grep -F 'connector open-brain-canary still points at http://127.0.0.1:8011/?…, where this canary no longer answers: re-run with --connect' /tmp/canary-root.out
           root_code=$(curl -s --max-time 20 -D /tmp/canary-root-head -o /tmp/canary-root-body -w '%{http_code}' -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
             -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
@@ -3146,23 +3156,24 @@ jobs:
             docker run -d --init --name open-brain-canary-sleep-1 --label com.docker.compose.project=open-brain-canary --label com.docker.compose.service=sleep \
               --label com.docker.compose.oneoff=False --label com.docker.compose.container-number=1 --entrypoint sleep docker.io/oven/bun:1.4.3-alpine 600; }
           standin > /dev/null
-          # SMD-3312: the canary's board-sync, running since the first up, is
-          # stopped for the migration too; with the read key gone from the
-          # canary's file it is left stopped, said, and the drift note names
-          # the key it lacks.
+          # SMD-3312: the canary's board-sync, running since the root up, is
+          # stopped for the migration too; with stable's read key in the
+          # canary's file in place of its own, the up clears it, said, and
+          # leaves board-sync stopped, said.
           sed -i '/^LINEAR_API_KEY=/d' .env.canary.local
+          printf 'LINEAR_API_KEY=%s\n' "$(sed -n 's/^LINEAR_API_KEY=//p' .env | tr -d "\"'")" >> .env.canary.local
           rc=0; FAKE_URL='http://127.0.0.1:8013/mcp?key=x' ./canary.sh up --no-refresh --no-smoke > /tmp/canary-nokey.out 2>&1 || rc=$?
-          { grep -qF 'canary board-sync stopped for the migration' /tmp/canary-nokey.out && grep -qF 'canary board-sync LEFT STOPPED' /tmp/canary-nokey.out \
-            && grep -qE "differs from stable's on .*LINEAR_API_KEY" /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with no LINEAR_API_KEY did not stop board-sync and leave it stopped, said, or the drift note did not name the key" >&2; exit 1; }
-          if [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)" ]; then echo "up --no-refresh ran board-sync with no LINEAR_API_KEY" >&2; exit 1; fi
+          { grep -qF "cleared LINEAR_API_KEY (stable's)" /tmp/canary-nokey.out && grep -qF 'canary board-sync stopped for the migration' /tmp/canary-nokey.out \
+            && grep -qF 'canary board-sync LEFT STOPPED' /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with stable's LINEAR_API_KEY did not clear it, stop board-sync and leave it stopped, said" >&2; exit 1; }
+          if grep -qF ci-dummy-linear-key .env.canary.local; then echo "the canary's env file still holds stable's read key" >&2; exit 1; fi
+          if [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)" ]; then echo "up --no-refresh ran board-sync on stable's read key" >&2; exit 1; fi
           board_before="$(docker ps -aq --no-trunc --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)"
           { [ "$rc" = 1 ] && grep -qF 'canary sleep worker LEFT STOPPED' /tmp/canary-nokey.out && grep -qF 'migrated in place (its own rows kept)' /tmp/canary-nokey.out; } || { cat /tmp/canary-nokey.out >&2; echo "up --no-refresh with a worker and no OB1_WORKER_KEY exited $rc, not 1 with the worker left stopped" >&2; exit 1; }
           if [ -n "$(docker ps -q --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=sleep)" ]; then echo "up --no-refresh started a worker with no OB1_WORKER_KEY" >&2; exit 1; fi
           printf 'OB1_WORKER_KEY=ci-canary-worker-key-not-stables\n' >> .env.canary.local
-          # SMD-3312: a read key of the canary's own (no drift), and a comment
-          # key an operator pasted in, which the canary's board-sync never
-          # holds: canary_compose sets it empty over the file.
-          printf 'LINEAR_API_KEY=ci-canary-own-linear-key\nLINEAR_COMMENT_API_KEY=ci-pasted-comment-key\n' >> .env.canary.local
+          # SMD-3312: the canary's own read key back, so board-sync comes back.
+          sed -i '/^LINEAR_API_KEY=/d' .env.canary.local
+          printf 'LINEAR_API_KEY=ci-canary-own-linear-key\n' >> .env.canary.local
           # The file as a canary mended by SMD-2874 PR 2 holds it, the dogfood
           # canary's next upgrade: its write key alone, no forward key. The up
           # mints the forward key, adding its entry to MCP_ACCESS_KEYS beside
@@ -3191,10 +3202,8 @@ jobs:
           grep -F 'canary board-sync, on the new build' /tmp/canary-norefresh.out
           board_after="$(docker ps -aq --no-trunc --filter label=com.docker.compose.project=open-brain-canary --filter label=com.docker.compose.service=board-sync)"
           { [ -n "$board_after" ] && [ "$board_after" != "$board_before" ]; } || { echo "up --no-refresh did not bring board-sync back as a new container (${board_after:-none})" >&2; exit 1; }
-          board_env | grep -qx 'LINEAR_API_KEY=ci-canary-own-linear-key' || { echo "the canary's board-sync does not run on the canary's own read key" >&2; exit 1; }
-          board_env | grep -qx 'LINEAR_COMMENT_API_KEY=' || { echo "the canary's board-sync holds the comment key pasted into its file" >&2; exit 1; }
-          if grep -E "differs from stable's on .*LINEAR_API_KEY" /tmp/canary-norefresh.out; then echo "the drift note names a read key of the canary's own" >&2; exit 1; fi
-          sed -i '/^LINEAR_COMMENT_API_KEY=ci-pasted-comment-key$/d' .env.canary.local
+          board_env | grep -qx 'LINEAR_API_KEY=ci-canary-own-linear-key' || { echo "up --no-refresh did not bring board-sync back on the canary's own read key" >&2; exit 1; }
+          board_env | grep -qx 'LINEAR_COMMENT_API_KEY=' || { echo "the canary's board-sync holds a comment key" >&2; exit 1; }
           grep -F 'migrated in place (its own rows kept)' /tmp/canary-norefresh.out
           if grep -F 'refresh open-brain-postgres-1' /tmp/canary-norefresh.out; then echo "up --no-refresh ran the refresh" >&2; exit 1; fi
           [ "$(cq "SELECT value FROM ob1_config WHERE key = 'ci_canary_only'")" = kept ] || { echo "up --no-refresh lost the canary's own row" >&2; exit 1; }

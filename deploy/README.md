@@ -2601,12 +2601,13 @@ database, and recreates the servers, its proxy and forwarder on its own
 networks. It is refused on a canary with no database to keep: no volume
 (changing nothing), or one whose database holds no relations. Either form
 builds its images while the canary serves, then stops its writers before its
-Postgres is touched, its servers and a running `sleep` worker, and brings the
-worker back on the new build once the smoke has passed, unless its env file
-holds no `OB1_WORKER_KEY` (then it stays stopped, `up` says how to start it,
-and exits 1). A run that fails after the stop says what it left stopped and
-how to go on. A running writer of another profile (the workers, board-sync,
-the import runner) is refused before anything changes: stop it first. A plain `up` still refreshes a canary holding rows of its own; SMD-3155
+Postgres is touched, its servers, a running `sleep` worker and a running
+board-sync, and brings the worker back on the new build once the smoke has
+passed, unless its env file holds no `OB1_WORKER_KEY` (then it stays stopped,
+`up` says how to start it, and exits 1), and board-sync as step 5 below says.
+A run that fails after the stop says what it left stopped and how to go on.
+A running writer of another profile (the workers, the import runner) is
+refused before anything changes: stop it first. A plain `up` still refreshes a canary holding rows of its own; SMD-3155
 is the guard.
 
 The canary is `compose.yaml` again under the project `<stable>-canary` (SMD-2873):
@@ -2641,10 +2642,10 @@ setting, each with the value compose read, quoted afresh, but for these:
 - **the database password**, which is a fresh one of the canary's;
 - **the secrets of the profiles the canary never runs**: the authorization
   server's `OB1_AUTH_*`, n8n's `N8N_*`, the import runner's `OB1_RUNNER_*`,
-  the workers' `OB1_WORKER_KEY`, and every Linear key but board-sync's read
-  key: `LINEAR_COMMENT_API_KEY`, which can comment (SMD-2882), and any other
-  `LINEAR_*`. `LINEAR_API_KEY` is carried, since the canary runs its own
-  board-sync (step 6, SMD-3312);
+  the workers' `OB1_WORKER_KEY`, and every Linear key, `LINEAR_*` in any
+  letter case (`LINEAR_COMMENT_API_KEY` can comment; SMD-2882). The canary's
+  own board-sync reads with a `LINEAR_API_KEY` of its own, never stable's
+  (step 5, SMD-3312);
 - **stable's keys and the secrets that go with them** (SMD-2874, SMD-3032):
   its `MCP_ACCESS_KEYS` (and the legacy `MCP_ACCESS_KEY`), the forwarder's
   `OB1_FORWARDER_KEY`, the plugins' webhook secrets `OB1_HOOK_SECRETS`, and
@@ -2884,23 +2885,28 @@ stable is redeployed:
      model changed without a reembed, and the smoke fails.
 
    `--no-smoke` skips the smoke.
-5. With `--connect` it registers the Claude Code connector named for the
+5. It (re)starts the canary's board-sync on the new build whenever the
+   canary's env file holds a `LINEAR_API_KEY` of its own (SMD-3312). A canary
+   upgraded in place (`--no-refresh`) is never refreshed, and a refresh was
+   what brought it stable's ticket rows, so without its own board-sync its
+   copy of the board stays as it was at its last refresh. A running
+   board-sync stops with the other writers before the canary's Postgres is
+   touched (3), as the sleep worker does.
+   - **The key is the canary's alone:** a Linear personal API key made for it
+     with Read access alone, put in its env file. Never stable's: a personal key can write
+     unless it was made read-only, and board-sync runs the checkout's `db/`,
+     an unreleased build's on the canary. The file never gets stable's, and
+     every `up` clears stable's, said, where the file holds it.
+   - **It never posts a finding to the board.** Every `up` clears any other
+     Linear key from the file (`LINEAR_COMMENT_API_KEY` pasted in, say), and
+     canary.sh holds `LINEAR_COMMENT_API_KEY` empty for every compose call it
+     makes besides.
+   - With no key of its own the run says board-sync is off; one stopped for
+     this run with no key since is left stopped, said.
+6. With `--connect` it registers the Claude Code connector named for the
    canary's project, `open-brain-canary` beside the default stable (`--name`
    names another), at user scope, under the canary's own key; a new
    session sees its tools. The URL is the canary's: `/mcp` on its port.
-6. It (re)starts the canary's board-sync on the new build whenever the
-   canary's env file holds a `LINEAR_API_KEY` (SMD-3312). A canary upgraded
-   in place (`--no-refresh`) is never refreshed, and a refresh was what
-   brought it stable's ticket rows, so without its own board-sync its copy of
-   the board stays as it was at its last refresh. A running board-sync stops
-   with the other writers before the canary's Postgres is touched (3), as the
-   sleep worker does. The key is stable's, carried when the file is made, or
-   a read-only key of the canary's own put there instead, which the drift
-   note does not name. The canary never posts a finding to the board: the
-   file never gets `LINEAR_COMMENT_API_KEY`, and canary.sh holds it empty
-   for every compose call, whatever the file says. With no `LINEAR_API_KEY`
-   the run says board-sync is off; one stopped for this run whose key has
-   since gone from the file is left stopped, said.
 
 `down` removes the canary's containers, its sleep worker and board-sync
 among them, and its own networks. It
