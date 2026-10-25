@@ -6,6 +6,7 @@
 // oracle rule (SMD-1298) withholds from a key is left off by the operation.
 
 import type { Citation } from "../store.ts";
+import type { ProposalSelection } from "./list-cursor.ts";
 
 /**
  * Every refusal an operation returns. The SMD-1978 codes the session hook keys
@@ -22,7 +23,7 @@ export type Refusal =
   | { code: "REFUSED_FILTER"; retryable: false; message: string }     // a metadata filter (or said_by/actor) the boundary refuses
   | { code: "REFUSED_EGRESS"; retryable: false; rule: string; reason: string; actor: string } // the query may not leave for its embedding (SMD-1903)
   | { code: "REFUSED_SINCE"; retryable: false; value: string }        // a `since` that is neither a time nor a cursor
-  | { code: "REFUSED_CURSOR"; retryable: false; value: string; reason?: "shape" | "sort"; sort?: "newest" | "oldest" } // list_thought_ids' `after` is not a thought id; list_thoughts' is none of this tool's cursors (shape) or was made under the other `sort` (sort: the one it was made under)
+  | { code: "REFUSED_CURSOR"; retryable: false; value: string; reason?: "shape" | "sort" | "filters"; sort?: "newest" | "oldest"; made?: ProposalSelection } // list_thought_ids' `after` is not a thought id; list_thoughts' is none of this tool's cursors (shape) or was made under the other `sort` (sort: the one it was made under); list_supersession_proposals' is none of its cursors (shape, SMD-3249) or was made under other filters (filters, made: the status, lineage and judge_key it was made under — tokens, a boolean and a pass key, review pass 1)
   // The compat search found nothing while its query's embedding provider did not answer (SMD-2891): what was
   // matched without a vector (the query's literals, or with none the query as one text) and why nothing came of it.
   | { code: "EMBEDDING_PROVIDER_UNAVAILABLE"; retryable: true; reason: string; detail: string; base: string; matched: "literals" | "text" | "none"; needles: string[]; commonNeedles: string[] }
@@ -82,8 +83,9 @@ const FACTS: Facts = {
   REFUSED_FILTER: none,
   REFUSED_EGRESS: (r) => ({ rule: r.rule }),
   REFUSED_SINCE: none,
-  // list_thoughts' (SMD-2995): which way the cursor would not do, and the sort it was made under — never the cursor itself.
-  REFUSED_CURSOR: (r) => ({ ...(r.reason ? { reason: r.reason } : {}), ...(r.sort ? { sort: r.sort } : {}) }),
+  // list_thoughts' (SMD-2995): which way the cursor would not do, and the sort it was made under — never the cursor itself;
+  // list_supersession_proposals' (SMD-3249) the filters it was made under.
+  REFUSED_CURSOR: (r) => ({ ...(r.reason ? { reason: r.reason } : {}), ...(r.sort ? { sort: r.sort } : {}), ...(r.made ? { made: r.made } : {}) }),
   // The provider's marker word and what was matched: the endpoint and the literals are in the text.
   EMBEDDING_PROVIDER_UNAVAILABLE: (r) => ({ reason: r.reason, matched: r.matched }),
   REFUSED_SUPERSEDES_SHAPE: none,

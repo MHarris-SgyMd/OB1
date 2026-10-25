@@ -49,6 +49,8 @@ const blend = () => {
 await resetSchema(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
 
 const store = new SqlStore(URL_, { max: 4 });
+/** A listing page's proposals (SMD-3249: the store answers a page — proposals, next, remaining). */
+const listP = async (o: Parameters<typeof store.listSupersessionProposals>[0]) => (await store.listSupersessionProposals(o)).proposals;
 /** listThoughts' page, its thoughts alone: what every filter case reads (the cursor's cases read the page whole, [4b]). */
 const listedThoughts = async (f: Parameters<typeof store.listThoughts>[0]) => (await store.listThoughts(f)).thoughts;
 
@@ -1370,7 +1372,7 @@ console.log("\n[10] listSupersessionProposals reads migration 029's queue throug
   await admin5`UPDATE thoughts SET created_at = now() - interval '10 days' WHERE id = ${older.id}`;
   const [{ id: pid }] = await admin5`
     SELECT record_supersession_proposal(${older.id}::uuid, ${newer.id}::uuid, 'newer_supersedes_older', 0.85, 'monthly versus annual', 0.97, 'consolidate:stub@p1', NULL) AS id`;
-  const pending = await store.listSupersessionProposals({});
+  const pending = await listP({});
   assert(pending.length === 1 && pending[0].id === pid, `the default lists the pending proposal (${pending.length})`);
   const row = pending[0];
   assert(row.status === "pending" && row.verdict === "newer_supersedes_older" && row.confidence === 0.85 && row.reason === "monthly versus annual" && Math.abs((row.similarity ?? 0) - 0.97) < 1e-5 && row.judgeKey === "consolidate:stub@p1",
@@ -1385,30 +1387,64 @@ console.log("\n[10] listSupersessionProposals reads migration 029's queue throug
       && row.older.supersededBy === null && row.newer.supersededBy === null && row.sameCapturer === false,
     `…and each side's writer read (094): neither a capture-only key's text, nothing superseding either, no capturer in common (${JSON.stringify({ older: row.older.writer, newer: row.newer.writer, sameCapturer: row.sameCapturer })})`);
   await admin5`DROP FUNCTION list_proposal_writers(uuid[])`;
-  const pre094 = await store.listSupersessionProposals({});
+  const pre094 = await listP({});
   await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("094_") });
-  assert(pre094.length === 1 && pre094[0].id === pid && pre094[0].older.writer === null && pre094[0].newer.writer === null && (await store.listSupersessionProposals({}))[0]?.newer.writer !== null,
+  assert(pre094.length === 1 && pre094[0].id === pid && pre094[0].older.writer === null && pre094[0].newer.writer === null && (await listP({}))[0]?.newer.writer !== null,
     "…without 094 the page still lists, no writer read; 094 applied, the writers read again");
-  assert((await store.listSupersessionProposals({ status: "accepted" })).length === 0, "a status filter applies");
+  assert((await listP({ status: "accepted" })).length === 0, "a status filter applies");
   // 109 (SMD-3248): the judge key selects in the SQL — this pass's row under its key, none under another or a prefix.
-  assert((await store.listSupersessionProposals({ judgeKey: "consolidate:stub@p1" }))[0]?.id === pid && (await store.listSupersessionProposals({ judgeKey: "consolidate:stub@p2" })).length === 0
-      && (await store.listSupersessionProposals({ judgeKey: "consolidate:stub" })).length === 0,
+  assert((await listP({ judgeKey: "consolidate:stub@p1" }))[0]?.id === pid && (await listP({ judgeKey: "consolidate:stub@p2" })).length === 0
+      && (await listP({ judgeKey: "consolidate:stub" })).length === 0,
     "a judge key selects its pass's proposals, exactly: none under another pass's key or a prefix of this one");
+  // 110 (SMD-3249): a page says where the next starts and how many follow it (review pass 1: not the selection from
+  // the page on, which the replies read as a total). One proposal and a page of one: no next, remaining 0. A cursor past it: an empty page. A cursor whose time Postgres cannot read
+  // (year 0, which the shape admits) is the caller's, refused as ListCursorRefused, not a fault.
+  const one1 = await store.listSupersessionProposals({ limit: 1 });
+  const past = await store.listSupersessionProposals({ after: { confidence: "0.85", judgedAt: "9999-01-01 00:00:00+00", id: "ffffffff-ffff-4fff-8fff-ffffffffffff" } });
+  let refusedTime = "";
+  try { await store.listSupersessionProposals({ after: { confidence: "0.85", judgedAt: "0000-01-01 00:00:00+00", id: pid } }); } catch (e) { refusedTime = (e as Error).name; }
+  assert(one1.proposals.length === 1 && one1.next === null && one1.remaining === 0 && past.proposals.length === 0 && past.next === null && refusedTime === "ListCursorRefused",
+    `a page of the one proposal: no next, none remaining; past it, none; a cursor time Postgres cannot read, ListCursorRefused (${refusedTime})`);
+  // …and a walk in pages of two over three: the store's next is the page's LAST row, so the second page holds the third
+  // alone and no next (a next built from the first row would repeat the second).
+  const extraA = await store.captureThought({ content: "queue: a third thought for paging", payload: { metadata: {} }, embedding: unit(6) });
+  const [{ id: pidB }] = await admin5`SELECT record_supersession_proposal(${newer.id}::uuid, ${extraA.id}::uuid, 'newer_supersedes_older', 0.75, 'paging two', 0.9, 'consolidate:stub@p1', NULL) AS id`;
+  const [{ id: pidC }] = await admin5`SELECT record_supersession_proposal(${older.id}::uuid, ${extraA.id}::uuid, 'newer_supersedes_older', 0.65, 'paging three', 0.9, 'consolidate:stub@p1', NULL) AS id`;
+  const w1 = await store.listSupersessionProposals({ limit: 2 });
+  const w2 = await store.listSupersessionProposals({ limit: 2, after: w1.next! });
+  assert(w1.proposals.map((p) => p.id).join() === [pid, pidB].join() && w1.remaining === 1 && w1.next?.id === pidB && w2.proposals.map((p) => p.id).join() === pidC && w2.next === null && w2.remaining === 0,
+    `pages of two over three: the first two with the second's place as next and one to follow, then the third alone with none (${w1.proposals.length}, ${w2.proposals.length})`);
+  // Review pass 2: what follows is counted off the listing, before the writers' read drops a row gone in between —
+  // here list_proposal_writers wrapped to lose the second row, as a delete between the two reads would: the page holds
+  // one, one more still follows, and the cursor is past the dropped row.
+  await admin5.unsafe(`DO $$ DECLARE r text := pg_get_function_result('list_proposal_writers(uuid[])'::regprocedure); BEGIN
+    ALTER FUNCTION list_proposal_writers(uuid[]) RENAME TO list_proposal_writers_kept;
+    EXECUTE format('CREATE FUNCTION list_proposal_writers(p_ids uuid[]) RETURNS %s LANGUAGE sql AS $f$ SELECT * FROM list_proposal_writers_kept(array(SELECT x FROM unnest(p_ids) x WHERE x <> %L::uuid)) $f$', r, '${pidB}');
+  END $$`);
+  let dropped: Awaited<ReturnType<typeof store.listSupersessionProposals>>;
+  try {
+    dropped = await store.listSupersessionProposals({ limit: 2 });
+  } finally {
+    await admin5.unsafe(`DROP FUNCTION list_proposal_writers(uuid[]); ALTER FUNCTION list_proposal_writers_kept(uuid[]) RENAME TO list_proposal_writers`);
+  }
+  assert(dropped.proposals.map((p) => p.id).join() === pid && dropped.remaining === 1 && dropped.next?.id === pidB,
+    `a row the writers' read drops is not counted as one to come: the page holds the first, one follows, the cursor past the dropped second (${dropped.proposals.length}, ${dropped.remaining}, ${dropped.next?.id === pidB})`);
+  await admin5`DELETE FROM supersession_proposals WHERE id IN (${pidB}::uuid, ${pidC}::uuid)`;
   await admin5`SELECT review_supersession_proposal(${pid}::uuid, 'accept', 'confirmed', NULL, NULL)`;
-  assert((await store.listSupersessionProposals({})).length === 0, "an accepted proposal leaves the pending list");
-  const all = await store.listSupersessionProposals({ status: null });
+  assert((await listP({})).length === 0, "an accepted proposal leaves the pending list");
+  const all = await listP({ status: null });
   assert(all.length === 1 && all[0].status === "accepted" && all[0].supersedingId === newer.id && all[0].reviewNote === "confirmed" && all[0].reviewedAt !== null,
          "null lists every state, and the accepted row names the thought it wrote");
   // 070 (SMD-2313): the flag, false on this pair; the newer thought's
   // derived_from set raw to name the older — the shape 066 stops the pass
   // proposing, a page and its evidence — and the row reads lineage, the
   // selector picks it, false leaves it out.
-  assert(all[0].lineage === false && (await store.listSupersessionProposals({ status: null, lineage: false })).length === 1 && (await store.listSupersessionProposals({ status: null, lineage: true })).length === 0,
+  assert(all[0].lineage === false && (await listP({ status: null, lineage: false })).length === 1 && (await listP({ status: null, lineage: true })).length === 0,
          "…and lineage is false on a pair neither side of which names the other (070): false selects it, true does not");
   await admin5`UPDATE thoughts SET derived_from = jsonb_build_array(${older.id}::text) WHERE id = ${newer.id}::uuid`;
-  const flaggedRows = await store.listSupersessionProposals({ status: null });
+  const flaggedRows = await listP({ status: null });
   assert(flaggedRows.length === 1 && flaggedRows[0].lineage === true, "with the newer thought's derived_from naming the older, the row reads lineage");
-  assert((await store.listSupersessionProposals({ status: null, lineage: true })).length === 1 && (await store.listSupersessionProposals({ status: null, lineage: false })).length === 0,
+  assert((await listP({ status: null, lineage: true })).length === 1 && (await listP({ status: null, lineage: false })).length === 0,
          "lineage: true selects it, false leaves it out — the third argument on every call");
   await admin5.close();
 }
@@ -1508,9 +1544,9 @@ console.log("\n[13] A NULL/infinity created_at survives the provenance and propo
     // down; a NULL one it fabricated to the epoch. Both now render as their own
     // value, and the call returns.
     await sql`SELECT record_supersession_proposal(${infOlder}::uuid, ${undatedNewer}::uuid, 'conflict_undirected', 0.7, 'infinity vs undated', 0.9, 'consolidate:smd1803@p1', NULL)`;
-    let proposals: Awaited<ReturnType<typeof store.listSupersessionProposals>> = [];
+    let proposals: Awaited<ReturnType<typeof listP>> = [];
     let threw = "";
-    try { proposals = await store.listSupersessionProposals({ status: null }); } catch (e) { threw = (e as Error).message; }
+    try { proposals = await listP({ status: null }); } catch (e) { threw = (e as Error).message; }
     assert(threw === "", `listSupersessionProposals returns rather than throwing on an infinity/NULL-dated pair (threw: ${threw.slice(0, 80)})`);
     const p = proposals.find((x) => x.older.id === infOlder && x.newer.id === undatedNewer);
     assert(p !== undefined, "…the planted proposal is listed");
