@@ -4829,6 +4829,17 @@ claude mcp add --transport http open-brain-stable http://127.0.0.1:8000/mcp \
   --header "x-brain-key: <key>"
 ```
 
+### One import per brain (SMD-3314)
+
+An import names one brain per run: `ingest-records.ts`, its `--items` seam and the
+import recipes behind it write to the database `--url` names, and nothing else. A
+canary is a brain of its own, fed from the sources themselves (docs/one-brain-per-stack.md,
+row 11), so to feed it an import runs again against the canary's database, with the
+canary's credentials. Each run is idempotent on its own brain and depends on no other
+brain's rows. Its ids are deterministic — the same record makes the same id on every
+brain — so a thought an import made has one id everywhere, as one a refresh copied
+does, and a copied edit or `supersedes` naming it needs no `client_key` to find it.
+
 ## The canary and working tiers — refresh, replay, diff, promote (SMD-1806)
 
 The **canary** is main's shadow and the **working** tier is a per-worktree
