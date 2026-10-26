@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { answersHealth, askRaw, childPort, createAssert, leaveMidUpload, MCP_HEALTH_BODY, pendingSettled, requestHead, REST_HEALTH_BODY, RuntimeUrl, serveChild, watchStream } from "../db/test-support.ts";
+import { answersHealth, askRaw, childPort, createAssert, leaveMidUpload, MCP_HEALTH_BODY, pendingSettled, requestHead, REST_HEALTH_BODY, RuntimeUrl, secondLoopback, serveChild, watchStream } from "../db/test-support.ts";
 import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES, UNLOCKS, type ToolScope } from "./tools.ts";
 import { openApiDocument } from "./rest/openapi.ts";
@@ -57,6 +57,11 @@ process.env.MCP_ACCESS_KEYS = Object.entries(NAMED_KEYS)
 const CAPTURE_KEY = "contract-capture-key-0123456789";
 process.env.MCP_ACCESS_KEYS += `,contract-capture:capture:${createHash("sha256").update(CAPTURE_KEY).digest("hex")}`;
 
+// Every server this suite starts listens on 127.0.0.1, where it is reached, and
+// so does each child, by OB1_LISTEN_HOST: on every address, macOS can give it a
+// port another app (Tailscale, a VM's port forwarder) holds on 127.0.0.1, and
+// that app answers in its place (SMD-3323).
+
 // The one provider call this suite makes is [17]'s, against a stub that can be
 // told to answer an embedding slowly — the server's env is read once, at the
 // first request, so the stub's address is set before it. Declared local to the
@@ -67,6 +72,7 @@ let embedDelayMs = 0;
 let embedHold: ((input: string) => Promise<void>) | undefined;
 const provider = Bun.serve({
   port: 0,
+  hostname: "127.0.0.1",
   async fetch(req) {
     const url = new URL(req.url);
     // A server's re-probe (SMD-2890) asks GET /models: an answer, with no body to parse.
@@ -110,8 +116,9 @@ edgeModule.useAuthReachability(new edgeModule.AuthReachability("http://auth.stub
 }) as unknown as typeof fetch));
 
 // Served with every field the export declares, so what the export says about
-// the runtime — and what it leaves at the default — is what [17] measures.
-const server = Bun.serve({ ...worker, port: 0 });
+// the runtime — and what it leaves at the default — is what [17] measures; the
+// hostname is the suite's own, 127.0.0.1 (SMD-3323), not the export's.
+const server = Bun.serve({ ...worker, port: 0, hostname: "127.0.0.1" });
 const PORT = server.port ?? 0;
 const BASE = `http://localhost:${PORT}`;
 
@@ -1601,12 +1608,12 @@ console.log("\n[13c] A keyed /health answers within its deadline from a database
   const { HEALTH_DEADLINE_MS } = await import("./core/reads.ts");
   // The REST core's keyed /health (SMD-2287 PR 6a: index.ts's answered `ok` as text; the MCP server's comes from here).
   const OK_BODY = JSON.stringify({ status: "ok" });
-  // Each child binds PORT 0 and says its port; the database that refuses is a quiet port, below the kernels' ranges for
-  // port 0, so neither child can be handed it (SMD-3296).
+  // Each child binds PORT 0 on 127.0.0.1 (SMD-3323) and says its port; the database that refuses is a quiet port,
+  // below the kernels' ranges for port 0, so neither child can be handed it (SMD-3296).
   const child = async (databaseUrl: string) => {
     const proc = Bun.spawn(["bun", "--no-env-file", "api.ts"], {
       cwd: import.meta.dir,
-      env: { ...process.env, PORT: "0", DATABASE_URL: databaseUrl, MCP_ACCESS_KEY: KEY, OB1_GIT_SHA: "c0ffee1" },
+      env: { ...process.env, PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", DATABASE_URL: databaseUrl, MCP_ACCESS_KEY: KEY, OB1_GIT_SHA: "c0ffee1" },
       stdout: "pipe",
       stderr: "ignore",
     });
@@ -1666,14 +1673,15 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
   // stdout and stderr both read: the per-request lines are warnings. A child is the REST core, on the database that
   // never replies, or the MCP server's entry (SMD-2287 PR 6a), its REST core a listener that never answers, so a
-  // keyed call stalls at its whoami as one stalls at the registry lookup. Each binds PORT 0 and says its port: seven
-  // start at once, then the MCP server in front of their REST core, and a port picked here and freed could go to
-  // another child first, whose answers and stop would then read as this one's (SMD-3296).
+  // keyed call stalls at its whoami as one stalls at the registry lookup. Each binds PORT 0 on 127.0.0.1
+  // (SMD-3323) and says its port: seven start at once, then the MCP server in front of their REST core, and a port
+  // picked here and freed could go to another child first, whose answers and stop would then read as this one's
+  // (SMD-3296).
   const start = async (env: Record<string, string> = {}, entry: "api" | "mcp" = "api") => {
     const proc = Bun.spawn(["bun", "--no-env-file", entry === "api" ? "api.ts" : "index.ts"], {
       cwd: entry === "api" ? import.meta.dir : `${import.meta.dir}/../mcp-server`,
       env: { ...process.env, PORT: "0", DATABASE_URL: `postgres://u:p@127.0.0.1:${silent.port}/db`, MCP_ACCESS_KEY: KEY,
-        ...(entry === "mcp" ? { OB1_REST_URL: `http://127.0.0.1:${silent.port}`, OB1_FORWARDER_KEY: "f".repeat(64), OB1_PLUGINS: "" } : {}), ...env },
+        ...(entry === "mcp" ? { OB1_REST_URL: `http://127.0.0.1:${silent.port}`, OB1_FORWARDER_KEY: "f".repeat(64), OB1_PLUGINS: "" } : {}), ...env, OB1_LISTEN_HOST: "127.0.0.1" },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -3158,14 +3166,14 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   // The mechanism dropped (bare) beside the mechanism (kept), on the runtime's
   // defaults. The bare server's kill is what prints Bun's own `warn: Bun.serve()
   // timed out a request after 10 seconds` after the suite's report: expected.
-  const bare = Bun.serve({ port: 0, fetch: () => silentSse() });
-  const kept = Bun.serve({ port: 0, fetch: (req) => withSseKeepalive(silentSse(), { signal: req.signal }) });
+  const bare = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => silentSse() });
+  const kept = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => withSseKeepalive(silentSse(), { signal: req.signal }) });
   // The ceiling, at a small scale: a stream silent for 500 ms with a 20 ms
   // frame and a 200 ms ceiling stops pinging at the ceiling and says so once.
   // Nominally nine frames, about twenty-four uncapped; the band below leaves a
   // loaded runner's timer drift room on both sides.
   let stalls = 0;
-  const capped = Bun.serve({ port: 0, fetch: (req) => withSseKeepalive(silentSse(500), { intervalMs: 20, maxMs: 200, signal: req.signal, label: "tools/call slow_one", onStall: () => { stalls++; } }) });
+  const capped = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => withSseKeepalive(silentSse(500), { intervalMs: 20, maxMs: 200, signal: req.signal, label: "tools/call slow_one", onStall: () => { stalls++; } }) });
   type Read = { ok: boolean; text: string; error: string; ms: number };
   const read = async (url: string, init: RequestInit = {}): Promise<Read> => {
     const t0 = performance.now();
@@ -3312,8 +3320,8 @@ console.log("\n[20] A Host the URL parser refuses, or none, is answered as a req
   // no Host (HTTP/1.0), userinfo or a path leave the bare request target, which Hono routed wrong (a 405 at /health). Raw sockets,
   // since fetch sends a Host of its own. The REST core is served beside the
   // MCP server through its own entry, api.ts; no row below reaches a store.
-  const { routable, REBUILD_ORIGIN } = await import("./auth.ts");
-  const rest = Bun.serve({ ...(await import("./api.ts")).default, port: 0 });
+  const { listenHostFrom, routable, REBUILD_ORIGIN } = await import("./auth.ts");
+  const rest = Bun.serve({ ...(await import("./api.ts")).default, port: 0, hostname: "127.0.0.1" });
   const { connect } = await import("node:net");
   const ask = askRaw;
   const J = ["content-type: application/json", "accept: application/json, text/event-stream"];
@@ -3394,6 +3402,24 @@ console.log("\n[20] A Host the URL parser refuses, or none, is answered as a req
   for (const [given, want] of [["/mcp", "/mcp"], ["//x/health", "//x/health"], ["*", "/*"], ["http://[::1/a?b#c", "/a?b#c"]] as const) {
     assert(routable(new RuntimeUrl(given)).url === `${REBUILD_ORIGIN}${want}`, `${JSON.stringify(given)} → ${want}, a path and not another host (${routable(new RuntimeUrl(given)).url})`);
   }
+  // listenHostFrom's own rules (SMD-3323): unset or blank is every address; an IP address, trimmed, is the one listened
+  // on, in one form (IPv6 as the URL parser writes it, an IPv4-mapped one as its IPv4), the wildcards included; given
+  // the host's addresses, one it does not have is a problem, and a link-local one, which the host lists without the
+  // zone Bun would need, is one of its own, zone or none; anything else — a name, a port, brackets, a pasted secret —
+  // is a problem; no problem says the value.
+  const HOST = ["127.0.0.1", "::1", "10.0.0.5", "fe80::1"];
+  const listenCases: [string | undefined, readonly string[] | undefined, string | undefined, "" | "not-ip" | "not-here" | "link-local"][] = [
+    [undefined, HOST, undefined, ""], ["", HOST, undefined, ""], ["  ", HOST, undefined, ""],
+    ["127.0.0.1", HOST, "127.0.0.1", ""], [" \t10.0.0.5\n", HOST, "10.0.0.5", ""], ["::0001", HOST, "::1", ""], ["::ffff:127.0.0.1", HOST, "127.0.0.1", ""], ["::FFFF:127.0.0.1", HOST, "127.0.0.1", ""],
+    ["0.0.0.0", HOST, "0.0.0.0", ""], ["::", HOST, "::", ""], ["192.0.2.1", undefined, "192.0.2.1", ""],
+    ["192.0.2.1", HOST, undefined, "not-here"], ["2001:db8::1", HOST, undefined, "not-here"],
+    ["localhost", HOST, undefined, "not-ip"], ["127.0.0.1:8000", HOST, undefined, "not-ip"], ["[::1]", HOST, undefined, "not-ip"], ["fe80::1", HOST, undefined, "link-local"], ["FE80::1", HOST, undefined, "link-local"], ["fe80::1%lo0", HOST, undefined, "link-local"],
+    ["1", HOST, undefined, "not-ip"], ["127.000.0.1", HOST, undefined, "not-ip"], ["::1]/x[", HOST, undefined, "not-ip"], ["Zq9XwVk7Jp4RmT", HOST, undefined, "not-ip"], ["4111111111111111", HOST, undefined, "not-ip"],
+  ];
+  const listenSaid = { "": null, "not-ip": "OB1_LISTEN_HOST (a value not shown) is not an IP address, so the server did not start", "not-here": "OB1_LISTEN_HOST (a value not shown) is not an address of this host, so the server did not start", "link-local": "OB1_LISTEN_HOST (a value not shown) is a link-local address, which needs an interface this setting does not take, so the server did not start" };
+  const listenWrong = listenCases.map(([raw, host, hostname, kind]) => ({ raw, got: listenHostFrom(raw, host), hostname, said: listenSaid[kind] }))
+    .filter(({ got, hostname, said }) => got.hostname !== hostname || (said === null ? got.problem !== null : !got.problem?.startsWith(said) || ["Zq9X", "4111"].some((planted) => got.problem!.includes(planted))));
+  assert(listenWrong.length === 0, `OB1_LISTEN_HOST: blank every address, an IP address the one in one form, one the host lacks, a link-local one or no address a problem without its value (${JSON.stringify(listenWrong)})`);
   // The edge reads a key form from the query the way auth.ts does, so the two agree on such a URL too.
   const kindOf = (url: string) => { try { return edgeModule.presentedKind(new RuntimeUrl(url)); } catch (e) { return `threw ${(e as Error).message}`; } };
   const kinds = [kindOf("http://x:99999/mcp?key="), kindOf("/mcp")];
@@ -4213,7 +4239,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     `the batch's sizes: queue 2,048 and export 512 by default, the export held to the queue, 0 and fractions ignored, each said (${JSON.stringify(sizes)})`);
   // OTEL_BSP_MAX_EXPORT_BATCH_SIZE=0 against a collector that refuses: the stop returns, and its last export's
   // failure is said at once though the batch's failed flush never reaches the exporter's shutdown (review pass 7).
-  const refusing = Bun.serve({ port: 0, fetch: () => new Response("no", { status: 400 }) });
+  const refusing = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("no", { status: 400 }) });
   const zeroSaid: string[] = [];
   const zeroBatch = process.env.OTEL_BSP_MAX_EXPORT_BATCH_SIZE;
   const refusingAt = `http://127.0.0.1:${refusing.port}`;
@@ -4440,7 +4466,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   // server, its own entry (SMD-2287 PR 4c), which refuses that request before
   // it calls the REST core: a port that never answers stands in for one.
   const received: Record<string, string[]> = {};
-  const collector = Bun.serve({ port: 0, fetch: async (req) => { (received[new URL(req.url).pathname] ??= []).push(await req.text()); return Response.json({}); } });
+  const collector = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => { (received[new URL(req.url).pathname] ??= []).push(await req.text()); return Response.json({}); } });
   const collectorPort = collector.port;
   const silent = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
   const mcp = await serveChild(`${import.meta.dir}/../mcp-server`, "index.ts", {
@@ -4480,10 +4506,42 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     `the request-duration histogram, labelled with the request's MCP method and outcome, never the key's name (${measured.slice(0, 200)})`);
   assert(!everything.includes(PLANTED) && !everything.includes(KEY) && !everything.includes("note="), `no signal holds the key, the query string or the planted text (${everything.length} chars)`);
 
+  // OB1_LISTEN_HOST, read as the REST core reads it (SMD-3323): serveChild's child on 127.0.0.1 alone, one with the
+  // variable blank on every address — told apart at a second loopback address, probed as test-rest [11b] probes it —
+  // and a value that is no IP address stops it before it serves, in words, the value never said.
+  const LISTEN_PLANTED = "Zq9XwVk7Jp4RmT";
+  const listenEnv = { MCP_ACCESS_KEY: KEY, OB1_FORWARDER_KEY: "f".repeat(64), OB1_REST_URL: "http://127.0.0.1:9", OB1_PLUGINS: "" };
+  const refusingMcp = Bun.spawn([process.execPath, "--no-env-file", "index.ts"], {
+    cwd: `${import.meta.dir}/../mcp-server`, stdout: "pipe", stderr: "pipe",
+    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", ...listenEnv, OB1_LISTEN_HOST: LISTEN_PLANTED },
+  });
+  const [second, loopbackMcp, everyMcp] = await Promise.all([
+    secondLoopback(),
+    serveChild(`${import.meta.dir}/../mcp-server`, "index.ts", listenEnv),
+    // Blank, so every address, as unset is: serveChild's 127.0.0.1 taken back out.
+    serveChild(`${import.meta.dir}/../mcp-server`, "index.ts", { ...listenEnv, OB1_LISTEN_HOST: "" }),
+  ]);
+  const mcpAt = (host: string | null, port: number) => (host === null ? Promise.resolve("no address") : fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(2_000) })
+    .then(async (r) => (r.ok && (await r.text()) === MCP_HEALTH_BODY ? "the child" : `${r.status}, another`), (e: Error) => (e.name === "TimeoutError" ? "timed out" : `refused (${e.name})`)));
+  let mcpSeen: Record<string, string> = {};
+  try {
+    mcpSeen = { second: second ?? "none", here4: await mcpAt("127.0.0.1", loopbackMcp.port), here2: await mcpAt(second, loopbackMcp.port), every2: await mcpAt(second, everyMcp.port) };
+  } finally {
+    loopbackMcp.kill();
+    everyMcp.kill();
+  }
+  assert(second !== null && loopbackMcp.up && mcpSeen.here4 === "the child" && mcpSeen.here2.startsWith("refused") && mcpSeen.every2 === "the child",
+    `bun index.ts under serveChild listens on 127.0.0.1 alone, and blank on every address: a second loopback address refuses the one, reaches the other (${JSON.stringify(mcpSeen)})`);
+  const mcpCode = await Promise.race([refusingMcp.exited, Bun.sleep(20_000).then(() => "still running")]);
+  if (mcpCode === "still running") refusingMcp.kill("SIGKILL");
+  const mcpSaid = (await new Response(refusingMcp.stdout).text()) + (await new Response(refusingMcp.stderr).text());
+  assert(mcpCode === 2 && mcpSaid.includes("OB1_LISTEN_HOST (a value not shown) is not an IP address, so the server did not start") && !mcpSaid.includes("Started") && !mcpSaid.includes("Zq9X"),
+    `bun index.ts told an OB1_LISTEN_HOST that is no IP address: exit 2 before it serves, the value never shown (exit ${mcpCode}; ${mcpSaid.trim().slice(0, 300)})`);
+
   // SMD-2902, this entry's stop wired as the REST core's (review pass 1's mutants): a collector that never answers is
   // cut at what its 3 s grace leaves less a second — not the 5 s budget, which a grace not passed would give — and
   // what each signal held is said.
-  const hung = Bun.serve({ port: 0, idleTimeout: 0, fetch: () => new Promise<Response>(() => {}) });
+  const hung = Bun.serve({ port: 0, hostname: "127.0.0.1", idleTimeout: 0, fetch: () => new Promise<Response>(() => {}) });
   const hungPort = hung.port;
   const silent2 = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {}, open() {} } });
   const mcp2 = await serveChild(`${import.meta.dir}/../mcp-server`, "index.ts", {
@@ -4509,7 +4567,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   // tool call the REST core never answers keeps the drain open, until its 5 s bound cuts it, past their deadline (about 3 s
   // after the signal), and the flush is answered — so the stop says not all sent, where a mark left unwired would count from the flush and say sent.
   const firstSeen = new Set<string>();
-  const firstTrickle = Bun.serve({ port: 0, idleTimeout: 0, fetch: (req) => {
+  const firstTrickle = Bun.serve({ port: 0, hostname: "127.0.0.1", idleTimeout: 0, fetch: (req) => {
     const path = new URL(req.url).pathname;
     if (path.endsWith("/metrics") || firstSeen.has(path)) return Response.json({});
     firstSeen.add(path);
@@ -4823,7 +4881,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   const intervalSaved = process.env.OTEL_METRIC_EXPORT_INTERVAL;
   process.env.OTEL_METRIC_EXPORT_INTERVAL = "500";
   // A collector that takes the reading: a refused one would hold the shutdown through the exporter's retries (SMD-2909 review pass 2).
-  const noteTaker = Bun.serve({ port: 0, fetch: () => Response.json({}) });
+  const noteTaker = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({}) });
   try {
     const noted = setUpTelemetry("open-brain-test", { report: { warn: (l) => losses.push(l), note: (l) => notes.push(l) }, urls: { metrics: `http://127.0.0.1:${noteTaker.port}/v1/metrics` } });
     await noted.shutdown();
@@ -4843,7 +4901,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
     const saved = Object.fromEntries(numeric.map((k) => [k, process.env[k]]));
     const plantNotes: string[] = [];
     const plantLosses: string[] = [];
-    const taker = Bun.serve({ port: 0, fetch: () => Response.json({}) });
+    const taker = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({}) });
     try {
       for (const k of numeric) process.env[k] = SECRET;
       const at = `http://127.0.0.1:${taker.port}`;
@@ -4868,7 +4926,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   {
     const { startTelemetry: startReal, stopTelemetry: stopReal, flushTelemetry: flushReal } = await import("./telemetry.ts");
     const { trace: traceApi } = await import("@opentelemetry/api");
-    const taker = Bun.serve({ port: 0, fetch: () => Response.json({}) });
+    const taker = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({}) });
     const kindsSaid: import("./telemetry.ts").Said[] = [];
     const saved = { endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT, queue: process.env.OTEL_BSP_MAX_QUEUE_SIZE, batch: process.env.OTEL_BSP_MAX_EXPORT_BATCH_SIZE, delay: process.env.OTEL_BSP_SCHEDULE_DELAY, interval: process.env.OTEL_METRIC_EXPORT_INTERVAL };
     Object.assign(process.env, { OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${taker.port}`, OTEL_BSP_MAX_QUEUE_SIZE: "1", OTEL_BSP_MAX_EXPORT_BATCH_SIZE: "1", OTEL_BSP_SCHEDULE_DELAY: "60000", OTEL_METRIC_EXPORT_INTERVAL: "500" });
@@ -4897,7 +4955,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   // The metric exporter asked for delta temporality (OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE): the reader asks
   // the watched exporter, which must answer as the OTLP exporter does (review pass 1).
   const metricBodies: string[] = [];
-  const refusing = Bun.serve({ port: 0, fetch: async (req) => {
+  const refusing = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => {
     const path = new URL(req.url).pathname;
     if (path === "/v1/metrics") metricBodies.push(await req.text());
     return path === "/v1/traces" ? Response.json({}) : new Response("no", { status: 400 });
@@ -4943,7 +5001,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   const sinceSignal: string[] = [];
   for (const failing of ["/v1/traces", "/v1/logs", "/v1/metrics"]) {
     let refuse = "";
-    const markTaker = Bun.serve({ port: 0, fetch: (req) => (new URL(req.url).pathname === refuse ? new Response("no", { status: 400 }) : Response.json({})) });
+    const markTaker = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => (new URL(req.url).pathname === refuse ? new Response("no", { status: 400 }) : Response.json({})) });
     const at = `http://127.0.0.1:${markTaker.port}`;
     const marked = setUpTelemetry("open-brain-test", { report: { warn: () => {} }, urls: { traces: `${at}/v1/traces`, metrics: `${at}/v1/metrics`, logs: `${at}/v1/logs` } });
     try {
@@ -4966,7 +5024,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
 
   // The log batch takes its delay from OTEL_BLRP_SCHEDULE_DELAY: at 0, a record goes as it comes, before any flush (review pass 1).
   const prompt: string[] = [];
-  const logCollector = Bun.serve({ port: 0, fetch: async (req) => { if (new URL(req.url).pathname === "/v1/logs") prompt.push(await req.text()); return Response.json({}); } });
+  const logCollector = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => { if (new URL(req.url).pathname === "/v1/logs") prompt.push(await req.text()); return Response.json({}); } });
   const delayAsked = process.env.OTEL_BLRP_SCHEDULE_DELAY;
   process.env.OTEL_BLRP_SCHEDULE_DELAY = "0";
   let promptBeforeFlush = -1;
@@ -5014,7 +5072,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
   // The span batch's delay is read here and held, not left to the SDK, which reads it unbounded (review pass 2):
   // asked for more than a timer's longest, a span waits rather than going at once.
   const heldSpans: string[] = [];
-  const spanCollector = Bun.serve({ port: 0, fetch: async (req) => { heldSpans.push(new URL(req.url).pathname); return Response.json({}); } });
+  const spanCollector = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => { heldSpans.push(new URL(req.url).pathname); return Response.json({}); } });
   const spanDelay = process.env.OTEL_BSP_SCHEDULE_DELAY;
   process.env.OTEL_BSP_SCHEDULE_DELAY = "3000000000";
   const heldSaid: string[] = [];
@@ -5305,6 +5363,7 @@ console.log("\n[26] A provider call, a store operation and a job's body under sp
   // A provider that answers each model its own way: tokens counted, a 503, a body that is not JSON, and one that never answers.
   const provider = Bun.serve({
     port: 0,
+    hostname: "127.0.0.1",
     async fetch(req) {
       if (new URL(req.url).pathname.endsWith("/embeddings")) return Response.json({ data: [{ embedding: [0.1, 0.2] }], usage: { prompt_tokens: 7, total_tokens: 7, completion_tokens: PLANTED } });
       const { model } = (await req.json()) as { model: string };

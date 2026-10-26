@@ -6,8 +6,9 @@
 // reached as api.ob1.internal on the mesh, and at /api only where the operator
 // names deploy/compose.api-public.yaml.
 
+import { networkInterfaces } from "node:os";
 import { agents, closeStore, db, env, hooks, initEnv, plugins, serveHere } from "./root.ts";
-import { routable } from "./auth.ts";
+import { listenHostFrom, routable } from "./auth.ts";
 import { createCore, mendIntervalFrom, reprobeIntervalFrom } from "./core/index.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "./shutdown.ts";
 import { markRunningLost } from "./jobs.ts";
@@ -71,6 +72,14 @@ export const app = restApp();
 // imports it.
 const SERVES_ON_BUN = typeof Bun !== "undefined" && import.meta.main === true;
 let bunServer: Stoppable | undefined;
+// Every address, or the one OB1_LISTEN_HOST names (SMD-3323): one that is no
+// IP address, a link-local IPv6 one, or none this host has, stops the server
+// before it starts, in words, as the MCP server's settings do.
+const listen = listenHostFrom(process.env.OB1_LISTEN_HOST, Object.values(networkInterfaces()).flatMap((list) => (list ?? []).map((a) => a.address)));
+if (SERVES_ON_BUN && listen.problem) {
+  console.error(listen.problem);
+  process.exit(2);
+}
 if (SERVES_ON_BUN) {
   // The store's first build wires the durable job store for this server: its
   // jobs carry its door, and its start-up reconcile marks lost those a prior
@@ -132,6 +141,7 @@ export const IDLE_TIMEOUT_S = 255;
 export default {
   // An empty PORT is unset, not port 0 (SMD-1799).
   port: Number(process.env.PORT || 8000),
+  ...(listen.hostname ? { hostname: listen.hostname } : {}),
   // Bun's longest idle timeout, 255 s, not its 10 s default: on Bun 1.4.3 the
   // default cuts a GET whose handler has not answered yet — measured, a
   // 14-second GET reset at 12 s while a POST ran to its end — and the MCP

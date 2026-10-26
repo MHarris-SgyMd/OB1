@@ -846,12 +846,36 @@ export function answersHealth(port: number, body: string, init: RequestInit = {}
 }
 
 /**
+ * A loopback address other than 127.0.0.1 that reaches a server listening on
+ * every address, as a URL's host (`[::1]`, else `127.0.0.2`), or null where
+ * neither does: a row holding that a server listens on 127.0.0.1 alone asks it
+ * there, and is refused (SMD-3323). Probed, not assumed: a host without IPv6
+ * loopback refuses [::1] whatever the server listens on, so the row would hold
+ * nothing; Linux answers 127.0.0.2 on its loopback, macOS answers neither
+ * without IPv6. The probe's answer is its own token, so another app holding
+ * the probe's port on that address does not read as it.
+ */
+export async function secondLoopback(): Promise<string | null> {
+  const token = crypto.randomUUID();
+  const probe = Bun.serve({ port: 0, fetch: () => new Response(token) });
+  try {
+    for (const host of ["[::1]", "127.0.0.2"]) {
+      const got = await fetch(`http://${host}:${probe.port}/`, { signal: AbortSignal.timeout(1_000) }).then((r) => r.text(), () => "");
+      if (got === token) return host;
+    }
+    return null;
+  } finally {
+    probe.stop(true);
+  }
+}
+
+/**
  * A server entry run as the image runs it (`bun --no-env-file <entry>`), on a
- * port of its own, with `env` beside PATH, HOME and PORT and no other: `up`
- * once its /health answers (30 s at most, each poll 1 s, none once it has
- * exited or a signal killed it), `sdk`
- * once it says where its spans go (with `waitForSdk`, 20 s at most — its SDK
- * loaded, not a fixed wait), `stop` its SIGTERM (SIGKILL past 8 s) and then
+ * port of its own, with `env` beside PATH, HOME, PORT and OB1_LISTEN_HOST and
+ * no other: `up` once its /health answers (30 s at most, each poll 1 s, none
+ * once it has exited or a signal killed it), `sdk` once it says where its
+ * spans go (with `waitForSdk`, 20 s at most — its SDK loaded, not a fixed
+ * wait), `stop` its SIGTERM (SIGKILL past 8 s) and then
  * its stdout and stderr together, `kill` for a `finally`. Its port is the one
  * it bound, at PORT 0, as Bun's start line says: a port picked here and freed
  * for it could be taken by another server in between, and a /health answered
@@ -860,12 +884,15 @@ export function answersHealth(port: number, body: string, init: RequestInit = {}
  * busy runner are slower than one, and a deadline costs a quick child nothing.
  * The entry must be served by its `export default` and read PORT, as api.ts and
  * mcp-server/index.ts are: one that calls Bun.serve itself prints no start line,
- * and is never up.
+ * and is never up. An entry that reads OB1_LISTEN_HOST, as those two do,
+ * listens on 127.0.0.1 alone, not every address: on macOS a port picked for
+ * every address can be one another app holds on 127.0.0.1, which then answers
+ * the child's /health and requests (SMD-3323); `env` can say otherwise.
  */
 export async function serveChild(cwd: string, entry: string, env: Record<string, string>, { waitForSdk = false } = {}): Promise<{ port: number; up: boolean; sdk: boolean; until: (pattern: RegExp, ms: number) => Promise<boolean>; stop: () => Promise<string>; kill: () => void }> {
   const child = Bun.spawn([process.execPath, "--no-env-file", entry], {
     cwd,
-    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", ...env },
+    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", ...env },
     stdout: "pipe",
     stderr: "pipe",
   });
