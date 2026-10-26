@@ -285,19 +285,18 @@ form, so a JavaScript array reached a `text[]` column as its `String()` (`a,b`,
 `""` for `[]`) and was refused as malformed — while the same array into a `jsonb`
 column beside it was right. Value shape cannot decide that (`tags TEXT[]` and
 `instructions JSONB` take the same `string[]`); the column's declared type does.
-A table's columns are re-read when the caller names one the map lacks, when a
-query that named a column remembered as absent then fails another way, when
-the shape read beside a star's rows moves (a column added, a table rebuilt
-under its name, a column retyped; a call must return rows to carry it),
-when a query that named an absent column runs (the column is there now), or
-when the shim's own list names one since dropped, which `.rpc()` also does for
-the table a `RETURNS SETOF` returns, or when Postgres refuses a statement's
-cached plan; a function's when one of its declared columns is gone, when a
-changed plan is refused, or when a scalar's row comes back with other columns.
-Anything else — a foreign key added, a column added to a `RETURNS TABLE`, a
-column added to a `RETURNS SETOF`'s table until a read of that table notices
-the count — is not seen until the process restarts, as with PostgREST's own
-cache. `toSQL()` reads the catalog too, so it is a promise.
+A table's columns are re-read when the caller names one the map lacks; when a
+query that named a column remembered as absent runs, or fails another way (the
+column is there now); when the shape read beside a star's rows moves (a column
+added, a table rebuilt under its name, a column retyped; a call must return rows
+to carry it); when the shim's own list names one since dropped, which `.rpc()`
+also does for the table a `RETURNS SETOF` returns; or when Postgres refuses a
+statement's cached plan. A function's are re-read when one of its declared
+columns is gone, when a changed plan is refused, or when a scalar's row comes
+back with other columns. Anything else — a foreign key added, a column added to
+a `RETURNS TABLE`, a column added to a `RETURNS SETOF`'s table until a read of
+that table notices the shape — is not seen until the process restarts, as with
+PostgREST's own cache. `toSQL()` reads the catalog too, so it is a promise.
 
 Clients on one connection URL share one pool. The vendored servers build a
 client inside each request and close none — an Edge Function's shape — and

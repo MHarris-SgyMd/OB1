@@ -28,6 +28,14 @@ const { assert, report } = createAssert();
 const COLUMNS_READ = /^\s*SELECT a\.attname AS name, format_type/;
 const CATALOG_READ = /^\s*SELECT (?:a\.attname AS name|p\.proargnames|c\.conname)|^SHOW server_encoding/;
 
+/** Runs `run` with each statement the client sends shown to `see` first, then puts the client's pool back as it was. */
+async function watching<R>(client: { sql: unknown }, see: (text: string) => void, run: () => Promise<R>): Promise<R> {
+  const pool = client.sql as { unsafe: (...a: unknown[]) => unknown };
+  const real = pool.unsafe;
+  pool.unsafe = function (this: unknown, ...a: unknown[]) { see(String(a[0])); return real.apply(this, a); };
+  try { return await run(); } finally { pool.unsafe = real; }
+}
+
 // [0] The pool size reads "" as unset — a compose file forwarding ${OB1_PG_POOL:-}
 // sends "" for an unset knob, and Number("") was 0 here until SMD-1843, a size
 // Bun's SQL refuses at construction.
@@ -596,7 +604,7 @@ try {
   const one = await db.from("gizmos").select("label, widgets (name)").eq("label", "g1").single();
   assert(one.error === null && (one.data as unknown as { widgets: { name: string } }).widgets?.name === "alpha", "an embed under single()");
   const { text } = await db.from("gizmos").select("*, widgets (name)").eq("label", "g1").toSQL();
-  assert(/^SELECT "id", "widget_id", "label", "made_on", \(SELECT c\.oid::text \|\| ':' \|\| c\.relnatts \|\| ':' \|\| md5\(.*?FROM pg_class c WHERE c\.oid = to_regclass\('"gizmos"'\)\) AS __natts, \(SELECT row_to_json\(__r\) FROM \(SELECT __e1\."name" FROM "widgets" AS __e1 WHERE __e1\."id" = "gizmos"\."widget_id"\) __r\) AS "widgets" FROM "gizmos" WHERE "label" = \$1/.test(text),
+  assert(/^SELECT "id", "widget_id", "label", "made_on", \(SELECT c\.oid::text \|\| ':' \|\| c\.relnatts \|\| ':' \|\| md5\(.*?FROM pg_class c WHERE c\.oid = to_regclass\('"gizmos"'\)\) AS __shape, \(SELECT row_to_json\(__r\) FROM \(SELECT __e1\."name" FROM "widgets" AS __e1 WHERE __e1\."id" = "gizmos"\."widget_id"\) __r\) AS "widgets" FROM "gizmos" WHERE "label" = \$1/.test(text),
     `the embed is a correlated subquery on the foreign key, its table aliased by depth (${text})`);
   // Refusals, each naming why.
   assert(/more than one foreign key/.test(await refusedMsg(() => db.from("links").select("*, widgets(name)"))), "two foreign keys to the same table are refused, naming the column form");
@@ -677,7 +685,7 @@ try {
   const starSecond = rowsOf(await db.from("latecomers").select("*").limit(1), "star, fresh map");
   assert(!("seen_on" in (starFirst[0] ?? {})) && starSecond[0]?.seen_on === "2026-09-21", `a column added under the client and reached only through * arrives on the second call: the first, spelled out from the map, lacked it and read the table's attribute count beside its rows, and the map was forgotten (${String(starFirst[0]?.seen_on)} → ${String(starSecond[0]?.seen_on)})`);
   const starNoArrays = rowsOf(await db.from("gizmos").select("*").limit(1), "star on a table without arrays");
-  assert(starNoArrays.length === 1 && "made_on" in starNoArrays[0] && !("__natts" in starNoArrays[0]), "…and a table without an array column is spelled out too, its count column lifted off (SMD-3329)");
+  assert(starNoArrays.length === 1 && "made_on" in starNoArrays[0] && !("__shape" in starNoArrays[0]), "…and a table without an array column is spelled out too, its count column lifted off (SMD-3329)");
   // …and when a migration then adds that very column, the absent memo would bind its array raw for the process's life:
   // the failed call forgets the map (22P02 is not "undefined column"), and the next one reads the table again.
   // in.() on a column the table lacks selects nothing and names nothing: not an error, and not a refresh — counted:
@@ -778,8 +786,8 @@ try {
   assert(nulled.error === null && JSON.stringify((nulled.data as unknown as { scores: unknown })?.scores) === "[0.9,null]", `a real[] holding a NULL comes back as [0.9, null] — Bun's binary decoder refused the column outright (ERR_POSTGRES_NULLS_IN_ARRAY_NOT_SUPPORTED_YET), so the query log's result_scores never landed through this shim (${nulled.error?.code ?? JSON.stringify((nulled.data as unknown as { scores: unknown })?.scores)})`);
   assert(JSON.stringify((nulled.data as unknown as { ids: unknown })?.ids) === '["11111111-1111-4111-8111-111111111111"]', `a uuid[] is a list of strings, not the literal text {…} Bun leaves it as (${JSON.stringify((nulled.data as unknown as { ids: unknown })?.ids)})`);
   const star = await db.from("pages").select("*").eq("id", 1).single();
-  assert(star.error === null && JSON.stringify((star.data as unknown as { scores: unknown })?.scores) === "[0.9,null]" && typeof (star.data as unknown as { name: unknown })?.name === "string" && !("__natts" in (star.data as object)),
-    `…through * as well, spelled out from the map on a table with an array column, the count column lifted off (${star.error?.code ?? Object.keys(star.data as object).join()})`);
+  assert(star.error === null && JSON.stringify((star.data as unknown as { scores: unknown })?.scores) === "[0.9,null]" && typeof (star.data as unknown as { name: unknown })?.name === "string" && !("__shape" in (star.data as object)),
+    `…through * as well, spelled out from the map on a table with an array column, the shape column lifted off (${star.error?.code ?? Object.keys(star.data as object).join()})`);
   const { text: starText } = await db.from("pages").select("*").toSQL();
   assert(/to_json\("scores"\) AS "scores"/.test(starText) && /relnatts/.test(starText) && !/SELECT \*/.test(starText), `the spelled-out star wraps the array columns and reads relnatts beside the rows (${starText.slice(0, 120)})`);
   const { text: plainText } = await db.from("gizmos").select("*").toSQL();
@@ -1014,7 +1022,7 @@ try {
     fn: await one.rpc("widen_fn", { p_name: "first" }),
     setof: await one.rpc("widen_rows", { p_name: "first" }),
     star: await one.from("widen_t").select("*").eq("name", "first"),
-    bare: await one.from("widen_t").select().eq("name", "first"),
+    bare: await one.from("widen_t").select().eq("id", 1),
     returning: await one.from("widen_t").update({ name: "first" }).eq("name", "first").select("*"),
     embed: await one.from("widgets").select("id, gizmos(*)").gt("id", 0).limit(1),
     label,
@@ -1035,12 +1043,8 @@ try {
   assert(scalarBefore.data === 1 && scalarAfter.error === null && (scalarAfter.data as { name: string }[])?.[0]?.name === "first", `a scalar function made again with columns: its 0A000 reads the catalog again and the call answers with the rows (${scalarAfter.error?.message ?? JSON.stringify(scalarAfter.data)})`);
   // Each read after the migration is one statement: a named list re-analyses to the result type it had, where a `*`
   // would be refused and run again as a new generation (SMD-3329's pass 3) — answering, but a refused call each.
-  const afterPool = one.sql as unknown as { unsafe: (...a: unknown[]) => unknown };
-  const afterUnsafe = afterPool.unsafe;
   let afterStatements = 0;
-  afterPool.unsafe = function (this: unknown, ...a: unknown[]) { if (!CATALOG_READ.test(String(a[0]))) afterStatements++; return afterUnsafe.apply(this, a); };
-  let after: Awaited<ReturnType<typeof reads>>;
-  try { after = await reads("after"); } finally { afterPool.unsafe = afterUnsafe; }
+  const after = await watching(one, (q) => { if (!CATALOG_READ.test(q)) afterStatements++; }, () => reads("after"));
   assert(afterStatements === 6, `the six reads after the migration ran six statements, none refused and run again (${afterStatements})`);
   assert(after.fn.error === null && (after.fn.data as { name: string }[])?.[0]?.name === "first", `rpc() of a function a migration widened answers on the same client (${ok(after)})`);
   assert(after.setof.error === null && (after.setof.data as { name: string }[])?.[0]?.name === "first", `…and rpc() of a function returning rows of a table a migration widened (${ok(after)})`);
@@ -1083,13 +1087,10 @@ try {
   // A column the CALLER names and the table lacks is the caller's 42703, not a stale map: no re-read, no second call —
   // in a filter, a payload, an update's SET, or an embed whose base table has a column of that name. Postgres places
   // each outside the spelled-out `*` (its error's `position`).
-  const pool = one.sql as unknown as { unsafe: (...a: unknown[]) => unknown };
-  const realUnsafe = pool.unsafe;
   const counted = async (run: () => PromiseLike<{ error: { code?: string } | null }>) => {
     let catalogReads = 0, queries = 0;
-    pool.unsafe = function (this: unknown, ...a: unknown[]) { if (CATALOG_READ.test(String(a[0]))) catalogReads++; else queries++; return realUnsafe.apply(this, a); };
     const codes: (string | undefined)[] = [];
-    try { for (let i = 0; i < 5; i++) codes.push((await run()).error?.code); } finally { pool.unsafe = realUnsafe; }
+    await watching(one, (q) => { if (CATALOG_READ.test(q)) catalogReads++; else queries++; }, async () => { for (let i = 0; i < 5; i++) codes.push((await run()).error?.code); });
     return { codes: codes.join(), catalogReads, queries };
   };
   for (const [what, run] of [
@@ -1111,13 +1112,11 @@ try {
   // The server's encoding is asked only for a 42703, whose place is read: a duplicate key on a statement with names
   // outside ASCII asks nothing (a fresh URL, so nothing is kept from the calls above).
   const three = createClient(`${URL_}${URL_.includes("?") ? "&" : "?"}application_name=smd3329three`, "k", { max: 1 });
-  const threePool = three.sql as unknown as { unsafe: (...a: unknown[]) => unknown };
-  const threeUnsafe = threePool.unsafe;
   let shows = 0;
-  threePool.unsafe = function (this: unknown, ...a: unknown[]) { if (/^SHOW server_encoding/.test(String(a[0]))) shows++; return threeUnsafe.apply(this, a); };
-  await three.from("emoji_names").insert({ id: 1 }).select("*");
-  const dup = await three.from("emoji_names").insert({ id: 1 }).select("*");
-  threePool.unsafe = threeUnsafe;
+  const dup = await watching(three, (q) => { if (/^SHOW server_encoding/.test(q)) shows++; }, async () => {
+    await three.from("emoji_names").insert({ id: 1 }).select("*");
+    return three.from("emoji_names").insert({ id: 1 }).select("*");
+  });
   await three.close();
   assert(dup.error?.code === "23505" && shows === 0, `a duplicate key on a statement naming columns outside ASCII asks the server's encoding ${shows} times`);
   // A 42703 raised inside a function body or a trigger has no place in the statement: never the shim's, so the
@@ -1216,18 +1215,12 @@ try {
   await admin`INSERT INTO widen_burst SELECT g, g FROM generate_series(1, 20) g`;
   await Promise.all(Array.from({ length: 20 }, (_, i) => burst.from("widen_burst").select("*").eq("id", i + 1)));
   await admin`ALTER TABLE widen_burst ALTER COLUMN n TYPE bigint`;
-  const burstPool = burst.sql as unknown as { unsafe: (...a: unknown[]) => unknown };
-  const burstUnsafe = burstPool.unsafe;
   let burstReads = 0;
   const burstGenerations = new Set<string>();
-  burstPool.unsafe = function (this: unknown, ...a: unknown[]) {
-    const q = String(a[0]);
+  const burstResults = await watching(burst, (q) => {
     if (COLUMNS_READ.test(q)) burstReads++;
     else if (/FROM "widen_burst"/.test(q)) burstGenerations.add(/generation (\d+)/.exec(q)?.[1] ?? "0");
-    return burstUnsafe.apply(this, a);
-  };
-  let burstResults: { error: { code?: string } | null }[];
-  try { burstResults = await Promise.all(Array.from({ length: 20 }, (_, i) => burst.from("widen_burst").select("*").eq("id", i + 1))); } finally { burstPool.unsafe = burstUnsafe; }
+  }, () => Promise.all(Array.from({ length: 20 }, (_, i) => burst.from("widen_burst").select("*").eq("id", i + 1))));
   await burst.close();
   assert(burstResults.every((r) => r.error === null) && burstReads <= 2 && burstGenerations.size === 2, `twenty calls refused at once by one retype on a pool of five: all answer, with ${burstReads} catalog read(s), the retries all one new generation (${[...burstGenerations].join(", ")})`);
   // A function returning a composite the catalog cannot see (a type off the search path) reads as a scalar, and its
@@ -1279,6 +1272,9 @@ try {
   await admin`INSERT INTO widen_cnt VALUES (1, 1), (2, 1)`;
   await one.from("widen_cnt").select("*").eq("c", 1);
   let pages = 0, dropped = false;
+  // Its own interceptor, not watching(): it runs the migration between the page and the count query.
+  const pool = one.sql as unknown as { unsafe: (...a: unknown[]) => unknown };
+  const realUnsafe = pool.unsafe;
   pool.unsafe = function (this: unknown, ...a: unknown[]) {
     const q = String(a[0]);
     if (q.startsWith("SELECT count(*)::int AS __count") && !dropped) { dropped = true; return admin`ALTER TABLE widen_cnt DROP COLUMN c`.then(() => realUnsafe.apply(this, a)); }
@@ -1302,11 +1298,8 @@ try {
   await asciiAdmin`ALTER TABLE tt DROP COLUMN z`;
   const asciiDrop = await ascii.from("tt").select("*").eq("id", 1);
   // …and a filter on a column the table lacks, after them, stays the caller's: the place read in bytes, not two a character.
-  const asciiPool = ascii.sql as unknown as { unsafe: (...a: unknown[]) => unknown };
-  const asciiUnsafe = asciiPool.unsafe;
   let asciiQueries = 0;
-  asciiPool.unsafe = function (this: unknown, ...a: unknown[]) { if (/FROM "tt"/.test(String(a[0]))) asciiQueries++; return asciiUnsafe.apply(this, a); };
-  try { for (let i = 0; i < 3; i++) await ascii.from("tt").select("*").eq("no_such_column", 1); } finally { asciiPool.unsafe = asciiUnsafe; }
+  await watching(ascii, (q) => { if (/FROM "tt"/.test(q)) asciiQueries++; }, async () => { for (let i = 0; i < 3; i++) await ascii.from("tt").select("*").eq("no_such_column", 1); });
   assert(asciiQueries === 3, `three filters on a missing column on the SQL_ASCII server: ${asciiQueries} queries, not a retry each`);
   assert(asciiDb === "smd3329_ascii" && asciiDrop.error === null && !("z" in ((asciiDrop.data as object[])?.[0] ?? { z: 1 })), `a column dropped under a client of a SQL_ASCII server, after twelve columns named outside ASCII: the next call answers (${asciiDb}; ${asciiDrop.error?.message ?? "ok"})`);
   await ascii.close();

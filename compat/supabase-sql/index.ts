@@ -284,7 +284,7 @@ type ColumnInfo = { type: string; category: string; elem?: string };
 type Columns = Map<string, ColumnInfo>;
 type ForeignKey = { name: string; from: string; fromCols: string[]; to: string; toCols: string[]; unique: boolean };
 type Overload = { names: string[]; types: string[]; categories: string[]; outs: Columns; returns: { type: string; category: string; table: string | null; set: boolean } };
-type CatalogStore = { columns: Map<string, Promise<Columns>>; absent: Map<string, Set<string>>; natts: Map<string, string>; fks: Map<string, Promise<ForeignKey[]>>; fns: Map<string, Promise<Overload[]>>; pks: Map<string, Promise<string[]>>; encoding?: Promise<string>; generations: Map<string, number> };
+type CatalogStore = { columns: Map<string, Promise<Columns>>; absent: Map<string, Set<string>>; shapes: Map<string, string>; fks: Map<string, Promise<ForeignKey[]>>; fns: Map<string, Promise<Overload[]>>; pks: Map<string, Promise<string[]>>; encoding?: Promise<string>; generations: Map<string, number> };
 
 /** What each memo resolved to, so a caller holding an answer can tell whether it is still the current one (forgetIf). */
 const RESOLVED = new WeakMap<Promise<unknown>, unknown>();
@@ -320,7 +320,7 @@ class Catalog {
 
   constructor(private sql: SQL, url: string) {
     let store = STORES.get(url);
-    if (!store) STORES.set(url, (store = { columns: new Map(), absent: new Map(), natts: new Map(), fks: new Map(), fns: new Map(), pks: new Map(), generations: new Map() }));
+    if (!store) STORES.set(url, (store = { columns: new Map(), absent: new Map(), shapes: new Map(), fks: new Map(), fns: new Map(), pks: new Map(), generations: new Map() }));
     this.store = store;
   }
 
@@ -429,7 +429,7 @@ class Catalog {
   forget(table: string): void {
     this.store.columns.delete(table);
     this.store.absent.delete(table);
-    this.store.natts.delete(table);
+    this.store.shapes.delete(table);
   }
 
   /**
@@ -439,8 +439,8 @@ class Catalog {
    * on the next call as a changed shape rather than as a key the map lacks
    * (SMD-1602, SMD-3329).
    */
-  nattsOf(table: string): string | undefined {
-    return this.store.natts.get(table);
+  shapeOf(table: string): string | undefined {
+    return this.store.shapes.get(table);
   }
 
   /**
@@ -468,15 +468,15 @@ class Catalog {
   private readColumns(table: string): Promise<Columns> {
     return (async () => {
       const rows = (await this.sql.unsafe(
-        `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, t.typcategory AS category, ${shapeSql("to_regclass($1)")} AS natts,
+        `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS type, t.typcategory AS category, ${shapeSql("to_regclass($1)")} AS shape,
                 (SELECT e.typname FROM pg_type b JOIN pg_type e ON e.oid = b.typelem
                   WHERE b.oid = CASE WHEN t.typtype = 'd' THEN t.typbasetype ELSE t.oid END) AS elem
            FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid JOIN pg_class c ON c.oid = a.attrelid
           WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped
           ORDER BY a.attnum`,
         [ident(table, "table")] as never[]
-      )) as unknown as { name: string; type: string; category: string; natts: string; elem: string | null }[];
-      if (rows.length) this.store.natts.set(table, String(rows[0].natts));
+      )) as unknown as { name: string; type: string; category: string; shape: string; elem: string | null }[];
+      if (rows.length) this.store.shapes.set(table, String(rows[0].shape));
       return new Map(rows.map((r) => [r.name, { type: r.type, category: r.category, ...(r.elem ? { elem: r.elem } : {}) }]));
     })();
   }
@@ -1331,7 +1331,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
         if (cols.size === 0) { push("*"); continue; }
         const from = at;
         for (const [name, info] of cols) push(this.columnSql(name, info));
-        push(`${shapeSql(`to_regclass('${base.alias}')`)} AS __natts`);
+        push(`${shapeSql(`to_regclass('${base.alias}')`)} AS __shape`);
         spelled.push([from, at - 2]);
       }
       else if (item.kind === "column") push(this.columnSql(item.name, cols.get(item.name)));
@@ -1459,10 +1459,10 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       // The page's total (count(*) OVER (), the same on every row) and the table's shape ride on the rows and
       // are lifted off them before the caller sees a row.
       let total: number | null = raw.length && "__count" in raw[0] ? Number(raw[0].__count) : null;
-      const natts = raw.length && "__natts" in raw[0] ? String(raw[0].__natts) : undefined;
+      const shape = raw.length && "__shape" in raw[0] ? String(raw[0].__shape) : undefined;
       const rows = raw.map((r) => {
-        if (!("__count" in r) && !("__natts" in r)) return jsonShaped(r, cols);
-        const { __count: _c, __natts: _n, ...rest } = r;
+        if (!("__count" in r) && !("__shape" in r)) return jsonShaped(r, cols);
+        const { __count: _c, __shape: _s, ...rest } = r;
         return jsonShaped(rest, cols);
       });
       // The query named a column remembered as absent and RAN: the column exists, the map is stale (a `date` column
@@ -1473,7 +1473,7 @@ export class QueryBuilder<T = Record<string, unknown>[]> implements PromiseLike<
       // and a changed shape makes the table's statements new as well (a new generation), since one prepared before a
       // column was retyped still holds the parameter types it was first given (SMD-3329's pass 4).
       const known = (k: string) => cols.size === 0 || cols.has(k) || this.items.some((it) => it.kind === "embed" && it.key === k);
-      const reshaped = natts !== undefined && this.catalog.nattsOf(table) !== undefined && natts !== this.catalog.nattsOf(table);
+      const reshaped = shape !== undefined && this.catalog.shapeOf(table) !== undefined && shape !== this.catalog.shapeOf(table);
       if (reshaped) {
         this.catalog.forgetIf(table, cols);
         this.catalog.nextGeneration(`table ${table}`, gen);
