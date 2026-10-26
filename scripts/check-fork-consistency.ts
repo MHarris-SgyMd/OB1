@@ -509,6 +509,15 @@
  *      reaches the result is read too). Its probe pins what it refuses and
  *      passes, the migrations' names, the line it reports, and that its walk
  *      reads each kind of file the brain's code has
+ *  42. in test-rest.ts, test-server.ts and db/test-support.ts every server
+ *      and child is held to 127.0.0.1 — Bun.serve and Bun.listen name
+ *      hostname "127.0.0.1" at their object's top level, a node listen its
+ *      host, an object giving a child PORT 0 or OB1_LISTEN_HOST that literal,
+ *      set last with no spread after it — read on the code alone (comments,
+ *      strings and regex literals blanked; a file it cannot read through is
+ *      reported): on macOS a port picked for every address can be one another
+ *      app holds on 127.0.0.1, which answers there in its place (SMD-3323);
+ *      LISTEN_EVERY_ADDRESS names the exceptions, one site each, with why
  *
  * Run: bun scripts/check-fork-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38 and 40 parse YAML with Bun.YAML)
@@ -3052,6 +3061,7 @@ const KNOB_SERVICE_ONLY: Record<string, string> = {
   OB1_HOOK_SECRETS: "the plugins' webhook secrets (SMD-2310): compose.yaml's x-hook-env, merged by the REST core alone — no other service serves a webhook, so none is handed the secrets",
 };
 const NOT_FORWARDED: Record<string, string> = {
+  OB1_LISTEN_HOST: "the one address a server run outside the stack listens on — a suite's child on 127.0.0.1 (SMD-3323); a container is reached on the mesh, so it listens on every address, and a value forwarded from deploy/.env would cut it off from the proxy",
   OB1_OTEL_TRUST_TRACEPARENT: "trusting a caller's traceparent (SMD-1849 PR 2b) is a proxy deployment's to say, by an operator's own -f file outside deploy/, not any stack here: forwarded by the server, it would be one setting in deploy/.env from continuing every caller's trace",
   OB1_STORE: "the SQL store is the server's only store (FORK.md change 97; the PostgREST store retired in SMD-3152) — forwarding it would only carry a value the server refuses",
   OB1_GIT_SHA: "the commit the image was built from, baked by server-portable/Dockerfile from the build arg of the same name (compose's `build.args`) — a runtime forward would override the baked value with whatever deploy/.env names, a commit the image need not have been built from (SMD-2041)",
@@ -6301,8 +6311,11 @@ const ROOT_ROLE: TransportRole = {
 const API_ROLE: TransportRole = {
   imports: new Map<string, "*" | ReadonlySet<string>>([
     ["./root.ts", new Set(["agents", "closeStore", "db", "env", "hooks", "initEnv", "plugins", "serveHere"])],
-    // The request rebuilt where its URL will not parse (SMD-2535), in auth.ts so the vendored copies have it (SMD-2595).
-    ["./auth.ts", new Set(["routable"])],
+    // The request rebuilt where its URL will not parse (SMD-2535), and the address listened on (SMD-3323), in auth.ts so
+    // the vendored copies have them (SMD-2595).
+    ["./auth.ts", new Set(["listenHostFrom", "routable"])],
+    // This host's addresses, so an OB1_LISTEN_HOST it does not have stops the server in words (SMD-3323): no store.
+    ["node:os", new Set(["networkInterfaces"])],
     ["./core/index.ts", "*"], ["./shutdown.ts", "*"], ["./jobs.ts", "*"], ["./rest/app.ts", "*"],
     // The authorization server's token check, built from the environment (SMD-2286): authorization, as auth.ts is, no store.
     ["./oauth-token.ts", new Set(["remoteChecker", "tokenSettings", "TokenCheck"])],
@@ -7181,6 +7194,425 @@ function checkStarReads() {
   }
 }
 checkStarReads();
+// ── 42: a suite's servers listen on 127.0.0.1, where they are reached (SMD-3323) ──
+/**
+ * 42: in test-rest.ts, test-server.ts and db/test-support.ts, every server and child is held to 127.0.0.1
+ * (listenSites says how each is read: a Bun.serve or Bun.listen call's own `hostname`, a node-style `.listen(`'s
+ * host, an object giving a child `PORT` 0 or naming `OB1_LISTEN_HOST`, each that literal, set last and with no
+ * spread after it). Listening on every address, a server can be handed, on macOS, a port another app (Tailscale, a
+ * VM's port forwarder) holds on 127.0.0.1, which then answers 127.0.0.1 at that port in its place: 8 of 18,000
+ * binds on every address took such a port, 0 of 18,000 on 127.0.0.1, and test-rest failed 7–8 runs in 300 under
+ * load from it. No suite sees a server put back on every address (the collision is rare, and Linux has none), so
+ * this does. Code alone is read (codeOnly): a quote in a comment, a regex literal or a `//` in a string earlier on
+ * the line does not carry the reading past a call or skip one, and a `hostname` nested, commented or quoted inside
+ * the call is not its own (review pass 2 found the first form's reading of a test-server provider ran 16,842
+ * characters past it on an apostrophe). A file the reader cannot read through is reported, never passed (review
+ * pass 3). LISTEN_EVERY_ADDRESS names each server or child that must listen on every address, by its file and a
+ * fragment that names it and no other, with why; a fragment that names none, several, or one already held is
+ * reported. Its probe pins each of these. The ticket's PR 2 widens the file list to the other suites.
+ */
+const LISTEN_LOOPBACK_FILES = ["server-portable/test-rest.ts", "server-portable/test-server.ts", "db/test-support.ts"];
+const LISTEN_EVERY_ADDRESS: [file: string, fragment: string, why: string][] = [
+  ["db/test-support.ts", "new Response(token)", "secondLoopback's probe: it stands for a server on every address, so a row can find an address that reaches one"],
+  ["db/test-support.ts", 'OB1_LISTEN_HOST: "127.0.0.1", ...env', "serveChild's own default, which a case's env may override; each override is an object naming OB1_LISTEN_HOST, read here as a site of its own"],
+  ["server-portable/test-rest.ts", "OB1_LISTEN_HOST: value", "[11b]'s refusing children: told a value that is no address, or none the host has, they exit before they serve"],
+  ["server-portable/test-rest.ts", 'OB1_LISTEN_HOST: "  "', "[11b]'s blank child: on every address on purpose, asked only at the second loopback address"],
+  ["server-portable/test-server.ts", "OB1_LISTEN_HOST: LISTEN_PLANTED", "the MCP server's refusing child: told a planted value, it exits before it serves"],
+  ["server-portable/test-server.ts", 'OB1_LISTEN_HOST: "" }', "the MCP server's blank child: on every address on purpose, asked only at the second loopback address"],
+];
+/**
+ * `text` as code alone, offsets kept: each comment, each string's and template literal's text and each regex
+ * literal's body blanked to spaces (newlines kept), the quotes and backticks left, so a quoted key still reads as
+ * one and no quote, parenthesis or brace inside them is counted. `openAt` is where a template or a `${` opened that
+ * the text ends inside (-1 for none): a reading that ran on, which the check reports at its line rather than trusts.
+ */
+function codeOnly(text: string): { code: string; openAt: number } {
+  const out = text.split("");
+  const n = text.length;
+  const blank = (from: number, to: number) => {
+    for (let k = from; k < Math.min(to, n); k++) if (out[k] !== "\n") out[k] = " ";
+  };
+  // Per `${` still open, the braces opened inside it: its `}` is the one met at zero; and where each opened.
+  const open: number[] = [];
+  const openedAt: number[] = [];
+  let unclosedAt = -1;
+  const KEYWORD = /^(return|typeof|case|in|of|void|delete|throw|new|yield|await|else|do|default)$/;
+  /** The word ending at `k`, and whether a `.` comes before it (a property, not a keyword). */
+  const wordAt = (k: number) => {
+    let w = k;
+    while (w >= 0 && /[\w$]/.test(out[w])) w--;
+    let p = w;
+    while (p >= 0 && /\s/.test(out[p])) p--;
+    return { word: out.slice(w + 1, k + 1).join(""), dotted: out[p] === "." };
+  };
+  /** Whether a `/` at `at` starts a regex: where an expression starts, not after a value. */
+  const startsRegex = (at: number): boolean => {
+    let k = at - 1;
+    while (k >= 0 && /\s/.test(out[k])) k--;
+    if (k < 0) return true;
+    const ch = out[k];
+    // `a++ / 2`, `a-- / 2`: a postfix operator ends a value. `x! / 2`: TypeScript's non-null assertion does too,
+    // where the `!` follows a value with no space; `!/re/` negates a regex.
+    if ((ch === "+" || ch === "-") && out[k - 1] === ch) return false;
+    if (ch === "!" && k > 0 && /[\w$)\]]/.test(out[k - 1])) {
+      const before = wordAt(k - 1);
+      return !before.dotted && KEYWORD.test(before.word); // `return!/re/` negates; `x! / 2` divides
+    }
+    if (/[(,=:[!&|?{};+\-*%<>~^]/.test(ch)) return true;
+    // A keyword, not a property named like one (`a.of / 2`).
+    const { word, dotted } = wordAt(k);
+    return !dotted && KEYWORD.test(word);
+  };
+  // Template text from `from` to its closing backtick or its next `${`.
+  const template = (from: number): number => {
+    let j = from;
+    while (j < n && text[j] !== "`" && !(text[j] === "$" && text[j + 1] === "{")) j += text[j] === "\\" ? 2 : 1;
+    blank(from, j);
+    if (j >= n) {
+      unclosedAt = from - 1;
+      return n;
+    }
+    if (text[j] === "$") {
+      open.push(0);
+      openedAt.push(j);
+      return j + 2;
+    }
+    return j + 1;
+  };
+  let i = 0;
+  while (i < n) {
+    const c = text[i];
+    const d = text[i + 1];
+    if (c === "/" && d === "/") {
+      const e = text.indexOf("\n", i);
+      const end = e < 0 ? n : e;
+      blank(i, end);
+      i = end;
+    } else if (c === "/" && d === "*") {
+      const e = text.indexOf("*/", i + 2);
+      const end = e < 0 ? n : e + 2;
+      blank(i, end);
+      i = end;
+    } else if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < n && text[j] !== c && text[j] !== "\n") j += text[j] === "\\" ? 2 : 1;
+      blank(i + 1, j);
+      i = j + 1;
+    } else if (c === "`") {
+      i = template(i + 1);
+    } else if (c === "}" && open.length && open[open.length - 1] === 0) {
+      open.pop();
+      openedAt.pop();
+      i = template(i + 1);
+    } else if (c === "/" && startsRegex(i)) {
+      let j = i + 1;
+      let cls = false;
+      while (j < n && text[j] !== "\n") {
+        if (text[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (text[j] === "[") cls = true;
+        else if (text[j] === "]") cls = false;
+        else if (text[j] === "/" && !cls) break;
+        j++;
+      }
+      blank(i + 1, j);
+      i = j + 1;
+    } else {
+      if (c === "{" && open.length) open[open.length - 1]++;
+      else if (c === "}" && open.length) open[open.length - 1]--;
+      i++;
+    }
+  }
+  return { code: out.join(""), openAt: unclosedAt >= 0 ? unclosedAt : openedAt.length ? openedAt[0] : -1 };
+}
+
+/**
+ * Each bracket's partner in `code`, in one pass: `match[i]` for an opening or closing bracket at `i`, -1 where it
+ * has none. `unpairedAt` is the first closing bracket that meets another kind's opening or none, else the first
+ * opening left open, else -1.
+ */
+function bracketsOf(code: string): { match: Int32Array; unpairedAt: number } {
+  const match = new Int32Array(code.length).fill(-1);
+  const stack: number[] = [];
+  const pair: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+  let unpairedAt = -1;
+  for (let k = 0; k < code.length; k++) {
+    const c = code[k];
+    if (c === "(" || c === "[" || c === "{") stack.push(k);
+    else if (c === ")" || c === "]" || c === "}") {
+      const o = stack.pop();
+      if (o === undefined || code[o] !== pair[c]) {
+        if (unpairedAt < 0) unpairedAt = k;
+        continue;
+      }
+      match[o] = k;
+      match[k] = o;
+    }
+  }
+  return { match, unpairedAt: unpairedAt >= 0 ? unpairedAt : stack.length ? stack[0] : -1 };
+}
+
+/** The parts of a bracketed list (an argument list, an object's entries) split at its own commas: [start, end) each. */
+function partsOf(code: string, match: Int32Array, open: number): [number, number][] {
+  const close = match[open];
+  const parts: [number, number][] = [];
+  let start = open + 1;
+  for (let k = open + 1; k < close; k++) {
+    const c = code[k];
+    if ((c === "(" || c === "[" || c === "{") && match[k] > k) k = match[k];
+    else if (c === ",") {
+      parts.push([start, k]);
+      start = k + 1;
+    }
+  }
+  if (code.slice(start, close).trim()) parts.push([start, close]);
+  return parts;
+}
+
+/** `text` between the first and last character of code in [a, b): a value's source, comments around it left out. */
+function sourceOf(text: string, code: string, a: number, b: number): string {
+  let s = a;
+  let e = b;
+  while (s < e && /\s/.test(code[s])) s++;
+  while (e > s && /\s/.test(code[e - 1])) e--;
+  return text.slice(s, e);
+}
+
+/** An object literal's own entries in order: each key and its value's source, or a spread. */
+type Entry = { key: string; value: string } | { spread: true };
+function entriesOf(text: string, code: string, match: Int32Array, open: number): Entry[] {
+  if (match[open] < 0) return [];
+  const entries: Entry[] = [];
+  for (const [a, b] of partsOf(code, match, open)) {
+    const part = code.slice(a, b);
+    if (/^\s*\.\.\./.test(part)) {
+      entries.push({ spread: true });
+      continue;
+    }
+    const m = /^\s*(?:([A-Za-z_$][\w$]*)|(["'])\s*\2)\s*:/.exec(part);
+    if (!m) {
+      // A computed key could be any key, as a spread could; a method, getter, setter or shorthand of a name sets
+      // that key to no literal.
+      if (/^\s*(?:(?:get|set|async)\s+)?\*?\s*\[/.test(part)) entries.push({ spread: true });
+      else {
+        const named = /^\s*(?:(?:get|set|async)\s+(?=[A-Za-z_$*]))?\*?\s*([A-Za-z_$][\w$]*)/.exec(part);
+        if (named) entries.push({ key: named[1], value: "" });
+      }
+      continue;
+    }
+    const quote = m[2] ? a + part.indexOf(m[2]) : -1;
+    const key = m[1] ?? text.slice(quote + 1, text.indexOf(m[2], quote + 1));
+    entries.push({ key, value: sourceOf(text, code, a + m[0].length, b) });
+  }
+  return entries;
+}
+
+/** Whether `key` is set, last, to a value `ok` takes, with no spread after it that could set it again. */
+function heldBy(entries: Entry[], key: string, ok: (value: string) => boolean): boolean {
+  let at = -1;
+  entries.forEach((e, k) => {
+    if ("key" in e && e.key === key) at = k;
+  });
+  if (at < 0) return false;
+  const e = entries[at];
+  return "key" in e && ok(e.value) && !entries.slice(at + 1).some((x) => "spread" in x);
+}
+
+const LOOPBACK_LITERAL = /^(["'`])127\.0\.0\.1\1$/;
+const isLoopback = (v: string) => LOOPBACK_LITERAL.test(v);
+
+/** One place a server or child is started, and whether it is held to 127.0.0.1. */
+type ListenSite = { line: number; what: string; loopback: boolean; text: string };
+
+/**
+ * Every place in `text` a server or child is started, each with whether it is held to 127.0.0.1:
+ * - a Bun.serve or Bun.listen call (`Bun.serve (`, `Bun?.serve(`, `Bun["serve"](`, `Bun.serve<T>(`): its object
+ *   sets `hostname` to that literal, last and with no spread after it, or names a `unix` socket; a Bun.serve or
+ *   Bun.listen named but not called (an alias this cannot follow) is a site never held, `typeof Bun.serve` aside;
+ * - a node-style `.listen(`: its second argument is that literal, or its object's `host` is, or it listens on a
+ *   path (a string that is not all digits);
+ * - an object that gives a child `PORT` 0 or names `OB1_LISTEN_HOST`: `OB1_LISTEN_HOST` is that literal, last
+ *   and with no spread after it.
+ * Code alone is read (codeOnly). A file it cannot read through — a template or `${` left open, or brackets that do
+ * not pair by kind — is one problem of its own, never a pass.
+ */
+function listenSites(text: string): ListenSite[] | { line: number; why: string } {
+  const starts = [0];
+  for (let k = 0; k < text.length; k++) if (text[k] === "\n") starts.push(k + 1);
+  const lineOf = (at: number) => {
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (starts[mid] <= at) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo + 1;
+  };
+  const { code, openAt } = codeOnly(text);
+  const { match, unpairedAt } = bracketsOf(code);
+  if (openAt >= 0) return { line: lineOf(openAt), why: "a template or ${ opened here is left open where the file ends" };
+  if (unpairedAt >= 0) return { line: lineOf(unpairedAt), why: "a bracket here does not pair" };
+  const sites: ListenSite[] = [];
+  const objectAt = (paren: number): number => {
+    for (let k = paren + 1; k < code.length; k++) if (!/\s/.test(code[k])) return code[k] === "{" ? k : -1;
+    return -1;
+  };
+  // The dot form read on the code (`Bun/* c */.serve` is one), the bracket form on the text, its name a string.
+  const named = [
+    ...code.matchAll(/\bBun\s*(?:\?\.|\.)\s*(serve|listen)\b/g),
+    ...[...text.matchAll(/\bBun\s*(?:\?\.\s*)?\[\s*(["'])(serve|listen)\1\s*\]/g)].filter((m) => code.slice(m.index, m.index + 3) === "Bun").map((m) => Object.assign([m[0], m[2]], { index: m.index })),
+  ];
+  for (const m of named) {
+    const fn = m[1];
+    const after = /^\s*(?:\?\.\s*)?(?:<[^()]*>\s*)?\(/.exec(code.slice(m.index + m[0].length));
+    if (!after) {
+      if (!/\btypeof\s*$/.test(code.slice(Math.max(0, m.index - 12), m.index))) sites.push({ line: lineOf(m.index), what: `Bun.${fn} named, not called (an alias this check cannot follow)`, loopback: false, text: text.slice(m.index, m.index + m[0].length) });
+      continue;
+    }
+    const paren = m.index + m[0].length + after[0].length - 1;
+    const obj = objectAt(paren);
+    const entries = obj >= 0 ? entriesOf(text, code, match, obj) : null;
+    const loopback = entries !== null && (heldBy(entries, "hostname", isLoopback) || entries.some((e) => "key" in e && e.key === "unix"));
+    sites.push({ line: lineOf(m.index), what: `Bun.${fn}(${entries === null ? " with no object literal" : ""}`, loopback, text: text.slice(m.index, match[paren] + 1) });
+  }
+  for (const m of code.matchAll(/\.\s*listen\s*\(/g)) {
+    if (/\bBun\s*(\?\.)?\s*$/.test(code.slice(Math.max(0, m.index - 6), m.index))) continue;
+    const paren = m.index + m[0].length - 1;
+    if (match[paren] < 0) continue;
+    const args = partsOf(code, match, paren);
+    const first = args[0] ? sourceOf(text, code, ...args[0]) : "";
+    let loopback: boolean;
+    if (/^["']/.test(first)) loopback = !/^(["'])\d*\1$/.test(first); // a path; a string of digits is a port
+    else if (first.startsWith("{")) {
+      const entries = entriesOf(text, code, match, args[0][0] + code.slice(...args[0]).indexOf("{"));
+      loopback = heldBy(entries, "host", isLoopback) || entries.some((e) => "key" in e && e.key === "path");
+    } else loopback = args[1] !== undefined && isLoopback(sourceOf(text, code, ...args[1]));
+    sites.push({ line: lineOf(m.index), what: ".listen(", loopback, text: text.slice(m.index, match[paren] + 1) });
+  }
+  for (const m of code.matchAll(/\{/g)) {
+    const entries = entriesOf(text, code, match, m.index);
+    const port = entries.find((e): e is { key: string; value: string } => "key" in e && e.key === "PORT");
+    const givesPort0 = port !== undefined && /^(?:(["'`])0\1|0|String\(0\))$/.test(port.value);
+    const namesHost = entries.some((e) => "key" in e && e.key === "OB1_LISTEN_HOST");
+    if (!givesPort0 && !namesHost) continue;
+    sites.push({ line: lineOf(m.index), what: givesPort0 ? 'a child given PORT "0"' : "a child given OB1_LISTEN_HOST", loopback: heldBy(entries, "OB1_LISTEN_HOST", isLoopback), text: text.slice(m.index, match[m.index] + 1) });
+  }
+  return sites.sort((a, b) => a.line - b.line);
+}
+
+/**
+ * The problems in `text`: one where the file cannot be read through, else each site not held to 127.0.0.1 that no
+ * `allowed` fragment names, and each fragment that names no site, more than one, or one already held (stale).
+ */
+type ListenProblem = { line: number; kind: "unread" | "site" | "exception"; msg: string };
+function listenProblems(text: string, allowed: string[] = []): ListenProblem[] {
+  const sites = listenSites(text);
+  if (!Array.isArray(sites)) return [{ line: sites.line, kind: "unread", msg: `check 42 cannot read the file through: ${sites.why}` }];
+  const out: ListenProblem[] = [];
+  const excused = new Set<ListenSite>();
+  for (const fragment of allowed) {
+    const named = sites.filter((s) => s.text.includes(fragment));
+    if (named.length !== 1) out.push({ line: 0, kind: "exception", msg: `the exception \`${fragment}\` names ${named.length} sites, not one` });
+    else if (named[0].loopback) out.push({ line: named[0].line, kind: "exception", msg: `the exception \`${fragment}\` names a site already held to 127.0.0.1` });
+    else excused.add(named[0]);
+  }
+  for (const s of sites) if (!s.loopback && !excused.has(s)) out.push({ line: s.line, kind: "site", msg: `${s.what} not held to 127.0.0.1` });
+  return out;
+}
+
+function checkLoopbackListeners() {
+  const cases: [string, number, string[]?][] = [
+    ['const s = Bun.serve({ port: 0, fetch: () => new Response("x") });', 1],
+    ['const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("x") });', 0],
+    ["const s = Bun.serve({ port: 0, hostname: '127.0.0.1' });", 0],
+    ['const s = Bun.serve({\n  port: 0,\n  hostname: "127.0.0.1",\n  fetch(req) { return new Response(")"); },\n});', 0],
+    ['const s = Bun.serve({\n  port: 0,\n  fetch(req) { return new Response("hostname: \\"127.0.0.1\\""); },\n});', 1],
+    ['const s = Bun.serve({ port: 0, hostname: "0.0.0.0", fetch });', 1],
+    ['const s = Bun.serve({ port: 0, hostname: "127.0.0.1", tls: {}, hostname: "0.0.0.0" });', 1],
+    ['const s = Bun.serve({ port: 0, tls: { hostname: "127.0.0.1" } });', 1],
+    ['const s = Bun.serve({ hostname: "127.0.0.1", ...opts });', 1],
+    ['const s = Bun.serve({ ...opts, hostname: "127.0.0.1" });', 0],
+    ['const s = Bun.serve({ port: 0, hostname: /* why */ "127.0.0.1" // last\n});', 0],
+    ['const s = Bun.serve({ unix: "/tmp/s.sock", fetch });', 0],
+    ['const s = Bun?.serve({ port: 0 });', 1],
+    ['const { serve } = Bun; const f = Bun.serve; f({ port: 0 });', 1],
+    ['type S = ReturnType<typeof Bun.serve>;', 0],
+    ['x = a++ / 2 + `/${q}`;\nconst s = Bun.serve({ port: 0 });\nconst u = `v`;', 1],
+    ['const t = `${n++ / 2}`; const s = Bun.serve({ port: 0 });', 1],
+    ['const r = x! / 2 + `${y}`; const s = Bun.serve({ port: 0 });', 1],
+    ['const r = a.of / 2 + `${y}`; const s = Bun.serve({ port: 0 });', 1],
+    ['const ok = !/a`b/.test(x); const s = Bun.serve({ port: 0, hostname: "127.0.0.1" });', 0],
+    ['const t = `open ${x', 1],
+    ['const t = `open\nconst s = Bun.serve({ port: 0 });', 1],
+    ['const v = a++ / 2; const s = Bun.serve({ port: 0 }); const w = b / 3;', 1],
+    ['const s = Bun.serve({ port: 0, hostname: "127.0.0.1" ];', 1],
+    ['server.listen("0", () => done());', 1],
+    ['const ok = () => { return!/\'/.test(s); }; const s = Bun.serve({ port: 0, hostname: "127.0.0.1" });', 0],
+    ['const s = Bun.serve({ hostname: "127.0.0.1", ["hostname"]: x });', 1],
+    ['const s = Bun.serve({ hostname: "127.0.0.1", hostname });', 1],
+    ['const s = Bun.serve({ hostname: "127.0.0.1", get hostname() { return "0.0.0.0"; } });', 1],
+    ['const s = Bun.serve({ hostname: "127.0.0.1", async fetch(req) { return new Response(""); } });', 0],
+    ['const s = Bun/* c */.serve({ port: 0 });', 1],
+    ['const s = Bun.serve({\n  port: 0,\n  // hostname: "127.0.0.1",\n});', 1],
+    ['const s = Bun.serve({ port: 0, /* hostname: "127.0.0.1", */ });', 1],
+    // An apostrophe in a comment inside a bad call, a good call after it: the bad one is still read.
+    ['const a = Bun.serve({\n  port: 0,\n  // the stub\'s answer (as the provider\n  fetch: () => new Response("x"),\n});\nconst b = Bun.serve({ port: 0, hostname: "127.0.0.1" });', 1],
+    ['const a = Bun.serve({ port: 0, fetch: (r) => new Response(r.url.replace(/"/g, "")) });\nconst b = Bun.serve({ port: 0, hostname: "127.0.0.1" });', 1],
+    ['const a = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (r) => new Response(r.url.replace(/\\)/g, "")) });', 0],
+    ['const a = Bun.serve({\n  port: 0, hostname: "127.0.0.1",\n  // see a) above\n  fetch,\n});', 0],
+    ['const t = `a ${`b ${"c"}`} Bun.serve(`; const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(`${x}"`) });', 0],
+    ['const u = "http://x"; const s = Bun.serve({ port: 0 });', 1],
+    ["const u = `http://127.0.0.1:${p}`; const s = Bun.serve({ port: 0, fetch });", 1],
+    ['const n = x / 2; const s = Bun.serve({ port: 0, hostname: "127.0.0.1" }); const m = y / 3;', 0],
+    ['// the bare server prints Bun\'s own `warn: Bun.serve()` line', 0],
+    ['const w = "warn: Bun.serve() closed";', 0],
+    ['const s = Bun["serve"]({ port: 0 });', 1],
+    ['const s = Bun.serve ({ port: 0 });', 1],
+    ['const s = Bun.serve<{ id: number }>({ port: 0 });', 1],
+    ['const s = Bun.serve(opts);', 1],
+    ['const l = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: {} });', 0],
+    ['const l = Bun.listen({ port: 0, socket: {} });', 1],
+    ['const l = Bun.listen({ unix: "/tmp/s.sock", socket: {} });', 0],
+    ['server.listen(0, "127.0.0.1", () => done());', 0],
+    ['server.listen(0, () => done());', 1],
+    ['server.listen({ port: 0, host: "127.0.0.1" });', 0],
+    ['server.listen("/tmp/s.sock");', 0],
+    ['  env: { PATH: "", PORT: "0", MCP_ACCESS_KEY: KEY },', 1],
+    ["  env: { PATH: '', PORT: '0' },", 1],
+    ['  env: { PATH: "", "PORT": "0" },', 1],
+    ['  env: { PATH: "", PORT: "0", OB1_LISTEN_HOST: "127.0.0.1" },', 0],
+    ['  env: { PATH: "", PORT: "0", OB1_LISTEN_HOST: "0.0.0.0" },', 1],
+    ['  env: { PATH: "", PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", ...env },', 1],
+    ['  env: { ...process.env, PORT: "0", OB1_LISTEN_HOST: "127.0.0.1" },', 0],
+    ['  serveChild(dir, "api.ts", { KEY: "k", OB1_LISTEN_HOST: "  " });', 1],
+    ['  env: { /* c */ "PORT": "0" },', 1],
+    ['  env: {\n    PATH: "",\n    PORT: "0",\n    OB1_LISTEN_HOST: "127.0.0.1",\n  },', 0],
+    ['  // env: { PORT: "0" }', 0],
+    ['  const env = { PORT: "8000" };', 0],
+    ['const s = Bun.serve({ port: 0, fetch: () => new Response(token) });', 0, ["new Response(token)"]],
+    ['const s = Bun.serve({ port: 0, fetch: () => new Response(token) });\nconst t = Bun.serve({ port: 0, fetch: () => new Response(token) });', 3, ["new Response(token)"]],
+    ['const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(token) });', 1, ["new Response(token)"]],
+    ['const s = Bun.serve({ port: 0 });', 2, ["new Response(token)"]],
+  ];
+  const wrong = cases.map(([t, n, allowed]) => ({ t, want: n, got: listenProblems(t, allowed ?? []).length })).filter((c) => c.got !== c.want);
+  if (wrong.length) fail(SELF, `check 42 no longer reads its probe as written (${JSON.stringify(wrong)}): code alone is read and an unreadable file reported, a call's own top-level hostname with no spread after it, a node listen's host, a child's OB1_LISTEN_HOST, and each exception naming one site still on every address (SMD-3323)`);
+  for (const f of LISTEN_LOOPBACK_FILES) {
+    if (!existsSync(join(ROOT, f))) { fail(f, `missing — check 42 holds its servers to 127.0.0.1 (SMD-3323)`); continue; }
+    const allowed = LISTEN_EVERY_ADDRESS.filter(([file]) => file === f).map(([, fragment]) => fragment);
+    for (const p of listenProblems(readFileSync(join(ROOT, f), "utf8"), allowed)) {
+      const fix = {
+        site: `on macOS a port picked for every address can be one another app holds on 127.0.0.1, which then answers there in its place; set hostname to the literal "127.0.0.1" (a node listen: its host; a child: OB1_LISTEN_HOST), last and with no spread after it, or list the site in LISTEN_EVERY_ADDRESS with why`,
+        exception: "make its fragment name exactly one site that is still on every address, or drop the entry",
+        unread: "a site after it could not be seen; mend the code there, or teach codeOnly the construct, with a probe case",
+      }[p.kind];
+      fail(p.line > 0 ? `${f}:${p.line}` : p.kind === "exception" ? SELF : f, `${p.msg} — ${fix} (check 42, SMD-3323)`);
+    }
+  }
+}
+checkLoopbackListeners();
 
 // ── 28: the proxy's route tables are held byte for byte, and only its backends answer it (SMD-2658, SMD-2685) ──
 //

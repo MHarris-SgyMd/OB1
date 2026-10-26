@@ -23,7 +23,7 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
 | File | What it is |
 |---|---|
 | `app.ts` | `createMcpApp`: the MCP endpoint, `/health`, the keyed worker mirrors, the job routes, the method guard and discovery |
-| `index.ts` | The entry, `bun index.ts`: OB1_REST_URL, OB1_FORWARDER_KEY, OB1_PLUGINS, PORT, OB1_STOP_GRACE, and for OAuth COMPOSE_PROFILES (naming `auth`), OB1_PUBLIC_ORIGIN and OB1_AUTH_SECRET_MCP |
+| `index.ts` | The entry, `bun index.ts`: OB1_REST_URL, OB1_FORWARDER_KEY, OB1_PLUGINS, PORT, OB1_LISTEN_HOST (one IP address to listen on, as the REST core's: unset, every address; never forwarded by compose; a value that is no IP address, a link-local IPv6 one, or one this host does not have, exits 2), OB1_STOP_GRACE, and for OAuth COMPOSE_PROFILES (naming `auth`), OB1_PUBLIC_ORIGIN and OB1_AUTH_SECRET_MCP |
 | `exchange.ts` | The token exchange at the hop (SMD-2286): an OAuth token traded for the REST core's, cached by its digest |
 | `stack.ts` | This server with the REST core behind it in one process, for server-portable's suites |
 | `test-mcp.ts` | The suite |
