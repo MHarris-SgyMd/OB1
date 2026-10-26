@@ -14112,8 +14112,17 @@ if (want("37b")) {
   }
 }
 
+/**
+ * A live write and nothing else, which [38] and [38b] wake the sleep scheduler
+ * with: an audit row an operator's key wrote, on no thought — what sleep.ts's
+ * newestLive reads as a write — so no pass gains work. A search wakes it no
+ * longer (SMD-3315).
+ */
+const liveWrite = (sql: SQL, note: string) =>
+  sql`INSERT INTO thought_audit (thought_id, action, actor_name, diff) VALUES (gen_random_uuid(), 'update', 'op-sleep', ${{ note }}::jsonb)`;
+
 if (want("38")) {
-  console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet, extraction alone until its pool drains, then consolidation beside it; a live read or write wakes it and the passes stop at once, their leases returned; a sync write does not; the passes write no audit row and nothing to thoughts.supersedes; --follow's heartbeat is heartbeat:sleep (SMD-1794)");
+  console.log("\n[38] db/sleep.ts: the sleep scheduler — asleep after the quiet, extraction alone until its pool drains, then consolidation beside it; a live write wakes it and the passes stop at once, their leases returned; a search and a sync write do not (SMD-3315); the passes write no audit row and nothing to thoughts.supersedes; --follow's heartbeat is heartbeat:sleep (SMD-1794)");
   // The suite's client closed at [24]; each section since opens its own.
   const sql = new SQL({ url: URL_, max: 4 });
   await sql`DELETE FROM thoughts`;
@@ -14198,7 +14207,7 @@ if (want("38")) {
   const auditRows = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_audit`)[0].c);
   const beat = async () => {
     const [r] = await sql`SELECT value FROM ob1_config WHERE key = 'heartbeat:sleep'`;
-    return r ? JSON.parse(r.value) as { running: boolean; outcome: string | null; ended?: boolean; every_s: number; slept?: { from: string; to: string | null }; reads?: string } : null;
+    return r ? JSON.parse(r.value) as { running: boolean; outcome: string | null; ended?: boolean; every_s: number; slept?: { from: string; to: string | null }; reads?: unknown } : null;
   };
   const lines: string[] = [];
   // The passes look for new work every second, not every 15 s (SMD-3048);
@@ -14253,12 +14262,12 @@ if (want("38")) {
     const dryText = lines.join("\n");
     assert(dry === 0 && /awake: a sleep would begin in (29\d|300) s with no live call/.test(dryText) && new RegExp(`extract \\(${EX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\): 0 in flight, 0 pending, 3 not yet in the pool`).test(dryText) && (await claims(EX)).pending === undefined,
       `--dry-run reads the brain awake, a capture just made, and the extraction pool unbuilt; nothing pooled (exit ${dry}: ${lines.filter((l) => /awake|extract \(/.test(l)).join(" | ").trim().slice(0, 200)})`);
-    // An empty query log is said: with OB1_QUERY_LOG off a search never wakes it.
+    // It reads no query log (SMD-3315): its start names none.
     // --poll past a minute is refused: the awake wait is at most a minute.
     lines.length = 0;
     const longPoll = await sleepRun({ poll: 61, dryRun: true });
-    assert(/query_log: no row in the last 24 h — either nothing was searched, or OB1_QUERY_LOG is off/.test(dryText) && longPoll === 2 && lines.some((l) => /--poll must be/.test(l)),
-      `an empty query log is said at the start, and --poll 61 is refused with 2 (exit ${longPoll})`);
+    assert(!/query_log|last read/.test(dryText) && /a search does not wake it/.test(dryText) && longPoll === 2 && lines.some((l) => /--poll must be/.test(l)),
+      `its start names no query log and says a search does not wake it, and --poll 61 is refused with 2 (exit ${longPoll})`);
     // --dump-dir must name a directory this process can write, checked before anything is read (SMD-3203).
     lines.length = 0;
     const noDump = await sleepRun({ dryRun: true, dumpDir: join(tmpdir(), `ob1-no-such-dir-${process.pid}`, "dumps") });
@@ -14329,7 +14338,7 @@ if (want("38")) {
     assert(early2Code === 130 && !lines.some((l) => /refused: followers/.test(l)) && (await beat()) === null,
       `a stop during the start's reads wins over a follower they found: 130, no refusal, no row (exit ${early2Code})`);
     assert(beside === 2 && /refused: followers are running outside sleep, and they do not yield to a live call: heartbeat:extract:outside@p2 — .*The sleep and workers profiles are alternatives/.test(besideText) && !/asleep:/.test(besideText)
-        && refusedBeat?.ended === true && refusedBeat.outcome === "failed" && refusedBeat.reads === "yes" && JSON.stringify(refusedBeat.slept) === JSON.stringify(priorSlept)
+        && refusedBeat?.ended === true && refusedBeat.outcome === "failed" && !("reads" in refusedBeat) && JSON.stringify(refusedBeat.slept) === JSON.stringify(priorSlept)
         && besideDry === 0 && /followers running outside sleep, which do not yield to a live call: heartbeat:extract:outside@p2/.test(besideDryText)
         && endedDry === 0 && !/outside sleep/.test(endedDryText),
       `a fresh follower outside refuses a run (2, no sleep, its row ended failed, its last sleep kept), the dry run names it (0), an ended one is none (exit ${beside}, dry ${besideDry}, ended ${endedDry}: ${JSON.stringify(refusedBeat)})`);
@@ -14419,7 +14428,7 @@ if (want("38")) {
       `with --dump-dir the sleep's pass writes each of its three verdicts to the consolidation key's file, created 0600, which its start names (${dumpedPairs || "no file"}, mode ${dumpMode.toString(8)})`);
     rmSync(onceDumps, { recursive: true, force: true });
 
-    // --follow: a live read wakes it mid-call; the passes stop at once.
+    // --follow: a search leaves the pass running (SMD-3315); a live write wakes it mid-call, and the passes stop at once.
     lines.length = 0;
     for (let i = 0; i < 3; i++) await capture(`A backlog note, number ${i}.`, "op-sleep", 0, 2);
     slow = 5000;
@@ -14429,9 +14438,16 @@ if (want("38")) {
     await pollUntil(async () => modelCalls.length > callsBefore && (await claims(EX)).claimed === 1, 20_000);
     const asleepBeat = await beat();
     const [inHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
+    // A logged search, two polls and a half inside the 5 s call: the lease stays where it is.
+    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a search during a pass')`;
+    await Bun.sleep(2500);
+    const [searchedHand] = await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${EX} AND status = 'claimed'`;
+    const searchWoke = lines.some((l) => /awake:/.test(l));
+    assert(searchedHand?.id === inHand?.id && !searchWoke,
+      `a search during a pass leaves it running, the thought in hand still claimed and no wake said (${searchedHand?.id === inHand?.id ? "same claim" : `claim ${searchedHand?.id ?? "none"}`}; woke ${searchWoke})`);
     const wokenAt = Date.now();
-    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read')`;
-    await pollUntil(async () => lines.some((l) => /awake: a live read/.test(l)) && !(await claims(EX)).claimed, 10_000);
+    await liveWrite(sql, "a live write");
+    await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)) && !(await claims(EX)).claimed, 10_000);
     const wakeMs = Date.now() - wokenAt;
     // The awake stamp lands after the wake's line and the leases' return (the
     // passes stop, their claims move to the tail, then the sleep is stamped
@@ -14442,7 +14458,7 @@ if (want("38")) {
     let awakeBeat = null as Awaited<ReturnType<typeof beat>>;
     await pollUntil(async () => (awakeBeat = await beat())?.running === false, 3_000);
     assert(asleepBeat?.running === true && wakeMs < 3000 && !(await claims(EX)).claimed && (await claims(EX)).pending === 3 && awakeBeat?.running === false && awakeBeat.outcome === "ok",
-      `a live read wakes a sleep with a 5 s call in hand: the passes stop within the poll, every lease returned, and heartbeat:sleep reads asleep then awake (${wakeMs} ms; ${JSON.stringify(await claims(EX))}; ${JSON.stringify(asleepBeat)} → ${JSON.stringify(awakeBeat)})`);
+      `a live write wakes a sleep with a 5 s call in hand: the passes stop within the poll, every lease returned, and heartbeat:sleep reads asleep then awake (${wakeMs} ms; ${JSON.stringify(await claims(EX))}; ${JSON.stringify(asleepBeat)} → ${JSON.stringify(awakeBeat)})`);
     // The thought the wake left goes to the back of the queue: claims are taken
     // oldest first and the release keeps its place, so a thought longer than
     // the sleeps would be every sleep's first (review pass 1).
@@ -14469,8 +14485,9 @@ if (want("38")) {
     await Bun.sleep(2500);
     const wakesAfterSync = lines.filter((l) => /awake: a live/.test(l)).length;
     await capture("A note typed by the operator.", "op-sleep", 0, 3);
-    await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 10_000);
-    assert(syncKind?.actor_kind === "ingested" && wakesAfterSync === wakesBefore && lines.some((l) => /awake: a live write/.test(l)),
+    // A wake line of its own: the planted write's above says "a live write" too (SMD-3315).
+    const capturedWoke = await pollUntil(async () => lines.filter((l) => /awake: a live write/.test(l)).length > wakesAfterSync, 10_000);
+    assert(syncKind?.actor_kind === "ingested" && wakesAfterSync === wakesBefore && capturedWoke,
       `a sync write ('ingested') and a mend leave it asleep; an operator's capture wakes it (${syncKind?.actor_kind}; ${wakesAfterSync - wakesBefore} wake(s) on the sync write and the mend)`);
     assert((mended as { ok?: boolean }).ok === true && mendEvent?.actor_name === MENDER_ACTOR && mendEvent.actor_kind === null && mendEvent.background === MENDER_ACTOR,
       `…and so does the vector mender's write, an event with no actor_kind (${JSON.stringify(mendEvent)})`);
@@ -14481,12 +14498,12 @@ if (want("38")) {
     assert(followCode === 0 && endBeat?.ended === true && endBeat.outcome === "stopped" && ownRows === 0,
       `a stopped --follow exits 0 and its heartbeat reads ended, and its followers wrote no heartbeat rows of their own (exit ${followCode}; ${JSON.stringify(endBeat)}; ${ownRows} follower row(s))`);
     // The row carries its last sleep (SMD-2678): when it began and when it
-    // ended, the database's instants, the end past the start; and its word on
-    // reading the query log, the owner's here (review pass 1).
+    // ended, the database's instants, the end past the start; and no word on
+    // reading the query log, which it reads no longer (SMD-3315).
     const mark = endBeat?.slept;
     const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-    assert(mark !== undefined && iso.test(mark.from) && typeof mark.to === "string" && iso.test(mark.to) && Date.parse(mark.to) >= Date.parse(mark.from) && endBeat?.reads === "yes",
-      `the heartbeat carries the last sleep's start and end, and that it reads the log (${JSON.stringify(mark)}; reads ${endBeat?.reads})`);
+    assert(mark !== undefined && iso.test(mark.from) && typeof mark.to === "string" && iso.test(mark.to) && Date.parse(mark.to) >= Date.parse(mark.from) && endBeat !== null && !("reads" in endBeat),
+      `the heartbeat carries the last sleep's start and end, and no reads word (${JSON.stringify(mark)}; reads ${JSON.stringify(endBeat?.reads)})`);
 
     // A capture whose transaction began before the sleep and commits after it
     // is dated before the sleep: it still wakes it. The quiet is 5 s, where it
@@ -14589,8 +14606,8 @@ if (want("38")) {
       // land it before the first, the grace spent with the call still running).
       for (const until = Date.now() + 15_000; !lines.some((l) => /asleep:/.test(l)) && Date.now() < until;) await Bun.sleep(3);
       await Bun.sleep(1500);
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read during the sweep')`;
-      wokeInSweep = await pollUntil(async () => lines.some((l) => /awake: a live read at \S+ during the re-derive sweep — the sleep ends/.test(l)), 15_000);
+      await liveWrite(sql, "a live write during the sweep");
+      wokeInSweep = await pollUntil(async () => lines.some((l) => /awake: a live write at \S+ during the re-derive sweep — the sleep ends/.test(l)), 15_000);
       extractedAtWake = extractedDuringSweep;
       leftByWake = await rowsBy("zz-wake");
       wakeMark = (await beat())?.slept;
@@ -14634,8 +14651,8 @@ if (want("38")) {
       await pollUntil(async () => lines.some((l) => /asleep:/.test(l)), 15_000);
       await Bun.sleep(1000);
       const wokeAt = Date.now();
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read while the sweep runs long')`;
-      if (await pollUntil(async () => lines.some((l) => /awake: a live read at \S+ during the re-derive sweep/.test(l)), 15_000)) heldMs = Date.now() - wokeAt;
+      await liveWrite(sql, "a live write while the sweep runs long");
+      if (await pollUntil(async () => lines.some((l) => /awake: a live write at \S+ during the re-derive sweep/.test(l)), 15_000)) heldMs = Date.now() - wokeAt;
       heldExtractedAtWake = heldExtracted;
       // The supersession lock, which rebuild_derived takes first: free once the call is cancelled, held while it still runs on the server.
       lockFreeAtWake = (await sql`SELECT pg_try_advisory_xact_lock(hashtext('ob1:supersession-review')) AS ok`)[0].ok === true;
@@ -14703,7 +14720,7 @@ if (want("38")) {
       let twoSleeps = false;
       try {
         await pollUntil(async () => lines.filter(failedSummary).length >= 1, 20_000);
-        await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read between two failing sweeps')`;
+        await liveWrite(sql, "a live write between two failing sweeps");
         twoSleeps = await pollUntil(async () => lines.filter(failedSummary).length >= 2, 20_000);
       } finally {
         acAllFailed.abort();
@@ -14742,7 +14759,7 @@ if (want("38")) {
       await sql`DELETE FROM thought_chunks WHERE thought_id = ${cursorLow}::uuid`;
       await sql`INSERT INTO derivations (id, artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
                 VALUES ('00000000-0000-4000-8000-000000000001', 'chunks', ${cursorLow}::uuid, ARRAY[${cursorLow}::uuid], ARRAY['fp'], 'zz-cursor-b', '{"deterministic": true}')`;
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after a whole sweep')`;
+      await liveWrite(sql, "a live write after a whole sweep");
       lowSwept = await pollUntil(async () => (await rowsBy("zz-cursor-b")) === 0, 20_000);
     } finally {
       acCursor.abort();
@@ -14771,7 +14788,7 @@ if (want("38")) {
       const deepRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acDeep.signal });
       const firstWindow = await pollUntil(async () => lines.some((l) => /re-derive: the lineage table holds more than one window of 10,001 rows — each sleep sweeps the next/.test(l)), 20_000);
       const afterFirst = await rowsBy("zz-deep");
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read between the windows')`;
+      await liveWrite(sql, "a live write between the windows");
       const secondWindow = await pollUntil(async () => (await rowsBy("zz-deep")) === 0, 30_000);
       acDeep.abort();
       await deepRun;
@@ -14852,7 +14869,7 @@ if (want("38")) {
     slowExtract = 0;
     await Bun.sleep(2500);
     const noSleep = asleepCount();
-    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after the budget')`;
+    await liveWrite(sql, "a live write after the budget");
     // The next sleep runs on the same 3 s clock, so the work moving
     // is what proves the resume, not the pool drained (review pass 2).
     const doneBefore = afterClock.succeeded ?? 0;
@@ -14907,7 +14924,7 @@ if (want("38")) {
       await dropSlow();
       await Bun.sleep(1500);
       const quietSleeps = asleepCount();
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after the slow statement')`;
+      await liveWrite(sql, "a live write after the slow statement");
       const after = await pollUntil(async () => asleepCount() === quietSleeps + 1 && !(await claims(EX)).pending && !(await claims(EX)).claimed, 20_000);
       assert(quietSleeps === 1 && after, `…and after a live call the next sleep, the statement no longer slow, does the work (${quietSleeps} sleep(s) before the call; ${JSON.stringify(await claims(EX))})`);
     } finally {
@@ -14927,7 +14944,7 @@ if (want("38")) {
     const idled = await pollUntil(async () => (idleBeat = await budgetBeat())?.resting === true, 30_000);
     assert(idled && lines.some((l) => /the sleep's clock is spent \(6000 ms\) with nothing left to do — it ends; the next begins after a live call/.test(l)) && idleBeat?.slept?.budget === undefined && typeof idleBeat?.slept?.to === "string" && idleBeat.budget?.stops === 0,
       `a clock spent on drained pools ends the sleep with no stop counted or marked, the row resting until a live call (${JSON.stringify(idleBeat)})`);
-    await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a live read after the idle clock')`;
+    await liveWrite(sql, "a live write after the idle clock");
     let nextBeat = null as BudgetBeat | null;
     const rested = await pollUntil(async () => asleepCount() === 2 && (nextBeat = await budgetBeat())?.running === true && nextBeat?.resting === undefined, 15_000);
     assert(rested, `…and once a live call and the quiet begin the next sleep, the row rests no longer (${JSON.stringify(nextBeat)})`);
@@ -15489,14 +15506,14 @@ if (want("38")) {
       await setKey(EX);
 
       // The banner once per process, from the check, and no summary at a wake:
-      // two sleeps, a live read between them.
+      // two sleeps, a live write between them.
       await capture("A note for the quiet passes.", "sync-sleep", 0, 10);
       const quietRun = followRun();
       await pollUntil(async () => count(/asleep:/) >= 1, 20_000);
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake between sleeps')`;
+      await liveWrite(sql, "a wake between sleeps");
       await pollUntil(async () => count(/asleep:/) >= 2, 30_000);
       const quietCode = await quietRun.stop();
-      const banners = { exJob: count(/\[extract\]\s+job:/), coJob: count(/\[consolidate\]\s+job:/), exEgress: count(/\[extract\]\s+egress:/), noKey: count(/\[extract\]\s+⚠  OB1_WORKER_KEY is not set/), workersLine: count(/worker\(s\), \d+ per claim/), summaries: count(/\[(extract|consolidate)\]\s+(after:|graph:)/), wakes: count(/awake: a live read/), sleeps: count(/asleep:/) };
+      const banners = { exJob: count(/\[extract\]\s+job:/), coJob: count(/\[consolidate\]\s+job:/), exEgress: count(/\[extract\]\s+egress:/), noKey: count(/\[extract\]\s+⚠  OB1_WORKER_KEY is not set/), workersLine: count(/worker\(s\), \d+ per claim/), summaries: count(/\[(extract|consolidate)\]\s+(after:|graph:)/), wakes: count(/awake: a live write/), sleeps: count(/asleep:/) };
       assert(quietCode === 0 && banners.exJob === 1 && banners.coJob === 1 && banners.exEgress === 1 && banners.noKey === 1 && banners.workersLine === 0 && banners.summaries === 0 && banners.wakes >= 1 && banners.sleeps >= 2,
         `across two sleeps and a wake each pass's banner is said once, by the start's check, and no pass runs its end-of-run summary (exit ${quietCode}; ${JSON.stringify(banners)})`);
 
@@ -15566,7 +15583,7 @@ if (want("38")) {
       const switchRun = followRun();
       await pollUntil(async () => (await claims(EX)).claimed === 1, 20_000);
       await setKey("extract:another-model@p2");
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake before the switched key')`;
+      await liveWrite(sql, "a wake before the switched key");
       const switchCode = await switchRun.settle();
       slowExtract = 0;
       await setKey(EX);
@@ -15582,7 +15599,7 @@ if (want("38")) {
       const revokeRun = followRun({ env: keyedEnv });
       await pollUntil(async () => (await claims(EX)).claimed === 1, 20_000);
       await sql`SELECT revoke_agent_key(${hashKey(rawKey)}, 'SMD-2752 live')`;
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake before the revoked key')`;
+      await liveWrite(sql, "a wake before the revoked key");
       const revokeCode = await revokeRun.settle();
       slowExtract = 0;
       // A permanent refusal at a later sleep's start names its kind on the row too (SMD-2752 PR 3).
@@ -15595,10 +15612,10 @@ if (want("38")) {
       // pulling it again): the check got that pass through its start, so the
       // refusal is retried, as one after a sleep that ran is (item 6).
       await sql`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
-      // A live read now: the scheduler stays awake its 8 s quiet, through the
+      // A live write now: the scheduler stays awake its 8 s quiet, through the
       // check and stamping as it waits, so the model goes before the first
       // sleep however long a loaded runner takes over the check (review pass 3).
-      await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'awake through the check')`;
+      await liveWrite(sql, "awake through the check");
       const checkedRun = followRun({ quiet: 8 });
       await pollUntil(async () => (await beat()) !== null, 10_000);
       missing = true;
@@ -15641,7 +15658,7 @@ if (want("38")) {
       try {
         // Both passes wait here, extraction having no work: > 0, where `=== 1` waited out its 15 s every run (SMD-3048).
         await pollUntil(async () => (((await beat()) as { waiting?: string[] } | null)?.waiting?.length ?? 0) > 0, 15_000);
-        await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake while the pass waits')`;
+        await liveWrite(sql, "a wake while the pass waits");
         let wokenBeat = null as { running?: boolean; outcome?: string | null; waiting?: string[] } | null;
         await pollUntil(async () => (wokenBeat = (await beat()) as typeof wokenBeat) !== null && wokenBeat.running === false, 15_000);
         const wokenCode = await wokenRun.stop();
@@ -15817,7 +15834,7 @@ if (want("38b")) {
         if (sleeps > cap) break;
         await Bun.sleep(scaled(3500));
         if (await done()) { reached = true; break; }
-        await sql`INSERT INTO query_log (kind, tool, query) VALUES ('search', 'search_thoughts', 'a wake into the sleep')`;
+        await liveWrite(sql, "a wake into the sleep");
         // Awake now: work captured in the awake period, before the next sleep —
         // after the scheduler has taken the wake (its tail move done), as an
         // awake period's captures come, not in the poll before it noticed.
@@ -16094,12 +16111,12 @@ if (want("38b")) {
     const throwAc = new AbortController();
     const throwRun = runSleep({ url: URL_!, env, quiet: 1, poll: 1, follow: true, minStampEveryS: 60, signal: throwAc.signal, writer: { out: () => {}, err: () => {} } });
     const throwInHand = await pollUntil(async () => stuckStarts.length > 0, 30_000);
-    await sql`ALTER TABLE query_log RENAME TO query_log_away`;
+    await sql`ALTER TABLE thought_audit RENAME TO thought_audit_away`;
     const thrown = await Promise.race([throwRun.then((c) => `code ${c}`, (e: Error) => `threw ${e.message}`), Bun.sleep(15_000).then(() => "hung")])
-      .finally(() => sql`ALTER TABLE query_log_away RENAME TO query_log`);
+      .finally(() => sql`ALTER TABLE thought_audit_away RENAME TO thought_audit`);
     await ended(throwRun, throwAc);
     const throwRow = await counts(handHeld);
-    assert(throwInHand && /^threw .*query_log/.test(thrown) && throwRow?.stops === 1 && throwRow.cuts === 2,
+    assert(throwInHand && /^threw .*thought_audit/.test(thrown) && throwRow?.stops === 1 && throwRow.cuts === 2,
       `the sleep throwing, the thought in hand: its stop of the passes counts a cut, the stops as they were (${thrown.slice(0, 80)}; ${JSON.stringify(throwRow)})`);
     // A pass that ends by itself — consolidation's start refused, its key
     // turned away — while extraction has a thought in hand: a cut. Read as the
