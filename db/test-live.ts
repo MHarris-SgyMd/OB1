@@ -153,15 +153,17 @@ function shortenPauses(): () => void {
 
 /**
  * Cut the first wait of a follower's outage schedule to `firstMs` in this
- * process, still doubling (SMD-3048): the worker reads OUTAGE_MS as it runs.
- * A case that spawns its worker keeps the real 5 s, so the shipped schedule
- * stays held ([10]'s and [16]'s database cuts, [38]'s CLI). Returns the
- * restore, for the case's finally.
+ * process, still doubling (SMD-3048), and its longest to `maxMs` when given
+ * (SMD-3196): the worker reads OUTAGE_MS as it runs. A case that spawns its
+ * worker keeps the real 5 s, so the shipped schedule stays held ([10]'s and
+ * [16]'s database cuts, [38]'s CLI). Returns the restore, for the case's
+ * finally.
  */
-function shortenOutage(firstMs = 1000): () => void {
-  const saved = OUTAGE_MS.first;
+function shortenOutage(firstMs = 1000, maxMs?: number): () => void {
+  const saved = { ...OUTAGE_MS };
   OUTAGE_MS.first = firstMs;
-  return () => { OUTAGE_MS.first = saved; };
+  if (maxMs !== undefined) OUTAGE_MS.max = maxMs;
+  return () => { Object.assign(OUTAGE_MS, saved); };
 }
 
 /** Run migrate.ts as a subprocess so its real exit code and output are observed. */
@@ -15882,7 +15884,12 @@ if (want("38b")) {
       heldSeen = await beat();
       stuckStatus = await status(stuck);
       [prog] = (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${stuck}::uuid AND work_type = ${EX}`) as typeof prog[];
-      // The dry run beside the scheduler: it reads, and names what is held.
+      // The dry run beside the scheduler: it reads, and names what is held —
+      // once the note a sync wrote while extraction was set aside is extracted,
+      // so the stalled thought is all extraction holds. Read at once, it raced
+      // the drain the scheduler sees a poll after the judgement: on a starved
+      // runner it read the note still pending (review pass 1 of SMD-3196 PR 3).
+      await pollUntil(async () => parkedNote !== "" && (await status(parkedNote)) === "succeeded", 3000);
       dryHeld = await runSleep({ url: URL_!, env, quiet: 1, poll: 1, dryRun: true, writer: { out: (l) => dryLines.push(l), err: (l) => dryLines.push(l) } });
       return true;
     };
@@ -15957,17 +15964,20 @@ if (want("38b")) {
       `a capture in every awake period is extracted ahead of the stalled thought, and consolidation still joins past it (reached ${c.reached} in ${c.sleeps} sleep(s), ${awakeNotes.length} captured, earlier ones ${notesAt.join(",")})`);
     // Joined mid-sleep, the captures done first: the stuck call in hand is
     // stopped, and none is in flight while consolidation judges (review pass 5).
-    // The first join and the judgement that answered after it: a later sleep's
-    // ordinary extraction is no overlap.
-    const joinAtC = lineAt.find((x) => /consolidating first/.test(x.l))?.at ?? Infinity;
-    const judgedC = judgedEnd.find((t) => t > joinAtC) ?? -Infinity;
+    // The first judgement and the join it answered, the last before it — a
+    // capture of the awake period landing after the next sleep began can wake
+    // that sleep and cut its first join (review pass 1 of SMD-3196 PR 3): a
+    // later sleep's ordinary extraction is no overlap.
+    const joinsC = lineAt.filter((x) => /consolidating first/.test(x.l)).map((x) => x.at);
+    const judgedC = judgedEnd.find((t) => joinsC.some((j) => j < t)) ?? -Infinity;
+    const joinAtC = joinsC.filter((j) => j < judgedC).at(-1) ?? Infinity;
     const overlapC = stuckCalls.filter(([a, b]) => a < judgedC && b > joinAtC + 1500).length;
     const relC = (t: number) => t - joinAtC;
     const resumeAtC = lineAt.find((x) => x.at > joinAtC && /consolidation drained — extracting beside it/.test(x.l))?.at ?? Infinity;
     // A poll a second after the join, not a spin: the stopped extraction's
     // settling aborted the poll's wait for the rest of the sleep (review pass 5).
     const readsAfterJoin = wakeReads.filter((t) => t > joinAtC && t < joinAtC + 3000).length;
-    assert(readsAfterJoin <= 8, `after the join the scheduler polls once a second, not without pause (${readsAfterJoin} wake reads in the 3 s after it)`);
+    assert(readsAfterJoin <= 8, `after the join the scheduler polls at its pace, once every ${scaled(1000)} ms, not without pause (${readsAfterJoin} wake reads in the 3 s after it)`);
     assert(joinAtC < judgedC && overlapC === 0 && resumeAtC >= judgedC, `no call for the stuck window runs while consolidation judges, past the stop at the join, and extraction resumes only after the judgement (${overlapC} overlapping; judged +${relC(judgedC)} ms; resumed +${relC(resumeAtC)} ms; stuck calls ${stuckCalls.map(([a, b]) => `[${relC(a)},${relC(b)}]`).join(" ")}; lines ${lineAt.filter((x) => /asleep:|awake:|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => `${relC(x.at)} ${x.l.trim().slice(0, 28)}`).join(" | ")})`);
 
     // Work that lands during a sleep — a sync's capture, which wakes nothing —
@@ -16029,7 +16039,7 @@ if (want("38b")) {
     await Promise.race([midRun, Bun.sleep(15_000)]);
     onExtract = null;
     const firstAt = (m: string) => extracts.find((e) => e.marker === m)?.at ?? Infinity;
-    // The first call for the stalled window, start to end: an abort ends it before its eight seconds (scaled).
+    // The first call for the stalled window, start to end: an abort ends it a second or more before its eight seconds (scaled).
     const [firstStuck0, firstStuckEnd] = stuckCalls[0] ?? [Infinity, Infinity];
     const secondStuck = extracts.filter((e) => e.marker === "stuck")[1]?.at ?? Infinity;
     const midRel = (t: number) => (t === Infinity ? "never" : `+${t - firstAt("pair")} ms`);
@@ -16039,7 +16049,7 @@ if (want("38b")) {
       `a capture written during the sleep, before the stalled thought is claimed, is extracted ahead of it (note ${midRel(firstAt("mid1"))}, stalled ${midRel(firstAt("stuck"))} after the pair's first call)`);
     // The restart re-arms the poll's wait, as the join does: a poll a second, not a spin (review pass 1).
     const readsRestarted = wakeReads.filter((t) => t > restartAt && t < joinAtMid).length;
-    assert(midJoined && mid2 !== "" && firstStuckEnd - firstStuck0 < 7000 && restartAt <= firstAt("mid2") && firstAt("mid2") < secondStuck && secondStuck < joinAtMid && joinAtMid > restartAt && held3At !== "succeeded" && readsRestarted <= 4,
+    assert(midJoined && mid2 !== "" && firstStuckEnd - firstStuck0 < scaled(8000) - 1000 && restartAt <= firstAt("mid2") && firstAt("mid2") < secondStuck && secondStuck < joinAtMid && joinAtMid > restartAt && held3At !== "succeeded" && readsRestarted <= 4,
       `one pending beside the stalled thought in hand restarts extraction: the window in hand is cut short, the note extracted next, the stalled thought taken again, and consolidation joins past it in the same sleep, polling at its pace (${readsRestarted} wake reads between the restart and the join; joined ${midJoined}; window ${midRel(firstStuck0)} to ${midRel(firstStuckEnd)}, restart ${midRel(restartAt)}, note ${midRel(firstAt("mid2"))}, stalled again ${midRel(secondStuck)}, join ${midRel(joinAtMid)}; the stalled thought ${held3At}; lines ${midLines.filter((x) => /asleep:|restarts|consolidating first|consolidation drained|extraction drained/.test(x.l)).map((x) => x.l.trim().slice(0, 40)).join(" | ")})`);
     assert(Number(prog3?.stalled) === 3 && Number(prog3?.stops) === 3 && Number(prog3?.cuts) === 2,
       `…the restart's stop and the join's set-aside each counted as the scheduler's cut, apart from the stops, which say the wakes — none here — and no stall (SMD-3060) (stops ${prog3?.stops}, stalled ${prog3?.stalled}, cuts ${prog3?.cuts})`);
@@ -16240,13 +16250,12 @@ if (want("38b")) {
     // shipped 5 s and 10 s put the probe that finds it back at 15 s, the judge
     // back at about 9 (SMD-3196). The waits aren't what either case asserts;
     // test-worker-bootstrap.ts holds the shipped schedule.
-    const keptOutage = { ...OUTAGE_MS };
+    const restoreJudgeOutage = shortenOutage(1000, 2000);
     try {
-      Object.assign(OUTAGE_MS, { first: 1000, max: 2000 });
       await judgeCase(false);
       await judgeCase(true);
     } finally {
-      Object.assign(OUTAGE_MS, keptOutage);
+      restoreJudgeOutage();
     }
     judgeProbeDown = false;
     judgeMissing = false;

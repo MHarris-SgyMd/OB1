@@ -748,10 +748,10 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     Bun.sleep(5000).then(() => "still running after 5 s"),
   ]);
   const hook = await thrown({ budgetMs: -1 });
-  // quietMs and pollMs too, positive whole milliseconds (SMD-3196).
-  const [quietHook, pollHook] = [await thrown({ quietMs: 0 }), await thrown({ pollMs: 0.5 })];
-  ok(/^RangeError: budgetMs must be/.test(hook) && /^RangeError: quietMs must be/.test(quietHook) && /^RangeError: pollMs must be/.test(pollHook),
-     `…and a negative budgetMs, a quietMs of 0 and a pollMs of half a millisecond are thrown, not run (${[hook, quietHook, pollHook].map((h) => h.slice(0, 40)).join(" | ")})`);
+  // quietMs and pollMs too, positive (0) and whole (700.5) milliseconds (SMD-3196).
+  const [quietHook, pollHook, partHook] = [await thrown({ quietMs: 0 }), await thrown({ pollMs: 0.5 }), await thrown({ pollMs: 700.5 })];
+  ok(/^RangeError: budgetMs must be/.test(hook) && /^RangeError: quietMs must be/.test(quietHook) && /^RangeError: pollMs must be/.test(pollHook) && /^RangeError: pollMs must be/.test(partHook),
+     `…and a negative budgetMs, a quietMs of 0 and a pollMs of half a millisecond or of 700.5 are thrown, not run (${[hook, quietHook, pollHook, partHook].map((h) => h.slice(0, 40)).join(" | ")})`);
 }
 
 // config.mjs's embeddingContract: the constants' rule over any record — over
