@@ -588,7 +588,7 @@ try {
   const one = await db.from("gizmos").select("label, widgets (name)").eq("label", "g1").single();
   assert(one.error === null && (one.data as unknown as { widgets: { name: string } }).widgets?.name === "alpha", "an embed under single()");
   const { text } = await db.from("gizmos").select("*, widgets (name)").eq("label", "g1").toSQL();
-  assert(/SELECT \*, \(SELECT row_to_json\(__r\) FROM \(SELECT __e1\."name" FROM "widgets" AS __e1 WHERE __e1\."id" = "gizmos"\."widget_id"\) __r\) AS "widgets" FROM "gizmos" WHERE "label" = \$1/.test(text),
+  assert(/^SELECT "id", "widget_id", "label", "made_on", \(SELECT c\.relnatts FROM pg_class c WHERE c\.oid = to_regclass\('"gizmos"'\)\)::int AS __natts, \(SELECT row_to_json\(__r\) FROM \(SELECT __e1\."name" FROM "widgets" AS __e1 WHERE __e1\."id" = "gizmos"\."widget_id"\) __r\) AS "widgets" FROM "gizmos" WHERE "label" = \$1/.test(text),
     `the embed is a correlated subquery on the foreign key, its table aliased by depth (${text})`);
   // Refusals, each naming why.
   assert(/more than one foreign key/.test(await refusedMsg(() => db.from("links").select("*, widgets(name)"))), "two foreign keys to the same table are refused, naming the column form");
@@ -669,7 +669,7 @@ try {
   const starSecond = rowsOf(await db.from("latecomers").select("*").limit(1), "star, fresh map");
   assert(!("seen_on" in (starFirst[0] ?? {})) && starSecond[0]?.seen_on === "2026-09-21", `a column added under the client and reached only through * arrives on the second call: the first, spelled out from the map, lacked it and read the table's attribute count beside its rows, and the map was forgotten (${String(starFirst[0]?.seen_on)} → ${String(starSecond[0]?.seen_on)})`);
   const starNoArrays = rowsOf(await db.from("gizmos").select("*").limit(1), "star on a table without arrays");
-  assert(starNoArrays.length === 1 && "made_on" in starNoArrays[0], "…while a table without an array column keeps its `*` as written");
+  assert(starNoArrays.length === 1 && "made_on" in starNoArrays[0] && !("__natts" in starNoArrays[0]), "…and a table without an array column is spelled out too, its count column lifted off (SMD-3329)");
   // …and when a migration then adds that very column, the absent memo would bind its array raw for the process's life:
   // the failed call forgets the map (22P02 is not "undefined column"), and the next one reads the table again.
   // in.() on a column the table lacks selects nothing and names nothing: not an error, and not a refresh — counted:
@@ -775,14 +775,15 @@ try {
   const { text: starText } = await db.from("pages").select("*").toSQL();
   assert(/to_json\("scores"\) AS "scores"/.test(starText) && /relnatts/.test(starText) && !/SELECT \*/.test(starText), `the spelled-out star wraps the array columns and reads relnatts beside the rows (${starText.slice(0, 120)})`);
   const { text: plainText } = await db.from("gizmos").select("*").toSQL();
-  assert(/^SELECT \* FROM "gizmos"/.test(plainText), `a table without an array column keeps SELECT * (${plainText.slice(0, 40)})`);
+  assert(/^SELECT "id", "widget_id", "label", "made_on", \(SELECT c\.relnatts/.test(plainText), `a table without an array column is spelled out too, since SMD-3329 (${plainText.slice(0, 60)})`);
   const viaFn = await db.rpc("pages_ids", { p_id: 1 });
   assert(JSON.stringify((viaFn.data as { ids: unknown }[])?.[0]?.ids) === '["11111111-1111-4111-8111-111111111111"]', `a function's uuid[] column is a list too (${JSON.stringify((viaFn.data as { ids: unknown }[])?.[0]?.ids)})`);
-  // A column dropped under the client: the spelled-out star names it once (42703), the map is forgotten, the next call is whole.
+  // A column dropped under the client: the spelled-out star names it (42703), the map is forgotten, and the call runs
+  // once more from the fresh map — no failed call since SMD-3329 (one before).
   await admin`ALTER TABLE pages DROP COLUMN ids`;
   const dropped = await db.from("pages").select("*").eq("id", 1).single();
   const afterDrop = await db.from("pages").select("*").eq("id", 1).single();
-  assert(dropped.error?.code === "42703" && afterDrop.error === null && !("ids" in (afterDrop.data as object)), `a column dropped under a running client costs one 42703 on a spelled-out star, then the map is read again (${dropped.error?.code ?? "ok"} → ${afterDrop.error?.code ?? "ok"})`);
+  assert(dropped.error === null && !("ids" in (dropped.data as object)) && afterDrop.error === null, `a column dropped under a running client: the spelled-out star's 42703 reads the map again and the call answers whole (${dropped.error?.code ?? "ok"} → ${afterDrop.error?.code ?? "ok"})`);
   await admin`DROP TABLE pages CASCADE`;
   await admin`DROP TABLE nopk CASCADE`;
   await admin.close();
@@ -980,6 +981,92 @@ try {
   await admin.close();
 } catch (e) {
   assert(false, `[21] threw: ${e instanceof Error ? e.message : String(e)}`);
+}
+
+console.log("\n[22] A running client survives a migration that widens what it reads (SMD-3329)");
+try {
+  // Bun prepares each statement and keeps it. A `*` over a function or a table that a migration widens re-analyses to
+  // a different result type, and Postgres refuses the cached plan (0A000, "cached plan must not change result type")
+  // on every call until the process restarts; a named list re-analyses to the same one. One client on one connection,
+  // so the second call runs on the connection that prepared the first.
+  const admin = new SQL({ url: URL_, max: 1 });
+  await admin`CREATE TABLE widen_t (id serial PRIMARY KEY, name text NOT NULL)`;
+  await admin`INSERT INTO widen_t (name) VALUES ('first')`;
+  await admin`CREATE FUNCTION widen_fn(p_name text) RETURNS TABLE (id int, name text) LANGUAGE sql STABLE AS $$ SELECT id, name FROM widen_t WHERE name = p_name $$`;
+  const one = createClient(`${URL_}${URL_.includes("?") ? "&" : "?"}application_name=smd3329`, "k", { max: 1 });
+  assert(one.sql !== db.sql, "the widening client has a pool of its own");
+  const reads = async (label: string) => ({
+    fn: await one.rpc("widen_fn", { p_name: "first" }),
+    setof: await one.rpc("gizmos_all"),
+    star: await one.from("widen_t").select("*").eq("name", "first"),
+    bare: await one.from("widen_t").select().eq("name", "first"),
+    returning: await one.from("widen_t").update({ name: "first" }).eq("name", "first").select("*"),
+    embed: await one.from("widgets").select("id, gizmos(*)").limit(1),
+    label,
+  });
+  const ok = (r: Awaited<ReturnType<typeof reads>>) => (["fn", "setof", "star", "bare", "returning", "embed"] as const).map((k) => `${k} ${r[k].error ? `${r[k].error?.code} ${r[k].error?.message}` : "ok"}`).join("; ");
+  const before = await reads("before");
+  assert([before.fn, before.setof, before.star, before.bare, before.returning, before.embed].every((r) => r.error === null), `each read answers before the migration (${ok(before)})`);
+  // The migration: the function dropped and made again with one more OUT column, the tables each given a column.
+  await admin`DROP FUNCTION widen_fn(text)`;
+  await admin`CREATE FUNCTION widen_fn(p_name text) RETURNS TABLE (id int, name text, added int) LANGUAGE sql STABLE AS $$ SELECT id, name, 7 FROM widen_t WHERE name = p_name $$`;
+  await admin`ALTER TABLE widen_t ADD COLUMN added int DEFAULT 7`;
+  await admin`ALTER TABLE gizmos ADD COLUMN added int DEFAULT 7`;
+  const after = await reads("after");
+  assert(after.fn.error === null && (after.fn.data as { name: string }[])?.[0]?.name === "first", `rpc() of a function a migration widened answers on the same client (${ok(after)})`);
+  assert(after.setof.error === null, `…and rpc() of a function returning rows of a table a migration widened (${ok(after)})`);
+  assert(after.star.error === null && (after.star.data as { name: string }[])?.[0]?.name === "first", `.select("*") of a table a migration widened answers on the same client (${ok(after)})`);
+  assert(after.bare.error === null && after.returning.error === null, `…and a bare .select(), and a write's RETURNING * (${ok(after)})`);
+  assert(after.embed.error === null, `…and an embed's (*), whose rows reach the caller as one json column (${ok(after)})`);
+  // The table's new column is seen on the next call: the attribute count read beside the rows said the map was short.
+  const third = await one.from("widen_t").select("*").eq("name", "first");
+  assert((third.data as { added?: number }[])?.[0]?.added === 7, `…and the table's new column arrives on the next call (${JSON.stringify(third.data)})`);
+  // A column dropped, or a function's OUT column renamed: the named list asks for a column that is gone (42703); the
+  // shim reads the catalog again and runs the call once more, so the caller sees no error.
+  await admin`ALTER TABLE widen_t DROP COLUMN added`;
+  await admin`DROP FUNCTION widen_fn(text)`;
+  await admin`CREATE FUNCTION widen_fn(p_name text) RETURNS TABLE (id int, title text) LANGUAGE sql STABLE AS $$ SELECT id, name FROM widen_t WHERE name = p_name $$`;
+  const narrowed = await reads("narrowed");
+  assert(narrowed.star.error === null && !("added" in ((narrowed.star.data as object[])?.[0] ?? {})), `a column dropped under the client: the next .select("*") answers without it (${ok(narrowed)})`);
+  assert(narrowed.fn.error === null && (narrowed.fn.data as { title: string }[])?.[0]?.title === "first", `an OUT column renamed under the client: the next rpc() answers with the new name (${ok(narrowed)} ${JSON.stringify(narrowed.fn.data)})`);
+  // A write whose RETURNING list names a dropped column runs again, and writes once: the failed statement wrote nothing.
+  await admin`ALTER TABLE widen_t ADD COLUMN gone int`;
+  await one.from("widen_t").select("*").limit(1); // the map learns `gone` from the attribute count…
+  await one.from("widen_t").select("*").limit(1); // …and spells it
+  await admin`ALTER TABLE widen_t DROP COLUMN gone`;
+  const written = await one.from("widen_t").insert({ name: "second" }).select("*");
+  const [{ n }] = await admin`SELECT count(*)::int AS n FROM widen_t WHERE name = 'second'`;
+  assert(written.error === null && n === 1, `an insert whose RETURNING * named a dropped column answers, and the row is written once (${written.error?.code ?? "ok"}, ${n} row)`);
+  // A column the CALLER names and the table lacks is the caller's 42703, not a stale map: no re-read, no second call.
+  const pool = one.sql as unknown as { unsafe: (...a: unknown[]) => unknown };
+  const realUnsafe = pool.unsafe;
+  let catalogReads = 0, calls = 0;
+  pool.unsafe = function (this: unknown, ...a: unknown[]) { if (/FROM pg_attribute/.test(String(a[0]))) catalogReads++; else if (/FROM "widen_t"/.test(String(a[0]))) calls++; return realUnsafe.apply(this, a); };
+  const typos = [];
+  for (let i = 0; i < 5; i++) typos.push(await one.from("widen_t").select("*").eq("no_such_column", 1));
+  pool.unsafe = realUnsafe;
+  assert(typos.every((r) => r.error?.code === "42703") && catalogReads <= 1 && calls === 5, `five calls filtering on a column the table lacks: five 42703s, ${catalogReads} catalog read(s) and ${calls} queries — one each, not a retry`);
+  // Every column a `*` spells out is the catalog's, so any name a column can have is quoted as Postgres quotes it —
+  // where a caller's own list keeps ident()'s rule — and an unnamed OUT parameter leaves the call reading `*`.
+  await admin.unsafe(`CREATE TABLE odd_names (id int PRIMARY KEY, "my col" text, "naïve" int, "q""uote" int)`);
+  await admin.unsafe(`INSERT INTO odd_names VALUES (1, 'a', 2, 3)`);
+  await admin.unsafe(`CREATE FUNCTION odd_out(p int, OUT a int, OUT int) LANGUAGE sql AS $$ SELECT p, p + 1 $$`);
+  await admin.unsafe(`CREATE FUNCTION odd_cols(p int) RETURNS TABLE ("my col" int, "x""y" text) LANGUAGE sql AS $$ SELECT p, 'z' $$`);
+  const oddStar = await one.from("odd_names").select("*");
+  const oddOut = await one.rpc("odd_out", { p: 1 });
+  const oddCols = await one.rpc("odd_cols", { p: 1 });
+  assert(JSON.stringify(oddStar.data) === '[{"id":1,"my col":"a","naïve":2,"q\\"uote":3}]', `a * over columns named with a space, a non-ASCII letter and a quote answers (${oddStar.error?.message ?? JSON.stringify(oddStar.data)})`);
+  assert(JSON.stringify(oddOut.data) === '{"a":1,"column2":2}' && JSON.stringify(oddCols.data) === '[{"my col":1,"x\\"y":"z"}]', `…as do a function with an unnamed OUT parameter and one whose OUT columns have such names (${oddOut.error?.message ?? JSON.stringify(oddOut.data)}; ${oddCols.error?.message ?? JSON.stringify(oddCols.data)})`);
+  await admin`DROP FUNCTION odd_out(int)`;
+  await admin`DROP FUNCTION odd_cols(int)`;
+  await admin`DROP TABLE odd_names`;
+  await one.close();
+  await admin`ALTER TABLE gizmos DROP COLUMN added`;
+  await admin`DROP FUNCTION widen_fn(text)`;
+  await admin`DROP TABLE widen_t CASCADE`;
+  await admin.close();
+} catch (e) {
+  assert(false, `[22] threw: ${e instanceof Error ? e.message : String(e)}`);
 }
 
 await db.close();
