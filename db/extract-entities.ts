@@ -23,7 +23,7 @@
  *   OB1_METADATA_MODEL=<larger> bun db/extract-entities.ts --url … --job <the recorded key> --retry-left-out --limit N   # a larger model over those N rows, the key and trigger left as they are (--status prints it)
  *   bun db/extract-entities.ts --url … --dump answers.jsonl   # also append every model answer, for evals/eval-entities.ts --replay
  *   bun db/extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config
- *   bun db/extract-entities.ts --url … --subjects [rules]     # each thought's own subject, where none stands at its text (db/subject-sweep.ts)
+ *   bun db/extract-entities.ts --url … --subjects [rules]     # each thought's own subject, where none is current (db/subject-sweep.ts)
  *   await run({ url, dryRun: true })                          # a dry run, in-process: import { run } from "./extract-entities.ts" (SMD-2304)
  *   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)   --batch N (1; at most 2147483647, claim_thoughts' int)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)   --timeout SECONDS (300, per model call — per window of a long thought; at most 9007199254740, a call signal's range)
  *   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
@@ -169,12 +169,13 @@
  *
  * ── A thought's own subject (SMD-3306) ──────────────────────────────────────
  * With its entities, each thought's own subject is recorded when a rule finds
- * it: the ticket it is filed under, else the first ticket on its first line
- * (server-portable/subject.ts), through migration 111's
+ * it: the ticket it is filed under, else a session summary's header ticket
+ * its prompts name (server-portable/subject.ts), through migration 111's
  * record_thought_subject at the text the claim read. No model is asked for
  * it here. `--subjects` is the sweep for the rest (db/subject-sweep.ts):
  * thoughts extracted before 111, those no rule keys, which it asks the judge
- * model about, and those whose text moved. A brain before 111, or a role
+ * model about, those whose text moved, and those whose subject an older rule
+ * or question found. A brain before 111, or a role
  * without the grants 111's door needs, records no subject and says so once;
  * the entities stand either way.
  */
@@ -188,8 +189,8 @@ import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, missingModelIs, modelListed, modelMissing, OUTAGE_MS, probeChat, probeRefusal, probeUntil, ProviderOutage, regateMessage, throughOutage, timedOut, TRANSIENT_PAUSES_MS, waitOut, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { callsMadeBy, callsOf, describeExtractWindow, extractEntities, extractionKey, MALFORMED_WINDOWS_MARK, OVER_BOUND_MARK, PARTIAL_CAVEAT_PREFIX, partialCaveat, StoppedBetweenWindows, windowingFor, windowList, type AbortedBy, type Extraction, type ExtractionWindow, type ExtractProgress } from "../server-portable/entities.ts";
 import { entityRecipe, subjectRecipe } from "../server-portable/lineage.ts";
-import { ruleSubject, SUBJECT_RULES_KEY } from "../server-portable/subject.ts";
-import { recordSubject, sweepSubjects } from "./subject-sweep.ts";
+import { ruleSubject, subjectRuleKey } from "../server-portable/subject.ts";
+import { DOOR_GRANTS, recordSubject, sweepSubjects } from "./subject-sweep.ts";
 import { decideEntities } from "../server-portable/hybrid-extract.ts";
 import { resolveJevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, reportLost, sleepUnless, startHeartbeat, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
@@ -1225,8 +1226,9 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   /**
    * The thought's own subject by the rules (SMD-3306), recorded once its
-   * entities are: the ticket it is filed under, else the first ticket on its
-   * first line, at the text the claim read; record_thought_subject refuses a
+   * entities are: the ticket it is filed under, else a session summary's
+   * header ticket its prompts name (subject.ts's ruleSubject), each under its
+   * rule's key, at the text the claim read; record_thought_subject refuses a
    * text that moved since. No model is asked here: a thought no rule keys is
    * --subjects' (db/subject-sweep.ts). A courtesy, as the kept windows are: a
    * brain before 111, or a role without its door's grants, records none and
@@ -1240,7 +1242,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     const found = ruleSubject(row);
     if (!found) return;
     try {
-      const w = await recordSubject(sql, { id: row.id, fingerprint: row.fingerprint }, found.key, found.by, SUBJECT_RULES_KEY, subjectRecipe(found), agentId);
+      const w = await recordSubject(sql, { id: row.id, fingerprint: row.fingerprint }, found.key, found.by, subjectRuleKey(found.by), subjectRecipe(found), agentId);
       if (w.action === "added" || w.action === "replaced") subjects.recorded++;
       else if (w.action === "kept") subjects.kept++;
     } catch (e) {
@@ -1249,7 +1251,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
         // Read after the call: every worker in hand may try at once.
         if (!subjecting) return;
         subjecting = false;
-        errAside(`  could not record a thought's own subject (${(e as Error).message}) — no subject is recorded with this run's entities: that needs migration 111, and for a role of its own INSERT on thought_facets and the writes on derivations; a running follower takes it up once restarted`);
+        errAside(`  could not record a thought's own subject (${(e as Error).message}) — no subject is recorded with this run's entities: that needs migration 111, and for a role of its own ${DOOR_GRANTS}; a running follower takes it up once restarted`);
         return;
       }
       if (saidSubject.passing) return;
