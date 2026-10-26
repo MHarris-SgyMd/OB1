@@ -379,7 +379,8 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
       if (row?.clientKey && row.clientKey.toLowerCase() !== clientKey) { keyed = "held"; if (UUID_RE.test(row.clientKey)) heldKey = row.clientKey.toLowerCase(); }
       else keyed = "recorded";
     }
-    const payload = { metadata: { ...clientMetadata, ...metadata, source: origin, genre: genre.genre, ...(keyed === "recorded" ? { client_key: clientKey } : {}) } };
+    // Built per attempt: a retry below may go without the key.
+    const payloadOf = () => ({ metadata: { ...clientMetadata, ...metadata, source: origin, genre: genre.genre, ...(keyed === "recorded" ? { client_key: clientKey } : {}) } });
 
     // Atomicity is the store's: it writes content, metadata and vector in one
     // statement, so a row is never committed without the embedding it was
@@ -396,7 +397,6 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     const store = await ctx.store();
     const captureArgs = {
       content,
-      payload,
       chunks,
       // 061: what this capture derived and how — the windows' split and
       // the extractor's model, prompt version and hash — recorded with
@@ -449,17 +449,35 @@ export async function capture(ctx: Ctx, principal: Principal, { content, derived
     // races let the third attempt meet the self-FK and answer UNKNOWN to a key
     // that cannot read (review pass 1).
     let derivedMended = false;
+    // One retry for a keyed capture whose read of the row was overtaken (SMD-3314, review pass 2).
+    let keyRaced = false;
     for (;;) {
       try {
-        captured = await store.captureThought({ ...captureArgs, supersedes: pointer, derivedFrom });
+        captured = await store.captureThought({ ...captureArgs, payload: payloadOf(), supersedes: pointer, derivedFrom });
         break;
       } catch (e) {
         const msg = String((e as Error)?.message ?? e);
         // Another capture with this key landed between the read above and
-        // this write (112's unique index): that thought, as a match.
-        if (clientKey !== undefined && /thoughts_client_key_unique/.test(msg)) {
+        // this write (112's unique index): that thought, as a match. It holds
+        // other text — copies of one text serialise on 033's fingerprint lock
+        // and land on one row, never meeting the index. Its holder gone again
+        // by the re-read, the write goes once more as read (review pass 2).
+        if (clientKey !== undefined && keyed === "recorded" && !keyRaced && /thoughts_client_key_unique/.test(msg)) {
+          keyRaced = true;
           const held = (await store.thoughtsNamed([clientKey])).get(clientKey);
           if (held) return ok(keyMatched(held, cfg.chat.base));
+          continue;
+        }
+        // The text's row took another key between the read and this write
+        // (112's set-once trigger refused the merge, and its event with it):
+        // the capture goes again without the key, as the read would have
+        // answered — held, naming the row's key (review pass 2).
+        if (clientKey !== undefined && keyed === "recorded" && !keyRaced && /client_key is set once/.test(msg)) {
+          keyRaced = true;
+          const row = await store.keyAtText(content);
+          keyed = "held";
+          heldKey = row?.clientKey && UUID_RE.test(row.clientKey) ? row.clientKey.toLowerCase() : undefined;
+          continue;
         }
         if (reader) throw e;
         // The pointer's target gone mid-write (the self-FK), or no longer this
@@ -658,6 +676,9 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id: name, 
   // string "null" is not a clear — clearing is JSON null, and a client that
   // sends the word meant an id.
   if (typeof supersedes === "string" && !UUID_RE.test(supersedes)) return refuse({ code: "REFUSED_SUPERSEDES_SHAPE", retryable: false, value: supersedes, orNull: true });
+  // A name that is no uuid names no thought, by id or by key: the function's
+  // cast would raise it as a fault (review pass 2), as reset_capture_stamp's does.
+  if (!UUID_RE.test(name)) return refuse({ code: "NOT_FOUND", retryable: false, id: name.slice(0, 80) });
   // The key is capture_thought's to set, once (SMD-3314): a patch moving it
   // would let one thought take another's name on every brain.
   if (metadata_patch !== undefined && Object.hasOwn(metadata_patch, "client_key")) return refuse({ code: "REFUSED_METADATA_SHAPE", retryable: false, problem: "reserved_key", key: "client_key" });
@@ -772,7 +793,8 @@ export async function updateThought(ctx: Ctx, principal: Principal, { id: name, 
 export type Deleted = { id: string; byClientKey?: string; detached?: number; inactive?: number };
 
 export async function deleteThought(ctx: Ctx, principal: Principal, { id: name, detach_citations }: Input<"delete_thought">): Promise<Outcome<Deleted>> {
-  // The thought by id, else by client_key (SMD-3314).
+  // A name that is no uuid names no thought (review pass 2); else the thought by id, else by client_key (SMD-3314).
+  if (!UUID_RE.test(name)) return refuse({ code: "NOT_FOUND", retryable: false, id: name.slice(0, 80) });
   const { id, byClientKey } = await targetNamed(ctx, principal, name);
   const result = await (await ctx.store()).deleteThought({
     id,

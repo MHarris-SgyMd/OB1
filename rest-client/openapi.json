@@ -1433,7 +1433,7 @@
                     }
                   },
                   "client_key": {
-                    "description": "An idempotency key you choose for this thought — a UUID, by convention its id on the brain the write was first made on, when you copy a write to another brain. If a thought already has that id or keeps that key, the capture returns it and writes nothing (no model calls); otherwise the key is kept as metadata.client_key, one thought per key. update_thought's and delete_thought's `id`, a capture's `supersedes` and `derived_from` and an edit's `supersedes` then accept the key wherever they take an id: the thought with that id, else the one keeping that key. A key that can read only: a capture-only key is refused it.",
+                    "description": "An idempotency key you choose for this thought — a UUID, by convention its id on the brain the write was first made on, when you copy a write to another brain. If a thought already has that id or keeps that key, the capture returns it and writes nothing (no model calls); otherwise the key is kept as metadata.client_key, one thought per key. update_thought's and delete_thought's `id`, a capture's `supersedes` and `derived_from` and an edit's `supersedes` then accept the key wherever they take an id: the thought with that id, else the one keeping that key (reads such as fetch take ids alone). A key is set once: a thought keeps the first it was given. A copied edit should not carry the first brain's `if_unchanged_since`, which this brain's own updated_at never matches. A key that can read only: a capture-only key is refused it.",
                     "type": "string"
                   }
                 },

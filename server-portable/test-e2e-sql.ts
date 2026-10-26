@@ -3988,7 +3988,7 @@ console.log("\n[24] A client_key names a thought on every brain: a keyed capture
     // The same key again, another text: that thought, nothing written, no model call.
     const before = await rows24();
     const again = await result("capture_thought", { content: "[24] a retried copy whose text moved on", client_key: K1 });
-    assert(!again.isError && again.sc?.id === a && again.sc?.keyed === "matched" && again.sc?.embeddingCall === false && /^Already captured — id /.test(again.text) && (await rows24()) === before,
+    assert(!again.isError && again.sc?.id === a && again.sc?.keyed === "matched" && again.sc?.embeddingCall === false && /^Already captured — id .+ and holds other text than the one sent/.test(again.text) && (await rows24()) === before,
       `the same key returns its thought and writes nothing (${again.text.slice(0, 100)}, rows ${before} → ${await rows24()})`);
 
     // The same key and the same text: a re-capture of that thought, merged as the first brain's was — not dropped.
@@ -4066,6 +4066,27 @@ console.log("\n[24] A client_key names a thought on every brain: a keyed capture
     const racedIds = new Set(raced.map((r) => r.sc?.id));
     assert(raced.every((r) => !r.isError) && racedIds.size === 1 && raced.filter((r) => r.sc?.keyed === "recorded").length === 1 && Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE metadata->>'client_key' = ${K4}`)[0].c) === 1,
       `copies racing under one key make one thought (${raced.map((r) => r.isError ? r.text.slice(0, 60) : r.sc?.keyed).join(", ")})`);
+    // Copies of one new text racing under one key (review pass 2): they serialise on the fingerprint lock and land on
+    // one row keeping the key, each merged — never "matched", which would drop what it merged, and never an error.
+    const K7 = digitLed();
+    const same = await Promise.all(Array.from({ length: 6 }, () => result("capture_thought", { content: "[24] one text sent six times at once", client_key: K7 })));
+    const sameRows = await sql`SELECT metadata->>'client_key' AS k FROM thoughts WHERE content = '[24] one text sent six times at once'`;
+    assert(same.every((r) => !r.isError && r.sc?.id === same[0].sc?.id && (r.sc?.keyed === "recorded" || r.sc?.keyed === "recaptured")) && sameRows.length === 1 && sameRows[0].k === K7,
+      `copies of one text racing under one key: one row keeping it, each recorded or a re-capture (${same.map((r) => r.isError ? r.text.slice(0, 60) : r.sc?.keyed).join(", ")})`);
+    // Two keys racing for one new text (review pass 2): the first to land keeps its key, and the other is told held,
+    // naming it — never both "recorded" with the first key moved off its thought by the second's merge.
+    const K5 = digitLed(), K6 = digitLed();
+    const pair = await Promise.all([K5, K6].map((k) => result("capture_thought", { content: "[24] one new text, two keys at once", client_key: k })));
+    const pairRow = (await sql`SELECT id::text AS id, metadata->>'client_key' AS k FROM thoughts WHERE content = '[24] one new text, two keys at once'`)[0] as { id: string; k: string };
+    const winner = pair.find((r) => r.sc?.keyed === "recorded"), loser = pair.find((r) => r.sc?.keyed === "held");
+    const loserKey = loser === winner ? undefined : pair[0] === loser ? K5 : K6;
+    const loserNames = loserKey ? await result("update_thought", { id: loserKey, metadata_patch: { note: "x" } }) : undefined;
+    assert(pair.every((r) => !r.isError && r.sc?.id === pairRow.id) && winner !== undefined && loser !== undefined && loser.sc?.heldKey === pairRow.k && pairRow.k === (pair[0] === winner ? K5 : K6) && loserNames?.sc?.code === "NOT_FOUND",
+      `two keys racing for one text: one recorded and kept, the other held naming it (${pair.map((r) => r.isError ? r.text.slice(0, 60) : r.sc?.keyed).join(", ")}; row ${pairRow.k === K5 ? "K5" : pairRow.k === K6 ? "K6" : pairRow.k})`);
+    // A name that is no uuid names no thought (review pass 2): NOT_FOUND, not the database's cast error.
+    const notUuidU = await result("update_thought", { id: " not-a-uuid ", metadata_patch: { note: "x" } });
+    const notUuidD = await result("delete_thought", { id: "release-plan" });
+    assert(notUuidU.sc?.code === "NOT_FOUND" && notUuidD.sc?.code === "NOT_FOUND" && !/invalid input syntax/.test(notUuidU.text + notUuidD.text), `a name that is no uuid is NOT_FOUND for update and delete (${notUuidU.sc?.code}, ${notUuidD.sc?.code})`);
   } finally {
     await sql`DELETE FROM thoughts WHERE content LIKE '[24]%'`;
     await sql.close();

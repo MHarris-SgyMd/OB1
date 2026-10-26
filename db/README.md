@@ -258,7 +258,7 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3060 assertions: 3060 passed, 0 failed` and `PASS`.
+`bun test-schema.ts` prints `3063 assertions: 3063 passed, 0 failed` and `PASS`.
 Against a real database, `bun migrate.ts` reports one hundred and twelve (112) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
@@ -2110,7 +2110,9 @@ key lives in metadata, not a column: the event carries the row's metadata (055,
 one. The file is one unique partial btree on `thoughts
 ((metadata->>'client_key'))` where the value is not null, which the servers'
 read of a key walks. Rows that already share a value (a caller's metadata could
-set the key before 112) are refused by name before the build; an index of
+set the key before 112) are refused by name before the build; a trigger
+(`ob1_client_key_set_once`) refuses a write that would give a keyed row another key,
+with its event, and the server captures it again without the key (`held`); an index of
 another shape, or an INVALID one, under its name is refused naming the statement
 that clears it, as 100's is. Needs nothing past 001; a re-apply is a no-op; no
 grant moves. test-schema [100] (the index's shape, one thought per key, the
@@ -5469,7 +5471,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 3060 assertions, PGlite, no container
+bun test-schema.ts                          # 3063 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1703 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1015 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell

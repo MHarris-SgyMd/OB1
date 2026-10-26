@@ -27,6 +27,14 @@
 --   re-capture's merge (080) onto a row keeping another key is not sent the
 --   new one. A deleted thought's row is gone, and its key with it.
 --
+--   A key is set once: a trigger on thoughts (ob1_client_key_set_once)
+--   refuses a write that would give a keyed row another key — a re-capture's
+--   merge of a second copy of the text racing past the servers' read — in the
+--   write's own transaction, so its event goes with it; the servers then
+--   capture it without the key and say so (`held`). Taking a key away is not
+--   refused. A replay of events from before 112 that moved a caller's key
+--   would meet it, and say so by name.
+--
 --   Rows that already share a value are refused by name before the build:
 --   until this file a caller's metadata could set `client_key` like any key
 --   of its own (SMD-2014), and two such rows would fail the build with
@@ -87,3 +95,28 @@ BEGIN
     'One thought per metadata.client_key: the key capture_thought keeps on a write copied from another brain (that brain''s id for it), which update_thought, delete_thought and the pointers resolve when no thought has the name as its id. Migration 112 / SMD-3314.');
 END
 $clientkey$;
+
+-- A key is set once (review pass 2): a write that would give a keyed row
+-- another key is refused, never applied. 080's re-capture merges a write
+-- key's metadata over the row's (old || new), so two keyed copies of one text
+-- racing past the servers' read of the row would move the first key off its
+-- thought; the index cannot see it, the two keys being different. Refused in
+-- the transaction that appends the write's event (060), so the event goes with
+-- it and the log and the row stay one. Taking a key away (a raw writer's
+-- `metadata - 'client_key'`) is not refused.
+-- ob1:client-key-set-once
+CREATE OR REPLACE FUNCTION ob1_client_key_set_once() RETURNS trigger
+LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF NEW.metadata->>'client_key' IS NOT NULL AND NEW.metadata->>'client_key' IS DISTINCT FROM OLD.metadata->>'client_key' THEN
+    RAISE EXCEPTION 'client_key is set once: thought % keeps %, and a write gave it %', OLD.id, left(OLD.metadata->>'client_key', 80), left(NEW.metadata->>'client_key', 80)
+      USING ERRCODE = 'integrity_constraint_violation', HINT = 'capture without the key, or name the thought by the key it keeps (migration 112)';
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+COMMENT ON FUNCTION ob1_client_key_set_once() IS
+  'BEFORE UPDATE OF metadata on thoughts, for a row already keeping a client_key: refuses a write that gives it another key (taking it away is not refused). The servers answer such a capture as held and write it without the key. Migration 112 / SMD-3314.';
+DROP TRIGGER IF EXISTS thoughts_client_key_set_once ON thoughts;
+CREATE TRIGGER thoughts_client_key_set_once BEFORE UPDATE OF metadata ON thoughts
+  FOR EACH ROW WHEN (OLD.metadata->>'client_key' IS NOT NULL) EXECUTE FUNCTION ob1_client_key_set_once();

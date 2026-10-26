@@ -8703,8 +8703,8 @@ console.log("\n[56] Migration 060: the write functions append then project — t
   assert(!/set_config\('ob1\.event', COALESCE/.test(two) && !/set_config\('ob1\.event', COALESCE/.test(three) && !/set_config\('ob1\.event', COALESCE/.test(upd) && (two.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (upd.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1 && (dlt.match(/set_config\('ob1\.event', ''/g) ?? []).length === 1,
     "no body sets the event for the trigger any more; every body clears it once — 046's anti-inheritance rule");
   const trigs = (await q<{ n: string; d: string }>(`SELECT tgname AS n, pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND NOT tgisinternal ORDER BY tgname`));
-  assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_updated_at",
-    `fifteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
+  assert(trigs.map((t) => t.n).join(",") === "thoughts_audit,thoughts_client_key_set_once,thoughts_close_relations,thoughts_delete_clears_event,thoughts_drop_derivations,thoughts_entity_extraction,thoughts_guard_citation_sources,thoughts_node_projection_delete,thoughts_node_projection_insert,thoughts_node_projection_truncate,thoughts_node_projection_update,thoughts_node_source_gate_update,thoughts_record_vector_lineage,thoughts_snapshot_embedding,thoughts_stamp_actor,thoughts_updated_at",
+    `sixteen triggers on thoughts — 060 adds the snapshot's, 061 the vector lineage's and the drop after a delete, 068 the node_state projection's four ([62]), 071 the gate's status move ([65]), 084 the relations' close after a delete ([74]), 112 the client_key's set-once ([100]), and none is renamed (${trigs.map((t) => t.n).join(", ")})`);
   assert(/AFTER INSERT OR UPDATE ON public\.thoughts FOR EACH ROW EXECUTE FUNCTION ob1_snapshot_embedding\(\)/.test(trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d ?? ""), `the snapshot trigger fires after every insert and update, bound to no column (a probe that drops one keeps it) (${trigs.find((t) => t.n === "thoughts_snapshot_embedding")?.d})`);
   const cols = (await q<{ c: string; t: string }>(`SELECT column_name AS c, udt_name AS t FROM information_schema.columns WHERE table_name = 'ob1_embedding_snapshot' ORDER BY ordinal_position`)).map((c) => `${c.c}:${c.t}`).join(",");
   assert(cols === "content_fingerprint:text,embedding_model:text,embedding:vector,dims:int4,taken_at:timestamptz", `the snapshot's five columns (${cols})`);
@@ -15903,10 +15903,30 @@ console.log("\n[100] Migration 112: a thought's client_key — a unique btree on
   await db.exec(`RESET enable_seqscan`);
   assert(/thoughts_client_key_unique/.test(plans), `the servers' read of a key walks the index — an equality implies its predicate (${plans.slice(0, 160)})`);
 
+  // A key is set once: a write giving a keyed row another key is refused, and the row keeps its own; the same key
+  // written again, a row with none taking one, and a key taken away are not refused (review pass 2).
+  const otherKey = "0b0c7f2e-1d1e-4b8e-9a3e-6f2a3d1c5e7b";
+  let moved = "";
+  try { await db.query(`UPDATE thoughts SET metadata = metadata || $1::jsonb WHERE content = '[100] keyed'`, [JSON.stringify({ client_key: otherKey })]); } catch (e) { moved = (e as Error).message; }
+  const kept = (await db.query<{ k: string | null }>(`SELECT metadata->>'client_key' AS k FROM thoughts WHERE content = '[100] keyed'`)).rows[0].k;
+  assert(/^client_key is set once: thought [0-9a-f-]{36} keeps 0b0c7f2e-1d1e-4b8e-9a3e-6f2a3d1c5e7a, and a write gave it 0b0c7f2e-1d1e-4b8e-9a3e-6f2a3d1c5e7b$/.test(moved) && kept === k,
+    `a write giving a keyed row another key is refused, the key kept (${moved.slice(0, 100) || "applied"}, ${kept})`);
+  let quiet = "";
+  try {
+    await db.query(`UPDATE thoughts SET metadata = metadata || $1::jsonb WHERE content = '[100] keyed'`, [JSON.stringify({ client_key: k, note: "same key" })]);
+    await db.query(`UPDATE thoughts SET metadata = metadata || $1::jsonb WHERE content = '[100] plain one'`, [JSON.stringify({ client_key: otherKey })]);
+    await db.exec(`UPDATE thoughts SET metadata = metadata - 'client_key' WHERE content = '[100] plain one'`);
+  } catch (e) { quiet = (e as Error).message; }
+  const plainKey = (await db.query<{ k: string | null }>(`SELECT metadata->>'client_key' AS k FROM thoughts WHERE content = '[100] plain one'`)).rows[0].k;
+  assert(quiet === "" && plainKey === null, `the same key again, a first key, and a key taken away are not refused (${quiet.slice(0, 80) || "none refused"}, ${plainKey})`);
+  const trig = (await db.query<{ n: number; c: string | null }>(`SELECT count(*)::int AS n, max(obj_description('ob1_client_key_set_once()'::regprocedure, 'pg_proc')) AS c FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_client_key_set_once'`)).rows[0];
+  assert(trig.n === 1 && /Migration 112 \/ SMD-3314/.test(trig.c ?? "") && /ob1:client-key-set-once/.test(src), `one set-once trigger on thoughts, its function's comment and the file's sentinel naming it (${trig.n})`);
+
   // Re-applied, nothing moves.
   let again: string;
   try { again = await reapply(file); } catch (e) { again = `threw: ${(e as Error).message}`; }
-  assert(again.endsWith("_thought_client_key.sql") && (await def()) === d, `112 applied again changes nothing (${again.slice(0, 80)})`);
+  const trigAgain = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgrelid = 'thoughts'::regclass AND tgname = 'thoughts_client_key_set_once'`)).rows[0].n;
+  assert(again.endsWith("_thought_client_key.sql") && (await def()) === d && trigAgain === 1, `112 applied again changes nothing: the index, one trigger (${again.slice(0, 80)}, ${trigAgain})`);
 
   const refusal = async () => { try { await reapply(file); return "applied"; } catch (e) { return (e as Error).message; } };
   // Rows already sharing a key — a caller's metadata could set it before 112 — refused by name before the build.

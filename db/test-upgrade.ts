@@ -5015,6 +5015,8 @@ console.log("\n[20bd] Migration 112: onto a populated brain at the file before i
     "cleared, the file builds the index and moves nothing it finds: every thought and audit row as it was, the caller's key kept");
   const dup = await sql`SELECT upsert_thought('upgrade 112: a third copy'::text, ${{ metadata: { source: "mcp", client_key: key }, actor, embedding_model: OPTS.model }}::jsonb, ${vec(4)}::vector) AS r`.then(() => "admitted", (e: Error) => e.message);
   assert(/thoughts_client_key_unique/.test(dup), `after it, one thought per key (${dup.slice(0, 80)})`);
+  const moved = await sql`UPDATE thoughts SET metadata = metadata || ${{ client_key: "0d3f4e1a-2b3c-4d5e-8f60-718293a4b5c7" }}::jsonb WHERE content = 'upgrade 112: thought 1'`.then(() => "applied", (e: Error) => e.message);
+  assert(/^client_key is set once: thought /.test(moved), `…and the caller's key, kept from before, is set once: a write moving it refused (${moved.slice(0, 80)})`);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the112 });
   assert((await rows()) === before && /^CREATE UNIQUE INDEX thoughts_client_key_unique /.test(await index()), "a re-apply is a no-op");
   await sql.close();

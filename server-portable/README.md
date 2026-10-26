@@ -852,6 +852,21 @@ on both brains, and a key equal to it names that thought.
   case: a `client_key` a caller's metadata set in upper case before 112 names nothing.
 - An edit or a delete that reached its thought by a key says so (`, named by its
   client_key …`, `byClientKey` beside it); one by the thought's own id says nothing.
+- **A key is set once**, in the database too: migration 112's trigger refuses a write
+  that would give a keyed row another key (two keyed copies of one text racing past the
+  servers' read of the row), with the write's event, and the server captures it again
+  without the key and answers `held`. A name that is no uuid is `NOT_FOUND` for an edit
+  or a delete.
+- **What is named:** only a thought that has a name's id, or keeps it as its key.
+  Reads (`fetch`, `GET /v1/thoughts/{id}`) take ids alone. A name that is both one
+  thought's id and another's key names the one with the id. A thought each brain's own
+  writers made (a board-sync row, a worker's output, anything captured before the copying
+  began) has an id of its own on each brain, so a copied pointer to it resolves to
+  nothing on the second brain and is refused there as an unknown id would be: a client
+  copying writes drops such a pointer, or the write, on that brain. A copied edit drops
+  the first brain's `if_unchanged_since` too, which the second brain's own `updated_at`
+  never matches; and it keeps the first brain's order (a capture before the edit or
+  delete of it), or a late capture after a delete would bring the thought back.
 
 ## Where a tool's logic lives (SMD-2283)
 

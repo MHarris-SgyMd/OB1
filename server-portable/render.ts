@@ -1254,7 +1254,9 @@ const safeCapture: Safe<Captured> = (v) => ({
 export function renderCapture(o: Outcome<Captured>): Reply {
   return render(o, (v) => {
     // A key that names a thought already (SMD-3314): that thought, nothing written.
-    if (v.keyed === "matched") return `Already captured — id ${v.id}: a thought there already has the \`client_key\` given as its id or its key, so nothing was written and no model was called.`;
+    // Its text is another than the one sent: one holding this very text is a re-capture (`recaptured`), so a client
+    // copying writes can tell a copy that diverged (review pass 2).
+    if (v.keyed === "matched") return `Already captured — id ${v.id}: a thought there already has the \`client_key\` given as its id or its key, and holds other text than the one sent, so nothing was written and no model was called.`;
     const meta = v.tags;
     const { existed, reader, embeddings, chat, chunks, contextFailures } = v;
     // The id, because update_thought and delete_thought take one. Without it
