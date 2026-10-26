@@ -697,8 +697,11 @@ const admin = serve((req, res) => {
   if (route.kind === "revoke") {
     const client = store.dropGrant(route.id);
     if (client === null) return answer(res, 404, { error: "not_found", error_description: "no live grant has that id" });
-    // The client it was for, by what the AS checked (its id); the GUI's log names the session (review pass 2).
-    console.log(`grant ${route.id} of client ${JSON.stringify(client)} revoked on the operator's page of grants`);
+    // The client it was for, by what the AS checked (its id); the GUI's log names the session (review pass 2). A
+    // metadata document's id is the client's own URL, which the library takes with a NEL, a C1 control or a
+    // bidirectional one in it: everything outside printable ASCII is written as an escape (review pass 3).
+    const said = JSON.stringify(client).replace(/[^\x20-\x7e]/gu, (c) => `\\u{${c.codePointAt(0)!.toString(16)}}`);
+    console.log(`grant ${route.id} of client ${said} revoked on the operator's page of grants`);
     res.writeHead(204, { "cache-control": "no-store" });
     return res.end();
   }

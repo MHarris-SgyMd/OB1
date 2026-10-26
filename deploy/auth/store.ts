@@ -406,6 +406,13 @@ async function selfCheck(): Promise<number> {
     await grant.destroy("gbad");
     expect("dropping a grant removes its refresh tokens and the Grant, and names the client it was for", open.dropGrant("ga") === "named" && (await refresh.find("ra2")) === undefined && (await grant.find("ga")) === undefined && open.grants().grants.map((g) => g.id).join() === "gc,gb,gd");
     expect("dropping a grant that is not there says so", open.dropGrant("ga") === null && open.dropGrant("no-such-grant") === null);
+    // A grant lapsed but not yet purged (a stale page's revoke): removed all the same, and said as no live grant (review pass 3).
+    await grant.upsert("glapsed", { accountId: "operator", clientId: "named", iat: t - 100, exp: t - 1 }, -CLOCK_TOLERANCE - 1);
+    const lapsedSaid = open.dropGrant("glapsed");
+    const peek = new Database(file, { readonly: true });
+    const lapsedLeft = peek.query<{ n: number }, []>("SELECT count(*) AS n FROM oidc WHERE model = 'Grant' AND id = 'glapsed'").get()?.n;
+    peek.close();
+    expect("dropping a lapsed grant removes it and says no live grant had that id", lapsedSaid === null && lapsedLeft === 0);
     await grant.destroy("gb");
     await grant.destroy("gc");
     await grant.destroy("gd");

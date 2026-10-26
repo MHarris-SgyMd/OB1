@@ -17,9 +17,10 @@ import { authReachability } from '../../../../server-portable/oauth-edge.ts';
 // load: a 404 without the AS, a 403 for a session that cannot write, checked at
 // the REST core each time (a session whose grant was revoked ends at its next
 // renewal here as on any page, review pass 1). The AS's reachability is the
-// sign-in page's probe, cached 30 s: an AS that stopped is said without a
-// call, one that hangs costs the probe's 2 s rather than a call's 10, and one
-// just started again shows once the cache lapses (review pass 2).
+// sign-in page's probe of /healthz, its answer either way kept 30 s: while it
+// says down, the page says so without calling the listener; while it says up,
+// the listener is called, and one that hangs costs a call's 10 s; an AS just
+// started again shows once a down answer lapses (review passes 2 and 3).
 
 /** The gate, before anything the request says: the AS's settings, or the page's error. */
 async function gate(event: RequestEvent): Promise<OAuthSettings> {
@@ -48,7 +49,7 @@ export const load: PageServerLoad = async (event) => {
 			// Each resource as a path on this origin, where it is one: `/mcp`, `/api`, a tier's.
 			resources: g.resources.map((r) => oneLine(r.startsWith(s.origin) ? r.slice(s.origin.length) || '/' : r, 200)),
 			created: at(g.createdAt),
-			// The AS lists a renewal only once a refresh token has been rotated: the sign-in's own is no renewal.
+			// The AS gives a renewal as its newest live refresh token's issue, when more than a minute after the grant's (store.ts renewedAfter).
 			renewed: g.renewedAt === null ? null : at(g.renewedAt),
 			lapses: at(g.expiresAt),
 		})),

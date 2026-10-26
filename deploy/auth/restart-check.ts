@@ -59,8 +59,9 @@
  * client's own and a wrong secret are 401, the GUI's lists the grants, and the
  * routes refuse other methods and shapes. `--refused` refreshes with the held
  * token and passes only on 400 `invalid_grant`, which the grant's revocation
- * makes. `--admin-lockout` dials the container's own address on the mesh,
- * not 127.0.0.1, so the listener sees an address --admin never used: 20
+ * makes. `--admin-lockout` dials the container's own address (its first
+ * non-loopback interface, on the mesh or on auth-egress: the listener is on
+ * both), not 127.0.0.1, so the listener sees an address --admin never used: 20
  * wrong secrets each 401, the 21st 429 with a Retry-After, and the GUI's own
  * credentials from that address 429 too — the failure limit, 20 in the window
  * (review passes 1 and 2). It leaves that address locked out for the window;

@@ -3761,9 +3761,9 @@ jobs:
       # key signs in with the server down, under a cookie of its own name, its
       # session opening nothing on the origin; a post there from another
       # loopback port, localhost, the configured origin or none is refused, and
-      # nothing but the GUI is routed; the page of grants says at once that the
-      # server is down, and a read key there has no such page (403, its revoke
-      # too). The keys go by name, never on a command line. `breakglass` is
+      # nothing but the GUI is routed; the page of grants says that the server
+      # is down, and a read key there has no such page (403, its revoke too);
+      # the smoke requires the read key, so these rows never skip. The keys go by name, never on a command line. `breakglass` is
       # removed after.
       - name: The break-glass port takes a key while the authorization server is down
         working-directory: deploy

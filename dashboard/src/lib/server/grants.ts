@@ -120,13 +120,15 @@ export async function grantsGate(env: Record<string, string | undefined>, sessio
 }
 
 /**
- * What a client's own words may not carry onto the page: every format character (the bidirectional controls, which
- * turned `\u202eedoc edualC` into `Claude code`, review pass 1; zero-width ones, the soft hyphen, the BOM), and the
- * fillers that render blank (review pass 2). Combining marks are kept, at most two on a character: a name may be
- * accented, not drawn over the rows around it.
+ * What a client's own words may not carry onto the page: every default-ignorable code point, which renders as
+ * nothing (the format characters: the bidirectional controls, which turned `\u202eedoc edualC` into `Claude
+ * code`, review pass 1, the zero-width ones, the soft hyphen; the fillers; the variation selectors and the combining
+ * grapheme joiner; the tag and unassigned ignorables; review passes 2 and 3), and the Braille blank, which renders as
+ * a space. Combining marks are kept, at most four on a character: enough for a Burmese or a pointed Hebrew name
+ * (review pass 3), not enough to draw over the rows around it.
  */
-const HIDDEN = /[\p{Cf}\u115f\u1160\u3164\uffa0]/gu;
-const STACKED = /(\p{M}{2})\p{M}+/gu;
+const HIDDEN = /[\p{Default_Ignorable_Code_Point}\u2800]/gu;
+const STACKED = /(\p{M}{4})\p{M}+/gu;
 const shown = (v: string) => v.replace(HIDDEN, '').replace(STACKED, '$1');
 
 /**

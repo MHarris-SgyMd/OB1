@@ -11,8 +11,8 @@
  *   OB1_SMOKE_KEY=… bun smoke-breakglass.ts --url http://127.0.0.1:8010/dashboard \
  *     --breakglass http://127.0.0.1:8002/dashboard --origin https://brain.example.test
  *
- * The key, a read or write key, is read from the environment, never the
- * command line. It asserts:
+ * The keys, a write key and a read key, are read from the environment
+ * (OB1_SMOKE_KEY, OB1_SMOKE_READ_KEY), never the command line. It asserts:
  *   - on the origin, the page says sign-in is unavailable and names the
  *     break-glass port, and offers no key field — a forged X-OB1-Listener
  *     header, or its underscore spelling, included: the proxy's `web`
@@ -31,17 +31,18 @@
  *     refused;
  *   - the break-glass port routes the GUI alone: /mcp, /auth, /health and the
  *     root are the proxy's 404;
- *   - the write session's nav names the page of grants, which says at once
- *     that the authorization server is down; with OB1_SMOKE_READ_KEY set (CI
- *     sets it), a read key signed in there has no such link, and the page and
- *     its revoke are refused 403 (SMD-3307 PR 3, review pass 1);
+ *   - the write session's nav names the page of grants, which says that the
+ *     authorization server is down; a read key (OB1_SMOKE_READ_KEY, which the
+ *     smoke requires, so these rows never skip: review pass 3) signed in there
+ *     has no such link, and the page and its revoke are refused 403 (SMD-3307
+ *     PR 3, review pass 1);
  *   - sign-out there ends the session and deletes its cookie, not Secure.
  *
  * With `--as-up`, run while the authorization server answers, it asserts
  * only that a sign-in through it starts on the origin (so it is up) and not on
  * the break-glass port, that no callback completes there (the origin's own
- * sign-in brought to it), that the key is offered there all the same, and,
- * with OB1_SMOKE_READ_KEY, that a read key's revoke on the page of grants is
+ * sign-in brought to it), that the key is offered there all the same, and
+ * that a read key's revoke on the page of grants is
  * refused by the action's own gate (the AS down, the load's would answer): the
  * full run is with it down, where those refusals would prove nothing.
  *
@@ -55,8 +56,8 @@ const BG = flag("breakglass")?.replace(/\/$/, "");
 const ORIGIN = flag("origin")?.replace(/\/$/, "");
 const KEY = process.env.OB1_SMOKE_KEY ?? "";
 const READ_KEY = process.env.OB1_SMOKE_READ_KEY ?? "";
-if (!MAIN || !BG || !ORIGIN || !KEY) {
-  console.error("usage: OB1_SMOKE_KEY=… bun smoke-breakglass.ts --url <origin's port>/dashboard --breakglass <break-glass port>/dashboard --origin <configured origin>");
+if (!MAIN || !BG || !ORIGIN || !KEY || !READ_KEY) {
+  console.error("usage: OB1_SMOKE_KEY=… OB1_SMOKE_READ_KEY=… bun smoke-breakglass.ts --url <origin's port>/dashboard --breakglass <break-glass port>/dashboard --origin <configured origin>");
   process.exit(2);
 }
 const BG_ORIGIN = new URL(BG).origin;
@@ -100,7 +101,7 @@ if (AS_UP) {
   // The revoke's own gate, with the AS answering: a read key's revoke of a made-up grant is the action's 403. Without
   // that gate it would reach the listener and come back 303 to ?gone=1; with the AS down the page's load answered 403
   // for it, which is why this row runs here (review pass 2).
-  if (READ_KEY) {
+  {
     const asRead = await req(`${BG}/signin`, { form: { key: READ_KEY }, headers: { origin: BG_ORIGIN } });
     const cookie = `${BG_COOKIE}=${sessionOf(asRead.setCookie)}`;
     const readRevoke = await req(`${BG}/grants?/revoke`, { form: { grant: "NoSuchGrantId" }, headers: { origin: BG_ORIGIN, cookie } });
@@ -155,14 +156,14 @@ assert(start.status === 303 && start.location === "/dashboard/signin", `no sign-
 const others = await Promise.all(["/mcp", "/auth/authorize", "/health", "/", "/api/v1/whoami"].map(async (p) => [p, await fetch(`${BG_ORIGIN}${p}`, { redirect: "manual" })] as const));
 assert(others.every(([, r]) => r.status === 404), `the break-glass port routes the GUI alone (${others.map(([p, r]) => `${p} ${r.status}`).join(", ")})`);
 
-// The page of grants (SMD-3307 PR 3; review pass 1): the write session's, the AS's absence said at once from the
-// sign-in page's 30 s probe, not after a call's 10 s timeout; a read key's, refused, its revoke too, since an action
-// runs before any load.
+// The page of grants (SMD-3307 PR 3; review pass 1): the write session's, the AS's absence said; a read key's,
+// refused, its revoke too (with the AS down the load's 403 answers for the action, whose own gate the --as-up run
+// holds: review pass 2).
 const t0 = performance.now();
 const grants = await req(`${BG}/grants`, { headers: { cookie: `${BG_COOKIE}=${sid}` } });
 const tookMs = Math.round(performance.now() - t0);
-assert(home.html.includes('href="/dashboard/grants"') && grants.status === 200 && grants.html.includes('data-testid="unreachable"') && tookMs < 5000, `the write session's nav names the page of grants, which says the authorization server is down at once (${grants.status}, ${tookMs} ms)`);
-if (READ_KEY) {
+assert(home.html.includes('href="/dashboard/grants"') && grants.status === 200 && grants.html.includes('data-testid="unreachable"') && tookMs < 5000, `the write session's nav names the page of grants, which says the authorization server is down (${grants.status}, ${tookMs} ms)`);
+{
   const asRead = await req(`${BG}/signin`, { form: { key: READ_KEY }, headers: { origin: BG_ORIGIN } });
   const readSid = sessionOf(asRead.setCookie);
   const cookie = `${BG_COOKIE}=${readSid}`;
