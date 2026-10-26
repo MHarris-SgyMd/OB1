@@ -6586,7 +6586,7 @@ if (want("10h")) {
   /** While false, the garbled thought's answer is an empty subject of the expected shape instead. */
   let garbledAnswers = true;
   /** Called as each own question arrives, with the thought asked about: the stop case aborts there, so a thought is in hand. */
-  let onOwn: ((thought: string) => void) | null = null;
+  let onOwn: ((thought: string) => void | Promise<unknown>) | null = null;
   const stub = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -6601,7 +6601,8 @@ if (want("10h")) {
       ownCalls++;
       // The thought alone, not the rules quoted before it.
       const thought = user.slice(user.indexOf("<thought_a>"));
-      onOwn?.(thought);
+      // Awaited: a case's edit lands before the answer does (the stale case, review pass 4).
+      await onOwn?.(thought);
       if (body.model !== "stub-judge") return new Response(JSON.stringify({ error: { message: `model "${body.model}" not found` } }), { status: 404 });
       if (judgeMode === "refuse") return new Response(JSON.stringify({ error: { message: "invalid api key" } }), { status: 401 });
       if (judgeMode === "503") return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
@@ -6764,6 +6765,16 @@ if (want("10h")) {
     assert(another === "replaced" && /^ {2}3 thought\(s\) with no current subject: none at their text, or one found under an older rule or question$/m.test(anotherDry.stdout)
       && /ask stub-judge about 3 \(1 with an out-of-date subject\)\./.test(anotherDry.stdout),
       `another model's subject at the current question is current, not taken (exit ${anotherDry.code}: ${anotherDry.stdout.trim().split("\n").slice(-1)[0]})`);
+    // A stale write (review pass 4): the thought edited while the model answers for it, so the door refuses the write
+    // as found in a text that is gone, and the out-of-date subject it leaves standing is counted. Then made current
+    // again at its new text, so the cases after see what they saw.
+    await asV1(pr, "pr:727", "model", "subject:stub-judge@p1");
+    onOwn = (t) => (t.includes("merged pull") ? sql`SELECT update_thought(${pr}::uuid, ${"Reviewed and merged pull request 727 for the dashboard, edited."})` : undefined);
+    const staleRun = await sweep().finally(() => { onOwn = null; });
+    assert(staleRun.code === 1 && tally(staleRun) === "0 subject(s) recorded; 2 the model named nothing for, 1 answered not as JSON of the expected shape, 1 edited mid-sweep — among them, 2 with an out-of-date subject still standing"
+      && (await standingOf(pr))?.judge === "subject:stub-judge@p1",
+      `a write refused as stale leaves its out-of-date subject standing, counted (exit ${staleRun.code}: ${tally(staleRun)})`);
+    await asV1(pr, "pr:727", "model", "subject:another-judge@p2");
 
     // The spawned CLI prints what run() in this process does (masked seconds).
     const spawned = await runScript(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--subjects", "rules"], { env: env as Record<string, string>, cwd: HERE });
