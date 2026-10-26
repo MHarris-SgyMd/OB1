@@ -125,6 +125,26 @@ chmod 600 ~/.config/open-brain/session-capture.json
 
 The key lives here and nowhere else — not in the hook's command line, which sits in a settings file every tool on the machine can read. (`"key_file": "/path"` is accepted in place of `"key"`.) Nor in the url: a connector URL pasted whole, with its `?key=`, is refused when the config loads, and the refusal says where the key goes without printing it. The hook names its url, in `--check` and in its log, with every query value masked (SMD-2743).
 
+**Several brains** (SMD-3313): to capture each summary into more than one brain — stable and its canary, say — list them, each with its own url and its own capture key (one minted on that brain):
+
+```json
+{
+  "brains": [
+    { "name": "stable", "url": "http://127.0.0.1:8010/mcp", "key_file": "/home/you/.config/open-brain/stable.key" },
+    { "name": "canary", "url": "http://127.0.0.1:8011/mcp", "key_file": "/home/you/.config/open-brain/canary.key" }
+  ]
+}
+```
+
+Write `key_file` as a full path (`~` is not expanded), each file mode 600.
+
+- **Each brain is a delivery of its own.** It has its own queue, its own chain per session, and its own log, so a summary supersedes that brain's earlier one by that brain's own id. A brain that does not answer waits in its own queue (`bun session-capture.mjs --brain <name> --post` drains it by hand) and delays no other.
+- **Where state lives.** The first brain keeps the state directory a one-brain config uses, so switching to a list keeps its chains. Each brain after it gets `brains/<name>/` under that directory.
+- **Provenance.** The `derived_from` ids are the ones the session read, from whichever brain served the reads. A brain that lacks some of them keeps the ones it holds, since the server trims the list for a capture key.
+- **Names and keys.** A name is lower-case letters, digits and hyphens, given once. A `url`, `key` or `key_file` beside the list is refused.
+- **The model summary**, if on, is shared and asked once per brain.
+- **The environment wins.** `OB1_BRAIN_URL` in the environment is one brain, over the list.
+
 To have a local model write the summary instead of the derived one, add the model keys (all optional; see [An optional model summary](#an-optional-model-summary) below):
 
 ```json
@@ -143,6 +163,8 @@ bun recipes/session-capture-hook/session-capture.mjs --check
 ```
 
 `ok: http://127.0.0.1:8010/mcp/ answers, and the key sees capture_thought alone (capture scope). On a secret: redact. State: ~/.local/state/open-brain/session-capture`. With a write key it warns — the hook would work, and a leak would read your brain. With a read key it exits 1: the key cannot capture. A url at the origin's root, the one given before the proxy, warns too on a stack before v2.0.0: it answers through the proxy's deprecated legacy route, and the warning names the `/mcp` url to set (SMD-2686). From v2.0.0 that route is gone (SMD-2532), and the root is the proxy's 404, which `--check` names as not the endpoint. A url at stable's `/canary/mcp` or `/working/mcp` on a stack before v2.0.0 warns as well (from v2.0.0 those tier routes are gone, SMD-2874, and such a url is the proxy's 404, which `--check` names as not the endpoint), and the warning says to set the tier itself, a canary's own port (`deploy/canary.sh`), never stable's `/mcp` (SMD-3057), and says so beside the 404 such a route gives with no tier behind it. Each route's `Deprecation` date tells which answered. Only `--check` says so, as for the root.
+
+With several brains, `--check` checks each, every line led by its name (`[canary] ok: …`, with that brain's own `State:`). It exits with the worst brain's code, so one brain that does not answer fails the check while the others still say ok.
 
 Then see what a session of yours would send, without sending it:
 

@@ -6,7 +6,7 @@
     "name": "Michael Harris",
     "github": "MHarris-SgyMd"
   },
-  "version": "1.4.1",
+  "version": "1.5.0",
   "requires": {
     "open_brain": true,
     "services": [],
@@ -16,9 +16,9 @@
     }
   },
   "requires_skills": ["session-summary"],
-  "tags": ["capture", "hooks", "session-end", "claude-code", "codex", "provenance", "derived_from", "capture-scope", "precompact", "checkpoint", "episodes", "segmentation", "redaction", "model-summary", "egress"],
+  "tags": ["capture", "hooks", "session-end", "claude-code", "codex", "provenance", "derived_from", "capture-scope", "precompact", "checkpoint", "episodes", "segmentation", "redaction", "model-summary", "egress", "several-brains"],
   "difficulty": "beginner",
   "estimated_time": "10 minutes",
   "created": "2026-09-22",
-  "updated": "2026-09-25"
+  "updated": "2026-10-25"
 }

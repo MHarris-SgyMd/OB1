@@ -7063,7 +7063,7 @@ console.log("\n[48] Migration 053: the source beside the thought — the canonic
   const rteSrc = await src("record_thought_entities(uuid, text, jsonb, jsonb, text, uuid, jsonb)");
   assert(lastDefinerOf("record_thought_entities").startsWith("061") && /ob1:structured-wins/.test(rteSrc), "053's record_thought_entities carries the structured-wins sentinel, and 061, its last definer (056's body with the lineage row, [57]), keeps it ([52])");
   const validatorSrc = await src("thought_facets_validate()");
-  assert(lastDefinerOf("thought_facets_validate").startsWith("102") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084 and 102, its last definer (053's body plus the relation kind, [74], with distinct, [92])");
+  assert(lastDefinerOf("thought_facets_validate").startsWith("111") && /ob1:link-facet/.test(validatorSrc), "…and of thought_facets_validate, which carries the link-facet sentinel through 084, 102 and 111, its last definer (053's body plus the relation kind, [74], with distinct, [92], and the subject kind, [98])");
   assert(/CASE WHEN v_structured THEN extraction_key = p_extraction_key ELSE extraction_key NOT LIKE 'source:%' END/.test(rteSrc) && (rteSrc.match(/WHERE (?:thought_entities|ob1_entity_edges)\.extraction_key NOT LIKE 'source:%'/g) ?? []).length === 2,
     "the rule is spelled on the key prefix: a source: pass replaces its own rows, an extraction the rest, and both conflict clauses yield to source:");
   assert(/link \(migration 053\)/.test(validatorSrc) && /relation \(migration 084\)/.test(validatorSrc) && LINK_RELATIONS.every((r) => validatorSrc.includes(`'${r}'`)) && LINK_RELATIONS.length === 6, `the validator's hint names the new kind, and every relation the contract names it admits (${LINK_RELATIONS.join(", ")})`);
@@ -9250,7 +9250,7 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   for (const [fn, last] of [["upsert_thought", "080"], ["update_thought", "099"]])
     assert(lastDefinerOf(fn).startsWith(last), `${last} is the last definer of ${fn} — 061's body with the trust stamp, [66] (${lastDefinerOf(fn)})`);
   assert(lastDefinerOf("record_supersession_proposal").startsWith("063"), `063 is the last definer of record_supersession_proposal — the stale proposal's replacement, on 061's body (${lastDefinerOf("record_supersession_proposal")})`);
-  assert(lastDefinerOf("ob1_record_derivation").startsWith("084"), `084 is the last definer of ob1_record_derivation — 063's body (061's plus the mark the upsert clears) plus the section kind ([59]) and the relation kind ([74]) (${lastDefinerOf("ob1_record_derivation")})`);
+  assert(lastDefinerOf("ob1_record_derivation").startsWith("111"), `111 is the last definer of ob1_record_derivation — 063's body (061's plus the mark the upsert clears) plus the section kind ([59]), the relation kind ([74]) and the subject kind ([99]) (${lastDefinerOf("ob1_record_derivation")})`);
   assert(lastDefinerOf("delete_thought").startsWith("060") && lastDefinerOf("thoughts_write_audit").startsWith("060") && lastDefinerOf("ob1_project_thought_event").startsWith("060") && lastDefinerOf("ob1_refresh_thought_vector").startsWith("060"),
     "060 stays the last definer of delete_thought, the audit trigger, the projector and the refresh — 061 touches none");
   const RECORDS = /ob1:derivation-recorded-with-its-artifact/;
@@ -9343,7 +9343,7 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   const badNull = await refused(`SELECT ob1_record_derivation('vector', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY[NULL::text], 'p', '{"deterministic": true}'::jsonb)`);
   const badKind = await refused(`SELECT ob1_record_derivation('facet', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY['x'], 'p', '{"deterministic": true}'::jsonb)`);
   const badPass = await refused(`SELECT ob1_record_derivation('vector', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY['x'], '', '{"deterministic": true}'::jsonb)`);
-  assert(/boolean "deterministic"/.test(badRecipe) && /one non-NULL fingerprint per input \(1 inputs, 2 fingerprints\)/.test(badLength) && /one non-NULL fingerprint per input/.test(badNull) && /artifact_kind must be chunks, entities, proposal, vector, metadata, section or relation, got 'facet'/.test(badKind) && /produced_by must name the pass/.test(badPass),
+  assert(/boolean "deterministic"/.test(badRecipe) && /one non-NULL fingerprint per input \(1 inputs, 2 fingerprints\)/.test(badLength) && /one non-NULL fingerprint per input/.test(badNull) && /artifact_kind must be chunks, entities, proposal, vector, metadata, section, relation or subject, got 'facet'/.test(badKind) && /produced_by must name the pass/.test(badPass),
     `the writer refuses a recipe without a boolean deterministic, unequal arrays, a NULL fingerprint, an unknown kind and an empty pass (${[badRecipe, badLength, badNull, badKind, badPass].map((m) => m.slice(0, 60)).join(" | ")})`);
   const direct = await refused(`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe) VALUES ('vector', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY['x'], 'p', '{"model": "m"}'::jsonb)`);
   assert(/violates check constraint/.test(direct), "…and the table's CHECK refuses the same recipe written around the writer — a missing key answers NULL, and COALESCE makes it false");
@@ -9533,8 +9533,8 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063 its last definer (${lastDefinerOf(fn)})`);
   assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("079"),
     `one consolidation_candidates, 079 its last definer — 063's body, the stale clause kept, plus the lineage exclusion ([60]) and the ticket rule ([70]) (${lastDefinerOf("consolidation_candidates")})`);
-  assert((await functionsNamed("ob1_record_derivation")) === 1 && lastDefinerOf("ob1_record_derivation").startsWith("084") && /ob1:rerun-clears-the-mark/.test(await src("ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)")),
-    `one ob1_record_derivation, 084 its last definer — 063's body, the mark's clearing and its sentinel kept, plus the section kind ([59]) and the relation kind ([74]) (${lastDefinerOf("ob1_record_derivation")})`);
+  assert((await functionsNamed("ob1_record_derivation")) === 1 && lastDefinerOf("ob1_record_derivation").startsWith("111") && /ob1:rerun-clears-the-mark/.test(await src("ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)")),
+    `one ob1_record_derivation, 111 its last definer — 063's body, the mark's clearing and its sentinel kept, plus the section kind ([59]), the relation kind ([74]) and the subject kind ([99]) (${lastDefinerOf("ob1_record_derivation")})`);
   // rebuild_derived's last definer is 067 (SMD-2297: the proposal arm reopens a pass-settled row); [61] asserts it.
   assert((await functionsNamed("rebuild_derived")) === 1 && lastDefinerOf("rebuild_derived").startsWith("067"), `one rebuild_derived, 067 its last definer (${lastDefinerOf("rebuild_derived")})`);
   const REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)", WALK_SIG = "derivation_descendants(uuid, int, int)";
@@ -9862,8 +9862,8 @@ console.log("\n[59] Migration 064: the page store — a page is a thought whose 
   const kindCheck = (await one<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'derivations_artifact_kind_check'`)).d;
   assert(/'section'/.test(kindCheck) && /'chunks'/.test(kindCheck) && /'metadata'/.test(kindCheck), `061's kind CHECK admits the sixth kind, section, beside the five (${kindCheck})`);
   const RD = "ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)";
-  assert(lastDefinerOf("ob1_record_derivation").startsWith("084") && (await functionsNamed("ob1_record_derivation")) === 1 && /'section'/.test(await src(RD)) && /ON CONFLICT \(artifact_kind, artifact_id, produced_by\) DO UPDATE/.test(await src(RD)),
-    "ob1_record_derivation, last defined by 084 — 061's body, one form, the section kind admitted (and since 084 the relation kind), the upsert kept");
+  assert(lastDefinerOf("ob1_record_derivation").startsWith("111") && (await functionsNamed("ob1_record_derivation")) === 1 && /'section'/.test(await src(RD)) && /ON CONFLICT \(artifact_kind, artifact_id, produced_by\) DO UPDATE/.test(await src(RD)),
+    "ob1_record_derivation, last defined by 110 — 061's body, one form, the section kind admitted (and since 084 the relation kind, since 110 the subject kind), the upsert kept");
   for (const fn of ["upsert_page", "write_page_section", "accept_page_section", "reject_page_section", "release_page_section", "lock_page_section", "delete_page_section", "render_page", "page_sections_as_of", "ob1_render_page_thought", "ob1_page_actor", "ob1_page_lock", "ob1_page_evidence", "ob1_page_recipe", "page_section_revisions_refuse_mutation", "ob1_drop_section_derivations"]) assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("064"), `one ${fn}, 064's`);
   const immutableDef = (await one<{ d: string }>(`SELECT pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgname = 'page_section_revisions_immutable'`))?.d ?? "";
   assert(/BEFORE (UPDATE OR DELETE|DELETE OR UPDATE) ON (public\.)?page_section_revisions FOR EACH ROW/.test(immutableDef), `the revisions' row trigger refuses UPDATE and DELETE (${immutableDef})`);
@@ -9874,7 +9874,7 @@ console.log("\n[59] Migration 064: the page store — a page is a thought whose 
   const trig = (await q<{ t: string }>(`SELECT tgname AS t FROM pg_trigger WHERE NOT tgisinternal AND tgrelid IN ('page_sections'::regclass, 'page_section_revisions'::regclass) ORDER BY 1`)).map((x) => x.t).join();
   assert(trig === "page_section_revisions_immutable,page_section_revisions_immutable_truncate,page_sections_drop_derivations", `the three triggers: the revisions' two refusals, the sections' lineage drop (${trig})`);
   const kindMsg = await refused(`SELECT ob1_record_derivation('bogus', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY['f'], 'p', '{"deterministic": true}'::jsonb)`);
-  assert(/chunks, entities, proposal, vector, metadata, section or relation, got 'bogus'/.test(kindMsg), `the writer's refusal names the seven kinds — 084 added relation (${kindMsg.slice(0, 100)})`);
+  assert(/chunks, entities, proposal, vector, metadata, section, relation or subject, got 'bogus'/.test(kindMsg), `the writer's refusal names the eight kinds — 084 added relation, 110 subject (${kindMsg.slice(0, 100)})`);
   const chk = (await q<{ n: string; d: string }>(`SELECT conname AS n, pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%'`));
   assert(chk.length === 1 && chk[0].n === "derivations_artifact_kind_check" && !/NOT VALID/.test(chk[0].d), `one CHECK on artifact_kind stands, validated (${chk.map((c) => c.n).join()})`);
 
@@ -10818,9 +10818,9 @@ console.log("\n[64] Migration 070: a proposal standing on a lineage pair is visi
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
-  // 109 (SMD-3248) is the listing's last definer: 070's body under a fourth, defaulted parameter. This section's calls
-  // pass three arguments, as a caller before 109 does, and resolve to it through the default.
-  const SIG = "list_supersession_proposals(text, int, boolean, text)";
+  // 110 (SMD-3249) is the listing's last definer: 070's body under 109's fourth and 110's three cursor parameters, all
+  // defaulted. This section's calls pass three arguments, as a caller before 109 does, and resolve to it through them.
+  const SIG = "list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid)";
   const MODEL = EMBEDDING_MODEL;
   const ACTOR = { name: "op-key", via: "test-door" };
   const EXTRACT = "extract:stub@p1";
@@ -10853,10 +10853,10 @@ console.log("\n[64] Migration 070: a proposal standing on a lineage pair is visi
   // three-argument forms gone, the comment.
   const body = await src(SIG);
   const cols = (await one<{ c: string }>(`SELECT array_to_string(array(SELECT n FROM unnest(proargnames, proargmodes) AS u(n, m) WHERE m = 't'), ',') AS c FROM pg_proc WHERE oid = $1::regprocedure`, [SIG])).c;
-  assert((await functionsNamed("list_supersession_proposals")) === 1 && lastDefinerOf("list_supersession_proposals").startsWith("109") && (await q(`SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('list_supersession_proposals(text, int)') OR oid = to_regprocedure('list_supersession_proposals(text, int, boolean)')`)).length === 0 && /ob1:listing-flags-the-lineage-pair/.test(body),
-    `one list_supersession_proposals, 109 its last definer (070's body), the two- and three-argument forms gone, 070's sentinel in the body (${lastDefinerOf("list_supersession_proposals")})`);
-  assert(cols === "id,status,verdict,confidence,reason,similarity,judge_key,judged_at,reviewed_at,review_note,superseding_id,older_id,older_content,older_created_at,newer_id,newer_content,newer_created_at,older_edited,newer_edited,lineage",
-    `029's nineteen columns in their order, then lineage (${cols})`);
+  assert((await functionsNamed("list_supersession_proposals")) === 1 && lastDefinerOf("list_supersession_proposals").startsWith("110") && (await q(`SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('list_supersession_proposals(text, int)') OR oid = to_regprocedure('list_supersession_proposals(text, int, boolean)') OR oid = to_regprocedure('list_supersession_proposals(text, int, boolean, text)')`)).length === 0 && /ob1:listing-flags-the-lineage-pair/.test(body),
+    `one list_supersession_proposals, 110 its last definer (070's body), the two-, three- and four-argument forms gone, 070's sentinel in the body (${lastDefinerOf("list_supersession_proposals")})`);
+  assert(cols === "id,status,verdict,confidence,reason,similarity,judge_key,judged_at,reviewed_at,review_note,superseding_id,older_id,older_content,older_created_at,newer_id,newer_content,newer_created_at,older_edited,newer_edited,lineage,page_key,remaining",
+    `029's nineteen columns in their order, then lineage, then 110's page_key and remaining (${cols})`);
   assert(/COALESCE\(n\.derived_from @> jsonb_build_array\(o\.id::text\), false\)/.test(body) && /COALESCE\(o\.derived_from @> jsonb_build_array\(n\.id::text\), false\)/.test(body) && /p_lineage IS NULL/.test(body),
     "both directions read, NULL-safe, in 066's spelling, and p_lineage NULL selects on nothing");
   const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
@@ -10934,8 +10934,8 @@ console.log("\n[64] Migration 070: a proposal standing on a lineage pair is visi
   assert(spelled("consolidate.ts") === 2 && spelled("../server-portable/preflight.ts") === 1 && (await src(SIG)).split("COALESCE(n.derived_from @> jsonb_build_array(o.id::text), false)").length - 1 === 2,
     `the TypeScript readers spell 066's predicate as the body does — twice in consolidate.ts (the guard, --status), once in preflight.ts (the census) (${spelled("consolidate.ts")}, ${spelled("../server-portable/preflight.ts")})`);
   // A re-apply of the last definer is a no-op: one form, the flag reading the
-  // same. (070 re-applied lands its form beside 109's: [97]'s case.)
-  await reapply("109");
+  // same. (070 re-applied lands its form beside 110's: [97]'s case.)
+  await reapply("110");
   assert((await functionsNamed("list_supersession_proposals")) === 1 && /ob1:listing-flags-the-lineage-pair/.test(await src(SIG)) && idsOf(await list(null, true)) === [pX, pN].sort().join(), "a re-apply leaves one form carrying the flag");
   await db.exec(`SELECT set_config('ob1.actor', '', false)`);
   await db.exec(`DELETE FROM thoughts`);
@@ -12559,6 +12559,10 @@ console.log("\n[74] Migration 084: the consolidation judge's relations — a `re
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
   const refused = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return (e as Error).message; } };
+  // What this section reads, as shipped: an earlier section's restore of rebuild_derived re-applies 067, whose
+  // comment on supersession_proposals predates 084's. Until 110 a later restore of the validator re-applied 102 and
+  // put its comment back by chance; restoring the door re-applies 102, and its closure 110 for the validator.
+  await restoreShipped("record_thought_relation");
   await db.exec(`DELETE FROM thoughts`);
   const thought = async (text: string) => (await one<{ r: { id: string } }>(`SELECT upsert_thought($1, '{}'::jsonb) AS r`, [text])).r.id;
   const RTR = "record_thought_relation(uuid, uuid, text, numeric, text, uuid, text, text, jsonb)";
@@ -14327,7 +14331,7 @@ console.log("\n[84] Migration 094: list_proposal_writers names who wrote each si
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
   const cols = (await one<{ c: string }>(`SELECT array_to_string(array(SELECT n FROM unnest(proargnames, proargmodes) AS u(n, m) WHERE m = 't'), ',') AS c FROM pg_proc WHERE oid = $1::regprocedure`, [SIG])).c;
   assert((await functionsNamed("list_proposal_writers")) === 1 && lastDefinerOf("list_proposal_writers").startsWith("107") && lastDefinerOf("ob1_capture_only_text").startsWith("094")
-      && lastDefinerOf("list_supersession_proposals").startsWith("109") && /ob1:listing-names-the-writers/.test(await src(SIG))
+      && lastDefinerOf("list_supersession_proposals").startsWith("110") && /ob1:listing-names-the-writers/.test(await src(SIG))
       && lastDefinerOf("ob1_accept_lapses").startsWith("097") && /ob1:accept-lapses-read/.test(await src("ob1_accept_lapses(uuid, uuid)")) && /094 \/ SMD-2707/.test(await comment("ob1_accept_lapses(uuid, uuid)"))
       && lastDefinerOf("ob1_accept_takes").startsWith("094") && /094 \/ SMD-2707/.test(await comment("ob1_accept_takes(uuid, uuid)"))
       && /094 \/ SMD-2707/.test(await comment(SIG)) && /094 \/ SMD-2707/.test(await comment("ob1_capture_only_text(uuid)")),
@@ -15061,11 +15065,12 @@ console.log("\n[92] Migration 102: the consolidation judge's distinct is stored 
   await db.exec(`DELETE FROM thoughts`);
   const thought = async (text: string) => (await one<{ r: { id: string } }>(`SELECT upsert_thought($1, '{}'::jsonb) AS r`, [text])).r.id;
 
-  // The shape: 102 the last definer of both, the sentinels, the comments.
+  // The shape: 102 the last definer of the door and, until 111 added the subject kind ([99]), of the validator; the
+  // sentinels, the comments.
   const door = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = to_regprocedure('${RTR}')`)).s);
   const validator = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
-  assert(lastDefinerOf("thought_facets_validate").startsWith("102") && lastDefinerOf("record_thought_relation").startsWith("102"),
-    `102 is the last definer of the validator and the door (${lastDefinerOf("thought_facets_validate")}, ${lastDefinerOf("record_thought_relation")})`);
+  assert(lastDefinerOf("thought_facets_validate").startsWith("111") && lastDefinerOf("record_thought_relation").startsWith("102"),
+    `102 is the last definer of the door, 111 of the validator, which carries 102's relation branch (${lastDefinerOf("thought_facets_validate")}, ${lastDefinerOf("record_thought_relation")})`);
   assert(/ob1:relation-distinct/.test(door) && /ob1:relation-lineage-with-its-artifact/.test(door) && /ob1:relation-facet/.test(validator) && /ob1:link-facet/.test(validator),
     "the sentinels: 102's in the door, which db/consolidate.ts reads to know whether to send distinct, and 084's and 053's kept");
   const doorComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [RTR])).c ?? "";
@@ -15553,18 +15558,19 @@ console.log("\n[97] Migration 109: the listing selects one pass's proposals — 
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
   const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
   const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
-  const SIG = "list_supersession_proposals(text, int, boolean, text)";
+  // 110 (SMD-3249) is the listing's last definer since: 109's body under the cursor's three defaulted parameters.
+  const SIG = "list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid)";
   const ACTOR = { name: "op-key", via: "test-door" };
   await restoreShipped("list_supersession_proposals", "record_supersession_proposal");
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[97]%'`);
   await db.exec(`SELECT set_config('ob1.actor', '${JSON.stringify(ACTOR)}', false)`);
 
-  // The shape: one form, 109's, both sentinels, the comment.
+  // The shape: one form, 110's on 109's body, 109's and 070's sentinels, the comment.
   const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
-  assert((await functionsNamed("list_supersession_proposals")) === 1 && lastDefinerOf("list_supersession_proposals").startsWith("109")
+  assert((await functionsNamed("list_supersession_proposals")) === 1 && lastDefinerOf("list_supersession_proposals").startsWith("110")
       && /ob1:listing-selects-a-pass/.test(await src(SIG)) && /ob1:listing-flags-the-lineage-pair/.test(await src(SIG)) && /p_judge_key IS NULL OR p\.judge_key = p_judge_key/.test(await src(SIG))
       && /109/.test(comment) && /p_judge_key/.test(comment) && /before the cap/.test(comment),
-    `one list_supersession_proposals, 109's: both sentinels, the exact-match term, the comment naming 109, the selector and that it comes before the cap (${lastDefinerOf("list_supersession_proposals")})`);
+    `one list_supersession_proposals, 110's on 109's body: both sentinels, the exact-match term, the comment naming 109, the selector and that it comes before the cap (${lastDefinerOf("list_supersession_proposals")})`);
 
   // The corpus: eight thoughts, a day apart, and seven proposals over distinct
   // pairs (029 holds one per pair) — three under pass A, four under pass B,
@@ -15607,11 +15613,11 @@ console.log("\n[97] Migration 109: the listing selects one pass's proposals — 
   try { await q(`SELECT 1 FROM list_supersession_proposals('pending', 3, NULL::boolean)`); } catch (e) { short = (e as Error).message; }
   const four = ids(await list("pending", 50, null, A));
   assert((await functionsNamed("list_supersession_proposals")) === 2 && /is not unique/.test(short) && four === [a1, a2].join(),
-    `070 re-applied by hand: two forms, a three-argument call ambiguous (${short.slice(0, 80)}), four resolving to 109's`);
-  const again = await reapply("109");
-  assert(again.startsWith("109_") && (await functionsNamed("list_supersession_proposals")) === 1 && (await q(`SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('list_supersession_proposals(text, int, boolean)')`)).length === 0
+    `070 re-applied by hand: two forms, a three-argument call ambiguous (${short.slice(0, 80)}), four resolving to the shipped form`);
+  const again = await reapply("110");
+  assert(again.startsWith("110_") && (await functionsNamed("list_supersession_proposals")) === 1 && (await q(`SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('list_supersession_proposals(text, int, boolean)')`)).length === 0
       && ids(await list("pending", 50, null, A)) === [a1, a2].join() && ids(await q<{ id: string }>(`SELECT id::text FROM list_supersession_proposals('pending', 3, NULL::boolean)`)) === [b1, b2, b3].join(),
-    "109 again drops the three-argument form; one form, the same rows, a three-argument call resolving again — a re-apply a no-op");
+    "the shipped form (110 since SMD-3249) again drops the three-argument form; one form, the same rows, a three-argument call resolving again — a re-apply a no-op");
   // 029's two-argument form left by a hand re-apply (stood up by hand here: 029 whole would put back its other bodies
   // too): beside 109's, only a call both take — under three arguments — is ambiguous, three and four resolve; 109
   // again drops it (review pass 1: no suite built this state, and 109's DROP of it survived a mutant).
@@ -15619,14 +15625,255 @@ console.log("\n[97] Migration 109: the listing selects one pass's proposals — 
   const call = async (sql: string) => { try { await q(sql); return "resolved"; } catch (e) { return (e as Error).message; } };
   const two = await call(`SELECT 1 FROM list_supersession_proposals('pending', 3)`), threeArgs = await call(`SELECT 1 FROM list_supersession_proposals('pending', 3, NULL::boolean)`);
   assert((await functionsNamed("list_supersession_proposals")) === 2 && /is not unique/.test(two) && threeArgs === "resolved" && ids(await list("pending", 50, null, A)) === [a1, a2].join(),
-    `029's two-argument form beside 109's: a two-argument call ambiguous (${two.slice(0, 60)}), three and four resolving — the wording preflight's beside arm gives`);
-  await reapply("109");
+    `029's two-argument form beside the shipped one: a two-argument call ambiguous (${two.slice(0, 60)}), three and four resolving — the wording preflight's beside arm gives`);
+  await reapply("110");
   assert((await functionsNamed("list_supersession_proposals")) === 1 && (await q(`SELECT 1 FROM pg_proc WHERE oid = to_regprocedure('list_supersession_proposals(text, int)')`)).length === 0
       && ids(await q<{ id: string }>(`SELECT id::text FROM list_supersession_proposals('pending', 3)`)) === [b1, b2, b3].join(),
-    "…and 109 again drops 029's leftover too: one form, a two-argument call resolving to it");
+    "…and the shipped form again drops 029's leftover too: one form, a two-argument call resolving to it");
 
   await db.exec(`SELECT set_config('ob1.actor', '', false)`);
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[97]%'`);
+}
+
+console.log("\n[98] Migration 110: the listing pages — list_supersession_proposals redefined on 109's body with an after-cursor (the last row's confidence, judged_at and id), a page_key and a remaining column; a walk of more than 200 rows in pages of 200 and of 7 gives each row once, in the listing's order, ties broken by judged_at then id; remaining counts from each page's first row on; a stale row re-judged in place under the cursor does not jump the walk; a partial cursor refused by name; a call of four arguments resolves through the defaults; 109 re-applied by hand lands its form beside and a short call is ambiguous while seven resolve, and 110 again takes it away; a re-apply a no-op (SMD-3249)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const SIG = "list_supersession_proposals(text, int, boolean, text, numeric, timestamptz, uuid)";
+  const ACTOR = { name: "op-key", via: "test-door" };
+  await restoreShipped("list_supersession_proposals", "record_supersession_proposal");
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[98]%'`);
+  await db.exec(`SELECT set_config('ob1.actor', '${JSON.stringify(ACTOR)}', false)`);
+
+  // The shape: one form, 110's, the three sentinels, the two columns last, the comment.
+  const cols = (await one<{ c: string }>(`SELECT array_to_string(array(SELECT n FROM unnest(proargnames, proargmodes) AS u(n, m) WHERE m = 't'), ',') AS c FROM pg_proc WHERE oid = $1::regprocedure`, [SIG])).c;
+  const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
+  const body = await src(SIG);
+  assert((await functionsNamed("list_supersession_proposals")) === 1 && lastDefinerOf("list_supersession_proposals").startsWith("110")
+      && /ob1:listing-pages/.test(body) && /ob1:listing-selects-a-pass/.test(body) && /ob1:listing-flags-the-lineage-pair/.test(body)
+      && cols.endsWith(",lineage,page_key,remaining") && /110/.test(comment) && /p_after_confidence/.test(comment) && /remaining/.test(comment),
+    `one list_supersession_proposals, 110's: the three sentinels, page_key and remaining after 109's columns, the comment naming 110, the cursor and remaining (${cols.slice(-40)})`);
+
+  // The corpus: 22 thoughts and 230 proposals over distinct ordered pairs (029 holds one per pair), the confidence
+  // cycling over four values and judged_at over three, so ties on both fall inside pages and across their edges.
+  const t: string[] = [];
+  for (let i = 0; i < 22; i++) {
+    t.push((await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [`[98] thought ${i}`, JSON.stringify({ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: EMBEDDING_MODEL }), unit(i)])).r.id);
+  }
+  const KEY = "consolidate:stub@p98";
+  let made = 0;
+  for (let i = 0; i < 22 && made < 230; i++) for (let j = 0; j < 22 && made < 230; j++) {
+    if (i === j) continue;
+    const conf = [0.91, 0.85, 0.85, 0.7, 0.55][made % 5];
+    await db.query(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', $3::numeric, 'stub', 0.9, $4::text)`, [t[i], t[j], conf, KEY]);
+    made++;
+  }
+  await db.exec(`UPDATE supersession_proposals SET judged_at = timestamptz '2026-10-01 00:00:00.123456+00' + make_interval(secs => (abs(hashtext(id::text)) % 3)) WHERE judge_key = '${KEY}'`);
+  const order = (await q<{ id: string }>(`SELECT id::text FROM supersession_proposals WHERE judge_key = $1 ORDER BY confidence DESC, judged_at, id`, [KEY])).map((r) => r.id);
+  type Row = { id: string; page_key: string; remaining: string | number };
+  const page = (limit: number, after: string[] | null) =>
+    q<Row>(`SELECT id::text, page_key, remaining FROM list_supersession_proposals('pending', $1::int, NULL::boolean, $2::text, $3::numeric, $4::timestamptz, $5::uuid)`,
+      [limit, KEY, after?.[0] ?? null, after?.[1] ?? null, after?.[2] ?? null]);
+  const walk = async (limit: number) => {
+    const seen: string[] = [], remainings: number[] = [];
+    let after: string[] | null = null;
+    for (let n = 0; n < 100; n++) {
+      const rows = await page(limit, after);
+      seen.push(...rows.map((r) => r.id));
+      remainings.push(rows.length ? Number(rows[0].remaining) : 0);
+      if (!rows.length || Number(rows[0].remaining) <= rows.length) break;
+      after = JSON.parse(rows[rows.length - 1].page_key) as string[];
+    }
+    return { seen, remainings };
+  };
+  const w200 = await walk(200), w7 = await walk(7);
+  assert(order.length === 230 && w200.seen.join() === order.join() && w200.remainings.join() === "230,30",
+    `pages of 200: every row once, in the listing's order, in two pages, remaining 230 then 30 (${w200.remainings.join()})`);
+  assert(w7.seen.join() === order.join() && new Set(w7.seen).size === 230 && w7.remainings[0] === 230 && w7.remainings.at(-1)! <= 7,
+    `pages of 7: every row once, in order, across ${w7.remainings.length} pages whose edges fall inside ties on confidence and judged_at`);
+  const [first] = await page(1, null);
+  const key0 = JSON.parse(first.page_key) as string[];
+  assert(key0[0] === "0.91" && /^2026-10-01 00:00:0[0-2]\.123456\+00$/.test(key0[1]) && key0[2] === first.id,
+    `page_key holds the row's values as text — numeric(3,2) exactly, judged_at to the microsecond, the id (${first.page_key})`);
+
+  // A stale row replaced under the cursor (063's recorder: in place, ON CONFLICT DO UPDATE — the same id, judged_at
+  // now(), the new verdict's confidence): the walk goes on from the place the page ended at, not the row's new one.
+  // The cursor's own row is re-judged at a lower confidence, so its new place is far down the order; a cursor that
+  // named the row would jump there.
+  const p1 = await page(7, null);
+  const cursorRow = p1[6].id;
+  const cur = JSON.parse(p1[6].page_key) as string[];
+  const [{ older_id: o6, newer_id: n6 }] = await q<{ older_id: string; newer_id: string }>(`SELECT older_id::text, newer_id::text FROM supersession_proposals WHERE id = $1::uuid`, [cursorRow]);
+  await db.query(`UPDATE supersession_proposals SET status = 'stale' WHERE id = $1::uuid`, [cursorRow]);
+  const [{ id: replaced }] = await q<{ id: string }>(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.55, 'stub again', 0.9, $3::text) AS id`, [o6, n6, KEY]);
+  const p2 = (await page(7, cur)).map((r) => r.id);
+  const whole = (await walk(200)).seen;
+  assert(replaced === cursorRow && p2.join() === order.slice(7, 14).join() && whole.filter((id) => id === cursorRow).length === 1 && whole.indexOf(cursorRow) > 13 && whole.length === 230,
+    `the cursor's own row re-judged in place (the same id, a new place far down): the next page is the seven that followed the place the page ended at, and a full walk meets the row once, at its new place (${p2.length} rows; at ${whole.indexOf(cursorRow)})`);
+
+  // A partial cursor is refused by name; a call of four arguments — a caller before 110 — resolves through the defaults.
+  let partial = "listed";
+  try { await q(`SELECT 1 FROM list_supersession_proposals('pending', 5, NULL::boolean, NULL::text, 0.5::numeric, NULL::timestamptz, NULL::uuid)`); } catch (e) { partial = (e as Error).message; }
+  assert(/the after-cursor is three values, p_after_confidence, p_after_judged_at and p_after_id, all set or none/.test(partial)
+      && (await q(`SELECT 1 FROM list_supersession_proposals('pending', 5, NULL::boolean, $1::text)`, [KEY])).length === 5,
+    `a partial cursor refused by name (${partial.slice(0, 70)}), a four-argument call listing through the defaults`);
+
+  // 109 re-applied by hand lands its four-argument form beside 110's: a call both take — under five arguments — is
+  // ambiguous, seven resolve; 110 again takes it away, a re-apply a no-op.
+  await reapply("109");
+  let four = "resolved";
+  try { await q(`SELECT 1 FROM list_supersession_proposals('pending', 5, NULL::boolean, $1::text)`, [KEY]); } catch (e) { four = (e as Error).message; }
+  const seven = (await page(5, null)).length;
+  assert((await functionsNamed("list_supersession_proposals")) === 2 && /is not unique/.test(four) && seven === 5,
+    `109 re-applied by hand: two forms, a four-argument call ambiguous (${four.slice(0, 60)}), seven resolving`);
+  const again = await reapply("110");
+  assert(again.startsWith("110_") && (await functionsNamed("list_supersession_proposals")) === 1 && (await walk(200)).seen.length === 230,
+    "110 again drops 109's form: one form, the walk whole — a re-apply a no-op");
+
+  await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[98]%'`);
+}
+
+console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet (key ticket:/pr:/version:/phrase:, by metadata | first_line | model, the pass's judge key, origin derived), one standing per thought, written standing and only closed; record_thought_subject refuses a text that moved, keeps the same subject, replaces another, closes on NULL; its lineage row (kind subject) written with it and dropped with it; a re-apply a no-op (SMD-3306)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const src = async (sig: string) => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [sig])).s);
+  const failure = async (sql: string, params: unknown[] = []) => {
+    try { await db.query(sql, params); return { code: null as string | null, message: "" }; } catch (e) { return { code: String((e as { code?: string }).code ?? "?"), message: (e as Error).message.split("\n")[0] }; }
+  };
+  const RTS = "record_thought_subject(uuid, text, text, text, uuid, text, jsonb)";
+  await restoreShipped("record_thought_subject", "thought_facets_validate", "ob1_record_derivation");
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[99]%'`);
+  const thought = async (text: string) => (await one<{ r: { id: string } }>(`SELECT upsert_thought($1, '{}'::jsonb) AS r`, [text])).r.id;
+  const fp = async (id: string) => (await one<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1::uuid`, [id])).f;
+  const KEY = "subject:qwen3.8:27b@p1";
+
+  // The shape: 111 the last definer of its four functions and of the two it carries; the sentinels; the trigger; the
+  // indexes; the CHECK; the comments.
+  for (const fn of ["subject_key_valid", "record_thought_subject", "ob1_drop_subject_derivation", "thought_facets_validate", "ob1_record_derivation"])
+    assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("111"), `one ${fn}, 111 its last definer (${lastDefinerOf(fn)})`);
+  const validatorSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
+  assert(/ob1:subject-facet/.test(validatorSrc) && /ob1:relation-facet/.test(validatorSrc) && /ob1:link-facet/.test(validatorSrc) && /ob1:subject-lineage-with-its-artifact/.test(await src(RTS)),
+    "the sentinels: the subject branch beside the relation's and the link's in the validator, the lineage with its artifact in the write");
+  const [shape] = await q<{ drop: string | null; uniq: string | null; key: string | null; chk: string }>(`SELECT
+      (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'thought_facets_drop_subject_derivation' AND tgrelid = 'thought_facets'::regclass) AS drop,
+      (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_subject_active_uniq') AS uniq,
+      (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_subject_key_idx') AS key,
+      (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'derivations_artifact_kind_check') AS chk`);
+  assert(/AFTER DELETE ON (public\.)?thought_facets FOR EACH ROW WHEN \(\(old\.kind = 'subject'::text\)\) EXECUTE FUNCTION ob1_drop_subject_derivation\(\)/.test(shape.drop ?? "")
+         && /UNIQUE INDEX/.test(shape.uniq ?? "") && /\(thought_id\)/.test(shape.uniq ?? "") && /WHERE \(\(kind = 'subject'::text\) AND \(valid_until IS NULL\)\)/.test(shape.uniq ?? "")
+         && /payload ->> 'key'/.test(shape.key ?? "") && /'subject'/.test(shape.chk) && /'relation'/.test(shape.chk),
+    `the lineage drop after a subject's delete, one standing per thought, the key probe, the CHECK admitting subject beside relation (${shape.drop}; ${shape.uniq}; ${shape.chk})`);
+  for (const sig of [RTS, "subject_key_valid(text)", "ob1_drop_subject_derivation()"]) {
+    const c = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? "";
+    assert(/111/.test(c) && /SMD-3306/.test(c), `${sig}'s comment names 111 and the ticket`);
+  }
+  const tableComment = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["thought_facets"])).c ?? "";
+  assert(/four kinds registered/.test(tableComment) && /subject \(111\)/.test(tableComment) && /111/.test((await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, ["thought_facets_validate()"])).c ?? ""),
+    "thought_facets' comment registers the fourth kind, and the validator's names 111");
+
+  // The key's shape: one rule, four namespaces.
+  const valid = async (k: string | null) => (await one<{ v: boolean | null }>(`SELECT subject_key_valid($1) AS v`, [k])).v === true;
+  const good = ["ticket:SMD-3306", "ticket:A1-2", "pr:727", "version:v1.9.0", "version:v2.0", "version:v1.2.3.4", "phrase:clean up stale branches", "phrase:dolphin", `phrase:${"a".repeat(200)}`];
+  const bad = ["ticket:smd-3306", "ticket:SMD-", "ticket:3306", "pr:", "pr:12a", "pr:1234567890", "version:1.9.0", "version:v1", "phrase:", "phrase:Clean", "phrase: lead", "phrase:trail ", "phrase:two  spaces", "phrase:a\nb", "phrase:tab\there", "SMD-3306", "issue:SMD-1", `phrase:${"a".repeat(201)}`];
+  const goodOk = await Promise.all(good.map(valid)), badOk = await Promise.all(bad.map(valid));
+  assert(goodOk.every(Boolean) && !(await valid(null)), `subject_key_valid admits each namespace's shape (${good.filter((_, i) => !goodOk[i]).join(" | ") || "all"}) and not NULL`);
+  assert(badOk.every((x) => !x), `…and refuses lower-case and empty tickets, a non-numeric or overlong PR, a version without v or a part, a phrase with capitals, edge or double spaces, a newline or tab, no namespace or another, 208 characters (${bad.filter((_, i) => badOk[i]).join(" | ") || "none admitted"})`);
+
+  // The validator, written around the door.
+  const a = await thought("[99] Session summary — SMD-3306 — a thought about threads");
+  const insert = (p: unknown, extra = "") => failure(`INSERT INTO thought_facets (thought_id, kind, payload${extra ? ", valid_until" : ""}) VALUES ($1::uuid, 'subject', $2::jsonb${extra ? `, ${extra}` : ""})`, [a, JSON.stringify(p)]);
+  const okPayload = { key: "ticket:SMD-3306", by: "first_line", judge_key: KEY };
+  const badKey = await insert({ ...okPayload, key: "SMD-3306" }), badBy = await insert({ ...okPayload, by: "guess" }), noJudge = await insert({ key: okPayload.key, by: okPayload.by });
+  const longJudge = await insert({ ...okPayload, judge_key: "k".repeat(201) }), numKey = await insert({ ...okPayload, key: 7 }), closedIns = await insert(okPayload, "now()");
+  assert([badKey, badBy, noJudge, longJudge, numKey, closedIns].every((r) => r.code === "23514")
+         && /ticket:<ID>, pr:<number>, version:<v1\.2\.3> or phrase:<lower-case words>, got 'SMD-3306'/.test(badKey.message) && /by is metadata, first_line or model, got 'guess'/.test(badBy.message)
+         && /judge_key, a non-empty string of at most 200 characters/.test(noJudge.message) && /judge_key/.test(longJudge.message) && /written standing/.test(closedIns.message),
+    `the validator refuses, as check violations: a key outside the namespaces or not a string, a way outside the three, a missing or overlong judge key, a subject written closed (${[badKey, badBy, noJudge, closedIns].map((r) => r.message.slice(0, 50)).join(" | ")})`);
+  assert((await insert(okPayload)).code === null, "…and takes a well-formed one written around the door");
+  const raw = await one<{ id: string; p: Record<string, unknown> }>(`SELECT id::text, payload AS p FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'subject' AND valid_until IS NULL`, [a]);
+  assert(raw.p.origin === "derived" && raw.p.key === okPayload.key, `origin is the validator's word, derived (${JSON.stringify(raw.p)})`);
+  const second = await insert({ ...okPayload, key: "pr:727" });
+  assert(second.code === "23505" && /thought_facets_subject_active_uniq/.test(second.message), `a second standing subject on the thought breaks the index (${second.code}: ${second.message.slice(0, 80)})`);
+  const rewrite = await failure(`UPDATE thought_facets SET payload = payload || '{"key": "pr:727"}'::jsonb WHERE id = $1::uuid`, [raw.id]);
+  const future = await failure(`UPDATE thought_facets SET valid_until = now() + interval '1 day' WHERE id = $1::uuid`, [raw.id]);
+  assert(rewrite.code === "23514" && /written once and only closed/.test(rewrite.message) && future.code === "23514",
+    `a subject is never rewritten, nor closed into the future (${rewrite.message.slice(0, 60)} | ${future.message.slice(0, 40)})`);
+  assert((await failure(`UPDATE thought_facets SET valid_until = now() WHERE id = $1::uuid`, [raw.id])).code === null
+         && (await failure(`UPDATE thought_facets SET valid_until = NULL WHERE id = $1::uuid`, [raw.id])).code === "23514",
+    "…its close is admitted, and a re-open is not");
+
+  // The door: added, kept, replaced, stale, closed, none, gone; each new facet's lineage in the same call.
+  type R = { ok: boolean; action: string; id?: string; stale?: boolean; gone?: boolean };
+  const write = async (id: string, key: string | null, by: string | null, fpr: string | null, recipe: unknown = null, judge = KEY) =>
+    (await one<{ r: R }>(`SELECT record_thought_subject($1::uuid, $2::text, $3::text, $4::text, NULL::uuid, $5::text, $6::jsonb) AS r`, [id, key, by, judge, fpr, recipe === null ? null : JSON.stringify(recipe)])).r;
+  const lineage = async (facet: string) => q<{ kind: string; inputs: string[]; fps: string[]; by: string; recipe: Record<string, unknown> }>(
+    `SELECT artifact_kind AS kind, input_ids::text[] AS inputs, input_fingerprints AS fps, produced_by AS by, recipe FROM derivations WHERE artifact_kind = 'subject' AND artifact_id = $1::uuid`, [facet]);
+  const standing = async (id: string) => q<{ id: string; key: string; by: string }>(`SELECT id::text, payload->>'key' AS key, payload->>'by' AS by FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'subject' AND valid_until IS NULL`, [id]);
+  const b = await thought("[99] SMD-3207's change record names its ticket below the title");
+  const fb = await fp(b);
+  const added = await write(b, "ticket:SMD-3207", "model", fb, { deterministic: false, model: "qwen3.8:27b", prompt_hash: "sha256:x" });
+  const [addedRow] = await lineage(added.id ?? "");
+  assert(added.ok && added.action === "added" && (await standing(b)).length === 1 && (await standing(b))[0].key === "ticket:SMD-3207"
+         && addedRow?.inputs.join() === b && addedRow?.fps.join() === fb && addedRow?.by === KEY && addedRow?.recipe.model === "qwen3.8:27b",
+    `added: one standing subject, its lineage row naming the thought at the fingerprint read, the pass and the recipe (${JSON.stringify(addedRow)})`);
+  const kept = await write(b, "ticket:SMD-3207", "model", fb, { deterministic: false, model: "qwen3.8:27b", prompt_hash: "sha256:y" });
+  assert(kept.action === "kept" && kept.id === added.id && (await lineage(added.id ?? ""))[0]?.recipe.prompt_hash === "sha256:y" && (await standing(b)).length === 1,
+    "kept: the same key, way and pass leave the facet standing, its lineage row moved to the recipe sent now");
+  const replaced = await write(b, "ticket:SMD-3306", "model", fb);
+  const closedOld = await one<{ v: string | null }>(`SELECT valid_until::text AS v FROM thought_facets WHERE id = $1::uuid`, [added.id]);
+  const [defaultRecipe] = await lineage(replaced.id ?? "");
+  assert(replaced.action === "replaced" && replaced.id !== added.id && closedOld.v !== null && (await standing(b))[0].key === "ticket:SMD-3306"
+         && defaultRecipe?.recipe.deterministic === false && defaultRecipe?.recipe.declared === false && (await lineage(added.id ?? "")).length === 1,
+    `replaced: another key closes the old facet (kept as history, its lineage with it) and writes a new one; with no recipe sent, the lineage says not deterministic (the model found it) and undeclared (${JSON.stringify(defaultRecipe?.recipe)})`);
+  const byChange = await write(b, "ticket:SMD-3306", "first_line", fb), judgeChange = await write(b, "ticket:SMD-3306", "first_line", fb, null, "subject:qwen3.8:27b@p2");
+  assert(byChange.action === "replaced" && judgeChange.action === "replaced" && (await standing(b))[0].by === "first_line"
+         && (await lineage(byChange.id ?? ""))[0]?.recipe.deterministic === true,
+    "replaced too when only the way or only the pass differs; a subject the rule found is deterministic by default");
+  // Edited through the door, which moves the stored fingerprint (a raw UPDATE of content leaves it, as every reader's
+  // COALESCE then reads).
+  await db.query(`SELECT update_thought($1::uuid, '[99] SMD-3207''s change record, edited while the pass read it')`, [b]);
+  const stale = await write(b, "ticket:SMD-9999", "model", fb);
+  assert(stale.ok && stale.action === "none" && stale.stale === true && (await standing(b))[0].key === "ticket:SMD-3306",
+    "stale: a subject found in a text that moved since is not written; the standing one stands for the pass to read again");
+  const fresh = await write(b, "ticket:SMD-9999", "model", await fp(b));
+  assert(fresh.action === "replaced", "…and at the new text's fingerprint it is");
+  const closed = await write(b, null, null, null);
+  const none = await write(b, null, null, null);
+  assert(closed.action === "closed" && closed.id === fresh.id && (await standing(b)).length === 0 && none.action === "none",
+    "a NULL key closes the standing subject, and again answers none");
+  const gone = await write("00000000-0000-4000-8000-000000000098", "ticket:SMD-1", "metadata", "f");
+  assert(gone.ok && gone.action === "none" && gone.gone === true, "a thought that does not exist answers none, gone");
+
+  // The door's refusals: parameter errors, before any lock or write.
+  const door = (args: unknown[]) => failure(`SELECT record_thought_subject($1::uuid, $2::text, $3::text, $4::text, NULL::uuid, $5::text, NULL::jsonb)`, args);
+  const refusals = [
+    await door([null, "ticket:SMD-1", "metadata", KEY, "f"]), await door([b, "ticket:SMD-1", "metadata", "", "f"]), await door([b, "ticket:SMD-1", "metadata", "k".repeat(201), "f"]),
+    await door([b, "SMD-1", "metadata", KEY, "f"]), await door([b, "ticket:SMD-1", "guess", KEY, "f"]), await door([b, "ticket:SMD-1", null, KEY, "f"]), await door([b, "ticket:SMD-1", "metadata", KEY, null]),
+  ];
+  assert(refusals.every((r) => r.code === "22023") && /a thought is required/.test(refusals[0].message) && /judge_key must name the pass/.test(refusals[1].message)
+         && /the key is ticket:<ID>/.test(refusals[3].message) && /by is metadata, first_line or model, got 'guess'/.test(refusals[4].message) && /fingerprint of the text/.test(refusals[6].message),
+    `the door refuses a missing thought, an empty or overlong judge key, a malformed key, a way outside the three or none, a missing fingerprint — each invalid_parameter_value (${refusals.map((r) => r.code).join()})`);
+
+  // Deletes: the thought's goes with its facets, and each subject's lineage row with its facet.
+  const c = await thought("[99] pr 727 reviewed");
+  const cw = await write(c, "pr:727", "model", await fp(c));
+  const cw2 = await write(c, "phrase:client review", "model", await fp(c));
+  assert((await lineage(cw.id ?? "")).length === 1 && (await lineage(cw2.id ?? "")).length === 1, "two facets, the first closed, each with its lineage row");
+  await db.query(`DELETE FROM thoughts WHERE id = $1::uuid`, [c]);
+  assert((await lineage(cw.id ?? "")).length === 0 && (await lineage(cw2.id ?? "")).length === 0 && (await q(`SELECT 1 FROM thought_facets WHERE thought_id = $1::uuid`, [c])).length === 0,
+    "a deleted thought takes its subjects, standing and closed, and their lineage rows: no orphan derivation");
+
+  // Re-applied, 111 changes nothing: the subjects stand, one CHECK, one of each function.
+  const before = (await q<{ n: number }>(`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'subject'`))[0].n;
+  await reapply("111");
+  const chk = await q(`SELECT 1 FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%'`);
+  assert((await q<{ n: number }>(`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'subject'`))[0].n === before && chk.length === 1 && (await functionsNamed("record_thought_subject")) === 1,
+    "a re-apply is a no-op: the subjects stand, one CHECK on the kind, one door");
+
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[99]%'`);
 }
 
 // db/README.md quotes this suite's assertion total in two places ("Expected

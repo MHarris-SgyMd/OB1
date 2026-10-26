@@ -13,7 +13,7 @@ import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stopp
 import { markRunningLost } from "./jobs.ts";
 import { createRestApp } from "./rest/app.ts";
 import { remoteChecker, tokenSettings, type TokenCheck } from "./oauth-token.ts";
-import { cutOpenRequests, cutTelemetry, flushTelemetry, startTelemetry } from "./telemetry.ts";
+import { cutOpenRequests, cutTelemetry, flushTelemetry, markTelemetry, startTelemetry } from "./telemetry.ts";
 
 /**
  * The door a write through this server names in its actor (`via`), which
@@ -105,6 +105,7 @@ if (SERVES_ON_BUN) {
     close: closeStore,
     // The telemetry still batched goes beside the pool's close, under a bound of its own, said on its own; cut short,
     // what each signal still held is said by count (SMD-2902).
+    mark: markTelemetry,
     flush: flushTelemetry,
     unsent: cutTelemetry,
     // A record the runtime no longer counts but that is still open ends before that flush, on every path (PR 2c review pass 3).
