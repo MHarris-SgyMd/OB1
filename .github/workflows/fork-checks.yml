@@ -701,9 +701,9 @@ jobs:
       matrix:
         shard: [rest, sleep, long, extract]
 
-    # A service container, not with-postgres.sh — the runner provides the database
-    # and Actions handles readiness. The local script exists for developers, who
-    # mostly run podman.
+    # A service container, not with-postgres.sh — the runner provides the
+    # database, and "Wait for the service Postgres" below waits for it. The
+    # local script exists for developers, who mostly run podman.
     services:
       postgres:
         image: pgvector/pgvector:0.8.6-pg16
@@ -712,11 +712,6 @@ jobs:
           POSTGRES_DB: ob1test
         ports:
           - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -730,6 +725,30 @@ jobs:
       - name: Install
         working-directory: db
         run: bun install --frozen-lockfile
+
+      # The service carries no health check, so the runner starts these steps
+      # as soon as its container does — with the 5 s pg_isready check it
+      # carried before, it held them until the check first passed, about 6 s
+      # later — and the checkout and install overlap Postgres's start
+      # (SMD-3196). This waits for it before the first suite, as
+      # db/with-postgres.sh does: over TCP inside the container, since over the
+      # socket the entrypoint's initialising server, which listens on no TCP
+      # address, reads as ready for a moment before the real one is up; and a
+      # container that has exited ends the wait at once.
+      - name: Wait for the service Postgres
+        run: |
+          ready() {
+            local deadline=$((SECONDS + 60)) why
+            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
+              if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
+              elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
+              else sleep 0.2; continue; fi
+              echo "the service Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
+            done
+          }
+          ready "$PG"
+        env:
+          PG: ${{ job.services.postgres.id }}
 
       # Covers what PGlite structurally cannot: the migration runner over TCP,
       # driver-level jsonb binding (where the double-encoding bug lived), and
@@ -765,11 +784,6 @@ jobs:
           POSTGRES_DB: ob1test
         ports:
           - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
       # The upgrade and preflight pair's own Postgres, which the start step's
       # two legs reach on 5433: its comment has why (SMD-3195).
       pair-postgres:
@@ -779,11 +793,6 @@ jobs:
           POSTGRES_DB: ob1upgrade
         ports:
           - 5433:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -797,6 +806,24 @@ jobs:
       - name: Install
         working-directory: server-portable
         run: bun install --frozen-lockfile
+
+      # The services carry no health check: db-live's "Wait for the service
+      # Postgres" has why (SMD-3196).
+      - name: Wait for the service Postgres
+        run: |
+          ready() {
+            local deadline=$((SECONDS + 60)) why
+            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
+              if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
+              elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
+              else sleep 0.2; continue; fi
+              echo "the service Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
+            done
+          }
+          ready "$PG"; ready "$PAIR_PG"
+        env:
+          PG: ${{ job.services.postgres.id }}
+          PAIR_PG: ${{ job.services.pair-postgres.id }}
 
       # Two suites side by side, each against its own database (SMD-2219), on
       # the second service, pair-postgres, which they have to themselves:
@@ -4157,11 +4184,6 @@ jobs:
           POSTGRES_DB: ob1test
         ports:
           - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -4179,6 +4201,23 @@ jobs:
       - name: Typecheck
         working-directory: compat/supabase-sql
         run: bunx tsc --noEmit
+
+      # The service carries no health check: db-live's "Wait for the service
+      # Postgres" has why (SMD-3196).
+      - name: Wait for the service Postgres
+        run: |
+          ready() {
+            local deadline=$((SECONDS + 60)) why
+            until docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do
+              if [ "$(docker container inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = false ]; then why="exited"
+              elif [ "$SECONDS" -ge "$deadline" ]; then why="did not accept a TCP connection within 60 s"
+              else sleep 0.2; continue; fi
+              echo "the service Postgres in container $1 $why" >&2; docker logs "$1" 2>&1 | tail -20 >&2; exit 1
+            done
+          }
+          ready "$PG"
+        env:
+          PG: ${{ job.services.postgres.id }}
 
       # Every file the codemod lists depends on this behaving exactly like supabase-js. A shim that is
       # merely close is worse than none — they would inherit the differences with
