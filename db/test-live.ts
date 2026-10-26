@@ -40,7 +40,7 @@ import { BITMAP_BYTES_PER_PAGE, BOUNDS_IN_FORCE_SQL, DB_LEVEL_SETTINGS_SQL, EMBE
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostname, tmpdir } from "node:os";
-import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
+import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, cuttableRelay, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
 import { LOOPBACK_HOSTS } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, MAX_BATCH } from "./lease.ts";
 import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
@@ -4698,6 +4698,8 @@ if (want("10")) {
   let downUntil = 0;
   let down: "503" | "404" | "hang" = "503";
   let probes = 0;
+  /** Probes that arrived, answered or not: a hung one too, which `probes` never counts (SMD-3196). */
+  let probesAsked = 0;
   /** An outage paced by probes, not the clock (SMD-3048): `down` answers each request while it lasts. */
   const outage = probePacedOutage();
   /** The models a probe or a call named, whatever the answer: the escalation model's start check must load nothing (review pass 3). */
@@ -4710,6 +4712,7 @@ if (want("10")) {
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string };
       modelsNamed.push(body.model ?? "");
       const isProbe = body.messages?.[0]?.content === PROBE_PROMPT;
+      if (isProbe) probesAsked++;
       if (outage.down(isProbe) || Date.now() < downUntil) {
         if (down === "hang") return neverAnswers();
         return down === "404"
@@ -4945,11 +4948,22 @@ if (want("10")) {
 
   // The one-shot runs above stamped no heartbeat: only a follower does (SMD-2261).
   const beatsOf = async (worker: string) => (await sql`SELECT key, value FROM ob1_config WHERE key LIKE ${`heartbeat:${worker}:%`}`) as { key: string; value: string }[];
+  /**
+   * Whether a follower's row says it polls: its first pass stamped, not ended, not running, with an outcome — its
+   * start stamps it running with none (SMD-3196: a 1.5 s sleep stood in for its polling).
+   */
+  const polling = (value: string | undefined): boolean => {
+    const b = JSON.parse(value ?? "{}") as { ended?: boolean; running?: boolean; outcome?: string | null };
+    return b.ended !== true && b.running === false && typeof b.outcome === "string";
+  };
+  /** This key's own heartbeat row: once the probe cases below run, another model's row stands beside it. */
+  const ownBeat = async (): Promise<string | undefined> => (await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value;
   assert((await beatsOf("extract")).length === 0, "no one-shot extraction run left a heartbeat row");
   // --follow: a capture made while the worker is polling is extracted without a
   // new run, and the first signal ends the process with exit 0.
   const follower = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--follow", "1"], { env, stdout: "pipe", stderr: "pipe", cwd: HERE });
-  await Bun.sleep(1500);
+  // Polling once its first pass has stamped its row (SMD-3196: a 1.5 s sleep stood in for it).
+  await pollUntil(async () => polling(await ownBeat()), 15_000);
   const sam = await seed("Sam adopted grafana for the on-call dashboards.");
   let extracted = false;
   for (let i = 0; i < 40 && !extracted; i++) {
@@ -4980,14 +4994,19 @@ if (want("10")) {
   {
     const relay = await cuttableRelay(URL_!);
     const cutFollower = Bun.spawn(["bun", "--no-env-file", join(HERE, "extract-entities.ts"), "--url", relay.url, "--follow", "1", "--workers", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+    const [cutStdout, cutStderr] = [watchStream(cutFollower.stdout), watchStream(cutFollower.stderr)];
+    const cutSaid = () => cutStdout.sofar() + cutStderr.sofar();
     // Deleted at the end, so the sections after count the thoughts they did.
     let idle = "";
     let inHand = "";
     try {
-      await Bun.sleep(1500);
+      // Polling once its first pass has stamped the row the follower before it
+      // ended, and the cut met once it says so, where 1.5 s and 2.5 s sleeps
+      // stood in for both (SMD-3196).
+      await pollUntil(async () => polling(await ownBeat()), 15_000);
       await relay.cut();
       idle = await seed("Quinn moved the alert rules to grafana while the database was away.");
-      await Bun.sleep(2500);
+      await pollUntil(async () => /the database is not answering/.test(cutSaid()), 15_000);
       const aliveIdle = cutFollower.exitCode === null;
       await relay.restore();
       const idleDone = await pollUntil(() => extractedNow(idle), 15_000);
@@ -5005,7 +5024,7 @@ if (want("10")) {
       const beatAfterCuts = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}") as { v?: number; ended?: boolean };
       slowMs = 0;
       cutFollower.kill("SIGINT");
-      const cutOut = (await new Response(cutFollower.stdout).text()) + (await new Response(cutFollower.stderr).text());
+      const cutOut = (await cutStdout.rest()) + (await cutStderr.rest());
       const cutCode = await cutFollower.exited;
       const [claim] = await sql`SELECT status, attempt_count FROM thought_work_claims WHERE thought_id = ${inHand}::uuid AND work_type = ${KEY}`;
       assert(aliveIdle && idleDone, `a follower whose database is cut while it polls keeps running, and extracts the thought captured meanwhile once it is back (alive ${aliveIdle}, extracted ${idleDone}; ${cutOut.split("\n").filter((l) => /not answering|answers again/.test(l)).map((l) => l.trim().slice(0, 90)).join(" | ")})`);
@@ -5335,28 +5354,37 @@ if (want("10")) {
         }
       }
 
-      // A stop ends a probe in flight: after a timeout of 8 s the probe has the
-      // call's whole timeout, and a first stop 2 s into it returns at once
-      // (review pass 1).
+      // A stop ends a probe in flight: after a timeout of 4 s the probe has the
+      // call's whole timeout, and a first stop 1 s into it returns at once,
+      // where the probe would have run 3 s more (review pass 1; 8 s and 2 s into
+      // it before SMD-3196). Timed from the probe's arrival, not the claim: a
+      // stop during the hung call takes another path, the call left to time out,
+      // no probe after it and the thought recorded failed. The hang begins once
+      // the start's probe has answered, so the start never meets it.
       {
         const stopProbe = new AbortController();
         const probeLines: string[] = [];
         let returnedAt = 0;
         // Deleted when the case ends: left pending, it would be the one-shot run's first claim below.
         let slow = "";
-        const probing = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 8, signal: stopProbe.signal, writer: { out: (l) => probeLines.push(l), err: (l) => probeLines.push(l) } }).then((c) => { returnedAt = Date.now(); return c; });
+        const startProbes = probes;
+        const probing = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 4, signal: stopProbe.signal, writer: { out: (l) => probeLines.push(l), err: (l) => probeLines.push(l) } }).then((c) => { returnedAt = Date.now(); return c; });
         try {
-          await Bun.sleep(1000);
+          // Its start's probe answered, then the settle the cases above give it (SMD-3196: a 1 s sleep stood in for both).
+          await pollUntil(async () => probes > startProbes, 10_000);
+          await Bun.sleep(500);
           down = "hang";
           downUntil = Date.now() + 60_000;
           slow = await seed("Yara watched the pager while the provider hung.");
-          await pollUntil(async () => (await claimRow(slow))?.status === "claimed", 5000);
-          await Bun.sleep(10_000);
+          const claimed = await pollUntil(async () => (await claimRow(slow))?.status === "claimed", 5000);
+          const askedBefore = probesAsked;
+          const probed = await pollUntil(async () => probesAsked > askedBefore, 15_000);
+          await Bun.sleep(1000);
           const stoppedAt = Date.now();
           stopProbe.abort();
           const code = await probing;
-          assert(code === 0 && returnedAt - stoppedAt < 2000 && (await claimRow(slow))?.status === "pending",
-                 `a first stop during a probe after a timeout ends it: the follower returns within 2 s, the thought back in the pool (exit ${code} after ${returnedAt - stoppedAt} ms, claim ${(await claimRow(slow))?.status})`);
+          assert(claimed && probed && code === 0 && returnedAt - stoppedAt < 2000 && (await claimRow(slow))?.status === "pending",
+                 `a first stop during a probe after a timeout ends it: the follower returns within 2 s, the thought back in the pool (exit ${code} after ${returnedAt - stoppedAt} ms, claim ${(await claimRow(slow))?.status}${claimed ? "" : "; the thought was not claimed within 5 s"}${probed ? "" : "; no probe came within 15 s of the claim"})`);
         } finally {
           downUntil = 0;
           stopProbe.abort();
@@ -5688,8 +5716,17 @@ if (want("10")) {
     const ac2 = new AbortController();
     let st: PassStop | undefined;
     const r = runExtract({ url: URL_!, env, workers: 1, follow: 30, signal: ac2.signal, onPass: (x) => { st = x; }, writer: { out: () => {}, err: () => {} } });
-    await Bun.sleep(1500);
-    const asleep = JSON.parse((await sql`SELECT value FROM ob1_config WHERE key = ${`heartbeat:${KEY}`}`)[0]?.value ?? "{}");
+    // Asleep once its pass has stamped the row done and not running — its start
+    // stamps it running with no outcome — and a moment more to be inside the
+    // sleep, where a 1.5 s sleep stood in for it (SMD-3196). A follower that
+    // never stamps it so fails the assertion below after 15 s.
+    let asleep: { outcome?: string | null; running?: boolean; ended?: boolean } = {};
+    await pollUntil(async () => {
+      const value = await ownBeat();
+      asleep = JSON.parse(value ?? "{}");
+      return polling(value) && asleep.outcome === "ok";
+    }, 15_000);
+    await Bun.sleep(300);
     const at = Date.now();
     stopIt(st, ac2);
     // A stop that does not reach the follower fails here rather than hanging the suite.
@@ -5898,14 +5935,16 @@ if (want("10")) {
   // polls in two halves a poll apart: under the floor each, they are judged
   // together, not dropped one poll at a time.
   const alarmFollower = Bun.spawn(["bun", join(HERE, "extract-entities.ts"), "--url", URL_!, "--follow", "1"], { env, stdout: "pipe", stderr: "pipe", cwd: HERE });
-  await Bun.sleep(1500);
+  // Polling once its first pass has stamped the row the run before it ended (SMD-3196: a 1.5 s sleep stood in for it).
+  await pollUntil(async () => polling(await ownBeat()), 15_000);
   const failedNow = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY} AND status = 'failed'`)[0].c);
   for (const half of [0, 24]) {
     for (let i = half; i < half + 24; i++) await seed(`A followed reference-list page, number ${i}.`);
     for (let i = 0; i < 100 && (await failedNow()) < 36 + half; i++) await Bun.sleep(200);
     await Bun.sleep(1500);
   }
-  await Bun.sleep(2500);
+  // The poll after the second half stamps the tripped block (SMD-3196: a 2.5 s sleep stood in for it).
+  await pollUntil(async () => JSON.parse((await ownBeat()) ?? "{}").malformed?.alarm === true, 15_000);
   // Every row failed, but on documents the model cannot read, not a down
   // provider: the passes are ok, and the alarm rides the poll's stamp, which
   // is what preflight warns on (review pass 2: rows failed against rows done
@@ -7960,6 +7999,7 @@ if (want("16")) {
     assert((await consolidateBeats()).length === 0, "no one-shot consolidation run left a heartbeat row (SMD-2261)");
     const relay = await cuttableRelay(URL_!);
     const follower = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", relay.url, "--follow", "1"], { env: env as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+    const [followStdout, followStderr] = [watchStream(follower.stdout), watchStream(follower.stderr)];
     let followSettled = false;
     let aliveCut = false;
     try {
@@ -7967,7 +8007,8 @@ if (want("16")) {
       assert((await proposalRow(cedar.id)).status === "stale" && seen.length === 0, "the follower's first polls leave the row waiting and call no judge");
       await relay.cut();
       await sql`UPDATE thoughts SET embedding = ${unit(11)}::vector WHERE id = ${cedarOld}::uuid`;
-      await Bun.sleep(2500);
+      // The cut met once the follower says so (SMD-3196: a 2.5 s sleep stood in for it).
+      await pollUntil(async () => /the database is not answering/.test(followStdout.sofar() + followStderr.sofar()), 15_000);
       aliveCut = follower.exitCode === null;
       await relay.restore();
       for (let i = 0; i < 80 && !followSettled; i++) {
@@ -7977,7 +8018,7 @@ if (want("16")) {
     } finally {
       follower.kill("SIGINT");
     }
-    const followOut = (await new Response(follower.stdout).text()) + (await new Response(follower.stderr).text());
+    const followOut = (await followStdout.rest()) + (await followStderr.rest());
     const followCode = await follower.exited;
     await relay.close();
     assert(aliveCut && /the database is not answering \([^)]*\) — the follower waits for it/.test(followOut) && /the database answers again after \d+ s; polling resumes/.test(followOut),
@@ -14189,7 +14230,10 @@ if (want("38")) {
   /** The suite's client with `before` run ahead of each statement: a database starting up, or a stop during a start read. */
   const around = (before: () => void): SQL => intercept((_, run) => { before(); return run(); });
   // The outage schedule starts at 1 s in this section (SMD-3048), but for
-  // the refusal retried and its reset, which read the real 5 s and 10 s.
+  // the refusal retried and its reset, which read 2.5 s and 5 s: long enough
+  // to see the row re-stamped through a wait, and the schedule still doubling
+  // and reset. test-worker-bootstrap.ts holds the shipped 5 s and 10 s
+  // (SMD-3196; they read the real schedule before it).
   let restoreOutage = shortenOutage();
   try {
     const older = await capture("We bill monthly, decided in March.", "op-sleep", 3);
@@ -14443,15 +14487,34 @@ if (want("38")) {
       `the heartbeat carries the last sleep's start and end, and that it reads the log (${JSON.stringify(mark)}; reads ${endBeat?.reads})`);
 
     // A capture whose transaction began before the sleep and commits after it
-    // is dated before the sleep: it still wakes it.
+    // is dated before the sleep: it still wakes it. The quiet is 5 s, where it
+    // was 10 (SMD-3196): the sleep reads back as far as its quiet, so the
+    // transaction must begin within it, and the row's sleep start says it did.
+    // The sleep begins the quiet after the capture above, and the transaction
+    // about half a second after that capture, so it leads the sleep by the
+    // quiet less that half second. It fails if the scheduler's own start, its
+    // passes' start checks, outlasts the quiet less a poll (its first wait is
+    // at least one), or if more than the quiet passes between that capture and
+    // the transaction (the follower before stopping): the sleep then begins at
+    // once, and the lead is 0 or less.
     lines.length = 0;
+    const lateQuiet = 5;
     const ac2 = new AbortController();
-    const late = sleepRun({ follow: true, quiet: 10, signal: ac2.signal });
+    const late = sleepRun({ follow: true, quiet: lateQuiet, signal: ac2.signal });
     const tx = await sql.reserve();
+    let txBegan = "";
+    let sleptFrom: string | undefined;
     try {
       await tx`BEGIN`;
+      [{ t: txBegan }] = await tx`SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t`;
       await tx`SELECT upsert_thought(${"A note committed late."}, ${{ metadata: { source: "live" }, actor: { name: "op-sleep", via: "test-live" } }}::jsonb, ${unit(4)}::vector)`;
       await pollUntil(async () => lines.some((l) => /asleep:/.test(l)), 20_000);
+      // The line comes before the row's write: polled for this sleep's mark, open (review pass 1).
+      await pollUntil(async () => {
+        const mark = (await beat())?.slept;
+        sleptFrom = mark?.to === null ? mark.from : undefined;
+        return sleptFrom !== undefined;
+      }, 5000);
       await tx`COMMIT`;
     } finally {
       tx.release();
@@ -14459,7 +14522,8 @@ if (want("38")) {
     const lateWoke = await pollUntil(async () => lines.some((l) => /awake: a live write/.test(l)), 8_000);
     ac2.abort();
     await late;
-    assert(lateWoke, `a capture committed after the sleep began, in a transaction begun before it, wakes it (${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
+    const lead = sleptFrom === undefined ? NaN : (Date.parse(sleptFrom) - Date.parse(txBegan)) / 1000;
+    assert(lateWoke && lead > 0 && lead < lateQuiet, `a capture committed after the sleep began, in a transaction begun before it, wakes it (begun ${lead.toFixed(2)} s before the sleep, within its ${lateQuiet} s quiet${sleptFrom === undefined ? "; no open sleep mark within 5 s" : ""}; ${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
 
     // ── The re-derive pass, first (SMD-2679) ─────────────────────────────────
     // A lineage row whose windows a raw delete took is swept before
@@ -15051,9 +15115,10 @@ if (want("38")) {
     // The same refusal after the pass has run in this process — a model
     // re-pulled, a credit top-up — is retried on the outage schedule, the row
     // failed meanwhile, and the next sleep that runs puts it back to ok. The
-    // real schedule here: its 5 s, its doubling and its reset are read from
-    // the lines, and the row is re-stamped 4 s into a 10 s wait.
+    // schedule from 2.5 s here: its first wait, its doubling and its reset are
+    // read from the lines, and the row is re-stamped 3 s into a 5 s wait.
     restoreOutage();
+    restoreOutage = shortenOutage(2500);
     lines.length = 0;
     // Two synced notes beside the March billing note: consolidation has pairs
     // to judge once extraction drains, and a slow judge holds one in hand.
@@ -15078,25 +15143,25 @@ if (want("38")) {
     }, 40_000);
     missing = true;
     await capture("A note that wakes it before the model goes.", "op-sleep", 0, 5);
-    const refusedLater = await pollUntil(async () => lines.some((l) => /tries it again in 5 s/.test(l)), 20_000);
+    const refusedLater = await pollUntil(async () => lines.some((l) => /tries it again in 2\.5 s/.test(l)), 20_000);
     slowJudge = 0;
     const coOrder = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${CO} AND status = 'pending' ORDER BY enqueued_at, thought_id`).map((r: { id: string }) => r.id);
     assert(judgedInHand?.id !== undefined && coOrder.at(-1) === judgedInHand.id && !(await claims(CO)).claimed,
       `a wake with a judgement in hand returns it and moves it to the back of consolidation's queue too (${coOrder.indexOf(judgedInHand?.id as string)} of ${coOrder.length}${held ? "" : "; no judge call was held within 40 s"})`);
     const laterBeat = await beat();
-    // Still refused at the next try: the wait doubles (5 s, then 10 s).
-    const backedOff = await pollUntil(async () => lines.some((l) => /tries it again in 10 s/.test(l)), 30_000);
-    // Four seconds into the 10 s wait the row is fresh — re-stamped through
-    // the wait — not three of its 1 s intervals old (review pass 2).
-    await Bun.sleep(4000);
+    // Still refused at the next try: the wait doubles (2.5 s, then 5 s).
+    const backedOff = await pollUntil(async () => lines.some((l) => /tries it again in 5 s/.test(l)), 30_000);
+    // Three seconds into the 5 s wait the row is fresh — re-stamped through
+    // the wait — not two of its 1 s intervals old (review pass 2).
+    await Bun.sleep(3000);
     const waitAge = Number((await sql`SELECT extract(epoch FROM now() - updated_at)::float8 AS age FROM ob1_config WHERE key = 'heartbeat:sleep'`)[0]?.age ?? 99);
     const stillRunning = !retryDone;
     missing = false;
     const at = lines.length;
     const recovered = await pollUntil(async () => lines.slice(at).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 40_000);
-    assert(refusedLater && backedOff && stillRunning && laterBeat?.outcome === "failed" && laterBeat.ended !== true && recovered && waitAge < 3,
+    assert(refusedLater && backedOff && stillRunning && laterBeat?.outcome === "failed" && laterBeat.ended !== true && recovered && waitAge < 2,
       `a refusal by a pass that has run before is retried, not the end: --follow runs on, the row failed and stamped through the wait, the wait doubling, then ok once a sleep runs (${JSON.stringify(laterBeat)}; ${waitAge.toFixed(1)} s old mid-wait; doubled ${backedOff}, recovered ${recovered})`);
-    // A sleep that ran resets the schedule: the next refusal waits 5 s again.
+    // A sleep that ran resets the schedule: the next refusal waits 2.5 s again.
     // The model goes only once the capture has woken the recovered sleep, so
     // that sleep ends as one that ran: flipped before, consolidation joining
     // it could meet the 404 at its own start, a refusal retried on the same
@@ -15109,14 +15174,16 @@ if (want("38")) {
       if (woke) missing = true;
       return woke;
     }, 20_000);
-    const resetWait = await pollUntil(async () => lines.slice(at2).some((l) => /tries it again in (\d+) s/.test(l)), 20_000);
-    const firstWaitAgain = lines.slice(at2).find((l) => /tries it again in \d+ s/.test(l))?.match(/in (\d+) s/)?.[1];
+    const resetWait = await pollUntil(async () => lines.slice(at2).some((l) => /tries it again in [\d.]+ s/.test(l)), 20_000);
+    const firstWaitAgain = lines.slice(at2).find((l) => /tries it again in [\d.]+ s/.test(l))?.match(/in ([\d.]+) s/)?.[1];
     missing = false;
     const at3 = lines.length;
     const recoveredAgain = await pollUntil(async () => lines.slice(at3).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 30_000);
     // Failed once in a full run under PR 3 (no retry line in 20 s) and passed in the harness since: the scheduler's lines say why next time.
+    // The 2.5 s schedule restored first, so the section's own restore puts back the shipped one, not 2.5 s.
+    restoreOutage();
     restoreOutage = shortenOutage();
-    assert(resetWait && firstWaitAgain === "5" && recoveredAgain, `…and a sleep that ran resets the wait: the next refusal waits 5 s again (${firstWaitAgain} s; recovered ${recoveredAgain}${resetWait && firstWaitAgain === "5" ? "" : `; its lines since the capture: ${lines.slice(at2, at2 + 12).join(" | ").trim()}`})`);
+    assert(resetWait && firstWaitAgain === "2.5" && recoveredAgain, `…and a sleep that ran resets the wait: the next refusal waits 2.5 s again (${firstWaitAgain} s; recovered ${recoveredAgain}${resetWait && firstWaitAgain === "2.5" ? "" : `; its lines since the capture: ${lines.slice(at2, at2 + 12).join(" | ").trim()}`})`);
 
     // A provider outage mid-sleep: the follower waits it out (SMD-2599), the
     // row reads failed while it does and ok once a pass runs again — the
