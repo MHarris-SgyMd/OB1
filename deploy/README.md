@@ -192,7 +192,8 @@ docker compose -f compose.yaml -f compose.release.yaml up -d --wait   # --profil
 `up` without `--build`: `compose.yaml`'s `build:` stays under the overlay and is
 used only when asked, so a pinned stack never rebuilds behind the overlay's back.
 The server's log carries preflight's row for the brain the release's migrator
-wrote — `schema version   <X.Y.Z>+upstream.<sha> · highest migration NNN` — and
+wrote — `schema version   <X.Y.Z> · highest migration NNN` (a release before 2.0.0
+prints `<X.Y.Z>+upstream.<sha>`) — and
 warns, by name, when a brain is at another release than its server: a server
 older than its brain, or a brain migrated past the range its version names (both
 images carry `releases.json` as of the tag, so the second reads the release's
@@ -398,13 +399,13 @@ nothing is on compose's default network:
   own Ollama and Jev, which fetch their weights there and are called there by
   name.
 - `auth-egress`, outward: the authorization server's alone.
-- `front`, internal: the forwarder and the proxy alone, where the forwarder
-  reaches the proxy as `proxy.ob1.internal`.
+- `front`, internal: the forwarder, the break-glass listener and the proxy
+  alone, where each reaches the proxy as `proxy.ob1.internal`.
 - `telemetry`, internal: the observability profile's collector and its
   Postgres exporter alone, where the collector scrapes it as
   `pg-exporter.ob1.internal` (SMD-1849 PR 3b).
-- `edge`, outward: the forwarder's alone, where the stack's port is
-  published. The proxy is on internal networks alone (`front` and `mesh`),
+- `edge`, outward: the forwarder's and the break-glass listener's alone,
+  where their ports are published. The proxy is on internal networks alone (`front` and `mesh`),
   so a name it looks up that nothing holds is never asked of the host's
   resolvers.
 
@@ -416,10 +417,11 @@ network of its own, `postgres-port`, for its loopback port, and
 
 | Service | On the stack's networks | On the host | From another machine |
 | --- | --- | --- | --- |
-| `forwarder` | Listens on 8000, on `edge`, and dials the proxy alone, as `proxy.ob1.internal` on `front`, at an address on `front` and no other; it opens each connection with the PROXY protocol's line naming the client (SMD-2583) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port without `--profile orchestration`; the MCP server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
-| `proxy` | `proxy.ob1.internal:8000` on `front`, which the forwarder dials, and `proxy:8000` on `mesh`; it dials every backend on the `mesh` network, by a name resolved with no search domains: the MCP server (`mcp`) as `mcp.ob1.internal:8000`, the operator GUI (`app`) as `app.ob1.internal:8000`, `auth.ob1.internal:3000`, and — with `compose.api-public.yaml` named — `api.ob1.internal:8000`, and with `compose.grafana-public.yaml` `lgtm.ob1.internal:3000` | Nothing of its own: the forwarder's port | Through the forwarder |
+| `forwarder` | Listens on 8000, on `edge`, and dials the proxy alone, as `proxy.ob1.internal` on `front`, at an address on `front` and no other; it opens each connection with the PROXY protocol's line naming the client (SMD-2583) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port but the break-glass port under the `auth` profile and n8n's under `--profile orchestration`; the MCP server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
+| `breakglass` (`--profile auth`) | Listens on 8001, on `edge`, and dials the proxy's `breakglass` entrypoint alone, `proxy.ob1.internal:8001` on `front`, as the forwarder dials `web` — the forwarder's script, `--port 8001`. That entrypoint routes `/dashboard` alone, marked `X-OB1-Listener: breakglass`, which the `web` entrypoint deletes from every request on the origin (SMD-3307) | `127.0.0.1:${BREAKGLASS_PORT:-8001}`, a literal loopback with no `_BIND` knob: the operator GUI's key sign-in while the stack is configured, the authorization server up or down (`dashboard/README.md`, "Signing in") | Never: no tunnel or proxy points at it, and the operator signs in on the brain's machine |
+| `proxy` | `proxy.ob1.internal:8000` on `front`, which the forwarder dials, and `proxy:8000` on `mesh`; its break-glass entrypoint listens on 8001 on both, which the break-glass listener dials on `front` (the mesh's servers reach it too, as they reach the GUI itself); it dials every backend on the `mesh` network, by a name resolved with no search domains: the MCP server (`mcp`) as `mcp.ob1.internal:8000`, the operator GUI (`app`) as `app.ob1.internal:8000`, `auth.ob1.internal:3000`, and — with `compose.api-public.yaml` named — `api.ob1.internal:8000`, and with `compose.grafana-public.yaml` `lgtm.ob1.internal:3000` | Nothing of its own: the forwarder's port, and under the `auth` profile the break-glass port | Through the forwarder, or on this machine the break-glass listener |
 | `mcp` | `mcp.ob1.internal:8000` on the `mesh` network alone — the proxy. It dials the REST core as `api.ob1.internal:8000` and, on a stack configured with the authorization server, `auth.ob1.internal:3000` to trade a token, both on the mesh: no Postgres, no model provider, nothing outward (SMD-2287) | Nothing of its own: `/mcp`, `/health` and the protected-resource document on the proxy's port | Through the proxy |
-| `app` | `app.ob1.internal:8000` on the `mesh` network alone — the proxy. It dials the REST core as `api.ob1.internal:8000` with each visitor's own key: no Postgres, no model provider, nothing outward (SMD-2280) | Nothing of its own: `/dashboard` on the proxy's port. With `OB1_PUBLIC_ORIGIN` set, sign-in works at that origin only, not here, nor through the edge proxy's host for the brain | Through the proxy; behind TLS, set `OB1_PUBLIC_ORIGIN`, or its sign-in form is refused as cross-site (`dashboard/README.md`, "The origin") |
+| `app` | `app.ob1.internal:8000` on the `mesh` network alone — the proxy. It dials the REST core as `api.ob1.internal:8000` with each visitor's own key: no Postgres, no model provider, nothing outward (SMD-2280) | Nothing of its own: `/dashboard` on the proxy's port, and under the `auth` profile on the break-glass port. With `OB1_PUBLIC_ORIGIN` set, sign-in through the proxy works at that origin only, not here, nor through the edge proxy's host for the brain | Through the proxy; behind TLS, set `OB1_PUBLIC_ORIGIN`, or its sign-in form is refused, its origin not the one the GUI reads (`dashboard/README.md`, "The origin") |
 | `api` | `api.ob1.internal:8000` on the `mesh` network, and `api:8000` on `data` and `egress`, which every container there can reach — a key is still required for anything but `/health` and `/openapi.json`. It dials `postgres:5432` and the model provider as the server does | Nothing of its own: `/api` on the proxy's port, only with `compose.api-public.yaml` named ("The REST core" below) | Through the proxy, as the server, when `/api` is on |
 | `postgres` | `postgres:5432` on `data` alone — the migrator, the REST core, board-sync, the workers, the sleep scheduler and the import runner; from `egress` the name does not resolve and its address does not answer (CI's "Postgres answers on the data network alone") | Nothing. `compose exec postgres psql -U postgres openbrain` for psql, `compose exec -T postgres pg_dump -U postgres openbrain > dump.sql` for a backup. A tool run from a checkout (`db/reembed.ts`, `db/extract-entities.ts`, `db/consolidate.ts`, the evals) adds `-f deploy/compose.host-ports.yaml`, which publishes it on `127.0.0.1:${POSTGRES_PORT:-5432}` — choose that when the stack comes up: adding or dropping the file later recreates `postgres` and, through `depends_on`, `api` | Never. `POSTGRES_BIND` exists for a firewalled host you have looked at; it is the superuser on the whole brain |
 | `ollama` (`--profile local-models`) | `ollama:11434` on `egress` — the server and `ollama-pull` | Nothing. `compose exec ollama ollama pull <model>`; the host-ports file publishes it on `127.0.0.1:${OLLAMA_PORT:-11434}` for an eval run from a checkout | Not intended; an unauthenticated model API |
@@ -431,7 +433,7 @@ network of its own, `postgres-port`, for its loopback port, and
 | `orchestration-runner` (`--profile orchestration`) | `orchestration-runner:8090` on `egress`, which n8n's import templates dial with `OB1_RUNNER_KEY`; it dials `postgres:5432` on `data` as its own role, `ob1_orchestration_runner`, and the model provider, and for a live-API emitter the hosts its pipeline names. Its emitters dial nothing (SMD-2289) | Nothing | Nothing |
 | `lgtm` (`--profile observability`) | `lgtm.ob1.internal` on the `mesh` network: the MCP server and the REST core send their OTLP to `:4318` there, and with `compose.grafana-public.yaml` the proxy dials its Grafana at `:3000` for `/grafana`. On the internal `telemetry` network its collector scrapes `pg-exporter` every 30 s. Its Prometheus, Tempo, Loki and Pyroscope listen on its own loopback. It dials nothing else by itself — a data source its admin adds reaches any name on `mesh` or `telemetry` ("The observability profile" below) — and shares no network with Postgres or the model providers | Nothing by default. `compose.grafana-port.yaml` publishes its Grafana on `${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}`, an origin of its own; `compose.grafana-public.yaml` routes `/grafana` on the proxy's port | Grafana's own sign-in, anonymous access off: through a TLS proxy to the loopback port (`GRAFANA_ORIGIN` its https origin), or at `/grafana` with `compose.grafana-public.yaml`, which shares the stack's origin ("The observability profile" below) |
 | `pg-exporter` (`--profile observability`) | `pg-exporter.ob1.internal:9187` on the internal `telemetry` network, where lgtm's collector scrapes it at `/cgi-bin/metrics`, the one path that answers; nothing on `data` reaches that port, and the exporter itself listens on the container's loopback (SMD-3023). It dials `postgres:5432` on `data` as `ob1_monitor` (a member of `pg_monitor` alone). It shares no network with the model providers or the mesh | Nothing | Nothing |
-| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); it dials client metadata documents outward on `auth-egress`, its own, through its fetch guard. It shares no network with Postgres, Ollama, Jev, n8n or the workers, and holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
+| `auth` (`--profile auth`) | `auth.ob1.internal:3000` on the `mesh` network, which the proxy dials for `/auth` and the discovery paths ("One origin" below), and the MCP server for its `/healthz` probe (SMD-2382); its admin listener, `auth.ob1.internal:3001`, which the operator GUI's page of grants dials and no proxy rule routes to (SMD-3307 PR 3); it dials client metadata documents outward on `auth-egress`, its own, through its fetch guard. It shares no network with Postgres, Ollama, Jev, n8n or the workers, and holds no Postgres credential | Nothing of its own: `/auth` and the discovery paths on the proxy's port. `compose exec auth …` for the backup below | Through the proxy, as the server |
 
 A canary stood beside this
 stack (`deploy/canary.sh`, "A canary beside the stack" below) is this file
@@ -478,7 +480,7 @@ drops a probe of a closed port), so read `lsof`, not the error's wording.
 ## One origin: the proxy and its paths
 
 The stack's one origin is the `proxy` service (Traefik, pinned by digest), behind
-the one port the stack publishes (the forwarder's, below), and each service is a
+the one port the stack publishes for its clients (the forwarder's, below), and each service is a
 path on it rather than a port of its own (SMD-1846). The
 paths today:
 
@@ -488,7 +490,7 @@ paths today:
 | `/api` and everything under it | the proxy's bodiless 404 by default. With `compose.api-public.yaml` named (below), `api` — the REST core, as `api.ob1.internal` on the `mesh` network — with `/api` stripped: `/api/v1/stats` reaches it as `/v1/stats`, and the links it answers carry `/api` back |
 | `/hooks` and everything under it | the proxy's bodiless 404 by default. With `compose.hooks-public.yaml` named ("Plugins' webhooks" below), `api` — the REST core — path kept: `/hooks/<plugin>/<name>` is a plugin's inbound webhook, served only for a plugin `OB1_HOOKS` names (SMD-2310) |
 | `/mcp` and everything under it | `mcp` — the MCP server built on the REST core (SMD-2287), as `mcp.ob1.internal` on the `mesh` network: the MCP endpoint (POST), `GET /mcp/health`, `/mcp/worker-status`, `/mcp/jobs/<id>`; `GET /mcp` is its 405. Every tool is a call on the REST core, the caller's key beside this server's own forward key |
-| `/dashboard` and everything under it | `app` — the operator GUI (SMD-2280), as `app.ob1.internal` on the `mesh` network, path kept: sign in with a read or write access key, then the brain's counts and newest thoughts, every thought a page at a time by its filters, search by meaning or by exact text, what changed, supersession proposals, the worker queue and the query log, its status (`brain_info`), any thought and an enabled plugin's pages, each read from the REST core under that key. Key sign-in is off while `COMPOSE_PROFILES` names `auth` (`dashboard/README.md`). While `app` is stopped or starting, the proxy's own 502 |
+| `/dashboard` and everything under it | `app` — the operator GUI (SMD-2280), as `app.ob1.internal` on the `mesh` network, path kept: sign in with a read or write access key, then the brain's counts and newest thoughts, every thought a page at a time by its filters, search by meaning or by exact text, what changed, supersession proposals, the worker queue and the query log, its status (`brain_info`), any thought and an enabled plugin's pages, each read from the REST core under that key. Key sign-in is off here while `COMPOSE_PROFILES` names `auth`, and on only at the break-glass port (`dashboard/README.md`). While `app` is stopped or starting, the proxy's own 502 |
 | `/grafana` and everything under it | the proxy's bodiless 404 by default. With `compose.grafana-public.yaml` named ("The observability profile" below), `lgtm` (`--profile observability`), as `lgtm.ob1.internal` on the `mesh` network — its Grafana, serving from `/grafana`, path kept, behind its own sign-in. With the profile off, or the container stopped or still starting, the proxy's bodiless 404 too, and so is a 502 of Grafana's own (a data source it cannot reach) |
 | every path starting with `/canary` or `/working`, in any letter case | the proxy's own 404 (SMD-2874: a canary or a working tier is a brain of its own on its own port, and this stack routes none; from SMD-2294 to v2.0.0 a tier answered at `/canary/mcp` here, deprecated by SMD-3057 for a release before it went). No router matches them, so a client still given a tier's URL here reaches nothing; until v2.0.0 `tier-off` kept them off the legacy route, and went with it (SMD-2532) |
 | `GET`/`HEAD`/`OPTIONS /health` | `mcp` — liveness for a GET-only probe at the origin root: `ok`, or the brain's record with a read key; OPTIONS for a browser's CORS preflight |
@@ -2191,16 +2193,13 @@ quiet again `OB1_SLEEP_QUIET` seconds after the last one. A sleep runs at most
 only while nobody is using the brain.
 `db/README.md`, "Sleep", has the full rules.
 
-**What wakes it.** A write through a key that is not classified `ingested`
-(board-sync's sync writes are; the servers' vector mender's are marked
-background and do not wake it either), and a search, but only when the server logs
-searches (`OB1_QUERY_LOG=on`) and the scheduler's role may read the log. This
-stack's database URL is the owner's, which may. A role set up with
-`migrate.ts --grant` may only when granted the opt-in **sleep** group,
-`--groups <its groups>,sleep` (`db/README.md`, "Grants for a capturing role"),
-since the log holds every search's text. Otherwise only writes wake it, and
-it could run its passes through a session of searches. Preflight's `sleep`
-row says which applies, and whether it is asleep, with its last sleep.
+**What wakes it.** A live write: one through a key that is not classified
+`ingested` (board-sync's sync writes are; the servers' vector mender's are
+marked background and do not wake it either). That is the "live call" these
+sections name. A search does not wake it, whatever `OB1_QUERY_LOG` says: a
+running pass costs a search 24–33 ms, so its passes go on through a session of
+searches (SMD-3315). Preflight's `sleep` row says whether it is asleep, with
+its last sleep.
 
 **First start.** The same worker key as the `workers` profile (`OB1_WORKER_KEY`,
 its line in `MCP_ACCESS_KEYS`), then:
@@ -2669,7 +2668,7 @@ setting, each with the value compose read, quoted afresh, but for these:
   `OB1_TIER="canary"` and `COMPOSE_PROFILES=""` (SMD-2874), which canary.sh
   also hands compose in the shell on every call, with an empty
   `OB1_PUBLIC_ORIGIN`: the canary is loopback alone, and stable's origin would
-  have its operator GUI refuse sign-in as cross-site (SMD-2280). A file written
+  have its operator GUI refuse sign-in, its origin not the canary's (SMD-2280). A file written
   since carries none; one written before may hold stable's, which canary.sh's own
   calls override, but compose run by hand with that file does not: delete the
   line;
@@ -3497,7 +3496,10 @@ its client: it trades each OAuth token sent to `/mcp` for the REST core's,
 as the `mcp` client (SMD-2286), and serves `/mcp` as the `mcp` service
 since SMD-2287 PR 5b; the operator GUI signs the operator in through it as
 the confidential `gui` client, code and PKCE with a refresh token, with
-`OB1_AUTH_SECRET_GUI` (SMD-3307, `dashboard/README.md`). The
+`OB1_AUTH_SECRET_GUI` (SMD-3307, `dashboard/README.md`), and lists and
+revokes grants on its page of grants through the server's admin listener:
+port 3001 on the mesh, which no proxy rule routes to, taking the `gui`
+client's credentials alone (`auth/admin.ts`). The
 MCP server sends clients to it (SMD-2382): at the public origin, while
 this server answers its probe on the mesh, it serves the protected-resource
 document and answers a keyless `/mcp` with the 401 challenge naming it.
@@ -3513,7 +3515,7 @@ started with. It assumes the stack of step 1: compose reads the whole of
 #              COMPOSE_PROFILES=auth   (with any other profiles, comma-separated)
 bun deploy/auth/provision.ts --init   # once: the profile's secrets into deploy/.env (it keeps every value it finds)
 bun deploy/auth/provision.ts          # what the server would refuse, read from deploy/.env
-compose up -d --wait --wait-timeout 60 auth api mcp app proxy   # builds and starts it, recreates the REST core, the MCP server and the GUI on the new .env (each reads the switch; the GUI signs in through it, and its sessions start again), and waits
+compose up -d --wait --wait-timeout 60 auth api mcp app proxy breakglass   # builds and starts it, recreates the REST core, the MCP server and the GUI on the new .env (each reads the switch; the GUI signs in through it, and its sessions start again), starts the GUI's break-glass port on 127.0.0.1:${BREAKGLASS_PORT:-8001}, and waits
 ```
 
 `COMPOSE_PROFILES=auth` in `deploy/.env` is the switch (ADR decision 16): the
@@ -3620,9 +3622,11 @@ refused there; it reaches the REST core only exchanged by the MCP server.
   For a leaked token, act at this server instead. An access token dies
   within ten minutes on its own. A client can revoke its own refresh token
   (RFC 7009, `<origin>/auth/token/revocation`), which revokes its grant, as
-  the GUI's sign-out does its own. The operator's page of grants is SMD-3307's
-  third PR; until then, the compromise steps under "Custody and backups" below
-  end every grant.
+  the GUI's sign-out does its own. The operator revokes any client's on the
+  GUI's page of grants (`/dashboard/grants`, SMD-3307 PR 3): its refresh
+  tokens are refused at once, and the access token it holds lapses within
+  ten minutes (the maintainer's choice of 2026-10-26: no revocation list).
+  The compromise steps under "Custody and backups" below end every grant.
 - **The keys:** it reads this server's signing keys on the mesh and keeps
   them ten minutes, the tokens' lifetime, reading again after that or for a
   key it lacks, at most once in 30 s. Once the keys are stale and reads fail,
@@ -3731,8 +3735,9 @@ measured). Only these per-address limits read it. Two hops need the tunnel to wr
 `X-Forwarded-For` and the proxy to trust that header (Traefik's
 `forwardedHeaders.trustedIPs`, which compose does not set); a tunnel that
 passes the header through unwritten lets the client name entry 2. A password from `--init`, or one of 12 characters
-or more, is what holds against many addresses guessing; the loopback
-break-glass sign-in is SMD-2280's. The proxy in front sets no rate limit of
+or more, is what holds against many addresses guessing; a lockout's way in is the
+GUI's loopback break-glass port (`breakglass`, `127.0.0.1:${BREAKGLASS_PORT:-8001}`),
+which takes an access key whatever the server's state (SMD-3307). The proxy in front sets no rate limit of
 its own, by design ("No rate limits on `/mcp`, by design" above).
 
 **Custody and backups.**
@@ -3791,7 +3796,7 @@ in today, so leave the profile off where others' claude.ai connectors must
 keep working; turning it off again makes the document a 404, and they
 proceed on the key.
 Not yet: passkey sign-in, which needs the public origin (SMD-2382,
-SMD-2286), and the GUI's break-glass key sign-in and page of grants (SMD-3307's second and third PRs). The release overlay does not pin an image for it yet,
+SMD-2286). The release overlay does not pin an image for it yet,
 so the profile builds from a checkout.
 
 ## What this does not cover

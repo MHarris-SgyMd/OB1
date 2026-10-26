@@ -134,6 +134,16 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
   nothing. The
   registry busy on this server's own key is busy, `-32003` with `Retry-After`, not a
   misconfiguration.
+- **CORS.** `/mcp` answers every origin, `Access-Control-Allow-Origin: *`
+  (`mcp-edge.ts`'s `corsHeaders`), and reads no allowlist, on purpose (SMD-2113). A
+  browser-hosted client, claude.ai or the Claude Desktop connector, calls from an origin
+  that is its own, not the operator's, so an allowlist could only refuse clients. CORS is
+  not what guards the brain: every MCP call still needs a key or a token, as from any
+  other client, and this server reads no cookie, so a page has no ambient credential to
+  borrow. The REST core sets no CORS at all (`docs/vendored-disposition.md`,
+  `OPTIONS *`): a page reaches it same-origin or through a server of its own, as the
+  operator GUI does. `server-portable/test-server.ts`'s `corsOk` and `test-mcp.ts`'s
+  preflight case hold the answer, so changing it is a decision, not a drift.
 
 **Known differences from `index.ts` (found by the parity runs SMD-2287 PR 6a retired):**
 - **Writes** record the REST core's door, `open-brain-api`, with this server named as

@@ -392,8 +392,8 @@ const EXEMPT: Record<string, Record<string, [number, string]>> = {
     Check: [1, "the GUI's password-every-time check (SMD-3307): the library runs it inside its authorization request, as each of its own prompt checks, where a throw is that request's error answer; it reads a set and two properties and cannot throw"],
   },
   "store.ts": {
-    transaction: [1, "bun:sqlite wraps the purge in a transaction, which the store runs in line"],
-    assign: [4, "the adapter's factory and its methods: the provider calls them inside its request handling, and server.ts calls close, countClients and purge itself, in line"],
+    transaction: [2, "bun:sqlite wraps the purge and a grant's revocation in a transaction each, which the store runs in line"],
+    assign: [6, "the adapter's factory and its methods: the provider calls them inside its request handling, and server.ts calls close, countClients, purge, grants and dropGrant itself, in line"],
   },
   "fetch-guard.ts": {
     reject: [2, "a promise's reject, which cannot throw"],

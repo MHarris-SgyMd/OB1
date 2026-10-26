@@ -5,13 +5,24 @@
 // front's. It sends the PROXY protocol's v1 line first, so the proxy, and the authorization server's
 // per-address limits behind it, see each client's address rather than this one's. No dollar sign in
 // this file, which compose would read as a variable: the script is inline in compose.yaml.
+// `--port 8001` is the break-glass listener (SMD-3307), the `breakglass` service: the same forwarding,
+// on the port the proxy's `breakglass` entrypoint listens on, which routes the operator GUI alone.
 import net from "node:net";
 import { lookup } from "node:dns/promises";
 import { networkInterfaces, type NetworkInterfaceInfo } from "node:os";
 import { readFileSync } from "node:fs";
 
 const PROXY = "proxy.ob1.internal.";
-const PORT = 8000;
+/** The proxy's entrypoints a forwarder may front: `web` (8000), the origin, and `breakglass` (8001). */
+const ENTRYPOINTS = new Set([8000, 8001]);
+/** The port to listen on and dial, from `--port N`: 8000 unless named, and only one of ENTRYPOINTS. */
+export function portFrom(argv: string[]): number | null {
+  const i = argv.indexOf("--port");
+  if (i < 0) return 8000;
+  const n = Number(argv[i + 1]);
+  return ENTRYPOINTS.has(n) ? n : null;
+}
+const PORT = portFrom(process.argv) ?? 0;
 const DEADLINE_MS = 5000;
 
 const read = (path: string) => { try { return readFileSync(path, "utf8"); } catch { return ""; } };
@@ -225,11 +236,16 @@ if (process.argv.includes("--self-check")) {
     ["a v4 PROXY line, the mapped address plain", proxyLine({ remoteAddress: "::ffff:203.0.113.7", localAddress: "::ffff:10.89.9.2", remotePort: 51234, localPort: 8000 }) === "PROXY TCP4 203.0.113.7 10.89.9.2 51234 8000\r\n"],
     ["a v6 PROXY line", proxyLine({ remoteAddress: "2001:db8::7", localAddress: "fd00::1", remotePort: 1, localPort: 8000 }) === "PROXY TCP6 2001:db8::7 fd00::1 1 8000\r\n"],
     ["mixed families are UNKNOWN", proxyLine({ remoteAddress: "203.0.113.7", localAddress: "fd00::1", remotePort: 1, localPort: 8000 }) === "PROXY UNKNOWN\r\n"],
+    ["the port is 8000 unless named, 8001 when named, and none other", portFrom(["bun", "/forwarder.ts"]) === 8000 && portFrom(["bun", "/forwarder.ts", "--port", "8001"]) === 8001 && portFrom(["--port", "8002"]) === null && portFrom(["--port"]) === null && portFrom(["--port", "80"]) === null],
     ...(await joinCases()),
   ];
   for (const [name, ok] of cases) console.log((ok ? "ok   " : "FAIL ") + name);
   process.exit(cases.every(([, ok]) => ok) ? 0 : 1);
 }
 
+if (PORT === 0) {
+  console.error("forwarder: --port takes one of " + [...ENTRYPOINTS].join(", ") + ", the proxy's entrypoints");
+  process.exit(2);
+}
 net.createServer({ allowHalfOpen: true }, (client) => { void forward(client); })
   .listen(PORT, () => console.error("forwarder: listening on " + PORT + ", to " + PROXY + ":" + PORT + " on an internal network"));
