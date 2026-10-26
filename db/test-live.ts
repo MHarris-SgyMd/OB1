@@ -6750,11 +6750,11 @@ if (want("10h")) {
     asked = ownCalls;
     const reRun = await sweep();
     const filedNow = (await standingOf(filed))!, prNow = (await standingOf(pr))!, noneNow = (await standingOf(none))!;
-    assert(reRun.code === 1 && tally(reRun) === "2 subject(s) recorded (1 by the ticket filed under, 1 by stub-judge), 2 in place of a standing one; 2 the model named nothing for, 1 answered not as JSON of the expected shape"
+    assert(reRun.code === 1 && tally(reRun) === "2 subject(s) recorded (1 by the ticket filed under, 1 by stub-judge), 2 in place of a standing one; 2 the model named nothing for, 1 answered not as JSON of the expected shape, 1 with an out-of-date subject still standing"
       && filedNow.key === "ticket:SMD-7" && filedNow.judge === "subject:metadata@r1" && prNow.key === "pr:727" && prNow.judge === "subject:stub-judge@p2" && ownCalls === asked + 4,
       `the sweep finds version 1's subjects again under the current keys, each in place of the old (exit ${reRun.code}, ${ownCalls - asked} asked: ${tally(reRun)})`);
     assert(noneNow.key === "ticket:SMD-11" && noneNow.judge === "subject:rules@r1" && !(await subjects()).some((x) => x.standing && (x.judge === "subject:stub-judge@p1" || (x.judge === "subject:rules@r1" && x.thought !== none))),
-      "…and the one the model now names nothing for stands, out of date, for the next sweep to ask again; no other of version 1's stands");
+      "…and the one the model now names nothing for stands, out of date and counted, for the next sweep to ask again; no other of version 1's stands");
     // Another model's subject under the current question is current: the sweep's query reads subjectCurrent's "any
     // model" (review pass 1: [10h] held only stub-judge's, so a query keyed to the configured model passed).
     const another = await asV1(pr, "pr:727", "model", "subject:another-judge@p2");
@@ -6781,7 +6781,7 @@ if (want("10h")) {
       `…and a dry run under it counts, and says a run would be refused (review pass 2) (exit ${gatedDry.code})`);
     // A policy that lets one row out: the others refused before their question and counted, exit 1, as the pass fails a refused row.
     const perRow = await sweep({}, { ...gatedEnv, OB1_EGRESS_ALLOW: "marker:garbled" });
-    assert(perRow.code === 1 && ownCalls === asked + 1 && tally(perRow) === "0 subject(s) recorded; 1 answered not as JSON of the expected shape, 2 refused by the egress gate" && /refused by the egress gate: /.test(perRow.stderr),
+    assert(perRow.code === 1 && ownCalls === asked + 1 && tally(perRow) === "0 subject(s) recorded; 1 answered not as JSON of the expected shape, 2 refused by the egress gate, 1 with an out-of-date subject still standing" && /refused by the egress gate: /.test(perRow.stderr),
       `rows the policy keeps in are refused before their question and counted, the row it lets out asked, exit 1 (exit ${perRow.code}: ${tally(perRow)})`);
     asked = ownCalls;
     judgeMode = "refuse";

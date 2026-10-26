@@ -3026,11 +3026,12 @@ will do before it claims anything.
 **A thought's own subject (SMD-3306).** With each thought's entities the pass
 records its own subject when a rule finds it: the ticket it is filed under
 (`metadata.ticket`, else `metadata.issue`, the fields node_state reads), else a
-session summary's header ticket, when the capture hook's header names that one
+session summary's header ticket, when the capture hook's header lists that one
 alone and the session's title or listed prompts name it too, in any case. The
 hook's header lists the tickets a session's prompts named, and its branch's or
 directory's only when they named none: a session on a branch may have done other
-work, and a header naming several is the model's to choose among. A ticket-shaped word counts unless
+work, and a header listing several, or its full three, is the model's to choose
+among. A ticket-shaped word counts unless
 its prefix is on a fixed list of encodings, hashes, protocols, standards,
 licences, model names and dated periods, so `UTF-8`, `SHA-256` or `GPT-4` names
 no ticket, and a key is the same on every brain and every run. It goes through
@@ -3043,8 +3044,8 @@ keyed by no rule, or edited since), or one found under an older rule or question
 replacing the old one. The model is asked the subject's own question about the
 thought alone (`server-portable/subject.ts`'s `OWN_RULES`, version 2), and its
 answer is read into a key: the first ticket id in it, else the one PR it names
-(several, a range or a list are no PR), else a release's version, else the answer
-as a lower-case phrase. Version 1 read
+(`PRs`, a range or a list are none), else a release's version, else the answer as
+a lower-case phrase. The question asks for one subject: a ticket by its id alone. Version 1 read
 any note's first-line ticket and asked SMD-3299's round 4 question; on 160
 canary thoughts it agreed with fresh blind raters 0.910 of the time against
 their own 0.987 (Verify item 1), the filed ticket exact, a branch's ticket taken

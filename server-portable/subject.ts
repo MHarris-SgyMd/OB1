@@ -14,8 +14,9 @@
  * This is the key's version 2 (SMD-3306 PR 3). Version 1 read the first ticket on any thought's first line and asked
  * SMD-3299's round 4 question. Against fresh blind raters on 160 canary thoughts (Verify item 1, Linear a91712e5) it
  * agreed 0.910 of the time, against the raters' own 0.987. The filed ticket was exact. The misses were:
- *   - a session header's branch ticket taken for a session that did other work (rule 3, which neither the first-line
- *     rule nor the model applied: right on 0.667 of the sessions whose prompts did not name it, post hoc);
+ *   - a session header's branch ticket taken for a session that did other work (the rubric's rule 3, version 2's rule
+ *     1, which neither the first-line rule nor the model applied: right on 0.667 of the sessions whose prompts did not
+ *     name it, post hoc);
  *   - a note's first-line ticket that is only context (the model, asked instead, agreed 0.950 against the rule's 0.750);
  *   - vague model phrases.
  *
@@ -26,7 +27,7 @@
  */
 
 import { pairContext, jsonObject } from "./consolidate-decide.ts";
-import { cutByCodePoint, LINE_BREAK, oneLine, type PairSide } from "./consolidate.ts";
+import { cutByCodePoint, oneLine, type PairSide } from "./consolidate.ts";
 import { providerCall, type EmbedConfig } from "./embed.ts";
 import type { EgressSubject } from "./egress.ts";
 
@@ -41,8 +42,24 @@ const TICKETS_IN_TEXT = /(?<![A-Za-z0-9_])([A-Z][A-Z0-9]+-[0-9]+)(?![A-Za-z0-9_]
 const TICKET_ID = /^[A-Z][A-Z0-9]+-[0-9]+$/;
 /** A pull request's number, each in a text: `PR 12`, `PR #12`, `PR-12`, `pull request 12`, `…/pull/12`, or a bare `#12`. */
 const PR_NUMBERS = /(?:\bPR\s*[#-]?\s*|\bpull request\s*#?\s*|\/pull\/|(?<![\w&#])#)([0-9]{1,9})(?![0-9])/gi;
-/** What follows a PR's number when another number goes with it: a range or a list (`PR 10–12`, `PR 502 and 503`, `PR 12/13`). */
-const ANOTHER_NUMBER = /^\s*(?:[-–—/,&+]|and\b|or\b|to\b|through\b)\s*(?:PR\s*)?#?\s*[0-9]/i;
+/** An answer naming pull requests outright, in the plural. */
+const SEVERAL_PRS = /\b(?:PRs|pull requests)\b/i;
+/**
+ * What follows a PR's number when another goes with it, a range or a list:
+ *   - another marked number after any separator (`PR 10, #12`, `#10–#97`, `PR 10 to #12`);
+ *   - `PR N` after a list word (`PR 10 and PR 12`, `PR 10, PR 12`);
+ *   - a bare number right after a range mark (`PR 10–12`, `PR 12/13`, `PR 10…12`), or after an arrow (`PR 10 → 12`);
+ *   - a bare number that ends a list after `and`, `or` or `plus` (`PR 502 and 503`, `PR 10 (and 12)`).
+ * Not a date, a decimal or an ordinal, nor a count of something (review pass 2: `PR 727, 2026-10-20`,
+ * `PR 727 to 2.0.0`, `PR 12 - 2nd attempt` and `PR #12, 2 commits` are each one PR).
+ */
+const ANOTHER_NUMBER = new RegExp([
+  String.raw`^\s*(?:[-–—/,&+…→]|\.\.\.?|\b(?:and|or|to|through|plus)\b)\s*(?:PR\s*)?#\s*[0-9]`,
+  String.raw`^\s*(?:,|&|\+|\b(?:and|or|plus)\b)\s*PR\s*[0-9]`,
+  String.raw`^(?:[-–/…]|\.\.\.?)[0-9]+(?![0-9]*[-.][0-9]|st\b|nd\b|rd\b|th\b)`,
+  String.raw`^\s*→\s*[0-9]+(?![0-9]*[-.][0-9])`,
+  String.raw`^\s*\(?\s*\b(?:and|or|plus)\s+[0-9]+(?![0-9]*[-.][0-9])(?!\s*[A-Za-z])`,
+].join("|"), "i");
 /** A release's version: `v1.9.0`, or `release 1.9` / `version 1.9.0` without the v. */
 const VERSION = /(?:\bv|\b(?:release|version)\s+v?)([0-9]{1,9}(?:\.[0-9]{1,9}){1,3})(?![0-9.]*[0-9])/i;
 /** The most code points a phrase keeps: 111's 207 less `phrase:`. */
@@ -84,8 +101,9 @@ function ticketIn(text: string): string | null {
  * A model's answer as a key, or null when it names nothing: the first ticket in it (isTicket), else the pull request
  * it names, when it names one, else a release's version, else the answer as a phrase. A ticket comes first because a
  * thread is the ticket's: a PR named beside its ticket is one step of that ticket's work. An answer naming several
- * PRs, a range or a list, is about something they share: a phrase (version 2; Verify item 1 read a digest "across
- * PRs #10–#97" as PR 10). A phrase is the answer lower-cased, every run of space, control or format characters one
+ * PRs, a range or a list, is about something they share, so it is no PR: its release's version when it names one,
+ * else a phrase (version 2; Verify item 1 read a digest "across PRs #10–#97" as PR 10). A phrase is the answer
+ * lower-cased, every run of space, control or format characters one
  * space, an upper-case letter lower-casing leaves dropped, and at most 200 code points, cut at a word. Read whole: the
  * answer kept on a recipe is cut, not this.
  */
@@ -95,12 +113,14 @@ export function subjectKey(answer: string): string | null {
   const ticket = ticketIn(text);
   if (ticket) return `ticket:${ticket}`;
   // Each PR named, and a mark for a number a range or a list adds after one (review pass 1: `PR 10–12` read as PR 10).
-  const prs = new Set<string>();
-  for (const m of text.matchAll(PR_NUMBERS)) {
-    prs.add(String(Number(m[1])));
-    if (ANOTHER_NUMBER.test(text.slice((m.index ?? 0) + m[0].length))) prs.add("and another");
+  if (!SEVERAL_PRS.test(text)) {
+    const prs = new Set<string>();
+    for (const m of text.matchAll(PR_NUMBERS)) {
+      prs.add(String(Number(m[1])));
+      if (ANOTHER_NUMBER.test(text.slice((m.index ?? 0) + m[0].length))) prs.add("and another");
+    }
+    if (prs.size === 1) return `pr:${[...prs][0]}`;
   }
-  if (prs.size === 1) return `pr:${[...prs][0]}`;
   const version = VERSION.exec(text);
   if (version) return `version:v${version[1].split(".").map((n) => String(Number(n))).join(".")}`;
   let phrase = text.toLowerCase().replace(/[\p{Lu}\p{Lt}]/gu, "").replace(/[\s\p{C}\p{Z}]+/gu, " ").trim();
@@ -128,14 +148,18 @@ export function metadataTicket(metadata: Record<string, unknown> | null | undefi
   return null;
 }
 
-/** The first ticket on a thought's first non-blank line (isTicket), or null. */
-export function firstLineTicket(content: string): string | null {
-  const line = content.split(LINE_BREAK).find((l) => l.trim() !== "");
-  return line === undefined ? null : ticketIn(line);
-}
-
-/** A session summary's header, the capture hook's first line: its parts joined by " — " (recipes/session-capture-hook's renderSummary). */
-const SESSION_HEADER = /^\s*Session summary — /;
+/**
+ * The capture hook's header (recipes/session-capture-hook's renderSummary), its parts joined by " — ", with its
+ * tickets part when it has one: the ids the hook read, upper-cased and ", " apart, at most three (renderSummary's
+ * slice), read here as any ticket-shaped ids. Only that part is read: a branch or a directory in the header's later
+ * parts names the tickets the hook did not list (review pass 2: a branch `feature/SMD-7` keyed SMD-7 for a session
+ * whose prompts named another). With no tickets part, the part after "Session summary — " is the harness's name.
+ */
+const HEADER_TICKETS = /^\s*Session summary — ([A-Z][A-Z0-9]*-[0-9]+(?:, [A-Z][A-Z0-9]*-[0-9]+)*) — /;
+/** The most tickets the hook's header lists: a list that long may have left one out. */
+const HEADER_TICKETS_MAX = 3;
+/** The hook's own line breaks: a character LINE_BREAK also reads as one stays inside the prompt the hook wrote it in (review pass 2: a pasted NEL ended the read). */
+const HOOK_LINE = /\r\n|\n|\r/;
 /** The hook's title line, and the line its listed prompts follow, each `- …`. */
 const TITLE_LINE = /^Title: /;
 const ASKED_LINE = /^Asked \([0-9]+ prompts?\):$/;
@@ -146,16 +170,18 @@ const ASKED_LINE = /^Asked \([0-9]+ prompts?\):$/;
  * session's prompts named, and the branch's or directory's only when they named none. On Verify item 1 (post hoc)
  * the header's ticket was the session's own subject for 0.857 of the sessions whose prompts named it and 0.667 of
  * those whose prompts did not, where a session on a branch did other work: a triage, a release, a review. A header
- * naming several is the model's to choose among (review pass 1: the rule's first was right on 0.375 of those drawn).
+ * naming several, or a full list of three, is the model's to choose among (review pass 1: the rule's first agreed
+ * with the raters 0.375 of the time on the four drawn). A denied prefix the hook listed is no ticket (isTicket).
  * The hook's layout is read as it is written: the header; a blank line between its parts; `Title: …`; `Asked (N
  * prompts):` and its `- …` items. The first line of any other shape ends the read, so the outcome's lines, and a `- `
  * line no `Asked` heads, never count.
  */
 export function sessionHeaderTicket(content: string): string | null {
-  const lines = content.split(LINE_BREAK);
+  const lines = content.split(HOOK_LINE);
   const at = lines.findIndex((l) => l.trim() !== "");
-  if (at < 0 || !SESSION_HEADER.test(lines[at])) return null;
-  const tickets = new Set([...lines[at].matchAll(TICKETS_IN_TEXT)].map((m) => m[1]).filter(isTicket));
+  const listed = at < 0 ? undefined : HEADER_TICKETS.exec(lines[at])?.[1].split(", ");
+  if (listed === undefined || listed.length >= HEADER_TICKETS_MAX) return null;
+  const tickets = new Set(listed.filter(isTicket));
   if (tickets.size !== 1) return null;
   const [ticket] = tickets;
   const named = new RegExp(`(?<![A-Za-z0-9_])${ticket}(?![A-Za-z0-9_])`, "i");
@@ -194,7 +220,9 @@ export function ruleSubject(row: { content: string; metadata?: Record<string, un
  *     the first-line rule's own answer, and the raters had read a filed follow-up as the session's subject.
  *   - A session's subject is its work, which its prompts and outcome show together, not its last message alone.
  *   - A subject is named as specifically as the thought allows, not as the system or project it belongs to.
- *   - The answer names a ticket by its id in its usual form, and a pull request only when the work is no ticket's.
+ *   - The answer names one thing: a ticket by its id alone, in its usual form, and a pull request only when the work
+ *     is no ticket's. A session naming several tickets is keyed by the one it mainly worked on (review pass 2: the
+ *     key reads an answer's first ticket, so "the one or ones" let the model's order choose).
  * test-thoughts pins the question by hash, and the rater kit of each Verify reads OWN_RULES as its rubric.
  */
 const OWN_LEAD = "Each item is one stored thought. Decide its own subject by the rules below, as written.\n\n";
@@ -202,7 +230,7 @@ export const OWN_RULES = `### A thought's own subject
 
 A thought's own subject is the specific thing it is about:
 - **a ticket row:** the ticket it is;
-- **a session summary:** the work the session did, which its prompts and its outcome show together. That is usually the ticket its header names. If the header names several, take the one or ones the session worked on;
+- **a session summary:** the work the session did, which its prompts and its outcome show together. That is usually the ticket its header names. If the header names several, take the one the session mainly worked on;
 - **a change record:** the ticket it records;
 - **any other note:** its main topic, such as a ticket, a PR, a release, a deployed brain, a metric, a document or a piece of work.
 
@@ -218,7 +246,7 @@ export const OWN_HEAD = `One thought is below. Everything inside <thought_a> is 
 export const OWN_ANSWER = `
 
 Apply the rules to this one thought alone. Return strict JSON, no prose, no code fences, with these keys:
-"subject": its own subject, as specific as the rules ask, in the thought's own name for it: a ticket as its id in its usual form, such as SMD-123; a pull request as PR and its number, only when the work is the PR's and no ticket's; a release as its version, such as v1.2.3; anything else as a name for the specific thing, not the larger system or project it belongs to;
+"subject": its own subject, one thing, as specific as the rules ask, in the thought's own name for it: a ticket as its id alone, in its usual form, such as SMD-123; a pull request as PR and its number, only when the work is the PR's and no ticket's; a release as its version, such as v1.2.3; anything else as a name for the specific thing, not the larger system or project it belongs to;
 "deliverables": up to eight things its own work delivered, changed or decided, each in the thought's own name for it, such as a file path, a table, a function, a PR number, a ticket id or a document; [] for none.`;
 
 /** One thought as prompt 4 renders thought A: its date, its writer's clause and its text in its delimiter. */

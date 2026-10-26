@@ -27,7 +27,8 @@
  * meanwhile, under its old key, as it does through a `--subjects rules` run: the door closes a subject without
  * reading which one, so closing it here could close one a pass wrote since the sweep read the thought. Until SMD-3306
  * PR 4 records "asked, got nothing", such a thought is asked again at every sweep, and two thoughts alike can hold
- * different keys by when each was found; the summary counts those left with an out-of-date subject. So do an answer that is not JSON with
+ * different keys by when each was found; a run's summary counts those it leaves with an out-of-date subject still
+ * standing, and a dry run those it would. So do an answer that is not JSON with
  * a subject, a timeout or the provider refusing the thought's length, and a row the egress gate refuses, each
  * counted. A rate limit, a server error or a lost connection is paused for and retried (TRANSIENT_PAUSES_MS), then
  * ends the sweep; any other refusal of the request ends it, exit 2, as it ends the pass. A dry run writes and asks
@@ -321,7 +322,7 @@ async function sweep(
       recipe = subjectRecipe({ by: found.by });
     } else if (!MODEL || DRY_RUN) {
       n.left++;
-      // One holding a subject found at another text or under an older rule or question: a model's answer would replace it.
+      // One holding a subject found at another text or under an older rule or question: it stands until a model's answer replaces it.
       if (row.standing_key !== null) n.leftOutOfDate++;
       return true;
     } else {
@@ -336,6 +337,8 @@ async function sweep(
           : { code: 1, line: `\n  The provider is not answering after ${TRANSIENT_PAUSES_MS.length} pauses (${(e as Error).message.slice(0, 300)}): the sweep stops here; run it again.` };
         return false;
       }
+      // Each outcome below writes nothing: a subject out of date stands (the header's limit), counted.
+      if (row.standing_key !== null && (!("key" in a) || a.key === null || a.answer === null)) n.leftOutOfDate++;
       if ("egress" in a) {
         n.egress++;
         sayOnce("egress", `  ${row.id}: ${a.egress.slice(0, 300)}`);
@@ -370,6 +373,7 @@ async function sweep(
       const state = sqlState(e);
       if (state === "22023") {
         n.refusedKey++;
+        if (row.standing_key !== null) n.leftOutOfDate++;
         sayOnce("refusedKey", `  ${row.id}: record_thought_subject refused the key (${(e as Error).message.slice(0, 300)})`);
         return true;
       }
@@ -454,7 +458,7 @@ async function sweep(
   }
   const recorded = n.metadata + n.first_line + n.model;
   const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the session header's ticket"], [n.model, `by ${cfg.judgeModel}`]]);
-  const rest = clauses([[n.kept, "kept, at the text read now"], [n.named, "the model named nothing for"], [n.left, `left for the judge model (--subjects rules)${n.leftOutOfDate ? `, ${n.leftOutOfDate} with an out-of-date subject` : ""}`], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.stale, "edited mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"]]);
+  const rest = clauses([[n.kept, "kept, at the text read now"], [n.named, "the model named nothing for"], [n.left, "left for the judge model (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.stale, "edited mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"], [n.leftOutOfDate, "with an out-of-date subject still standing"]]);
   out(`\n  ${n.seen} thought(s) in ${elapsed}s${calls ? ` (${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s))` : ""}: ${recorded} subject(s) recorded${by ? ` (${by})` : ""}${n.replaced ? `, ${n.replaced} in place of a standing one` : ""}${rest ? `; ${rest}` : ""}`);
   if (endedBy) {
     err(endedBy.line);
