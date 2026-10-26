@@ -2193,16 +2193,13 @@ quiet again `OB1_SLEEP_QUIET` seconds after the last one. A sleep runs at most
 only while nobody is using the brain.
 `db/README.md`, "Sleep", has the full rules.
 
-**What wakes it.** A write through a key that is not classified `ingested`
-(board-sync's sync writes are; the servers' vector mender's are marked
-background and do not wake it either), and a search, but only when the server logs
-searches (`OB1_QUERY_LOG=on`) and the scheduler's role may read the log. This
-stack's database URL is the owner's, which may. A role set up with
-`migrate.ts --grant` may only when granted the opt-in **sleep** group,
-`--groups <its groups>,sleep` (`db/README.md`, "Grants for a capturing role"),
-since the log holds every search's text. Otherwise only writes wake it, and
-it could run its passes through a session of searches. Preflight's `sleep`
-row says which applies, and whether it is asleep, with its last sleep.
+**What wakes it.** A live write: one through a key that is not classified
+`ingested` (board-sync's sync writes are; the servers' vector mender's are
+marked background and do not wake it either). That is the "live call" these
+sections name. A search does not wake it, whatever `OB1_QUERY_LOG` says: a
+running pass costs a search 24–33 ms, so its passes go on through a session of
+searches (SMD-3315). Preflight's `sleep` row says whether it is asleep, with
+its last sleep.
 
 **First start.** The same worker key as the `workers` profile (`OB1_WORKER_KEY`,
 its line in `MCP_ACCESS_KEYS`), then:
