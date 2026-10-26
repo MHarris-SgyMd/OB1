@@ -64,8 +64,10 @@ export function originRefusal(request: Request, url: URL, port: number | null): 
 		: port === null
 			? "This break-glass port cannot take a sign-in: the dashboard's BREAKGLASS_PORT is not a port. Set it in deploy/.env and recreate app and breakglass."
 			: `The break-glass port takes a sign-in from http://127.0.0.1:${port}/dashboard/ alone (not localhost): open the dashboard at that address.`;
-	if (request.headers.get('x-sveltekit-action') === 'true' && request.headers.get('accept') === 'application/json') return Response.json({ type: 'failure', status: 403, data: JSON.stringify([{ error: 1 }, message]) });
-	return request.headers.get('accept') === 'application/json' ? Response.json({ message }, { status: 403 }) : new Response(message, { status: 403, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+	const json = request.headers.get('accept') === 'application/json';
+	if (json && request.headers.get('x-sveltekit-action') === 'true') return Response.json({ type: 'failure', status: 403, data: JSON.stringify([{ error: 1 }, message]) });
+	if (json) return Response.json({ message }, { status: 403 });
+	return new Response(message, { status: 403, headers: { 'content-type': 'text/plain; charset=utf-8' } });
 }
 
 /**

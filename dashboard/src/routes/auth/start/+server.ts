@@ -4,7 +4,6 @@ import { base } from '$app/paths';
 import type { RequestHandler } from './$types';
 import { authorizeUrl, newSignIn, oauthSettings } from '$lib/server/oauth';
 import { SIGNIN_COOKIE, SIGNIN_MAX_AGE, signInCookieOptions } from '$lib/server/session';
-import { onBreakGlass } from '$lib/server/listener';
 import { authReachability } from '../../../../../server-portable/oauth-edge.ts';
 
 // A sign-in through the authorization server starts here (SMD-3307): a binding
@@ -18,9 +17,9 @@ import { authReachability } from '../../../../../server-portable/oauth-edge.ts';
 // hooks.server.ts checks of every unsafe request, one with no body too (review
 // pass 3). Never on the break-glass port, whose key sign-in is the way in
 // there: the AS answers at the origin alone (SMD-3307).
-export const POST: RequestHandler = async ({ cookies, url, locals, request }) => {
+export const POST: RequestHandler = async ({ cookies, url, locals }) => {
 	const s = oauthSettings(env);
-	if (!s || locals.session || onBreakGlass(request) || !(await authReachability().reachable())) throw redirect(303, `${base}/signin`);
+	if (!s || locals.session || locals.breakglass || !(await authReachability().reachable())) throw redirect(303, `${base}/signin`);
 	const { binding, state, challenge } = newSignIn();
 	cookies.set(SIGNIN_COOKIE, binding, { ...signInCookieOptions(url), maxAge: SIGNIN_MAX_AGE });
 	throw redirect(303, authorizeUrl(s, state, challenge));

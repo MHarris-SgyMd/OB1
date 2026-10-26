@@ -7045,11 +7045,12 @@ const MCP_SERVICE = {
 };
 /**
  * compose.yaml's `app`, the operator GUI (SMD-2280), whole, its logging aside: the server's image run as
- * `bun ../dashboard/serve.ts` with auto-install off, holding no brain key — only the origin, the break-glass port and the configured
- * switch its sign-in reads (COMPOSE_PROFILES naming auth turns key sign-in off but on the break-glass port, ADR decision 16, so dropping or
- * pinning it would reopen that door), and the authorization server's secret for its `gui` client, the one secret it
- * holds, which signs the operator in through the AS while the stack is configured (SMD-3307) — on the mesh alone, its files read-only and no capability, its
- * health on its own path, and its wait on the REST core. A change to it is made here too, on purpose (review pass 1:
+ * `bun ../dashboard/serve.ts` with auto-install off, holding no brain key — only the origin, the break-glass port
+ * and the configured switch its sign-in reads (COMPOSE_PROFILES naming auth turns key sign-in off but on the
+ * break-glass port, ADR decision 16, so dropping or pinning it would reopen that door), and the authorization
+ * server's secret for its `gui` client, the one secret it holds, which signs the operator in through the AS while
+ * the stack is configured (SMD-3307) — on the mesh alone, its files read-only and no capability, its health on its
+ * own path, and its wait on the REST core. A change to it is made here too, on purpose (review pass 1:
  * a key list, a forwarder key, `user: root`, another image and COMPOSE_PROFILES dropped each passed the per-key rules).
  */
 const APP_SERVICE = {

@@ -91,9 +91,9 @@ if (publicOrigin && !problem) {
   env.PROTOCOL_HEADER = "x-forwarded-proto";
 }
 // Configured for the authorization server, the GUI signs in only through it (SMD-3307), as its `gui` client:
-// without the client's secret, or a sound origin to redirect through, it offers none on the origin (the break-glass
-// port takes an access key whatever its settings). Said at the
-// start, as the MCP server says its own (the sign-in page says it too).
+// without the client's secret, or a sound origin to redirect through, it offers none on the origin (the
+// break-glass port takes an access key whatever its settings). Said at the start, as the MCP server says its
+// own (the sign-in page says it too).
 if (configuredIn(env.COMPOSE_PROFILES)) {
   if (!env.OB1_AUTH_SECRET_GUI?.trim()) console.warn("dashboard: COMPOSE_PROFILES names auth but OB1_AUTH_SECRET_GUI is not set, so no sign-in is offered but an access key on the break-glass port: set it in deploy/.env (provision.ts --init writes it) and recreate app.");
   else if (!publicOrigin || problem) console.warn("dashboard: COMPOSE_PROFILES names auth but OB1_PUBLIC_ORIGIN is not a sound origin, so no sign-in through the authorization server is offered.");

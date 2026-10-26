@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 /**
  * smoke-breakglass.ts — the operator GUI's break-glass key sign-in (SMD-3307;
- * ADR decision 15), on a stack configured with the authorization server whose
- * authorization server is down, driven as a browser would: the origin through
+ * ADR decision 15), on a stack configured with the authorization server, that
+ * server down, driven as a browser would: the origin through
  * the forwarder's port, and the break-glass port the `breakglass` service
  * publishes on 127.0.0.1. CI's deploy-stack-auth job runs it on BREAKGLASS_PORT
  * 8002, first with --as-up while the authorization server answers (below),

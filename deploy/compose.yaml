@@ -2484,8 +2484,9 @@ networks:
   #          pg-exporter alone, where the collector scrapes it (SMD-1849
   #          PR 3b).
   #   edge   outward, the forwarder's and the break-glass listener's alone:
-  #          where their ports are published. The proxy is on internal networks alone, so a name it
-  #          looks up that nothing holds never reaches the host's resolvers.
+  #          where their ports are published. The proxy is on internal
+  #          networks alone, so a name it looks up that nothing holds never
+  #          reaches the host's resolvers.
   # An internal network has no route out and does not forward a name it does
   # not hold to the host's resolvers (measured on podman 6); it also
   # publishes no port, so Postgres's, in compose.host-ports.yaml, and

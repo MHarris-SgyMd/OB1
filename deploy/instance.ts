@@ -18,8 +18,8 @@
 // setting is read from the compose files' own mapping, the house form check 13 of
 // scripts/check-fork-consistency.ts holds, "${X_BIND:-127.0.0.1}:${X_PORT:-N}:C" (read a little more widely
 // here: any names, any default address), or its one literal loopback exception, "127.0.0.1:${X_PORT:-N}:C",
-// which names a port setting alone (the break-glass listener, SMD-3307). Who holds a port is read from every container, stopped ones included
-// (one takes its port back when it starts; Docker's stopped ones through their port bindings), of every runtime
+// which names a port setting alone (the break-glass listener, SMD-3307). Who holds a port is read from every
+// container, stopped ones included (one takes its port back when it starts; Docker's stopped ones through their port bindings), of every runtime
 // on PATH, by compose's labels: its project, its service, and the env files it was made from — the label compose
 // writes for --env-file or COMPOSE_ENV_FILES, or, made with neither, the `.env` of its project's directory. A
 // port no container publishes but a connection reaches is a process on the host. Exit 0 when the brain is its
@@ -39,7 +39,7 @@ const HOUSE = /^\$\{([A-Z][A-Z0-9_]*):-[^}]*\}:\$\{([A-Z][A-Z0-9_]*):-\d+\}:(\d+
 /** Check 13's named exception: a literal 127.0.0.1 with the port's setting alone (the break-glass listener, SMD-3307). */
 const LOOPBACK = /^127\.0\.0\.1:\$\{([A-Z][A-Z0-9_]*):-\d+\}:(\d+)$/;
 
-/** Each house-form mapping in a compose file's text, by service and container port. */
+/** Each house-form or literal loopback mapping in a compose file's text, by service and container port. */
 export function knobsIn(text: string): Knob[] {
   let doc: unknown;
   try { doc = Bun.YAML.parse(text); } catch { return []; }
@@ -48,8 +48,9 @@ export function knobsIn(text: string): Knob[] {
   for (const [service, def] of Object.entries(services)) {
     const ports = Array.isArray(def?.ports) ? def.ports : [];
     for (const p of ports) {
-      const m = typeof p === "string" ? HOUSE.exec(p.trim()) : null;
-      const l = typeof p === "string" ? LOOPBACK.exec(p.trim()) : null;
+      const item = typeof p === "string" ? p.trim() : "";
+      const m = HOUSE.exec(item);
+      const l = LOOPBACK.exec(item);
       if (m) out.push({ service, target: Number(m[3]), bind: m[1], port: m[2] });
       else if (l) out.push({ service, target: Number(l[2]), bind: null, port: l[1] });
     }
