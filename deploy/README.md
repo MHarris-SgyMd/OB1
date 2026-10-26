@@ -192,7 +192,8 @@ docker compose -f compose.yaml -f compose.release.yaml up -d --wait   # --profil
 `up` without `--build`: `compose.yaml`'s `build:` stays under the overlay and is
 used only when asked, so a pinned stack never rebuilds behind the overlay's back.
 The server's log carries preflight's row for the brain the release's migrator
-wrote — `schema version   <X.Y.Z>+upstream.<sha> · highest migration NNN` — and
+wrote — `schema version   <X.Y.Z> · highest migration NNN` (a release before 2.0.0
+prints `<X.Y.Z>+upstream.<sha>`) — and
 warns, by name, when a brain is at another release than its server: a server
 older than its brain, or a brain migrated past the range its version names (both
 images carry `releases.json` as of the tag, so the second reads the release's

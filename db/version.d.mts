@@ -22,13 +22,13 @@ export interface Release {
   frozenShas?: Record<string, string>;
 }
 
-/** The upstream commit the fork sits on — FORK.md's pin. */
+/** The upstream commit the fork sits on — FORK.md's pin, frozen; a release records it as data (releases.json's `upstream`). */
 export const UPSTREAM_PIN: string;
 
 /** The fork's repository URL, for compare links and release downloads. */
 export const REPO_URL: string;
 
-/** The current fork version, `MAJOR.MINOR.PATCH+upstream.<sha>`. */
+/** The current fork version: plain `MAJOR.MINOR.PATCH` from 2.0.0; 1.0.0 to 1.9.0 carried `+upstream.<sha>` (SMD-3317). */
 export const FORK_VERSION: string;
 
 /** First 12 hex of sha256 over a migration template — the ledger's identity. */

@@ -3094,6 +3094,18 @@ else {
     assert(olderJson.ok === true && olderJson.checks.some((c) => c.name === "schema version" && c.status === "warn"),
            "…carried as a warning in --json, under ok:true — a version mismatch never refuses the deploy");
 
+    // SMD-3317: from 2.0.0 a stamp is plain. Either form is judged by its core: a plain stamp ahead of the server
+    // warns as the pinned one does, and a plain stamp of the server's own core is the server's release.
+    await claims.unsafe("UPDATE ob1_config SET value = '9.9.9' WHERE key = 'schema_version'");
+    const olderPlain = await run(SQL_ENV);
+    assert(new RegExp(`schema version\\s+the brain is at 9\\.9\\.9 but this server is ${rx(FORK_VERSION)} — a server older than the brain`).test(olderPlain.out),
+           `a plain stamp ahead of the server warns as a pinned one does (${olderPlain.out.split("\n").find((l) => /schema version/.test(l))?.trim()})`);
+    const core = FORK_VERSION.split("+")[0];
+    await claims.unsafe(`UPDATE ob1_config SET value = '${core}' WHERE key = 'schema_version'`);
+    const sameCore = await run(SQL_ENV);
+    assert(new RegExp(`✓\\s+schema version\\s+${rx(core)} · highest migration (?:\\d+|unknown)`).test(sameCore.out),
+           `a plain stamp of the server's own core is that release, not a mismatch (${sameCore.out.split("\n").find((l) => /schema version/.test(l))?.trim()})`);
+
     await claims.unsafe("DELETE FROM ob1_config WHERE key = 'schema_version'");
     const absent = await run(SQL_ENV);
     assert(/schema version\s+ob1_config records no schema_version — this brain predates migration 044/.test(absent.out) && /bun migrate\.ts --url \$DATABASE_URL/.test(absent.out),
