@@ -5356,29 +5356,33 @@ if (want("10")) {
       // call's whole timeout, and a first stop 1 s into it returns at once,
       // where the probe would have run 3 s more (review pass 1; 8 s and 2 s into
       // it before SMD-3196). Timed from the probe's arrival, not the claim: a
-      // stop during the hung call takes another path, the call left to time out
-      // and no probe after it.
+      // stop during the hung call takes another path, the call left to time out,
+      // no probe after it and the thought recorded failed. The hang begins once
+      // the start's probe has answered, so the start never meets it.
       {
         const stopProbe = new AbortController();
         const probeLines: string[] = [];
         let returnedAt = 0;
         // Deleted when the case ends: left pending, it would be the one-shot run's first claim below.
         let slow = "";
+        const startProbes = probes;
         const probing = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 4, signal: stopProbe.signal, writer: { out: (l) => probeLines.push(l), err: (l) => probeLines.push(l) } }).then((c) => { returnedAt = Date.now(); return c; });
         try {
-          await Bun.sleep(1000);
+          // Its start's probe answered, then the settle the cases above give it (SMD-3196: a 1 s sleep stood in for both).
+          await pollUntil(async () => probes > startProbes, 10_000);
+          await Bun.sleep(500);
           down = "hang";
           downUntil = Date.now() + 60_000;
           slow = await seed("Yara watched the pager while the provider hung.");
-          await pollUntil(async () => (await claimRow(slow))?.status === "claimed", 5000);
+          const claimed = await pollUntil(async () => (await claimRow(slow))?.status === "claimed", 5000);
           const askedBefore = probesAsked;
           const probed = await pollUntil(async () => probesAsked > askedBefore, 15_000);
           await Bun.sleep(1000);
           const stoppedAt = Date.now();
           stopProbe.abort();
           const code = await probing;
-          assert(probed && code === 0 && returnedAt - stoppedAt < 2000 && (await claimRow(slow))?.status === "pending",
-                 `a first stop during a probe after a timeout ends it: the follower returns within 2 s, the thought back in the pool (exit ${code} after ${returnedAt - stoppedAt} ms, claim ${(await claimRow(slow))?.status}${probed ? "" : "; no probe came within 15 s of the claim"})`);
+          assert(claimed && probed && code === 0 && returnedAt - stoppedAt < 2000 && (await claimRow(slow))?.status === "pending",
+                 `a first stop during a probe after a timeout ends it: the follower returns within 2 s, the thought back in the pool (exit ${code} after ${returnedAt - stoppedAt} ms, claim ${(await claimRow(slow))?.status}${claimed ? "" : "; the thought was not claimed within 5 s"}${probed ? "" : "; no probe came within 15 s of the claim"})`);
         } finally {
           downUntil = 0;
           stopProbe.abort();
@@ -14486,9 +14490,10 @@ if (want("38")) {
     // The sleep begins the quiet after the capture above, and the transaction
     // about half a second after that capture, so it leads the sleep by the
     // quiet less that half second. It fails if the scheduler's own start, its
-    // passes' start checks, outlasts the quiet, or if more than the quiet
-    // passes between that capture and the transaction (the follower before
-    // stopping): the sleep then begins at once, and the lead is 0 or less.
+    // passes' start checks, outlasts the quiet less a poll (its first wait is
+    // at least one), or if more than the quiet passes between that capture and
+    // the transaction (the follower before stopping): the sleep then begins at
+    // once, and the lead is 0 or less.
     lines.length = 0;
     const ac2 = new AbortController();
     const late = sleepRun({ follow: true, quiet: 5, signal: ac2.signal });
@@ -14514,7 +14519,7 @@ if (want("38")) {
     ac2.abort();
     await late;
     const lead = sleptFrom === undefined ? NaN : (Date.parse(sleptFrom) - Date.parse(txBegan)) / 1000;
-    assert(lateWoke && lead > 0 && lead < 5, `a capture committed after the sleep began, in a transaction begun before it, wakes it (begun ${lead.toFixed(2)} s before the sleep, within its 5 s quiet; ${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
+    assert(lateWoke && lead > 0 && lead < 5, `a capture committed after the sleep began, in a transaction begun before it, wakes it (begun ${lead.toFixed(2)} s before the sleep, within its 5 s quiet${sleptFrom === undefined ? "; no open sleep mark within 5 s" : ""}; ${lines.filter((l) => /asleep:|awake:/.test(l)).join(" | ").trim().slice(0, 200)})`);
 
     // ── The re-derive pass, first (SMD-2679) ─────────────────────────────────
     // A lineage row whose windows a raw delete took is swept before
