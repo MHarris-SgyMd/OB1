@@ -48,14 +48,15 @@ const SEVERAL_PRS = /\b(?:PRs|pull requests)\b/i;
  * What follows a PR's number when an unmarked one goes with it, a range or a list (a second marked number, `#12` or
  * `PR 12`, is a second match of PR_NUMBERS already):
  *   - a bare number right after a range mark (`PR 10–12`, `PR 12/13`, `PR 10…12`), or after an arrow (`PR 10 → 12`);
- *   - a bare number that ends a list after `and`, `or` or `plus` (`PR 502 and 503`, `PR 10 (and 12)`).
+ *   - a bare number that ends a list after `and`, `or`, `plus`, `&`, `+` or a comma (`PR 502 and 503`, `PR 10 (and 12)`,
+ *     `PR 12 & 13`, `PR 12, 13`: review pass 3).
  * Not a date, a decimal or an ordinal, nor a count of something (review pass 2: `PR 727, 2026-10-20`,
  * `PR 727 to 2.0.0`, `PR 12 - 2nd attempt` and `PR #12, 2 commits` are each one PR).
  */
 const ANOTHER_NUMBER = new RegExp([
   String.raw`^(?:[-–/…]|\.\.\.?)[0-9]+(?![0-9]*[-.][0-9]|st\b|nd\b|rd\b|th\b)`,
   String.raw`^\s*→\s*[0-9]+(?![0-9]*[-.][0-9])`,
-  String.raw`^\s*\(?\s*\b(?:and|or|plus)\s+[0-9]+(?![0-9]*[-.][0-9])(?!\s*[A-Za-z])`,
+  String.raw`^\s*\(?\s*(?:\b(?:and|or|plus)\b|[&+,])\s*[0-9]+(?![0-9]*[-.][0-9])(?!\s*[A-Za-z])`,
 ].join("|"), "i");
 /** A release's version: `v1.9.0`, or `release 1.9` / `version 1.9.0` without the v. */
 const VERSION = /(?:\bv|\b(?:release|version)\s+v?)([0-9]{1,9}(?:\.[0-9]{1,9}){1,3})(?![0-9.]*[0-9])/i;
@@ -95,7 +96,8 @@ function ticketIn(text: string): string | null {
 }
 
 /**
- * A model's answer as a key, or null when it names nothing: the first ticket in it (isTicket), else the pull request
+ * A model's answer as a key, or null when it names nothing: the first ticket in it (isTicket; with `named`, one the
+ * thought names, askOwnSubject's guard), else the pull request
  * it names, when it names one, else a release's version, else the answer as a phrase. A ticket comes first because a
  * thread is the ticket's: a PR named beside its ticket is one step of that ticket's work. An answer naming several
  * PRs, a range or a list, is about something they share, so it is no PR: its release's version when it names one,
@@ -104,9 +106,17 @@ function ticketIn(text: string): string | null {
  * space, an upper-case letter lower-casing leaves dropped, and at most 200 code points, cut at a word. Read whole: the
  * answer kept on a recipe is cut, not this.
  */
-export function subjectKey(answer: string): string | null {
-  const text = oneLine(answer);
-  if (!text) return null;
+export function subjectKey(answer: string, named?: (id: string) => boolean): string | null {
+  let text = oneLine(answer);
+  // With `named`, a ticket the thought itself does not name is dropped from the answer: the model's invention, or its
+  // copy of the question's example (review pass 3). What is left is read as before; nothing but marks left, none.
+  if (named) {
+    let dropped = false;
+    text = text.replace(TICKETS_IN_TEXT, (id) => (isTicket(id) && !named(id) ? ((dropped = true), " ") : id));
+    // The marks a dropped ticket leaves at either end (`SMD-999: the review` is `the review`).
+    if (dropped) text = oneLine(text).replace(/^[\p{P}\p{S}\s]+|[\p{P}\p{S}\s]+$/gu, "");
+  }
+  if (!text || !/[\p{L}\p{N}]/u.test(text)) return null;
   const ticket = ticketIn(text);
   if (ticket) return `ticket:${ticket}`;
   // Each PR named, and a mark for a number a range or a list adds after one (review pass 1: `PR 10–12` read as PR 10).
@@ -157,21 +167,26 @@ const HEADER_TICKETS = /^\s*Session summary — ([A-Z][A-Z0-9]*-[0-9]+(?:, [A-Z]
 const HEADER_TICKETS_MAX = 3;
 /** The hook's own line breaks: a character LINE_BREAK also reads as one stays inside the prompt the hook wrote it in (review pass 2: a pasted NEL ended the read). */
 const HOOK_LINE = /\r\n|\n|\r/;
-/** The hook's title line, and the line its listed prompts follow, each `- …`. */
+/**
+ * The hook's title line, passed over: renderSummary writes the harness's own title when it has one (Claude Code's
+ * `ai-title`), else the first prompt, so a title can name the branch's ticket no prompt named (review pass 3: a
+ * session on `smd-55-x` whose one prompt was "continue", titled "Continue SMD-55 work"). And the line the listed
+ * prompts follow, each `- …`, which are read.
+ */
 const TITLE_LINE = /^Title: /;
 const ASKED_LINE = /^Asked \([0-9]+ prompts?\):$/;
 
 /**
- * A session summary's header ticket, when the header names one ticket alone and the session's title or listed prompts
- * name it too, in any case, as the hook reads a prompt's tickets; else null. The hook's header lists the tickets the
+ * A session summary's header ticket, when the header names one ticket alone and one of the session's listed prompts
+ * names it too, in any case, as the hook reads a prompt's tickets; else null. The hook's header lists the tickets the
  * session's prompts named, and the branch's or directory's only when they named none. On Verify item 1 (post hoc)
  * the header's ticket was the session's own subject for 0.857 of the sessions whose prompts named it and 0.667 of
  * those whose prompts did not, where a session on a branch did other work: a triage, a release, a review. A header
  * naming several, or a full list of three, is the model's to choose among (review pass 1: the rule's first agreed
  * with the raters 0.375 of the time on the four drawn). A denied prefix the hook listed is no ticket (isTicket).
- * The hook's layout is read as it is written: the header; a blank line between its parts; `Title: …`; `Asked (N
- * prompts):` and its `- …` items. The first line of any other shape ends the read, so the outcome's lines, and a `- `
- * line no `Asked` heads, never count.
+ * The hook's layout is read as it is written: the header; a blank line between its parts; `Title: …`, passed over;
+ * `Asked (N prompts):` and its `- …` items, read. The first line of any other shape ends the read, so the outcome's
+ * lines, and a `- ` line no `Asked` heads, never count.
  */
 export function sessionHeaderTicket(content: string): string | null {
   const lines = content.split(HOOK_LINE);
@@ -184,10 +199,11 @@ export function sessionHeaderTicket(content: string): string | null {
   const named = new RegExp(`(?<![A-Za-z0-9_])${ticket}(?![A-Za-z0-9_])`, "i");
   let asked = false;
   for (const line of lines.slice(at + 1)) {
-    if (line.trim() === "") continue;
-    if (ASKED_LINE.test(line)) asked = true;
-    else if (!TITLE_LINE.test(line) && !(asked && line.startsWith("- "))) break;
-    else if (named.test(line)) return ticket;
+    if (line.trim() === "" || (!asked && TITLE_LINE.test(line))) continue;
+    if (!asked && ASKED_LINE.test(line)) asked = true;
+    else if (asked && line.startsWith("- ")) {
+      if (named.test(line)) return ticket;
+    } else break;
   }
   return null;
 }
@@ -306,8 +322,8 @@ export function subjectCurrent(by: string | null, judge: string | null): boolean
  * The judge model's own subject for one thought: one call at the chat endpoint, as decide mode's writer is asked,
  * through providerCall, which refuses before the request when the egress gate says the row may not leave (kind
  * `egress`) and bounds it by `cfg.timeoutMs`. `answer` is the subject at most 200 code points, for a recipe, null when
- * the answer gave no subject string; `key` is read from the subject whole (subjectKey), null when it named nothing a
- * key holds.
+ * the answer gave no subject string; `key` is read from the subject whole (subjectKey), a ticket only when the thought's
+ * own text names it, and null when it named nothing a key holds.
  */
 export async function askOwnSubject(cfg: EmbedConfig, side: PairSide, subject: EgressSubject, signal?: AbortSignal): Promise<{ raw: string; answer: string | null; key: string | null }> {
   const d = await providerCall<{ choices?: { message?: { content?: string } }[] }>(cfg, "/chat/completions", {
@@ -315,5 +331,7 @@ export async function askOwnSubject(cfg: EmbedConfig, side: PairSide, subject: E
   }, subject, signal);
   const raw = d?.choices?.[0]?.message?.content ?? "";
   const whole = ownSubjectOf(raw, SUBJECT_READ_MAX);
-  return { raw, answer: whole === null ? null : cutByCodePoint(whole, 200), key: whole === null ? null : subjectKey(whole) };
+  // A ticket counts when the thought names it, in any case: a branch's lower-case id is the thought's own name for it.
+  const named = (id: string) => new RegExp(`(?<![A-Za-z0-9_])${id}(?![A-Za-z0-9_])`, "i").test(side.content);
+  return { raw, answer: whole === null ? null : cutByCodePoint(whole, 200), key: whole === null ? null : subjectKey(whole, named) };
 }

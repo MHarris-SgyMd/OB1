@@ -6683,7 +6683,7 @@ if (want("10h")) {
     // The sweep: a dry run, then the rules alone, ask no model and write nothing.
     let asked = ownCalls;
     const dry = await sweep({ dryRun: true });
-    assert(dry.code === 0 && /^ {2}5 thought\(s\) with no subject at their text by the current rules and question$/m.test(dry.stdout) && /would: of 5 thought\(s\), record none by the rules; ask stub-judge about 5\. Nothing was written or asked\./.test(dry.stdout) && ownCalls === asked && (await subjects()).length === 3,
+    assert(dry.code === 0 && /^ {2}5 thought\(s\) with no current subject: none at their text, or one found under an older rule or question$/m.test(dry.stdout) && /would: of 5 thought\(s\), record none by the rules; ask stub-judge about 5\. Nothing was written or asked\./.test(dry.stdout) && ownCalls === asked && (await subjects()).length === 3,
       `--subjects --dry-run counts the five no rule keys, asks nothing and writes nothing (exit ${dry.code}: ${dry.stdout.trim().split("\n").slice(-1)[0]})`);
     // A dry run reads on: a signal aborted before it changes nothing (review pass 1: it read none and exited 0).
     const dryStopped = await sweep({ dryRun: true, signal: AbortSignal.abort() });
@@ -6742,15 +6742,16 @@ if (want("10h")) {
     const fpOf = async (id: string) => ((await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${id}::uuid`)[0] as { fp: string }).fp;
     const asV1 = async (id: string, key: string, by: string, judge: string) =>
       ((await sql`SELECT record_thought_subject(${id}::uuid, ${key}, ${by}, ${judge}, NULL, ${await fpOf(id)}, NULL) AS r`)[0].r as { action: string }).action;
-    const v1 = [await asV1(filed, "ticket:SMD-7", "metadata", "subject:rules@r1"), await asV1(pr, "pr:727", "model", "subject:stub-judge@p1"), await asV1(none, "ticket:SMD-11", "first_line", "subject:rules@r1")];
+    // The filed thought's version 1 key is another ticket's, so the run reports a new key (review pass 3).
+    const v1 = [await asV1(filed, "ticket:SMD-70", "metadata", "subject:rules@r1"), await asV1(pr, "pr:727", "model", "subject:stub-judge@p1"), await asV1(none, "ticket:SMD-11", "first_line", "subject:rules@r1")];
     assert(v1.join() === "replaced,replaced,added", `version 1's subjects written as PR 2 wrote them: its rules key, its question's (${v1.join(", ")})`);
     const reDry = await sweep({ dryRun: true });
-    assert(reDry.code === 0 && /would: of 5 thought\(s\), record 1 by the ticket each is filed under \(1 in place of a standing subject\); ask stub-judge about 4 \(2 with an out-of-date subject\)\./.test(reDry.stdout),
+    assert(reDry.code === 0 && /would: of 5 thought\(s\), record 1 by the ticket each is filed under \(1 in place of a standing subject, 1 with a new key\); ask stub-judge about 4 \(2 with an out-of-date subject\)\./.test(reDry.stdout),
       `a dry run counts them as a run would: the filed ticket found again in place of version 1's, the rest the model's (exit ${reDry.code}: ${reDry.stdout.trim().split("\n").slice(-1)[0]})`);
     asked = ownCalls;
     const reRun = await sweep();
     const filedNow = (await standingOf(filed))!, prNow = (await standingOf(pr))!, noneNow = (await standingOf(none))!;
-    assert(reRun.code === 1 && tally(reRun) === "2 subject(s) recorded (1 by the ticket filed under, 1 by stub-judge), 2 in place of a standing one; 2 the model named nothing for, 1 answered not as JSON of the expected shape, 1 with an out-of-date subject still standing"
+    assert(reRun.code === 1 && tally(reRun) === "2 subject(s) recorded (1 by the ticket filed under, 1 by stub-judge), 2 in place of a standing one (1 with a new key); 2 the model named nothing for, 1 answered not as JSON of the expected shape — among them, 1 with an out-of-date subject still standing"
       && filedNow.key === "ticket:SMD-7" && filedNow.judge === "subject:metadata@r1" && prNow.key === "pr:727" && prNow.judge === "subject:stub-judge@p2" && ownCalls === asked + 4,
       `the sweep finds version 1's subjects again under the current keys, each in place of the old (exit ${reRun.code}, ${ownCalls - asked} asked: ${tally(reRun)})`);
     assert(noneNow.key === "ticket:SMD-11" && noneNow.judge === "subject:rules@r1" && !(await subjects()).some((x) => x.standing && (x.judge === "subject:stub-judge@p1" || (x.judge === "subject:rules@r1" && x.thought !== none))),
@@ -6759,7 +6760,7 @@ if (want("10h")) {
     // model" (review pass 1: [10h] held only stub-judge's, so a query keyed to the configured model passed).
     const another = await asV1(pr, "pr:727", "model", "subject:another-judge@p2");
     const anotherDry = await sweep({ dryRun: true });
-    assert(another === "replaced" && /^ {2}3 thought\(s\) with no subject at their text by the current rules and question$/m.test(anotherDry.stdout)
+    assert(another === "replaced" && /^ {2}3 thought\(s\) with no current subject: none at their text, or one found under an older rule or question$/m.test(anotherDry.stdout)
       && /ask stub-judge about 3 \(1 with an out-of-date subject\)\./.test(anotherDry.stdout),
       `another model's subject at the current question is current, not taken (exit ${anotherDry.code}: ${anotherDry.stdout.trim().split("\n").slice(-1)[0]})`);
 
@@ -6781,7 +6782,7 @@ if (want("10h")) {
       `…and a dry run under it counts, and says a run would be refused (review pass 2) (exit ${gatedDry.code})`);
     // A policy that lets one row out: the others refused before their question and counted, exit 1, as the pass fails a refused row.
     const perRow = await sweep({}, { ...gatedEnv, OB1_EGRESS_ALLOW: "marker:garbled" });
-    assert(perRow.code === 1 && ownCalls === asked + 1 && tally(perRow) === "0 subject(s) recorded; 1 answered not as JSON of the expected shape, 2 refused by the egress gate, 1 with an out-of-date subject still standing" && /refused by the egress gate: /.test(perRow.stderr),
+    assert(perRow.code === 1 && ownCalls === asked + 1 && tally(perRow) === "0 subject(s) recorded; 1 answered not as JSON of the expected shape, 2 refused by the egress gate — among them, 1 with an out-of-date subject still standing" && /refused by the egress gate: /.test(perRow.stderr),
       `rows the policy keeps in are refused before their question and counted, the row it lets out asked, exit 1 (exit ${perRow.code}: ${tally(perRow)})`);
     asked = ownCalls;
     judgeMode = "refuse";

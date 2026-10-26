@@ -27,8 +27,9 @@
  * meanwhile, under its old key, as it does through a `--subjects rules` run: the door closes a subject without
  * reading which one, so closing it here could close one a pass wrote since the sweep read the thought. Until SMD-3306
  * PR 4 records "asked, got nothing", such a thought is asked again at every sweep, and two thoughts alike can hold
- * different keys by when each was found; a run's summary counts those it leaves with an out-of-date subject still
- * standing, and a dry run those it would. So do an answer that is not JSON with
+ * different keys by when each was found. A run's summary says how many of the thoughts it finished keep an
+ * out-of-date subject; a dry run, how many of those it would ask hold one, and how many of the rules' replacements
+ * would take a new key (a model's it cannot know before asking). So do an answer that is not JSON with
  * a subject, a timeout or the provider refusing the thought's length, and a row the egress gate refuses, each
  * counted. A rate limit, a server error or a lost connection is paused for and retried (TRANSIENT_PAUSES_MS), then
  * ends the sweep; any other refusal of the request ends it, exit 2, as it ends the pass. A dry run writes and asks
@@ -225,13 +226,14 @@ async function sweep(
     return 2;
   }
   const todo = LIMIT ? Math.min(LIMIT, total) : total;
-  out(`  ${total} thought(s) with no subject at their text by the current rules and question${LIMIT ? `; this run takes at most ${LIMIT}` : ""}`);
+  out(`  ${total} thought(s) with no current subject: none at their text, or one found under an older rule or question${LIMIT ? `; this run takes at most ${LIMIT}` : ""}`);
 
   /**
    * `seen`: the thoughts finished, each in one of the buckets after it, so the summary's counts add up to it (review
    * pass 2: a thought the sweep ended at was counted and in none). `taken`, for --limit, counts that one too.
+   * `replaced` and `newKey` count within the recorded ones, and `leftOutOfDate` within the rest: no bucket of their own.
    */
-  const n = { seen: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, kept: 0, named: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, gone: 0, refusedKey: 0, egress: 0 };
+  const n = { seen: 0, metadata: 0, first_line: 0, model: 0, replaced: 0, newKey: 0, kept: 0, named: 0, unread: 0, unanswered: 0, left: 0, leftOutOfDate: 0, stale: 0, gone: 0, refusedKey: 0, egress: 0 };
   let taken = 0;
   let llmMs = 0;
   let calls = 0;
@@ -312,7 +314,10 @@ async function sweep(
       if (row.standing_key === found.key && row.standing_by === found.by && row.standing_judge === subjectRuleKey(found.by)) n.kept++;
       else {
         n[found.by]++;
-        if (row.standing_key !== null) n.replaced++;
+        if (row.standing_key !== null) {
+          n.replaced++;
+          if (row.standing_key !== found.key) n.newKey++;
+        }
       }
       return true;
     }
@@ -392,7 +397,11 @@ async function sweep(
     else if (w.action === "kept") n.kept++;
     else if (w.action === "added" || w.action === "replaced") {
       n[by]++;
-      if (w.action === "replaced") n.replaced++;
+      if (w.action === "replaced") {
+        n.replaced++;
+        // Review pass 3: the replacements of a version's bump mostly keep their key; how many changed is what a reader wants.
+        if (row.standing_key !== key) n.newKey++;
+      }
     }
     return true;
   }
@@ -449,7 +458,7 @@ async function sweep(
       return endedBy.code;
     }
     out(`\n  would: of ${n.seen} thought(s), record ${clauses([[n.metadata, "by the ticket each is filed under"], [n.first_line, "by its session header's ticket"]]) || "none by the rules"}` +
-      (n.replaced ? ` (${n.replaced} in place of a standing subject)` : "") +
+      (n.replaced ? ` (${n.replaced} in place of a standing subject, ${n.newKey} with a new key)` : "") +
       (n.kept ? `, keep ${n.kept} found the same way at the text read now` : "") + "; " +
       (MODEL ? `ask ${cfg.judgeModel} about ${n.left}` : `leave ${n.left} for the judge model (--subjects without rules)`) +
       (n.leftOutOfDate ? ` (${n.leftOutOfDate} with an out-of-date subject)` : "") + ". Nothing was written or asked." +
@@ -458,8 +467,9 @@ async function sweep(
   }
   const recorded = n.metadata + n.first_line + n.model;
   const by = clauses([[n.metadata, "by the ticket filed under"], [n.first_line, "by the session header's ticket"], [n.model, `by ${cfg.judgeModel}`]]);
-  const rest = clauses([[n.kept, "kept, at the text read now"], [n.named, "the model named nothing for"], [n.left, "left for the judge model (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.stale, "edited mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"], [n.leftOutOfDate, "with an out-of-date subject still standing"]]);
-  out(`\n  ${n.seen} thought(s) in ${elapsed}s${calls ? ` (${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s))` : ""}: ${recorded} subject(s) recorded${by ? ` (${by})` : ""}${n.replaced ? `, ${n.replaced} in place of a standing one` : ""}${rest ? `; ${rest}` : ""}`);
+  const rest = clauses([[n.kept, "kept, at the text read now"], [n.named, "the model named nothing for"], [n.left, "left for the judge model (--subjects rules)"], [n.unread, "answered not as JSON of the expected shape"], [n.unanswered, "unanswered"], [n.stale, "edited mid-sweep"], [n.gone, "deleted mid-sweep"], [n.egress, "refused by the egress gate"], [n.refusedKey, "keys refused"]]);
+  const outOfDate = n.leftOutOfDate ? ` — among them, ${n.leftOutOfDate} with an out-of-date subject still standing` : "";
+  out(`\n  ${n.seen} thought(s) in ${elapsed}s${calls ? ` (${(llmMs / 1000).toFixed(1)}s in ${calls} model call(s))` : ""}: ${recorded} subject(s) recorded${by ? ` (${by})` : ""}${n.replaced ? `, ${n.replaced} in place of a standing one (${n.newKey} with a new key)` : ""}${rest ? `; ${rest}${outOfDate}` : ""}`);
   if (endedBy) {
     err(endedBy.line);
     return endedBy.code;

@@ -3027,7 +3027,8 @@ will do before it claims anything.
 records its own subject when a rule finds it: the ticket it is filed under
 (`metadata.ticket`, else `metadata.issue`, the fields node_state reads), else a
 session summary's header ticket, when the capture hook's header lists that one
-alone and the session's title or listed prompts name it too, in any case. The
+alone and one of the session's listed prompts names it too, in any case (not its
+title, which may be the harness's own and name the branch's ticket). The
 hook's header lists the tickets a session's prompts named, and its branch's or
 directory's only when they named none: a session on a branch may have done other
 work, and a header listing several, or its full three, is the model's to choose
@@ -3043,7 +3044,8 @@ keyed by no rule, or edited since), or one found under an older rule or question
 — gets the rules' subject, else the judge model's (`OB1_JUDGE_MODEL`), the door
 replacing the old one. The model is asked the subject's own question about the
 thought alone (`server-portable/subject.ts`'s `OWN_RULES`, version 2), and its
-answer is read into a key: the first ticket id in it, else the one PR it names
+answer is read into a key: the first ticket id in it that the thought itself
+names (an id it does not name is the model's invention, dropped), else the one PR it names
 (`PRs`, a range or a list are none), else a release's version, else the answer as
 a lower-case phrase. The question asks for one subject: a ticket by its id alone. Version 1 read
 any note's first-line ticket and asked SMD-3299's round 4 question; on 160
@@ -3055,12 +3057,20 @@ at a time without a lease, the door's lock and fingerprint check making a sweep
 beside the pass safe. An answer naming nothing records nothing, so the next
 sweep asks again, and an out-of-date subject stands meanwhile, under its old key:
 its thought is asked again at every sweep, and counted in the summary, until
-SMD-3306 PR 4 records "asked, got nothing" and closes it safely. One that is not
+SMD-3306 PR 4 records "asked, got nothing" and closes it safely; `--limit` takes
+thoughts in id order, so such a thought is taken first again. A run's summary
+counts the subjects it recorded in place of a standing one, and how many of those
+took a new key. One that is not
 JSON with a subject records nothing either, is said, and exits 1, as the pass
 fails a malformed answer. A changed judge model leaves its predecessor's
 subjects standing, current at the same question: nothing asks them again yet.
 `--subjects rules` stops at the rules, for a brain whose judge model has not
-been measured on the question (the stable brain's, today). The egress gate
+been measured on the question (the stable brain's, today). On a brain upgraded
+from version 1 it leaves every thought the model must answer under its old
+subject, out of date and counted, until a run with the model. There the
+extraction pass, too, finds an edited thought's subject only when a rule keys it:
+an edited note version 1 keyed by its first line keeps its old subject at its old
+text until a `--subjects` run. The egress gate
 reads each row before its question, and a policy that refuses every row
 refuses the sweep before any; the rules alone send nothing. On a brain before
 111, or under a role without the door's grants, the pass records no subject and

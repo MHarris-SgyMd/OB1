@@ -2642,6 +2642,8 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     ["PR 727, 2026-10-20", "pr:727"], ["PR 727 — 2026-10-20 merge", "pr:727"], ["PR 502 — 3 review passes", "pr:502"], ["PR #12, 2 commits", "pr:12"], ["PR 12 - 2nd attempt", "pr:12"],
     ["PR 727 to 2.0.0", "pr:727"], ["PR #12 - the fix", "pr:12"], ["PR 5 to main", "pr:5"], ["PR 727: 2 fixes", "pr:727"], ["PR 727, then v2.0.0", "pr:727"], ["PR 12 and 2 commits", "pr:12"],
     ["PR 12-2nd try", "pr:12"], ["PR 727/2.1 notes", "pr:727"], ["PR 727-2026-10-20", "pr:727"], ["the PRs behind #727", "phrase:the prs behind #727"],
+    // Review pass 3: `&`, `+` and a comma end a list too.
+    ["PR 12 & 13", "phrase:pr 12 & 13"], ["PR 12 + 13", "phrase:pr 12 + 13"], ["PR 12, 13", "phrase:pr 12, 13"],
     ["", null], ["   ", null], ["ϒ", null],
   ];
   for (const [answer, want] of keyed) assert(subjectKey(answer) === want, `${JSON.stringify(answer.slice(0, 40))} → ${want} (got ${subjectKey(answer)})`);
@@ -2671,17 +2673,17 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   ].join("\n\n");
   const named = hook("SMD-2125", ["start smd-2125", "review for issues"], "Done: SMD-2125 is merged.");
   assert(sessionHeaderTicket(named) === "SMD-2125" && sessionHeaderTicket(hook("SMD-2125", ["look around", "merge SMD-2125 now"], "", "x")) === "SMD-2125"
-    && sessionHeaderTicket(hook("SMD-2125", [], "", "SMD-2125 implementation")) === "SMD-2125" && sessionHeaderTicket(`\r\n\n${named.replaceAll("\n", "\r\n")}`) === "SMD-2125"
-    && sessionHeaderTicket(named.replaceAll("\n\n", "\n")) === "SMD-2125",
-    "a session summary's header ticket its title or a listed prompt names, in any case: in the hook's layout, its parts a blank line apart, past blank lines and CRLF, and with none between");
+    && sessionHeaderTicket(`\r\n\n${named.replaceAll("\n", "\r\n")}`) === "SMD-2125" && sessionHeaderTicket(named.replaceAll("\n\n", "\n")) === "SMD-2125",
+    "a session summary's header ticket a listed prompt names, in any case: in the hook's layout, its parts a blank line apart, past blank lines and CRLF, and with none between");
   assert(sessionHeaderTicket(hook("SMD-2125", ["highest value open issue"], "- Recommendation: SMD-2125, or SMD-1972")) === null
-    && sessionHeaderTicket(hook("SMD-2125", ["look at SMD-21250, smd-2125x and xsmd-2125"])) === null && sessionHeaderTicket(hook("SMD-2125", [], "", "")) === null,
-    "…none when only the outcome names it (its `- ` lines included), when a prompt names only a longer id, or with no title or prompt");
+    && sessionHeaderTicket(hook("SMD-2125", ["look at SMD-21250, smd-2125x and xsmd-2125"])) === null && sessionHeaderTicket(hook("SMD-2125", [], "", "")) === null
+    && sessionHeaderTicket(hook("SMD-2125", [], "", "SMD-2125 implementation")) === null && sessionHeaderTicket(hook("SMD-2125", ["continue"], "", "Continue SMD-2125 work")) === null,
+    "…none when only the outcome names it (its `- ` lines included), when a prompt names only a longer id, with no prompt, or when only the title does: the harness's own title may name the branch's ticket (review pass 3)");
   assert(sessionHeaderTicket(hook("SMD-2615, SMD-2614", ["start smd-2615"])) === null && sessionHeaderTicket(hook("SMD-2614, FY-2026", ["start smd-2614"])) === "SMD-2614"
       && sessionHeaderTicket(hook("FY-2026, CWE-79, SMD-12", ["FY-2026 and CWE-79 for SMD-12, then SMD-13"])) === null,
     "…none from a header naming several tickets, the model's to choose among (review pass 1); a denied prefix the hook listed beside one is no second ticket; a full list of three may have left one out (review pass 2)");
   assert(sessionHeaderTicket("Session summary — claude-code — ob1 (feature/SMD-7) — 2026-10-01\n\nTitle: SMD-8 builds on SMD-7: implement SMD-8") === null
-      && sessionHeaderTicket("Session summary — SMD-3400 — claude-code — ob1 (feature/SMD-3306-x) — 2026-10-01\n\nTitle: implement SMD-3400") === "SMD-3400",
+      && sessionHeaderTicket("Session summary — SMD-3400 — claude-code — ob1 (feature/SMD-3306-x) — 2026-10-01\n\nTitle: implement SMD-3400\n\nAsked (1 prompt):\n- implement SMD-3400") === "SMD-3400",
     "…the header's tickets part alone: a branch's ticket in a later part is none the hook listed, and no second ticket beside the one it did (review pass 2)");
   assert(sessionHeaderTicket(hook("SMD-3306", ["pasted log\u0085then start smd-3306"], "", "x")) === "SMD-3306",
     "…a prompt read whole past a NEL inside it, which the hook keeps on the prompt's line (review pass 2)");
@@ -2691,6 +2693,18 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
   assert(sessionHeaderTicket("SMD-2125 session summary\nTitle: smd-2125") === null && sessionHeaderTicket("OB1 process note (SMD-1933): Title: SMD-1933") === null && sessionHeaderTicket("") === null
     && sessionHeaderTicket(hook("UTF-8", ["utf-8"])) === null && sessionHeaderTicket("Session summary — claude-code — OB1 (michaelharris/smd-1156-x) — 2026-09-24\n\nTitle: smd-1156") === null,
     "…none for a note that is no session summary, a header naming no ticket (the hook's older layout, its branch's id lower case) or a denied prefix");
+  // The hook's own renderSummary (review passes 1 and 3), its session as the segmenter fills one: a header it writes for
+  // prompts naming their ticket is keyed; one carrying the branch's ticket, the harness's title naming it, is not.
+  const { renderSummary } = (await import(new URL("../recipes/session-capture-hook/session-capture.mjs", import.meta.url).href)) as { renderSummary: (s: Record<string, unknown>) => string };
+  const hookSession = (branch: string, prompts: string[], named: string[], title = "") => ({
+    harness: "claude-code", sessionId: "s-1", title, cwd: "/work/ob1", branch, roots: new Set(), prompts, outcome: "Done.", assistant: [], files: new Set(), commits: 0, prs: [],
+    retrieved: new Set(), captured: new Set(), first: "2026-10-01T10:00:00Z", last: "2026-10-01T11:00:00Z", pushed: false, checkpoint: undefined, n: 0, named: new Set(named),
+    about: new Set(), opened: undefined, closed: undefined, episodes: [],
+  });
+  const fromHook = renderSummary(hookSession("michaelharris/smd-2125-x", ["start smd-2125", "review for issues"], ["SMD-2125"]));
+  const branchOnly = renderSummary(hookSession("michaelharris/smd-55-x", ["continue"], [], "Continue SMD-55 work"));
+  assert(sessionHeaderTicket(fromHook) === "SMD-2125" && /^Session summary — SMD-55 — /.test(branchOnly) && sessionHeaderTicket(branchOnly) === null,
+    `…as the hook's own renderSummary writes a session: its prompts' ticket keyed; the branch's, named by its title alone, not (${JSON.stringify(fromHook.split("\n")[0])})`);
   assert(JSON.stringify(ruleSubject({ content: "SMD-2 x", metadata: { issue: "SMD-1" } })) === JSON.stringify({ key: "ticket:SMD-1", by: "metadata" })
     && JSON.stringify(ruleSubject({ content: named, metadata: { issue: "none" } })) === JSON.stringify({ key: "ticket:SMD-2125", by: "first_line" })
     && ruleSubject({ content: "SMD-2 x", metadata: { issue: "none" } }) === null && ruleSubject({ content: "no ticket", metadata: null }) === null,
@@ -2761,7 +2775,7 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
 
   // The call: the judge model at the chat endpoint, as decide mode's writer; the egress gate before any request.
   const bodies: Record<string, unknown>[] = [];
-  const answers = ['{"subject":"PR 727","deliverables":[]}', '{"subject":"","deliverables":[]}', "not json", JSON.stringify({ subject: `${"x ".repeat(97)}SMD-12345 work`, deliverables: [] })];
+  const answers = ['{"subject":"PR 727","deliverables":[]}', '{"subject":"","deliverables":[]}', "not json", JSON.stringify({ subject: `${"x ".repeat(97)}SMD-12345 work`, deliverables: [] }), '{"subject":"SMD-123","deliverables":[]}'];
   const stub = Bun.serve({ port: 0, fetch: async (req) => { bodies.push((await req.json()) as Record<string, unknown>); return Response.json({ choices: [{ message: { content: answers.shift() } }] }); } });
   try {
     const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_JUDGE_MODEL: "judge-27b", OB1_METADATA_MODEL: "meta-7b" });
@@ -2776,13 +2790,20 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     const bad = await askOwnSubject(cfg, sides[1], subject);
     assert(bad.answer === null && bad.key === null && bad.raw === "not json", "an answer that is not JSON: none, its raw text kept");
     // Review pass 1: the key was read from the subject cut at 200 code points, so a ticket across the cut read as SMD-12.
-    const long = await askOwnSubject(cfg, sides[1], subject);
+    const names12345 = { content: "The smd-12345 work, its branch's id in lower case.", createdAt: null, metadata: {}, writer: null };
+    const long = await askOwnSubject(cfg, names12345, subject);
     assert(long.key === "ticket:SMD-12345" && long.answer !== null && [...long.answer].length === 200,
-      `a ticket past the 200th code point is read whole; the answer a recipe keeps is cut (${long.key}, ${long.answer?.length})`);
+      `a ticket past the 200th code point is read whole, the thought naming it in any case; the answer a recipe keeps is cut (${long.key}, ${long.answer?.length})`);
+    // Review pass 3: a ticket the thought never names is the model's invention, or its copy of the question's example.
+    const copied = await askOwnSubject(cfg, sides[1], subject);
+    assert(copied.answer === "SMD-123" && copied.key === null, `a ticket the thought does not name is dropped from the key: here nothing is left (${JSON.stringify(copied)})`);
+    assert(subjectKey("SMD-999: the dashboard review", (id) => id !== "SMD-999") === "phrase:the dashboard review" && subjectKey("SMD-2 and SMD-999", (id) => id === "SMD-2") === "ticket:SMD-2"
+        && subjectKey("SMD-999", () => false) === null && subjectKey("SMD-999 — PR 12", () => false) === "pr:12",
+      "…the rest of the answer read as before: a phrase, the ticket it does name, a PR; the marks a dropped id leaves trimmed");
     const gated = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_EGRESS_POLICY: "deny" });
     let refused: unknown;
     try { await askOwnSubject(gated, sides[1], subject); } catch (e) { refused = e; }
-    assert(refused instanceof ProviderError && refused.kind === "egress" && bodies.length === 4, "an endpoint the gate refuses: a ProviderError of kind egress, and no request");
+    assert(refused instanceof ProviderError && refused.kind === "egress" && bodies.length === 5, "an endpoint the gate refuses: a ProviderError of kind egress, and no request");
   } finally {
     stub.stop(true);
   }
