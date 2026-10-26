@@ -1295,6 +1295,25 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   const waits = [["extract"], ["extract", "consolidate"], [], ["extract", "extract"], ["board-sync"], "extract", ["extract", "consolidate", "extract"]].map((w) => markOf("heartbeat:sleep", { waiting: w })?.waiting ?? null);
   assert(JSON.stringify(waits) === JSON.stringify([["extract"], ["extract", "consolidate"], null, null, null, null, null]) && markOf("heartbeat:board-sync", { waiting: ["extract"] })?.waiting === undefined,
     `the scheduler's waiting passes are carried by name, each once, and never off another worker's row (${JSON.stringify(waits)})`);
+  // Re-embed's among them since the scheduler runs it (SMD-2679 PR 4b), at its start and mid-pass.
+  const reWaits = [markOf("heartbeat:sleep", { waiting: ["reembed", "extract"] })?.waiting, markOf("heartbeat:sleep", { waitingMidPass: ["reembed"] })?.waitingMidPass];
+  assert(JSON.stringify(reWaits) === JSON.stringify([["reembed", "extract"], ["reembed"]]),
+    `the scheduler's re-embed pass is carried waiting, at its start and mid-pass (${JSON.stringify(reWaits)})`);
+  // Its re-embed pass set aside on a model switch (SMD-2679 PR 4b): carried when of the shape, never off another worker's row.
+  const asideOk = { reembed: { kind: "model-switch", recorded: "old-embed", configured: "new-embed" } };
+  const asides = [
+    asideOk,
+    { reembed: { kind: "model", recorded: "old-embed", configured: "new-embed" } },
+    { reembed: { kind: "made-up" } },
+    { reembed: { kind: "model-switch", recorded: "", configured: "new-embed" } },
+    { reembed: { kind: "model-switch", recorded: "same", configured: "same" } },
+    { reembed: { kind: "model-switch", recorded: "x".repeat(201), configured: "new-embed" } },
+    { reembed: { kind: "model-switch", recorded: "old\nembed", configured: "new-embed" } },
+    { extract: { kind: "model-switch", recorded: "old-embed", configured: "new-embed" } },
+    "model-switch",
+  ].map((a) => markOf("heartbeat:sleep", { aside: a })?.aside ?? null);
+  assert(JSON.stringify(asides) === JSON.stringify([asideOk, { reembed: { kind: "model" } }, null, null, null, null, null, null, null]) && markOf("heartbeat:reembed:new-embed@1024", { aside: asideOk })?.aside === undefined,
+    `the scheduler's re-embed set aside is carried when of the shape — a model switch with two model names that differ, or a kind that set it down for the sleep, its names left off — and never off another worker's row (${JSON.stringify(asides)})`);
   const refusals = ["key", "identity", "lookup", "made-up", 2, null].map((r) => markOf("heartbeat:sleep", { refused: r })?.refused ?? null);
   // Since SMD-3214 db/supervise.ts's guard writes one on any compose follower's row, so every worker's is read.
   assert(JSON.stringify(refusals) === JSON.stringify(["key", "identity", "lookup", null, null, null]) && markOf("heartbeat:board-sync", { refused: "key" })?.refused === "key" && markOf("heartbeat:extract:x", { refused: "identity" })?.refused === "identity" && markOf("heartbeat:extract:x", { refused: "made-up" })?.refused === undefined && markOf("heartbeat:sleep", { refused: "made-up" }) !== undefined,

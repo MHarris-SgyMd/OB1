@@ -1249,10 +1249,11 @@ export type Actor = {
    */
   vectorFailed?: string;
   /**
-   * A write a server's background work made, not a caller's: the vector
-   * mender's (SMD-2889). Lands in thought_audit.actor_context as
+   * A write background work made, not a caller's: the vector mender's
+   * (SMD-2889), and a re-embed follower's (db/reembed.ts --follow, which the
+   * sleep scheduler runs, SMD-2679). Lands in thought_audit.actor_context as
    * `background`, which db/sleep.ts reads past as it reads past an ingested
-   * write. Only the server sets it; no caller's write carries it.
+   * write. No caller's write through the server carries it.
    */
   background?: string;
 };
