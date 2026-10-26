@@ -17,8 +17,9 @@
 		{ href: `${base}/query-log`, label: 'Query log' },
 		{ href: `${base}/status`, label: 'Status' },
 	];
-	// After the brain's own views: the enabled plugins' pages (SMD-2280 PR 3), as the registry labels them.
-	const views = $derived([...nav, ...data.pluginPages]);
+	// After the brain's own views: the page of grants where the session may use it (SMD-3307 PR 3), then the enabled
+	// plugins' pages (SMD-2280 PR 3), as the registry labels them.
+	const views = $derived([...nav, ...(data.grantsPage ? [{ href: `${base}/grants`, label: 'Grants' }] : []), ...data.pluginPages]);
 </script>
 
 <div class="min-h-screen flex flex-col">
