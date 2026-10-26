@@ -307,7 +307,8 @@ than by editing a hand-numbered FORK.md section:
   cut, which records itself in `releases.json` instead (SMD-1860).
 - **A removal names its side of the version contract.** This applies to a
   fragment that removes or renames a URL, route, port or setting in a file a
-  release ships, or that deletes vendored code. It says in one sentence which
+  release ships, a flag or named value of a command a shipped image runs, or
+  that deletes vendored code. It says in one sentence which
   side of the contract the change falls on (FORK.md, "Versioning", "What the
   version contract covers"; SMD-2687). Inside the contract it is a `major`.
   Maintainer tooling and vendored code are outside it, so there it is a `minor`,
