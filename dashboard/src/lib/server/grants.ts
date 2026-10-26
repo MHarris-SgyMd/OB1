@@ -58,13 +58,9 @@ function grantOf(v: unknown): Grant | null {
 export async function listGrants(s: OAuthSettings, fetchFn: typeof fetch = fetch): Promise<GrantsAnswer> {
 	try {
 		const r = await fetchFn(`${ADMIN_MESH_URL}/grants`, { headers: { authorization: basic(s), accept: 'application/json' }, signal: AbortSignal.timeout(AUTH_TIMEOUT_MS), redirect: 'manual' });
-		if (r.status >= 500) {
-			void r.body?.cancel().catch(() => {});
-			return { ok: false, unreachable: true };
-		}
 		if (r.status !== 200) {
 			void r.body?.cancel().catch(() => {});
-			return { ok: false, refused: r.status };
+			return r.status >= 500 ? { ok: false, unreachable: true } : { ok: false, refused: r.status };
 		}
 		const body = (await r.json()) as { grants?: unknown; more?: unknown };
 		const grants = Array.isArray(body.grants) ? body.grants.map(grantOf).filter((g): g is Grant => g !== null) : [];

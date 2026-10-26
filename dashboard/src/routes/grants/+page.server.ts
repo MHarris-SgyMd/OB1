@@ -37,9 +37,10 @@ export const load: PageServerLoad = async (event) => {
 	const said = event.url.searchParams;
 	const notice = said.has('revoked') ? 'revoked' : said.has('gone') ? 'gone' : null;
 	const answer = (await authReachability().reachable()) ? await listGrants(s) : ({ ok: false, unreachable: true } as const);
-	if (!answer.ok) return { state: grantsState(answer), grants: [], more: false, notice };
+	const state = grantsState(answer);
+	if (!answer.ok) return { state, grants: [], more: false, notice };
 	return {
-		state: grantsState(answer),
+		state,
 		notice,
 		more: answer.more,
 		grants: answer.grants.map((g) => ({
