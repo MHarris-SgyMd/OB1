@@ -443,7 +443,7 @@ CANARY_DROPPED='POSTGRES_PASSWORD|OB1_AUTH_[A-Z0-9_]*|N8N_[A-Z0-9_]*|OB1_RUNNER_
 # values of these (env_file write), OB1_GIT_SHA aside, a build's, and
 # OB1_PUBLIC_ORIGIN, which the canary never has: it is loopback alone and never
 # configured, and stable's origin would have its operator GUI refuse every
-# sign-in on the canary's port as cross-site (SMD-2280 review pass 2).
+# sign-in on the canary's port, its origin not stable's (SMD-2280 review pass 2).
 CANARY_SET='SERVER_PORT|SERVER_BIND|OB1_TIER|COMPOSE_PROFILES|OB1_PUBLIC_ORIGIN|OB1_GIT_SHA'
 
 # Env files as compose reads them, by value (review pass 2: copying stable's

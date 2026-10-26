@@ -65,8 +65,10 @@
  *      `include`) or onto the host without a port (`network_mode`), and
  *      PUBLISHES names which service publishes from which file, one mapping
  *      each, so a mapping that is gone or refused fails as missing:
- *      compose.yaml publishes the forwarder (SMD-2583), and n8n under its opt-in profile
- *      (SMD-2210); the database, Ollama and the typed-decision tier (jev)
+ *      compose.yaml publishes the forwarder (SMD-2583), the break-glass
+ *      listener under the auth profile on a literal 127.0.0.1 and no knob, the
+ *      one named exception (LOOPBACK_MAPPINGS, SMD-3307), and n8n under its
+ *      opt-in profile (SMD-2210); the database, Ollama and the typed-decision tier (jev)
  *      publish through compose.host-ports.yaml, a second -f, and the
  *      observability profile's Grafana through compose.grafana-port.yaml
  *      (SMD-1849); and
@@ -77,7 +79,7 @@
  *      read the stack's project through a stub carrying compose.yaml's own
  *      `name:` on one code line that reads an env file, and name it nowhere
  *      else in code but a short list (SMD-2873).
- *      The files are parsed with Bun.YAML (SMD-1844); no exceptions
+ *      The files are parsed with Bun.YAML (SMD-1844); no other exceptions
  *  14. every knob the server reads reaches the container: each `OB1_*` /
  *      `OPEN_BRAIN_*` name server-portable/root.ts declares in its `type Env`
  *      (the block's other names — DATABASE_URL, the key material, SUPABASE_*,
@@ -2328,7 +2330,8 @@ function checkSupabaseIsms() {
 // ${X_PORT:-n}:n"` — the literal 127.0.0.1 unless the operator names an
 // address, in a knob deploy/.env.example documents — and the base file
 // publishes the server (since SMD-1846 the proxy in front of it, on the same
-// knobs), plus n8n under the opt-in `orchestration` profile
+// knobs), the break-glass listener under the `auth` profile on a literal
+// 127.0.0.1 (SMD-3307), plus n8n under the opt-in `orchestration` profile
 // since SMD-2210; the database and Ollama reach the host only
 // through compose.host-ports.yaml, a second -f an operator adds for a tool run
 // from a checkout.
@@ -2415,15 +2418,27 @@ function documentedEnvKnobs(pattern: RegExp) {
 const PUBLISHES: Record<string, string[]> = {
   // The forwarder, in front of the stack's one origin (SMD-1846, SMD-2583):
   // the proxy behind it is on internal networks alone and the server is
-  // `/mcp` on it, neither publishing; and n8n under `--profile orchestration`
-  // (SMD-2210): its editor, API, webhooks and MCP endpoint on loopback, for
-  // the provisioning step and an AI client on this host.
-  "compose.yaml": ["forwarder", "n8n"],
+  // `/mcp` on it, neither publishing; the break-glass listener under the auth
+  // profile (SMD-3307), on a literal 127.0.0.1 (LOOPBACK_MAPPINGS); and n8n
+  // under `--profile orchestration` (SMD-2210): its editor, API, webhooks and
+  // MCP endpoint on loopback, for the provisioning step and an AI client on
+  // this host.
+  "compose.yaml": ["forwarder", "breakglass", "n8n"],
   "compose.host-ports.yaml": ["postgres", "ollama", "jev"],
   "compose.grafana-port.yaml": ["lgtm"],
 };
 const COMPOSE_FILE = /^(docker-)?compose.*\.ya?ml$/;
 
+/**
+ * The named exceptions to the house form: a service whose one mapping is on a literal 127.0.0.1, with no `_BIND`
+ * knob a deploy/.env could widen — [the mapping, its documented `_PORT` knob, its default port]. The break-glass
+ * listener (SMD-3307; ADR decision 15) is the operator's way in while the authorization server is down, key
+ * sign-in to the GUI, so loopback alone is its whole point: a `BREAKGLASS_BIND=0.0.0.0` would offer key sign-in
+ * on the network, the weaker door the configured origin closes.
+ */
+const LOOPBACK_MAPPINGS: Record<string, [string, string, string]> = {
+  breakglass: ["127.0.0.1:${BREAKGLASS_PORT:-8001}:8001", "BREAKGLASS_PORT", "8001"],
+};
 /** The house form: the host port is the bind knob's own `_PORT` knob, so no mapping publishes on another's (SMD-2685: jev on `${SERVER_PORT}` would bind the proxy's port first and take its clients' keys). */
 const PORT_ITEM = /^\$\{([A-Z0-9_]+)_BIND:-([^}]*)\}:\$\{\1_PORT:-([1-9]\d*)\}:\d+$/;
 /** Colon-separated fields of a short-form mapping, `${…}` contents not counted. */
@@ -2471,6 +2486,12 @@ function publishedPortGapsIn(text: string, { documented }: { documented: Set<str
       const v = String(item);
       const line = lineOf(text, v) || lineOf(text, "ports");
       if (portFields(v) < 3) { gaps.push(["no-address", service, line, v]); continue; }
+      const literal = LOOPBACK_MAPPINGS[service];
+      if (literal && v === literal[0]) {
+        if (documented && !documented.has(literal[1])) gaps.push(["undocumented-knob", service, line, literal[1]]);
+        else { published.push(service); knobs.push([service, literal[1].replace(/_PORT$/, ""), literal[2]]); }
+        continue;
+      }
       const m = PORT_ITEM.exec(v);
       if (!m) { gaps.push(["not-house-form", service, line, v]); continue; }
       if (m[2] !== "127.0.0.1") gaps.push(["default-not-loopback", service, line, `${m[1]}_BIND defaults to "${m[2]}"`]);
@@ -2514,6 +2535,11 @@ const PORT_PROBES: [string, string[], string[]][] = [
   [`services:\n  server:\n    ports:\n      - "\${OTHER_BIND:-127.0.0.1}:\${OTHER_PORT:-8000}:8000"\n`, ["undocumented-knob"], []],
   [`services:\n  jev:\n    ports:\n      - "\${JEV_BIND:-127.0.0.1}:\${SERVER_PORT:-8000}:8020"\n`, ["not-house-form"], []],
   [`services:\n  jev:\n    ports:\n      - "\${JEV_BIND:-127.0.0.1}:\${JEV_PORT:-08000}:8020"\n`, ["not-house-form"], []],
+  // The named loopback exception (LOOPBACK_MAPPINGS): the break-glass listener's literal, and no other spelling or service.
+  [`services:\n  breakglass:\n    ports:\n      - "127.0.0.1:\${BREAKGLASS_PORT:-8001}:8001"\n`, [], ["breakglass"]],
+  [`services:\n  breakglass:\n    ports:\n      - "0.0.0.0:\${BREAKGLASS_PORT:-8001}:8001"\n`, ["not-house-form"], []],
+  [`services:\n  breakglass:\n    ports:\n      - "\${BREAKGLASS_BIND:-127.0.0.1}:\${BREAKGLASS_PORT:-8001}:8001"\n`, ["undocumented-knob"], []],
+  [`services:\n  forwarder:\n    ports:\n      - "127.0.0.1:\${BREAKGLASS_PORT:-8001}:8001"\n`, ["not-house-form"], []],
   // What reaches outside the file, or the host, without a ports: item.
   [`services:\n  postgres:\n    extends:\n      file: base/pg.yaml\n      service: pg\n`, ["extends"], []],
   [`include:\n  - other.yaml\nservices:\n  server:\n    ports:\n      - ${GOOD}\n`, ["include"], ["server"]],
@@ -2553,7 +2579,8 @@ const ENV_EXAMPLE_PROBES: [string, string, number][] = [
 ];
 
 function checkPublishedPorts() {
-  const knobs = documentedEnvKnobs(/_BIND$/);
+  // The _BIND knobs, and the _PORT knob of each named loopback exception, which has no _BIND.
+  const knobs = documentedEnvKnobs(new RegExp(`_BIND$|^(${Object.values(LOOPBACK_MAPPINGS).map(([, k]) => k).join("|")})$`));
   if (knobs === null) return;
   const documented = new Set(knobs.map((k) => k.name));
   // The file every operator copies to deploy/.env: a live line there is a setting every stack brought up from it runs with, whatever compose.yaml's fallback says, and no check renders it (CI writes its own .env). A live _BIND line put the stack on the network (SMD-1844); a COMPOSE_PROJECT_NAME there renames the project, a COMPOSE_FILE adds a file no check reads, a _PORT moves a mapping onto another's port (SMD-2685 review pass 3). So the live lines are exactly the keys an operator must fill in.
@@ -2588,7 +2615,7 @@ function checkPublishedPorts() {
       }
     }
   }
-  const probeDocs = new Set(["SERVER_BIND", "POSTGRES_BIND"]);
+  const probeDocs = new Set(["SERVER_BIND", "POSTGRES_BIND", "BREAKGLASS_PORT"]);
   for (const [text, kinds, services] of PORT_PROBES) {
     const got = publishedPortGapsIn(text, { documented: probeDocs });
     const gotKinds = got.gaps.map((g) => g[0]);
@@ -6750,8 +6777,10 @@ const meshName = (kind: "mcp" | "api") => `${kind}.ob1.internal`;
 // compose.yaml's, compose.api-public.yaml's and compose.hooks-public.yaml's
 // tables from them.
 /** A router, its `middlewares:` line left out when `mw` is "" (a router with none, as /mcp and /health have had since SMD-2532 took not-legacy away). */
-const routeRouter = (name: string, rule: string, priority: number, mw: string, service: string) =>
-  `    ${name}:\n      rule: "${rule}"\n      priority: ${priority}\n      entryPoints: [web]\n${mw ? `      middlewares: [${mw}]\n` : ""}      service: ${service}\n`;
+const routeRouter = (name: string, rule: string, priority: number, mw: string, service: string, entry = "web") =>
+  `    ${name}:\n      rule: "${rule}"\n      priority: ${priority}\n      entryPoints: [${entry}]\n${mw ? `      middlewares: [${mw}]\n` : ""}      service: ${service}\n`;
+/** A headers middleware setting one request header (an empty value deletes it). */
+const routeHeader = (name: string, header: string, value: string) => `    ${name}:\n      headers:\n        customRequestHeaders:\n          ${header}: "${value}"\n`;
 const routeErrors = (name: string, status: string) =>
   `    ${name}:\n      errors:\n        status: ["${status}"]\n        service: noop@internal\n        statusRewrites:\n          "${status}": 404\n`;
 const routeService = (name: string, url: string) => `    ${name}:\n      loadBalancer:\n        servers:\n          - url: "${url}"\n`;
@@ -7693,9 +7722,12 @@ const PROXY_ROUTE_TABLE = "http:\n  routers:\n"
   + routeRouter("grafana-off", "Path(`/grafana`) || PathPrefix(`/grafana/`)", 35, "not-served", "noop@internal")
   + routeRouter("mcp", "Path(`/mcp`) || PathPrefix(`/mcp/`)", 30, "", "mcp")
   + routeRouter("dashboard", "Path(`/dashboard`) || PathPrefix(`/dashboard/`)", 30, "", "app")
+  // The break-glass entrypoint's one router (SMD-3307): the GUI, marked; web strips the marker (PROXY_SERVICE's entrypoint middleware).
+  + routeRouter("dashboard-breakglass", "Path(`/dashboard`) || PathPrefix(`/dashboard/`)", 30, "breakglass-listener", "app", "breakglass")
   + routeHealth("mcp")
   + "  middlewares:\n"
   + routeErrors("auth-absent", "502") + routeErrors("api-off", "418") + routeErrors("not-served", "418")
+  + routeHeader("breakglass-listener", "X-OB1-Listener", "breakglass") + routeHeader("strip-listener", "X-OB1-Listener", "")
   + "  services:\n" + routeService("mcp", `http://${meshName("mcp")}.:8000`)
   + routeService("auth", "http://auth.ob1.internal.:3000")
   + routeService("app", "http://app.ob1.internal.:8000");
@@ -7731,6 +7763,10 @@ const PROXY_SERVICE = {
     TRAEFIK_ENTRYPOINTS_WEB_ADDRESS: ":8000",
     TRAEFIK_ENTRYPOINTS_WEB_PROXYPROTOCOL_TRUSTEDIPS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7",
     TRAEFIK_ENTRYPOINTS_WEB_HTTP_ALIASHEADERSSTRATEGY: "delete",
+    TRAEFIK_ENTRYPOINTS_WEB_HTTP_MIDDLEWARES: "strip-listener@file",
+    TRAEFIK_ENTRYPOINTS_BREAKGLASS_ADDRESS: ":8001",
+    TRAEFIK_ENTRYPOINTS_BREAKGLASS_PROXYPROTOCOL_TRUSTEDIPS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7",
+    TRAEFIK_ENTRYPOINTS_BREAKGLASS_HTTP_ALIASHEADERSSTRATEGY: "delete",
     TRAEFIK_PROVIDERS_FILE_DIRECTORY: "/etc/traefik/dynamic",
     TRAEFIK_ACCESSLOG: "true",
     TRAEFIK_ACCESSLOG_FORMAT: "json",
@@ -7768,6 +7804,20 @@ const FORWARDER_SERVICE = {
   depends_on: { proxy: { condition: "service_started" } },
   restart: "unless-stopped",
 };
+/**
+ * compose.yaml's break-glass listener (SMD-3307; ADR decision 15), whole but for its label (the script's, held as the
+ * forwarder's) and its logging: the forwarder's script and confinement on `--port 8001`, the proxy's `breakglass`
+ * entrypoint, which routes the GUI alone and marks it; under the auth profile alone, published on a literal
+ * 127.0.0.1 (check 13's LOOPBACK_MAPPINGS), on `edge` and `front` alone. A key sign-in reaches the GUI through it
+ * while the stack is configured, so a change to it is made here too, on purpose.
+ */
+const BREAKGLASS_SERVICE = {
+  ...FORWARDER_SERVICE,
+  profiles: ["auth"],
+  command: ["bun", "/forwarder.ts", "--port", "8001"],
+  ports: ["127.0.0.1:${BREAKGLASS_PORT:-8001}:8001"],
+  healthcheck: { ...FORWARDER_SERVICE.healthcheck, test: ["CMD-SHELL", "grep -qE ':1F41 0+:0000 0A' /proc/net/tcp /proc/net/tcp6"] },
+};
 /** Where lgtm's Grafana finds the provisioned dashboard (SMD-1849 PR 3c): the file its provider reads, mounted from the grafana-dashboard config and its home page; and where the provider is mounted, Grafana's provisioning directory's dashboards/, every file of which it reads as a provider. Check 37's DASHBOARD_PROVIDER names the first. */
 const DASHBOARD_PATH = "/otel-lgtm/open-brain-dashboard.json";
 const DASHBOARD_PROVIDER_PATH = "/otel-lgtm/grafana/conf/provisioning/dashboards/open-brain.yaml";
@@ -7802,11 +7852,12 @@ const MCP_SERVICE = {
 };
 /**
  * compose.yaml's `app`, the operator GUI (SMD-2280), whole, its logging aside: the server's image run as
- * `bun ../dashboard/serve.ts` with auto-install off, holding no brain key — only the origin and the configured
- * switch its sign-in reads (COMPOSE_PROFILES naming auth turns key sign-in off, ADR decision 16, so dropping or
- * pinning it would reopen that door), and the authorization server's secret for its `gui` client, the one secret it
- * holds, which signs the operator in through the AS while the stack is configured (SMD-3307) — on the mesh alone, its files read-only and no capability, its
- * health on its own path, and its wait on the REST core. A change to it is made here too, on purpose (review pass 1:
+ * `bun ../dashboard/serve.ts` with auto-install off, holding no brain key — only the origin, the break-glass port
+ * and the configured switch its sign-in reads (COMPOSE_PROFILES naming auth turns key sign-in off but on the
+ * break-glass port, ADR decision 16, so dropping or pinning it would reopen that door), and the authorization
+ * server's secret for its `gui` client, the one secret it holds, which signs the operator in through the AS while
+ * the stack is configured (SMD-3307) — on the mesh alone, its files read-only and no capability, its health on its
+ * own path, and its wait on the REST core. A change to it is made here too, on purpose (review pass 1:
  * a key list, a forwarder key, `user: root`, another image and COMPOSE_PROFILES dropped each passed the per-key rules).
  */
 const APP_SERVICE = {
@@ -7819,6 +7870,7 @@ const APP_SERVICE = {
     COMPOSE_PROFILES: "${COMPOSE_PROFILES:-}",
     OB1_STOP_GRACE: "${OB1_STOP_GRACE:-}",
     OB1_AUTH_SECRET_GUI: "${OB1_AUTH_SECRET_GUI:-}",
+    BREAKGLASS_PORT: "${BREAKGLASS_PORT:-8001}",
   },
   stop_grace_period: "${OB1_STOP_GRACE:-10}s",
   depends_on: { api: { condition: "service_started" } },
@@ -8100,6 +8152,14 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
     const fdiffs: string[] = [];
     pathDiffs(JSON.parse(JSON.stringify(omitKeys(forwarder, ["labels", "logging"]))), FORWARDER_SERVICE, "services.forwarder", fdiffs);
     if (fdiffs.length) flag("proxy", `${fdiffs.slice(0, 6).join("; ")}${fdiffs.length > 6 ? `; and ${fdiffs.length - 6} more` : ""} — compose.yaml's forwarder is check 28's FORWARDER_SERVICE, its label aside: it holds the stack's published port and every client's bytes, so a change to it is made there too, on purpose (SMD-2583)`);
+    // The break-glass listener, whole, its label the same script (SMD-3307).
+    const breakglass = isMapping(services.breakglass) ? services.breakglass : undefined;
+    const bdiffs: string[] = [];
+    pathDiffs(JSON.parse(JSON.stringify(omitKeys(breakglass, ["labels", "logging"]))), BREAKGLASS_SERVICE, "services.breakglass", bdiffs);
+    pathDiffs(breakglass && isMapping(breakglass.labels) ? breakglass.labels["ob1.forwarder"] : undefined, FORWARDER_SCRIPT, "services.breakglass.labels.ob1.forwarder", bdiffs);
+    const botherLabels = Object.keys(breakglass && isMapping(breakglass.labels) ? breakglass.labels : {}).filter((k) => k !== "ob1.forwarder");
+    if (botherLabels.length) bdiffs.push(`services.breakglass.labels carries ${botherLabels.join(", ")} beside ob1.forwarder, where its one label is its script`);
+    if (bdiffs.length) flag("proxy", `${bdiffs.slice(0, 6).join("; ")}${bdiffs.length > 6 ? `; and ${bdiffs.length - 6} more` : ""} — compose.yaml's breakglass is check 28's BREAKGLASS_SERVICE, its label the forwarder's script: it publishes the GUI's key sign-in while the stack is configured, on loopback alone, so a change to it is made there too, on purpose (SMD-3307)`);
     // The MCP server built on the REST core, whole (SMD-2287): what it holds, how it starts, its health.
     const mcp = isMapping(services.mcp) ? services.mcp : undefined;
     const mdiffs: string[] = [];
@@ -8161,7 +8221,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
       if (name === "app" && file in GRAFANA_APP_ENV && canonJson(svc.environment ?? null) !== canonJson(GRAFANA_APP_ENV[file])) flag("keys", `sets services.app.environment ${JSON.stringify(svc.environment ?? null)} where check 28's GRAFANA_APP_ENV holds ${JSON.stringify(GRAFANA_APP_ENV[file])} — the overlay names the operator GUI's link to the Grafana it reaches and nothing else: any other key there steers the GUI, its origin or its REST core included (SMD-2280)`);
       continue;
     }
-    if (name === "proxy" || name === "forwarder") continue;
+    if (name === "proxy" || name === "forwarder" || name === "breakglass") continue;
     const extra = Object.keys(svc).filter((k) => !SERVICE_KEYS.includes(k));
     if (extra.length) flag("keys", `sets ${extra.map((k) => `services.${name}.${k}`).join(", ")} — a compose.yaml service sets only check 28's SERVICE_KEYS, which act inside its own container: \`pid: service:proxy\` with a capability wrote a route file through /proc/<pid>/root that Traefik loaded live (SMD-2685, measured), and a hook may run privileged; a key that is safe is added there on purpose`);
     const confinement = Object.fromEntries(CONFINEMENT_KEYS.filter((k) => k in svc).map((k) => [k, svc[k]]));
@@ -8175,7 +8235,7 @@ function routeTableProblems(file: string, text: string): { rule: RouteRule; mess
   const wantNets = FILE_NETWORKS[file] ?? null;
   if (canonJson(doc.networks ?? null) !== canonJson(wantNets)) flag("networks", `defines networks ${JSON.stringify(doc.networks ?? null)} where check 28's FILE_NETWORKS holds ${JSON.stringify(wantNets)} — a network renamed, made external or defined twice under one name puts the proxy, or a service that answers as a backend, on another network (SMD-2658 review pass 3; SMD-2685's second key into stable's mesh)`);
   for (const [name, def] of Object.entries(services)) {
-    if (base && (name === "proxy" || name === "forwarder")) continue;
+    if (base && (name === "proxy" || name === "forwarder" || name === "breakglass")) continue;
     const got = isMapping(def) ? def.networks ?? null : null;
     const want = SERVICE_NETWORKS[file]?.[name] ?? null;
     // compose.yaml's every service is named there: one that names no network lands on compose's default, beside nothing else (SMD-2583 review pass 1: null held null).
@@ -8283,10 +8343,12 @@ const ROUTE_TABLE_PROBES: [string, string, string, string][] = [
   ["compose.yaml's proxy given a hosts entry for its backend's name", "compose.yaml", "    dns_search: [\".\"]\n    healthcheck:\n      test: [\"CMD\", \"traefik\", \"healthcheck\"]", "    dns_search: [\".\"]\n    extra_hosts: [\"mcp.ob1.internal:10.0.0.9\"]\n    healthcheck:\n      test: [\"CMD\", \"traefik\", \"healthcheck\"]"],
   // The forwarder and the proxy behind it (SMD-2583).
   ["compose.yaml's proxy publishing a port again, back on an outward network", "compose.yaml", "    networks:\n      front:\n        aliases: [proxy.ob1.internal]\n      mesh: {}\n", "    ports:\n      - \"127.0.0.1:8001:8000\"\n    networks:\n      edge: {}\n      front:\n        aliases: [proxy.ob1.internal]\n      mesh: {}\n"],
-  ["compose.yaml's forwarder on the mesh too, beside every backend", "compose.yaml", "    networks: [edge, front]\n", "    networks: [edge, front, mesh]\n"],
+  ["compose.yaml's forwarder on the mesh too, beside every backend", "compose.yaml", "      - \"${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000\"\n    networks: [edge, front]\n", "      - \"${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000\"\n    networks: [edge, front, mesh]\n"],
+  ["compose.yaml's breakglass on the mesh too, beside every backend", "compose.yaml", "      - \"127.0.0.1:${BREAKGLASS_PORT:-8001}:8001\"\n    networks: [edge, front]\n", "      - \"127.0.0.1:${BREAKGLASS_PORT:-8001}:8001\"\n    networks: [edge, front, mesh]\n"],
   ["compose.yaml's forwarder given a capability back", "compose.yaml", "  forwarder:\n    image: docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373\n    # Nothing it needs is root's, as the proxy's: it listens on 8000 and\n    # writes only to stderr. Not read_only, for the proxy's reason: compose\n    # writes the inline script into the container's own filesystem.\n    user: \"65534:65534\"\n    cap_drop: [ALL]\n", "  forwarder:\n    image: docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373\n    # Nothing it needs is root's, as the proxy's: it listens on 8000 and\n    # writes only to stderr. Not read_only, for the proxy's reason: compose\n    # writes the inline script into the container's own filesystem.\n    user: \"65534:65534\"\n    cap_drop: [ALL]\n    cap_add: [NET_RAW]\n"],
   ["the forwarder's inline script dialling whatever its lookup answers", "compose.yaml", "return addresses.find((a) => own.has(a.toLowerCase()) === false", "return addresses[0] ?? addresses.find((a) => own.has(a.toLowerCase()) === false"],
-  ["the forwarder's label a script other than its config's", "compose.yaml", "    labels:\n      ob1.forwarder: *forwarder\n", "    labels:\n      ob1.forwarder: \"an older script\"\n"],
+  ["the forwarder's label a script other than its config's", "compose.yaml", "    # recreates the container, as the proxy's route table does.\n    labels:\n      ob1.forwarder: *forwarder\n", "    # recreates the container, as the proxy's route table does.\n    labels:\n      ob1.forwarder: \"an older script\"\n"],
+  ["breakglass's label a script other than the forwarder's", "compose.yaml", "        target: /forwarder.ts\n    labels:\n      ob1.forwarder: *forwarder\n    ports:\n      - \"127.0.0.1", "        target: /forwarder.ts\n    labels:\n      ob1.forwarder: \"an older script\"\n    ports:\n      - \"127.0.0.1"],
   ["compose.yaml's front given a route out", "compose.yaml", "  front:\n    internal: true\n", "  front: {}\n"],
   ["a compose.debug.yaml no OVERLAYS entry declares", "compose.debug.yaml", "", "services:\n  shadow:\n    image: oven/bun:1.4.3-alpine\n"],
 ];
@@ -8957,7 +9019,7 @@ await checkPlugins();
 // so this file is the one to read.
 /** Each compose.yaml service's `restart`, exactly. */
 const RESTART_POLICIES: Record<string, string> = {
-  postgres: "unless-stopped", migrate: "no", api: "unless-stopped", mcp: "unless-stopped", app: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped",
+  postgres: "unless-stopped", migrate: "no", api: "unless-stopped", mcp: "unless-stopped", app: "unless-stopped", proxy: "unless-stopped", forwarder: "unless-stopped", breakglass: "unless-stopped",
   "board-sync": "unless-stopped", extract: "unless-stopped", consolidate: "unless-stopped", sleep: "unless-stopped",
   ollama: "unless-stopped", "ollama-pull": "no", jev: "unless-stopped",
   n8n: "unless-stopped", "orchestration-runner-role": "no", "orchestration-runner": "unless-stopped", auth: "unless-stopped",
