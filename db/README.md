@@ -258,10 +258,10 @@ guards against the accident (`plugins/README.md`).
 
 ## Expected outcome
 
-`bun test-schema.ts` prints `3048 assertions: 3048 passed, 0 failed` and `PASS`.
-Against a real database, `bun migrate.ts` reports one hundred and eleven (111) migrations applied, and
-`\d thoughts` shows ten columns and twelve indexes — eleven of our own plus
-the primary key, which `\d` also lists. Eleven with `OB1_TRGM_INDEX=off`. `\d
+`bun test-schema.ts` prints `3063 assertions: 3063 passed, 0 failed` and `PASS`.
+Against a real database, `bun migrate.ts` reports one hundred and twelve (112) migrations applied, and
+`\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
+the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
 
 ## The migrations
@@ -300,7 +300,7 @@ Migrations 024 onward are described in `FORK.md`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH+upstream.<sha>`; 044 wrote the pre-first-release
@@ -2097,6 +2097,32 @@ test-schema [99] (the key's shape, every refusal, each action of the door, the
 lineage and the delete), test-upgrade [20bc] (refused without each
 prerequisite; onto a populated brain at 110, nothing moved), test-live [10h]
 (the pass and the sweep), `server-portable/test-preflight.ts`.
+
+Migration 112 gives a thought a `client_key`: one thought per key (SMD-3314).
+The canary is a brain of its own (SMD-2872), and the operator's and agents'
+writes reach it by a client that repeats each write there. A thought captured on
+each brain gets two ids, while an edit, a delete or a `supersedes` names it by
+the id the first brain gave it. `capture_thought`'s `client_key` keeps that id
+on the copy as `metadata.client_key`, and the servers resolve a name to the
+thought with that id, else the one keeping it as its key: `update_thought`,
+`delete_thought`, and the `supersedes` and `derived_from` of either. A key that
+names a thought already returns it and writes nothing; a capture-only key is
+refused the key, and its names stay ids (SMD-1298's existence-oracle rule). The
+key lives in metadata, not a column: the event carries the row's metadata (055,
+060), so a replay keeps it. The servers refuse it in a caller's `metadata` or
+`metadata_patch`, and a re-capture onto a row keeping another key keeps that
+one. The file is one unique partial btree on `thoughts
+((metadata->>'client_key'))` where the value is not null, which the servers'
+read of a key walks. Rows that already share a value (a caller's metadata could
+set the key before 112) are refused by name before the build; a trigger
+(`ob1_client_key_set_once`) refuses a write that would give a keyed row another key,
+with its event, and the server captures it again without the key (`held`); an index of
+another shape, or an INVALID one, under its name is refused naming the statement
+that clears it, as 100's is. Needs nothing past 001; a re-apply is a no-op; no
+grant moves. test-schema [100] (the index's shape, one thought per key, the
+duplicate refusal, the re-apply), test-upgrade [20bd] (onto a populated brain at
+111, a duplicate refused by name), `server-portable/test-e2e-sql.ts` [24] (the
+tools).
 
 ## What changed relative to the guide
 
@@ -5449,7 +5475,7 @@ Two suites cover most of it, because one of them cannot reach everything, and a
 third covers the one thing the test image cannot reproduce.
 
 ```bash
-bun test-schema.ts                          # 3048 assertions, PGlite, no container
+bun test-schema.ts                          # 3063 assertions, PGlite, no container
 ./with-postgres.sh bun test-live.ts         # 1703 assertions, real server, throwaway container (fewer when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [26]'s four sweep cases under recipes/lint-sweep/.env or .env.local, [29]'s no-URL case under recipes/thought-enrichment/.env.local)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # 1015 assertions: one shard, as its Fork Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # 88 assertions: the shards SHARDS lists in test-live.ts, each its own cell

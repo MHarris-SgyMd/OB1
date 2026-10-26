@@ -816,6 +816,58 @@ one told to use the operator's own key — and a database before 086 is named in
 fault; the REST core answers the code and its status. `thought_changes` reads the event
 as "reset by <key>", and a decline's line names the reset as the way out.
 
+## A write copied to another brain: `client_key` (SMD-3314)
+
+A thought captured on two brains separately gets two ids, while an edit, a delete or a
+`supersedes` names a thought by the id the brain that made it gave it. A client that
+repeats a write on a second brain (the canary, SMD-2872) passes **`client_key`** on
+`capture_thought`: a UUID, by convention the thought's id on the brain where it was
+first written. The copy keeps it as `metadata.client_key`, one thought per key
+(migration 112's unique index), and every name a write takes resolves to **the thought
+with that id, else the one keeping it as its key**: `update_thought`'s and
+`delete_thought`'s `id` (and the REST paths `PATCH`/`DELETE /v1/thoughts/{id}`), and
+the `supersedes` and `derived_from` of a capture or an edit. So the client sends the
+second brain the same ids it sent the first. A thought a refresh copied has the same id
+on both brains, and a key equal to it names that thought.
+
+- **A key that names a thought already** (as its id or its key) returns that thought
+  and writes nothing, with no model call: `Already captured — id …`, `keyed:
+  "matched"` beside it (REST and MCP alike). A retried copy, or copies racing under one key, make one
+  thought; the loser of a race is answered the same way.
+- **A key naming the thought that holds this very text** is a re-capture of it
+  (`keyed: "recaptured"`): merged as any write key's re-capture is (080), the key not
+  sent again, so the copy takes what the first brain's re-capture merged.
+- **A key that names nothing** is kept on the new row (`keyed: "recorded"`), and on
+  a re-capture of text already a thought it is merged onto that row, as 080's merge
+  takes a write key's metadata. A row already keeping another key keeps it
+  (`keyed: "held"`, with `heldKey` when it is a key's shape): the reply says the
+  key given was not recorded and names nothing here.
+- **Only a key that can read** sends one. A capture-only key is refused
+  (`REFUSED_CLIENT_KEY_SCOPE`, 403 over REST), as the match would tell it whether an id
+  exists (SMD-1298), and its names stay ids. A key that is not a UUID is
+  `REFUSED_CLIENT_KEY_SHAPE` (400).
+- **The key is set once.** `metadata.client_key` in a capture's `metadata`, or a
+  `metadata_patch` naming it, is `REFUSED_METADATA_SHAPE` (`reserved_key`). A deleted
+  thought's key goes with it, and is free again. Keys are kept and compared in lower
+  case: a `client_key` a caller's metadata set in upper case before 112 names nothing.
+- An edit or a delete that reached its thought by a key says so (`, named by its
+  client_key …`, `byClientKey` beside it); one by the thought's own id says nothing.
+- **A key is set once**, in the database too: migration 112's trigger refuses a write
+  that would give a keyed row another key (two keyed copies of one text racing past the
+  servers' read of the row), with the write's event, and the server captures it again
+  without the key and answers `held`. A name that is no uuid is `NOT_FOUND` for an edit
+  or a delete.
+- **What is named:** only a thought that has a name's id, or keeps it as its key.
+  Reads (`fetch`, `GET /v1/thoughts/{id}`) take ids alone. A name that is both one
+  thought's id and another's key names the one with the id. A thought each brain's own
+  writers made (a board-sync row, a worker's output, anything captured before the copying
+  began) has an id of its own on each brain, so a copied pointer to it resolves to
+  nothing on the second brain and is refused there as an unknown id would be: a client
+  copying writes drops such a pointer, or the write, on that brain. A copied edit drops
+  the first brain's `if_unchanged_since` too, which the second brain's own `updated_at`
+  never matches; and it keeps the first brain's order (a capture before the edit or
+  delete of it), or a late capture after a delete would bring the thought back.
+
 ## Where a tool's logic lives (SMD-2283)
 
 A tool is three pieces, so that the REST core (SMD-2284) calls the same logic the
