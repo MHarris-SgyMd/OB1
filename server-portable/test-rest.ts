@@ -11,7 +11,7 @@
  *   bun test-rest.ts
  */
 
-import { createAssert, REST_HEALTH_BODY, RuntimeUrl, secondLoopback, serveChild } from "../db/test-support.ts";
+import { createAssert, exitAndOutput, healthAt, REST_HEALTH_BODY, RuntimeUrl, secondLoopback, serveChild } from "../db/test-support.ts";
 import { hashKey, type Principal } from "./auth.ts";
 import { TOOLS, TOOL_NAMES, READ_TOOL_NAMES, CAPTURE_TOOL_NAMES, type ToolName } from "./tools.ts";
 import { SPECS, type Core } from "./core/index.ts";
@@ -1283,8 +1283,7 @@ console.log("\n[11b] `bun api.ts` listens where OB1_LISTEN_HOST says: serveChild
     serveChild(import.meta.dir, "api.ts", { OPENROUTER_API_KEY: "stub", OB1_LISTEN_HOST: "  " }),
   ]);
   // Its own body, not a status: another app holding the port on that address does not read as the child.
-  const at = (host: string | null, port: number) => (host === null ? Promise.resolve("no address") : fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(2_000) })
-    .then(async (r) => (r.ok && (await r.text()) === REST_HEALTH_BODY ? "the child" : `${r.status}, another`), (e: Error) => (e.name === "TimeoutError" ? "timed out" : `refused (${e.name})`)));
+  const at = (host: string | null, port: number) => healthAt(host, port, REST_HEALTH_BODY);
   let seen: Record<string, string> = {};
   try {
     seen = { second: second ?? "none", here4: await at("127.0.0.1", here.port), here2: await at(second, here.port), every2: await at(second, every.port) };
@@ -1297,12 +1296,7 @@ console.log("\n[11b] `bun api.ts` listens where OB1_LISTEN_HOST says: serveChild
   // Asked at the second address alone: on every address, the child is the one this suite cannot keep from another app's
   // 127.0.0.1 listener at its port (a stress run saw it once in 300), and its own body there is what shows every address.
   assert(seen.every2 === "the child", `told a blank value, the child listens on every address, as unset: ${second} reaches it (${JSON.stringify(seen)})`);
-  const ended = await Promise.all(refusing.map(async (child) => {
-    const code = await Promise.race([child.exited, Bun.sleep(20_000).then(() => "still running")]);
-    if (code === "still running") child.kill("SIGKILL");
-    return { code, said: ((await new Response(child.stdout).text()) + (await new Response(child.stderr).text())).trim() };
-  }));
-  const [notIp, notHere] = ended;
+  const [notIp, notHere] = await Promise.all(refusing.map((child) => exitAndOutput(child)));
   assert(notIp.code === 2 && notIp.said.includes("OB1_LISTEN_HOST (a value not shown) is not an IP address, so the server did not start") && !notIp.said.includes("Started") && !notIp.said.includes("Zq9X"),
     `a value that is no IP address: exit 2 before it serves, said in words, the value never shown (exit ${notIp.code}; ${notIp.said.slice(0, 300)})`);
   assert(notHere.code === 2 && notHere.said.includes("OB1_LISTEN_HOST (a value not shown) is not an address of this host, so the server did not start") && !notHere.said.includes("Started") && !notHere.said.includes("192.0.2"),

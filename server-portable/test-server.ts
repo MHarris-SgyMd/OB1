@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { answersHealth, askRaw, childPort, createAssert, leaveMidUpload, MCP_HEALTH_BODY, pendingSettled, requestHead, REST_HEALTH_BODY, RuntimeUrl, secondLoopback, serveChild, watchStream } from "../db/test-support.ts";
+import { answersHealth, askRaw, childPort, createAssert, exitAndOutput, healthAt, leaveMidUpload, MCP_HEALTH_BODY, pendingSettled, requestHead, REST_HEALTH_BODY, RuntimeUrl, secondLoopback, serveChild, watchStream } from "../db/test-support.ts";
 import { DEFAULT_EMBEDDING_DIM, queryLogEnabled, queryLogRetentionDays, QUERY_LOG, tierProblem, trimmedEnv } from "../db/config.mjs";
 import { visibleToolNames, READ_TOOL_NAMES, UNLOCKS, type ToolScope } from "./tools.ts";
 import { openApiDocument } from "./rest/openapi.ts";
@@ -4521,8 +4521,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     // Blank, so every address, as unset is: serveChild's 127.0.0.1 taken back out.
     serveChild(`${import.meta.dir}/../mcp-server`, "index.ts", { ...listenEnv, OB1_LISTEN_HOST: "" }),
   ]);
-  const mcpAt = (host: string | null, port: number) => (host === null ? Promise.resolve("no address") : fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(2_000) })
-    .then(async (r) => (r.ok && (await r.text()) === MCP_HEALTH_BODY ? "the child" : `${r.status}, another`), (e: Error) => (e.name === "TimeoutError" ? "timed out" : `refused (${e.name})`)));
+  const mcpAt = (host: string | null, port: number) => healthAt(host, port, MCP_HEALTH_BODY);
   let mcpSeen: Record<string, string> = {};
   try {
     mcpSeen = { second: second ?? "none", here4: await mcpAt("127.0.0.1", loopbackMcp.port), here2: await mcpAt(second, loopbackMcp.port), every2: await mcpAt(second, everyMcp.port) };
@@ -4532,11 +4531,9 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   }
   assert(second !== null && loopbackMcp.up && mcpSeen.here4 === "the child" && mcpSeen.here2.startsWith("refused") && mcpSeen.every2 === "the child",
     `bun index.ts under serveChild listens on 127.0.0.1 alone, and blank on every address: a second loopback address refuses the one, reaches the other (${JSON.stringify(mcpSeen)})`);
-  const mcpCode = await Promise.race([refusingMcp.exited, Bun.sleep(20_000).then(() => "still running")]);
-  if (mcpCode === "still running") refusingMcp.kill("SIGKILL");
-  const mcpSaid = (await new Response(refusingMcp.stdout).text()) + (await new Response(refusingMcp.stderr).text());
+  const { code: mcpCode, said: mcpSaid } = await exitAndOutput(refusingMcp);
   assert(mcpCode === 2 && mcpSaid.includes("OB1_LISTEN_HOST (a value not shown) is not an IP address, so the server did not start") && !mcpSaid.includes("Started") && !mcpSaid.includes("Zq9X"),
-    `bun index.ts told an OB1_LISTEN_HOST that is no IP address: exit 2 before it serves, the value never shown (exit ${mcpCode}; ${mcpSaid.trim().slice(0, 300)})`);
+    `bun index.ts told an OB1_LISTEN_HOST that is no IP address: exit 2 before it serves, the value never shown (exit ${mcpCode}; ${mcpSaid.slice(0, 300)})`);
 
   // SMD-2902, this entry's stop wired as the REST core's (review pass 1's mutants): a collector that never answers is
   // cut at what its 3 s grace leaves less a second — not the 5 s budget, which a grace not passed would give — and

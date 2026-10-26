@@ -870,6 +870,25 @@ export async function secondLoopback(): Promise<string | null> {
 }
 
 /**
+ * What a child at `host` (a URL's host; null where there is none) answers on
+ * /health, as a listen row reads it: "the child" for its own `body`, "<status>,
+ * another" for any other answer (another app's listener at its port), "timed
+ * out" past 2 s, "refused (…)" where nothing listens (SMD-3323).
+ */
+export function healthAt(host: string | null, port: number, body: string): Promise<string> {
+  if (host === null) return Promise.resolve("no address");
+  return fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(2_000) })
+    .then(async (r) => (r.ok && (await r.text()) === body ? "the child" : `${r.status}, another`), (e: Error) => (e.name === "TimeoutError" ? "timed out" : `refused (${e.name})`));
+}
+
+/** A spawned child's exit code and all it said, waited on for at most `ms`; one still running then is killed and reads "still running". */
+export async function exitAndOutput(child: { exited: Promise<number>; kill(signal?: number | NodeJS.Signals): void; stdout: ReadableStream<Uint8Array>; stderr: ReadableStream<Uint8Array> }, ms = 20_000): Promise<{ code: number | "still running"; said: string }> {
+  const code = await Promise.race([child.exited, Bun.sleep(ms).then(() => "still running" as const)]);
+  if (code === "still running") child.kill("SIGKILL");
+  return { code, said: ((await new Response(child.stdout).text()) + (await new Response(child.stderr).text())).trim() };
+}
+
+/**
  * A server entry run as the image runs it (`bun --no-env-file <entry>`), on a
  * port of its own, with `env` beside PATH, HOME, PORT and OB1_LISTEN_HOST and
  * no other: `up` once its /health answers (30 s at most, each poll 1 s, none
