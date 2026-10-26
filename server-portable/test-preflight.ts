@@ -23,7 +23,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { applyMigrations, createAssert, dropSchema, runScript } from "../db/test-support.ts";
+import { applyMigrations, createAssert, dropSchema, migrationFiles, plantLedger, runScript } from "../db/test-support.ts";
 import { POSTGREST_RETIRED } from "./store.ts";
 import { pathFix, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
 import { ACCEPTED_CAVEAT_PREFIX, bytesText, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
@@ -2677,7 +2677,7 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") || f.endsWith("_extraction_progress.sql") });
 
   // SMD-2880's Verify: the walk index remedy followed literally. A ledger
-  // the migrator wrote (--baseline over the full apply) records 039. 038
+  // planted over the full apply records 039. 038
   // re-applied by hand on a current brain puts a 6-argument form beside 074's
   // 7-argument one — the search signatures row's to report, the walk reading
   // the 7 — so the walk index is moved by the other half, 001's DDL re-run
@@ -2687,8 +2687,8 @@ else {
   // goes after, as every block here that makes one drops it.
   {
     await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL });
-    const recorded = await migrate(["--url", LIVE, "--baseline"]);
-    assert(recorded.code === 0, `migrate.ts --baseline records every file, 039 among them (exit ${recorded.code})`);
+    const recorded = await plantLedger(LIVE);
+    assert(recorded === migrationFiles().length, `the planted ledger records every file, 039 among them (${recorded} rows)`);
     try {
       await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("038") });
       await claims.unsafe(`DROP INDEX thoughts_embedding_idx`);
@@ -3136,8 +3136,8 @@ else {
     assert(new RegExp(`✓\\s+version module\\s+server-portable/version\\.ts matches db/migrations/ \\(${last}\\)`).test(bare.out),
            `the version module row holds version.ts to the tree it sits in (${row(bare.out, "version module")})`);
 
-    const adopt = await migrate(["--url", LIVE, "--baseline"]);
-    assert(adopt.code === 0, `migrate.ts --baseline records every file (${adopt.out.trim().split("\n").slice(-1)[0]})`);
+    const planted = await plantLedger(LIVE);
+    assert(planted === migrationFiles().length, `the planted ledger records every file (${planted} rows)`);
     const current = await run(SQL_ENV);
     assert(new RegExp(`✓\\s+migration ledger\\s+schema_migrations present, highest ${last} — this server's tree ends there too`).test(current.out)
              // Between releases the tree's last file is past the release range,
